@@ -1,0 +1,23 @@
+[package]
+name = "{{project-name}}"
+version = "0.1.0"
+edition = "2021"
+description = "{{description}}"
+authors = ["{{authors}}"]
+license = "MIT"
+
+[lib]
+# WASM components must be cdylib so wasm32-wasip1 produces a linkable artifact.
+crate-type = ["cdylib"]
+
+[dependencies]
+# The WIT contract is the dep boundary — we do NOT pull wcore-plugin-api here.
+wit-bindgen = "0.32"
+
+[package.metadata.component]
+# The host's WIT package name; must match `package wayland:host@...` in wit/.
+package = "wayland:host"
+
+[package.metadata.component.target]
+path = "wit"
+world = "wayland-tool"

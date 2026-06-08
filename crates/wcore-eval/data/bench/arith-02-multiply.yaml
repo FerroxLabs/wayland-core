@@ -1,0 +1,13 @@
+id: arith-02-multiply
+category: arithmetic
+prompt: |
+  Compute 12 * 13. Reply with the integer answer only.
+match_strategy:
+  kind: numeric_equal
+  expected: 156.0
+  tolerance: 0.0
+rationale: |
+  Two-digit multiplication. Within the LLM "no scratch-pad needed"
+  range but still trips lazy approximation.
+allowed_tools: []
+timeout_secs: 15

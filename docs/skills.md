@@ -1,0 +1,276 @@
+# Skills
+
+Skills are named prompt snippets that the agent can invoke on demand.  They
+let you package reusable instructions, workflows, or tool sequences into a
+single callable name.
+
+## Overview
+
+A skill is a Markdown file with a YAML front matter header.  When the agent
+invokes a skill, it:
+
+1. Resolves the skill by name from the loaded skill list
+2. Substitutes variables (`$ARGUMENTS`, `$0`, `${WCORE_SKILL_DIR}`)
+3. Expands any shell commands (`` !`cmd` `` syntax)
+4. Returns the processed text as the skill's output
+
+## Directory Structure
+
+Skills are loaded from the following locations, in priority order (first match
+wins for duplicate names):
+
+| Priority | Path | Description |
+|----------|------|-------------|
+| 1 | `.wayland-core/skills/` | Project-local skills (checked-in with the repo) |
+| 2 | `<CONFIG_DIR>/wayland-core/skills/` | User-global skills (see below) |
+| 3 | `.wayland-core/commands/` | Legacy flat `.md` files (backward compatibility) |
+
+> **`<CONFIG_DIR>` by platform:**
+> - **macOS:** `~/Library/Application Support/`
+> - **Linux:** `~/.config/` (or `$XDG_CONFIG_HOME`)
+> - **Windows:** `C:\Users\<USER>\AppData\Roaming\`
+>
+> Run `wayland-core --skills-path` to see the actual paths on your machine.
+
+Each skill is either a single `SKILL.md` file inside a named subdirectory, or
+a flat `.md` file in a `commands/` directory:
+
+```
+.wayland-core/skills/
+├── deploy/
+│   └── SKILL.md          # invoked as "deploy"
+├── review-pr/
+│   └── SKILL.md          # invoked as "review-pr"
+```
+
+## Writing a Skill
+
+### Minimal skill
+
+```markdown
+---
+name: greet
+description: Print a greeting
+---
+
+Hello! How can I help you today?
+```
+
+### Full front matter reference
+
+```yaml
+---
+# Required
+name: skill-name          # Unique identifier; used to invoke the skill
+description: One-line description shown in the skill list
+
+# Optional — conditional activation
+paths:
+  - "src/**/*.rs"         # Skill is only active when the working path matches
+
+# Optional — context overrides applied when the skill runs
+model: claude-sonnet-4-20250514  # Override the active model
+effort: high              # reasoning effort: low | medium | high
+allowedTools:             # Restrict which tools the skill may use
+  - Read
+  - Grep
+
+# Optional — permission rules
+permissions:
+  allow:
+    - "Bash(git *)"
+  deny:
+    - "Bash(rm *)"
+
+# Optional — hooks registered when the skill is active
+hooks:
+  PreToolUse:
+    - "echo 'about to run a tool'"
+  PostToolUse:
+    - "echo 'tool finished'"
+  Stop:
+    - "echo 'session ended'"
+---
+
+Skill body goes here.
+```
+
+### Front matter fields
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `name` | string | **Required.** Unique skill name. |
+| `description` | string | **Required.** Shown in system prompt skill list. |
+| `paths` | string[] | Glob patterns; skill is dormant unless the current path matches at least one. |
+| `model` | string | Override active model for the duration of the skill. |
+| `effort` | string | Override reasoning effort: `low`, `medium`, or `high`. |
+| `allowedTools` | string[] | Restrict tools to this list when the skill is running. |
+| `permissions.allow` | string[] | Tool patterns that are always allowed. |
+| `permissions.deny` | string[] | Tool patterns that are always denied (highest priority). |
+| `hooks.PreToolUse` | string[] | Shell commands run before each tool call. |
+| `hooks.PostToolUse` | string[] | Shell commands run after each tool call. |
+| `hooks.Stop` | string[] | Shell commands run when the session ends. |
+
+## Variable Substitution
+
+Inside the skill body, the following variables are replaced at runtime:
+
+| Variable | Replaced with |
+|----------|---------------|
+| `$ARGUMENTS` | The full argument string passed to the skill invocation |
+| `$0` | The skill name itself |
+| `${WCORE_SKILL_DIR}` | Absolute path to the directory containing this skill's `SKILL.md` |
+| `${WCORE_SESSION_ID}` | Current session ID (when sessions are enabled) |
+
+`${AIONRS_SKILL_DIR}` and `${AIONRS_SESSION_ID}` are kept as backward-compat
+aliases — skills authored before the rebrand continue to work unchanged. New
+skills should prefer the `WCORE_*` form.
+
+Example:
+
+```markdown
+---
+name: run-tests
+description: Run tests for a specific module
+---
+
+Run the test suite for module: $ARGUMENTS
+
+Working directory: ${WCORE_SKILL_DIR}
+```
+
+## Shell Command Expansion
+
+Lines containing `` !`cmd` `` execute `cmd` in a shell and substitute the
+output inline:
+
+```markdown
+---
+name: git-status
+description: Show current git status
+---
+
+Current branch: !`git rev-parse --abbrev-ref HEAD`
+
+Recent commits:
+!`git log --oneline -5`
+```
+
+## Conditional Activation
+
+Skills with a `paths:` field are **dormant** by default and become **active**
+only when the current working path matches one of the glob patterns:
+
+```yaml
+---
+name: rust-review
+description: Rust-specific code review checklist
+paths:
+  - "**/*.rs"
+  - "Cargo.toml"
+---
+
+When reviewing Rust code, check:
+- No unwrap() in library code
+- Error types implement std::error::Error
+- Public APIs have doc comments
+```
+
+The skill appears in the system prompt only when a `.rs` file or `Cargo.toml`
+is in scope.
+
+## MCP Skills
+
+Skills can also be loaded from MCP servers.  MCP-sourced skills behave
+identically to local skills with one restriction: **shell command expansion
+(`` !`cmd` ``) is disabled** for MCP skills to prevent arbitrary code
+execution from untrusted sources.
+
+Configure MCP skill sources in the config file — see [mcp.md](mcp.md) for
+server configuration.
+
+## Bundled Skills
+
+A small set of skills is compiled into the binary.  Bundled skills:
+
+- Are always available regardless of the filesystem skill directories
+- Are **never truncated** by the prompt budget (they survive even when the
+  skill list is shortened to stay within token limits)
+- Cannot be overridden by a user skill with the same name
+
+## Prompt Budget
+
+When the total size of all skill descriptions exceeds the prompt budget, the
+agent truncates the non-bundled skill list.  Bundled skills are always
+preserved.  To stay within budget, keep skill descriptions concise.
+
+## Troubleshooting
+
+Use `--skills-path` to see which directories are being scanned and whether
+they exist on disk:
+
+```
+$ wayland-core --skills-path
+User:    ~/Library/Application Support/wayland-core/skills  (exists)
+Project: /path/to/repo/.wayland-core/skills                 (exists)
+Legacy:  /path/to/repo/.wayland-core/commands                (not found)
+```
+
+## Progressive loading (W4)
+
+Skill listings injected into the system prompt no longer include body
+content. Each skill is represented as a `SkillRef` (name, description,
+when-to-use, paths conditional, source) plus the file path on disk.
+The agent activates a skill via the `Skill` tool; the body is read
+from disk on demand and cached in a session-bounded 32-entry LRU.
+
+This means: adding 50 skills to a project no longer adds 50× body-length
+tokens to the prompt — only 50 rows of (name + ~250-char description).
+
+## Artifacts (W4)
+
+A skill can declare files to be written when it activates:
+
+```yaml
+---
+name: build-report
+description: Generate a project status report
+arguments:
+  - date
+  - author
+artifacts:
+  - path: reports/status-${args.date}.md
+    template: |
+      # Project status (${args.date})
+      Run by ${args.author}
+---
+
+Body referencing the produced artifact ...
+```
+
+Template substitution supports `${args.foo}` only (no expression
+language). Paths must stay under the skill's CWD; `..` escapes and
+absolute paths are rejected with a typed `PathEscape` error. Failure
+to write an artifact halts skill activation — `SkillTool::execute`
+returns an `is_error` result rather than running the body against a
+half-materialised state.
+
+## Audit (W4)
+
+Run `wayland-core --skills-audit` to scan the current project's
+skill corpus. Outputs a Markdown summary on stdout and a
+machine-readable JSON report at `.wayland-core/skills-audit.json`
+with three finding kinds:
+
+- `stale` — last modified beyond the configured threshold (default 180 days).
+- `duplicate` — descriptions within a Levenshtein distance of N (default 5).
+- `broken_ref` — declared artifact paths that won't resolve safely.
+
+The JSON schema is defined by `wcore_skills::audit::AuditReport`.
+W9's skill curator consumes the same shape when deciding which drafts
+to promote vs archive.
+
+agentskills.io frontmatter format is supported natively — see fixtures
+at `crates/wcore-skills/tests/fixtures/agentskills_io/`. Those fixtures
+document the shape wcore currently round-trips; spec-anchored compat
+(pinned to an agentskills.io spec/commit) is a follow-up.

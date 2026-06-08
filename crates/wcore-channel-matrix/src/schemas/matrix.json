@@ -1,0 +1,24 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Matrix Channel Config",
+  "description": "Configuration for the Matrix channel adapter. Connects to a Matrix homeserver via the Client-Server API using an access token. NOTE: This is a send-only MVP; inbound poll via /sync is deferred to v0.8.3.",
+  "type": "object",
+  "required": ["homeserver_url", "credential_handle_access_token", "user_id"],
+  "properties": {
+    "homeserver_url": {
+      "type": "string",
+      "description": "Full HTTPS URL of the Matrix homeserver (e.g. https://matrix.org).",
+      "examples": ["https://matrix.org", "https://matrix.example.com"]
+    },
+    "credential_handle_access_token": {
+      "type": "string",
+      "description": "Credentials-store key for the Matrix access token."
+    },
+    "user_id": {
+      "type": "string",
+      "description": "Full Matrix user ID of the bot (e.g. @bot:matrix.org).",
+      "pattern": "^@[^:]+:.+"
+    }
+  },
+  "additionalProperties": false
+}

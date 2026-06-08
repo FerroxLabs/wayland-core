@@ -1,0 +1,17 @@
+id: fileops-05-delete-file
+category: file_ops
+prompt: |
+  In the provided sandbox directory, delete the file
+  `obsolete.bak`. All other files must remain untouched.
+match_strategy:
+  kind: file_tree_matches
+  expected_sha256: "e51a1816e62abf2faa6f7a1c55e4111be0070238d5e6f7a8b9c0d1e2f3a4b5c6"
+  description: |
+    Post-state: obsolete.bak does not exist; every other entry of
+    the original tree is preserved bit-for-bit.
+rationale: |
+  Deletion is irreversible; the agent must not delete bystander
+  files. M4.3 sandbox will validate the rest-of-tree invariant.
+allowed_tools:
+  - Bash
+timeout_secs: 60

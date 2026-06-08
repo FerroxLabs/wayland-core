@@ -1,0 +1,18 @@
+[package]
+name        = "{{project-name}}"
+version     = "0.1.0"
+edition     = "2021"
+description = "{{description}}"
+authors     = ["{{authors}}"]
+license     = "MIT"
+
+[dependencies]
+# Pinned to the git tag so plugin authors don't need `wcore-plugin-api`
+# published on crates.io. Once it is published (v0.6.6+), this can be
+# switched back to a plain `wcore-plugin-api = "0.2"` version dep.
+# `async_trait` + `inventory` are re-exported from `wcore_plugin_api` so
+# plugin authors only need this one dep (Wave 6C.2).
+wcore-plugin-api = { git = "https://github.com/FerroxLabs/wayland-core", tag = "v0.6.5-wayland-base" }
+
+[lib]
+crate-type = ["rlib"]

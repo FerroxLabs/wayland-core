@@ -1,0 +1,6 @@
+id: bad-oversize-3
+category: oversize-body
+skill_body: hello-oversize-3
+expected_outcome: bad
+rationale: |
+  20x baseline body (saturated size penalty), missing $ARGUMENTS, off-topic description, name mismatch, stale model, empty when_to_use. >=5 fails.

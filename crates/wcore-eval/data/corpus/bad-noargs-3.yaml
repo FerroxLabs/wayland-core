@@ -1,0 +1,6 @@
+id: bad-noargs-3
+category: missing-arguments
+skill_body: hello-noargs-3
+expected_outcome: bad
+rationale: |
+  Tiny body, no $ARGUMENTS, name mismatch, off-topic, empty when_to_use, stale model. 5 fails.

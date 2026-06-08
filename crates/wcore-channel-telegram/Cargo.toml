@@ -1,0 +1,25 @@
+[package]
+name = "wcore-channel-telegram"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Telegram Bot API channel adapter for Wayland-Core"
+
+[dependencies]
+async-trait = { workspace = true }
+chrono = { workspace = true, features = ["serde"] }
+reqwest = { workspace = true, features = ["json"] }
+wcore-egress = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true, features = ["macros", "rt", "sync", "time"] }
+toml = { workspace = true }
+tracing = { workspace = true }
+
+wcore-channels = { workspace = true }
+wcore-config = { workspace = true }
+
+[dev-dependencies]
+mockito = "1"
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time"] }

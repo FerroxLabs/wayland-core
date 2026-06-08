@@ -1,0 +1,228 @@
+[package]
+name = "wcore-agent"
+description = "Agent engine, session management, output sinks, and orchestration for wayland-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+wcore-types.workspace     = true
+wcore-protocol.workspace  = true
+wcore-config.workspace    = true
+wcore-providers.workspace = true
+wcore-egress.workspace = true
+wcore-tools.workspace     = true
+wcore-mcp.workspace       = true
+wcore-skills.workspace    = true
+# v0.8.0 Task K — wire `TemplateRouter` as primary orchestration-template
+# selector with `IntentClassifier` as deterministic cold-start fallback.
+# Already transitively pulled via wcore-skills; declaring directly keeps
+# the `orchestration::template_routing` import edge explicit.
+wcore-dispatch.workspace  = true
+# v0.8.1 U1 — bridge to GEPA's `PromptStore` so the per-turn
+# `SkillRouter` can hydrate Beta priors from `evolved_prompts`
+# winners at bootstrap. `wcore-evolve` is a LEAF below
+# `wcore-memory`/`wcore-skills`/`wcore-providers`/`wcore-eval`, none of
+# which depend on `wcore-agent`, so this edge does not introduce a
+# cycle.
+wcore-evolve.workspace    = true
+wcore-swarm.workspace          = true
+wcore-agents-pack.workspace = true
+wcore-memory.workspace    = true
+wcore-user-model.workspace = true
+# v0.8.0 Task H — selectable user-model backend (local vs honcho) at bootstrap.
+wcore-honcho-adapter.workspace = true
+wcore-compact.workspace       = true
+wcore-plugin-api.workspace    = true
+# v0.6.5 Task 2.7 — host wire-up needs both new runner crates so the
+# loader can route `PluginIdentity::Wasm` / `Subprocess` / `mcp-bridge`
+# manifests through the right runtime. Both edges are LEAF in the
+# dependency graph (api-only seams; no cycle introduced).
+wcore-plugin-wasm.workspace       = true
+wcore-plugin-subprocess.workspace = true
+wcore-observability.workspace = true
+# M5.3: ExecutionBudget + ExecutionBudgetView extracted into wcore-budget;
+# `wcore_agent::budget` re-exports them. New BudgetTracker / BudgetCap /
+# BudgetEvent surfaces are also reached via this dep.
+wcore-budget.workspace        = true
+# W7 (v0.6.3) — the per-turn budget charge resolves cost from the
+# `wcore-pricing` provider×model catalog. A catalog miss falls back to
+# the `ProviderCompat` heuristic in `wcore-observability::cost`.
+wcore-pricing.workspace       = true
+# Wave BR — host adapter `plugins::adapters::browser_adapter` translates
+# `BrowserToolSpec` from a loaded `wayland-browser` plugin into a real
+# `BrowserTool` via `wcore_browser::adapter::from_spec`. Plugin shells
+# still cannot depend on `wcore-browser` (audit F2); the host can.
+wcore-browser.workspace       = true
+# Wave CU — host adapter `plugins::adapters::cua_adapter` reifies
+# `CuaToolSpec` plugin payloads into real `wcore_cua::CuaTool` instances.
+# Same audit-F2 asymmetry as BR: plugin shells cannot depend on
+# `wcore-cua`, but the host can.
+wcore-cua.workspace           = true
+# v0.6.1 hardening (CRIT-1) — install the M5.8/M5.9 permissions layer
+# at the tool-dispatch boundary. Without this dep, wcore-permissions
+# shipped as orphan code in v0.6.0 and the ACL never enforced.
+wcore-permissions.workspace   = true
+# v0.8.1 U5 — channel auto-registration. Scans
+# `~/.wayland/channels/*.toml` at engine boot and registers each
+# adapter (Slack / Telegram / Email / Discord / SMS / WhatsApp /
+# Signal) into a `ChannelManager`. Without this dep the 7 channel
+# crates ship as orphan code; every deploy has to hand-wire them.
+wcore-channels.workspace          = true
+wcore-channels-registry.workspace = true
+# v0.8.1 U7 — production wire-up for `wcore-cron`. `bootstrap.rs` spawns
+# a `CronRunner` with an `EngineJobHandler` (see `cron.rs`) so cron
+# jobs persisted via the `wayland-core cron` CLI fire when the engine
+# is running.
+wcore-cron.workspace              = true
+# v0.6.5 Task 1.5 — host adapter `plugins::apply::deliver_user_models`
+# translates each `CapturedUserModel` into a live `HonchoClient` via
+# `HonchoClient::from_spec`. Same audit-F2 asymmetry as wcore-browser /
+# wcore-cua: plugin shells cannot depend on `wcore-agent`, but the host
+# can depend on plugin shells.
+wayland-honcho.workspace      = true
+
+tokio.workspace       = true
+futures.workspace     = true
+serde.workspace       = true
+serde_json.workspace  = true
+serde_yaml.workspace  = true
+async-trait.workspace = true
+anyhow.workspace      = true
+thiserror.workspace   = true
+regex.workspace       = true
+glob.workspace        = true
+# Declarative workflow DSL front-end (orchestration/workflow/dsl.rs) —
+# parses RON and lowers it onto the existing `GraphConfig` IR.
+ron.workspace         = true
+chrono.workspace      = true
+dirs.workspace        = true
+uuid.workspace        = true
+crossterm.workspace   = true
+is-terminal.workspace = true
+tracing.workspace     = true
+
+# W8a A.2: ExecutionBudget runtime state behind a synchronous lock + CancellationToken
+parking_lot.workspace = true
+tokio-util.workspace  = true
+
+# W8b D.2: filesystem watcher (notify-rs) for external-edit detection.
+notify.workspace = true
+
+# v0.6.3 D.0: real HTTP backends for the API-seam catalog tools
+# (github/gitlab/linear/notion) — see `tool_backends`.
+reqwest.workspace = true
+
+# Wave SD: SHA-256 for FileHistory.byte_digest (replacing collidable
+# 64-bit DefaultHasher). Closes SECURITY MAJOR #17.
+sha2.workspace = true
+
+# Sec6: ed25519 plugin signature verification
+ed25519-dalek.workspace = true
+base64.workspace = true
+
+# v0.9.0 Wave-1 B0 — OAuth subsystem (Google Meet / future PKCE flows).
+# Listener (hyper) binds an ephemeral localhost port for the redirect_uri
+# callback; `open` launches the user's browser at the consent URL;
+# urlencoding percent-encodes query params; subtle guarantees
+# constant-time `state` token comparison so timing leaks cannot bypass CSRF.
+# `rand` (already a dev-dep) is promoted to a runtime dep because OAuth
+# state + PKCE verifier generation are runtime paths, not test paths.
+hyper.workspace        = true
+hyper-util.workspace   = true
+open.workspace         = true
+urlencoding.workspace  = true
+subtle.workspace       = true
+rand.workspace         = true
+# B2 egress policy: registrable-domain (eTLD+1) extraction for allowlist
+# matching + URL parsing for the exfil-shape classifier.
+url.workspace          = true
+psl.workspace          = true
+
+# v0.9.0 W1 sub-agent backends (B1-B12 wave1-rescue):
+# - tempfile: atomic file writes (B2 tts, B3 video frame extraction)
+# - tar + flate2: Piper voice .tar.gz extraction (B11)
+# - tokio-postgres: real Postgres schema introspection (B8)
+# - cpal + hound: voice_mode mic capture (B10) — cpal wraps the OS audio
+#   API (CoreAudio / WASAPI / ALSA) in pure Rust with no PortAudio system
+#   dep; hound writes the captured PCM samples to a WAV file the
+#   transcription backend can upload.
+tempfile.workspace     = true
+tar.workspace          = true
+flate2.workspace       = true
+tokio-postgres.workspace = true
+cpal.workspace         = true
+hound.workspace        = true
+
+workspace-hack.workspace = true
+
+[features]
+# W7 Pre-flight 0.0e: opt-in test-driver helpers (ScriptedProvider,
+# TestSink, run_synthetic_turn, build_for_test) for downstream
+# integration tests. Pulls in `wcore-memory/test-utils` for the
+# `open_for_test` in-memory backend.
+test-utils = ["wcore-memory/test-utils"]
+# W12 (debt B.4-tokens): enables the `--live-api` path inside the
+# `tool_token_bench` binary. Off by default — the scripted path is the
+# CI baseline. Live mode requires real API keys; see
+# `docs/tool-token-empirical-2026-05-15.md` §2.
+live-api  = []
+# M2.6 — live-API tests that actually hit the provider HTTPS endpoint.
+# Default CI does NOT compile or run these. To enable locally:
+#   cargo nextest run -p wcore-agent --features live-anthropic,live-openai,live-bedrock --test e2e
+# With the feature ON, a missing API key PANICS rather than skipping.
+live-anthropic = []
+live-openai    = []
+live-bedrock   = []
+# v0.9.0 W1 B11: opt-in Piper local TTS synthesis path. OFF by default
+# (TTS gates through OpenAI/ElevenLabs cloud backends from B2). When ON,
+# build_tts_backend falls through to a local Piper backend if voices are
+# downloaded. Synthesis runtime is stubbed for v0.9.0 — turning the
+# feature on does not yet produce audio. Wire-up tracked for v0.9.1.
+piper_tts      = []
+
+[dev-dependencies]
+# Self-reference with test-utils feature so wcore-agent's own
+# integration tests can use ScriptedProvider/TestSink/build_for_test
+# (W7 Pre-flight 0.0d).
+wcore-agent = { path = ".", features = ["test-utils"] }
+wcore-mcp = { path = "../wcore-mcp", features = ["test-utils"] }
+# Wave OL: end-to-end wiremock smoke through `OllamaProvider`
+# (`tests/ollama_e2e_test.rs`). Dev-only — no runtime dep edge.
+wayland-ollama = { path = "../wayland-ollama" }
+wiremock.workspace    = true
+tokio-test.workspace  = true
+tempfile.workspace    = true
+mockall.workspace     = true
+rstest.workspace      = true
+serial_test.workspace = true
+inventory.workspace   = true
+criterion.workspace   = true
+
+# ── Integration test binaries ──────────────────────────────────────────────
+[[test]]
+name = "e2e"
+path = "tests/e2e/mod.rs"
+# E2E tests require real API keys; run via: cargo nextest run --profile e2e --test e2e
+
+[[test]]
+name = "acceptance"
+path = "tests/acceptance/mod.rs"
+# Acceptance tests for evolution features; run via: cargo nextest run --profile e2e --test acceptance
+
+# ── W12 (debt B.4-tokens): tool-token measurement harness ─────────────────
+# Lives in wcore-agent because it dispatches through
+# `execute_tool_calls_with_budget` + uses `test_utils::ScriptedProvider`.
+# Built only when the `test-utils` feature is on so the released
+# wayland-core binary doesn't carry it.
+[[bin]]
+name              = "tool_token_bench"
+path              = "src/bin/tool_token_bench.rs"
+required-features = ["test-utils"]
+
+[[bench]]
+name    = "orchestration_graph_bench"
+harness = false
+

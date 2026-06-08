@@ -1,0 +1,6 @@
+id: bad-noargs-1
+category: missing-arguments
+skill_body: hello-noargs-1
+expected_outcome: bad
+rationale: |
+  No $ARGUMENTS, name mismatch, off-topic (SVG/vector), empty when_to_use, stale model. 5 fails.

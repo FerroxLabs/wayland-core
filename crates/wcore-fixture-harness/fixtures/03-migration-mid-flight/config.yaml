@@ -1,0 +1,9 @@
+# SANITIZED FIXTURE — generated 2026-05-24 from migration-mid-flight — secrets redacted per .blackboard/E2E-FIXTURE-SANITIZATION-2026-05-24.md
+# Legacy yaml still present post-migration (engine hasn't deleted it yet).
+# Engine should prefer config.toml's [default] block when both exist.
+model:
+  default: anthropic/claude-opus-4.6
+  provider: anthropic
+  base_url: https://openrouter.ai/api/v1
+memory:
+  memory_enabled: true

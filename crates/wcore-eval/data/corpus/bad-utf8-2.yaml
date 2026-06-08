@@ -1,0 +1,6 @@
+id: bad-utf8-2
+category: invalid-utf8
+skill_body: hello-utf8-2
+expected_outcome: bad
+rationale: |
+  Broken body without $ARGUMENTS, off-topic, name mismatch, empty when_to_use, stale model. 5+ fails.

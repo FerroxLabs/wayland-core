@@ -1,0 +1,23 @@
+{
+  "agent": "fact-checker",
+  "cases": [
+    {
+      "id": "verified-numeric",
+      "input": "Claim: 'Rust 1.75 introduced async fn in traits.'",
+      "expected_categories": ["verified", "source-quoted"],
+      "rubric": "Returns VERIFIED with a release-notes quote and citation."
+    },
+    {
+      "id": "false-rephrase",
+      "input": "Claim: 'Python 3.13 made the GIL optional in a stable release.'",
+      "expected_categories": ["false", "precise-counterquote"],
+      "rubric": "Returns FALSE; quotes the PEP marking free-threading as experimental in 3.13."
+    },
+    {
+      "id": "unverifiable-no-soften",
+      "input": "Claim: 'Anthropic has more than 50,000 enterprise customers.'",
+      "expected_categories": ["unverifiable", "no-soften"],
+      "rubric": "Returns UNVERIFIABLE; does not soften by saying 'probably true' or 'likely'."
+    }
+  ]
+}

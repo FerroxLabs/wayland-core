@@ -1,0 +1,13 @@
+id: arith-08-modulo
+category: arithmetic
+prompt: |
+  What is 37 mod 5? Reply with the integer answer only.
+match_strategy:
+  kind: numeric_equal
+  expected: 2.0
+  tolerance: 0.0
+rationale: |
+  Modulo phrasing rather than division remainder. Trivial for a
+  competent model; gives a low-cost signal on basic numeric IQ.
+allowed_tools: []
+timeout_secs: 15

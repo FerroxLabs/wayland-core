@@ -1,0 +1,29 @@
+[package]
+name = "wcore-channel-whatsapp"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Production WhatsApp Cloud API adapter for wcore-channels — graph.facebook.com REST outbound + webhook inbound with X-Hub-Signature-256 verification"
+
+[dependencies]
+async-trait = { workspace = true }
+chrono = { workspace = true, features = ["serde"] }
+hmac = "0.12"
+sha2 = { workspace = true }
+hex = "0.4"
+reqwest = { workspace = true }
+wcore-egress = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true, features = ["macros", "rt", "sync", "time"] }
+tracing = { workspace = true }
+rand = { workspace = true }
+
+wcore-channels = { workspace = true }
+wcore-config = { workspace = true }
+
+[dev-dependencies]
+mockito = "1"
+toml = { workspace = true }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time", "sync"] }

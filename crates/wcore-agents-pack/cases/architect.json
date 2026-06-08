@@ -1,0 +1,29 @@
+{
+  "agent": "architect",
+  "cases": [
+    {
+      "id": "rate-limit-design",
+      "input": "Design a per-user API rate limiter for a 50-rps endpoint with bursting up to 200 rps for 5 seconds.",
+      "expected_categories": ["named-tradeoffs", "single-recommendation", "named-assumption"],
+      "rubric": "Names at least one tradeoff (memory vs precision, central vs sharded), recommends one design, states the assumption that would flip the choice."
+    },
+    {
+      "id": "fan-out-cache",
+      "input": "We have a feed endpoint with 95% read traffic and 5% writes. Reads hit Postgres. P99 latency is 600ms. How should we cache?",
+      "expected_categories": ["read-through-vs-aside", "invalidation-strategy", "blast-radius"],
+      "rubric": "Distinguishes read-through from cache-aside, addresses invalidation explicitly, mentions blast radius if the cache fails."
+    },
+    {
+      "id": "event-vs-rpc",
+      "input": "Should the new billing service consume orders via Kafka events or REST polling? 500k orders/day.",
+      "expected_categories": ["coupling-tradeoff", "failure-mode", "complexity"],
+      "rubric": "Names the coupling tradeoff, mentions at least one failure mode of each approach, picks one with justification."
+    },
+    {
+      "id": "push-back-premise",
+      "input": "We need a service mesh for our 3-service backend to be production-ready.",
+      "expected_categories": ["premise-rejected", "simpler-alternative"],
+      "rubric": "Pushes back on the premise (3 services do not need a mesh), offers a simpler alternative."
+    }
+  ]
+}

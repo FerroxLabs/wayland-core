@@ -1,0 +1,7 @@
+id: bad-oversize-2
+category: oversize-body
+skill_body: hello-oversize-2
+trace_fixture: expensive-bad-2.json
+expected_outcome: bad
+rationale: |
+  5x baseline body, missing $ARGUMENTS, empty when_to_use, name mismatch, stale model. 4+ fails + expensive trace.

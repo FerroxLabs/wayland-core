@@ -1,0 +1,13 @@
+id: arith-07-decimal-sum
+category: arithmetic
+prompt: |
+  Compute 1.5 + 2.25. Reply with the decimal answer only.
+match_strategy:
+  kind: numeric_equal
+  expected: 3.75
+  tolerance: 0.001
+rationale: |
+  Exact representable decimals (3.75 is exact in binary). Tolerance
+  is 1e-3 so a model that emits `3.7500` still passes.
+allowed_tools: []
+timeout_secs: 15

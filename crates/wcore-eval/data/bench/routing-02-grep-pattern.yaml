@@ -1,0 +1,17 @@
+id: routing-02-grep-pattern
+category: tool_routing
+prompt: |
+  Find every occurrence of the literal string `TODO(security)` across
+  all files in the current repository. Which tool should the agent
+  invoke? Reply with the tool's canonical name only.
+match_strategy:
+  kind: contains_all
+  tokens:
+    - "Grep"
+rationale: |
+  Grep is the dedicated regex/literal-search-across-files tool. The
+  phrasing "every occurrence across all files" rules out Read (single
+  file) and Glob (filename-only).
+allowed_tools:
+  - Grep
+timeout_secs: 30

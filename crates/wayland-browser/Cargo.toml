@@ -1,0 +1,31 @@
+[package]
+name = "wayland-browser"
+description = "Browser tool plugin shell — registers a BrowserToolSpec via the wcore-plugin-api mirror (NOT a direct wcore-browser dep, per audit F2)"
+version.workspace    = true
+edition.workspace    = true
+license.workspace    = true
+repository.workspace = true
+rust-version.workspace = true
+
+# REV-2 audit F2 invariant: deps MUST be ONLY wcore-plugin-api,
+# wcore-types, wcore-protocol, plus external. NO wcore-browser dep.
+# Verified by `crates/wcore-plugin-api/build.rs` FORBIDDEN_CORE_IMPORTS lint
+# (transitively — the plugin's own crate dep graph can't reach a forbidden
+# crate without going through this manifest, which is the source of truth).
+[dependencies]
+wcore-plugin-api.workspace = true
+wcore-types.workspace      = true
+wcore-protocol.workspace   = true
+
+async-trait.workspace = true
+serde.workspace       = true
+serde_json.workspace  = true
+inventory.workspace   = true
+tokio.workspace       = true
+tracing.workspace     = true
+thiserror.workspace   = true
+
+workspace-hack.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

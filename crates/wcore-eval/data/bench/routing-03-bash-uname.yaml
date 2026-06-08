@@ -1,0 +1,16 @@
+id: routing-03-bash-uname
+category: tool_routing
+prompt: |
+  Print the kernel name of the host machine by running `uname -s`.
+  Which tool should the agent use? Reply with the tool's canonical
+  name only.
+match_strategy:
+  kind: contains_all
+  tokens:
+    - "Bash"
+rationale: |
+  Running a shell command is Bash. Read/Grep/Write/Edit/Glob do not
+  spawn subprocesses, so the only valid answer is Bash.
+allowed_tools:
+  - Bash
+timeout_secs: 30

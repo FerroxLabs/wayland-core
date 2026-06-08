@@ -1,0 +1,40 @@
+[package]
+name = "wcore-plugin-wasm"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+# v0.6.5 Task 2.1 — WASM Component Model plugin host. Sub-wave B fills
+# `runtime`, `limiter`, `bindings`, `host_adapters`, `runner` modules.
+
+[dependencies]
+# wasmtime 30.x — held until the bindgen `async:` syntax migration to
+# `imports/exports` (changed at 33+) and the module-structure changes can
+# be done with proper plugin-loading verification across the version
+# delta. The 18 advisories that affect 30.x are documented in
+# `.cargo/audit.toml` with threat-model rationale: they all describe
+# panics/UB triggered by malicious wasm input, but Wayland loads SIGNED
+# plugins only, so the attack surface is "compromised dev signing key",
+# not "open-internet wasm". Tracked work item: wasmtime → 44+/45+.
+wasmtime      = { version = "36", default-features = false, features = ["component-model", "cranelift", "runtime", "async"] }
+wasmtime-wasi = { version = "36", default-features = false }
+
+wcore-plugin-api = { path = "../wcore-plugin-api" }
+
+tokio.workspace       = true
+tracing.workspace     = true
+anyhow.workspace      = true
+thiserror.workspace   = true
+async-trait.workspace = true
+reqwest.workspace     = true
+serde_json.workspace  = true
+wcore-egress.workspace = true
+url.workspace         = true
+glob.workspace        = true
+
+[dev-dependencies]
+wit-parser = "0.225"
+tempfile.workspace = true
+wiremock.workspace = true

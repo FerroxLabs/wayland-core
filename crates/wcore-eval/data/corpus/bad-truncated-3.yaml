@@ -1,0 +1,6 @@
+id: bad-truncated-3
+category: truncated-body
+skill_body: hello-truncated-3
+expected_outcome: bad
+rationale: |
+  25% truncation: no $ARGUMENTS, empty when_to_use, name mismatch, off-topic description (calculator), stale model pin.

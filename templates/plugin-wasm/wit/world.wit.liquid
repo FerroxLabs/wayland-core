@@ -1,0 +1,59 @@
+// Minimum-viable plugin WIT. Re-declares the host's interfaces (host + tool)
+// and binds them into the `wayland-tool` world that the host adapter loads.
+//
+// The package + world names here MUST match what the host's loader resolves
+// against — see `crates/wcore-plugin-wasm/wit/tool.wit` for the canonical
+// definitions. wit-bindgen will generate guest stubs from this file at build
+// time via `cargo component build`.
+
+package wayland:host@1.0.0;
+
+interface host {
+    // Reserved for v0.6.5 Task 2.3 capability handles. Today this interface
+    // is intentionally empty — guests are sandboxed by host policy and do
+    // not yet receive capability handles. The import is kept so the world
+    // shape matches the host's WIT exactly.
+}
+
+interface tool {
+    variant tool-category {
+        utility,
+        mutation,
+        navigation,
+        exec,
+        retrieval,
+        %other(string),
+    }
+
+    record tool-metadata {
+        name: string,
+        description: string,
+        input-schema: string,
+        category: tool-category,
+        is-deferred: bool,
+        max-result-size: u64,
+        caps-version: u32,
+    }
+
+    record request {
+        input: string,
+        call-id: string,
+        source-agent: option<string>,
+    }
+
+    record response {
+        stdout: string,
+        structured: option<string>,
+        is-error: bool,
+    }
+
+    execute: func(req: request) -> result<response, string>;
+    schema: func() -> string;
+    description: func() -> string;
+    metadata: func() -> tool-metadata;
+}
+
+world wayland-tool {
+    import host;
+    export tool;
+}

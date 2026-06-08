@@ -1,0 +1,34 @@
+[package]
+name = "wcore-channels-registry"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Per-platform factory dispatch + on-disk auto-registration for wcore-channels (v0.8.1 U5)"
+
+[dependencies]
+serde = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true, features = ["sync", "rt", "macros"] }
+toml = { workspace = true }
+tracing = { workspace = true }
+dirs = { workspace = true }
+
+wcore-channels = { workspace = true }
+wcore-config = { path = "../wcore-config" }
+wcore-channel-slack = { workspace = true }
+wcore-channel-telegram = { workspace = true }
+wcore-channel-email = { workspace = true }
+wcore-channel-discord = { workspace = true }
+wcore-channel-sms = { workspace = true }
+wcore-channel-whatsapp = { workspace = true }
+wcore-channel-signal = { workspace = true }
+# F-045 (W7-M): iMessage + Matrix + MS Teams adapters.
+wcore-channel-matrix  = { workspace = true }
+wcore-channel-msteams = { workspace = true }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+wcore-channel-imessage = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "sync"] }

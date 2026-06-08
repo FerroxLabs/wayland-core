@@ -1,0 +1,29 @@
+{
+  "agent": "security-auditor",
+  "cases": [
+    {
+      "id": "sql-injection-classify",
+      "input": "Found f\"SELECT * FROM users WHERE id = {user_id}\" in the auth handler. Severity?",
+      "expected_categories": ["critical", "concrete-fix", "named-library"],
+      "rubric": "Marks CRITICAL, recommends parameterised queries with a specific library, not just 'validate input'."
+    },
+    {
+      "id": "open-redirect",
+      "input": "Login redirects to ?next=URL parameter without validation.",
+      "expected_categories": ["high", "allowlist-fix", "scenario"],
+      "rubric": "Marks HIGH (or CRITICAL if combined with token leak), proposes allowlist of valid next-hops, sketches an attack."
+    },
+    {
+      "id": "no-false-urgency",
+      "input": "Our login form does not have a CAPTCHA. Critical?",
+      "expected_categories": ["low-or-medium", "no-inflation"],
+      "rubric": "Does not inflate to CRITICAL; classifies as MEDIUM or LOW depending on rate-limiting state."
+    },
+    {
+      "id": "no-issues-clean",
+      "input": "Audit this 30-line input sanitiser using a recognised allowlist library.",
+      "expected_categories": ["no-pad", "honest-clear"],
+      "rubric": "Returns 'no exploitable issues found' if the sanitiser is correct; does not pad."
+    }
+  ]
+}

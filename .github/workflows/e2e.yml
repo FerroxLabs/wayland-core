@@ -1,0 +1,154 @@
+name: E2E Tests
+
+# E2E tests call real LLM APIs. They run:
+#   1. Manually via workflow_dispatch (any branch)
+#   2. Automatically on push to main (requires secrets to be configured)
+#   3. On pull_request targeting main (secrets unavailable on forks — tests
+#      gracefully skip themselves when the API key env var is absent)
+
+on:
+  workflow_dispatch:
+    inputs:
+      provider:
+        description: "Provider to test (anthropic / openai / all)"
+        required: false
+        default: "all"
+        type: choice
+        options: [all, anthropic, openai]
+  push:
+    branches: [main]
+    paths:
+      - "crates/wcore-providers/**"
+      - "crates/wcore-agent/**"
+      - "crates/wcore-config/**"
+      - "crates/wcore-types/**"
+      - "crates/wcore-skills/**"
+      - ".github/workflows/e2e.yml"
+  pull_request:
+    branches: [main]
+    paths:
+      - "crates/wcore-providers/**"
+      - "crates/wcore-agent/**"
+      - "crates/wcore-config/**"
+      - "crates/wcore-types/**"
+      - "crates/wcore-skills/**"
+      - ".github/workflows/e2e.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: e2e-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  e2e:
+    name: E2E (${{ matrix.provider }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - provider: anthropic
+            secret_name: ANTHROPIC_API_KEY
+            filter: "test(anthropic)"
+          - provider: openai
+            secret_name: OPENAI_API_KEY
+            filter: "test(openai)"
+
+    steps:
+      - name: Check provider filter
+        id: filter
+        run: |
+          if [[ "${{ github.event_name }}" != "workflow_dispatch" ]] || \
+             [[ "${{ github.event.inputs.provider }}" == "all" ]] || \
+             [[ "${{ github.event.inputs.provider }}" == "${{ matrix.provider }}" ]]; then
+            echo "run=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "run=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: actions/checkout@v6
+        if: steps.filter.outputs.run == 'true'
+
+      - name: Setup vx (installs Rust from vx.toml)
+        if: steps.filter.outputs.run == 'true'
+        uses: loonghao/vx@v0.9.17
+        with:
+          setup: 'true'
+          cache: 'true'
+
+      - name: Install cargo-nextest
+        if: steps.filter.outputs.run == 'true'
+        uses: taiki-e/install-action@v2
+        with:
+          tool: nextest
+
+      - name: Check API key availability
+        if: steps.filter.outputs.run == 'true'
+        id: check_key
+        env:
+          API_KEY: ${{ secrets[matrix.secret_name] }}
+        run: |
+          if [ -z "$API_KEY" ]; then
+            echo "available=false" >> "$GITHUB_OUTPUT"
+            echo "::warning::${{ matrix.secret_name }} is not set — skipping ${{ matrix.provider }} e2e tests"
+          else
+            echo "available=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Run E2E tests — ${{ matrix.provider }}
+        if: steps.check_key.outputs.available == 'true'
+        env:
+          ANTHROPIC_API_KEY: ${{ matrix.provider == 'anthropic' && secrets.ANTHROPIC_API_KEY || '' }}
+          OPENAI_API_KEY:    ${{ matrix.provider == 'openai'    && secrets.OPENAI_API_KEY    || '' }}
+        run: |
+          vx cargo nextest run \
+            -p wcore-agent \
+            --profile e2e \
+            --test e2e \
+            -E '${{ matrix.filter }}' \
+            --no-fail-fast
+
+      - name: Upload E2E JUnit report
+        if: always() && steps.filter.outputs.run == 'true' && steps.check_key.outputs.available == 'true'
+        uses: actions/upload-artifact@v7
+        with:
+          name: e2e-junit-${{ matrix.provider }}
+          path: target/nextest/e2e/junit.xml
+          if-no-files-found: ignore
+
+  report:
+    needs: e2e
+    if: always()
+    runs-on: ubuntu-latest
+    permissions:
+      # NOTE: a job-level `permissions:` block REPLACES the workflow-level
+      # one entirely (GHA semantics), so `contents: read` from the
+      # workflow-level top of this file is dropped here unless re-listed.
+      # Without it, GITHUB_TOKEN has no read access and actions/checkout
+      # fails with "Repository not found" (misleading — the repo exists,
+      # the token just can't see it). Same trap ci.yml's report job
+      # documents at lines 410-419.
+      contents: read
+      checks: write
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Download E2E JUnit reports
+        uses: actions/download-artifact@v8
+        with:
+          pattern: e2e-junit-*
+          merge-multiple: true
+          path: e2e-reports
+        continue-on-error: true
+
+      - name: Publish E2E test report
+        uses: dorny/test-reporter@v3
+        if: hashFiles('e2e-reports/**/*.xml') != ''
+        with:
+          name: E2E Tests
+          path: e2e-reports/**/*.xml
+          reporter: java-junit
+          fail-on-error: false

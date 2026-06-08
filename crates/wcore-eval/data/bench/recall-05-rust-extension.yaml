@@ -1,0 +1,13 @@
+id: recall-05-rust-extension
+category: recall
+prompt: |
+  What is the canonical file extension (including the leading dot)
+  for a Rust source file? Reply with the extension only.
+match_strategy:
+  kind: exact
+  expected: ".rs"
+rationale: |
+  Programming-language convention frozen since Rust 1.0. The leading
+  dot is included so the answer is unambiguous.
+allowed_tools: []
+timeout_secs: 15

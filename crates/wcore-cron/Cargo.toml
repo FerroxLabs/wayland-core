@@ -1,0 +1,31 @@
+[package]
+name = "wcore-cron"
+description = "Memory-resident scheduled triggers for Wayland-Core (v0.8.1 U7)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+# v0.8.1 U7 — Scheduled-trigger crate. Cron-expression parsing via the
+# `cron` crate, three target types (Slash command, Channel message, Skill
+# invocation), JSON-file persistence (procedural partition is keyed by
+# skill_name and not a fit for arbitrary job rows; ~/.wayland/cron/jobs.json
+# is the production store), and a 30s background runner spawned at
+# bootstrap. Wire-up site: crates/wcore-agent/src/bootstrap.rs.
+
+[dependencies]
+async-trait = { workspace = true }
+chrono = { workspace = true }
+cron = "0.12"
+dirs = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+uuid = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+tokio = { workspace = true }

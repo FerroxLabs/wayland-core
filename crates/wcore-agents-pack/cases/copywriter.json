@@ -1,0 +1,23 @@
+{
+  "agent": "copywriter",
+  "cases": [
+    {
+      "id": "tighten-hero",
+      "input": "Hero line: 'Our revolutionary AI-powered platform empowers teams to leverage data for unprecedented growth.' Rewrite.",
+      "expected_categories": ["specific-number", "no-adjective-pile", "named-action"],
+      "rubric": "Replaces with a number-led benefit line; cuts all four banned adjectives; ends with an explicit verb."
+    },
+    {
+      "id": "weak-offer-pushback",
+      "input": "Write the landing-page copy for: 'Free 14-day trial of our generic project management tool.'",
+      "expected_categories": ["pushback-offer", "specifity-ask"],
+      "rubric": "Pushes back on the weak/generic positioning before writing; asks for a specific differentiator."
+    },
+    {
+      "id": "platform-match",
+      "input": "Write a 280-char Twitter post and a paragraph LinkedIn post for the same product launch.",
+      "expected_categories": ["different-voice", "platform-fit"],
+      "rubric": "Two clearly different voices; Twitter punchier, LinkedIn more measured."
+    }
+  ]
+}

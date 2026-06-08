@@ -1,0 +1,30 @@
+plugin_api_version = "1.0"
+
+[plugin]
+name = "{{project-name}}"
+version = "0.1.0"
+description = "{{description}}"
+entry = "component"
+authors = ["{{authors}}"]
+license = "MIT"
+
+[permissions]
+register_tools = true
+tool_namespace = "{{project-name}}"
+# WASM-specific permissions (all default-false; set explicitly per tool).
+allow_network = false
+allow_workspace_read = false
+allow_workspace_write = false
+allow_tool_invoke = false
+permitted_secrets = []
+
+[runtime]
+kind = "wasm"
+
+[runtime.wasm]
+component_path = "{{project-name}}.wasm"
+# Optional sandbox limits override (defaults shown):
+# [runtime.wasm.limits]
+# memory_bytes = 10485760  # 10 MB
+# fuel = 500000000         # 500M
+# timeout_secs = 60        # 60s

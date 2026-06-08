@@ -1,0 +1,7 @@
+id: bad-namemismatch-3
+category: name-vs-filename
+skill_body: hello-namemismatch-3
+trace_fixture: expensive-bad-3.json
+expected_outcome: bad
+rationale: |
+  Name says 'file-mover', file is hello-namemismatch-3, off-topic description, empty when_to_use, stale model. >=4 fails + expensive trace.

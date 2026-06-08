@@ -1,0 +1,90 @@
+# OSV-Scanner config for wayland-core.
+#
+# Posture (verified 2026-06-02, wasmtime now 36.0.10):
+#   * 0 vulnerabilities. 0 Critical / High / Medium.
+#   * The criticals OSV used to hide (wasmtime 9.2/9.0 CVSS) are FIXED at the
+#     source — wasmtime + wasmtime-wasi upgraded 30 -> 36, unmaintained
+#     yaml-rust dropped. Confirmed by `osv-scanner scan source -r ./`.
+#   * What remains are 5 warning-class advisories (4 "unmaintained", 1
+#     "unsound"), ALL transitive, each traced to its parent and each
+#     genuinely irreducible without a regression or a pre-release dep. (A 6th,
+#     lru, was eliminated at source via the ratatui 0.30 upgrade — see below.)
+#
+# Every entry below is a PUBLIC, DATED, REASONED disposition — not a silent
+# mute. `ignoreUntil` forces a re-evaluation; on each dependency bump, re-run
+# `osv-scanner scan source -r ./` and delete any entry whose advisory has
+# cleared. An empty IgnoredVulns list is the goal whenever the ecosystem
+# allows it.
+#
+# Parent trace recipe: `cargo tree -i <crate>@<ver> --all-features --target all`.
+
+# ── paste 1.0.15 (unmaintained) ──────────────────────────────────────────
+# Multi-parent and irreducible: pulled by the candle ML SIMD stack
+# (gemm/gemm-common/pulp <- candle-core <- candle-transformers, used by
+# wcore-memory for local embeddings) AND by ratatui. No maintained drop-in
+# replacement exists; the macro is build-time only (proc-macro, no runtime
+# surface). Re-evaluate when candle or ratatui drop it.
+[[IgnoredVulns]]
+id = "RUSTSEC-2024-0436"
+ignoreUntil = "2026-09-02T00:00:00Z"
+reason = "paste: build-time proc-macro, no runtime surface; multi-parent (candle SIMD stack + ratatui), no maintained replacement. Tracked; revisit on candle/ratatui bump."
+
+# ── bincode 1.3.3 (unmaintained) ─────────────────────────────────────────
+# Transitive solely via syntect 5.3.0, which is the LATEST published syntect.
+# bincode 1.x is syntect's binary dump format for its bundled syntax/theme
+# sets (TUI highlighting via load_defaults_newlines). Irreducible until
+# syntect itself moves off bincode 1.x.
+[[IgnoredVulns]]
+id = "RUSTSEC-2025-0141"
+ignoreUntil = "2026-09-02T00:00:00Z"
+reason = "bincode 1.x: syntect 5.3.0 (latest) dump-format dep; no newer syntect exists. Tracked; revisit on syntect release."
+
+# ── number_prefix 0.4.0 (unmaintained) ───────────────────────────────────
+# indicatif depends on number_prefix at EVERY published version (incl 0.18);
+# indicatif arrives via hf-hub (HuggingFace download progress bars), which is
+# an OPTIONAL, default-off dependency of wcore-memory. Not our dep to
+# reconfigure; eliminating it means dropping indicatif from hf-hub upstream.
+[[IgnoredVulns]]
+id = "RUSTSEC-2025-0119"
+ignoreUntil = "2026-09-02T00:00:00Z"
+reason = "number_prefix: indicatif pulls it at all versions; indicatif arrives via optional default-off hf-hub. Tracked; revisit if hf-hub drops indicatif."
+
+# ── rustls-pemfile 2.2.0 (unmaintained) ──────────────────────────────────
+# Deprecated (folded into rustls). Transitive ONLY via bollard, which is an
+# OPTIONAL, default-OFF dependency of wcore-sandbox (Docker sandbox backend).
+# Does NOT compile into the default/shipped binary. A bollard 0.17 -> 0.21
+# bump (4 breaking majors) to clear a non-shipping warning is not worth the
+# regression risk on the sandbox path.
+[[IgnoredVulns]]
+id = "RUSTSEC-2025-0134"
+ignoreUntil = "2026-09-02T00:00:00Z"
+reason = "rustls-pemfile: only via optional default-OFF bollard; not in shipped binary. Tracked; revisit on bollard bump."
+
+# ── lexical-core 0.7.6 (unsound) ─────────────────────────────────────────
+# Transitive via nom 5 <- imap 2.4.1, which is the latest STABLE imap. The
+# only release that drops the nom5/lexical-core chain is imap 3.0.0-alpha.x.
+# Shipping a pre-release on the email channel is a worse posture than the
+# warning. The unsound paths are float parsing, not reachable from IMAP
+# protocol framing as wcore-channel-email uses it.
+[[IgnoredVulns]]
+id = "RUSTSEC-2023-0086"
+ignoreUntil = "2026-09-02T00:00:00Z"
+reason = "lexical-core: via nom5 <- imap 2.4.1 (latest stable); only imap 3.0-alpha drops it. Pre-release email dep is worse than the warning. Tracked; revisit on stable imap 3.x."
+
+# ── proc-macro-error 1.0.4 (unmaintained) ────────────────────────────────
+# Build-time proc-macro with NO runtime surface (expands only during compile).
+# Transitive via utoipa-gen 4.3.1 <- utoipa 4.2.3 <- wcore-acp (the ACP REST
+# OpenAPI layer). utoipa 5.x drops proc-macro-error but is a breaking major;
+# chasing it to clear a compile-time-only "unmaintained" warning is not worth
+# the REST-surface regression risk. Already accepted in the cargo-audit ignore
+# set — this entry aligns OSV with audit. Surfaced on main's 2026-06-07 scan
+# (pre-existing, not a code change). Revisit on a utoipa 5.x upgrade.
+[[IgnoredVulns]]
+id = "RUSTSEC-2024-0370"
+ignoreUntil = "2026-09-02T00:00:00Z"
+reason = "proc-macro-error: build-time proc-macro, no runtime surface; transitive via utoipa-gen <- utoipa <- wcore-acp. Already accepted by cargo-audit. Tracked; revisit on utoipa 5.x."
+
+# NOTE: RUSTSEC-2026-0002 (lru 0.12.5, unsound) was ELIMINATED AT THE SOURCE,
+# not ignored — ratatui upgraded 0.29 -> 0.30, which moved lru to 0.16.x. The
+# vulnerable lru 0.12.5 is gone from the tree. (The migration was a single
+# `where B::Error: ...` bound; all wcore-cli tests stayed green.)

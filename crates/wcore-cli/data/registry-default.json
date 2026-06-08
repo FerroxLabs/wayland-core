@@ -1,0 +1,32 @@
+[
+  {
+    "name": "wayland-ollama",
+    "version": "0.6.0",
+    "requires_sandbox": false,
+    "description": "Local Ollama provider plugin"
+  },
+  {
+    "name": "wayland-honcho",
+    "version": "0.6.0",
+    "requires_sandbox": false,
+    "description": "Honcho user-model plugin (mock + live-gated)"
+  },
+  {
+    "name": "wayland-browser",
+    "version": "0.6.0",
+    "requires_sandbox": true,
+    "description": "Browser tool plugin shell (Camoufox / chromiumoxide / Browserbase)"
+  },
+  {
+    "name": "wayland-cua",
+    "version": "0.6.0",
+    "requires_sandbox": false,
+    "description": "Computer-use plugin shell (multi-platform)"
+  },
+  {
+    "name": "wayland-ijfw",
+    "version": "0.6.0",
+    "requires_sandbox": false,
+    "description": "IJFW anchor plugin (exercises every register_* surface)"
+  }
+]

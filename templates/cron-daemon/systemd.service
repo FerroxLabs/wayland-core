@@ -1,0 +1,55 @@
+# Wayland-Core Cron Daemon — systemd user unit (Linux)
+#
+# Installation:
+#   1. Copy this file to ~/.config/systemd/user/wayland-cron-daemon.service
+#   2. Edit ExecStart below to point to the wayland-core binary.
+#   3. Optionally override WAYLAND_HOME if it differs from ~/.wayland.
+#   4. Enable + start:
+#        systemctl --user daemon-reload
+#        systemctl --user enable --now wayland-cron-daemon.service
+#   5. Verify:
+#        systemctl --user status wayland-cron-daemon.service
+#
+# Uninstall:
+#   systemctl --user disable --now wayland-cron-daemon.service
+#   rm ~/.config/systemd/user/wayland-cron-daemon.service
+#   systemctl --user daemon-reload
+#
+# Logs:
+#   journalctl --user -u wayland-cron-daemon.service -f
+#   # or from the log file:
+#   tail -f ~/.wayland/cron-daemon.log
+
+[Unit]
+Description=Wayland-Core Cron Daemon
+Documentation=https://github.com/FerroxLabs/wayland-core
+After=network.target
+
+[Service]
+Type=simple
+
+# Replace with the absolute path to the wayland-core binary.
+# Example: ExecStart=/usr/local/bin/wayland-core cron daemon
+ExecStart=/usr/local/bin/wayland-core cron daemon
+
+# Run the daemon body directly (systemd is the process manager).
+Environment=WAYLAND_CRON_DAEMON_CHILD=1
+
+# Override if your Wayland home is not ~/.wayland.
+# Environment=WAYLAND_HOME=/home/youruser/.wayland
+
+# Redirect logs to the daemon log file. systemd also captures
+# stdout/stderr via journald by default.
+StandardOutput=append:%h/.wayland/cron-daemon.log
+StandardError=append:%h/.wayland/cron-daemon.log
+
+# Restart on unexpected exit. Do not restart on SIGTERM (clean shutdown).
+Restart=on-failure
+RestartSec=10s
+
+# Allow the unit to start at login via `loginctl enable-linger`.
+KillMode=process
+TimeoutStopSec=10
+
+[Install]
+WantedBy=default.target

@@ -1,0 +1,16 @@
+[plugin]
+name        = "wayland-ollama"
+version     = "0.1.0"
+description = "Ollama local-inference provider"
+entry       = "builtin:wayland_ollama"
+authors     = ["Wayland-Core"]
+license     = "MIT"
+
+[permissions]
+register_tools     = false
+register_hooks     = false
+register_providers = true
+register_agents    = false
+register_skills    = false
+register_rules     = false
+register_mcp_server = false

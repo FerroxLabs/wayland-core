@@ -1,0 +1,7 @@
+id: bad-namemismatch-2
+category: name-vs-filename
+skill_body: hello-namemismatch-2
+trace_fixture: expensive-bad-2.json
+expected_outcome: bad
+rationale: |
+  Name says 'translator', file is hello-namemismatch-2, off-topic description, empty when_to_use, stale model. >=4 fails + expensive trace.

@@ -1,0 +1,23 @@
+{
+  "agent": "incident-commander",
+  "cases": [
+    {
+      "id": "stabilise-first",
+      "input": "Error rate on /checkout at 12%, started 4 minutes ago. Engineers are arguing about which service is the cause.",
+      "expected_categories": ["stabilise-first", "stop-debate", "set-update-interval"],
+      "rubric": "Drives stabilisation first (roll back or fail over); shuts down the cause debate until impact stops; sets the next update interval."
+    },
+    {
+      "id": "premature-resolved",
+      "input": "Error rate dropped from 8% to 0.4% one minute ago. Can we declare resolved?",
+      "expected_categories": ["observation-window", "no-premature"],
+      "rubric": "Refuses to declare resolved on one data point; specifies a full observation window."
+    },
+    {
+      "id": "exec-comm",
+      "input": "Draft a stakeholder update for a SEV-2 affecting 8% of billing.",
+      "expected_categories": ["jargon-free", "impact-action-next"],
+      "rubric": "No engineering jargon; states impact, current action, next decision time."
+    }
+  ]
+}

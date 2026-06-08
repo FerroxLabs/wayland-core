@@ -1,0 +1,58 @@
+# {{project-name}}
+
+{{description}}
+
+A Wayland WASM tool plugin. Built as a [WebAssembly Component](https://component-model.bytecodealliance.org/)
+that exports the `wayland:host/tool` WIT interface.
+
+## Toolchain
+
+```bash
+rustup target add wasm32-wasip1
+cargo install cargo-component
+```
+
+## Build
+
+```bash
+cargo component build --release
+# produces target/wasm32-wasip1/release/{{project-name}}.wasm
+```
+
+## Install
+
+```bash
+mkdir -p ~/.wayland/plugins/{{project-name}}
+cp plugin.toml ~/.wayland/plugins/{{project-name}}/
+cp target/wasm32-wasip1/release/{{project-name}}.wasm \
+   ~/.wayland/plugins/{{project-name}}/
+```
+
+The engine scans `~/.wayland/plugins/` at startup and loads any directory
+that contains a `plugin.toml` with `[runtime] kind = "wasm"`.
+
+## Signing (production)
+
+Unsigned plugins load only when the engine is started with `--allow-unsigned`.
+For production:
+
+```bash
+# Generate sig (ed25519 over component bytes)
+wayland plugin sign --key ~/.wayland/signing-key ~/.wayland/plugins/{{project-name}}/
+```
+
+Authorize the matching public key for the engine by copying its `.pub`
+file into `~/.wayland/trusted-keys/`.
+
+## Test
+
+```bash
+cargo test
+```
+
+## Editing the plugin
+
+The hello-world body lives in `src/lib.rs::Plugin::execute`. Update the
+input schema in `Plugin::schema()` to match the JSON your `execute()`
+expects, then update `Plugin::metadata()` so the host can present the
+tool correctly to the LLM.

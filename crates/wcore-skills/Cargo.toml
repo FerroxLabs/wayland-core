@@ -1,0 +1,59 @@
+[package]
+name = "wcore-skills"
+description = "Skills system for wayland-core: named prompt snippets with tool orchestration, permissions, hooks, and MCP integration"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+wcore-types.workspace          = true
+wcore-config.workspace         = true
+wcore-dispatch.workspace       = true
+wcore-mcp.workspace            = true
+wcore-memory.workspace         = true
+wcore-observability.workspace  = true
+
+serde.workspace        = true
+serde_json.workspace   = true
+serde_yaml.workspace   = true
+tokio.workspace        = true
+uuid.workspace         = true
+futures.workspace      = true
+async-trait.workspace  = true
+anyhow.workspace       = true
+thiserror.workspace    = true
+glob.workspace         = true
+dirs.workspace         = true
+regex.workspace        = true
+notify.workspace       = true
+tracing.workspace      = true
+unicode-width.workspace = true
+lru.workspace          = true
+chrono.workspace       = true
+parking_lot.workspace  = true
+
+[target.'cfg(unix)'.dependencies]
+libc.workspace = true
+
+# Audit W-3 fix: restrict bundled-skill dir/file permissions on Windows.
+# windows-sys is already a workspace dep (see wcore-sandbox/Cargo.toml).
+# We need Win32_Security for SetSecurityInfo + related types.
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = [
+  "Win32_Foundation",
+  "Win32_Security",
+  "Win32_Storage_FileSystem",
+  "Win32_System_Threading",
+] }
+
+workspace-hack.workspace = true
+
+[dev-dependencies]
+wcore-mcp = { workspace = true, features = ["test-utils"] }
+wcore-memory = { workspace = true, features = ["test-utils"] }
+tempfile.workspace   = true
+rstest.workspace     = true
+serial_test.workspace = true
+filetime = "0.2"

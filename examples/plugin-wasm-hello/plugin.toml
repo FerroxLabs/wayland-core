@@ -1,0 +1,27 @@
+# v0.6.5 Task 4.4 — manifest for the canonical hello plugin.
+#
+# Mirrors `crates/wcore-plugin-api/src/manifest.rs`'s `PluginManifest`.
+# Read at runtime by `WasmPluginRunner::load` to decide which Gated*
+# vs Deny* host adapters to wire (composition root in
+# `crates/wcore-plugin-wasm/src/runner.rs::LoadedWasmPlugin::adapter_selection`).
+
+[plugin]
+name = "hello"
+version = "0.1.0"
+description = "Canonical Wayland WASM Tool plugin — returns 'Hello, {input}!'."
+entry = "plugin_wasm_hello.wasm"
+authors = ["Wayland <plugins@wayland.dev>"]
+license = "Apache-2.0"
+
+[permissions]
+register_tools = true
+tool_namespace = "hello"
+
+# This plugin uses no host capabilities; every Gated* vs Deny* defaults to
+# Deny under Path X (see runner.rs module docs). We list them explicitly
+# for clarity.
+allow_network = false
+allow_workspace_read = false
+allow_workspace_write = false
+allow_tool_invoke = false
+permitted_secrets = []

@@ -1,0 +1,12 @@
+id: arith-04-divide-exact
+category: arithmetic
+prompt: |
+  Compute 144 / 12. Reply with the integer answer only.
+match_strategy:
+  kind: numeric_equal
+  expected: 12.0
+  tolerance: 0.0
+rationale: |
+  Exact integer division. Tolerance 0 because the result is exact.
+allowed_tools: []
+timeout_secs: 15

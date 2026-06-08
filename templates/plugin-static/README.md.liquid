@@ -1,0 +1,56 @@
+# {{project-name}}
+
+{{description}}
+
+A Wayland **static plugin** — compiled into the engine binary at build time,
+discovered at startup via `inventory::submit!`.
+
+## Build
+
+```bash
+cargo build --release
+```
+
+## Test
+
+```bash
+cargo test
+```
+
+## Install
+
+Static plugins compile **into** the engine binary. To use this plugin in
+Wayland-Core:
+
+1. Clone Wayland-Core: `git clone https://github.com/FerroxLabs/wayland-core`
+2. Add this crate as a path dep in the workspace `Cargo.toml`:
+   ```toml
+   [workspace]
+   members = [
+       # ...existing members...
+       "../{{project-name}}",
+   ]
+   ```
+3. Add a runtime dep on this crate from `crates/wcore-agent/Cargo.toml` (so
+   `inventory::submit!` actually links in):
+   ```toml
+   [dependencies]
+   {{project-name}} = { path = "../../../{{project-name}}" }
+   ```
+4. Rebuild the engine: `cargo install --path crates/wcore-cli`
+
+For **dynamic** (on-disk, no engine rebuild required) plugins, use the
+`plugin-wasm` or `plugin-subprocess` template instead.
+
+## Layout
+
+- `src/lib.rs` — `Plugin` impl + `PluginFactory` + `inventory::submit!` slot.
+- The manifest is embedded inline as a TOML string; edit the `[permissions]`
+  and capability blocks to declare what your plugin needs.
+
+## API version
+
+This template depends on `wcore-plugin-api` via git tag `v0.6.5-wayland-base`
+(`PLUGIN_API_VERSION = "1.0"`). The host rejects plugins whose
+`plugin_api_version` does not match. When `wcore-plugin-api` is published to
+crates.io, the dep will be converted to a plain version string.

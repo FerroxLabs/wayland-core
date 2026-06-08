@@ -1,0 +1,7 @@
+id: bad-namemismatch-1
+category: name-vs-filename
+skill_body: hello-namemismatch-1
+trace_fixture: expensive-bad-1.json
+expected_outcome: bad
+rationale: |
+  Name claims 'calculator' but file is 'hello-namemismatch-1', off-topic description (calculator matches name not body), empty when_to_use, stale model pin. 4+ fails + expensive trace.

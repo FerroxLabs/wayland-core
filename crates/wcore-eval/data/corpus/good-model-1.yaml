@@ -1,0 +1,6 @@
+id: good-model-1
+category: healthy
+skill_body: hello-model-1
+expected_outcome: good
+rationale: |
+  Healthy model-pin variant 1 — model is in the W10A allowlist.

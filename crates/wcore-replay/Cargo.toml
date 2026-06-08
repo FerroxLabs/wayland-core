@@ -1,0 +1,21 @@
+[package]
+name = "wcore-replay"
+description = "Trace + replay + diff for wayland-core session debugging (M5.2)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+# M5.2 — session-trace replay + diff. Zero internal deps; the schema is
+# defined here (not in wcore-observability) because observability spans
+# are infrastructure-side while these events are agent-flow primitives.
+
+[dependencies]
+serde.workspace      = true
+serde_json.workspace = true
+thiserror.workspace  = true
+wcore-config.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

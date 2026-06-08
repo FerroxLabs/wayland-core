@@ -1,0 +1,40 @@
+{
+  "archetype": "05-mcp-multi-server",
+  "generated": "2026-05-24",
+  "sanitization_rules": ".blackboard/E2E-FIXTURE-SANITIZATION-2026-05-24.md",
+  "source_description": "Derived from Sean's machine state where wayland-image-generation MCP server was configured with a real Google Gemini API key in its env block. Expanded to 4 MCP servers to cover stdio (deferred + eager), SSE transport, and the top_k curation path. All keys and Bearer tokens redacted.",
+  "files_sanitized": [
+    {
+      "path": "config.toml",
+      "source_type": "wayland-core TOML config with 4 MCP servers",
+      "redactions": [
+        "mcp.servers.image-gen.env.WAYLAND_IMG_API_KEY (was AIza... pattern)",
+        "mcp.servers.remote-sse.headers.Authorization (was real Bearer token)",
+        "all <<WAYLAND_HOME>> path placeholders"
+      ],
+      "preserved": [
+        "deferred=true/false per-server settings",
+        "SSE transport config structure",
+        "mcp.curation.k=10 setting",
+        "4 distinct server entries covering all transport types"
+      ]
+    },
+    {
+      "path": "cron/jobs.json",
+      "source_type": "synthetic cron job using Skill target (not slash/channel)",
+      "redactions": ["job id"],
+      "preserved": ["skill target kind (tests the Skill arm of Target enum — F-014 class)"]
+    }
+  ],
+  "uuid_map": {
+    "00000000-0005-4000-8000-000000000005": "original was UUID v4 (synthetic)"
+  },
+  "bug_classes_targeted": ["B-9", "B-3", "B-5"],
+  "findings_covered": ["F-016", "F-010", "F-035", "F-014", "F-021"],
+  "scenarios_that_replay_this": [
+    "T6: boot with sealed env (env_clear + allowlist) — assert image-gen server gets only its fixture env block, not host WAYLAND_IMG_API_KEY",
+    "T6: boot — assert ready event lists 4 MCP servers; deferred ones appear in tool list as name-only stubs",
+    "T6: cron list — assert skill target job appears with target.kind=skill",
+    "T6: MCP curation top_k=10 — assert tool list is capped at 10 entries per turn"
+  ]
+}

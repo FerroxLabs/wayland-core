@@ -1,0 +1,2001 @@
+//! Diagnostics surfaces — `/doctor`, `/cost`, and `/memory`.
+//!
+//! Three compact diagnostic screens implemented as one [`Surface`] with a
+//! mode switch:
+//!
+//! - **Doctor** — system dependency + environment health. Runs the real
+//!   [`crate::doctor::collect`] probe on `on_enter` and the `r` re-run
+//!   key; the same data that `wayland-core --doctor` prints.
+//! - **Cost** — session token usage and spend, read live from
+//!   [`App::cost`] (populated by the protocol bridge from
+//!   [`ProtocolEvent::SessionCost`] events).
+//!   ([`wcore_protocol::events::ProtocolEvent::SessionCost`])
+//! - **Memory** — what long-term memory holds, scanned from the project
+//!   memory directory via `wcore_memory::store`, with a real delete.
+//!
+//! ## Live wiring (Wave 3)
+//!
+//! - **Doctor** — `on_enter` and the `r` key call [`crate::doctor::collect`]
+//!   on a short-lived worker thread (the probe is async; the surface
+//!   hooks are sync), then convert its [`crate::doctor::CheckResult`] rows
+//!   into [`HealthCheck`] rows.
+//! - **Cost** — `render` reads [`App::cost`] every frame, so cost events
+//!   that stream in while the screen is open are reflected immediately.
+//! - **Memory** — `on_enter` scans `auto_memory_dir(cwd)` with
+//!   `scan_memory_files`; the `d` key deletes the selected entry with
+//!   `delete_memory` and re-scans.
+//!
+//! The OSC-9 desktop-notification helper ([`osc9_notification`]) and the
+//! terminal-bell helper ([`terminal_bell`]) are pure string functions so
+//! they are unit-testable without a terminal.
+
+use ratatui::Frame;
+use ratatui::crossterm::event::{KeyCode, KeyEvent};
+use ratatui::layout::{Constraint, Layout, Rect};
+use ratatui::style::{Modifier, Style};
+use ratatui::text::{Line, Span};
+use ratatui::widgets::{Paragraph, Wrap};
+use wcore_agent::health::{self, HealthStatus, ProviderHealth as AgentProviderHealth};
+
+use crate::doctor;
+use crate::tui::app::{App, TurnRole};
+use crate::tui::surfaces::{Surface, SurfaceAction, SurfaceId};
+use crate::tui::theme::Theme;
+use crate::tui::turn_element::TurnElement;
+use crate::tui::widgets::panel;
+
+// ─────────────────────────────────────────────────────────────────────────
+// OSC-9 / terminal-bell notification helpers
+// ─────────────────────────────────────────────────────────────────────────
+
+/// The reason a desktop notification is being posted.
+///
+/// The TUI fires a notification only when the terminal is unfocused —
+/// either an action is needed from the user, or a long task has just
+/// finished — so the message copy is keyed to one of these two cases.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NotifyKind {
+    /// A tool call is waiting on the user's approval.
+    ApprovalNeeded,
+    /// A long-running task finished while the user was away.
+    TaskFinished,
+}
+
+impl NotifyKind {
+    /// The human-readable notification body for this kind.
+    fn message(self) -> &'static str {
+        match self {
+            NotifyKind::ApprovalNeeded => "wayland-core: approval needed",
+            NotifyKind::TaskFinished => "wayland-core: task finished",
+        }
+    }
+}
+
+/// Build an [OSC-9] desktop-notification escape sequence.
+///
+/// OSC-9 is the widely supported "post a desktop notification" control
+/// string: `ESC ] 9 ; <text> BEL`. iTerm2, kitty, WezTerm, and Ghostty
+/// all honor it; terminals that don't simply ignore the sequence (it is
+/// inert text to them), so emitting it is always safe.
+///
+/// The returned string is meant to be written straight to the terminal.
+/// Callers should only emit it when the terminal is unfocused — see
+/// [`maybe_notify`].
+///
+/// [OSC-9]: https://iterm2.com/documentation-escape-codes.html
+pub fn osc9_notification(kind: NotifyKind) -> String {
+    // ESC ] 9 ; <message> BEL
+    format!("\x1b]9;{}\x07", kind.message())
+}
+
+/// The terminal-bell control character (`BEL`, `0x07`).
+///
+/// A bare bell is the lowest-common-denominator attention signal for
+/// terminals with no OSC-9 support. It is paired with the OSC-9 sequence
+/// by [`maybe_notify`] so a notification lands on every terminal.
+pub fn terminal_bell() -> &'static str {
+    "\x07"
+}
+
+/// Build the full attention signal for an unfocused terminal: an OSC-9
+/// desktop notification followed by a terminal bell.
+///
+/// Returns `None` when `focused` is `true` — a focused user is already
+/// looking at the TUI and does not need a desktop interrupt. This is the
+/// single decision point the TUI event loop calls; keeping the
+/// focused-check here means no call site can forget it.
+pub fn maybe_notify(kind: NotifyKind, focused: bool) -> Option<String> {
+    if focused {
+        return None;
+    }
+    Some(format!("{}{}", osc9_notification(kind), terminal_bell()))
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// Local view models — populated by Wave 2 (see module docs)
+// ─────────────────────────────────────────────────────────────────────────
+
+/// Outcome of one `/doctor` health check.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HealthState {
+    /// The check passed.
+    Ok,
+    /// The check failed in a non-fatal way (an optional dependency).
+    Warn,
+    /// The check failed and the dependency is required.
+    Fail,
+}
+
+impl HealthState {
+    /// The status glyph painted in the left column.
+    fn glyph(self) -> &'static str {
+        match self {
+            HealthState::Ok => "●",
+            HealthState::Warn => "▲",
+            HealthState::Fail => "✕",
+        }
+    }
+
+    /// The theme color for this state.
+    fn color(self, t: &Theme) -> ratatui::style::Color {
+        match self {
+            HealthState::Ok => t.success,
+            HealthState::Warn => t.warning,
+            HealthState::Fail => t.error,
+        }
+    }
+}
+
+/// One row of the `/doctor` report — a named check and its outcome.
+#[derive(Debug, Clone)]
+pub struct HealthCheck {
+    /// Human-readable check label (e.g. `Anthropic API key`).
+    pub label: String,
+    /// The check outcome.
+    pub state: HealthState,
+    /// A short detail string (the discovered value or the failure hint).
+    pub detail: String,
+}
+
+impl HealthCheck {
+    /// Construct a health check row.
+    pub fn new(label: impl Into<String>, state: HealthState, detail: impl Into<String>) -> Self {
+        Self {
+            label: label.into(),
+            state,
+            detail: detail.into(),
+        }
+    }
+}
+
+/// The `/doctor` report: system dependency + environment health.
+///
+/// Built from a live [`crate::doctor::collect`] run by [`run_doctor`];
+/// `Default` is the empty report shown for the one frame before the first
+/// `on_enter` collection lands.
+#[derive(Debug, Clone, Default)]
+pub struct DoctorReport {
+    /// The individual check rows, in display order.
+    pub checks: Vec<HealthCheck>,
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// v0.9.0 Wave-4 E2 — extended `/doctor` sections
+// ─────────────────────────────────────────────────────────────────────────
+
+/// One well-known external-service tool and the env var that gates it.
+///
+/// The agent's `ToolRegistry::register` silently skips any tool whose
+/// `is_available()` returns false (the audit pattern for `Null*Backend`
+/// defaults), so the host's running registry shows only enabled tools.
+/// The `/doctor` surface lists the *full* set of host-known tools — both
+/// enabled and not — so a user can see which env var would upgrade a
+/// disabled tool. This table is the static catalog of those gates.
+///
+/// The list is intentionally curated, not auto-discovered: the only
+/// thing a user needs to know from `/doctor` is "set X to enable Y."
+struct ToolGate {
+    /// The tool's host-facing name (matches `Tool::name()`).
+    name: &'static str,
+    /// The env var the host probes to construct a real backend (e.g.
+    /// `DISCORD_BOT_TOKEN`). When set, the tool is enabled.
+    env_var: &'static str,
+}
+
+/// The curated list of external-service tools and their gating env vars.
+/// Source of truth: each tool's `tool_backends::build_*` in `wcore-agent`.
+const TOOL_GATES: &[ToolGate] = &[
+    ToolGate {
+        name: "github",
+        env_var: "GITHUB_TOKEN",
+    },
+    ToolGate {
+        name: "gitlab",
+        env_var: "GITLAB_TOKEN",
+    },
+    ToolGate {
+        name: "linear",
+        env_var: "LINEAR_API_KEY",
+    },
+    ToolGate {
+        name: "notion",
+        env_var: "NOTION_TOKEN",
+    },
+    ToolGate {
+        name: "discord",
+        env_var: "DISCORD_BOT_TOKEN",
+    },
+    ToolGate {
+        name: "spotify",
+        env_var: "SPOTIFY_REFRESH_TOKEN",
+    },
+    ToolGate {
+        name: "google_meet",
+        env_var: "GOOGLE_OAUTH_CLIENT_ID",
+    },
+    ToolGate {
+        name: "web_search",
+        env_var: "BRAVE_API_KEY",
+    },
+    ToolGate {
+        name: "web_fetch",
+        env_var: "WAYLAND_FETCH_ALLOWED",
+    },
+    ToolGate {
+        name: "transcribe_audio",
+        env_var: "OPENAI_API_KEY",
+    },
+    ToolGate {
+        name: "vision_analyze",
+        env_var: "OPENAI_API_KEY",
+    },
+    ToolGate {
+        name: "tts",
+        env_var: "OPENAI_API_KEY",
+    },
+];
+
+/// One row of the per-tool backend-status section.
+#[derive(Debug, Clone)]
+pub struct ToolStatusRow {
+    /// The tool's host-facing name.
+    pub name: String,
+    /// Whether the env var that gates the tool is set (non-empty).
+    pub enabled: bool,
+    /// The gating env var the user would set to enable the tool.
+    pub env_var: String,
+}
+
+/// Snapshot of one recent engine error for the `/doctor` errors panel.
+#[derive(Debug, Clone)]
+pub struct RecentErrorRow {
+    /// Index of the system turn in `app.session.turns` this came from
+    /// (debug aid — never rendered).
+    pub turn_index: usize,
+    /// The error message (already pre-formatted by `protocol_bridge`).
+    pub message: String,
+}
+
+/// Snapshot of the token budget for the active model.
+#[derive(Debug, Clone, Default)]
+pub struct TokenBudgetView {
+    /// The active model identifier (e.g. `claude-sonnet-4-6`).
+    pub model: String,
+    /// Tokens currently occupying the context window.
+    pub used_tokens: u64,
+    /// Total context-window size.
+    pub window_size: u64,
+    /// Output tokens for the current/last turn.
+    pub last_turn_output: u64,
+}
+
+/// Run the real [`crate::doctor::collect`] probe and convert its result
+/// into a [`DoctorReport`] of [`HealthCheck`] rows.
+///
+/// `doctor::collect` is async (its `which` probes spawn subprocesses),
+/// but the surface's `on_enter` / `handle_key` hooks are synchronous and
+/// run inside the TUI's tokio runtime — so `block_on` cannot be called
+/// here. The probe is therefore driven on a short-lived worker thread
+/// with its own current-thread runtime, and this fn blocks joining it.
+/// The probe is a handful of `which` calls, so the stall is sub-100ms.
+fn run_doctor() -> DoctorReport {
+    let raw = std::thread::spawn(|| {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("doctor probe runtime");
+        rt.block_on(doctor::collect())
+    })
+    .join()
+    .expect("doctor probe thread");
+
+    DoctorReport {
+        checks: raw.checks.iter().map(health_check_from).collect(),
+    }
+}
+
+/// Run the live provider-health probes on a short-lived worker thread,
+/// using the same thread-per-call pattern as [`run_doctor`].
+///
+/// The async [`wcore_agent::health::provider_health_check_all`] races
+/// four 5-second-capped HTTP probes in parallel, so the worst-case
+/// stall on the calling (sync) `on_enter` is one timeout, ~5s.
+fn run_provider_health() -> Vec<AgentProviderHealth> {
+    std::thread::spawn(|| {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("provider-health probe runtime");
+        rt.block_on(health::provider_health_check_all())
+    })
+    .join()
+    .expect("provider-health probe thread")
+}
+
+/// Build the per-tool backend-status snapshot by walking [`TOOL_GATES`]
+/// and probing each tool's gating env var. A tool is "enabled" only
+/// when its env var is set and non-empty (matching the
+/// `build_*_backend` resolver's empty-string-is-no-key semantic).
+fn scan_tool_status() -> Vec<ToolStatusRow> {
+    TOOL_GATES
+        .iter()
+        .map(|gate| ToolStatusRow {
+            name: gate.name.to_string(),
+            enabled: env_set_nonempty(gate.env_var),
+            env_var: gate.env_var.to_string(),
+        })
+        .collect()
+}
+
+/// Return true iff the named env var is set AND non-empty. Empty
+/// strings are treated as "unset" — matching the agent's tool-backend
+/// resolvers (e.g. `build_discord_backend` returns `None` for both
+/// `Err` and an empty value).
+fn env_set_nonempty(name: &str) -> bool {
+    matches!(std::env::var(name), Ok(v) if !v.is_empty())
+}
+
+/// Extract the last 10 engine errors from the session transcript.
+/// The protocol bridge pushes each `ProtocolEvent::Error` as a
+/// `TurnRole::System` turn whose first markdown element starts with
+/// one of the marker prefixes this detector matches.
+///
+/// v0.9.1.1 H3: previously matched on `Error [` (the pre-fix shape).
+/// After the H3 fix, the bridge maps known internal classes
+/// (`engine_error`, `engine_panic`, `rate_limit`) to user-facing
+/// labels (`Error:`, `Turn ended unexpectedly:`, `Rate limit:`).
+/// Unknown classes fall back to the `Error [<code>]:` chip shape so
+/// new failure categories still surface here.
+fn collect_recent_errors(app: &App) -> Vec<RecentErrorRow> {
+    const MAX: usize = 10;
+    let mut rows: Vec<RecentErrorRow> = Vec::new();
+    for (i, turn) in app.session.turns.iter().enumerate().rev() {
+        if turn.role != TurnRole::System {
+            continue;
+        }
+        // Walk the typed elements (Markdown only — Thinking/Sources are
+        // not error carriers). Match any of the known error-line
+        // shapes the protocol bridge emits.
+        for element in &turn.elements {
+            if let TurnElement::Markdown(text) = element
+                && (text.starts_with("Error [")
+                    || text.starts_with("Error:")
+                    || text.starts_with("Turn ended unexpectedly")
+                    || text.starts_with("Rate limit")
+                    || text.starts_with("Budget exceeded "))
+            {
+                rows.push(RecentErrorRow {
+                    turn_index: i,
+                    message: text.clone(),
+                });
+                break;
+            }
+        }
+        if rows.len() >= MAX {
+            break;
+        }
+    }
+    rows
+}
+
+/// Build the token-budget snapshot from `App` state.
+fn token_budget_view(app: &App) -> TokenBudgetView {
+    TokenBudgetView {
+        model: app.config.model.clone(),
+        used_tokens: app.context.used_tokens,
+        window_size: app.context.window_size,
+        last_turn_output: app.session.tokens_out,
+    }
+}
+
+/// Convert a [`HealthStatus`] into a [`HealthState`] so the doctor row
+/// helpers (glyph + theme color) work uniformly across the four
+/// sections.
+fn health_state_from_status(status: HealthStatus) -> HealthState {
+    match status {
+        HealthStatus::Green => HealthState::Ok,
+        HealthStatus::Yellow => HealthState::Warn,
+        HealthStatus::Red => HealthState::Fail,
+    }
+}
+
+/// Convert one [`crate::doctor::CheckResult`] into a [`HealthCheck`] row.
+///
+/// `Pass` → `Ok`; `Fail` → `Fail`; `Warn`/`Skip`/`Manual` → `Warn`
+/// (none of those flip the doctor exit code, so they are non-fatal in the
+/// surface's three-state model). The detail string mirrors what
+/// `--doctor` prints for that row.
+fn health_check_from(c: &doctor::CheckResult) -> HealthCheck {
+    use doctor::Outcome;
+    let (state, detail) = match &c.outcome {
+        Outcome::Pass { detail } => (HealthState::Ok, detail.clone()),
+        Outcome::Fail { hints } => (
+            HealthState::Fail,
+            match hints.first() {
+                Some(h) => format!("not found — {h}"),
+                None => "not found".to_string(),
+            },
+        ),
+        Outcome::Warn { detail, .. } => (HealthState::Warn, detail.clone()),
+        Outcome::Skip { reason } => (HealthState::Warn, format!("skipped ({reason})")),
+        Outcome::Manual { hint } => (HealthState::Warn, hint.clone()),
+    };
+    HealthCheck::new(c.label, state, detail)
+}
+
+/// One long-term memory entry shown in the `/memory` report.
+#[derive(Debug, Clone)]
+pub struct MemoryItem {
+    /// A stable id shown in the UI — the entry filename (e.g.
+    /// `user_role.md`).
+    pub id: String,
+    /// The full on-disk path to the entry, used by the delete affordance.
+    pub path: std::path::PathBuf,
+    /// The memory category (`user`, `feedback`, `project`, `reference`).
+    pub category: String,
+    /// A one-line summary of what the entry holds.
+    pub summary: String,
+}
+
+/// The `/memory` report: what long-term memory currently holds.
+#[derive(Debug, Clone, Default)]
+pub struct MemoryReport {
+    /// The stored memory entries, newest first.
+    pub items: Vec<MemoryItem>,
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// DiagnosticsSurface
+// ─────────────────────────────────────────────────────────────────────────
+
+/// Which of the three diagnostic screens is in view.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DiagMode {
+    /// `/doctor` — provider / key / MCP health.
+    Doctor,
+    /// `/cost` — session token usage and spend.
+    Cost,
+    /// `/memory` — long-term memory contents + delete.
+    Memory,
+}
+
+impl DiagMode {
+    /// The three modes in tab order.
+    const ALL: [DiagMode; 3] = [DiagMode::Doctor, DiagMode::Cost, DiagMode::Memory];
+
+    /// The slash-command label for this mode.
+    fn label(self) -> &'static str {
+        match self {
+            DiagMode::Doctor => "/doctor",
+            DiagMode::Cost => "/cost",
+            DiagMode::Memory => "/memory",
+        }
+    }
+}
+
+/// The `/doctor` `/cost` `/memory` diagnostics surface.
+///
+/// All three screens live here because they are small, related, and
+/// share the same chrome. Local UI state (the active mode, the `/memory`
+/// selection cursor, the doctor + memory report data) lives on this
+/// struct; the `/cost` data is read live from [`App::cost`] at render
+/// time, so cost events that arrive while the screen is open show
+/// immediately.
+pub struct DiagnosticsSurface {
+    /// Which screen is currently shown.
+    mode: DiagMode,
+    /// The `/doctor` report — refreshed by [`run_doctor`] on `on_enter`
+    /// and the `r` re-run key.
+    doctor: DoctorReport,
+    /// The `/memory` report — scanned from the project memory dir on
+    /// `on_enter` and after a delete.
+    memory: MemoryReport,
+    /// The selected row in the `/memory` list, for the delete affordance.
+    memory_cursor: usize,
+    /// Two-step delete confirmation arm. `Some(idx)` means a first `d` was
+    /// pressed on row `idx` and a second `d` on that same row will perform
+    /// the irreversible disk delete. Any cursor move or other key clears it
+    /// back to `None`, so the destructive action always needs an explicit,
+    /// in-place second confirmation. (D043)
+    delete_armed: Option<usize>,
+    /// Whether the `/doctor` report has been collected at least once.
+    /// `false` for the single frame between construction and the first
+    /// `on_enter`, when the report is still empty.
+    doctor_collected: bool,
+    /// v0.9.0 W4 E2 — live provider health rows (Anthropic / OpenAI /
+    /// Gemini / Groq), refreshed on `on_enter` + the `r` key.
+    provider_health: Vec<AgentProviderHealth>,
+    /// v0.9.0 W4 E2 — per-tool backend status rows derived from
+    /// `TOOL_GATES` + a live env-var probe. Cheap to recompute, but
+    /// caching it keeps the render path free of `std::env::var` calls.
+    tool_status: Vec<ToolStatusRow>,
+}
+
+impl Default for DiagnosticsSurface {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl DiagnosticsSurface {
+    /// Construct the surface on the `/doctor` screen. The doctor + memory
+    /// reports are populated by `on_enter` (the doctor probe is async and
+    /// the memory scan touches the filesystem — neither belongs in a
+    /// constructor).
+    pub fn new() -> Self {
+        Self {
+            mode: DiagMode::Doctor,
+            doctor: DoctorReport::default(),
+            memory: MemoryReport::default(),
+            memory_cursor: 0,
+            delete_armed: None,
+            doctor_collected: false,
+            provider_health: Vec::new(),
+            tool_status: Vec::new(),
+        }
+    }
+
+    /// The currently displayed diagnostic mode.
+    pub fn mode(&self) -> DiagMode {
+        self.mode
+    }
+
+    /// Run the live `doctor` probe and store its report. Also refreshes
+    /// the v0.9.0 W4 E2 provider-health probes (real HTTP) + the cheap
+    /// env-driven tool-status snapshot.
+    fn refresh_doctor(&mut self) {
+        self.doctor = run_doctor();
+        self.provider_health = run_provider_health();
+        self.tool_status = scan_tool_status();
+        self.doctor_collected = true;
+    }
+
+    /// Re-scan the project long-term memory directory into the `/memory`
+    /// report, clamping the selection cursor so it never dangles past the
+    /// new (possibly shorter) list.
+    fn refresh_memory(&mut self) {
+        self.memory = scan_memory();
+        let last = self.memory.items.len().saturating_sub(1);
+        self.memory_cursor = self.memory_cursor.min(last);
+        // A re-scan changes the list under the cursor; never carry a stale
+        // delete arm across it.
+        self.delete_armed = None;
+    }
+
+    /// Move the `/memory` selection cursor by `delta`, clamped to the
+    /// list bounds.
+    fn move_memory_cursor(&mut self, delta: isize) {
+        if self.memory.items.is_empty() {
+            return;
+        }
+        let last = self.memory.items.len() as isize - 1;
+        let next = (self.memory_cursor as isize + delta).clamp(0, last);
+        self.memory_cursor = next as usize;
+        // Moving the selection cancels any pending delete confirmation so
+        // the armed `d` can never fire against a different row.
+        self.delete_armed = None;
+    }
+
+    /// Handle the `/memory` delete key (`d` / `Delete`) with a two-step,
+    /// in-place confirmation so a single keystroke can never erase a fact
+    /// from disk (D043).
+    ///
+    /// - First press on a row arms the delete: it records the row index and
+    ///   returns `None` (no disk write, no notice). The render path shows a
+    ///   "press d again to delete - cannot be undone" warning while armed.
+    /// - Second press, while still armed on the **same** row, performs the
+    ///   irreversible delete and returns the result notice.
+    ///
+    /// Any cursor move or other key clears the arm (handled at those call
+    /// sites), so the destructive second `d` is always explicit and local.
+    fn handle_delete_key(&mut self) -> Option<String> {
+        // Nothing selectable - cannot arm or delete.
+        if self.memory.items.is_empty() {
+            self.delete_armed = None;
+            return None;
+        }
+        match self.delete_armed {
+            // Armed on the row still under the cursor: confirm + delete.
+            Some(idx) if idx == self.memory_cursor => {
+                self.delete_armed = None;
+                self.delete_selected_memory()
+            }
+            // Not armed (or armed on a now-stale row): arm this row only.
+            // The first keypress must never delete.
+            _ => {
+                self.delete_armed = Some(self.memory_cursor);
+                None
+            }
+        }
+    }
+
+    /// Delete the currently selected memory entry from disk and re-scan.
+    /// Returns a human-readable result line (success or failure) for the
+    /// caller to surface as a system notice, or `None` if the list is
+    /// empty (nothing to delete).
+    ///
+    /// This is the unconditional disk-write primitive; the two-step
+    /// confirmation gate lives in [`Self::handle_delete_key`].
+    fn delete_selected_memory(&mut self) -> Option<String> {
+        let item = self.memory.items.get(self.memory_cursor)?;
+        let path = item.path.clone();
+        let id = item.id.clone();
+        let result = match wcore_memory::store::delete_memory(&path) {
+            Ok(()) => format!("Deleted memory entry `{id}`"),
+            Err(e) => format!("Failed to delete memory entry `{id}`: {e}"),
+        };
+        self.refresh_memory();
+        Some(result)
+    }
+}
+
+/// Scan the project long-term memory directory into a [`MemoryReport`].
+///
+/// The directory is `auto_memory_dir(cwd)` — the per-project flat-file
+/// memory store. A missing directory (no memory yet) or an unresolvable
+/// base dir yields an empty report; failures degrade to empty rather than
+/// erroring, since the diagnostics screen is read-only.
+fn scan_memory() -> MemoryReport {
+    let Ok(cwd) = std::env::current_dir() else {
+        return MemoryReport::default();
+    };
+    let Some(dir) = wcore_memory::paths::auto_memory_dir(&cwd) else {
+        return MemoryReport::default();
+    };
+    let headers = wcore_memory::store::scan_memory_files(&dir).unwrap_or_default();
+    MemoryReport {
+        items: headers
+            .into_iter()
+            .map(|h| MemoryItem {
+                id: h.filename,
+                path: h.file_path,
+                category: h
+                    .memory_type
+                    .map(|t| t.as_str().to_string())
+                    .unwrap_or_else(|| "unknown".to_string()),
+                summary: h
+                    .description
+                    .unwrap_or_else(|| "(no description)".to_string()),
+            })
+            .collect(),
+    }
+}
+
+impl Surface for DiagnosticsSurface {
+    fn id(&self) -> SurfaceId {
+        SurfaceId::Diagnostics
+    }
+
+    /// Refresh both the doctor probe and the memory scan when the surface
+    /// becomes active, so re-entering the screen always shows live data.
+    fn on_enter(&mut self, _app: &mut App) {
+        self.refresh_doctor();
+        self.refresh_memory();
+    }
+
+    fn render(&mut self, frame: &mut Frame, area: Rect, app: &App, theme: &Theme) {
+        if area.height == 0 || area.width == 0 {
+            return;
+        }
+
+        // A mode-switcher header row, then the active screen's body.
+        let [header_area, body_area] =
+            Layout::vertical([Constraint::Length(1), Constraint::Min(0)]).areas(area);
+
+        render_mode_switcher(frame, header_area, self.mode, theme);
+
+        match self.mode {
+            DiagMode::Doctor => self.render_doctor(frame, body_area, app, theme),
+            DiagMode::Cost => self.render_cost(frame, body_area, app, theme),
+            DiagMode::Memory => self.render_memory(frame, body_area, theme),
+        }
+    }
+
+    fn handle_key(&mut self, key: KeyEvent, app: &mut App) -> SurfaceAction {
+        // Any key other than the delete key disarms a pending delete
+        // confirmation, so the destructive second `d` is only ever reachable
+        // by pressing `d` twice in a row on the same row (D043). The delete
+        // arm/fire decision itself is made in `handle_delete_key`.
+        let is_delete_key = matches!(key.code, KeyCode::Char('d') | KeyCode::Delete);
+        if !is_delete_key {
+            self.delete_armed = None;
+        }
+        match key.code {
+            // Mode switching: number keys + Tab cycle.
+            KeyCode::Char('1') => {
+                self.mode = DiagMode::Doctor;
+                SurfaceAction::None
+            }
+            KeyCode::Char('2') => {
+                self.mode = DiagMode::Cost;
+                SurfaceAction::None
+            }
+            KeyCode::Char('3') => {
+                self.mode = DiagMode::Memory;
+                SurfaceAction::None
+            }
+            KeyCode::Tab => {
+                let idx = DiagMode::ALL
+                    .iter()
+                    .position(|&m| m == self.mode)
+                    .unwrap_or(0);
+                self.mode = DiagMode::ALL[(idx + 1) % DiagMode::ALL.len()];
+                SurfaceAction::None
+            }
+            KeyCode::BackTab => {
+                let idx = DiagMode::ALL
+                    .iter()
+                    .position(|&m| m == self.mode)
+                    .unwrap_or(0);
+                let len = DiagMode::ALL.len();
+                self.mode = DiagMode::ALL[(idx + len - 1) % len];
+                SurfaceAction::None
+            }
+            // `/doctor` re-run — re-run the live probe in place.
+            KeyCode::Char('r') if self.mode == DiagMode::Doctor => {
+                self.refresh_doctor();
+                SurfaceAction::None
+            }
+            // `/memory` list navigation.
+            KeyCode::Up | KeyCode::Char('k') if self.mode == DiagMode::Memory => {
+                self.move_memory_cursor(-1);
+                SurfaceAction::None
+            }
+            KeyCode::Down | KeyCode::Char('j') if self.mode == DiagMode::Memory => {
+                self.move_memory_cursor(1);
+                SurfaceAction::None
+            }
+            // `/memory` delete — two-step confirmation. The first `d` arms
+            // the delete and shows a warning in the render; only a second
+            // `d` on the same row writes to disk + surfaces a notice (D043).
+            KeyCode::Char('d') | KeyCode::Delete if self.mode == DiagMode::Memory => {
+                if let Some(notice) = self.handle_delete_key() {
+                    app.session.turns.push(crate::tui::app::TurnView {
+                        role: crate::tui::app::TurnRole::System,
+                        elements: vec![crate::tui::turn_element::TurnElement::Markdown(notice)],
+                    });
+                }
+                SurfaceAction::None
+            }
+            _ => SurfaceAction::None,
+        }
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// Rendering helpers — one per screen
+// ─────────────────────────────────────────────────────────────────────────
+
+/// Render the three-tab mode switcher header.
+fn render_mode_switcher(frame: &mut Frame, area: Rect, active: DiagMode, t: &Theme) {
+    let mut spans: Vec<Span> = Vec::new();
+    for (i, mode) in DiagMode::ALL.iter().enumerate() {
+        if i > 0 {
+            spans.push(Span::styled("  ", Style::default().bg(t.surface)));
+        }
+        let style = if *mode == active {
+            Style::default()
+                .bg(t.surface)
+                .fg(t.orange)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().bg(t.surface).fg(t.text_muted)
+        };
+        spans.push(Span::styled(format!(" {} ", mode.label()), style));
+    }
+    let bar = Paragraph::new(Line::from(spans)).style(Style::default().bg(t.surface));
+    frame.render_widget(bar, area);
+}
+
+/// Render a "no data yet" empty-state line into `area`.
+fn render_empty(frame: &mut Frame, area: Rect, t: &Theme, msg: &str) {
+    let para = Paragraph::new(Line::from(Span::styled(
+        msg.to_string(),
+        Style::default().fg(t.text_muted),
+    )))
+    .wrap(Wrap { trim: true });
+    frame.render_widget(para, area);
+}
+
+/// Push a dim, bold section heading line onto `lines`. Used by the
+/// extended `/doctor` view to delimit its five sections.
+fn push_section_header(lines: &mut Vec<Line<'static>>, t: &Theme, label: &str) {
+    lines.push(Line::from(Span::styled(
+        label.to_string(),
+        Style::default()
+            .fg(t.text_muted)
+            .add_modifier(Modifier::BOLD),
+    )));
+}
+
+/// Build one tri-state status row: glyph + colored label + dim detail.
+/// Shared between the system, provider, and tool sections of `/doctor`
+/// so every row paints with the same shape and palette.
+fn status_row(state: HealthState, label: &str, detail: &str, t: &Theme) -> Line<'static> {
+    let color = state.color(t);
+    Line::from(vec![
+        Span::styled(
+            format!(" {} ", state.glyph()),
+            Style::default().fg(color).add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(format!("{:<22}", label), Style::default().fg(t.text)),
+        Span::styled(detail.to_string(), Style::default().fg(t.text_dim)),
+    ])
+}
+
+impl DiagnosticsSurface {
+    /// Render the `/doctor` screen — five stacked sections inside one
+    /// panel:
+    ///   1. System dependency rows (from `doctor::collect`)
+    ///   2. Provider health rows (Anthropic / OpenAI / Gemini / Groq)
+    ///   3. Per-tool backend status (from `TOOL_GATES` + env probe)
+    ///   4. Recent engine errors (last 10 system error turns)
+    ///   5. Token budget for the active model
+    fn render_doctor(&self, frame: &mut Frame, area: Rect, app: &App, t: &Theme) {
+        let block = panel(
+            " /doctor — system · providers · tools · errors · tokens ",
+            t,
+        );
+        let inner = block.inner(area);
+        frame.render_widget(block, area);
+        if inner.height == 0 {
+            return;
+        }
+
+        // The empty report shown for the single frame before the first
+        // `on_enter` probe lands.
+        if !self.doctor_collected && self.doctor.checks.is_empty() {
+            render_empty(frame, inner, t, "Running system checks…");
+            return;
+        }
+
+        let mut lines: Vec<Line> = Vec::new();
+
+        // ── 1. System dependency rows ───────────────────────────────
+        push_section_header(&mut lines, t, "SYSTEM");
+        for check in &self.doctor.checks {
+            lines.push(status_row(check.state, &check.label, &check.detail, t));
+        }
+
+        // ── 2. Provider health rows ─────────────────────────────────
+        lines.push(Line::from(""));
+        push_section_header(&mut lines, t, "PROVIDERS");
+        if self.provider_health.is_empty() {
+            lines.push(Line::from(Span::styled(
+                "  no provider probes yet",
+                Style::default().fg(t.text_muted),
+            )));
+        } else {
+            for ph in &self.provider_health {
+                lines.push(status_row(
+                    health_state_from_status(ph.status),
+                    &ph.name,
+                    &ph.detail,
+                    t,
+                ));
+            }
+        }
+
+        // ── 3. Per-tool backend status ──────────────────────────────
+        lines.push(Line::from(""));
+        push_section_header(&mut lines, t, "TOOLS");
+        for row in &self.tool_status {
+            let (state, label) = if row.enabled {
+                (HealthState::Ok, "yes")
+            } else {
+                (HealthState::Warn, "no")
+            };
+            let detail = if row.enabled {
+                format!("{label} · env {}", row.env_var)
+            } else {
+                format!("{label} · set {} to enable", row.env_var)
+            };
+            lines.push(status_row(state, &row.name, &detail, t));
+        }
+
+        // ── 4. Recent engine errors ─────────────────────────────────
+        lines.push(Line::from(""));
+        push_section_header(&mut lines, t, "RECENT ERRORS");
+        let errors = collect_recent_errors(app);
+        if errors.is_empty() {
+            lines.push(Line::from(Span::styled(
+                "  none — clean session",
+                Style::default().fg(t.text_muted),
+            )));
+        } else {
+            for err in &errors {
+                // The protocol bridge prefixes each line; we just show
+                // the message as-is so the user sees what the engine
+                // surfaced.
+                lines.push(Line::from(vec![
+                    Span::styled(" ✕ ", Style::default().fg(t.error)),
+                    Span::styled(err.message.clone(), Style::default().fg(t.text_dim)),
+                ]));
+            }
+        }
+
+        // ── 5. Token budget ─────────────────────────────────────────
+        lines.push(Line::from(""));
+        push_section_header(&mut lines, t, "TOKEN BUDGET");
+        let budget = token_budget_view(app);
+        if budget.window_size == 0 && budget.used_tokens == 0 && budget.last_turn_output == 0 {
+            lines.push(Line::from(Span::styled(
+                "  no usage recorded yet",
+                Style::default().fg(t.text_muted),
+            )));
+        } else {
+            let model_label = if budget.model.is_empty() {
+                "(unknown)".to_string()
+            } else {
+                budget.model.clone()
+            };
+            lines.push(Line::from(vec![
+                Span::styled("  model     ", Style::default().fg(t.text_dim)),
+                Span::styled(model_label, Style::default().fg(t.text)),
+            ]));
+            let remaining = budget.window_size.saturating_sub(budget.used_tokens);
+            lines.push(Line::from(vec![
+                Span::styled("  context   ", Style::default().fg(t.text_dim)),
+                Span::styled(
+                    format!(
+                        "{} / {} ({} remaining)",
+                        budget.used_tokens, budget.window_size, remaining
+                    ),
+                    Style::default().fg(t.text),
+                ),
+            ]));
+            lines.push(Line::from(vec![
+                Span::styled("  last turn ", Style::default().fg(t.text_dim)),
+                Span::styled(
+                    format!("↑ {} output tokens", budget.last_turn_output),
+                    Style::default().fg(t.text),
+                ),
+            ]));
+        }
+
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(
+            "  r re-run · 1 doctor · 2 cost · 3 memory · esc workspace",
+            Style::default().fg(t.text_muted),
+        )));
+
+        let para = Paragraph::new(lines)
+            .style(Style::default().bg(t.surface))
+            .wrap(Wrap { trim: true });
+        frame.render_widget(para, inner);
+    }
+
+    /// Render the `/cost` screen: total spend + a per-turn breakdown.
+    ///
+    /// Reads [`App::cost`] live, so a `SessionCost` event that arrives
+    /// while this screen is open shows on the next frame.
+    fn render_cost(&self, frame: &mut Frame, area: Rect, app: &App, t: &Theme) {
+        let block = panel(" /cost — session token usage · spend ", t);
+        let inner = block.inner(area);
+        frame.render_widget(block, area);
+        if inner.height == 0 {
+            return;
+        }
+
+        // v0.9.1.1 H4: previously this gated on `!c.per_turn.is_empty()`,
+        // which left the diagnostics screen showing "No cost recorded
+        // yet" while the status bar (which reads only `total_cost_usd`)
+        // showed the real session spend. Disagreement arose whenever
+        // `total_cost_usd > 0` but `per_turn = []` — most commonly a
+        // session that emitted `SessionCost` without any per-turn rows
+        // pushed (e.g. an Esc-cancelled first turn). Treat any
+        // `Some(c)` as a recorded cost; an empty per-turn breakdown is
+        // rendered as the total alone, with a "(no per-turn rows
+        // available)" footnote so the absence is explicit. Both
+        // surfaces now share a single source of truth: `app.cost`.
+        let cost = match app.cost.as_ref() {
+            Some(c) => c,
+            None => {
+                render_empty(
+                    frame,
+                    inner,
+                    t,
+                    "No cost recorded yet — spend appears here once a session runs.",
+                );
+                return;
+            }
+        };
+
+        let mut lines: Vec<Line> = Vec::new();
+
+        // The session aggregate, accented.
+        lines.push(Line::from(vec![
+            Span::styled("  session  ", Style::default().fg(t.text_dim)),
+            Span::styled(cost.session_id.clone(), Style::default().fg(t.text)),
+        ]));
+        lines.push(Line::from(vec![
+            Span::styled("  total    ", Style::default().fg(t.text_dim)),
+            Span::styled(
+                format!("${:.4}", cost.total_cost_usd),
+                Style::default().fg(t.orange).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                format!("   ({} turns)", cost.per_turn.len()),
+                Style::default().fg(t.text_muted),
+            ),
+        ]));
+        lines.push(Line::from(""));
+
+        // Per-turn rows.
+        if cost.per_turn.is_empty() {
+            // v0.9.1.1 H4 — `total > 0` with no per-turn breakdown is a
+            // valid state (the engine emitted `SessionCost` from a path
+            // where no `per_turn_costs.push` ran, e.g. a cancelled first
+            // turn). Show the total alone with a footnote so the
+            // absence is explicit, rather than the previous "No cost
+            // recorded yet" lie.
+            lines.push(Line::from(Span::styled(
+                "  (no per-turn breakdown available for this session)",
+                Style::default().fg(t.text_muted),
+            )));
+        } else {
+            for row in &cost.per_turn {
+                lines.push(Line::from(vec![
+                    Span::styled(
+                        format!("  turn {:>3}  ", row.turn),
+                        Style::default().fg(t.text_muted),
+                    ),
+                    Span::styled(
+                        format!("{:<24}", format!("{} · {}", row.provider, row.model)),
+                        Style::default().fg(t.text_dim),
+                    ),
+                    Span::styled(format!("${:.4}", row.cost_usd), Style::default().fg(t.text)),
+                ]));
+            }
+        }
+
+        let para = Paragraph::new(lines)
+            .style(Style::default().bg(t.surface))
+            .wrap(Wrap { trim: true });
+        frame.render_widget(para, inner);
+    }
+
+    /// Render the `/memory` screen: the stored entries + a delete
+    /// affordance on the selected row.
+    fn render_memory(&self, frame: &mut Frame, area: Rect, t: &Theme) {
+        let block = panel(" /memory — long-term memory contents ", t);
+        let inner = block.inner(area);
+        frame.render_widget(block, area);
+        if inner.height == 0 {
+            return;
+        }
+
+        if self.memory.items.is_empty() {
+            render_empty(
+                frame,
+                inner,
+                t,
+                "Long-term memory is empty — entries appear here as they accumulate.",
+            );
+            return;
+        }
+
+        let mut lines: Vec<Line> = Vec::new();
+        for (i, item) in self.memory.items.iter().enumerate() {
+            let selected = i == self.memory_cursor;
+            let marker = if selected { "›" } else { " " };
+            let row_style = if selected {
+                Style::default().bg(t.surface_hover)
+            } else {
+                Style::default().bg(t.surface)
+            };
+            lines.push(Line::from(vec![
+                Span::styled(format!(" {marker} "), row_style.fg(t.orange)),
+                Span::styled(
+                    format!("[{:<9}] ", item.category),
+                    row_style.fg(t.text_muted),
+                ),
+                Span::styled(item.summary.clone(), row_style.fg(t.text)),
+            ]));
+        }
+
+        lines.push(Line::from(""));
+
+        // When a delete is armed on the selected row, the footer becomes a
+        // loud confirmation prompt instead of the normal hint. The first `d`
+        // only arms; this warning makes the destructive second `d` explicit
+        // (D043).
+        if self.delete_armed == Some(self.memory_cursor) {
+            let armed_id = self
+                .memory
+                .items
+                .get(self.memory_cursor)
+                .map(|item| item.id.as_str())
+                .unwrap_or("this entry");
+            lines.push(Line::from(Span::styled(
+                format!("  press d again to delete {armed_id} · cannot be undone"),
+                Style::default().fg(t.error).add_modifier(Modifier::BOLD),
+            )));
+            lines.push(Line::from(Span::styled(
+                "  any other key cancels",
+                Style::default().fg(t.text_muted),
+            )));
+        } else {
+            lines.push(Line::from(Span::styled(
+                "  ↑/↓ select · d delete · 1 doctor · 2 cost · 3 memory · esc workspace",
+                Style::default().fg(t.text_muted),
+            )));
+        }
+
+        let para = Paragraph::new(lines).style(Style::default().bg(t.surface));
+        frame.render_widget(para, inner);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+    use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+    use super::*;
+    use crate::tui::app::App;
+    use crate::tui::theme::Theme;
+
+    fn key(code: KeyCode) -> KeyEvent {
+        KeyEvent::new(code, KeyModifiers::NONE)
+    }
+
+    /// Render `surface` into an 80×24 `TestBackend` and return the buffer
+    /// as a single flattened string for substring assertions.
+    fn render_to_string(surface: &mut DiagnosticsSurface) -> String {
+        let app = App::new();
+        let theme = Theme::hearth();
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).expect("test terminal");
+        terminal
+            .draw(|f| surface.render(f, f.area(), &app, &theme))
+            .expect("render diagnostics");
+        let buf = terminal.backend().buffer();
+        let mut out = String::new();
+        for y in 0..24 {
+            for x in 0..80 {
+                out.push_str(buf[(x, y)].symbol());
+            }
+            out.push('\n');
+        }
+        out
+    }
+
+    // -- OSC-9 / bell helpers ----------------------------------------------
+
+    #[test]
+    fn osc9_notification_wraps_message_in_the_control_string() {
+        let s = osc9_notification(NotifyKind::ApprovalNeeded);
+        // ESC ] 9 ; <text> BEL — exact framing.
+        assert!(s.starts_with("\x1b]9;"), "missing OSC-9 prefix: {s:?}");
+        assert!(s.ends_with('\x07'), "missing BEL terminator: {s:?}");
+        assert!(
+            s.contains("approval needed"),
+            "approval copy missing: {s:?}"
+        );
+    }
+
+    #[test]
+    fn osc9_notification_copy_differs_per_kind() {
+        let approval = osc9_notification(NotifyKind::ApprovalNeeded);
+        let finished = osc9_notification(NotifyKind::TaskFinished);
+        assert_ne!(approval, finished);
+        assert!(finished.contains("task finished"));
+    }
+
+    #[test]
+    fn terminal_bell_is_the_bel_byte() {
+        assert_eq!(terminal_bell(), "\x07");
+    }
+
+    #[test]
+    fn maybe_notify_is_silent_when_terminal_is_focused() {
+        // A focused user is already looking at the TUI — no interrupt.
+        assert!(maybe_notify(NotifyKind::ApprovalNeeded, true).is_none());
+        assert!(maybe_notify(NotifyKind::TaskFinished, true).is_none());
+    }
+
+    #[test]
+    fn maybe_notify_emits_osc9_plus_bell_when_unfocused() {
+        let signal = maybe_notify(NotifyKind::TaskFinished, false)
+            .expect("unfocused terminal should get a notification");
+        // The OSC-9 sequence first, then the standalone bell.
+        assert!(signal.starts_with("\x1b]9;"), "OSC-9 missing: {signal:?}");
+        assert!(signal.contains("task finished"));
+        // Two BEL bytes total: the OSC-9 terminator + the trailing bell.
+        assert_eq!(signal.matches('\x07').count(), 2, "bell pairing wrong");
+    }
+
+    // -- mode switching ----------------------------------------------------
+
+    #[test]
+    fn surface_starts_on_doctor() {
+        let s = DiagnosticsSurface::new();
+        assert_eq!(s.mode(), DiagMode::Doctor);
+        assert_eq!(s.id(), SurfaceId::Diagnostics);
+    }
+
+    #[test]
+    fn number_keys_switch_modes() {
+        let mut s = DiagnosticsSurface::new();
+        let mut app = App::new();
+        s.handle_key(key(KeyCode::Char('2')), &mut app);
+        assert_eq!(s.mode(), DiagMode::Cost);
+        s.handle_key(key(KeyCode::Char('3')), &mut app);
+        assert_eq!(s.mode(), DiagMode::Memory);
+        s.handle_key(key(KeyCode::Char('1')), &mut app);
+        assert_eq!(s.mode(), DiagMode::Doctor);
+    }
+
+    #[test]
+    fn tab_cycles_through_the_three_modes() {
+        let mut s = DiagnosticsSurface::new();
+        let mut app = App::new();
+        s.handle_key(key(KeyCode::Tab), &mut app);
+        assert_eq!(s.mode(), DiagMode::Cost);
+        s.handle_key(key(KeyCode::Tab), &mut app);
+        assert_eq!(s.mode(), DiagMode::Memory);
+        s.handle_key(key(KeyCode::Tab), &mut app);
+        // Wraps back to the first mode.
+        assert_eq!(s.mode(), DiagMode::Doctor);
+        s.handle_key(key(KeyCode::BackTab), &mut app);
+        assert_eq!(s.mode(), DiagMode::Memory);
+    }
+
+    // -- /doctor screen ----------------------------------------------------
+
+    #[test]
+    fn health_check_from_maps_outcomes_to_states() {
+        use crate::doctor::{CheckResult, Outcome};
+        // Pass → Ok.
+        let pass = health_check_from(&CheckResult {
+            label: "binary version",
+            outcome: Outcome::Pass {
+                detail: "v0.6.1".into(),
+            },
+        });
+        assert_eq!(pass.state, HealthState::Ok);
+        assert_eq!(pass.detail, "v0.6.1");
+
+        // Fail → Fail, detail carries the first hint.
+        let fail = health_check_from(&CheckResult {
+            label: "chromium browser",
+            outcome: Outcome::Fail {
+                hints: vec!["apt install chromium-browser".into()],
+            },
+        });
+        assert_eq!(fail.state, HealthState::Fail);
+        assert!(fail.detail.contains("apt install chromium-browser"));
+
+        // Warn / Skip / Manual all degrade to the non-fatal Warn state.
+        for outcome in [
+            Outcome::Warn {
+                detail: "not set".into(),
+                hints: vec![],
+            },
+            Outcome::Skip {
+                reason: "Linux-only".into(),
+            },
+            Outcome::Manual {
+                hint: "check System Settings".into(),
+            },
+        ] {
+            let hc = health_check_from(&CheckResult {
+                label: "x",
+                outcome,
+            });
+            assert_eq!(hc.state, HealthState::Warn);
+        }
+    }
+
+    #[test]
+    fn doctor_renders_live_probe_rows_after_on_enter() {
+        // `on_enter` runs the real `doctor::collect` probe. Every doctor
+        // run includes the structural `binary version` row, so the live
+        // report must show it — and no placeholder banner.
+        let mut s = DiagnosticsSurface::new();
+        s.on_enter(&mut App::new());
+        assert!(
+            s.doctor_collected,
+            "on_enter must collect the doctor report"
+        );
+        assert!(
+            !s.doctor.checks.is_empty(),
+            "live doctor report must have rows"
+        );
+        let out = render_to_string(&mut s);
+        assert!(out.contains("/doctor"), "doctor header missing");
+        assert!(out.contains("binary version"), "version check row missing");
+        assert!(
+            !out.contains("Wave 2") && !out.contains("representative report"),
+            "live report must not show the placeholder banner"
+        );
+    }
+
+    #[test]
+    fn doctor_re_run_key_refreshes_in_place() {
+        let mut s = DiagnosticsSurface::new();
+        let mut app = App::new();
+        // `r` runs the probe directly and consumes the key (no command).
+        match s.handle_key(key(KeyCode::Char('r')), &mut app) {
+            SurfaceAction::None => {}
+            other => panic!("expected re-run to be inert, got {other:?}"),
+        }
+        assert!(s.doctor_collected, "the `r` key must run the probe");
+        assert!(!s.doctor.checks.is_empty(), "re-run must populate rows");
+    }
+
+    // -- /cost screen ------------------------------------------------------
+
+    #[test]
+    fn cost_shows_an_empty_state_with_no_data() {
+        let mut s = DiagnosticsSurface::new();
+        s.handle_key(key(KeyCode::Char('2')), &mut App::new());
+        let out = render_to_string(&mut s);
+        assert!(out.contains("/cost"), "cost header missing");
+        assert!(
+            out.contains("No cost recorded yet"),
+            "empty-state copy missing"
+        );
+    }
+
+    #[test]
+    fn cost_status_bar_and_doctor_view_agree_v0911() {
+        // v0.9.1.1 H4 regression — the bug-hunter observed the status
+        // bar at `$0.0178` while `/cost` showed "No cost recorded yet"
+        // in the same session. Disagreement arose because `/cost`
+        // gated on `!per_turn.is_empty()` while the status bar reads
+        // only `total_cost_usd`. Both surfaces must now agree: when
+        // `app.cost` is `Some(c)`, both render `c.total_cost_usd`.
+        use crate::tui::app::SessionCostView;
+        let mut s = DiagnosticsSurface::new();
+        s.handle_key(key(KeyCode::Char('2')), &mut App::new());
+        let mut app = App::new();
+        // The exact bug-hunter state: total > 0, per_turn empty (a
+        // cancelled first turn that never pushed a `per_turn_costs`
+        // row but where `fire_on_session_end` still emitted
+        // `SessionCost`).
+        app.cost = Some(SessionCostView {
+            session_id: "h4-regression".into(),
+            total_cost_usd: 0.0178,
+            per_turn: vec![],
+        });
+        let out = render_with_app(&mut s, &app);
+        // The total appears verbatim — same field the status bar uses.
+        assert!(
+            out.contains("$0.0178"),
+            "total spend missing — /cost disagrees with status bar: {out}"
+        );
+        // The misleading empty-state copy is gone.
+        assert!(
+            !out.contains("No cost recorded yet"),
+            "stale empty-state copy fired on a populated cost view: {out}"
+        );
+        // The absence of per-turn rows is acknowledged explicitly.
+        assert!(
+            out.contains("no per-turn breakdown"),
+            "missing footnote for empty per_turn: {out}"
+        );
+    }
+
+    #[test]
+    fn cost_renders_total_and_per_turn_rows_from_app_cost() {
+        use crate::tui::app::{SessionCostView, TurnCostView};
+        let mut s = DiagnosticsSurface::new();
+        s.handle_key(key(KeyCode::Char('2')), &mut App::new());
+
+        // The `/cost` screen reads `App::cost` live.
+        let mut app = App::new();
+        app.cost = Some(SessionCostView {
+            session_id: "a3f8c2".into(),
+            total_cost_usd: 0.0731,
+            per_turn: vec![
+                TurnCostView {
+                    turn: 1,
+                    model: "claude-sonnet-4-6".into(),
+                    provider: "anthropic".into(),
+                    cost_usd: 0.0412,
+                },
+                TurnCostView {
+                    turn: 2,
+                    model: "claude-sonnet-4-6".into(),
+                    provider: "anthropic".into(),
+                    cost_usd: 0.0319,
+                },
+            ],
+        });
+        let out = render_with_app(&mut s, &app);
+        assert!(out.contains("a3f8c2"), "session id missing");
+        assert!(out.contains("$0.0731"), "total spend missing");
+        assert!(out.contains("turn   1"), "turn 1 row missing");
+        assert!(out.contains("turn   2"), "turn 2 row missing");
+        assert!(out.contains("anthropic"), "provider missing");
+    }
+
+    // -- /memory screen ----------------------------------------------------
+
+    #[test]
+    fn memory_shows_an_empty_state_with_no_entries() {
+        let mut s = DiagnosticsSurface::new();
+        s.handle_key(key(KeyCode::Char('3')), &mut App::new());
+        let out = render_to_string(&mut s);
+        assert!(out.contains("/memory"), "memory header missing");
+        assert!(
+            out.contains("Long-term memory is empty"),
+            "empty-state copy missing"
+        );
+    }
+
+    #[test]
+    fn memory_lists_entries_and_marks_the_selection() {
+        let mut s = sample_memory_surface();
+        s.handle_key(key(KeyCode::Char('3')), &mut App::new());
+        let out = render_to_string(&mut s);
+        assert!(out.contains("user role"), "first entry missing");
+        assert!(out.contains("project context"), "second entry missing");
+        // The selection marker sits on the first row by default.
+        assert!(out.contains("› [user"), "selection marker missing");
+    }
+
+    #[test]
+    fn memory_cursor_moves_within_bounds() {
+        let mut s = sample_memory_surface();
+        s.handle_key(key(KeyCode::Char('3')), &mut App::new());
+        // Down moves to the second entry.
+        s.handle_key(key(KeyCode::Down), &mut App::new());
+        assert_eq!(s.memory_cursor, 1);
+        // Down again is clamped at the last entry (two items total).
+        s.handle_key(key(KeyCode::Down), &mut App::new());
+        assert_eq!(s.memory_cursor, 1);
+        // Up returns to the first; Up again is clamped at 0.
+        s.handle_key(key(KeyCode::Up), &mut App::new());
+        assert_eq!(s.memory_cursor, 0);
+        s.handle_key(key(KeyCode::Up), &mut App::new());
+        assert_eq!(s.memory_cursor, 0);
+    }
+
+    #[test]
+    fn memory_delete_removes_the_file_and_pushes_a_notice() {
+        // `delete_selected_memory` performs a real `delete_memory` on the
+        // entry's on-disk path. Back it with a tempfile so the delete is
+        // observable.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let path = tmp.path().join("user_role.md");
+        std::fs::write(&path, "---\ntype: user\n---\nbody").expect("seed file");
+        assert!(path.exists());
+
+        let mut s = DiagnosticsSurface::new();
+        s.memory = MemoryReport {
+            items: vec![MemoryItem {
+                id: "user_role.md".into(),
+                path: path.clone(),
+                category: "user".into(),
+                summary: "user role".into(),
+            }],
+        };
+        s.handle_key(key(KeyCode::Char('3')), &mut App::new());
+
+        // First `d` only arms — the file must still exist and no notice
+        // fires. The destructive write requires a second confirmation.
+        let mut app = App::new();
+        let armed = s.handle_key(key(KeyCode::Char('d')), &mut app);
+        assert!(matches!(armed, SurfaceAction::None));
+        assert!(path.exists(), "first d must NOT delete (arm only)");
+        assert!(
+            app.session.turns.is_empty(),
+            "first d must not push a notice"
+        );
+
+        // Second `d` on the same row performs the irreversible delete.
+        let action = s.handle_key(key(KeyCode::Char('d')), &mut app);
+        assert!(matches!(action, SurfaceAction::None));
+        // The file is gone and a system notice was pushed.
+        assert!(!path.exists(), "second d must remove the file from disk");
+        assert_eq!(app.session.turns.len(), 1);
+        assert!(
+            app.session.turns[0].text().contains("Deleted memory entry"),
+            "delete must surface a system notice"
+        );
+    }
+
+    #[test]
+    fn memory_delete_is_inert_when_the_list_is_empty() {
+        let mut s = DiagnosticsSurface::new();
+        s.handle_key(key(KeyCode::Char('3')), &mut App::new());
+        let mut app = App::new();
+        match s.handle_key(key(KeyCode::Char('d')), &mut app) {
+            SurfaceAction::None => {}
+            _ => panic!("empty-list delete must be inert (expected SurfaceAction::None)"),
+        }
+        assert!(
+            app.session.turns.is_empty(),
+            "empty-list delete must not push a notice"
+        );
+    }
+
+    // -- D043: two-step delete confirmation (render-asserted) --------------
+
+    /// Build a tempdir-backed surface on the `/memory` screen whose single
+    /// entry points at a real on-disk file, so a delete is observable. The
+    /// `tempfile::TempDir` is returned so the caller keeps it alive.
+    fn armed_delete_surface() -> (DiagnosticsSurface, std::path::PathBuf, tempfile::TempDir) {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let path = tmp.path().join("user_role.md");
+        std::fs::write(&path, "---\ntype: user\n---\nbody").expect("seed file");
+        let mut s = DiagnosticsSurface::new();
+        s.memory = MemoryReport {
+            items: vec![MemoryItem {
+                id: "user_role.md".into(),
+                path: path.clone(),
+                category: "user".into(),
+                summary: "user role".into(),
+            }],
+        };
+        s.handle_key(key(KeyCode::Char('3')), &mut App::new());
+        (s, path, tmp)
+    }
+
+    #[test]
+    fn first_d_arms_and_renders_the_confirm_prompt_without_deleting() {
+        let (mut s, path, _tmp) = armed_delete_surface();
+
+        // The idle hint is shown before arming; the warning is not.
+        let before = render_with_app(&mut s, &App::new());
+        assert!(
+            before.contains("d delete"),
+            "idle hint must show the plain delete affordance"
+        );
+        assert!(
+            !before.contains("press d again"),
+            "no confirm prompt before the first d"
+        );
+
+        let mut app = App::new();
+        s.handle_key(key(KeyCode::Char('d')), &mut app);
+
+        // First d must NOT delete and must NOT push a notice.
+        assert!(path.exists(), "first d must not delete the file");
+        assert!(
+            app.session.turns.is_empty(),
+            "first d must not push a system notice"
+        );
+
+        // The RENDERED footer now carries the destructive-confirm warning.
+        let after = render_with_app(&mut s, &app);
+        assert!(
+            after.contains("press d again to delete"),
+            "first d must render the confirm prompt, got:\n{after}"
+        );
+        assert!(
+            after.contains("cannot be undone"),
+            "confirm prompt must warn the action is irreversible"
+        );
+    }
+
+    #[test]
+    fn second_d_confirms_and_deletes() {
+        let (mut s, path, _tmp) = armed_delete_surface();
+        let mut app = App::new();
+
+        s.handle_key(key(KeyCode::Char('d')), &mut app); // arm
+        assert!(path.exists(), "arming must not delete");
+
+        s.handle_key(key(KeyCode::Char('d')), &mut app); // confirm
+        assert!(!path.exists(), "second d must delete the file from disk");
+        assert_eq!(app.session.turns.len(), 1, "delete must push one notice");
+        assert!(
+            app.session.turns[0].text().contains("Deleted memory entry"),
+            "confirmed delete must surface a system notice"
+        );
+
+        // After the delete the list is empty, so the warning is gone.
+        let after = render_with_app(&mut s, &app);
+        assert!(
+            !after.contains("press d again"),
+            "confirm prompt must clear after the delete fires"
+        );
+    }
+
+    #[test]
+    fn a_different_key_disarms_the_delete() {
+        let (mut s, path, _tmp) = armed_delete_surface();
+        let mut app = App::new();
+
+        s.handle_key(key(KeyCode::Char('d')), &mut app); // arm
+        let armed = render_with_app(&mut s, &app);
+        assert!(
+            armed.contains("press d again to delete"),
+            "first d must arm + render the prompt"
+        );
+
+        // A non-delete key (mode switch back to memory) must disarm.
+        s.handle_key(key(KeyCode::Char('3')), &mut app);
+        assert!(path.exists(), "disarming key must not delete");
+
+        let disarmed = render_with_app(&mut s, &app);
+        assert!(
+            !disarmed.contains("press d again"),
+            "a different key must clear the confirm prompt, got:\n{disarmed}"
+        );
+
+        // And a single `d` after disarming only re-arms (does NOT delete),
+        // proving the arm was truly reset rather than carried over.
+        s.handle_key(key(KeyCode::Char('d')), &mut app);
+        assert!(
+            path.exists(),
+            "the re-armed first d must not delete after a disarm"
+        );
+    }
+
+    #[test]
+    fn moving_the_cursor_disarms_the_delete() {
+        let mut s = sample_memory_surface();
+        s.handle_key(key(KeyCode::Char('3')), &mut App::new());
+        let mut app = App::new();
+
+        s.handle_key(key(KeyCode::Char('d')), &mut app); // arm row 0
+        assert_eq!(s.delete_armed, Some(0));
+
+        // Navigating to another row must cancel the arm so the next `d`
+        // cannot fire against the row that was originally selected.
+        s.handle_key(key(KeyCode::Down), &mut app);
+        assert_eq!(s.delete_armed, None, "cursor move must disarm");
+
+        let rendered = render_with_app(&mut s, &app);
+        assert!(
+            !rendered.contains("press d again"),
+            "moving the cursor must clear the confirm prompt"
+        );
+    }
+
+    #[test]
+    fn refresh_memory_clamps_a_stale_cursor() {
+        // A re-scan that shrinks the list must not leave the cursor
+        // dangling past the end. Drive it through a tempdir-backed scan
+        // so `refresh_memory` exercises the real scan path.
+        let mut s = sample_memory_surface();
+        s.move_memory_cursor(1);
+        assert_eq!(s.memory_cursor, 1);
+        // Directly shrink + re-clamp the way `refresh_memory` does.
+        s.memory = MemoryReport {
+            items: vec![MemoryItem {
+                id: "only.md".into(),
+                path: std::path::PathBuf::from("only.md"),
+                category: "user".into(),
+                summary: "the only entry".into(),
+            }],
+        };
+        let last = s.memory.items.len().saturating_sub(1);
+        s.memory_cursor = s.memory_cursor.min(last);
+        assert_eq!(s.memory_cursor, 0);
+    }
+
+    /// Render `surface` against an explicit `app` and flatten the buffer.
+    fn render_with_app(surface: &mut DiagnosticsSurface, app: &App) -> String {
+        let theme = Theme::hearth();
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).expect("test terminal");
+        terminal
+            .draw(|f| surface.render(f, f.area(), app, &theme))
+            .expect("render diagnostics");
+        let buf = terminal.backend().buffer();
+        let mut out = String::new();
+        for y in 0..24 {
+            for x in 0..80 {
+                out.push_str(buf[(x, y)].symbol());
+            }
+            out.push('\n');
+        }
+        out
+    }
+
+    /// Render a diagnostics surface into a tall buffer so the extended
+    /// `/doctor` view (5 sections) fits without overflow. The default
+    /// 80×24 terminal cuts off the bottom three sections; E2 tests that
+    /// assert on TOOLS / RECENT ERRORS / TOKEN BUDGET use this helper.
+    fn render_tall(surface: &mut DiagnosticsSurface, app: &App) -> String {
+        const W: u16 = 120;
+        const H: u16 = 80;
+        let theme = Theme::hearth();
+        let mut terminal = Terminal::new(TestBackend::new(W, H)).expect("test terminal");
+        terminal
+            .draw(|f| surface.render(f, f.area(), app, &theme))
+            .expect("render diagnostics");
+        let buf = terminal.backend().buffer();
+        let mut out = String::new();
+        for y in 0..H {
+            for x in 0..W {
+                out.push_str(buf[(x, y)].symbol());
+            }
+            out.push('\n');
+        }
+        out
+    }
+
+    // -- v0.9.0 W4 E2 — extended /doctor sections -------------------------
+
+    /// Per-test batch of env-var mutations. Takes the diagnostics env
+    /// lock on construction (so tests don't race on `std::env::set_var`)
+    /// and restores every changed key on drop. `std::sync::Mutex` is
+    /// not re-entrant, so each test takes one batch and calls
+    /// `set`/`unset` repeatedly — not a per-key guard.
+    struct EnvBatch {
+        priors: Vec<(&'static str, Option<String>)>,
+        _lock: std::sync::MutexGuard<'static, ()>,
+    }
+
+    use std::sync::Mutex;
+    static DIAG_ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    impl EnvBatch {
+        fn new() -> Self {
+            let lock = DIAG_ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+            Self {
+                priors: Vec::new(),
+                _lock: lock,
+            }
+        }
+
+        fn set(&mut self, key: &'static str, val: &str) {
+            self.priors.push((key, std::env::var(key).ok()));
+            // SAFETY: env mutations are serialized by `DIAG_ENV_LOCK`.
+            unsafe { std::env::set_var(key, val) };
+        }
+
+        fn unset(&mut self, key: &'static str) {
+            self.priors.push((key, std::env::var(key).ok()));
+            // SAFETY: env mutations are serialized by `DIAG_ENV_LOCK`.
+            unsafe { std::env::remove_var(key) };
+        }
+    }
+
+    impl Drop for EnvBatch {
+        fn drop(&mut self) {
+            for (key, prior) in self.priors.iter().rev() {
+                // SAFETY: env mutations are serialized by `DIAG_ENV_LOCK`.
+                match prior {
+                    Some(v) => unsafe { std::env::set_var(key, v) },
+                    None => unsafe { std::env::remove_var(key) },
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn doctor_lists_all_tools_with_backend_status() {
+        // The TOOLS section must include every entry in `TOOL_GATES`,
+        // each annotated with its current `enabled` state and the env
+        // var that gates it. A user reading /doctor must see "set X to
+        // enable Y" for any disabled tool. Uses a tall terminal so the
+        // tools section is not cut off below the system + provider rows.
+        let mut s = DiagnosticsSurface::new();
+        let mut app = App::new();
+        s.on_enter(&mut app);
+        let out = render_tall(&mut s, &app);
+        assert!(out.contains("TOOLS"), "TOOLS section header missing");
+        // Every gate must appear by name, paired with its env var.
+        for gate in TOOL_GATES {
+            assert!(
+                out.contains(gate.name),
+                "tool `{}` missing from /doctor output",
+                gate.name
+            );
+            assert!(
+                out.contains(gate.env_var),
+                "env var `{}` (for `{}`) missing from /doctor output",
+                gate.env_var,
+                gate.name
+            );
+        }
+    }
+
+    #[test]
+    fn doctor_shows_yellow_when_key_unset() {
+        // With no provider keys set, every provider row must render as
+        // Yellow with the "no key" detail string. The brand-yellow `▲`
+        // glyph is what HealthState::Warn paints.
+        let mut env = EnvBatch::new();
+        env.unset("ANTHROPIC_API_KEY");
+        env.unset("OPENAI_API_KEY");
+        env.unset("GEMINI_API_KEY");
+        env.unset("GROQ_API_KEY");
+
+        let mut s = DiagnosticsSurface::new();
+        s.on_enter(&mut App::new());
+
+        // All four probes must report Yellow.
+        assert_eq!(s.provider_health.len(), 4);
+        for ph in &s.provider_health {
+            assert_eq!(
+                ph.status,
+                wcore_agent::health::HealthStatus::Yellow,
+                "{} expected Yellow with no key, got {:?}",
+                ph.name,
+                ph.status
+            );
+            assert_eq!(ph.detail, "no key");
+        }
+
+        // The rendered surface must carry the `no key` detail copy on
+        // every provider row.
+        let out = render_to_string(&mut s);
+        assert!(
+            out.contains("PROVIDERS"),
+            "PROVIDERS section header missing"
+        );
+        for name in ["Anthropic", "OpenAI", "Gemini", "Groq"] {
+            assert!(
+                out.contains(name),
+                "provider `{name}` missing from /doctor output"
+            );
+        }
+        assert!(
+            out.contains("no key"),
+            "yellow detail copy must reach the rendered surface"
+        );
+    }
+
+    #[test]
+    fn doctor_provider_health_times_out_at_5s() {
+        // A wedged provider must NOT stall /doctor past the configured
+        // 5s health-check cap. We point `ANTHROPIC_API_BASE` at a TCP
+        // listener that accepts and never replies, set the api key so
+        // the probe is exercised (not skipped as Yellow), then assert
+        // the whole `on_enter` returns inside 10s (5s cap + slack for
+        // CI noise + the other three probes' connect-failures).
+        use std::time::Instant;
+        use tokio::io::AsyncReadExt;
+        use tokio::net::TcpListener;
+
+        // Spawn the sink listener on a worker thread (the surface's
+        // `on_enter` is sync; we need the listener live for the whole
+        // duration of the probe).
+        let listener = std::thread::spawn(|| {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("rt");
+            rt.block_on(async {
+                let l = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+                let addr = l.local_addr().expect("addr");
+                tokio::spawn(async move {
+                    loop {
+                        if let Ok((mut sock, _)) = l.accept().await {
+                            let mut buf = [0u8; 1024];
+                            let _ = sock.read(&mut buf).await;
+                            // Park forever — slowloris shape.
+                            std::future::pending::<()>().await;
+                        }
+                    }
+                });
+                addr.port()
+            })
+        })
+        .join()
+        .expect("listener thread");
+
+        let mut env = EnvBatch::new();
+        env.set(
+            "ANTHROPIC_API_BASE",
+            &format!("http://127.0.0.1:{listener}"),
+        );
+        env.set("ANTHROPIC_API_KEY", "sk-ant-test");
+        env.unset("OPENAI_API_KEY");
+        env.unset("GEMINI_API_KEY");
+        env.unset("GROQ_API_KEY");
+
+        let mut s = DiagnosticsSurface::new();
+        let started = Instant::now();
+        s.on_enter(&mut App::new());
+        let elapsed = started.elapsed();
+
+        // The 5s cap holds — generous slack for slow CI.
+        assert!(
+            elapsed < std::time::Duration::from_secs(15),
+            "/doctor on_enter must respect the 5s health-probe cap (took {elapsed:?})"
+        );
+
+        // The Anthropic row must be Red with an unreachable detail.
+        let anth = s
+            .provider_health
+            .iter()
+            .find(|p| p.name == "Anthropic")
+            .expect("Anthropic probe must run");
+        assert_eq!(anth.status, wcore_agent::health::HealthStatus::Red);
+        assert!(
+            anth.detail.starts_with("unreachable:"),
+            "anthropic detail must mark unreachable: {}",
+            anth.detail
+        );
+    }
+
+    #[test]
+    fn doctor_recent_errors_pulls_from_session_turns() {
+        use crate::tui::app::{TurnRole, TurnView};
+        let mut s = DiagnosticsSurface::new();
+        let mut app = App::new();
+        // Seed two error turns + one non-error system turn (must be
+        // ignored by the filter).
+        app.session.turns.push(TurnView {
+            role: TurnRole::System,
+            elements: vec![TurnElement::Markdown("Error [E001]: rate limited".into())],
+        });
+        app.session.turns.push(TurnView {
+            role: TurnRole::System,
+            elements: vec![TurnElement::Markdown("Note: cache miss".into())],
+        });
+        app.session.turns.push(TurnView {
+            role: TurnRole::System,
+            elements: vec![TurnElement::Markdown("Error [E002]: invalid model".into())],
+        });
+        s.on_enter(&mut app);
+        let out = render_tall(&mut s, &app);
+        assert!(out.contains("RECENT ERRORS"), "errors header missing");
+        assert!(out.contains("E001"), "first error missing");
+        assert!(out.contains("E002"), "second error missing");
+        // The non-error system turn must NOT appear in the panel.
+        assert!(
+            !out.contains("cache miss"),
+            "non-error system turn leaked into errors panel"
+        );
+    }
+
+    #[test]
+    fn doctor_token_budget_renders_from_app_context() {
+        let mut s = DiagnosticsSurface::new();
+        let mut app = App::new();
+        app.config.model = "claude-sonnet-4-6".into();
+        app.context.used_tokens = 12_500;
+        app.context.window_size = 200_000;
+        app.session.tokens_out = 421;
+        s.on_enter(&mut app);
+        let out = render_tall(&mut s, &app);
+        assert!(out.contains("TOKEN BUDGET"), "budget header missing");
+        assert!(out.contains("claude-sonnet-4-6"), "model label missing");
+        assert!(out.contains("12500"), "used tokens missing");
+        assert!(out.contains("200000"), "window size missing");
+        assert!(out.contains("187500"), "remaining tokens missing");
+        assert!(out.contains("421"), "last-turn output tokens missing");
+    }
+
+    /// A diagnostics surface preloaded with two memory entries.
+    fn sample_memory_surface() -> DiagnosticsSurface {
+        let mut s = DiagnosticsSurface::new();
+        s.memory = MemoryReport {
+            items: vec![
+                MemoryItem {
+                    id: "user_role.md".into(),
+                    path: std::path::PathBuf::from("user_role.md"),
+                    category: "user".into(),
+                    summary: "user role — Rust engineer on wayland-core".into(),
+                },
+                MemoryItem {
+                    id: "project_context.md".into(),
+                    path: std::path::PathBuf::from("project_context.md"),
+                    category: "project".into(),
+                    summary: "project context — CLI/TUI redesign in flight".into(),
+                },
+            ],
+        };
+        s
+    }
+}

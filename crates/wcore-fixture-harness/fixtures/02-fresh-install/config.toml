@@ -1,0 +1,22 @@
+# SANITIZED FIXTURE — generated 2026-05-24 from fresh-install — secrets redacted per .blackboard/E2E-FIXTURE-SANITIZATION-2026-05-24.md
+# This is the minimal config the engine writes on first launch.
+# No sessions, no cron jobs, no plans, no plugins.
+# Tests: boot-path flag ordering (B-2), hermeticity (B-5), silent diagnostic dropout (B-1).
+
+[default]
+provider = "anthropic"
+model = "claude-opus-4-5"
+max_tokens = 4096
+
+[providers.anthropic]
+# api_key intentionally absent — tests the "no key configured" boot path.
+# Engine should emit a clear error event rather than crashing or silently proceeding.
+
+[tools]
+auto_approve = false
+
+[session]
+enabled = true
+
+[storage.credentials]
+backend = "plaintext"

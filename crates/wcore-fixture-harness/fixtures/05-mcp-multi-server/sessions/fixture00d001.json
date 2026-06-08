@@ -1,0 +1,19 @@
+{
+  "_sanitized": "2026-05-24",
+  "_archetype": "mcp-multi-server",
+  "_rules": ".blackboard/E2E-FIXTURE-SANITIZATION-2026-05-24.md",
+  "schema_version": 1,
+  "id": "fixture00d001",
+  "created_at": "2026-01-01T09:00:00Z",
+  "updated_at": "2026-01-01T09:15:00Z",
+  "provider": "anthropic",
+  "model": "anthropic/claude-opus-4.6",
+  "cwd": "<<HOME>>/dev/mcp-project",
+  "total_usage": {
+    "input_tokens": 4500,
+    "output_tokens": 200,
+    "cache_creation_tokens": 0,
+    "cache_read_tokens": 0
+  },
+  "messages": []
+}

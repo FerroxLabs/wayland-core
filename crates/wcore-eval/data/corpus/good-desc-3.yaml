@@ -1,0 +1,6 @@
+id: good-desc-3
+category: healthy
+skill_body: hello-desc-3
+expected_outcome: good
+rationale: |
+  Healthy description variant 3 — shares the 'greet'/'hello'/'welcome' token with the body.

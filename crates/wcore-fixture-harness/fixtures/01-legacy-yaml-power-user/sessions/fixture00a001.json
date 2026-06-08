@@ -1,0 +1,19 @@
+{
+  "_sanitized": "2026-05-24",
+  "_archetype": "legacy-yaml-power-user",
+  "_rules": ".blackboard/E2E-FIXTURE-SANITIZATION-2026-05-24.md",
+  "schema_version": 1,
+  "id": "fixture00a001",
+  "created_at": "2026-01-01T09:00:00Z",
+  "updated_at": "2026-01-01T09:05:00Z",
+  "provider": "anthropic",
+  "model": "anthropic/claude-opus-4.6",
+  "cwd": "<<HOME>>/dev/project-alpha",
+  "total_usage": {
+    "input_tokens": 12309,
+    "output_tokens": 245,
+    "cache_creation_tokens": 0,
+    "cache_read_tokens": 0
+  },
+  "messages": []
+}

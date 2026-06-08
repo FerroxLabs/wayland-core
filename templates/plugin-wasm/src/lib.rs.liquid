@@ -1,0 +1,56 @@
+//! {{project-name}} — {{description}}
+//!
+//! WASM plugin for Wayland-Core. Generated from the `plugin-wasm`
+//! cargo-generate template. The plugin author edits `execute()` and
+//! `schema()` below; the rest is boilerplate that matches the host's
+//! `wayland:host/tool` WIT contract.
+
+wit_bindgen::generate!({
+    world: "wayland-tool",
+    path: "wit",
+});
+
+use exports::wayland::host::tool::{
+    Guest, Request, Response, ToolCategory, ToolMetadata,
+};
+
+struct Plugin;
+
+impl Guest for Plugin {
+    fn execute(req: Request) -> Result<Response, String> {
+        // Plugin author edits this — the hello-world body.
+        Ok(Response {
+            stdout: format!("Hello from {{project-name}}: {}", req.input),
+            structured: None,
+            is_error: false,
+        })
+    }
+
+    fn schema() -> String {
+        // JSON Schema for the tool's input. Plugin author edits to match
+        // whatever shape `execute()` parses out of `req.input`.
+        r#"{"type":"object","properties":{}}"#.to_string()
+    }
+
+    fn description() -> String {
+        "{{description}}".to_string()
+    }
+
+    fn metadata() -> ToolMetadata {
+        ToolMetadata {
+            name: "{{project-name}}".to_string(),
+            description: "{{description}}".to_string(),
+            input_schema: r#"{"type":"object"}"#.to_string(),
+            // `Utility` is the safe default; switch to Mutation/Exec/etc.
+            // if this tool writes state or runs subprocesses.
+            category: ToolCategory::Utility,
+            is_deferred: false,
+            max_result_size: 8192,
+            // Bump alongside the host's runtime_caps_version when the
+            // plugin starts to depend on newer capability handles.
+            caps_version: 1,
+        }
+    }
+}
+
+export!(Plugin);

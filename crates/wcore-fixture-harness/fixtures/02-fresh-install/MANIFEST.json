@@ -1,0 +1,23 @@
+{
+  "archetype": "02-fresh-install",
+  "generated": "2026-05-24",
+  "sanitization_rules": ".blackboard/E2E-FIXTURE-SANITIZATION-2026-05-24.md",
+  "source_description": "Synthetic — represents a first-launch state: minimal config.toml written by the engine, no sessions directory contents, no cron jobs, no plans, no plugins. No real user state was used as input.",
+  "files_sanitized": [
+    {
+      "path": "config.toml",
+      "source_type": "synthetic minimal config (no real user data)",
+      "redactions": [],
+      "preserved": ["minimal required fields only"]
+    }
+  ],
+  "uuid_map": {},
+  "bug_classes_targeted": ["B-1", "B-2", "B-5"],
+  "findings_covered": ["F-001", "F-012", "F-018", "F-010", "F-035"],
+  "scenarios_that_replay_this": [
+    "T6: boot with empty WAYLAND_HOME, assert ready event emits and contains expected capability set",
+    "T6: --list-sessions on empty home returns empty list without touching $HOME (hermeticity check)",
+    "T6: --version / --help flags exit <500ms with no config loaded (B-2 boot-order proof)",
+    "T6: boot with no api_key configured, assert engine emits error event rather than panicking"
+  ]
+}

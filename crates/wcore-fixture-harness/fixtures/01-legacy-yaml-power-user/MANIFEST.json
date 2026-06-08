@@ -1,0 +1,61 @@
+{
+  "archetype": "01-legacy-yaml-power-user",
+  "generated": "2026-05-24",
+  "sanitization_rules": ".blackboard/E2E-FIXTURE-SANITIZATION-2026-05-24.md",
+  "source_description": "Derived from a machine state where both the legacy ~/.wayland/config.yaml (Desktop-app era) and the canonical ~/Library/Application Support/wayland-core/config.toml coexist. Two MCP servers registered. Two sessions with different providers. Two cron jobs (one with the Desktop-app 'schedule' field alias, one smoke-check job). Two plan files. All PII and secrets removed.",
+  "files_sanitized": [
+    {
+      "path": "config.yaml",
+      "source_type": "legacy IJFW-era YAML config (Desktop app writes)",
+      "redactions": [],
+      "preserved": ["model settings", "agent config", "personality definitions structure (text generalized)"]
+    },
+    {
+      "path": "config.toml",
+      "source_type": "canonical wayland-core TOML config (engine writes)",
+      "redactions": [
+        "mcp.servers.wayland-image-generation.env.WAYLAND_IMG_API_KEY (was AIza... pattern)",
+        "mcp.servers.local-tools.env.SOME_API_KEY",
+        "session.directory path (was a real absolute home path — replaced with <<WAYLAND_HOME>>)"
+      ],
+      "preserved": ["provider names", "model name", "tool allow_list", "compact settings", "mcp curation config"]
+    },
+    {
+      "path": "cron/jobs.json",
+      "source_type": "Desktop-app cron job store (jobs.json with 'schedule' field alias)",
+      "redactions": [
+        "job IDs (were production UUIDs)",
+        "prompt text (generalized from real content)"
+      ],
+      "preserved": ["cron expression format", "job state structure", "deliveryChannels shape", "schemaVersion field"]
+    },
+    {
+      "path": "sessions/fixture00a001.json",
+      "source_type": "wcore session file (v1 schema)",
+      "redactions": [
+        "id (was real 12-hex short_id)",
+        "cwd (was a real absolute home path — replaced with <<HOME>>/dev/...)",
+        "timestamps (normalized to 2026-01-01)"
+      ],
+      "preserved": ["schema_version=1", "provider/model fields", "token usage shape"]
+    },
+    {
+      "path": "sessions/fixture00a002.json",
+      "source_type": "wcore session file (v1 schema, different provider)",
+      "redactions": ["same as fixture00a001"],
+      "preserved": ["schema_version=1", "openai provider path"]
+    }
+  ],
+  "uuid_map": {
+    "00000000-0001-4000-8000-000000000001": "original was UUID v4 (cron job id — GitHub Grabber)",
+    "00000000-0002-4000-8000-000000000002": "original was non-UUID string id (smoke-loadbearing-r1)"
+  },
+  "bug_classes_targeted": ["B-11", "B-3", "B-9", "B-4"],
+  "findings_covered": ["F-011", "F-018", "R-001", "F-016"],
+  "scenarios_that_replay_this": [
+    "T6: dual-config resolution order (config.yaml wins / config.toml wins / merge)",
+    "T6: Desktop-app 'schedule' cron alias deserializes to 'expression' field",
+    "T6: multi-MCP server boot without leaking host WAYLAND_IMG_API_KEY into engine env",
+    "T6: cron list shows both jobs with correct next_run_at"
+  ]
+}

@@ -1,0 +1,7 @@
+id: bad-offtopic-1
+category: off-topic-description
+skill_body: hello-offtopic-1
+trace_fixture: expensive-bad-4.json
+expected_outcome: bad
+rationale: |
+  Description about Rust/WASM compilation has zero token overlap with greeter body; name mismatch; empty when_to_use; stale model. 4+ fails + expensive trace.

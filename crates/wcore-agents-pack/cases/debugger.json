@@ -1,0 +1,29 @@
+{
+  "agent": "debugger",
+  "cases": [
+    {
+      "id": "flaky-test-isolation",
+      "input": "Test test_order_total fails 1 in 20 runs locally, never in CI. No stack trace, just an assertion mismatch.",
+      "expected_categories": ["reproduce-first", "determinism", "isolate-non-test-state"],
+      "rubric": "Demands a deterministic reproducer first; identifies non-test state (time, random seed, ordering) as the likely source; refuses to add retry logic."
+    },
+    {
+      "id": "regression-bisect",
+      "input": "Endpoint /search started returning 500s after Tuesday's deploy. We made 14 commits Tuesday.",
+      "expected_categories": ["bisection", "minimal-reproducer", "no-symptom-patch"],
+      "rubric": "Proposes git bisect against a minimal reproducer; refuses to fix by widening the catch."
+    },
+    {
+      "id": "no-suppress",
+      "input": "An intermittent NullPointerException in handleResponse. Can we wrap it in try/catch and log it?",
+      "expected_categories": ["refuse-suppress", "root-cause-required"],
+      "rubric": "Explicitly refuses to suppress; insists on finding the null source first."
+    },
+    {
+      "id": "user-mental-model",
+      "input": "The cache is broken — I get stale data every time.",
+      "expected_categories": ["check-mental-model", "ask-evidence"],
+      "rubric": "Asks for the cache key, the TTL, and what 'stale' means before concluding the cache is broken."
+    }
+  ]
+}

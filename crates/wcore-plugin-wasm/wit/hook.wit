@@ -1,0 +1,62 @@
+// v0.6.5 Task 2.3 — Hook export world.
+//
+// Lifecycle pattern lifted from Ironclaw's `channel.wit` (lines 349-422). A
+// hook plugin runs around tool-calls, session boundaries, and error paths.
+// Every callback returns `result<_, string>` so the engine can short-circuit
+// on policy violations (e.g. pre-tool-call may veto a call).
+//
+// Hook names follow the task brief's signatures (pre-tool-call, post-tool-call,
+// on-session-start, on-session-end, on-error). The host's `HookPhase` enum in
+// `wcore-plugin-api::registry::hooks` is a superset (8 phases). The remaining
+// phases (turn-start/turn-end/pre-prompt/pre-compact) are intentionally
+// deferred from the v0.6.5 WASM export surface and stay native-only until a
+// later task wires them in.
+
+// Package declared in `wayland-host.wit`. Files in the same directory share
+// the package decl and contribute interfaces/worlds to it.
+
+interface hook {
+    /// Event for a tool call about to fire. Pre-hook may veto by returning
+    /// `Err`, which short-circuits the engine before the tool runs.
+    record tool-call-event {
+        tool-name: string,
+        input: string,
+        call-id: string,
+    }
+
+    /// Event for a completed tool call. Post-hook sees the tool's outcome.
+    /// Field name is `outcome` (not `result`) because `result` is a reserved
+    /// keyword in WIT; the type is still `result<string, string>`.
+    record tool-result-event {
+        tool-name: string,
+        outcome: result<string, string>,
+        call-id: string,
+    }
+
+    /// Session boundary event (start or end).
+    record session-event {
+        session-id: string,
+    }
+
+    /// Fired before a tool call. Returning `Err` aborts the tool call and
+    /// the engine surfaces the error to the agent.
+    pre-tool-call: func(ev: tool-call-event) -> result<_, string>;
+
+    /// Fired after a tool call completes (success or failure).
+    post-tool-call: func(ev: tool-result-event) -> result<_, string>;
+
+    /// Fired when a session opens.
+    on-session-start: func(ev: session-event) -> result<_, string>;
+
+    /// Fired when a session closes.
+    on-session-end: func(ev: session-event) -> result<_, string>;
+
+    /// Fired when the engine surfaces an error to the user. The hook may
+    /// rewrite or annotate by returning `Err` with a replacement message.
+    on-error: func(error: string) -> result<_, string>;
+}
+
+world wayland-hook {
+    import host;
+    export hook;
+}

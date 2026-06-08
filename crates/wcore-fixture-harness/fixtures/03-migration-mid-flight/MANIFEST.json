@@ -1,0 +1,43 @@
+{
+  "archetype": "03-migration-mid-flight",
+  "generated": "2026-05-24",
+  "sanitization_rules": ".blackboard/E2E-FIXTURE-SANITIZATION-2026-05-24.md",
+  "source_description": "Synthetic — represents v0.8.1 -> v0.8.2 upgrade state where the yaml->toml migration ran once but hasn't completed its full re-serialization pass. config.toml has the [default] block from migration. config.yaml still exists (engine hasn't removed it). jobs.json still uses Desktop-app 'schedule' alias. One session is v0 schema (no schema_version field) — the migration ladder must stamp it v1 on first load.",
+  "files_sanitized": [
+    {
+      "path": "config.toml",
+      "source_type": "synthetic post-migration TOML config",
+      "redactions": [],
+      "preserved": ["migrated_from field", "migration_version field"]
+    },
+    {
+      "path": "config.yaml",
+      "source_type": "synthetic legacy yaml (rump, post-migration)",
+      "redactions": [],
+      "preserved": ["minimal yaml fields"]
+    },
+    {
+      "path": "cron/jobs.json",
+      "source_type": "synthetic cron with Desktop-app 'schedule' alias",
+      "redactions": ["job id (was UUID v4)"],
+      "preserved": ["schedule alias field (not 'expression')", "schemaVersion=1"]
+    },
+    {
+      "path": "sessions/fixture00b001.json",
+      "source_type": "synthetic v0-schema session (no schema_version field)",
+      "redactions": ["id", "cwd", "timestamps"],
+      "preserved": ["absent schema_version (tests v0->v1 migration ladder)"]
+    }
+  ],
+  "uuid_map": {
+    "00000000-0003-4000-8000-000000000003": "original was UUID v4 (cron job id)"
+  },
+  "bug_classes_targeted": ["B-11", "B-3", "B-7"],
+  "findings_covered": ["F-011", "F-018", "R-001", "F-031", "F-032"],
+  "scenarios_that_replay_this": [
+    "T6: config resolution prefers [default] toml block over yaml model when both exist",
+    "T6: cron list deserializes 'schedule' alias to 'expression' field correctly",
+    "T6: session loader runs v0->v1 migration ladder and stamps schema_version=1",
+    "T6: --list-sessions shows the v0 session after migration (not silently dropped)"
+  ]
+}

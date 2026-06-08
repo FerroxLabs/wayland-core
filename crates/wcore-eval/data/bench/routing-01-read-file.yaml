@@ -1,0 +1,17 @@
+id: routing-01-read-file
+category: tool_routing
+prompt: |
+  I need to view the full contents of /etc/hosts on this machine. Which
+  built-in tool should the agent reach for? Reply with only the tool's
+  canonical name.
+match_strategy:
+  kind: contains_all
+  tokens:
+    - "Read"
+rationale: |
+  Read is the canonical tool for opening a file by absolute path. The
+  case forbids guessing Bash + `cat` by phrasing the goal as "view
+  contents" with a specific path supplied.
+allowed_tools:
+  - Read
+timeout_secs: 30

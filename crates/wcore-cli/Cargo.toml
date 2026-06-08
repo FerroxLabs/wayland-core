@@ -1,0 +1,256 @@
+[package]
+name = "wcore-cli"
+description = "CLI binary for wayland-core — a multi-provider AI agent with tool orchestration"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+keywords = ["ai", "agent", "cli", "llm", "anthropic"]
+categories = ["command-line-utilities"]
+
+[[bin]]
+name = "wayland-core"
+path = "src/main.rs"
+
+# M5.4: lib target so the plugin marketplace module is callable from
+# integration tests under `tests/`. The binary keeps its `main.rs` entry
+# point; the lib re-exports `pub mod plugin` for tests + the bin to use.
+[lib]
+name = "wcore_cli"
+path = "src/lib.rs"
+
+[[bench]]
+name    = "agent_nav_perf"
+harness = false
+
+[features]
+# M5.4: remote-registry gates the network-backed `GitHubReleasesResolver`
+# behind a feature flag (default ON for v0.6) so unit tests stay offline
+# and a stripped build can disable the reqwest dep entirely.
+default = ["remote-registry", "workflow"]
+remote-registry = ["dep:reqwest", "dep:wcore-egress"]
+# User-flow harness Layer 3: the `harness_failure_injection` integration
+# test reproduces the audit's hang-class bugs (wedged MCP server, Ctrl+C
+# mid-task). It is slow — it boots the real binary and waits out the
+# bounded 30s MCP connect handshake — so it is gated OFF by default,
+# mirroring how `wcore-browser` gates its live Chromium tests behind
+# `browser-live-tests`. Run with:
+#   cargo test -p wcore-cli --features harness-failure-injection \
+#       --test harness_failure_injection
+harness-failure-injection = []
+# v0.9.2 W4 (SPEC §1C): feature gates for the optional permission components
+# (Workflow / Monitor / ReviewArtifact). The W4 `#[cfg(feature = "...")]`
+# dispatch arms reference these; declaring them here keeps the gated arms
+# valid without an `unexpected_cfgs` clippy error. Empty arrays — they gate
+# code paths only, no dep pull-in.
+# v0.9.x B6 (live workflow confirm gate): `workflow` is now in `default` so
+# the proposal card compiles into the normal binary; `monitor` /
+# `review_artifact` remain default-off.
+workflow = []
+monitor = []
+review_artifact = []
+
+[dependencies]
+async-trait.workspace    = true
+wcore-agent.workspace    = true
+wcore-agents-pack.workspace = true
+wcore-compact.workspace  = true
+wcore-config.workspace   = true
+wcore-memory.workspace   = true
+# Wave OL: needed for the `PluginProvider` trait surface that the
+# CLI-side `make_plugin_provider_router` consumes (downcasts via
+# `as_any` to recover the concrete `OllamaProvider`).
+wcore-plugin-api.workspace = true
+wcore-providers.workspace = true
+wcore-replay.workspace   = true
+# The `/repomap` TUI command runs a fresh symbol scan of the project root and
+# renders an inline summary. `wcore-repomap` is a leaf crate (no internal deps).
+wcore-repomap.workspace  = true
+wcore-tools.workspace    = true
+wcore-mcp.workspace      = true
+# v0.6.4 Task 2.5: `PolicyGateAdapter` bridges `wcore-mcp::PolicyCheck` to
+# the workspace `PolicyGate`. The `mcp-serve` subcommand constructs a
+# `PolicyEngine` + grants on the production path, so this is a regular dep,
+# not dev-only.
+wcore-permissions.workspace = true
+wcore-protocol.workspace = true
+# Regular dep (also dev-only below for the Tool trait in tests): the TUI
+# `/model` command reads `wcore_types::model_aliases` to list + resolve the
+# current provider's models.
+wcore-types.workspace    = true
+wcore-skills.workspace   = true
+# v0.7.0 Task 1.A.10: `acp` subcommand wires `wcore-acp` into the CLI.
+wcore-acp = { path = "../wcore-acp" }
+# v0.7.0 Task 1.A.10: `StreamExt::next` for the streaming `acp request send`
+# path against `AcpClient::send_message`.
+futures = { workspace = true }
+# v0.7.0 Task 1.A.10: `axum::serve` runs the `HttpSseTransport::router()`
+# returned by wcore-acp. Version-pinned to match wcore-acp itself.
+axum = "0.7"
+# v0.6.4 Task 2.6: `swarm` subcommand wires `wcore-swarm` into the CLI.
+wcore-swarm = { path = "../wcore-swarm" }
+# v0.8.1 U7: `cron` subcommand wires `wcore-cron` into the CLI.
+wcore-cron  = { path = "../wcore-cron" }
+# F-089: `models list` subcommand reads the bundled pricing catalog to
+# enumerate known provider/model ids without a live API call.
+wcore-pricing.workspace = true
+# v0.6.4 Task 2.6: parse humantime durations from `--brief` TOML + the
+# `--timeout` flag. `humantime-serde` covers the serde derive path for
+# the TOML brief; `humantime` itself is needed for the flag-side
+# `parse_duration` call.
+humantime = "2"
+humantime-serde.workspace = true
+
+# W8c.3 H.2: link the plugin shells so their `inventory::submit!`
+# factories are picked up by `PluginLoader::discover`. The binary
+# never names these crates directly — Rust's inventory crate runs
+# every `submit!` block at startup via `linkme`-style ctors as long
+# as the crate is *linked*. Removing any line below means the
+# corresponding plugin silently disappears.
+wayland-browser = { path = "../wayland-browser" }
+wayland-cua     = { path = "../wayland-cua" }
+wayland-honcho  = { path = "../wayland-honcho" }
+wayland-ijfw    = { path = "../wayland-ijfw" }
+wayland-ollama  = { path = "../wayland-ollama" }
+
+tokio.workspace  = true
+# AUDIT-D: `CancellationToken` for the TUI's cooperative turn-cancel —
+# `TuiEngine::cancel` fires a per-turn token before the hard `abort()`.
+tokio-util.workspace = true
+anyhow.workspace = true
+# F-001: install tracing_subscriber at main() startup so every
+# tracing::info!/warn!/error!/debug! call in the engine reaches a live
+# surface instead of a dead no-op sink.
+tracing.workspace            = true
+tracing-subscriber.workspace = true
+tracing-appender.workspace   = true
+clap.workspace   = true
+serde_json.workspace = true
+uuid.workspace   = true
+
+# TUI (ratatui terminal UI) — Wave 0 foundation. ratatui re-exports
+# crossterm, so the TUI uses `ratatui::crossterm` and deliberately does
+# NOT add a separate direct crossterm dep here (avoids version skew with
+# the workspace's crossterm 0.29). The full set is wired now so later TUI
+# waves never need to touch this manifest:
+# - `ratatui`         — terminal rendering + the re-exported crossterm.
+# - `tui-input`       — text-field state for composer / config forms.
+# - `nucleo`          — fuzzy match for the command palette.
+# - `syntect`         — syntax highlight for the diff view.
+# - `tui-tree-widget` — the path-map tree widget.
+ratatui.workspace         = true
+tui-input.workspace       = true
+nucleo.workspace          = true
+syntect.workspace         = true
+tui-tree-widget.workspace = true
+# v0.9.0 TUI-V1 W0.1: markdown rendering + paragraph wrapping. Used by
+# the upcoming W2 transcript renderer; added in Wave 0 so later waves
+# never need to touch this manifest.
+pulldown-cmark.workspace  = true
+textwrap.workspace        = true
+# Live CPU/RAM sampling for the compact TUI header. Sampled on a ~1s
+# interval and cached — never refreshed per frame.
+sysinfo.workspace         = true
+
+# M5.4: plugin marketplace deps.
+# - `toml` parses local-file plugin manifests.
+# - `url` builds GitHub Releases URLs via path_segments_mut (never string
+#   interpolation of a plugin name into a URL).
+# - `regex` is reserved for future manifest version-spec matching; the
+#   current `validate_plugin_name` is hand-written for zero-runtime-deps.
+# - `serde` for `PluginManifest` derive.
+# - `thiserror` for the typed `PluginCliError`.
+# - `dirs` for `data_dir()`/`config_dir()` lookups (matches wcore-config).
+# - `reqwest` is optional via the `remote-registry` feature (blocking
+#   client; the plugin install path is sync). Default-features off keeps
+#   our rustls-only TLS posture intact from the workspace dep spec.
+toml.workspace = true
+url.workspace = true
+regex.workspace = true
+serde.workspace = true
+thiserror.workspace = true
+dirs.workspace = true
+reqwest = { workspace = true, features = ["blocking"], optional = true }
+# B1: self_update routes through the egress chokepoint. Gated behind the same
+# `remote-registry` feature as reqwest so a stripped build drops both.
+wcore-egress = { workspace = true, optional = true }
+
+# v0.7.0 1.E.1: marketplace allowlist index — ed25519 signature
+# verification over the index body + SHA-256 of plugin archives.
+ed25519-dalek = { workspace = true }
+sha2          = { workspace = true }
+
+# v0.8.1 U9: `wayland-core self-update` deps.
+# - `base64` decodes the pinned marketplace pubkey + env override.
+# - `self_replace` swaps the running binary across POSIX (rename) and
+#   Windows (MoveFileExW + the running-exe-lock dance).
+# - `futures-util` streams reqwest response bytes into a file in
+#   bounded chunks (otherwise the full release tarball would buffer).
+# - `tempfile` already a dev-dep; promoted to a regular dep so the
+#   download path can stage artifacts in a scratch dir.
+base64       = { workspace = true }
+self-replace = "1"
+futures-util = "0.3"
+tempfile     = { workspace = true }
+# v0.9.0 W4 E1: `/auth google-meet` opens the authorize URL in the
+# user's default browser via `open::that_detached`.
+open         = { workspace = true }
+
+workspace-hack.workspace = true
+
+# W-1 fix: OpenProcess + GetExitCodeProcess for process_is_alive() on Windows.
+# windows-sys is already a workspace dependency (see wcore-sandbox/Cargo.toml).
+# We need Win32_Foundation (BOOL, HANDLE) + Win32_System_Threading
+# (OpenProcess, GetExitCodeProcess, PROCESS_QUERY_LIMITED_INFORMATION,
+# STILL_ACTIVE) + Win32_Security (no-op, pulled in by Foundation).
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = [
+  "Win32_Foundation",
+  "Win32_System_Threading",
+] }
+
+[dev-dependencies]
+# v0.9.4 S0.4: criterion bench harness for agent_nav_perf bench.
+criterion.workspace = true
+# v0.8.1 U9: mockito mocks the GitHub Releases API in the
+# `fetch_latest_release_from_url` round-trip test (no live network).
+mockito = "1"
+# v0.7.0 1.E.1: ed25519 keypair generation in `plugin::index` tests.
+# Workspace `rand` is at 0.8 — `rand::rngs::OsRng` satisfies dalek 2.x's
+# `CryptoRng + RngCore` bounds via its rand_core re-export.
+rand.workspace = true
+# W6 B.7: test the boot-time `McpReady` emission helper against a
+# pre-populated `McpManager` without spinning up real transports.
+wcore-mcp = { path = "../wcore-mcp", features = ["test-utils"] }
+# v0.6.4 Task 2.4: mcp-serve smoke test constructs a FakeTool against
+# the `Tool` trait — needs `ToolResult` / `JsonSchema` from `wcore-types`.
+wcore-types.workspace = true
+async-trait.workspace = true
+# v0.6.2 integration: skills_lifecycle_cmd mutates the global
+# WCORE_MEMORY_DIR env var; serialize against other crates that
+# touch the same env (wcore-memory/wcore-cua/wcore-browser/wcore-agent).
+serial_test.workspace = true
+# User-flow harness Layer 2/3: drive the real `wayland-core` binary
+# through a pseudo-terminal like a human would.
+# - `portable-pty` spawns the binary attached to a PTY (so the TUI's
+#   `IsTerminal` check passes and the full-screen UI launches).
+# - `vt100` parses the raw terminal byte stream into a screen grid so
+#   tests can assert on rendered text anchors instead of escape codes.
+#   Pinned to 0.15: vt100 0.16 requires `unicode-width ^0.2.1`, which
+#   collides with `ratatui 0.29`'s exact `unicode-width = "=0.2.0"` pin.
+#   0.15 uses `unicode-width ^0.1.10` (the workspace already resolves
+#   `unicode-width 0.1.14`), so the lockfile stays conflict-free.
+portable-pty = "0.9"
+vt100 = "0.15"
+# Wave 1.1: R-009/R-011/R-012 use the Scenario builder + Wave-1.1
+# assertion variants (StderrContains, CostWithinTolerance) to close
+# the silent-pass class. The crate is already in the workspace.
+wcore-eval-scenarios = { path = "../wcore-eval-scenarios" }
+# E2E-harness foundation: `tests/support/mock_llm.rs` mounts an in-process
+# Anthropic-shaped HTTP mock (bind 127.0.0.1:0) that serves `/v1/messages`
+# with scripted SSE bodies, so the real `wcore_providers::anthropic`
+# provider can be driven without a live network call. wiremock 0.6 is
+# already resolved in the workspace lockfile (used by wcore-providers /
+# wcore-config / wcore-agent integration tests).
+wiremock = "0.6"

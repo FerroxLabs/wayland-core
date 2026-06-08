@@ -1,0 +1,60 @@
+# SANITIZED FIXTURE — generated 2026-05-24 from mcp-multi-server — secrets redacted per .blackboard/E2E-FIXTURE-SANITIZATION-2026-05-24.md
+# Four MCP servers — covers env hermeticity (B-9 / F-016), deferred vs eager tool schemas (B-3),
+# and the multi-server startup ordering. This is the fixture that catches F-016's class:
+# MCP server inheriting the host shell's full env (including real API keys).
+
+[default]
+provider = "anthropic"
+model = "anthropic/claude-opus-4.6"
+max_tokens = 8192
+
+[providers.anthropic]
+base_url = "https://openrouter.ai/api/v1"
+
+[tools]
+auto_approve = false
+
+[session]
+enabled = true
+
+# Server 1: image generation (has its own API key in env — must NOT inherit host key)
+[mcp.servers.image-gen]
+transport = "stdio"
+command = "node"
+args = ["<<WAYLAND_HOME>>/builtin-mcp-image-gen.js"]
+deferred = true
+
+[mcp.servers.image-gen.env]
+WAYLAND_IMG_API_KEY = "<<REDACTED:KEY:google>>"
+WAYLAND_IMG_PLATFORM = "gemini"
+WAYLAND_IMG_BASE_URL = "https://generativelanguage.googleapis.com"
+
+# Server 2: local filesystem tool (no API key, stdio only)
+[mcp.servers.local-fs]
+transport = "stdio"
+command = "npx"
+args = ["-y", "@modelcontextprotocol/server-filesystem", "<<WAYLAND_HOME>>/workspace"]
+deferred = false
+
+# Server 3: SSE transport (tests the SSE code path — different from stdio)
+[mcp.servers.remote-sse]
+transport = "sse"
+url = "http://localhost:9000/sse"
+deferred = true
+
+[mcp.servers.remote-sse.headers]
+Authorization = "Bearer <<REDACTED:BEARER>>"
+
+# Server 4: deferred with curation limit (tests top_k curation logic)
+[mcp.servers.tools-pack]
+transport = "stdio"
+command = "node"
+args = ["<<WAYLAND_HOME>>/tools-pack.js"]
+deferred = true
+
+[mcp.curation]
+kind = "top_k"
+k = 10
+
+[storage.credentials]
+backend = "plaintext"

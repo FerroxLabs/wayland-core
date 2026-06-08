@@ -1,0 +1,71 @@
+//! {{project-name}} — {{description}}
+//!
+//! Minimum-viable Wayland static plugin scaffolded by `cargo generate`.
+//! Discovered at engine startup via the `inventory::submit!` slot below.
+
+use wcore_plugin_api::*;
+
+pub struct {{crate_name | capitalize}}Plugin;
+
+#[wcore_plugin_api::async_trait]
+impl Plugin for {{crate_name | capitalize}}Plugin {
+    fn manifest(&self) -> &PluginManifest {
+        static MANIFEST: std::sync::OnceLock<PluginManifest> = std::sync::OnceLock::new();
+        MANIFEST.get_or_init(|| {
+            PluginManifest::from_toml_str(
+                r#"
+plugin_api_version = "1.0"
+
+[plugin]
+name = "{{project-name}}"
+version = "0.1.0"
+description = "{{description}}"
+entry = "builtin:{{crate_name}}"
+authors = ["{{authors}}"]
+license = "MIT"
+
+[runtime]
+kind = "static"
+"#,
+            )
+            .expect("{{project-name}} manifest parses")
+        })
+    }
+}
+
+pub struct {{crate_name | capitalize}}Factory;
+
+impl PluginFactory for {{crate_name | capitalize}}Factory {
+    fn name(&self) -> &'static str {
+        "{{project-name}}"
+    }
+    fn build(&self) -> Box<dyn Plugin> {
+        Box::new({{crate_name | capitalize}}Plugin)
+    }
+}
+
+wcore_plugin_api::submit! {
+    &{{crate_name | capitalize}}Factory as &dyn PluginFactory
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn manifest_parses_and_matches_api_version() {
+        let plugin = {{crate_name | capitalize}}Plugin;
+        let manifest = plugin.manifest();
+        assert_eq!(manifest.plugin.name, "{{project-name}}");
+        manifest
+            .require_api_version(PLUGIN_API_VERSION)
+            .expect("manifest API version matches the linked plugin-api");
+    }
+
+    #[test]
+    fn factory_builds_a_plugin() {
+        let factory = {{crate_name | capitalize}}Factory;
+        let plugin = factory.build();
+        assert_eq!(plugin.manifest().plugin.version, "0.1.0");
+    }
+}

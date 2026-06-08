@@ -1,0 +1,35 @@
+[package]
+name = "wcore-plugin-subprocess"
+description = "v0.6.5 — Subprocess plugin host (JSON-RPC over stdio, reuses wcore-mcp::protocol framing)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+wcore-plugin-api.workspace = true
+# v0.6.5 Task 3.1 — reuse JSON-RPC envelope types from wcore-mcp::protocol
+# (pub mod protocol in crates/wcore-mcp/src/lib.rs:3).
+wcore-mcp.workspace        = true
+# v0.6.5 Task 3.4 — synthesized PluginTools carry wcore-protocol's
+# ToolCategory + wcore-types' ToolResult. Already transitive via
+# wcore-plugin-api; declared explicit for the mcp_bridge module's
+# direct `use` statements.
+wcore-protocol.workspace   = true
+wcore-types.workspace      = true
+
+tokio       = { workspace = true, features = ["io-util", "process", "rt", "rt-multi-thread", "macros", "sync", "time"] }
+tracing.workspace    = true
+anyhow.workspace     = true
+thiserror.workspace  = true
+serde       = { workspace = true, features = ["derive"] }
+serde_json.workspace = true
+
+workspace-hack.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+# v0.6.5 Task 3.4 — mcp_bridge_e2e.rs constructs PluginToolCaps which
+# needs tokio_util::sync::CancellationToken to drive synthesized tools.
+tokio-util.workspace = true

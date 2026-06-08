@@ -1,0 +1,85 @@
+name: Bench regression (M4.2)
+
+# M4.2 — per-PR regression gate for the 30-case mini-bench corpus.
+#
+# Runs the deterministic CannedBenchRunner via `wcore-eval-bench`,
+# uploads the JSON report as an artifact, and fails the PR if
+# `pass_ratio < floor`. No LLM API keys required — the runner derives
+# its outputs from each case's match_strategy. A real session-backed
+# runner ships in M4.3 and will replace the runner behind a flag.
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+# One run per branch; cancel superseded PR pushes so we don't queue.
+concurrency:
+  group: bench-regression-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  bench-regression:
+    name: Bench regression (linux)
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v6
+
+      # Mirror ci.yml — Ubuntu runners run out of disk during a workspace
+      # debug build. The bench binary itself is tiny but pulls in the
+      # full wcore-eval tree on first build, so the same cleanup applies.
+      - name: Free disk space (drop unused preinstalled toolchains)
+        run: |
+          set -e
+          echo "=== BEFORE ==="; df -h /
+          sudo rm -rf /usr/share/dotnet
+          sudo rm -rf /usr/local/lib/android
+          sudo rm -rf /opt/ghc
+          sudo rm -rf /opt/hostedtoolcache
+          sudo rm -rf /usr/local/share/boost
+          sudo rm -rf /usr/share/swift
+          sudo rm -rf /usr/share/miniconda
+          sudo rm -rf /home/linuxbrew
+          sudo rm -rf /usr/local/share/chromium
+          echo "=== AFTER ==="; df -h /
+
+      # libdbus + mold mirror ci.yml. wcore-eval doesn't link dbus
+      # itself, but its workspace siblings do, and a workspace-aware
+      # cargo invocation can still touch them during dep resolution.
+      - name: Install Linux system deps (libdbus + mold linker)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libdbus-1-dev libseccomp-dev pkg-config mold
+
+      - name: Setup vx (installs Rust from vx.toml)
+        uses: loonghao/vx@v0.9.17
+        with:
+          setup: 'true'
+          cache: 'true'
+
+      # Pre-build the bench binary so the regression step measures the
+      # gate, not the build. `cargo run` would compile on every step
+      # invocation; splitting build + run keeps logs readable.
+      - name: Build wcore-eval-bench
+        run: vx cargo build -p wcore-eval --bin wcore-eval-bench
+
+      # The gate. Exit code 0 iff pass_ratio >= floor. Floor matches the
+      # default in the binary; pinned here so a binary-side default change
+      # is a deliberate two-place edit, not a silent loosening.
+      - name: Run mini-bench (floor 0.7)
+        run: vx cargo run --bin wcore-eval-bench -- --floor 0.7 --report-json bench.json
+
+      # Artifact stays even on regression so a maintainer can inspect
+      # `failures[]` per case without re-running CI locally.
+      - name: Upload bench.json
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: bench-regression-report
+          path: bench.json
+          if-no-files-found: error

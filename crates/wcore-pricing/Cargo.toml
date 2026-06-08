@@ -1,0 +1,27 @@
+[package]
+name = "wcore-pricing"
+description = "Pricing-as-data: TOML catalog of provider x model token rates with microcent cost API"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+serde.workspace      = true
+serde_json.workspace = true
+toml.workspace       = true
+thiserror.workspace  = true
+once_cell            = "1.19"
+wcore-egress.workspace = true
+reqwest  = { workspace = true, features = ["json"] }
+tokio    = { workspace = true }
+chrono   = { workspace = true }
+dirs     = { workspace = true }
+
+workspace-hack.workspace = true
+
+[dev-dependencies]
+wiremock = { workspace = true }
+tempfile = { workspace = true }
+tokio    = { workspace = true }

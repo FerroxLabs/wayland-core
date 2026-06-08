@@ -1,0 +1,26 @@
+[package]
+name = "wcore-egress"
+description = "Single egress chokepoint: every outbound HTTP request in the workspace flows through EgressClient so the egress policy is enforced in exactly one place (injection/exfil-defense SPEC, Layer 1 / B1)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+# The ONLY crate permitted to construct a raw `reqwest::Client` — a workspace
+# clippy `disallowed-methods` lint bans `reqwest::Client::new`/`builder`
+# everywhere else (see clippy.toml). reqwest features inherit from the
+# workspace dep (json + stream + multipart + rustls-tls).
+reqwest = { workspace = true }
+# `http` is needed only to restate reqwest's own generic header bounds
+# (`Into<http::Error>`) on the EgressRequestBuilder forwarding methods.
+http        = "1"
+serde.workspace       = true
+thiserror.workspace   = true
+async-trait.workspace = true
+
+workspace-hack.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true }

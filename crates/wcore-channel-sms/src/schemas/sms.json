@@ -1,0 +1,38 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "SmsChannelConfig",
+  "description": "TOML config for one wcore-channel-sms instance. Secrets are keychain-handles only.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "from_number",
+    "credential_handle_account_sid",
+    "credential_handle_auth_token"
+  ],
+  "properties": {
+    "from_number": {
+      "type": "string",
+      "description": "Twilio-owned phone number (E.164, e.g. \"+15551234567\") used as the outbound From for every send."
+    },
+    "credential_handle_account_sid": {
+      "type": "string",
+      "description": "Key used to look up the Twilio Account SID (ACxxxxxxxx...) in the CredentialsStore."
+    },
+    "credential_handle_auth_token": {
+      "type": "string",
+      "description": "Key used to look up the Twilio Auth Token in the CredentialsStore."
+    },
+    "api_base_url": {
+      "type": "string",
+      "description": "Override for the Twilio REST API base URL. Defaults to https://api.twilio.com — tests inject a mockito URL here.",
+      "default": "https://api.twilio.com"
+    },
+    "max_retry_attempts": {
+      "type": "integer",
+      "description": "Number of attempts (including the first) before giving up on transient failures.",
+      "default": 5,
+      "minimum": 1,
+      "maximum": 10
+    }
+  }
+}

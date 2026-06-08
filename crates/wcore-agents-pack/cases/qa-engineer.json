@@ -1,0 +1,23 @@
+{
+  "agent": "qa-engineer",
+  "cases": [
+    {
+      "id": "branch-not-coverage",
+      "input": "Coverage on the auth module is 92%. Are we good?",
+      "expected_categories": ["branch-criticality", "untested-edges"],
+      "rubric": "Rejects coverage % as the metric; identifies high-criticality untested branches (token expiry, retry exhaustion)."
+    },
+    {
+      "id": "failing-first",
+      "input": "Add a test for the new discount cap of 30%.",
+      "expected_categories": ["failing-first", "behaviour-name"],
+      "rubric": "Writes a test that fails BEFORE the cap is enforced and passes after; test name describes behaviour."
+    },
+    {
+      "id": "no-brittle",
+      "input": "The team wants tests that assert the exact string of every error message.",
+      "expected_categories": ["push-back", "contract-not-string"],
+      "rubric": "Pushes back; suggests asserting error type or category, not exact wording."
+    }
+  ]
+}

@@ -1,0 +1,487 @@
+name: Release
+
+on:
+  push:
+    tags:
+      # Superset of the wayland release tag convention: vX.Y.Z-wayland-<suffix>
+      # (e.g. -base, -safety, -spawner-wired, -multi-agent-nav, -tui-*). The
+      # v0.9.x series used new suffixes that the old two explicit patterns
+      # never matched, so the pipeline silently never fired for any v0.9.x tag
+      # (release run history: nothing between v0.8.1 and v0.9.4.2). This single
+      # glob catches the whole family so future tags auto-publish on push.
+      - 'v*-wayland-*'
+  workflow_call:
+    inputs:
+      tag_name:
+        description: "Release tag to build and publish (e.g., v0.2.0)"
+        required: true
+        type: string
+  workflow_dispatch:
+    inputs:
+      tag_name:
+        description: "Release tag to build and publish (e.g., v0.2.0)"
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+env:
+  BINARY_NAME: wayland-core
+  CARGO_TERM_COLOR: always
+  CARGO_HTTP_TIMEOUT: "600"
+  CARGO_NET_RETRY: "10"
+
+jobs:
+  prepare-release:
+    name: Prepare Release Metadata
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.metadata.outputs.version }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: refs/tags/${{ inputs.tag_name || github.ref_name }}
+
+      - name: Extract version from tag
+        id: metadata
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ inputs.tag_name || github.ref_name }}
+        run: |
+          version="${RELEASE_TAG#v}"
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+
+  build:
+    name: Build ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    needs: prepare-release
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            binary_name: wayland-core
+          - os: ubuntu-latest
+            target: aarch64-unknown-linux-gnu
+            binary_name: wayland-core
+            use_cross: true
+          - os: macos-latest
+            target: x86_64-apple-darwin
+            binary_name: wayland-core
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            binary_name: wayland-core
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            binary_name: wayland-core.exe
+          - os: windows-latest
+            target: aarch64-pc-windows-msvc
+            binary_name: wayland-core.exe
+
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: refs/tags/${{ inputs.tag_name || github.ref_name }}
+
+      # Linux: mirror the setup that ci.yml's build: job uses. Native
+      # x86_64-unknown-linux-gnu needs libdbus-1-dev for the keyring crate's
+      # transitive `libdbus-sys` dep; without it the build fails with
+      # `pkg_config failed: dbus-1 not found` (release run 25961407439 for
+      # tag v0.2.3-wayland-base). Cross-compile aarch64 is handled by the
+      # cross docker image (Cross.toml pre-build) so doesn't need host libs.
+      - name: Free disk space (drop unused preinstalled toolchains)
+        if: runner.os == 'Linux' && matrix.use_cross != true
+        run: |
+          set -e
+          echo "=== BEFORE ==="; df -h /
+          sudo rm -rf /usr/share/dotnet
+          sudo rm -rf /usr/local/lib/android
+          sudo rm -rf /opt/ghc
+          sudo rm -rf /opt/hostedtoolcache
+          sudo rm -rf /usr/local/share/boost
+          sudo rm -rf /usr/share/swift
+          sudo rm -rf /usr/share/miniconda
+          sudo rm -rf /home/linuxbrew
+          echo "=== AFTER ==="; df -h /
+
+      - name: Install Linux system deps (libdbus + libseccomp + libasound + mold linker)
+        if: runner.os == 'Linux' && matrix.use_cross != true
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libdbus-1-dev libseccomp-dev libasound2-dev pkg-config mold
+
+      - name: Setup vx (installs Rust from vx.toml)
+        uses: loonghao/vx@v0.9.17
+        with:
+          setup: 'true'
+          cache: 'true'
+
+      - name: Add cross-compile target
+        run: rustup target add ${{ matrix.target }}
+
+      - name: Fix MSVC linker (remove Git's link.exe)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: Remove-Item 'C:\Program Files\Git\usr\bin\link.exe' -Force -ErrorAction SilentlyContinue
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: release-${{ matrix.target }}
+
+      - name: Install cross (Linux aarch64)
+        if: matrix.use_cross == true
+        run: cargo install cross --git https://github.com/cross-rs/cross
+
+      - name: Build release binary
+        shell: bash
+        run: |
+          if [[ "${{ matrix.use_cross }}" == "true" ]]; then
+            cross build --release --target ${{ matrix.target }} -p wcore-cli
+          else
+            vx cargo build --release --target ${{ matrix.target }} -p wcore-cli
+          fi
+
+      - name: Package binary (Unix)
+        if: runner.os != 'Windows'
+        shell: bash
+        env:
+          VERSION: ${{ needs.prepare-release.outputs.version }}
+        run: |
+          mkdir -p dist
+          ARCHIVE="wayland-core-v${VERSION}-${{ matrix.target }}.tar.gz"
+          tar -C target/${{ matrix.target }}/release -czf "dist/${ARCHIVE}" ${{ matrix.binary_name }}
+          echo "ARCHIVE=${ARCHIVE}" >> "$GITHUB_ENV"
+
+      - name: Package binary (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          VERSION: ${{ needs.prepare-release.outputs.version }}
+        run: |
+          New-Item -ItemType Directory -Force -Path dist | Out-Null
+          $archive = "wayland-core-v${env:VERSION}-${{ matrix.target }}.zip"
+          Compress-Archive -Path "target/${{ matrix.target }}/release/${{ matrix.binary_name }}" -DestinationPath "dist/${archive}" -Force
+          "ARCHIVE=${archive}" | Out-File -FilePath $env:GITHUB_ENV -Append
+
+      - name: Upload release artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ matrix.target }}
+          path: dist/${{ env.ARCHIVE }}
+          if-no-files-found: error
+
+  github-release:
+    name: Upload GitHub Release assets
+    runs-on: ubuntu-latest
+    needs:
+      - prepare-release
+      - build
+    steps:
+      - name: Download build artifacts
+        uses: actions/download-artifact@v8
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Generate checksums
+        shell: bash
+        run: |
+          cd artifacts
+          sha256sum wayland-core-* > wayland-core-checksums.txt
+
+      - name: Upload release assets
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_TAG: ${{ inputs.tag_name || github.ref_name }}
+          REPOSITORY: ${{ github.repository }}
+        run: |
+          release_url="https://github.com/${REPOSITORY}/releases/tag/${RELEASE_TAG}"
+          if gh release view "${RELEASE_TAG}" --repo "${REPOSITORY}" > /dev/null 2>&1; then
+            gh release upload "${RELEASE_TAG}" artifacts/* --repo "${REPOSITORY}" --clobber
+          else
+            gh release create "${RELEASE_TAG}" artifacts/* \
+              --repo "${REPOSITORY}" \
+              --title "${RELEASE_TAG}" \
+              --generate-notes
+          fi
+          echo "Uploaded assets to ${release_url}"
+
+  # ── M2.5 — Post-tag binary smoke ──────────────────────────────────────
+  # Download each platform's release archive from the just-published
+  # release, extract it, and run `wayland-core --version`. Any non-zero
+  # exit fails the job. Gates the next tag: a missing or unrunnable
+  # binary surfaces BEFORE customers try to download it.
+  #
+  # The matrix mirrors `build:` so every artifact is exercised on its
+  # native OS. Cross-compiled aarch64 Linux is smoked on ubuntu-latest
+  # via `qemu-user-static` since GitHub-hosted runners are amd64.
+  # Windows aarch64 cannot execute on amd64 hosts; we verify the PE
+  # COFF machine field instead (promote to a self-hosted ARM runner
+  # when one is provisioned).
+  #
+  # Manual verification against an existing tag (e.g. v0.3.0-wayland-base):
+  #   gh workflow run release.yml --ref main \
+  #     --field tag_name=v0.3.0-wayland-base
+  # The workflow_dispatch path reuses `inputs.tag_name` end to end.
+  post-tag-smoke:
+    name: Smoke ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    needs:
+      - prepare-release
+      - github-release
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            archive_ext: tar.gz
+            binary_name: wayland-core
+          - os: ubuntu-latest
+            target: aarch64-unknown-linux-gnu
+            archive_ext: tar.gz
+            binary_name: wayland-core
+            use_qemu: true
+          - os: macos-latest
+            target: x86_64-apple-darwin
+            archive_ext: tar.gz
+            binary_name: wayland-core
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            archive_ext: tar.gz
+            binary_name: wayland-core
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            archive_ext: zip
+            binary_name: wayland-core.exe
+          - os: windows-latest
+            target: aarch64-pc-windows-msvc
+            archive_ext: zip
+            binary_name: wayland-core.exe
+    steps:
+      # M4.9 prep: Linux aarch64 binaries link against libdbus + other host
+      # libs that the GitHub-hosted amd64 runner does not have in arm64
+      # variants by default. Rather than chase a full multiarch sysroot
+      # (libc6-arm64-cross + libdbus-1-3:arm64 + every downstream dep),
+      # we switch the aarch64-linux smoke to ELF-header verification — the
+      # same shape Windows aarch64 already uses. The binary is shipped
+      # to real aarch64 hosts via M2.4's self-hosted runner (parked).
+      - name: (no-op) aarch64-linux uses ELF-header verification
+        if: matrix.use_qemu == true
+        run: echo "qemu execution replaced by ELF-header check below."
+
+      - name: Download release archive
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_TAG: ${{ inputs.tag_name || github.ref_name }}
+          REPOSITORY: ${{ github.repository }}
+          VERSION: ${{ needs.prepare-release.outputs.version }}
+          TARGET: ${{ matrix.target }}
+          ARCHIVE_EXT: ${{ matrix.archive_ext }}
+        run: |
+          set -euo pipefail
+          archive="wayland-core-v${VERSION}-${TARGET}.${ARCHIVE_EXT}"
+          echo "Downloading ${archive} from release ${RELEASE_TAG}"
+          gh release download "${RELEASE_TAG}" \
+            --repo "${REPOSITORY}" \
+            --pattern "${archive}" \
+            --dir ./smoke
+
+          ls -la ./smoke
+          echo "ARCHIVE_PATH=./smoke/${archive}" >> "$GITHUB_ENV"
+
+      - name: Extract archive (Unix tar.gz)
+        if: matrix.archive_ext == 'tar.gz'
+        shell: bash
+        env:
+          BINARY_NAME: ${{ matrix.binary_name }}
+        run: |
+          set -euo pipefail
+          mkdir -p ./smoke/extracted
+          tar -xzf "$ARCHIVE_PATH" -C ./smoke/extracted
+          ls -la ./smoke/extracted
+          chmod +x "./smoke/extracted/${BINARY_NAME}"
+
+      - name: Extract archive (Windows zip)
+        if: matrix.archive_ext == 'zip'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          New-Item -ItemType Directory -Force -Path ./smoke/extracted | Out-Null
+          Expand-Archive -Path "$env:ARCHIVE_PATH" -DestinationPath ./smoke/extracted -Force
+          Get-ChildItem ./smoke/extracted
+
+      - name: Run --version (native Unix)
+        if: matrix.os != 'windows-latest' && matrix.use_qemu != true
+        shell: bash
+        env:
+          BINARY_NAME: ${{ matrix.binary_name }}
+        run: |
+          set -euo pipefail
+          out="$("./smoke/extracted/${BINARY_NAME}" --version)"
+          echo "version output: ${out}"
+          # Sanity: output must contain "wayland-core" and a SemVer.
+          echo "${out}" | grep -E 'wayland-core[[:space:]]+[0-9]+\.[0-9]+\.[0-9]+' \
+            || { echo "ERROR: --version output did not match expected shape"; exit 1; }
+
+      - name: Verify Linux aarch64 binary file shape only (cannot execute on amd64 runner)
+        if: matrix.use_qemu == true
+        shell: bash
+        env:
+          BINARY_NAME: ${{ matrix.binary_name }}
+        run: |
+          set -euo pipefail
+          bin="./smoke/extracted/${BINARY_NAME}"
+          test -f "$bin" || { echo "ERROR: $bin not found"; exit 1; }
+          size=$(stat -c%s "$bin")
+          # Sanity: >= 1MB. Our release binary is ~24MB; anything tiny is broken.
+          test "$size" -ge 1048576 || { echo "ERROR: $bin suspiciously small ($size bytes)"; exit 1; }
+          # ELF e_machine at offset 0x12 (2 bytes, little-endian). AArch64 = 0xB7.
+          machine=$(od -An -tx2 -j18 -N2 --endian=little "$bin" | tr -d ' \n')
+          if [ "$machine" != "00b7" ]; then
+            echo "ERROR: $bin is not aarch64 (e_machine=0x${machine}; expected 0x00b7)"
+            exit 1
+          fi
+          # ELF magic at offset 0: 0x7F 'E' 'L' 'F'.
+          head -c 4 "$bin" | xxd -p | grep -q '^7f454c46' \
+            || { echo "ERROR: $bin missing ELF magic"; exit 1; }
+          echo "OK: ${BINARY_NAME} is a valid aarch64 Linux ELF binary (${size} bytes)."
+
+      - name: Run --version (Windows amd64-native targets)
+        if: matrix.os == 'windows-latest' && matrix.target == 'x86_64-pc-windows-msvc'
+        shell: pwsh
+        env:
+          BINARY_NAME: ${{ matrix.binary_name }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $out = & "./smoke/extracted/$env:BINARY_NAME" --version
+          Write-Host "version output: $out"
+          if ($out -notmatch 'wayland-core\s+\d+\.\d+\.\d+') {
+            throw "ERROR: --version output did not match expected shape"
+          }
+
+      - name: Verify Windows aarch64 binary file shape only (cannot execute on amd64 runner)
+        if: matrix.os == 'windows-latest' && matrix.target == 'aarch64-pc-windows-msvc'
+        shell: pwsh
+        env:
+          BINARY_NAME: ${{ matrix.binary_name }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $bin = "./smoke/extracted/$env:BINARY_NAME"
+          if (-not (Test-Path $bin)) {
+            throw "ERROR: $bin not found in extracted archive"
+          }
+          $size = (Get-Item $bin).Length
+          if ($size -lt 1MB) {
+            throw "ERROR: $bin suspiciously small ($size bytes)"
+          }
+          # PE machine code 0xAA64 = ARM64. Probe via reading the COFF header.
+          $bytes = [System.IO.File]::ReadAllBytes($bin)
+          # e_lfanew at offset 0x3C points at the PE header.
+          $pe_off = [BitConverter]::ToInt32($bytes, 0x3C)
+          # "PE\0\0" at $pe_off, then COFF header starts at $pe_off+4. Machine = first 2 bytes.
+          $machine = [BitConverter]::ToUInt16($bytes, $pe_off + 4)
+          if ($machine -ne 0xAA64) {
+            throw "ERROR: $bin is not ARM64 (machine=0x$($machine.ToString('X4')))"
+          }
+          Write-Host "ARM64 PE binary verified: $bin ($size bytes)"
+
+  # ── npm publish ────────────────────────────────────────────────────────────
+  # Repackage the smoke-verified release binaries into the npm publish tree
+  # (launcher `@ferroxlabs/wayland-core` + six os/cpu-gated platform packages)
+  # and publish them. Consumers — AionCLI (a plain dependency) and the Wayland
+  # desktop's prepareWaylandCore.js (node_modules resolution path) — pull the
+  # ONE binary matching their platform via npm's os/cpu + optionalDependencies.
+  #
+  # Gated on post-tag-smoke: npm only ever serves a binary that already ran
+  # `--version` on its native OS. Requires the org secret NPM_TOKEN (an
+  # automation token for the @ferroxlabs npm org); without it the job no-ops
+  # with a notice instead of failing the release.
+  publish-npm:
+    name: Publish to npm
+    runs-on: ubuntu-latest
+    needs:
+      - prepare-release
+      - post-tag-smoke
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: refs/tags/${{ inputs.tag_name || github.ref_name }}
+
+      - name: Guard — NPM_TOKEN present
+        id: guard
+        shell: bash
+        env:
+          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          if [ -z "${NPM_TOKEN:-}" ]; then
+            echo "::notice::NPM_TOKEN not set — skipping npm publish for this release."
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Setup Node
+        if: steps.guard.outputs.skip == 'false'
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          registry-url: https://registry.npmjs.org
+
+      - name: Download build artifacts
+        if: steps.guard.outputs.skip == 'false'
+        uses: actions/download-artifact@v8
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Extract binaries by target
+        if: steps.guard.outputs.skip == 'false'
+        shell: bash
+        env:
+          VERSION: ${{ needs.prepare-release.outputs.version }}
+        run: |
+          set -euo pipefail
+          mkdir -p binaries
+          for triple in \
+            aarch64-apple-darwin x86_64-apple-darwin \
+            aarch64-unknown-linux-gnu x86_64-unknown-linux-gnu \
+            aarch64-pc-windows-msvc x86_64-pc-windows-msvc; do
+            dest="binaries/${triple}"
+            mkdir -p "$dest"
+            case "$triple" in
+              *windows*)
+                unzip -o "artifacts/wayland-core-v${VERSION}-${triple}.zip" -d "$dest" ;;
+              *)
+                tar -xzf "artifacts/wayland-core-v${VERSION}-${triple}.tar.gz" -C "$dest" ;;
+            esac
+            ls -l "$dest"
+          done
+
+      - name: Generate npm publish tree
+        if: steps.guard.outputs.skip == 'false'
+        env:
+          VERSION: ${{ needs.prepare-release.outputs.version }}
+        run: node npm/generate.mjs --version "${VERSION}" --binaries binaries --out npm-dist
+
+      - name: Publish (platform packages first, launcher last)
+        if: steps.guard.outputs.skip == 'false'
+        shell: bash
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          VERSION: ${{ needs.prepare-release.outputs.version }}
+        run: |
+          set -euo pipefail
+          # Platform packages BEFORE the launcher so the launcher's
+          # optionalDependencies are resolvable the instant it lands.
+          # (Add `--provenance` here once the job has `permissions: id-token: write`.)
+          for d in npm-dist/wayland-core-*; do
+            ( cd "$d" && npm publish --access public )
+          done
+          ( cd npm-dist/wayland-core && npm publish --access public )
+          echo "Published @ferroxlabs/wayland-core@${VERSION} + platform packages"

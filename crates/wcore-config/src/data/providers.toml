@@ -1,0 +1,866 @@
+# Wayland Core — Bundled Provider Catalog
+# ========================================
+# Data-driven OpenAI-compatible provider registry. Each entry lets
+# `--provider <id>` resolve a generic CatalogProvider (a thin wrapper over
+# OpenAIProvider) WITHOUT a hand-written ProviderType match arm.
+#
+# Source of truth: models.dev catalog (https://models.dev/api.json), the same
+# catalog OpenCode uses. Curated 2026-06-06. Only providers with a STATIC
+# OpenAI-compatible base URL are included.
+#
+# EXCLUDED from this file:
+#   - Local providers (lmstudio, atomic-chat, privatemode-ai): no fixed cloud
+#     URL; covered by the existing ollama/local story.
+#   - Templated-host providers (databricks, snowflake-cortex,
+#     cloudflare-workers-ai): base URL contains ${ACCOUNT}/${HOST} that must be
+#     substituted per-account — not expressible as a static catalog row.
+#   - Anthropic-wire providers (minimax*, kimi-for-coding): not OpenAI-compat.
+#
+# COLLISIONS with native ProviderType arms (deepseek, fireworks-ai, nvidia,
+# openrouter, perplexity-agent, moonshotai) are kept here for completeness but
+# the loader MUST skip any id already owned by a native ProviderType so native
+# wiring wins. See CATALOG-PLAN.md §Loader.
+#
+# Schema per entry:
+#   id                 string  — CLI id for `--provider <id>` (unique)
+#   display_name       string  — human label
+#   base_url           string  — OpenAI-compatible REST root (no trailing slash)
+#   env_var            string  — env var holding the API key
+#   openai_compatible  bool    — always true in this file
+#   api_path           string  — OPTIONAL. Path appended to base_url for chat
+#                                 completions. Omitted => OpenAIProvider default
+#                                 "/v1/chat/completions" (base is a bare host).
+#                                 "/chat/completions" when base already ends in
+#                                 a version segment (/v1, /v4, /openai, ...).
+#                                 "" when base_url IS the full endpoint.
+
+[[provider]]
+id = "302ai"
+display_name = "302.AI"
+base_url = "https://api.302.ai/v1"
+env_var = "302AI_API_KEY"
+openai_compatible = true
+api_path = "/chat/completions"
+
+[[provider]]
+id = "abacus"
+display_name = "Abacus"
+base_url = "https://routellm.abacus.ai/v1"
+env_var = "ABACUS_API_KEY"
+openai_compatible = true
+api_path = "/chat/completions"
+
+[[provider]]
+id = "abliteration-ai"
+display_name = "abliteration.ai"
+base_url = "https://api.abliteration.ai/v1"
+env_var = "ABLIT_KEY"
+openai_compatible = true
+api_path = "/chat/completions"
+
+[[provider]]
+id = "alibaba"
+display_name = "Alibaba"
+base_url = "https://dashscope-intl.aliyuncs.com/compatible-mode/v1"
+env_var = "DASHSCOPE_API_KEY"
+openai_compatible = true
+api_path = "/chat/completions"
+
+[[provider]]
+id = "alibaba-cn"
+display_name = "Alibaba (China)"
+base_url = "https://dashscope.aliyuncs.com/compatible-mode/v1"
+env_var = "DASHSCOPE_API_KEY"
+openai_compatible = true
+api_path = "/chat/completions"
+
+[[provider]]
+id = "alibaba-coding-plan"
+display_name = "Alibaba Coding Plan"
+base_url = "https://coding-intl.dashscope.aliyuncs.com/v1"
+env_var = "ALIBABA_CODING_PLAN_API_KEY"
+openai_compatible = true
+api_path = "/chat/completions"
+
+[[provider]]
+id = "alibaba-coding-plan-cn"
+display_name = "Alibaba Coding Plan (China)"
+base_url = "https://coding.dashscope.aliyuncs.com/v1"
+env_var = "ALIBABA_CODING_PLAN_API_KEY"
+openai_compatible = true
+api_path = "/chat/completions"
+
+[[provider]]
+id = "alibaba-token-plan"
+display_name = "Alibaba Token Plan"
+base_url = "https://token-plan.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1"
+env_var = "ALIBABA_TOKEN_PLAN_API_KEY"
+openai_compatible = true
+api_path = "/chat/completions"
+
+[[provider]]
+id = "ambient"
+display_name = "Ambient"
+base_url = "https://api.ambient.xyz/v1"
+env_var = "AMBIENT_API_KEY"
+openai_compatible = true
+api_path = "/chat/completions"
+
+[[provider]]
+id = "anyapi"
+display_name = "AnyAPI"
+base_url = "https://api.anyapi.ai/v1"
+env_var = "ANYAPI_API_KEY"
+openai_compatible = true
+api_path = "/chat/completions"
+
+[[provider]]
+id = "auriko"
+display_name = "Auriko"
+base_url = "https://api.auriko.ai/v1"
+env_var = "AURIKO_API_KEY"
+openai_compatible = true
+api_path = "/chat/completions"
+
+[[provider]]
+id = "bailing"
+display_name = "Bailing"
+base_url = "https://api.tbox.cn/api/llm/v1/chat/completions"
+env_var = "BAILING_API_TOKEN"
+openai_compatible = true
+api_path = ""
+
+[[provider]]
+id = "baseten"
+display_name = "Baseten"
+base_url = "https://inference.baseten.co/v1"
+env_var = "BASETEN_API_KEY"
+openai_compatible = true
+api_path = "/chat/completions"
+
+[[provider]]
+id = "berget"
+display_name = "Berget.AI"
+base_url = "https://api.berget.ai/v1"
+env_var = "BERGET_API_KEY"
+openai_compatible = true
+api_path = "/chat/completions"
+
+[[provider]]
+id = "chutes"
+display_name = "Chutes"
+base_url = "https://llm.chutes.ai/v1"
+env_var = "CHUTES_API_KEY"
+openai_compatible = true
+api_path = "/chat/completions"
+
+[[provider]]
+id = "clarifai"
+display_name = "Clarifai"
+base_url = "https://api.clarifai.com/v2/ext/openai/v1"
+env_var = "CLARIFAI_PAT"
+openai_compatible = true
+api_path = "/chat/completions"
+
+[[provider]]
+id = "claudinio"
+display_name = "Claudinio"
+base_url = "https://api.claudin.io/v1"
+env_var = "CLAUDINIO_API_KEY"
+openai_compatible = true
+api_path = "/chat/completions"
+
+[[provider]]
+id = "cloudferro-sherlock"
+display_name = "CloudFerro Sherlock"
+base_url = "https://api-sherlock.cloudferro.com/openai/v1"
+env_var = "CLOUDFERRO_SHERLOCK_API_KEY"
+openai_compatible = true
+api_path = "/chat/completions"
+
+[[provider]]
+id = "cortecs"
+display_name = "Cortecs"
+base_url = "https://api.cortecs.ai/v1"
+env_var = "CORTECS_API_KEY"
+openai_compatible = true
+api_path = "/chat/completions"
+
+[[provider]]
+id = "crof"
+display_name = "CrofAI"
+base_url = "https://crof.ai/v1"
+env_var = "CROF_API_KEY"
+openai_compatible = true
+api_path = "/chat/completions"
+
+[[provider]]
+id = "deepseek"
+display_name = "DeepSeek"
+base_url = "https://api.deepseek.com"
+env_var = "DEEPSEEK_API_KEY"
+openai_compatible = true
+
+[[provider]]
+id = "digitalocean"
+display_name = "DigitalOcean"
+base_url = "https://inference.do-ai.run/v1"
+env_var = "DIGITALOCEAN_ACCESS_TOKEN"
+openai_compatible = true
+api_path = "/chat/completions"
+
+[[provider]]
+id = "dinference"
+display_name = "DInference"
+base_url = "https://api.dinference.com/v1"
+env_var = "DINFERENCE_API_KEY"
+openai_compatible = true
+api_path = "/chat/completions"
+
+[[provider]]
+id = "drun"
+display_name = "D.Run (China)"
+base_url = "https://chat.d.run/v1"
+env_var = "DRUN_API_KEY"
+openai_compatible = true
+api_path = "/chat/completions"
+
+[[provider]]
+id = "evroc"
+display_name = "evroc"
+base_url = "https://models.think.evroc.com/v1"
+env_var = "EVROC_API_KEY"
+openai_compatible = true
+api_path = "/chat/completions"
+
+[[provider]]
+id = "fastrouter"
+display_name = "FastRouter"
+base_url = "https://go.fastrouter.ai/api/v1"
+env_var = "FASTROUTER_API_KEY"
+openai_compatible = true
+api_path = "/chat/completions"
+
+[[provider]]
+id = "firepass"
+display_name = "Fireworks (Firepass)"
+base_url = "https://api.fireworks.ai/inference/v1"
+env_var = "FIREPASS_API_KEY"
+openai_compatible = true
+api_path = "/chat/completions"
+
+[[provider]]
+id = "fireworks-ai"
+display_name = "Fireworks AI"
+base_url = "https://api.fireworks.ai/inference/v1"
+env_var = "FIREWORKS_API_KEY"
+openai_compatible = true
+api_path = "/chat/completions"
+
+[[provider]]
+id = "friendli"
+display_name = "Friendli"
+base_url = "https://api.friendli.ai/serverless/v1"
+env_var = "FRIENDLI_TOKEN"
+openai_compatible = true
+api_path = "/chat/completions"
+
+[[provider]]
+id = "frogbot"
+display_name = "FrogBot"
+base_url = "https://app.frogbot.ai/api/v1"
+env_var = "FROGBOT_API_KEY"
+openai_compatible = true
+api_path = "/chat/completions"
+
+[[provider]]
+id = "github-copilot"
+display_name = "GitHub Copilot"
+base_url = "https://api.githubcopilot.com"
+env_var = "GITHUB_TOKEN"
+openai_compatible = true
+
+[[provider]]
+id = "github-models"
+display_name = "GitHub Models"
+base_url = "https://models.github.ai/inference"
+env_var = "GITHUB_TOKEN"
+openai_compatible = true
+api_path = "/chat/completions"
+
+[[provider]]
+id = "gmicloud"
+display_name = "GMI Cloud"
+base_url = "https://api.gmi-serving.com/v1"
+env_var = "GMICLOUD_API_KEY"
+openai_compatible = true
+api_path = "/chat/completions"
+
+[[provider]]
+id = "helicone"
+display_name = "Helicone"
+base_url = "https://ai-gateway.helicone.ai/v1"
+env_var = "HELICONE_API_KEY"
+openai_compatible = true
+api_path = "/chat/completions"
+
+[[provider]]
+id = "hpc-ai"
+display_name = "HPC-AI"
+base_url = "https://api.hpc-ai.com/inference/v1"
+env_var = "HPC_AI_API_KEY"
+openai_compatible = true
+api_path = "/chat/completions"
+
+[[provider]]
+id = "huggingface"
+display_name = "Hugging Face"
+base_url = "https://router.huggingface.co/v1"
+env_var = "HF_TOKEN"
+openai_compatible = true
+api_path = "/chat/completions"
+
+[[provider]]
+id = "iflowcn"
+display_name = "iFlow"
+base_url = "https://apis.iflow.cn/v1"
+env_var = "IFLOW_API_KEY"
+openai_compatible = true
+api_path = "/chat/completions"
+
+[[provider]]
+id = "inception"
+display_name = "Inception"
+base_url = "https://api.inceptionlabs.ai/v1"
+env_var = "INCEPTION_API_KEY"
+openai_compatible = true
+api_path = "/chat/completions"
+
+[[provider]]
+id = "inceptron"
+display_name = "Inceptron"
+base_url = "https://api.inceptron.io/v1"
+env_var = "INCEPTRON_API_KEY"
+openai_compatible = true
+api_path = "/chat/completions"
+
+[[provider]]
+id = "inference"
+display_name = "Inference"
+base_url = "https://inference.net/v1"
+env_var = "INFERENCE_API_KEY"
+openai_compatible = true
+api_path = "/chat/completions"
+
+[[provider]]
+id = "io-net"
+display_name = "IO.NET"
+base_url = "https://api.intelligence.io.solutions/api/v1"
+env_var = "IOINTELLIGENCE_API_KEY"
+openai_compatible = true
+api_path = "/chat/completions"
+
+[[provider]]
+id = "jiekou"
+display_name = "Jiekou.AI"
+base_url = "https://api.jiekou.ai/openai"
+env_var = "JIEKOU_API_KEY"
+openai_compatible = true
+api_path = "/chat/completions"
+
+[[provider]]
+id = "kilo"
+display_name = "Kilo Gateway"
+base_url = "https://api.kilo.ai/api/gateway"
+env_var = "KILO_API_KEY"
+openai_compatible = true
+api_path = "/chat/completions"
+
+[[provider]]
+id = "kuae-cloud-coding-plan"
+display_name = "KUAE Cloud Coding Plan"
+base_url = "https://coding-plan-endpoint.kuaecloud.net/v1"
+env_var = "KUAE_API_KEY"
+openai_compatible = true
+api_path = "/chat/completions"
+
+[[provider]]
+id = "lilac"
+display_name = "Lilac"
+base_url = "https://api.getlilac.com/v1"
+env_var = "LILAC_API_KEY"
+openai_compatible = true
+api_path = "/chat/completions"
+
+[[provider]]
+id = "llama"
+display_name = "Llama"
+base_url = "https://api.llama.com/compat/v1"
+env_var = "LLAMA_API_KEY"
+openai_compatible = true
+api_path = "/chat/completions"
+
+[[provider]]
+id = "llmgateway"
+display_name = "LLM Gateway"
+base_url = "https://api.llmgateway.io/v1"
+env_var = "LLMGATEWAY_API_KEY"
+openai_compatible = true
+api_path = "/chat/completions"
+
+[[provider]]
+id = "lucidquery"
+display_name = "LucidQuery AI"
+base_url = "https://lucidquery.com/api/v1"
+env_var = "LUCIDQUERY_API_KEY"
+openai_compatible = true
+api_path = "/chat/completions"
+
+[[provider]]
+id = "meganova"
+display_name = "Meganova"
+base_url = "https://api.meganova.ai/v1"
+env_var = "MEGANOVA_API_KEY"
+openai_compatible = true
+api_path = "/chat/completions"
+
+[[provider]]
+id = "mixlayer"
+display_name = "Mixlayer"
+base_url = "https://models.mixlayer.ai/v1"
+env_var = "MIXLAYER_API_KEY"
+openai_compatible = true
+api_path = "/chat/completions"
+
+[[provider]]
+id = "moark"
+display_name = "Moark"
+base_url = "https://moark.com/v1"
+env_var = "MOARK_API_KEY"
+openai_compatible = true
+api_path = "/chat/completions"
+
+[[provider]]
+id = "modelscope"
+display_name = "ModelScope"
+base_url = "https://api-inference.modelscope.cn/v1"
+env_var = "MODELSCOPE_API_KEY"
+openai_compatible = true
+api_path = "/chat/completions"
+
+[[provider]]
+id = "moonshotai"
+display_name = "Moonshot AI"
+base_url = "https://api.moonshot.ai/v1"
+env_var = "MOONSHOT_API_KEY"
+openai_compatible = true
+api_path = "/chat/completions"
+
+[[provider]]
+id = "moonshotai-cn"
+display_name = "Moonshot AI (China)"
+base_url = "https://api.moonshot.cn/v1"
+env_var = "MOONSHOT_API_KEY"
+openai_compatible = true
+api_path = "/chat/completions"
+
+[[provider]]
+id = "morph"
+display_name = "Morph"
+base_url = "https://api.morphllm.com/v1"
+env_var = "MORPH_API_KEY"
+openai_compatible = true
+api_path = "/chat/completions"
+
+[[provider]]
+id = "nano-gpt"
+display_name = "NanoGPT"
+base_url = "https://nano-gpt.com/api/v1"
+env_var = "NANO_GPT_API_KEY"
+openai_compatible = true
+api_path = "/chat/completions"
+
+[[provider]]
+id = "nearai"
+display_name = "NEAR AI Cloud"
+base_url = "https://cloud-api.near.ai/v1"
+env_var = "NEARAI_API_KEY"
+openai_compatible = true
+api_path = "/chat/completions"
+
+[[provider]]
+id = "nebius"
+display_name = "Nebius Token Factory"
+base_url = "https://api.tokenfactory.nebius.com/v1"
+env_var = "NEBIUS_API_KEY"
+openai_compatible = true
+api_path = "/chat/completions"
+
+[[provider]]
+id = "neuralwatt"
+display_name = "Neuralwatt"
+base_url = "https://api.neuralwatt.com/v1"
+env_var = "NEURALWATT_API_KEY"
+openai_compatible = true
+api_path = "/chat/completions"
+
+[[provider]]
+id = "nova"
+display_name = "Nova"
+base_url = "https://api.nova.amazon.com/v1"
+env_var = "NOVA_API_KEY"
+openai_compatible = true
+api_path = "/chat/completions"
+
+[[provider]]
+id = "novita-ai"
+display_name = "NovitaAI"
+base_url = "https://api.novita.ai/openai"
+env_var = "NOVITA_API_KEY"
+openai_compatible = true
+api_path = "/chat/completions"
+
+[[provider]]
+id = "nvidia"
+display_name = "Nvidia"
+base_url = "https://integrate.api.nvidia.com/v1"
+env_var = "NVIDIA_API_KEY"
+openai_compatible = true
+api_path = "/chat/completions"
+
+[[provider]]
+id = "ollama-cloud"
+display_name = "Ollama Cloud"
+base_url = "https://ollama.com/v1"
+env_var = "OLLAMA_API_KEY"
+openai_compatible = true
+api_path = "/chat/completions"
+
+[[provider]]
+id = "opencode"
+display_name = "OpenCode Zen"
+base_url = "https://opencode.ai/zen/v1"
+env_var = "OPENCODE_API_KEY"
+openai_compatible = true
+api_path = "/chat/completions"
+
+[[provider]]
+id = "opencode-go"
+display_name = "OpenCode Go"
+base_url = "https://opencode.ai/zen/go/v1"
+env_var = "OPENCODE_API_KEY"
+openai_compatible = true
+api_path = "/chat/completions"
+
+[[provider]]
+id = "openrouter"
+display_name = "OpenRouter"
+base_url = "https://openrouter.ai/api/v1"
+env_var = "OPENROUTER_API_KEY"
+openai_compatible = true
+api_path = "/chat/completions"
+
+[[provider]]
+id = "orcarouter"
+display_name = "OrcaRouter"
+base_url = "https://api.orcarouter.ai/v1"
+env_var = "ORCAROUTER_API_KEY"
+openai_compatible = true
+api_path = "/chat/completions"
+
+[[provider]]
+id = "ovhcloud"
+display_name = "OVHcloud AI Endpoints"
+base_url = "https://oai.endpoints.kepler.ai.cloud.ovh.net/v1"
+env_var = "OVHCLOUD_API_KEY"
+openai_compatible = true
+api_path = "/chat/completions"
+
+[[provider]]
+id = "perplexity-agent"
+display_name = "Perplexity Agent"
+base_url = "https://api.perplexity.ai/v1"
+env_var = "PERPLEXITY_API_KEY"
+openai_compatible = true
+api_path = "/chat/completions"
+
+[[provider]]
+id = "poe"
+display_name = "Poe"
+base_url = "https://api.poe.com/v1"
+env_var = "POE_API_KEY"
+openai_compatible = true
+api_path = "/chat/completions"
+
+[[provider]]
+id = "poolside"
+display_name = "Poolside"
+base_url = "https://inference.poolside.ai/v1"
+env_var = "POOLSIDE_API_KEY"
+openai_compatible = true
+api_path = "/chat/completions"
+
+[[provider]]
+id = "qihang-ai"
+display_name = "QiHang"
+base_url = "https://api.qhaigc.net/v1"
+env_var = "QIHANG_API_KEY"
+openai_compatible = true
+api_path = "/chat/completions"
+
+[[provider]]
+id = "qiniu-ai"
+display_name = "Qiniu"
+base_url = "https://api.qnaigc.com/v1"
+env_var = "QINIU_API_KEY"
+openai_compatible = true
+api_path = "/chat/completions"
+
+[[provider]]
+id = "regolo-ai"
+display_name = "Regolo AI"
+base_url = "https://api.regolo.ai/v1"
+env_var = "REGOLO_API_KEY"
+openai_compatible = true
+api_path = "/chat/completions"
+
+[[provider]]
+id = "requesty"
+display_name = "Requesty"
+base_url = "https://router.requesty.ai/v1"
+env_var = "REQUESTY_API_KEY"
+openai_compatible = true
+api_path = "/chat/completions"
+
+[[provider]]
+id = "routing-run"
+display_name = "routing.run"
+base_url = "https://ai.routing.sh/v1"
+env_var = "ROUTING_RUN_API_KEY"
+openai_compatible = true
+api_path = "/chat/completions"
+
+[[provider]]
+id = "sarvam"
+display_name = "Sarvam AI"
+base_url = "https://api.sarvam.ai/v1"
+env_var = "SARVAM_API_KEY"
+openai_compatible = true
+api_path = "/chat/completions"
+
+[[provider]]
+id = "scaleway"
+display_name = "Scaleway"
+base_url = "https://api.scaleway.ai/v1"
+env_var = "SCALEWAY_API_KEY"
+openai_compatible = true
+api_path = "/chat/completions"
+
+[[provider]]
+id = "siliconflow"
+display_name = "SiliconFlow"
+base_url = "https://api.siliconflow.com/v1"
+env_var = "SILICONFLOW_API_KEY"
+openai_compatible = true
+api_path = "/chat/completions"
+
+[[provider]]
+id = "siliconflow-cn"
+display_name = "SiliconFlow (China)"
+base_url = "https://api.siliconflow.cn/v1"
+env_var = "SILICONFLOW_CN_API_KEY"
+openai_compatible = true
+api_path = "/chat/completions"
+
+[[provider]]
+id = "stackit"
+display_name = "STACKIT"
+base_url = "https://api.openai-compat.model-serving.eu01.onstackit.cloud/v1"
+env_var = "STACKIT_API_KEY"
+openai_compatible = true
+api_path = "/chat/completions"
+
+[[provider]]
+id = "stepfun"
+display_name = "StepFun"
+base_url = "https://api.stepfun.com/v1"
+env_var = "STEPFUN_API_KEY"
+openai_compatible = true
+api_path = "/chat/completions"
+
+[[provider]]
+id = "stepfun-ai"
+display_name = "StepFun AI"
+base_url = "https://api.stepfun.ai/step_plan/v1"
+env_var = "STEPFUN_API_KEY"
+openai_compatible = true
+api_path = "/chat/completions"
+
+[[provider]]
+id = "submodel"
+display_name = "submodel"
+base_url = "https://llm.submodel.ai/v1"
+env_var = "SUBMODEL_INSTAGEN_ACCESS_KEY"
+openai_compatible = true
+api_path = "/chat/completions"
+
+[[provider]]
+id = "synthetic"
+display_name = "Synthetic"
+base_url = "https://api.synthetic.new/openai/v1"
+env_var = "SYNTHETIC_API_KEY"
+openai_compatible = true
+api_path = "/chat/completions"
+
+[[provider]]
+id = "tencent-coding-plan"
+display_name = "Tencent Coding Plan (China)"
+base_url = "https://api.lkeap.cloud.tencent.com/coding/v3"
+env_var = "TENCENT_CODING_PLAN_API_KEY"
+openai_compatible = true
+api_path = "/chat/completions"
+
+[[provider]]
+id = "tencent-tokenhub"
+display_name = "Tencent TokenHub"
+base_url = "https://tokenhub.tencentmaas.com/v1"
+env_var = "TENCENT_TOKENHUB_API_KEY"
+openai_compatible = true
+api_path = "/chat/completions"
+
+[[provider]]
+id = "the-grid-ai"
+display_name = "The Grid AI"
+base_url = "https://api.thegrid.ai/v1"
+env_var = "THEGRIDAI_API_KEY"
+openai_compatible = true
+api_path = "/chat/completions"
+
+[[provider]]
+id = "umans-ai-coding-plan"
+display_name = "Umans AI Coding Plan"
+base_url = "https://api.code.umans.ai/v1"
+env_var = "UMANS_AI_CODING_PLAN_API_KEY"
+openai_compatible = true
+api_path = "/chat/completions"
+
+[[provider]]
+id = "upstage"
+display_name = "Upstage"
+base_url = "https://api.upstage.ai/v1/solar"
+env_var = "UPSTAGE_API_KEY"
+openai_compatible = true
+api_path = "/chat/completions"
+
+[[provider]]
+id = "vivgrid"
+display_name = "Vivgrid"
+base_url = "https://api.vivgrid.com/v1"
+env_var = "VIVGRID_API_KEY"
+openai_compatible = true
+api_path = "/chat/completions"
+
+[[provider]]
+id = "vultr"
+display_name = "Vultr"
+base_url = "https://api.vultrinference.com/v1"
+env_var = "VULTR_API_KEY"
+openai_compatible = true
+api_path = "/chat/completions"
+
+[[provider]]
+id = "wafer.ai"
+display_name = "Wafer"
+base_url = "https://pass.wafer.ai/v1"
+env_var = "WAFER_API_KEY"
+openai_compatible = true
+api_path = "/chat/completions"
+
+[[provider]]
+id = "wandb"
+display_name = "Weights & Biases"
+base_url = "https://api.inference.wandb.ai/v1"
+env_var = "WANDB_API_KEY"
+openai_compatible = true
+api_path = "/chat/completions"
+
+[[provider]]
+id = "xiaomi"
+display_name = "Xiaomi"
+base_url = "https://api.xiaomimimo.com/v1"
+env_var = "XIAOMI_API_KEY"
+openai_compatible = true
+api_path = "/chat/completions"
+
+[[provider]]
+id = "xiaomi-token-plan-ams"
+display_name = "Xiaomi Token Plan (Europe)"
+base_url = "https://token-plan-ams.xiaomimimo.com/v1"
+env_var = "XIAOMI_API_KEY"
+openai_compatible = true
+api_path = "/chat/completions"
+
+[[provider]]
+id = "xiaomi-token-plan-cn"
+display_name = "Xiaomi Token Plan (China)"
+base_url = "https://token-plan-cn.xiaomimimo.com/v1"
+env_var = "XIAOMI_API_KEY"
+openai_compatible = true
+api_path = "/chat/completions"
+
+[[provider]]
+id = "xiaomi-token-plan-sgp"
+display_name = "Xiaomi Token Plan (Singapore)"
+base_url = "https://token-plan-sgp.xiaomimimo.com/v1"
+env_var = "XIAOMI_API_KEY"
+openai_compatible = true
+api_path = "/chat/completions"
+
+[[provider]]
+id = "xpersona"
+display_name = "Xpersona"
+base_url = "https://www.xpersona.co/v1"
+env_var = "XPERSONA_API_KEY"
+openai_compatible = true
+api_path = "/chat/completions"
+
+[[provider]]
+id = "zai"
+display_name = "Z.AI"
+base_url = "https://api.z.ai/api/paas/v4"
+env_var = "ZHIPU_API_KEY"
+openai_compatible = true
+api_path = "/chat/completions"
+
+[[provider]]
+id = "zai-coding-plan"
+display_name = "Z.AI Coding Plan"
+base_url = "https://api.z.ai/api/coding/paas/v4"
+env_var = "ZHIPU_API_KEY"
+openai_compatible = true
+api_path = "/chat/completions"
+
+[[provider]]
+id = "zenmux"
+display_name = "ZenMux"
+base_url = "https://zenmux.ai/api/v1"
+env_var = "ZENMUX_API_KEY"
+openai_compatible = true
+api_path = "/chat/completions"
+
+[[provider]]
+id = "zhipuai"
+display_name = "Zhipu AI"
+base_url = "https://open.bigmodel.cn/api/paas/v4"
+env_var = "ZHIPU_API_KEY"
+openai_compatible = true
+api_path = "/chat/completions"
+
+[[provider]]
+id = "zhipuai-coding-plan"
+display_name = "Zhipu AI Coding Plan"
+base_url = "https://open.bigmodel.cn/api/coding/paas/v4"
+env_var = "ZHIPU_API_KEY"
+openai_compatible = true
+api_path = "/chat/completions"
+

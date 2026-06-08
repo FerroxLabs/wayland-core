@@ -1,0 +1,21 @@
+[package]
+name = "wcore-budget"
+description = "Budget caps, tracker, and telemetry events for wayland-core (extracted M5.3 from wcore-agent + wcore-config)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+serde.workspace        = true
+serde_json.workspace   = true
+toml.workspace         = true
+thiserror.workspace    = true
+parking_lot.workspace  = true
+chrono.workspace       = true
+
+workspace-hack.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true

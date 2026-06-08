@@ -1,0 +1,11 @@
+[template]
+cargo_generate_version = ">=0.18.0"
+# Files matched here are NOT copied into the generated user plugin —
+# the smoke test belongs to the template author, not to plugins built
+# from it. Without this exclusion, `cargo generate` would scaffold a
+# `tests/template_smoke.rs` into every plugin, which is wrong.
+ignore = ["tests/template_smoke.rs"]
+
+[placeholders]
+description = { type = "string", prompt = "Short description of the plugin", default = "A Wayland WASM tool plugin" }
+authors = { type = "string", prompt = "Plugin author(s) (Name <email>)", default = "Unknown <unknown@example.com>" }

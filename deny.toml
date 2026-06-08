@@ -1,0 +1,79 @@
+# cargo-deny configuration for wayland-core
+# T3-9 (v0.6.2): final dependency-set audit gate.
+#
+# Policy:
+#   - Permissive OSS licenses only. AGPL is implicitly denied by absence
+#     (per BATTLE-PLAN: no AGPL in-process; AGPL is only acceptable via
+#     subprocess MCP, which is out-of-process and not represented here).
+#   - Yanked crates are denied.
+#   - All deps must come from crates.io; unknown registries / git sources
+#     require an explicit allow-list entry.
+#   - Multiple-version drift is `warn` (transitive ecosystem reality, e.g.
+#     windows-sys, hashbrown), not `deny`.
+
+[graph]
+all-features = false
+no-default-features = false
+
+[output]
+feature-depth = 1
+
+# ---------------------------------------------------------------------------
+# Licenses
+# ---------------------------------------------------------------------------
+[licenses]
+# Permissive license allowlist. Anything not on this list fails the gate.
+# AGPL-*, GPL-*, LGPL-*, SSPL-*, Commons-Clause are intentionally absent.
+allow = [
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "MIT",
+    "MIT-0",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Unicode-3.0",
+    "Zlib",
+    "MPL-2.0",
+    "CC0-1.0",
+    "BSL-1.0",
+    "CDLA-Permissive-2.0",
+    "0BSD",
+]
+confidence-threshold = 0.93
+exceptions = []
+
+# `workspace-hack` is an internal `cargo hakari` feature-unification crate;
+# it never publishes and has no license. Treat it as a first-party private
+# crate so cargo-deny ignores its missing license field.
+private = { ignore = true }
+
+# ---------------------------------------------------------------------------
+# Advisories (RUSTSEC)
+# ---------------------------------------------------------------------------
+[advisories]
+# version = 2 schema (cargo-deny >= 0.14)
+yanked = "deny"
+# Populate ONLY with documented workarounds. Each entry must reference a
+# tracking issue and rationale.
+ignore = []
+
+# ---------------------------------------------------------------------------
+# Bans
+# ---------------------------------------------------------------------------
+[bans]
+multiple-versions = "warn"
+wildcards = "allow"
+highlight = "all"
+deny = []
+skip = []
+skip-tree = []
+
+# ---------------------------------------------------------------------------
+# Sources
+# ---------------------------------------------------------------------------
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []

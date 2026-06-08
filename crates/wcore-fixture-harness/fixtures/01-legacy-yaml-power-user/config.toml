@@ -1,0 +1,119 @@
+# SANITIZED FIXTURE — generated 2026-05-24 from legacy-yaml-power-user — secrets redacted per .blackboard/E2E-FIXTURE-SANITIZATION-2026-05-24.md
+# Source: ~/Library/Application Support/wayland-core/config.toml shape (engine-written)
+# Both config.yaml (legacy) and config.toml (canonical) exist simultaneously —
+# this tests the engine's dual-config resolution order (B-11 / F-011 / F-018).
+
+[default]
+provider = "anthropic"
+model = "anthropic/claude-opus-4.6"
+max_tokens = 8192
+
+[providers.anthropic]
+base_url = "https://openrouter.ai/api/v1"
+
+[providers.openrouter]
+base_url = "https://openrouter.ai/api/v1"
+
+[profiles]
+
+[tools]
+auto_approve = false
+allow_list = [
+    "Read",
+    "Grep",
+    "Glob",
+]
+verify_edits = false
+
+[tools.skills]
+deny = []
+allow = []
+
+[session]
+enabled = true
+directory = "<<WAYLAND_HOME>>/sessions"
+max_sessions = 20
+
+[compact]
+context_window = 200000
+output_reserve = 20000
+autocompact_buffer = 13000
+emergency_buffer = 3000
+max_failures = 3
+micro_keep_recent = 5
+micro_gap_seconds = 3600
+compactable_tools = [
+    "Read",
+    "Bash",
+    "Grep",
+    "Glob",
+    "Write",
+    "Edit",
+]
+enabled = true
+cache_diagnostics = false
+compaction = "safe"
+toon = false
+
+[plan]
+enabled = true
+plan_directory = ".wayland-core/plans"
+
+[file_cache]
+max_entries = 100
+max_size_bytes = 26214400
+enabled = true
+
+[hooks]
+pre_tool_use = []
+post_tool_use = []
+stop = []
+
+# Two MCP servers — tests env-hermeticity (B-9) for the multi-server case.
+[mcp.servers.wayland-image-generation]
+transport = "stdio"
+command = "node"
+args = ["<<WAYLAND_HOME>>/builtin-mcp-image-gen.js"]
+
+[mcp.servers.wayland-image-generation.env]
+WAYLAND_IMG_API_KEY = "<<REDACTED:KEY:google>>"
+WAYLAND_IMG_PLATFORM = "gemini"
+WAYLAND_IMG_MODEL = "nano-banana-pro-preview"
+WAYLAND_IMG_BASE_URL = "https://generativelanguage.googleapis.com"
+
+[mcp.servers.local-tools]
+transport = "stdio"
+command = "node"
+args = ["<<WAYLAND_HOME>>/local-tools-server.js"]
+
+[mcp.servers.local-tools.env]
+SOME_API_KEY = "<<REDACTED:ENV:SOME_API_KEY>>"
+
+[mcp.curation]
+kind = "top_k"
+k = 15
+
+[debug]
+
+[observability]
+structured_traces = false
+skills_lifecycle = false
+online_evolution = false
+
+[provider_chain]
+enabled = false
+failure_threshold = 3
+recovery_timeout_secs = 30
+
+[budget]
+
+[storage.credentials]
+backend = "plaintext"
+
+[memory]
+enabled = true
+dream_cycle_throttle_secs = 1800
+decay_interval_secs = 3600
+
+[memory.embedder]
+backend = "hashed"

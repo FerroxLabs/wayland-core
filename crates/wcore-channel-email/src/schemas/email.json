@@ -1,0 +1,38 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "EmailConfig",
+  "description": "Per-channel TOML config for the SMTP outbound + IMAP inbound email adapter.",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "from_address": {
+      "type": "string",
+      "description": "RFC 5322 mailbox address used as the From: header on outbound messages (e.g. 'bot@acme.com')."
+    },
+    "smtp": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "host": { "type": "string" },
+        "port": { "type": "integer", "minimum": 1, "maximum": 65535, "default": 587 },
+        "user_credential_handle": { "type": "string" },
+        "password_credential_handle": { "type": "string" }
+      },
+      "required": ["host", "user_credential_handle", "password_credential_handle"]
+    },
+    "imap": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "host": { "type": "string" },
+        "port": { "type": "integer", "minimum": 1, "maximum": 65535, "default": 993 },
+        "user_credential_handle": { "type": "string" },
+        "password_credential_handle": { "type": "string" },
+        "mailbox": { "type": "string", "default": "INBOX" },
+        "poll_interval_secs": { "type": "integer", "minimum": 1, "maximum": 3600, "default": 30 }
+      },
+      "required": ["host", "user_credential_handle", "password_credential_handle"]
+    }
+  },
+  "required": ["from_address", "smtp"]
+}

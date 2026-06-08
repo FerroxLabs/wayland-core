@@ -1,0 +1,28 @@
+{
+  "_sanitized": "2026-05-24",
+  "_archetype": "migration-mid-flight",
+  "_rules": ".blackboard/E2E-FIXTURE-SANITIZATION-2026-05-24.md",
+  "jobs": [
+    {
+      "id": "00000000-0003-4000-8000-000000000003",
+      "name": "Weekly Review",
+      "schedule": "0 18 * * 5",
+      "state": "scheduled",
+      "enabled": true,
+      "next_run_at": "2026-01-02T18:00:00Z",
+      "last_run_at": "2026-01-01T08:00:00Z",
+      "last_status": "ok",
+      "last_error": null,
+      "prompt": "Summarize the key accomplishments from this week in 3 bullet points.",
+      "skills": [],
+      "deliver": "local",
+      "deliverTargets": ["local"],
+      "defaultInputs": {},
+      "autonomy": "full",
+      "schemaVersion": 1,
+      "schedule_display": "0 18 * * 5",
+      "deliveryChannels": ["home"]
+    }
+  ],
+  "updated_at": "2026-01-01T00:00:00Z"
+}

@@ -1,0 +1,33 @@
+# Force LF line endings for all text files in this repo. The wayland-ijfw
+# snapshots (included via `include_str!` at compile time) parse YAML
+# frontmatter via literal `---\n` matches — Windows autocrlf converting
+# them to CRLF on checkout broke `each_vendored_agent_parses` on
+# windows-latest CI (run 25953429275). Forcing LF everywhere is the
+# canonical fix and matches how Rust source / Cargo manifests are
+# already authored.
+* text=auto eol=lf
+
+# Belt-and-suspenders: snapshot content + Rust + TOML stays LF even if
+# someone later flips the top-level rule.
+crates/wayland-ijfw/snapshots/** text eol=lf
+*.rs                              text eol=lf
+*.toml                            text eol=lf
+*.md                              text eol=lf
+*.yml                             text eol=lf
+*.yaml                            text eol=lf
+
+# Audit §1.3 fix: insta snapshot files must always land with LF in the repo.
+# Without this, Windows checkout produces CRLF snapshots and every snapshot
+# test shows a false failure on windows-latest CI (insta compares byte-for-byte).
+# Companion fix: set INSTA_NORMALIZE=1 in the Windows CI matrix env.
+*.snap      text eol=lf
+*.snap.new  text eol=lf
+
+# Binary files: do not touch.
+*.png  binary
+*.jpg  binary
+*.gif  binary
+*.ico  binary
+*.zip  binary
+*.gz   binary
+*.tar  binary

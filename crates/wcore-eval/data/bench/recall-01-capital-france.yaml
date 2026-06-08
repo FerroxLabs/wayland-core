@@ -1,0 +1,13 @@
+id: recall-01-capital-france
+category: recall
+prompt: |
+  Name the capital city of France. Reply with the city name only,
+  no surrounding punctuation.
+match_strategy:
+  kind: exact
+  expected: "Paris"
+rationale: |
+  Stable factual recall; the canonical answer does not drift across
+  decades. Exact-match keeps the case unambiguous.
+allowed_tools: []
+timeout_secs: 15

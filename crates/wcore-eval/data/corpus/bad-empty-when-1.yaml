@@ -1,0 +1,7 @@
+id: bad-empty-when-1
+category: empty-when-to-use
+skill_body: hello-empty-when-1
+trace_fixture: expensive-bad-3.json
+expected_outcome: bad
+rationale: |
+  Empty when_to_use, name mismatch, off-topic description (financial calculator), stale model pin. 4 fails + expensive trace.

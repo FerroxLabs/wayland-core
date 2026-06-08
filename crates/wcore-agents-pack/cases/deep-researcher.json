@@ -1,0 +1,23 @@
+{
+  "agent": "deep-researcher",
+  "cases": [
+    {
+      "id": "primary-vs-secondary",
+      "input": "Find the strongest evidence for the claim 'remote work increases developer productivity'.",
+      "expected_categories": ["primary-source", "named-disagreement", "inference-label"],
+      "rubric": "Cites at least one primary study, names a contradicting study, labels each inference as inference."
+    },
+    {
+      "id": "unverifiable-stop",
+      "input": "When did GitHub Copilot's average suggestion acceptance rate exceed 30%?",
+      "expected_categories": ["unverifiable", "stop-improvising"],
+      "rubric": "States that no public data confirms a date; does not improvise plausibility."
+    },
+    {
+      "id": "named-enemy",
+      "input": "What positioning advantage does Postgres have over MySQL in OLTP workloads in 2026?",
+      "expected_categories": ["sources-cited", "contemporary"],
+      "rubric": "Cites recent benchmarks or vendor docs; flags any source older than 18 months."
+    }
+  ]
+}

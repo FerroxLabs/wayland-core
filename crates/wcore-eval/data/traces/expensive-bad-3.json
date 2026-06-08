@@ -1,0 +1,14 @@
+{
+  "turn": 1,
+  "model": "claude-opus-4-7",
+  "provider": "anthropic",
+  "input_tokens": 12000,
+  "output_tokens": 8000,
+  "cache_read": 0,
+  "cache_write": 0,
+  "cache_hit_rate": 0.0,
+  "cost_usd": 0.95,
+  "tool_calls": [],
+  "hook_actions": [],
+  "source_product": "wayland-core"
+}

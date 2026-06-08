@@ -1,0 +1,199 @@
+//! B2.5 — a [`ConsentDoorbell`] backed by the engine's [`ApprovalBridge`].
+//!
+//! This is the production doorbell: it rides the **existing** approval journey
+//! (the same `ApprovalRequired` event + bridge resolution the ScriptTool HITL
+//! path uses). On an `Ask` verdict the policy calls [`ask`](BridgeConsentDoorbell::ask),
+//! which:
+//!   1. registers a pending approval on the bridge (`request` → correlation id +
+//!      a one-shot receiver),
+//!   2. emits `ApprovalRequired` through the [`OutputSink`] so the host renders
+//!      a prompt,
+//!   3. awaits the operator's decision and maps it to a [`ConsentDecision`].
+//!
+//! The host resolves the request through the engine's existing
+//! `ApprovalResume` arm (`engine.approval_bridge().resolve(...)`). A binary
+//! approve/deny maps to `Once`/`No`; an `always` scope — carried in the
+//! resolved [`ApprovalOutcome::modifications`] as `{"egress_scope":"always"}` —
+//! maps to `Always`, which the policy persists. A closed channel or a TTL
+//! timeout (the operator walked away) is treated as **deny** — fail-closed,
+//! since a doorbell being present means an interactive answer was expected.
+
+use std::sync::Arc;
+
+use crate::approval::{ApprovalBridge, ApprovalRequest};
+use crate::output::OutputSink;
+
+use super::consent::{ConsentDecision, ConsentDoorbell};
+
+/// A consent doorbell that surfaces the prompt through the engine's approval
+/// bridge + output sink.
+pub struct BridgeConsentDoorbell {
+    bridge: Arc<ApprovalBridge>,
+    sink: Arc<dyn OutputSink>,
+}
+
+impl BridgeConsentDoorbell {
+    /// Wire a doorbell to the engine's shared approval bridge and output sink.
+    pub fn new(bridge: Arc<ApprovalBridge>, sink: Arc<dyn OutputSink>) -> Self {
+        Self { bridge, sink }
+    }
+}
+
+/// Decode the once/always scope a host may attach to its approval. Absent or
+/// unrecognized ⇒ `Once` (a plain approve does not persist).
+fn scope_is_always(modifications: &Option<serde_json::Value>) -> bool {
+    modifications
+        .as_ref()
+        .and_then(|v| v.get("egress_scope"))
+        .and_then(|s| s.as_str())
+        .map(|s| s.eq_ignore_ascii_case("always"))
+        .unwrap_or(false)
+}
+
+#[async_trait::async_trait]
+impl ConsentDoorbell for BridgeConsentDoorbell {
+    async fn ask(&self, host: &str, registrable: &str, reason: &str) -> ConsentDecision {
+        // The `call_id` doubles as the bridge correlation id (`request_with_id`),
+        // so a resolver only needs the `call_id` it already has — no separate
+        // token to thread through the UI. A uuid keeps concurrent asks (even to
+        // the same host) from colliding in the bridge's pending map. The `egress:`
+        // prefix lets the TUI/host recognize this as an egress-consent request.
+        let call_id = format!("egress:{}", uuid::Uuid::new_v4());
+        let prompt = format!("Allow network access to `{registrable}`? ({reason})");
+        // Structured context so a host UI can render richly and a resolver can
+        // recognize this as an egress-consent request (vs a tool approval).
+        let context = serde_json::json!({
+            "kind": "egress_consent",
+            "host": host,
+            "registrable": registrable,
+        })
+        .to_string();
+
+        let rx = self
+            .bridge
+            .request_with_id(
+                call_id.clone(),
+                ApprovalRequest {
+                    call_id: call_id.clone(),
+                    reason: prompt.clone(),
+                    context: context.clone(),
+                },
+            )
+            .await;
+
+        // Surface the prompt. The resume_token IS the call_id (see above). A
+        // no-op on sinks without an approval surface (then the request only
+        // resolves via TTL → deny), so this doorbell is only installed where a
+        // real surface exists.
+        self.sink
+            .emit_approval_required(&call_id, &call_id, &prompt, &context);
+
+        match rx.await {
+            Ok(outcome) if outcome.approved => {
+                if scope_is_always(&outcome.modifications) {
+                    ConsentDecision::Always
+                } else {
+                    ConsentDecision::Once
+                }
+            }
+            // Explicit deny, or the channel closed / TTL-cancelled (operator
+            // walked away): fail-closed.
+            Ok(_) | Err(_) => ConsentDecision::No,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::approval::ApprovalOutcome;
+    use crate::output::null_sink::NullSink;
+
+    fn doorbell() -> (Arc<ApprovalBridge>, BridgeConsentDoorbell) {
+        let bridge = Arc::new(ApprovalBridge::new());
+        let db = BridgeConsentDoorbell::new(bridge.clone(), Arc::new(NullSink));
+        (bridge, db)
+    }
+
+    #[tokio::test]
+    async fn approve_without_scope_is_once() {
+        let (bridge, db) = doorbell();
+        let resolver = {
+            let bridge = bridge.clone();
+            tokio::spawn(async move {
+                // Wait for the request to register, then approve it.
+                loop {
+                    let pending = bridge.pending_tokens().await;
+                    if let Some(token) = pending.first() {
+                        bridge
+                            .resolve(
+                                token,
+                                ApprovalOutcome {
+                                    approved: true,
+                                    modifications: None,
+                                },
+                            )
+                            .await;
+                        break;
+                    }
+                    tokio::task::yield_now().await;
+                }
+            })
+        };
+        let decision = db.ask("react.dev", "react.dev", "data-less GET").await;
+        resolver.await.unwrap();
+        assert_eq!(decision, ConsentDecision::Once);
+    }
+
+    #[tokio::test]
+    async fn approve_with_always_scope_is_always() {
+        let (bridge, db) = doorbell();
+        let resolver = {
+            let bridge = bridge.clone();
+            tokio::spawn(async move {
+                loop {
+                    let pending = bridge.pending_tokens().await;
+                    if let Some(token) = pending.first() {
+                        bridge
+                            .resolve(
+                                token,
+                                ApprovalOutcome {
+                                    approved: true,
+                                    modifications: Some(serde_json::json!({
+                                        "egress_scope": "always"
+                                    })),
+                                },
+                            )
+                            .await;
+                        break;
+                    }
+                    tokio::task::yield_now().await;
+                }
+            })
+        };
+        let decision = db.ask("react.dev", "react.dev", "data-less GET").await;
+        resolver.await.unwrap();
+        assert_eq!(decision, ConsentDecision::Always);
+    }
+
+    #[tokio::test]
+    async fn deny_is_no() {
+        let (bridge, db) = doorbell();
+        let resolver = {
+            let bridge = bridge.clone();
+            tokio::spawn(async move {
+                loop {
+                    let pending = bridge.pending_tokens().await;
+                    if let Some(token) = pending.first() {
+                        bridge.resolve(token, ApprovalOutcome::cancelled()).await;
+                        break;
+                    }
+                    tokio::task::yield_now().await;
+                }
+            })
+        };
+        let decision = db.ask("evil.test", "evil.test", "data-less GET").await;
+        resolver.await.unwrap();
+        assert_eq!(decision, ConsentDecision::No);
+    }
+}

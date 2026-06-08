@@ -1,0 +1,8 @@
+---
+name: hello-desc-1
+description: Greets the user warmly at session start.
+when_to_use: At the start of every session to greet the user warmly.
+allowed_tools: []
+model: claude-sonnet-4-7
+---
+Hello! I am a friendly greeting skill that welcomes the user warmly. $ARGUMENTS

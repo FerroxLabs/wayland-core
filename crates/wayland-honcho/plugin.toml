@@ -1,0 +1,17 @@
+[plugin]
+name        = "wayland-honcho"
+version     = "0.1.0"
+description = "Honcho user-model backend (mock-by-default; live HTTP via HONCHO_API_KEY)"
+entry       = "builtin:wayland_honcho"
+authors     = ["Wayland-Core"]
+license     = "MIT"
+
+[permissions]
+register_tools      = false
+register_hooks      = false
+register_providers  = false
+register_agents     = false
+register_skills     = false
+register_rules      = false
+register_mcp_server = false
+register_user_models = true

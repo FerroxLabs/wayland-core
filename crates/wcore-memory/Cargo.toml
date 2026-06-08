@@ -1,0 +1,119 @@
+[package]
+name = "wcore-memory"
+description = "Long-term memory system for wayland-core: cross-session storage of user preferences, feedback, project context, and external references"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+wcore-config.workspace = true
+wcore-observability.workspace = true
+
+serde.workspace      = true
+serde_json.workspace = true
+serde_yaml.workspace = true
+chrono.workspace     = true
+thiserror.workspace  = true
+anyhow.workspace     = true
+async-trait.workspace = true
+tracing.workspace    = true
+tokio        = { workspace = true }
+dirs.workspace       = true
+
+# W5 memory v2 deps
+rusqlite     = { workspace = true }
+sqlite-vec   = { workspace = true }
+uuid         = { workspace = true }
+parking_lot  = { workspace = true }
+bytemuck     = { workspace = true }
+sha2         = { workspace = true }
+
+# v0.7.0 Task 4.B.1 — Blackboard partition TTL serde (humantime-readable
+# Duration via #[serde(with = "humantime_serde")]). Workspace dep.
+humantime-serde = { workspace = true }
+
+# M4.6+ — real embedding backends (OpenAI, Voyage, …) speak HTTPS. The
+# backend modules compile unconditionally; only the live integration
+# tests are gated behind `live-*` features.
+reqwest      = { workspace = true }
+wcore-egress = { workspace = true }
+regex        = { workspace = true }
+
+# v0.6.4 Phase 6 (Task 6.4) — ThompsonSampler. rand 0.9 + rand_distr 0.5
+# provide the Beta sampler (Marsaglia–Tsang); we do NOT reimplement it by
+# hand. Workspace currently pins `rand = "0.8"` for ed25519-dalek, so we
+# pin direct versions here to avoid a workspace-wide bump in this commit.
+rand        = "0.9"
+rand_distr  = "0.5"
+
+# M5b3 — direct candle integration for the real bge-small-en-v1.5
+# backend. Optional; only pulled in when the `bge-local` feature is on.
+candle-core         = { workspace = true, optional = true }
+candle-nn           = { workspace = true, optional = true }
+candle-transformers = { workspace = true, optional = true }
+tokenizers          = { workspace = true, optional = true }
+hf-hub              = { workspace = true, optional = true }
+safetensors         = { workspace = true, optional = true }
+
+workspace-hack.workspace = true
+
+[features]
+# M5b3 strategic pivot: bge-local is opt-in, not default.
+# Reason: every wcore-cli user has an LLM provider configured
+# (Anthropic/OpenAI/Bedrock/Vertex/Ollama/etc), so the "no API key"
+# motivation for default-on local embeddings doesn't survive contact
+# with real users — same reason Hermes-Agent ships cloud-only.
+# Users who want fully-offline embeddings opt in with
+# `cargo install wcore-cli --features bge-local`.
+# The candle code in src/embed/bge_local.rs ships in-tree and is
+# fully tested; only the default flip changes here.
+default = ["local-embedder"]
+# Test-only constructor surface for downstream W9 integration tests.
+# Enables `wcore_memory::open_for_test(path)` from `tests/` directories
+# of consumer crates (where `#[cfg(test)]` items are invisible because
+# integration tests are separate crates).
+test-utils = []
+# M4.7 — gates the live-HTTP integration test against Voyage AI's
+# /v1/embeddings endpoint. Default builds + nextest paths stay
+# network-free; flip the feature and set VOYAGE_API_KEY to exercise
+# the real wire. The backend file itself compiles unconditionally.
+live-voyage = []
+
+# M4.6 — gate the network-hitting OpenAI embeddings integration test.
+# The backend impl itself (src/embed/openai.rs) compiles without this
+# feature so callers can construct an `OpenAiEmbedder` via config
+# dispatch in normal builds.
+live-openai = []
+
+# M5b3 — real bge-small-en-v1.5 via direct candle integration.
+# Pure Rust — no native deps, no binary downloads, cross-compile clean.
+# Downloads model weights from HuggingFace on first use (~133MB cached
+# under ~/.cache/huggingface). Replaces the reserved `local-embedder-real`
+# flag that previously triggered a compile_error.
+bge-local = [
+    "dep:candle-core",
+    "dep:candle-nn",
+    "dep:candle-transformers",
+    "dep:tokenizers",
+    "dep:hf-hub",
+    "dep:safetensors",
+]
+
+# M4.7b — deterministic 384-dim L2-normalized fallback. Used when
+# `bge-local` is disabled (CI determinism, offline builds). The backend
+# module (src/embed/bge_local.rs) compiles a stub variant when this
+# flag is on and `bge-local` is off.
+local-embedder = []
+
+[dev-dependencies]
+tempfile.workspace    = true
+rstest.workspace      = true
+serial_test.workspace = true
+tokio.workspace       = true
+# Self-reference with test-utils feature so wcore-memory's own
+# integration tests can call `wcore_memory::open_for_test(...)`.
+# default-features = false so `--no-default-features` invocations on the
+# parent crate don't get bge-local unified back in via dev-deps.
+wcore-memory          = { path = ".", default-features = false, features = ["test-utils"] }

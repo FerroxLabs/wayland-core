@@ -1,0 +1,33 @@
+[package]
+name = "wayland-ijfw"
+description = "IJFW anchor plugin — exercises every register_* surface (tools/hooks/agents/skills/rules/mcp_server) via wcore-plugin-api mirrors (NO wcore-* core deps, per audit F2)"
+version.workspace    = true
+edition.workspace    = true
+license.workspace    = true
+repository.workspace = true
+rust-version.workspace = true
+
+# REV-2 audit F2 invariant: deps MUST be ONLY wcore-plugin-api,
+# wcore-types, wcore-protocol, plus external. NO wcore-skills /
+# wcore-mcp / wcore-memory / wcore-agent deps. Capability flows
+# through the api-crate mirror types (BundledSkillSpec, AgentManifest,
+# RuleSpec, McpServerSpec).
+[dependencies]
+wcore-plugin-api.workspace = true
+wcore-types.workspace      = true
+wcore-protocol.workspace   = true
+
+async-trait.workspace = true
+serde.workspace       = true
+serde_json.workspace  = true
+serde_yaml.workspace  = true
+inventory.workspace   = true
+tokio.workspace       = true
+tracing.workspace     = true
+thiserror.workspace   = true
+
+workspace-hack.workspace = true
+
+[dev-dependencies]
+tokio  = { workspace = true, features = ["macros", "rt-multi-thread"] }
+chrono = { workspace = true, features = ["serde"] }

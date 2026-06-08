@@ -1,0 +1,6 @@
+id: good-tools-3
+category: healthy
+skill_body: hello-tools-3
+expected_outcome: good
+rationale: |
+  Healthy allowed_tools variant 3 — body still healthy, no tool-name leakage.

@@ -1,0 +1,6 @@
+id: bad-disallowed-2
+category: disallowed-tool
+skill_body: hello-disallowed-2
+expected_outcome: bad
+rationale: |
+  Body mentions Bash but allowed_tools=[]; name mismatch; off-topic description (cron); empty when_to_use; stale model. >=4 fails.

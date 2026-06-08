@@ -1,0 +1,141 @@
+[package]
+name = "wcore-tools"
+description = "Built-in agent tools for wayland-core (Read, Write, Edit, Bash, Grep, Glob, Spawn)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+wcore-types.workspace         = true
+wcore-protocol.workspace      = true
+wcore-config.workspace        = true
+wcore-repomap.workspace       = true
+wcore-observability.workspace = true
+# T3-3.1.7: SessionSearchTool queries past-session episodes via MemoryApi.
+wcore-memory.workspace        = true
+# S9: BashTool routes all 4 execute paths through the sandbox backend.
+# Non-Linux build: namespace-/profile-only sandbox (no seccomp/landlock —
+# those need a Linux-only native lib at link time). The Linux-specific
+# dependency override below turns the `seccomp` + `landlock` features on so
+# `SyscallPolicy::Strict` is actually enforced rather than a silent no-op
+# (D.1 Round 1 — S3/S4 were dead code in every shipped build).
+wcore-sandbox.workspace       = true
+
+tokio.workspace       = true
+futures.workspace     = true
+serde.workspace       = true
+serde_json.workspace  = true
+async-trait.workspace = true
+anyhow.workspace      = true
+thiserror.workspace   = true
+glob.workspace        = true
+lru.workspace         = true
+
+# T7: ArchiveTool — read-only zip/tar/tar.gz list + extraction (pure-Rust).
+zip.workspace    = true
+tar.workspace    = true
+flate2.workspace = true
+
+# SA Wave: BashTool credential-exfiltration denylist (compile-once regex set)
+regex.workspace       = true
+
+# W8a A.3: ToolContext cancellation + SandboxedFs/InMemoryFs interior state
+parking_lot.workspace = true
+tokio-util.workspace  = true
+
+# T3-3.1.8: DebugSession helper (per-tool opt-in JSON call log, env-gated).
+chrono.workspace = true
+uuid.workspace   = true
+dirs.workspace   = true
+tracing.workspace = true
+
+# T3-3.3.3: url_safety helper parses URLs via the workspace `url` crate;
+# T3-3.3.4: website_policy helper shares `url` for host extraction and
+# adds `serde_yaml` for YAML blocklist parsing.
+url.workspace = true
+serde_yaml.workspace = true
+
+# F-019 / #279: url_safety exposes `ssrf_safe_redirect_policy()` so every
+# tool-side HTTP client (WebFetch + github_api + linear + notion + gitlab)
+# shares one SSRF-resistant redirect policy. Only the `reqwest::redirect`
+# type is needed here — the rest of the HTTP client stack stays in
+# `wcore-providers::http_client`, which already depends on reqwest.
+reqwest.workspace = true
+
+# v0.6.3 T1: SqlQueryTool runs read-only queries against SQLite. `bundled`
+# (set on the workspace dep) means no system SQLite is required. Postgres /
+# MySQL are intentionally NOT dependencies here — adding them would belong
+# behind a `sql-extra` cargo feature with optional drivers.
+rusqlite.workspace = true
+
+# v0.6.3 T10: EmailParseTool — read-only .eml / .mbox parsing. Pure-Rust,
+# zero external (C) deps, ~RFC 5322 + MIME conformant. Light enough to be
+# a normal (non-optional) dependency.
+mail-parser = "0.11"
+
+# v0.6.3 T2: optional Postgres client for postgres_schema_tool's live
+# backend. Heavy + pulls native libs, so it is OFF by default and gated
+# behind the `postgres` feature — the tool itself compiles without it.
+tokio-postgres = { version = "0.7", optional = true }
+
+# T15: pure-Rust PDF text extraction for PdfTool. Optional dep gated by
+# the default-on `pdf` feature so the ~90-crate tree can be dropped by
+# downstreams that don't need PDF support; PdfTool degrades gracefully
+# (honest error) when the feature is off.
+pdf-extract = { workspace = true, optional = true }
+
+# T8: ImageInspectTool — read-only image metadata (dimensions / format /
+# color type) + EXIF parsing. Both pure-Rust, no native build deps, but
+# `image` pulls a non-trivial transitive tree, so they are gated behind the
+# default-on `image-inspect` feature (mirroring the `pdf` feature). A build
+# with `--no-default-features` drops them and ImageInspectTool degrades to an
+# honest error (D.1 Round 1 — restores the documented vision_tools link-size
+# decision).
+image        = { workspace = true, optional = true }
+kamadak-exif = { workspace = true, optional = true }
+
+# v0.9.0 W1 B10 voice_mode — used only by the `VoiceModeTool` Tool impl in
+# `voice_mode.rs` for type-level Arc<dyn ...> wiring. The cpal-backed
+# concrete recorder/player live in wcore-agent's `tool_backends/voice_mode.rs`.
+# Kept in dependencies (not dev-dependencies) so the Tool struct compiles in
+# the production crate.
+
+workspace-hack.workspace = true
+
+# D.1 Round 1 (S3/S4): on Linux, request the `seccomp` + `landlock` features
+# of wcore-sandbox so the bwrap backend actually applies the seccomp-bpf
+# filter and Landlock ruleset for `SyscallPolicy::Strict`. These features
+# pull a Linux-only native lib (libseccomp) at link time, so they MUST NOT
+# be requested on macOS/Windows — the plain workspace dep above covers those
+# platforms with namespace-/profile-only isolation.
+[target.'cfg(target_os = "linux")'.dependencies]
+wcore-sandbox = { workspace = true, features = ["seccomp", "landlock"] }
+
+[features]
+default = ["pdf", "image-inspect"]
+# Enables postgres_schema_tool::live::TokioPostgresBackend.
+postgres = ["dep:tokio-postgres"]
+# T15: enables PdfTool's real PDF text-extraction backend.
+pdf = ["dep:pdf-extract"]
+# T8: enables ImageInspectTool's real image-metadata + EXIF backend.
+# Default-on; `--no-default-features` drops the `image` transitive tree and
+# ImageInspectTool returns an honest "compiled without image-inspect" error.
+image-inspect = ["dep:image", "dep:kamadak-exif"]
+
+[dev-dependencies]
+tempfile.workspace  = true
+criterion.workspace = true
+# R2 fix A2: debug_helpers tests mutate process-wide env vars; serialize
+# against other crates that also touch env (auto_memorize, skills_lifecycle).
+serial_test.workspace = true
+
+[[bench]]
+name    = "registry_dispatch_bench"
+harness = false
+
+# Wave RA — cancel_subprocess_test.rs uses kill(pid, 0) to probe whether
+# the spawned subprocess actually died after `.kill_on_drop(true)` fired.
+[target.'cfg(unix)'.dev-dependencies]
+libc.workspace = true

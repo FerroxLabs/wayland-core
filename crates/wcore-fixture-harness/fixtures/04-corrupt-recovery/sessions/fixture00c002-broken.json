@@ -1,0 +1,1 @@
+{"_sanitized":"2026-05-24","_archetype":"corrupt-recovery","schema_version":1,"id":"fixture00c002","created_at":"2026-01-01T10:00:00Z","updated_at":"2026-01-01T10:00:01Z","provider":"openai","model":"gpt-4o","cwd":"<<HOME>>/dev","total_usage":{"input_tokens":1,"output_tokens":1,"cache_creation_tokens":0

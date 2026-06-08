@@ -1,0 +1,74 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Wayland-Core Cron Daemon — launchd user agent (macOS)
+
+  Installation:
+    1. Copy this file to ~/Library/LaunchAgents/com.wayland.cron-daemon.plist
+    2. Edit the paths below to match your installation:
+         - ProgramArguments: path to the wayland-core binary
+         - WAYLAND_HOME: your Wayland home directory (default ~/.wayland)
+    3. Load the agent:
+         launchctl bootstrap gui/$(id -u) \
+           ~/Library/LaunchAgents/com.wayland.cron-daemon.plist
+    4. Verify it is running:
+         launchctl list com.wayland.cron-daemon
+
+  Uninstall:
+    launchctl bootout gui/$(id -u) \
+      ~/Library/LaunchAgents/com.wayland.cron-daemon.plist
+
+  Notes:
+    - The daemon writes its PID to $WAYLAND_HOME/cron-daemon.pid
+    - Logs go to $WAYLAND_HOME/cron-daemon.log (stdout + stderr)
+    - launchd restarts the daemon automatically if it crashes
+    - To stop temporarily: launchctl kill TERM gui/$(id -u)/com.wayland.cron-daemon
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.wayland.cron-daemon</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <!-- Replace with the absolute path to the wayland-core binary. -->
+    <!-- Example: /usr/local/bin/wayland-core                        -->
+    <string>/usr/local/bin/wayland-core</string>
+    <string>cron</string>
+    <string>daemon</string>
+  </array>
+
+  <key>EnvironmentVariables</key>
+  <dict>
+    <!-- Override if your Wayland home is not ~/.wayland -->
+    <key>WAYLAND_HOME</key>
+    <string>~/.wayland</string>
+    <!-- Prevents the child-process re-exec dance; launchd is already
+         the process manager, so we run the daemon body directly. -->
+    <key>WAYLAND_CRON_DAEMON_CHILD</key>
+    <string>1</string>
+  </dict>
+
+  <!-- Restart on crash. launchd throttles to at most once per 10 s. -->
+  <key>KeepAlive</key>
+  <true/>
+
+  <key>ThrottleInterval</key>
+  <integer>10</integer>
+
+  <!-- Run from the user's home directory. -->
+  <key>WorkingDirectory</key>
+  <string>~</string>
+
+  <!-- Route stdout + stderr to the daemon log file. -->
+  <key>StandardOutPath</key>
+  <string>~/.wayland/cron-daemon.log</string>
+  <key>StandardErrorPath</key>
+  <string>~/.wayland/cron-daemon.log</string>
+
+  <!-- Launch at login. -->
+  <key>RunAtLoad</key>
+  <true/>
+</dict>
+</plist>

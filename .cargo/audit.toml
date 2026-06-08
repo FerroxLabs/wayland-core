@@ -1,0 +1,31 @@
+# cargo-audit configuration.
+#
+# Posture (verified 2026-06-02): `cargo audit` reports 0 vulnerabilities and
+# 5 warning-class advisories (4 "unmaintained", 1 "unsound"). CI runs plain
+# `cargo audit`, which does NOT fail on warning-class advisories — so the gate
+# is green WITHOUT ignoring anything. (A 6th, the lru "unsound" advisory, was
+# eliminated at source by the ratatui 0.29 -> 0.30 upgrade.)
+#
+# The ignore list is intentionally EMPTY. The 6 remaining advisories are left
+# VISIBLE as warnings (not silenced) and are dispositioned — publicly, dated,
+# with parent traces — in `.github/osv-scanner.toml`, which is the gating
+# scanner. Duplicating those mutes here would only hide warnings we want to
+# keep seeing on every run.
+#
+# History: a prior 18-entry wasmtime / wasmtime-wasi ignore block lived here
+# while the runtime was pinned at 30.x (it masked CVSS 9.2 / 9.0 advisories).
+# Those are now FIXED at the source — wasmtime + wasmtime-wasi were upgraded
+# 30 -> 36.0.10 (the bindgen async-syntax migration that had blocked the bump
+# is done) — so every entry in that block is satisfied and has been removed.
+# Confirmed: `cargo audit` with this file's ignore list bypassed reports the
+# same 6 warnings and zero wasmtime advisories.
+#
+# Rotation policy: on every dependency bump, re-run `cargo audit`. If a real
+# vulnerability ever needs a temporary documented exception, add it to
+# `ignore` below WITH a parent trace, a threat-model note, and a tracking
+# item — never as a bare id.
+#
+# Format reference: https://docs.rs/cargo-audit/latest/cargo_audit/
+
+[advisories]
+ignore = []

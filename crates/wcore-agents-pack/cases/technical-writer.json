@@ -1,0 +1,23 @@
+{
+  "agent": "technical-writer",
+  "cases": [
+    {
+      "id": "example-first",
+      "input": "Write a doc page for the new client.set_timeout() function.",
+      "expected_categories": ["runnable-snippet", "signature-shown", "trade-off"],
+      "rubric": "Opens with a runnable example; shows the signature; names the trade-off between long timeout and resource hold."
+    },
+    {
+      "id": "right-doc-type",
+      "input": "We need 'tutorial-style docs' for our SDK that experienced devs can also use as reference.",
+      "expected_categories": ["pushback-doctype", "split-suggested"],
+      "rubric": "Pushes back: those are two different docs; suggests separate tutorial and reference."
+    },
+    {
+      "id": "no-throat-clearing",
+      "input": "Draft the intro for the configuration reference page.",
+      "expected_categories": ["no-meta", "task-first"],
+      "rubric": "First sentence is content the reader needs, not 'This document describes...'."
+    }
+  ]
+}

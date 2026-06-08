@@ -1,0 +1,19 @@
+---
+name: refactor-imports
+description: Reorder Rust import groups
+when_to_use: After editing imports
+---
+
+# Refactor Imports
+
+## Preconditions
+- A Rust source file is open
+- The file currently builds
+- Imports already follow the std then external then internal grouping
+
+## Steps
+- Open the file
+- Locate the three import groups
+- Order each group alphabetically
+- Insert blank line separators between groups
+- Re-run cargo check to confirm the file still builds

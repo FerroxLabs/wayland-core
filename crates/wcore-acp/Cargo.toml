@@ -1,0 +1,28 @@
+[package]
+name = "wcore-acp"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "ACP (Agent Client Protocol) server + client for Wayland-Core"
+
+[dependencies]
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+tokio = { workspace = true, features = ["sync", "io-util", "macros", "rt-multi-thread"] }
+tokio-tungstenite = "0.24"
+thiserror = { workspace = true }
+tracing = { workspace = true }
+async-trait = { workspace = true }
+uuid = { workspace = true }
+wcore-config = { path = "../wcore-config" }
+axum = { version = "0.7", features = ["macros"] }
+tower-http = { version = "0.5", features = ["cors"] }
+futures = { workspace = true }
+reqwest = { workspace = true, features = ["stream"] }
+wcore-egress = { workspace = true }
+bytes = "1"
+# OpenAPI 3.0.3 doc generation for the REST transport (transport::rest).
+utoipa = { workspace = true }
+
+[dev-dependencies]
+tower = { version = "0.5", features = ["util"] }

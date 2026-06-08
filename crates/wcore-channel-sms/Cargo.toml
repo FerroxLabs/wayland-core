@@ -1,0 +1,29 @@
+[package]
+name = "wcore-channel-sms"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Production Twilio SMS adapter for wcore-channels — REST outbound + webhook inbound"
+
+[dependencies]
+async-trait = { workspace = true }
+base64 = { workspace = true }
+chrono = { workspace = true, features = ["serde"] }
+hmac = "0.12"
+sha1 = "0.10"
+reqwest = { workspace = true, features = ["json"] }
+wcore-egress = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true, features = ["macros", "rt", "sync", "time"] }
+toml = { workspace = true }
+tracing = { workspace = true }
+url = { workspace = true }
+
+wcore-channels = { workspace = true }
+wcore-config = { workspace = true }
+
+[dev-dependencies]
+mockito = "1"
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time", "sync"] }

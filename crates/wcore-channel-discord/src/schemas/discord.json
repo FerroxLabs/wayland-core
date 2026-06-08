@@ -1,0 +1,32 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "DiscordConfig",
+  "description": "Per-channel TOML config for the Discord adapter (REST outbound + Gateway WebSocket inbound).",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "credential_handle": {
+      "type": "string",
+      "description": "Key used to look up the bot token in the wcore-config credentials store (OS keychain by default)."
+    },
+    "allowed_channel_ids": {
+      "type": "array",
+      "items": { "type": "string" },
+      "default": [],
+      "description": "Optional allow-list of Discord channel IDs (snowflake strings). When non-empty, inbound MESSAGE_CREATE events whose channel_id is not in this list are dropped before reaching poll_events."
+    },
+    "intents": {
+      "type": "integer",
+      "minimum": 0,
+      "default": 33792,
+      "description": "Discord Gateway intents bitmask. Default = (1<<9 | 1<<15) = GUILD_MESSAGES + MESSAGE_CONTENT (both required for inbound message text)."
+    },
+    "heartbeat_grace_ms": {
+      "type": "integer",
+      "minimum": 0,
+      "default": 5000,
+      "description": "Grace window (ms) after a heartbeat for the HEARTBEAT_ACK to arrive before the gateway connection is treated as dead."
+    }
+  },
+  "required": ["credential_handle"]
+}

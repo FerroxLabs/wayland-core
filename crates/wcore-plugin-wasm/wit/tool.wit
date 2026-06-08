@@ -1,0 +1,90 @@
+package wayland:host@1.0.0;
+
+// Wayland WASM Tool Export World (v0.6.5, Task 2.2)
+//
+// A Wayland WASM tool plugin imports the shared host interface
+// (`wayland:host/host`) and exports the `tool` interface defined here.
+// Metadata mirrors `wcore_plugin_api::tool::PluginTool` so a host
+// adapter can wrap a `wayland-tool` component as a real `Tool`
+// without information loss.
+
+/// Tool surface implemented by a WASM Tool plugin.
+interface tool {
+    /// Maps onto `wcore_protocol::events::ToolCategory`. Kept open via
+    /// `%other` so future host-side categories don't break old guests.
+    variant tool-category {
+        utility,
+        mutation,
+        navigation,
+        exec,
+        retrieval,
+        %other(string),
+    }
+
+    /// Stable, versioned mirror of `PluginTool` metadata. Field set
+    /// matches `crates/wcore-plugin-api/src/tool.rs` exactly so the
+    /// host adapter is a 1:1 mapping. `caps-version` lets a host
+    /// reject a guest that demands newer capability handles than the
+    /// running runtime supports.
+    record tool-metadata {
+        /// Bare (pre-namespace) tool name.
+        name: string,
+        description: string,
+        /// JSON Schema for the input, serialized as a JSON string.
+        input-schema: string,
+        category: tool-category,
+        is-deferred: bool,
+        /// Maps onto `Tool::max_result_size()`.
+        max-result-size: u64,
+        /// Capability-handle schema version the guest was built against.
+        /// Host enforces `caps-version <= runtime_caps_version`.
+        caps-version: u32,
+    }
+
+    /// Request payload for a single tool invocation.
+    record request {
+        /// JSON-encoded tool input matching `tool-metadata.input-schema`.
+        input: string,
+        /// Stable in-flight tool-call id (matches `ToolContext.call_id`
+        /// on the host side).
+        call-id: string,
+        /// Originating sub-agent name; `none` = main agent.
+        source-agent: option<string>,
+    }
+
+    /// Response from a single tool invocation. Mirrors `ToolResult` on
+    /// the host: `stdout` is the textual content, `structured` carries
+    /// an optional JSON-encoded structured result, and `is-error`
+    /// flags a tool-level failure (distinct from a host-level error
+    /// returned via the outer `result<_, string>`).
+    record response {
+        stdout: string,
+        structured: option<string>,
+        is-error: bool,
+    }
+
+    /// Execute the tool. Outer `Err` = host-level failure (cancelled,
+    /// trap, leak detected). Inner `is-error = true` = tool-reported
+    /// failure that still produced output.
+    execute: func(req: request) -> result<response, string>;
+
+    /// Return the JSON Schema for this tool's input as a JSON string.
+    schema: func() -> string;
+
+    /// Return a human-readable description used by the LLM to decide
+    /// when to invoke this tool.
+    description: func() -> string;
+
+    /// Return the full tool metadata. Host calls this once at load
+    /// time to populate `PluginTool { name, description, input_schema,
+    /// category, is_deferred, max_result_size }` plus the
+    /// `caps-version` gate.
+    metadata: func() -> tool-metadata;
+}
+
+/// World implemented by a Wayland WASM Tool plugin: imports the
+/// shared host interface, exports the tool interface.
+world wayland-tool {
+    import host;
+    export tool;
+}

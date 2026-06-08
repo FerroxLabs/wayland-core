@@ -1,0 +1,20 @@
+[package]
+name = "wcore-repomap"
+description = "Light symbol extractor + codebase index (Aider-style repo map). Isolated from the rest of wayland-core: no internal wcore deps."
+version.workspace      = true
+edition.workspace      = true
+license.workspace      = true
+repository.workspace   = true
+rust-version.workspace = true
+
+[dependencies]
+regex.workspace     = true
+serde.workspace     = true
+thiserror.workspace = true
+ignore              = "0.4"
+
+workspace-hack.workspace = true
+
+[dev-dependencies]
+tempfile.workspace   = true
+serde_json.workspace = true

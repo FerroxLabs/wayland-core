@@ -1,0 +1,34 @@
+[net]
+# Use the sparse protocol for faster registry index fetching
+git-fetch-with-cli = false
+
+[registries.crates-io]
+protocol = "sparse"
+
+# ─────────────────────────────────────────────────────────────
+# Linux: use `mold` instead of rust-lld.
+#
+# Rust 1.84+ defaults to `rust-lld` on x86_64-unknown-linux-gnu, but
+# lld memory-maps every static library and exceeds the ubuntu-latest
+# runner's 7GB RAM during the workspace test link (~250 rlibs per
+# binary), crashing with SIGBUS (CI run 25949028331).
+#
+# `gold` worked memory-wise but is deprecated upstream and rustc emits
+# a deprecation warning on every build (CI run 25949482628).
+#
+# `mold` is the modern replacement: same streaming-I/O memory profile
+# as gold, ~5× faster than gold, actively maintained, ships in apt on
+# ubuntu-22.04+. The CI workflow installs it via the libdbus step.
+#
+# macOS / Windows targets are unaffected — the target blocks below
+# only override `*-unknown-linux-gnu`.
+# ─────────────────────────────────────────────────────────────
+[target.x86_64-unknown-linux-gnu]
+linker = "cc"
+rustflags = ["-Clink-arg=-fuse-ld=mold"]
+
+# NOTE: no aarch64-unknown-linux-gnu block here. That target is only
+# built via the cross-rs docker image (build job, matrix.use_cross),
+# and the cross image ships aarch64-linux-gnu-gcc without mold. Setting
+# -fuse-ld=mold there triggers `unrecognized command line option`
+# (CI run 25950860071). Let cross pick its own linker (gold by default).

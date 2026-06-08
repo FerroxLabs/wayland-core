@@ -1,0 +1,7 @@
+id: bad-offtopic-3
+category: off-topic-description
+skill_body: hello-offtopic-3
+trace_fixture: expensive-bad-1.json
+expected_outcome: bad
+rationale: |
+  Description about k8s shares no token with greeter; name mismatch; empty when_to_use; stale model. 4+ fails + expensive trace.

@@ -1,0 +1,26 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "SignalConfig",
+  "description": "Per-channel TOML config for the signal-cli subprocess adapter. The adapter spawns `signal-cli -a <account> jsonRpc` and communicates via JSON-RPC over stdio.",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "signal_cli_path": {
+      "type": "string",
+      "default": "signal-cli",
+      "description": "Path to the signal-cli executable. Defaults to looking up `signal-cli` on $PATH."
+    },
+    "account": {
+      "type": "string",
+      "description": "Signal account identifier (typically the phone number registered with signal-cli, e.g. `+15551234567`). Passed as `-a <account>`."
+    },
+    "send_timeout_secs": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 120,
+      "default": 10,
+      "description": "Per-request timeout (seconds) for outbound send_message JSON-RPC round-trips."
+    }
+  },
+  "required": ["account"]
+}

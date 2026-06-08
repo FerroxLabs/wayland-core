@@ -1,0 +1,43 @@
+{
+  "archetype": "04-corrupt-recovery",
+  "generated": "2026-05-24",
+  "sanitization_rules": ".blackboard/E2E-FIXTURE-SANITIZATION-2026-05-24.md",
+  "source_description": "Synthetic — deliberately broken fixture. Valid config.toml but: (1) cron/jobs.json is truncated mid-array (simulates SIGKILL during cron write), (2) one session file is truncated mid-JSON (simulates disk-full during session save), (3) config references a non-existent MCP server path. Engine must recover-and-continue, not panic.",
+  "files_sanitized": [
+    {
+      "path": "config.toml",
+      "source_type": "synthetic valid config with bad MCP reference",
+      "redactions": [],
+      "preserved": ["nonexistent-server MCP entry (deliberate)"]
+    },
+    {
+      "path": "cron/jobs.json",
+      "source_type": "synthetic truncated JSON (deliberate corruption)",
+      "redactions": ["job id"],
+      "preserved": ["truncated mid-array structure (deliberate — tests parse error recovery)"]
+    },
+    {
+      "path": "sessions/fixture00c001-good.json",
+      "source_type": "synthetic valid session (control)",
+      "redactions": ["id", "cwd", "timestamps"],
+      "preserved": ["valid schema_version=1"]
+    },
+    {
+      "path": "sessions/fixture00c002-broken.json",
+      "source_type": "synthetic truncated session JSON (deliberate corruption)",
+      "redactions": ["id", "cwd"],
+      "preserved": ["truncated mid-object (deliberate — tests session load error recovery)"]
+    }
+  ],
+  "uuid_map": {
+    "00000000-0004-4000-8000-000000000004": "original was UUID v4 (synthetic cron job)"
+  },
+  "bug_classes_targeted": ["B-7", "B-9", "B-4"],
+  "findings_covered": ["F-030", "F-031", "F-033", "F-034", "F-037", "F-086"],
+  "scenarios_that_replay_this": [
+    "T6: boot with truncated cron/jobs.json — assert engine logs a parse error but continues (no panic, no exit 1)",
+    "T6: --list-sessions with one broken session file — assert valid session listed, broken one skipped with error log",
+    "T6: boot with nonexistent MCP server path — assert engine emits mcp_error event, continues without the server",
+    "T10 (chaos): SIGKILL mid-session-write produces truncated file; next boot recovers the good session"
+  ]
+}

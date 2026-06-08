@@ -1,0 +1,6 @@
+id: bad-oversize-1
+category: oversize-body
+skill_body: hello-oversize-1
+expected_outcome: bad
+rationale: |
+  Oversize body (~15KB) shares NO tokens with description, missing $ARGUMENTS, name mismatch, stale model. Size penalty saturated.

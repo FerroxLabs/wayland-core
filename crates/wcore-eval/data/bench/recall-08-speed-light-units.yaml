@@ -1,0 +1,14 @@
+id: recall-08-speed-light-units
+category: recall
+prompt: |
+  What is the SI unit symbol used in physics to describe the speed of
+  light's units of measure (the standard meters-per-second symbol)?
+  Reply with the unit symbol only, using ASCII characters.
+match_strategy:
+  kind: exact
+  expected: "m/s"
+rationale: |
+  SI unit symbol "m/s" is frozen since 1960. ASCII representation
+  removes Unicode-fraction ambiguity.
+allowed_tools: []
+timeout_secs: 15

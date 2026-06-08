@@ -1,0 +1,23 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "iMessage Channel Config",
+  "description": "Configuration for the macOS iMessage channel adapter. Requires Full Disk Access (to read ~/Library/Messages/chat.db) and macOS Automation consent (to send via Messages.app via osascript).",
+  "type": "object",
+  "required": [],
+  "properties": {
+    "poll_interval_ms": {
+      "type": "integer",
+      "description": "How often (in milliseconds) to poll chat.db for new inbound messages. Clamped to [500, 60000]. Default: 2000.",
+      "default": 2000,
+      "minimum": 500,
+      "maximum": 60000
+    },
+    "allowed_handles": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "Optional allow-list of phone numbers or emails (case-insensitive). When non-empty, only messages from these senders are surfaced.",
+      "default": []
+    }
+  },
+  "additionalProperties": false
+}

@@ -1,0 +1,25 @@
+# Standalone (NOT a workspace member). The empty `[workspace]` table tells
+# cargo this is its own root, so it won't be inherited into the main Wayland
+# workspace. Build it from this directory: `cargo build --release`.
+[workspace]
+
+[package]
+name = "mcp-server-time"
+version = "0.1.0"
+edition = "2021"
+description = "Tiny demo MCP server that exposes a `get_time` tool over JSON-RPC stdio. Used by the Wayland mcp-bridge example plugin."
+license = "MIT"
+publish = false
+
+[[bin]]
+name = "mcp-server-time"
+path = "src/main.rs"
+
+[dependencies]
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "io-std", "io-util"] }
+serde_json = "1"
+
+[profile.release]
+opt-level = "z"
+lto = true
+strip = true

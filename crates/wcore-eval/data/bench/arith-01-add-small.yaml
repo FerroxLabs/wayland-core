@@ -1,0 +1,13 @@
+id: arith-01-add-small
+category: arithmetic
+prompt: |
+  Compute 17 + 25. Reply with the integer answer only.
+match_strategy:
+  kind: numeric_equal
+  expected: 42.0
+  tolerance: 0.0
+rationale: |
+  Single-shot integer addition. Tolerance 0 because the answer is
+  exact and integer-valued.
+allowed_tools: []
+timeout_secs: 15

@@ -1,0 +1,17 @@
+[plugin]
+name        = "wayland-browser"
+version     = "0.1.0"
+description = "Browser tool family — Camoufox / chromium / Browserbase via wcore-browser"
+entry       = "builtin:wayland_browser"
+authors     = ["Wayland-Core"]
+license     = "MIT"
+
+[permissions]
+register_tools      = true
+tool_namespace      = "Browser"
+register_hooks      = false
+register_providers  = false
+register_agents     = false
+register_skills     = false
+register_rules      = false
+register_mcp_server = false

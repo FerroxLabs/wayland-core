@@ -1,0 +1,27 @@
+[package]
+name = "wcore-channel-discord"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Discord channel adapter for Wayland-Core — REST (outbound) + Gateway WebSocket (inbound)"
+
+[dependencies]
+async-trait = { workspace = true }
+chrono = { workspace = true, features = ["serde"] }
+futures-util = "0.3"
+reqwest = { workspace = true, features = ["json"] }
+wcore-egress = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true, features = ["macros", "rt", "sync", "time"] }
+tokio-tungstenite = { version = "0.24", features = ["rustls-tls-webpki-roots"] }
+toml = { workspace = true }
+tracing = { workspace = true }
+
+wcore-channels = { workspace = true }
+wcore-config = { workspace = true }
+
+[dev-dependencies]
+mockito = "1"
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time"] }

@@ -1,0 +1,41 @@
+[package]
+name = "wayland-honcho"
+description = "Honcho user-model plugin shell — mock-by-default, live HTTP behind `live-honcho` feature (NO wcore-browser/wcore-cua deps, per audit F2)"
+version.workspace      = true
+edition.workspace      = true
+license.workspace      = true
+repository.workspace   = true
+rust-version.workspace = true
+
+# Wave B4 F2 invariant: deps MUST be ONLY wcore-plugin-api, wcore-types,
+# wcore-protocol, plus external. NO wcore-browser / wcore-cua / wcore-agent
+# / wcore-cli deps. Plugin talks through wcore-plugin-api mirror types only.
+[dependencies]
+wcore-plugin-api.workspace = true
+wcore-types.workspace      = true
+wcore-protocol.workspace   = true
+
+serde.workspace       = true
+serde_json.workspace  = true
+thiserror.workspace   = true
+anyhow.workspace      = true
+inventory.workspace   = true
+reqwest.workspace     = true
+wcore-egress.workspace = true
+tokio.workspace       = true
+async-trait.workspace = true
+
+workspace-hack.workspace = true
+
+[features]
+default = []
+# Gate the live-HTTP integration test (`tests/live_test.rs`). Default
+# build/test path is mock-only — no network, deterministic.
+live-honcho = []
+
+[dev-dependencies]
+tokio  = { workspace = true, features = ["macros", "rt-multi-thread"] }
+chrono = { workspace = true, features = ["serde"] }
+# v0.8.1 U3 — used by `tests/representations_test.rs` to exercise the
+# `representations` endpoint over an in-process HTTP mock.
+wiremock = { workspace = true }

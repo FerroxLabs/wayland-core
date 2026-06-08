@@ -1,0 +1,35 @@
+[package]
+name = "wcore-swarm"
+description = "Productized worktree-isolated multi-agent dispatch foundation (M5.5)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+# M5.5 — Swarm dispatch API. Foundation for M5.6 (consensus) + M5.7 (memory
+# propagation). All git subprocess goes through wcore_config::shell::shell_command_argv
+# (argv mode — no shell interpretation), per AGENTS.md cross-platform rules.
+
+[dependencies]
+wcore-config        = { workspace = true }
+wcore-types         = { workspace = true }
+# M5.7 — SwarmMemoryBridge wires Swarm dispatch into wcore-memory's
+# episodic / procedural / semantic partitions for cross-session memory
+# propagation. Keeps the dep edge one-way (swarm -> memory); nothing in
+# wcore-memory depends on wcore-swarm.
+wcore-memory        = { workspace = true }
+serde               = { workspace = true }
+serde_json          = { workspace = true }
+thiserror           = { workspace = true }
+tokio               = { workspace = true }
+futures             = { workspace = true }
+tracing             = { workspace = true }
+uuid                = { workspace = true }
+humantime-serde     = { workspace = true }
+# T3-2 — sqlite-backed Auto-Mode audit trail (lifted from Forge AuditTrail).
+rusqlite            = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+tokio    = { workspace = true }

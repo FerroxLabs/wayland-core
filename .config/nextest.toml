@@ -1,0 +1,115 @@
+[profile.default]
+# Local dev: friendly output, show failures immediately
+failure-output = "immediate"
+success-output = "never"
+status-level = "pass"
+final-status-level = "flaky"
+# Retry flaky tests once locally
+retries = 1
+# Per-test timeout (seconds)
+slow-timeout = { period = "30s", terminate-after = 2 }
+test-threads = "num-cpus"
+
+[profile.default.junit]
+# Generate JUnit XML for local tooling if wanted
+path = "target/nextest/default/junit.xml"
+
+# Per-test overrides (same philosophy as the CI profile): the genuinely-heavy
+# tests get an explicit, documented exception instead of loosening everyone's
+# 30s budget.
+#
+# The full-engine-build cohort — every test that constructs a real
+# `AgentBootstrap` (the `bootstrap_*` binaries in wcore-agent, the
+# `bootstrap_with_ollama_*` / `*_is_registered_in_bootstrap` cases) or the full
+# tool registry (`registry_inventory_snapshot` in wcore-cli) — runs ~38s in
+# isolation and 40-55s under full-parallel load on a contended dev machine.
+# That crosses the 30s slow line, and kill-after-2x terminates them at 60s
+# mid-run even though they pass on CI (90s budget) and in isolation. Give this
+# cohort the same headroom CI already has so a busy laptop doesn't false-fail
+# the workspace suite. (Found 2026-06-01: a stray busy-loop stealing a core
+# pushed 10 of these past 60s and fail-fast aborted the whole run; the tests
+# themselves were never hung — just slow under load.)
+[[profile.default.overrides]]
+filter = 'binary(/bootstrap/) or binary(/registry_inventory_snapshot/) or test(/bootstrap/)'
+slow-timeout = { period = "90s", terminate-after = 2 }
+
+# ── CI profile ─────────────────────────────────────────────────────────────
+[profile.ci]
+# In CI: always show output for failed tests, machine-readable JUnit
+failure-output = "immediate-final"
+success-output = "never"
+status-level = "fail"
+final-status-level = "all"
+# Retry flaky tests up to 2 times in CI
+retries = 2
+# Bumped from 60s after CI run 25950354044 — Ubuntu CI cold caches made
+# several normal tests cross the 60s slow line, and kill-after-2x meant
+# they died at 120s. 90s headroom × 2 = 180s before kill is enough for
+# any non-pathological test.
+slow-timeout = { period = "90s", terminate-after = 2 }
+test-threads = "num-cpus"
+
+# Per-test overrides: tests that genuinely take longer than the global
+# slow-timeout get explicit, documented exceptions instead of bumping
+# everyone's budget.
+[[profile.ci.overrides]]
+# W12 tool-token bench smoke shells out to `cargo run --bin
+# tool_token_bench`. The CI workflow pre-builds that binary in a
+# step BEFORE `vx just test-ci`, so the test should hit warm cache
+# and finish in ~30s. Retries=0 because retrying a slow-cargo-run
+# just compounds (CI run 25952102095 hit kill-after-2x on 3 attempts).
+filter = 'test(=scripted_run_writes_expected_markdown)'
+slow-timeout = { period = "180s", terminate-after = 2 }
+retries = 0
+
+# release_binary_smoke tests shell out to `cargo build --release` if the
+# binary doesn't exist. The CI workflow pre-builds it; this override
+# gives the test cohort enough headroom on Windows where mandatory
+# file locks make even read-only target/ checks slower than Linux/macOS
+# (CI run 25953795604 — `release_binary_ready_event_advertises_plugin_
+# capabilities` hung on file lock against parallel tests).
+[[profile.ci.overrides]]
+filter = 'test(/release_binary_/)'
+slow-timeout = { period = "180s", terminate-after = 2 }
+retries = 0
+
+[profile.ci.junit]
+path = "target/nextest/ci/junit.xml"
+
+# ── E2E profile ─────────────────────────────────────────────────────────────
+# Run with: cargo nextest run --profile e2e --test e2e
+[profile.e2e]
+failure-output = "immediate"
+success-output = "immediate"
+status-level = "all"
+final-status-level = "all"
+# No retries for e2e — failures are real
+retries = 0
+# E2E tests can be slow (real API calls)
+slow-timeout = { period = "120s", terminate-after = 2 }
+# Run sequentially to avoid hammering the API
+test-threads = 1
+
+[profile.e2e.junit]
+path = "target/nextest/e2e/junit.xml"
+
+# ── EVAL profile ─────────────────────────────────────────────────────────────
+# Per cross-audit M-6 (serialize per-provider to avoid hammering provider
+# rate-limits in the matrix) + M-3 (retries=2 absorbs transient noise so
+# remaining failures are real signal). Used by `wcore-eval-scenarios` —
+# `just eval` invokes nextest with `--profile eval`.
+[profile.eval]
+failure-output = "immediate"
+success-output = "immediate"
+status-level = "all"
+final-status-level = "all"
+# M-3: retries absorb transient provider noise; remaining failures are real.
+retries = 2
+# Scenarios drive real LLMs over multi-step tool chains; budgets per
+# scenario are tight in source but the slow-timeout is the outer guard.
+slow-timeout = { period = "300s", terminate-after = 2 }
+# M-6: serialize so provider rate limits don't fail-cross-contaminate.
+test-threads = 1
+
+[profile.eval.junit]
+path = "target/nextest/eval/junit.xml"

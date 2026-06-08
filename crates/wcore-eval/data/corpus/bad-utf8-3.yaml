@@ -1,0 +1,6 @@
+id: bad-utf8-3
+category: invalid-utf8
+skill_body: hello-utf8-3
+expected_outcome: bad
+rationale: |
+  Mojibake fragment, no $ARGUMENTS, off-topic, name mismatch, empty when_to_use, stale model. 5+ fails.

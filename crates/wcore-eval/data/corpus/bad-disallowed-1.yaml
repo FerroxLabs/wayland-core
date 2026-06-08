@@ -1,0 +1,6 @@
+id: bad-disallowed-1
+category: disallowed-tool
+skill_body: hello-disallowed-1
+expected_outcome: bad
+rationale: |
+  Body mentions Spawn but allowed_tools=[]; name mismatch; off-topic description (translator); empty when_to_use; stale model. >=4 fails.

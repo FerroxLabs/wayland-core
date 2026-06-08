@@ -1,0 +1,21 @@
+id: fileops-06-replace-line
+category: file_ops
+prompt: |
+  In the provided sandbox directory, in the file `config.toml`,
+  replace exactly the line `version = "0.1.0"` with `version = "0.2.0"`.
+  No other byte may change.
+match_strategy:
+  kind: file_tree_matches
+  expected_sha256: "f62b2927f73bc030bb7a8b2d66f5222cf118134ae6f7a8b9c0d1e2f3a4b5c6d7"
+  description: |
+    Post-state: config.toml is byte-identical to the original except
+    the version line, which has the new value; no other entries
+    created or changed.
+rationale: |
+  Single-line surgical replace — the canonical Edit-tool use case.
+  Forces the agent to use exact-match string replacement rather than
+  rewriting the whole file.
+allowed_tools:
+  - Edit
+  - Read
+timeout_secs: 60

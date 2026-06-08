@@ -1,0 +1,7 @@
+id: bad-offtopic-2
+category: off-topic-description
+skill_body: hello-offtopic-2
+trace_fixture: expensive-bad-5.json
+expected_outcome: bad
+rationale: |
+  Description about 3D rendering shares no token with greeter; name mismatch; empty when_to_use; stale model. 4+ fails + expensive trace.

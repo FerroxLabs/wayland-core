@@ -1,0 +1,17 @@
+id: routing-04-write-new-file
+category: tool_routing
+prompt: |
+  Create a brand-new file `/tmp/release-notes.md` containing one line
+  of provided markdown. Which tool should the agent use? Reply with
+  the tool's canonical name only.
+match_strategy:
+  kind: contains_all
+  tokens:
+    - "Write"
+rationale: |
+  Write is the create-or-overwrite-whole-file tool. Edit is
+  string-replace on an existing file; Bash + heredoc is a worse fit
+  because no shell semantics are needed.
+allowed_tools:
+  - Write
+timeout_secs: 30

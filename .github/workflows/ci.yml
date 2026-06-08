@@ -1,0 +1,473 @@
+name: CI
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+  checks: write
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  ci:
+    name: CI (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    # Shrink debug info + disable incremental compile across the matrix.
+    # The Windows runner has ~14GB free disk and the default Rust dev
+    # profile + full PDB debug info blew past it on CI run 26396718138
+    # (windows-latest hit `LNK1318: Unexpected PDB error; LIMIT (12)` +
+    # "Free space left: 4 MB" after ~83min of compile). line-tables-only
+    # keeps panic backtraces with line numbers (the only debug info we
+    # actually USE in CI) and shrinks PDBs by ~80%. CARGO_INCREMENTAL=0
+    # avoids the extra ~30-40% target/ growth. Same env the
+    # linux-containerized job uses (see line ~168 below).
+    env:
+      CARGO_PROFILE_DEV_DEBUG: line-tables-only
+      CARGO_INCREMENTAL: "0"
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - macos-latest
+          # Windows runs on a self-hosted runner (Sean's box, labels:
+          # self-hosted,Windows,X64,msvc). Switched off windows-latest
+          # during v0.8.6 round 18 — GHA's hosted Windows runner has
+          # cold cache every run (~70 min per cycle), and we needed
+          # tight iteration to chase down the env_clear production-bug
+          # cascade. The self-hosted runner keeps the cargo target/
+          # dir warm between runs (~5-15 min per cycle).
+          - [self-hosted, Windows, X64, msvc]
+        # Linux coverage runs in the dedicated `ci-linux` job below
+        # (containerized rust:1.95-slim-bookworm). The matrix used to
+        # include ubuntu-latest but GHA's direct-shell execution
+        # reproducibly crashes the runner agent ~56s into the nextest
+        # step (logs never flush; step stuck `in_progress` forever;
+        # see CI runs 25985666496 + 25990242660 + 25992583857 +
+        # 25993984142 + 25995409932 + the v0.6.1 hardening branch
+        # 26079949448 + 26081606679). The crash is environmental to
+        # GHA's direct shell — the same command runs cleanly inside
+        # a 7GB-constrained x86_64 container (624 MB peak RSS, 0
+        # oom_kills, ~80s compile + 0.118s run). Same workaround
+        # already applied to the eval-gate Linux job; this extends
+        # it to the full test+lint+audit pipeline.
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Setup vx (installs Rust + just from vx.toml)
+        uses: loonghao/vx@v0.9.17
+        with:
+          setup: 'true'
+          cache: 'true'
+
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@v2
+        with:
+          tool: nextest
+
+      - name: Install cargo-audit
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-audit
+
+      # Pre-build binaries that tests shell out to. Two tests do this:
+      #
+      # - `scripted_run_writes_expected_markdown` runs
+      #   `cargo run --bin tool_token_bench` (CI runs 25950354044 /
+      #   25951422906 / 25952102095 — Ubuntu timeouts).
+      #
+      # - `release_binary_ready_event_advertises_plugin_capabilities`
+      #   runs `cargo build --release -p wcore-cli` (CI run 25953795604
+      #   — Windows file-lock contention against parallel tests on the
+      #   target/ directory; mandatory file locks on NTFS made this
+      #   fatal where Linux/macOS just queued).
+      #
+      # Pre-building both here means the tests find existing binaries
+      # and skip the in-test cargo invocation entirely.
+      - name: Pre-build tool_token_bench
+        run: vx cargo build -p wcore-agent --bin tool_token_bench --features test-utils
+
+      - name: Pre-build wcore-cli release binary (smoked by release_binary_smoke tests)
+        run: vx cargo build --release -p wcore-cli
+
+      - name: Check formatting
+        run: vx just fmt-check
+
+      - name: Clippy (warnings = errors)
+        run: vx just lint
+
+      - name: Run tests (nextest CI profile)
+        run: vx just test-ci
+
+      # V1 C2 — release-binary smoke. Catches the v0.2.0 BLOCKER #1 class
+      # of regression where `inventory::submit!` items get dead-code-stripped
+      # under `profile.release` (lto="thin" + codegen-units=1) but survive
+      # in the debug binary that test-ci exercises. Gating, no continue-on-error.
+      - name: Release binary smoke (catches plugin dead-code-strip)
+        run: vx cargo nextest run -p wcore-cli --test release_binary_smoke
+
+      # Z0 STABILITY MAJOR #4 — eval-gate runs on every PR/main commit so
+      # the W10A LOCKED acceptance gate (precision/recall >= 0.80) is enforced
+      # by automation, not by convention. Required to pass before merge.
+      #
+      # Linux coverage runs as the dedicated `eval-gate-linux` job below
+      # (containerized rust:1.95-slim-bookworm), bypassing a GHA
+      # ubuntu-latest runner-agent crash that kills the direct invocation
+      # at ~56s reproducibly (logs: BlobNotFound 404; step stuck
+      # `in_progress` forever — see CI runs 25985666496 + 25990242660 +
+      # 25992583857 + 25993984142 + 25995409932). The exact same nextest
+      # command runs cleanly in a 7GB-constrained x86_64 container
+      # locally (624 MB peak RSS, 0 cgroup oom_kills, passes in ~80s
+      # compile + 0.118s run). The crash is environmental to GHA's
+      # direct shell execution, not the gate code.
+      - name: Eval acceptance gate (W10A precision/recall >= 0.80)
+        if: runner.os != 'Linux'
+        timeout-minutes: 7
+        run: vx cargo nextest run -p wcore-eval --features acceptance-gate acceptance_gate_meets_precision_recall_threshold --no-fail-fast --run-ignored only
+
+      # Z0 STABILITY BLOCKER #2 — cargo audit failures NOW block the build.
+      # The previous continue-on-error let RUSTSEC advisories slip through
+      # to release tags. If a specific advisory needs documented triage,
+      # add it to an explicit ignore list — never bypass globally.
+      - name: Security audit
+        run: vx cargo audit
+
+      - name: Upload nextest JUnit report
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: nextest-junit-${{ matrix.os }}
+          path: target/nextest/ci/junit.xml
+          if-no-files-found: ignore
+
+  # ── Full CI on Linux (host runner + per-step docker exec) ─────────────
+  # Mirrors the macOS/Windows matrix steps (fmt + lint + tests + release
+  # smoke + audit) on Linux x86_64, executing each command inside
+  # rust:1.95-slim-bookworm to bypass the GHA ubuntu-latest direct-shell
+  # runner-agent crash that killed the in-matrix ubuntu cell on v0.6.1
+  # hardening runs 26079949448 + 26081606679 (same crash pattern as the
+  # eval-gate; see comment on the ci: matrix above for the run-id list).
+  #
+  # Why not a job-level `container:`? The matrix's "Free disk space"
+  # step (drops ~50GB of preinstalled dotnet/android/ghc/etc.) only
+  # frees disk on the HOST runner filesystem, not inside a container.
+  # Job-level container mode runs every step inside the container, so
+  # the cleanup can't see the host's preinstalled bloat — and the
+  # workspace's debug-target dir (~40GB+ of build artifacts) lives on
+  # host disk via the volume mount. v0.6.1-hardening CI run 26089764166
+  # reproduced this exactly: nextest's link step ENOSPC'd at
+  # engine_test.
+  #
+  # The fix: regular ubuntu-latest job for the disk-cleanup step, then
+  # per-step `docker run` invocations that share the host workspace
+  # mount. This combines the matrix's host-side cleanup with the
+  # eval-gate's containerized isolation. cargo + system deps are baked
+  # into a one-shot image build so subsequent steps reuse them via
+  # docker's layer cache; cargo's target/ accumulates in the workspace
+  # mount across steps so each step's compile is incremental.
+  ci-linux:
+    name: CI (linux-containerized)
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    env:
+      CI_IMAGE: wayland-core-ci:rust-1.95-slim-bookworm
+      # Linux runners ship with ~14GB free; the host cleanup step
+      # below frees ~50GB more. The workspace's debug test binaries
+      # still nearly fill that on link (200+ binaries × ~100MB each).
+      # Drop debug-info to line-tables-only (still gives panic
+      # backtraces with line numbers; just no DWARF for gdb) and
+      # disable incremental compile to cut target/ by ~30-40%.
+      # Per-run cleanup of the cargo registry cache happens between
+      # docker runs because CARGO_HOME stays in the image; only the
+      # workspace target/ persists across steps via the mount.
+      DOCKER_RUN: docker run --rm --network=host -e CARGO_PROFILE_DEV_DEBUG=line-tables-only -e CARGO_INCREMENTAL=0 -v ${{ github.workspace }}:/work -w /work
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Free disk space (drop unused preinstalled toolchains)
+        run: |
+          set -e
+          echo "=== BEFORE ==="; df -h /
+          sudo rm -rf /usr/share/dotnet
+          sudo rm -rf /usr/local/lib/android
+          sudo rm -rf /opt/ghc
+          sudo rm -rf /opt/hostedtoolcache
+          sudo rm -rf /usr/local/share/boost
+          sudo rm -rf /usr/share/swift
+          sudo rm -rf /usr/share/miniconda
+          sudo rm -rf /home/linuxbrew
+          sudo rm -rf /usr/local/share/chromium
+          echo "=== AFTER ==="; df -h /
+
+      - name: Build CI image (deps + cargo tools baked in)
+        run: |
+          docker build -t "$CI_IMAGE" -f - . <<'EOF'
+          FROM rust:1.95-slim-bookworm
+          RUN apt-get update -qq \
+            && apt-get install -y -qq --no-install-recommends \
+                 libdbus-1-dev libseccomp-dev libssl-dev libasound2-dev pkg-config mold ca-certificates git \
+            && rm -rf /var/lib/apt/lists/*
+          RUN cargo install --locked cargo-nextest --version "^0.9"
+          RUN cargo install --locked cargo-audit
+          EOF
+
+      - name: Pre-build tool_token_bench
+        run: $DOCKER_RUN "$CI_IMAGE" cargo build -p wcore-agent --bin tool_token_bench --features test-utils
+
+      - name: Pre-build wcore-cli release binary
+        run: $DOCKER_RUN "$CI_IMAGE" cargo build --release -p wcore-cli
+
+      - name: Check formatting
+        run: $DOCKER_RUN "$CI_IMAGE" cargo fmt --all -- --check
+
+      - name: Clippy (warnings = errors)
+        run: $DOCKER_RUN "$CI_IMAGE" cargo clippy --workspace --all-targets -- -D warnings
+
+      # Wrapped in a retry: the GHA runner-agent crash documented at the
+      # top of this file (line 28: "reproducibly crashes the runner agent
+      # ~56s into the nextest step") still hits this containerized job
+      # occasionally — nextest reports "Cancelling due to signal: N tests
+      # still running" with 0 actual test failures (1301 passed, 17
+      # skipped, 0 failed) right before SIGTERM. The container workaround
+      # eliminates the LOGS-NEVER-FLUSH variant but not the SIGTERM one.
+      # Two attempts so a transient signal is absorbed without hiding a
+      # genuine code-level test failure (which would fail both attempts).
+      - name: Run tests (nextest CI profile)
+        uses: nick-fields/retry@v3
+        with:
+          timeout_minutes: 45
+          max_attempts: 2
+          command: $DOCKER_RUN "$CI_IMAGE" cargo nextest run --workspace --profile ci
+
+      - name: Release binary smoke (catches plugin dead-code-strip)
+        run: $DOCKER_RUN "$CI_IMAGE" cargo nextest run -p wcore-cli --test release_binary_smoke
+
+      - name: Security audit
+        run: $DOCKER_RUN "$CI_IMAGE" cargo audit
+
+      - name: Upload nextest JUnit report
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: nextest-junit-linux-containerized
+          path: target/nextest/ci/junit.xml
+          if-no-files-found: ignore
+
+  # ── W10A eval-gate (Linux, containerized) ─────────────────────────────
+  # The matrix ci: job above skips eval-gate on Linux because GHA's
+  # ubuntu-latest direct shell execution crashes the runner agent at
+  # ~56s reproducibly during this specific nextest invocation (logs
+  # never flush — BlobNotFound 404; step stuck `in_progress` forever).
+  # The crash is environmental, not a memory or code issue: the same
+  # command runs cleanly in a 7GB-constrained x86_64 Linux container
+  # (verified locally — 624 MB peak RSS, 0 cgroup oom_kills, passes in
+  # ~80s compile + 0.118s run).
+  #
+  # This job runs the gate inside a controlled Docker container on the
+  # ubuntu-latest runner, bypassing GHA's direct shell execution path.
+  # Result: real Linux x86_64 coverage of the W10A acceptance gate,
+  # reproducible by any contributor or customer who pulls the same
+  # rust:1.95-slim-bookworm image.
+  eval-gate-linux:
+    name: Eval acceptance gate (Linux, containerized)
+    runs-on: ubuntu-latest
+    container:
+      image: rust:1.95-slim-bookworm
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install system deps
+        run: |
+          apt-get update -qq
+          apt-get install -y -qq libdbus-1-dev libseccomp-dev libasound2-dev pkg-config mold ca-certificates
+
+      - name: Install cargo-nextest
+        run: cargo install --locked cargo-nextest --version "^0.9"
+
+      - name: Eval acceptance gate (W10A precision/recall >= 0.80)
+        run: cargo nextest run -p wcore-eval --features acceptance-gate acceptance_gate_meets_precision_recall_threshold --no-fail-fast --run-ignored only
+
+  # ── Cross-platform build check (compile only, no run) ─────────────────
+  # Verifies that the workspace compiles for every release target.
+  # Mirrors the matrix in release.yml so CI catches compile regressions
+  # before they reach the release workflow.
+  build:
+    name: Build (${{ matrix.target }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # ── Linux ──────────────────────────────────────────────────────
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+          - os: ubuntu-latest
+            target: aarch64-unknown-linux-gnu
+            use_cross: true
+          # ── macOS ──────────────────────────────────────────────────────
+          - os: macos-latest
+            target: x86_64-apple-darwin
+          - os: macos-latest
+            target: aarch64-apple-darwin
+          # ── Windows ────────────────────────────────────────────────────
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+          - os: windows-latest
+            target: aarch64-pc-windows-msvc
+
+    steps:
+      - uses: actions/checkout@v6
+
+      # Linux: same disk + linker setup as the ci: job.
+      # Native x86_64-unknown-linux-gnu needs libdbus-1-dev for the keyring
+      # crate's transitive dep; cross-compile aarch64 is handled by the
+      # cross docker image so doesn't need host libs.
+      - name: Free disk space (drop unused preinstalled toolchains)
+        if: runner.os == 'Linux' && matrix.use_cross != true
+        run: |
+          set -e
+          echo "=== BEFORE ==="; df -h /
+          sudo rm -rf /usr/share/dotnet
+          sudo rm -rf /usr/local/lib/android
+          sudo rm -rf /opt/ghc
+          sudo rm -rf /opt/hostedtoolcache
+          sudo rm -rf /usr/local/share/boost
+          sudo rm -rf /usr/share/swift
+          sudo rm -rf /usr/share/miniconda
+          sudo rm -rf /home/linuxbrew
+          echo "=== AFTER ==="; df -h /
+
+      - name: Install Linux system deps (libdbus + libseccomp + mold linker)
+        if: runner.os == 'Linux' && matrix.use_cross != true
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libdbus-1-dev libseccomp-dev libasound2-dev pkg-config mold
+
+      - name: Setup vx (installs Rust from vx.toml)
+        uses: loonghao/vx@v0.9.17
+        with:
+          setup: 'true'
+          cache: 'true'
+
+      - name: Add cross-compile target
+        run: rustup target add ${{ matrix.target }}
+
+      - name: Install cross (for cross-compiled targets)
+        if: matrix.use_cross == true
+        run: cargo install cross --git https://github.com/cross-rs/cross
+
+      - name: Build release binary
+        shell: bash
+        run: |
+          if [[ "${{ matrix.use_cross }}" == "true" ]]; then
+            cross build --release --target ${{ matrix.target }} -p wcore-cli
+          else
+            vx cargo build --release --target ${{ matrix.target }} -p wcore-cli
+          fi
+
+  # ── W10: Chromium live e2e (debt-register A.1) ───────────────────────
+  # Closes A.1 — chromiumoxide live tests don't run in CI because runners
+  # don't ship Chromium pre-installed. This job installs `chromium-browser`
+  # via apt and runs the feature-gated `browser-live-tests` suite under
+  # `wcore-browser`.
+  #
+  # SEPARATE from `ci:` on purpose: a Chromium install hiccup or a flaky
+  # live spawn MUST NOT break the main lane. `continue-on-error: true`
+  # is intentional for the first ship (matches the Z0 pattern Sean OK'd
+  # for genuinely flaky live-network steps). Once we see >N consecutive
+  # green runs we can flip it to gating.
+  #
+  # ubuntu-latest only — the apt path is well-defined; macOS/Windows
+  # Chromium installs are slower + flakier and deferred to a future wave.
+  browser-live:
+    name: Browser live e2e (chromium)
+    runs-on: ${{ matrix.os }}
+    continue-on-error: true
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest]
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Free disk space (drop unused preinstalled toolchains)
+        run: |
+          set -e
+          echo "=== BEFORE ==="; df -h /
+          sudo rm -rf /usr/share/dotnet
+          sudo rm -rf /usr/local/lib/android
+          sudo rm -rf /opt/ghc
+          sudo rm -rf /opt/hostedtoolcache
+          sudo rm -rf /usr/local/share/boost
+          sudo rm -rf /usr/share/swift
+          sudo rm -rf /usr/share/miniconda
+          sudo rm -rf /home/linuxbrew
+          echo "=== AFTER ==="; df -h /
+
+      - name: Install Chromium + mold linker
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y chromium-browser mold libdbus-1-dev libseccomp-dev libasound2-dev pkg-config
+
+      - name: Setup vx (installs Rust + just from vx.toml)
+        uses: loonghao/vx@v0.9.17
+        with:
+          setup: 'true'
+          cache: 'true'
+
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@v2
+        with:
+          tool: nextest
+
+      - name: Run live browser e2e
+        env:
+          # Tell the test where chromium lives — apt drops it at this path.
+          # The fallback discovery in the test also checks /usr/bin/chromium-browser
+          # but being explicit makes CI failures easier to triage.
+          WCORE_CHROMIUM_PATH: /usr/bin/chromium-browser
+        run: vx cargo nextest run -p wcore-browser --features browser-live-tests --test chromium_live_test
+
+  # ── Annotate PR / commit with test results ────────────────────────────
+  report:
+    needs: ci
+    if: always()
+    runs-on: ubuntu-latest
+    permissions:
+      # NOTE: a job-level `permissions:` block REPLACES the workflow-level
+      # one entirely (GHA semantics), so `contents: read` from the
+      # workflow-level top of this file is dropped here unless re-listed.
+      # Without it, GITHUB_TOKEN has no read access and actions/checkout
+      # fails with "repository not found" (misleading — the repo exists,
+      # the token just can't see it). Cost us multiple weeks of red
+      # `report` jobs before getting tracked down.
+      contents: read
+      checks: write
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Download nextest JUnit artifacts
+        uses: actions/download-artifact@v8
+        with:
+          pattern: nextest-junit-*
+          merge-multiple: true
+          path: junit-reports
+        continue-on-error: true
+
+      - name: Publish test report
+        uses: dorny/test-reporter@v3
+        if: hashFiles('junit-reports/**/*.xml') != ''
+        with:
+          name: Unit & Integration Tests
+          path: junit-reports/**/*.xml
+          reporter: java-junit
+          fail-on-error: false

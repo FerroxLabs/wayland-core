@@ -1,0 +1,1017 @@
+// Configuration-driven provider compatibility layer.
+// Each provider type has default presets; users can override any field via config.
+
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
+
+/// Provider-level compatibility settings.
+/// Each field is Option — None means "use provider-type default".
+#[derive(Debug, Clone, Deserialize, Serialize, Default)]
+pub struct ProviderCompat {
+    /// Field name for max tokens in request body.
+    /// Default: "max_tokens" for all providers.
+    pub max_tokens_field: Option<String>,
+
+    /// Merge consecutive assistant messages (text concat + tool_calls merge).
+    /// Default: true for openai.
+    pub merge_assistant_messages: Option<bool>,
+
+    /// Remove tool_use blocks that have no corresponding tool_result.
+    /// Default: true for openai.
+    pub clean_orphan_tool_calls: Option<bool>,
+
+    /// Deduplicate tool results with same tool_call_id (keep last).
+    /// Default: true for openai.
+    pub dedup_tool_results: Option<bool>,
+
+    /// Ensure messages alternate user/assistant (insert filler if needed).
+    /// Default: true for anthropic/bedrock/vertex.
+    pub ensure_alternation: Option<bool>,
+
+    /// Merge consecutive same-role messages into one.
+    /// Default: true for anthropic/bedrock/vertex.
+    pub merge_same_role: Option<bool>,
+
+    /// Sanitize JSON schemas for strict providers (remove additionalProperties, etc.).
+    /// Default: true for bedrock.
+    pub sanitize_schema: Option<bool>,
+
+    /// Text patterns to strip from message history before sending.
+    /// Default: empty.
+    pub strip_patterns: Option<Vec<String>>,
+
+    /// Auto-generate tool IDs when missing.
+    /// Default: true for anthropic/bedrock/vertex.
+    pub auto_tool_id: Option<bool>,
+
+    /// Custom API path appended to base_url for chat completions.
+    /// Default: "/v1/chat/completions" for OpenAI provider.
+    /// Override to "/chat/completions" for providers like Gemini that include
+    /// version prefix in the base URL itself.
+    pub api_path: Option<String>,
+
+    /// Whether this provider supports extended thinking (Anthropic-style).
+    /// Default: true for anthropic/bedrock/vertex, false for openai.
+    pub supports_thinking: Option<bool>,
+
+    /// Whether this provider supports reasoning_effort (OpenAI-style).
+    /// Default: false for anthropic/bedrock/vertex, true for openai.
+    pub supports_effort: Option<bool>,
+
+    /// Available effort levels for this provider (e.g., ["low", "medium", "high"]).
+    /// Only meaningful when supports_effort is true.
+    pub effort_levels: Option<Vec<String>>,
+
+    /// Whether this provider honours explicit `cache_control` breakpoint
+    /// markers on individual messages (in addition to the system prompt and
+    /// tools list). Anthropic-family providers (anthropic, bedrock, vertex)
+    /// honour up to four per request; OpenAI and Gemini do not.
+    ///
+    /// When `Some(true)`, the `wcore-observability::cache::mark_cache_boundaries`
+    /// helper places one additional breakpoint at the tail of the prompt to
+    /// raise multi-turn cache hit rate; `Some(false)` / `None` disables the
+    /// extra marker for this provider.
+    pub cache_message_breakpoints: Option<bool>,
+
+    /// W6 — structured provider identity for trace and cost attribution.
+    /// Replaces the W1 `supports_thinking()` heuristic in `wcore-agent`.
+    /// Set to one of: "anthropic" | "bedrock" | "vertex" | "openai" | "ollama".
+    /// Defaults to "unknown" when missing.
+    pub provider_type: Option<String>,
+
+    /// W6 F7 — USD per input token. Multiply by token count for per-turn cost.
+    /// Set in each provider preset; `None` → 0.0 (free / local provider).
+    /// Per-provider list price (NOT per-model); per-model pricing is W6.1.
+    pub cost_per_input_token: Option<f64>,
+
+    /// W6 F7 — USD per output token.
+    pub cost_per_output_token: Option<f64>,
+
+    /// W6 F7 — USD per cached input token read.
+    pub cost_per_cache_read_token: Option<f64>,
+
+    /// W6 F7 — USD per cached input token written (cache creation).
+    pub cost_per_cache_write_token: Option<f64>,
+}
+
+impl ProviderCompat {
+    /// Defaults for Anthropic-family providers (Anthropic, Vertex)
+    pub fn anthropic_defaults() -> Self {
+        Self {
+            ensure_alternation: Some(true),
+            merge_same_role: Some(true),
+            auto_tool_id: Some(true),
+            // TODO(pricing-audit-2026-05-24): per-model thinking capability table —
+            // Anthropic Opus 4.7 doesn't support extended thinking, but supports_thinking
+            // is a flat provider flag. Needs a per-model lookup when that table exists.
+            supports_thinking: Some(true),
+            supports_effort: Some(false),
+            cache_message_breakpoints: Some(true),
+            provider_type: Some("anthropic".into()),
+            // Per-PROVIDER (NOT per-model) Q2-2026 list price as a coarse default.
+            // Every Anthropic model reports this price in TurnTrace.cost_usd
+            // unless the user overrides via wcore.toml. Per-model pricing is
+            // deferred to W6.1 (audit rev-2 finding 6).
+            cost_per_input_token: Some(15.0 / 1_000_000.0),
+            cost_per_output_token: Some(75.0 / 1_000_000.0),
+            cost_per_cache_read_token: Some(1.5 / 1_000_000.0),
+            cost_per_cache_write_token: Some(18.75 / 1_000_000.0),
+            ..Default::default()
+        }
+    }
+
+    /// Defaults for Bedrock (Anthropic + schema sanitization)
+    pub fn bedrock_defaults() -> Self {
+        Self {
+            ensure_alternation: Some(true),
+            merge_same_role: Some(true),
+            auto_tool_id: Some(true),
+            sanitize_schema: Some(true),
+            supports_thinking: Some(true),
+            supports_effort: Some(false),
+            cache_message_breakpoints: Some(true),
+            provider_type: Some("bedrock".into()),
+            // Bedrock hosts Anthropic models; mirror the Anthropic list price.
+            cost_per_input_token: Some(15.0 / 1_000_000.0),
+            cost_per_output_token: Some(75.0 / 1_000_000.0),
+            cost_per_cache_read_token: Some(1.5 / 1_000_000.0),
+            cost_per_cache_write_token: Some(18.75 / 1_000_000.0),
+            ..Default::default()
+        }
+    }
+
+    /// Defaults for Vertex (Anthropic via Google Cloud)
+    pub fn vertex_defaults() -> Self {
+        Self {
+            provider_type: Some("vertex".into()),
+            ..Self::anthropic_defaults()
+        }
+    }
+
+    /// Defaults for native Google Gemini (Generative Language API).
+    ///
+    /// Distinct from `vertex_defaults()` — Vertex routes through the
+    /// Anthropic-shape SSE pipeline (it hosts Claude); native Gemini uses
+    /// its own request/response shape (functionDeclarations,
+    /// systemInstruction, thoughtSignature). The compat flags below are
+    /// the *behavioural* knobs the shared engine still asks about:
+    ///
+    /// - `merge_same_role`: Gemini tolerates either shape but prefers
+    ///   merged turns; matches the body-builder in `gemini.rs`.
+    /// - `cache_message_breakpoints`: Gemini doesn't honour explicit
+    ///   message-level cache breakpoints (cf. compat.rs:68 comment).
+    /// - `supports_thinking`: Gemini's `thinkingConfig.includeThoughts` is
+    ///   reasoning-style (closer to OpenAI's `reasoning_effort`), not
+    ///   Anthropic's `thinking_budget` — drive it through `reasoning_effort`.
+    /// - `provider_type`: `"gemini"` so trace/cost attribution is distinct
+    ///   from Vertex (which hosts Anthropic models on Google Cloud).
+    pub fn gemini_defaults() -> Self {
+        Self {
+            merge_same_role: Some(true),
+            ensure_alternation: Some(false),
+            // Gemini has no `tool_use_id` on `functionCall` parts; the
+            // engine synthesizes one in `parse_sse_chunk`. The auto-ID flag
+            // is Anthropic-shape specific and would no-op here, but
+            // keeping it false makes the intent explicit.
+            auto_tool_id: Some(false),
+            supports_thinking: Some(false),
+            supports_effort: Some(true),
+            effort_levels: Some(vec!["low".into(), "medium".into(), "high".into()]),
+            cache_message_breakpoints: Some(false),
+            provider_type: Some("gemini".into()),
+            // Q2-2026 Gemini 2.5 Pro list price (per Google AI Studio pricing page).
+            // Free tier exists for low volume; the paid tier price is
+            // $1.25 / 1M input tokens, $10 / 1M output. Use the paid
+            // numbers as a coarse cost-attribution baseline — local runs
+            // on the free tier overestimate by exactly this fraction,
+            // which is the safe direction for the budget guardrail.
+            cost_per_input_token: Some(1.25 / 1_000_000.0),
+            cost_per_output_token: Some(10.0 / 1_000_000.0),
+            cost_per_cache_read_token: Some(0.3125 / 1_000_000.0),
+            cost_per_cache_write_token: None,
+            ..Default::default()
+        }
+    }
+
+    /// Defaults for OpenAI-compatible providers
+    pub fn openai_defaults() -> Self {
+        Self {
+            max_tokens_field: Some("max_tokens".into()),
+            merge_assistant_messages: Some(true),
+            clean_orphan_tool_calls: Some(true),
+            dedup_tool_results: Some(true),
+            supports_thinking: Some(false),
+            supports_effort: Some(true),
+            effort_levels: Some(vec!["low".into(), "medium".into(), "high".into()]),
+            provider_type: Some("openai".into()),
+            // Fix(pricing-audit-2026-05-24): was $8/$32 (GPT-5-class), which caused silent
+            // 53x overcharge for every common OpenAI model not in the catalog (e.g. gpt-4o-mini).
+            // Changed to $0/$0 sentinel — matches the openai_compat_provider() pattern.
+            // Unmatched OpenAI models now report honest $0 instead of confident-but-wrong GPT-5 rate.
+            // Common models (gpt-4o, gpt-4o-mini, gpt-4.1-mini, o1, o1-mini, o3-mini) are now in
+            // the pricing.toml catalog so they resolve correctly before reaching this fallback.
+            cost_per_input_token: Some(0.0),
+            cost_per_output_token: Some(0.0),
+            ..Default::default()
+        }
+    }
+
+    /// Defaults for an OpenAI-wire-compatible Tier-2 provider.
+    ///
+    /// v0.6.3 D.2 — the 6 new Tier-2 providers (Azure OpenAI, Together,
+    /// Fireworks, Nvidia, Perplexity, Cerebras) all speak the OpenAI wire
+    /// shape, so they share `openai_defaults()`'s behavioural flags
+    /// (`merge_assistant_messages`, `clean_orphan_tool_calls`, etc.). But
+    /// they are NOT OpenAI for the purposes of cost attribution: reusing
+    /// `openai_defaults()` verbatim hard-codes `provider_type = "openai"`
+    /// and GPT-class cost rows ($8/$32 per Mtok), which over-charges the
+    /// budget tracker 10-40x for the cheap Llama-class models these
+    /// providers host and mislabels every spend as `"openai"`.
+    ///
+    /// This helper takes the OpenAI behavioural preset, stamps the real
+    /// provider id, and clears the inline cost rows. With the cost rows
+    /// `None`, `wcore_observability::cost::estimate_turn_cost` returns
+    /// `0.0` — an honest "unknown cost" — for any model not found in the
+    /// `wcore-pricing` catalog. Per-model pricing comes from the catalog,
+    /// keyed by `provider_type` (the real id), which now matches the
+    /// `[<provider>.<model>]` rows in `pricing.toml`.
+    pub(crate) fn openai_compat_provider(provider_id: &str) -> Self {
+        Self {
+            provider_type: Some(provider_id.into()),
+            // F-026 fix: use Some(0.0) as a sentinel meaning "pricing
+            // resolves via catalog; emit cost events but report $0 when the
+            // catalog has no entry for this model". Previously these were
+            // `None`, which caused the bootstrap cost-attribution gate
+            // (`bootstrap.rs:1093-1097`) to see `is_some() = false` and
+            // never set `cost_attribution = true` — so OpenRouter, Groq,
+            // Deepseek, xAI, and every other openai-compat secondary was
+            // excluded from cost reporting even when session_cost would have
+            // been emitted (F-009).
+            //
+            // The observability cost estimator already handles 0.0 as
+            // "unknown / catalog-resolved" — this is not a regression.
+            cost_per_input_token: Some(0.0),
+            cost_per_output_token: Some(0.0),
+            cost_per_cache_read_token: Some(0.0),
+            cost_per_cache_write_token: Some(0.0),
+            ..Self::openai_defaults()
+        }
+    }
+
+    /// Defaults for Azure OpenAI (OpenAI models hosted on Azure).
+    /// Azure prices match OpenAI list price, but cost attribution must be
+    /// labelled `"azure-openai"` and resolve against the catalog.
+    pub fn azure_openai_defaults() -> Self {
+        Self::openai_compat_provider("azure-openai")
+    }
+
+    /// Defaults for Together AI (open-weight model host).
+    pub fn together_defaults() -> Self {
+        Self::openai_compat_provider("together")
+    }
+
+    /// Defaults for Fireworks AI (open-weight model host).
+    pub fn fireworks_defaults() -> Self {
+        Self::openai_compat_provider("fireworks")
+    }
+
+    /// Defaults for Nvidia NIM / build.nvidia.com.
+    pub fn nvidia_defaults() -> Self {
+        Self::openai_compat_provider("nvidia")
+    }
+
+    /// Defaults for Perplexity (Sonar models).
+    pub fn perplexity_defaults() -> Self {
+        Self::openai_compat_provider("perplexity")
+    }
+
+    /// Defaults for Cerebras (fast open-weight inference).
+    pub fn cerebras_defaults() -> Self {
+        Self::openai_compat_provider("cerebras")
+    }
+
+    /// Defaults for OpenRouter (100+ models via OpenAI-compat router surface).
+    pub fn openrouter_defaults() -> Self {
+        Self::openai_compat_provider("openrouter")
+    }
+
+    /// Defaults for Flux Router (Sean's own OpenAI-compat router product).
+    pub fn flux_router_defaults() -> Self {
+        Self::openai_compat_provider("flux-router")
+    }
+
+    /// v0.8.1 U10b — Defaults for DeepSeek (OpenAI-compatible chat surface).
+    pub fn deepseek_defaults() -> Self {
+        Self::openai_compat_provider("deepseek")
+    }
+
+    /// v0.8.1 U10b — Defaults for xAI / Grok (OpenAI-compatible chat surface).
+    pub fn xai_defaults() -> Self {
+        Self::openai_compat_provider("xai")
+    }
+
+    /// v0.8.1 U10b — Defaults for Groq (fast LPU inference, OpenAI-compatible).
+    pub fn groq_defaults() -> Self {
+        Self::openai_compat_provider("groq")
+    }
+
+    /// Defaults for Moonshot (Kimi). v0.8.1 U10e.
+    pub fn moonshot_defaults() -> Self {
+        Self::openai_compat_provider("moonshot")
+    }
+
+    /// Defaults for Alibaba Qwen via DashScope's OpenAI-compat mode.
+    /// v0.8.1 U10e.
+    pub fn qwen_defaults() -> Self {
+        Self::openai_compat_provider("qwen")
+    }
+
+    /// Defaults for Mistral AI (OpenAI-compatible chat surface).
+    /// F-025 fix: wired from orphan module to reachable ProviderType arm.
+    pub fn mistral_defaults() -> Self {
+        Self::openai_compat_provider("mistral")
+    }
+
+    /// Defaults for Cohere (native chat API, not OpenAI-compat).
+    /// F-025 fix: wired from orphan module to reachable ProviderType arm.
+    /// Cohere's native API is not OpenAI-wire-compatible; pricing resolves
+    /// via catalog keyed by `provider_type = "cohere"`.
+    pub fn cohere_defaults() -> Self {
+        Self {
+            provider_type: Some("cohere".into()),
+            cost_per_input_token: None,
+            cost_per_output_token: None,
+            cost_per_cache_read_token: None,
+            cost_per_cache_write_token: None,
+            ..Default::default()
+        }
+    }
+
+    /// Defaults for Ollama (local provider — pricing is zero).
+    /// Not currently routed via `ProviderType` (only Anthropic/OpenAI/Bedrock/
+    /// Vertex are wired through that enum); exposed so users with an Ollama
+    /// alias in wcore.toml can opt in via explicit compat, and so the cost
+    /// helper has a baseline "local = free" preset to test against.
+    pub fn ollama_defaults() -> Self {
+        Self {
+            provider_type: Some("ollama".into()),
+            cost_per_input_token: Some(0.0),
+            cost_per_output_token: Some(0.0),
+            cost_per_cache_read_token: Some(0.0),
+            cost_per_cache_write_token: Some(0.0),
+            ..Default::default()
+        }
+    }
+
+    /// Merge user config over defaults (user wins on non-None fields)
+    pub fn merge(defaults: Self, user: Self) -> Self {
+        Self {
+            max_tokens_field: user.max_tokens_field.or(defaults.max_tokens_field),
+            merge_assistant_messages: user
+                .merge_assistant_messages
+                .or(defaults.merge_assistant_messages),
+            clean_orphan_tool_calls: user
+                .clean_orphan_tool_calls
+                .or(defaults.clean_orphan_tool_calls),
+            dedup_tool_results: user.dedup_tool_results.or(defaults.dedup_tool_results),
+            ensure_alternation: user.ensure_alternation.or(defaults.ensure_alternation),
+            merge_same_role: user.merge_same_role.or(defaults.merge_same_role),
+            sanitize_schema: user.sanitize_schema.or(defaults.sanitize_schema),
+            strip_patterns: user.strip_patterns.or(defaults.strip_patterns),
+            auto_tool_id: user.auto_tool_id.or(defaults.auto_tool_id),
+            api_path: user.api_path.or(defaults.api_path),
+            supports_thinking: user.supports_thinking.or(defaults.supports_thinking),
+            supports_effort: user.supports_effort.or(defaults.supports_effort),
+            effort_levels: user.effort_levels.or(defaults.effort_levels),
+            cache_message_breakpoints: user
+                .cache_message_breakpoints
+                .or(defaults.cache_message_breakpoints),
+            provider_type: user.provider_type.or(defaults.provider_type),
+            cost_per_input_token: user.cost_per_input_token.or(defaults.cost_per_input_token),
+            cost_per_output_token: user
+                .cost_per_output_token
+                .or(defaults.cost_per_output_token),
+            cost_per_cache_read_token: user
+                .cost_per_cache_read_token
+                .or(defaults.cost_per_cache_read_token),
+            cost_per_cache_write_token: user
+                .cost_per_cache_write_token
+                .or(defaults.cost_per_cache_write_token),
+        }
+    }
+
+    // --- Resolved accessors (Option<bool> → bool with false default) ---
+
+    pub fn merge_assistant_messages(&self) -> bool {
+        self.merge_assistant_messages.unwrap_or(false)
+    }
+
+    pub fn clean_orphan_tool_calls(&self) -> bool {
+        self.clean_orphan_tool_calls.unwrap_or(false)
+    }
+
+    pub fn dedup_tool_results(&self) -> bool {
+        self.dedup_tool_results.unwrap_or(false)
+    }
+
+    pub fn ensure_alternation(&self) -> bool {
+        self.ensure_alternation.unwrap_or(false)
+    }
+
+    pub fn merge_same_role(&self) -> bool {
+        self.merge_same_role.unwrap_or(false)
+    }
+
+    pub fn sanitize_schema(&self) -> bool {
+        self.sanitize_schema.unwrap_or(false)
+    }
+
+    pub fn auto_tool_id(&self) -> bool {
+        self.auto_tool_id.unwrap_or(false)
+    }
+
+    pub fn api_path(&self) -> &str {
+        self.api_path.as_deref().unwrap_or("/v1/chat/completions")
+    }
+
+    pub fn supports_thinking(&self) -> bool {
+        self.supports_thinking.unwrap_or(false)
+    }
+
+    pub fn supports_effort(&self) -> bool {
+        self.supports_effort.unwrap_or(false)
+    }
+
+    pub fn effort_levels(&self) -> &[String] {
+        self.effort_levels.as_deref().unwrap_or(&[])
+    }
+
+    /// Resolved accessor for `cache_message_breakpoints`. None → false.
+    pub fn cache_message_breakpoints(&self) -> bool {
+        self.cache_message_breakpoints.unwrap_or(false)
+    }
+
+    /// W6 — structured provider identity. Defaults to `"unknown"` when not set.
+    /// Populated by every preset; consumed by `wcore-agent::engine` for
+    /// `TurnTrace.provider` and by `wcore-observability::cost::estimate_turn_cost`.
+    pub fn provider_type(&self) -> &str {
+        self.provider_type.as_deref().unwrap_or("unknown")
+    }
+}
+
+/// Sanitize a JSON Schema for strict providers (e.g., Bedrock).
+/// - Root type must be "object" (wrap if not)
+/// - Recursively remove "additionalProperties"
+/// - Normalize array types: ["string", "null"] → "string"
+pub fn sanitize_json_schema(schema: &Value) -> Value {
+    let mut schema = schema.clone();
+
+    // Ensure root type is "object"
+    if schema.get("type").and_then(|t| t.as_str()) != Some("object") {
+        schema = serde_json::json!({
+            "type": "object",
+            "properties": {
+                "value": schema
+            },
+            "required": ["value"]
+        });
+    }
+
+    strip_additional_properties(&mut schema);
+    normalize_array_types(&mut schema);
+    schema
+}
+
+fn strip_additional_properties(val: &mut Value) {
+    if let Some(obj) = val.as_object_mut() {
+        obj.remove("additionalProperties");
+        for v in obj.values_mut() {
+            strip_additional_properties(v);
+        }
+    } else if let Some(arr) = val.as_array_mut() {
+        for v in arr.iter_mut() {
+            strip_additional_properties(v);
+        }
+    }
+}
+
+fn normalize_array_types(val: &mut Value) {
+    if let Some(obj) = val.as_object_mut() {
+        // Normalize ["string", "null"] → "string"
+        if let Some(arr) = obj.get("type").and_then(Value::as_array) {
+            let non_null: Vec<&Value> = arr.iter().filter(|v| v.as_str() != Some("null")).collect();
+            if non_null.len() == 1 {
+                obj.insert("type".to_string(), non_null[0].clone());
+            }
+        }
+        for v in obj.values_mut() {
+            normalize_array_types(v);
+        }
+    } else if let Some(arr) = val.as_array_mut() {
+        for v in arr.iter_mut() {
+            normalize_array_types(v);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn test_anthropic_defaults() {
+        let compat = ProviderCompat::anthropic_defaults();
+        assert!(compat.ensure_alternation());
+        assert!(compat.merge_same_role());
+        assert!(compat.auto_tool_id());
+        assert!(!compat.sanitize_schema());
+        assert!(!compat.merge_assistant_messages());
+        assert!(!compat.clean_orphan_tool_calls());
+    }
+
+    #[test]
+    fn test_bedrock_defaults() {
+        let compat = ProviderCompat::bedrock_defaults();
+        assert!(compat.ensure_alternation());
+        assert!(compat.merge_same_role());
+        assert!(compat.auto_tool_id());
+        assert!(compat.sanitize_schema());
+    }
+
+    #[test]
+    fn test_openai_defaults() {
+        let compat = ProviderCompat::openai_defaults();
+        assert!(compat.merge_assistant_messages());
+        assert!(compat.clean_orphan_tool_calls());
+        assert!(compat.dedup_tool_results());
+        assert_eq!(compat.max_tokens_field.as_deref(), Some("max_tokens"));
+        assert!(!compat.ensure_alternation());
+    }
+
+    #[test]
+    fn test_merge_user_overrides_defaults() {
+        let defaults = ProviderCompat::openai_defaults();
+        let user = ProviderCompat {
+            max_tokens_field: Some("max_completion_tokens".into()),
+            merge_assistant_messages: Some(false),
+            ..Default::default()
+        };
+
+        let merged = ProviderCompat::merge(defaults, user);
+        assert_eq!(
+            merged.max_tokens_field.as_deref(),
+            Some("max_completion_tokens")
+        );
+        assert!(!merged.merge_assistant_messages());
+        // Non-overridden fields keep defaults
+        assert!(merged.clean_orphan_tool_calls());
+        assert!(merged.dedup_tool_results());
+    }
+
+    #[test]
+    fn test_merge_empty_user_keeps_defaults() {
+        let defaults = ProviderCompat::anthropic_defaults();
+        let user = ProviderCompat::default();
+
+        let merged = ProviderCompat::merge(defaults, user);
+        assert!(merged.ensure_alternation());
+        assert!(merged.merge_same_role());
+        assert!(merged.auto_tool_id());
+    }
+
+    #[test]
+    fn test_sanitize_schema_wraps_non_object_root() {
+        let schema = json!({"type": "string"});
+        let sanitized = sanitize_json_schema(&schema);
+
+        assert_eq!(sanitized["type"], "object");
+        assert_eq!(sanitized["properties"]["value"]["type"], "string");
+    }
+
+    #[test]
+    fn test_sanitize_schema_removes_additional_properties() {
+        let schema = json!({
+            "type": "object",
+            "properties": {
+                "name": {"type": "string", "additionalProperties": false}
+            },
+            "additionalProperties": false
+        });
+        let sanitized = sanitize_json_schema(&schema);
+
+        assert!(sanitized.get("additionalProperties").is_none());
+        assert!(
+            sanitized["properties"]["name"]
+                .get("additionalProperties")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn test_sanitize_schema_normalizes_array_types() {
+        let schema = json!({
+            "type": "object",
+            "properties": {
+                "name": {"type": ["string", "null"]}
+            }
+        });
+        let sanitized = sanitize_json_schema(&schema);
+
+        assert_eq!(sanitized["properties"]["name"]["type"], "string");
+    }
+
+    #[test]
+    fn test_sanitize_schema_no_change_for_valid_object() {
+        let schema = json!({
+            "type": "object",
+            "properties": {
+                "cmd": {"type": "string"}
+            },
+            "required": ["cmd"]
+        });
+        let sanitized = sanitize_json_schema(&schema);
+
+        assert_eq!(sanitized["type"], "object");
+        assert_eq!(sanitized["properties"]["cmd"]["type"], "string");
+    }
+
+    #[test]
+    fn test_anthropic_defaults_capability_fields() {
+        let compat = ProviderCompat::anthropic_defaults();
+        assert_eq!(compat.supports_thinking, Some(true));
+        assert_eq!(compat.supports_effort, Some(false));
+        assert!(compat.effort_levels.is_none());
+    }
+
+    #[test]
+    fn test_openai_defaults_capability_fields() {
+        let compat = ProviderCompat::openai_defaults();
+        assert_eq!(compat.supports_thinking, Some(false));
+        assert_eq!(compat.supports_effort, Some(true));
+        assert_eq!(
+            compat.effort_levels,
+            Some(vec![
+                "low".to_string(),
+                "medium".to_string(),
+                "high".to_string()
+            ])
+        );
+    }
+
+    #[test]
+    fn test_bedrock_defaults_capability_fields() {
+        let compat = ProviderCompat::bedrock_defaults();
+        assert_eq!(compat.supports_thinking, Some(true));
+        assert_eq!(compat.supports_effort, Some(false));
+    }
+
+    #[test]
+    fn test_merge_capability_fields_user_overrides() {
+        let defaults = ProviderCompat::openai_defaults();
+        let user = ProviderCompat {
+            supports_thinking: Some(true),
+            ..Default::default()
+        };
+        let merged = ProviderCompat::merge(defaults, user);
+        assert_eq!(merged.supports_thinking, Some(true));
+        assert_eq!(merged.supports_effort, Some(true));
+    }
+
+    #[test]
+    fn test_capability_accessors() {
+        let compat = ProviderCompat::anthropic_defaults();
+        assert!(compat.supports_thinking());
+        assert!(!compat.supports_effort());
+        assert!(compat.effort_levels().is_empty());
+
+        let compat2 = ProviderCompat::openai_defaults();
+        assert!(!compat2.supports_thinking());
+        assert!(compat2.supports_effort());
+        assert_eq!(compat2.effort_levels(), &["low", "medium", "high"]);
+    }
+
+    #[test]
+    fn test_deserialize_from_toml() {
+        let toml_str = r#"
+max_tokens_field = "max_completion_tokens"
+merge_assistant_messages = true
+strip_patterns = ["__REASONING__"]
+"#;
+        let compat: ProviderCompat = toml::from_str(toml_str).unwrap();
+        assert_eq!(
+            compat.max_tokens_field.as_deref(),
+            Some("max_completion_tokens")
+        );
+        assert_eq!(compat.merge_assistant_messages, Some(true));
+        assert_eq!(
+            compat.strip_patterns,
+            Some(vec!["__REASONING__".to_string()])
+        );
+        assert!(compat.clean_orphan_tool_calls.is_none());
+    }
+}
+
+// --- W1 Task 3: cache_message_breakpoints ---
+
+#[cfg(test)]
+mod cache_breakpoint_tests {
+    use super::*;
+
+    #[test]
+    fn anthropic_defaults_enable_cache_message_breakpoints() {
+        let compat = ProviderCompat::anthropic_defaults();
+        assert_eq!(compat.cache_message_breakpoints, Some(true));
+        assert!(compat.cache_message_breakpoints());
+    }
+
+    #[test]
+    fn bedrock_defaults_enable_cache_message_breakpoints() {
+        let compat = ProviderCompat::bedrock_defaults();
+        assert_eq!(compat.cache_message_breakpoints, Some(true));
+        assert!(compat.cache_message_breakpoints());
+    }
+
+    #[test]
+    fn openai_defaults_do_not_enable_cache_message_breakpoints() {
+        let compat = ProviderCompat::openai_defaults();
+        // None or Some(false) both resolve to false through the accessor —
+        // we leave it None to preserve "use provider-type default" semantics
+        // for OpenAI users who haven't asked for it.
+        assert_eq!(compat.cache_message_breakpoints, None);
+        assert!(!compat.cache_message_breakpoints());
+    }
+
+    #[test]
+    fn user_can_override_cache_message_breakpoints_via_merge() {
+        let defaults = ProviderCompat::anthropic_defaults();
+        let user = ProviderCompat {
+            cache_message_breakpoints: Some(false),
+            ..ProviderCompat::default()
+        };
+        let merged = ProviderCompat::merge(defaults, user);
+        assert_eq!(merged.cache_message_breakpoints, Some(false));
+        assert!(!merged.cache_message_breakpoints());
+    }
+
+    #[test]
+    fn cache_message_breakpoints_accessor_returns_false_when_none() {
+        let compat = ProviderCompat::default();
+        assert_eq!(compat.cache_message_breakpoints, None);
+        assert!(!compat.cache_message_breakpoints());
+    }
+
+    #[test]
+    fn vertex_provider_type_inherits_anthropic_cache_breakpoints() {
+        // Asserts the resolution at wcore-config/src/config.rs:400:
+        //   ProviderType::Vertex => ProviderCompat::anthropic_defaults()
+        // is exercised by the match-arm code path. We assert the
+        // observable contract (cache_message_breakpoints() returns true for
+        // a Vertex-resolved compat) rather than the match itself so the test
+        // survives any future renaming of the preset constructor.
+        //
+        // If a future Vertex-specific preset is introduced and silently
+        // drops the cache marker, this assertion fails — exactly the
+        // "no hardcoded provider quirks" failure mode AGENTS.md warns
+        // about.
+        use crate::config::ProviderType;
+
+        let resolved = match ProviderType::Vertex {
+            ProviderType::Anthropic => ProviderCompat::anthropic_defaults(),
+            ProviderType::Bedrock => ProviderCompat::bedrock_defaults(),
+            ProviderType::Vertex => ProviderCompat::vertex_defaults(),
+            ProviderType::Gemini => ProviderCompat::gemini_defaults(),
+            ProviderType::OpenAI => ProviderCompat::openai_defaults(),
+            ProviderType::AzureOpenAI => ProviderCompat::azure_openai_defaults(),
+            ProviderType::Together => ProviderCompat::together_defaults(),
+            ProviderType::Fireworks => ProviderCompat::fireworks_defaults(),
+            ProviderType::Nvidia => ProviderCompat::nvidia_defaults(),
+            ProviderType::Perplexity => ProviderCompat::perplexity_defaults(),
+            ProviderType::Cerebras => ProviderCompat::cerebras_defaults(),
+            ProviderType::OpenRouter => ProviderCompat::openrouter_defaults(),
+            ProviderType::FluxRouter => ProviderCompat::flux_router_defaults(),
+            ProviderType::Deepseek => ProviderCompat::deepseek_defaults(),
+            ProviderType::Xai => ProviderCompat::xai_defaults(),
+            ProviderType::Groq => ProviderCompat::groq_defaults(),
+            ProviderType::Moonshot => ProviderCompat::moonshot_defaults(),
+            ProviderType::Qwen => ProviderCompat::qwen_defaults(),
+            // F-025: Mistral + Cohere arms added to keep this exhaustive match
+            // compiling as the ProviderType enum grows.
+            ProviderType::Mistral => ProviderCompat::mistral_defaults(),
+            ProviderType::Cohere => ProviderCompat::cohere_defaults(),
+        };
+        assert_eq!(
+            resolved.cache_message_breakpoints,
+            Some(true),
+            "Vertex must inherit cache_message_breakpoints from anthropic_defaults \
+             (see config.rs:400). If this fails, either a vertex_defaults() preset \
+             was introduced — in which case set cache_message_breakpoints: Some(true) \
+             on it — or the inheritance match arm changed."
+        );
+        assert!(resolved.cache_message_breakpoints());
+    }
+}
+
+// --- W6 T1: provider_type + cost rows ---
+
+#[cfg(test)]
+mod w6_provider_type_and_cost_tests {
+    use super::*;
+
+    #[test]
+    fn every_default_preset_has_provider_type() {
+        assert_eq!(
+            ProviderCompat::anthropic_defaults().provider_type(),
+            "anthropic"
+        );
+        assert_eq!(
+            ProviderCompat::bedrock_defaults().provider_type(),
+            "bedrock"
+        );
+        assert_eq!(ProviderCompat::openai_defaults().provider_type(), "openai");
+        assert_eq!(ProviderCompat::vertex_defaults().provider_type(), "vertex");
+        assert_eq!(ProviderCompat::ollama_defaults().provider_type(), "ollama");
+    }
+
+    #[test]
+    fn anthropic_preset_has_cost_rows() {
+        let c = ProviderCompat::anthropic_defaults();
+        assert!(c.cost_per_input_token.unwrap_or(0.0) > 0.0);
+        assert!(c.cost_per_output_token.unwrap_or(0.0) > 0.0);
+        assert!(c.cost_per_cache_read_token.unwrap_or(0.0) > 0.0);
+        assert!(c.cost_per_cache_write_token.unwrap_or(0.0) > 0.0);
+    }
+
+    #[test]
+    fn bedrock_preset_has_cost_rows() {
+        let c = ProviderCompat::bedrock_defaults();
+        assert!(c.cost_per_input_token.unwrap_or(0.0) > 0.0);
+        assert!(c.cost_per_output_token.unwrap_or(0.0) > 0.0);
+    }
+
+    /// Fix(pricing-audit-2026-05-24): openai_defaults() now uses Some(0.0) as a sentinel.
+    /// The old $8/$32 values were a silent 53x overcharge on unrecognised OpenAI models.
+    /// Cost attribution is still enabled (Some(0.0) vs None); real pricing resolves via catalog.
+    #[test]
+    fn openai_preset_has_cost_rows() {
+        let c = ProviderCompat::openai_defaults();
+        // Some(0.0) sentinel: cost attribution gate fires (is_some() = true)
+        // but unmatched models report $0 rather than the stale GPT-5-class rate.
+        assert_eq!(c.cost_per_input_token, Some(0.0));
+        assert_eq!(c.cost_per_output_token, Some(0.0));
+    }
+
+    #[test]
+    fn vertex_inherits_anthropic_cost_rows_with_vertex_type() {
+        let v = ProviderCompat::vertex_defaults();
+        let a = ProviderCompat::anthropic_defaults();
+        assert_eq!(v.provider_type(), "vertex");
+        assert_eq!(v.cost_per_input_token, a.cost_per_input_token);
+        assert_eq!(v.cost_per_output_token, a.cost_per_output_token);
+    }
+
+    #[test]
+    fn ollama_preset_is_zero_cost() {
+        let c = ProviderCompat::ollama_defaults();
+        assert_eq!(c.cost_per_input_token, Some(0.0));
+        assert_eq!(c.cost_per_output_token, Some(0.0));
+    }
+
+    #[test]
+    fn unknown_provider_type_when_not_set() {
+        let c = ProviderCompat::default();
+        assert_eq!(c.provider_type(), "unknown");
+    }
+
+    #[test]
+    fn merge_user_cost_overrides_default() {
+        let defaults = ProviderCompat::anthropic_defaults();
+        let user = ProviderCompat {
+            cost_per_input_token: Some(0.0), // override to free
+            ..ProviderCompat::default()
+        };
+        let merged = ProviderCompat::merge(defaults, user);
+        assert_eq!(merged.cost_per_input_token, Some(0.0));
+        // Non-overridden cost rows still inherit from defaults.
+        assert!(merged.cost_per_output_token.unwrap_or(0.0) > 0.0);
+    }
+
+    #[test]
+    fn merge_user_provider_type_overrides_default() {
+        let defaults = ProviderCompat::anthropic_defaults();
+        let user = ProviderCompat {
+            provider_type: Some("custom-fork".into()),
+            ..ProviderCompat::default()
+        };
+        let merged = ProviderCompat::merge(defaults, user);
+        assert_eq!(merged.provider_type(), "custom-fork");
+    }
+}
+
+// --- D.2 (v0.6.3): Tier-2 provider presets report their real id + no
+// GPT-class cost rows ---
+#[cfg(test)]
+mod d2_tier2_provider_cost_tests {
+    use super::*;
+
+    /// Each Tier-2 provider preset must report its OWN provider id, NOT
+    /// "openai" — otherwise cost attribution mislabels every spend and the
+    /// pricing-catalog lookup is wrong-keyed.
+    #[test]
+    fn tier2_presets_report_their_real_provider_id() {
+        assert_eq!(
+            ProviderCompat::azure_openai_defaults().provider_type(),
+            "azure-openai"
+        );
+        assert_eq!(
+            ProviderCompat::together_defaults().provider_type(),
+            "together"
+        );
+        assert_eq!(
+            ProviderCompat::fireworks_defaults().provider_type(),
+            "fireworks"
+        );
+        assert_eq!(ProviderCompat::nvidia_defaults().provider_type(), "nvidia");
+        assert_eq!(
+            ProviderCompat::perplexity_defaults().provider_type(),
+            "perplexity"
+        );
+        assert_eq!(
+            ProviderCompat::cerebras_defaults().provider_type(),
+            "cerebras"
+        );
+    }
+
+    /// Tier-2 presets must NOT carry the inline GPT-class cost rows from
+    /// `openai_defaults()`.
+    ///
+    /// F-026 update: cost rows are now `Some(0.0)` rather than `None`.
+    /// `Some(0.0)` is a sentinel meaning "cost attribution is enabled and
+    /// events should be emitted, but real pricing resolves via the
+    /// `wcore-pricing` catalog; use 0.0 as a floor when the model isn't
+    /// in the catalog." This sentinel makes the bootstrap cost-attribution
+    /// gate (`bootstrap.rs:1093-1097`) trigger for all openai-compat
+    /// secondaries (OpenRouter, Groq, Deepseek, etc.) so `session_cost`
+    /// events flow even when exact pricing is catalog-only.
+    ///
+    /// The important invariant that IS preserved: none of these carry
+    /// GPT-class prices ($8/$32 per Mtok). 0.0 is unambiguously not
+    /// a GPT-class price.
+    #[test]
+    fn tier2_presets_have_no_inline_cost_rows() {
+        for c in [
+            ProviderCompat::azure_openai_defaults(),
+            ProviderCompat::together_defaults(),
+            ProviderCompat::fireworks_defaults(),
+            ProviderCompat::nvidia_defaults(),
+            ProviderCompat::perplexity_defaults(),
+            ProviderCompat::cerebras_defaults(),
+        ] {
+            // F-026: cost_per_input_token is now Some(0.0) as a sentinel, not None.
+            // Assert that it is NOT the GPT-class price — that's the load-bearing
+            // invariant (D.2 v0.6.3 was preventing over-billing, not preventing cost emission).
+            assert_ne!(
+                c.cost_per_input_token,
+                Some(8.0 / 1_000_000.0),
+                "provider {} must not carry GPT-class input price",
+                c.provider_type()
+            );
+            assert_ne!(
+                c.cost_per_output_token,
+                Some(32.0 / 1_000_000.0),
+                "provider {} must not carry GPT-class output price",
+                c.provider_type()
+            );
+            // Sentinel value: exactly 0.0 (enables cost attribution gate without
+            // fabricating a price; real pricing comes from the catalog).
+            assert_eq!(
+                c.cost_per_input_token,
+                Some(0.0),
+                "provider {} must use Some(0.0) sentinel for cost attribution (F-026)",
+                c.provider_type()
+            );
+        }
+    }
+
+    /// Tier-2 presets keep the OpenAI *wire-shape* behavioural flags —
+    /// only identity and cost change.
+    #[test]
+    fn tier2_presets_keep_openai_wire_behaviour() {
+        let c = ProviderCompat::together_defaults();
+        assert!(c.merge_assistant_messages());
+        assert!(c.clean_orphan_tool_calls());
+        assert!(c.dedup_tool_results());
+        assert!(c.supports_effort());
+        assert_eq!(c.max_tokens_field.as_deref(), Some("max_tokens"));
+    }
+
+    /// OpenAI itself is still labelled "openai" with cost rows present (Some(0.0) sentinel).
+    /// Real per-model pricing resolves via the pricing.toml catalog (gpt-4o, gpt-4o-mini, etc.).
+    #[test]
+    fn openai_preset_unchanged() {
+        let c = ProviderCompat::openai_defaults();
+        assert_eq!(c.provider_type(), "openai");
+        // Some(0.0): cost attribution gate fires; catalog provides real rates.
+        assert!(c.cost_per_input_token.is_some());
+    }
+}

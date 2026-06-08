@@ -1,0 +1,19 @@
+[plugin]
+name        = "wayland-ijfw"
+version     = "0.1.0"
+description = "IJFW anchor plugin — tools + hooks + agents + skills + rules + MCP server"
+entry       = "builtin:wayland_ijfw"
+authors     = ["Wayland-Core"]
+license     = "MIT"
+
+[permissions]
+register_tools      = true
+tool_namespace      = "ijfw"
+register_hooks      = true
+register_providers  = false
+register_agents     = true
+register_skills     = true
+register_rules      = true
+register_mcp_server = true
+memory_partitions_writable = ["P2"]
+memory_partitions_readable = ["P2", "P3", "P4"]

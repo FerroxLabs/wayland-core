@@ -1,0 +1,19 @@
+id: fileops-02-append-line
+category: file_ops
+prompt: |
+  In the provided sandbox directory, append the line `# appended` (no
+  trailing whitespace) plus one newline to the end of the existing
+  file `notes.txt`. Do not modify any other byte of the file.
+match_strategy:
+  kind: file_tree_matches
+  expected_sha256: "b2e7e5f4b3f86c9c7e3c4f9d22b1e8f9bac4d9e5f2b3c4d5e6f7a8b9c0d1e2f3"
+  description: |
+    Post-state: notes.txt has the original bytes plus "# appended\n"
+    appended. No other entries created or modified.
+rationale: |
+  Append rather than overwrite — disambiguates Edit vs Write semantics
+  for partial-file mutation in M4.3.
+allowed_tools:
+  - Edit
+  - Read
+timeout_secs: 60

@@ -1,0 +1,68 @@
+[package]
+name = "wcore-eval-scenarios"
+description = "Scenario-level eval harness for wayland-core — drives the real binary against real LLM APIs"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+publish = false
+
+[lib]
+name = "wcore_eval_scenarios"
+path = "src/lib.rs"
+
+[[bin]]
+name = "wayland-eval"
+path = "bin/wayland-eval.rs"
+
+[dependencies]
+# Async runtime — used by the runner for spawn/timeout/stderr-drain.
+tokio        = { workspace = true }
+# Serde for ProtocolEvent/ProtocolCommand wire decoding and config TOML emit.
+serde        = { workspace = true }
+serde_json   = { workspace = true }
+# TOML emission for seeded `[session] directory = ...` + `[provider.*] api_key = ...`
+# (and optional `[budget] max_cost_usd = ...` per H-6).
+toml         = { workspace = true }
+# Hermetic tempdirs for per-scenario session-dir / cwd hermeticity (C-3).
+tempfile     = { workspace = true }
+# Error plumbing.
+anyhow       = { workspace = true }
+thiserror    = { workspace = true }
+# clap for the wayland-eval CLI (full CLI lands in T5; bin stub here).
+clap         = { workspace = true }
+# Structured logging for runner diagnostics.
+tracing      = { workspace = true }
+# Direct HTTPS for the D9 LLM-as-judge grader (semantic eval). The eval crate
+# is a test harness, so its one raw reqwest call carries a scoped
+# `#[allow(clippy::disallowed_methods)]` (see judge.rs) rather than routing
+# through wcore-egress, which would add an internal-crate edge this crate avoids.
+reqwest      = { workspace = true }
+# D8 PTY TUI capture — drive wayland-core's ratatui TUI under a pseudo-terminal
+# and read the rendered screen. Direct deps (not in [workspace.dependencies])
+# but already in the lockfile via wcore-cli's TUI harness; vt100 pinned <0.16 to
+# keep unicode-width =0.2.0 (ratatui 0.29). Unix-only (see pty_capture.rs gate).
+portable-pty = "0.9"
+vt100        = "0.15"
+
+# Wire-format types — reuse the engine's authoritative ProtocolEvent /
+# ProtocolCommand enums instead of redefining shapes that would drift.
+wcore-protocol = { workspace = true }
+
+[dev-dependencies]
+# Tests need the wayland-core binary available — declaring wcore-cli as
+# an artifact dev-dep would also work, but the runner already supports
+# binary discovery via WCORE_EVAL_BIN env + relative target/ walk
+# (mirrors the existing release_binary_smoke.rs pattern). The smoke
+# tests in tests/smoke.rs use that helper so no extra build dep is
+# required and there's no risk of pulling the entire wcore-cli tree
+# into the test compile graph.
+
+# libc — `hung_scenario_does_not_leak_pid` checks PID reaping via
+# `libc::kill(pid, 0)` instead of shelling out to /bin/kill, which is
+# absent in the ci-linux slim Debian docker image
+# (`rust:1.95-slim-bookworm`) — caused ENOENT panic + nextest job fail
+# in CI run 26396718138.
+[target.'cfg(unix)'.dev-dependencies]
+libc = { workspace = true }

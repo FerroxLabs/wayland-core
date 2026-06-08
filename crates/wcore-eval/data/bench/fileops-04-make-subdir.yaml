@@ -1,0 +1,19 @@
+id: fileops-04-make-subdir
+category: file_ops
+prompt: |
+  In the provided sandbox directory, create a subdirectory named
+  `build` and inside it create an empty file `marker`. No other
+  filesystem changes are permitted.
+match_strategy:
+  kind: file_tree_matches
+  expected_sha256: "d4090705d519ae1e905e6f0b44d300abdff6f127c4d5e6f7a8b9c0d1e2f3a4b5"
+  description: |
+    Post-state: build/ exists as a directory; build/marker is a
+    regular zero-byte file; no other entries.
+rationale: |
+  Two-step file-op (mkdir + create-file) exercises ordering. The
+  empty-file content removes any byte-encoding ambiguity.
+allowed_tools:
+  - Bash
+  - Write
+timeout_secs: 60

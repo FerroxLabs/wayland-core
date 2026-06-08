@@ -1,0 +1,7 @@
+id: good-trace-1
+category: healthy
+skill_body: hello-trace-1
+trace_fixture: cheap-greet-1.json
+expected_outcome: good
+rationale: |
+  Healthy variant 1 paired with a cheap trace (within saturation thresholds).

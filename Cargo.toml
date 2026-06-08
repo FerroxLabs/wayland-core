@@ -1,0 +1,465 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/wcore-types",
+    "crates/wcore-protocol",
+    "crates/wcore-plugin-api",
+    # v0.6.5 Task 2.1: WASM Component Model plugin host (wasmtime 30 + WASI).
+    "crates/wcore-plugin-wasm",
+    "crates/wcore-compact",
+    "crates/wcore-config",
+    # B1 (injection/exfil-defense SPEC, Layer 1): single outbound-HTTP
+    # chokepoint. A clippy `disallowed-methods` lint bans raw
+    # `reqwest::Client::new`/`builder` outside this crate, so every
+    # network-capable crate routes through EgressClient and the egress policy
+    # is enforced in exactly one place. Near-leaf: depends only on reqwest.
+    "crates/wcore-egress",
+    "crates/wcore-providers",
+    # T1-D1 (v0.6.2): pricing-as-data catalog (provider x model token rates).
+    "crates/wcore-pricing",
+    "crates/wcore-tools",
+    # v0.7.0 Task 2.B.1: user-model backend abstraction (preferences,
+    # expertise, style, brief). LocalBackend ships now; Honcho adapter
+    # wires through the same trait in 2.B.2.
+    "crates/wcore-user-model",
+    # v0.8.0 Task H: Honcho adapter for the user-model backend trait —
+    # bridges `wcore-user-model::UserModelBackend` to
+    # `wayland-honcho::HonchoClient` so production deploys can run with
+    # Honcho as the persistent-across-devices substrate.
+    "crates/wcore-honcho-adapter",
+    "crates/wcore-acp",
+    "crates/wcore-mcp",
+    "crates/wcore-skills",
+    "crates/wcore-eval",
+    # T1+T2 (2026-05-23): scenario-level eval harness — drives the real
+    # wayland-core binary against real LLM APIs in --json-stream mode and
+    # asserts the OUTCOME. Plan: .blackboard/EVAL-HARNESS-PLAN-2026-05-23.md.
+    "crates/wcore-eval-scenarios",
+    "crates/wcore-evolve",
+    # M5.2: session-trace replay + diff for debugging.
+    "crates/wcore-replay",
+    # M5.3: budget caps + telemetry, extracted from wcore-agent + wcore-config.
+    "crates/wcore-budget",
+    # M5.1: container-isolated tool execution (Docker behind `live-docker` feature).
+    "crates/wcore-sandbox",
+    "crates/wcore-memory",
+    # Wave B2: multi-actor ACL + bearer token (Team Mode foundation).
+    "crates/wcore-permissions",
+    "crates/wcore-observability",
+    "crates/wcore-repomap",
+    "crates/wcore-agent",
+    # v0.7.0 Task 3.A.1: built-in agent pack — 13 default agent manifests
+    # bundled as embedded TOML for `--agent=<name>` CLI selection.
+    "crates/wcore-agents-pack",
+    # v0.7.0 Task 4.A.1: internal decision router foundation — generic
+    # DecisionRouter trait + Thompson-sampling Beta scorer. Underpins
+    # template / agent / skill routers (4.A.2–4.A.4).
+    "crates/wcore-dispatch",
+    # v0.7.0 Task 2.A.1: channel runtime — trait + lifecycle + config loader
+    # for chat-platform adapters (Slack, Discord, Telegram, …).
+    "crates/wcore-channels",
+    # v0.8.0 Task A: production Slack adapter (Web API outbound +
+    # Events API webhook inbound), implementing the Channel trait.
+    "crates/wcore-channel-slack",
+    # v0.8.0 Task B: production Telegram Bot API adapter — outbound via
+    # sendMessage + inbound via getUpdates long-poll, bot token in keychain.
+    "crates/wcore-channel-telegram",
+    # v0.8.0 Task D: production Discord adapter — outbound via REST
+    # channels/<id>/messages + inbound via Gateway WebSocket (v10) with
+    # HELLO/HEARTBEAT_ACK lifecycle and IDENTIFY using GUILD_MESSAGES +
+    # MESSAGE_CONTENT intents. Bot token in keychain.
+    "crates/wcore-channel-discord",
+    # v0.8.0 Task E: production Twilio SMS adapter — REST outbound via
+    # /2010-04-01/Accounts/<sid>/Messages.json + webhook inbound with
+    # HMAC-SHA1 signature verification.
+    "crates/wcore-channel-sms",
+    # v0.8.0 Task C: production email adapter — SMTP outbound via lettre
+    # + IMAP poll inbound on spawn_blocking, credentials in keychain.
+    "crates/wcore-channel-email",
+    # v0.8.0 Task F: production WhatsApp Cloud API adapter — REST outbound
+    # to graph.facebook.com + webhook inbound with X-Hub-Signature-256.
+    "crates/wcore-channel-whatsapp",
+    # v0.8.0 Task G: signal-cli subprocess channel adapter — JSON-RPC
+    # over stdio against `signal-cli -a <account> jsonRpc`.
+    "crates/wcore-channel-signal",
+    # F-045 (W7-M): iMessage + Matrix + MS Teams channel adapters ported from
+    # desktop app's OpenClaw fork. iMessage: macOS-only, AppleScript/osascript.
+    # Matrix: send-only MVP REST (poll/sync deferred to v0.8.3).
+    # MS Teams: Bot Framework OAuth2 + Connector REST send (webhook inbound deferred to v0.8.3).
+    "crates/wcore-channel-imessage",
+    "crates/wcore-channel-matrix",
+    "crates/wcore-channel-msteams",
+    # v0.8.1 Task U5: per-platform factory dispatch + on-disk
+    # auto-registration that scans `~/.wayland/channels/*.toml` and
+    # registers each adapter into ChannelManager at engine boot.
+    "crates/wcore-channels-registry",
+    "crates/wcore-cli",
+    # W8c.1: multi-backend browser tool family (Camoufox / chromium / Browserbase).
+    "crates/wcore-browser",
+    # W8c.2: multi-platform computer-use (CUA) tool family — design §5.18.
+    "crates/wcore-cua",
+    # W8a B.1: first reference plugin — Ollama provider registration via W2.5 plugin-api.
+    "crates/wayland-ollama",
+    # W8c.1 E.13: wayland-browser plugin shell — registers BrowserToolSpec via the
+    # wcore-plugin-api mirror (no wcore-browser dep, per audit F2).
+    "crates/wayland-browser",
+    # W8c.2 F.8: wayland-cua plugin shell — registers CuaToolSpec via the
+    # wcore-plugin-api mirror (no wcore-cua dep, per audit F2).
+    "crates/wayland-cua",
+    # W8c.3 G.1: wayland-ijfw anchor plugin — exercises every register_*
+    # surface through wcore-plugin-api mirrors (no wcore-skills /
+    # wcore-mcp / wcore-memory deps, per audit F2).
+    "crates/wayland-ijfw",
+    # Wave B4: Honcho user-model plugin shell — mock-by-default, live HTTP
+    # behind `live-honcho` feature (no wcore-browser / wcore-cua deps,
+    # per audit F2).
+    "crates/wayland-honcho",
+    # M5.5: productized worktree-isolated multi-agent dispatch foundation.
+    "crates/wcore-swarm",
+    # v0.8.1 U7: cron scheduler — memory-resident scheduled triggers with
+    # 3 target types (slash command, channel message, skill invocation).
+    "crates/wcore-cron",
+    # v0.6.1 H2: output validator + PII scrubber primitives (R8 + Sec5).
+    "crates/wcore-safety",
+    # v0.6.5 Task 3.1: subprocess plugin host (JSON-RPC over stdio,
+    # reuses wcore-mcp::protocol framing).
+    "crates/wcore-plugin-subprocess",
+    # T6 (2026-05-24): customer-fixture catalog + replay harness.
+    # Wave 1: fixture data + skeleton. Wave 2: FixturePlayback runner.
+    # See .blackboard/E2E-TESTING-STRATEGY-2026-05-24.md §3.5 T6.
+    "crates/wcore-fixture-harness",
+    "workspace-hack",
+]
+
+# v0.6.5 — `templates/` holds `cargo generate` scaffolds (`.liquid` files
+# that won't parse as Rust) and `examples/` holds standalone plugin
+# packages (independent crates, sometimes wasm32-wasip1 targets or
+# external binaries). Neither belongs in the workspace member set.
+exclude = ["templates/**", "examples/**"]
+
+[workspace.package]
+version = "0.9.6-rc.2"
+edition = "2024"
+rust-version = "1.95"
+license = "Apache-2.0"
+repository = "https://github.com/FerroxLabs/wayland-core"
+
+[workspace.dependencies]
+# Internal crates
+wcore-types         = { path = "crates/wcore-types" }
+wcore-protocol      = { path = "crates/wcore-protocol" }
+wcore-plugin-api    = { path = "crates/wcore-plugin-api" }
+# v0.6.5 Task 2.7 — host wire-up. Both deps are LEAF (depend on
+# wcore-plugin-api only); wcore-agent's dep on them does not create a
+# cycle because they cannot themselves depend on wcore-agent.
+wcore-plugin-wasm       = { path = "crates/wcore-plugin-wasm" }
+wcore-plugin-subprocess = { path = "crates/wcore-plugin-subprocess" }
+wcore-compact       = { path = "crates/wcore-compact" }
+wcore-config        = { path = "crates/wcore-config" }
+wcore-egress        = { path = "crates/wcore-egress" }
+wcore-dispatch      = { path = "crates/wcore-dispatch" }
+wcore-providers     = { path = "crates/wcore-providers" }
+wcore-tools         = { path = "crates/wcore-tools" }
+wcore-user-model    = { path = "crates/wcore-user-model" }
+wcore-honcho-adapter = { path = "crates/wcore-honcho-adapter" }
+wcore-mcp           = { path = "crates/wcore-mcp" }
+wcore-skills        = { path = "crates/wcore-skills" }
+wcore-swarm         = { path = "crates/wcore-swarm" }
+wcore-eval          = { path = "crates/wcore-eval" }
+wcore-evolve        = { path = "crates/wcore-evolve" }
+wcore-replay        = { path = "crates/wcore-replay" }
+wcore-budget        = { path = "crates/wcore-budget" }
+wcore-pricing       = { path = "crates/wcore-pricing" }
+wcore-permissions   = { path = "crates/wcore-permissions" }
+wcore-sandbox       = { path = "crates/wcore-sandbox" }
+wcore-memory        = { path = "crates/wcore-memory" }
+wcore-observability = { path = "crates/wcore-observability" }
+wcore-repomap       = { path = "crates/wcore-repomap" }
+wcore-browser       = { path = "crates/wcore-browser" }
+wcore-cua           = { path = "crates/wcore-cua" }
+wcore-agent         = { path = "crates/wcore-agent" }
+wcore-agents-pack   = { path = "crates/wcore-agents-pack" }
+wcore-channels      = { path = "crates/wcore-channels" }
+wcore-channel-slack    = { path = "crates/wcore-channel-slack" }
+wcore-channel-telegram = { path = "crates/wcore-channel-telegram" }
+wcore-channel-discord  = { path = "crates/wcore-channel-discord" }
+wcore-channel-sms      = { path = "crates/wcore-channel-sms" }
+wcore-channel-email    = { path = "crates/wcore-channel-email" }
+wcore-channel-whatsapp = { path = "crates/wcore-channel-whatsapp" }
+wcore-channel-signal   = { path = "crates/wcore-channel-signal" }
+# F-045 (W7-M): new channel adapters.
+wcore-channel-imessage = { path = "crates/wcore-channel-imessage" }
+wcore-channel-matrix   = { path = "crates/wcore-channel-matrix" }
+wcore-channel-msteams  = { path = "crates/wcore-channel-msteams" }
+# v0.8.1 U5: factory dispatch + boot-time auto-registration that
+# scans `~/.wayland/channels/*.toml` and registers each adapter into
+# ChannelManager — closes the v0.8.0 gap where every deploy had to
+# hand-wire the 7 channel crates.
+wcore-channels-registry = { path = "crates/wcore-channels-registry" }
+wcore-cron             = { path = "crates/wcore-cron" }
+wcore-safety        = { path = "crates/wcore-safety" }
+# v0.6.5 Task 1.5 — wcore-agent host-side adapter reifies the user-model
+# plugin shell. Same host↑plugin dep asymmetry as wcore-browser/wcore-cua.
+wayland-honcho      = { path = "crates/wayland-honcho" }
+
+# Async runtime
+tokio   = { version = "1", features = ["full"] }
+futures = "0.3"
+
+# HTTP client
+# HTTP client — use rustls to avoid native OpenSSL dep during cross-compilation
+reqwest = { version = "0.12", features = ["json", "stream", "multipart", "rustls-tls"], default-features = false }
+
+# Serialization
+serde      = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# OpenAPI 3.0.3 document generation for the REST transport (wcore-acp).
+# Pinned to 4.x for axum 0.7 compatibility; utoipa 5 requires axum 0.8
+# (a repo-wide bump). `axum_extras` adds the Path-extractor glue so path
+# params document cleanly.
+utoipa = { version = "4.2", features = ["axum_extras"] }
+
+# Async trait support
+async-trait = "0.1"
+
+# CLI argument parsing
+clap = { version = "4", features = ["derive", "env"] }
+
+# Error handling
+thiserror = "2"
+anyhow    = "1"
+
+# File globbing
+glob = "0.3"
+
+# RON (Rusty Object Notation) — declarative workflow DSL front-end
+# (orchestration/workflow). Lowers to the existing `GraphConfig` IR.
+ron = "0.8"
+
+# Archive handling (T7 ArchiveTool — pure-Rust, no native libs)
+zip    = { version = "2", default-features = false, features = ["deflate"] }
+tar    = "0.4"
+flate2 = "1"
+
+# v0.9.0 W1 B8 postgres_schema_tool backend — real tokio-postgres client
+# with NoTls + chrono mapping for timestamp columns. SSRF mitigation is
+# enforced at connection-config parse time (private-range host rejection)
+# inside `crates/wcore-agent/src/tool_backends/postgres_schema.rs`.
+tokio-postgres = { version = "0.7", features = ["with-chrono-0_4"] }
+
+# LRU cache (for file state tracking)
+lru = "0.18"
+
+# Date/time
+chrono = { version = "0.4", features = ["serde"] }
+
+# TOML config parsing
+toml = "1.0"
+
+# JSON Schema generation (used by wcore-plugin-api for PluginManifest validation)
+schemars = "0.8"
+
+# Compile-time plugin discovery slot (wcore-plugin-api)
+inventory = "0.3"
+
+# Structured logging facade (wcore-plugin-api logger surface)
+tracing = "0.1"
+# Subscriber implementation for the tracing facade — installed in main()
+# with env-filter so RUST_LOG controls verbosity at runtime.
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+# Non-blocking writer for the TUI-mode log file: offloads file writes to a
+# dedicated worker thread so trace events never block the async runtime.
+tracing-appender = "0.2"
+
+# YAML frontmatter parsing (for skill files)
+serde_yaml = "0.9"
+
+# XDG/platform config directory
+dirs = "6"
+
+# Regular expressions (for argument substitution in skills)
+regex = "1"
+
+# File system change notification (for skill hot-reload)
+notify = "8"
+
+# Terminal color support
+crossterm = "0.29"
+
+# TTY detection
+is-terminal = "0.4"
+
+# TUI (wcore-cli ratatui terminal UI). ratatui re-exports crossterm; the
+# TUI uses `ratatui::crossterm` exclusively to avoid version skew with the
+# workspace's direct crossterm 0.29 dep above.
+# v0.9.1.4 H1: `unstable-rendered-line-info` exposes
+# `Paragraph::line_count(width)` — the post-wrap visual row count needed
+# to compute the bottom-scroll anchor correctly when long lines wrap.
+# Without this, wide markdown turns (URLs, tables, long descriptions)
+# render below the visible viewport and `End` cannot reach them.
+ratatui         = { version = "0.30", features = ["unstable-rendered-line-info"] }
+tui-input       = "0.15"
+nucleo          = "0.5"
+# `default-fancy` minus `yaml-load`: the TUI loads syntect's bundled binary dump
+# (`SyntaxSet::load_defaults_newlines`), never `.sublime-syntax` YAML at runtime,
+# so the `yaml-load` feature — the sole puller of the UNMAINTAINED `yaml-rust`
+# (RUSTSEC-2024-0320) — is dropped. Everything else `default-fancy` provides is kept.
+syntect         = { version = "5", default-features = false, features = ["parsing", "default-syntaxes", "default-themes", "html", "plist-load", "dump-load", "dump-create", "regex-fancy"] }
+tui-tree-widget = "0.24"
+# v0.9.0 TUI-V1 W0.1: markdown rendering + paragraph wrapping for the TUI
+# transcript pane.
+pulldown-cmark  = "0.13"
+textwrap        = "0.16"
+# Live CPU/RAM sampling for the compact TUI header. Default features pull
+# in network/disk/component probes we never read — disable them and opt
+# into only `system` (CPU + memory).
+sysinfo         = { version = "0.33", default-features = false, features = ["system"] }
+
+# AWS SigV4 signing (for Bedrock provider)
+# v0.7.0 1.D.2: exact-pinned (auth-boundary crypto).
+aws-sigv4            = "=1.4.3"
+aws-credential-types = { version = "1", features = ["hardcoded-credentials"] }
+aws-config           = { version = "1", features = ["behavior-version-latest"] }
+aws-sdk-sts          = { version = "1", default-features = false, features = ["rt-tokio", "default-https-client", "sigv4a"] }
+
+# Pin rustls-webpki to fix RUSTSEC-2026-{0098,0099,0104}
+rustls-webpki = "0.103.13"
+
+# JWT creation (for Vertex GCP service account auth)
+# v0.7.0 1.D.2: exact-pinned (auth-boundary crypto — see CONTRIBUTING.md §Security-Critical Pinning).
+jsonwebtoken = "=10.3.0"
+
+# Base64 encoding
+base64 = "0.22"
+
+# URL parsing
+url = "2"
+
+# Public Suffix List (compile-time bundled, offline) for correct registrable-
+# domain / eTLD+1 extraction in the egress policy allowlist (B2). Using the PSL
+# avoids the `evil.co.uk`-treated-as-`co.uk` class of allowlist-bypass bugs.
+psl = "2"
+
+# T15: pure-Rust PDF text extraction (no native deps). Optional —
+# wcore-tools gates it behind the default-on `pdf` cargo feature.
+pdf-extract = "0.10"
+
+# T8: read-only image metadata inspection. `image` reads only the header
+# for dimensions — the full pixel buffer is never decoded; `kamadak-exif`
+# parses EXIF. Both pure-Rust, no native build deps.
+image        = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "bmp", "webp", "tiff"] }
+kamadak-exif = "0.6"
+
+# Relaxed from "0.2.2" to "0.2" so the single resolved version can also
+# satisfy ratatui 0.29's exact `=0.2.0` pin (TUI foundation, Wave 0).
+# wcore-skills only uses unicode-width for display-width, stable across 0.2.x.
+unicode-width = "0.2"
+
+# Unix file flags (O_NOFOLLOW) for secure bundled skill file extraction
+libc = "0.2"
+
+# W5 memory v2 dependencies — SQLite (bundled to avoid system-lib drift on Windows)
+rusqlite      = { version = "0.32", features = ["bundled", "blob", "chrono"] }
+sqlite-vec    = "0.1"
+uuid          = { version = "1", features = ["v4", "v5", "v7", "serde"] }
+parking_lot   = "0.12"
+bytemuck      = "1"
+
+# W8a: cooperative cancellation primitives (CancellationToken) for ToolContext.cancel
+tokio-util    = { version = "0.7", features = ["rt"] }
+
+# Wave SD: SHA-256 for FileHistory.byte_digest (replacing 64-bit DefaultHasher)
+sha2 = "0.10"
+
+# Sec6: ed25519 plugin signature verification (opt-in, default off)
+# v0.7.0 1.D.2: exact-pinned (signature verification — trust-boundary).
+ed25519-dalek = { version = "=2.2.0", default-features = false, features = ["std", "rand_core"] }
+
+# Cryptographic RNG (used by ed25519-dalek key generation in tests)
+rand = "0.8"
+
+# v0.9.0 Wave-1 B0 — OAuth subsystem (Google Meet et al.).
+# - hyper/hyper-util: minimal callback listener for the localhost redirect leg
+# - open: cross-platform launcher for the consent URL
+# - urlencoding: percent-encode query parameters in the authorize URL
+# - subtle: constant-time `state` token comparison (closes S-H CSRF replay)
+hyper      = { version = "1.5", features = ["server", "http1"] }
+hyper-util = { version = "0.1", features = ["server", "tokio"] }
+open       = "5"
+urlencoding = "2"
+subtle      = "2.6"
+
+# Wave SD: OS keyring backend for CredentialsStore (feature-gated in wcore-config)
+# v0.7.0 1.D.2: exact-pinned (OS-keychain trust-boundary).
+keyring = { version = "=3.6.3", default-features = false, features = ["apple-native", "windows-native", "sync-secret-service"] }
+
+# T1-E1: Encrypted-file credentials backend (Argon2id KDF + XChaCha20-Poly1305 AEAD).
+# Crypto patterns adopted from Forge vault.ts (Apache-2.0); this is a Rust
+# re-implementation, not a direct port.
+# v0.7.0 1.D.2: exact-pinned (vault-at-rest crypto — trust-boundary).
+argon2            = "=0.5.3"
+chacha20poly1305  = "=0.10.1"
+zeroize           = "=1.8.2"
+
+# S11: interactive passphrase prompt for the EncryptedFile credentials backend.
+# Used when WAYLAND_VAULT_PASSPHRASE is unset and a TTY is attached.
+# v0.7.0 1.D.2: exact-pinned (TTY-secret input — trust-boundary).
+rpassword         = "=7.5.2"
+
+# M5.5 swarm: humantime-readable Duration serde for SwarmBrief/SwarmResult
+# (e.g. timeout = "30s" in TOML briefs).
+humantime-serde = "1"
+
+# M5b3 — real bge-small-en-v1.5 weight load via direct candle integration.
+# Pure-Rust dep tree (no ort-sys, no native binary downloads, cross-compile
+# clean for x86_64-darwin + aarch64-linux). Gated behind wcore-memory's
+# `bge-local` feature. Models are fetched from HuggingFace on first use
+# (~133MB cached under ~/.cache/huggingface).
+candle-core         = { version = "0.9", default-features = false }
+candle-nn           = { version = "0.9", default-features = false }
+candle-transformers = { version = "0.9", default-features = false }
+tokenizers          = { version = "0.21", default-features = false, features = ["onig"] }
+hf-hub              = { version = "0.4", default-features = false, features = ["tokio", "rustls-tls"] }
+safetensors         = "0.5"
+
+# workspace-hack (managed by cargo-hakari for build speed)
+workspace-hack = { path = "workspace-hack" }
+
+# Test utilities
+wiremock    = "0.6"
+tokio-test  = "0.4"
+tempfile    = "3"
+mockall     = "0.14"
+rstest      = "0.26"
+serial_test = "3"
+criterion   = { version = "0.5", features = ["html_reports"] }
+
+# v0.9.0 W1 B10 voice_mode — cpal wraps CoreAudio/WASAPI/ALSA (pure-Rust,
+# no PortAudio system dep); hound writes captured PCM samples to a WAV file
+# the transcription backend can upload.
+cpal  = "0.15"
+hound = "3"
+
+# ── Release profile (Z0 STABILITY MINOR #8) ──────────────────────────────────
+# Smaller, more optimized release binaries for distribution. Measured delta
+# tracked in engine/docs/decisions/0001-binary-size-v0.2.0-vs-v0.2.1.md.
+#
+# - lto = "thin": cross-crate inlining without the build-time cost of fat LTO
+# - codegen-units = 1: maximize optimization at the cost of slower release builds
+# - strip = "debuginfo": drop debug symbols from the shipped binary
+#
+# NOTE: `panic = "abort"` deliberately NOT set. Wave RB adds
+# `std::panic::catch_unwind` boundaries around tool dispatch so a single
+# tool panic degrades that tool call rather than crashing the session.
+# `panic = "abort"` would make catch_unwind a no-op and tool panics fatal,
+# losing the fault-isolation invariant. The unwind-tables binary-size cost
+# is acceptable in exchange.
+[profile.release]
+lto           = "thin"
+codegen-units = 1
+strip         = "debuginfo"
+# Defense-in-depth (security audit H-8 / rel-panic-66): trap integer overflow in
+# release so an attacker-influenced length (e.g. a malformed provider event-stream
+# frame) panics deterministically instead of wrapping into an out-of-bounds slice.
+overflow-checks = true

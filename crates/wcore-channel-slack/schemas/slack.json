@@ -1,0 +1,39 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "SlackChannelConfig",
+  "description": "TOML config for one wcore-channel-slack instance. Secrets are keychain-handles only.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["workspace_name", "credential_handle_bot_token", "credential_handle_signing_secret"],
+  "properties": {
+    "workspace_name": {
+      "type": "string",
+      "description": "Human-readable workspace label (e.g. \"acme\"). Used for logging only."
+    },
+    "default_channel_id": {
+      "type": "string",
+      "description": "Optional Slack channel/conversation ID used when OutgoingMessage.conversation_id is empty.",
+      "default": ""
+    },
+    "credential_handle_bot_token": {
+      "type": "string",
+      "description": "Key used to look up the Bot User OAuth Token (xoxb-...) in the CredentialsStore."
+    },
+    "credential_handle_signing_secret": {
+      "type": "string",
+      "description": "Key used to look up the Slack app signing secret in the CredentialsStore."
+    },
+    "api_base_url": {
+      "type": "string",
+      "description": "Override for the Slack Web API base URL. Defaults to https://slack.com — tests inject a mockito URL here.",
+      "default": "https://slack.com"
+    },
+    "max_retry_attempts": {
+      "type": "integer",
+      "description": "Number of attempts (including the first) before giving up on transient failures.",
+      "default": 5,
+      "minimum": 1,
+      "maximum": 10
+    }
+  }
+}

@@ -1,0 +1,30 @@
+[package]
+name = "wayland-cua"
+description = "Computer-use tool plugin shell — registers a CuaToolSpec via the wcore-plugin-api mirror (NOT a direct wcore-cua dep, per audit F2)"
+version.workspace    = true
+edition.workspace    = true
+license.workspace    = true
+repository.workspace = true
+rust-version.workspace = true
+
+# REV-2 audit F2 invariant: deps MUST be ONLY wcore-plugin-api,
+# wcore-types, wcore-protocol, plus external. NO wcore-cua dep.
+# Verified manually + by the workspace-wide `rg "wcore-cua|wcore_cua"
+# crates/wayland-cua/` grep contract.
+[dependencies]
+wcore-plugin-api.workspace = true
+wcore-types.workspace      = true
+wcore-protocol.workspace   = true
+
+async-trait.workspace = true
+serde.workspace       = true
+serde_json.workspace  = true
+inventory.workspace   = true
+tokio.workspace       = true
+tracing.workspace     = true
+thiserror.workspace   = true
+
+workspace-hack.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

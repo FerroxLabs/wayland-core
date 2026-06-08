@@ -1,0 +1,43 @@
+name: OSV Scanner
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - '**/Cargo.lock'
+      - '**/Cargo.toml'
+      - '.github/workflows/osv-scan.yml'
+      - '.github/osv-scanner.toml'
+  schedule:
+    # Nightly at 06:23 UTC — offset to avoid the top-of-hour rush.
+    - cron: '23 6 * * *'
+  workflow_dispatch:
+
+# Read-only. The previous reusable-workflow form required `security-events:
+# write` to upload SARIF to GitHub Code Scanning — which this repo does not
+# have enabled, so every run failed with JOB_STATUS_CONFIGURATION_ERROR. The
+# direct-binary form below needs no code-scanning, no SARIF, no extra perms.
+permissions:
+  contents: read
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Pin the exact osv-scanner release we verified locally (v2.3.8). Direct
+      # binary — no Docker action, no reusable workflow, no code-scanning dep.
+      - name: Install osv-scanner
+        run: |
+          curl -sSfL \
+            https://github.com/google/osv-scanner/releases/download/v2.3.8/osv-scanner_linux_amd64 \
+            -o /usr/local/bin/osv-scanner
+          chmod +x /usr/local/bin/osv-scanner
+          osv-scanner --version
+
+      # `scan source` walks every Cargo.lock in the tree. Exits non-zero on any
+      # finding not dispositioned in .github/osv-scanner.toml, so this gates the
+      # PR directly. Dispositions are public, dated, and reasoned in that file.
+      - name: Scan dependencies
+        run: osv-scanner scan source --recursive --config=.github/osv-scanner.toml ./

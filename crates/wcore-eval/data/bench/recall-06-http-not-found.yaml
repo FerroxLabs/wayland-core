@@ -1,0 +1,14 @@
+id: recall-06-http-not-found
+category: recall
+prompt: |
+  What is the standard HTTP status code that indicates the requested
+  resource was not found? Reply with the three-digit code only.
+match_strategy:
+  kind: exact
+  expected: "404"
+rationale: |
+  Stable HTTP/1.1 spec value (RFC 9110). The case uses `exact` rather
+  than `numeric_equal` to ensure the code is reported as a string
+  (no trailing decimals).
+allowed_tools: []
+timeout_secs: 15

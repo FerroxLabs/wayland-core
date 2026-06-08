@@ -1,0 +1,26 @@
+# SANITIZED FIXTURE — generated 2026-05-24 from corrupt-recovery — secrets redacted per .blackboard/E2E-FIXTURE-SANITIZATION-2026-05-24.md
+# This config is valid — the corruption is in cron/jobs.json and sessions/.
+# Tests: engine's recover-and-continue posture (B-7), plugin config bad reference (B-9).
+
+[default]
+provider = "anthropic"
+model = "anthropic/claude-opus-4.6"
+max_tokens = 8192
+
+[providers.anthropic]
+base_url = "https://openrouter.ai/api/v1"
+
+[tools]
+auto_approve = false
+
+[session]
+enabled = true
+
+# Plugin that references a non-existent MCP server — tests graceful degradation (B-9).
+[mcp.servers.nonexistent-server]
+transport = "stdio"
+command = "node"
+args = ["/nonexistent/path/server.js"]
+
+[storage.credentials]
+backend = "plaintext"

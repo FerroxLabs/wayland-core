@@ -1,0 +1,6 @@
+id: bad-stalemodel-2
+category: stale-model-pin
+skill_body: hello-stalemodel-2
+expected_outcome: bad
+rationale: |
+  Stale/non-Claude model, no $ARGUMENTS, off-topic, name mismatch, empty when_to_use. 5 fails.

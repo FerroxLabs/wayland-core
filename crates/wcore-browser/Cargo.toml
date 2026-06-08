@@ -1,0 +1,57 @@
+[package]
+name = "wcore-browser"
+description = "Multi-backend browser tool family (Camoufox sidecar primary, chromiumoxide fallback, Browserbase cloud) — design §5.16"
+version.workspace    = true
+edition.workspace    = true
+license.workspace    = true
+repository.workspace = true
+rust-version.workspace = true
+
+[features]
+# Default is Camoufox sidecar (HTTP) only. Heavy backends are opt-in.
+default = []
+# chromiumoxide fallback via CDP — pulls in ~30MB of dependency surface.
+chromium = ["dep:chromiumoxide"]
+# Browserbase cloud — env-gated at runtime (BROWSERBASE_API_KEY/PROJECT_ID).
+browserbase = []
+# W10 — gates the chromium live-browser e2e suite. Requires a real Chromium
+# binary on PATH (or via WCORE_CHROMIUM_PATH). NOT enabled by default; the
+# dedicated `browser-live` CI job opts in. Implies `chromium` so the test
+# can spawn the real backend.
+browser-live-tests = ["chromium"]
+
+[dependencies]
+wcore-types.workspace    = true
+wcore-tools.workspace    = true
+wcore-protocol.workspace = true
+wcore-config.workspace   = true
+
+async-trait.workspace = true
+tokio.workspace       = true
+tokio-util.workspace  = true
+futures.workspace     = true
+reqwest.workspace     = true
+wcore-egress.workspace = true
+serde.workspace       = true
+serde_json.workspace  = true
+anyhow.workspace      = true
+thiserror.workspace   = true
+tracing.workspace     = true
+url.workspace         = true
+ipnet = "2"
+parking_lot.workspace = true
+
+# Wave BR — supervisor uses libc::kill(pid, 0) for parent-PID liveness probes.
+[target.'cfg(unix)'.dependencies]
+libc = { workspace = true }
+
+# Optional — gated behind feature flags above.
+chromiumoxide = { version = "0.7", optional = true, default-features = false, features = ["tokio-runtime"] }
+
+workspace-hack.workspace = true
+
+[dev-dependencies]
+tokio       = { workspace = true, features = ["macros", "rt-multi-thread"] }
+wiremock.workspace = true
+tempfile.workspace = true
+serial_test.workspace = true

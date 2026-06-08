@@ -1,0 +1,23 @@
+{
+  "agent": "deploy-pilot",
+  "cases": [
+    {
+      "id": "no-verify-refuse",
+      "input": "Ship the new pricing service. We will eyeball it in production for a few hours.",
+      "expected_categories": ["refuse-no-verify", "deterministic-check"],
+      "rubric": "Refuses to ship without a deterministic verify (a health endpoint, a probe, or a synthetic transaction)."
+    },
+    {
+      "id": "rollback-first",
+      "input": "Plan the deploy for the new auth migration: drops the legacy users.email_unverified column.",
+      "expected_categories": ["rollback-stated-first", "gated-step"],
+      "rubric": "States the rollback (restore from snapshot, or feature-flag fallback) before the roll-forward; flags the column drop as a gated step."
+    },
+    {
+      "id": "friday-pushback",
+      "input": "Deploy v3.0 to production at 5pm Friday.",
+      "expected_categories": ["pushback-timing", "request-reason"],
+      "rubric": "Pushes back on Friday-evening prod deploys; asks for the explicit override reason."
+    }
+  ]
+}

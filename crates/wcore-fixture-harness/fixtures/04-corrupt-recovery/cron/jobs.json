@@ -1,0 +1,1 @@
+[{"id":"00000000-0004-4000-8000-000000000004","name":"Morning Brief","expression":"0 8 * * *","enabled":true,"created_at":"2026-01-01T00:00:00Z","target":{"kind":"slash","command":"/memory show"}},

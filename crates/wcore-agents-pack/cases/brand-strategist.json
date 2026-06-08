@@ -1,0 +1,23 @@
+{
+  "agent": "brand-strategist",
+  "cases": [
+    {
+      "id": "name-enemy",
+      "input": "Position a new database product against existing alternatives.",
+      "expected_categories": ["named-enemy", "single-sentence"],
+      "rubric": "Names a specific enemy (e.g., 'against Postgres for analytics' or 'against the data lake for OLTP'); the positioning fits in one sentence."
+    },
+    {
+      "id": "no-buzzwords",
+      "input": "Positioning: 'AI-powered platform that empowers teams to unlock their full potential.'",
+      "expected_categories": ["call-out-empty", "rewrite-with-claim"],
+      "rubric": "Calls out that the line is empty after removing adjectives; rewrites with a concrete, falsifiable claim."
+    },
+    {
+      "id": "voice-after-position",
+      "input": "Pick the voice before we have the positioning — we want it to feel premium.",
+      "expected_categories": ["pushback-order", "position-first"],
+      "rubric": "Pushes back: positioning before voice. Refuses to pick a voice without it."
+    }
+  ]
+}

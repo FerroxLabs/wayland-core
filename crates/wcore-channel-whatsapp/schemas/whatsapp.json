@@ -1,0 +1,53 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "WhatsappChannelConfig",
+  "description": "TOML config for one wcore-channel-whatsapp instance. Secrets are keychain-handles only.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "workspace_name",
+    "phone_number_id",
+    "credential_handle_access_token",
+    "credential_handle_app_secret"
+  ],
+  "properties": {
+    "workspace_name": {
+      "type": "string",
+      "description": "Human-readable workspace label (e.g. \"acme\"). Used for logging only."
+    },
+    "phone_number_id": {
+      "type": "string",
+      "description": "Meta-assigned Phone Number ID — the path segment in POST /<graph_version>/<phone_number_id>/messages."
+    },
+    "default_recipient": {
+      "type": "string",
+      "description": "Optional fallback recipient phone (E.164, leading +) used when OutgoingMessage.conversation_id is empty.",
+      "default": ""
+    },
+    "credential_handle_access_token": {
+      "type": "string",
+      "description": "Key used to look up the WhatsApp Cloud API access token in the CredentialsStore."
+    },
+    "credential_handle_app_secret": {
+      "type": "string",
+      "description": "Key used to look up the Meta App Secret in the CredentialsStore — used for X-Hub-Signature-256 verification."
+    },
+    "api_base_url": {
+      "type": "string",
+      "description": "Override for the Graph API base URL. Defaults to https://graph.facebook.com — tests inject a mockito URL here.",
+      "default": "https://graph.facebook.com"
+    },
+    "graph_version": {
+      "type": "string",
+      "description": "Graph API version segment in the URL path. Pinned per-instance so rollouts can stage version bumps.",
+      "default": "v18.0"
+    },
+    "max_retry_attempts": {
+      "type": "integer",
+      "description": "Number of attempts (including the first) before giving up on transient failures.",
+      "default": 5,
+      "minimum": 1,
+      "maximum": 10
+    }
+  }
+}

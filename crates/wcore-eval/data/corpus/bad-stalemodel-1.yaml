@@ -1,0 +1,6 @@
+id: bad-stalemodel-1
+category: stale-model-pin
+skill_body: hello-stalemodel-1
+expected_outcome: bad
+rationale: |
+  Stale model (haiku-3-20240306), no $ARGUMENTS, off-topic description, name mismatch, empty when_to_use. 5 fails.

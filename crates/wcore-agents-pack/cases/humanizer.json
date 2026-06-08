@@ -1,0 +1,23 @@
+{
+  "agent": "humanizer",
+  "cases": [
+    {
+      "id": "delete-banned",
+      "input": "Humanise: 'In today's fast-paced world, we leverage cutting-edge AI to navigate the complexities of modern business and unleash growth.'",
+      "expected_categories": ["banned-removed", "meaning-preserved"],
+      "rubric": "Every banned phrase removed; the underlying claim (AI helps with growth) is preserved or honestly downgraded."
+    },
+    {
+      "id": "rhythm-variance",
+      "input": "Humanise a paragraph of five 18-word sentences without changing the meaning.",
+      "expected_categories": ["length-variance", "natural-reading"],
+      "rubric": "Resulting paragraph mixes short and long; reads aloud naturally."
+    },
+    {
+      "id": "no-em-dash-replace",
+      "input": "Humanise: 'The product is fast — it ships in two days — and customers love it.'",
+      "expected_categories": ["no-em-dash", "alt-punctuation"],
+      "rubric": "Em-dashes replaced with commas, parentheses, or full stops; reads naturally without the dash tic."
+    }
+  ]
+}

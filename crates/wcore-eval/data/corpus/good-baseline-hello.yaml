@@ -1,0 +1,6 @@
+id: good-baseline-hello
+category: healthy
+skill_body: hello-baseline
+expected_outcome: good
+rationale: |
+  Unmodified bundled hello skill. Must pass all 9 structural checks.

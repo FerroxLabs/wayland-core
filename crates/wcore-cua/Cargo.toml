@@ -1,0 +1,138 @@
+[package]
+name = "wcore-cua"
+description = "Multi-platform computer-use (CUA) tool family — background-mode invariant across macOS / Linux (X11+Wayland) / Windows — design §5.18"
+version.workspace    = true
+edition.workspace    = true
+license.workspace    = true
+repository.workspace = true
+rust-version.workspace = true
+
+[features]
+# Default ships the OS-native backend(s) for the build target. The
+# per-platform native crates are enabled by default for their target via
+# the `[target.'cfg(...)'.dependencies]` blocks below.
+#
+# `x11` is included in `default` so Linux users get the real XTest
+# backend out-of-the-box. On non-Linux targets, the `dep:x11rb`
+# reference is inert because `x11rb` is only declared under
+# `[target.'cfg(target_os = "linux")'.dependencies]` — Cargo silently
+# skips target-mismatched optional deps. Opt out with
+# `--no-default-features` for the structural-only fallback.
+default = ["x11"]
+# Wayland positive-invariance test gate. Off by default — opt-in for CI
+# fixtures that exercise compositor probes.
+wayland-test = []
+# X11 positive-invariance test gate. Off by default.
+x11-test = []
+# Optional OCR-backed sensitive-content redaction on **Linux**. Off by
+# default; pulls in `leptess` (libtesseract bindings) when enabled.
+# macOS uses Apple Vision and Windows uses `Windows.Media.Ocr` — both
+# ship with the OS, so neither needs a feature flag. The heuristic
+# password-band detector stays as the always-on baseline.
+# `tempfile` is unconditional on Linux (the Wayland `wlr_screenshot`
+# path needs it for the `grim` round-trip), so it does NOT belong here.
+redact-ocr = ["dep:leptess"]
+# Linux X11 real XTest backend. ON by default on Linux (via the
+# `default` set); inert on non-Linux because `x11rb` is target-gated.
+# Pass `--no-default-features` to fall back to the structural backend.
+x11 = ["dep:x11rb"]
+# Linux Wayland real input + screenshot. Off by default; uses `wlrctl`
+# (input) + `grim` (screenshot) subprocesses through
+# `wcore_config::shell::shell_command_argv` — no extra Rust deps.
+wayland = []
+# Real CUA e2e test (loads the wayland-cua plugin spec through the host
+# adapter, exercises a SAFE op). Off by default; opt-in for runners that
+# allow plugin discovery.
+cua-e2e = []
+
+[dependencies]
+wcore-types.workspace      = true
+wcore-tools.workspace      = true
+wcore-protocol.workspace   = true
+wcore-config.workspace     = true
+wcore-plugin-api.workspace = true
+
+async-trait.workspace = true
+tokio.workspace       = true
+tokio-util.workspace  = true
+futures.workspace     = true
+serde.workspace       = true
+serde_json.workspace  = true
+anyhow.workspace      = true
+thiserror.workspace   = true
+tracing.workspace     = true
+parking_lot.workspace = true
+dirs.workspace        = true
+
+# Image crate for screenshot decode/blur + sensitive-content redaction.
+# `jpeg` enabled for the macOS CGImage round-trip (CGImageDestinationRef
+# emits PNG natively, so this is defensive). `bmp` for the Windows GDI
+# `BITMAPINFOHEADER` round-trip helper.
+image = { version = "0.25", default-features = false, features = ["png", "bmp"] }
+base64.workspace = true
+
+# `leptess` (the Linux-only OCR backend) is declared under the
+# `[target.'cfg(target_os = "linux")'.dependencies]` block below so the
+# native Tesseract libs are NEVER linked into macOS / Windows builds.
+# macOS uses Apple Vision (via `objc2-vision`, also target-gated), and
+# Windows uses `Windows.Media.Ocr` (via the existing `windows` crate).
+
+workspace-hack.workspace = true
+
+# ── macOS native input + screenshot ──────────────────────────────────
+# Default-enabled on the macOS target so the `MacOsBackend` ships REAL
+# CGEvent + CGDisplay implementations.
+[target.'cfg(target_os = "macos")'.dependencies]
+# `highsierra` feature unlocks `CGEvent::new_scroll_event`
+# (safe wrapper around `CGEventCreateScrollWheelEvent2`), required
+# by the macOS `Scroll` op. Safe to enable: the API has been stable
+# since macOS 10.13 (2017); our minimum target is well past that.
+core-graphics    = { version = "0.23", features = ["highsierra"] }
+core-foundation  = "0.10"
+# Apple Vision OCR (W9): default OCR backend on macOS — no feature
+# flag, ships with the OS. `objc2-vision` provides safe bindings to
+# `VNRecognizeTextRequest`; `objc2-foundation` gives us `NSData` /
+# `NSArray` / `NSString` for the request setup.
+objc2                 = "0.6"
+objc2-vision          = "0.3"
+objc2-foundation      = "0.3"
+objc2-core-foundation = "0.3"
+
+# ── Linux X11 + optional Tesseract OCR (feature-gated) ───────────────
+# `leptess` is the Linux OCR backend (opt-in via `redact-ocr`); macOS
+# and Windows have first-class OS-provided OCR (Apple Vision /
+# Windows.Media.Ocr), so the Tesseract native libs are Linux-only.
+# `tempfile` is unconditional on Linux — the Wayland screenshot path
+# (`wlr_screenshot` → `grim` round-trip in `backends/linux_wayland.rs`)
+# uses it on the always-on dispatch path, and the optional `leptess`
+# OCR backend also needs it to feed `LepTess::set_image` from disk.
+[target.'cfg(target_os = "linux")'.dependencies]
+x11rb    = { version = "0.13", optional = true, features = ["xtest"] }
+leptess  = { version = "0.14", optional = true }
+tempfile = { workspace = true }
+
+# ── Windows native input + screenshot ────────────────────────────────
+# Default-enabled on the Windows target so the `WindowsBackend` ships
+# REAL SendInput + GDI implementations.
+[target.'cfg(target_os = "windows")'.dependencies]
+# WinRT OCR (W9) lives behind the `Media_Ocr` feature; bitmap decode
+# behind `Graphics_Imaging`; the byte-buffer→stream wrapping behind
+# `Storage_Streams`. All three are part of the OS — no extra runtime
+# dependency, just enabling the right module set in the `windows` crate.
+windows = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_UI_WindowsAndMessaging",
+    "Win32_Graphics_Gdi",
+    "Win32_System_DataExchange",
+    "Win32_System_Memory",
+    "Media_Ocr",
+    "Graphics_Imaging",
+    "Storage_Streams",
+    "Foundation",
+] }
+
+[dev-dependencies]
+tokio       = { workspace = true, features = ["macros", "rt-multi-thread"] }
+serial_test.workspace = true
+tempfile.workspace = true

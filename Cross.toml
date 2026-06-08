@@ -1,0 +1,27 @@
+# Cross-compile configuration for `cross` (https://github.com/cross-rs/cross).
+# Only consulted when CI's build job sets `use_cross: true` (currently
+# aarch64-unknown-linux-gnu).
+
+[target.aarch64-unknown-linux-gnu]
+# Install arm64 system deps inside the cross docker image. The transitive
+# deps each need their dev headers at compile time, otherwise build fails:
+#   · libdbus-sys (keyring)         -> libdbus-1-dev (CI run 25950354044)
+#   · openssl-sys (reqwest)         -> libssl-dev
+#   · libseccomp-sys (wcore-sandbox) -> libseccomp-dev (mold link step)
+#   · alsa-sys (cpal/voice_mode)    -> libasound2-dev (release run 26638881659)
+# Same lesson banked in ci.yml + bench-regression.yml + the DO real-workload
+# apt list — the cross image is intentionally minimal so every host-side dep
+# must be installed here too. arm64 variants only — host x86_64 toolchain
+# is in the image already.
+pre-build = [
+    "dpkg --add-architecture arm64",
+    "apt-get update",
+    "apt-get install --assume-yes --no-install-recommends libdbus-1-dev:arm64 libssl-dev:arm64 libseccomp-dev:arm64 libasound2-dev:arm64 pkg-config",
+]
+
+[target.aarch64-unknown-linux-gnu.env]
+# pkg-config refuses cross-arch queries by default; opt in so it'll
+# return the arm64 dbus-1.pc found above.
+passthrough = [
+    "PKG_CONFIG_ALLOW_CROSS=1",
+]

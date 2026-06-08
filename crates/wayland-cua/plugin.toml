@@ -1,0 +1,17 @@
+[plugin]
+name        = "wayland-cua"
+version     = "0.1.0"
+description = "Computer-use tool family — synthesized mouse/keyboard/screenshot via wcore-cua"
+entry       = "builtin:wayland_cua"
+authors     = ["Wayland-Core"]
+license     = "MIT"
+
+[permissions]
+register_tools      = true
+tool_namespace      = "Cua"
+register_hooks      = false
+register_providers  = false
+register_agents     = false
+register_skills     = false
+register_rules      = false
+register_mcp_server = false

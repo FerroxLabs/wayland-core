@@ -1,0 +1,13 @@
+id: recall-07-water-formula
+category: recall
+prompt: |
+  Write the chemical formula for water using the standard ASCII
+  representation (no subscripts). Reply with the formula only.
+match_strategy:
+  kind: exact
+  expected: "H2O"
+rationale: |
+  Universally taught primary-school chemistry. ASCII form is
+  unambiguous (no Unicode subscript shenanigans).
+allowed_tools: []
+timeout_secs: 15

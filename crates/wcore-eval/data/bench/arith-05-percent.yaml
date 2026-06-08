@@ -1,0 +1,13 @@
+id: arith-05-percent
+category: arithmetic
+prompt: |
+  What is 25 percent of 200? Reply with the integer answer only.
+match_strategy:
+  kind: numeric_equal
+  expected: 50.0
+  tolerance: 0.0
+rationale: |
+  Percent-of phrasing rather than raw `0.25 * 200`. Exercises the
+  model's ability to translate natural language into arithmetic.
+allowed_tools: []
+timeout_secs: 15

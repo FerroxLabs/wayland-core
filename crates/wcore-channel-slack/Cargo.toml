@@ -1,0 +1,29 @@
+[package]
+name = "wcore-channel-slack"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Production Slack adapter for wcore-channels — Web API outbound + Events API webhook inbound"
+
+[dependencies]
+async-trait = { workspace = true }
+chrono = { workspace = true, features = ["serde"] }
+hmac = "0.12"
+sha2 = { workspace = true }
+hex = "0.4"
+reqwest = { workspace = true }
+wcore-egress = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true, features = ["macros", "rt", "sync", "time"] }
+tracing = { workspace = true }
+rand = { workspace = true }
+
+wcore-channels = { workspace = true }
+wcore-config = { workspace = true }
+
+[dev-dependencies]
+mockito = "1"
+toml = { workspace = true }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time", "sync"] }

@@ -1,0 +1,20 @@
+{
+  "_sanitized": "2026-05-24",
+  "_archetype": "mcp-multi-server",
+  "_rules": ".blackboard/E2E-FIXTURE-SANITIZATION-2026-05-24.md",
+  "jobs": [
+    {
+      "id": "00000000-0005-4000-8000-000000000005",
+      "name": "Tool Health Check",
+      "expression": "0 */6 * * *",
+      "enabled": true,
+      "created_at": "2026-01-01T00:00:00Z",
+      "last_fired": "2026-01-01T06:00:00Z",
+      "target": {
+        "kind": "skill",
+        "name": "health-check",
+        "args": {}
+      }
+    }
+  ]
+}

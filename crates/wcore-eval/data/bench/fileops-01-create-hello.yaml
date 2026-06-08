@@ -1,0 +1,19 @@
+id: fileops-01-create-hello
+category: file_ops
+prompt: |
+  In the provided sandbox directory, create a single file named
+  `hello.txt` whose contents are exactly the seven bytes "hello\n"
+  (six ASCII letters followed by one newline). Make no other
+  filesystem changes.
+match_strategy:
+  kind: file_tree_matches
+  expected_sha256: "a1d6d4f3a2e75b8b6d2b3f8c11a0d7e8a9b3c8d4e1f2a3b4c5d6e7f8a9b0c1d2"
+  description: |
+    Post-state: one regular file hello.txt at the sandbox root, six
+    letters + LF, no other entries.
+rationale: |
+  Minimal file-create exercise. SHA-256 will be re-pinned in M4.3
+  when a real sandbox runner replaces the canned-output runner.
+allowed_tools:
+  - Write
+timeout_secs: 60

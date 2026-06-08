@@ -1,0 +1,13 @@
+id: recall-03-largest-planet
+category: recall
+prompt: |
+  Name the largest planet in the solar system by mass. Reply with
+  the planet's English name only.
+match_strategy:
+  kind: exact
+  expected: "Jupiter"
+rationale: |
+  Astronomical fact stable since the term was coined. No ambiguity
+  even if other Jovian definitions were adopted.
+allowed_tools: []
+timeout_secs: 15

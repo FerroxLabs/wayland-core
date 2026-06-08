@@ -1,0 +1,22 @@
+# B1 (injection/exfil-defense SPEC, Layer 1) — the egress chokepoint lint.
+#
+# Every outbound HTTP request in the workspace must flow through
+# `wcore_egress::EgressClient` so the egress policy is enforced in exactly one
+# place. Constructing a raw `reqwest::Client` anywhere else is a hole the policy
+# can never see, so it is banned here. `disallowed-methods` matches by RESOLVED
+# path, so it also catches aliased imports (`use reqwest::Client as Foo;` then
+# `Foo::builder()`) that a text grep would miss.
+#
+# The ONLY sanctioned exceptions carry a local `#[allow(clippy::disallowed_methods)]`
+# with a comment:
+#   - crates/wcore-egress/src/client.rs — EgressClient itself wraps reqwest.
+#   - crates/wcore-providers/src/retry.rs — one self-test needs a genuine
+#     reqwest::Error to exercise the reqwest-error mapper directly.
+#
+# A new off-gate network call now fails `cargo clippy -D warnings` (CI gate).
+disallowed-methods = [
+    { path = "reqwest::Client::new", reason = "construct via wcore_egress::EgressClient (B1 egress chokepoint)" },
+    { path = "reqwest::Client::builder", reason = "construct via wcore_egress::EgressClient::builder (B1 egress chokepoint)" },
+    { path = "reqwest::ClientBuilder::new", reason = "construct via wcore_egress::EgressClient::builder (B1 egress chokepoint)" },
+    { path = "reqwest::get", reason = "construct via wcore_egress::EgressClient (B1 egress chokepoint)" },
+]

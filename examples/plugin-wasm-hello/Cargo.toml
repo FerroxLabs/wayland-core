@@ -1,0 +1,37 @@
+# v0.6.5 Task 4.4 — canonical Wayland WASM Tool plugin example.
+#
+# This crate is intentionally OUTSIDE the workspace (see top-level
+# `Cargo.toml`'s `[workspace] exclude` list) because the `wasm32-wasip1`
+# target it builds for cannot link against workspace-hack and friends.
+# Build it with:
+#
+#     cargo install cargo-component   # one-time
+#     cd examples/plugin-wasm-hello
+#     cargo component build --release
+#
+# The produced `target/wasm32-wasip1/release/plugin_wasm_hello.wasm`
+# is the artifact you copy to
+# `crates/wcore-plugin-wasm/tests/fixtures/hello.wasm` to refresh the
+# checked-in fixture. See `crates/wcore-plugin-wasm/tests/fixtures/README.md`
+# for the regeneration recipe.
+
+[package]
+name = "plugin-wasm-hello"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+description = "Canonical Wayland WASM Tool plugin — returns 'Hello, {input}!'."
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+wit-bindgen-rt = { version = "0.32", features = ["bitflags"] }
+
+[package.metadata.component]
+package = "wayland:hello"
+
+[package.metadata.component.target]
+path = "wit"
+world = "wayland-tool"

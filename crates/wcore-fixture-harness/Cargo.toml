@@ -1,0 +1,28 @@
+[package]
+name = "wcore-fixture-harness"
+version = "0.1.0"
+edition = "2021"
+description = "Customer-fixture catalog and replay harness for T6 app-integration tests."
+
+# See .blackboard/E2E-TESTING-STRATEGY-2026-05-24.md §3.5 T6 for the full design.
+# This crate owns:
+#   - fixtures/<archetype>/  — sanitized real-user-shaped $WAYLAND_HOME snapshots
+#   - src/lib.rs             — FixtureCatalog, FixturePlayback, replay() (Wave 2+)
+#   - src/sanitizer.rs       — PII/secret redaction (Wave 2+)
+#
+# Wave 1 (this commit): skeleton only — fixtures seeded, harness stubs present.
+# Wave 2: FixturePlayback::with_sealed_home() + json-stream replay runner.
+# Wave 3: wcore fixture verify CLI sub-command (anti-leak gate tool).
+
+[dependencies]
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+tempfile = { workspace = true }
+
+[dev-dependencies]
+# No additional dev deps yet — harness runner added in Wave 2.
+
+[features]
+# Feature-gate the replay runner so CI can build this crate without the
+# release binary being present.  Wave 2 adds: harness-replay.
+# Wave 3 adds: harness-verify (the anti-leak CLI tool).

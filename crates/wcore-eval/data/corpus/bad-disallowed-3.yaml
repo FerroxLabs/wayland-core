@@ -1,0 +1,6 @@
+id: bad-disallowed-3
+category: disallowed-tool
+skill_body: hello-disallowed-3
+expected_outcome: bad
+rationale: |
+  Body mentions Write but allowed_tools=[]; name mismatch; off-topic (AWS); empty when_to_use; stale model. >=4 fails.

@@ -1,0 +1,12 @@
+id: recall-04-author-1984
+category: recall
+prompt: |
+  Who wrote the dystopian novel "Nineteen Eighty-Four"? Reply with
+  the author's full name only.
+match_strategy:
+  kind: exact
+  expected: "George Orwell"
+rationale: |
+  Single canonical author attribution; no co-authors or revisions.
+allowed_tools: []
+timeout_secs: 15

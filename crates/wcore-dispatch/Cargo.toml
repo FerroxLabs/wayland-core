@@ -1,0 +1,23 @@
+[package]
+name = "wcore-dispatch"
+description = "Internal decision router for Wayland-Core: pick a template, agent, or skill given task context. Thompson-sampling-backed scorer with observation feedback. Not a model router (that's Flux)."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+serde       = { workspace = true, features = ["derive"] }
+serde_json  = { workspace = true }
+thiserror   = { workspace = true }
+tracing     = { workspace = true }
+wcore-agents-pack = { workspace = true }
+
+# rand 0.9 / rand_distr 0.5 mirrors wcore-memory::partition::thompson; both
+# stay crate-local (workspace `rand = "0.8"` is pinned for ed25519-dalek).
+rand        = "0.9"
+rand_distr  = "0.5"
+
+[dev-dependencies]
+# Tests use the same crate-local rand. No additional dev-deps.

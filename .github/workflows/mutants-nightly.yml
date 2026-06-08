@@ -1,0 +1,251 @@
+name: Nightly Mutation Tests
+
+# Schedule: 06:00 UTC = 13:00 ICT (Sean's GMT+7)
+# Full nightly per no-rotation policy (AGENTS.md §8).
+# Each crate is an independent matrix job; GHA concurrency throttles naturally.
+on:
+  schedule:
+    - cron: "0 6 * * *"
+  workflow_dispatch:
+    inputs:
+      shard:
+        description: "Optional shard override (e.g. 1/4). Leave empty for full run."
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+  issues: write
+
+concurrency:
+  group: mutants-nightly
+  cancel-in-progress: false   # Never cancel an in-flight nightly
+
+jobs:
+  mutants:
+    name: "mutants / ${{ matrix.crate }}"
+    runs-on: macos-latest
+    strategy:
+      fail-fast: false          # Every crate gets its own result
+      matrix:
+        include:
+          # ─────────────────────────────────────────────────────────────────
+          # Crate             | Baseline mutants | Estimated wall-time (full)
+          # ─────────────────────────────────────────────────────────────────
+          # wcore-cron        | 54               | ~10 min   (deterministic)
+          # wcore-config      | 494              | ~90 min   (slow test suite)
+          # wcore-providers   | 834              | ~160 min  (mostly unnetworked)
+          # wcore-agent       | 2012             | ~6 hr     (large; has flaky bootstrap test)
+          # wcore-cli         | 2007             | ~6 hr     (large)
+          # ─────────────────────────────────────────────────────────────────
+          # NOTE: wcore-agent and wcore-cli have pre-existing test failures
+          # that block cargo-mutants in copy-workspace mode. Run with
+          # --in-place to avoid workspace copy issues. See strategy doc
+          # .blackboard/E2E-MUTATION-BASELINE-2026-05-24.md §5.
+          # ─────────────────────────────────────────────────────────────────
+          - crate: wcore-cron
+            test_timeout: 90
+            in_place: "false"
+            estimated_minutes: 10
+
+          - crate: wcore-config
+            test_timeout: 180
+            in_place: "true"
+            estimated_minutes: 90
+
+          - crate: wcore-providers
+            test_timeout: 60
+            in_place: "false"
+            estimated_minutes: 160
+
+          - crate: wcore-agent
+            test_timeout: 120
+            in_place: "true"
+            estimated_minutes: 360
+
+          - crate: wcore-cli
+            test_timeout: 120
+            in_place: "true"
+            estimated_minutes: 360
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup vx (installs Rust + just from vx.toml)
+        uses: loonghao/vx@v0.9.17
+        with:
+          setup: 'true'
+          cache: 'true'
+
+      # Restore Cargo registry + build artefacts to cut incremental compile time
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+          key: cargo-reg-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            cargo-reg-${{ runner.os }}-
+
+      - name: Cache cargo build (per-crate)
+        uses: actions/cache@v4
+        with:
+          path: target
+          key: cargo-target-mutants-${{ runner.os }}-${{ matrix.crate }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            cargo-target-mutants-${{ runner.os }}-${{ matrix.crate }}-
+            cargo-target-mutants-${{ runner.os }}-
+
+      - name: Install cargo-mutants
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-mutants
+
+      # Resolve shard: use workflow_dispatch input if provided, else full run
+      - name: Resolve shard arg
+        id: shard
+        env:
+          SHARD_INPUT: ${{ github.event.inputs.shard }}
+        run: |
+          if [ -n "${SHARD_INPUT}" ]; then
+            echo "arg=--shard ${SHARD_INPUT}" >> "$GITHUB_OUTPUT"
+          else
+            echo "arg=" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Run cargo-mutants (${{ matrix.crate }})
+        id: mutants
+        env:
+          CRATE: ${{ matrix.crate }}
+          TEST_TIMEOUT: ${{ matrix.test_timeout }}
+          IN_PLACE: ${{ matrix.in_place }}
+          SHARD_ARG: ${{ steps.shard.outputs.arg }}
+        run: |
+          mkdir -p .blackboard/E2E-MUTATION-BASELINE
+
+          IN_PLACE_FLAG=""
+          if [ "${IN_PLACE}" = "true" ]; then
+            IN_PLACE_FLAG="--in-place"
+          fi
+
+          set +e   # capture exit code; don't fail the step immediately
+          # shellcheck disable=SC2086
+          cargo mutants \
+            -p "${CRATE}" \
+            --no-shuffle \
+            --timeout "${TEST_TIMEOUT}" \
+            ${IN_PLACE_FLAG} \
+            --output "target/mutants-${CRATE}" \
+            ${SHARD_ARG} \
+            2>&1 | tee ".blackboard/E2E-MUTATION-BASELINE/${CRATE}.log"
+          MUTANTS_EXIT=$?
+
+          # Parse summary line
+          SUMMARY=$(grep "mutants tested in" ".blackboard/E2E-MUTATION-BASELINE/${CRATE}.log" | tail -1 || echo "no summary")
+          echo "summary=${SUMMARY}" >> "$GITHUB_OUTPUT"
+          echo "exit_code=${MUTANTS_EXIT}" >> "$GITHUB_OUTPUT"
+
+          # Compute catch rate
+          CAUGHT=$(echo "${SUMMARY}" | grep -oE '[0-9]+ caught' | grep -oE '[0-9]+' || echo 0)
+          MISSED=$(echo "${SUMMARY}" | grep -oE '[0-9]+ missed' | grep -oE '[0-9]+' || echo 0)
+          VIABLE=$((CAUGHT + MISSED))
+          if [ "${VIABLE}" -gt 0 ]; then
+            RATE=$(awk "BEGIN { printf \"%.1f\", (${CAUGHT} / ${VIABLE}) * 100 }")
+          else
+            RATE="N/A"
+          fi
+          echo "catch_rate=${RATE}%" >> "$GITHUB_OUTPUT"
+          echo "caught=${CAUGHT}" >> "$GITHUB_OUTPUT"
+          echo "missed=${MISSED}" >> "$GITHUB_OUTPUT"
+
+          # Collect missed mutants for the issue body
+          MISSED_LINES=$(grep "^MISSED" ".blackboard/E2E-MUTATION-BASELINE/${CRATE}.log" | head -20 || echo "none")
+          {
+            printf 'missed_mutants<<MUTANTS_EOF\n'
+            printf '%s\n' "${MISSED_LINES}"
+            printf 'MUTANTS_EOF\n'
+          } >> "$GITHUB_OUTPUT"
+
+          exit 0   # Always succeed the step; failures reported via issue
+        shell: bash
+
+      # Safety: --in-place may leave mutated source if the job is cancelled.
+      # Restore the tree so the workspace is clean for artifact upload and
+      # any subsequent steps. actions/checkout at the top handles this on
+      # re-runs, but explicit restore is belt-and-suspenders.
+      - name: Restore mutated source files (in-place safety net)
+        if: always()
+        run: git checkout -- .
+        shell: bash
+
+      - name: Upload mutation log
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: mutants-log-${{ matrix.crate }}
+          path: |
+            .blackboard/E2E-MUTATION-BASELINE/${{ matrix.crate }}.log
+            target/mutants-${{ matrix.crate }}/mutants.out/
+          retention-days: 30
+
+      # Open (or update) a GitHub issue when survived mutants detected
+      - name: Report red result to issue tracker
+        if: steps.mutants.outputs.exit_code != '0' || steps.mutants.outputs.missed != '0'
+        uses: actions/github-script@v7
+        env:
+          CRATE: ${{ matrix.crate }}
+          CATCH_RATE: ${{ steps.mutants.outputs.catch_rate }}
+          SUMMARY: ${{ steps.mutants.outputs.summary }}
+          MISSED_MUTANTS: ${{ steps.mutants.outputs.missed_mutants }}
+        with:
+          script: |
+            const crate   = process.env.CRATE;
+            const rate    = process.env.CATCH_RATE;
+            const summary = process.env.SUMMARY;
+            const missed  = process.env.MISSED_MUTANTS;
+            const runUrl  = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
+            const today   = new Date().toISOString().slice(0, 10);
+
+            const title = `[mutants-nightly] ${crate} — surviving mutants (${today})`;
+            const body = [
+              `## Mutation test: \`${crate}\` — ${today}`,
+              '',
+              `**Catch rate**: ${rate}`,
+              `**Summary**: ${summary}`,
+              `**Run**: ${runUrl}`,
+              '',
+              '### Top surviving mutants (up to 20)',
+              '```',
+              missed,
+              '```',
+              '',
+              'See `.blackboard/E2E-MUTATION-BASELINE-2026-05-24.md` for triage starter pack.',
+            ].join('\n');
+
+            const { data: issues } = await github.rest.issues.listForRepo({
+              owner: context.repo.owner,
+              repo:  context.repo.repo,
+              state: 'open',
+              labels: ['mutation-testing', crate],
+            });
+
+            const existing = issues.find(i => i.title.startsWith(`[mutants-nightly] ${crate}`));
+
+            if (existing) {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo:  context.repo.repo,
+                issue_number: existing.number,
+                body,
+              });
+            } else {
+              await github.rest.issues.create({
+                owner:  context.repo.owner,
+                repo:   context.repo.repo,
+                title,
+                body,
+                labels: ['mutation-testing', crate, 'test-debt'],
+              });
+            }

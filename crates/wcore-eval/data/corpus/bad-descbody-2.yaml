@@ -1,0 +1,6 @@
+id: bad-descbody-2
+category: description-equals-body
+skill_body: hello-descbody-2
+expected_outcome: bad
+rationale: |
+  Description == body, no $ARGUMENTS, name mismatch, empty when_to_use, stale model. >=4 fails.

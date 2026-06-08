@@ -1,0 +1,6 @@
+id: bad-noargs-2
+category: missing-arguments
+skill_body: hello-noargs-2
+expected_outcome: bad
+rationale: |
+  Short body, no $ARGUMENTS, name mismatch, off-topic, empty when_to_use, stale model. 5 fails.

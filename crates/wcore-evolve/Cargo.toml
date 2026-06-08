@@ -1,0 +1,67 @@
+[package]
+name        = "wcore-evolve"
+description = "W10B F12 GEPA evolution loop — deterministic mutators + generation runner scored via wcore-eval."
+version.workspace    = true
+edition.workspace    = true
+license.workspace    = true
+repository.workspace = true
+rust-version.workspace = true
+
+[features]
+default = []
+# Real-provider network tests for Paraphrase, gated off by default.
+# CI does not run these; local dev opts in explicitly.
+network-tests = []
+
+[dependencies]
+wcore-eval.workspace          = true
+wcore-memory.workspace        = true
+wcore-observability.workspace = true
+wcore-config.workspace        = true
+wcore-providers.workspace     = true
+wcore-protocol.workspace      = true
+wcore-skills.workspace        = true
+wcore-types.workspace         = true
+
+serde.workspace      = true
+serde_json.workspace = true
+thiserror.workspace  = true
+tokio.workspace      = true
+anyhow.workspace     = true
+async-trait.workspace = true
+clap.workspace        = true
+dirs.workspace       = true
+chrono.workspace     = true
+uuid.workspace       = true
+rusqlite             = { workspace = true }
+
+rand        = "0.8"
+rand_chacha = "0.3"
+blake3      = "1"
+
+workspace-hack.workspace = true
+
+[dev-dependencies]
+wcore-eval = { workspace = true, features = ["test-utils"] }
+wcore-providers.workspace = true
+wcore-types.workspace     = true
+wcore-config.workspace    = true
+async-trait.workspace     = true
+serde_json.workspace      = true
+tempfile.workspace = true
+rstest.workspace   = true
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time", "test-util"] }
+
+# Explicit bin manifest — clap autodetect would pick both files up by
+# filename, but naming them here documents the surface and lets
+# downstream consumers depend on the names without surprise renames.
+[[bin]]
+name = "wcore-evolve"
+path = "src/bin/wcore-evolve.rs"
+
+# M4.3: bench-driven GEPA entrypoint. Same loop as `wcore-evolve`, but
+# the scorer is `wcore_eval::BenchScorer` over the 30-case mini-bench
+# instead of the structural `DefaultScorer`.
+[[bin]]
+name = "wcore-evolve-bench"
+path = "src/bin/wcore-evolve-bench.rs"

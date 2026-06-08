@@ -1,0 +1,17 @@
+id: routing-05-edit-existing
+category: tool_routing
+prompt: |
+  In an existing source file, rename one function call site from
+  `legacy_parse(s)` to `parse_v2(s)`. The rest of the file must be
+  untouched. Which tool should the agent use? Reply with the tool's
+  canonical name only.
+match_strategy:
+  kind: contains_all
+  tokens:
+    - "Edit"
+rationale: |
+  Edit is the targeted string-replace tool. Write would overwrite the
+  whole file; Bash + sed is brittle and the canonical answer is Edit.
+allowed_tools:
+  - Edit
+timeout_secs: 30

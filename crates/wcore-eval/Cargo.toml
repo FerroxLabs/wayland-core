@@ -1,0 +1,47 @@
+[package]
+name        = "wcore-eval"
+description = "Eval harness for skill candidate classification. Gates F12 GEPA per design §5.3."
+version.workspace    = true
+edition.workspace    = true
+license.workspace    = true
+repository.workspace = true
+rust-version.workspace = true
+
+[features]
+default          = []
+# Enable to run the long-running acceptance gate test that asserts
+# precision/recall thresholds against the 60-case corpus. Required by
+# `just eval-gate`; not set by default so the workspace suite stays fast.
+acceptance-gate  = []
+# Enabled by integration tests + the GEPA loop in W10B to access
+# Harness::fixture_for_tests().
+test-utils       = []
+
+[dependencies]
+wcore-types.workspace         = true
+wcore-skills.workspace        = true
+wcore-observability.workspace = true
+
+serde.workspace      = true
+serde_json.workspace = true
+serde_yaml.workspace = true
+thiserror.workspace  = true
+
+workspace-hack.workspace = true
+
+[dev-dependencies]
+rstest.workspace   = true
+tempfile.workspace = true
+# Wave RC: SHA-256 pinning of the LOCKED scoring constants
+# (tests/locked_constants_test.rs).
+sha2.workspace     = true
+
+[[bin]]
+name = "wcore-eval"
+path = "src/bin/wcore-eval.rs"
+
+# M4.2 — per-PR bench-regression gate (`bench-regression.yml` runs this).
+# Same dependencies as the lib; no extra crates pulled in.
+[[bin]]
+name = "wcore-eval-bench"
+path = "src/bin/wcore-eval-bench.rs"

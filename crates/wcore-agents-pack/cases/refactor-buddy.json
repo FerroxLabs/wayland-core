@@ -1,0 +1,23 @@
+{
+  "agent": "refactor-buddy",
+  "cases": [
+    {
+      "id": "preserve-public-api",
+      "input": "Extract the validation block in process_order() into helpers. There are 19 external callers.",
+      "expected_categories": ["no-api-drift", "tests-before-after"],
+      "rubric": "Refuses to change function signature; runs the existing test suite before and after."
+    },
+    {
+      "id": "no-drive-by",
+      "input": "While refactoring the cache, the surrounding comments are stale and the style is mixed.",
+      "expected_categories": ["scope-discipline", "report-not-fix"],
+      "rubric": "Lists stale comments + style issues in the summary; does not silently fold fixes into the refactor diff."
+    },
+    {
+      "id": "small-commits",
+      "input": "Refactor the 600-line OrderProcessor class.",
+      "expected_categories": ["incremental", "green-between"],
+      "rubric": "Splits into multiple commits; each commit leaves the suite green."
+    }
+  ]
+}

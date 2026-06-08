@@ -1,0 +1,14 @@
+{
+  "turn": 1,
+  "model": "claude-sonnet-4-7",
+  "provider": "anthropic",
+  "input_tokens": 80,
+  "output_tokens": 40,
+  "cache_read": 0,
+  "cache_write": 0,
+  "cache_hit_rate": 0.0,
+  "cost_usd": 0.0012,
+  "tool_calls": [],
+  "hook_actions": [],
+  "source_product": "wayland-core"
+}

@@ -1,0 +1,18 @@
+{
+  "_sanitized": "2026-05-24",
+  "_archetype": "migration-mid-flight",
+  "_rules": ".blackboard/E2E-FIXTURE-SANITIZATION-2026-05-24.md",
+  "id": "fixture00b001",
+  "created_at": "2025-12-01T09:00:00Z",
+  "updated_at": "2025-12-01T09:10:00Z",
+  "provider": "anthropic",
+  "model": "claude-opus-4-5",
+  "cwd": "<<HOME>>/dev/old-project",
+  "total_usage": {
+    "input_tokens": 5000,
+    "output_tokens": 100,
+    "cache_creation_tokens": 0,
+    "cache_read_tokens": 0
+  },
+  "messages": []
+}

@@ -1,0 +1,37 @@
+# Wayland plugin manifest — wraps the local `mcp-server-time` binary as a
+# Wayland plugin via the mcp-bridge runtime kind. When the engine's plugin
+# loader (v0.6.5 Task 2.7b on-disk discovery) sees this manifest, it
+# dispatches to `McpBridgePluginRunner::load`, which spawns the binary,
+# performs the MCP `initialize` + `tools/list` handshake, and synthesizes
+# one Wayland `PluginTool` per discovered MCP tool — in this case, exactly
+# one: `Time::get_time`.
+#
+# To install, copy this file to `~/.wayland/plugins/mcp-time/plugin.toml`
+# and adjust `runtime.subprocess.binary_path` to the absolute path of the
+# built `mcp-server-time` binary. See ../README.md for the full flow.
+
+plugin_api_version = "1.0"
+
+[plugin]
+name = "mcp-time"
+version = "0.1.0"
+description = "Wraps mcp-server-time as a Wayland plugin"
+entry = "mcp-server-time"
+authors = ["Wayland Examples"]
+license = "MIT"
+
+[permissions]
+register_mcp_server = true
+register_tools = true
+tool_namespace = "Time"
+
+[runtime]
+kind = "mcp-bridge"
+
+[runtime.subprocess]
+# Relative to this manifest's directory. When installed at
+# `~/.wayland/plugins/mcp-time/plugin.toml`, change to the absolute path of
+# the built release binary, e.g.
+#   binary_path = "/Users/you/dev/wayland/examples/plugin-subprocess-mcp/mcp-server-time/target/release/mcp-server-time"
+binary_path = "./mcp-server-time/target/release/mcp-server-time"
+args = []

@@ -1,0 +1,160 @@
+name: nightly-windows-soak
+
+# Cross-OS counterpart to the DO ephemeral Linux soak that
+# scripts/wayland-e2e-real-workload.sh runs against a fresh droplet.
+# Windows-specific code paths (cfg(target_os = "windows") in wcore-cua,
+# wcore-sandbox, channel adapters, etc.) never got nightly soak coverage
+# before this workflow. PR-time CI in ci.yml exercises the matrix but
+# stops at fmt/clippy/test/release-smoke/audit (~5-15 min). This adds a
+# full Windows mutants-enumerator + per-crate nextest pass on the same
+# 5-crate surface the Linux real-workload validates.
+#
+# Schedule: 05:30 UTC = 12:30 ICT (Sean's GMT+7). 30 min before
+# mutants-nightly.yml (06:00 UTC) so Windows-only failures and the
+# macOS mutation results both land in the issue tracker around the same
+# morning window.
+
+on:
+  schedule:
+    - cron: "30 5 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+concurrency:
+  group: nightly-windows-soak
+  cancel-in-progress: false
+
+env:
+  # All untrusted/dynamic inputs land here as env vars BEFORE any shell
+  # interpolation. The PowerShell + github-script blocks below read these
+  # via $env:NAME / process.env.NAME, never via direct ${{ }} expansion
+  # inside a run: body. Mirrors the GitHub Actions Security guidance:
+  # https://github.blog/security/vulnerability-research/how-to-catch-github-actions-workflow-injections-before-attackers-do/
+  RUN_ID: ${{ github.run_id }}
+  SERVER_URL: ${{ github.server_url }}
+  REPO_OWNER: ${{ github.repository_owner }}
+  REPO_NAME: ${{ github.event.repository.name }}
+
+jobs:
+  windows-soak:
+    name: Windows soak (windows-2022)
+    runs-on: windows-2022
+    timeout-minutes: 60
+
+    steps:
+      # NOTE: when this workflow lands on main, the SHA-pinning sweep
+      # described in security audit F7 should hit it in the same change
+      # that pins every other workflow's actions.
+      - uses: actions/checkout@v4
+
+      - name: Setup Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest
+
+      - name: Install cargo-mutants
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-mutants
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+          key: cargo-reg-windows-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            cargo-reg-windows-
+
+      - name: Cache cargo build
+        uses: actions/cache@v4
+        with:
+          path: target
+          key: cargo-target-windows-soak-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            cargo-target-windows-soak-
+
+      - name: Run Windows soak
+        shell: pwsh
+        env:
+          # The script reads LOCAL_RESULTS_DIR to know where to write
+          # per-phase logs. We route through the workspace so the
+          # upload-artifact step finds it. github.workspace is a trusted
+          # GHA-controlled path; safe to interpolate into env.
+          LOCAL_RESULTS_DIR: ${{ github.workspace }}\windows-soak-results
+        run: |
+          pwsh scripts/wayland-e2e-windows-soak.ps1
+
+      - name: Upload soak logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-soak-logs-${{ github.run_id }}
+          path: windows-soak-results/
+          retention-days: 14
+          if-no-files-found: warn
+
+      # Open (or update) a GitHub issue when the soak fails. Mirrors
+      # mutants-nightly.yml so a failure shows up in the tracker the next
+      # morning rather than being buried in a red workflow badge.
+      - name: Report red result to issue tracker
+        if: failure()
+        uses: actions/github-script@v7
+        with:
+          # All workflow inputs the script needs are pulled from process.env,
+          # NOT from ${{ }} interpolation inside the script body. context.*
+          # values (runId, repo, serverUrl) come from the GHA-trusted runtime
+          # context, never from user input.
+          script: |
+            const today = new Date().toISOString().slice(0, 10);
+            const runUrl = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
+            const title = `[nightly-windows-soak] FAIL - ${today}`;
+            const body = [
+              `## Windows soak FAILED - ${today}`,
+              ``,
+              `**Run**: ${runUrl}`,
+              ``,
+              `**Artifacts**: windows-soak-logs-${context.runId} attached to the run`,
+              ``,
+              `### Triage`,
+              `1. Download the artifact and grep F-build.log, G-nextest.log,`,
+              `   H-mutants.log for the first failing step.`,
+              `2. Reproduce locally with pwsh scripts/wayland-e2e-windows-soak.ps1`,
+              `   on a Windows machine if the failure isn't environment-specific.`,
+              `3. PR the fix; the next nightly cron tick will close this issue.`,
+              ``,
+              `_Auto-opened by .github/workflows/nightly-windows-soak.yml_`,
+            ].join('\n');
+
+            const { data: issues } = await github.rest.issues.listForRepo({
+              owner: context.repo.owner,
+              repo:  context.repo.repo,
+              state: 'open',
+              labels: ['windows-soak', 'test-debt'],
+            });
+            const existing = issues.find(i => i.title.startsWith('[nightly-windows-soak] FAIL'));
+
+            if (existing) {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo:  context.repo.repo,
+                issue_number: existing.number,
+                body,
+              });
+            } else {
+              await github.rest.issues.create({
+                owner:  context.repo.owner,
+                repo:   context.repo.repo,
+                title,
+                body,
+                labels: ['windows-soak', 'test-debt'],
+              });
+            }

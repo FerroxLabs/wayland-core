@@ -1,0 +1,7 @@
+id: bad-truncated-1
+category: truncated-body
+skill_body: hello-truncated-1
+trace_fixture: expensive-bad-1.json
+expected_outcome: bad
+rationale: |
+  90% truncation: no $ARGUMENTS, empty when_to_use, name mismatch, off-topic description (translator), stale model pin. >=5 checks fail.

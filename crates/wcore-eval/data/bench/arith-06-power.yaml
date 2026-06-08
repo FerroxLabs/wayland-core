@@ -1,0 +1,14 @@
+id: arith-06-power
+category: arithmetic
+prompt: |
+  Compute 2 raised to the 10th power. Reply with the integer answer
+  only.
+match_strategy:
+  kind: numeric_equal
+  expected: 1024.0
+  tolerance: 0.0
+rationale: |
+  Powers of two anchor an LLM that has seen them in pre-training; the
+  scoring side stays a single deterministic integer.
+allowed_tools: []
+timeout_secs: 15

@@ -1,0 +1,16 @@
+id: routing-08-bash-vs-write
+category: tool_routing
+prompt: |
+  Run `rustfmt --version` and report its output. Which tool should
+  the agent use? Reply with the tool's canonical name only.
+match_strategy:
+  kind: contains_all
+  tokens:
+    - "Bash"
+rationale: |
+  The task requires capturing a subprocess's stdout. Bash is the
+  only tool that runs external programs; Write/Edit do not invoke
+  subprocesses.
+allowed_tools:
+  - Bash
+timeout_secs: 30

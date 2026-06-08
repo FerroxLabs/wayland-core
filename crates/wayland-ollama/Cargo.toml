@@ -1,0 +1,34 @@
+[package]
+name = "wayland-ollama"
+description = "Ollama local-inference provider — reference plugin for wcore-plugin-api register_providers"
+version.workspace    = true
+edition.workspace    = true
+license.workspace    = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+wcore-plugin-api.workspace = true
+wcore-types.workspace      = true
+# Wave OL: real `LlmProvider` impl on `OllamaProvider`. Plugin crates are
+# top-tier — they CAN depend on wcore-* (only `wcore-plugin-api` itself is
+# blocked from importing core crates per FORBIDDEN_CORE_IMPORTS).
+wcore-providers.workspace  = true
+
+async-trait.workspace = true
+reqwest.workspace     = true
+wcore-egress.workspace = true
+serde.workspace       = true
+serde_json.workspace  = true
+inventory.workspace   = true
+thiserror.workspace   = true
+tokio.workspace       = true
+tracing.workspace     = true
+# Wave OL: NDJSON stream consumption via `bytes_stream().next()`.
+futures.workspace     = true
+
+workspace-hack.workspace = true
+
+[dev-dependencies]
+tokio       = { workspace = true, features = ["macros", "rt-multi-thread"] }
+wiremock.workspace = true

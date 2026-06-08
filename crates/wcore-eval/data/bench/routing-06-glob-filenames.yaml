@@ -1,0 +1,17 @@
+id: routing-06-glob-filenames
+category: tool_routing
+prompt: |
+  Enumerate every `.rs` file under `crates/wcore-skills/src/` recursively.
+  No file contents are needed — just the paths. Which tool should the
+  agent use? Reply with the tool's canonical name only.
+match_strategy:
+  kind: contains_all
+  tokens:
+    - "Glob"
+rationale: |
+  Glob is the filename-only listing tool. Grep would read contents
+  unnecessarily; Bash + `find` works but Glob is the canonical
+  in-product answer.
+allowed_tools:
+  - Glob
+timeout_secs: 30

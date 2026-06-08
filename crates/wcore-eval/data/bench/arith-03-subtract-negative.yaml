@@ -1,0 +1,13 @@
+id: arith-03-subtract-negative
+category: arithmetic
+prompt: |
+  Compute 7 - 19. Reply with the signed integer answer only.
+match_strategy:
+  kind: numeric_equal
+  expected: -12.0
+  tolerance: 0.0
+rationale: |
+  Negative-result subtraction. Exercises the parser's leading-minus
+  handling.
+allowed_tools: []
+timeout_secs: 15

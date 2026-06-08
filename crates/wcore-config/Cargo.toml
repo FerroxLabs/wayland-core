@@ -1,0 +1,65 @@
+[package]
+name = "wcore-config"
+description = "Configuration layer for wayland-core: Config struct, ProviderCompat, auth, hooks, session config"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+wcore-types.workspace   = true
+wcore-compact.workspace = true
+# M5.3: BudgetConfig moved into wcore-budget; this crate re-exports it.
+wcore-budget.workspace  = true
+
+# H2-R5: CircuitBreaker uses parking_lot::Mutex (no poisoning semantics).
+parking_lot.workspace = true
+
+serde.workspace      = true
+serde_json.workspace = true
+toml.workspace       = true
+anyhow.workspace     = true
+thiserror.workspace  = true
+dirs.workspace       = true
+chrono.workspace     = true
+reqwest.workspace    = true
+glob.workspace       = true
+tokio.workspace      = true
+async-trait.workspace = true
+
+# Wave SD — OS keyring backend for CredentialsStore.
+keyring.workspace    = true
+
+# v0.6.1 hardening — atomic_write sibling-tempfile + rename pattern.
+tempfile.workspace   = true
+
+# T1-E1 — Encrypted-file credentials backend.
+# Argon2id KDF (64 MiB / t=3 / p=1) + XChaCha20-Poly1305 AEAD.
+# Crypto patterns adopted from Forge vault.ts (Apache-2.0).
+argon2.workspace            = true
+chacha20poly1305.workspace  = true
+rand.workspace              = true
+zeroize.workspace           = true
+base64.workspace            = true
+
+# S11 — interactive passphrase prompt for the EncryptedFile backend.
+rpassword                   = { workspace = true }
+tracing.workspace           = true
+# F-081: URL host validation for OAuth issuer allowlist.
+url.workspace               = true
+# Legacy yaml migration: one-shot import of ~/.wayland/config.yaml into
+# the canonical config.toml when the latter is missing [default] model.
+serde_yaml.workspace        = true
+
+workspace-hack.workspace = true
+
+[dev-dependencies]
+wiremock.workspace   = true
+tokio-test.workspace = true
+# S11 — env-var-driven tests in credentials::tests must not race.
+serial_test.workspace = true
+# v0.9.0 W4 E1 — env_file::tests::env_file_log_does_not_contain_value
+# captures tracing field values via fmt::Subscriber to assert no value
+# leaks through INFO. Test-only — production code only uses `tracing`.
+tracing-subscriber.workspace = true

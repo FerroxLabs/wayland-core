@@ -1,0 +1,41 @@
+[package]
+name = "wcore-plugin-api"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+build = "build.rs"
+
+[dependencies]
+wcore-types.workspace = true
+wcore-protocol.workspace = true
+# M5.1 — sandbox primitive lives in the plugin-api graph as a security
+# allowlisted dep. Plugins receive a `SandboxRegistry` handle through
+# `PluginContext`; they MUST NOT take a direct wcore-sandbox dep.
+wcore-sandbox.workspace = true
+async-trait.workspace = true
+serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true
+schemars = { workspace = true, features = ["chrono"] }
+toml.workspace = true
+inventory.workspace = true
+thiserror.workspace = true
+anyhow.workspace = true
+chrono.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+dirs.workspace = true
+# v0.6.4 Task 1.1 — `BoxFuture` for the `PluginTool::execute` closure type.
+# External crate, allowed by the FORBIDDEN_CORE_IMPORTS boundary.
+futures.workspace = true
+# v0.6.4 Task 1.1 — `CancellationToken` for `PluginToolCaps.cancel`.
+# External crate, allowed by the boundary; matches `ToolContext.cancel`.
+tokio-util.workspace = true
+
+[build-dependencies]
+toml = { workspace = true }
+
+[dev-dependencies]
+rstest.workspace = true
+tempfile.workspace = true

@@ -1,0 +1,45 @@
+[package]
+name = "wcore-observability"
+description = "Trace schema, OTLP exporter, span sinks, and prompt-cache discipline for wayland-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[features]
+default = []
+# Enables the OTLP exporter sink. Off by default to keep the binary
+# notarization-time budget intact per design §2.2 (target ≤5MB delta
+# from this feature alone, measured by `cargo bloat`).
+otlp = ["dep:opentelemetry", "dep:opentelemetry-otlp", "dep:opentelemetry_sdk"]
+
+[dependencies]
+wcore-types.workspace    = true
+wcore-config.workspace   = true
+wcore-safety.workspace   = true
+# M5.3: ObservabilityBudgetEventBridge implements BudgetEventSink and forwards
+# BudgetEvent into the existing SpanSink JSON channel.
+wcore-budget.workspace   = true
+
+serde.workspace      = true
+serde_json.workspace = true
+thiserror.workspace  = true
+chrono.workspace     = true
+tokio.workspace      = true
+
+# OTLP exporter — pulled in only when `otlp` feature is on.
+opentelemetry      = { version = "0.27", optional = true, default-features = false, features = ["trace"] }
+opentelemetry-otlp = { version = "0.27", optional = true, default-features = false, features = ["http-proto", "reqwest-blocking-client"] }
+opentelemetry_sdk  = { version = "0.27", optional = true, default-features = false, features = ["trace", "rt-tokio"] }
+
+workspace-hack.workspace = true
+
+[dev-dependencies]
+rstest.workspace    = true
+tempfile.workspace  = true
+tokio-test.workspace = true
+# W9: serialize env-var mutation in WAYLAND_TRACE_RESULT_SNIPPETS tests.
+serial_test.workspace = true
+# Integration tests round-trip through the Anthropic build_messages helper.
+wcore-providers.workspace = true

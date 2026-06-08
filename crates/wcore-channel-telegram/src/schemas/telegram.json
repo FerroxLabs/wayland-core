@@ -1,0 +1,33 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "TelegramConfig",
+  "description": "Per-channel TOML config for the Telegram Bot API adapter.",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "credential_handle": {
+      "type": "string",
+      "description": "Key used to look up the bot token in the wcore-config credentials store (OS keychain by default)."
+    },
+    "allowed_chat_ids": {
+      "type": "array",
+      "items": { "type": "string" },
+      "default": [],
+      "description": "Optional allow-list of chat IDs (as strings — Telegram chat_ids fit in i64 but stringify for negative supergroup ids). When non-empty, inbound messages whose chat.id is not in the list are dropped before reaching poll_events."
+    },
+    "long_poll_timeout_secs": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 120,
+      "default": 30,
+      "description": "Long-poll wait seconds passed as the `timeout` query param to getUpdates."
+    },
+    "parse_mode": {
+      "type": "string",
+      "enum": ["MarkdownV2", "HTML", "Markdown"],
+      "default": "MarkdownV2",
+      "description": "Default parse_mode used by sendMessage."
+    }
+  },
+  "required": ["credential_handle"]
+}

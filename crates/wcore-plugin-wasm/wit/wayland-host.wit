@@ -1,0 +1,101 @@
+package wayland:host@1.0.0;
+
+// Wayland WASM Plugin Host Interface (v0.6.5)
+//
+// Defines host-provided capabilities available to sandboxed plugins
+// (both Tool exports and Hook exports). Shared by `tool.wit` and
+// `hook.wit` so plugins import a single `wayland:host/host` interface.
+//
+// Security Model:
+// - WASM plugins are untrusted and run in a wasmtime Component Model sandbox.
+// - All capabilities are opt-in at the host adapter layer (default: deny).
+// - Secrets are NEVER exposed to WASM. `secret-exists` returns presence only;
+//   actual credentials are injected by the host at the HTTP boundary.
+// - All outputs are subject to host-side leak scanning before returning to WASM.
+// - Cancellation is cooperative: the guest must poll `is-cancelled`.
+
+/// Host-provided capabilities. Every fallible function returns
+/// `result<_, string>` to keep the ABI uniform with Ironclaw's pattern.
+interface host {
+    /// HTTP request payload. Record form (rather than positional args)
+    /// so future fields can be added without breaking the ABI.
+    record http-req {
+        method: string,
+        url: string,
+        /// Headers serialized as a JSON object string.
+        headers-json: string,
+        /// Optional request body bytes.
+        body: option<list<u8>>,
+        /// Optional client timeout in milliseconds.
+        /// Defaults host-side (typically 30s); capped at the callback timeout.
+        timeout-ms: option<u32>,
+    }
+
+    /// HTTP response payload.
+    record http-resp {
+        status: u16,
+        /// Response headers as a JSON object string.
+        headers-json: string,
+        body: list<u8>,
+    }
+
+    /// Emit a structured log entry from the plugin.
+    /// `level` is one of "trace" | "debug" | "info" | "warn" | "error".
+    log: func(level: string, msg: string);
+
+    /// Current wall-clock timestamp in milliseconds since Unix epoch.
+    now-millis: func() -> u64;
+
+    /// Read a workspace file as raw bytes.
+    ///
+    /// Path must be workspace-relative (no leading "/", no ".." segments).
+    /// Returns Err if the capability is not granted, the path is outside
+    /// the workspace, or the file does not exist.
+    workspace-read: func(path: string) -> result<list<u8>, string>;
+
+    /// Write a workspace file as raw bytes.
+    ///
+    /// Path must be workspace-relative (no leading "/", no ".." segments).
+    /// Returns Err if the capability is not granted or the host policy
+    /// rejects the write.
+    workspace-write: func(path: string, body: list<u8>) -> result<_, string>;
+
+    /// Make an HTTP request through the host's allowlisted client.
+    ///
+    /// Security:
+    /// - Only allowlisted endpoints (host/path patterns) may be reached.
+    /// - Credentials matching the request are injected host-side; WASM
+    ///   never observes them.
+    /// - Response is scanned for leaked secrets before being returned.
+    /// - Rate-limited per plugin instance.
+    http-request: func(req: http-req) -> result<http-resp, string>;
+
+    /// Check whether a named secret is available to this plugin.
+    ///
+    /// Security: existence only. WASM CAN NEVER READ a secret value;
+    /// `secret-read` is deliberately not exposed. Credentials reach the
+    /// network only via `http-request`, where the host injects them.
+    secret-exists: func(name: string) -> bool;
+
+    /// Invoke another tool registered with the host by name.
+    ///
+    /// Lets a plugin tool delegate to a host-side (or another plugin's)
+    /// tool. `input` is the JSON-encoded tool input matching the target
+    /// tool's schema; the returned string is the JSON-encoded tool
+    /// output. Rate-limited and leak-scanned.
+    tool-invoke: func(name: string, input: string) -> result<string, string>;
+
+    /// Emit a chat message into the host's conversation log.
+    ///
+    /// `role` is one of "system" | "assistant" | "user" | "tool".
+    /// Used by Hook plugins (and tool plugins that legitimately need
+    /// to surface a message) to render UI without going through HTTP.
+    emit-message: func(role: string, text: string);
+
+    /// Cooperative cancellation poll.
+    ///
+    /// Returns `true` once the host has signalled cancellation for the
+    /// current invocation. Long-running guests SHOULD poll this between
+    /// units of work and exit cleanly when it flips to `true`.
+    is-cancelled: func() -> bool;
+}

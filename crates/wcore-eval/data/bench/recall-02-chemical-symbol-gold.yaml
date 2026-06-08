@@ -1,0 +1,13 @@
+id: recall-02-chemical-symbol-gold
+category: recall
+prompt: |
+  What is the chemical-symbol abbreviation for gold on the periodic
+  table? Reply with the two-letter symbol only.
+match_strategy:
+  kind: exact
+  expected: "Au"
+rationale: |
+  Periodic-table symbols are frozen by IUPAC; canonical answer is
+  unambiguous and short.
+allowed_tools: []
+timeout_secs: 15

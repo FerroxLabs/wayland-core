@@ -1,0 +1,36 @@
+[package]
+name = "wcore-permissions"
+description = "Multi-actor ACL + bearer-token authn/authz for wayland-core sessions (Team Mode foundation)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+# Wave B2 — multi-actor ACL + bearer token. v0.3 scope ACL only;
+# OAuth/OIDC + role hierarchies deferred to a post-v0.6 wave.
+
+[features]
+default = ["sqlite-revocation"]
+# M5.9 — bundle a sqlite-backed `RevocationStore` impl. Embedders that ship
+# their own backing (e.g. a remote service) can disable this to drop the
+# rusqlite dep.
+sqlite-revocation = ["dep:rusqlite"]
+
+[dependencies]
+serde.workspace      = true
+serde_json.workspace = true
+thiserror.workspace  = true
+anyhow.workspace     = true
+chrono.workspace     = true
+sha2.workspace       = true
+hex                  = "0.4"
+# 3.C.3 — per-tool learned-permissions persistence (`learning` module).
+toml.workspace       = true
+dirs.workspace       = true
+# M5.9 — gated by `sqlite-revocation`. Workspace-pinned to the same bundled
+# build used by wcore-memory so static-link drift on Windows is impossible.
+rusqlite             = { workspace = true, optional = true }
+
+[dev-dependencies]
+tempfile.workspace = true

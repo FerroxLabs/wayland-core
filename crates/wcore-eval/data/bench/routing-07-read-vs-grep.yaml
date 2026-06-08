@@ -1,0 +1,17 @@
+id: routing-07-read-vs-grep
+category: tool_routing
+prompt: |
+  The user asks: "What does `Cargo.toml` declare as the workspace
+  resolver version?" The file path is known. Which tool should the
+  agent use? Reply with the tool's canonical name only.
+match_strategy:
+  kind: contains_all
+  tokens:
+    - "Read"
+rationale: |
+  When the file is small and the path is known, opening the whole
+  file with Read is cheaper than a Grep scan. Distinct from routing-01
+  because it disambiguates Read against Grep when both are plausible.
+allowed_tools:
+  - Read
+timeout_secs: 30
