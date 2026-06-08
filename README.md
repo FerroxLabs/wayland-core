@@ -195,6 +195,12 @@ Wayland Core ships a scored evolutionary optimizer: it generates variant prompts
 
 <div align="center">
 
+![Built-in tools, compared — Wayland Core vs OpenClaw, Hermes, opencode, aider](docs/img/compare-tools.png)
+
+</div>
+
+<div align="center">
+
 ![Extensibility, compared](docs/img/compare-extensibility.png)
 
 </div>
