@@ -1870,7 +1870,15 @@ mod tests {
         provider.mark_key_success("solo-key");
         assert_eq!(provider.select_key().unwrap(), "solo-key");
 
-        let empty = OpenAIProvider::new("", "http://localhost", openai_compat(), DebugConfig::default());
-        assert!(matches!(empty.select_key(), Err(ProviderError::MissingApiKey)));
+        let empty = OpenAIProvider::new(
+            "",
+            "http://localhost",
+            openai_compat(),
+            DebugConfig::default(),
+        );
+        assert!(matches!(
+            empty.select_key(),
+            Err(ProviderError::MissingApiKey)
+        ));
     }
 }

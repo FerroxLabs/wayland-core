@@ -246,9 +246,9 @@ mod tests {
 
     use clap::Parser;
     use std::time::Duration as StdDuration;
-    use wcore_swarm::{ReduceOutput, SwarmResult, WorkerStatus};
     use wcore_swarm::consensus::ConsensusOutcome;
     use wcore_swarm::debate::DebateOutcome;
+    use wcore_swarm::{ReduceOutput, SwarmResult, WorkerStatus};
 
     /// Minimal clap harness so `--reduce` is parsed exactly as the real CLI
     /// parses it (value_parser + default included).
@@ -300,7 +300,12 @@ mod tests {
         let out = reduce(a.reduce, results, &scorer);
         match out {
             ReduceOutput::Consensus {
-                outcome: ConsensusOutcome::Agreed { value, votes, total },
+                outcome:
+                    ConsensusOutcome::Agreed {
+                        value,
+                        votes,
+                        total,
+                    },
             } => {
                 assert_eq!(value, "42");
                 assert_eq!(votes, 2);
@@ -320,7 +325,11 @@ mod tests {
         let out = reduce(a.reduce, results, &scorer);
         match out {
             ReduceOutput::Debate {
-                outcome: DebateOutcome::Converged { value, converged_at_round },
+                outcome:
+                    DebateOutcome::Converged {
+                        value,
+                        converged_at_round,
+                    },
             } => {
                 assert_eq!(value, "y");
                 assert_eq!(converged_at_round, 1);

@@ -78,11 +78,7 @@ pub enum ReduceOutput {
 
 /// Reduce `results` according to `mode`. `scorer` is consulted only for the
 /// [`ReduceMode::Consensus`] and [`ReduceMode::Debate`] branches.
-pub fn reduce<S: Scorer>(
-    mode: ReduceMode,
-    results: Vec<SwarmResult>,
-    scorer: &S,
-) -> ReduceOutput {
+pub fn reduce<S: Scorer>(mode: ReduceMode, results: Vec<SwarmResult>, scorer: &S) -> ReduceOutput {
     match mode {
         ReduceMode::Mesh => ReduceOutput::Mesh { results },
         ReduceMode::Fleet => {
@@ -103,10 +99,7 @@ pub fn reduce<S: Scorer>(
         ReduceMode::Debate => {
             // The collected batch is a single round; the orchestrator owns
             // true multi-round replay (see debate.rs module docs).
-            let rounds = vec![DebateRound {
-                round: 1,
-                results,
-            }];
+            let rounds = vec![DebateRound { round: 1, results }];
             ReduceOutput::Debate {
                 outcome: Debate::evaluate(&rounds, scorer),
             }
@@ -209,11 +202,7 @@ mod tests {
     #[test]
     fn debate_mode_routes_to_evaluate_single_round() {
         let scorer = RuleBasedScorer::exact_stdout();
-        let out = reduce(
-            ReduceMode::Debate,
-            vec![ok("y"), ok("y"), ok("z")],
-            &scorer,
-        );
+        let out = reduce(ReduceMode::Debate, vec![ok("y"), ok("y"), ok("z")], &scorer);
         match out {
             ReduceOutput::Debate {
                 outcome:

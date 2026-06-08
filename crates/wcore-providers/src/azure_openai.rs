@@ -207,7 +207,9 @@ impl AzureOpenAIProvider {
     /// AAD bearer mode.
     fn mark_key_success(&self, key: &str) {
         if let AzureAuth::ApiKey(pool) = &self.auth {
-            pool.lock().expect("key pool mutex poisoned").mark_success(key);
+            pool.lock()
+                .expect("key pool mutex poisoned")
+                .mark_success(key);
         }
     }
 
@@ -215,7 +217,9 @@ impl AzureOpenAIProvider {
     /// (401/403/429). No-op for AAD bearer mode.
     fn mark_key_failure(&self, key: &str) {
         if let AzureAuth::ApiKey(pool) = &self.auth {
-            pool.lock().expect("key pool mutex poisoned").mark_failure(key);
+            pool.lock()
+                .expect("key pool mutex poisoned")
+                .mark_failure(key);
         }
     }
 
@@ -521,7 +525,10 @@ mod tests {
         assert!(first == "key-a" || first == "key-b");
 
         p.mark_key_failure(&first);
-        let second = p.select_key().unwrap().expect("rotation finds the other key");
+        let second = p
+            .select_key()
+            .unwrap()
+            .expect("rotation finds the other key");
         assert_ne!(second, first);
 
         p.mark_key_success(&second);
@@ -543,7 +550,10 @@ mod tests {
             ProviderCompat::openai_defaults(),
             DebugConfig::default(),
         );
-        assert!(matches!(empty.select_key(), Err(ProviderError::MissingApiKey)));
+        assert!(matches!(
+            empty.select_key(),
+            Err(ProviderError::MissingApiKey)
+        ));
     }
 
     #[test]

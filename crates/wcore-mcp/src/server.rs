@@ -343,21 +343,19 @@ impl McpServer {
         // an advertised tool, route the call to it. Per the MCP spec the
         // tool's arguments live under `params.arguments` (object); default
         // to an empty object when omitted.
-        if advertised {
-            if let Some(executor) = self.executor.as_ref() {
-                let args = params
-                    .get("arguments")
-                    .cloned()
-                    .unwrap_or_else(|| json!({}));
-                return match executor.call(&name, args).await {
-                    Ok(result) => ServerJsonRpcResponse::ok(id, result),
-                    Err(e) => ServerJsonRpcResponse::err(
-                        id,
-                        error_code::INTERNAL_ERROR,
-                        format!("tool `{}` execution failed: {:#}", name, e),
-                    ),
-                };
-            }
+        if advertised && let Some(executor) = self.executor.as_ref() {
+            let args = params
+                .get("arguments")
+                .cloned()
+                .unwrap_or_else(|| json!({}));
+            return match executor.call(&name, args).await {
+                Ok(result) => ServerJsonRpcResponse::ok(id, result),
+                Err(e) => ServerJsonRpcResponse::err(
+                    id,
+                    error_code::INTERNAL_ERROR,
+                    format!("tool `{}` execution failed: {:#}", name, e),
+                ),
+            };
         }
 
         // No executor wired (standalone server) or a KNOWN_STUB name:
@@ -499,7 +497,11 @@ mod tests {
                 Some(json!({ "name": "echo", "arguments": { "x": 1 } })),
             ))
             .await;
-        assert!(resp.error.is_none(), "expected success, got {:?}", resp.error);
+        assert!(
+            resp.error.is_none(),
+            "expected success, got {:?}",
+            resp.error
+        );
         let result = resp.result.expect("result");
         assert_eq!(result["isError"], false);
         let text = result["content"][0]["text"].as_str().expect("text");

@@ -80,9 +80,8 @@ impl AnthropicProvider {
     /// console API keys authenticate via the `x-api-key` header.
     fn build_headers(&self, key: &str) -> Result<HeaderMap, ProviderError> {
         let mut headers = HeaderMap::new();
-        let value = HeaderValue::from_str(key).map_err(|e| {
-            ProviderError::Connection(format!("Invalid x-api-key header: {}", e))
-        })?;
+        let value = HeaderValue::from_str(key)
+            .map_err(|e| ProviderError::Connection(format!("Invalid x-api-key header: {}", e)))?;
         headers.insert("x-api-key", value);
 
         headers.insert("anthropic-version", HeaderValue::from_static("2023-06-01"));

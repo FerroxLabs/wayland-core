@@ -1078,7 +1078,10 @@ mod tests {
         let solo = GeminiProvider::new("solo", "", compat(), DebugConfig::default());
         assert_eq!(solo.select_key().unwrap(), "solo");
         let empty = GeminiProvider::new("", "", compat(), DebugConfig::default());
-        assert!(matches!(empty.select_key(), Err(ProviderError::MissingApiKey)));
+        assert!(matches!(
+            empty.select_key(),
+            Err(ProviderError::MissingApiKey)
+        ));
     }
 
     #[test]
