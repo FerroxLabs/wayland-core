@@ -222,9 +222,13 @@ async fn tc_5_4_06_replace_all_updates_cache() {
 // TC-5.4-W: WriteTool cache update
 // ==========================================================================
 
-/// TC-5.4-W01: Write then Read returns "unchanged" (Write populates cache).
+/// TC-5.4-W01: Write then Read returns the full current content, NOT the
+/// "unchanged since last read" stub. A Write populates the cache as a
+/// `WriteEcho` (post-write disk state the model has not seen as a read), so the
+/// stub — which tells the model to "refer to the earlier Read tool_result" —
+/// would point at a Read that never happened. The Read must return real content.
 #[tokio::test]
-async fn tc_5_4_w01_write_then_read_dedup() {
+async fn tc_5_4_w01_write_then_read_returns_content() {
     let dir = tempfile::tempdir().unwrap();
     let file = dir.path().join("write_read.txt");
 
@@ -232,7 +236,7 @@ async fn tc_5_4_w01_write_then_read_dedup() {
     let write_tool = WriteTool::new(Some(cache.clone()));
     let read_tool = ReadTool::new(Some(cache));
 
-    // Write creates file and populates cache.
+    // Write creates file and populates cache (as WriteEcho).
     let write_input = json!({
         "file_path": file.to_str().unwrap(),
         "content": "written content"
@@ -240,14 +244,19 @@ async fn tc_5_4_w01_write_then_read_dedup() {
     let wr = write_tool.execute(write_input).await;
     assert!(!wr.is_error, "write failed: {}", wr.content);
 
-    // Read immediately after: should return "unchanged" because Write
-    // already cached the content with the correct mtime.
+    // Read immediately after: must return the actual content, not a stub that
+    // references a nonexistent earlier Read.
     let read_input = json!({ "file_path": file.to_str().unwrap() });
     let rr = read_tool.execute(read_input).await;
     assert!(!rr.is_error);
     assert!(
-        rr.content.contains(UNCHANGED_MARKER),
-        "Read after Write should return unchanged stub, got: {}",
+        !rr.content.contains(UNCHANGED_MARKER),
+        "Read after Write must not emit the unchanged stub, got: {}",
+        rr.content
+    );
+    assert!(
+        rr.content.contains("written content"),
+        "Read after Write must return the real content, got: {}",
         rr.content
     );
 }
@@ -283,7 +292,10 @@ async fn tc_5_4_w02_write_then_edit() {
     assert_eq!(std::fs::read_to_string(&file).unwrap(), "goodbye world");
 }
 
-/// TC-5.4-W03: Write → Write → Read returns fresh content (mtime updated).
+/// TC-5.4-W03: Write → Write → Read returns the fresh content, not a stub.
+/// Both writes cache `WriteEcho` entries, so the Read must materialize the
+/// current on-disk content (version 2) rather than dedup against content the
+/// model never saw as a read.
 #[tokio::test]
 async fn tc_5_4_w03_write_overwrite_then_read() {
     let dir = tempfile::tempdir().unwrap();
@@ -310,16 +322,19 @@ async fn tc_5_4_w03_write_overwrite_then_read() {
     });
     write_tool.execute(w2).await;
 
-    // Read: cache was updated by second Write, so should see "unchanged"
-    // (cache content matches disk content with matching mtime).
+    // Read: the cache entry is a WriteEcho, so the Read returns the real
+    // current content instead of a misleading unchanged stub.
     let read_input = json!({ "file_path": file.to_str().unwrap() });
     let rr = read_tool.execute(read_input).await;
     assert!(!rr.is_error);
-    // The cache was updated by the second Write with the new content,
-    // so Read should hit the dedup path.
     assert!(
-        rr.content.contains(UNCHANGED_MARKER),
-        "Read after second Write should dedup, got: {}",
+        !rr.content.contains(UNCHANGED_MARKER),
+        "Read after second Write must not dedup against unseen content, got: {}",
+        rr.content
+    );
+    assert!(
+        rr.content.contains("version 2"),
+        "Read must return the current content, got: {}",
         rr.content
     );
 
@@ -331,9 +346,14 @@ async fn tc_5_4_w03_write_overwrite_then_read() {
 // Supplementary: Cross-tool interaction tests
 // ==========================================================================
 
-/// Read → Edit → Read should dedup (Edit updated the cache).
+/// Read → Edit → Read must return the POST-edit content, not the unchanged
+/// stub. This is the load-bearing correctness case: the stub tells the model
+/// "the earlier Read is still current — refer to that", but the earlier Read is
+/// the PRE-edit content (`alpha beta`). After the edit the file is `ALPHA beta`,
+/// and a verify-read exists precisely to confirm that. The WriteEcho provenance
+/// guard forces the real current content.
 #[tokio::test]
-async fn read_edit_read_dedup() {
+async fn read_edit_read_returns_post_edit_content() {
     let dir = tempfile::tempdir().unwrap();
     let file = dir.path().join("cross.txt");
     std::fs::write(&file, "alpha beta").unwrap();
@@ -342,7 +362,7 @@ async fn read_edit_read_dedup() {
     let read_tool = ReadTool::new(Some(cache.clone()));
     let edit_tool = EditTool::new(Some(cache));
 
-    // Read.
+    // Read (model sees `alpha beta`).
     read_file(&read_tool, &file).await;
 
     // Edit.
@@ -354,13 +374,19 @@ async fn read_edit_read_dedup() {
     let er = edit_tool.execute(edit_input).await;
     assert!(!er.is_error);
 
-    // Read again: Edit updated the cache, so Read should see "unchanged".
+    // Read again: must surface the post-edit content, NOT a stub pointing at the
+    // stale pre-edit Read.
     let read_input = json!({ "file_path": file.to_str().unwrap() });
     let rr = read_tool.execute(read_input).await;
     assert!(!rr.is_error);
     assert!(
-        rr.content.contains(UNCHANGED_MARKER),
-        "Read after Edit should dedup, got: {}",
+        !rr.content.contains(UNCHANGED_MARKER),
+        "Read after Edit must not point the model at stale pre-edit content, got: {}",
+        rr.content
+    );
+    assert!(
+        rr.content.contains("ALPHA beta"),
+        "Read after Edit must return the post-edit content, got: {}",
         rr.content
     );
 }

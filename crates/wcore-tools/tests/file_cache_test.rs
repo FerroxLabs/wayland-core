@@ -8,7 +8,7 @@ use std::sync::{Arc, RwLock};
 
 use wcore_config::file_cache::FileCacheConfig;
 use wcore_tools::file_cache::{FileStateCache, file_mtime_ms, update_cache_after_write};
-use wcore_types::file_state::FileState;
+use wcore_types::file_state::{FileState, Provenance};
 
 fn default_config() -> FileCacheConfig {
     FileCacheConfig {
@@ -24,6 +24,7 @@ fn make_state(content: &str, mtime_ms: u64) -> FileState {
         mtime_ms,
         offset: None,
         limit: None,
+        provenance: Provenance::ReadResult,
     }
 }
 
@@ -222,6 +223,7 @@ fn partial_read_state_round_trip() {
         mtime_ms: 999,
         offset: Some(10),
         limit: Some(20),
+        provenance: Provenance::ReadResult,
     };
     cache.insert(PathBuf::from("/partial"), state);
 
@@ -285,6 +287,9 @@ fn update_cache_after_write_stores_numbered_content() {
     // Offset and limit should be None (full file).
     assert!(cached.offset.is_none());
     assert!(cached.limit.is_none());
+
+    // A write-side update is a WriteEcho, not something the model has read.
+    assert_eq!(cached.provenance, Provenance::WriteEcho);
 }
 
 /// update_cache_after_write handles empty content.

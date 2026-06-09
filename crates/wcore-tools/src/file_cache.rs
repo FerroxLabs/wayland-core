@@ -6,7 +6,7 @@ use std::time::UNIX_EPOCH;
 use lru::LruCache;
 
 use wcore_config::file_cache::FileCacheConfig;
-use wcore_types::file_state::FileState;
+use wcore_types::file_state::{FileState, Provenance};
 
 /// LRU cache for file states seen by the model.
 ///
@@ -110,6 +110,12 @@ impl FileStateCache {
 /// Reads the new mtime from disk and stores line-numbered content.
 /// This is the single point for post-write cache updates, eliminating
 /// duplication between EditTool and WriteTool.
+///
+/// The entry is tagged [`Provenance::WriteEcho`]: the content reflects the new
+/// disk state, but the model has NOT seen it as a Read result. A later
+/// verify-read therefore must not be short-circuited to the "file unchanged"
+/// stub (which would point the model at the pre-write content still sitting in
+/// the transcript). See [`Provenance`].
 pub fn update_cache_after_write(
     cache_arc: &Arc<std::sync::RwLock<FileStateCache>>,
     path: &Path,
@@ -133,6 +139,7 @@ pub fn update_cache_after_write(
             mtime_ms: new_mtime,
             offset: None,
             limit: None,
+            provenance: Provenance::WriteEcho,
         },
     );
 }
@@ -201,6 +208,7 @@ mod tests {
             mtime_ms,
             offset: None,
             limit: None,
+            provenance: Provenance::ReadResult,
         }
     }
 
@@ -419,6 +427,7 @@ mod tests {
             mtime_ms: 500,
             offset: Some(10),
             limit: Some(20),
+            provenance: Provenance::ReadResult,
         };
         cache.insert(PathBuf::from("/file"), state);
         let got = cache.get(Path::new("/file")).unwrap();

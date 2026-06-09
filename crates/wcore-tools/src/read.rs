@@ -5,7 +5,7 @@ use async_trait::async_trait;
 use serde_json::{Value, json};
 
 use wcore_protocol::events::ToolCategory;
-use wcore_types::file_state::FileState;
+use wcore_types::file_state::{FileState, Provenance};
 use wcore_types::tool::{JsonSchema, ToolResult};
 
 use crate::Tool;
@@ -102,12 +102,20 @@ impl Tool for ReadTool {
 
         // Dedup check: if cache has the same file with matching offset/limit and mtime,
         // return a short stub instead of full content.
+        //
+        // The `ReadResult` provenance guard is load-bearing: after an Edit/Write,
+        // `update_cache_after_write` refreshes this entry to the post-write content
+        // AND mtime (provenance `WriteEcho`). Without the guard a verify-read would
+        // see mtime-equality and emit "file unchanged, refer to the earlier Read" —
+        // but the earlier Read in the transcript is the *pre-edit* content. Only a
+        // `ReadResult` entry is something the model has actually seen as a read.
         if let (Some(cache_arc), Some(current_mtime)) = (&self.file_cache, mtime_ms)
             && let Ok(mut cache) = cache_arc.write()
             && let Some(cached) = cache.get(&validated)
             && cached.offset == offset
             && cached.limit == limit
             && cached.mtime_ms == current_mtime
+            && cached.provenance == Provenance::ReadResult
         {
             return ToolResult {
                 content: FILE_UNCHANGED_STUB.to_string(),
@@ -162,6 +170,7 @@ impl Tool for ReadTool {
                     mtime_ms: mtime,
                     offset,
                     limit,
+                    provenance: Provenance::ReadResult,
                 },
             );
         }
@@ -207,12 +216,16 @@ impl Tool for ReadTool {
         let path = validated.as_path();
         let mtime_ms = file_mtime_ms(path);
 
+        // See the `execute()` dedup block: the `ReadResult` guard prevents a
+        // post-write `WriteEcho` entry from emitting a stub that points the model
+        // at stale pre-edit content.
         if let (Some(cache_arc), Some(current_mtime)) = (&self.file_cache, mtime_ms)
             && let Ok(mut cache) = cache_arc.write()
             && let Some(cached) = cache.get(path)
             && cached.offset == offset
             && cached.limit == limit
             && cached.mtime_ms == current_mtime
+            && cached.provenance == Provenance::ReadResult
         {
             return ToolResult {
                 content: FILE_UNCHANGED_STUB.to_string(),
@@ -264,6 +277,7 @@ impl Tool for ReadTool {
                     mtime_ms: mtime,
                     offset,
                     limit,
+                    provenance: Provenance::ReadResult,
                 },
             );
         }
@@ -539,5 +553,49 @@ mod tests {
         let r2 = tool.execute(input).await;
         assert!(!r2.is_error);
         assert_eq!(r2.content, FILE_UNCHANGED_STUB);
+    }
+
+    #[tokio::test]
+    async fn read_after_write_returns_full_content_not_stub() {
+        // Regression: the Read dedup keyed on mtime-equality alone would false-stub
+        // a post-write verify-read. `update_cache_after_write` refreshes the entry
+        // to the new content AND mtime, so a verify-read sees mtime-equality and
+        // (pre-fix) returned "file unchanged, refer to the earlier Read" — but the
+        // earlier Read in the transcript is the PRE-edit content. The `WriteEcho`
+        // provenance guard must force full current content instead.
+        use crate::file_cache::update_cache_after_write;
+
+        let dir = tempdir().unwrap();
+        let file_path = dir.path().join("verify.txt");
+        std::fs::write(&file_path, "version1\n").unwrap();
+
+        let cache = make_cache();
+        let tool = ReadTool::new(Some(cache.clone()));
+        let input = json!({ "file_path": file_path.to_str().unwrap() });
+
+        // Model reads version1.
+        let r1 = tool.execute(input.clone()).await;
+        assert!(r1.content.contains("version1"));
+
+        // A tool writes version2 (Edit/Write path): cache entry becomes WriteEcho
+        // with the new on-disk mtime.
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        std::fs::write(&file_path, "version2\n").unwrap();
+        update_cache_after_write(&cache, &file_path, "version2\n");
+
+        // Verify-read: mtime matches the WriteEcho entry, but the model never saw
+        // version2 as a read — must return full content, NOT the misleading stub.
+        let r2 = tool.execute(input.clone()).await;
+        assert!(!r2.is_error);
+        assert_ne!(
+            r2.content, FILE_UNCHANGED_STUB,
+            "post-write verify-read must not emit the unchanged stub"
+        );
+        assert!(r2.content.contains("version2"));
+
+        // The verify-read re-cached version2 as a genuine ReadResult, so an
+        // immediate unchanged re-read now correctly stubs.
+        let r3 = tool.execute(input).await;
+        assert_eq!(r3.content, FILE_UNCHANGED_STUB);
     }
 }
