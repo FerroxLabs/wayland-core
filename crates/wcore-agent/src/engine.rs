@@ -768,6 +768,22 @@ pub struct AgentEngine {
     /// from disk. Only the live gate reads this; the rest of the engine uses
     /// the derived fields above.
     config: Config,
+    /// Token-opt "compaction floor": the number of leading conversation
+    /// messages that autocompact has summarized/collapsed away. Any absolute
+    /// message index `< compaction_floor` no longer maps to its original
+    /// message — autocompact replaced that whole prefix with a single folded
+    /// boundary+summary `User` message (see `run_compaction`).
+    ///
+    /// Consumers (diff-resend, read-once) use this to decide whether an earlier
+    /// message's content is STILL verbatim in the model's visible history.
+    /// Microcompact does NOT move this floor: it clears tool-result *bodies*
+    /// in place (leaving the message + its `CLEARED`/`SUPERSEDED` marker), so
+    /// the indices still map — a stubbed body is detected via those markers,
+    /// not via the floor.
+    ///
+    /// Reset to 0 on conversation reset (`/clear`, `/resume`), where the
+    /// message buffer is replaced wholesale.
+    compaction_floor: usize,
 }
 
 impl Drop for AgentEngine {
@@ -966,6 +982,8 @@ impl AgentEngine {
             // captured before the partial moves above.
             workflow_live_mode,
             config: retained_config,
+            // Token-opt: no history has been collapsed yet at construction.
+            compaction_floor: 0,
         }
     }
 
@@ -1117,11 +1135,38 @@ impl AgentEngine {
             // captured before the partial moves above.
             workflow_live_mode,
             config: retained_config,
+            // Token-opt: no history has been collapsed yet at construction.
+            compaction_floor: 0,
         }
     }
 
     pub fn compaction_level(&self) -> wcore_compact::CompactionLevel {
         self.compaction_level
+    }
+
+    /// Token-opt: the compaction floor — the number of leading conversation
+    /// messages that autocompact has summarized/collapsed away. Any absolute
+    /// message index `< compaction_floor` no longer maps to its original
+    /// message. `0` means no autocompact has run this conversation. See the
+    /// `compaction_floor` field doc.
+    //
+    // `allow(dead_code)`: the consumers (diff-resend, read-once) land later in
+    // the token-opt campaign; this is the shared primitive they read. The field
+    // itself is already live (written by autocompact, reset on `/clear`).
+    #[allow(dead_code)]
+    pub(crate) fn compaction_floor(&self) -> usize {
+        self.compaction_floor
+    }
+
+    /// Token-opt: whether the absolute message index `idx` still maps to its
+    /// original message in the model's visible history (i.e. autocompact has
+    /// not collapsed it away). Note: this only tracks autocompact's leading
+    /// collapse — a message can still be *visible* by this test yet have an
+    /// in-place-cleared tool-result body (microcompact); detect that via the
+    /// `CLEARED`/`SUPERSEDED` markers, not this helper.
+    #[allow(dead_code)]
+    pub(crate) fn message_index_still_visible(&self, idx: usize) -> bool {
+        idx >= self.compaction_floor
     }
 
     /// Get a reference to the shared provider
@@ -1724,6 +1769,9 @@ impl AgentEngine {
         // explicit `/model` pin no longer applies, so hook/skill switches
         // are honoured again until the user pins anew.
         self.user_model_pin = None;
+        // Token-opt: the message buffer is gone, so the compaction floor
+        // (which indexes into it) no longer means anything — reset it.
+        self.compaction_floor = 0;
     }
 
     /// `/resume <id>` - swap the in-memory conversation buffer to a loaded
@@ -1731,6 +1779,10 @@ impl AgentEngine {
     /// Symmetric with `clear_conversation`; the system prompt is preserved.
     pub fn load_conversation(&mut self, messages: Vec<Message>) {
         self.messages = messages;
+        // Token-opt: a swapped-in buffer is a fresh index space; the prior
+        // session's compaction floor does not apply. Symmetric with the
+        // `clear_conversation` reset below.
+        self.compaction_floor = 0;
         // Wave-6 #5 (secondary): a resumed/loaded session must start without the
         // PREVIOUS session's explicit `/model` pin. Symmetric with
         // `clear_conversation` (a `/new` re-baselines): the loaded session's
@@ -4145,6 +4197,17 @@ impl AgentEngine {
                     if let Some(turn) = live_user_turn {
                         folded.extend(turn.content);
                     }
+                    // Token-opt compaction-floor: every message currently in
+                    // `self.messages` is the prefix autocompact just summarized
+                    // (the live user turn was popped out above and re-folded
+                    // verbatim, so it is NOT in this count). Replacing the whole
+                    // buffer with one synthetic boundary+summary message
+                    // collapses all of them away — none map to an original
+                    // index any more. Advance the floor by that count (the
+                    // `+=` accumulates across repeated autocompacts, since the
+                    // synthetic message itself becomes part of the next prefix).
+                    let collapsed = self.messages.len();
+                    self.compaction_floor += collapsed;
                     self.messages = vec![Message::now(Role::User, folded)];
                     compacted = true;
                 }
@@ -5361,6 +5424,7 @@ mod set_config_tests {
             // default config for the (unused-in-these-fixtures) live gate.
             workflow_live_mode: false,
             config: wcore_config::config::Config::default(),
+            compaction_floor: 0,
         }
     }
 
@@ -6079,6 +6143,7 @@ mod phase6_tests {
             // default config for the (unused-in-these-fixtures) live gate.
             workflow_live_mode: false,
             config: wcore_config::config::Config::default(),
+            compaction_floor: 0,
         }
     }
 
@@ -6356,6 +6421,7 @@ mod compact_tests {
             // default config for the (unused-in-these-fixtures) live gate.
             workflow_live_mode: false,
             config: wcore_config::config::Config::default(),
+            compaction_floor: 0,
         }
     }
 
@@ -6917,6 +6983,85 @@ mod compact_tests {
         );
     }
 
+    // -- Token-opt compaction-floor primitive --
+
+    #[tokio::test]
+    async fn autocompact_advances_compaction_floor_and_reset_clears_it() {
+        // Token-opt: after autocompact collapses the leading N messages,
+        // `compaction_floor()` must equal N, indices `< N` must report
+        // not-visible and index N must report visible. A conversation reset
+        // (`/clear`) must return the floor to 0.
+        let config = CompactConfig {
+            context_window: 200_000,
+            ..Default::default()
+        };
+        let mut state = CompactState::new();
+        // Above the autocompact threshold (167k), below emergency.
+        state.last_input_tokens = 180_000;
+
+        // Three leading messages (indices 0,1,2 — the ones that collapse)
+        // plus a trailing LIVE user turn. `run_compaction` pops the live
+        // turn out before handing the rest to `autocompact`, so exactly
+        // 3 messages are summarized away → floor advances by 3.
+        let messages = vec![
+            Message::new(
+                Role::User,
+                vec![ContentBlock::Text {
+                    text: "leading one".into(),
+                }],
+            ),
+            Message::new(
+                Role::Assistant,
+                vec![ContentBlock::Text {
+                    text: "leading two".into(),
+                }],
+            ),
+            Message::new(
+                Role::User,
+                vec![ContentBlock::Text {
+                    text: "leading three".into(),
+                }],
+            ),
+            // Trailing live user turn — popped+re-folded, NOT counted.
+            Message::new(
+                Role::Assistant,
+                vec![ContentBlock::Text {
+                    text: "assistant reply".into(),
+                }],
+            ),
+            Message::new(
+                Role::User,
+                vec![ContentBlock::Text {
+                    text: "the live task".into(),
+                }],
+            ),
+        ];
+        // Leading span handed to autocompact = everything except the popped
+        // trailing User turn = 4 messages → N = 4.
+        let n = messages.len() - 1;
+
+        let mut engine = make_compact_engine(config, state, messages);
+        engine.provider = Arc::new(SummaryProvider);
+
+        // Precondition: nothing collapsed yet, every index visible.
+        assert_eq!(engine.compaction_floor(), 0);
+        assert!(engine.message_index_still_visible(0));
+
+        engine.run_compaction().await.expect("autocompact succeeds");
+
+        // The floor advanced by exactly the collapsed leading count.
+        assert_eq!(engine.compaction_floor(), n);
+        // The last collapsed index is no longer visible…
+        assert!(!engine.message_index_still_visible(n - 1));
+        // …but the index at the floor (and beyond) maps to live history.
+        assert!(engine.message_index_still_visible(n));
+
+        // A conversation reset re-baselines the index space.
+        engine.clear_conversation();
+        assert_eq!(engine.compaction_floor(), 0);
+        assert!(engine.message_index_still_visible(0));
+    }
+
     // -- Circuit broken prevents autocompact, emergency still fires --
 
     #[tokio::test]
@@ -7124,6 +7269,7 @@ mod plan_mode_tests {
             // default config for the (unused-in-these-fixtures) live gate.
             workflow_live_mode: false,
             config: wcore_config::config::Config::default(),
+            compaction_floor: 0,
         }
     }
 
@@ -7534,6 +7680,7 @@ mod hook_integration_tests {
             // default config for the (unused-in-these-fixtures) live gate.
             workflow_live_mode: false,
             config: wcore_config::config::Config::default(),
+            compaction_floor: 0,
         }
     }
 
@@ -8193,6 +8340,7 @@ mod approval_bridge_engine_tests {
             // default config for the (unused-in-these-fixtures) live gate.
             workflow_live_mode: false,
             config: wcore_config::config::Config::default(),
+            compaction_floor: 0,
         }
     }
 
@@ -8408,6 +8556,7 @@ mod user_model_writeback_tests {
             // default config for the (unused-in-these-fixtures) live gate.
             workflow_live_mode: false,
             config: wcore_config::config::Config::default(),
+            compaction_floor: 0,
         }
     }
 
