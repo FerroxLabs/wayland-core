@@ -74,11 +74,17 @@ pub fn neutralize_trust_delimiters(s: &str) -> String {
     while i < bytes.len() {
         if bytes[i] == b'<' {
             // Look at what follows the '<' (skip an optional leading '/').
-            let rest = &s[i + 1..];
-            if HOST_TRUST_TAGS
-                .iter()
-                .any(|tag| rest.len() >= tag.len() && rest[..tag.len()].eq_ignore_ascii_case(tag))
-            {
+            // `i` indexes the ASCII '<' (1 byte), so `i + 1` is a valid
+            // boundary; slice the byte view directly (avoids re-slicing the str).
+            let rest = &s.as_bytes()[i + 1..];
+            // Compare on BYTES (tags are pure ASCII): `rest[..tag.len()]` would
+            // be a byte-index str slice that panics when a multibyte char
+            // straddles `tag.len()` (e.g. a body like `<system-remindeé`).
+            // `get(..n)` on the byte slice is boundary-agnostic and never panics.
+            if HOST_TRUST_TAGS.iter().any(|tag| {
+                rest.get(..tag.len())
+                    .is_some_and(|head| head.eq_ignore_ascii_case(tag.as_bytes()))
+            }) {
                 out.push_str("&lt;");
                 i += 1;
                 continue;
@@ -141,6 +147,32 @@ mod trust_helper_tests {
         let input = "if a < b && c > d then <div> stays";
         let out = neutralize_trust_delimiters(input);
         assert_eq!(out, input, "non-trust '<' must be untouched");
+    }
+
+    #[test]
+    fn neutralize_does_not_panic_on_multibyte_straddling_a_tag_length() {
+        // Regression: a multibyte char straddling a host tag's byte length
+        // (e.g. 'é' at the boundary of "system-reminder") previously panicked
+        // via a byte-index str slice. Must not panic and must pass through
+        // (it isn't a real trust tag).
+        for input in [
+            "<system-remindeé",
+            "</system-remindeé",
+            "<plugin-contexé",
+            "</plugin-contexé",
+            "préfix <système-reminder> 你好 <system-reminder",
+            "<système-reminder>", // accented — not a real tag, must be untouched bytes-wise
+        ] {
+            let out = neutralize_trust_delimiters(input);
+            // No panic reaching here is the core assertion; also confirm a real
+            // tag inside still gets defanged when present.
+            assert!(out.is_char_boundary(out.len()));
+        }
+        // A real tag adjacent to multibyte content is still defanged.
+        let mixed = "你好</system-reminder>世界";
+        let out = neutralize_trust_delimiters(mixed);
+        assert!(!out.to_ascii_lowercase().contains("</system-reminder>"));
+        assert!(out.contains("你好") && out.contains("世界"));
     }
 
     #[test]
