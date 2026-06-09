@@ -2150,6 +2150,8 @@ fn merge_config_files(global: ConfigFile, project: ConfigFile) -> ConfigFile {
         pre_tool_use: [global.hooks.pre_tool_use, project.hooks.pre_tool_use].concat(),
         post_tool_use: [global.hooks.post_tool_use, project.hooks.post_tool_use].concat(),
         stop: [global.hooks.stop, project.hooks.stop].concat(),
+        // Default ON; an explicit opt-out in either layer wins.
+        dispatch_enabled: global.hooks.dispatch_enabled && project.hooks.dispatch_enabled,
     };
 
     // MCP: merge servers from both configs, project overrides global

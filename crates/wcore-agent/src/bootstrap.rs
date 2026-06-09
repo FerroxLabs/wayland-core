@@ -823,6 +823,81 @@ impl AgentBootstrap {
 
         let has_mcp = mcp_manager.is_some() || !mcp_managers.is_empty();
 
+        // C1 / Task A1 — build the host hook dispatcher. Plugin lifecycle hooks
+        // (e.g. SessionStart) can pull a contribution from an MCP tool of the
+        // same NAME on the plugin's MCP server. The dispatcher is framework-
+        // blind (see `crate::hooks::mcp_dispatcher`); the only IJFW-or-anything
+        // knowledge is the `plugin -> mcp server` map built here from registry
+        // state — no plugin name is hardcoded.
+        //
+        // Provenance gap: `McpServerSpec` carries no originating-plugin field
+        // and `HostMcpRegistrar` stores a flat list, so we cannot read the map
+        // directly. Instead we resolve generically: each plugin that registered
+        // a hook is matched to the connected MCP server whose advertised tool
+        // list contains one of that plugin's hook names. Tools are discovered
+        // eagerly at connect (`tools/list`), so the live `all_tools()` view is
+        // populated by the time we get here.
+        //
+        // First-match assumption: this binds a plugin to the FIRST server (in
+        // `all_tools()` iteration order, which is not deterministic across a
+        // HashMap) advertising any of its hook tool names. That is unambiguous
+        // only while hook-tool names are unique across servers — the case today
+        // (one memory-style plugin → one server). If two servers ever advertise
+        // a tool sharing a plugin's hook name, the bind is arbitrary; the real
+        // fix is plugin→server provenance on `HostMcpRegistrar` (see A4/A5).
+        //
+        // Gated by `config.hooks.dispatch_enabled` (default ON). When off, or
+        // when no plugin hook resolves to a server, no dispatcher is wired and
+        // plugin hooks stay log-only (the legacy behavior).
+        let hook_dispatcher: Option<Arc<dyn crate::hooks::HookDispatcher>> =
+            if self.config.hooks.dispatch_enabled
+                && !applied.plugin_hooks.is_empty()
+                && !mcp_managers.is_empty()
+            {
+                // plugin name -> set of its hook tool names
+                let mut hooks_by_plugin: std::collections::HashMap<&str, Vec<&str>> =
+                    std::collections::HashMap::new();
+                for h in &applied.plugin_hooks {
+                    hooks_by_plugin
+                        .entry(h.plugin.as_str())
+                        .or_default()
+                        .push(h.name.as_str());
+                }
+                // For each plugin, find the server advertising one of its hook tools.
+                let mut server_for_plugin: std::collections::HashMap<String, String> =
+                    std::collections::HashMap::new();
+                for (plugin, hook_names) in &hooks_by_plugin {
+                    'mgr: for mgr in &mcp_managers {
+                        for (server_name, tool) in mgr.all_tools() {
+                            if hook_names.iter().any(|hn| *hn == tool.name) {
+                                server_for_plugin
+                                    .insert((*plugin).to_string(), server_name.to_string());
+                                break 'mgr;
+                            }
+                        }
+                    }
+                    if !server_for_plugin.contains_key(*plugin) {
+                        tracing::debug!(
+                            target: "wcore_agent::hooks",
+                            plugin = %plugin,
+                            "no MCP server advertises this plugin's hook tools; hooks stay log-only"
+                        );
+                    }
+                }
+                if server_for_plugin.is_empty() {
+                    None
+                } else {
+                    let caller =
+                        Arc::new(crate::hooks::McpManagerCaller::new(mcp_managers.clone()));
+                    Some(Arc::new(crate::hooks::McpHookDispatcher::new(
+                        caller,
+                        server_for_plugin,
+                    )))
+                }
+            } else {
+                None
+            };
+
         // M3.6.2 — build memory_api BEFORE skill_refs so the prioritizer
         // can reorder the catalog at session start. Moved up from its
         // original location (post-engine-construction) for sequencing.
@@ -1627,6 +1702,13 @@ impl AgentBootstrap {
         // engine's `HookEngine` (constructed inside `new_with_provider` /
         // `resume_with_provider`, so this must happen post-construction).
         engine.register_plugin_hooks(applied.plugin_hooks);
+        // C1 / Task A1 — wire the host hook dispatcher built above (gated by
+        // `config.hooks.dispatch_enabled`). `None` ⇒ plugin hooks stay
+        // log-only. Set after `register_plugin_hooks` so the engine already
+        // knows which hooks the dispatcher will be asked to resolve.
+        if let Some(dispatcher) = hook_dispatcher {
+            engine.set_hook_dispatcher(dispatcher);
+        }
         // v0.6.5 Wave 6A.2 — install plugin-reified user-model backends.
         // The session-end PUM path mirrors every inferred delta to each
         // backend (e.g. Honcho via `learn_preference`) in addition to the

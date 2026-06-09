@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use crate::shell::shell_command_builder;
 
 /// Hook system configuration
-#[derive(Debug, Clone, Deserialize, Serialize, Default)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct HooksConfig {
     #[serde(default)]
     pub pre_tool_use: Vec<HookDef>,
@@ -14,6 +14,33 @@ pub struct HooksConfig {
     pub post_tool_use: Vec<HookDef>,
     #[serde(default)]
     pub stop: Vec<HookDef>,
+    /// Kill-switch for the host plugin-hook→MCP dispatcher. When `true`
+    /// (default), bootstrap wires a `HookDispatcher` so plugin lifecycle
+    /// hooks can pull a contribution from their MCP backend. Set `false`
+    /// to keep plugin hooks log-only (the legacy behavior) without
+    /// disabling plugins or MCP.
+    ///
+    /// Scope today: only the `SessionStart` phase dispatches a contribution;
+    /// the other phases (`PrePrompt`, `PreCompact`, …) stay log-only until they
+    /// are wired in later increments. Flipping this off disables the
+    /// SessionStart path now and any phase added later.
+    #[serde(default = "default_dispatch_enabled")]
+    pub dispatch_enabled: bool,
+}
+
+impl Default for HooksConfig {
+    fn default() -> Self {
+        Self {
+            pre_tool_use: Vec::new(),
+            post_tool_use: Vec::new(),
+            stop: Vec::new(),
+            dispatch_enabled: default_dispatch_enabled(),
+        }
+    }
+}
+
+fn default_dispatch_enabled() -> bool {
+    true
 }
 
 /// A single hook definition
@@ -436,6 +463,7 @@ mod tests {
             pre_tool_use: vec![make_hook("pre", vec!["*"], "echo ok")],
             post_tool_use: vec![],
             stop: vec![],
+            ..Default::default()
         };
         let engine = ShellHooks::new(config);
         assert!(engine.has_hooks());
@@ -449,6 +477,7 @@ mod tests {
             pre_tool_use: vec![make_hook("allow", vec!["Read"], "echo ok")],
             post_tool_use: vec![],
             stop: vec![],
+            ..Default::default()
         };
         let engine = ShellHooks::new(config);
         let result = engine.run_pre_tool_use("Read", &json!({})).await;
@@ -461,6 +490,7 @@ mod tests {
             pre_tool_use: vec![make_hook("blocker", vec!["Read"], "exit 1")],
             post_tool_use: vec![],
             stop: vec![],
+            ..Default::default()
         };
         let engine = ShellHooks::new(config);
         let result = engine.run_pre_tool_use("Read", &json!({})).await;
@@ -474,6 +504,7 @@ mod tests {
             pre_tool_use: vec![],
             post_tool_use: vec![make_hook("post", vec!["Read"], "echo done")],
             stop: vec![],
+            ..Default::default()
         };
         let engine = ShellHooks::new(config);
         let messages = engine.run_post_tool_use("Read", &json!({}), "output").await;
@@ -493,6 +524,7 @@ mod tests {
             }],
             post_tool_use: vec![],
             stop: vec![],
+            ..Default::default()
         };
         let engine = ShellHooks::new(config);
         let result = engine.run_pre_tool_use("Read", &json!({})).await;
@@ -524,6 +556,7 @@ mod phase11_tests {
             pre_tool_use: names.iter().map(|n| make_hook(n)).collect(),
             post_tool_use: vec![],
             stop: vec![],
+            ..Default::default()
         }
     }
 
@@ -535,6 +568,7 @@ mod phase11_tests {
             pre_tool_use: vec![make_hook("pre-b"), make_hook("pre-c")],
             post_tool_use: vec![],
             stop: vec![],
+            ..Default::default()
         };
         engine.merge_hooks(additional);
         assert_eq!(engine.config.pre_tool_use.len(), 3);
@@ -548,6 +582,7 @@ mod phase11_tests {
             pre_tool_use: vec![],
             post_tool_use: vec![make_hook("post-a")],
             stop: vec![],
+            ..Default::default()
         };
         engine.merge_hooks(additional);
         assert_eq!(engine.config.post_tool_use.len(), 1);
@@ -560,12 +595,14 @@ mod phase11_tests {
             pre_tool_use: vec![],
             post_tool_use: vec![],
             stop: vec![make_hook("stop-a")],
+            ..Default::default()
         };
         let mut engine = ShellHooks::new(initial);
         let additional = HooksConfig {
             pre_tool_use: vec![],
             post_tool_use: vec![],
             stop: vec![make_hook("stop-b")],
+            ..Default::default()
         };
         engine.merge_hooks(additional);
         assert_eq!(engine.config.stop.len(), 2);
@@ -612,6 +649,7 @@ mod phase11_tests {
             pre_tool_use: vec![],
             post_tool_use: vec![],
             stop: vec![make_hook("stop-x")],
+            ..Default::default()
         };
         engine.merge_hooks(additional);
         assert_eq!(

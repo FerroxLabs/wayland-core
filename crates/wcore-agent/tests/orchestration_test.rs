@@ -240,6 +240,7 @@ async fn test_pre_hook_blocks_tool() {
         pre_tool_use: vec![make_pre_hook("blocker", "echo", "exit 1")],
         post_tool_use: vec![],
         stop: vec![],
+        ..Default::default()
     };
     let mut hook_engine = HookEngine::new(hook_config);
 
@@ -286,6 +287,7 @@ async fn test_post_hook_runs_after_tool() {
         pre_tool_use: vec![],
         post_tool_use: vec![make_post_hook("post-logger", "echo", "echo done")],
         stop: vec![],
+        ..Default::default()
     };
     let mut hook_engine = HookEngine::new(hook_config);
 

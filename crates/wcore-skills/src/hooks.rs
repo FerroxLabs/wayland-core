@@ -133,6 +133,7 @@ pub fn to_hook_defs(config: &SkillHooksConfig, skill_name: &str) -> HooksConfig 
         pre_tool_use: build_defs(&config.pre_tool_use, skill_name, "pre_tool_use"),
         post_tool_use: build_defs(&config.post_tool_use, skill_name, "post_tool_use"),
         stop: build_defs(&config.stop, skill_name, "stop"),
+        ..Default::default()
     }
 }
 

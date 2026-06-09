@@ -243,6 +243,7 @@ async fn pre_tool_use_shell_block_propagates() {
         pre_tool_use: vec![make_pre_hook_def("shell-blocker", cmd)],
         post_tool_use: vec![],
         stop: vec![],
+        ..Default::default()
     };
     let mut engine = HookEngine::new(config);
     engine.register_rust_hook(Box::new(ContinueHook {
@@ -263,6 +264,7 @@ async fn pre_tool_use_rust_block_short_circuits_shell() {
         pre_tool_use: vec![make_pre_hook_def("would-block", "exit 1")],
         post_tool_use: vec![],
         stop: vec![],
+        ..Default::default()
     };
     let mut engine = HookEngine::new(config);
     engine.register_rust_hook(Box::new(BlockPreHook {
@@ -328,6 +330,7 @@ async fn post_tool_use_shell_log_lines_appended() {
         pre_tool_use: vec![],
         post_tool_use: vec![make_post_hook_def("post-logger", "echo done")],
         stop: vec![],
+        ..Default::default()
     };
     let engine = HookEngine::new(config);
 
@@ -403,6 +406,7 @@ async fn on_session_end_runs_only_rust_hooks() {
             command: "echo SHELL-STOP-FIRED".into(),
             timeout_ms: 5_000,
         }],
+        ..Default::default()
     };
     let mut engine = HookEngine::new(config);
     let fired = std::sync::Arc::new(Mutex::new(false));
@@ -450,6 +454,7 @@ fn has_hooks_true_with_shell_only() {
         pre_tool_use: vec![make_pre_hook_def("pre", "echo ok")],
         post_tool_use: vec![],
         stop: vec![],
+        ..Default::default()
     };
     let engine = HookEngine::new(config);
     assert!(engine.has_hooks());
@@ -473,6 +478,7 @@ async fn merge_hooks_only_touches_shell_side() {
         pre_tool_use: vec![make_pre_hook_def("merged", "exit 1")],
         post_tool_use: vec![],
         stop: vec![],
+        ..Default::default()
     };
     engine.merge_hooks(additional);
 

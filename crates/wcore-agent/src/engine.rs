@@ -1358,6 +1358,19 @@ impl AgentEngine {
         }
     }
 
+    /// C1 / Task A1 — install the host `HookDispatcher` onto the engine's
+    /// `HookEngine`. Until set, plugin lifecycle hooks fire log-only. Called by
+    /// `AgentBootstrap` after `register_plugin_hooks`. No-op when `self.hooks`
+    /// is `None` (synthetic test-mode engines).
+    pub fn set_hook_dispatcher(
+        &mut self,
+        dispatcher: std::sync::Arc<dyn crate::hooks::HookDispatcher>,
+    ) {
+        if let Some(engine) = self.hooks.as_mut() {
+            engine.set_dispatcher(dispatcher);
+        }
+    }
+
     /// v0.6.4 Task 1.2 — install a plugin-contributed `AgentRegistry`.
     ///
     /// Called by `AgentBootstrap` after `apply_initialize_outcome` returns,
