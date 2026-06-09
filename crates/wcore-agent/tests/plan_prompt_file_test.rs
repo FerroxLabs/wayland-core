@@ -73,6 +73,7 @@ fn tc_3_4_03_system_prompt_includes_plan_instructions_when_active() {
         true,
         false,
         &[],
+        false,
     );
 
     // Should contain plan mode instructions
@@ -107,6 +108,7 @@ fn tc_3_4_04_system_prompt_excludes_plan_instructions_when_inactive() {
         false,
         false,
         &[],
+        false,
     );
 
     // Should NOT contain plan mode instructions
@@ -230,6 +232,7 @@ fn plan_instructions_appear_after_memory_before_skills() {
         true,
         false,
         &[],
+        false,
     );
 
     let memory_pos = result

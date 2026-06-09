@@ -150,6 +150,7 @@ mod tests {
             reasoning_effort: None,
             cache_tier: None,
             routing_hint: None,
+            stop_sequences: Vec::new(),
         };
         let result = p.stream(&req).await;
         assert!(result.is_err(), "expected error from unreachable host");

@@ -44,6 +44,7 @@ fn tc_4_3_01_tool_guidance_section_exists() {
         false,
         false,
         &[],
+        false,
     );
     assert!(
         result.contains("# Using your tools"),
@@ -68,6 +69,7 @@ fn tc_4_3_02_bash_prohibition_list() {
         false,
         false,
         &[],
+        false,
     );
 
     // Glob replaces find/ls
@@ -114,6 +116,7 @@ fn tc_4_3_03_parallel_call_guidance() {
         false,
         false,
         &[],
+        false,
     );
     assert!(
         result.contains("parallel"),
@@ -142,6 +145,7 @@ fn tc_4_3_04_edit_write_read_rules() {
         false,
         false,
         &[],
+        false,
     );
     assert!(
         result.contains("Prefer Edit over Write"),
@@ -170,6 +174,7 @@ fn tc_4_3_05_order_after_intro_before_custom() {
         false,
         false,
         &[],
+        false,
     );
 
     let intro_pos = result
@@ -210,6 +215,7 @@ fn tc_4_3_06_order_before_skills() {
         false,
         false,
         &[],
+        false,
     );
 
     let guidance_pos = result
@@ -247,6 +253,7 @@ fn tc_4_3_06_order_before_memory() {
         false,
         false,
         &[],
+        false,
     );
 
     let guidance_pos = result
@@ -296,6 +303,7 @@ fn tc_4_3_07_all_sections_coexist() {
         true, // plan mode active
         false,
         &[],
+        false,
     );
 
     // All sections should exist
@@ -353,6 +361,7 @@ fn tc_4_3_08_guidance_in_plan_mode() {
         true,
         false,
         &[],
+        false,
     );
     assert!(
         result.contains("# Using your tools"),

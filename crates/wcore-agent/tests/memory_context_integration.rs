@@ -34,6 +34,7 @@ fn tc_7_1_memory_dir_with_content_injects_prompt() {
         false,
         false,
         &[],
+        false,
     );
 
     // Should contain minimal memory system sections
@@ -78,6 +79,7 @@ fn tc_7_2_no_memory_dir_no_injection() {
         false,
         false,
         &[],
+        false,
     );
 
     assert!(
@@ -138,6 +140,7 @@ fn tc_7_3_section_ordering() {
         false,
         false,
         &[],
+        false,
     );
 
     let agents_pos = result
@@ -177,6 +180,7 @@ fn tc_7_4_nonexistent_dir_graceful_degradation() {
         false,
         false,
         &[],
+        false,
     );
 
     // Should not panic
@@ -218,6 +222,7 @@ fn tc_7_5_memory_md_content_injected() {
         false,
         false,
         &[],
+        false,
     );
 
     assert!(
@@ -260,6 +265,7 @@ fn tc_7_6_no_memory_md_shows_empty() {
         false,
         false,
         &[],
+        false,
     );
 
     assert!(
@@ -294,6 +300,7 @@ fn tc_7_7_no_bb_brand_in_integrated_prompt() {
         false,
         false,
         &[],
+        false,
     );
 
     assert!(

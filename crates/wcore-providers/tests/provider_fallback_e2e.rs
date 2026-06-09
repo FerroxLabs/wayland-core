@@ -60,6 +60,7 @@ fn dummy_request() -> LlmRequest {
         reasoning_effort: None,
         cache_tier: None,
         routing_hint: None,
+        stop_sequences: Vec::new(),
     }
 }
 

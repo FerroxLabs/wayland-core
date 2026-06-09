@@ -23,6 +23,7 @@ fn system_prompt_contains_tool_guidance() {
         false,
         false,
         &[],
+        false,
     );
 
     // 1. Heading

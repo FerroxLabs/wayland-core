@@ -448,6 +448,7 @@ fn case_8_toon_system_prompt_injection() {
         false,
         true, // toon_enabled
         &[],
+        false,
     );
 
     eprintln!(
@@ -477,6 +478,7 @@ fn case_8_toon_system_prompt_injection() {
         false,
         false, // toon_enabled
         &[],
+        false,
     );
 
     eprintln!(

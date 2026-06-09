@@ -10,6 +10,18 @@ use wcore_types::message::{ContentBlock, Message, Role};
 use crate::agents_md;
 use crate::plan::prompt as plan_prompt;
 
+/// Output-side token optimization (Part B): a single, fixed terseness
+/// directive injected into the cached system prefix.
+///
+/// It MUST be byte-identical on every turn — it lives ahead of the volatile
+/// message tail in the cached prefix, so any variation would bust the prompt
+/// cache. Keeping it a `const` (not a `format!`) guarantees that. Injected
+/// only when the route optimizes client-side
+/// (`compat.input_optimization() == "client"`); router-optimized routes pass
+/// `terse_enabled = false` and the section is omitted entirely.
+pub const TERSENESS_DIRECTIVE: &str = "Be concise. Lead with the answer or the \
+    action; skip restating the question and ceremonial preamble/closing.";
+
 /// Session-scoped cache for system prompt sections.
 ///
 /// Each section (intro, tool guidance, AGENTS.md, memory, skills) is cached
@@ -24,6 +36,8 @@ pub struct SystemPromptCache {
     pub(crate) last_plan_mode: bool,
     /// Track last toon_enabled value to detect changes.
     pub(crate) last_toon_enabled: bool,
+    /// Track last terse_enabled value to detect changes (Part B route gate).
+    pub(crate) last_terse: bool,
 }
 
 impl SystemPromptCache {
@@ -33,6 +47,7 @@ impl SystemPromptCache {
             joined: None,
             last_plan_mode: false,
             last_toon_enabled: false,
+            last_terse: false,
         }
     }
 
@@ -120,12 +135,18 @@ fn format_plugin_rules(rules: &[RuleSpec], cwd: &str) -> String {
 /// Sections are assembled in this order:
 /// 1. Base intro (role, model identity, working directory, date)
 /// 2. Tool usage guidance (dedicated tools, parallel calls, etc.)
+/// 2b. Terseness directive (output-side opt — only when `terse_enabled`)
 /// 3. Custom prompt (user config)
 /// 4. AGENTS.md (project instructions)
 /// 5. Memory system prompt (behavioral instructions + MEMORY.md content)
 /// 6. Plan mode instructions (when active)
 /// 7. Skills reminder (available skills listing)
 /// 8. Plugin rules (universal + project-scoped, gated on cwd)
+///
+/// `terse_enabled` gates the static [`TERSENESS_DIRECTIVE`] section. The caller
+/// passes the route-optimization flag here (`true` when
+/// `compat.input_optimization() == "client"`); the directive is byte-identical
+/// every turn so it stays inside the cached prefix without busting the cache.
 ///
 /// Session-permanent sections (intro, tool guidance, custom prompt, AGENTS.md,
 /// plugin rules) are cached in `cache.sections` and reused across calls. The
@@ -143,11 +164,13 @@ pub fn build_system_prompt(
     plan_mode_active: bool,
     toon_enabled: bool,
     plugin_rules: &[RuleSpec],
+    terse_enabled: bool,
 ) -> String {
     // Fast path: return cached joined result if nothing changed
     if let Some(ref joined) = cache.joined
         && cache.last_plan_mode == plan_mode_active
         && cache.last_toon_enabled == toon_enabled
+        && cache.last_terse == terse_enabled
     {
         return joined.clone();
     }
@@ -177,6 +200,17 @@ pub fn build_system_prompt(
         .entry("tool_guidance")
         .or_insert_with(|| tool_usage_guidance().to_string());
     parts.push(guidance.clone());
+
+    // Section: terseness directive (output-side opt, route-gated).
+    // Fixed `const` content, cached under a stable key so it never perturbs the
+    // prompt-cache prefix. Only emitted when the route optimizes client-side.
+    if terse_enabled {
+        let terse = cache
+            .sections
+            .entry("terseness")
+            .or_insert_with(|| TERSENESS_DIRECTIVE.to_string());
+        parts.push(terse.clone());
+    }
 
     // Section: custom prompt (session permanent)
     if let Some(custom) = custom_prompt {
@@ -284,6 +318,7 @@ pub fn build_system_prompt(
     cache.joined = Some(joined.clone());
     cache.last_plan_mode = plan_mode_active;
     cache.last_toon_enabled = toon_enabled;
+    cache.last_terse = terse_enabled;
     joined
 }
 
@@ -379,6 +414,7 @@ mod tests {
             false,
             false,
             &[],
+            false,
         );
         assert!(prompt.contains(cwd), "system prompt should contain the cwd");
     }
@@ -396,6 +432,7 @@ mod tests {
             false,
             false,
             &[],
+            false,
         );
         assert!(
             prompt.contains("deepseek-chat"),
@@ -422,6 +459,7 @@ mod tests {
             false,
             false,
             &[],
+            false,
         );
         assert!(
             prompt.contains(custom),
@@ -539,6 +577,7 @@ mod tests {
             false,
             false,
             &[],
+            false,
         );
         assert!(
             !result.contains("The following skills are available"),
@@ -563,6 +602,7 @@ mod tests {
             false,
             false,
             &[],
+            false,
         );
         assert!(
             result.contains("<system-reminder>"),
@@ -597,6 +637,7 @@ mod tests {
             false,
             false,
             &[],
+            false,
         );
         assert!(
             result.contains("visible-skill"),
@@ -625,6 +666,7 @@ mod tests {
             false,
             false,
             &[],
+            false,
         );
         assert!(
             !result.contains("The following skills are available"),
@@ -646,6 +688,7 @@ mod tests {
             false,
             false,
             &[],
+            false,
         );
         assert!(
             result.contains("Custom instructions here"),
@@ -671,6 +714,7 @@ mod tests {
             false,
             false,
             &[],
+            false,
         );
         let custom_pos = result.find("Custom text").unwrap();
         let reminder_pos = result.rfind("<system-reminder>").unwrap();
@@ -695,6 +739,7 @@ mod tests {
             false,
             false,
             &[],
+            false,
         );
         // Minimal mode: skill appears as name only, no ': '
         assert!(
@@ -720,6 +765,7 @@ mod tests {
             false,
             false,
             &[],
+            false,
         );
         assert!(
             result.contains("/workspace/my-project"),
@@ -747,6 +793,7 @@ mod tests {
             false,
             false,
             &[],
+            false,
         );
 
         assert!(
@@ -786,6 +833,7 @@ mod tests {
             false,
             false,
             &[],
+            false,
         );
 
         assert!(
@@ -813,6 +861,7 @@ mod tests {
             false,
             false,
             &[],
+            false,
         );
         assert!(
             !result.contains("auto memory"),
@@ -842,6 +891,7 @@ mod tests {
             false,
             false,
             &[],
+            false,
         );
 
         assert!(
@@ -871,6 +921,7 @@ mod tests {
             false,
             false,
             &[],
+            false,
         );
 
         // Should not panic and should show empty state
@@ -898,6 +949,7 @@ mod tests {
             false,
             false,
             &[],
+            false,
         );
 
         assert!(
@@ -932,6 +984,7 @@ mod tests {
             false,
             false,
             &[],
+            false,
         );
 
         let agents_pos = result.find("PROJECT_RULES_HERE").unwrap();
@@ -970,6 +1023,7 @@ mod tests {
             false,
             false,
             &[],
+            false,
         );
 
         assert!(
@@ -997,6 +1051,7 @@ mod tests {
             false,
             false,
             &[],
+            false,
         );
         assert!(
             result.contains("# Using your tools"),
@@ -1017,6 +1072,7 @@ mod tests {
             false,
             false,
             &[],
+            false,
         );
         assert!(
             result.contains("Glob"),
@@ -1053,6 +1109,7 @@ mod tests {
             false,
             false,
             &[],
+            false,
         );
         assert!(
             result.contains("parallel"),
@@ -1077,6 +1134,7 @@ mod tests {
             false,
             false,
             &[],
+            false,
         );
         assert!(
             result.contains("Prefer Edit over Write"),
@@ -1097,6 +1155,7 @@ mod tests {
             false,
             false,
             &[],
+            false,
         );
         assert!(
             result.contains("Read a file before editing"),
@@ -1117,6 +1176,7 @@ mod tests {
             false,
             false,
             &[],
+            false,
         );
         let intro_pos = result.find("Working directory").unwrap();
         let guidance_pos = result.find("# Using your tools").unwrap();
@@ -1145,6 +1205,7 @@ mod tests {
             false,
             false,
             &[],
+            false,
         );
         let guidance_pos = result.find("# Using your tools").unwrap();
         let skills_pos = result.find("guide-test-skill").unwrap();
@@ -1167,6 +1228,7 @@ mod tests {
             true,
             false,
             &[],
+            false,
         );
         assert!(
             result.contains("# Using your tools"),
@@ -1187,6 +1249,7 @@ mod tests {
             false,
             false,
             &[],
+            false,
         );
         assert!(
             result.contains("deferred"),
@@ -1216,6 +1279,7 @@ mod tests {
             false,
             false,
             &[],
+            false,
         );
         let guidance_pos = result.find("# Using your tools").unwrap();
         let memory_pos = result.find("auto memory").unwrap();
@@ -1300,6 +1364,7 @@ mod tests {
             false,
             false,
             &[],
+            false,
         );
         assert!(cache.joined.is_some());
 
@@ -1314,6 +1379,7 @@ mod tests {
             false,
             false,
             &[],
+            false,
         );
         assert_eq!(first, second);
     }
@@ -1332,6 +1398,7 @@ mod tests {
             false,
             false,
             &[],
+            false,
         );
         let with_plan = build_system_prompt(
             &mut cache,
@@ -1344,6 +1411,7 @@ mod tests {
             true,
             false,
             &[],
+            false,
         );
         assert_ne!(without_plan, with_plan);
     }
@@ -1363,6 +1431,7 @@ mod tests {
             false,
             true,
             &[],
+            false,
         );
         assert!(
             result.contains("TOON"),
@@ -1387,6 +1456,7 @@ mod tests {
             false,
             false,
             &[],
+            false,
         );
         assert!(
             !result.contains("TOON"),
@@ -1424,6 +1494,7 @@ mod tests {
             false,
             false,
             &rules,
+            false,
         );
         assert!(
             result.contains("UNIVERSAL_RULE_BODY_MARKER"),
@@ -1444,6 +1515,7 @@ mod tests {
             false,
             false,
             &[],
+            false,
         );
         assert!(
             !result.contains("UNIVERSAL_RULE_BODY_MARKER"),
@@ -1474,6 +1546,7 @@ mod tests {
             false,
             false,
             &rules,
+            false,
         );
         assert!(
             result.contains("PROJECT_SCOPED_RULE_MARKER"),
@@ -1503,6 +1576,7 @@ mod tests {
             false,
             false,
             &rules,
+            false,
         );
         assert!(
             !result.contains("PROJECT_SCOPED_RULE_MARKER"),
@@ -1535,6 +1609,7 @@ mod tests {
             false,
             false,
             &rules,
+            false,
         );
         assert!(
             result.contains("UNIVERSAL_RULE_BODY_MARKER"),
@@ -1543,6 +1618,68 @@ mod tests {
         assert!(
             !result.contains("PROJECT_SCOPED_RULE_MARKER"),
             "project-scoped rule must still be excluded outside a project"
+        );
+    }
+
+    // --- Output-side opt (Part B): terseness directive ---------------------
+
+    /// The directive constant must be non-empty so the injected section
+    /// carries actual instruction text.
+    #[test]
+    fn terseness_directive_is_non_empty() {
+        assert!(!TERSENESS_DIRECTIVE.trim().is_empty());
+    }
+
+    /// Cache-stability: the directive must render byte-identically across two
+    /// `build_system_prompt` calls so it never busts the prompt-cache prefix.
+    #[test]
+    fn terseness_directive_is_cache_stable_across_calls() {
+        let build = || {
+            build_system_prompt(
+                &mut SystemPromptCache::new(),
+                None,
+                "/tmp",
+                "test-model",
+                &[],
+                None,
+                None,
+                false,
+                false,
+                &[],
+                true, // terse_enabled
+            )
+        };
+        let first = build();
+        let second = build();
+        assert_eq!(
+            first, second,
+            "terseness-enabled prompt must be identical across turns (cache-safe)"
+        );
+        assert!(
+            first.contains(TERSENESS_DIRECTIVE),
+            "terse_enabled=true must inject the directive verbatim"
+        );
+    }
+
+    /// Route gate: with `terse_enabled = false` the directive is omitted.
+    #[test]
+    fn terseness_directive_omitted_when_disabled() {
+        let result = build_system_prompt(
+            &mut SystemPromptCache::new(),
+            None,
+            "/tmp",
+            "test-model",
+            &[],
+            None,
+            None,
+            false,
+            false,
+            &[],
+            false, // terse_enabled
+        );
+        assert!(
+            !result.contains(TERSENESS_DIRECTIVE),
+            "terse_enabled=false must omit the directive (router-optimized route)"
         );
     }
 }

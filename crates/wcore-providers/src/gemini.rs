@@ -243,6 +243,26 @@ pub(crate) fn build_gemini_body(
         generation_config["thinkingConfig"] = thinking_cfg;
     }
 
+    // Output-side optimization (Part A): UNION the request's fluff stop
+    // sequences into Gemini's `generationConfig.stopSequences`, preserving any
+    // the caller already placed there. Skipped when empty so back-compatible
+    // callers emit no stop field.
+    if !request.stop_sequences.is_empty() {
+        match generation_config
+            .get_mut("stopSequences")
+            .and_then(Value::as_array_mut)
+        {
+            Some(existing) => {
+                for s in &request.stop_sequences {
+                    existing.push(json!(s));
+                }
+            }
+            None => {
+                generation_config["stopSequences"] = json!(request.stop_sequences);
+            }
+        }
+    }
+
     let mut body = json!({
         "contents": contents,
         "generationConfig": generation_config,
@@ -826,6 +846,7 @@ mod tests {
             reasoning_effort: None,
             cache_tier: None,
             routing_hint: None,
+            stop_sequences: Vec::new(),
         }
     }
 
@@ -949,6 +970,39 @@ mod tests {
         )]);
         let body = provider.build_request_body(&request);
         assert_eq!(body["generationConfig"]["maxOutputTokens"], 1024);
+    }
+
+    // --- Output-side opt (Part A): stop_sequences ->
+    //     generationConfig.stopSequences ---
+
+    #[test]
+    fn build_request_body_omits_stop_sequences_when_empty() {
+        let provider = GeminiProvider::new("k", "", compat(), DebugConfig::default());
+        let request = make_request_with_messages(vec![Message::new(
+            Role::User,
+            vec![ContentBlock::Text { text: "hi".into() }],
+        )]);
+        let body = provider.build_request_body(&request);
+        assert!(
+            body["generationConfig"].get("stopSequences").is_none(),
+            "empty stop_sequences must emit no stopSequences field (back-compat)"
+        );
+    }
+
+    #[test]
+    fn build_request_body_emits_stop_sequences_under_generation_config() {
+        let provider = GeminiProvider::new("k", "", compat(), DebugConfig::default());
+        let mut request = make_request_with_messages(vec![Message::new(
+            Role::User,
+            vec![ContentBlock::Text { text: "hi".into() }],
+        )]);
+        request.stop_sequences = vec!["\n\nLet me know if".into(), "\n\nFeel free to".into()];
+        let body = provider.build_request_body(&request);
+        assert_eq!(
+            body["generationConfig"]["stopSequences"],
+            json!(["\n\nLet me know if", "\n\nFeel free to"]),
+            "Gemini must emit stops under generationConfig.stopSequences"
+        );
     }
 
     #[test]

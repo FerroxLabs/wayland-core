@@ -322,6 +322,7 @@ fn plugin_rule_reaches_the_system_prompt() {
         false,
         false,
         &applied.plugin_rules,
+        false,
     );
 
     assert!(

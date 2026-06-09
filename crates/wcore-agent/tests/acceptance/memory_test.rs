@@ -46,6 +46,7 @@ fn memory_injection_into_system_prompt() {
         false,
         false,
         &[],
+        false,
     );
 
     // Behavioral instructions must be present
@@ -129,6 +130,7 @@ fn memory_full_lifecycle() {
         false,
         false,
         &[],
+        false,
     );
 
     assert!(
@@ -179,6 +181,7 @@ fn memory_full_lifecycle() {
         false,
         false,
         &[],
+        false,
     );
 
     assert!(

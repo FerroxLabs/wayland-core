@@ -126,6 +126,27 @@ impl AnthropicProvider {
             });
         }
 
+        // Output-side optimization (Part A): UNION the request's fluff stop
+        // sequences into Anthropic's `stop_sequences` field, preserving any the
+        // caller already placed on the body. Must run BEFORE apply_cache_zones
+        // so the body shape is final before cache markers are injected. Skipped
+        // entirely when empty so back-compatible callers emit no stop field.
+        if !request.stop_sequences.is_empty() {
+            let stops = body
+                .get_mut("stop_sequences")
+                .and_then(Value::as_array_mut);
+            match stops {
+                Some(existing) => {
+                    for s in &request.stop_sequences {
+                        existing.push(json!(s));
+                    }
+                }
+                None => {
+                    body["stop_sequences"] = json!(request.stop_sequences);
+                }
+            }
+        }
+
         // Inject 3-zone cache_control markers (system / tools / messages) when
         // caching is enabled. W8 v0.6.3: honor `request.cache_tier` when the
         // caller selected one (e.g. via `cache_tier::pick_cache_tier`), falling
@@ -685,6 +706,7 @@ mod tests {
             reasoning_effort: None,
             cache_tier: tier,
             routing_hint: None,
+            stop_sequences: Vec::new(),
         }
     }
 
@@ -717,6 +739,29 @@ mod tests {
         assert!(
             body["system"][0].get("cache_control").is_none(),
             "request.cache_tier=Some(None) must inject no cache_control marker"
+        );
+    }
+
+    // --- Output-side opt (Part A): stop_sequences -> body["stop_sequences"] ---
+
+    #[test]
+    fn build_request_body_omits_stop_sequences_when_empty() {
+        let body = provider().build_request_body(&cache_req(None));
+        assert!(
+            body.get("stop_sequences").is_none(),
+            "empty stop_sequences must emit no stop field (back-compat)"
+        );
+    }
+
+    #[test]
+    fn build_request_body_emits_stop_sequences_when_present() {
+        let mut req = cache_req(None);
+        req.stop_sequences = vec!["\n\nLet me know if".into(), "\n\nFeel free to".into()];
+        let body = provider().build_request_body(&req);
+        assert_eq!(
+            body["stop_sequences"],
+            json!(["\n\nLet me know if", "\n\nFeel free to"]),
+            "Anthropic must emit stops under the `stop_sequences` key"
         );
     }
 }

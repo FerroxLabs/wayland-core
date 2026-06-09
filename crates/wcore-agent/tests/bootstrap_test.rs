@@ -421,6 +421,7 @@ mod resilience_wrap {
                 reasoning_effort: None,
                 cache_tier: None,
                 routing_hint: None,
+                stop_sequences: Vec::new(),
             };
             let _ = result.provider.stream(&req).await;
         }
@@ -467,6 +468,7 @@ mod resilience_wrap {
                 reasoning_effort: None,
                 cache_tier: None,
                 routing_hint: None,
+                stop_sequences: Vec::new(),
             };
             let _ = result.provider.stream(&req).await;
         }

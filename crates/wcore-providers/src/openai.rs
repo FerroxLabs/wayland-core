@@ -359,6 +359,33 @@ impl OpenAIProvider {
             body["reasoning_effort"] = json!(effort);
         }
 
+        // Output-side optimization (Part A): UNION the request's fluff stop
+        // sequences into OpenAI's `stop` field, preserving any the caller
+        // already placed on the body. The Chat Completions API accepts `stop`
+        // as a string or an array of up to 4 strings; normalize a pre-existing
+        // string into an array before appending. Skipped when empty so
+        // back-compatible callers emit no stop field.
+        if !request.stop_sequences.is_empty() {
+            match body.get_mut("stop") {
+                Some(existing) if existing.is_array() => {
+                    let arr = existing.as_array_mut().expect("checked is_array");
+                    for s in &request.stop_sequences {
+                        arr.push(json!(s));
+                    }
+                }
+                Some(existing) if existing.is_string() => {
+                    let mut arr = vec![existing.clone()];
+                    for s in &request.stop_sequences {
+                        arr.push(json!(s));
+                    }
+                    body["stop"] = json!(arr);
+                }
+                _ => {
+                    body["stop"] = json!(request.stop_sequences);
+                }
+            }
+        }
+
         body
     }
 }
@@ -1201,10 +1228,58 @@ mod tests {
             reasoning_effort: None,
             cache_tier: None,
             routing_hint: None,
+            stop_sequences: Vec::new(),
         };
         let body = provider.build_request_body(&req);
         assert_eq!(body["max_tokens"], 1024);
         assert!(body.get("max_completion_tokens").is_none());
+    }
+
+    // --- Output-side opt (Part A): stop_sequences -> body["stop"] ----------
+
+    fn stop_provider() -> OpenAIProvider {
+        OpenAIProvider::new(
+            "key",
+            "http://localhost",
+            openai_compat(),
+            DebugConfig::default(),
+        )
+    }
+
+    fn stop_req() -> LlmRequest {
+        LlmRequest {
+            model: "gpt-4o".into(),
+            system: String::new(),
+            messages: vec![],
+            tools: vec![],
+            max_tokens: 1024,
+            thinking: None,
+            reasoning_effort: None,
+            cache_tier: None,
+            routing_hint: None,
+            stop_sequences: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn build_request_body_omits_stop_when_empty() {
+        let body = stop_provider().build_request_body(&stop_req());
+        assert!(
+            body.get("stop").is_none(),
+            "empty stop_sequences must emit no `stop` field (back-compat)"
+        );
+    }
+
+    #[test]
+    fn build_request_body_emits_stop_when_present() {
+        let mut req = stop_req();
+        req.stop_sequences = vec!["\n\nLet me know if".into(), "\n\nFeel free to".into()];
+        let body = stop_provider().build_request_body(&req);
+        assert_eq!(
+            body["stop"],
+            json!(["\n\nLet me know if", "\n\nFeel free to"]),
+            "OpenAI must emit stops under the `stop` key as an array"
+        );
     }
 
     #[test]
@@ -1225,6 +1300,7 @@ mod tests {
             reasoning_effort: None,
             cache_tier: None,
             routing_hint: None,
+            stop_sequences: Vec::new(),
         };
         let body = provider.build_request_body(&req);
         assert_eq!(body["max_completion_tokens"], 2048);
@@ -1258,6 +1334,7 @@ mod tests {
             reasoning_effort: None,
             cache_tier: None,
             routing_hint: None,
+            stop_sequences: Vec::new(),
         };
         let body = provider.build_request_body(&req);
         assert_eq!(body["max_completion_tokens"], 1024);
@@ -1287,6 +1364,7 @@ mod tests {
             reasoning_effort: None,
             cache_tier: None,
             routing_hint: None,
+            stop_sequences: Vec::new(),
         };
         let body = provider.build_request_body(&req);
         assert_eq!(body["max_tokens"], 1024);
@@ -1314,6 +1392,7 @@ mod tests {
             reasoning_effort: Some("medium".into()),
             cache_tier: None,
             routing_hint: None,
+            stop_sequences: Vec::new(),
         };
         let body = provider.build_request_body(&req);
         assert!(
@@ -1341,6 +1420,7 @@ mod tests {
             reasoning_effort: Some("medium".into()),
             cache_tier: None,
             routing_hint: None,
+            stop_sequences: Vec::new(),
         };
         let body = provider.build_request_body(&req);
         assert_eq!(body["reasoning_effort"], "medium");

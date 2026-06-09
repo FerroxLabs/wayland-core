@@ -55,6 +55,15 @@ pub struct LlmRequest {
     /// and consumed by `ProviderChain`. Free-form label — providers ignore
     /// hints they don't recognize.
     pub routing_hint: Option<RoutingHint>,
+    /// Output-side token optimization: extra stop sequences that providers
+    /// UNION (never replace) into their native stop-sequence field, so the
+    /// model halts the moment it begins a known fluff closer at a paragraph
+    /// boundary. Populated by the engine ONLY when the route optimizes
+    /// client-side (`compat.input_optimization() == "client"`); empty for
+    /// router-optimized routes. `Default` yields an empty Vec, so all
+    /// existing `..Default::default()` construction sites stay back-compatible
+    /// and emit no stop field.
+    pub stop_sequences: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -190,6 +199,15 @@ mod tests {
     fn routing_hint_newtype_eq() {
         assert_eq!(RoutingHint::new("a"), RoutingHint("a".to_string()));
         assert_ne!(RoutingHint::new("a"), RoutingHint::new("b"));
+    }
+
+    /// Output-side opt (Part A) back-compat: a default-constructed request
+    /// carries NO stop sequences, so existing `..Default::default()` callers
+    /// keep emitting no provider stop field.
+    #[test]
+    fn llm_request_default_has_empty_stop_sequences() {
+        let req = LlmRequest::default();
+        assert!(req.stop_sequences.is_empty());
     }
 
     #[test]

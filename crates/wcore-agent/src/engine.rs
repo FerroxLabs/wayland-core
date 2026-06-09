@@ -818,6 +818,29 @@ const SKILL_DETECTION_WINDOW: usize = 6;
 /// bound for a multi-turn agent session.
 const AGENT_TURN_CACHE_REUSE_WINDOW_SECS: u64 = 1800;
 
+/// Output-side token optimization (Part A): fluff closers that, once the model
+/// starts emitting one at a *paragraph boundary*, signal the answer is over and
+/// only ceremonial filler follows. Sent as provider stop sequences so the model
+/// halts before spending output tokens on the closer.
+///
+/// EVERY entry is prefixed with `"\n\n"` on purpose: a stop sequence is a raw
+/// substring match, so prefixing the paragraph break guarantees these only fire
+/// at the start of a fresh paragraph. A mid-sentence occurrence of the same
+/// words (e.g. "...let me know if that helps, but first...") never matches,
+/// because it is not preceded by a blank line. Anthropic caps stop sequences at
+/// a small number, so keep this list at most 4 entries.
+///
+/// Only applied when the route optimizes client-side
+/// (`compat.input_optimization() == "client"`); router-optimized routes get an
+/// empty Vec and emit no stop field. The list is a fixed `const`, so it never
+/// perturbs the cached prompt prefix.
+const FLUFF_STOP_SEQUENCES: [&str; 4] = [
+    "\n\nLet me know if",
+    "\n\nI hope this helps",
+    "\n\nFeel free to",
+    "\n\nIs there anything else",
+];
+
 /// v0.8.0 Task M — default user-id key for per-turn user-model
 /// write-back. Mirrors the bootstrap read site (`bootstrap.rs`,
 /// `user_id = "default"`). Override via the `WAYLAND_USER_ID` env var.
@@ -2901,6 +2924,16 @@ impl AgentEngine {
             // injection between an assistant tool_use and its result.
             self.repair_all_orphaned_tool_uses();
 
+            // Output-side optimization (Part A): attach fluff stop sequences
+            // only when the route optimizes client-side. On router-optimized
+            // routes the server already trims output, so we leave the Vec
+            // empty and providers emit no stop field.
+            let stop_sequences = if self.compat.input_optimization() == "client" {
+                FLUFF_STOP_SEQUENCES.iter().map(|s| s.to_string()).collect()
+            } else {
+                Vec::new()
+            };
+
             let mut request = LlmRequest {
                 model: self.model.clone(),
                 system,
@@ -2911,6 +2944,7 @@ impl AgentEngine {
                 reasoning_effort: self.current_reasoning_effort.clone(),
                 cache_tier,
                 routing_hint: None,
+                stop_sequences,
             };
 
             // Cache-stability (token-opt): inject the per-turn skill-router
@@ -9884,5 +9918,31 @@ mod audit_2026_05_22_tests {
             state.get("cwd").is_some_and(|v| v.is_string()),
             "cwd must be a string; got {state:?}"
         );
+    }
+
+    /// Output-side opt (Part A) safety invariant: every fluff stop sequence is
+    /// prefixed with a paragraph break (`"\n\n"`). This is what guarantees the
+    /// stop only fires at a fresh paragraph boundary — a mid-sentence
+    /// occurrence of the same words (e.g. "...in summary, the result is...")
+    /// is NOT preceded by a blank line and therefore never matches, so the
+    /// model is never cut off mid-answer.
+    #[test]
+    fn fluff_stop_sequences_all_start_with_paragraph_break() {
+        assert!(
+            !super::FLUFF_STOP_SEQUENCES.is_empty(),
+            "fluff stop list must be non-empty"
+        );
+        // Anthropic caps stop sequences at a small number; keep the list <= 4.
+        assert!(
+            super::FLUFF_STOP_SEQUENCES.len() <= 4,
+            "keep the fluff stop list at most 4 entries"
+        );
+        for s in super::FLUFF_STOP_SEQUENCES {
+            assert!(
+                s.starts_with("\n\n"),
+                "fluff stop {s:?} must start with a paragraph break so it only \
+                 fires at a paragraph boundary, never mid-sentence"
+            );
+        }
     }
 }

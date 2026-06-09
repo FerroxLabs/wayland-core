@@ -42,6 +42,7 @@ fn minimal_request() -> LlmRequest {
         reasoning_effort: None,
         cache_tier: None,
         routing_hint: None,
+        stop_sequences: Vec::new(),
     }
 }
 
@@ -613,6 +614,7 @@ async fn gemini_live_api_smoke_test() {
         reasoning_effort: None,
         cache_tier: None,
         routing_hint: None,
+        stop_sequences: Vec::new(),
     };
 
     let rx = provider

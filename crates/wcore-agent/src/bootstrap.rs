@@ -1089,6 +1089,10 @@ impl AgentBootstrap {
             // fragments are appended to the prompt; `ProjectScoped` ones are
             // gated on cwd inside `build_system_prompt` (Task 1.4).
             &applied.plugin_rules,
+            // Output-side opt (Part B): inject the terseness directive only when
+            // the route optimizes client-side. Router-optimized routes already
+            // trim output server-side, so the directive is omitted there.
+            self.config.compat.input_optimization() == "client",
         );
         // G1 slice 4: when the user enabled `[plan] plan_first` (via /config),
         // append a standing preference so the agent enters plan mode on its
