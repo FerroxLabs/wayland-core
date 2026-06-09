@@ -13,6 +13,15 @@ use wcore_types::message::{ContentBlock, Message, Role};
 /// Placeholder that replaces cleared tool result content.
 pub const CLEARED_TOOL_RESULT: &str = "[Tool result cleared]";
 
+/// Constant PREFIX for a Read result superseded by a later edit to the same
+/// file (token-opt trajectory-pruning). A PREFIX, not an exact constant, so the
+/// stub can name the file while staying idempotent: any body starting with it
+/// is treated as already-cleared, so a second pass never re-mutates it.
+pub const SUPERSEDED_TOOL_RESULT_PREFIX: &str = "[Stale read superseded by a later edit]";
+
+/// Tools whose result mutates a file, invalidating earlier full reads of it.
+const MUTATION_TOOLS: &[&str] = &["Edit", "Write", "MultiEdit", "NotebookEdit"];
+
 /// Statistics returned after a microcompact pass.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MicrocompactResult {
@@ -76,6 +85,11 @@ fn count_trigger(messages: &[Message], config: &CompactConfig) -> bool {
 /// Already-cleared results are left untouched and do not count toward
 /// the keep budget.
 pub fn microcompact(messages: &mut [Message], config: &CompactConfig) -> MicrocompactResult {
+    // Supersession pre-pass (token-opt trajectory-pruning): a full Read result
+    // is stale once a later Edit/Write to the same file appears AND a newer read
+    // of that file exists. Stub those bodies before the recency pass runs.
+    let (superseded_count, superseded_tokens) = prune_superseded_reads(messages, config);
+
     let tool_names = build_tool_name_map(messages);
     let compactable_set: HashSet<&str> = config
         .compactable_tools
@@ -90,8 +104,8 @@ pub fn microcompact(messages: &mut [Message], config: &CompactConfig) -> Microco
     let keep = config.micro_keep_recent.max(1);
     if targets.len() <= keep {
         return MicrocompactResult {
-            cleared_count: 0,
-            estimated_tokens_freed: 0,
+            cleared_count: superseded_count,
+            estimated_tokens_freed: superseded_tokens,
         };
     }
 
@@ -110,9 +124,131 @@ pub fn microcompact(messages: &mut [Message], config: &CompactConfig) -> Microco
     }
 
     MicrocompactResult {
-        cleared_count,
-        estimated_tokens_freed: tokens_freed,
+        cleared_count: cleared_count + superseded_count,
+        estimated_tokens_freed: tokens_freed + superseded_tokens,
     }
+}
+
+/// Normalize a tool-input file path for supersession matching. Conservative:
+/// trims and strips a single leading `./`. Exact-match only — a missed match
+/// merely keeps the read (safe); we never want a false match across files.
+fn normalize_path(p: &str) -> String {
+    let t = p.trim();
+    t.strip_prefix("./").unwrap_or(t).to_string()
+}
+
+/// Supersession pre-pass (token-opt trajectory-pruning).
+///
+/// A *full* `Read` result of file P is stale once (a) a later `Edit`/`Write` to
+/// P appears in history and (b) a newer `Read` result of P also exists — the
+/// model holds both the edit and the fresher read, so the old full body is dead
+/// weight. Replace such bodies with a constant-prefixed stub naming the file.
+///
+/// Conservative and idempotent:
+/// - only full reads (no `offset`/`limit`) are touched;
+/// - errored reads are skipped;
+/// - the *freshest* read of every path is always kept;
+/// - already-stubbed/cleared bodies are skipped, so a second pass is a no-op;
+/// - `Read` must be in `compactable_tools` (respects the user's allow-list);
+/// - exact (normalized) path match only — a missed match keeps the read.
+///
+/// Returns `(stubbed_count, estimated_tokens_freed)`.
+fn prune_superseded_reads(messages: &mut [Message], config: &CompactConfig) -> (usize, usize) {
+    if !config.enabled || !config.compactable_tools.iter().any(|t| t == "Read") {
+        return (0, 0);
+    }
+
+    // tool_use_id -> (tool name, normalized file path, is a windowed/partial read)
+    let mut meta: HashMap<String, (String, Option<String>, bool)> = HashMap::new();
+    // path -> latest message index of a mutation (Edit/Write/...) to it.
+    let mut latest_mutation: HashMap<String, usize> = HashMap::new();
+    for (mi, msg) in messages.iter().enumerate() {
+        for block in &msg.content {
+            if let ContentBlock::ToolUse {
+                id, name, input, ..
+            } = block
+            {
+                let path = input
+                    .get("file_path")
+                    .and_then(|v| v.as_str())
+                    .map(normalize_path);
+                let partial = input.get("offset").is_some() || input.get("limit").is_some();
+                if MUTATION_TOOLS.contains(&name.as_str())
+                    && let Some(p) = path.clone()
+                {
+                    let e = latest_mutation.entry(p).or_insert(mi);
+                    *e = (*e).max(mi);
+                }
+                meta.insert(id.clone(), (name.clone(), path, partial));
+            }
+        }
+    }
+
+    // path -> latest message index of a live full Read *result* of it.
+    let mut freshest_read: HashMap<String, usize> = HashMap::new();
+    for (mi, msg) in messages.iter().enumerate() {
+        for block in &msg.content {
+            if let ContentBlock::ToolResult {
+                tool_use_id,
+                content,
+                is_error,
+            } = block
+                && !*is_error
+                && content != CLEARED_TOOL_RESULT
+                && !content.starts_with(SUPERSEDED_TOOL_RESULT_PREFIX)
+                && let Some((name, Some(path), partial)) = meta.get(tool_use_id)
+                && name.as_str() == "Read"
+                && !*partial
+            {
+                let e = freshest_read.entry(path.clone()).or_insert(mi);
+                *e = (*e).max(mi);
+            }
+        }
+    }
+
+    // Stub stale reads (read-then-write to satisfy the borrow checker).
+    let mut count = 0usize;
+    let mut tokens = 0usize;
+    for (mi, msg) in messages.iter_mut().enumerate() {
+        for bi in 0..msg.content.len() {
+            let stale: Option<(String, usize)> = if let ContentBlock::ToolResult {
+                tool_use_id,
+                content,
+                is_error,
+            } = &msg.content[bi]
+            {
+                if *is_error
+                    || content == CLEARED_TOOL_RESULT
+                    || content.starts_with(SUPERSEDED_TOOL_RESULT_PREFIX)
+                {
+                    None
+                } else if let Some((name, Some(path), partial)) = meta.get(tool_use_id) {
+                    let later_edit = latest_mutation.get(path).is_some_and(|&j| j > mi);
+                    let newer_read = freshest_read.get(path).is_some_and(|&f| f > mi);
+                    if name.as_str() == "Read" && !*partial && later_edit && newer_read {
+                        Some((path.clone(), content.len()))
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
+
+            if let Some((path, len)) = stale
+                && let ContentBlock::ToolResult { content, .. } = &mut msg.content[bi]
+            {
+                tokens += len / 4;
+                *content = format!(
+                    "{SUPERSEDED_TOOL_RESULT_PREFIX} {path} — re-read if you need the current contents."
+                );
+                count += 1;
+            }
+        }
+    }
+    (count, tokens)
 }
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
@@ -177,7 +313,7 @@ fn is_compactable_and_live(
         ..
     } = block
     {
-        if content == CLEARED_TOOL_RESULT {
+        if content == CLEARED_TOOL_RESULT || content.starts_with(SUPERSEDED_TOOL_RESULT_PREFIX) {
             return false;
         }
         if let Some(name) = tool_names.get(tool_use_id) {
@@ -581,5 +717,159 @@ mod tests {
             }
             _ => panic!("expected ToolResult"),
         }
+    }
+
+    // ── trajectory-pruning: supersession pre-pass ───────────────────────
+
+    fn read_use(id: &str, path: &str) -> ContentBlock {
+        ContentBlock::ToolUse {
+            id: id.to_string(),
+            name: "Read".to_string(),
+            input: json!({ "file_path": path }),
+            extra: None,
+        }
+    }
+    fn read_use_window(id: &str, path: &str) -> ContentBlock {
+        ContentBlock::ToolUse {
+            id: id.to_string(),
+            name: "Read".to_string(),
+            input: json!({ "file_path": path, "offset": 1, "limit": 20 }),
+            extra: None,
+        }
+    }
+    fn edit_use(id: &str, path: &str) -> ContentBlock {
+        ContentBlock::ToolUse {
+            id: id.to_string(),
+            name: "Edit".to_string(),
+            input: json!({ "file_path": path }),
+            extra: None,
+        }
+    }
+    fn read_only_cfg() -> CompactConfig {
+        CompactConfig {
+            compactable_tools: vec!["Read".into()],
+            ..default_config()
+        }
+    }
+
+    #[test]
+    fn supersedes_stale_read_after_edit_and_reread() {
+        let mut msgs = vec![
+            assistant_msg(vec![read_use("r1", "src/x.rs")]),
+            user_msg(vec![tool_result_block(
+                "r1",
+                &"old contents v1 ".repeat(20),
+            )]),
+            assistant_msg(vec![edit_use("e1", "src/x.rs")]),
+            user_msg(vec![tool_result_block("e1", "edit applied")]),
+            assistant_msg(vec![read_use("r2", "src/x.rs")]),
+            user_msg(vec![tool_result_block(
+                "r2",
+                &"new contents v2 ".repeat(20),
+            )]),
+        ];
+        let (count, tokens) = prune_superseded_reads(&mut msgs, &read_only_cfg());
+        assert_eq!(count, 1, "the pre-edit read must be stubbed");
+        assert!(tokens > 0);
+        // r1 result (index 1) is now a superseded stub naming the file.
+        match &msgs[1].content[0] {
+            ContentBlock::ToolResult { content, .. } => {
+                assert!(content.starts_with(SUPERSEDED_TOOL_RESULT_PREFIX));
+                assert!(content.contains("src/x.rs"));
+            }
+            _ => panic!("expected ToolResult"),
+        }
+        // r2 result (index 5, the fresh post-edit read) is untouched.
+        match &msgs[5].content[0] {
+            ContentBlock::ToolResult { content, .. } => assert!(content.contains("v2")),
+            _ => panic!("expected ToolResult"),
+        }
+    }
+
+    #[test]
+    fn supersession_pass_is_idempotent() {
+        let mut msgs = vec![
+            assistant_msg(vec![read_use("r1", "a.rs")]),
+            user_msg(vec![tool_result_block("r1", &"x".repeat(80))]),
+            assistant_msg(vec![edit_use("e1", "a.rs")]),
+            user_msg(vec![tool_result_block("e1", "ok")]),
+            assistant_msg(vec![read_use("r2", "a.rs")]),
+            user_msg(vec![tool_result_block("r2", &"y".repeat(80))]),
+        ];
+        let (first, _) = prune_superseded_reads(&mut msgs, &read_only_cfg());
+        assert_eq!(first, 1);
+        let stub_after_first = match &msgs[1].content[0] {
+            ContentBlock::ToolResult { content, .. } => content.clone(),
+            _ => panic!("expected ToolResult"),
+        };
+        let (second, second_tokens) = prune_superseded_reads(&mut msgs, &read_only_cfg());
+        assert_eq!(second, 0, "a second pass must be a no-op");
+        assert_eq!(second_tokens, 0);
+        let stub_after_second = match &msgs[1].content[0] {
+            ContentBlock::ToolResult { content, .. } => content.clone(),
+            _ => panic!("expected ToolResult"),
+        };
+        assert_eq!(
+            stub_after_first, stub_after_second,
+            "the stub must not be re-mutated on a second pass"
+        );
+    }
+
+    #[test]
+    fn never_supersedes_a_partial_read() {
+        let mut msgs = vec![
+            assistant_msg(vec![read_use_window("r1", "p.rs")]),
+            user_msg(vec![tool_result_block("r1", &"windowed slice ".repeat(20))]),
+            assistant_msg(vec![edit_use("e1", "p.rs")]),
+            user_msg(vec![tool_result_block("e1", "ok")]),
+            assistant_msg(vec![read_use("r2", "p.rs")]),
+            user_msg(vec![tool_result_block("r2", &"full ".repeat(20))]),
+        ];
+        let (count, _) = prune_superseded_reads(&mut msgs, &read_only_cfg());
+        assert_eq!(count, 0, "partial reads are never superseded");
+    }
+
+    #[test]
+    fn keeps_the_freshest_read_even_with_a_later_edit() {
+        // Read then Edit with NO verify-read: the single read is the freshest
+        // view of the file, so it is conservatively kept.
+        let mut msgs = vec![
+            assistant_msg(vec![read_use("r1", "z.rs")]),
+            user_msg(vec![tool_result_block("r1", &"only read ".repeat(20))]),
+            assistant_msg(vec![edit_use("e1", "z.rs")]),
+            user_msg(vec![tool_result_block("e1", "ok")]),
+        ];
+        let (count, _) = prune_superseded_reads(&mut msgs, &read_only_cfg());
+        assert_eq!(count, 0, "the only/freshest read of a file is always kept");
+    }
+
+    #[test]
+    fn no_edit_means_no_supersession() {
+        let mut msgs = vec![
+            assistant_msg(vec![read_use("r1", "q.rs")]),
+            user_msg(vec![tool_result_block("r1", &"v ".repeat(20))]),
+            assistant_msg(vec![read_use("r2", "q.rs")]),
+            user_msg(vec![tool_result_block("r2", &"v ".repeat(20))]),
+        ];
+        let (count, _) = prune_superseded_reads(&mut msgs, &read_only_cfg());
+        assert_eq!(count, 0, "supersession requires an intervening edit");
+    }
+
+    #[test]
+    fn errored_read_is_not_superseded() {
+        let mut msgs = vec![
+            assistant_msg(vec![read_use("r1", "e.rs")]),
+            user_msg(vec![ContentBlock::ToolResult {
+                tool_use_id: "r1".into(),
+                content: "permission denied ".repeat(5),
+                is_error: true,
+            }]),
+            assistant_msg(vec![edit_use("e1", "e.rs")]),
+            user_msg(vec![tool_result_block("e1", "ok")]),
+            assistant_msg(vec![read_use("r2", "e.rs")]),
+            user_msg(vec![tool_result_block("r2", &"full ".repeat(20))]),
+        ];
+        let (count, _) = prune_superseded_reads(&mut msgs, &read_only_cfg());
+        assert_eq!(count, 0, "errored reads carry signal and are never stubbed");
     }
 }
