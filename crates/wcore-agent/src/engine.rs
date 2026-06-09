@@ -49,6 +49,23 @@ use crate::session::{Session, SessionManager};
 /// `/100_000` divisor was off by 1000× — verified against
 /// `wcore_pricing::PricingCatalog::estimate_cost_microcents`, which
 /// computes `usd * 100 * 1_000_000`.)
+/// Token-opt (read-once): a short human-readable label for a Grep/Glob/Bash
+/// call, used in the backref stub so the model can locate the earlier result.
+fn backref_label(name: &str, input: &serde_json::Value) -> String {
+    let detail = match name {
+        "Grep" | "Glob" => input.get("pattern").and_then(|v| v.as_str()),
+        "Bash" => input.get("command").and_then(|v| v.as_str()),
+        _ => None,
+    };
+    match detail {
+        Some(d) => {
+            let trimmed: String = d.chars().take(60).collect();
+            format!("`{name}` ({trimmed})")
+        }
+        None => format!("`{name}`"),
+    }
+}
+
 fn pricing_turn_cost_usd(
     provider: &str,
     model: &str,
@@ -1803,6 +1820,10 @@ impl AgentEngine {
         // Token-opt: the message buffer is gone, so the compaction floor
         // (which indexes into it) no longer means anything — reset it.
         self.compaction_floor = 0;
+        // Token-opt: wipe the file cache (read states + read-once backrefs) too.
+        // None of the prior reads/outputs are in the new transcript, so a dedup
+        // stub or backref must not reference them.
+        self.clear_file_cache();
     }
 
     /// `/resume <id>` - swap the in-memory conversation buffer to a loaded
@@ -1822,6 +1843,9 @@ impl AgentEngine {
         // hook/skill `switch_model` for the resumed conversation. The user can
         // pin anew with `/model` after resuming.
         self.user_model_pin = None;
+        // Token-opt: the prior session's cached reads/outputs are not in this
+        // buffer; wipe the file cache so no dedup stub or backref references them.
+        self.clear_file_cache();
     }
 
     /// The engine's current conversation messages, oldest first. After a
@@ -1943,6 +1967,65 @@ impl AgentEngine {
             && let Ok(mut c) = cache.write()
         {
             c.bump_compaction_generation();
+        }
+    }
+
+    /// Token-opt: wipe the file cache (read states + read-once backrefs) on a
+    /// conversation reset. No-op when no cache is wired or the lock is poisoned.
+    fn clear_file_cache(&self) {
+        if let Some(cache) = &self.file_cache
+            && let Ok(mut c) = cache.write()
+        {
+            c.clear();
+        }
+    }
+
+    /// Token-opt (read-once): rewrite a repeated Grep/Glob/Bash output to a short
+    /// backref pointing at the earlier identical result, instead of re-sending
+    /// the whole thing into the transcript. Runs AFTER the result is displayed to
+    /// the user (so the human still sees full output) and only mutates the copy
+    /// that goes to the model. The backref is gated (client route + min size) and
+    /// generation-guarded inside `output_backref`, so it only fires while the
+    /// referenced result is still in the visible transcript.
+    ///
+    /// `None` file cache (sub-agents, cache disabled) makes this a no-op, which
+    /// also keeps the process-wide cache from cross-referencing a sibling agent's
+    /// output that this transcript never contained.
+    fn dedup_repeated_tool_outputs(
+        &self,
+        blocks: &mut [ContentBlock],
+        tool_calls: &[ContentBlock],
+    ) {
+        const DEDUP_TOOLS: [&str; 3] = ["Grep", "Glob", "Bash"];
+        let Some(cache) = &self.file_cache else {
+            return;
+        };
+        for block in blocks.iter_mut() {
+            let ContentBlock::ToolResult {
+                tool_use_id,
+                content,
+                ..
+            } = block
+            else {
+                continue;
+            };
+            let Some((name, input)) = tool_calls.iter().find_map(|c| match c {
+                ContentBlock::ToolUse {
+                    id, name, input, ..
+                } if id == tool_use_id => Some((name.as_str(), input)),
+                _ => None,
+            }) else {
+                continue;
+            };
+            if !DEDUP_TOOLS.contains(&name) {
+                continue;
+            }
+            if let Ok(mut c) = cache.write() {
+                let label = backref_label(name, input);
+                if let Some(stub) = c.output_backref(content, &label) {
+                    *content = stub;
+                }
+            }
         }
     }
 
@@ -3815,6 +3898,11 @@ impl AgentEngine {
             // turn with zero external edits keeps `tool_results_content`
             // = `outcome.results` verbatim.
             let mut tool_results_content = outcome.results;
+            // Token-opt (read-once): rewrite repeated Grep/Glob/Bash outputs to a
+            // backref before they enter the transcript. The user already saw the
+            // full output via `emit_tool_result` above; only the model's copy is
+            // deduped.
+            self.dedup_repeated_tool_outputs(&mut tool_results_content, &tool_calls);
             if let Some(edit_msg) = self.drain_external_edits_message() {
                 tool_results_content.push(ContentBlock::Text { text: edit_msg });
             }
@@ -7184,6 +7272,72 @@ mod compact_tests {
             cache.read().unwrap().compaction_generation() >= 1,
             "a compaction pass must bump the wired file cache's generation"
         );
+    }
+
+    #[tokio::test]
+    async fn read_once_backrefs_repeated_grep_output() {
+        // Token-opt (read-once): a repeated identical Grep result is rewritten to
+        // a short backref before it enters the transcript; the first is kept full.
+        let mut engine = make_compact_engine(CompactConfig::default(), CompactState::new(), vec![]);
+        let cache = Arc::new(std::sync::RwLock::new(
+            wcore_tools::file_cache::FileStateCache::new(
+                &wcore_config::file_cache::FileCacheConfig {
+                    max_entries: 10,
+                    max_size_bytes: 1_000_000,
+                    enabled: true,
+                },
+            ),
+        ));
+        cache.write().unwrap().set_optimize_reads(true);
+        engine.set_file_cache(cache);
+
+        let big = "src/lib.rs:42: let token = compute();\n".repeat(20); // > 300 bytes
+        let tool_calls = vec![
+            ContentBlock::ToolUse {
+                id: "a".into(),
+                name: "Grep".into(),
+                input: serde_json::json!({ "pattern": "token" }),
+                extra: None,
+            },
+            ContentBlock::ToolUse {
+                id: "b".into(),
+                name: "Grep".into(),
+                input: serde_json::json!({ "pattern": "token" }),
+                extra: None,
+            },
+        ];
+        let mut blocks = vec![
+            ContentBlock::ToolResult {
+                tool_use_id: "a".into(),
+                content: big.clone(),
+                is_error: false,
+            },
+            ContentBlock::ToolResult {
+                tool_use_id: "b".into(),
+                content: big.clone(),
+                is_error: false,
+            },
+        ];
+
+        engine.dedup_repeated_tool_outputs(&mut blocks, &tool_calls);
+
+        match &blocks[0] {
+            ContentBlock::ToolResult { content, .. } => {
+                assert_eq!(content, &big, "first occurrence keeps full output")
+            }
+            _ => panic!("expected ToolResult"),
+        }
+        match &blocks[1] {
+            ContentBlock::ToolResult { content, .. } => {
+                assert!(
+                    content.contains("Identical to the earlier result"),
+                    "repeat must be a backref, got: {content}"
+                );
+                assert!(content.contains("token"), "backref names the earlier call");
+                assert!(content.len() < big.len());
+            }
+            _ => panic!("expected ToolResult"),
+        }
     }
 
     // -- Circuit broken prevents autocompact, emergency still fires --

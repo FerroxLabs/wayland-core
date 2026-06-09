@@ -1,3 +1,4 @@
+use std::hash::{Hash, Hasher};
 use std::num::NonZeroUsize;
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
@@ -7,6 +8,27 @@ use lru::LruCache;
 
 use wcore_config::file_cache::FileCacheConfig;
 use wcore_types::file_state::{FileState, Provenance};
+
+/// Token-opt (read-once): a re-issued Grep/Glob/Bash whose output is smaller
+/// than this many bytes is never deduplicated — the backref stub itself costs
+/// ~100 bytes, so deduping a tiny output would be a net loss.
+const MIN_DEDUP_BYTES: usize = 300;
+/// Token-opt (read-once): max distinct tool outputs tracked for backref dedup.
+const OUTPUT_BACKREF_CAP: usize = 128;
+
+/// Token-opt (read-once): the earliest tool call that produced a given output,
+/// so a later identical output can point back to it instead of re-sending bytes.
+#[derive(Debug, Clone)]
+struct OutputBackref {
+    /// Human-readable identifier of the originating call (e.g. `Grep for "foo"`).
+    label: String,
+    /// Compaction generation when recorded; a hit requires it to still match,
+    /// proving the referenced result is still in the model's visible transcript.
+    gen_at_record: u64,
+    /// Byte length of the original output — a second equality check alongside the
+    /// hash, so an astronomically-unlikely hash collision can't mis-dedup.
+    len: usize,
+}
 
 /// LRU cache for file states seen by the model.
 ///
@@ -34,6 +56,12 @@ pub struct FileStateCache {
     /// collapsed or cleared out of the model's visible transcript. See
     /// [`FileState::gen_at_read`].
     compaction_generation: u64,
+    /// Token-opt (read-once): content-addressed map of recent Grep/Glob/Bash
+    /// outputs (hash → first call that produced them). Lets a re-issued tool
+    /// whose output is byte-identical return a short backref instead of
+    /// re-sending the whole result. Shares `compaction_generation` (visibility)
+    /// and `optimize_reads` (route gate) with the read cache.
+    output_backrefs: LruCache<u64, OutputBackref>,
 }
 
 impl FileStateCache {
@@ -50,7 +78,52 @@ impl FileStateCache {
             current_size_bytes: 0,
             optimize_reads: false,
             compaction_generation: 0,
+            output_backrefs: LruCache::new(
+                NonZeroUsize::new(OUTPUT_BACKREF_CAP).expect("cap is non-zero"),
+            ),
         }
+    }
+
+    /// Token-opt (read-once): check whether `content` (a Grep/Glob/Bash output)
+    /// is byte-identical to an output already emitted this generation, and if so
+    /// return a short backref stub pointing at the earlier call. Otherwise record
+    /// this call as the canonical source and return `None` (the caller keeps the
+    /// full output).
+    ///
+    /// Gated on `optimize_reads` (client routes only) and a minimum size, so a
+    /// tiny output is never deduped into a longer stub. The generation check
+    /// makes a hit safe: it only fires while the referenced result is still in
+    /// the model's visible transcript.
+    pub fn output_backref(&mut self, content: &str, label: &str) -> Option<String> {
+        if !self.optimize_reads || content.len() < MIN_DEDUP_BYTES {
+            return None;
+        }
+        let hash = {
+            let mut h = std::collections::hash_map::DefaultHasher::new();
+            content.as_bytes().hash(&mut h);
+            h.finish()
+        };
+        if let Some(entry) = self.output_backrefs.get(&hash)
+            && entry.gen_at_record == self.compaction_generation
+            && entry.len == content.len()
+        {
+            return Some(format!(
+                "(Identical to the earlier result of {} in this conversation — that output is \
+                 unchanged and still shown above; refer to it instead of this repeat.)",
+                entry.label
+            ));
+        }
+        // Miss (or a stale entry from before a compaction): this call becomes the
+        // canonical reference for its content at the current generation.
+        self.output_backrefs.put(
+            hash,
+            OutputBackref {
+                label: label.to_string(),
+                gen_at_record: self.compaction_generation,
+                len: content.len(),
+            },
+        );
+        None
     }
 
     /// Token-opt: enable/disable diff-resend for this cache's route. Called once
@@ -121,10 +194,14 @@ impl FileStateCache {
         removed
     }
 
-    /// Remove all entries.
+    /// Remove all entries (read states AND read-once backrefs). Called on a
+    /// conversation reset (`/clear`, `/resume`): none of the prior reads or tool
+    /// outputs are visible to the model any more, so neither a dedup stub nor a
+    /// backref may reference them.
     pub fn clear(&mut self) {
         self.entries.clear();
         self.current_size_bytes = 0;
+        self.output_backrefs.clear();
     }
 
     /// Number of cached entries.
@@ -456,6 +533,80 @@ mod tests {
         cache.insert(PathBuf::from("/empty"), make_state("", 1));
         assert!(cache.get(Path::new("/empty")).is_some());
         assert_eq!(cache.current_size_bytes(), 0);
+    }
+
+    // -- read-once output-backref tests --
+
+    fn opt_cache() -> FileStateCache {
+        let mut c = FileStateCache::new(&make_config(10, 1_000_000));
+        c.set_optimize_reads(true);
+        c
+    }
+
+    #[test]
+    fn output_backref_dedups_identical_repeat() {
+        let mut cache = opt_cache();
+        let big = "match: foo\n".repeat(40); // > MIN_DEDUP_BYTES
+        // First occurrence records and keeps the full output.
+        assert!(cache.output_backref(&big, "`Grep` (foo)").is_none());
+        // Second identical occurrence → a shorter backref stub.
+        let stub = cache
+            .output_backref(&big, "`Grep` (foo)")
+            .expect("identical repeat should dedup");
+        assert!(
+            stub.len() < big.len(),
+            "backref must be smaller than output"
+        );
+        assert!(stub.contains("Identical to the earlier result"));
+        assert!(stub.contains("Grep"));
+    }
+
+    #[test]
+    fn output_backref_route_gated_off_by_default() {
+        // optimize_reads defaults false (router route) → never dedups.
+        let mut cache = FileStateCache::new(&make_config(10, 1_000_000));
+        let big = "x".repeat(500);
+        assert!(cache.output_backref(&big, "l").is_none());
+        assert!(cache.output_backref(&big, "l").is_none());
+    }
+
+    #[test]
+    fn output_backref_skips_small_outputs() {
+        let mut cache = opt_cache();
+        let small = "tiny output".to_string(); // < MIN_DEDUP_BYTES
+        assert!(cache.output_backref(&small, "l").is_none());
+        assert!(cache.output_backref(&small, "l").is_none());
+    }
+
+    #[test]
+    fn output_backref_distinct_outputs_do_not_dedup() {
+        let mut cache = opt_cache();
+        let a = "a".repeat(500);
+        let b = "b".repeat(500);
+        assert!(cache.output_backref(&a, "l").is_none());
+        assert!(cache.output_backref(&b, "l").is_none());
+    }
+
+    #[test]
+    fn output_backref_generation_bump_invalidates() {
+        let mut cache = opt_cache();
+        let big = "z".repeat(500);
+        assert!(cache.output_backref(&big, "l").is_none()); // recorded at gen 0
+        cache.bump_compaction_generation(); // a compaction collapsed the transcript
+        // The referenced result may be gone → must NOT dedup; re-records at new gen.
+        assert!(cache.output_backref(&big, "l").is_none());
+        // A repeat at the new generation dedups again.
+        assert!(cache.output_backref(&big, "l").is_some());
+    }
+
+    #[test]
+    fn clear_wipes_output_backrefs() {
+        let mut cache = opt_cache();
+        let big = "w".repeat(500);
+        assert!(cache.output_backref(&big, "l").is_none());
+        cache.clear();
+        // After a conversation reset the prior output is gone → first occurrence.
+        assert!(cache.output_backref(&big, "l").is_none());
     }
 
     #[test]
