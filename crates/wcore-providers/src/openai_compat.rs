@@ -39,6 +39,52 @@ pub fn accepts_reasoning_effort(model: &str) -> bool {
     is_o_series(&m) || is_gpt5(&m)
 }
 
+/// True when the model must be served via the OpenAI **Responses API**
+/// (`POST /v1/responses`) instead of Chat Completions
+/// (`POST /v1/chat/completions`).
+///
+/// The `gpt-5*` family is **rejected** at `/v1/chat/completions` with
+/// `unsupported_api_for_model` — it accepts ONLY the Responses surface,
+/// which uses a different request body (`input` instead of `messages`,
+/// `instructions` for the system prompt, Responses-format `tools`,
+/// `reasoning.effort`, `max_output_tokens`) and a different streaming
+/// event shape. `OpenAIProvider::stream` consults this predicate per
+/// request to pick the endpoint + parser; everything else (`gpt-4o`,
+/// `o1*`, `o3*`, third-party openai-compat models) keeps using Chat
+/// Completions.
+///
+/// This is intentionally a SEPARATE predicate from `is_gpt5` even though
+/// they currently coincide: the o-series can still be served via Chat
+/// Completions today, and a future model could need Responses without the
+/// `gpt-5` prefix. Keeping the routing decision in its own named function
+/// (mirroring the other model-family predicates here) is the single,
+/// documented seam for the chat-vs-responses API-surface choice.
+///
+/// Callers that need to FORCE one surface (e.g. an openai-compat gateway
+/// that proxies `gpt-5*` over Chat Completions, or a deployment that
+/// requires Responses for a non-`gpt-5` model) should prefer
+/// [`crate::openai_compat::responses_api_override`], which threads a
+/// `ProviderCompat` flag over this default.
+pub fn model_uses_responses_api(model: &str) -> bool {
+    let m = lower(model);
+    is_gpt5(&m)
+}
+
+/// Resolve the chat-vs-responses routing decision, honoring an optional
+/// per-deployment `ProviderCompat.uses_responses_api` override before
+/// falling back to the model-family default in [`model_uses_responses_api`].
+///
+/// `Some(true)` / `Some(false)` force the Responses / Chat surface
+/// respectively (for gateways that proxy `gpt-5*` over Chat Completions, or
+/// custom endpoints that require Responses for an unrecognized model id);
+/// `None` defers to the model-family predicate.
+pub fn responses_api_override(model: &str, override_flag: Option<bool>) -> bool {
+    match override_flag {
+        Some(forced) => forced,
+        None => model_uses_responses_api(model),
+    }
+}
+
 /// True when the model accepts an explicit `temperature`. False for the
 /// `o1*` / `o3*` reasoning families (which fix `temperature` at `1.0`),
 /// true everywhere else — including `gpt-5*`, which still honors it.
@@ -177,6 +223,58 @@ mod tests {
     fn accepts_reasoning_effort_case_insensitive() {
         assert!(accepts_reasoning_effort("GPT-5"));
         assert!(accepts_reasoning_effort("O1-Mini"));
+    }
+
+    // --- model_uses_responses_api -----------------------------------------
+
+    #[test]
+    fn model_uses_responses_api_gpt5_is_true() {
+        assert!(model_uses_responses_api("gpt-5"));
+        assert!(model_uses_responses_api("gpt-5.5-preview"));
+        assert!(model_uses_responses_api("gpt-5-turbo"));
+        assert!(model_uses_responses_api("gpt-5o-mini"));
+    }
+
+    #[test]
+    fn model_uses_responses_api_gpt4o_is_false() {
+        assert!(!model_uses_responses_api("gpt-4o"));
+        assert!(!model_uses_responses_api("gpt-4o-2024-08-06"));
+        assert!(!model_uses_responses_api("gpt-4.1"));
+    }
+
+    #[test]
+    fn model_uses_responses_api_o_series_is_false() {
+        // o-series stays on Chat Completions today.
+        assert!(!model_uses_responses_api("o1"));
+        assert!(!model_uses_responses_api("o3-mini"));
+    }
+
+    #[test]
+    fn model_uses_responses_api_case_insensitive() {
+        assert!(model_uses_responses_api("GPT-5"));
+        assert!(!model_uses_responses_api("GPT-4o"));
+    }
+
+    #[test]
+    fn model_uses_responses_api_non_openai_is_false() {
+        assert!(!model_uses_responses_api("octo-7b"));
+        assert!(!model_uses_responses_api("ollama-llama3"));
+    }
+
+    // --- responses_api_override -------------------------------------------
+
+    #[test]
+    fn responses_api_override_none_defers_to_family() {
+        assert!(responses_api_override("gpt-5", None));
+        assert!(!responses_api_override("gpt-4o", None));
+    }
+
+    #[test]
+    fn responses_api_override_forces_surface() {
+        // Force a gpt-5 model back onto Chat Completions (gateway proxy).
+        assert!(!responses_api_override("gpt-5", Some(false)));
+        // Force a non-gpt-5 model onto Responses (custom endpoint).
+        assert!(responses_api_override("custom-model", Some(true)));
     }
 
     // --- accepts_temperature ----------------------------------------------

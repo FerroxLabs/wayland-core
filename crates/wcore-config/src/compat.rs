@@ -107,6 +107,22 @@ pub struct ProviderCompat {
     /// endpoint does, not any product-specific behaviour. No billing, savings,
     /// or arbitrage logic lives here.
     pub input_optimization: Option<String>,
+
+    /// Force the OpenAI chat-vs-responses API surface for this provider,
+    /// overriding the per-model family default
+    /// (`openai_compat::model_uses_responses_api`).
+    ///
+    /// - `Some(true)` — always use the Responses API (`POST /v1/responses`),
+    ///   e.g. a custom endpoint that requires it for an unrecognized model id.
+    /// - `Some(false)` — always use Chat Completions (`POST /v1/chat/completions`),
+    ///   e.g. an openai-compat gateway that proxies `gpt-5*` over the chat
+    ///   surface.
+    /// - `None` (default) — defer to the model-family predicate: the `gpt-5*`
+    ///   family routes to Responses, everything else to Chat Completions.
+    ///
+    /// The `gpt-5*` family is rejected at `/v1/chat/completions` upstream, so
+    /// the default `None` already does the right thing for native OpenAI.
+    pub uses_responses_api: Option<bool>,
 }
 
 impl ProviderCompat {
@@ -466,6 +482,7 @@ impl ProviderCompat {
                 .cost_per_cache_write_token
                 .or(defaults.cost_per_cache_write_token),
             input_optimization: user.input_optimization.or(defaults.input_optimization),
+            uses_responses_api: user.uses_responses_api.or(defaults.uses_responses_api),
         }
     }
 
@@ -532,6 +549,13 @@ impl ProviderCompat {
     /// (the default when unset) means the client must optimize itself.
     pub fn input_optimization(&self) -> &str {
         self.input_optimization.as_deref().unwrap_or("client")
+    }
+
+    /// Optional override for the OpenAI chat-vs-responses API surface.
+    /// `None` (default) defers to the per-model family predicate
+    /// (`wcore_providers::openai_compat::model_uses_responses_api`).
+    pub fn uses_responses_api(&self) -> Option<bool> {
+        self.uses_responses_api
     }
 }
 

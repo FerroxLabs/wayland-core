@@ -27,6 +27,7 @@ pub mod nvidia;
 pub mod openai;
 pub mod openai_compat;
 pub mod openai_compatible;
+pub mod openai_responses;
 pub mod openrouter;
 pub mod perplexity;
 pub mod qwen;

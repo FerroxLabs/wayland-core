@@ -11,6 +11,7 @@ use wcore_types::tool::{ToolDef, truncate_deferred_description};
 
 use crate::key_rotation::{KeyPool, split_keys};
 use crate::openai_compat;
+use crate::openai_responses;
 use crate::retry::builder_send_with_retry;
 use crate::{
     LlmProvider, ModelInfo, ProviderError, alias_models, dump_request_body, dump_response_chunk,
@@ -319,6 +320,32 @@ impl OpenAIProvider {
         }
     }
 
+    /// Derive the Responses endpoint URL (`/v1/responses`) from the configured
+    /// chat endpoint, the same way [`Self::models_url`] derives `/v1/models`.
+    ///
+    /// The chat surface is `base_url + api_path()` where `api_path()` defaults
+    /// to `/v1/chat/completions`. Strip a trailing `/chat/completions` from the
+    /// path and append `/responses` so the Responses request shares the `/v1`
+    /// API root. When the path has no such suffix (an unusual override) fall
+    /// back to the canonical `/v1/responses` under the base URL.
+    fn responses_url(&self) -> String {
+        let base = self.base_url.trim_end_matches('/');
+        let path = self.compat.api_path();
+        match path.strip_suffix("/chat/completions") {
+            Some(root) => format!("{base}{root}/responses"),
+            None => format!("{base}/v1/responses"),
+        }
+    }
+
+    /// True when this request must be served via the OpenAI Responses API
+    /// instead of Chat Completions. Per-request (not per-provider): the same
+    /// `OpenAIProvider` serves `gpt-4o` + `gpt-5` in one session. Honors the
+    /// optional `ProviderCompat.uses_responses_api` override before falling
+    /// back to the model-family default. See `openai_compat` module docs.
+    fn uses_responses_api(&self, request: &LlmRequest) -> bool {
+        openai_compat::responses_api_override(&request.model, self.compat.uses_responses_api())
+    }
+
     pub(crate) fn build_request_body(&self, request: &LlmRequest) -> Value {
         // Per-request detection: the same OpenAIProvider instance serves
         // multiple models in one session (e.g. gpt-4o + gpt-5), so the
@@ -606,8 +633,21 @@ impl LlmProvider for OpenAIProvider {
         &self,
         request: &LlmRequest,
     ) -> Result<mpsc::Receiver<LlmEvent>, ProviderError> {
-        let url = format!("{}{}", self.base_url, self.compat.api_path());
-        let body = self.build_request_body(request);
+        // Per-request API-surface routing: the `gpt-5*` family is rejected at
+        // `/v1/chat/completions` and MUST use the Responses API. Everything
+        // else keeps the chat path unchanged. See `uses_responses_api`.
+        let use_responses = self.uses_responses_api(request);
+        let (url, body) = if use_responses {
+            (
+                self.responses_url(),
+                openai_responses::build_responses_body(request, &self.compat),
+            )
+        } else {
+            (
+                format!("{}{}", self.base_url, self.compat.api_path()),
+                self.build_request_body(request),
+            )
+        };
 
         dump_request_body(&self.debug, &body);
         reset_response_dump(&self.debug);
@@ -650,7 +690,12 @@ impl LlmProvider for OpenAIProvider {
         let debug = self.debug.clone();
 
         tokio::spawn(async move {
-            if let Err(e) = process_sse_stream(response, &tx, &debug).await {
+            let result = if use_responses {
+                process_responses_sse_stream(response, &tx, &debug).await
+            } else {
+                process_sse_stream(response, &tx, &debug).await
+            };
+            if let Err(e) = result {
                 let _ = tx.send(LlmEvent::Error(e.to_string())).await;
             }
         });
@@ -831,6 +876,93 @@ pub(crate) async fn process_sse_stream(
         return Err(ProviderError::Connection(
             "OpenAI SSE stream closed before any terminal event ([DONE] / \
              finish_reason / error) — response truncated"
+                .into(),
+        ));
+    }
+
+    Ok(())
+}
+
+/// Process the OpenAI **Responses API** SSE byte stream into [`LlmEvent`]s.
+///
+/// Mirrors the chunking / UTF-8 decoding / buffer-cap / truncation-detection
+/// discipline of [`process_sse_stream`] (the chat path), but parses Responses
+/// events via [`openai_responses::parse_responses_event`]. The Responses stream
+/// has NO `[DONE]` sentinel — the terminal frame is `response.completed`
+/// (mapped to [`LlmEvent::Done`]) or `response.failed` / `error` (mapped to
+/// [`LlmEvent::Error`]). A byte stream that closes before any terminal event is
+/// a silent truncation and surfaces as a connection error.
+pub(crate) async fn process_responses_sse_stream(
+    response: reqwest::Response,
+    tx: &mpsc::Sender<LlmEvent>,
+    debug: &DebugConfig,
+) -> Result<(), ProviderError> {
+    use futures::StreamExt;
+
+    let mut state = openai_responses::ResponsesStreamState::new();
+    let mut buffer = String::new();
+    let mut stream = response.bytes_stream();
+    let mut utf8 = wcore_types::utf8_stream::Utf8StreamDecoder::new();
+    let mut terminal_seen = false;
+
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.map_err(|e| ProviderError::Connection(e.to_string()))?;
+        let text = utf8.push(&chunk);
+        buffer.push_str(&text);
+
+        if buffer.len() > MAX_SSE_BUFFER_BYTES {
+            return Err(ProviderError::Parse(format!(
+                "SSE frame exceeded {MAX_SSE_BUFFER_BYTES} bytes without a newline delimiter"
+            )));
+        }
+
+        while let Some(line_end) = buffer.find('\n') {
+            let line = buffer[..line_end].trim().to_string();
+            buffer = buffer[line_end + 1..].to_string();
+
+            if line.is_empty() || line.starts_with(':') {
+                continue;
+            }
+
+            if let Some(data) = line.strip_prefix("data: ") {
+                dump_response_chunk(debug, data);
+                // The Responses stream uses no `[DONE]` sentinel; the OpenAI
+                // SDK still tolerates one defensively, so skip it if present.
+                if data == "[DONE]" {
+                    continue;
+                }
+
+                // Whether this raw frame is a stream-terminal *error* frame
+                // (`response.failed` / `error`). A per-tool-call argument
+                // parse error is emitted on an `output_item.done` frame and is
+                // NOT terminal — the stream still ends on its own
+                // `response.completed`. So we decide terminality from the
+                // frame type, not from the `LlmEvent` variant (mirrors the
+                // chat path, which only treats the in-band error frame as
+                // terminal).
+                let is_error_frame = openai_responses::is_terminal_error_frame(data);
+
+                let events = openai_responses::parse_responses_event(data, &mut state);
+                for event in events {
+                    if matches!(event, LlmEvent::Done { .. }) {
+                        let _ = tx.send(event).await;
+                        return Ok(());
+                    }
+                    if is_error_frame {
+                        terminal_seen = true;
+                    }
+                    if tx.send(event).await.is_err() {
+                        return Ok(());
+                    }
+                }
+            }
+        }
+    }
+
+    if !terminal_seen {
+        return Err(ProviderError::Connection(
+            "OpenAI Responses SSE stream closed before any terminal event \
+             (response.completed / response.failed / error) — response truncated"
                 .into(),
         ));
     }
@@ -1148,6 +1280,106 @@ mod tests {
             DebugConfig::default(),
         );
         assert_eq!(p.models_url(), "https://example.test/v1/models");
+    }
+
+    // --- Responses API routing (gpt-5) ------------------------------------
+
+    #[test]
+    fn responses_url_default_openai_base() {
+        // Native OpenAI: base has no /v1, default api_path is
+        // /v1/chat/completions → /v1/responses.
+        let p = OpenAIProvider::new(
+            "key",
+            "https://api.openai.com",
+            openai_compat(),
+            DebugConfig::default(),
+        );
+        assert_eq!(p.responses_url(), "https://api.openai.com/v1/responses");
+    }
+
+    #[test]
+    fn responses_url_base_with_v1_and_overridden_api_path() {
+        // Catalog style: base ends in /v1, api_path is /chat/completions →
+        // strip suffix, append /responses → /v1/responses.
+        let compat = ProviderCompat {
+            api_path: Some("/chat/completions".into()),
+            ..Default::default()
+        };
+        let p = OpenAIProvider::new(
+            "key",
+            "https://api.example.com/v1",
+            compat,
+            DebugConfig::default(),
+        );
+        assert_eq!(p.responses_url(), "https://api.example.com/v1/responses");
+    }
+
+    #[test]
+    fn uses_responses_api_routes_gpt5_only_by_default() {
+        let p = OpenAIProvider::new(
+            "key",
+            "https://api.openai.com",
+            openai_compat(),
+            DebugConfig::default(),
+        );
+        let mut req = LlmRequest {
+            model: "gpt-5".into(),
+            ..Default::default()
+        };
+        assert!(p.uses_responses_api(&req), "gpt-5 must route to Responses");
+        req.model = "gpt-4o".into();
+        assert!(
+            !p.uses_responses_api(&req),
+            "gpt-4o must stay on Chat Completions"
+        );
+        req.model = "o1-mini".into();
+        assert!(
+            !p.uses_responses_api(&req),
+            "o-series stays on Chat Completions"
+        );
+    }
+
+    #[test]
+    fn uses_responses_api_honors_compat_override() {
+        // Override forces gpt-5 back onto Chat Completions (gateway proxy).
+        let compat = ProviderCompat {
+            uses_responses_api: Some(false),
+            ..ProviderCompat::openai_defaults()
+        };
+        let p = OpenAIProvider::new(
+            "key",
+            "https://gateway.example.com/v1",
+            compat,
+            DebugConfig::default(),
+        );
+        let req = LlmRequest {
+            model: "gpt-5".into(),
+            ..Default::default()
+        };
+        assert!(
+            !p.uses_responses_api(&req),
+            "compat override Some(false) forces Chat Completions"
+        );
+    }
+
+    #[test]
+    fn build_request_body_for_gpt5_is_only_built_on_chat_path() {
+        // Sanity: the chat-path body builder still uses max_completion_tokens
+        // for gpt-5 (used only when an override forces gpt-5 onto chat).
+        let p = OpenAIProvider::new(
+            "key",
+            "https://api.openai.com",
+            openai_compat(),
+            DebugConfig::default(),
+        );
+        let req = LlmRequest {
+            model: "gpt-5".into(),
+            max_tokens: 1024,
+            ..Default::default()
+        };
+        let body = p.build_request_body(&req);
+        assert_eq!(body["max_completion_tokens"], 1024);
+        assert!(body.get("max_tokens").is_none());
     }
 
     // --- map_openai_finish_reason (Task F) --------------------------------
