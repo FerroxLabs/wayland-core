@@ -35,6 +35,12 @@ pub struct ChannelConfig {
     /// (preferred) or plain strings (unsafe; logged as warning).
     #[serde(default)]
     pub secrets: toml::Table,
+    /// Inbound access + session-shaping policy for this channel. Absent
+    /// `[inbound]` table -> the fail-closed default (denies all inbound
+    /// until the operator adds allowlist entries). See
+    /// [`crate::dispatch::access::InboundPolicy`].
+    #[serde(default)]
+    pub inbound: crate::dispatch::access::InboundPolicy,
 }
 
 fn default_enabled() -> bool {
@@ -163,6 +169,56 @@ platform = "slack"
         let loader = ChannelConfigLoader::new(tmp.path());
         let err = loader.load_all().expect_err("expected mismatch");
         assert!(matches!(err, ChannelError::Config(_)));
+    }
+
+    #[test]
+    fn inbound_table_round_trips_into_policy() {
+        use crate::dispatch::access::{DmPolicy, GroupPolicy};
+        let tmp = TempDir::new().unwrap();
+        std::fs::write(
+            tmp.path().join("acme.toml"),
+            r#"
+name = "acme"
+platform = "slack"
+
+[inbound]
+dm = "allowlist"
+group = "open"
+require_mention = false
+dm_allowlist = ["*"]
+"#,
+        )
+        .unwrap();
+        let loader = ChannelConfigLoader::new(tmp.path());
+        let v = loader.load_all().unwrap();
+        assert_eq!(v.len(), 1);
+        assert_eq!(v[0].inbound.dm, DmPolicy::Allowlist);
+        assert_eq!(v[0].inbound.group, GroupPolicy::Open);
+        assert!(!v[0].inbound.require_mention);
+        assert_eq!(v[0].inbound.dm_allowlist, vec!["*".to_string()]);
+    }
+
+    #[test]
+    fn missing_inbound_table_defaults_fail_closed() {
+        use crate::dispatch::access::{DmPolicy, GroupPolicy, InboundPolicy};
+        let tmp = TempDir::new().unwrap();
+        std::fs::write(
+            tmp.path().join("acme.toml"),
+            r#"
+name = "acme"
+platform = "slack"
+"#,
+        )
+        .unwrap();
+        let loader = ChannelConfigLoader::new(tmp.path());
+        let v = loader.load_all().unwrap();
+        assert_eq!(v.len(), 1);
+        // No [inbound] table -> the fail-closed default.
+        assert_eq!(v[0].inbound, InboundPolicy::default());
+        assert_eq!(v[0].inbound.dm, DmPolicy::Allowlist);
+        assert_eq!(v[0].inbound.group, GroupPolicy::Disabled);
+        assert!(v[0].inbound.require_mention);
+        assert!(v[0].inbound.dm_allowlist.is_empty());
     }
 
     #[test]

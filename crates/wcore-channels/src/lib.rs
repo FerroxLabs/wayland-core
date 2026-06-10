@@ -15,6 +15,7 @@
 
 pub mod auto_register;
 pub mod config;
+pub mod dispatch;
 pub mod error;
 pub mod event;
 pub mod manager;
@@ -22,6 +23,10 @@ pub mod mock;
 pub mod outgoing;
 
 pub use config::{ChannelConfig, ChannelConfigLoader};
+pub use dispatch::{
+    build_session_key, classify, decide_access, evaluate, AccessDecision, DedupeCache, DedupeKey,
+    DispatchOutcome, DmPolicy, GroupPolicy, InboundPolicy, TurnAdmission,
+};
 pub use error::ChannelError;
 pub use event::{
     Attachment, ChannelEvent, ChatType, ConnectionState, IncomingMessage, MediaKind, MentionKind,
