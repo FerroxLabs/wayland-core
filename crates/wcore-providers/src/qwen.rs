@@ -29,7 +29,12 @@ use crate::registry::{ProviderFactory, ProviderRegistry, RegistryError};
 use crate::{LlmProvider, ProviderError};
 
 /// Default Qwen (DashScope) base URL — OpenAI-compat mode.
-pub const QWEN_DEFAULT_BASE_URL: &str = "https://dashscope.aliyuncs.com/compatible-mode/v1";
+///
+/// Targets the INTERNATIONAL host (`dashscope-intl.aliyuncs.com`). Mainland-China
+/// users reach the `dashscope.aliyuncs.com` endpoint via the `alibaba-cn`
+/// catalog alias.
+pub const QWEN_DEFAULT_BASE_URL: &str =
+    "https://dashscope-intl.aliyuncs.com/compatible-mode/v1";
 
 /// Qwen provider — delegates to [`OpenAIProvider`] over DashScope's
 /// OpenAI-compatible endpoint.
@@ -96,12 +101,13 @@ mod tests {
     }
 
     #[test]
-    fn default_base_url_is_dashscope_compat_v1() {
-        // Bearer-token auth over the OpenAI-compat surface at
-        // dashscope.aliyuncs.com/compatible-mode/v1.
+    fn default_base_url_is_dashscope_intl_compat_v1() {
+        // Bearer-token auth over the OpenAI-compat surface at the INTERNATIONAL
+        // host dashscope-intl.aliyuncs.com/compatible-mode/v1. China users use
+        // the alibaba-cn alias.
         assert_eq!(
             QWEN_DEFAULT_BASE_URL,
-            "https://dashscope.aliyuncs.com/compatible-mode/v1"
+            "https://dashscope-intl.aliyuncs.com/compatible-mode/v1"
         );
     }
 

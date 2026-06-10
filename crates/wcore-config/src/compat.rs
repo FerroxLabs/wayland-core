@@ -373,13 +373,21 @@ impl ProviderCompat {
 
     /// Defaults for Moonshot (Kimi). v0.8.1 U10e.
     pub fn moonshot_defaults() -> Self {
-        Self::openai_compat_provider("moonshot")
+        // Base URL ends in `/v1`; pin `api_path` to avoid `/v1/v1`.
+        Self {
+            api_path: Some("/chat/completions".into()),
+            ..Self::openai_compat_provider("moonshot")
+        }
     }
 
     /// Defaults for Alibaba Qwen via DashScope's OpenAI-compat mode.
     /// v0.8.1 U10e.
     pub fn qwen_defaults() -> Self {
-        Self::openai_compat_provider("qwen")
+        // Base URL ends in `/compatible-mode/v1`; pin `api_path` to avoid `/v1/v1`.
+        Self {
+            api_path: Some("/chat/completions".into()),
+            ..Self::openai_compat_provider("qwen")
+        }
     }
 
     /// Defaults for Mistral AI (OpenAI-compatible chat surface).
@@ -619,8 +627,8 @@ mod tests {
 
     /// Regression guard (2026-06 provider-correctness audit): native-arm
     /// providers whose base URL already ends in `/v1` (together, fireworks,
-    /// nvidia, cerebras, flux-router, xai, mistral) — or whose vendor endpoint
-    /// omits `/v1` entirely (perplexity) — must pin `api_path` to
+    /// nvidia, cerebras, flux-router, xai, mistral, moonshot, qwen) — or whose
+    /// vendor endpoint omits `/v1` entirely (perplexity) — must pin `api_path` to
     /// `/chat/completions`. Otherwise the default `/v1/chat/completions`
     /// produces `…/v1/v1/chat/completions` (or an erroneous `/v1`) and every
     /// request 404s out of the box.
@@ -635,6 +643,8 @@ mod tests {
             ProviderCompat::flux_router_defaults(),
             ProviderCompat::xai_defaults(),
             ProviderCompat::mistral_defaults(),
+            ProviderCompat::moonshot_defaults(),
+            ProviderCompat::qwen_defaults(),
         ] {
             assert_eq!(compat.api_path(), "/chat/completions");
         }

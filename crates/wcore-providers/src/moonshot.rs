@@ -24,7 +24,10 @@ use crate::registry::{ProviderFactory, ProviderRegistry, RegistryError};
 use crate::{LlmProvider, ProviderError};
 
 /// Default Moonshot base URL (OpenAI-compat surface).
-pub const MOONSHOT_DEFAULT_BASE_URL: &str = "https://api.moonshot.cn/v1";
+///
+/// Targets the INTERNATIONAL host (`api.moonshot.ai`). Mainland-China users
+/// reach the `api.moonshot.cn` endpoint via the `moonshotai-cn` catalog alias.
+pub const MOONSHOT_DEFAULT_BASE_URL: &str = "https://api.moonshot.ai/v1";
 
 /// Moonshot (Kimi) provider — delegates to [`OpenAIProvider`] over Moonshot's
 /// OpenAI-compatible endpoint.
@@ -91,9 +94,10 @@ mod tests {
     }
 
     #[test]
-    fn default_base_url_is_moonshot_v1() {
-        // Bearer-token auth over the OpenAI-compat surface at api.moonshot.cn/v1.
-        assert_eq!(MOONSHOT_DEFAULT_BASE_URL, "https://api.moonshot.cn/v1");
+    fn default_base_url_is_moonshot_intl_v1() {
+        // Bearer-token auth over the OpenAI-compat surface at the INTERNATIONAL
+        // host api.moonshot.ai/v1. China users use the moonshotai-cn alias.
+        assert_eq!(MOONSHOT_DEFAULT_BASE_URL, "https://api.moonshot.ai/v1");
     }
 
     #[test]
