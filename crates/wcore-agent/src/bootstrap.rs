@@ -339,6 +339,32 @@ impl AgentBootstrap {
                     );
                     plugin_outcome.tools.extend(synth.tools);
                 }
+                crate::plugins::LoadedRuntimeHandle::Declarative { hooks, mcp_server } => {
+                    // Path B step 1 — a declarative plugin contributes its
+                    // lifecycle hooks + optional MCP server straight into the
+                    // plugin outcome. `apply_initialize_outcome` then routes
+                    // `hooks` → `applied.plugin_hooks` and `mcp_servers` →
+                    // `applied.plugin_mcp_servers`; the existing C1 dispatcher
+                    // binds plugin→server and fires the hooks.
+                    plugin_outcome.hooks.extend(hooks);
+                    if let Some(spec) = mcp_server {
+                        // Reachability gate mirroring the compiled-in IJFW
+                        // plugin: a stdio server whose command isn't launchable
+                        // is skipped (info-log) so boot never hangs. SSE/HTTP
+                        // transports can't be cheaply probed locally — trust
+                        // them and let wcore-mcp surface connect-time errors.
+                        if declarative_mcp_server_is_reachable(&spec) {
+                            plugin_outcome.mcp_servers.push(spec);
+                        } else {
+                            tracing::info!(
+                                plugin = %plugin_name,
+                                server = %spec.name,
+                                "declarative plugin MCP server did not start cleanly — \
+                                 skipping registration (hooks stay log-only)"
+                            );
+                        }
+                    }
+                }
                 crate::plugins::LoadedRuntimeHandle::None => {}
             }
         }
@@ -2253,6 +2279,65 @@ impl AgentBootstrap {
         let mut engine = AgentEngine::new_with_provider(provider, config, registry, sink_arc);
         engine.set_test_sink_handle(handle.clone());
         (engine, handle)
+    }
+}
+
+/// Path B step 1 — reachability probe for a declarative plugin's MCP server.
+///
+/// Mirrors the compiled-in IJFW plugin's `mcp_server_is_reachable`: a stdio
+/// server is launchable iff (a) for `node`/`python`/`deno` with an absolute
+/// first arg, the script file exists, or (b) for any other command, a fast
+/// `--help` spawn with a 2-second cap at least *starts* the process. SSE/HTTP
+/// transports can't be cheaply probed and are trusted (connect-time errors
+/// surface in wcore-mcp). Non-fatal: a `false` here only skips registration.
+fn declarative_mcp_server_is_reachable(spec: &wcore_plugin_api::McpServerSpec) -> bool {
+    use wcore_plugin_api::McpTransport;
+    let (command, args) = match &spec.transport {
+        McpTransport::Stdio { command, args } => (command, args),
+        // SSE / HTTP: trust the registration.
+        McpTransport::Sse { .. } | McpTransport::Http { .. } => return true,
+    };
+
+    // Fast path: interpreter + absolute script path → check the file exists.
+    if matches!(command.as_str(), "node" | "python3" | "python" | "deno")
+        && args
+            .first()
+            .map(|a| std::path::Path::new(a).is_absolute())
+            .unwrap_or(false)
+    {
+        return std::path::Path::new(&args[0]).exists();
+    }
+
+    // Smoke-test path: spawn `<command> <args...> --help`, give it 2 seconds.
+    // The process merely STARTING (even if `--help` exits non-zero) proves the
+    // binary is present and executable.
+    let mut probe_args: Vec<&str> = args.iter().map(String::as_str).collect();
+    probe_args.push("--help");
+    let mut cmd = std::process::Command::new(command);
+    cmd.args(&probe_args)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+
+    match cmd.spawn() {
+        Err(_) => false,
+        Ok(mut child) => {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+            loop {
+                match child.try_wait() {
+                    Ok(Some(_)) => return true,
+                    Ok(None) if std::time::Instant::now() < deadline => {
+                        std::thread::sleep(std::time::Duration::from_millis(50));
+                    }
+                    Ok(None) => {
+                        // Still running after 2 s — a real server. Reachable.
+                        let _ = child.kill();
+                        return true;
+                    }
+                    Err(_) => return false,
+                }
+            }
+        }
     }
 }
 

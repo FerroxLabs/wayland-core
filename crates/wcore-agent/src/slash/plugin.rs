@@ -152,6 +152,14 @@ fn describe_handle(h: &LoadedRuntimeHandle) -> (&'static str, String) {
             "mcp-bridge",
             format!("{} synthesized tools", p.tool_count()),
         ),
+        LoadedRuntimeHandle::Declarative { hooks, mcp_server } => (
+            "declarative",
+            format!(
+                "{} hook(s), {} mcp server",
+                hooks.len(),
+                if mcp_server.is_some() { 1 } else { 0 }
+            ),
+        ),
     }
 }
 

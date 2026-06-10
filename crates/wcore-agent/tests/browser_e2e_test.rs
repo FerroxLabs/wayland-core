@@ -52,6 +52,8 @@ fn fixture_manifest(allowed: &[&str]) -> PluginManifest {
         capabilities: Default::default(),
         plugin_api_version: None,
         runtime: None,
+        hooks: vec![],
+        mcp_server: None,
     }
     .also(|_| {
         let _ = allowed;

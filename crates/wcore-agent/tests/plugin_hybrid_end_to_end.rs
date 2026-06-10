@@ -174,6 +174,11 @@ kind = "wasm"
                 plugin_outcome.tools.extend(synth.tools);
                 synthesizer_runs.push((name, dispatch));
             }
+            LoadedRuntimeHandle::Declarative { .. } => {
+                // Declarative plugins contribute hooks + mcp servers, not
+                // synthesized tools; this hybrid test only exercises the
+                // binary-backed runtimes, so nothing to do here.
+            }
             LoadedRuntimeHandle::None => {}
         }
     }

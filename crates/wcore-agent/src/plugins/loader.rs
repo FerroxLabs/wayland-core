@@ -20,6 +20,7 @@ use std::sync::Arc;
 
 use ed25519_dalek::VerifyingKey;
 use wcore_config::plugins_config::PluginsConfig;
+use wcore_plugin_api::McpServerSpec;
 use wcore_plugin_api::manifest::PluginIdentity;
 use wcore_plugin_api::registry::tools::NamespaceLedger;
 use wcore_plugin_api::{
@@ -27,6 +28,8 @@ use wcore_plugin_api::{
 };
 use wcore_plugin_subprocess::{LoadedMcpBridgePlugin, LoadedSubprocessPlugin};
 use wcore_plugin_wasm::LoadedWasmPlugin;
+
+use super::runner::PluginHook;
 
 use crate::plugins::sig_verifier::{
     ENV_TRUST_UNSIGNED, KeySource, load_filesystem_keys, parse_verifying_key_b64, trusted_keys_dir,
@@ -117,6 +120,21 @@ pub enum LoadedRuntimeHandle {
     Wasm(Arc<LoadedWasmPlugin>),
     Subprocess(Arc<LoadedSubprocessPlugin>),
     McpBridge(LoadedMcpBridgePlugin),
+    /// Path B step 1 — declarative on-disk plugin. Plain data: the parsed
+    /// lifecycle hooks and optional MCP server spec, threaded into
+    /// `plugin_outcome.hooks` / `plugin_outcome.mcp_servers` by bootstrap so
+    /// the existing C1 dispatcher binds + fires them. No Arc — there is no
+    /// running runtime to keep alive.
+    Declarative {
+        hooks: Vec<PluginHook>,
+        mcp_server: Option<McpServerSpec>,
+    },
+}
+
+impl std::fmt::Debug for LoadedRuntimeHandle {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.kind_str())
+    }
 }
 
 impl LoadedRuntimeHandle {
@@ -126,6 +144,7 @@ impl LoadedRuntimeHandle {
             Self::Wasm(_) => "Wasm",
             Self::Subprocess(_) => "Subprocess",
             Self::McpBridge(_) => "McpBridge",
+            Self::Declarative { .. } => "Declarative",
         }
     }
 }
@@ -479,7 +498,10 @@ impl<'a> PluginLoader<'a> {
                 .as_ref()
                 .and_then(|r| r.subprocess.as_ref())
                 .and_then(|s| s.binary_path.clone()),
-            RuntimeDispatch::Static => None,
+            // Path B step 1 — declarative plugins have no entry binary, so
+            // there is nothing to resolve or signature-verify. The
+            // `entry_path` guard below short-circuits on `None`.
+            RuntimeDispatch::Static | RuntimeDispatch::Declarative => None,
         };
 
         let entry_path: Option<PathBuf> = match declared_rel.as_deref() {
@@ -615,6 +637,30 @@ impl<'a> PluginLoader<'a> {
                 (
                     Err("on-disk manifest classified as Static".to_string()),
                     LoadedRuntimeHandle::None,
+                )
+            }
+            RuntimeDispatch::Declarative => {
+                // Path B step 1 — no binary to spawn or verify. Translate the
+                // manifest's declared `[[hooks]]` into `PluginHook`s (tagged
+                // with this plugin's name) and carry the optional `[mcp_server]`
+                // spec out on the handle. Path-prefix trust is already enforced
+                // (identity was built via `from_subprocess_path` above);
+                // binary signature verification does not apply.
+                let hooks: Vec<PluginHook> = manifest
+                    .hooks
+                    .iter()
+                    .map(|h| PluginHook {
+                        plugin: plugin_name.clone(),
+                        phase: h.phase,
+                        name: h.tool.clone(),
+                    })
+                    .collect();
+                (
+                    Ok(()),
+                    LoadedRuntimeHandle::Declarative {
+                        hooks,
+                        mcp_server: manifest.mcp_server.clone(),
+                    },
                 )
             }
         };
@@ -811,6 +857,10 @@ pub enum RuntimeDispatch {
     Subprocess,
     /// MCP-server-as-plugin bridge — load via `McpBridgePluginRunner::load`.
     McpBridge,
+    /// Path B step 1 — declarative plugin (`runtime.kind = "declarative"`):
+    /// no executable. Contributes `[[hooks]]` + an optional `[mcp_server]`
+    /// straight into the host's plugin outcome.
+    Declarative,
 }
 
 /// v0.6.5 Task 2.7 — classify a manifest into its target runtime.
@@ -828,6 +878,13 @@ pub fn classify_runtime(
 ) -> RuntimeDispatch {
     use wcore_plugin_api::manifest::PluginIdentity;
 
+    // Path B step 1 — declarative kind wins over identity: a declarative
+    // plugin has no binary, so it never routes to a binary-backed runner.
+    if let Some(rt) = manifest.runtime.as_ref()
+        && rt.kind.eq_ignore_ascii_case("declarative")
+    {
+        return RuntimeDispatch::Declarative;
+    }
     if let Some(rt) = manifest.runtime.as_ref()
         && rt.kind.eq_ignore_ascii_case("mcp-bridge")
     {
@@ -1083,5 +1140,14 @@ license = "Apache-2.0"
         let id = PluginIdentity::from_static("fixture");
         let m = fixture_manifest(None);
         assert_eq!(classify_runtime(&id, &m), RuntimeDispatch::Static);
+    }
+
+    // Path B step 1 — T8: a manifest with runtime.kind = "declarative" routes
+    // to RuntimeDispatch::Declarative regardless of the (path-prefix) identity.
+    #[test]
+    fn classify_runtime_routes_declarative_kind_to_declarative() {
+        let id = PluginIdentity::from_static("fixture");
+        let m = fixture_manifest(Some("declarative"));
+        assert_eq!(classify_runtime(&id, &m), RuntimeDispatch::Declarative);
     }
 }

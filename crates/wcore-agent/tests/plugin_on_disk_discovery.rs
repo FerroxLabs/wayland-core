@@ -481,6 +481,127 @@ binary_path = "bin/plugin"
     );
 }
 
+// ---------------------------------------------------------------------------
+// Path B step 1 — declarative on-disk plugin kind.
+//
+// A declarative plugin ships a `plugin.toml` with `runtime.kind =
+// "declarative"`, `[[hooks]]`, and an optional `[mcp_server]` — NO executable.
+// Discovery must route it to `RuntimeDispatch::Declarative`, succeed (no binary
+// to sign/spawn), and carry the parsed hooks + mcp_server spec out on the
+// handle.
+// ---------------------------------------------------------------------------
+
+/// T10 — a declarative manifest dispatches to `Declarative`, loads Ok, and the
+/// handle carries the declared hooks + mcp_server spec.
+#[tokio::test]
+async fn on_disk_declarative_plugin_discovered_and_dispatched() {
+    use wcore_agent::plugins::LoadedRuntimeHandle;
+    use wcore_plugin_api::registry::hooks::HookPhase;
+
+    let tmp = tempfile::TempDir::new().unwrap();
+    let _guard = EnvGuard::set(tmp.path());
+
+    let manifest_toml = r#"
+[plugin]
+name = "declarative-plug"
+version = "0.0.0"
+description = "fixture"
+license = "Apache-2.0"
+
+[permissions]
+register_hooks = true
+register_mcp_server = true
+
+[runtime]
+kind = "declarative"
+
+[[hooks]]
+phase = "session_start"
+tool = "memory_prelude"
+
+[mcp_server]
+name = "declarative-plug-server"
+
+[mcp_server.transport]
+kind = "sse"
+url = "https://example.invalid/sse"
+"#;
+    let _ = make_plugin_dir(tmp.path(), "declarative-plug", manifest_toml, None, None);
+
+    let config = config();
+    let mut loader = PluginLoader::discover(&config);
+    let runner = PluginRunner::new();
+    let gate = Arc::new(PluginAccessGate);
+
+    loader.discover_on_disk(&runner, None, gate).await;
+
+    let recs = loader.on_disk_dispatches();
+    assert_eq!(recs.len(), 1, "expected one dispatch, got {recs:?}");
+    let r = &recs[0];
+    assert_eq!(r.plugin_name, "declarative-plug");
+    assert_eq!(r.dispatch, RuntimeDispatch::Declarative);
+    assert!(
+        r.load_result.is_ok(),
+        "declarative load must succeed (no binary): {:?}",
+        r.load_result
+    );
+    match &r.handle {
+        LoadedRuntimeHandle::Declarative { hooks, mcp_server } => {
+            assert_eq!(hooks.len(), 1);
+            assert_eq!(hooks[0].plugin, "declarative-plug");
+            assert_eq!(hooks[0].phase, HookPhase::SessionStart);
+            assert_eq!(hooks[0].name, "memory_prelude");
+            let spec = mcp_server.as_ref().expect("mcp_server present on handle");
+            assert_eq!(spec.name, "declarative-plug-server");
+        }
+        other => panic!("expected Declarative handle, got {other:?}"),
+    }
+    assert!(!runner.is_disabled("declarative-plug"));
+}
+
+/// T11 — a declarative plugin declaring `[[hooks]]` without `register_hooks`
+/// fails to load (manifest validation rejects it before dispatch).
+#[tokio::test]
+async fn on_disk_declarative_hooks_without_permission_rejected() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let _guard = EnvGuard::set(tmp.path());
+
+    let manifest_toml = r#"
+[plugin]
+name = "declarative-nogrant"
+version = "0.0.0"
+description = "fixture"
+license = "Apache-2.0"
+
+[runtime]
+kind = "declarative"
+
+[[hooks]]
+phase = "session_start"
+tool = "memory_prelude"
+"#;
+    let _ = make_plugin_dir(tmp.path(), "declarative-nogrant", manifest_toml, None, None);
+
+    let config = config();
+    let mut loader = PluginLoader::discover(&config);
+    let runner = PluginRunner::new();
+    let gate = Arc::new(PluginAccessGate);
+
+    loader.discover_on_disk(&runner, None, gate).await;
+
+    let recs = loader.on_disk_dispatches();
+    assert_eq!(recs.len(), 1);
+    let r = &recs[0];
+    let err = r
+        .load_result
+        .as_ref()
+        .expect_err("hooks-without-register_hooks must be rejected");
+    assert!(
+        err.contains("parse manifest") || err.contains("register_hooks"),
+        "expected manifest-validation rejection, got: {err}"
+    );
+}
+
 #[cfg(unix)]
 #[tokio::test]
 async fn symlink_entry_in_plugins_root_skipped() {
