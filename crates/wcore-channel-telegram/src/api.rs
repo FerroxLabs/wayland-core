@@ -40,21 +40,90 @@ pub struct Message {
     pub from: Option<User>,
     #[serde(default)]
     pub text: Option<String>,
+    /// Forum topic / thread id (supergroups with topics enabled).
+    #[serde(default)]
+    pub message_thread_id: Option<i64>,
+    /// The message this one replies to, if any.
+    #[serde(default)]
+    pub reply_to_message: Option<Box<Message>>,
+    /// Photo sizes — present when the message contains a photo.
+    #[serde(default)]
+    pub photo: Option<Vec<PhotoSize>>,
+    /// Voice note — present when the message contains a voice recording.
+    #[serde(default)]
+    pub voice: Option<Voice>,
+    /// Generic document attachment.
+    #[serde(default)]
+    pub document: Option<Document>,
+    /// Video attachment.
+    #[serde(default)]
+    pub video: Option<Video>,
+    /// Text entities (mentions, bot_commands, …).
+    #[serde(default)]
+    pub entities: Option<Vec<MessageEntity>>,
+}
+
+/// Telegram `PhotoSize` — we only need the `file_id` as a reference URL.
+#[derive(Debug, Clone, Deserialize)]
+pub struct PhotoSize {
+    pub file_id: String,
+}
+
+/// Telegram `Voice` note.
+#[derive(Debug, Clone, Deserialize)]
+pub struct Voice {
+    pub file_id: String,
+    #[serde(default)]
+    pub mime_type: Option<String>,
+}
+
+/// Telegram `Document`.
+#[derive(Debug, Clone, Deserialize)]
+pub struct Document {
+    pub file_id: String,
+    #[serde(default)]
+    pub mime_type: Option<String>,
+}
+
+/// Telegram `Video`.
+#[derive(Debug, Clone, Deserialize)]
+pub struct Video {
+    pub file_id: String,
+    #[serde(default)]
+    pub mime_type: Option<String>,
+}
+
+/// Telegram `MessageEntity` — text annotations (mentions, commands, …).
+#[derive(Debug, Clone, Deserialize)]
+pub struct MessageEntity {
+    /// Entity type string, e.g. `"mention"`, `"bot_command"`, …
+    #[serde(rename = "type")]
+    pub kind: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct Chat {
     /// Telegram chat ids are i64 (can be negative for groups/channels).
     pub id: i64,
+    /// Chat type: `"private"`, `"group"`, `"supergroup"`, `"channel"`.
+    #[serde(rename = "type", default)]
+    pub chat_type: String,
+    /// Human-facing title (groups/channels); absent for private chats.
+    #[serde(default)]
+    pub title: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct User {
     pub id: i64,
     #[serde(default)]
+    pub is_bot: bool,
+    #[serde(default)]
     pub username: Option<String>,
     #[serde(default)]
     pub first_name: Option<String>,
+    #[serde(default)]
+    pub last_name: Option<String>,
 }
 
 /// Envelope wrapping every Telegram Bot API response.

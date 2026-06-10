@@ -35,7 +35,7 @@
 use hmac::{Hmac, Mac};
 use serde::Deserialize;
 use sha2::Sha256;
-use wcore_channels::event::{ChannelEvent, IncomingMessage};
+use wcore_channels::event::{Attachment, ChannelEvent, ChatType, IncomingMessage, MediaKind};
 
 use crate::error::WhatsappError;
 
@@ -94,7 +94,33 @@ struct Change {
 #[derive(Debug, Deserialize)]
 struct ChangeValue {
     #[serde(default)]
+    metadata: Option<RawMetadata>,
+    #[serde(default)]
+    contacts: Vec<RawContact>,
+    #[serde(default)]
     messages: Vec<RawMessage>,
+}
+
+#[derive(Debug, Deserialize)]
+struct RawMetadata {
+    /// Receiving phone number id — stable account routing key.
+    #[serde(default)]
+    phone_number_id: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct RawContact {
+    /// Stable WhatsApp user id (same value as `messages[].from`).
+    #[serde(default)]
+    wa_id: Option<String>,
+    #[serde(default)]
+    profile: Option<RawProfile>,
+}
+
+#[derive(Debug, Deserialize)]
+struct RawProfile {
+    #[serde(default)]
+    name: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -109,12 +135,42 @@ struct RawMessage {
     text: Option<RawText>,
     #[serde(default, rename = "type")]
     kind: Option<String>,
+    /// Present when this message is a reply — carries the quoted message id
+    /// (and optionally its body if the platform inlines it).
+    #[serde(default)]
+    context: Option<RawContext>,
+    // Media message objects — present when kind != "text".
+    #[serde(default)]
+    image: Option<RawMedia>,
+    #[serde(default)]
+    audio: Option<RawMedia>,
+    #[serde(default)]
+    video: Option<RawMedia>,
+    #[serde(default)]
+    document: Option<RawMedia>,
 }
 
 #[derive(Debug, Deserialize)]
 struct RawText {
     #[serde(default)]
     body: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct RawContext {
+    /// Message id of the message being replied to.
+    #[serde(default)]
+    id: Option<String>,
+}
+
+/// Shared shape for image / audio / video / document objects.
+/// WhatsApp Cloud API returns a media `id` (to be fetched via the Media
+/// API), not a direct URL, so we store the media id as the `url` field
+/// until a later fetch resolves it to a download URL.
+#[derive(Debug, Deserialize)]
+struct RawMedia {
+    #[serde(default)]
+    id: Option<String>,
 }
 
 /// Parse one webhook body. Caller is responsible for first verifying
@@ -128,24 +184,90 @@ pub fn parse_webhook(raw_body: &str) -> Result<Vec<ChannelEvent>, WhatsappError>
     for entry in env.entry {
         for change in entry.changes {
             let Some(value) = change.value else { continue };
-            for raw in value.messages {
-                // We currently translate only `text` messages — status
-                // events / media / interactive replies surface as
-                // PlatformWarning so they don't fail the whole envelope
-                // and so the engine sees they arrived.
+
+            // Receiving account id (phone_number_id from metadata).
+            let account_id = value
+                .metadata
+                .as_ref()
+                .and_then(|m| m.phone_number_id.clone());
+            // Destructure before the consuming loop so both fields are
+            // accessible inside it without a partial-move error.
+            let ChangeValue { contacts, messages, .. } = value;
+
+            for raw in messages {
                 let kind = raw.kind.as_deref().unwrap_or("text");
-                if kind != "text" {
-                    out.push(ChannelEvent::PlatformWarning {
-                        message: format!("ignored non-text whatsapp message kind={kind}"),
-                    });
-                    continue;
-                }
-                let body = raw
-                    .text
-                    .as_ref()
-                    .and_then(|t| t.body.clone())
-                    .unwrap_or_default();
-                let from = raw.from.unwrap_or_else(|| "unknown".to_string());
+
+                // Build an attachment list for media message types.
+                // WhatsApp Cloud API returns a media id rather than a direct
+                // URL; we store it as the `url` field (prefixed with the
+                // media id) for the fetching layer to resolve.
+                let (body, attachments): (String, Vec<Attachment>) = match kind {
+                    "text" => {
+                        let text = raw
+                            .text
+                            .as_ref()
+                            .and_then(|t| t.body.clone())
+                            .unwrap_or_default();
+                        (text, Vec::new())
+                    }
+                    "image" => {
+                        let att = raw.image.as_ref().and_then(|m| m.id.as_deref()).map(|id| {
+                            Attachment {
+                                url: id.to_string(),
+                                kind: MediaKind::Image,
+                                ..Default::default()
+                            }
+                        });
+                        (String::new(), att.into_iter().collect())
+                    }
+                    "audio" => {
+                        let att =
+                            raw.audio.as_ref().and_then(|m| m.id.as_deref()).map(|id| {
+                                Attachment {
+                                    url: id.to_string(),
+                                    kind: MediaKind::Audio,
+                                    ..Default::default()
+                                }
+                            });
+                        (String::new(), att.into_iter().collect())
+                    }
+                    "video" => {
+                        let att =
+                            raw.video.as_ref().and_then(|m| m.id.as_deref()).map(|id| {
+                                Attachment {
+                                    url: id.to_string(),
+                                    kind: MediaKind::Video,
+                                    ..Default::default()
+                                }
+                            });
+                        (String::new(), att.into_iter().collect())
+                    }
+                    "document" => {
+                        let att =
+                            raw.document
+                                .as_ref()
+                                .and_then(|m| m.id.as_deref())
+                                .map(|id| Attachment {
+                                    url: id.to_string(),
+                                    kind: MediaKind::Document,
+                                    ..Default::default()
+                                });
+                        (String::new(), att.into_iter().collect())
+                    }
+                    _ => {
+                        // Status events / interactive replies / stickers etc. —
+                        // surface as PlatformWarning so the engine sees they
+                        // arrived without failing the whole envelope.
+                        out.push(ChannelEvent::PlatformWarning {
+                            message: format!(
+                                "ignored non-text whatsapp message kind={kind}"
+                            ),
+                        });
+                        continue;
+                    }
+                };
+
+                let from = raw.from.clone().unwrap_or_else(|| "unknown".to_string());
                 let id = raw.id.unwrap_or_default();
                 let ts_secs: i64 = raw
                     .timestamp
@@ -153,13 +275,71 @@ pub fn parse_webhook(raw_body: &str) -> Result<Vec<ChannelEvent>, WhatsappError>
                     .and_then(|s| s.parse().ok())
                     .unwrap_or(0);
 
+                // Look up the contact entry whose wa_id matches this message's
+                // `from` field to resolve the display name.
+                let sender_display: Option<String> = contacts
+                    .iter()
+                    .find(|c| c.wa_id.as_deref() == Some(from.as_str()))
+                    .and_then(|c| c.profile.as_ref())
+                    .and_then(|p| p.name.clone());
+
+                // WhatsApp Cloud API is strictly 1:1 DMs in the standard
+                // messages webhook; group-chat webhooks carry a group id in
+                // `from` that starts with a numeric prefix but is distinct from
+                // individual phone numbers. The Meta Cloud API does not expose a
+                // reliable "is this a group" flag in the messages object itself,
+                // so we default to Direct — the correct value for every standard
+                // Business API integration. Group-aware connectors should
+                // override this after construction if they can detect group ids.
+                let chat_type = ChatType::Direct;
+
+                // Reply context: messages[].context.id is the id of the message
+                // being replied to.
+                let reply_to_message_id: Option<String> =
+                    raw.context.as_ref().and_then(|c| c.id.clone());
+
                 let msg = IncomingMessage {
-                    id: id.clone(),
+                    id,
+                    // conversation_id: for 1:1 DMs on WhatsApp Cloud API the
+                    // natural conversation key is the sender's wa_id (= `from`).
                     conversation_id: from.clone(),
-                    author: from,
+                    // author: human-facing label; same as sender_id here because
+                    // WhatsApp Cloud API does not provide a separate display-name
+                    // in the message object (only in contacts[].profile.name).
+                    author: from.clone(),
                     text: body,
                     ts_secs,
-                    attachments: Vec::new(),
+                    attachments,
+                    // sender_id: the `from` field is the stable wa_id / phone
+                    // number id assigned by the platform — the correct
+                    // access-control and dedup key.
+                    sender_id: from,
+                    sender_display,
+                    // sender_handle / sender_alt_id: not exposed by WhatsApp
+                    // Cloud API in the standard webhook payload.
+                    sender_handle: None,
+                    sender_alt_id: None,
+                    is_bot: false,
+                    is_self: false,
+                    chat_type,
+                    // chat_name / space_id / thread_id / parent_chat_id: not
+                    // present in the WhatsApp Cloud API webhook payload.
+                    chat_name: None,
+                    space_id: None,
+                    thread_id: None,
+                    parent_chat_id: None,
+                    account_id: account_id.clone(),
+                    platform: Some("whatsapp".into()),
+                    // was_mentioned / mention_kind: bots in 1:1 DMs are always
+                    // directly addressed — but WhatsApp has no explicit mention
+                    // syntax, so we leave this false; the dispatch kernel can
+                    // infer addressing from chat_type == Direct.
+                    was_mentioned: false,
+                    mention_kind: None,
+                    reply_to_message_id,
+                    // reply_to_text: WhatsApp Cloud API does not inline the
+                    // quoted body in the context object.
+                    reply_to_text: None,
                 };
                 out.push(ChannelEvent::MessageReceived { msg });
             }
@@ -241,23 +421,90 @@ mod tests {
             ChannelEvent::MessageReceived { msg } => {
                 assert_eq!(msg.text, "hello there");
                 assert_eq!(msg.author, "15555550100");
+                assert_eq!(msg.sender_id, "15555550100");
                 assert_eq!(msg.conversation_id, "15555550100");
                 assert_eq!(msg.id, "wamid.HBgL...");
                 assert_eq!(msg.ts_secs, 1700000000);
+                assert_eq!(msg.sender_display.as_deref(), Some("Alice"));
+                assert_eq!(msg.account_id.as_deref(), Some("PNID"));
+                assert_eq!(msg.platform.as_deref(), Some("whatsapp"));
+                assert_eq!(msg.chat_type, ChatType::Direct);
+                assert!(!msg.is_bot);
+                assert!(!msg.is_self);
+                assert!(msg.attachments.is_empty());
+                assert!(msg.reply_to_message_id.is_none());
             }
             other => panic!("expected MessageReceived, got {other:?}"),
         }
     }
 
     #[test]
-    fn parse_webhook_non_text_kind_surfaces_warning() {
+    fn parse_webhook_image_message_produces_attachment() {
+        let body = r#"{
+            "entry":[{"changes":[{"value":{
+                "metadata":{"phone_number_id":"PNID"},
+                "contacts":[],
+                "messages":[{
+                    "from":"15555550100",
+                    "id":"wamid.IMG",
+                    "timestamp":"1700000001",
+                    "type":"image",
+                    "image":{"id":"media-abc123"}
+                }]
+            }}]}]
+        }"#;
+        let evs = parse_webhook(body).unwrap();
+        assert_eq!(evs.len(), 1);
+        match &evs[0] {
+            ChannelEvent::MessageReceived { msg } => {
+                assert_eq!(msg.attachments.len(), 1);
+                assert_eq!(msg.attachments[0].url, "media-abc123");
+                assert_eq!(msg.attachments[0].kind, MediaKind::Image);
+                assert!(msg.text.is_empty());
+            }
+            other => panic!("expected MessageReceived, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_webhook_reply_context_sets_reply_to_message_id() {
+        let body = r#"{
+            "entry":[{"changes":[{"value":{
+                "metadata":{"phone_number_id":"PNID"},
+                "contacts":[],
+                "messages":[{
+                    "from":"15555550100",
+                    "id":"wamid.REPLY",
+                    "timestamp":"1700000002",
+                    "type":"text",
+                    "text":{"body":"that's great"},
+                    "context":{"id":"wamid.ORIGINAL"}
+                }]
+            }}]}]
+        }"#;
+        let evs = parse_webhook(body).unwrap();
+        assert_eq!(evs.len(), 1);
+        match &evs[0] {
+            ChannelEvent::MessageReceived { msg } => {
+                assert_eq!(
+                    msg.reply_to_message_id.as_deref(),
+                    Some("wamid.ORIGINAL")
+                );
+                assert!(msg.reply_to_text.is_none());
+            }
+            other => panic!("expected MessageReceived, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_webhook_unhandled_kind_surfaces_warning() {
+        // Stickers, interactive replies, reactions — not yet translated.
         let body = r#"{
             "entry":[{"changes":[{"value":{"messages":[{
                 "from":"15555550100",
                 "id":"wamid.X",
                 "timestamp":"1700000000",
-                "type":"image",
-                "image":{"id":"media-id"}
+                "type":"sticker"
             }]}}]}]
         }"#;
         let evs = parse_webhook(body).unwrap();

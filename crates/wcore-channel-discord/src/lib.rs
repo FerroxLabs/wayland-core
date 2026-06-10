@@ -165,6 +165,10 @@ impl Channel for DiscordChannel {
             allowed_channel_ids: allowed,
             inbox: Arc::clone(&self.inbox),
             shutdown: rx,
+            // bot_id is populated from the READY event; pre-READY messages
+            // will have is_self=false and was_mentioned=false (conservative).
+            // A future pass can resolve via GET /users/@me at start() time.
+            bot_id: None,
         };
         let handle = tokio::spawn(gateway::gateway_loop(args));
         self.gateway_handle = Some(handle);

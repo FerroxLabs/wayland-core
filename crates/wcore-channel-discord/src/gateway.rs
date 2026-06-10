@@ -20,7 +20,9 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::{Mutex, watch};
 use tokio_tungstenite::tungstenite::Message as WsMessage;
 
-use wcore_channels::event::{ChannelEvent, ConnectionState, IncomingMessage};
+use wcore_channels::event::{
+    Attachment, ChannelEvent, ChatType, ConnectionState, IncomingMessage, MediaKind, MentionKind,
+};
 
 // =============================================================================
 // Opcodes (https://discord.com/developers/docs/topics/gateway-events)
@@ -67,6 +69,24 @@ pub struct MessageCreate {
     pub timestamp: Option<String>,
     #[serde(default)]
     pub author: Option<MessageAuthor>,
+    /// Present on guild messages; absent for DMs and group DMs.
+    #[serde(default)]
+    pub guild_id: Option<String>,
+    /// Populated when the message is in a thread channel.
+    #[serde(default)]
+    pub thread: Option<MessageThread>,
+    /// File / media attachments.
+    #[serde(default)]
+    pub attachments: Vec<MessageAttachment>,
+    /// Users explicitly `@mention`ed in the message body.
+    #[serde(default)]
+    pub mentions: Vec<MessageMention>,
+    /// Inlined replied-to message (present when `message_type == 19`).
+    #[serde(default)]
+    pub referenced_message: Option<Box<ReferencedMessage>>,
+    /// Lightweight reply cross-reference (message_id / channel / guild).
+    #[serde(default)]
+    pub message_reference: Option<MessageReference>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -74,8 +94,53 @@ pub struct MessageAuthor {
     pub id: String,
     #[serde(default)]
     pub username: Option<String>,
+    /// Pomelo global display name (new username system, 2023+).
+    #[serde(default)]
+    pub global_name: Option<String>,
+    /// Legacy four-digit discriminator (`"0"` for migrated accounts).
+    #[serde(default)]
+    pub discriminator: Option<String>,
     #[serde(default)]
     pub bot: bool,
+}
+
+/// Minimal representation of a Discord attachment object.
+#[derive(Debug, Clone, Deserialize)]
+pub struct MessageAttachment {
+    /// CDN URL for the attachment.
+    pub url: String,
+    /// MIME type reported by Discord, if any.
+    #[serde(default)]
+    pub content_type: Option<String>,
+}
+
+/// Minimal mention entry — only the stable user id is needed.
+#[derive(Debug, Clone, Deserialize)]
+pub struct MessageMention {
+    pub id: String,
+}
+
+/// Inlined replied-to message — only the author id is needed for bot
+/// detection (`is_self` / `mention_kind`).
+#[derive(Debug, Clone, Deserialize)]
+pub struct ReferencedMessage {
+    pub id: String,
+    #[serde(default)]
+    pub author: Option<MessageAuthor>,
+}
+
+/// Lightweight reply cross-reference carried on the replying message.
+#[derive(Debug, Clone, Deserialize)]
+pub struct MessageReference {
+    #[serde(default)]
+    pub message_id: Option<String>,
+}
+
+/// Thread object embedded in MESSAGE_CREATE when the message is posted
+/// inside a thread. Only the id is used (as `thread_id`).
+#[derive(Debug, Clone, Deserialize)]
+pub struct MessageThread {
+    pub id: String,
 }
 
 // -----------------------------------------------------------------------------
@@ -165,9 +230,14 @@ pub(crate) fn parse_message_create(payload: &GatewayPayload) -> Option<MessageCr
 /// Returns `None` if the message is from a bot account (we don't echo
 /// our own messages back through `poll_events`) or if the channel ID is
 /// not in `allowed_channel_ids` (when non-empty).
+///
+/// `bot_id` — the stable user id of the receiving bot (from the READY
+/// event). When `Some`, `is_self` and mention detection are precise.
+/// When `None`, both default conservatively to `false`.
 pub(crate) fn map_message_create(
     msg: MessageCreate,
     allowed_channel_ids: &HashSet<String>,
+    bot_id: Option<&str>,
 ) -> Option<IncomingMessage> {
     if !allowed_channel_ids.is_empty() && !allowed_channel_ids.contains(&msg.channel_id) {
         return None;
@@ -176,24 +246,152 @@ pub(crate) fn map_message_create(
     if author_is_bot {
         return None;
     }
-    let author_str = msg
+
+    // ---- Sender identity ------------------------------------------------
+    let sender_id = msg
         .author
         .as_ref()
-        .and_then(|a| a.username.clone().or_else(|| Some(a.id.clone())))
+        .map(|a| a.id.clone())
         .unwrap_or_else(|| "unknown".to_string());
+
+    // global_name is the preferred display name (Pomelo); fall back to
+    // username, then the raw id.
+    let sender_display = msg
+        .author
+        .as_ref()
+        .and_then(|a| a.global_name.clone().or_else(|| a.username.clone()));
+
+    // @username#discriminator — omit discriminator when "0" (migrated acct)
+    // or absent (same thing in the new system).
+    let sender_handle = msg.author.as_ref().and_then(|a| {
+        let uname = a.username.as_deref()?;
+        let disc = a.discriminator.as_deref().unwrap_or("0");
+        if disc == "0" || disc.is_empty() {
+            Some(uname.to_string())
+        } else {
+            Some(format!("{uname}#{disc}"))
+        }
+    });
+
+    // Human-facing author label: global_name > username > id.
+    let author_str = sender_display
+        .clone()
+        .unwrap_or_else(|| sender_id.clone());
+
+    let is_self = bot_id.is_some_and(|bid| bid == sender_id);
+
     let ts_secs = msg
         .timestamp
         .as_deref()
         .map(crate::rest::parse_iso8601_to_epoch)
         .unwrap_or(0);
+
+    // ---- Chat type -------------------------------------------------------
+    // guild_id present → guild text channel (Channel).
+    // guild_id absent  → DM or group DM.
+    //   Discord MESSAGE_CREATE does not include `channel_type` directly,
+    //   so we cannot distinguish 1:1 DM (type=1) from group DM (type=3)
+    //   without a separate channel fetch. We default absent-guild to Direct;
+    //   group DMs are uncommon for bots and the distinction is low-risk here.
+    let chat_type = if msg.guild_id.is_some() {
+        ChatType::Channel
+    } else {
+        ChatType::Direct
+    };
+
+    // ---- Thread context --------------------------------------------------
+    let thread_id = msg.thread.as_ref().map(|t| t.id.clone());
+
+    // ---- Attachments -----------------------------------------------------
+    let attachments: Vec<Attachment> = msg
+        .attachments
+        .into_iter()
+        .map(|a| {
+            let kind = media_kind_from_content_type(a.content_type.as_deref());
+            Attachment {
+                url: a.url,
+                content_type: a.content_type,
+                kind,
+                ..Default::default()
+            }
+        })
+        .collect();
+
+    // ---- Mention / addressing --------------------------------------------
+    // 1. Native @mention: bot's id appears in the `mentions` array.
+    // 2. ReplyToBot: the inlined `referenced_message` was authored by the bot.
+    let (was_mentioned, mention_kind) = if let Some(bid) = bot_id {
+        let native = msg.mentions.iter().any(|m| m.id == bid);
+        let reply_to_bot = msg
+            .referenced_message
+            .as_deref()
+            .and_then(|r| r.author.as_ref())
+            .is_some_and(|a| a.id == bid);
+        match (native, reply_to_bot) {
+            (true, _) => (true, Some(MentionKind::Native)),
+            (false, true) => (true, Some(MentionKind::ReplyToBot)),
+            _ => (false, None),
+        }
+    } else {
+        (false, None)
+    };
+
+    // ---- Reply / quote ---------------------------------------------------
+    // Prefer the richer inlined object; fall back to the lightweight ref.
+    let reply_to_message_id = msg
+        .referenced_message
+        .as_deref()
+        .map(|r| r.id.clone())
+        .or_else(|| {
+            msg.message_reference
+                .as_ref()
+                .and_then(|r| r.message_id.clone())
+        });
+    // referenced_message body is not captured in the struct (would bloat the
+    // payload deserialization for limited value). A future REST-enrichment
+    // pass can fill this in; leave None for now.
+    let reply_to_text: Option<String> = None;
+
     Some(IncomingMessage {
         id: msg.id,
-        conversation_id: msg.channel_id,
+        conversation_id: msg.channel_id.clone(),
         author: author_str,
         text: msg.content,
         ts_secs,
-        attachments: Vec::new(),
+        attachments,
+        sender_id,
+        sender_display,
+        sender_handle,
+        sender_alt_id: None,
+        is_bot: false, // already filtered above — only non-bot messages reach here
+        is_self,
+        chat_type,
+        chat_name: None,    // not in MESSAGE_CREATE; requires channel GET
+        space_id: msg.guild_id,
+        thread_id,
+        parent_chat_id: None, // thread's parent channel not in this payload
+        account_id: None,     // single-account connector; not tracked
+        platform: Some("discord".into()),
+        was_mentioned,
+        mention_kind,
+        reply_to_message_id,
+        reply_to_text,
     })
+}
+
+/// Coarsely classify a MIME type string into a [`MediaKind`].
+fn media_kind_from_content_type(ct: Option<&str>) -> MediaKind {
+    match ct {
+        Some(s) if s.starts_with("image/") => MediaKind::Image,
+        Some(s) if s.starts_with("video/") => MediaKind::Video,
+        Some(s) if s.starts_with("audio/") => MediaKind::Audio,
+        Some(s)
+            if s.starts_with("application/") || s.starts_with("text/") =>
+        {
+            MediaKind::Document
+        }
+        _ => MediaKind::Other,
+    }
 }
 
 // -----------------------------------------------------------------------------
@@ -263,6 +461,10 @@ pub(crate) struct GatewayArgs {
     pub allowed_channel_ids: HashSet<String>,
     pub inbox: Arc<Mutex<VecDeque<ChannelEvent>>>,
     pub shutdown: watch::Receiver<bool>,
+    /// Stable user id of this bot (from Discord READY). Used for
+    /// `is_self` detection and `was_mentioned` classification.
+    /// `None` until the connector resolves it (e.g. via `/users/@me`).
+    pub bot_id: Option<String>,
 }
 
 /// Drive one or more gateway connection cycles until shutdown is
@@ -277,6 +479,7 @@ pub(crate) async fn gateway_loop(args: GatewayArgs) {
         allowed_channel_ids,
         inbox,
         mut shutdown,
+        bot_id,
     } = args;
 
     // Discord's gateway endpoint takes ?v=10&encoding=json.
@@ -298,6 +501,7 @@ pub(crate) async fn gateway_loop(args: GatewayArgs) {
             intents,
             heartbeat_grace_ms,
             &allowed_channel_ids,
+            bot_id.as_deref(),
             &inbox,
             &mut shutdown,
         )
@@ -344,12 +548,16 @@ enum SessionExit {
     Reconnect,
 }
 
+// One Gateway session carries many independent connection parameters;
+// grouping them into a struct would add indirection without clarity.
+#[allow(clippy::too_many_arguments)]
 async fn run_one_session(
     url: &str,
     bot_token: &str,
     intents: u64,
     heartbeat_grace_ms: u64,
     allowed_channel_ids: &HashSet<String>,
+    bot_id: Option<&str>,
     inbox: &Arc<Mutex<VecDeque<ChannelEvent>>>,
     shutdown: &mut watch::Receiver<bool>,
 ) -> Result<SessionExit, String> {
@@ -478,7 +686,8 @@ async fn run_one_session(
                     }
                     OP_DISPATCH => {
                         if let Some(mc) = parse_message_create(&payload)
-                            && let Some(im) = map_message_create(mc, allowed_channel_ids)
+                            && let Some(im) =
+                                map_message_create(mc, allowed_channel_ids, bot_id)
                         {
                             inbox
                                 .lock()
@@ -536,7 +745,7 @@ mod tests {
         assert_eq!(payload.s, Some(42));
         let mc = parse_message_create(&payload).expect("message_create parses");
         let allowed = HashSet::new();
-        let im = map_message_create(mc, &allowed).expect("mapper produces an event");
+        let im = map_message_create(mc, &allowed, None).expect("mapper produces an event");
         assert_eq!(im.id, "123456789");
         assert_eq!(im.conversation_id, "55555");
         assert_eq!(im.author, "alice");
@@ -556,7 +765,7 @@ mod tests {
         let mc = parse_message_create(&payload).unwrap();
         let allowed = HashSet::new();
         assert!(
-            map_message_create(mc, &allowed).is_none(),
+            map_message_create(mc, &allowed, None).is_none(),
             "bot messages should be dropped"
         );
     }
@@ -573,7 +782,7 @@ mod tests {
         let mut allowed = HashSet::new();
         allowed.insert("ALLOWED".to_string());
         assert!(
-            map_message_create(mc, &allowed).is_none(),
+            map_message_create(mc, &allowed, None).is_none(),
             "channel_id outside allow-list should be dropped"
         );
     }

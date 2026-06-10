@@ -15,7 +15,7 @@ use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncWrite, BufReader};
 use tokio::process::Command;
 use tokio::sync::{Mutex, oneshot, watch};
 
-use wcore_channels::event::{ChannelEvent, IncomingMessage};
+use wcore_channels::event::{ChannelEvent, ChatType, IncomingMessage};
 
 use crate::error::SignalError;
 use crate::jsonrpc::{Frame, ReceiveParams};
@@ -245,6 +245,18 @@ fn build_incoming(parsed: &ReceiveParams) -> Option<IncomingMessage> {
         .or_else(|| envelope.source_uuid.clone())
         .unwrap_or_default();
 
+    // sender_id: ACI/UUID is the stable Signal identity. Fall back to
+    // phone number if no UUID is present (older clients / linked devices
+    // may omit it), then to source_name as last resort.
+    let sender_id = envelope
+        .source_uuid
+        .clone()
+        .or_else(|| envelope.source.clone())
+        .or_else(|| envelope.source_name.clone())
+        .unwrap_or_default();
+
+    // author: stable address label — phone, then UUID, then display name
+    // as a last resort. The display name lives in `sender_display`.
     let author = envelope
         .source
         .clone()
@@ -252,12 +264,72 @@ fn build_incoming(parsed: &ReceiveParams) -> Option<IncomingMessage> {
         .or_else(|| envelope.source_name.clone())
         .unwrap_or_default();
 
+    // sender_display: source_name when present.
+    let sender_display = envelope.source_name.clone();
+
+    // sender_handle: e164 phone number.
+    let sender_handle = envelope.source.clone();
+
+    // sender_alt_id: the OTHER half of the UUID/number union. When UUID
+    // is the primary id (sender_id), put the phone number here; when UUID
+    // is absent and phone is primary, there is no alt.
+    let sender_alt_id = if envelope.source_uuid.is_some() {
+        envelope.source.clone()
+    } else {
+        None
+    };
+
+    // chat_type: presence of groupInfo in the data message is the
+    // definitive Signal indicator for a group context. Signal does not
+    // have broadcast channels in the daemon JSON-RPC surface, so all
+    // non-group messages are 1:1 Direct.
+    let chat_type = if data.group_info.is_some() {
+        ChatType::Group
+    } else {
+        ChatType::Direct
+    };
+
+    // account_id: the receiving Signal account number, if signal-cli
+    // reported it in the outer params envelope.
+    let account_id = parsed.account.clone();
+
     Some(IncomingMessage {
         id,
         conversation_id,
         author,
         text,
         ts_secs,
+        // attachments: signal-cli's JSON-RPC `receive` notification does
+        // not surface attachment references in the current ReceiveParams
+        // schema; leave empty until the struct gains an attachments field.
         attachments: Vec::new(),
+        sender_id,
+        sender_display,
+        sender_handle,
+        sender_alt_id,
+        // is_bot / is_self: signal-cli gives no bot flag and no self-send
+        // indicator in the receive notification path.
+        is_bot: false,
+        is_self: false,
+        chat_type,
+        // chat_name: GroupInfo only carries a base64 group id, not a
+        // human-readable name; leave None until a name-resolution layer
+        // is added.
+        chat_name: None,
+        // space_id / thread_id / parent_chat_id: Signal has no workspace
+        // or thread nesting concept exposed via JSON-RPC.
+        space_id: None,
+        thread_id: None,
+        parent_chat_id: None,
+        account_id,
+        platform: Some("signal".into()),
+        // was_mentioned / mention_kind: ReceiveParams carries no mentions
+        // array; mention detection is deferred to a higher layer.
+        was_mentioned: false,
+        mention_kind: None,
+        // reply_to_message_id / reply_to_text: DataMessage carries no
+        // quote field in the current schema.
+        reply_to_message_id: None,
+        reply_to_text: None,
     })
 }

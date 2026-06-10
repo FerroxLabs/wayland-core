@@ -486,6 +486,12 @@ mod tests {
         assert_eq!(msg.conversation_id, "+15550002222");
         assert_eq!(msg.ts_secs, 1_700_000_999);
         assert_eq!(msg.id, "1700000999000");
+        // Enriched fields: no UUID in this payload, so the phone is the
+        // stable sender id; sourceName surfaces as the display label; a
+        // non-group envelope is a 1:1 Direct chat.
+        assert_eq!(msg.sender_id, "+15550002222");
+        assert_eq!(msg.sender_display.as_deref(), Some("Alice"));
+        assert_eq!(msg.chat_type, wcore_channels::ChatType::Direct);
         ch.stop().await.unwrap();
     }
 

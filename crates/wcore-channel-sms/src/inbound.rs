@@ -17,7 +17,7 @@
 use base64::Engine;
 use hmac::{Hmac, Mac};
 use sha1::Sha1;
-use wcore_channels::event::IncomingMessage;
+use wcore_channels::event::{Attachment, ChatType, IncomingMessage, MediaKind};
 
 use crate::error::SmsError;
 
@@ -139,19 +139,32 @@ pub fn pairs_to_incoming(pairs: &[(String, String)]) -> Result<IncomingMessage, 
     let num_media: usize = get("NumMedia").and_then(|s| s.parse().ok()).unwrap_or(0);
     let mut attachments = Vec::with_capacity(num_media);
     for i in 0..num_media {
-        let key = format!("MediaUrl{i}");
-        if let Some(url) = get(&key) {
-            attachments.push(url.to_string());
+        let url_key = format!("MediaUrl{i}");
+        if let Some(url) = get(&url_key) {
+            let ct_key = format!("MediaContentType{i}");
+            let content_type = get(&ct_key).map(|s| s.to_string());
+            let kind = match content_type.as_deref() {
+                Some(ct) if ct.starts_with("image/") => MediaKind::Image,
+                Some(ct) if ct.starts_with("video/") => MediaKind::Video,
+                Some(ct) if ct.starts_with("audio/") => MediaKind::Audio,
+                _ => MediaKind::Other,
+            };
+            attachments.push(Attachment {
+                url: url.to_string(),
+                content_type,
+                kind,
+                ..Default::default()
+            });
         }
     }
 
     Ok(IncomingMessage {
-        id: sid,
-        conversation_id: to,
-        author: from,
-        text: body,
-        ts_secs: chrono::Utc::now().timestamp(),
+        sender_id: from.clone(),
+        chat_type: ChatType::Direct,
+        account_id: Some(to.clone()),
+        platform: Some("sms".into()),
         attachments,
+        ..IncomingMessage::new(sid, to, from, body, chrono::Utc::now().timestamp())
     })
 }
 
@@ -252,7 +265,13 @@ mod tests {
         let msg = pairs_to_incoming(&pairs).unwrap();
         assert_eq!(msg.id, "SM123");
         assert_eq!(msg.author, "+15551234567");
+        assert_eq!(msg.sender_id, "+15551234567");
         assert_eq!(msg.conversation_id, "+15559876543");
+        assert_eq!(msg.account_id.as_deref(), Some("+15559876543"));
+        assert_eq!(msg.platform.as_deref(), Some("sms"));
+        assert_eq!(msg.chat_type, ChatType::Direct);
+        assert!(!msg.is_bot);
+        assert!(!msg.is_self);
         assert_eq!(msg.text, "hello");
         assert!(msg.attachments.is_empty());
     }
@@ -262,12 +281,17 @@ mod tests {
         let pairs = parse_form(
             "MessageSid=SM1&From=%2B1&To=%2B2&Body=see&NumMedia=2\
              &MediaUrl0=https%3A%2F%2Fapi.twilio.com%2Fa.jpg\
+             &MediaContentType0=image%2Fjpeg\
              &MediaUrl1=https%3A%2F%2Fapi.twilio.com%2Fb.jpg",
         );
         let msg = pairs_to_incoming(&pairs).unwrap();
         assert_eq!(msg.attachments.len(), 2);
-        assert_eq!(msg.attachments[0], "https://api.twilio.com/a.jpg");
-        assert_eq!(msg.attachments[1], "https://api.twilio.com/b.jpg");
+        assert_eq!(msg.attachments[0].url, "https://api.twilio.com/a.jpg");
+        assert_eq!(msg.attachments[0].content_type.as_deref(), Some("image/jpeg"));
+        assert_eq!(msg.attachments[0].kind, MediaKind::Image);
+        assert_eq!(msg.attachments[1].url, "https://api.twilio.com/b.jpg");
+        assert_eq!(msg.attachments[1].content_type, None);
+        assert_eq!(msg.attachments[1].kind, MediaKind::Other);
     }
 
     #[test]

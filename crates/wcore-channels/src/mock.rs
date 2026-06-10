@@ -47,14 +47,13 @@ impl MockChannel {
         text: impl Into<String>,
     ) {
         self.inject(ChannelEvent::MessageReceived {
-            msg: IncomingMessage {
-                id: format!("mock-in-{}", self.next_id),
-                conversation_id: conversation_id.into(),
-                author: author.into(),
-                text: text.into(),
-                ts_secs: 0,
-                attachments: Vec::new(),
-            },
+            msg: IncomingMessage::new(
+                format!("mock-in-{}", self.next_id),
+                conversation_id,
+                author,
+                text,
+                0,
+            ),
         });
         self.next_id += 1;
     }

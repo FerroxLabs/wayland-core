@@ -7,7 +7,7 @@ use std::sync::{Arc, Mutex as StdMutex};
 use std::time::Duration;
 
 use tokio::sync::{Mutex, watch};
-use wcore_channels::event::{ChannelEvent, IncomingMessage};
+use wcore_channels::event::{Attachment, ChannelEvent, ChatType, IncomingMessage};
 
 use crate::error::EmailError;
 
@@ -239,6 +239,7 @@ pub(crate) fn parse_basic_rfc5322(uid: u32, body: &[u8]) -> Result<IncomingMessa
     let mut subject: Option<String> = None;
     let mut date: Option<String> = None;
     let mut message_id: Option<String> = None;
+    let mut in_reply_to: Option<String> = None;
 
     // Header unfolding: a line starting with whitespace continues the
     // previous header.
@@ -281,6 +282,17 @@ pub(crate) fn parse_basic_rfc5322(uid: u32, body: &[u8]) -> Result<IncomingMessa
                     .trim_matches(|c| c == '<' || c == '>')
                     .to_string(),
             );
+        } else if let Some(rest) = h
+            .strip_prefix("In-Reply-To:")
+            .or_else(|| h.strip_prefix("in-reply-to:"))
+        {
+            let stripped = rest
+                .trim()
+                .trim_matches(|c| c == '<' || c == '>')
+                .to_string();
+            if !stripped.is_empty() {
+                in_reply_to = Some(stripped);
+            }
         }
     }
 
@@ -305,13 +317,43 @@ pub(crate) fn parse_basic_rfc5322(uid: u32, body: &[u8]) -> Result<IncomingMessa
     let ts_secs = date.and_then(parse_rfc2822_to_epoch).unwrap_or(0);
     let id = message_id.unwrap_or_else(|| format!("uid:{uid}"));
 
+    // Stable sender identity: the normalized addr-spec from the From header.
+    // `normalize_from_addr` strips the display name and lowercases, giving a
+    // consistent key that survives name changes and quoting variations.
+    let sender_id = normalize_from_addr(&author);
+
+    // Display name: present only when the From header is in "Name <addr>" form.
+    // We derive it by taking the text before the angle-addr, trimmed of quotes.
+    let sender_display = from.as_deref().and_then(extract_display_name);
+
+    // conversation_id: the stable addr-spec so all messages from a given
+    // sender map to one conversation, regardless of display-name drift.
+    let conversation_id = sender_id.clone();
+
     Ok(IncomingMessage {
         id,
-        conversation_id: author.clone(),
+        conversation_id,
         author,
         text: combined_text,
         ts_secs,
-        attachments: Vec::new(),
+        // No attachment extraction today — the parser discards non-text/plain
+        // MIME parts; Vec::new() is correct (not a stub, just reflects reality).
+        attachments: Vec::<Attachment>::new(),
+        sender_id,
+        sender_display,
+        // sender_handle, sender_alt_id: no handle/alt-id concept in email.
+        // is_bot, is_self: not determinable without knowing our own address here.
+        chat_type: ChatType::Direct,
+        chat_name: subject,
+        // space_id, parent_chat_id: no enclosing workspace in email.
+        // thread_id: References-based root is not parsed; would require scanning
+        //   the full References chain. Leave None until thread extraction lands.
+        // account_id: receiving mailbox not passed into this fn; caller sets it.
+        platform: Some("email".into()),
+        // was_mentioned, mention_kind: N/A for email.
+        reply_to_message_id: in_reply_to,
+        // reply_to_text: we don't inline quoted-reply bodies; leave None.
+        ..Default::default()
     })
 }
 
@@ -339,6 +381,25 @@ pub(crate) fn is_sender_allowed(
     match allow_set {
         None => true,
         Some(set) => set.contains(&normalize_from_addr(raw_from)),
+    }
+}
+
+/// Extract the display name from a `From:`-style header value, returning
+/// `None` when no display name is present (bare addr-spec form).
+///
+/// `Alice <alice@acme.com>`        -> `Some("Alice")`
+/// `"Carol D" <carol@acme.com>`    -> `Some("Carol D")`
+/// `bob@acme.com`                  -> `None`
+fn extract_display_name(raw: &str) -> Option<String> {
+    let trimmed = raw.trim();
+    let angle = trimmed.find('<')?;
+    let name = trimmed[..angle]
+        .trim()
+        .trim_matches(|c| c == '"' || c == '\'');
+    if name.is_empty() {
+        None
+    } else {
+        Some(name.to_string())
     }
 }
 

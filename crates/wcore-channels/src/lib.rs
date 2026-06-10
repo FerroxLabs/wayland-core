@@ -23,7 +23,10 @@ pub mod outgoing;
 
 pub use config::{ChannelConfig, ChannelConfigLoader};
 pub use error::ChannelError;
-pub use event::{ChannelEvent, ConnectionState, IncomingMessage, MessageReceipt};
+pub use event::{
+    Attachment, ChannelEvent, ChatType, ConnectionState, IncomingMessage, MediaKind, MentionKind,
+    MessageReceipt,
+};
 pub use manager::{ChannelManager, TaggedEvent};
 pub use mock::MockChannel;
 pub use outgoing::OutgoingMessage;

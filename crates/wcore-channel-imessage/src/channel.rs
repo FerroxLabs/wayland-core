@@ -15,7 +15,9 @@ use tokio::task::JoinHandle;
 
 use wcore_channels::Channel;
 use wcore_channels::error::ChannelError;
-use wcore_channels::event::{ChannelEvent, ConnectionState, IncomingMessage, MessageReceipt};
+use wcore_channels::event::{
+    ChannelEvent, ChatType, ConnectionState, IncomingMessage, MessageReceipt,
+};
 use wcore_channels::outgoing::OutgoingMessage;
 use wcore_config::credentials::CredentialsStore;
 
@@ -214,17 +216,33 @@ async fn poll_loop(
                         continue;
                     }
 
+                    let conversation_id = if row.chat_guid.is_empty() {
+                        row.sender_handle.clone()
+                    } else {
+                        row.chat_guid.clone()
+                    };
                     let msg = IncomingMessage {
                         id: row.rowid.to_string(),
-                        conversation_id: if row.chat_guid.is_empty() {
-                            row.sender_handle.clone()
-                        } else {
-                            row.chat_guid.clone()
-                        },
+                        conversation_id,
+                        // sender_handle is the phone/email handle from chat.db — the
+                        // stable identity key for access control and dedup.
+                        sender_id: row.sender_handle.clone(),
                         author: row.sender_handle.clone(),
+                        sender_handle: Some(row.sender_handle.clone()),
                         text: row.text,
                         ts_secs: apple_ns_to_unix_secs(row.ts_apple_ns),
-                        attachments: Vec::new(),
+                        // SQL query filters is_from_me = 0; these are never self-sent.
+                        is_self: false,
+                        // is_group is derived in SQL: c.style=43 OR chat_identifier LIKE 'chat%'
+                        chat_type: if row.is_group {
+                            ChatType::Group
+                        } else {
+                            ChatType::Direct
+                        },
+                        platform: Some("imessage".into()),
+                        // No attachment paths, reply guids, display names, or group names
+                        // are present in the chat.db row — leave at defaults.
+                        ..Default::default()
                     };
 
                     inbox

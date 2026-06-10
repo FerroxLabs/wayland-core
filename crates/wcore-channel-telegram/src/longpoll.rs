@@ -6,7 +6,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use tokio::sync::{Mutex, watch};
-use wcore_channels::event::{ChannelEvent, IncomingMessage};
+use wcore_channels::event::{
+    Attachment, ChannelEvent, ChatType, IncomingMessage, MediaKind, MentionKind,
+};
 
 use crate::api::{Update, get_updates};
 
@@ -104,17 +106,98 @@ async fn ingest_updates(
         if !allowed_chat_ids.is_empty() && !allowed_chat_ids.contains(&chat_id_str) {
             continue;
         }
-        let author = msg
-            .from
-            .as_ref()
-            .and_then(|f| {
-                f.username
+
+        // ---- Sender identity ----------------------------------------
+        let (sender_id, author, sender_display, sender_handle, is_bot) =
+            if let Some(ref f) = msg.from {
+                let sid = f.id.to_string();
+                // author: prefer @username, fall back to first_name, then id
+                let display_name = match (f.first_name.as_deref(), f.last_name.as_deref()) {
+                    (Some(first), Some(last)) => Some(format!("{first} {last}")),
+                    (Some(first), None) => Some(first.to_string()),
+                    _ => None,
+                };
+                let author = f
+                    .username
                     .clone()
-                    .or_else(|| f.first_name.clone())
-                    .or_else(|| Some(f.id.to_string()))
-            })
-            .unwrap_or_else(|| "unknown".to_string());
+                    .or_else(|| display_name.clone())
+                    .unwrap_or_else(|| sid.clone());
+                (sid, author, display_name, f.username.clone(), f.is_bot)
+            } else {
+                ("unknown".to_string(), "unknown".to_string(), None, None, false)
+            };
+
+        // ---- Chat type ----------------------------------------------
+        let chat_type = match msg.chat.chat_type.as_str() {
+            "private" => ChatType::Direct,
+            "group" | "supergroup" => ChatType::Group,
+            "channel" => ChatType::Channel,
+            // Unrecognised future type — treat as Group (multi-party)
+            _ => ChatType::Group,
+        };
+
+        // ---- Attachments --------------------------------------------
+        let mut attachments: Vec<Attachment> = Vec::new();
+        // Photos: take the last (largest) PhotoSize only
+        if let Some(ref sizes) = msg.photo
+            && let Some(largest) = sizes.last()
+        {
+            attachments.push(Attachment {
+                url: largest.file_id.clone(),
+                kind: MediaKind::Image,
+                ..Default::default()
+            });
+        }
+        if let Some(ref v) = msg.voice {
+            attachments.push(Attachment {
+                url: v.file_id.clone(),
+                content_type: v.mime_type.clone(),
+                kind: MediaKind::Audio,
+                ..Default::default()
+            });
+        }
+        if let Some(ref d) = msg.document {
+            attachments.push(Attachment {
+                url: d.file_id.clone(),
+                content_type: d.mime_type.clone(),
+                kind: MediaKind::Document,
+                ..Default::default()
+            });
+        }
+        if let Some(ref vid) = msg.video {
+            attachments.push(Attachment {
+                url: vid.file_id.clone(),
+                content_type: vid.mime_type.clone(),
+                kind: MediaKind::Video,
+                ..Default::default()
+            });
+        }
+
+        // ---- Mention detection --------------------------------------
+        // A `mention` entity in the text signals an @-mention; the bot
+        // has no self-identity here so we can only detect the presence of
+        // any mention and surface it as Native.
+        let has_mention = msg
+            .entities
+            .as_deref()
+            .unwrap_or_default()
+            .iter()
+            .any(|e| e.kind == "mention");
+        let was_mentioned = has_mention;
+        let mention_kind = was_mentioned.then_some(MentionKind::Native);
+
+        // ---- Reply context ------------------------------------------
+        let reply_to_message_id = msg
+            .reply_to_message
+            .as_deref()
+            .map(|r| r.message_id.to_string());
+        let reply_to_text = msg
+            .reply_to_message
+            .as_deref()
+            .and_then(|r| r.text.clone());
+
         let text = msg.text.unwrap_or_default();
+
         events.push(ChannelEvent::MessageReceived {
             msg: IncomingMessage {
                 id: msg.message_id.to_string(),
@@ -122,7 +205,29 @@ async fn ingest_updates(
                 author,
                 text,
                 ts_secs: msg.date,
-                attachments: Vec::new(),
+                attachments,
+                // Sender identity
+                sender_id,
+                sender_display,
+                sender_handle,
+                sender_alt_id: None,
+                is_bot,
+                is_self: false,
+                // Chat context
+                chat_type,
+                chat_name: msg.chat.title.clone(),
+                space_id: None,
+                thread_id: msg.message_thread_id.map(|id| id.to_string()),
+                parent_chat_id: None,
+                // Account / platform routing
+                account_id: None,
+                platform: Some("telegram".into()),
+                // Mention
+                was_mentioned,
+                mention_kind,
+                // Reply
+                reply_to_message_id,
+                reply_to_text,
             },
         });
     }
