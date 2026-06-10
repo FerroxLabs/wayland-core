@@ -17,9 +17,11 @@
 //!      grace window.
 //!   5. Map every `op=0 t="MESSAGE_CREATE"` to a `ChannelEvent::MessageReceived`
 //!      and queue it for `poll_events`.
-//!   6. On `op=7 RECONNECT` / `op=9 INVALID_SESSION` / socket error:
-//!      tear down + re-IDENTIFY on next session. Full RESUME (with
-//!      session_id) is deferred.
+//!   6. On `op=7 RECONNECT` / dropped socket / heartbeat lapse: tear
+//!      down and RESUME (op 6) against `resume_gateway_url`, replaying
+//!      events buffered during the gap. On `op=9 INVALID_SESSION`:
+//!      resume when `d == true`, else clear the session and fall back to
+//!      a fresh IDENTIFY after the Discord-required 1–5s wait.
 
 use std::collections::{HashSet, VecDeque};
 use std::sync::Arc;

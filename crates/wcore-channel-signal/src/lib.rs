@@ -13,8 +13,14 @@
 //! - `send_message()` allocates a request id, registers a pending
 //!   oneshot, writes the request to stdin, then awaits the oneshot
 //!   with the configured `send_timeout_secs`.
-//! - `stop()` flips a watch::Sender to true (reader exits its select),
-//!   drops the writer, kills the child if still alive, and joins.
+//! - A supervisor task owns the launch → reader-loop cycle in a respawn
+//!   loop: when the child dies / stdout hits EOF / the reader errors for
+//!   a non-shutdown reason, it emits `ConnectionState::Reconnecting`,
+//!   backs off, and relaunches `signal-cli` — rebuilding the stdin
+//!   writer and pending map without losing channel identity.
+//! - `stop()` flips a watch::Sender to true (reader + supervisor exit),
+//!   drops the writer, kills the child if still alive, and joins. No
+//!   respawn happens after an intentional stop.
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
@@ -23,7 +29,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use serde_json::json;
-use tokio::io::{AsyncWrite, AsyncWriteExt};
+use tokio::io::AsyncWriteExt;
 use tokio::sync::{Mutex, oneshot, watch};
 use tokio::task::JoinHandle;
 
@@ -36,13 +42,15 @@ pub use crate::config::SignalConfig;
 pub use crate::error::SignalError;
 pub use crate::jsonrpc::SendResult;
 pub use crate::subprocess::{
-    PendingResponses, RealLauncher, SignalProcessHandle, SignalProcessLauncher,
+    PendingResponses, RealLauncher, SharedStdin, SignalProcessHandle, SignalProcessLauncher,
 };
+pub use crate::supervisor::Backoff;
 
 pub mod config;
 pub mod error;
 pub mod jsonrpc;
 pub mod subprocess;
+pub mod supervisor;
 
 /// Production Signal channel adapter.
 pub struct SignalChannel {
@@ -50,17 +58,20 @@ pub struct SignalChannel {
     config: SignalConfig,
     state: ConnectionState,
     launcher: Arc<dyn SignalProcessLauncher>,
-    /// The subprocess handle. Set inside `start()`, cleared by `stop()`.
-    child: Option<tokio::process::Child>,
-    /// Locked stdin writer — `send_message` serializes writes here.
-    stdin: Option<Arc<Mutex<Box<dyn AsyncWrite + Unpin + Send>>>>,
+    /// Swappable stdin writer — `send_message` serializes writes through
+    /// the current inner box. The supervisor swaps the inner writer on
+    /// each (re)spawn, and clears it (`None`) between process death and
+    /// the next respawn. Always `Some(Arc)` after construction.
+    stdin: SharedStdin,
     /// Monotonic id allocator for JSON-RPC requests.
     request_id: Arc<AtomicU64>,
     /// Inbox of inbound events (drained by `poll_events`).
     inbox: Arc<Mutex<VecDeque<ChannelEvent>>>,
     /// In-flight request id → response sender.
     pending: PendingResponses,
-    reader_handle: Option<JoinHandle<()>>,
+    /// The supervisor task — owns the launch → reader → respawn loop.
+    /// Set by `start()`, joined + cleared by `stop()`.
+    supervisor_handle: Option<JoinHandle<()>>,
     shutdown: Option<watch::Sender<bool>>,
 }
 
@@ -82,12 +93,11 @@ impl SignalChannel {
             config,
             state: ConnectionState::Disconnected,
             launcher,
-            child: None,
-            stdin: None,
+            stdin: Arc::new(Mutex::new(None)),
             request_id: Arc::new(AtomicU64::new(1)),
             inbox: Arc::new(Mutex::new(VecDeque::new())),
             pending: Arc::new(Mutex::new(HashMap::new())),
-            reader_handle: None,
+            supervisor_handle: None,
             shutdown: None,
         }
     }
@@ -109,13 +119,17 @@ impl Channel for SignalChannel {
     }
 
     async fn start(&mut self) -> Result<(), ChannelError> {
-        if self.reader_handle.is_some() {
+        if self.supervisor_handle.is_some() {
             // Already started — idempotent.
             return Ok(());
         }
         self.state = ConnectionState::Connecting;
 
-        let handle = self
+        // Perform the FIRST launch synchronously so a launcher failure
+        // surfaces as a `start()` error (rather than vanishing into the
+        // supervisor's retry loop). Subsequent respawns are owned by the
+        // supervisor task.
+        let seed = self
             .launcher
             .launch(&self.config.signal_cli_path, &self.config.account)
             .map_err(|e| {
@@ -123,14 +137,15 @@ impl Channel for SignalChannel {
                 ChannelError::from(e)
             })?;
 
+        // Install the seed's stdin writer into the shared, swappable
+        // slot. The supervisor swaps this on each respawn; `send_message`
+        // always reads the current writer.
         let SignalProcessHandle {
-            stdin,
-            stdout,
-            child,
-        } = handle;
-
-        self.child = child;
-        self.stdin = Some(Arc::new(Mutex::new(stdin)));
+            stdin: seed_stdin,
+            stdout: seed_stdout,
+            child: seed_child,
+        } = seed;
+        *self.stdin.lock().await = Some(seed_stdin);
 
         // Push a Connected state-change so consumers know we're up.
         self.inbox
@@ -141,34 +156,52 @@ impl Channel for SignalChannel {
             });
 
         let (tx, rx) = watch::channel(false);
-        let args = subprocess::ReaderArgs {
-            stdout,
+        let args = supervisor::SupervisorArgs {
+            config: self.config.clone(),
+            launcher: Arc::clone(&self.launcher),
+            stdin: Arc::clone(&self.stdin),
             inbox: Arc::clone(&self.inbox),
             pending: Arc::clone(&self.pending),
             shutdown: rx,
+            seed: supervisor::SeedHandle {
+                stdout: seed_stdout,
+                child: seed_child,
+            },
         };
-        let join = tokio::spawn(subprocess::reader_loop(args));
-        self.reader_handle = Some(join);
+        let join = tokio::spawn(supervisor::supervisor_loop(args));
+        self.supervisor_handle = Some(join);
         self.shutdown = Some(tx);
         self.state = ConnectionState::Connected;
         Ok(())
     }
 
     async fn stop(&mut self) -> Result<(), ChannelError> {
-        if self.reader_handle.is_none() {
+        if self.supervisor_handle.is_none() {
             return Ok(());
         }
+        // Flip the shutdown watch: both the active reader loop AND the
+        // supervisor observe it and exit without respawning.
         if let Some(tx) = self.shutdown.take() {
             let _ = tx.send(true);
         }
-        // Drop the writer — closing stdin signals signal-cli to exit.
-        self.stdin = None;
-        // Kill child if still running.
-        if let Some(mut child) = self.child.take() {
-            let _ = child.start_kill();
-        }
-        if let Some(handle) = self.reader_handle.take() {
-            let _ = tokio::time::timeout(Duration::from_secs(5), handle).await;
+        // Drop the live writer — closing stdin signals signal-cli to
+        // exit. The supervisor owns + kills the child it launched.
+        *self.stdin.lock().await = None;
+        // Join the supervisor task so it fully unwinds (kills its child,
+        // clears stdin) before we return — no task leak. If it doesn't
+        // exit in time, abort it explicitly so it can't linger and
+        // respawn behind our back (a dropped JoinHandle detaches, it does
+        // NOT cancel).
+        if let Some(mut handle) = self.supervisor_handle.take()
+            && tokio::time::timeout(Duration::from_secs(5), &mut handle)
+                .await
+                .is_err()
+        {
+            tracing::warn!(
+                target: "wcore_channel_signal",
+                "stop: supervisor did not exit within 5s; aborting task"
+            );
+            handle.abort();
         }
         // Drain any pending oneshots (they'll get SubprocessClosed from
         // the reader's EOF branch, but in case the reader exited via
@@ -194,7 +227,7 @@ impl Channel for SignalChannel {
     }
 
     async fn send_message(&mut self, msg: OutgoingMessage) -> Result<MessageReceipt, ChannelError> {
-        let stdin = self.stdin.as_ref().ok_or(ChannelError::NotStarted)?.clone();
+        let stdin = Arc::clone(&self.stdin);
         let id = self.request_id.fetch_add(1, Ordering::Relaxed);
 
         // Register pending oneshot BEFORE writing — avoids a race where
@@ -211,18 +244,28 @@ impl Channel for SignalChannel {
             .map_err(|e| ChannelError::from(SignalError::Decode(format!("encode request: {e}"))))?;
 
         // Write line + newline atomically — JSON-RPC over stdio is
-        // line-delimited.
+        // line-delimited. The stdin slot is swapped by the supervisor on
+        // respawn and is `None` between a process death and the next
+        // (re)launch; treat an absent writer as NotStarted so callers
+        // can retry once the supervisor reconnects.
         {
             let mut guard = stdin.lock().await;
-            if let Err(e) = guard.write_all(line.as_bytes()).await {
+            let writer = match guard.as_mut() {
+                Some(w) => w,
+                None => {
+                    self.pending.lock().await.remove(&id);
+                    return Err(ChannelError::NotStarted);
+                }
+            };
+            if let Err(e) = writer.write_all(line.as_bytes()).await {
                 self.pending.lock().await.remove(&id);
                 return Err(SignalError::Io(format!("write request: {e}")).into());
             }
-            if let Err(e) = guard.write_all(b"\n").await {
+            if let Err(e) = writer.write_all(b"\n").await {
                 self.pending.lock().await.remove(&id);
                 return Err(SignalError::Io(format!("write newline: {e}")).into());
             }
-            if let Err(e) = guard.flush().await {
+            if let Err(e) = writer.flush().await {
                 self.pending.lock().await.remove(&id);
                 return Err(SignalError::Io(format!("flush: {e}")).into());
             }
@@ -538,12 +581,12 @@ mod tests {
         let (launcher, _io) = build_test_pair();
         let mut ch = SignalChannel::with_launcher("test", cfg(), launcher);
         ch.start().await.unwrap();
-        assert!(ch.reader_handle.is_some());
+        assert!(ch.supervisor_handle.is_some());
 
         ch.stop().await.unwrap();
-        assert!(ch.reader_handle.is_none());
+        assert!(ch.supervisor_handle.is_none());
         assert!(ch.shutdown.is_none());
-        assert!(ch.stdin.is_none());
+        assert!(ch.stdin.lock().await.is_none());
         assert_eq!(ch.state(), ConnectionState::Disconnected);
 
         // Idempotent.
@@ -650,7 +693,7 @@ send_timeout_secs = 20
             other => panic!("expected Transport, got {other:?}"),
         }
         assert_eq!(ch.state(), ConnectionState::Disconnected);
-        assert!(ch.reader_handle.is_none());
+        assert!(ch.supervisor_handle.is_none());
     }
 
     // -----------------------------------------------------------------
@@ -697,5 +740,132 @@ send_timeout_secs = 20
             }
             other => panic!("expected Rejected, got {other:?}"),
         }
+    }
+
+    // -----------------------------------------------------------------
+    // 11. SUPERVISED RESPAWN (CRITICAL-4). A launcher that serves a
+    //     queue of duplex handles + counts launches. The first child's
+    //     stdout is closed (EOF), which must drive the supervisor to:
+    //       (a) emit ConnectionState::Reconnecting,
+    //       (b) call the launcher a SECOND time (respawn),
+    //     and then `stop()` must tear down WITHOUT a third launch.
+    // -----------------------------------------------------------------
+
+    /// One queued handle the respawn launcher will hand out, in order.
+    struct QueuedHandle {
+        stdin: DuplexStream,
+        stdout: DuplexStream,
+    }
+
+    /// Launcher that serves handles from a queue and records launch
+    /// count. Returns an error if asked to launch past the queue end.
+    struct RespawnLauncher {
+        queue: StdMutex<VecDeque<QueuedHandle>>,
+        launches: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    impl SignalProcessLauncher for RespawnLauncher {
+        fn launch(
+            &self,
+            _cli_path: &Path,
+            _account: &str,
+        ) -> Result<SignalProcessHandle, SignalError> {
+            self.launches
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let h = self
+                .queue
+                .lock()
+                .unwrap()
+                .pop_front()
+                .ok_or_else(|| SignalError::Spawn("respawn launcher: queue exhausted".into()))?;
+            Ok(SignalProcessHandle {
+                stdin: Box::new(h.stdin),
+                stdout: Box::new(BufReader::new(h.stdout)),
+                child: None,
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn supervisor_respawns_on_eof_and_stops_without_respawn() {
+        // First handle: keep the write-half of its stdout so we can drop
+        // it to force EOF. Second handle: the respawn target.
+        let (ch_stdin_1, _harness_reads_1) = tokio::io::duplex(64 * 1024);
+        let (harness_writes_1, ch_stdout_1) = tokio::io::duplex(64 * 1024);
+        let (ch_stdin_2, _harness_reads_2) = tokio::io::duplex(64 * 1024);
+        let (_harness_writes_2, ch_stdout_2) = tokio::io::duplex(64 * 1024);
+
+        let mut queue = VecDeque::new();
+        queue.push_back(QueuedHandle {
+            stdin: ch_stdin_1,
+            stdout: ch_stdout_1,
+        });
+        queue.push_back(QueuedHandle {
+            stdin: ch_stdin_2,
+            stdout: ch_stdout_2,
+        });
+
+        let launches = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let launcher = Arc::new(RespawnLauncher {
+            queue: StdMutex::new(queue),
+            launches: Arc::clone(&launches),
+        });
+
+        let mut ch = SignalChannel::with_launcher("test", cfg(), launcher);
+        ch.start().await.unwrap();
+        assert_eq!(
+            launches.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "start() should launch exactly once"
+        );
+
+        // Force EOF on the first child's stdout: drop the harness's
+        // write-half. The reader sees Ok(0) → the supervisor respawns.
+        drop(harness_writes_1);
+
+        // Wait for the second launch (respawn). Backoff base is 1s, so
+        // give it a generous window.
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while launches.load(std::sync::atomic::Ordering::SeqCst) < 2 {
+            if std::time::Instant::now() >= deadline {
+                panic!("supervisor did not respawn within 5s");
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        assert_eq!(
+            launches.load(std::sync::atomic::Ordering::SeqCst),
+            2,
+            "supervisor must relaunch exactly once after EOF"
+        );
+
+        // A Reconnecting event must have been emitted onto the inbox.
+        let mut saw_reconnecting = false;
+        for ev in ch.poll_events().await.unwrap() {
+            if let ChannelEvent::ConnectionStateChanged {
+                state: ConnectionState::Reconnecting,
+            } = ev
+            {
+                saw_reconnecting = true;
+            }
+        }
+        assert!(
+            saw_reconnecting,
+            "supervisor must emit a Reconnecting state-change on respawn"
+        );
+
+        // Now stop. The supervisor must observe shutdown and exit; with
+        // the queue exhausted, any erroneous third launch attempt would
+        // bump the counter — assert it does NOT.
+        ch.stop().await.unwrap();
+        let after_stop = launches.load(std::sync::atomic::Ordering::SeqCst);
+        // Give any stray respawn a moment to (incorrectly) fire.
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert_eq!(
+            launches.load(std::sync::atomic::Ordering::SeqCst),
+            after_stop,
+            "no respawn may occur after stop()"
+        );
+        assert_eq!(after_stop, 2, "exactly two launches total");
+        assert!(ch.supervisor_handle.is_none());
     }
 }

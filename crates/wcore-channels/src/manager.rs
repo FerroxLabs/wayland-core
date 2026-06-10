@@ -19,11 +19,23 @@ use tokio::task::JoinHandle;
 
 use crate::Channel;
 use crate::error::ChannelError;
-use crate::event::{ChannelEvent, MessageReceipt};
+use crate::event::{ChannelEvent, ConnectionState, MessageReceipt};
 use crate::outgoing::OutgoingMessage;
 
 const DEFAULT_POLL_INTERVAL_MS: u64 = 250;
 const EVENT_CHANNEL_CAP: usize = 256;
+
+/// Consecutive non-`NotStarted` poll errors tolerated before the poll
+/// task treats the channel as disconnected and enters supervised
+/// reconnect. Below this, errors back off one tick and retry (the
+/// historical behavior) to absorb transient blips without churn.
+const RECONNECT_ERROR_THRESHOLD: u32 = 5;
+/// First reconnect-attempt backoff. Doubles each failed `start()` up to
+/// `RECONNECT_BACKOFF_CAP`.
+const RECONNECT_BACKOFF_BASE: Duration = Duration::from_secs(1);
+/// Upper bound on reconnect backoff so a permanently broken channel
+/// retries at a steady, low rate rather than escalating unbounded.
+const RECONNECT_BACKOFF_CAP: Duration = Duration::from_secs(30);
 
 /// Driver for a set of `Channel` instances. Build with `new`, register
 /// channels with `register`, then call `start_all` to spawn the poll
@@ -94,20 +106,78 @@ impl ChannelManager {
             let handle = tokio::spawn(async move {
                 let mut ticker = tokio::time::interval(interval);
                 ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+                // Consecutive non-`NotStarted` poll errors. Reset to 0 on
+                // any successful poll. Crossing `RECONNECT_ERROR_THRESHOLD`
+                // promotes the channel to supervised reconnect.
+                let mut consecutive_errors: u32 = 0;
                 loop {
                     ticker.tick().await;
                     let evs = {
                         let mut guard = task_slot.lock().await;
                         match guard.poll_events().await {
-                            Ok(v) => v,
+                            Ok(v) => {
+                                consecutive_errors = 0;
+                                v
+                            }
                             Err(ChannelError::NotStarted) => break,
                             Err(e) => {
+                                consecutive_errors += 1;
                                 tracing::warn!(
                                     target: "wcore_channels::manager",
                                     channel = %task_name,
                                     error = %e,
+                                    consecutive_errors,
                                     "poll_events errored; backing off one tick"
                                 );
+                                if consecutive_errors < RECONNECT_ERROR_THRESHOLD {
+                                    continue;
+                                }
+                                // Drop the guard before the reconnect loop so we
+                                // don't hold the slot lock across backoff sleeps
+                                // (send_to / stop_all must still acquire it).
+                                drop(guard);
+                                // Supervised reconnect: announce Reconnecting and
+                                // retry start() with exponential backoff until it
+                                // succeeds. The task is stopped via handle.abort()
+                                // (stop_all / register replace), so the sleeps
+                                // below double as the abort points.
+                                let _ = task_tx.send(TaggedEvent {
+                                    channel_name: task_name.clone(),
+                                    event: ChannelEvent::ConnectionStateChanged {
+                                        state: ConnectionState::Reconnecting,
+                                    },
+                                });
+                                let mut backoff = RECONNECT_BACKOFF_BASE;
+                                loop {
+                                    tokio::time::sleep(backoff).await;
+                                    let start_result = {
+                                        let mut guard = task_slot.lock().await;
+                                        guard.start().await
+                                    };
+                                    match start_result {
+                                        Ok(()) => {
+                                            tracing::info!(
+                                                target: "wcore_channels::manager",
+                                                channel = %task_name,
+                                                "channel reconnected; resuming polling"
+                                            );
+                                            consecutive_errors = 0;
+                                            break;
+                                        }
+                                        Err(re) => {
+                                            backoff = (backoff * 2).min(RECONNECT_BACKOFF_CAP);
+                                            tracing::warn!(
+                                                target: "wcore_channels::manager",
+                                                channel = %task_name,
+                                                error = %re,
+                                                next_backoff_ms = backoff.as_millis() as u64,
+                                                "reconnect start() failed; will retry"
+                                            );
+                                        }
+                                    }
+                                }
+                                // Reconnected — skip this tick's broadcast and
+                                // resume the normal polling cadence.
                                 continue;
                             }
                         }
@@ -171,8 +241,89 @@ impl Default for ChannelManager {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::event::IncomingMessage;
     use crate::mock::MockChannel;
+    use async_trait::async_trait;
     use std::time::Duration;
+
+    /// Test-only channel whose `poll_events` errors until the manager
+    /// re-`start()`s it (the reconnect primitive), after which it recovers
+    /// and delivers a single injected message. Models a channel whose
+    /// polling breaks until supervised reconnect heals it.
+    struct FlakyChannel {
+        name: String,
+        /// True once the channel has been started at least once.
+        started_once: bool,
+        /// True after a second `start()` (the manager's reconnect).
+        recovered: bool,
+        /// True once the recovery message has been delivered.
+        delivered: bool,
+    }
+
+    impl FlakyChannel {
+        fn new(name: impl Into<String>) -> Self {
+            Self {
+                name: name.into(),
+                started_once: false,
+                recovered: false,
+                delivered: false,
+            }
+        }
+    }
+
+    #[async_trait]
+    impl Channel for FlakyChannel {
+        fn name(&self) -> &str {
+            &self.name
+        }
+
+        fn platform(&self) -> &str {
+            "flaky"
+        }
+
+        async fn start(&mut self) -> Result<(), ChannelError> {
+            // First start() = initial connect. Any later start() is the
+            // manager's reconnect attempt, which heals the channel.
+            if self.started_once {
+                self.recovered = true;
+            }
+            self.started_once = true;
+            Ok(())
+        }
+
+        async fn stop(&mut self) -> Result<(), ChannelError> {
+            Ok(())
+        }
+
+        async fn poll_events(&mut self) -> Result<Vec<ChannelEvent>, ChannelError> {
+            if self.recovered {
+                if !self.delivered {
+                    self.delivered = true;
+                    return Ok(vec![ChannelEvent::MessageReceived {
+                        msg: IncomingMessage::new("flaky-1", "c1", "alice", "back online", 0),
+                    }]);
+                }
+                return Ok(Vec::new());
+            }
+            // Still in the failing window: error until reconnect heals us.
+            Err(ChannelError::Transport("simulated poll failure".into()))
+        }
+
+        async fn send_message(
+            &mut self,
+            msg: OutgoingMessage,
+        ) -> Result<MessageReceipt, ChannelError> {
+            Ok(MessageReceipt {
+                id: "flaky-out".into(),
+                conversation_id: msg.conversation_id,
+                ts_secs: 0,
+            })
+        }
+
+        fn config_schema(&self) -> &str {
+            r#"{"name": "string", "platform": "flaky"}"#
+        }
+    }
 
     #[tokio::test]
     async fn register_and_list() {
@@ -229,6 +380,50 @@ mod tests {
             .unwrap();
         assert!(!receipt.id.is_empty());
         let _ = rx; // suppress unused
+        mgr.stop_all().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn persistent_poll_failure_triggers_supervised_reconnect() {
+        // Fail enough polls to cross the threshold, then recover on the
+        // manager's reconnect start(). Assert a Reconnecting state is
+        // broadcast and the channel resumes delivering messages.
+        let mut mgr = ChannelManager::new().with_poll_interval(Duration::from_millis(5));
+        let mut rx = mgr.subscribe();
+        mgr.register(Box::new(FlakyChannel::new("flaky"))).await;
+        mgr.start_all().await.unwrap();
+
+        // Reconnect backoff base is 1s; allow margin for ticks + delivery.
+        let deadline = std::time::Instant::now() + Duration::from_secs(4);
+        let mut saw_reconnecting = false;
+        let mut saw_recovery_msg = false;
+        while std::time::Instant::now() < deadline && !(saw_reconnecting && saw_recovery_msg) {
+            match tokio::time::timeout(Duration::from_millis(200), rx.recv()).await {
+                Ok(Ok(tagged)) => {
+                    assert_eq!(tagged.channel_name, "flaky");
+                    match tagged.event {
+                        ChannelEvent::ConnectionStateChanged {
+                            state: ConnectionState::Reconnecting,
+                        } => saw_reconnecting = true,
+                        ChannelEvent::MessageReceived { ref msg }
+                            if msg.text == "back online" =>
+                        {
+                            saw_recovery_msg = true;
+                        }
+                        _ => {}
+                    }
+                }
+                _ => continue,
+            }
+        }
+        assert!(
+            saw_reconnecting,
+            "expected a Reconnecting ConnectionStateChanged broadcast"
+        );
+        assert!(
+            saw_recovery_msg,
+            "expected the channel to resume delivering messages after reconnect"
+        );
         mgr.stop_all().await.unwrap();
     }
 

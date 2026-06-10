@@ -7,9 +7,15 @@
 //!    tests can exercise the protocol without standing up a fake gateway
 //!    server.
 //! 2. **WebSocket driver** — `gateway_loop` connects to Discord, sends
-//!    IDENTIFY, runs HEARTBEATs on an interval, and pushes
-//!    `MESSAGE_CREATE` events into the inbox. Reconnect-on-drop is plain
-//!    re-IDENTIFY; full resume is deferred (commented).
+//!    IDENTIFY (or RESUME on a resumable reconnect), runs HEARTBEATs on
+//!    an interval, and pushes `MESSAGE_CREATE` events into the inbox.
+//!    After READY we capture `session_id`, `resume_gateway_url`, and the
+//!    latest dispatch sequence; on a resumable disconnect (op 7, a
+//!    dropped socket, or op 9 with `d == true`) the next session connects
+//!    to `resume_gateway_url` and sends a RESUME (op 6) so Discord
+//!    replays the events buffered during the gap. A non-resumable op 9
+//!    (`d == false`) clears the session and falls back to a fresh
+//!    IDENTIFY after the Discord-required 1–5s wait.
 
 use std::collections::{HashSet, VecDeque};
 use std::sync::Arc;
@@ -31,6 +37,7 @@ use wcore_channels::event::{
 pub const OP_DISPATCH: u64 = 0;
 pub const OP_HEARTBEAT: u64 = 1;
 pub const OP_IDENTIFY: u64 = 2;
+pub const OP_RESUME: u64 = 6;
 pub const OP_RECONNECT: u64 = 7;
 pub const OP_INVALID_SESSION: u64 = 9;
 pub const OP_HELLO: u64 = 10;
@@ -56,6 +63,19 @@ pub struct GatewayPayload {
 #[derive(Debug, Clone, Deserialize)]
 pub struct HelloData {
     pub heartbeat_interval: u64,
+}
+
+/// READY payload (`d` for op=0 t="READY"). Carries the session handle
+/// Discord wants echoed back on a RESUME plus the dedicated resume host.
+#[derive(Debug, Clone, Deserialize)]
+pub struct ReadyData {
+    /// Opaque session identifier — required field of the RESUME payload.
+    pub session_id: String,
+    /// Host to reconnect to when resuming. Discord recommends using this
+    /// instead of the normal gateway URL for resumes; absent on older
+    /// gateway versions, in which case we fall back to the normal URL.
+    #[serde(default)]
+    pub resume_gateway_url: Option<String>,
 }
 
 /// MESSAGE_CREATE payload (`d` for op=0 t="MESSAGE_CREATE").
@@ -167,6 +187,25 @@ struct IdentifyProperties<'a> {
     device: &'a str,
 }
 
+// -----------------------------------------------------------------------------
+// RESUME (sent by client)
+// -----------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Serialize)]
+struct ResumePayload<'a> {
+    op: u64,
+    d: ResumeData<'a>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct ResumeData<'a> {
+    token: &'a str,
+    session_id: &'a str,
+    /// Last dispatch sequence number we processed. Discord replays every
+    /// event after this seq.
+    seq: i64,
+}
+
 #[derive(Debug, Clone, Serialize)]
 struct HeartbeatPayload {
     op: u64,
@@ -198,6 +237,20 @@ pub(crate) fn heartbeat_frame(seq: Option<i64>) -> String {
     .expect("HeartbeatPayload always serialises")
 }
 
+/// Build a RESUME (op 6) frame echoing the session handle and the last
+/// dispatch sequence so Discord replays everything buffered since `seq`.
+pub(crate) fn resume_frame(token: &str, session_id: &str, seq: i64) -> String {
+    serde_json::to_string(&ResumePayload {
+        op: OP_RESUME,
+        d: ResumeData {
+            token,
+            session_id,
+            seq,
+        },
+    })
+    .expect("ResumePayload always serialises")
+}
+
 // =============================================================================
 // Pure parsing + mapping (unit-testable without IO)
 // =============================================================================
@@ -222,6 +275,30 @@ pub(crate) fn parse_message_create(payload: &GatewayPayload) -> Option<MessageCr
         return None;
     }
     serde_json::from_value(payload.d.clone()).ok()
+}
+
+/// Decode the `d` of a `op=0 t="READY"` dispatch into the session handle
+/// and resume host. `None` for any other frame.
+pub(crate) fn parse_ready(payload: &GatewayPayload) -> Option<ReadyData> {
+    if payload.op != OP_DISPATCH || payload.t.as_deref() != Some("READY") {
+        return None;
+    }
+    serde_json::from_value(payload.d.clone()).ok()
+}
+
+/// True when the payload is `op=0 t="RESUMED"` — Discord's signal that a
+/// RESUME succeeded and the buffered events have been (or are being)
+/// replayed as normal dispatches.
+pub(crate) fn is_resumed(payload: &GatewayPayload) -> bool {
+    payload.op == OP_DISPATCH && payload.t.as_deref() == Some("RESUMED")
+}
+
+/// Interpret the `d` of an `op=9 Invalid Session` frame. Discord encodes
+/// resumability as a bare boolean: `true` → the session can still be
+/// resumed (retry RESUME), `false` → it is gone (must re-IDENTIFY).
+/// Defaults to non-resumable when `d` is malformed.
+pub(crate) fn invalid_session_resumable(payload: &GatewayPayload) -> bool {
+    payload.d.as_bool().unwrap_or(false)
 }
 
 /// Translate a `MESSAGE_CREATE` payload into an `IncomingMessage`
@@ -448,6 +525,69 @@ impl HeartbeatTracker {
     }
 }
 
+// -----------------------------------------------------------------------------
+// Resume state + handshake decision (pure, unit-testable)
+// -----------------------------------------------------------------------------
+
+/// Everything needed to RESUME a prior session. Populated from READY and
+/// kept across reconnects so the outer loop can replay instead of
+/// re-identifying. Cleared whenever the session becomes non-resumable.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ResumeState {
+    /// Opaque session id from READY (echoed in the RESUME payload).
+    pub session_id: String,
+    /// Dedicated resume host from READY, if Discord supplied one. When
+    /// `None` the caller resumes against the normal gateway URL.
+    pub resume_gateway_url: Option<String>,
+    /// Last dispatch sequence number we have processed.
+    pub seq: i64,
+}
+
+/// Which handshake a (re)connect should perform after HELLO.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum Handshake {
+    /// Fresh login: clear any session and send IDENTIFY.
+    Identify,
+    /// Replay: send RESUME with the carried session + seq.
+    Resume,
+}
+
+/// Why a session ended, as far as the resume decision cares. Lets the
+/// outer loop pick RESUME-vs-IDENTIFY without re-deriving the reason.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ReconnectReason {
+    /// op 7 Reconnect, or the socket dropped / heartbeat lapsed — the
+    /// session itself is still valid, so resume if we have state.
+    Resumable,
+    /// op 9 Invalid Session with `d == true` — Discord says retry RESUME.
+    InvalidSessionResumable,
+    /// op 9 Invalid Session with `d == false` — session is gone.
+    InvalidSessionFatal,
+}
+
+/// Decide the next handshake given the carried session state and why the
+/// last session ended. Pure so the policy is unit-testable in isolation
+/// from the socket.
+///
+/// - We can only RESUME when we actually hold a `session_id`.
+/// - A fatal Invalid Session forces a fresh IDENTIFY regardless of state.
+/// - Everything else resumes when state is present, else IDENTIFYs.
+pub(crate) fn decide_handshake(
+    have_session: bool,
+    reason: &ReconnectReason,
+) -> Handshake {
+    match reason {
+        ReconnectReason::InvalidSessionFatal => Handshake::Identify,
+        ReconnectReason::Resumable | ReconnectReason::InvalidSessionResumable => {
+            if have_session {
+                Handshake::Resume
+            } else {
+                Handshake::Identify
+            }
+        }
+    }
+}
+
 // =============================================================================
 // Gateway driver
 // =============================================================================
@@ -467,9 +607,21 @@ pub(crate) struct GatewayArgs {
     pub bot_id: Option<String>,
 }
 
+/// Append `?v=10&encoding=json` to a bare gateway host if it lacks a
+/// query string. Idempotent — a URL that already carries query params is
+/// returned untouched.
+fn with_gateway_query(base: &str) -> String {
+    if base.contains('?') {
+        base.to_string()
+    } else {
+        format!("{base}?v=10&encoding=json")
+    }
+}
+
 /// Drive one or more gateway connection cycles until shutdown is
-/// signalled. On disconnect / heartbeat-timeout / op=7 / op=9 we tear
-/// down the WS and re-connect with a short backoff.
+/// signalled. On op=7 / dropped socket / heartbeat-timeout we RESUME
+/// (replaying buffered events); on a fatal op=9 we fall back to a fresh
+/// IDENTIFY. Reconnects use a short backoff.
 pub(crate) async fn gateway_loop(args: GatewayArgs) {
     let GatewayArgs {
         gateway_url,
@@ -482,17 +634,36 @@ pub(crate) async fn gateway_loop(args: GatewayArgs) {
         bot_id,
     } = args;
 
-    // Discord's gateway endpoint takes ?v=10&encoding=json.
-    let mut url = gateway_url.clone();
-    if !url.contains('?') {
-        url.push_str("?v=10&encoding=json");
-    }
+    // Normalised default gateway URL used for fresh IDENTIFYs and as the
+    // fallback when no resume host is known.
+    let identify_url = with_gateway_query(&gateway_url);
 
     let mut backoff_ms: u64 = 1_000;
+    // Carried session handle. `Some` once READY lands; cleared on a fatal
+    // Invalid Session so the next cycle re-IDENTIFYs from scratch.
+    let mut resume: Option<ResumeState> = None;
+    // How the *previous* session ended. The very first cycle has no prior
+    // session, so it IDENTIFYs (no resume state anyway).
+    let mut reason = ReconnectReason::Resumable;
 
     loop {
         if *shutdown.borrow() {
             break;
+        }
+
+        // Pick the handshake + connect URL for this cycle.
+        let handshake = decide_handshake(resume.is_some(), &reason);
+        let url = match (&handshake, &resume) {
+            (Handshake::Resume, Some(state)) => state
+                .resume_gateway_url
+                .clone()
+                .map(|u| with_gateway_query(&u))
+                .unwrap_or_else(|| identify_url.clone()),
+            _ => identify_url.clone(),
+        };
+        // A fresh IDENTIFY means any stale session is meaningless.
+        if handshake == Handshake::Identify {
+            resume = None;
         }
 
         match run_one_session(
@@ -504,11 +675,34 @@ pub(crate) async fn gateway_loop(args: GatewayArgs) {
             bot_id.as_deref(),
             &inbox,
             &mut shutdown,
+            &handshake,
+            &mut resume,
         )
         .await
         {
             Ok(SessionExit::Shutdown) => break,
-            Ok(SessionExit::Reconnect) => {
+            Ok(SessionExit::Reconnect(next_reason)) => {
+                // Surface Reconnecting so the manager/UI sees the gap.
+                inbox
+                    .lock()
+                    .await
+                    .push_back(ChannelEvent::ConnectionStateChanged {
+                        state: ConnectionState::Reconnecting,
+                    });
+                // op 9 may demand a fresh IDENTIFY after a random 1–5s
+                // delay; clear the session and wait before re-entering.
+                if matches!(next_reason, ReconnectReason::InvalidSessionFatal) {
+                    resume = None;
+                    let delay = invalid_session_backoff();
+                    let sleep = tokio::time::sleep(delay);
+                    tokio::pin!(sleep);
+                    tokio::select! {
+                        biased;
+                        _ = shutdown.changed() => { if *shutdown.borrow() { break; } }
+                        _ = &mut sleep => {}
+                    }
+                }
+                reason = next_reason;
                 backoff_ms = 1_000;
             }
             Err(e) => {
@@ -516,6 +710,7 @@ pub(crate) async fn gateway_loop(args: GatewayArgs) {
                     target: "wcore_channel_discord::gateway",
                     error = %e,
                     backoff_ms,
+                    resumable = resume.is_some(),
                     "gateway session ended; backing off before reconnect"
                 );
                 inbox
@@ -524,6 +719,9 @@ pub(crate) async fn gateway_loop(args: GatewayArgs) {
                     .push_back(ChannelEvent::ConnectionStateChanged {
                         state: ConnectionState::Reconnecting,
                     });
+                // A dropped socket / heartbeat lapse keeps the session
+                // valid — resume if we have state.
+                reason = ReconnectReason::Resumable;
                 // Bounded exponential backoff. Race against shutdown so
                 // stop() isn't blocked by the sleep.
                 let sleep = tokio::time::sleep(Duration::from_millis(backoff_ms));
@@ -541,11 +739,25 @@ pub(crate) async fn gateway_loop(args: GatewayArgs) {
     }
 }
 
+/// Discord requires a random 1–5s wait before re-IDENTIFYing after a
+/// fatal Invalid Session. Uses a cheap time-seeded pick — no extra RNG
+/// dependency, and the exact value is non-critical.
+fn invalid_session_backoff() -> Duration {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.subsec_nanos())
+        .unwrap_or(0);
+    // Map into the inclusive 1000..=5000 ms window.
+    let ms = 1_000 + u64::from(nanos % 4_001);
+    Duration::from_millis(ms)
+}
+
 enum SessionExit {
     /// `shutdown` watch flipped — exit the outer loop.
     Shutdown,
-    /// Clean reconnect requested (op=7 / op=9). Outer loop re-enters.
-    Reconnect,
+    /// Reconnect requested. The carried reason tells the outer loop
+    /// whether to RESUME or fall back to a fresh IDENTIFY.
+    Reconnect(ReconnectReason),
 }
 
 // One Gateway session carries many independent connection parameters;
@@ -560,6 +772,11 @@ async fn run_one_session(
     bot_id: Option<&str>,
     inbox: &Arc<Mutex<VecDeque<ChannelEvent>>>,
     shutdown: &mut watch::Receiver<bool>,
+    handshake: &Handshake,
+    // Shared session handle: updated in place as READY / dispatches
+    // arrive so the carried seq + session_id survive even when this
+    // function returns via Err (dropped socket).
+    resume: &mut Option<ResumeState>,
 ) -> Result<SessionExit, String> {
     let (ws, _) = tokio_tungstenite::connect_async(url)
         .await
@@ -594,16 +811,47 @@ async fn run_one_session(
 
     let interval_ms = hello.heartbeat_interval;
     let mut tracker = HeartbeatTracker::new(interval_ms, heartbeat_grace_ms);
-    let mut last_seq: Option<i64> = None;
+    // On a RESUME we continue heartbeating from the carried seq; on a
+    // fresh IDENTIFY there is nothing to acknowledge yet.
+    let mut last_seq: Option<i64> = match handshake {
+        Handshake::Resume => resume.as_ref().map(|s| s.seq),
+        Handshake::Identify => None,
+    };
 
-    // Send IDENTIFY.
-    sink.send(WsMessage::Text(identify_frame(bot_token, intents)))
-        .await
-        .map_err(|e| format!("identify send: {e}"))?;
+    // Send RESUME or IDENTIFY per the handshake decision.
+    match handshake {
+        Handshake::Resume => {
+            let state = resume
+                .as_ref()
+                .ok_or_else(|| "resume requested without session state".to_string())?;
+            sink.send(WsMessage::Text(resume_frame(
+                bot_token,
+                &state.session_id,
+                state.seq,
+            )))
+            .await
+            .map_err(|e| format!("resume send: {e}"))?;
+            tracing::debug!(
+                target: "wcore_channel_discord::gateway",
+                session_id = %state.session_id,
+                seq = state.seq,
+                "sent RESUME"
+            );
+        }
+        Handshake::Identify => {
+            sink.send(WsMessage::Text(identify_frame(bot_token, intents)))
+                .await
+                .map_err(|e| format!("identify send: {e}"))?;
+            tracing::debug!(
+                target: "wcore_channel_discord::gateway",
+                "sent IDENTIFY"
+            );
+        }
+    }
 
-    // Push Connected once we've handed IDENTIFY off; READY landing is
-    // the formal "live" moment but for routing it's close enough — the
-    // manager dedupes state-changes anyway.
+    // Push Connected once we've handed the handshake off; READY / RESUMED
+    // landing is the formal "live" moment but for routing it's close
+    // enough — the manager dedupes state-changes anyway.
     inbox
         .lock()
         .await
@@ -660,6 +908,12 @@ async fn run_one_session(
                 let Some(payload) = parse_payload(&text) else { continue };
                 if let Some(s) = payload.s {
                     last_seq = Some(s);
+                    // Keep the carried session's seq current so a later
+                    // RESUME asks Discord to replay from the right point —
+                    // even if this session ends via a dropped socket.
+                    if let Some(state) = resume.as_mut() {
+                        state.seq = s;
+                    }
                 }
 
                 match payload.op {
@@ -674,17 +928,48 @@ async fn run_one_session(
                         tracker.on_send(Instant::now());
                     }
                     OP_RECONNECT => {
-                        // 7: clean reconnect. (Full resume is deferred —
-                        // we re-IDENTIFY on the next session.)
-                        return Ok(SessionExit::Reconnect);
+                        // 7: Discord asks us to reconnect. The session is
+                        // still valid — RESUME (if we have state) on the
+                        // next cycle to replay buffered events.
+                        return Ok(SessionExit::Reconnect(ReconnectReason::Resumable));
                     }
                     OP_INVALID_SESSION => {
-                        // 9: session invalidated. Discord asks for a 1-5s
-                        // delay before re-identify; we reconnect after the
-                        // outer backoff.
-                        return Ok(SessionExit::Reconnect);
+                        // 9: session invalidated. `d == true` means the
+                        // session can still be resumed; `d == false` means
+                        // it's gone and we must re-IDENTIFY after a 1-5s
+                        // wait (handled by the outer loop). Note: op 9 can
+                        // also arrive right after IDENTIFY (always
+                        // non-resumable in that case), which this same
+                        // branch handles correctly.
+                        let reason = if invalid_session_resumable(&payload) {
+                            ReconnectReason::InvalidSessionResumable
+                        } else {
+                            ReconnectReason::InvalidSessionFatal
+                        };
+                        return Ok(SessionExit::Reconnect(reason));
                     }
                     OP_DISPATCH => {
+                        // Capture the session handle from READY so future
+                        // reconnects can RESUME instead of re-IDENTIFY.
+                        if let Some(ready) = parse_ready(&payload) {
+                            *resume = Some(ResumeState {
+                                session_id: ready.session_id,
+                                resume_gateway_url: ready.resume_gateway_url,
+                                seq: last_seq.unwrap_or(0),
+                            });
+                            tracing::debug!(
+                                target: "wcore_channel_discord::gateway",
+                                "READY received; session captured for resume"
+                            );
+                        } else if is_resumed(&payload) {
+                            // RESUME succeeded: buffered events follow as
+                            // normal MESSAGE_CREATE dispatches through the
+                            // mapping below — nothing else to do here.
+                            tracing::debug!(
+                                target: "wcore_channel_discord::gateway",
+                                "RESUMED received; replayed events will flow as dispatches"
+                            );
+                        }
                         if let Some(mc) = parse_message_create(&payload)
                             && let Some(im) =
                                 map_message_create(mc, allowed_channel_ids, bot_id)
@@ -694,8 +979,8 @@ async fn run_one_session(
                                 .await
                                 .push_back(ChannelEvent::MessageReceived { msg: im });
                         }
-                        // Other DISPATCH events (READY, GUILD_CREATE, …)
-                        // are not surfaced.
+                        // Other DISPATCH events (GUILD_CREATE, …) are not
+                        // surfaced.
                     }
                     other => {
                         tracing::trace!(
@@ -850,5 +1135,164 @@ mod tests {
         assert_eq!(v1["d"], 7);
         assert_eq!(v2["op"], 1);
         assert!(v2["d"].is_null());
+    }
+
+    // ---- RESUME support -------------------------------------------------
+
+    #[test]
+    fn resume_frame_carries_op6_token_session_and_seq() {
+        let raw = resume_frame("BOT-TOKEN", "sess-abc", 99);
+        let v: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        assert_eq!(v["op"], 6, "RESUME is opcode 6");
+        assert_eq!(v["d"]["token"], "BOT-TOKEN");
+        assert_eq!(v["d"]["session_id"], "sess-abc");
+        assert_eq!(v["d"]["seq"], 99);
+    }
+
+    #[test]
+    fn ready_parses_session_id_and_resume_url() {
+        let raw = r#"{
+            "op":0,"t":"READY","s":1,
+            "d":{
+                "session_id":"abc123",
+                "resume_gateway_url":"wss://resume.example.gg",
+                "user":{"id":"42"}
+            }
+        }"#;
+        let payload = parse_payload(raw).unwrap();
+        let ready = parse_ready(&payload).expect("READY parses");
+        assert_eq!(ready.session_id, "abc123");
+        assert_eq!(
+            ready.resume_gateway_url.as_deref(),
+            Some("wss://resume.example.gg")
+        );
+    }
+
+    #[test]
+    fn ready_tolerates_missing_resume_url() {
+        let raw = r#"{"op":0,"t":"READY","s":1,"d":{"session_id":"x"}}"#;
+        let payload = parse_payload(raw).unwrap();
+        let ready = parse_ready(&payload).expect("READY parses");
+        assert_eq!(ready.session_id, "x");
+        assert!(ready.resume_gateway_url.is_none());
+    }
+
+    #[test]
+    fn parse_ready_rejects_non_ready_dispatch() {
+        let raw = r#"{"op":0,"t":"MESSAGE_CREATE","s":1,"d":{"session_id":"x"}}"#;
+        let payload = parse_payload(raw).unwrap();
+        assert!(parse_ready(&payload).is_none());
+    }
+
+    #[test]
+    fn resumed_dispatch_detected() {
+        let resumed = parse_payload(r#"{"op":0,"t":"RESUMED","s":5,"d":{}}"#).unwrap();
+        assert!(is_resumed(&resumed));
+        let other = parse_payload(r#"{"op":0,"t":"READY","s":5,"d":{}}"#).unwrap();
+        assert!(!is_resumed(&other));
+    }
+
+    #[test]
+    fn invalid_session_resumability_reads_d_boolean() {
+        let yes = parse_payload(r#"{"op":9,"d":true}"#).unwrap();
+        let no = parse_payload(r#"{"op":9,"d":false}"#).unwrap();
+        // Discord may also send op 9 with a missing/null d (post-IDENTIFY)
+        // — treat that conservatively as non-resumable.
+        let bare = parse_payload(r#"{"op":9}"#).unwrap();
+        assert!(invalid_session_resumable(&yes));
+        assert!(!invalid_session_resumable(&no));
+        assert!(!invalid_session_resumable(&bare));
+    }
+
+    #[test]
+    fn decide_handshake_resumes_when_session_and_reason_allow() {
+        // op 7 / dropped socket with a live session → RESUME.
+        assert_eq!(
+            decide_handshake(true, &ReconnectReason::Resumable),
+            Handshake::Resume
+        );
+        // op 9 resumable=true with a live session → RESUME.
+        assert_eq!(
+            decide_handshake(true, &ReconnectReason::InvalidSessionResumable),
+            Handshake::Resume
+        );
+    }
+
+    #[test]
+    fn decide_handshake_identifies_without_session() {
+        // No session captured yet (e.g. very first connect, or dropped
+        // before READY) → IDENTIFY regardless of a resumable reason.
+        assert_eq!(
+            decide_handshake(false, &ReconnectReason::Resumable),
+            Handshake::Identify
+        );
+        assert_eq!(
+            decide_handshake(false, &ReconnectReason::InvalidSessionResumable),
+            Handshake::Identify
+        );
+    }
+
+    #[test]
+    fn decide_handshake_fatal_invalid_session_forces_identify() {
+        // op 9 with d == false → fresh IDENTIFY even if we still hold a
+        // session id.
+        assert_eq!(
+            decide_handshake(true, &ReconnectReason::InvalidSessionFatal),
+            Handshake::Identify
+        );
+        assert_eq!(
+            decide_handshake(false, &ReconnectReason::InvalidSessionFatal),
+            Handshake::Identify
+        );
+    }
+
+    #[test]
+    fn seq_tracking_advances_carried_resume_state() {
+        // Mirrors the driver's inbound-frame seq update: every dispatch
+        // with an `s` bumps the carried session's seq so a later RESUME
+        // replays from the correct point.
+        let mut resume = Some(ResumeState {
+            session_id: "s1".to_string(),
+            resume_gateway_url: None,
+            seq: 0,
+        });
+
+        for raw in [
+            r#"{"op":0,"t":"MESSAGE_CREATE","s":10,"d":{}}"#,
+            r#"{"op":11}"#, // HEARTBEAT_ACK: no `s`, seq unchanged.
+            r#"{"op":0,"t":"MESSAGE_CREATE","s":11,"d":{}}"#,
+        ] {
+            let payload = parse_payload(raw).unwrap();
+            if let Some(s) = payload.s
+                && let Some(state) = resume.as_mut()
+            {
+                state.seq = s;
+            }
+        }
+
+        assert_eq!(resume.unwrap().seq, 11, "seq tracks the latest dispatch s");
+    }
+
+    #[test]
+    fn invalid_session_backoff_in_discord_window() {
+        // Discord mandates a random 1–5s wait before re-IDENTIFY.
+        let d = invalid_session_backoff();
+        assert!(
+            d >= Duration::from_millis(1_000) && d <= Duration::from_millis(5_000),
+            "backoff {d:?} must sit in the 1–5s window"
+        );
+    }
+
+    #[test]
+    fn with_gateway_query_is_idempotent() {
+        assert_eq!(
+            with_gateway_query("wss://gateway.discord.gg"),
+            "wss://gateway.discord.gg?v=10&encoding=json"
+        );
+        // Already carries query params → untouched.
+        assert_eq!(
+            with_gateway_query("wss://resume.gg?v=10&encoding=json"),
+            "wss://resume.gg?v=10&encoding=json"
+        );
     }
 }

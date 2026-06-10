@@ -25,6 +25,12 @@ use crate::jsonrpc::{Frame, ReceiveParams};
 pub type PendingResponses =
     Arc<Mutex<HashMap<u64, oneshot::Sender<Result<serde_json::Value, SignalError>>>>>;
 
+/// Shared, swappable stdin writer. `send_message` reads the current
+/// writer from this slot; the supervisor swaps the inner writer on each
+/// (re)spawn so sends always target the live `signal-cli` process. The
+/// `Option` is `None` between a process death and the next respawn.
+pub type SharedStdin = Arc<Mutex<Option<Box<dyn AsyncWrite + Unpin + Send>>>>;
+
 /// Handle returned by a [`SignalProcessLauncher`]. Carries the
 /// half-duplex stdio + (optional) a child handle to kill on `stop()`.
 pub struct SignalProcessHandle {
