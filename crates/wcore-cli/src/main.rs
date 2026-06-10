@@ -1241,9 +1241,14 @@ async fn run() -> anyhow::Result<ExitCode> {
 
     let provider_name = config.provider_label.clone();
 
-    // Bootstrap engine with full feature initialization
+    // Bootstrap engine with full feature initialization. Phase 1B-2 — this
+    // build backs both the long-running interactive line-REPL and the
+    // headless one-shot `-p` path; opt into inbound channel dispatch so the
+    // primary interactive session listens to configured channels (the
+    // short-lived one-shot simply aborts the subscriber on exit).
     let mut bootstrap = AgentBootstrap::new(config, &cwd, output.clone())
-        .plugin_provider_router(make_plugin_provider_router());
+        .plugin_provider_router(make_plugin_provider_router())
+        .enable_inbound_dispatch(true);
 
     if let Some(resume_id) = &resume {
         let cfg = bootstrap.config();
@@ -1532,8 +1537,12 @@ async fn run_tui_mode(
         approval_manager.set_mode(wcore_protocol::commands::SessionMode::Force);
     }
 
+    // Phase 1B-2 — the interactive TUI is a primary long-running session, so
+    // opt into inbound channel dispatch (the InboundSubscriber turns admitted
+    // channel messages into agent turns for the lifetime of this session).
     let mut bootstrap = AgentBootstrap::new(config, cwd, output.clone())
-        .plugin_provider_router(make_plugin_provider_router());
+        .plugin_provider_router(make_plugin_provider_router())
+        .enable_inbound_dispatch(true);
 
     if let Some(resume_id) = &resume {
         let cfg = bootstrap.config();
@@ -2217,9 +2226,12 @@ async fn run_json_stream_mode(
 
     let provider_name = config.provider_label.clone();
 
-    // Bootstrap engine with full feature initialization
+    // Bootstrap engine with full feature initialization. Phase 1B-2 —
+    // json-stream is a primary long-running host session (e.g. AionUI), so
+    // opt into inbound channel dispatch.
     let mut bootstrap = AgentBootstrap::new(config, cwd, output.clone())
-        .plugin_provider_router(make_plugin_provider_router());
+        .plugin_provider_router(make_plugin_provider_router())
+        .enable_inbound_dispatch(true);
 
     if let Some(resume_id) = &resume {
         let cfg = bootstrap.config();

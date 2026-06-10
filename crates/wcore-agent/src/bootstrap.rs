@@ -77,6 +77,13 @@ pub struct BootstrapResult {
     /// background tokio task. `Option` so the boot path can leave it
     /// `None` when the store path can't be resolved.
     pub cron_runner: Option<wcore_cron::CronRunner>,
+    /// Phase 1B-2 — handle to the spawned `InboundSubscriber` task that
+    /// turns inbound channel messages into agent turns. `Some` only when the
+    /// caller opted in via `AgentBootstrap::enable_inbound_dispatch(true)`
+    /// AND channels were not skipped (`without_channels(false)`). Dropping
+    /// the handle does NOT stop the task; aborting it does. `None` for every
+    /// per-session / sub-agent / ACP build.
+    pub inbound_subscriber: Option<tokio::task::JoinHandle<()>>,
 }
 
 /// Wave OL: plugin-provider router. Called after plugin discovery + init
@@ -124,6 +131,16 @@ pub struct AgentBootstrap {
     ///
     /// Default `None` keeps pre-M5 behaviour: both bridges stay dormant.
     span_sink: Option<Arc<dyn SpanSink>>,
+    /// Phase 1B-2 — skip the entire channel block (registration, start_all,
+    /// transport upgrade, inbound subscriber). Set by per-session engines
+    /// built by `ChannelTurnDispatcher` so they don't re-register channels
+    /// or recurse. Default `false`.
+    without_channels: bool,
+    /// Phase 1B-2 — primary session entry points opt in to spawn the
+    /// `InboundSubscriber` that turns inbound channel messages into agent
+    /// turns. Off by default so per-session / sub-agent / ACP builds never
+    /// spawn it.
+    enable_inbound_dispatch: bool,
 }
 
 impl AgentBootstrap {
@@ -137,7 +154,27 @@ impl AgentBootstrap {
             extra_skill_dirs: Vec::new(),
             plugin_provider_router: None,
             span_sink: None,
+            without_channels: false,
+            enable_inbound_dispatch: false,
         }
+    }
+
+    /// Phase 1B-2 — skip the entire channel block (registration, start_all,
+    /// transport upgrade, inbound subscriber). Set by per-session engines
+    /// built by `ChannelTurnDispatcher` so they don't re-register channels
+    /// or recurse.
+    pub fn without_channels(mut self, v: bool) -> Self {
+        self.without_channels = v;
+        self
+    }
+
+    /// Phase 1B-2 — primary session entry points opt in to spawn the
+    /// `InboundSubscriber` that turns inbound channel messages into agent
+    /// turns. Off by default so per-session / sub-agent / ACP builds never
+    /// spawn it.
+    pub fn enable_inbound_dispatch(mut self, v: bool) -> Self {
+        self.enable_inbound_dispatch = v;
+        self
     }
 
     /// M5.bootstrap-wiring — install an `Arc<dyn SpanSink>` that bootstrap
@@ -1692,6 +1729,13 @@ impl AgentBootstrap {
         // below can hand the same store to every adapter's factory.
         // Failure here means we skip channel auto-registration; the
         // engine itself starts fine.
+        // Phase 1B-2 — clone the resolved config BEFORE it is moved into the
+        // engine below. The inbound dispatcher needs an owned `Config` to
+        // build its per-session engines. Only used when
+        // `enable_inbound_dispatch` is set; the clone is cheap relative to
+        // bootstrap and `self.config` is unavailable after the move.
+        let config_for_dispatch = self.config.clone();
+
         let channel_credentials: Option<
             std::sync::Arc<dyn wcore_config::credentials::CredentialsStore>,
         > = match self.config.open_credentials_store() {
@@ -2002,93 +2046,172 @@ impl AgentBootstrap {
             });
 
         // F-014 (CRIT, Aud-4/Aud-11): construct ChannelManager, auto-register
-        // adapters, call start_all to spawn per-channel inbound poll tasks, and
-        // lift the manager to Arc<Mutex<ChannelManager>> so the cron handler
-        // (and any future inbound-event subscriber in the CLI) can hold a clone.
+        // adapters, lift the manager to Arc<Mutex<ChannelManager>>, (optionally)
+        // subscribe the inbound dispatcher, then call start_all to spawn
+        // per-channel inbound poll tasks.
         //
-        // Previously bootstrap stopped at `auto_register_from_user_config` and
-        // never called `start_all`, so inbound messages were never polled on
-        // any configured channel.
+        // Phase 1B-2 — the WHOLE block is skipped when `without_channels` is
+        // set (per-session engines built by `ChannelTurnDispatcher`): they must
+        // not re-register channels, spawn pollers, upgrade the transport, or
+        // spawn another inbound subscriber (recursion guard). In that case the
+        // result still needs a `channel_manager` value, so we construct an
+        // empty one the per-session engine never touches.
         //
-        // start_all is idempotent (already-started channels skip re-start).
-        // Errors from individual channel start() calls are surfaced as
-        // ChannelError and bubble up; non-fatal channels that fail independently
-        // already return Ok from their start() impl — this is the same contract
-        // as the channels crate manager tests.
-        let mut channel_manager_inner = wcore_channels::ChannelManager::new();
-        let channels_auto_registered = if let Some(creds) = channel_credentials {
-            match wcore_channels_registry::auto_register_from_user_config(
-                &mut channel_manager_inner,
-                creds,
-            )
-            .await
-            {
-                Ok(count) => {
-                    tracing::info!(
-                        target: "wcore_agent::bootstrap",
-                        count,
-                        "F-014: channels auto-registered from ~/.wayland/channels"
-                    );
-                    count
-                }
-                Err(e) => {
-                    tracing::warn!(
-                        target: "wcore_agent::bootstrap",
-                        error = %e,
-                        "F-014: channel auto-register failed; continuing with empty ChannelManager"
-                    );
-                    0
-                }
-            }
-        } else {
-            0
-        };
-        // Call start_all to arm inbound poll tasks. Best-effort: if start_all
-        // returns an error we warn and continue (session still works, channels
-        // just won't deliver inbound messages).
-        if let Err(e) = channel_manager_inner.start_all().await {
-            tracing::warn!(
-                target: "wcore_agent::bootstrap",
-                error = %e,
-                "F-014: channel_manager.start_all() failed; inbound polling may be partial"
-            );
-        } else {
-            tracing::info!(
-                target: "wcore_agent::bootstrap",
-                "F-014: channel_manager.start_all() complete — inbound polling active"
-            );
-        }
-        // Lift to Arc<tokio::sync::Mutex<>> so the cron handler and future
-        // CLI inbound subscribers can hold a clone across async boundaries.
-        // tokio Mutex is required because ChannelManager::send_to is async
-        // and the guard must survive an await point in the cron channel arm.
-        let channel_manager: std::sync::Arc<tokio::sync::Mutex<wcore_channels::ChannelManager>> =
-            std::sync::Arc::new(tokio::sync::Mutex::new(channel_manager_inner));
+        // Ordering (when channels are enabled): register → lift → subscribe →
+        // start_all. Subscribing BEFORE start_all closes the broadcast-ordering
+        // gap: tokio broadcast drops events emitted before a receiver exists,
+        // so the subscriber must acquire its receiver before polling begins.
+        let channel_manager: std::sync::Arc<tokio::sync::Mutex<wcore_channels::ChannelManager>>;
+        let channels_auto_registered: usize;
+        let inbound_subscriber: Option<tokio::task::JoinHandle<()>>;
 
-        // FleetDispatcher-class fix (audit 2026-05-24): SendMessageTool was
-        // registered above with the boot-default `NullMessageTransport` so
-        // its schema reaches the LLM from the start of the session. Now that
-        // `channel_manager` is lifted to `Arc<Mutex<>>`, replace the tool's
-        // transport with the real `ChannelManagerTransport` adapter so the
-        // LLM's `send_message` calls route through user-configured channels
-        // (Telegram/Discord/Slack/Email/etc.) instead of returning the Null
-        // transport's loud "no transport configured" error on every call.
-        if let Some(reg) = engine.registry_mut() {
-            let transport =
-                std::sync::Arc::new(crate::channel_send_transport::ChannelManagerTransport::new(
-                    std::sync::Arc::clone(&channel_manager),
-                ));
-            reg.replace_by_name(Box::new(wcore_tools::send_message::SendMessageTool::new(
-                transport,
-            )));
+        if !self.without_channels {
+            // Register adapters on the inner manager.
+            //
+            // Previously bootstrap stopped at `auto_register_from_user_config`
+            // and never called `start_all`, so inbound messages were never
+            // polled on any configured channel.
+            //
+            // start_all is idempotent (already-started channels skip re-start).
+            // Errors from individual channel start() calls are surfaced as
+            // ChannelError and bubble up; non-fatal channels that fail
+            // independently already return Ok from their start() impl — same
+            // contract as the channels crate manager tests.
+            let mut channel_manager_inner = wcore_channels::ChannelManager::new();
+            channels_auto_registered = if let Some(creds) = channel_credentials {
+                match wcore_channels_registry::auto_register_from_user_config(
+                    &mut channel_manager_inner,
+                    creds,
+                )
+                .await
+                {
+                    Ok(count) => {
+                        tracing::info!(
+                            target: "wcore_agent::bootstrap",
+                            count,
+                            "F-014: channels auto-registered from ~/.wayland/channels"
+                        );
+                        count
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            target: "wcore_agent::bootstrap",
+                            error = %e,
+                            "F-014: channel auto-register failed; continuing with empty ChannelManager"
+                        );
+                        0
+                    }
+                }
+            } else {
+                0
+            };
+
+            // Lift to Arc<tokio::sync::Mutex<>> so the cron handler, the
+            // inbound subscriber, and the send-message transport can each hold
+            // a clone across async boundaries. tokio Mutex is required because
+            // ChannelManager::send_to is async and the guard must survive an
+            // await point.
+            let lifted: std::sync::Arc<tokio::sync::Mutex<wcore_channels::ChannelManager>> =
+                std::sync::Arc::new(tokio::sync::Mutex::new(channel_manager_inner));
+
+            // Phase 1B-2 — spawn the inbound subscriber BEFORE start_all so no
+            // early inbound event is dropped by the broadcast. Only when the
+            // caller opted in via `enable_inbound_dispatch`.
+            inbound_subscriber = if self.enable_inbound_dispatch {
+                // Per-channel inbound policies, keyed by channel name. A channel
+                // absent from this map uses the fail-closed default.
+                let policies: std::collections::HashMap<
+                    String,
+                    wcore_channels::InboundPolicy,
+                > = wcore_channels::config::ChannelConfigLoader::new(
+                    wcore_channels::config::ChannelConfigLoader::default_root(),
+                )
+                .load_all()
+                .map(|v| v.into_iter().map(|c| (c.name, c.inbound)).collect())
+                .unwrap_or_default();
+
+                let dispatcher: Arc<dyn crate::channel_inbound::TurnDispatcher> =
+                    Arc::new(crate::channel_dispatch::ChannelTurnDispatcher::new(
+                        config_for_dispatch,
+                        self.workspace.clone(),
+                        provider.clone(),
+                    ));
+                let subscriber = crate::channel_inbound::InboundSubscriber::new(
+                    std::sync::Arc::clone(&lifted),
+                    dispatcher,
+                    policies,
+                    60_000,
+                    1024,
+                );
+                let handle = subscriber.spawn().await;
+                tracing::info!(
+                    target: "wcore_agent::bootstrap",
+                    "Phase 1B-2: inbound channel subscriber spawned"
+                );
+                Some(handle)
+            } else {
+                // Channels are enabled but inbound dispatch was not opted in:
+                // the dispatcher config clone goes unused on this path.
+                let _ = config_for_dispatch;
+                None
+            };
+
+            // Call start_all to arm inbound poll tasks (now that the subscriber
+            // is listening). Best-effort: if start_all returns an error we warn
+            // and continue (session still works, channels just won't deliver
+            // inbound messages).
+            if let Err(e) = lifted.lock().await.start_all().await {
+                tracing::warn!(
+                    target: "wcore_agent::bootstrap",
+                    error = %e,
+                    "F-014: channel_manager.start_all() failed; inbound polling may be partial"
+                );
+            } else {
+                tracing::info!(
+                    target: "wcore_agent::bootstrap",
+                    "F-014: channel_manager.start_all() complete — inbound polling active"
+                );
+            }
+
+            // FleetDispatcher-class fix (audit 2026-05-24): SendMessageTool was
+            // registered above with the boot-default `NullMessageTransport` so
+            // its schema reaches the LLM from the start of the session. Now that
+            // `channel_manager` is lifted to `Arc<Mutex<>>`, replace the tool's
+            // transport with the real `ChannelManagerTransport` adapter so the
+            // LLM's `send_message` calls route through user-configured channels
+            // (Telegram/Discord/Slack/Email/etc.) instead of returning the Null
+            // transport's loud "no transport configured" error on every call.
+            if let Some(reg) = engine.registry_mut() {
+                let transport = std::sync::Arc::new(
+                    crate::channel_send_transport::ChannelManagerTransport::new(
+                        std::sync::Arc::clone(&lifted),
+                    ),
+                );
+                reg.replace_by_name(Box::new(wcore_tools::send_message::SendMessageTool::new(
+                    transport,
+                )));
+            } else {
+                tracing::warn!(
+                    target: "wcore_agent::bootstrap",
+                    "send_message transport upgrade skipped: engine.registry_mut() \
+                     returned None (a stale Arc clone of the tools registry is held \
+                     somewhere). send_message will continue to use NullMessageTransport \
+                     and fail loudly on every call."
+                );
+            }
+
+            channel_manager = lifted;
         } else {
-            tracing::warn!(
-                target: "wcore_agent::bootstrap",
-                "send_message transport upgrade skipped: engine.registry_mut() \
-                 returned None (a stale Arc clone of the tools registry is held \
-                 somewhere). send_message will continue to use NullMessageTransport \
-                 and fail loudly on every call."
-            );
+            // Per-session engine path: no channel runtime. The result field is
+            // populated with an empty manager the engine never uses, and no
+            // inbound subscriber is spawned (recursion guard).
+            let _ = channel_credentials;
+            let _ = config_for_dispatch;
+            channel_manager = std::sync::Arc::new(tokio::sync::Mutex::new(
+                wcore_channels::ChannelManager::new(),
+            ));
+            channels_auto_registered = 0;
+            inbound_subscriber = None;
         }
 
         // v0.8.1 U7 — spawn the cron runner. Errors resolving the
@@ -2235,6 +2358,7 @@ impl AgentBootstrap {
             channel_manager,
             channels_auto_registered,
             cron_runner,
+            inbound_subscriber,
         })
     }
 }

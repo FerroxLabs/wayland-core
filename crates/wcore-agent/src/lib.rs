@@ -20,6 +20,11 @@ pub mod cancel;
 // drives an agent turn through the TurnDispatcher seam, then sends the
 // reply back. Completes the inbound path that was structurally missing.
 pub mod channel_inbound;
+// Phase 1B-2 — the real engine-backed `TurnDispatcher`. Builds one
+// per-session `AgentEngine` (via AgentBootstrap, `.without_channels(true)`
+// to avoid channel recursion) and drives an agent turn from each admitted
+// inbound message, returning the reply text the subscriber sends back.
+pub mod channel_dispatch;
 // FleetDispatcher-class fix (audit 2026-05-24): bridges SendMessageTool's
 // `MessageTransport` boundary to the host's `ChannelManager` so the LLM
 // can drive Telegram/Discord/Slack/etc. through user-configured channels.
