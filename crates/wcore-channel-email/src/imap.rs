@@ -325,7 +325,7 @@ pub(crate) fn parse_message(
     let MimeResult {
         text: body_text,
         attachments,
-    } = walk_mime(&headers, body_part);
+    } = walk_mime(&headers, body_part, 0);
 
     // Prepend the subject so consumers can use it as a thread hint, mirroring
     // the prior behavior (and Slack's subject-in-text convention).
@@ -461,7 +461,13 @@ struct ContentType {
 ///
 /// Guarantees a non-empty `text` whenever any renderable text part exists
 /// anywhere in the tree.
-fn walk_mime(headers: &[String], body: &str) -> MimeResult {
+/// Maximum MIME nesting depth walked. A hostile sender can craft a message
+/// with thousands of nested `multipart/*` levels; without a cap the
+/// recursion would overflow the stack and crash the poll thread. Past this
+/// depth a part is surfaced as raw text rather than recursed into.
+const MAX_MIME_DEPTH: usize = 20;
+
+fn walk_mime(headers: &[String], body: &str, depth: usize) -> MimeResult {
     let ct = parse_content_type(headers);
     let disposition = headers
         .iter()
@@ -483,7 +489,15 @@ fn walk_mime(headers: &[String], body: &str) -> MimeResult {
         || (filename.is_some() && !ct.mime.starts_with("text/"));
 
     if ct.mime.starts_with("multipart/") {
-        return walk_multipart(&ct, body);
+        if depth >= MAX_MIME_DEPTH {
+            // Pathologically nested multipart — stop recursing and surface the
+            // raw body as text rather than risk a stack overflow.
+            return MimeResult {
+                text: body.trim().to_string(),
+                attachments: Vec::new(),
+            };
+        }
+        return walk_multipart(&ct, body, depth);
     }
 
     if is_attachment {
@@ -510,7 +524,7 @@ fn walk_mime(headers: &[String], body: &str) -> MimeResult {
 
 /// Split a multipart body on its boundary and fold the sub-parts into a
 /// single `MimeResult`.
-fn walk_multipart(ct: &ContentType, body: &str) -> MimeResult {
+fn walk_multipart(ct: &ContentType, body: &str, depth: usize) -> MimeResult {
     let boundary = match &ct.boundary {
         Some(b) => b,
         // Malformed multipart with no boundary: best-effort treat the raw
@@ -532,7 +546,7 @@ fn walk_multipart(ct: &ContentType, body: &str) -> MimeResult {
     for raw_part in split_parts(body, boundary) {
         let (phead, pbody) = split_headers_body(raw_part);
         let pheaders = unfold_headers(phead);
-        let sub = walk_mime(&pheaders, pbody);
+        let sub = walk_mime(&pheaders, pbody, depth + 1);
         attachments.extend(sub.attachments);
 
         if sub.text.trim().is_empty() {

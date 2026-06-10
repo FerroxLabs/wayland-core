@@ -62,10 +62,13 @@ pub struct OutgoingRow {
 pub async fn fetch_outgoing_since(
     db_path: PathBuf,
     since_rowid: i64,
+    chat_id: String,
 ) -> Result<Vec<OutgoingRow>, IMessageError> {
-    tokio::task::spawn_blocking(move || fetch_outgoing_since_blocking(&db_path, since_rowid))
-        .await
-        .map_err(|e| IMessageError::Database(format!("spawn_blocking panic: {e}")))?
+    tokio::task::spawn_blocking(move || {
+        fetch_outgoing_since_blocking(&db_path, since_rowid, &chat_id)
+    })
+    .await
+    .map_err(|e| IMessageError::Database(format!("spawn_blocking panic: {e}")))?
 }
 
 // ---------------------------------------------------------------------------
@@ -91,18 +94,25 @@ const SQL_NEW_MESSAGES: &str = "
   ORDER BY m.rowid ASC
 ";
 
-// Outgoing messages to a specific handle, newer than the cursor. The handle
-// match keeps us from picking up a concurrent send to a different recipient;
-// `is_from_me = 1` restricts to messages we sent. Ordered DESC so the newest
-// (most likely our just-sent message) is considered first.
+// Outgoing messages in a specific CHAT, newer than the cursor. Scoping to
+// the chat (via the same chat_message_join → chat join the inbound query
+// uses) keeps a concurrent send to a DIFFERENT conversation from being
+// mis-matched as our just-sent message — without it, a same-text send
+// elsewhere could steal this send's GUID and corrupt receipt correlation.
+// `?2` matches either the chat guid or the chat_identifier (the
+// conversation_id can be in either form). `is_from_me = 1` restricts to
+// messages we sent. Ordered DESC so the newest (most likely ours) wins.
 const SQL_OUTGOING_SINCE: &str = "
   SELECT
     m.rowid           AS rowid,
     COALESCE(m.guid, '') AS guid,
     COALESCE(m.text, '') AS text
   FROM message m
+  LEFT JOIN chat_message_join cmj ON cmj.message_id = m.rowid
+  LEFT JOIN chat c ON c.rowid = cmj.chat_id
   WHERE m.rowid > ?1
     AND m.is_from_me = 1
+    AND (c.guid = ?2 OR c.chat_identifier = ?2)
     AND COALESCE(m.text, '') != ''
   ORDER BY m.rowid DESC
 ";
@@ -122,8 +132,9 @@ pub fn match_outgoing_guid(rows: &[OutgoingRow], sent_text: &str) -> Option<Stri
 fn fetch_outgoing_since_blocking(
     db_path: &std::path::Path,
     since_rowid: i64,
+    chat_id: &str,
 ) -> Result<Vec<OutgoingRow>, IMessageError> {
-    use rusqlite::{Connection, OpenFlags};
+    use rusqlite::{params, Connection, OpenFlags};
 
     let conn = Connection::open_with_flags(db_path, OpenFlags::SQLITE_OPEN_READ_ONLY)
         .map_err(|e| IMessageError::Database(format!("open chat.db: {e}")))?;
@@ -133,7 +144,7 @@ fn fetch_outgoing_since_blocking(
         .map_err(|e| IMessageError::Database(format!("prepare: {e}")))?;
 
     let rows = stmt
-        .query_map([since_rowid], |row| {
+        .query_map(params![since_rowid, chat_id], |row| {
             Ok(OutgoingRow {
                 rowid: row.get(0)?,
                 guid: row.get(1)?,

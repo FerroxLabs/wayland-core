@@ -208,12 +208,17 @@ pub fn build_send_params(conversation_id: &str, text: &str) -> Value {
     }
 }
 
-/// Discriminator between a direct recipient and a group id. Signal e164
-/// phone numbers (and signal-cli's accepted recipient addresses) start
-/// with `+`; group ids are base64 strings that never do. We treat a
-/// leading `+` as the sole signal for a direct recipient.
+/// Discriminator between a direct recipient and a group id. A direct
+/// recipient is an e164 phone number: a leading `+` followed by ALL digits.
+/// The leading `+` alone is NOT sufficient — Signal group ids are base64
+/// (the standard alphabet includes `+`), so an id like `+abc/123==` starts
+/// with `+` yet must route via `groupId`. Requiring digits after the `+`
+/// disambiguates the ~1.5% of group ids that happen to start with `+`.
 pub fn is_direct_recipient(conversation_id: &str) -> bool {
-    conversation_id.starts_with('+')
+    match conversation_id.strip_prefix('+') {
+        Some(rest) => !rest.is_empty() && rest.bytes().all(|b| b.is_ascii_digit()),
+        None => false,
+    }
 }
 
 #[cfg(test)]
@@ -245,6 +250,14 @@ mod tests {
         assert!(is_direct_recipient("+15551234567"));
         assert!(!is_direct_recipient("abcd1234EFGH=="));
         assert!(!is_direct_recipient(""));
+        // A base64 group id that happens to start with '+' is NOT a phone
+        // number and must route via groupId, not recipient.
+        assert!(!is_direct_recipient("+abc/123Qo=="));
+        assert!(!is_direct_recipient("+"));
+        // build_send_params must follow the same discrimination.
+        let p = build_send_params("+abc/123Qo==", "hi");
+        assert!(p.get("recipient").is_none());
+        assert_eq!(p["groupId"], "+abc/123Qo==");
     }
 
     #[test]

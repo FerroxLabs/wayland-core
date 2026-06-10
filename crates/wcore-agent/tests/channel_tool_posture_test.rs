@@ -114,14 +114,17 @@ async fn workspace_posture_jails_filesystem_reads() {
         .expect("bootstrap");
 
     let names = result.engine.tool_names();
-    // Jailable fs tools come back…
+    // Vfs-jailable fs tools come back…
     assert!(names.iter().any(|n| n == "Read"), "workspace exposes Read");
-    assert!(names.iter().any(|n| n == "Grep"), "workspace exposes Grep");
-    // …but non-jailable shell/exec tools stay gone.
-    assert!(
-        !names.iter().any(|n| n == "Bash"),
-        "workspace must NOT expose Bash, got: {names:?}"
-    );
+    assert!(names.iter().any(|n| n == "Edit"), "workspace exposes Edit");
+    // …but non-jailable shell/exec tools stay gone — including Grep/Glob,
+    // which shell out and would escape the jail with a default `path="."`.
+    for gone in ["Bash", "Grep", "Glob"] {
+        assert!(
+            !names.iter().any(|n| n == gone),
+            "workspace must NOT expose non-jailable tool '{gone}', got: {names:?}"
+        );
+    }
 
     // The engine's tool vfs is a SandboxedFs jailed to the workspace root.
     let ctx = result.engine.current_tool_context();

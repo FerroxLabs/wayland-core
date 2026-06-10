@@ -158,15 +158,23 @@ impl Channel for MatrixChannel {
             let _ = tx.send(true);
         }
         if let Some(handle) = self.poll_handle.take() {
-            // Give the loop a brief moment to observe the shutdown signal
-            // and drop out; if it lingers past the grace window, abort.
-            let joined = tokio::time::timeout(std::time::Duration::from_secs(2), handle).await;
-            if joined.is_err() {
-                tracing::warn!(
-                    target: "wcore_channel_matrix",
-                    channel = %self.name,
-                    "/sync task did not exit within shutdown grace; aborted"
-                );
+            // Give the loop a brief moment to observe the shutdown signal and
+            // drop out; if it lingers past the grace window (e.g. parked in a
+            // long /sync read), abort it. `timeout(dur, handle)` would only
+            // DROP the handle on elapse — which DETACHES, not aborts, the task,
+            // leaking it — so race the join against a sleep and abort
+            // explicitly via the AbortHandle on the timeout arm.
+            let abort = handle.abort_handle();
+            tokio::select! {
+                _ = handle => {}
+                _ = tokio::time::sleep(std::time::Duration::from_secs(2)) => {
+                    abort.abort();
+                    tracing::warn!(
+                        target: "wcore_channel_matrix",
+                        channel = %self.name,
+                        "/sync task did not exit within shutdown grace; aborted"
+                    );
+                }
             }
         }
         self.access_token = None;

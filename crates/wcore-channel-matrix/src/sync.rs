@@ -149,7 +149,15 @@ pub(crate) async fn sync_loop(args: SyncArgs) {
                         }
                     }
                 }
-                since = Some(next_batch);
+                // Advance the cursor only on a non-empty token. A spec-
+                // compliant homeserver always returns a non-empty next_batch,
+                // but a malformed/proxy response with `next_batch: ""` would,
+                // if stored, send `?since=` next tick — which some homeservers
+                // treat as an initial sync and could replay backlog. Keep the
+                // prior cursor in that case.
+                if !next_batch.is_empty() {
+                    since = Some(next_batch);
+                }
             }
             Err(e) => {
                 tracing::warn!(

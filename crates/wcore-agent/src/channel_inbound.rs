@@ -203,23 +203,24 @@ impl InboundSubscriber {
                                         );
                                     }
                                 }
-                                let typing_handle = if ack.typing() {
-                                    Some(spawn_typing_keepalive(
+                                // Abort-on-drop guard: the keepalive is killed
+                                // the instant the turn completes AND if this
+                                // subscriber task is itself cancelled
+                                // mid-dispatch (a bare JoinHandle drop does NOT
+                                // abort the task; the guard's Drop does).
+                                let _typing_guard = ack.typing().then(|| {
+                                    AbortOnDrop(spawn_typing_keepalive(
                                         std::sync::Arc::clone(&manager),
                                         tagged.channel_name.clone(),
                                         msg.conversation_id.clone(),
                                     ))
-                                } else {
-                                    None
-                                };
+                                });
 
                                 let dispatch_result = dispatcher
                                     .dispatch(&session_key, &tagged.channel_name, &msg)
                                     .await;
 
-                                if let Some(h) = typing_handle {
-                                    h.abort();
-                                }
+                                drop(_typing_guard);
                                 if ack.reactions() {
                                     let emoji = if dispatch_result.is_ok() { "✅" } else { "❌" };
                                     let g = manager.lock().await;
@@ -306,11 +307,23 @@ impl InboundSubscriber {
     }
 }
 
+/// Aborts the wrapped task when dropped. Used for the typing keepalive so it
+/// is killed both on normal turn completion (explicit `drop`) and if the
+/// owning subscriber task is cancelled mid-turn (a dropped `JoinHandle` alone
+/// does NOT abort the task it refers to).
+struct AbortOnDrop(tokio::task::JoinHandle<()>);
+
+impl Drop for AbortOnDrop {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
 /// Spawn a best-effort typing-indicator keepalive for `conversation_id` on
 /// `channel`. Sends a typing signal immediately, then refreshes every 5s
-/// until the returned handle is aborted (the subscriber aborts it the moment
-/// the turn completes). Each send locks the manager only briefly; failures
-/// (platform has no typing API, transient error) are ignored.
+/// until the wrapping [`AbortOnDrop`] guard is dropped (on turn completion or
+/// subscriber cancellation). Each send locks the manager only briefly;
+/// failures (platform has no typing API, transient error) are ignored.
 fn spawn_typing_keepalive(
     manager: Arc<Mutex<ChannelManager>>,
     channel: String,

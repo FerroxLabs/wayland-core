@@ -59,13 +59,21 @@ const CONVERSATIONAL_SAFE: &[&str] = &[
     "ToolSearch",
 ];
 
-/// Filesystem tools added back in `Workspace` posture. Every one honours
-/// `ctx.vfs`, so a [`SandboxedFs`](wcore_tools::vfs::SandboxedFs) jail
-/// confines it. Tools that touch the host fs/shell WITHOUT routing through
-/// `ctx.vfs` (Bash, Git, RepoMap, pdf_extract, kubectl, gcloud, aws_cli,
-/// sql_query, Script, …) are deliberately absent and stay unavailable —
-/// they would escape the jail.
-const WORKSPACE_FS_TOOLS: &[&str] = &["Read", "Write", "Edit", "Grep", "Glob"];
+/// Filesystem tools added back in `Workspace` posture. Every one routes its
+/// reads/writes through `ctx.vfs`, so a
+/// [`SandboxedFs`](wcore_tools::vfs::SandboxedFs) jail genuinely confines it.
+///
+/// `Grep`/`Glob` are deliberately EXCLUDED: they only probe the top-level
+/// path argument through `ctx.vfs` and then shell out (`rg`/`grep`) or walk
+/// the glob crate against the real filesystem at the process cwd — the
+/// recursive scan is NOT confined by the jail, so a `Grep`/`Glob` with the
+/// default `path="."` (or a symlink inside the workspace) would escape it.
+/// Until their subprocess cwd is pinned to the jail root and symlink
+/// following is disabled, they stay unavailable in `Workspace` (and `Full`
+/// remains the escape hatch for unconfined search). Likewise Bash, Git,
+/// RepoMap, pdf_extract, kubectl, gcloud, aws_cli, sql_query, Script touch
+/// the host fs/shell outside `ctx.vfs` and stay unavailable.
+const WORKSPACE_FS_TOOLS: &[&str] = &["Read", "Write", "Edit"];
 
 /// Operator-wired MCP tools are kept under restricted postures: they are
 /// deliberate, named extensions the operator installed, not ambient host
@@ -262,10 +270,13 @@ mod tests {
                 "workspace must expose vfs-jailable fs tool '{name}'"
             );
         }
-        // …but shell/exec and non-vfs fs readers stay dropped.
-        for name in ["Bash", "Git", "RepoMap", "pdf_extract", "kubectl", "Script"] {
+        // …but shell/exec, non-vfs fs readers, AND the shell-out search
+        // tools (Grep/Glob — not confined by the vfs jail) stay dropped.
+        for name in [
+            "Bash", "Git", "RepoMap", "pdf_extract", "kubectl", "Script", "Grep", "Glob",
+        ] {
             assert!(
-                !keep_under(ChannelToolPosture::Workspace, &tool(name, ToolCategory::Exec)),
+                !keep_under(ChannelToolPosture::Workspace, &tool(name, ToolCategory::Info)),
                 "workspace must NOT expose host-escaping tool '{name}'"
             );
         }

@@ -186,7 +186,9 @@ impl Channel for IMessageChannel {
         result.map_err(ChannelError::from)?;
 
         let ts_secs = chrono::Utc::now().timestamp();
-        let id = resolve_sent_guid(db_path, pre_send_rowid, &msg.text, ts_secs).await;
+        let id =
+            resolve_sent_guid(db_path, pre_send_rowid, &msg.conversation_id, &msg.text, ts_secs)
+                .await;
 
         Ok(MessageReceipt {
             id,
@@ -311,6 +313,7 @@ async fn do_send(chat_id: &str, text: &str) -> Result<(), crate::error::IMessage
 async fn resolve_sent_guid(
     db_path: std::path::PathBuf,
     pre_send_rowid: Option<i64>,
+    chat_id: &str,
     sent_text: &str,
     ts_secs: i64,
 ) -> String {
@@ -324,7 +327,7 @@ async fn resolve_sent_guid(
         if attempt > 0 {
             tokio::time::sleep(std::time::Duration::from_millis(GUID_LOOKUP_INTERVAL_MS)).await;
         }
-        match fetch_outgoing_since(db_path.clone(), since_rowid).await {
+        match fetch_outgoing_since(db_path.clone(), since_rowid, chat_id.to_string()).await {
             Ok(rows) => {
                 if let Some(guid) = match_outgoing_guid(&rows, sent_text) {
                     return guid;
