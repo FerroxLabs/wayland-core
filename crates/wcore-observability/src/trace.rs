@@ -131,6 +131,57 @@ impl ToolCallTrace {
     }
 }
 
+/// Aggregate native Bash output-compaction savings across a set of tool-call
+/// traces — the data behind the `gain`-style savings report. Built from the
+/// `compaction_bytes` each `ToolCallTrace` carries, which already flows to the
+/// host in every emitted `TurnTrace`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CompactionSavings {
+    /// Number of tool calls whose output was compacted.
+    pub calls: u64,
+    /// Total raw bytes before compaction (summed over those calls).
+    pub raw_bytes: u64,
+    /// Total bytes after compaction (summed over those calls).
+    pub compacted_bytes: u64,
+}
+
+impl CompactionSavings {
+    /// Bytes saved (`raw - compacted`, floored at 0).
+    pub fn saved_bytes(&self) -> u64 {
+        self.raw_bytes.saturating_sub(self.compacted_bytes)
+    }
+
+    /// Savings as a fraction of raw bytes in `[0.0, 1.0]`; 0.0 when nothing
+    /// was compacted.
+    pub fn ratio(&self) -> f64 {
+        if self.raw_bytes == 0 {
+            0.0
+        } else {
+            self.saved_bytes() as f64 / self.raw_bytes as f64
+        }
+    }
+
+    /// Fold another tally into this one.
+    pub fn add(&mut self, other: &CompactionSavings) {
+        self.calls += other.calls;
+        self.raw_bytes += other.raw_bytes;
+        self.compacted_bytes += other.compacted_bytes;
+    }
+}
+
+/// Sum the Bash output-compaction savings recorded across `traces`.
+pub fn aggregate_compaction(traces: &[ToolCallTrace]) -> CompactionSavings {
+    let mut out = CompactionSavings::default();
+    for t in traces {
+        if let Some((raw, compacted)) = t.compaction_bytes {
+            out.calls += 1;
+            out.raw_bytes += raw;
+            out.compacted_bytes += compacted;
+        }
+    }
+    out
+}
+
 /// One turn of the agent loop: the LLM call + every tool call it triggered.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TurnTrace {
@@ -445,6 +496,28 @@ mod tests {
     fn tool_call_trace_new_sets_source_product() {
         let t = ToolCallTrace::new("c1".into(), "Read".into(), json!({}));
         assert_eq!(t.source_product, SOURCE_PRODUCT);
+    }
+
+    #[test]
+    fn aggregate_compaction_sums_savings_and_ratio() {
+        let mut a = ToolCallTrace::new("a".into(), "Bash".into(), json!({}));
+        a.record_compaction(1000, 200);
+        let mut b = ToolCallTrace::new("b".into(), "Bash".into(), json!({}));
+        b.record_compaction(500, 250);
+        // A non-compacted call must not contribute.
+        let c = ToolCallTrace::new("c".into(), "Read".into(), json!({}));
+
+        let s = aggregate_compaction(&[a, b, c]);
+        assert_eq!(s.calls, 2);
+        assert_eq!(s.raw_bytes, 1500);
+        assert_eq!(s.compacted_bytes, 450);
+        assert_eq!(s.saved_bytes(), 1050);
+        assert!((s.ratio() - 0.7).abs() < 1e-9);
+
+        // Empty input yields a zero tally with a safe 0.0 ratio.
+        let empty = aggregate_compaction(&[]);
+        assert_eq!(empty, CompactionSavings::default());
+        assert_eq!(empty.ratio(), 0.0);
     }
 
     #[test]

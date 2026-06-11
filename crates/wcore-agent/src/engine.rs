@@ -3952,6 +3952,14 @@ impl AgentEngine {
                                     c.raw_bytes as u64,
                                     c.compacted_bytes as u64,
                                 );
+                                tracing::debug!(
+                                    target: "wcore_agent::compaction",
+                                    command = %command,
+                                    raw_bytes = c.raw_bytes,
+                                    compacted_bytes = c.compacted_bytes,
+                                    saved_bytes = c.raw_bytes - c.compacted_bytes,
+                                    "bash output compacted"
+                                );
                                 bash_compactions.insert(tool_use_id.clone(), c.content);
                             }
                         }
