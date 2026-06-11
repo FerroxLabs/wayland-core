@@ -40,10 +40,52 @@ pub fn default_server_spec() -> McpServerSpec {
 /// declares `register_mcp_server = true`, so the registry must be
 /// present.
 ///
+/// Build a [`std::process::Command`] that runs `program` with Windows
+/// PATHEXT shim resolution.
+///
+/// **Issue #6:** on Windows, Node ships `npx` as `npx.cmd` / `npx.ps1`
+/// (there is no `npx.exe`), and a bare `Command::new("npx")` does NOT
+/// resolve `.cmd`/`.bat`/`.ps1` shims — Rust's std only appends `.exe`. So
+/// the presence/reachability probes below were failing on Windows even when
+/// npx was installed and on PATH, which silently skipped MCP registration.
+/// Routing the probe through `cmd /C` makes the Windows shell apply PATHEXT,
+/// mirroring how the wcore-mcp stdio transport spawns the server itself
+/// (`shell_command_builder` → `cmd /C …`). On Unix `npx` is a real binary /
+/// symlink, so we spawn it directly.
+///
+/// (This plugin can't reuse `wcore_config::shell` — audit F2 forbids any
+/// `wcore-*` core dep — so the cmd-wrapping is inlined here.)
+#[cfg(windows)]
+fn shim_aware_command(program: &str) -> std::process::Command {
+    let mut c = std::process::Command::new("cmd");
+    c.arg("/C").arg(program);
+    c
+}
+
+#[cfg(not(windows))]
+fn shim_aware_command(program: &str) -> std::process::Command {
+    std::process::Command::new(program)
+}
+
+/// `true` if `program <version_arg>` starts and exits 0 — a fast PATH (+
+/// PATHEXT on Windows) presence check. Used to gate MCP registration on npx
+/// being installed.
+fn command_available(program: &str, version_arg: &str) -> bool {
+    shim_aware_command(program)
+        .arg(version_arg)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+}
+
 /// F-060 / B4: gate on `npx` being present on PATH AND the server being
 /// reachable. Two-stage probe:
 ///
-/// 1. `npx --version` presence check (fast).
+/// 1. `npx --version` presence check (fast; PATHEXT-aware on Windows so it
+///    recognises `npx.cmd` — issue #6).
 /// 2. If the transport is `Stdio { command: "node", args: [path, …] }`,
 ///    check the script path exists with `std::fs::metadata`.  Otherwise,
 ///    run the command with a 2-second timeout (`--help` or similar) to
@@ -60,17 +102,9 @@ pub fn register(ctx: &mut PluginContext<'_>) -> PluginResult<()> {
         }
     })?;
 
-    // Stage 1: npx presence (fast, no startup cost).
-    let npx_available = std::process::Command::new("npx")
-        .arg("--version")
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false);
-
-    if !npx_available {
+    // Stage 1: npx presence (fast, no startup cost). PATHEXT-aware so the
+    // Windows `npx.cmd` shim is found (issue #6).
+    if !command_available("npx", "--version") {
         tracing::info!(
             "ijfw-memory: npx not found on PATH — skipping MCP registration \
              (install Node.js to enable)"
@@ -135,7 +169,10 @@ fn mcp_server_is_reachable(spec: &wcore_plugin_api::mcp_server_spec::McpServerSp
             let mut probe_args: Vec<&str> = args.iter().map(String::as_str).collect();
             probe_args.push("--help");
 
-            let mut cmd = std::process::Command::new(command);
+            // PATHEXT-aware (issue #6): on Windows this becomes
+            // `cmd /C npx -y @ijfw/memory-server --help` so the `npx.cmd`
+            // shim resolves; on Unix it spawns `npx …` directly.
+            let mut cmd = shim_aware_command(command);
             cmd.args(&probe_args)
                 .stdin(std::process::Stdio::null())
                 .stdout(std::process::Stdio::null())
@@ -199,5 +236,35 @@ mod tests {
             }
             _ => panic!("expected stdio transport for default IJFW MCP server"),
         }
+    }
+
+    // Issue #6: the probe must route through `cmd /C` on Windows so the
+    // `npx.cmd` PATHEXT shim resolves; on Unix it spawns the program direct.
+    #[test]
+    fn shim_aware_command_routes_through_cmd_on_windows() {
+        let cmd = shim_aware_command("npx");
+        let program = cmd.get_program().to_string_lossy().to_string();
+        let args: Vec<String> = cmd
+            .get_args()
+            .map(|a| a.to_string_lossy().to_string())
+            .collect();
+        #[cfg(windows)]
+        {
+            assert_eq!(program, "cmd");
+            assert_eq!(args, vec!["/C".to_string(), "npx".to_string()]);
+        }
+        #[cfg(not(windows))]
+        {
+            assert_eq!(program, "npx");
+            assert!(args.is_empty());
+        }
+    }
+
+    #[test]
+    fn command_available_is_false_for_absent_binary() {
+        assert!(!command_available(
+            "wayland-ijfw-definitely-absent-binary-xyz",
+            "--version"
+        ));
     }
 }
