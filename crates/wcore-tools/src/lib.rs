@@ -14,6 +14,9 @@ pub mod assert_fact;
 // a read-only operation allowlist; mutating ops rejected. Sandboxed via Tier S.
 pub mod aws_cli_tool;
 pub mod bash;
+// Native per-command Bash output compaction (cargo/git/test/grep) — engine-owned,
+// fail-open, size-gated. See `.planning/2026-06-11-NATIVE-BASH-COMPACTION-DESIGN.md`.
+pub mod bash_compact;
 // T3-3.2.1: pure-string binary extension filter ported from hermes (sub-wave 2).
 pub mod binary_extensions;
 // T3-3.1.1: clarify_tool ported from wayland-hermes (sub-wave 1).
