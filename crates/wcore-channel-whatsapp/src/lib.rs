@@ -265,6 +265,38 @@ impl Channel for WhatsappChannel {
         Some(4096)
     }
 
+    /// Send a reaction message — the ack signal. `conversation_id` is the
+    /// recipient `wa_id`, `message_id` the inbound `wamid`. Unicode emoji
+    /// are sent directly. Note: WhatsApp's typing indicator is tied to a
+    /// per-message read receipt (it needs the message id, which the typing
+    /// keepalive does not carry), so `send_typing` keeps the trait no-op.
+    async fn react(
+        &self,
+        conversation_id: &str,
+        message_id: &str,
+        emoji: &str,
+    ) -> Result<(), ChannelError> {
+        let access_token = self
+            .access_token
+            .as_deref()
+            .ok_or_else(|| ChannelError::Auth("access token not loaded".to_string()))?;
+        let req = api::SendReactionRequest::new(
+            conversation_id.to_string(),
+            message_id.to_string(),
+            emoji.to_string(),
+        );
+        api::send_reaction(
+            &self.http,
+            &self.config.api_base_url,
+            &self.config.graph_version,
+            &self.config.phone_number_id,
+            access_token,
+            &req,
+        )
+        .await
+        .map_err(ChannelError::from)
+    }
+
     /// Handle a Meta WhatsApp Cloud API webhook request.
     ///
     /// Meta drives two distinct flows over the same URL:

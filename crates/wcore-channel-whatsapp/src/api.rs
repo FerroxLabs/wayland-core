@@ -268,3 +268,139 @@ fn summarise(s: &str) -> String {
         format!("{}…", &s[..MAX])
     }
 }
+
+/// Outbound WhatsApp reaction message. A reaction is just a message of
+/// `type: "reaction"` referencing the inbound message id (`wamid`) and a
+/// unicode emoji, sent to the same recipient.
+#[derive(Debug, Clone, Serialize)]
+pub struct SendReactionRequest {
+    pub messaging_product: &'static str,
+    pub recipient_type: &'static str,
+    pub to: String,
+    #[serde(rename = "type")]
+    pub kind: &'static str,
+    pub reaction: ReactionBody,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ReactionBody {
+    pub message_id: String,
+    pub emoji: String,
+}
+
+impl SendReactionRequest {
+    pub fn new(
+        recipient: impl Into<String>,
+        message_id: impl Into<String>,
+        emoji: impl Into<String>,
+    ) -> Self {
+        Self {
+            messaging_product: "whatsapp",
+            recipient_type: "individual",
+            to: recipient.into(),
+            kind: "reaction",
+            reaction: ReactionBody {
+                message_id: message_id.into(),
+                emoji: emoji.into(),
+            },
+        }
+    }
+}
+
+/// Send a reaction message. Single attempt — the ack reaction is a
+/// best-effort, non-fatal signal, so it does not consume the send-retry
+/// budget. We don't need the returned message id, so success is `()`.
+pub async fn send_reaction(
+    http: &wcore_egress::EgressClient,
+    api_base: &str,
+    graph_version: &str,
+    phone_number_id: &str,
+    access_token: &str,
+    req: &SendReactionRequest,
+) -> Result<(), WhatsappError> {
+    let url = format!(
+        "{}/{}/{}/messages",
+        api_base.trim_end_matches('/'),
+        graph_version.trim_matches('/'),
+        phone_number_id,
+    );
+    let resp = http
+        .post(&url)
+        .bearer_auth(access_token)
+        .header("Content-Type", "application/json; charset=utf-8")
+        .json(req)
+        .send()
+        .await
+        .map_err(|e| WhatsappError::Api(format!("send error: {e}")))?;
+
+    let status = resp.status();
+    if status == StatusCode::UNAUTHORIZED || status == StatusCode::FORBIDDEN {
+        let body = resp.text().await.unwrap_or_default();
+        return Err(WhatsappError::Auth(format!(
+            "HTTP {}: {}",
+            status.as_u16(),
+            summarise(&body)
+        )));
+    }
+    if !status.is_success() {
+        let body = resp.text().await.unwrap_or_default();
+        return Err(WhatsappError::Api(format!(
+            "HTTP {}: {}",
+            status.as_u16(),
+            summarise(&body)
+        )));
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod reaction_tests {
+    use super::*;
+
+    #[test]
+    fn reaction_request_shape() {
+        let req = SendReactionRequest::new("15551234567", "wamid.ABC", "👀");
+        let json = serde_json::to_value(&req).unwrap();
+        assert_eq!(json["messaging_product"], "whatsapp");
+        assert_eq!(json["type"], "reaction");
+        assert_eq!(json["to"], "15551234567");
+        assert_eq!(json["reaction"]["message_id"], "wamid.ABC");
+        assert_eq!(json["reaction"]["emoji"], "👀");
+    }
+
+    #[tokio::test]
+    async fn send_reaction_succeeds_on_200() {
+        let mut server = mockito::Server::new_async().await;
+        let mock = server
+            .mock("POST", "/v20.0/PHONE/messages")
+            .match_header("authorization", "Bearer tok")
+            .match_body(mockito::Matcher::Regex(r#""type":"reaction""#.to_string()))
+            .with_status(200)
+            .with_body(r#"{"messaging_product":"whatsapp","messages":[{"id":"wamid.R"}]}"#)
+            .create_async()
+            .await;
+        let http = wcore_egress::EgressClient::new();
+        let req = SendReactionRequest::new("15551234567", "wamid.ABC", "👀");
+        send_reaction(&http, &server.url(), "v20.0", "PHONE", "tok", &req)
+            .await
+            .expect("reaction should succeed on 200");
+        mock.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn send_reaction_unauthorized_maps_to_auth() {
+        let mut server = mockito::Server::new_async().await;
+        let _mock = server
+            .mock("POST", mockito::Matcher::Any)
+            .with_status(401)
+            .with_body(r#"{"error":{"message":"bad token"}}"#)
+            .create_async()
+            .await;
+        let http = wcore_egress::EgressClient::new();
+        let req = SendReactionRequest::new("15551234567", "wamid.ABC", "👀");
+        let err = send_reaction(&http, &server.url(), "v20.0", "PHONE", "tok", &req)
+            .await
+            .expect_err("401 should error");
+        assert!(matches!(err, WhatsappError::Auth(_)), "got {err:?}");
+    }
+}

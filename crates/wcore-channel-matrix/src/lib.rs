@@ -219,6 +219,50 @@ impl Channel for MatrixChannel {
     fn config_schema(&self) -> &str {
         include_str!("schemas/matrix.json")
     }
+
+    /// `PUT /rooms/{room}/typing/{userId}` — the bot's own `user_id` (a
+    /// config field) is the path subject. 30s server-side timeout; the
+    /// subscriber re-sends on a shorter cadence while a turn runs.
+    async fn send_typing(&self, conversation_id: &str) -> Result<(), ChannelError> {
+        let token = self
+            .access_token
+            .as_deref()
+            .ok_or(ChannelError::NotStarted)?;
+        rest::send_typing(
+            &self.http,
+            &self.api_base,
+            token,
+            conversation_id,
+            &self.config.user_id,
+            30_000,
+        )
+        .await
+        .map_err(|e| ChannelError::Transport(e.to_string()))
+    }
+
+    /// `m.reaction` annotation relating to the inbound event — the ack
+    /// signal. `message_id` is the Matrix `event_id`.
+    async fn react(
+        &self,
+        conversation_id: &str,
+        message_id: &str,
+        emoji: &str,
+    ) -> Result<(), ChannelError> {
+        let token = self
+            .access_token
+            .as_deref()
+            .ok_or(ChannelError::NotStarted)?;
+        rest::send_reaction(
+            &self.http,
+            &self.api_base,
+            token,
+            conversation_id,
+            message_id,
+            emoji,
+        )
+        .await
+        .map_err(|e| ChannelError::Transport(e.to_string()))
+    }
 }
 
 // ---------------------------------------------------------------------------

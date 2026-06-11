@@ -189,3 +189,160 @@ async fn sleep_backoff(attempt: u32, retry_after: Option<Duration>) {
     let sleep_ms = (base as i64 + jitter).max(0) as u64;
     tokio::time::sleep(Duration::from_millis(sleep_ms)).await;
 }
+
+/// `reactions.add` request body. Slack identifies the target message by
+/// `channel` + `timestamp` (the message `ts`), and the emoji by its
+/// shortcode `name` (NOT a unicode glyph — see [`slack_emoji_name`]).
+#[derive(Debug, Clone, Serialize)]
+pub struct AddReactionRequest {
+    pub channel: String,
+    pub timestamp: String,
+    pub name: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct AddReactionResponse {
+    ok: bool,
+    #[serde(default)]
+    error: Option<String>,
+}
+
+/// Map the small set of ack unicode emoji the subscriber sends to the
+/// Slack shortcodes `reactions.add` expects. Returns `None` for an emoji
+/// we have no mapping for, so the caller can skip rather than send a name
+/// Slack would reject (`invalid_name`).
+pub fn slack_emoji_name(emoji: &str) -> Option<&'static str> {
+    match emoji {
+        "👀" => Some("eyes"),
+        "✅" => Some("white_check_mark"),
+        "❌" => Some("x"),
+        "👍" => Some("+1"),
+        "🎉" => Some("tada"),
+        _ => None,
+    }
+}
+
+/// Add a reaction via `POST /api/reactions.add`. Single attempt — the ack
+/// reaction is a best-effort, non-fatal signal, so it does not consume the
+/// send-retry budget. `already_reacted` is treated as success (idempotent).
+pub async fn add_reaction(
+    http: &wcore_egress::EgressClient,
+    api_base: &str,
+    bot_token: &str,
+    req: &AddReactionRequest,
+) -> Result<(), SlackError> {
+    let url = format!("{}/api/reactions.add", api_base.trim_end_matches('/'));
+    let resp = http
+        .post(&url)
+        .bearer_auth(bot_token)
+        .header("Content-Type", "application/json; charset=utf-8")
+        .json(req)
+        .send()
+        .await
+        .map_err(|e| SlackError::Api(format!("send error: {e}")))?;
+
+    let status = resp.status();
+    if status == StatusCode::UNAUTHORIZED || status == StatusCode::FORBIDDEN {
+        let body = resp.text().await.unwrap_or_default();
+        return Err(SlackError::Auth(format!(
+            "HTTP {}: {body}",
+            status.as_u16()
+        )));
+    }
+    if !status.is_success() {
+        let body = resp.text().await.unwrap_or_default();
+        return Err(SlackError::Api(format!("HTTP {}: {body}", status.as_u16())));
+    }
+
+    let parsed: AddReactionResponse = resp
+        .json()
+        .await
+        .map_err(|e| SlackError::MalformedPayload(format!("decode reactions.add response: {e}")))?;
+    if !parsed.ok {
+        let code = parsed.error.unwrap_or_else(|| "unknown".to_string());
+        // Already reacted is benign for the ack use case.
+        if code == "already_reacted" {
+            return Ok(());
+        }
+        if matches!(
+            code.as_str(),
+            "invalid_auth" | "not_authed" | "token_revoked" | "token_expired"
+        ) {
+            return Err(SlackError::Auth(code));
+        }
+        return Err(SlackError::Api(code));
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod reaction_tests {
+    use super::*;
+
+    #[test]
+    fn emoji_map_covers_ack_set() {
+        assert_eq!(slack_emoji_name("👀"), Some("eyes"));
+        assert_eq!(slack_emoji_name("✅"), Some("white_check_mark"));
+        assert_eq!(slack_emoji_name("❌"), Some("x"));
+        assert_eq!(slack_emoji_name("🦄"), None);
+    }
+
+    fn req() -> AddReactionRequest {
+        AddReactionRequest {
+            channel: "C123".to_string(),
+            timestamp: "1234.5678".to_string(),
+            name: "eyes".to_string(),
+        }
+    }
+
+    #[tokio::test]
+    async fn add_reaction_succeeds_on_ok_true() {
+        let mut server = mockito::Server::new_async().await;
+        let mock = server
+            .mock("POST", "/api/reactions.add")
+            .match_header("authorization", "Bearer xoxb-tok")
+            .with_status(200)
+            .with_body(r#"{"ok":true}"#)
+            .create_async()
+            .await;
+        let http = wcore_egress::EgressClient::new();
+        add_reaction(&http, &server.url(), "xoxb-tok", &req())
+            .await
+            .expect("ok:true should succeed");
+        mock.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn already_reacted_is_treated_as_success() {
+        let mut server = mockito::Server::new_async().await;
+        let _mock = server
+            .mock("POST", "/api/reactions.add")
+            .with_status(200)
+            .with_body(r#"{"ok":false,"error":"already_reacted"}"#)
+            .create_async()
+            .await;
+        let http = wcore_egress::EgressClient::new();
+        add_reaction(&http, &server.url(), "xoxb-tok", &req())
+            .await
+            .expect("already_reacted is idempotent success");
+    }
+
+    #[tokio::test]
+    async fn unknown_ok_false_is_api_error() {
+        let mut server = mockito::Server::new_async().await;
+        let _mock = server
+            .mock("POST", "/api/reactions.add")
+            .with_status(200)
+            .with_body(r#"{"ok":false,"error":"message_not_found"}"#)
+            .create_async()
+            .await;
+        let http = wcore_egress::EgressClient::new();
+        let err = add_reaction(&http, &server.url(), "xoxb-tok", &req())
+            .await
+            .expect_err("ok:false should error");
+        assert!(
+            matches!(err, SlackError::Api(ref c) if c == "message_not_found"),
+            "got {err:?}"
+        );
+    }
+}

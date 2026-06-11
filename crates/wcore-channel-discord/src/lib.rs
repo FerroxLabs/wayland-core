@@ -255,6 +255,35 @@ impl Channel for DiscordChannel {
     fn max_message_len(&self) -> Option<usize> {
         Some(2000)
     }
+
+    /// `POST /channels/{id}/typing` — shows the bot as typing for ~10s.
+    async fn send_typing(&self, conversation_id: &str) -> Result<(), ChannelError> {
+        let token = self.bot_token.as_deref().ok_or(ChannelError::NotStarted)?;
+        rest::trigger_typing(&self.http, &self.api_base, token, conversation_id)
+            .await
+            .map_err(ChannelError::from)
+    }
+
+    /// `PUT /channels/{id}/messages/{msg}/reactions/{emoji}/@me` — adds the
+    /// bot's reaction (the ack signal). Unicode emoji are accepted directly.
+    async fn react(
+        &self,
+        conversation_id: &str,
+        message_id: &str,
+        emoji: &str,
+    ) -> Result<(), ChannelError> {
+        let token = self.bot_token.as_deref().ok_or(ChannelError::NotStarted)?;
+        rest::add_reaction(
+            &self.http,
+            &self.api_base,
+            token,
+            conversation_id,
+            message_id,
+            emoji,
+        )
+        .await
+        .map_err(ChannelError::from)
+    }
 }
 
 // ===========================================================================

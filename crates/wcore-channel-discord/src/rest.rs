@@ -188,3 +188,161 @@ pub(crate) fn parse_iso8601_to_epoch(ts: &str) -> i64 {
         .map(|dt| dt.timestamp())
         .unwrap_or(0)
 }
+
+/// Trigger the typing indicator in a channel via
+/// `POST /channels/{channel_id}/typing` (empty body, `204 No Content`).
+///
+/// Best-effort and single-shot: the subscriber calls this periodically
+/// while a turn runs, so retrying a missed indicator is pointless — the
+/// next keepalive tick supersedes it. A failure is mapped to a structured
+/// error the caller logs and ignores.
+pub(crate) async fn trigger_typing(
+    http: &wcore_egress::EgressClient,
+    api_base: &str,
+    bot_token: &str,
+    channel_id: &str,
+) -> Result<(), DiscordError> {
+    let url = format!("{api_base}/api/v10/channels/{channel_id}/typing");
+    let auth = format!("Bot {bot_token}");
+    let resp = http
+        .post(&url)
+        .header(reqwest::header::AUTHORIZATION, &auth)
+        .send()
+        .await
+        .map_err(|e| DiscordError::Http(format!("network: {e}")))?;
+    status_to_result(resp.status(), "typing")
+}
+
+/// Add a single-emoji reaction to a message via
+/// `PUT /channels/{channel_id}/messages/{message_id}/reactions/{emoji}/@me`
+/// (`204 No Content`). The unicode emoji is percent-encoded into the path.
+pub(crate) async fn add_reaction(
+    http: &wcore_egress::EgressClient,
+    api_base: &str,
+    bot_token: &str,
+    channel_id: &str,
+    message_id: &str,
+    emoji: &str,
+) -> Result<(), DiscordError> {
+    let encoded = percent_encode(emoji);
+    let url = format!(
+        "{api_base}/api/v10/channels/{channel_id}/messages/{message_id}/reactions/{encoded}/@me"
+    );
+    let auth = format!("Bot {bot_token}");
+    let resp = http
+        .put(&url)
+        .header(reqwest::header::AUTHORIZATION, &auth)
+        .send()
+        .await
+        .map_err(|e| DiscordError::Http(format!("network: {e}")))?;
+    status_to_result(resp.status(), "reaction")
+}
+
+/// Classify a bodyless Discord response: 2xx → Ok, 401/403 → Auth,
+/// anything else → Rejected. Used by the best-effort typing/reaction calls
+/// that don't parse a response body.
+fn status_to_result(status: reqwest::StatusCode, op: &str) -> Result<(), DiscordError> {
+    if status.is_success() {
+        Ok(())
+    } else if matches!(status.as_u16(), 401 | 403) {
+        Err(DiscordError::Auth(format!("{op}: status {status}")))
+    } else {
+        Err(DiscordError::Rejected {
+            code: status.as_u16(),
+            description: format!("{op}: status {status}"),
+        })
+    }
+}
+
+/// Percent-encode a string's UTF-8 bytes, leaving only the RFC 3986
+/// unreserved set untouched — enough to put a unicode emoji safely into a
+/// URL path segment. Kept local to avoid pulling in a urlencoding dep.
+fn percent_encode(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() * 3);
+    for byte in s.bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(byte as char)
+            }
+            _ => {
+                out.push('%');
+                out.push(
+                    char::from_digit((byte >> 4) as u32, 16)
+                        .unwrap()
+                        .to_ascii_uppercase(),
+                );
+                out.push(
+                    char::from_digit((byte & 0xf) as u32, 16)
+                        .unwrap()
+                        .to_ascii_uppercase(),
+                );
+            }
+        }
+    }
+    out
+}
+
+#[cfg(test)]
+mod reaction_tests {
+    use super::*;
+
+    #[test]
+    fn percent_encode_emoji_encodes_utf8_bytes() {
+        // 👀 is U+1F440 → UTF-8 F0 9F 91 80.
+        assert_eq!(percent_encode("👀"), "%F0%9F%91%80");
+        // ✅ is U+2705 → UTF-8 E2 9C 85.
+        assert_eq!(percent_encode("✅"), "%E2%9C%85");
+        // ASCII unreserved passes through.
+        assert_eq!(percent_encode("aZ9-_.~"), "aZ9-_.~");
+    }
+
+    #[tokio::test]
+    async fn trigger_typing_succeeds_on_204() {
+        let mut server = mockito::Server::new_async().await;
+        let mock = server
+            .mock("POST", "/api/v10/channels/chan1/typing")
+            .match_header("authorization", "Bot tok")
+            .with_status(204)
+            .create_async()
+            .await;
+        let http = wcore_egress::EgressClient::new();
+        trigger_typing(&http, &server.url(), "tok", "chan1")
+            .await
+            .expect("typing should succeed on 204");
+        mock.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn add_reaction_puts_encoded_emoji_and_succeeds_on_204() {
+        let mut server = mockito::Server::new_async().await;
+        let mock = server
+            .mock(
+                "PUT",
+                "/api/v10/channels/chan1/messages/msg1/reactions/%F0%9F%91%80/@me",
+            )
+            .match_header("authorization", "Bot tok")
+            .with_status(204)
+            .create_async()
+            .await;
+        let http = wcore_egress::EgressClient::new();
+        add_reaction(&http, &server.url(), "tok", "chan1", "msg1", "👀")
+            .await
+            .expect("reaction should succeed on 204");
+        mock.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn reaction_forbidden_maps_to_auth() {
+        let mut server = mockito::Server::new_async().await;
+        let _mock = server
+            .mock("PUT", mockito::Matcher::Any)
+            .with_status(403)
+            .create_async()
+            .await;
+        let http = wcore_egress::EgressClient::new();
+        let err = add_reaction(&http, &server.url(), "tok", "c", "m", "👀")
+            .await
+            .expect_err("403 should error");
+        assert!(matches!(err, DiscordError::Auth(_)), "got {err:?}");
+    }
+}

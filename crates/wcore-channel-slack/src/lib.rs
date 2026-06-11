@@ -271,6 +271,34 @@ impl Channel for SlackChannel {
         Some(39_000)
     }
 
+    /// `reactions.add` — the ack signal. `message_id` is the Slack message
+    /// `ts`. Slack takes an emoji *shortcode*, not a unicode glyph, so the
+    /// ack emoji is mapped; an unmapped emoji is rejected (skipped by the
+    /// caller). Note: Slack has no bot-usable typing API, so `send_typing`
+    /// deliberately keeps the trait's no-op default.
+    async fn react(
+        &self,
+        conversation_id: &str,
+        message_id: &str,
+        emoji: &str,
+    ) -> Result<(), ChannelError> {
+        let bot_token = self
+            .bot_token
+            .as_deref()
+            .ok_or_else(|| ChannelError::Auth("bot token not loaded".to_string()))?;
+        let name = api::slack_emoji_name(emoji).ok_or_else(|| {
+            ChannelError::Rejected(format!("no slack shortcode for emoji {emoji}"))
+        })?;
+        let req = api::AddReactionRequest {
+            channel: conversation_id.to_string(),
+            timestamp: message_id.to_string(),
+            name: name.to_string(),
+        };
+        api::add_reaction(&self.http, &self.config.api_base_url, bot_token, &req)
+            .await
+            .map_err(ChannelError::from)
+    }
+
     /// Verify a Slack Events API POST and enqueue any resulting event.
     ///
     /// Pulls the `X-Slack-Signature` + `X-Slack-Request-Timestamp` headers

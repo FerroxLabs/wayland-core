@@ -103,9 +103,20 @@ ack = "both"   # off (default) | reactions | typing | both
   it works.
 - `both` — reactions + typing.
 
-Best-effort: a connector without the platform API simply does nothing
-(Telegram implements both today; other connectors fall back to no-op until
-implemented). Ack failures never affect the reply itself.
+Best-effort: a connector without the platform API simply does nothing.
+Ack failures never affect the reply itself. Per-connector support:
+
+| Connector | Reactions | Typing | Notes |
+|-----------|-----------|--------|-------|
+| Telegram  | ✅ | ✅ | `setMessageReaction` + `sendChatAction` |
+| Discord   | ✅ | ✅ | `PUT …/reactions/{emoji}/@me` + `POST …/typing` |
+| Matrix    | ✅ | ✅ | `m.reaction` annotation + `…/typing/{userId}` |
+| Slack     | ✅ | —  | `reactions.add` (ack emoji mapped to shortcodes); Slack has no bot-usable typing API |
+| WhatsApp  | ✅ | —  | reaction message; typing needs a per-message read receipt the keepalive can't carry |
+| Signal / iMessage | — | — | no reaction/typing API surface wired |
+
+Slack maps the ack emoji (👀/✅/❌) to its shortcodes (`eyes`/`white_check_mark`/`x`)
+because `reactions.add` takes a name, not a unicode glyph.
 
 ## Inbound webhook host (Slack / WhatsApp / Twilio SMS)
 
