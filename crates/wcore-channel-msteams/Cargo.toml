@@ -8,10 +8,15 @@ description = "Microsoft Teams channel adapter for Wayland-Core — Bot Framewor
 [dependencies]
 async-trait = { workspace = true }
 chrono = { workspace = true, features = ["serde"] }
-# `rust_crypto`: jsonwebtoken 10.x requires an explicit CryptoProvider feature
-# (no default). Pure-Rust provider — no C toolchain, so the Windows CI lane
-# builds cleanly. Needed because this crate actually verifies RS256 JWTs.
-jsonwebtoken = { workspace = true, features = ["rust_crypto"] }
+# `aws_lc_rs`: jsonwebtoken 10.x requires an explicit CryptoProvider feature
+# (no default). We use aws_lc_rs (constant-time AWS-LC) NOT the pure-Rust
+# `rust_crypto` provider, because rust_crypto pulls the `rsa` crate which
+# carries RUSTSEC-2023-0071 (Marvin Attack timing sidechannel, no upstream
+# fix). aws-lc-rs is ALREADY in the tree (rustls's default crypto provider)
+# and its aws-lc-sys C build compiles green on every CI target incl.
+# aarch64-pc-windows-msvc — so this adds no new build surface and drops `rsa`
+# at the source. Used here to verify RS256 JWTs.
+jsonwebtoken = { workspace = true, features = ["aws_lc_rs"] }
 reqwest = { workspace = true, features = ["json"] }
 wcore-egress = { workspace = true }
 serde = { workspace = true, features = ["derive"] }

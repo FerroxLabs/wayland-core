@@ -28,22 +28,9 @@
 # Format reference: https://docs.rs/cargo-audit/latest/cargo_audit/
 
 [advisories]
-# ── rsa 0.9.x — RUSTSEC-2023-0071 (Marvin Attack, timing sidechannel) ──────
-# Parent trace (`cargo tree -i rsa`): rsa 0.9.10 <- jsonwebtoken 10.3.0, with
-# TWO consumers:
-#   1. wcore-channel-msteams — Bot Framework inbound JWT *verification* with
-#      Microsoft's PUBLIC JWKS keys. RS256 verify never touches a private key,
-#      never decrypts/signs → the vulnerable path is unreachable here.
-#   2. wcore-providers (Vertex AI) — *signs* a service-account JWT (RS256) with
-#      the operator's OWN RSA private key to mint a Google access token. This
-#      IS a private-key op (the advisory's target surface), but practical
-#      exploitability is low: signing is infrequent (token refresh ~hourly),
-#      runs locally, is NOT remotely attacker-triggerable at the volume/timing
-#      precision a Marvin attack needs, and exposes no timing oracle to any
-#      remote party (the signature goes to Google's token endpoint, not back to
-#      an attacker). No fixed `rsa` release exists ("No fixed upgrade available").
-# Permanent remediation (tracked): migrate jsonwebtoken to the `aws_lc_rs`
-# CryptoProvider (constant-time AWS-LC, drops the pure-Rust `rsa` crate),
-# pending Windows-CI validation of the C-toolchain build — `rust_crypto` was
-# chosen originally for a Windows-clean pure-Rust build.
-ignore = ["RUSTSEC-2023-0071"]
+# The ignore list is EMPTY again. RUSTSEC-2023-0071 (rsa Marvin Attack) was
+# ELIMINATED AT THE SOURCE, not ignored: jsonwebtoken migrated `rust_crypto`
+# -> `aws_lc_rs` in wcore-channel-msteams + wcore-providers, dropping the
+# pure-Rust `rsa` crate from the tree (`cargo tree -i rsa` -> not found).
+# aws-lc-rs was already present via rustls, so this added no build surface.
+ignore = []

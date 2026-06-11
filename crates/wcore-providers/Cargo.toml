@@ -24,7 +24,12 @@ tracing.workspace      = true
 dirs.workspace         = true
 url.workspace          = true
 base64.workspace       = true
-jsonwebtoken.workspace = true
+# aws_lc_rs CryptoProvider (NOT rust_crypto) so this crate's RS256 Vertex
+# service-account JWT *signing* never links the `rsa` crate (RUSTSEC-2023-0071).
+# Must be declared explicitly: previously this rode on wcore-channel-msteams's
+# feature unification, which is fragile (isolated builds of this crate had no
+# crypto backend). See that crate's Cargo.toml note.
+jsonwebtoken = { workspace = true, features = ["aws_lc_rs"] }
 chrono.workspace       = true
 parking_lot.workspace  = true
 

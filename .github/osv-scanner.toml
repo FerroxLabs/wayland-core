@@ -84,23 +84,11 @@ id = "RUSTSEC-2024-0370"
 ignoreUntil = "2026-09-02T00:00:00Z"
 reason = "proc-macro-error: build-time proc-macro, no runtime surface; transitive via utoipa-gen <- utoipa <- wcore-acp. Already accepted by cargo-audit. Tracked; revisit on utoipa 5.x."
 
-# ── rsa 0.9.x (VULNERABILITY — Marvin Attack timing sidechannel) ──────────
-# The only vulnerability-class (not warning-class) entry in this file, so it
-# is dispositioned with care. Parent trace: rsa 0.9.10 <- jsonwebtoken 10.3.0,
-# TWO consumers: wcore-channel-msteams (RS256 JWT *verify* with Microsoft
-# PUBLIC keys — vulnerable private-key path unreachable) and wcore-providers
-# (Vertex AI *signs* a service-account JWT with the operator's RSA private key
-# — the advisory's target surface). The signing path's practical exploitability
-# is low: infrequent (~hourly token refresh), local, not remotely
-# attacker-triggerable at Marvin timing precision, and no timing oracle is
-# exposed to a remote party. No fixed `rsa` release exists. Permanent fix
-# (tracked): migrate jsonwebtoken to the aws_lc_rs CryptoProvider (constant-time
-# AWS-LC, drops rsa), pending Windows-CI validation of its C-toolchain build.
-# Aligned with the cargo-audit ignore set (.cargo/audit.toml).
-[[IgnoredVulns]]
-id = "RUSTSEC-2023-0071"
-ignoreUntil = "2026-09-02T00:00:00Z"
-reason = "rsa Marvin Attack: jsonwebtoken <- {msteams JWT verify (public key, unreachable) + Vertex JWT sign (local, infrequent, no remote timing oracle)}. No upstream fix. Tracked: migrate to aws_lc_rs provider. Aligned with cargo-audit ignore."
+# NOTE: RUSTSEC-2023-0071 (rsa 0.9.x, Marvin Attack) was ELIMINATED AT THE
+# SOURCE, not ignored: jsonwebtoken migrated rust_crypto -> aws_lc_rs in
+# wcore-channel-msteams + wcore-providers, dropping the pure-Rust `rsa` crate
+# (`cargo tree -i rsa` -> not found). aws-lc-rs was already in the tree via
+# rustls, so no new build surface.
 
 # NOTE: RUSTSEC-2026-0002 (lru 0.12.5, unsound) was ELIMINATED AT THE SOURCE,
 # not ignored — ratatui upgraded 0.29 -> 0.30, which moved lru to 0.16.x. The
