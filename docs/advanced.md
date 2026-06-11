@@ -362,6 +362,41 @@ In `--json-stream` mode, the compaction level can be changed at runtime via `set
 {"type": "set_config", "compaction": "full"}
 ```
 
+### Native Bash Output Compaction
+
+On top of the generic levels above, the engine compacts verbose **Bash** tool
+output per-command before it enters the model's transcript. It parses the
+output grammar of common dev commands and reconstructs a compact,
+signal-preserving form:
+
+| Command | What is kept |
+|---------|--------------|
+| `cargo build/check/clippy/test/nextest` | each `error[E…]`/`warning` **with its full code-frame block** (`-->` location, code frame, `= help`), the `could not compile` verdict, and `test result:` + `FAILED` names + panic blocks. Drops `Compiling …` spam and passing `... ok` lines. |
+| `git status` / `diff` / `log` | status grouped by change-type with counts + capped path lists; diff structure (`@@` hunks, `+/-`); log collapsed to one line per commit (drops `Author:`/`Date:`). |
+| `pytest` / `jest` / `vitest` / `go test` | the pass/fail summary, failing test names, and each failure's full traceback/assertion block. Drops passing lines. |
+| `grep` / `rg` / `find` | total match count + unique-file count + the first paths. |
+| anything else (fallback) | a generic shape classifier keeps error/warn/fail lines, else a head+tail with an omission marker. |
+
+Properties:
+
+- **Default on.** Resolved from `ProviderCompat::compact_bash()`.
+- **Fail-open.** A parser that can't confidently parse falls through to the
+  classifier, then to the raw output — the error signal is never dropped, and
+  a non-trivial compaction always appends the last raw lines as a guaranteed
+  tail. Output below ~40 lines / 8 KB is passed through verbatim.
+- **Human sees full output.** Only the model's transcript copy is compacted;
+  the host/terminal still receives the complete result via the live stream.
+- **Telemetry.** Per-call `(raw_bytes, compacted_bytes)` is recorded on the
+  tool-call trace (`compaction_bytes`) and a `wcore_agent::compaction` debug
+  line is emitted, feeding a savings ("gain") report.
+
+Disable it per provider/profile in `ProviderCompat`:
+
+```toml
+[providers.<name>.compat]
+compact_bash = false   # default: true
+```
+
 ## Skills lifecycle (W9)
 
 When `observability.skills_lifecycle = true` in `wcore.toml`, three subsystems become available to the engine:

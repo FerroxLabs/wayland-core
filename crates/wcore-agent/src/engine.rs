@@ -529,6 +529,11 @@ pub struct AgentEngine {
     cache_detector: CacheBreakDetector,
     compaction_level: wcore_compact::CompactionLevel,
     toon_enabled: bool,
+    /// Token-opt: native Bash output compaction gate (cargo/git/test/grep).
+    /// Resolved from `ProviderCompat::compact_bash()` at construction. When
+    /// on, verbose Bash tool output is compacted into the model's transcript
+    /// copy (the human still sees full output) before read-once dedup.
+    compact_bash: bool,
     /// W4 (Task 8): engine-advertised capability flags. Mirrored to
     /// `Capabilities.*` when emitting Ready/ConfigChanged.
     advertised_capabilities: wcore_config::tools::AdvertisedCapabilitiesConfig,
@@ -994,6 +999,7 @@ impl AgentEngine {
             cache_detector: CacheBreakDetector::new(),
             compaction_level: config.compact.compaction,
             toon_enabled: config.compact.toon,
+            compact_bash: config.compat.compact_bash(),
             advertised_capabilities: config.advertised_capabilities.clone(),
             per_turn_costs: Vec::new(),
             mcp_curation: config.mcp.curation.clone(),
@@ -1153,6 +1159,7 @@ impl AgentEngine {
             cache_detector: CacheBreakDetector::new(),
             compaction_level: config.compact.compaction,
             toon_enabled: config.compact.toon,
+            compact_bash: config.compat.compact_bash(),
             advertised_capabilities: config.advertised_capabilities.clone(),
             per_turn_costs: Vec::new(),
             mcp_curation: config.mcp.curation.clone(),
@@ -3866,6 +3873,12 @@ impl AgentEngine {
             // concurrent borrow conflict.
             let tool_call_batch_size = tool_call_traces.len().max(1) as u128;
 
+            // Token-opt: native Bash output compactions collected during the
+            // display loop (where the per-call traces are still live), keyed
+            // by tool_use_id, then applied to the model's transcript copy
+            // below — before read-once dedup.
+            let mut bash_compactions: std::collections::HashMap<String, String> =
+                std::collections::HashMap::new();
             // Display tool results AND populate the matching ToolCallTrace.
             for result in &outcome.results {
                 if let ContentBlock::ToolResult {
@@ -3910,6 +3923,46 @@ impl AgentEngine {
                         // env gate now governs (previously the gated builder
                         // method had zero callers).
                         *trace = trace.clone().with_result_snippet(content);
+
+                        // Token-opt: native Bash output compaction. The human
+                        // already saw full output via `emit_tool_result`
+                        // above; compact only the model's copy (applied below,
+                        // before read-once dedup) and record the savings here
+                        // while the trace is live. Fail-open inside
+                        // `compact_bash` — never drops the error signal.
+                        if self.compact_bash && tool_name == "Bash" {
+                            let command = tool_calls
+                                .iter()
+                                .find_map(|c| match c {
+                                    ContentBlock::ToolUse { id, input, .. }
+                                        if id == tool_use_id =>
+                                    {
+                                        input.get("command").and_then(|v| v.as_str())
+                                    }
+                                    _ => None,
+                                })
+                                .unwrap_or("");
+                            let c = wcore_tools::bash_compact::compact_bash(
+                                command,
+                                content,
+                                parse_bash_exit_code(content),
+                            );
+                            if c.compacted_bytes < c.raw_bytes {
+                                trace.record_compaction(
+                                    c.raw_bytes as u64,
+                                    c.compacted_bytes as u64,
+                                );
+                                tracing::debug!(
+                                    target: "wcore_agent::compaction",
+                                    command = %command,
+                                    raw_bytes = c.raw_bytes,
+                                    compacted_bytes = c.compacted_bytes,
+                                    saved_bytes = c.raw_bytes - c.compacted_bytes,
+                                    "bash output compacted"
+                                );
+                                bash_compactions.insert(tool_use_id.clone(), c.content);
+                            }
+                        }
                     }
                 }
             }
@@ -3971,6 +4024,23 @@ impl AgentEngine {
             // turn with zero external edits keeps `tool_results_content`
             // = `outcome.results` verbatim.
             let mut tool_results_content = outcome.results;
+            // Token-opt: swap the compacted Bash output into the model's copy
+            // (the host/human already received the full result via
+            // `emit_tool_result`). Done before dedup so identical compacted
+            // outputs collapse to a backref.
+            if !bash_compactions.is_empty() {
+                for block in &mut tool_results_content {
+                    if let ContentBlock::ToolResult {
+                        tool_use_id,
+                        content,
+                        ..
+                    } = block
+                        && let Some(compacted) = bash_compactions.remove(tool_use_id)
+                    {
+                        *content = compacted;
+                    }
+                }
+            }
             // Token-opt (read-once): rewrite repeated Grep/Glob/Bash outputs to a
             // backref before they enter the transcript. The user already saw the
             // full output via `emit_tool_result` above; only the model's copy is
@@ -5665,6 +5735,18 @@ pub(crate) fn is_hook_lifecycle_line(line: &str) -> bool {
         || line.starts_with("on_session_end fired")
 }
 
+/// Parse the leading `Exit code: N` line of a Bash tool result, defaulting to
+/// 0 when absent or unparseable. Lets the compactor bias toward preserving the
+/// failure reason on a non-zero exit.
+fn parse_bash_exit_code(content: &str) -> i32 {
+    content
+        .lines()
+        .next()
+        .and_then(|l| l.strip_prefix("Exit code:"))
+        .and_then(|n| n.trim().parse().ok())
+        .unwrap_or(0)
+}
+
 fn truncate_for_trace(s: &str, max: usize) -> String {
     if s.len() <= max {
         return s.to_string();
@@ -5766,6 +5848,7 @@ mod set_config_tests {
             cache_detector: super::CacheBreakDetector::new(),
             compaction_level: wcore_compact::CompactionLevel::default(),
             toon_enabled: false,
+            compact_bash: false,
             advertised_capabilities: wcore_config::tools::AdvertisedCapabilitiesConfig::default(),
             per_turn_costs: Vec::new(),
             mcp_curation: wcore_config::config::McpCurationPolicy::default(),
@@ -6486,6 +6569,7 @@ mod phase6_tests {
             cache_detector: super::CacheBreakDetector::new(),
             compaction_level: wcore_compact::CompactionLevel::default(),
             toon_enabled: false,
+            compact_bash: false,
             advertised_capabilities: wcore_config::tools::AdvertisedCapabilitiesConfig::default(),
             per_turn_costs: Vec::new(),
             mcp_curation: wcore_config::config::McpCurationPolicy::default(),
@@ -6766,6 +6850,7 @@ mod compact_tests {
             cache_detector: super::CacheBreakDetector::new(),
             compaction_level: wcore_compact::CompactionLevel::default(),
             toon_enabled: false,
+            compact_bash: false,
             advertised_capabilities: wcore_config::tools::AdvertisedCapabilitiesConfig::default(),
             per_turn_costs: Vec::new(),
             mcp_curation: wcore_config::config::McpCurationPolicy::default(),
@@ -7730,6 +7815,7 @@ mod plan_mode_tests {
             cache_detector: super::CacheBreakDetector::new(),
             compaction_level: wcore_compact::CompactionLevel::default(),
             toon_enabled: false,
+            compact_bash: false,
             advertised_capabilities: wcore_config::tools::AdvertisedCapabilitiesConfig::default(),
             per_turn_costs: Vec::new(),
             mcp_curation: wcore_config::config::McpCurationPolicy::default(),
@@ -8143,6 +8229,7 @@ mod hook_integration_tests {
             cache_detector: super::CacheBreakDetector::new(),
             compaction_level: wcore_compact::CompactionLevel::default(),
             toon_enabled: false,
+            compact_bash: false,
             advertised_capabilities: wcore_config::tools::AdvertisedCapabilitiesConfig::default(),
             per_turn_costs: Vec::new(),
             mcp_curation: wcore_config::config::McpCurationPolicy::default(),
@@ -8805,6 +8892,7 @@ mod approval_bridge_engine_tests {
             cache_detector: super::CacheBreakDetector::new(),
             compaction_level: wcore_compact::CompactionLevel::default(),
             toon_enabled: false,
+            compact_bash: false,
             advertised_capabilities: wcore_config::tools::AdvertisedCapabilitiesConfig::default(),
             per_turn_costs: Vec::new(),
             mcp_curation: wcore_config::config::McpCurationPolicy::default(),
@@ -9030,6 +9118,7 @@ mod user_model_writeback_tests {
             cache_detector: super::CacheBreakDetector::new(),
             compaction_level: wcore_compact::CompactionLevel::default(),
             toon_enabled: false,
+            compact_bash: false,
             advertised_capabilities: wcore_config::tools::AdvertisedCapabilitiesConfig::default(),
             per_turn_costs: Vec::new(),
             mcp_curation: wcore_config::config::McpCurationPolicy::default(),

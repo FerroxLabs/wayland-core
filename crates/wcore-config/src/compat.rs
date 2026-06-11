@@ -108,6 +108,12 @@ pub struct ProviderCompat {
     /// or arbitrage logic lives here.
     pub input_optimization: Option<String>,
 
+    /// Token-opt: when `true` (the default), the engine compacts verbose Bash
+    /// output (cargo/git/test/grep) before it enters the model's transcript.
+    /// `None` ⇒ use the resolver default (ON). See `compact_bash()`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compact_bash: Option<bool>,
+
     /// Force the OpenAI chat-vs-responses API surface for this provider,
     /// overriding the per-model family default
     /// (`openai_compat::model_uses_responses_api`).
@@ -482,6 +488,7 @@ impl ProviderCompat {
                 .cost_per_cache_write_token
                 .or(defaults.cost_per_cache_write_token),
             input_optimization: user.input_optimization.or(defaults.input_optimization),
+            compact_bash: user.compact_bash.or(defaults.compact_bash),
             uses_responses_api: user.uses_responses_api.or(defaults.uses_responses_api),
         }
     }
@@ -549,6 +556,13 @@ impl ProviderCompat {
     /// (the default when unset) means the client must optimize itself.
     pub fn input_optimization(&self) -> &str {
         self.input_optimization.as_deref().unwrap_or("client")
+    }
+
+    /// Resolved gate for native Bash output compaction. Defaults ON: verbose
+    /// cargo/git/test/grep output is compacted before reaching the model's
+    /// transcript unless a provider/profile sets `compact_bash = false`.
+    pub fn compact_bash(&self) -> bool {
+        self.compact_bash.unwrap_or(true)
     }
 
     /// Optional override for the OpenAI chat-vs-responses API surface.
@@ -1150,6 +1164,16 @@ mod d2_tier2_provider_cost_tests {
 #[cfg(test)]
 mod input_optimization_tests {
     use super::*;
+
+    /// Native Bash compaction defaults ON (unset ⇒ true) and honours an
+    /// explicit `false` override.
+    #[test]
+    fn compact_bash_defaults_on_and_honors_override() {
+        let mut c = ProviderCompat::default();
+        assert!(c.compact_bash(), "default must be ON");
+        c.compact_bash = Some(false);
+        assert!(!c.compact_bash());
+    }
 
     /// Flux Router is a server-side routing layer → "router".
     #[test]

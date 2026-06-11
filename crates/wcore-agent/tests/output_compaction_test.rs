@@ -493,3 +493,102 @@ fn case_8_toon_system_prompt_injection() {
 
     eprintln!("[compaction:B] ✓ TOON system prompt injection verified");
 }
+
+// ---------------------------------------------------------------------------
+// B Layer: Case 9 — native Bash output compaction reaches the LLM
+// ---------------------------------------------------------------------------
+
+/// End-to-end proof that engine-level Bash output compaction shrinks the
+/// model's transcript copy of a verbose `cargo` run. Drives a real
+/// `AgentEngine` turn with a `Bash` tool returning 300 lines of compile spam
+/// and asserts the tool-result content captured in the follow-up LLM request
+/// is compacted (shorter, mid-run spam dropped). The generic content
+/// compaction is turned OFF so the only shrinkage is the Bash compactor.
+#[tokio::test]
+async fn case_9_bash_output_compaction_reaches_llm() {
+    let body: String = (0..300)
+        .map(|i| format!("   Compiling crate{i} v0.1.0"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let raw = format!("Exit code: 0\nSTDOUT:\n{body}\nSTDERR:\n");
+
+    let captured: Arc<Mutex<Vec<LlmRequest>>> = Arc::new(Mutex::new(Vec::new()));
+    let provider = CapturingProvider {
+        inner: MockLlmProvider::with_turns(vec![
+            vec![
+                LlmEvent::ToolUse {
+                    id: "b1".to_string(),
+                    name: "Bash".to_string(),
+                    input: json!({ "command": "cargo build" }),
+                    extra: None,
+                },
+                LlmEvent::Done {
+                    stop_reason: StopReason::ToolUse,
+                    finish_reason: wcore_types::message::FinishReason::from_stop_reason(
+                        StopReason::ToolUse,
+                    ),
+                    usage: TokenUsage::default(),
+                },
+            ],
+            vec![
+                LlmEvent::TextDelta("done".to_string()),
+                LlmEvent::Done {
+                    stop_reason: StopReason::EndTurn,
+                    finish_reason: wcore_types::message::FinishReason::from_stop_reason(
+                        StopReason::EndTurn,
+                    ),
+                    usage: TokenUsage::default(),
+                },
+            ],
+        ]),
+        captured: captured.clone(),
+    };
+
+    // Isolate Bash compaction from the generic content compaction.
+    let mut config = test_config();
+    config.compact.compaction = CompactionLevel::Off;
+    config.compact.toon = false;
+
+    let mut registry = ToolRegistry::new();
+    registry.register(Box::new(MockTool::new("Bash", &raw, false)));
+
+    let output: Arc<dyn OutputSink> = Arc::new(NullSink);
+    let mut engine = AgentEngine::new_with_provider(Arc::new(provider), config, registry, output);
+
+    engine
+        .run("run cargo build", "")
+        .await
+        .expect("engine.run should succeed");
+
+    let requests = captured.lock().unwrap();
+    assert!(
+        requests.len() >= 2,
+        "expected an initial request plus a follow-up after the tool call"
+    );
+    let second = &requests[1];
+    let mut found = false;
+    for msg in &second.messages {
+        for block in &msg.content {
+            if let ContentBlock::ToolResult { content, .. } = block {
+                found = true;
+                eprintln!(
+                    "[compaction:B] Case 9: LLM saw {} chars (raw {})",
+                    content.len(),
+                    raw.len()
+                );
+                assert!(
+                    content.len() < raw.len(),
+                    "LLM should see compacted Bash output ({} >= {} raw)",
+                    content.len(),
+                    raw.len()
+                );
+                assert!(
+                    !content.contains("Compiling crate150"),
+                    "mid-run compile spam should be dropped: {content}"
+                );
+            }
+        }
+    }
+    assert!(found, "follow-up request should carry the Bash ToolResult");
+    eprintln!("[compaction:B] ✓ LLM received compacted Bash output");
+}
