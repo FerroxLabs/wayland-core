@@ -200,12 +200,20 @@ jobs:
           REPOSITORY: ${{ github.repository }}
         run: |
           release_url="https://github.com/${REPOSITORY}/releases/tag/${RELEASE_TAG}"
+          # A semver pre-release (e.g. v0.11.0-rc.1) must NOT become the
+          # "Latest" release — that would mask the stable line. Detect the
+          # `-` in the version part and mark the GitHub release accordingly.
+          PRERELEASE_FLAG=""
+          case "${RELEASE_TAG#v}" in
+            *-*) PRERELEASE_FLAG="--prerelease" ;;
+          esac
           if gh release view "${RELEASE_TAG}" --repo "${REPOSITORY}" > /dev/null 2>&1; then
             gh release upload "${RELEASE_TAG}" artifacts/* --repo "${REPOSITORY}" --clobber
           else
             gh release create "${RELEASE_TAG}" artifacts/* \
               --repo "${REPOSITORY}" \
               --title "${RELEASE_TAG}" \
+              ${PRERELEASE_FLAG} \
               --generate-notes
           fi
           echo "Uploaded assets to ${release_url}"
@@ -477,11 +485,20 @@ jobs:
           VERSION: ${{ needs.prepare-release.outputs.version }}
         run: |
           set -euo pipefail
+          # A semver pre-release (e.g. 0.11.0-rc.1) must publish under the
+          # `next` dist-tag, NOT `latest` — otherwise a plain
+          # `npm install @ferroxlabs/wayland-core` would serve the RC over the
+          # stable line. Stable versions keep the default `latest`.
+          case "${VERSION}" in
+            *-*) NPM_DIST_TAG="next" ;;
+            *)   NPM_DIST_TAG="latest" ;;
+          esac
+          echo "Publishing @ferroxlabs/wayland-core@${VERSION} under dist-tag '${NPM_DIST_TAG}'"
           # Platform packages BEFORE the launcher so the launcher's
           # optionalDependencies are resolvable the instant it lands.
           # (Add `--provenance` here once the job has `permissions: id-token: write`.)
           for d in npm-dist/wayland-core-*; do
-            ( cd "$d" && npm publish --access public )
+            ( cd "$d" && npm publish --access public --tag "${NPM_DIST_TAG}" )
           done
-          ( cd npm-dist/wayland-core && npm publish --access public )
-          echo "Published @ferroxlabs/wayland-core@${VERSION} + platform packages"
+          ( cd npm-dist/wayland-core && npm publish --access public --tag "${NPM_DIST_TAG}" )
+          echo "Published @ferroxlabs/wayland-core@${VERSION} (dist-tag ${NPM_DIST_TAG}) + platform packages"
