@@ -10,6 +10,7 @@ use wcore_memory::embed::{Embedder, HashedEmbedder};
 use wcore_memory::gate::{AccessPolicy, MemoryAccessGate};
 use wcore_memory::partition::PartitionDispatcher;
 use wcore_memory::partition::working::WorkingEntry;
+use wcore_memory::v2_types::{EpisodeId, Tier};
 
 async fn fresh_dispatcher() -> PartitionDispatcher {
     let db = Arc::new(Db::open_memory().unwrap());
@@ -94,5 +95,94 @@ async fn compact_reduces_tokens_and_remains_recoverable() {
         .collect();
     for (m, c) in markers.iter().zip(&count_each) {
         assert!(*c >= 1, "marker '{m}' not recoverable via atomic_facts");
+    }
+}
+
+/// Rank 67 — pin the `String -> EpisodeId` round-trip that the
+/// "non-destructive" guarantee depends on. The bookmark that replaces the
+/// offloaded turns stores `ep_id.0.to_string()`; this test proves that
+/// string parses back into an `EpisodeId` and that `episodic.get()` returns
+/// the very episode whose `summary`/`atomic_facts` absorbed the compacted
+/// turns. If the stored format ever drifts away from what `get()` parses,
+/// recovery breaks silently — this test fails loudly instead.
+#[tokio::test]
+async fn bookmark_episode_id_round_trips_to_get_episode() {
+    let d = fresh_dispatcher().await;
+
+    // Seed enough turns that compaction must offload some of them.
+    let big_words: String = "lorem ipsum dolor sit amet ".repeat(40);
+    for i in 0..50 {
+        d.working
+            .push(WorkingEntry::Turn {
+                ts: i,
+                role: if i % 2 == 0 {
+                    "user".into()
+                } else {
+                    "assistant".into()
+                },
+                text: format!("turn {i}: {big_words}"),
+            })
+            .await
+            .unwrap();
+    }
+
+    let report = d.compact(5_000).await.unwrap();
+    assert!(
+        report.turns_offloaded > 0 && report.bookmarks_inserted == 1,
+        "expected a bookmark to be inserted: {report:?}"
+    );
+
+    // Extract the bookmark's stored episode_id String from live P1.
+    let snapshot = d.working.snapshot();
+    let episode_id_str = snapshot
+        .iter()
+        .find_map(|e| match e {
+            WorkingEntry::Bookmark { episode_id, .. } => Some(episode_id.clone()),
+            _ => None,
+        })
+        .expect("compaction must leave a Bookmark in working memory");
+
+    // The exact recovery path: parse the String back into an EpisodeId.
+    let parsed = uuid::Uuid::parse_str(&episode_id_str)
+        .map(EpisodeId)
+        .expect("bookmark episode_id must parse back into an EpisodeId");
+
+    // compact() persists the absorbing episode at Tier::Project.
+    let recovered = d
+        .episodic
+        .get(&parsed, Tier::Project)
+        .await
+        .expect("episode referenced by the bookmark must be recoverable");
+
+    // The recovered episode is the compaction episode, and its preview
+    // matches the bookmark's summary_preview (both derived from the same
+    // summary), proving the round-trip recovers the right episode.
+    assert_eq!(recovered.id, parsed, "get() returned a different episode");
+    assert_eq!(
+        recovered.source_product, "wcore-compact-internal",
+        "recovered episode is not the Letta compaction episode"
+    );
+    let preview: String = recovered.summary.chars().take(120).collect();
+    let bookmark_preview = snapshot
+        .iter()
+        .find_map(|e| match e {
+            WorkingEntry::Bookmark {
+                summary_preview, ..
+            } => Some(summary_preview.clone()),
+            _ => None,
+        })
+        .unwrap();
+    assert_eq!(
+        preview, bookmark_preview,
+        "recovered episode summary does not match the bookmark preview"
+    );
+
+    // Non-destructive guarantee: every offloaded turn is recoverable from
+    // the episode reached purely through the bookmark round-trip.
+    for marker in ["turn 3:", "turn 11:", "turn 22:"] {
+        assert!(
+            recovered.atomic_facts.iter().any(|f| f.contains(marker)),
+            "marker '{marker}' missing from the round-trip-recovered episode"
+        );
     }
 }
