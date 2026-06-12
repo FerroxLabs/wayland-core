@@ -194,6 +194,14 @@ impl WaylandIntrospectionBackend for LocalIntrospectionBackend {
                     "results": top,
                 });
                 if !matches!(by, TopNMetric::Calls) {
+                    // The results are call-count-sorted, not token/duration
+                    // sorted. Report the sort key honestly as `calls` so the
+                    // model does not read these as tokens/duration-ranked;
+                    // `degraded`/`degraded_reason` carry the requested metric.
+                    payload
+                        .as_object_mut()
+                        .expect("payload is an object")
+                        .insert("by".to_string(), Value::String("calls".to_string()));
                     payload
                         .as_object_mut()
                         .expect("payload is an object")
@@ -442,6 +450,15 @@ mod tests {
         };
         let v = ok_payload(run(backend.telemetry_query(&q)));
         assert_eq!(v["degraded"].as_bool(), Some(true));
+        // When degrading to call-count sorting, `by` must report `calls`
+        // honestly (not `tokens`) so the model does not misread the rank.
+        assert_eq!(v["by"].as_str(), Some("calls"));
+        assert!(
+            v["degraded_reason"]
+                .as_str()
+                .is_some_and(|s| s.contains("tokens")),
+            "the requested metric should still be recoverable from degraded_reason"
+        );
     }
 
     #[test]

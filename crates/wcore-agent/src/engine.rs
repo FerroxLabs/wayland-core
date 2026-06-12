@@ -156,7 +156,13 @@ fn is_http_4xx_error(reason: &str) -> bool {
             return false;
         }
         // Reject `4000…` style multi-digit ids.
-        !matches!(b.get(3), Some(c) if c.is_ascii_digit())
+        if matches!(b.get(3), Some(c) if c.is_ascii_digit()) {
+            return false;
+        }
+        // 429 (rate limit) is transient: the HTTP path retries it with backoff,
+        // so the prefixed shapes ("API error 429: …") must stay retryable too,
+        // matching the generic substring list below (which also omits 429).
+        &b[..3] != b"429"
     }
     // The exact "API error <code>: " prefix the provider chain emits.
     if let Some(rest) = reason.strip_prefix("API error ")
@@ -171,7 +177,11 @@ fn is_http_4xx_error(reason: &str) -> bool {
         return true;
     }
     // Generic substring matches — slower but catches misc shapes.
-    for code in ["400", "401", "403", "404", "409", "413", "422", "429"] {
+    // NOTE: 429 is deliberately absent. A rate-limit is transient: the
+    // HTTP path retries it with backoff, so the in-band SSE string path
+    // (HTTP 200 + an error body carrying "429") must agree and stay
+    // retryable rather than failing the turn immediately.
+    for code in ["400", "401", "403", "404", "409", "413", "422"] {
         // Require the code as a standalone token to avoid matching
         // "4000" or a trace id like "4000-abc". `code` is always 3
         // digits so a boundary check on each side suffices.
@@ -263,7 +273,16 @@ mod v0911_engine_recovery_tests {
             "API error 400: invalid_request_error tool_use ids…"
         ));
         assert!(is_http_4xx_error("API error 401: invalid x-api-key"));
-        assert!(is_http_4xx_error("API error 429: rate_limit_exceeded"));
+    }
+
+    #[test]
+    fn rate_limit_429_is_retryable_not_a_client_error() {
+        // A 429 is transient: the HTTP path backs off and retries it, so
+        // the in-band SSE string path (HTTP 200 + an error body carrying
+        // "429") must agree and NOT classify it as a non-retryable 4xx.
+        assert!(!is_http_4xx_error("API error 429: rate_limit_exceeded"));
+        assert!(!is_http_4xx_error("API 429: too many requests"));
+        assert!(!is_http_4xx_error("provider returned status 429"));
     }
 
     #[test]
