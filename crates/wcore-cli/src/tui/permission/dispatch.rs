@@ -136,4 +136,37 @@ mod tests {
     fn review_artifact_tool_routes_to_bespoke_when_feature_on() {
         assert_ne!(permission_component_for("ReviewArtifact").icon(), "⊘");
     }
+
+    // Rank-90 fix: `monitor` and `review_artifact` are now in the crate's
+    // DEFAULT feature set (see Cargo.toml), so a normal build must route the
+    // `Monitor` / `ReviewArtifact` tools to their tool-specific component
+    // rather than degrading to the generic FallbackComponent. These tests
+    // are NOT feature-gated — they would fail to compile (and so flag the
+    // regression) if the features were dropped from `default`. The assertion
+    // pins the exact bespoke icon (`◉` / `▤`), which is strictly stronger
+    // than "not the `⊘` fallback glyph": the MonitorComponent's filled circle
+    // and ReviewArtifactComponent's document glyph are unique to those
+    // components, so matching them proves the request reached the correct
+    // tool-specific component, not merely some non-fallback one.
+    #[test]
+    fn monitor_routes_to_its_component_with_default_features() {
+        let c = permission_component_for("Monitor");
+        assert_ne!(c.icon(), "⊘", "Monitor must not degrade to Fallback");
+        assert_eq!(
+            c.icon(),
+            "◉",
+            "Monitor must route to MonitorComponent (filled-circle icon)"
+        );
+    }
+
+    #[test]
+    fn review_artifact_routes_to_its_component_with_default_features() {
+        let c = permission_component_for("ReviewArtifact");
+        assert_ne!(c.icon(), "⊘", "ReviewArtifact must not degrade to Fallback");
+        assert_eq!(
+            c.icon(),
+            "▤",
+            "ReviewArtifact must route to ReviewArtifactComponent (document icon)"
+        );
+    }
 }

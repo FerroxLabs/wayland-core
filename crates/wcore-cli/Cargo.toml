@@ -28,7 +28,7 @@ harness = false
 # M5.4: remote-registry gates the network-backed `GitHubReleasesResolver`
 # behind a feature flag (default ON for v0.6) so unit tests stay offline
 # and a stripped build can disable the reqwest dep entirely.
-default = ["remote-registry", "workflow"]
+default = ["remote-registry", "workflow", "monitor", "review_artifact"]
 remote-registry = ["dep:reqwest", "dep:wcore-egress"]
 # User-flow harness Layer 3: the `harness_failure_injection` integration
 # test reproduces the audit's hang-class bugs (wedged MCP server, Ctrl+C
@@ -45,8 +45,10 @@ harness-failure-injection = []
 # valid without an `unexpected_cfgs` clippy error. Empty arrays — they gate
 # code paths only, no dep pull-in.
 # v0.9.x B6 (live workflow confirm gate): `workflow` is now in `default` so
-# the proposal card compiles into the normal binary; `monitor` /
-# `review_artifact` remain default-off.
+# the proposal card compiles into the normal binary. `monitor` /
+# `review_artifact` are likewise in `default` (rank-90 fix) so the
+# Monitor / ReviewArtifact tools render their tool-specific approval cards
+# instead of degrading to the generic FallbackComponent in normal builds.
 workflow = []
 monitor = []
 review_artifact = []
