@@ -573,6 +573,10 @@ struct StreamState {
     tool_calls: Vec<ToolCallAccumulator>,
     input_tokens: u64,
     output_tokens: u64,
+    /// Cache-read (prompt cache hit) tokens reported by the chat path's usage
+    /// chunk. Informational only — `input_tokens` already includes these on the
+    /// OpenAI chat surface, so this is not added to/subtracted from input.
+    cache_read_tokens: u64,
     /// Deferred Done event: populated when finish_reason arrives, emitted on
     /// [DONE] so the final usage-only chunk has a chance to update token counts.
     pending_done: Option<LlmEvent>,
@@ -584,6 +588,7 @@ impl StreamState {
             tool_calls: Vec::new(),
             input_tokens: 0,
             output_tokens: 0,
+            cache_read_tokens: 0,
             pending_done: None,
         }
     }
@@ -607,7 +612,7 @@ impl StreamState {
                     input_tokens: self.input_tokens,
                     output_tokens: self.output_tokens,
                     cache_creation_tokens: 0,
-                    cache_read_tokens: 0,
+                    cache_read_tokens: self.cache_read_tokens,
                 },
             },
             other => other,
@@ -671,7 +676,10 @@ impl LlmProvider for OpenAIProvider {
             // E-H1 / L3: capture headers before `.text()` consumes the body
             // so a 429 can honour `Retry-After` (header, then nested body).
             let headers = response.headers().clone();
-            let body_text = response.text().await.unwrap_or_default();
+            let body_text = response
+                .text()
+                .await
+                .unwrap_or_else(|e| format!("<body read failed: {e}>"));
             if status.as_u16() == 429 {
                 return Err(ProviderError::RateLimited {
                     retry_after_ms: crate::retry::resolve_retry_after_ms(&headers, &body_text),
@@ -1025,6 +1033,21 @@ fn parse_sse_chunk(data: &str, state: &mut StreamState) -> Vec<LlmEvent> {
         state.output_tokens = usage["completion_tokens"]
             .as_u64()
             .unwrap_or(state.output_tokens);
+
+        // Cache-read accounting. DeepSeek reports the hit count in the separate
+        // `prompt_cache_hit_tokens` field (cache-miss-only prompt_tokens); the
+        // OpenAI-standard surface reports it under
+        // `prompt_tokens_details.cached_tokens` (prompt_tokens already total).
+        // Either way the cache-read count is informational and must be surfaced
+        // so chat-path sessions show cache savings, matching the Responses path.
+        let cached_details = usage
+            .get("prompt_tokens_details")
+            .and_then(|d| d.get("cached_tokens"))
+            .and_then(Value::as_u64)
+            .unwrap_or(0);
+        if cache_hit > 0 || cached_details > 0 {
+            state.cache_read_tokens = cache_hit.max(cached_details);
+        }
     }
 
     let Some(choice) = json["choices"].as_array().and_then(|c| c.first()) else {
@@ -1956,6 +1979,43 @@ mod tests {
         // prompt_tokens is already the full total for OpenAI
         assert_eq!(state.input_tokens, 1_000_000);
         assert_eq!(state.output_tokens, 100);
+    }
+
+    #[test]
+    fn chat_path_emits_cache_read_tokens_in_done() {
+        // Rank 39: the chat path must surface cache-read tokens in the Done
+        // event (like the Responses path), not hardcode 0. OpenAI-standard
+        // reports the hit count under prompt_tokens_details.cached_tokens while
+        // prompt_tokens stays the full total — so input_tokens is unchanged.
+        let mut state = StreamState::new();
+
+        let chunk = r#"{"choices":[{"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":1000,"completion_tokens":50,"prompt_tokens_details":{"cached_tokens":800}}}"#;
+        let _ = parse_sse_chunk(chunk, &mut state);
+
+        assert_eq!(state.input_tokens, 1000, "prompt_tokens stays the total");
+        assert_eq!(state.cache_read_tokens, 800);
+
+        let done = state.flush_done().expect("pending_done should be Some");
+        match done {
+            LlmEvent::Done { usage, .. } => {
+                assert_eq!(usage.cache_read_tokens, 800);
+                assert_eq!(usage.input_tokens, 1000);
+            }
+            other => panic!("expected Done, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn chat_path_cache_read_from_deepseek_hit_field() {
+        // DeepSeek reports the hit count separately and prompt_tokens carries
+        // only the cache-miss portion; cache_read_tokens must reflect the hit.
+        let mut state = StreamState::new();
+
+        let chunk = r#"{"choices":[{"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":200,"completion_tokens":10,"prompt_cache_hit_tokens":800}}"#;
+        let _ = parse_sse_chunk(chunk, &mut state);
+
+        assert_eq!(state.input_tokens, 1000, "miss + hit = total prompt");
+        assert_eq!(state.cache_read_tokens, 800);
     }
 
     #[test]

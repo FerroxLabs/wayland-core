@@ -380,7 +380,10 @@ impl BedrockProvider {
             // E-H1 / L3: capture headers before `.text()` consumes the body
             // so a 429 can honour `Retry-After` (header, then nested body).
             let headers = response.headers().clone();
-            let body_text = response.text().await.unwrap_or_default();
+            let body_text = response
+                .text()
+                .await
+                .unwrap_or_else(|e| format!("<body read failed: {e}>"));
             if status.as_u16() == 429 {
                 return Err(ProviderError::RateLimited {
                     retry_after_ms: crate::retry::resolve_retry_after_ms(&headers, &body_text),
@@ -554,7 +557,10 @@ impl LlmProvider for BedrockProvider {
             // E-H1 / L3: capture headers before `.text()` consumes the body
             // so a 429 can honour `Retry-After` (header, then nested body).
             let headers = response.headers().clone();
-            let body_text = response.text().await.unwrap_or_default();
+            let body_text = response
+                .text()
+                .await
+                .unwrap_or_else(|e| format!("<body read failed: {e}>"));
             if status.as_u16() == 429 {
                 return Err(ProviderError::RateLimited {
                     retry_after_ms: crate::retry::resolve_retry_after_ms(&headers, &body_text),
