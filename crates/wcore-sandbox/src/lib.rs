@@ -8,14 +8,13 @@
 //! a `ResourceLimitEnforcement` flag so they can warn the operator when
 //! limits are advisory rather than enforced.
 //!
-//! Wave A.0 (this commit) ships:
-//! - The trait, the manifest schema, and the registry dispatcher.
-//! - `NoSandboxBackend` — direct execution with a warn-once log; the
-//!   fallback when no real backend is available.
-//! - Docker backend migrated to the new trait.
-//!
-//! Wave A.1 backends (bwrap / sandbox-exec / AppContainer) plug into
-//! `default_for_platform` via `cfg` branches.
+//! `default_for_platform` selects the platform's real backend by `cfg`:
+//! bubblewrap on Linux, sandbox-exec on macOS, AppContainer on Windows
+//! (Docker is an opt-in via `WAYLAND_SANDBOX=docker`). There is no
+//! unsandboxed default — when no real backend is available the dispatcher
+//! fails closed via `FailClosedBackend` (refusing execution), and only
+//! falls back to `NoSandboxBackend` under the explicit
+//! `WAYLAND_ALLOW_NO_SANDBOX=1` opt-in.
 
 pub mod backends;
 pub mod error;
@@ -248,16 +247,16 @@ impl SandboxRegistry {
 
 /// Choose the default backend for the current platform.
 ///
-/// Wave A.1 backends register themselves via this dispatcher. For Wave A.0
-/// (this commit) every `cfg` branch returns `NoSandboxBackend` with a
-/// warn-once log so operators know they are running unsandboxed; downstream
-/// agents replace each branch with their concrete backend.
+/// Each platform's real backend is selected by a `cfg` branch below:
+/// bubblewrap (Linux), sandbox-exec (macOS), AppContainer (Windows), each
+/// used when its `is_available()` holds. There is no unsandboxed default —
+/// when no real backend is available the dispatcher fails closed (see below).
 ///
 /// `WAYLAND_SANDBOX=none` forces the no-op backend, but ONLY when the
 /// operator has also opted in via `WAYLAND_ALLOW_NO_SANDBOX=1`; otherwise it
 /// fails closed (audit M-2). `WAYLAND_SANDBOX=docker` opts in to the Docker
-/// backend (Wave A.1 S7); when Docker is unreachable it fails closed rather
-/// than silently substituting NoSandbox.
+/// backend; when Docker is unreachable it fails closed rather than silently
+/// substituting NoSandbox.
 ///
 /// Whenever no real sandbox backend is available, this routes through
 /// [`unsandboxed_fallback`]: it returns a [`FailClosedBackend`] (refuses

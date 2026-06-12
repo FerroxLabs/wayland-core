@@ -12,7 +12,7 @@
 //! - Reports `ResourceLimitEnforcement::Enforced` because `--memory` and
 //!   `--cpus` are enforced by the Docker daemon / kernel cgroups.
 //!
-//! S7 alignment (this commit):
+//! Lazy, cheap availability probing:
 //! - `new()` is sync and does NOT contact dockerd. The client is
 //!   constructed lazily on the first `execute()` call via `OnceCell`,
 //!   so `default_for_platform()` can poll `is_available()` cheaply.

@@ -164,9 +164,9 @@ impl SandboxExecBackend {
                 // No network rule = denied by deny-default.
             }
             NetworkPolicy::AllowHosts(_) => {
-                // SBPL has no DNS-name allowlist; only port + protocol filters.
-                // Wave A.1 returns PolicyNotSupported; v0.6.4 may add per-IP
-                // filter once we have a DNS-resolution shim.
+                // SBPL has no DNS-name allowlist; only port + protocol filters,
+                // so AllowHosts returns PolicyNotSupported (see execute()). A
+                // per-IP filter would need a DNS-resolution shim first.
             }
         }
         Ok(p)
