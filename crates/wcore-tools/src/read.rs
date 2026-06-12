@@ -341,9 +341,22 @@ impl Tool for ReadTool {
             current_gen = cache.compaction_generation();
             if let Some(cached) = cache.get(path) {
                 let matches_window = cached.offset == offset && cached.limit == limit;
+                // The stub tells the model "you already saw this content earlier";
+                // that claim is only sound when the earlier Read is STILL in this
+                // transcript. Gate it the same way as the diff path below:
+                //   * `single_agent` — the cache is process-wide, so a sibling's
+                //     read must not make the main agent claim it saw content its
+                //     own transcript never contained, and
+                //   * `gen_at_read == current_gen` — if compaction has advanced
+                //     since the cache entry was seeded, the referenced Read has
+                //     been collapsed/cleared, so the stub would point the model at
+                //     gone content (a hallucination seed). On a stale generation
+                //     fall through to a fresh full read.
                 if matches_window
                     && cached.mtime_ms == current_mtime
                     && cached.provenance == Provenance::ReadResult
+                    && single_agent
+                    && cached.gen_at_read == current_gen
                 {
                     return ToolResult {
                         content: FILE_UNCHANGED_STUB.to_string(),
@@ -948,6 +961,50 @@ mod tests {
         // No change at all: the stub still fires (mtime + ReadResult match).
         let r2 = tool.execute_with_ctx(input, &ctx).await;
         assert_eq!(r2.content, FILE_UNCHANGED_STUB);
+    }
+
+    #[tokio::test]
+    async fn compaction_generation_bump_invalidates_stub() {
+        let dir = tempdir().unwrap();
+        let file = write_lines(dir.path(), "big.txt", 20, "X");
+
+        let cache = opt_cache();
+        let tool = ReadTool::new(Some(cache.clone()));
+        let ctx = ctx_main();
+        let input = json!({ "file_path": file.to_str().unwrap() });
+
+        tool.execute_with_ctx(input.clone(), &ctx).await;
+        // Compaction collapses the earlier Read out of the transcript.
+        cache.write().unwrap().bump_compaction_generation();
+
+        // Even with the file unchanged, the stub must NOT fire: it would point
+        // the model at content that was just cleared (a hallucination seed).
+        // Full content is returned instead.
+        let r2 = tool.execute_with_ctx(input, &ctx).await;
+        assert_ne!(
+            r2.content, FILE_UNCHANGED_STUB,
+            "a stale compaction generation must not answer with the unchanged stub"
+        );
+        assert!(r2.content.contains('X'));
+    }
+
+    #[tokio::test]
+    async fn subagent_reread_never_stubs() {
+        let dir = tempdir().unwrap();
+        let file = write_lines(dir.path(), "big.txt", 20, "X");
+
+        let cache = opt_cache();
+        let tool = ReadTool::new(Some(cache));
+        let input = json!({ "file_path": file.to_str().unwrap() });
+
+        // A sub-agent seeds the cache, then re-reads. The stub must not fire:
+        // the process-wide cache must not make a sibling claim it saw content
+        // that was never in its own transcript.
+        let sub = ctx_sub();
+        tool.execute_with_ctx(input.clone(), &sub).await;
+        let r2 = tool.execute_with_ctx(input, &sub).await;
+        assert_ne!(r2.content, FILE_UNCHANGED_STUB);
+        assert!(r2.content.contains('X'));
     }
 
     // -- semantic slicing (symbol=) tests --
