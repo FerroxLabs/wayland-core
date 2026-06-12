@@ -1392,19 +1392,21 @@ impl TuiEngine {
 
     /// Force a context compaction now (the `/compact` command). Runs in a
     /// spawned task (the engine is behind an async mutex) and emits a single
-    /// `Info` event with the before→after message count so the user gets real
+    /// `Info` event with the freed-tokens summary so the user gets real
     /// feedback instead of a silent no-op.
     pub fn compact(&self) {
         let engine = self.engine.clone();
         let tx = self.tx.clone();
         tokio::spawn(async move {
-            // Keep the first message + the last 8 turns; fold the middle.
-            let (before, after) = engine.lock().await.compact_now(8);
-            let message = if before == after {
-                "Nothing to compact yet — the conversation is still short.".to_string()
+            // Deterministic micro-compaction: clear old tool-result bodies in
+            // place. Preserves the conversation; no canned-summary truncation.
+            let result = engine.lock().await.compact_now();
+            let message = if result.cleared_count == 0 {
+                "Nothing to compact yet — no old tool results to clear.".to_string()
             } else {
                 format!(
-                    "Context compacted: {before} → {after} messages (older turns folded into a summary)."
+                    "Context compacted: cleared {} old tool result(s) (~{} tokens freed).",
+                    result.cleared_count, result.estimated_tokens_freed
                 )
             };
             let _ = tx.send(ProtocolEvent::Info {

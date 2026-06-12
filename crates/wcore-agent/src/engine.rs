@@ -1862,14 +1862,28 @@ impl AgentEngine {
         }
     }
 
-    /// Force a context compaction now (the TUI `/compact` command): fold the
-    /// middle of the conversation into a one-line summary, keeping the first
-    /// message and the last `keep_tail`. Returns `(before, after)` message
-    /// counts; a no-op (equal counts) when there is too little to fold.
-    pub fn compact_now(&mut self, keep_tail: usize) -> (usize, usize) {
-        let before = self.messages.len();
-        crate::context::compact_messages(&mut self.messages, keep_tail);
-        (before, self.messages.len())
+    /// Force a context compaction now (the TUI `/compact` command).
+    ///
+    /// Runs the same deterministic micro-compaction stage the automatic
+    /// [`run_compaction`](Self::run_compaction) path uses: old tool-result
+    /// bodies are cleared in place (and superseded reads pruned), which frees
+    /// the bulk of the context tokens without discarding any conversational
+    /// text. The earlier fixed-string fold replaced the whole middle of the
+    /// transcript with a canned `[Previous conversation summary: …]` placeholder
+    /// — that threw away real context and is no longer used here.
+    ///
+    /// Returns the [`MicrocompactResult`]; `cleared_count == 0` means there was
+    /// nothing eligible to compact yet.
+    pub fn compact_now(&mut self) -> micro::MicrocompactResult {
+        let result = micro::microcompact(&mut self.messages, &self.compact_config);
+        if result.cleared_count > 0 {
+            // Token-opt (diff-resend): clearing a tool-result body can remove
+            // the read content a cached diff base references. Bump the file
+            // cache's compaction generation so those bases stop qualifying —
+            // mirrors `run_compaction`'s microcompact branch.
+            self.bump_file_cache_generation();
+        }
+        result
     }
 
     /// M3.2 — number of background decay-scheduler tasks owned by the
@@ -7397,6 +7411,61 @@ mod compact_tests {
             .count();
 
         assert_eq!(cleared_count, 9);
+    }
+
+    // -- Manual /compact runs deterministic micro-compaction, not the
+    //    old fixed-string truncation --
+
+    #[tokio::test]
+    async fn compact_now_microcompacts_without_canned_summary() {
+        // A real conversational message plus enough tool results to trip the
+        // count trigger (keep_recent=3 → threshold 6).
+        let mut messages = vec![Message::new(
+            Role::User,
+            vec![ContentBlock::Text {
+                text: "PRESERVE_THIS_USER_TURN".to_string(),
+            }],
+        )];
+        for i in 0..12 {
+            let id = format!("t{i}");
+            messages.push(tool_use_msg(&id, "Read"));
+            messages.push(tool_result_msg(&id, &format!("data-{i}")));
+        }
+
+        let config = CompactConfig {
+            micro_keep_recent: 3,
+            ..Default::default()
+        };
+        let mut engine = make_compact_engine(config, CompactState::new(), messages);
+
+        let result = engine.compact_now();
+
+        // Micro-compaction ran: old tool-result bodies were cleared.
+        assert_eq!(
+            result.cleared_count, 9,
+            "manual /compact should clear old tool results via micro-compaction"
+        );
+
+        // The original real content must still be present — manual /compact no
+        // longer discards the middle of the transcript.
+        let has_user_turn =
+            engine.messages.iter().flat_map(|m| &m.content).any(
+                |b| matches!(b, ContentBlock::Text { text } if text == "PRESERVE_THIS_USER_TURN"),
+            );
+        assert!(
+            has_user_turn,
+            "the user's real text turn must survive manual compaction"
+        );
+
+        // The old canned fixed-string summary must NEVER appear.
+        let has_canned_summary = engine.messages.iter().flat_map(|m| &m.content).any(|b| {
+            matches!(b, ContentBlock::Text { text }
+                    if text.contains("[Previous conversation summary"))
+        });
+        assert!(
+            !has_canned_summary,
+            "manual /compact must not emit the old canned truncation summary"
+        );
     }
 
     // -- Disabled config skips micro and auto but not emergency --
