@@ -11,7 +11,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use lettre::message::header::{HeaderName, HeaderValue};
-use lettre::message::{Message, header::ContentType};
+use lettre::message::{Attachment, Message, MultiPart, SinglePart, header::ContentType};
 use lettre::transport::smtp::AsyncSmtpTransport;
 use lettre::transport::smtp::authentication::Credentials;
 use lettre::transport::smtp::response::Response;
@@ -203,6 +203,7 @@ pub(crate) fn build_message(
     text: &str,
     reply: Option<&ReplyContext>,
     subject_override: Option<&str>,
+    attachments: &[OutboundAttachment],
 ) -> Result<Message, EmailError> {
     let from_addr = from
         .parse()
@@ -234,10 +235,134 @@ pub(crate) fn build_message(
         }
     }
 
+    // Text-only: a single text/plain body (the prior behavior). With
+    // attachments: a multipart/mixed body — the text part first, then one
+    // octet-typed part per attachment with Content-Disposition: attachment so
+    // a file/image reply isn't silently dropped.
+    if attachments.is_empty() {
+        return builder
+            .header(ContentType::TEXT_PLAIN)
+            .body(text.to_string())
+            .map_err(|e| EmailError::Envelope(format!("body: {e}")));
+    }
+
+    let mut multipart = MultiPart::mixed().singlepart(SinglePart::plain(text.to_string()));
+    for att in attachments {
+        let ct = ContentType::parse(&att.content_type)
+            .unwrap_or(ContentType::parse("application/octet-stream").expect("static mime"));
+        multipart =
+            multipart.singlepart(Attachment::new(att.filename.clone()).body(att.bytes.clone(), ct));
+    }
     builder
-        .header(ContentType::TEXT_PLAIN)
-        .body(text.to_string())
-        .map_err(|e| EmailError::Envelope(format!("body: {e}")))
+        .multipart(multipart)
+        .map_err(|e| EmailError::Envelope(format!("multipart body: {e}")))
+}
+
+/// A resolved outbound attachment, ready to embed as a MIME part.
+#[derive(Debug)]
+pub(crate) struct OutboundAttachment {
+    pub(crate) filename: String,
+    pub(crate) content_type: String,
+    pub(crate) bytes: Vec<u8>,
+}
+
+/// Resolve an [`OutgoingMessage`] attachment reference to embeddable bytes.
+///
+/// Supported forms:
+/// - `data:<mime>;base64,<payload>` — inline bytes (no I/O, no network).
+/// - a local filesystem path — read from disk; filename from the basename and
+///   content-type inferred from the extension.
+///
+/// Remote `http(s)://` URLs are rejected with an explicit error. Email has no
+/// platform media-host allowlist, so fetching an arbitrary URL server-side
+/// would be an SSRF surface; rejecting keeps the drop loud (the whole point of
+/// this fix) rather than silently fetching or silently discarding.
+///
+/// [`OutgoingMessage`]: wcore_channels::outgoing::OutgoingMessage
+pub(crate) fn resolve_attachment(reference: &str) -> Result<OutboundAttachment, EmailError> {
+    let trimmed = reference.trim();
+
+    if let Some(rest) = trimmed.strip_prefix("data:") {
+        let (meta, b64) = rest.split_once(";base64,").ok_or_else(|| {
+            EmailError::Envelope(format!("unsupported data URL attachment: {reference}"))
+        })?;
+        let mime = if meta.is_empty() {
+            "application/octet-stream"
+        } else {
+            meta
+        };
+        return Ok(OutboundAttachment {
+            filename: format!("attachment{}", ext_for_mime(mime)),
+            content_type: mime.to_string(),
+            bytes: crate::imap::decode_base64_bytes(b64),
+        });
+    }
+
+    let lower = trimmed.to_ascii_lowercase();
+    if lower.starts_with("http://") || lower.starts_with("https://") {
+        return Err(EmailError::Envelope(format!(
+            "remote attachment URLs are not supported for email \
+             (no media-host allowlist — fetching would be an SSRF surface): {reference}"
+        )));
+    }
+
+    let path = std::path::Path::new(trimmed);
+    let bytes = std::fs::read(path)
+        .map_err(|e| EmailError::Envelope(format!("read attachment {reference}: {e}")))?;
+    let filename = path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .filter(|s| !s.is_empty())
+        .unwrap_or("attachment")
+        .to_string();
+    Ok(OutboundAttachment {
+        content_type: content_type_for_path(trimmed).to_string(),
+        filename,
+        bytes,
+    })
+}
+
+/// Best-effort content-type from a path extension; falls back to
+/// `application/octet-stream`.
+fn content_type_for_path(path: &str) -> &'static str {
+    let ext = std::path::Path::new(path)
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    match ext.as_str() {
+        "png" => "image/png",
+        "jpg" | "jpeg" => "image/jpeg",
+        "gif" => "image/gif",
+        "webp" => "image/webp",
+        "pdf" => "application/pdf",
+        "txt" | "log" => "text/plain",
+        "csv" => "text/csv",
+        "json" => "application/json",
+        "zip" => "application/zip",
+        "mp3" => "audio/mpeg",
+        "mp4" => "video/mp4",
+        _ => "application/octet-stream",
+    }
+}
+
+/// A filename extension (including the dot) for a data-URL mime, so inline
+/// attachments land with a sensible name. Empty when unknown.
+fn ext_for_mime(mime: &str) -> &'static str {
+    match mime {
+        "image/png" => ".png",
+        "image/jpeg" => ".jpg",
+        "image/gif" => ".gif",
+        "image/webp" => ".webp",
+        "application/pdf" => ".pdf",
+        "text/plain" => ".txt",
+        "text/csv" => ".csv",
+        "application/json" => ".json",
+        "application/zip" => ".zip",
+        "audio/mpeg" => ".mp3",
+        "video/mp4" => ".mp4",
+        _ => "",
+    }
 }
 
 /// Send one message with retry. `Arc<dyn MailSender>` so the same
@@ -360,7 +485,15 @@ mod tests {
     #[tokio::test]
     async fn send_records_envelope_from_to_body() {
         let sender = RecordingSender::new(vec![RecordingSender::ok_with_queue_id("Q1")]);
-        let msg = build_message("bot@acme.com", "ops@acme.com", "hello body", None, None).unwrap();
+        let msg = build_message(
+            "bot@acme.com",
+            "ops@acme.com",
+            "hello body",
+            None,
+            None,
+            &[],
+        )
+        .unwrap();
         let resp = send_with_retry(sender.clone(), msg).await.unwrap();
         assert_eq!(response_message_id(&resp), "Q1");
         let sent = sender.sent.lock().unwrap();
@@ -378,7 +511,15 @@ mod tests {
             Err(SendError::Transient("conn reset".into())),
             RecordingSender::ok_with_queue_id("Q2"),
         ]);
-        let msg = build_message("bot@acme.com", "ops@acme.com", "after retry", None, None).unwrap();
+        let msg = build_message(
+            "bot@acme.com",
+            "ops@acme.com",
+            "after retry",
+            None,
+            None,
+            &[],
+        )
+        .unwrap();
         let resp = send_with_retry(sender.clone(), msg).await.unwrap();
         assert_eq!(response_message_id(&resp), "Q2");
         assert_eq!(sender.sent.lock().unwrap().len(), 3);
@@ -397,6 +538,7 @@ mod tests {
             "should not retry",
             None,
             None,
+            &[],
         )
         .unwrap();
         let err = send_with_retry(sender.clone(), msg)
@@ -416,7 +558,7 @@ mod tests {
             Err(SendError::Permanent("550 user unknown".into())),
             RecordingSender::ok_with_queue_id("nope"),
         ]);
-        let msg = build_message("bot@acme.com", "ops@acme.com", "nope", None, None).unwrap();
+        let msg = build_message("bot@acme.com", "ops@acme.com", "nope", None, None, &[]).unwrap();
         let err = send_with_retry(sender.clone(), msg)
             .await
             .expect_err("permanent");
@@ -429,12 +571,70 @@ mod tests {
 
     #[test]
     fn build_message_rejects_bad_from() {
-        let err = build_message("not-an-email", "ops@acme.com", "x", None, None)
+        let err = build_message("not-an-email", "ops@acme.com", "x", None, None, &[])
             .expect_err("expected envelope error");
         match err {
             EmailError::Envelope(_) => {}
             other => panic!("expected Envelope, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn build_message_with_attachments_is_multipart() {
+        let att = OutboundAttachment {
+            filename: "report.pdf".to_string(),
+            content_type: "application/pdf".to_string(),
+            bytes: b"%PDF-1.4 hello".to_vec(),
+        };
+        let msg = build_message(
+            "bot@acme.com",
+            "ops@acme.com",
+            "see attached",
+            None,
+            Some("Daily report"),
+            std::slice::from_ref(&att),
+        )
+        .expect("multipart build");
+        let raw = String::from_utf8_lossy(&msg.formatted()).to_string();
+        assert!(raw.contains("multipart/mixed"), "not multipart: {raw}");
+        assert!(
+            raw.contains("Content-Disposition: attachment"),
+            "no attachment disposition: {raw}"
+        );
+        assert!(raw.contains("report.pdf"), "filename missing: {raw}");
+        // Text part still present.
+        assert!(raw.contains("see attached"), "body text missing");
+    }
+
+    #[test]
+    fn resolve_attachment_decodes_data_url() {
+        // base64 of "hello" is aGVsbG8=
+        let a = resolve_attachment("data:image/png;base64,aGVsbG8=").expect("data url");
+        assert_eq!(a.bytes, b"hello");
+        assert_eq!(a.content_type, "image/png");
+        assert_eq!(a.filename, "attachment.png");
+    }
+
+    #[test]
+    fn resolve_attachment_rejects_remote_url() {
+        let err = resolve_attachment("https://evil.example/x.png").expect_err("remote rejected");
+        match err {
+            EmailError::Envelope(m) => assert!(m.contains("SSRF"), "msg: {m}"),
+            other => panic!("expected Envelope, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn resolve_attachment_reads_local_file() {
+        let dir = std::env::temp_dir().join(format!("wcore_email_att_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("notes.txt");
+        std::fs::write(&path, b"local bytes").unwrap();
+        let a = resolve_attachment(path.to_str().unwrap()).expect("local read");
+        assert_eq!(a.bytes, b"local bytes");
+        assert_eq!(a.filename, "notes.txt");
+        assert_eq!(a.content_type, "text/plain");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -503,6 +703,7 @@ mod tests {
             "thread reply body",
             Some(&reply),
             None,
+            &[],
         )
         .unwrap();
         let rfc = String::from_utf8_lossy(&msg.formatted()).to_string();
@@ -520,7 +721,7 @@ mod tests {
 
     #[test]
     fn non_reply_message_uses_default_subject_not_blank() {
-        let msg = build_message("bot@acme.com", "ops@acme.com", "fresh", None, None).unwrap();
+        let msg = build_message("bot@acme.com", "ops@acme.com", "fresh", None, None, &[]).unwrap();
         let rfc = String::from_utf8_lossy(&msg.formatted()).to_string();
         // A blank Subject reads as a malformed orphan; we emit a default.
         assert!(rfc.contains("Subject: (no subject)"), "rfc = {rfc}");
@@ -534,6 +735,7 @@ mod tests {
             "fresh",
             None,
             Some("Weekly report"),
+            &[],
         )
         .unwrap();
         let rfc = String::from_utf8_lossy(&msg.formatted()).to_string();

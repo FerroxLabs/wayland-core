@@ -278,12 +278,23 @@ impl Channel for EmailChannel {
                 })
         });
 
+        // Resolve any attachments to embeddable bytes (local path or data URL;
+        // remote URLs are rejected loudly — see resolve_attachment). A bad
+        // reference fails the send rather than silently dropping the file.
+        let resolved: Vec<crate::smtp::OutboundAttachment> = msg
+            .attachments
+            .iter()
+            .map(|a| crate::smtp::resolve_attachment(a))
+            .collect::<Result<_, _>>()
+            .map_err(ChannelError::from)?;
+
         let envelope = crate::smtp::build_message(
             &self.config.from_address,
             &msg.conversation_id,
             &msg.text,
             reply_ctx.as_ref(),
             None,
+            &resolved,
         )
         .map_err(ChannelError::from)?;
         let response = crate::smtp::send_with_retry(sender, envelope)
