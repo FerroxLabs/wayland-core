@@ -7,10 +7,11 @@ use std::time::Duration;
 
 use tokio::sync::{Mutex, watch};
 use wcore_channels::event::{
-    Attachment, ChannelEvent, ChatType, IncomingMessage, MediaKind, MentionKind,
+    Attachment, ChannelEvent, ChatType, ConnectionState, IncomingMessage, MediaKind, MentionKind,
 };
 
 use crate::api::{Update, get_updates};
+use crate::error::TelegramError;
 
 /// Constructor arguments — flatter than a struct, easier to spawn.
 pub(crate) struct LongPollArgs {
@@ -74,6 +75,27 @@ pub(crate) async fn longpoll_loop(args: LongPollArgs) {
                 if offset > before {
                     crate::offset_store::save(&channel_name, offset);
                 }
+            }
+            // A revoked/invalid bot token makes getUpdates return 401/403,
+            // which classifies as TelegramError::Auth. That is terminal — no
+            // amount of backoff recovers a dead token, and hammering 401s
+            // every few seconds risks Telegram deleting the bot. Surface the
+            // failure as an AuthError state-change (so the manager's
+            // supervision sees the channel is dead instead of Connected) and
+            // break the loop. Transient errors keep their existing backoff.
+            Err(TelegramError::Auth(desc)) => {
+                tracing::error!(
+                    target: "wcore_channel_telegram::longpoll",
+                    error = %desc,
+                    "getUpdates rejected the bot token (auth); stopping long-poll"
+                );
+                inbox
+                    .lock()
+                    .await
+                    .push_back(ChannelEvent::ConnectionStateChanged {
+                        state: ConnectionState::AuthError,
+                    });
+                break;
             }
             Err(e) => {
                 tracing::warn!(
@@ -494,6 +516,69 @@ mod tests {
             }
             other => panic!("unexpected event: {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn auth_failure_terminates_loop_and_surfaces_auth_error() {
+        // A revoked/invalid bot token makes getUpdates return 401, which the
+        // api layer classifies as TelegramError::Auth. The loop must treat
+        // this as terminal: stop retrying (so it can't hammer 401s forever and
+        // risk Telegram deleting the bot) and push an AuthError state-change so
+        // supervision sees the channel is dead rather than Connected.
+        let mut server = mockito::Server::new_async().await;
+        // Every getUpdates returns 401. expect_at_least(1) lets us assert the
+        // loop polled at least once; the breaker means it must NOT keep
+        // polling indefinitely — verified by the loop's JoinHandle completing.
+        let _m_401 = server
+            .mock("GET", "/bot111:TOKEN/getUpdates")
+            // getUpdates carries ?offset&timeout&allowed_updates; without an
+            // explicit query matcher mockito won't match the query-bearing
+            // request (it would 501 → transient → backoff → never hit the auth
+            // arm). Match any query so the 401 is what the loop actually sees.
+            .match_query(mockito::Matcher::Any)
+            .with_status(401)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"ok":false,"error_code":401,"description":"Unauthorized"}"#)
+            .expect_at_least(1)
+            .create_async()
+            .await;
+
+        let http = wcore_egress::EgressClient::new();
+        let inbox = Arc::new(Mutex::new(VecDeque::new()));
+        let (_tx, rx) = watch::channel(false);
+        let args = LongPollArgs {
+            http,
+            api_base: server.url(),
+            bot_token: "111:TOKEN".to_string(),
+            channel_name: "auth-test".to_string(),
+            timeout_secs: 0,
+            allowed_chat_ids: HashSet::new(),
+            inbox: Arc::clone(&inbox),
+            shutdown: rx,
+        };
+
+        // The loop must return on its own (no shutdown signal sent). If the
+        // breaker were missing it would back off and retry forever, so the
+        // timeout would fire and the test would fail.
+        let handle = tokio::spawn(longpoll_loop(args));
+        tokio::time::timeout(Duration::from_secs(5), handle)
+            .await
+            .expect("loop must terminate on auth failure, not retry forever")
+            .expect("loop task should not panic");
+
+        let guard = inbox.lock().await;
+        let saw_auth_error = guard.iter().any(|e| {
+            matches!(
+                e,
+                ChannelEvent::ConnectionStateChanged {
+                    state: ConnectionState::AuthError
+                }
+            )
+        });
+        assert!(
+            saw_auth_error,
+            "loop must surface an AuthError state-change so supervision sees the dead channel"
+        );
     }
 
     #[tokio::test]
