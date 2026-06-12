@@ -54,6 +54,11 @@ pub enum OllamaError {
     Status { status: u16, body: String },
     #[error("ollama response missing `message.content`: {0}")]
     ShapeError(Value),
+    #[error(
+        "ollama provider does not support tool-calling: a {0} content block was \
+         encountered but Ollama's /api/chat tools API is not implemented yet"
+    )]
+    ToolUseUnsupported(&'static str),
 }
 
 impl From<OllamaError> for ProviderError {
@@ -66,6 +71,7 @@ impl From<OllamaError> for ProviderError {
                 message: body,
             },
             OllamaError::ShapeError(v) => ProviderError::Parse(v.to_string()),
+            e @ OllamaError::ToolUseUnsupported(_) => ProviderError::Parse(e.to_string()),
         }
     }
 }
@@ -113,11 +119,13 @@ impl OllamaProvider {
     pub async fn send_chat_blocking(&self, messages: &[Message]) -> Result<String, OllamaError> {
         let mapped: Vec<OllamaChatMessage> = messages
             .iter()
-            .map(|m| OllamaChatMessage {
-                role: ollama_role(&m.role),
-                content: extract_text(m),
+            .map(|m| {
+                Ok(OllamaChatMessage {
+                    role: ollama_role(&m.role),
+                    content: extract_text(m)?,
+                })
             })
-            .collect();
+            .collect::<Result<_, OllamaError>>()?;
         let body = json!({
             "model": self.model,
             "messages": mapped,
@@ -177,7 +185,9 @@ impl LlmProvider for OllamaProvider {
         for m in &request.messages {
             mapped.push(OllamaChatMessage {
                 role: ollama_role(&m.role),
-                content: extract_text(m),
+                // Fail loudly on tool blocks rather than silently dropping
+                // them and letting the model loop with no error.
+                content: extract_text(m).map_err(ProviderError::from)?,
             });
         }
 
@@ -334,20 +344,31 @@ fn ollama_role(role: &Role) -> &'static str {
     }
 }
 
-fn extract_text(m: &Message) -> String {
-    // Concatenate all text-shaped ContentBlocks. Tool calls/results are
-    // out of scope for v0.2.x Ollama support — Ollama's tool-use API is
-    // model-specific and lands in a later wave once we pick a baseline.
+fn extract_text(m: &Message) -> Result<String, OllamaError> {
+    // Concatenate all text-shaped ContentBlocks. Ollama's tool-use API is
+    // model-specific and not implemented yet, so a ToolUse/ToolResult block
+    // cannot be represented on the wire. Silently dropping it makes tool
+    // output invisible to the model, which then loops with no error — so we
+    // fail LOUDLY instead. `Thinking` blocks are non-load-bearing and skipped.
     let mut out = String::new();
     for block in &m.content {
-        if let ContentBlock::Text { text } = block {
-            if !out.is_empty() {
-                out.push('\n');
+        match block {
+            ContentBlock::Text { text } => {
+                if !out.is_empty() {
+                    out.push('\n');
+                }
+                out.push_str(text);
             }
-            out.push_str(text);
+            ContentBlock::ToolUse { .. } => {
+                return Err(OllamaError::ToolUseUnsupported("tool_use"));
+            }
+            ContentBlock::ToolResult { .. } => {
+                return Err(OllamaError::ToolUseUnsupported("tool_result"));
+            }
+            ContentBlock::Thinking { .. } => {}
         }
     }
-    out
+    Ok(out)
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -374,5 +395,62 @@ mod prefix_tests {
         assert_eq!(strip_ollama_prefix("ollama:llama3"), Some("llama3"));
         assert_eq!(strip_ollama_prefix("ollama:llama3:8b"), Some("llama3:8b"));
         assert_eq!(strip_ollama_prefix("llama3"), None);
+    }
+}
+
+#[cfg(test)]
+mod extract_text_tests {
+    use super::{OllamaError, extract_text};
+    use wcore_types::message::{ContentBlock, Message, Role};
+
+    #[test]
+    fn concatenates_text_blocks() {
+        let m = Message::new(
+            Role::User,
+            vec![
+                ContentBlock::Text {
+                    text: "hello".into(),
+                },
+                ContentBlock::Text {
+                    text: "world".into(),
+                },
+            ],
+        );
+        assert_eq!(extract_text(&m).unwrap(), "hello\nworld");
+    }
+
+    #[test]
+    fn tool_use_block_fails_loudly() {
+        // Regression: a ToolUse block was silently dropped, leaving the model
+        // looping with no error. It must now surface a visible failure.
+        let m = Message::new(
+            Role::Assistant,
+            vec![ContentBlock::ToolUse {
+                id: "call_1".into(),
+                name: "Bash".into(),
+                input: serde_json::json!({"cmd": "ls"}),
+                extra: None,
+            }],
+        );
+        match extract_text(&m) {
+            Err(OllamaError::ToolUseUnsupported("tool_use")) => {}
+            other => panic!("expected ToolUseUnsupported(tool_use), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn tool_result_block_fails_loudly() {
+        let m = Message::new(
+            Role::Tool,
+            vec![ContentBlock::ToolResult {
+                tool_use_id: "call_1".into(),
+                content: "output".into(),
+                is_error: false,
+            }],
+        );
+        match extract_text(&m) {
+            Err(OllamaError::ToolUseUnsupported("tool_result")) => {}
+            other => panic!("expected ToolUseUnsupported(tool_result), got {other:?}"),
+        }
     }
 }
