@@ -299,6 +299,23 @@ impl Channel for EmailChannel {
     fn config_schema(&self) -> &str {
         include_str!("schemas/email.json")
     }
+
+    /// Return the bytes of an inbound email attachment. The IMAP parser already
+    /// decoded each attachment part and inlined it as a `data:<mime>;base64,…`
+    /// URL (bounded — oversize parts stay metadata-only), so there is no network
+    /// fetch and no SSRF surface; this just decodes the inline payload.
+    async fn fetch_media(
+        &self,
+        attachment: &wcore_channels::event::Attachment,
+    ) -> Result<Vec<u8>, ChannelError> {
+        let rest = attachment.url.strip_prefix("data:").ok_or_else(|| {
+            ChannelError::Rejected("email attachment has no inline data".to_string())
+        })?;
+        let b64 = rest.split_once(";base64,").map(|(_, b)| b).ok_or_else(|| {
+            ChannelError::Rejected("unsupported email attachment data URL".to_string())
+        })?;
+        Ok(crate::imap::decode_base64_bytes(b64))
+    }
 }
 
 // ===========================================================================
@@ -403,6 +420,36 @@ mod tests {
             ("email.test.smtp_user", "user"),
             ("email.test.smtp_pass", "pass"),
         ])
+    }
+
+    #[tokio::test]
+    async fn fetch_media_decodes_inline_data_url() {
+        let ch = EmailChannel::with_sender(
+            "test",
+            cfg_outbound_only(),
+            creds_for_outbound(),
+            RecordingSender::new(vec![]),
+        );
+        let att = wcore_channels::event::Attachment {
+            url: "data:image/png;base64,aGVsbG8=".to_string(),
+            ..Default::default()
+        };
+        assert_eq!(ch.fetch_media(&att).await.unwrap(), b"hello");
+    }
+
+    #[tokio::test]
+    async fn fetch_media_rejects_attachment_without_inline_data() {
+        let ch = EmailChannel::with_sender(
+            "test",
+            cfg_outbound_only(),
+            creds_for_outbound(),
+            RecordingSender::new(vec![]),
+        );
+        let att = wcore_channels::event::Attachment::default(); // empty url
+        assert!(matches!(
+            ch.fetch_media(&att).await.unwrap_err(),
+            ChannelError::Rejected(_)
+        ));
     }
 
     // -----------------------------------------------------------------

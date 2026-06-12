@@ -517,6 +517,12 @@ struct ContentType {
 /// depth a part is surfaced as raw text rather than recursed into.
 const MAX_MIME_DEPTH: usize = 20;
 
+/// Upper bound on an attachment we inline (as a `data:` URL) for later fetch.
+/// Email images/audio are typically well under this; larger parts stay
+/// metadata-only (fetch_media returns Rejected and the enricher falls back to
+/// the bare summary), keeping the inbound event bounded with no temp files.
+const MAX_INLINE_ATTACHMENT_BYTES: usize = 2 * 1024 * 1024;
+
 fn walk_mime(headers: &[String], body: &str, depth: usize) -> MimeResult {
     let ct = parse_content_type(headers);
     let disposition = headers
@@ -554,7 +560,7 @@ fn walk_mime(headers: &[String], body: &str, depth: usize) -> MimeResult {
         let name = filename.unwrap_or_else(|| "attachment".to_string());
         return MimeResult {
             text: String::new(),
-            attachments: vec![attachment_from(&ct.mime, &name)],
+            attachments: vec![attachment_from(&ct.mime, &name, body, cte.as_deref())],
         };
     }
 
@@ -724,12 +730,14 @@ fn parse_filename(disposition: &str) -> Option<String> {
     ct_param_in(disposition, "filename")
 }
 
-/// Map a leaf part to a typed `Attachment`. For email there is no fetch
-/// URL, so `url` stays empty and the filename is surfaced via `path` so
-/// downstream consumers have a human-facing name. The raw bytes are not
-/// inlined (v1 surfaces metadata only); `content_type` + `kind` let a
-/// consumer decide whether to fetch later.
-fn attachment_from(mime: &str, filename: &str) -> Attachment {
+/// Map a leaf part to a typed `Attachment`, decoding and inlining its bytes.
+///
+/// The decoded payload is carried as a `data:<mime>;base64,…` URL when it fits
+/// under [`MAX_INLINE_ATTACHMENT_BYTES`], so [`EmailChannel::fetch_media`] can
+/// hand the bytes to the inbound-media enricher without a network round-trip or
+/// any temp-file lifecycle. Oversize parts stay metadata-only (empty `url`).
+/// `path` keeps the human-facing filename; `content_type` + `kind` route it.
+fn attachment_from(mime: &str, filename: &str, body: &str, cte: Option<&str>) -> Attachment {
     let kind = if mime.starts_with("image/") {
         MediaKind::Image
     } else if mime.starts_with("audio/") {
@@ -739,8 +747,21 @@ fn attachment_from(mime: &str, filename: &str) -> Attachment {
     } else {
         MediaKind::Document
     };
+
+    let bytes = decode_transfer_bytes(body, cte);
+    let url = if !bytes.is_empty() && bytes.len() <= MAX_INLINE_ATTACHMENT_BYTES {
+        let ct = if mime.is_empty() {
+            "application/octet-stream"
+        } else {
+            mime
+        };
+        format!("data:{ct};base64,{}", encode_base64(&bytes))
+    } else {
+        String::new()
+    };
+
     Attachment {
-        url: String::new(),
+        url,
         path: Some(filename.to_string()),
         content_type: if mime.is_empty() {
             None
@@ -815,6 +836,13 @@ fn decode_quoted_printable(input: &str) -> String {
 /// Minimal base64 decoder for text parts. Ignores whitespace/newlines and
 /// stops at padding. Returns a lossy-UTF-8 rendering of the decoded bytes.
 fn decode_base64_text(input: &str) -> String {
+    String::from_utf8_lossy(&decode_base64_bytes(input)).into_owned()
+}
+
+/// Decode standard base64 to raw bytes, skipping whitespace/newlines and
+/// stopping at the first `=` pad. Used for both text bodies and binary
+/// attachment payloads (and to read back inline `data:` attachment URLs).
+pub(crate) fn decode_base64_bytes(input: &str) -> Vec<u8> {
     fn val(c: u8) -> Option<u8> {
         match c {
             b'A'..=b'Z' => Some(c - b'A'),
@@ -840,7 +868,45 @@ fn decode_base64_text(input: &str) -> String {
             out.push((acc >> bits) as u8);
         }
     }
-    String::from_utf8_lossy(&out).into_owned()
+    out
+}
+
+/// Encode raw bytes as standard (padded) base64 — the inverse of
+/// [`decode_base64_bytes`], used to inline small attachments as `data:` URLs.
+fn encode_base64(bytes: &[u8]) -> String {
+    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
+    for chunk in bytes.chunks(3) {
+        let b0 = chunk[0] as u32;
+        let b1 = *chunk.get(1).unwrap_or(&0) as u32;
+        let b2 = *chunk.get(2).unwrap_or(&0) as u32;
+        let n = (b0 << 16) | (b1 << 8) | b2;
+        out.push(ALPHABET[((n >> 18) & 63) as usize] as char);
+        out.push(ALPHABET[((n >> 12) & 63) as usize] as char);
+        out.push(if chunk.len() > 1 {
+            ALPHABET[((n >> 6) & 63) as usize] as char
+        } else {
+            '='
+        });
+        out.push(if chunk.len() > 2 {
+            ALPHABET[(n & 63) as usize] as char
+        } else {
+            '='
+        });
+    }
+    out
+}
+
+/// Decode a leaf part body to raw bytes according to its
+/// `Content-Transfer-Encoding`. The bytes-returning sibling of
+/// [`decode_transfer`], used for binary attachment payloads.
+pub(crate) fn decode_transfer_bytes(body: &str, cte: Option<&str>) -> Vec<u8> {
+    match cte {
+        Some("base64") => decode_base64_bytes(body),
+        Some("quoted-printable") => decode_quoted_printable(body).into_bytes(),
+        // 7bit / 8bit / binary / none: the body bytes are the payload as-is.
+        _ => body.as_bytes().to_vec(),
+    }
 }
 
 /// Heuristic: does this body look like HTML even without a Content-Type?
@@ -1157,24 +1223,58 @@ aGVsbG8=\r\n\
         assert_eq!(att.kind, MediaKind::Image);
         assert_eq!(att.content_type.as_deref(), Some("image/png"));
         assert_eq!(att.path.as_deref(), Some("chart.png"));
-        assert!(att.url.is_empty(), "email attachments have no fetch url");
+        // The decoded payload (`aGVsbG8=` → "hello") is inlined as a data URL
+        // so fetch_media can serve the bytes without a network round-trip.
+        assert_eq!(att.url, "data:image/png;base64,aGVsbG8=");
+        assert_eq!(decode_base64_bytes("aGVsbG8="), b"hello");
     }
 
     #[test]
     fn attachment_kind_maps_from_content_type() {
+        let empty: Option<&str> = None;
         assert_eq!(
-            attachment_from("image/jpeg", "a.jpg").kind,
+            attachment_from("image/jpeg", "a.jpg", "", empty).kind,
             MediaKind::Image
         );
         assert_eq!(
-            attachment_from("audio/mpeg", "a.mp3").kind,
+            attachment_from("audio/mpeg", "a.mp3", "", empty).kind,
             MediaKind::Audio
         );
-        assert_eq!(attachment_from("video/mp4", "a.mp4").kind, MediaKind::Video);
         assert_eq!(
-            attachment_from("application/pdf", "a.pdf").kind,
+            attachment_from("video/mp4", "a.mp4", "", empty).kind,
+            MediaKind::Video
+        );
+        assert_eq!(
+            attachment_from("application/pdf", "a.pdf", "", empty).kind,
             MediaKind::Document
         );
+    }
+
+    #[test]
+    fn base64_roundtrips_through_encode_decode() {
+        let data = b"\x00\x01\x02\xff binary \xfe payload";
+        assert_eq!(decode_base64_bytes(&encode_base64(data)), data);
+    }
+
+    #[test]
+    fn decode_transfer_bytes_handles_base64_and_plain() {
+        assert_eq!(decode_transfer_bytes("aGVsbG8=", Some("base64")), b"hello");
+        assert_eq!(decode_transfer_bytes("hi", None), b"hi");
+    }
+
+    #[test]
+    fn oversize_attachment_is_metadata_only() {
+        // A part above the inline cap surfaces metadata but no fetch url.
+        let big = "A".repeat(MAX_INLINE_ATTACHMENT_BYTES + 4); // 7bit, 1 byte/char
+        let att = attachment_from("application/zip", "big.zip", &big, None);
+        assert!(att.url.is_empty(), "oversize attachment must not inline");
+        assert_eq!(att.path.as_deref(), Some("big.zip"));
+    }
+
+    #[test]
+    fn small_attachment_inlines_as_data_url() {
+        let att = attachment_from("image/png", "x.png", "aGVsbG8=", Some("base64"));
+        assert_eq!(att.url, "data:image/png;base64,aGVsbG8=");
     }
 
     #[test]
