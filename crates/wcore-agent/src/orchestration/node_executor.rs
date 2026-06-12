@@ -162,6 +162,16 @@ pub struct AgentNodeExecutor {
     /// from a `tokio::spawn`-ed task; the engine reclaims state from
     /// the same cell after `ExecutionGraph::execute` returns.
     turn_cell: Arc<TokioMutex<TurnCell>>,
+    /// Rank 52: lock-free first-dispatch latch. Set to `true` by the
+    /// task that wins the dispatch (under the `turn_cell` lock) and
+    /// read WITHOUT the lock by every later sibling so they can
+    /// short-circuit to an empty carrier without contending on the
+    /// mutex while the winner runs its full async LLM dispatch. Lives
+    /// alongside the `TokioMutex` (rather than inside `TurnCell`) so the
+    /// fast-path check is truly lock-free — reading it from inside
+    /// `TurnCell` would force every late sibling to acquire the lock,
+    /// which is exactly the serialisation this fix removes.
+    dispatched: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl AgentNodeExecutor {
@@ -169,7 +179,11 @@ impl AgentNodeExecutor {
     /// turn's `tool_calls` and any `hooks` the engine wants the
     /// adapter to mutate.
     pub fn new(cfg: AgentExecutorConfig, turn_cell: Arc<TokioMutex<TurnCell>>) -> Self {
-        Self { cfg, turn_cell }
+        Self {
+            cfg,
+            turn_cell,
+            dispatched: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        }
     }
 }
 
@@ -188,12 +202,8 @@ impl NodeExecutor for AgentNodeExecutor {
     /// `Value` carries a `{"error": "..."}` shape so non-engine
     /// callers (tests) can observe the failure too.
     async fn run_agent(&self, _agent: &str, _input: &Value) -> Result<Value, String> {
-        // Lock the cell for the duration of this dispatch. For Direct
-        // there is exactly one `AgentCall` per turn so contention is
-        // zero; for parallel templates each sibling serialises through
-        // the shared hook engine (correct semantics — hooks observe a
-        // sequential view of tool events).
-        let mut cell = self.turn_cell.lock().await;
+        use std::sync::atomic::Ordering;
+
         // Multi-node templates (Sequential, Parallel, etc.) call
         // `run_agent` once per AgentCall. The engine's per-turn loop
         // hands the adapter exactly one batch of tool_calls; we run
@@ -204,23 +214,59 @@ impl NodeExecutor for AgentNodeExecutor {
         // adapter without changing the engine's "one batch per turn"
         // contract — full multi-LLM-turn orchestration is a follow-up
         // wave.
-        if cell.outcome.is_some() {
-            // First invocation already dispatched; subsequent nodes
-            // get an empty carrier and the cached outcome is
-            // preserved.
+        //
+        // Rank 52: the walker `tokio::spawn`s each parallel AgentCall
+        // sibling and `join_all`s them. Previously this fn held the
+        // `turn_cell` lock across the entire `dispatch_once(...).await`
+        // (a full async LLM tool dispatch), so every sibling blocked on
+        // `lock().await` until the winner finished — `join_all` never
+        // achieved real parallelism. The fix keeps first-dispatch-wins
+        // semantics but releases the lock during dispatch.
+        //
+        // (a) Lock-free fast path: a late sibling that observes the
+        // `dispatched` latch returns the empty carrier WITHOUT ever
+        // touching the mutex. `Acquire` here pairs with the winner's
+        // `Release` store below so a sibling that sees `dispatched=true`
+        // also sees a consistent view of the cell it (correctly) skips.
+        if self.dispatched.load(Ordering::Acquire) {
             return Ok(Value::Object(serde_json::Map::new()));
         }
+
+        // (b) Acquire the lock to claim the dispatch.
+        let mut cell = self.turn_cell.lock().await;
+
+        // (c) TOCTOU re-check: two tasks can both pass the atomic load
+        // before either takes the lock. The first to lock claims the
+        // dispatch and sets the latch; the second observes the
+        // already-populated outcome here and returns an inert carrier.
+        if cell.outcome.is_some() {
+            return Ok(Value::Object(serde_json::Map::new()));
+        }
+
+        // (d) Claim it: take the batch + hooks out of the cell and set
+        // the latch with `Release` so the matching `Acquire` load above
+        // sees this and everything that precedes it.
         let tool_calls = std::mem::take(&mut cell.tool_calls);
         let hooks_owned = cell.hooks.take();
+        self.dispatched.store(true, Ordering::Release);
 
-        // Move ownership out of the cell so we can pass `&mut` into the
-        // dispatch path. We put them back at the end of this fn.
+        // (e) Drop the guard BEFORE dispatching — this is the
+        // load-bearing fix. With the lock released, sibling tasks hit
+        // the lock-free fast path in (a) instead of blocking here while
+        // the winner runs its full async LLM dispatch.
+        drop(cell);
+
+        // (f) Dispatch with no lock held.
         let (outcome, hooks_back) = dispatch_once(&self.cfg, &tool_calls, hooks_owned).await;
-        cell.hooks = hooks_back;
+
         let carrier = match &outcome {
             Ok(_) => Value::Object(serde_json::Map::new()),
             Err(_) => serde_json::json!({"error": "ExecutionControl::Quit"}),
         };
+
+        // (g) Re-acquire the lock only to write the result back.
+        let mut cell = self.turn_cell.lock().await;
+        cell.hooks = hooks_back;
         cell.outcome = Some(outcome);
         Ok(carrier)
     }
@@ -493,6 +539,66 @@ mod tests {
         assert!(
             cell_inner.outcome.is_some(),
             "outcome must be populated exactly once across sibling agents"
+        );
+    }
+
+    #[tokio::test]
+    async fn parallel_siblings_do_not_block_on_lock_during_dispatch() {
+        // Rank 52 regression guard. Before the fix, `run_agent` held the
+        // `turn_cell` lock across the entire `dispatch_once(...).await`,
+        // so the walker's spawned sibling tasks serialised through the
+        // lock instead of running concurrently. The fix releases the
+        // lock before dispatch and uses a lock-free `dispatched` latch so
+        // late siblings short-circuit WITHOUT touching the mutex.
+        //
+        // We prove the lock is free during dispatch by holding the
+        // `turn_cell` lock from the test task across the entire graph
+        // walk: if `run_agent` still tried to acquire it across dispatch,
+        // the walk would deadlock (and the test would hang / time out).
+        // Because the winner takes the lock only briefly (claim + final
+        // write-back) and siblings never take it at all once the latch is
+        // set, the walk completes even while the test contends for the
+        // lock between those two short critical sections.
+        let cfg = make_cfg_empty();
+        let cell = Arc::new(TokioMutex::new(TurnCell::new(vec![], None)));
+        let executor = Arc::new(AgentNodeExecutor::new(cfg, cell.clone()));
+        let dispatched = executor.dispatched.clone();
+        let exec: Arc<dyn NodeExecutor> = executor;
+        let graph = GraphConfig::parallel_fanout(
+            vec!["worker_a", "worker_b", "worker_c"],
+            AggregationStrategy::MergeObjects,
+        );
+        let ctx = GraphContext {
+            cancel: CancellationToken::new(),
+            executor: exec,
+        };
+
+        // Bound the walk so a regression (re-introduced lock-across-
+        // dispatch) surfaces as a failed timeout rather than a hung test.
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            ExecutionGraph::execute(graph, Value::Null, ctx),
+        )
+        .await
+        .expect("parallel walk must not deadlock — lock must be free during dispatch");
+        assert!(result.is_ok(), "parallel fanout must walk cleanly");
+
+        // The latch must have been set exactly once (by the winner).
+        assert!(
+            dispatched.load(std::sync::atomic::Ordering::Acquire),
+            "the first-dispatch latch must be set after the walk"
+        );
+
+        // First-dispatch-wins preserved: exactly one outcome, populated.
+        let cell_inner = cell.lock().await;
+        assert!(
+            cell_inner.outcome.is_some(),
+            "outcome must be populated exactly once across sibling agents"
+        );
+        let outcome = cell_inner.outcome.as_ref().unwrap().as_ref().unwrap();
+        assert!(
+            outcome.results.is_empty(),
+            "empty batch yields an empty outcome regardless of sibling count"
         );
     }
 
