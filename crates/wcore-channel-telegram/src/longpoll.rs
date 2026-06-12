@@ -245,7 +245,10 @@ async fn ingest_updates(
             .map(|r| r.message_id.to_string());
         let reply_to_text = msg.reply_to_message.as_deref().and_then(|r| r.text.clone());
 
-        let text = msg.text.unwrap_or_default();
+        // Media messages carry their words in `caption`, not `text`, so fall
+        // back to the caption when `text` is absent — otherwise a captioned
+        // photo would reach the engine with an empty body.
+        let text = msg.text.or(msg.caption).unwrap_or_default();
 
         events.push(ChannelEvent::MessageReceived {
             msg: IncomingMessage {
@@ -362,5 +365,28 @@ mod tests {
     fn pending_media_empty_for_text_only_message() {
         let msg = message_from_json(r#"{"message_id":1,"chat":{"id":1},"text":"hello"}"#);
         assert!(pending_media(&msg).is_empty());
+    }
+
+    #[tokio::test]
+    async fn caption_only_media_message_yields_nonempty_text() {
+        // A captioned photo arrives with `text` absent and the words in
+        // `caption`. ingest_updates must surface the caption as the message
+        // body — otherwise the engine receives an empty turn.
+        let update: Update = serde_json::from_str(
+            r#"{"update_id":10,"message":{"message_id":1,"chat":{"id":1},"photo":[{"file_id":"f"}],"caption":"what is this?"}}"#,
+        )
+        .expect("valid Update JSON");
+        let inbox = Arc::new(Mutex::new(VecDeque::new()));
+        let mut offset = 0;
+        ingest_updates(vec![update], &HashSet::new(), &inbox, &mut offset).await;
+
+        let guard = inbox.lock().await;
+        let event = guard.front().expect("one event ingested");
+        match event {
+            ChannelEvent::MessageReceived { msg } => {
+                assert_eq!(msg.text, "what is this?");
+            }
+            other => panic!("unexpected event: {other:?}"),
+        }
     }
 }

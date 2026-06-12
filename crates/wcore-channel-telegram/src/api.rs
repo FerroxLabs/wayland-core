@@ -49,6 +49,11 @@ pub struct Message {
     pub from: Option<User>,
     #[serde(default)]
     pub text: Option<String>,
+    /// Caption — Telegram puts the message text in `caption` (not `text`)
+    /// when the message carries media (photo / document / video / …), so a
+    /// "photo + what is this?" arrives with `text` empty and the words here.
+    #[serde(default)]
+    pub caption: Option<String>,
     /// Forum topic / thread id (supergroups with topics enabled).
     #[serde(default)]
     pub message_thread_id: Option<i64>,
