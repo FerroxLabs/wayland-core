@@ -12,11 +12,13 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use serde_json::Value;
 
+use wcore_config::config::{EmbedderBackend, EmbedderConfig};
+
 use crate::api::MemoryApi;
 use crate::audit::AuditLog;
 use crate::cdc::CdcWriter;
 use crate::db::Db;
-use crate::embed::{Embedder, HashedEmbedder};
+use crate::embed::{Embedder, HashedEmbedder, OpenAiEmbedder, VoyageEmbedder};
 use crate::error::{MemoryError, Result};
 use crate::gate::{AccessPolicy, MemoryAccessGate};
 use crate::legacy_import::{self, LegacyImportReport};
@@ -26,6 +28,69 @@ use crate::v2_types::{
     AccessToken, CompactReport, DreamReport, Episode, EpisodeId, Fact, FactId, Hit, Procedure,
     ProcedureId, Query, Tier, UserModel,
 };
+
+/// Resolve the configured embedder backend into a concrete `Arc<dyn Embedder>`.
+///
+/// Selection rules (in order of the [`EmbedderBackend`] variant):
+/// * `OpenAi` / `Voyage` — read the API key from the env var named in
+///   `cfg.api_key_env` (defaulting to the provider's conventional var) and
+///   build the cloud backend. A missing/empty key is a hard error rather than
+///   a silent downgrade — the user explicitly asked for a cloud embedder.
+/// * `LocalBge` — build the real candle-backed BERT embedder, but ONLY when
+///   the `bge-local` feature is compiled in. Without the feature the local
+///   backend is the same keyword-hash stub as `Hashed`, so we surface the
+///   degraded mode and fall through to `HashedEmbedder`.
+/// * `Hashed` — the deterministic keyword-hash bag. Functional but NOT real
+///   semantic similarity; we emit a one-time warning so degraded retrieval is
+///   never silent.
+///
+/// Extension point: new cloud/local backends slot into the `match` below and
+/// reuse the same env-var resolution + degraded-mode warning machinery.
+async fn build_embedder(cfg: &EmbedderConfig) -> Result<Arc<dyn Embedder>> {
+    fn resolve_key(cfg: &EmbedderConfig, default_env: &str) -> Result<String> {
+        let var = cfg.api_key_env.as_deref().unwrap_or(default_env);
+        match std::env::var(var) {
+            Ok(k) if !k.is_empty() => Ok(k),
+            _ => Err(MemoryError::Embedding(format!(
+                "embedder backend requires an API key, but env var {var:?} is unset or empty"
+            ))),
+        }
+    }
+
+    match cfg.backend {
+        EmbedderBackend::OpenAi => {
+            let key = resolve_key(cfg, "OPENAI_API_KEY")?;
+            Ok(Arc::new(OpenAiEmbedder::new(key, cfg.model.as_deref())?))
+        }
+        EmbedderBackend::Voyage => {
+            let key = resolve_key(cfg, "VOYAGE_API_KEY")?;
+            Ok(Arc::new(VoyageEmbedder::new(key, cfg.model.clone()).await?))
+        }
+        #[cfg(feature = "bge-local")]
+        EmbedderBackend::LocalBge => {
+            Ok(Arc::new(crate::embed::LocalBgeSmallEmbedder::new().await?))
+        }
+        #[cfg(not(feature = "bge-local"))]
+        EmbedderBackend::LocalBge => {
+            tracing::warn!(
+                target: "wcore_memory::embed",
+                "semantic search degraded: backend=local_bge requested but this binary \
+                 was built without the `bge-local` feature; using keyword-hash embedder. \
+                 Rebuild with `--features bge-local` or configure a cloud embedder for \
+                 real semantic similarity."
+            );
+            Ok(Arc::new(HashedEmbedder::new().await?))
+        }
+        EmbedderBackend::Hashed => {
+            tracing::warn!(
+                target: "wcore_memory::embed",
+                "semantic search degraded: using keyword-hash embedder; enable bge-local \
+                 or configure a cloud embedder (openai/voyage) for real semantic similarity."
+            );
+            Ok(Arc::new(HashedEmbedder::new().await?))
+        }
+    }
+}
 
 /// Public facade. Cheap to clone (everything inside is Arc-wrapped).
 #[derive(Clone)]
@@ -41,10 +106,25 @@ pub struct Memory {
 }
 
 impl Memory {
-    /// Open a Memory rooted at the given project_root + session_id.
+    /// Open a Memory rooted at the given project_root + session_id with the
+    /// default embedder config (keyword-hash bag — degraded semantic search).
+    ///
+    /// Production bootstrap should prefer [`Memory::open_with_config`] so the
+    /// embedder backend honours `[memory.embedder]` in `wcore.toml`. This
+    /// signature is preserved for existing callers and tests.
+    pub async fn open(project_root: &Path, session_id: &str) -> Result<Self> {
+        Self::open_with_config(project_root, session_id, &EmbedderConfig::default()).await
+    }
+
+    /// Open a Memory rooted at the given project_root + session_id, selecting
+    /// the embedder backend from `embedder` (see [`build_embedder`]).
     /// Uses `paths::*` for DB locations; creates all required parent
     /// directories.
-    pub async fn open(project_root: &Path, session_id: &str) -> Result<Self> {
+    pub async fn open_with_config(
+        project_root: &Path,
+        session_id: &str,
+        embedder_cfg: &EmbedderConfig,
+    ) -> Result<Self> {
         let session_path = paths::session_db_path(session_id);
         let project_path = Some(paths::project_db_path(project_root));
         let global_path = paths::global_db_path().ok_or_else(|| {
@@ -56,7 +136,7 @@ impl Memory {
             .ok_or_else(|| MemoryError::PathValidation("no audit base dir resolvable".into()))?;
         let audit = Arc::new(AuditLog::open(audit_path)?);
         let gate = Arc::new(MemoryAccessGate::new(audit.clone(), AccessPolicy::empty()));
-        let embedder: Arc<dyn Embedder> = Arc::new(HashedEmbedder::new().await?);
+        let embedder: Arc<dyn Embedder> = build_embedder(embedder_cfg).await?;
         let cdc = Arc::new(CdcWriter::new_with_sinks(
             paths::changelog_path("session"),
             paths::changelog_path("project"),
@@ -80,12 +160,18 @@ impl Memory {
         })
     }
 
-    /// All-in-memory Memory (for tests).
+    /// All-in-memory Memory (for tests). Uses the default embedder config
+    /// (keyword-hash bag).
     pub async fn open_in_memory() -> Result<Self> {
+        Self::open_in_memory_with_config(&EmbedderConfig::default()).await
+    }
+
+    /// All-in-memory Memory selecting the embedder backend from `embedder_cfg`.
+    pub async fn open_in_memory_with_config(embedder_cfg: &EmbedderConfig) -> Result<Self> {
         let db = Arc::new(Db::open_memory()?);
         let audit = Arc::new(AuditLog::open_memory()?);
         let gate = Arc::new(MemoryAccessGate::new(audit.clone(), AccessPolicy::empty()));
-        let embedder: Arc<dyn Embedder> = Arc::new(HashedEmbedder::new().await?);
+        let embedder: Arc<dyn Embedder> = build_embedder(embedder_cfg).await?;
         let cdc = Arc::new(CdcWriter::new_stub());
         let dispatcher = PartitionDispatcher::new(
             gate.clone(),
@@ -230,5 +316,62 @@ impl MemoryApi for Memory {
     }
     async fn rebind_session(&self, session_id: &str) -> Result<()> {
         self.dispatcher.rebind_session(session_id).await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Default config + default cargo features must resolve to the
+    /// keyword-hash fallback. This is the degraded-but-functional path the
+    /// finding flags — selection is config-driven, not hardcoded.
+    #[tokio::test]
+    async fn default_config_selects_hashed_fallback() {
+        let embedder = build_embedder(&EmbedderConfig::default()).await.unwrap();
+        assert_eq!(embedder.name(), "hashed/384");
+    }
+
+    /// `open_in_memory` (default config) wires the hashed embedder into a live
+    /// `Memory` — the degraded fallback is observable on the facade.
+    #[tokio::test]
+    async fn open_in_memory_uses_hashed_embedder() {
+        let mem = Memory::open_in_memory().await.unwrap();
+        assert_eq!(mem.embedder.name(), "hashed/384");
+    }
+
+    /// Requesting a cloud backend with no resolvable API key is a hard error,
+    /// proving the cloud arms are actually dispatched (not silently ignored).
+    /// Uses a deliberately-unset env var name so the test is hermetic
+    /// regardless of the developer's real `OPENAI_API_KEY`.
+    #[tokio::test]
+    async fn cloud_backend_without_key_errors() {
+        let cfg = EmbedderConfig {
+            backend: EmbedderBackend::OpenAi,
+            api_key_env: Some("WCORE_MEMORY_TEST_UNSET_KEY_VAR".to_string()),
+            model: None,
+        };
+        // `Arc<dyn Embedder>` isn't Debug, so unwrap_err()'s bound won't hold —
+        // extract the error by match instead.
+        let err = match build_embedder(&cfg).await {
+            Ok(_) => panic!("expected an error when the cloud API key env var is unset"),
+            Err(e) => e,
+        };
+        assert!(matches!(err, MemoryError::Embedding(_)));
+        assert!(err.to_string().contains("API key"));
+    }
+
+    /// Without the `bge-local` feature, requesting the local BERT backend
+    /// degrades to the hashed fallback rather than failing.
+    #[cfg(not(feature = "bge-local"))]
+    #[tokio::test]
+    async fn local_bge_without_feature_degrades_to_hashed() {
+        let cfg = EmbedderConfig {
+            backend: EmbedderBackend::LocalBge,
+            api_key_env: None,
+            model: None,
+        };
+        let embedder = build_embedder(&cfg).await.unwrap();
+        assert_eq!(embedder.name(), "hashed/384");
     }
 }

@@ -1038,7 +1038,13 @@ impl AgentBootstrap {
             // order or the staleness `CREATE TABLE` fails. v0.6.2 wires
             // neither; this note exists to bank the ordering constraint
             // before the wiring lands.
-            match wcore_memory::Memory::open(cwd_path, "boot").await {
+            match wcore_memory::Memory::open_with_config(
+                cwd_path,
+                "boot",
+                &self.config.memory.embedder,
+            )
+            .await
+            {
                 Ok(mem) => {
                     if self.config.observability.skills_lifecycle {
                         tracing::info!(
