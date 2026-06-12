@@ -232,6 +232,14 @@ pub fn config_view_from(config: &wcore_config::config::Config) -> app::ConfigVie
         // after this snapshot is taken — it is not a resolved-config
         // field, so the default here is `false`.
         force: false,
+        // The active provider's resolved `ProviderCompat` cost overrides,
+        // seeded so the Expert tier shows + persists the real pricing.
+        compat_costs: app::CompatCosts {
+            input: config.compat.cost_per_input_token,
+            output: config.compat.cost_per_output_token,
+            cache_read: config.compat.cost_per_cache_read_token,
+            cache_write: config.compat.cost_per_cache_write_token,
+        },
     }
 }
 

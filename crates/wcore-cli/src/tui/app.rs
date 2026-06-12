@@ -1152,6 +1152,28 @@ pub struct ConfigView {
     /// (`SessionMode::Force`). The status bar appends a `· FORCE` badge
     /// so the mode is impossible to miss.
     pub force: bool,
+    /// The active provider's resolved `ProviderCompat` cost-per-token
+    /// values (`cost_per_input_token`, `cost_per_output_token`,
+    /// `cost_per_cache_read_token`, `cost_per_cache_write_token`). `None`
+    /// for each field means "no override set" — the cost meter falls back
+    /// to the provider preset. Carried so the Config surface's Expert tier
+    /// seeds + persists the real pricing values instead of placeholders.
+    pub compat_costs: CompatCosts,
+}
+
+/// The four `ProviderCompat` cost-per-token overrides surfaced by the
+/// Config Expert tier. Each is `Option<f64>`: `None` = no override (the
+/// provider preset stands), `Some(x)` = an explicit per-token USD price.
+#[derive(Debug, Default, Clone, Copy, PartialEq)]
+pub struct CompatCosts {
+    /// USD charged per input token.
+    pub input: Option<f64>,
+    /// USD charged per output token.
+    pub output: Option<f64>,
+    /// USD per token read from the prompt cache.
+    pub cache_read: Option<f64>,
+    /// USD per token written into the prompt cache.
+    pub cache_write: Option<f64>,
 }
 
 // ─────────────────────────────────────────────────────────────────────────

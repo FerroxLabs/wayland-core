@@ -11,9 +11,13 @@
 //! - **Tier 2 — section detail.** `⏎` on a section opens a per-section
 //!   detail pane; for radio settings that pane is where the choice is
 //!   made.
-//! - **Tier 3 — expert.** `x` opens the expert pane: the 24
+//! - **Tier 3 — expert.** `x` opens the expert pane: the 19
 //!   `wcore_config::ProviderCompat` fields, each glossed in one line of
-//!   plain language so the raw key is never the only label.
+//!   plain language so the raw key is never the only label. The four
+//!   Pricing (cost-per-token) fields are editable in place — `⏎` opens a
+//!   buffer, `⏎` commits (persisted to `[providers.<active>].compat`),
+//!   `esc` cancels; an empty buffer clears the override. The remaining
+//!   message-format / routing / capability fields stay read-only.
 //!
 //! ## State ownership
 //!
@@ -207,6 +211,10 @@ struct SettingsModel {
     compaction: Compaction,
     /// Whether long-term cross-session memory is on.
     long_term_memory: bool,
+    // EXPERT (provider tuning) --------------------------------------------
+    /// The four editable `ProviderCompat` cost-per-token overrides for the
+    /// active provider (Expert tier). Each `None` = "no override set".
+    compat_costs: crate::tui::app::CompatCosts,
 }
 
 impl SettingsModel {
@@ -236,6 +244,7 @@ impl SettingsModel {
             stop_after_turns: cv.max_turns.map(|n| n as u32).unwrap_or(25),
             compaction: Compaction::from_view_str(&cv.compaction),
             long_term_memory: cv.memory_enabled,
+            compat_costs: cv.compat_costs,
         }
     }
 }
@@ -344,6 +353,13 @@ pub struct ConfigSurface {
     /// `Some` while a text field is being edited; the edited row plus its
     /// `tui-input` buffer. `None` when no field edit is in flight.
     editor: Option<(Row, Input)>,
+    /// `Some` while an Expert-tier cost field is being edited in place: the
+    /// `CostField` under edit plus its `tui-input` buffer. Mirrors the
+    /// `StopAfter` `editor` machinery (same `Input` buffer, `⏎` commits via
+    /// `patch_global_config`, `esc` cancels) but is keyed by the focused
+    /// expert field rather than a Tier-1 `Row`. `None` when no expert edit
+    /// is in flight.
+    expert_editor: Option<(CostField, Input)>,
     /// True once a save has landed this session — drives the `✓ saved`
     /// indicator in the context line.
     save_pending: bool,
@@ -382,6 +398,7 @@ impl ConfigSurface {
             tier: Tier::Overview,
             expert_focus: 0,
             editor: None,
+            expert_editor: None,
             save_pending: false,
             save_error: None,
             providers_focus: 0,
@@ -404,9 +421,10 @@ impl ConfigSurface {
     /// Revert every unsaved edit back to the baseline and drop any
     /// in-flight text edit. Returns `true` if anything actually changed.
     fn revert(&mut self) -> bool {
-        let was_dirty = self.is_dirty() || self.editor.is_some();
+        let was_dirty = self.is_dirty() || self.editor.is_some() || self.expert_editor.is_some();
         self.current = self.baseline.clone();
         self.editor = None;
+        self.expert_editor = None;
         was_dirty
     }
 
@@ -549,6 +567,146 @@ impl ConfigSurface {
         let len = EXPERT_FIELDS.len() as isize;
         let next = (self.expert_focus as isize + delta).rem_euclid(len);
         self.expert_focus = next as usize;
+    }
+
+    /// Begin an in-place edit of the focused Expert field, if it is one of
+    /// the editable cost fields. Seeds the buffer with the current value (or
+    /// empty when the override is unset) so `⏎` either keeps or replaces it.
+    /// Non-cost fields are inert (read-only), matching the footer promise.
+    fn enter_expert(&mut self) {
+        if let Some(field) = CostField::for_index(self.expert_focus) {
+            // A fresh edit clears any stale save outcome from the context line.
+            self.save_error = None;
+            self.save_pending = false;
+            let seed = field
+                .value(&self.current.compat_costs)
+                .map(format_cost)
+                .unwrap_or_default();
+            self.expert_editor = Some((field, Input::new(seed)));
+        }
+    }
+
+    /// Commit the in-flight Expert cost edit (`⏎`). An empty buffer clears
+    /// the override (`None`); a parseable non-negative number sets it. An
+    /// unparseable / negative value is rejected and the edit is dropped
+    /// without changing the setting. On a real change the new value is
+    /// persisted to `[providers.<active>].compat` via `patch_global_config`.
+    fn commit_expert_edit(&mut self) {
+        let Some((field, input)) = self.expert_editor.take() else {
+            return;
+        };
+        let trimmed = input.value().trim().to_string();
+        let new_value = if trimmed.is_empty() {
+            Some(None)
+        } else {
+            match trimmed.parse::<f64>() {
+                Ok(n) if n >= 0.0 && n.is_finite() => Some(Some(n)),
+                // Unparseable / negative / non-finite: reject, leave unchanged.
+                _ => None,
+            }
+        };
+        if let Some(value) = new_value
+            && field.value(&self.current.compat_costs) != value
+        {
+            // Only persist on a real change — an unchanged commit (e.g. an
+            // empty buffer over an already-unset field) writes nothing and
+            // raises no save indicator, mirroring the Tier-1 `is_dirty` guard.
+            field.set(&mut self.current.compat_costs, value);
+            self.save_expert();
+        }
+    }
+
+    /// Persist the current Expert cost overrides to the active provider's
+    /// `[providers.<provider>].compat` table via the partial-merge writer.
+    /// On success advances the baseline (so the D007 rebind seam fires) and
+    /// flips the `✓ saved` indicator; on failure records the error string.
+    fn save_expert(&mut self) {
+        match self.persist_expert_to_disk() {
+            Ok(()) => {
+                self.baseline = self.current.clone();
+                self.save_pending = true;
+                self.save_error = None;
+            }
+            Err(e) => self.save_error = Some(e),
+        }
+    }
+
+    /// Write the four cost overrides into `[providers.<active>].compat` in
+    /// the global `config.toml`. Every other key (and every other compat
+    /// field) is preserved by the partial-merge writer. Returns a display
+    /// error string on failure.
+    fn persist_expert_to_disk(&self) -> Result<(), String> {
+        let provider = self.current.provider.clone();
+        let costs = self.current.compat_costs;
+        wcore_config::config::patch_global_config(|f| {
+            let entry = f.providers.entry(provider).or_default();
+            let compat = entry
+                .compat
+                .get_or_insert_with(wcore_config::compat::ProviderCompat::default);
+            compat.cost_per_input_token = costs.input;
+            compat.cost_per_output_token = costs.output;
+            compat.cost_per_cache_read_token = costs.cache_read;
+            compat.cost_per_cache_write_token = costs.cache_write;
+        })
+        .map(|_| ())
+        .map_err(|e| format!("{e:#}"))
+    }
+}
+
+/// Format a cost-per-token value for display / edit-buffer seeding. Uses
+/// `{}` so an exact value like `0.000003` round-trips through the buffer
+/// rather than being truncated by a fixed precision.
+fn format_cost(v: f64) -> String {
+    format!("{v}")
+}
+
+/// The four editable `ProviderCompat` cost-per-token fields surfaced in the
+/// Expert tier, identified by their index into [`EXPERT_FIELDS`]. Each maps
+/// to one `Option<f64>` on [`crate::tui::app::CompatCosts`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CostField {
+    /// `cost_per_input_token` — `EXPERT_FIELDS[15]`.
+    Input,
+    /// `cost_per_output_token` — `EXPERT_FIELDS[16]`.
+    Output,
+    /// `cost_per_cache_read_token` — `EXPERT_FIELDS[17]`.
+    CacheRead,
+    /// `cost_per_cache_write_token` — `EXPERT_FIELDS[18]`.
+    CacheWrite,
+}
+
+impl CostField {
+    /// The editable cost field at this `EXPERT_FIELDS` index, or `None` if
+    /// the index names a read-only field (message-format / routing /
+    /// capability). The four Pricing rows are the trailing entries 15..=18.
+    fn for_index(idx: usize) -> Option<CostField> {
+        match idx {
+            15 => Some(CostField::Input),
+            16 => Some(CostField::Output),
+            17 => Some(CostField::CacheRead),
+            18 => Some(CostField::CacheWrite),
+            _ => None,
+        }
+    }
+
+    /// Read this field's current value off the cost overrides.
+    fn value(self, costs: &crate::tui::app::CompatCosts) -> Option<f64> {
+        match self {
+            CostField::Input => costs.input,
+            CostField::Output => costs.output,
+            CostField::CacheRead => costs.cache_read,
+            CostField::CacheWrite => costs.cache_write,
+        }
+    }
+
+    /// Write `value` into this field on the cost overrides.
+    fn set(self, costs: &mut crate::tui::app::CompatCosts, value: Option<f64>) {
+        match self {
+            CostField::Input => costs.input = value,
+            CostField::Output => costs.output = value,
+            CostField::CacheRead => costs.cache_read = value,
+            CostField::CacheWrite => costs.cache_write = value,
+        }
     }
 }
 
@@ -1205,6 +1363,7 @@ impl Surface for ConfigSurface {
         self.tier = Tier::Overview;
         self.expert_focus = 0;
         self.editor = None;
+        self.expert_editor = None;
         self.providers_focus = 0;
         self.credentials_modal = None;
         self.credential_saved = false;
@@ -1246,6 +1405,28 @@ impl Surface for ConfigSurface {
                         input.handle_event(&ratatui::crossterm::event::Event::Key(key));
                     }
                 }
+            }
+            return SurfaceAction::None;
+        }
+
+        // An Expert-tier cost edit captures every key the same way. `⏎`
+        // commits (and persists, which advances `baseline` — the rebind
+        // check below then fires the live engine rebind); `esc` cancels.
+        if self.expert_editor.is_some() {
+            let baseline_before = self.baseline.clone();
+            match key.code {
+                KeyCode::Enter => self.commit_expert_edit(),
+                KeyCode::Esc => {
+                    self.expert_editor = None;
+                }
+                _ => {
+                    if let Some((_, input)) = self.expert_editor.as_mut() {
+                        input.handle_event(&ratatui::crossterm::event::Event::Key(key));
+                    }
+                }
+            }
+            if self.baseline != baseline_before && !self.is_dirty() {
+                app.rebind_request = crate::tui::app::RebindRequest::Tier1Save;
             }
             return SurfaceAction::None;
         }
@@ -1358,8 +1539,10 @@ impl ConfigSurface {
         }
     }
 
-    /// Tier-3 keys: scroll the expert-field list; `esc` returns to the
-    /// overview.
+    /// Tier-3 keys: scroll the expert-field list; `⏎` begins an in-place
+    /// edit of the focused Pricing (cost) field (inert on read-only fields);
+    /// `esc` returns to the overview. The in-flight edit itself is captured
+    /// earlier in `handle_key` (the `expert_editor` state machine).
     fn handle_expert_key(&mut self, key: KeyEvent) -> SurfaceAction {
         match key.code {
             KeyCode::Up | KeyCode::Char('k') => {
@@ -1368,6 +1551,12 @@ impl ConfigSurface {
             }
             KeyCode::Down | KeyCode::Char('j') => {
                 self.move_expert(1);
+                SurfaceAction::None
+            }
+            KeyCode::Enter => {
+                // `⏎` on an editable (Pricing) field begins an in-place edit;
+                // on a read-only field it is inert.
+                self.enter_expert();
                 SurfaceAction::None
             }
             KeyCode::Esc => {
@@ -1744,6 +1933,9 @@ impl ConfigSurface {
 
         let mut lines: Vec<Line> = Vec::new();
         let mut last_group: Option<&'static str> = None;
+        // The body-line index of the focused field's gloss row, so the body
+        // can scroll it into view (the list is taller than the viewport).
+        let mut focus_line = 0usize;
         for (idx, field) in EXPERT_FIELDS.iter().enumerate() {
             if Some(field.group) != last_group {
                 if last_group.is_some() {
@@ -1756,6 +1948,11 @@ impl ConfigSurface {
                 last_group = Some(field.group);
             }
             let focused = idx == self.expert_focus;
+            if focused {
+                // Anchor the scroll on the focused field's gloss row (the
+                // next push); its key/value/editor line follows.
+                focus_line = lines.len();
+            }
             let marker = if focused { "▸ " } else { "  " };
             let gloss_style = if focused {
                 Style::default().fg(t.orange).add_modifier(Modifier::BOLD)
@@ -1767,17 +1964,79 @@ impl ConfigSurface {
                 Span::styled(field.gloss.to_string(), gloss_style),
             ]));
             // The raw key, dimmed — the gloss leads, the mechanism follows.
-            lines.push(Line::from(Span::styled(
-                format!("    {}", field.key),
-                Style::default().fg(t.text_muted),
-            )));
+            // Editable (Pricing) fields also show their live value plus an
+            // edit affordance; while one is under edit the live `tui-input`
+            // buffer renders with a trailing cursor.
+            let key_line = match CostField::for_index(idx) {
+                Some(cost) => {
+                    if let Some((editing, input)) = &self.expert_editor
+                        && *editing == cost
+                    {
+                        Line::from(vec![
+                            Span::styled(
+                                format!("    {}  ", field.key),
+                                Style::default().fg(t.text_muted),
+                            ),
+                            Span::styled(
+                                format!("{}_", input.value()),
+                                Style::default().fg(t.orange).add_modifier(Modifier::BOLD),
+                            ),
+                            Span::styled(
+                                "  (⏎ save · esc cancel · empty clears)",
+                                Style::default().fg(t.text_muted),
+                            ),
+                        ])
+                    } else {
+                        let shown = cost
+                            .value(&self.current.compat_costs)
+                            .map(format_cost)
+                            .unwrap_or_else(|| "provider default".to_string());
+                        let edit_style = if focused {
+                            Style::default().fg(t.orange)
+                        } else {
+                            Style::default().fg(t.text_muted)
+                        };
+                        Line::from(vec![
+                            Span::styled(
+                                format!("    {}  ", field.key),
+                                Style::default().fg(t.text_muted),
+                            ),
+                            Span::styled(shown, Style::default().fg(t.text)),
+                            Span::styled("   ▸ edit", edit_style),
+                        ])
+                    }
+                }
+                None => Line::from(Span::styled(
+                    format!("    {}", field.key),
+                    Style::default().fg(t.text_muted),
+                )),
+            };
+            lines.push(key_line);
         }
-        frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), body_area);
+        // Scroll so the focused field (gloss + its key/value/editor line) stays
+        // visible — the 19-field list is taller than the viewport. Mirrors the
+        // Providers tier (Issue #16): no scroll near the top, clamped so the
+        // last page never scrolls past the final row.
+        let visible = body_area.height as usize;
+        let total = lines.len();
+        let scroll_y = (focus_line + 2)
+            .saturating_sub(visible)
+            .min(total.saturating_sub(visible)) as u16;
+        frame.render_widget(
+            Paragraph::new(lines)
+                .wrap(Wrap { trim: false })
+                .scroll((scroll_y, 0)),
+            body_area,
+        );
 
+        // The footer advertises the edit affordance so it is not a phantom:
+        // `⏎ edit` is live for the Pricing fields, inert elsewhere.
         frame.render_widget(
             Paragraph::new(Line::from(vec![
                 Span::styled(" ↑↓ ", Style::default().fg(t.orange)),
                 Span::styled("move   ", Style::default().fg(t.text_dim)),
+                Span::styled("⏎ ", Style::default().fg(t.orange)),
+                Span::styled("edit cost   ", Style::default().fg(t.text_dim)),
                 Span::styled("esc ", Style::default().fg(t.orange)),
                 Span::styled("back to settings", Style::default().fg(t.text_dim)),
             ])),
@@ -2794,6 +3053,180 @@ mod tests {
         surface.handle_key(key(KeyCode::Enter), &mut app);
         // A zero runaway-guard is rejected; the old value stands.
         assert_eq!(surface.current.stop_after_turns, 25);
+    }
+
+    // ── the Expert-tier (ProviderCompat cost) in-place editor ───────────
+    //
+    // The Expert tier was read-only before this slice — `handle_expert_key`
+    // handled only `↑↓`/`esc`, the static `EXPERT_FIELDS` table carried no
+    // live values, and the footer advertised no edit. These tests drive real
+    // keys through the router and assert the RENDERED frame changes (cursor,
+    // value, footer) — not just an internal flag — to guard against a
+    // phantom-affordance regression.
+
+    /// Process-global env guard: `WAYLAND_HOME` / `set_var` are process-wide,
+    /// so the persisting test serialises through this lock (the same pattern
+    /// the theme tests use) to stay hermetic under the concurrent runner.
+    static EXPERT_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// Open the Expert tier and step the selection to the first editable
+    /// Pricing field (`cost_per_input_token`, `EXPERT_FIELDS[15]`).
+    fn enter_expert_on_first_cost_field(surface: &mut ConfigSurface, app: &mut App) {
+        surface.handle_key(ch('x'), app); // overview → Expert tier
+        assert_eq!(surface.tier, Tier::Expert);
+        for _ in 0..15 {
+            surface.handle_key(key(KeyCode::Down), app);
+        }
+        assert_eq!(
+            CostField::for_index(surface.expert_focus),
+            Some(CostField::Input),
+            "selection should rest on cost_per_input_token"
+        );
+    }
+
+    #[test]
+    fn expert_footer_advertises_the_edit_affordance() {
+        // The footer must promise the edit so the affordance is not a phantom.
+        let mut app = App::new();
+        let mut surface = ConfigSurface::new();
+        surface.on_enter(&mut app);
+        surface.handle_key(ch('x'), &mut app);
+        let frame = render_text(&mut surface, &app);
+        assert!(
+            frame.contains("edit cost"),
+            "expert footer must advertise the edit affordance, got:\n{frame}"
+        );
+    }
+
+    #[test]
+    fn expert_enter_renders_the_edit_cursor_on_a_cost_field() {
+        // Pressing `⏎` on a Pricing field must show the live edit buffer +
+        // cursor in the RENDERED frame, plus the save/cancel hint.
+        let mut app = App::new();
+        let mut surface = ConfigSurface::new();
+        surface.on_enter(&mut app);
+        enter_expert_on_first_cost_field(&mut surface, &mut app);
+        // Before edit: no buffer cursor, no save hint.
+        let before = render_text(&mut surface, &app);
+        assert!(
+            !before.contains("⏎ save · esc cancel"),
+            "no edit hint before ⏎, got:\n{before}"
+        );
+        surface.handle_key(key(KeyCode::Enter), &mut app);
+        assert!(surface.expert_editor.is_some(), "edit should be in flight");
+        let after = render_text(&mut surface, &app);
+        assert!(
+            after.contains('_'),
+            "the edit buffer cursor must render, got:\n{after}"
+        );
+        assert!(
+            after.contains("⏎ save · esc cancel"),
+            "the in-place edit hint must render, got:\n{after}"
+        );
+    }
+
+    #[test]
+    fn expert_typing_updates_the_rendered_cost_value() {
+        // Keystrokes must update the RENDERED buffer, not just the state var.
+        let mut app = App::new();
+        let mut surface = ConfigSurface::new();
+        surface.on_enter(&mut app);
+        enter_expert_on_first_cost_field(&mut surface, &mut app);
+        surface.handle_key(key(KeyCode::Enter), &mut app);
+        // The default ConfigView seeds no override, so the buffer starts empty.
+        surface.handle_key(ch('0'), &mut app);
+        surface.handle_key(ch('.'), &mut app);
+        surface.handle_key(ch('5'), &mut app);
+        let frame = render_text(&mut surface, &app);
+        assert!(
+            frame.contains("0.5_"),
+            "the typed value + cursor must render, got:\n{frame}"
+        );
+    }
+
+    #[test]
+    fn expert_commit_renders_new_value_and_persists() {
+        // `⏎` commits: the new value must render (buffer gone) AND land in
+        // `[providers.<active>].compat` on disk. Hermetic via WAYLAND_HOME.
+        let _guard = EXPERT_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = tempfile::tempdir().expect("tempdir");
+        let prev = std::env::var_os("WAYLAND_HOME");
+        // SAFETY: process-global env mutation is serialised by EXPERT_ENV_LOCK;
+        // the previous value is restored before the lock is released.
+        unsafe { std::env::set_var("WAYLAND_HOME", dir.path()) };
+
+        let mut app = App::new();
+        app.config.provider = "anthropic".into();
+        let mut surface = ConfigSurface::new();
+        surface.on_enter(&mut app);
+        enter_expert_on_first_cost_field(&mut surface, &mut app);
+        surface.handle_key(key(KeyCode::Enter), &mut app);
+        surface.handle_key(ch('0'), &mut app);
+        surface.handle_key(ch('.'), &mut app);
+        surface.handle_key(ch('2'), &mut app);
+        surface.handle_key(key(KeyCode::Enter), &mut app); // commit
+
+        assert!(surface.expert_editor.is_none(), "edit should be committed");
+        assert_eq!(surface.current.compat_costs.input, Some(0.2));
+        // The committed value renders as a value, not a live buffer.
+        let frame = render_text(&mut surface, &app);
+        assert!(
+            frame.contains("0.2") && !frame.contains("0.2_"),
+            "the committed value must render without the edit cursor, got:\n{frame}"
+        );
+        // And it must have been written to the active provider's compat table.
+        let written = std::fs::read_to_string(dir.path().join("config.toml"))
+            .expect("config.toml should have been written");
+        assert!(
+            written.contains("cost_per_input_token"),
+            "the override must persist to [providers.anthropic].compat, got:\n{written}"
+        );
+
+        // SAFETY: restore the prior env under the same lock.
+        unsafe {
+            match prev {
+                Some(v) => std::env::set_var("WAYLAND_HOME", v),
+                None => std::env::remove_var("WAYLAND_HOME"),
+            }
+        }
+    }
+
+    #[test]
+    fn expert_esc_cancels_without_change() {
+        // `esc` drops the in-flight edit; the override stays unset and the
+        // buffer no longer renders.
+        let mut app = App::new();
+        let mut surface = ConfigSurface::new();
+        surface.on_enter(&mut app);
+        enter_expert_on_first_cost_field(&mut surface, &mut app);
+        surface.handle_key(key(KeyCode::Enter), &mut app);
+        surface.handle_key(ch('9'), &mut app);
+        surface.handle_key(key(KeyCode::Esc), &mut app);
+        assert!(surface.expert_editor.is_none());
+        assert_eq!(surface.current.compat_costs.input, None);
+        let frame = render_text(&mut surface, &app);
+        assert!(
+            !frame.contains("⏎ save · esc cancel"),
+            "the edit hint must be gone after esc, got:\n{frame}"
+        );
+    }
+
+    #[test]
+    fn expert_read_only_field_has_no_edit_affordance() {
+        // `⏎` on a non-Pricing field (e.g. the first message-format toggle,
+        // index 0) is inert — no editor opens — so the affordance stays
+        // honest (read-only fields are not advertised as editable).
+        let mut app = App::new();
+        let mut surface = ConfigSurface::new();
+        surface.on_enter(&mut app);
+        surface.handle_key(ch('x'), &mut app);
+        assert_eq!(surface.expert_focus, 0);
+        assert!(CostField::for_index(0).is_none());
+        surface.handle_key(key(KeyCode::Enter), &mut app);
+        assert!(
+            surface.expert_editor.is_none(),
+            "⏎ on a read-only field must not open an editor"
+        );
     }
 
     // ── navigation ──────────────────────────────────────────────────────
