@@ -37,6 +37,11 @@ pub struct Update {
     pub update_id: i64,
     #[serde(default)]
     pub message: Option<Message>,
+    /// New incoming channel post. A bot added to a broadcast channel receives
+    /// its posts here rather than in `message`; these carry no `from` (the
+    /// sender identity falls back to the channel chat).
+    #[serde(default)]
+    pub channel_post: Option<Message>,
 }
 
 #[derive(Debug, Clone, Deserialize)]

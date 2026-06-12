@@ -17,6 +17,9 @@ pub(crate) struct LongPollArgs {
     pub http: wcore_egress::EgressClient,
     pub api_base: String,
     pub bot_token: String,
+    /// Channel name — keys the persisted update offset so a restart resumes
+    /// past the last-confirmed update instead of re-delivering it.
+    pub channel_name: String,
     pub timeout_secs: u32,
     pub allowed_chat_ids: HashSet<String>,
     pub inbox: Arc<Mutex<VecDeque<ChannelEvent>>>,
@@ -32,13 +35,16 @@ pub(crate) async fn longpoll_loop(args: LongPollArgs) {
         http,
         api_base,
         bot_token,
+        channel_name,
         timeout_secs,
         allowed_chat_ids,
         inbox,
         mut shutdown,
     } = args;
 
-    let mut offset: i64 = 0;
+    // Seed from the persisted watermark so a restart does not re-deliver the
+    // final unconfirmed batch as duplicate turns. Absent/corrupt file → 0.
+    let mut offset: i64 = crate::offset_store::load(&channel_name).unwrap_or(0);
     let mut consecutive_failures: u32 = 0;
 
     loop {
@@ -60,7 +66,14 @@ pub(crate) async fn longpoll_loop(args: LongPollArgs) {
         match updates {
             Ok(updates) => {
                 consecutive_failures = 0;
+                let before = offset;
                 ingest_updates(updates, &allowed_chat_ids, &inbox, &mut offset).await;
+                // Persist only when the offset actually advanced — confirming
+                // these updates so the next getUpdates (this run or after a
+                // restart) starts past them.
+                if offset > before {
+                    crate::offset_store::save(&channel_name, offset);
+                }
             }
             Err(e) => {
                 tracing::warn!(
@@ -177,7 +190,12 @@ async fn ingest_updates(
         // otherwise we'd loop on the same filtered-out message forever.
         *offset = (*offset).max(u.update_id + 1);
 
-        let Some(msg) = u.message else { continue };
+        // A bot in a broadcast channel receives posts in `channel_post`, not
+        // `message` — treat either as the inbound message so channel posts are
+        // not silently dropped.
+        let Some(msg) = u.message.or(u.channel_post) else {
+            continue;
+        };
         let chat_id_str = msg.chat.id.to_string();
         if !allowed_chat_ids.is_empty() && !allowed_chat_ids.contains(&chat_id_str) {
             continue;
@@ -200,10 +218,18 @@ async fn ingest_updates(
                     .unwrap_or_else(|| sid.clone());
                 (sid, author, display_name, f.username.clone(), f.is_bot)
             } else {
+                // No `from` — this is a channel post (broadcast channels carry
+                // no per-message sender). Fall back to the channel's own
+                // identity: the chat id, with the title as the display name.
+                let author = msg
+                    .chat
+                    .title
+                    .clone()
+                    .unwrap_or_else(|| chat_id_str.clone());
                 (
-                    "unknown".to_string(),
-                    "unknown".to_string(),
-                    None,
+                    chat_id_str.clone(),
+                    author,
+                    msg.chat.title.clone(),
                     None,
                     false,
                 )
@@ -365,6 +391,36 @@ mod tests {
     fn pending_media_empty_for_text_only_message() {
         let msg = message_from_json(r#"{"message_id":1,"chat":{"id":1},"text":"hello"}"#);
         assert!(pending_media(&msg).is_empty());
+    }
+
+    #[tokio::test]
+    async fn channel_post_update_yields_message_received() {
+        // A bot added to a broadcast channel receives posts in `channel_post`,
+        // not `message`, and they carry no `from`. ingest_updates must surface
+        // the post as a MessageReceived with the channel's chat identity as the
+        // sender — otherwise channel posts are silently dropped.
+        let update: Update = serde_json::from_str(
+            r#"{"update_id":42,"channel_post":{"message_id":7,"chat":{"id":-1001234,"type":"channel","title":"News"},"text":"breaking"}}"#,
+        )
+        .expect("valid Update JSON");
+        let inbox = Arc::new(Mutex::new(VecDeque::new()));
+        let mut offset = 0;
+        ingest_updates(vec![update], &HashSet::new(), &inbox, &mut offset).await;
+
+        assert_eq!(offset, 43, "offset must advance past the channel post");
+        let guard = inbox.lock().await;
+        let event = guard.front().expect("one event ingested");
+        match event {
+            ChannelEvent::MessageReceived { msg } => {
+                assert_eq!(msg.text, "breaking");
+                assert_eq!(msg.conversation_id, "-1001234");
+                assert_eq!(msg.chat_type, ChatType::Channel);
+                // No `from` → sender falls back to the channel chat identity.
+                assert_eq!(msg.sender_id, "-1001234");
+                assert_eq!(msg.author, "News");
+            }
+            other => panic!("unexpected event: {other:?}"),
+        }
     }
 
     #[tokio::test]

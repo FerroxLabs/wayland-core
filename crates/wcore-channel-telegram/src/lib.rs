@@ -26,6 +26,7 @@ mod api;
 pub mod config;
 pub mod error;
 mod longpoll;
+mod offset_store;
 
 /// Production base URL. Override in tests via [`TelegramChannel::with_api_base`].
 pub const TELEGRAM_API_BASE: &str = "https://api.telegram.org";
@@ -164,6 +165,7 @@ impl Channel for TelegramChannel {
             http: self.http.clone(),
             api_base: self.api_base.clone(),
             bot_token: token,
+            channel_name: self.name.clone(),
             timeout_secs: self.config.long_poll_timeout_secs,
             allowed_chat_ids: allowed,
             inbox: Arc::clone(&self.inbox),
@@ -410,6 +412,20 @@ mod tests {
     }
 
     fn cfg() -> TelegramConfig {
+        // Isolate per-test persisted state (the getUpdates offset watermark)
+        // under a pid-unique WAYLAND_HOME so concurrent test processes — and
+        // prior box runs — can't read each other's offset and skip a mocked
+        // update. nextest runs one test per process, so the pid is unique and
+        // the env mutation is local. Set once, before any state I/O.
+        static ISOLATE: std::sync::Once = std::sync::Once::new();
+        ISOLATE.call_once(|| {
+            let dir =
+                std::env::temp_dir().join(format!("wcore_tg_test_state_{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&dir);
+            // SAFETY: process-per-test under nextest; no other thread reads the env.
+            unsafe { std::env::set_var("WAYLAND_HOME", &dir) };
+        });
+
         TelegramConfig {
             credential_handle: "telegram.test.bot_token".to_string(),
             allowed_chat_ids: Vec::new(),
@@ -644,6 +660,7 @@ mod tests {
     // -----------------------------------------------------------------
     #[tokio::test]
     async fn longpoll_ingests_message_into_inbox() {
+        // State isolation (pid-unique WAYLAND_HOME) is set up by `cfg()` below.
         let mut server = mockito::Server::new_async().await;
         // First getUpdates returns one update; subsequent calls return
         // empty so the loop doesn't burn CPU.
