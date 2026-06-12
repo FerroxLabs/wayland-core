@@ -89,11 +89,7 @@ fn dispatch(command: &str, raw: &str, exit_code: i32) -> Option<String> {
 /// env `K=V`). For a `&&`/`;` chain, classify the LAST segment (its output
 /// dominates). Lowercased basename.
 pub(crate) fn program_and_sub(command: &str) -> (&str, Option<&str>) {
-    let segment = command
-        .rsplit([';', '&'])
-        .map(str::trim)
-        .find(|s| !s.is_empty())
-        .unwrap_or(command.trim());
+    let segment = last_subcommand(command);
 
     let mut toks = segment.split_whitespace().filter(|t| {
         // Skip env assignments and known wrappers.
@@ -107,6 +103,41 @@ pub(crate) fn program_and_sub(command: &str) -> (&str, Option<&str>) {
     let prog = prog.rsplit(['/', '\\']).next().unwrap_or(prog);
     let sub = toks.next();
     (prog, sub)
+}
+
+/// Return the trimmed LAST sub-command of a shell chain, splitting ONLY on the
+/// chain separators `;`, `&&`, and `||`. A bare `&` is deliberately NOT a
+/// separator: it is part of redirection idioms like `2>&1` / `>&2`, so
+/// splitting on it would mis-tokenize the program name (e.g. `cargo test 2>&1`
+/// would otherwise classify as program `1` and defeat dispatch).
+fn last_subcommand(command: &str) -> &str {
+    let bytes = command.as_bytes();
+    // Byte index just past the last chain separator; 0 means no separator.
+    let mut last_sep_end = 0usize;
+    let mut i = 0usize;
+    while i < bytes.len() {
+        match bytes[i] {
+            b';' => {
+                last_sep_end = i + 1;
+                i += 1;
+            }
+            b'&' if bytes.get(i + 1) == Some(&b'&') => {
+                last_sep_end = i + 2;
+                i += 2;
+            }
+            b'|' if bytes.get(i + 1) == Some(&b'|') => {
+                last_sep_end = i + 2;
+                i += 2;
+            }
+            _ => i += 1,
+        }
+    }
+    let segment = command[last_sep_end..].trim();
+    if segment.is_empty() {
+        command.trim()
+    } else {
+        segment
+    }
 }
 
 /// Append the last `GUARANTEED_TAIL_LINES` raw lines after the compacted body
@@ -160,5 +191,54 @@ mod tests {
             program_and_sub("/usr/bin/grep -r foo ."),
             ("grep", Some("-r"))
         );
+    }
+
+    #[test]
+    fn program_and_sub_keeps_program_with_stderr_redirect() {
+        // A bare `&` inside `2>&1` must NOT be treated as a chain separator —
+        // otherwise the program tokenizes as `1` and dispatch never engages.
+        assert_eq!(program_and_sub("cargo test 2>&1"), ("cargo", Some("test")));
+        assert_eq!(
+            program_and_sub("cargo build 2>&1 | rg foo"),
+            ("cargo", Some("build"))
+        );
+        // Real chain operators still pick the last segment.
+        assert_eq!(
+            program_and_sub("cargo build 2>&1; git status"),
+            ("git", Some("status"))
+        );
+        assert_eq!(
+            program_and_sub("make 2>&1 || cargo check 2>&1"),
+            ("cargo", Some("check"))
+        );
+    }
+
+    #[test]
+    fn stderr_redirected_cargo_dispatches_to_cargo_parser() {
+        // Build a large cargo-shaped output so the size gate is cleared and the
+        // cargo-aware parser (not the generic shape classifier) handles it.
+        let noise = (0..100)
+            .map(|i| format!("   Compiling crate{i} v0.1.0"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let raw = format!(
+            "{noise}\nerror[E0599]: no method named `foo` found\n \
+             --> src/x.rs:10:20\n   |\n10 |     bar.foo();\n   |         ^^^ method not found\n\
+             error: could not compile `x` due to previous error"
+        );
+
+        // The redirection idiom must route to the cargo parser, which keeps the
+        // diagnostic block AND drops the `Compiling` spam — behavior the generic
+        // classifier does not produce.
+        let got = compact_bash("cargo test 2>&1", &raw, 1);
+        assert!(
+            got.content.contains("--> src/x.rs:10:20"),
+            "cargo parser must keep the diagnostic location block"
+        );
+        assert!(
+            !got.content.contains("Compiling crate50"),
+            "cargo parser must drop compile spam (generic classifier would not)"
+        );
+        assert!(got.compacted_bytes < got.raw_bytes);
     }
 }

@@ -35,12 +35,15 @@
 //!
 //! ## Composability with sibling sub-wave 6 modules
 //!
-//! `transcription_tools` and `tts_tool` live on parallel feature
-//! branches (T3-3.6-a / T3-3.6-c) — at port-time **they are not yet
-//! merged**, so this module deliberately does NOT depend on them.
-//! Once those branches land, the host can wire their concrete
-//! implementations into [`TranscriptionBackend`] / [`AudioPlayer`]
-//! without touching this module.
+//! `transcription_tools` and `tts_tool` (originally on parallel
+//! feature branches T3-3.6-a / T3-3.6-c) are now **both merged and
+//! present in this crate** — declared in `lib.rs` (`pub mod
+//! transcription_tools;` / `pub mod tts_tool;`) — and `VoiceModeTool`
+//! is registered into the tool registry at bootstrap. This module
+//! still deliberately does NOT depend on them directly: the host
+//! wires their concrete implementations into [`TranscriptionBackend`]
+//! / [`AudioPlayer`] through the pluggable seams above, keeping this
+//! module decoupled from their internals.
 //!
 //! ## Divergences from the Python original (intentional)
 //!
