@@ -46,7 +46,9 @@ pub mod file_safety;
 // T3-3.2.3: cross-agent file state coordination (port of hermes file_state.py).
 pub mod file_state;
 // T3-3.2.7: 9-strategy fuzzy find-and-replace helper (port of hermes
-// fuzzy_match.py). HELPER module — not yet wired into EditTool.
+// fuzzy_match.py). Wired into EditTool as an opt-in fallback (Rank 41):
+// `EditTool::with_fuzzy_fallback(true)` retries an exact-match failure
+// through this chain; default OFF so the exact path is byte-identical.
 pub mod fuzzy_match;
 // W8b.2.A — FileWriteNotifier trait carried on ToolContext (D.4).
 pub mod file_write_notifier;

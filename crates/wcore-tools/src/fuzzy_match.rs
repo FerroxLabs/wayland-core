@@ -6,10 +6,12 @@
 //! content in whitespace, indentation, Unicode punctuation, or escape
 //! conventions.
 //!
-//! This module is a **HELPER**: it is intentionally NOT wired into the
-//! current `EditTool` at this commit boundary. It exposes a single public
-//! entry point — [`fuzzy_find_and_replace`] — that the Edit tool (and the
-//! script DSL editor) can opt into in a future change.
+//! This module exposes a single public entry point —
+//! [`fuzzy_find_and_replace`] — wired into `EditTool` as an **opt-in**
+//! fallback (Rank 41): `EditTool::with_fuzzy_fallback(true)` retries an
+//! exact-match failure through this chain. The gate defaults OFF, so the
+//! exact-match path stays byte-identical when callers don't opt in. The
+//! script DSL editor can opt into the same helper.
 //!
 //! ## Strategies (tried in order)
 //!

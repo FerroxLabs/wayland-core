@@ -10,10 +10,17 @@ use wcore_types::tool::{JsonSchema, ToolResult};
 use crate::Tool;
 use crate::context::ToolContext;
 use crate::file_cache::{FileStateCache, file_mtime_ms, update_cache_after_write};
+use crate::fuzzy_match::fuzzy_find_and_replace;
 use crate::path_validation::validate_user_path;
 
 pub struct EditTool {
     file_cache: Option<Arc<RwLock<FileStateCache>>>,
+    /// Rank 41: opt-in fuzzy fallback. When `true`, an exact-match failure
+    /// (`old_string` not found, or found multiple times without
+    /// `replace_all`) retries through [`fuzzy_find_and_replace`]'s 9-strategy
+    /// chain. Default `false` so existing behavior and error messages are
+    /// byte-identical on the happy path.
+    fuzzy_fallback: bool,
 }
 
 impl EditTool {
@@ -25,8 +32,73 @@ impl EditTool {
     /// - Post-write cache update (mtime + content refreshed after edit)
     ///
     /// Pass `None` to disable all cache-related guards (legacy behavior).
+    ///
+    /// The fuzzy fallback is OFF by default; opt in via
+    /// [`EditTool::with_fuzzy_fallback`].
     pub fn new(file_cache: Option<Arc<RwLock<FileStateCache>>>) -> Self {
-        Self { file_cache }
+        Self {
+            file_cache,
+            fuzzy_fallback: false,
+        }
+    }
+
+    /// Rank 41: enable (or disable) the fuzzy find-and-replace fallback.
+    ///
+    /// When enabled, an exact-match failure falls back to the 9-strategy
+    /// [`fuzzy_find_and_replace`] chain (whitespace / indentation / Unicode
+    /// drift tolerance). Builder-style so the existing one-arg `new()`
+    /// signature stays back-compatible for every call site.
+    pub fn with_fuzzy_fallback(mut self, enabled: bool) -> Self {
+        self.fuzzy_fallback = enabled;
+        self
+    }
+
+    /// Compute the post-edit content and replacement count, shared by both
+    /// the legacy `execute` and the vfs-aware `execute_with_ctx` paths.
+    ///
+    /// The exact-match behavior and its error messages are preserved
+    /// byte-for-byte on the happy path. Only when the exact attempt FAILS
+    /// (`old_string` not found, or found multiple times without
+    /// `replace_all`) AND `self.fuzzy_fallback` is on do we retry through
+    /// the 9-strategy [`fuzzy_find_and_replace`] chain.
+    ///
+    /// Returns `Ok((new_content, match_count))` on success or `Err(message)`
+    /// carrying the existing error string.
+    fn compute_edit(
+        &self,
+        content: &str,
+        old_string: &str,
+        new_string: &str,
+        replace_all: bool,
+    ) -> Result<(String, usize), String> {
+        let match_count = content.matches(old_string).count();
+
+        // Exact-match happy path — identical behavior to the original.
+        if match_count == 1 || (match_count > 1 && replace_all) {
+            let new_content = if replace_all {
+                content.replace(old_string, new_string)
+            } else {
+                content.replacen(old_string, new_string, 1)
+            };
+            return Ok((new_content, match_count));
+        }
+
+        // Exact match failed. Fall back to fuzzy only when the gate is on.
+        if self.fuzzy_fallback {
+            let res = fuzzy_find_and_replace(content, old_string, new_string, replace_all);
+            if res.error.is_none() && res.match_count > 0 {
+                return Ok((res.content, res.match_count));
+            }
+        }
+
+        // Preserve the original error messages on the exact path.
+        if match_count == 0 {
+            Err("old_string not found in file".to_string())
+        } else {
+            Err(format!(
+                "Multiple matches found ({match_count}). Use replace_all or provide more context."
+            ))
+        }
     }
 }
 
@@ -154,30 +226,16 @@ impl Tool for EditTool {
             }
         };
 
-        let match_count = content.matches(old_string).count();
-
-        if match_count == 0 {
-            return ToolResult {
-                content: "old_string not found in file".to_string(),
-                is_error: true,
+        let (new_content, match_count) =
+            match self.compute_edit(&content, old_string, new_string, replace_all) {
+                Ok(v) => v,
+                Err(msg) => {
+                    return ToolResult {
+                        content: msg,
+                        is_error: true,
+                    };
+                }
             };
-        }
-
-        if match_count > 1 && !replace_all {
-            return ToolResult {
-                content: format!(
-                    "Multiple matches found ({}). Use replace_all or provide more context.",
-                    match_count
-                ),
-                is_error: true,
-            };
-        }
-
-        let new_content = if replace_all {
-            content.replace(old_string, new_string)
-        } else {
-            content.replacen(old_string, new_string, 1)
-        };
 
         if let Err(e) = wcore_config::atomic_write(path, new_content.as_bytes()) {
             return ToolResult {
@@ -278,29 +336,16 @@ impl Tool for EditTool {
         };
         let content = String::from_utf8_lossy(&bytes).into_owned();
 
-        let match_count = content.matches(old_string).count();
-
-        if match_count == 0 {
-            return ToolResult {
-                content: "old_string not found in file".to_string(),
-                is_error: true,
+        let (new_content, match_count) =
+            match self.compute_edit(&content, old_string, new_string, replace_all) {
+                Ok(v) => v,
+                Err(msg) => {
+                    return ToolResult {
+                        content: msg,
+                        is_error: true,
+                    };
+                }
             };
-        }
-
-        if match_count > 1 && !replace_all {
-            return ToolResult {
-                content: format!(
-                    "Multiple matches found ({match_count}). Use replace_all or provide more context."
-                ),
-                is_error: true,
-            };
-        }
-
-        let new_content = if replace_all {
-            content.replace(old_string, new_string)
-        } else {
-            content.replacen(old_string, new_string, 1)
-        };
 
         // W8b.2.A D.4 — mark this write as engine-originated BEFORE the
         // actual write so an upstream FileWatcher can debounce its own
@@ -589,6 +634,71 @@ mod tests {
             result.content
         );
         assert_eq!(std::fs::read_to_string(&file_path).unwrap(), "bye");
+    }
+
+    // -- Rank 41: fuzzy fallback gate --
+
+    #[tokio::test]
+    async fn fuzzy_fallback_on_succeeds_on_whitespace_mismatch() {
+        let dir = tempdir().unwrap();
+        let file_path = dir.path().join("fuzzy_on.txt");
+        // On-disk line has trailing whitespace the LLM-supplied old_string lacks.
+        std::fs::write(&file_path, "def foo():   \n    pass\n").unwrap();
+
+        let tool = EditTool::new(None).with_fuzzy_fallback(true);
+        let input = json!({
+            "file_path": file_path.to_str().unwrap(),
+            // No EXACT match: the on-disk line has trailing spaces before the
+            // newline that this multi-line old_string lacks, so the span isn't
+            // found by substring search — only the whitespace-tolerant fuzzy
+            // path matches.
+            "old_string": "def foo():\n    pass",
+            "new_string": "def bar():\n    pass"
+        });
+
+        let result = tool.execute(input).await;
+
+        assert!(
+            !result.is_error,
+            "fuzzy fallback should have matched: {}",
+            result.content
+        );
+        let content = std::fs::read_to_string(&file_path).unwrap();
+        assert!(
+            content.starts_with("def bar():"),
+            "expected fuzzy replacement, got: {content:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn fuzzy_fallback_off_errors_on_whitespace_mismatch() {
+        let dir = tempdir().unwrap();
+        let file_path = dir.path().join("fuzzy_off.txt");
+        std::fs::write(&file_path, "def foo():   \n    pass\n").unwrap();
+
+        // Default tool: fuzzy fallback OFF.
+        let tool = EditTool::new(None);
+        let input = json!({
+            "file_path": file_path.to_str().unwrap(),
+            // Same real (whitespace) mismatch as the on-test: exact search can't
+            // find it, and with fuzzy off there is no fallback, so it must error.
+            "old_string": "def foo():\n    pass",
+            "new_string": "def bar():\n    pass"
+        });
+
+        let result = tool.execute(input).await;
+
+        assert!(result.is_error, "exact match should fail with fuzzy off");
+        assert!(
+            result.content.contains("not found"),
+            "expected exact-path error message, got: {}",
+            result.content
+        );
+        // File must be unchanged.
+        assert_eq!(
+            std::fs::read_to_string(&file_path).unwrap(),
+            "def foo():   \n    pass\n"
+        );
     }
 
     #[tokio::test]
