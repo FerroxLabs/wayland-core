@@ -130,6 +130,24 @@ impl Channel for TelegramChannel {
             })?;
         self.bot_token = Some(token.clone());
 
+        // Clear any previously-registered webhook before long-polling. A bot
+        // cannot use webhooks and getUpdates at the same time — a stale webhook
+        // makes every getUpdates return 409 forever while we'd still report
+        // Connected. A bad token is fatal (Auth), but any other deleteWebhook
+        // failure is best-effort: surfacing it would block startup on a
+        // transient blip, and getUpdates will retry regardless.
+        if let Err(e) = api::delete_webhook(&self.http, &self.api_base, &token).await {
+            match ChannelError::from(e) {
+                auth @ ChannelError::Auth(_) => return Err(auth),
+                other => tracing::warn!(
+                    target: "wcore_channel_telegram",
+                    channel = %self.name,
+                    error = %other,
+                    "deleteWebhook failed at start; proceeding to long-poll anyway"
+                ),
+            }
+        }
+
         // Emit a Connected state-change so subscribers know the
         // channel went live (the manager will tag and broadcast it).
         self.inbox
@@ -223,18 +241,23 @@ impl Channel for TelegramChannel {
         // documents carry the payload in that case.
         let has_attachments = !msg.attachments.is_empty();
         if !msg.text.is_empty() || !has_attachments {
-            // Under MarkdownV2 every reserved character must be backslash-escaped
-            // or Telegram rejects the send with `400 ... can't parse entities`.
-            // We escape the full text (see `escape_markdown_v2` docs for v1
-            // semantics). HTML / legacy Markdown have different escaping rules and
-            // are left untouched here. `escaped` outlives `body`'s borrow.
+            // Under MarkdownV2 / HTML every reserved character must be escaped or
+            // Telegram rejects the send with `400 ... can't parse entities` and
+            // silently drops the reply. We escape the full text per parse mode
+            // (see the `escape_*` docs for v1 semantics). Legacy `Markdown` has a
+            // different reserved set and is left untouched here. `escaped`
+            // outlives `body`'s borrow.
             let escaped;
             let text: &str = match self.config.parse_mode {
                 ParseMode::MarkdownV2 => {
                     escaped = config::escape_markdown_v2(&msg.text);
                     &escaped
                 }
-                ParseMode::Html | ParseMode::Markdown => &msg.text,
+                ParseMode::Html => {
+                    escaped = config::escape_html(&msg.text);
+                    &escaped
+                }
+                ParseMode::Markdown => &msg.text,
             };
             let body = api::SendMessageBody {
                 chat_id: &msg.conversation_id,
@@ -397,6 +420,19 @@ mod tests {
     }
 
     const TEST_TOKEN: &str = "111:AAAA-test-bot-token";
+
+    /// Register the `deleteWebhook` mock that `start()` now always POSTs before
+    /// spawning the long-poll task. Returns nothing useful — tests just need it
+    /// present so `start()` doesn't fail on an unmatched 501.
+    async fn mock_delete_webhook(server: &mut mockito::Server) {
+        server
+            .mock("POST", format!("/bot{TEST_TOKEN}/deleteWebhook").as_str())
+            .with_status(200)
+            .with_body(r#"{"ok":true,"result":true}"#)
+            .expect_at_least(0)
+            .create_async()
+            .await;
+    }
 
     #[test]
     fn max_message_len_is_telegram_cap() {
@@ -1094,5 +1130,99 @@ parse_mode = "MarkdownV2"
             TelegramChannel::with_api_base("test", cfg(), creds, "http://unused".to_string());
         let err = ch.start().await.expect_err("expected Auth error");
         assert!(matches!(err, ChannelError::Auth(_)), "got {err:?}");
+    }
+
+    // -----------------------------------------------------------------
+    // 16. HTML parse mode escapes `< > &` so a reply containing them does
+    //     not trigger Telegram's `400 ... can't parse entities` (which
+    //     silently drops the reply). Rank 34 regression guard.
+    // -----------------------------------------------------------------
+    #[tokio::test]
+    async fn html_mode_escapes_reserved_entities_in_payload() {
+        let mut server = mockito::Server::new_async().await;
+        mock_delete_webhook(&mut server).await;
+        let mock = server
+            .mock("POST", format!("/bot{TEST_TOKEN}/sendMessage").as_str())
+            .match_body(mockito::Matcher::PartialJsonString(
+                // `a < b & c > d` must reach Telegram HTML-escaped. `&` is
+                // escaped first so it is not double-escaped via `&lt;`/`&gt;`.
+                r#"{"text":"a &lt; b &amp; c &gt; d","parse_mode":"HTML"}"#.to_string(),
+            ))
+            .with_status(200)
+            .with_body(r#"{"ok":true,"result":{"message_id":1,"date":1,"chat":{"id":1}}}"#)
+            .expect(1)
+            .create_async()
+            .await;
+
+        let html_cfg = TelegramConfig {
+            parse_mode: ParseMode::Html,
+            ..cfg()
+        };
+        let creds = InMemoryCreds::with_token("telegram.test.bot_token", TEST_TOKEN);
+        let mut ch = TelegramChannel::with_api_base("test", html_cfg, creds, server.url());
+        ch.start().await.unwrap();
+        ch.send_message(OutgoingMessage::text("1", "a < b & c > d"))
+            .await
+            .unwrap();
+        mock.assert_async().await;
+        ch.stop().await.unwrap();
+    }
+
+    // -----------------------------------------------------------------
+    // 17. start() POSTs deleteWebhook before long-polling so a previously
+    //     registered webhook can't 409 getUpdates forever. Rank 19.
+    // -----------------------------------------------------------------
+    #[tokio::test]
+    async fn start_deletes_webhook_before_long_polling() {
+        let mut server = mockito::Server::new_async().await;
+        let m_del = server
+            .mock("POST", format!("/bot{TEST_TOKEN}/deleteWebhook").as_str())
+            .with_status(200)
+            .with_body(r#"{"ok":true,"result":true}"#)
+            .expect(1)
+            .create_async()
+            .await;
+        let _m_poll = server
+            .mock("GET", format!("/bot{TEST_TOKEN}/getUpdates").as_str())
+            .with_status(200)
+            .with_body(r#"{"ok":true,"result":[]}"#)
+            .expect_at_least(0)
+            .create_async()
+            .await;
+
+        let creds = InMemoryCreds::with_token("telegram.test.bot_token", TEST_TOKEN);
+        let mut ch = TelegramChannel::with_api_base("test", cfg(), creds, server.url());
+        ch.start().await.unwrap();
+        m_del.assert_async().await;
+        ch.stop().await.unwrap();
+    }
+
+    // -----------------------------------------------------------------
+    // 18. A 401 on deleteWebhook (revoked token) is fatal and surfaces as
+    //     Auth — start() must not proceed to spawn the poll task. Rank 19.
+    // -----------------------------------------------------------------
+    #[tokio::test]
+    async fn start_deletes_webhook_401_is_auth() {
+        let mut server = mockito::Server::new_async().await;
+        let _m_del = server
+            .mock("POST", format!("/bot{TEST_TOKEN}/deleteWebhook").as_str())
+            .with_status(401)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"ok":false,"error_code":401,"description":"Unauthorized"}"#)
+            .expect(1)
+            .create_async()
+            .await;
+
+        let creds = InMemoryCreds::with_token("telegram.test.bot_token", TEST_TOKEN);
+        let mut ch = TelegramChannel::with_api_base("test", cfg(), creds, server.url());
+        let err = ch
+            .start()
+            .await
+            .expect_err("expected Auth on 401 deleteWebhook");
+        assert!(matches!(err, ChannelError::Auth(_)), "got {err:?}");
+        assert!(
+            ch.poll_handle.is_none(),
+            "poll task must not spawn on auth failure"
+        );
     }
 }

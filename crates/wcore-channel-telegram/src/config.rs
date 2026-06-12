@@ -94,6 +94,23 @@ pub fn escape_markdown_v2(s: &str) -> String {
     out
 }
 
+/// Escape the three characters Telegram reserves under `HTML` parse mode so
+/// agent text is delivered as literal content rather than triggering a
+/// `400 Bad Request: can't parse entities` (which silently drops the reply).
+///
+/// Per <https://core.telegram.org/bots/api#html-style>, only `<`, `>`, and `&`
+/// must be escaped. `&` is replaced FIRST — otherwise the `&` introduced by
+/// `&lt;` / `&gt;` would be double-escaped into `&amp;lt;`.
+///
+/// As with [`escape_markdown_v2`], this is the safe v1 default: any
+/// model-emitted HTML markup (`<b>`, `<a href>`) renders literally rather than
+/// being interpreted. Never 400 beats occasional formatting fidelity.
+pub fn escape_html(s: &str) -> String {
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

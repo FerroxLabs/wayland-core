@@ -583,6 +583,24 @@ async fn post_once<B: Serialize>(
     })
 }
 
+/// Clear any previously-registered webhook so `getUpdates` long-poll can run.
+///
+/// A bot can use webhooks OR long-poll, never both: if a webhook is still
+/// registered, every `getUpdates` call fails with `409 Conflict` indefinitely
+/// while the channel reports Connected. Calling `deleteWebhook` at `start()`
+/// guarantees the long-poll path is usable. Single attempt; 401/403 surface as
+/// [`TelegramError::Auth`] (handled by [`post_once`]).
+pub(crate) async fn delete_webhook(
+    http: &wcore_egress::EgressClient,
+    api_base: &str,
+    bot_token: &str,
+) -> Result<(), TelegramError> {
+    let url = format!("{api_base}/bot{bot_token}/deleteWebhook");
+    // `drop_pending_updates: false` — we keep any updates Telegram queued
+    // while a webhook was active so the first long-poll drains them.
+    post_once(http, &url, &serde_json::json!({})).await
+}
+
 /// Send a `typing` chat action. Best-effort, single attempt.
 pub(crate) async fn send_chat_action(
     http: &wcore_egress::EgressClient,
