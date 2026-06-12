@@ -9,12 +9,12 @@
 //! context block so the model sees both the user's phrasing and the
 //! referenced material.
 //!
-//! Scope (v1): the **local, deterministic** kinds — `@file`, `@dir`
-//! (via [`at_ref_resolve::resolve`]) and `@diff` (via `git diff` in argv
-//! mode). The kinds that need network egress (`@url`), a captured shell
-//! buffer (`@output`), a session store (`@session`) or a repomap symbol
-//! index (`@symbol`) are left as their literal text — a strict no-op, no
-//! worse than today — and are the documented follow-up. Refusals (a
+//! Scope: the **local, repo-backed** kinds — `@file`, `@dir` (via
+//! [`at_ref_resolve::resolve`]), `@diff` (via `git diff` in argv mode) and
+//! `@symbol` (via the repomap symbol index). The kinds that need network
+//! egress (`@url`), a captured shell buffer (`@output`) or a session store
+//! (`@session`) are left as their literal text — a strict no-op, no worse
+//! than today — and are the documented follow-up. Refusals (a
 //! secret/git-ignored `@file`) are surfaced as an explicit note, never a
 //! silent omission, matching the guarantee in [`at_ref_resolve`].
 //!
@@ -37,6 +37,14 @@ const CONTEXT_HEADER: &str = "─── Referenced context (auto-resolved from @
 /// truncate with an explicit note.
 const MAX_DIFF_BYTES: usize = 100_000;
 
+/// Cap on how many same-named symbol definitions a single `@symbol` inlines
+/// — a common name (e.g. `new`) can appear in hundreds of files.
+const MAX_SYMBOL_MATCHES: usize = 5;
+
+/// Lines of source shown as the preview for one `@symbol` match. The repomap
+/// records only a symbol's start line, so we show a fixed window from there.
+const SYMBOL_SNIPPET_LINES: usize = 16;
+
 /// A reference this module knows how to resolve at send time.
 enum Resolvable {
     /// `@file` / `@dir` — resolved through the filesystem resolver, which
@@ -45,6 +53,9 @@ enum Resolvable {
     Fs(AtRef),
     /// `@diff` (working tree) or `@diff <ref>`.
     Diff(Option<String>),
+    /// `@SymbolName` — a function/type/trait definition, looked up in the
+    /// repomap symbol index.
+    Symbol(String),
 }
 
 /// Resolve the `@`-references in `text` against `root`, returning the
@@ -77,6 +88,11 @@ pub async fn resolve_message(text: &str, root: &Path) -> String {
                 };
                 if seen.insert(label.clone()) {
                     blocks.push(render_diff(base, root).await);
+                }
+            }
+            Resolvable::Symbol(name) => {
+                if seen.insert(format!("@{name}")) {
+                    blocks.push(render_symbol(name, root).await);
                 }
             }
         }
@@ -127,10 +143,12 @@ fn scan(text: &str) -> Vec<Resolvable> {
             }
             "@output" => {}
             _ if !body.is_empty() => {
-                // A path or symbol token. Parse to classify; resolve only the
-                // filesystem kinds, leave a bare `@Symbol` literal (follow-up).
-                if let Ok(at @ (AtRef::File(_) | AtRef::Dir(_))) = AtRef::parse(tok) {
-                    out.push(Resolvable::Fs(at));
+                // A path or symbol token. Parse to classify: filesystem kinds
+                // resolve via the fs resolver, a bare `@Symbol` via the repomap.
+                match AtRef::parse(tok) {
+                    Ok(at @ (AtRef::File(_) | AtRef::Dir(_))) => out.push(Resolvable::Fs(at)),
+                    Ok(AtRef::Symbol(name)) => out.push(Resolvable::Symbol(name)),
+                    _ => {}
                 }
             }
             _ => {}
@@ -243,6 +261,78 @@ async fn render_diff(base: Option<String>, root: &Path) -> String {
     }
 }
 
+/// Render `@SymbolName` by looking the name up in the repomap symbol index.
+/// The whole index build + the per-match source reads are CPU/IO heavy, so
+/// the work runs on a blocking task off the runtime worker.
+async fn render_symbol(name: String, root: &Path) -> String {
+    let root = root.to_path_buf();
+    tokio::task::spawn_blocking(move || render_symbol_blocking(&name, &root))
+        .await
+        .unwrap_or_else(|e| format!("▌ @symbol — repomap task failed: {e}"))
+}
+
+/// Blocking body of [`render_symbol`]: build the index, find every symbol
+/// whose name matches exactly, and show a source preview from each match's
+/// start line. Returns a note (never panics) on any failure.
+fn render_symbol_blocking(name: &str, root: &Path) -> String {
+    let label = format!("@{name}");
+    let map = match wcore_repomap::RepoMap::build(root) {
+        Ok(m) => m,
+        Err(e) => return format!("▌ {label} — repomap index failed: {e}"),
+    };
+
+    let mut blocks: Vec<String> = Vec::new();
+    let mut total = 0usize;
+    for f in &map.files {
+        for s in f.symbols.iter().filter(|s| s.name == name) {
+            total += 1;
+            if blocks.len() >= MAX_SYMBOL_MATCHES {
+                continue;
+            }
+            let full = if f.path.is_absolute() {
+                f.path.clone()
+            } else {
+                root.join(&f.path)
+            };
+            let snippet = read_def_snippet(&full, s.line);
+            blocks.push(format!(
+                "▌ {label} › {}:{} ({:?})\n{snippet}",
+                f.path.display(),
+                s.line,
+                s.kind
+            ));
+        }
+    }
+
+    if blocks.is_empty() {
+        return format!("▌ {label} — no symbol by that name in the repomap index");
+    }
+    let mut out = blocks.join("\n\n");
+    if total > MAX_SYMBOL_MATCHES {
+        out.push_str(&format!(
+            "\n… ({total} matches; showing the first {MAX_SYMBOL_MATCHES})"
+        ));
+    }
+    out
+}
+
+/// Read a fixed window of source starting at a symbol's 1-based start line.
+/// The repomap records only the start line, so this is a preview, not the
+/// exact definition span.
+fn read_def_snippet(path: &Path, start_line: usize) -> String {
+    let content = match std::fs::read_to_string(path) {
+        Ok(c) => c,
+        Err(e) => return format!("(could not read definition: {e})"),
+    };
+    let lines: Vec<&str> = content.lines().collect();
+    if start_line == 0 || start_line > lines.len() {
+        return "(definition line out of range)".to_string();
+    }
+    let start = start_line - 1;
+    let end = start.saturating_add(SYMBOL_SNIPPET_LINES).min(lines.len());
+    lines[start..end].join("\n")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -283,11 +373,36 @@ mod tests {
     #[tokio::test]
     async fn unsupported_kinds_stay_literal_with_no_header() {
         let tmp = TempDir::new().unwrap();
-        // @url / @session / @output / @symbol are the v1 follow-up: they
+        // @url / @session / @output are the remaining follow-up kinds: they
         // resolve to nothing, so the message is unchanged (no empty header).
-        let text = "check @url https://example.com and @output and @MyType";
+        let text = "check @url https://example.com and @output and @session s1";
         let out = resolve_message(text, tmp.path()).await;
         assert_eq!(out, text);
+    }
+
+    #[tokio::test]
+    async fn a_symbol_reference_inlines_its_definition_from_the_repomap() {
+        let tmp = TempDir::new().unwrap();
+        fs::write(
+            tmp.path().join("lib.rs"),
+            "pub fn target_fn() {\n    let x = 1;\n}\n",
+        )
+        .unwrap();
+        let out = resolve_message("explain @target_fn", tmp.path()).await;
+        assert!(out.contains(CONTEXT_HEADER));
+        // The definition preview carries the function body.
+        assert!(
+            out.contains("fn target_fn"),
+            "symbol definition must be inlined: {out}"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_unknown_symbol_is_a_note_not_silent() {
+        let tmp = TempDir::new().unwrap();
+        fs::write(tmp.path().join("lib.rs"), "pub fn other() {}\n").unwrap();
+        let out = resolve_message("find @NoSuchSymbol", tmp.path()).await;
+        assert!(out.contains("no symbol by that name"));
     }
 
     #[tokio::test]
