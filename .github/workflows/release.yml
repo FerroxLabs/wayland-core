@@ -179,12 +179,29 @@ jobs:
     needs:
       - prepare-release
       - build
+    # A job-level block REPLACES the workflow-level `contents: write`, so it must
+    # be restated. `id-token: write` + `attestations: write` let
+    # attest-build-provenance mint keyless Sigstore SLSA provenance for each
+    # release archive (verifiable via `gh attestation verify`). Public repo only.
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
     steps:
       - name: Download build artifacts
         uses: actions/download-artifact@v8
         with:
           path: artifacts
           merge-multiple: true
+
+      - name: Attest build provenance (keyless, Sigstore-backed)
+        uses: actions/attest-build-provenance@v4
+        with:
+          # Attest the distributed archives themselves — that is what consumers
+          # download and what `gh attestation verify <archive>` checks.
+          subject-path: |
+            artifacts/wayland-core-*.tar.gz
+            artifacts/wayland-core-*.zip
 
       - name: Generate checksums
         shell: bash
@@ -416,6 +433,13 @@ jobs:
     needs:
       - prepare-release
       - post-tag-smoke
+    # `id-token: write` lets `npm publish --provenance` mint a keyless,
+    # Sigstore-signed, transparency-logged provenance attestation for each npm
+    # package (no key custody). A job-level block REPLACES the workflow-level
+    # `contents: write`; this job only reads the checked-out tag.
+    permissions:
+      contents: read
+      id-token: write
     steps:
       - uses: actions/checkout@v6
         with:
@@ -496,9 +520,11 @@ jobs:
           echo "Publishing @ferroxlabs/wayland-core@${VERSION} under dist-tag '${NPM_DIST_TAG}'"
           # Platform packages BEFORE the launcher so the launcher's
           # optionalDependencies are resolvable the instant it lands.
-          # (Add `--provenance` here once the job has `permissions: id-token: write`.)
+          # `--provenance` rides the job's `id-token: write` to emit a keyless
+          # Sigstore provenance statement (requires repository.url in each
+          # package.json to case-match the GitHub slug — see npm/generate.mjs).
           for d in npm-dist/wayland-core-*; do
-            ( cd "$d" && npm publish --access public --tag "${NPM_DIST_TAG}" )
+            ( cd "$d" && npm publish --provenance --access public --tag "${NPM_DIST_TAG}" )
           done
-          ( cd npm-dist/wayland-core && npm publish --access public --tag "${NPM_DIST_TAG}" )
+          ( cd npm-dist/wayland-core && npm publish --provenance --access public --tag "${NPM_DIST_TAG}" )
           echo "Published @ferroxlabs/wayland-core@${VERSION} (dist-tag ${NPM_DIST_TAG}) + platform packages"

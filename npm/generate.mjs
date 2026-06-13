@@ -24,9 +24,12 @@ const SCOPE = "@ferroxlabs";
 const LAUNCHER = `${SCOPE}/wayland-core`;
 const LICENSE = "Apache-2.0";
 // Canonical object form so npm doesn't auto-correct (string → object) at publish.
+// The owner casing MUST exactly match the GitHub repo slug (`FerroxLabs`): npm
+// provenance validates `repository.url` against the OIDC source claim and 422s
+// on any case mismatch (npm/cli#8036). The OIDC claim reports the real casing.
 const REPOSITORY = {
   type: "git",
-  url: "git+https://github.com/ferroxlabs/wayland-core.git",
+  url: "git+https://github.com/FerroxLabs/wayland-core.git",
 };
 
 // rust triple → npm os/cpu (node's process.platform/process.arch vocabulary,
