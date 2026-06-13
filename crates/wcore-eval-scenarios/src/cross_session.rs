@@ -189,10 +189,13 @@ mod tests {
         // would see every session save as a phantom user edit.
         let p = ProviderConfig::new(ProviderId::DeepSeek, "deepseek-v4-pro").with_api_key("k");
         let env = CrossSessionEnv::build(&p).expect("build env");
-        let cfg = fs::read_to_string(env.project().join(".wayland-core/config.toml"))
-            .expect("seeded config exists");
+        // The seeded session-dir assertion uses Unix path semantics, so the
+        // config read lives inside the cfg(unix) block — otherwise `cfg` is an
+        // unused binding on Windows (clippy `-D warnings`).
         #[cfg(unix)]
         {
+            let cfg = fs::read_to_string(env.project().join(".wayland-core/config.toml"))
+                .expect("seeded config exists");
             let needle = format!("directory = \"{}", env.home().join("sessions").display());
             assert!(
                 cfg.contains(&needle),
