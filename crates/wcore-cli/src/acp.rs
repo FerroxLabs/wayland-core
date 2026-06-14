@@ -55,6 +55,14 @@ pub struct AcpServeArgs {
     #[arg(long)]
     pub api_key: Option<String>,
 
+    /// Base URL override for the LLM provider (e.g.
+    /// `https://integrate.api.nvidia.com/v1`). Omit to use the
+    /// `[providers.<name>] base_url` from the config file, then the catalog
+    /// default. Required for OpenAI-compatible providers (NVIDIA, local
+    /// servers, etc.) whose key must NOT be presented to `api.openai.com`.
+    #[arg(long)]
+    pub base_url: Option<String>,
+
     /// Auto-approve EVERY tool call (shell, file writes, sub-agents) for API
     /// sessions. Off by default. Turning this on makes the API key
     /// root-equivalent: anyone who can reach the server and present the key
@@ -151,7 +159,7 @@ async fn serve(args: AcpServeArgs) -> anyhow::Result<()> {
     let config = wcore_config::config::Config::resolve(&wcore_config::config::CliArgs {
         provider: args.provider.clone(),
         api_key: args.api_key.clone(),
-        base_url: None,
+        base_url: args.base_url.clone(),
         model: args.model.clone(),
         max_tokens: None,
         max_turns: None,
