@@ -257,3 +257,44 @@ Bedrock / Vertex) is documented in §2 of the same doc and still
 requires real credentials to fill in — that path is gated behind the
 `live-api` Cargo feature on `wcore-agent` and currently exits with a
 runbook pointer.
+
+## Web search backends
+
+The `web` tool (search / extract / crawl) dispatches through a pluggable
+`WebBackend`. The active backend is chosen at startup by
+`build_web_search_backend()`. **Every selected backend falls back to
+DuckDuckGo on failure** (transport error, non-2xx, or no valid results),
+so search never hard-fails — except when explicitly disabled.
+
+**Selection order (first match wins):**
+
+| Priority | Trigger | Backend |
+|----------|---------|---------|
+| override | `WAYLAND_WEB_BACKEND=off` | disabled (no fallback) |
+| override | `WAYLAND_WEB_BACKEND=duckduckgo` | DuckDuckGo only |
+| override | `WAYLAND_WEB_BACKEND=parallel` | Parallel free → DDG |
+| 1 | `FIRECRAWL_API_KEY` (+ optional `FIRECRAWL_API_URL`) | Firecrawl → DDG |
+| 2 | `PARALLEL_API_KEY` | Parallel REST → DDG |
+| 3 | `TAVILY_API_KEY` | Tavily → DDG |
+| 4 | `EXA_API_KEY` | Exa → DDG |
+| 5 | `SEARXNG_URL` | SearXNG → DDG |
+| 6 | `BRAVE_SEARCH_API_KEY` | Brave → DDG |
+| default | *(no keys)* | **Parallel free → DDG** |
+
+`WAYLAND_WEB_BACKEND` is an explicit override that wins over key presence;
+`auto` (or unset / unrecognized) runs the ladder. The order matches the Hermes
+agent's preference (firecrawl → parallel → tavily → exa → searxng → brave → ddg).
+
+**Default (no config):** the engine uses Parallel.ai's free, anonymous Search
+MCP (`https://search.parallel.ai/mcp`) — ranked URLs with query-relevant
+excerpts, no API key. **Privacy:** your search queries are sent to parallel.ai.
+A one-time log notes this on first use; set `WAYLAND_WEB_BACKEND=duckduckgo` to
+keep queries on DuckDuckGo, or `=off` to disable web search entirely.
+
+**SearXNG** is gated by `SEARXNG_URL` (your own or a public instance — the
+engine ships the connector, not the instance). The instance must be **publicly
+resolvable**: requests go through the SSRF-safe client, so a `SEARXNG_URL`
+pointing at `localhost` / a private IP is rejected. (A scoped opt-in for
+private SearXNG instances is a planned follow-up.)
+
+API keys are redacted from logs / model context by `wcore-safety` PII scrubbing.

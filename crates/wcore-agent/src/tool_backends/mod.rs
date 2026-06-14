@@ -43,12 +43,15 @@ use wcore_tools::notion_tool::NotionBackend;
 use wcore_tools::transcription_tools::{AudioFetcher, TranscriptionBackend};
 use wcore_tools::vision_tools::{ImageFetcher, VisionBackend};
 use wcore_tools::web_fetch::FetchBackend;
-use wcore_tools::web_tools::WebBackend;
+use wcore_tools::web_tools::{CrawlRequest, ExtractRequest, WebBackend, WebOutcome};
 
 // -- Sub-modules: one file per backend (v0.9.0 W1 B0 split). --
 pub mod anthropic_vision;
 pub mod brave_web;
+pub mod chained_web;
 pub mod duckduckgo_web;
+pub mod exa_web;
+pub mod firecrawl_web;
 pub mod gemini_vision;
 pub mod http_fetch;
 pub mod http_github;
@@ -57,6 +60,8 @@ pub mod http_linear;
 pub mod http_notion;
 pub mod openai_compat_whisper;
 pub mod openai_vision;
+pub mod parallel_web;
+pub mod searxng_web;
 pub mod shared;
 pub mod tavily_web;
 
@@ -80,7 +85,10 @@ pub mod voice_mode;
 // -- Re-exports so existing consumers keep using `wcore_agent::tool_backends::X`. --
 pub use anthropic_vision::AnthropicVisionBackend;
 pub use brave_web::BraveWebBackend;
+pub use chained_web::ChainedWebBackend;
 pub use duckduckgo_web::DuckDuckGoWebBackend;
+pub use exa_web::ExaWebBackend;
+pub use firecrawl_web::FirecrawlWebBackend;
 pub use gemini_vision::GeminiVisionBackend;
 pub use http_fetch::HttpFetchBackend;
 pub use http_github::HttpGitHubBackend;
@@ -89,6 +97,8 @@ pub use http_linear::HttpLinearBackend;
 pub use http_notion::HttpNotionBackend;
 pub use openai_compat_whisper::OpenAiCompatWhisperBackend;
 pub use openai_vision::OpenAiVisionBackend;
+pub use parallel_web::ParallelWebBackend;
+pub use searxng_web::SearxngWebBackend;
 pub use shared::read_env_key;
 pub use tavily_web::TavilyWebBackend;
 
@@ -166,27 +176,139 @@ pub fn build_fetch_backend() -> Arc<dyn FetchBackend> {
     Arc::new(HttpFetchBackend::new())
 }
 
-/// Pick the best available `WebBackend` based on what the user has
-/// configured in their environment, with sensible free-of-charge
-/// fallbacks.
+/// Explicit web-backend selection via `WAYLAND_WEB_BACKEND`.
+///
+/// This is an EXPLICIT override layered ON TOP of the key-presence priority
+/// ladder below — distinct from the vision/transcription builders, which are
+/// key-presence-only. `auto` (the default / unset / unrecognized) runs the
+/// full ladder.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WebBackendChoice {
+    Auto,
+    Parallel,
+    DuckDuckGo,
+    Off,
+}
+
+fn resolve_backend_choice(raw: Option<&str>) -> WebBackendChoice {
+    match raw.map(|s| s.trim().to_ascii_lowercase()).as_deref() {
+        Some("off") | Some("none") | Some("disabled") => WebBackendChoice::Off,
+        Some("duckduckgo") | Some("ddg") => WebBackendChoice::DuckDuckGo,
+        Some("parallel") => WebBackendChoice::Parallel,
+        _ => WebBackendChoice::Auto,
+    }
+}
+
+/// One-time privacy disclosure for the anonymous Parallel default — emitted
+/// the first time the keyless/`parallel` path is selected, not on every search.
+fn disclose_parallel_once() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        tracing::info!(
+            "web search: using Parallel.ai free search (anonymous). Your search queries are sent \
+             to parallel.ai. Set WAYLAND_WEB_BACKEND=duckduckgo to keep queries on DuckDuckGo, \
+             =off to disable, or set FIRECRAWL_API_KEY / TAVILY_API_KEY / EXA_API_KEY / \
+             SEARXNG_URL / BRAVE_SEARCH_API_KEY for a configured provider."
+        );
+    });
+}
+
+/// Pick the active `WebBackend`. Explicit `WAYLAND_WEB_BACKEND` wins; otherwise
+/// the first configured key (Hermes preference order) is used. Every selected
+/// primary is wrapped so it falls back to DuckDuckGo on failure — DDG is the
+/// floor for all tiers except an explicit `off`.
 ///
 /// Resolution order (first match wins):
-/// 1. `TAVILY_API_KEY` — Tavily (paid; best LLM-tuned results)
-/// 2. `BRAVE_SEARCH_API_KEY` — Brave Search API (free tier 2000/mo)
-/// 3. **Default**: DuckDuckGo HTML scrape (free, no key required)
+/// * `WAYLAND_WEB_BACKEND` = `off` | `duckduckgo` | `parallel` (explicit override)
+/// * `FIRECRAWL_API_KEY` → Firecrawl
+/// * `PARALLEL_API_KEY` → Parallel (keyed REST)
+/// * `TAVILY_API_KEY` → Tavily
+/// * `EXA_API_KEY` → Exa
+/// * `SEARXNG_URL` → SearXNG (public instance; URL-gated)
+/// * `BRAVE_SEARCH_API_KEY` → Brave
+/// * default → Parallel free MCP → DuckDuckGo
 pub fn build_web_search_backend() -> Arc<dyn WebBackend> {
+    fn ddg() -> Arc<dyn WebBackend> {
+        Arc::new(DuckDuckGoWebBackend::new())
+    }
+    fn chain(primary: Arc<dyn WebBackend>) -> Arc<dyn WebBackend> {
+        Arc::new(ChainedWebBackend::new(primary, ddg()))
+    }
+
+    // A. Explicit override always wins.
+    match resolve_backend_choice(std::env::var("WAYLAND_WEB_BACKEND").ok().as_deref()) {
+        WebBackendChoice::Off => {
+            tracing::info!("web search: disabled (WAYLAND_WEB_BACKEND=off)");
+            return Arc::new(DisabledWebBackend);
+        }
+        WebBackendChoice::DuckDuckGo => {
+            tracing::info!("web search: DuckDuckGo (WAYLAND_WEB_BACKEND=duckduckgo)");
+            return ddg();
+        }
+        WebBackendChoice::Parallel => {
+            disclose_parallel_once();
+            return chain(Arc::new(ParallelWebBackend::free()));
+        }
+        WebBackendChoice::Auto => {}
+    }
+
+    // 1..6 — Hermes preference order, first key present wins; each floors on DDG.
+    if let Some(key) = read_env_key("FIRECRAWL_API_KEY") {
+        tracing::info!("web search: Firecrawl (FIRECRAWL_API_KEY found)");
+        return chain(Arc::new(FirecrawlWebBackend::new(key)));
+    }
+    if let Some(key) = read_env_key("PARALLEL_API_KEY") {
+        tracing::info!("web search: Parallel keyed (PARALLEL_API_KEY found)");
+        return chain(Arc::new(ParallelWebBackend::keyed(key)));
+    }
     if let Some(key) = read_env_key("TAVILY_API_KEY") {
-        tracing::info!("web search: using Tavily (TAVILY_API_KEY found)");
-        return Arc::new(TavilyWebBackend::new(key));
+        tracing::info!("web search: Tavily (TAVILY_API_KEY found)");
+        return chain(Arc::new(TavilyWebBackend::new(key)));
+    }
+    if let Some(key) = read_env_key("EXA_API_KEY") {
+        tracing::info!("web search: Exa (EXA_API_KEY found)");
+        return chain(Arc::new(ExaWebBackend::new(key)));
+    }
+    if let Some(url) = read_env_key("SEARXNG_URL") {
+        tracing::info!("web search: SearXNG (SEARXNG_URL found)");
+        return chain(Arc::new(SearxngWebBackend::new(url)));
     }
     if let Some(key) = read_env_key("BRAVE_SEARCH_API_KEY") {
-        tracing::info!("web search: using Brave (BRAVE_SEARCH_API_KEY found)");
-        return Arc::new(BraveWebBackend::new(key));
+        tracing::info!("web search: Brave (BRAVE_SEARCH_API_KEY found)");
+        return chain(Arc::new(BraveWebBackend::new(key)));
     }
-    tracing::info!(
-        "web search: using DuckDuckGo (free default; set TAVILY_API_KEY / BRAVE_SEARCH_API_KEY for premium)"
-    );
-    Arc::new(DuckDuckGoWebBackend::new())
+
+    // 7 — keyless default: Parallel free → DuckDuckGo, with privacy disclosure.
+    disclose_parallel_once();
+    chain(Arc::new(ParallelWebBackend::free()))
+}
+
+/// `WebBackend` returned when `WAYLAND_WEB_BACKEND=off` — every call fails
+/// loudly so the model knows web search is intentionally disabled.
+pub struct DisabledWebBackend;
+
+#[async_trait]
+impl WebBackend for DisabledWebBackend {
+    async fn search(&self, _query: &str, _limit: u32) -> WebOutcome {
+        disabled_err()
+    }
+    async fn extract(&self, _req: ExtractRequest) -> WebOutcome {
+        disabled_err()
+    }
+    async fn crawl(&self, _req: CrawlRequest) -> WebOutcome {
+        disabled_err()
+    }
+    fn backend_id(&self) -> &str {
+        "disabled"
+    }
+}
+
+fn disabled_err() -> WebOutcome {
+    WebOutcome::Err {
+        message: "web search is disabled (WAYLAND_WEB_BACKEND=off). Unset it or set it to \
+                  `auto`/`duckduckgo`/`parallel` to re-enable."
+            .to_string(),
+    }
 }
 
 /// Pick the best available vision backend from env keys.
@@ -366,6 +488,38 @@ mod tests {
     use wcore_tools::notion_tool::{HttpMethod as NoMethod, NotionOutcome, NotionRequest};
     use wcore_tools::url_safety::is_safe_url;
     use wcore_tools::web_fetch::{FetchOutcome, FetchRequest};
+
+    #[test]
+    fn resolve_backend_choice_maps_overrides() {
+        assert_eq!(resolve_backend_choice(Some("off")), WebBackendChoice::Off);
+        assert_eq!(
+            resolve_backend_choice(Some("DISABLED")),
+            WebBackendChoice::Off
+        );
+        assert_eq!(
+            resolve_backend_choice(Some(" DuckDuckGo ")),
+            WebBackendChoice::DuckDuckGo
+        );
+        assert_eq!(
+            resolve_backend_choice(Some("ddg")),
+            WebBackendChoice::DuckDuckGo
+        );
+        assert_eq!(
+            resolve_backend_choice(Some("parallel")),
+            WebBackendChoice::Parallel
+        );
+        assert_eq!(
+            resolve_backend_choice(Some("garbage")),
+            WebBackendChoice::Auto
+        );
+        assert_eq!(resolve_backend_choice(None), WebBackendChoice::Auto);
+    }
+
+    #[tokio::test]
+    async fn disabled_backend_errors_on_every_op() {
+        let b = DisabledWebBackend;
+        assert!(matches!(b.search("q", 5).await, WebOutcome::Err { .. }));
+    }
 
     #[test]
     fn parse_json_or_raw_handles_json() {
