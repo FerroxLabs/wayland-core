@@ -59,6 +59,8 @@ static PATTERNS: &[(&str, &str)] = &[
     ("TAVILY_API_KEY", r"tvly-[A-Za-z0-9]{20,}"),
     // Exa search API key.
     ("EXA_API_KEY", r"exa_[A-Za-z0-9]{20,}"),
+    // Firecrawl API key.
+    ("FIRECRAWL_API_KEY", r"fc-[A-Za-z0-9]{20,}"),
     // BrowserBase live API key.
     ("BROWSERBASE_KEY", r"bb_live_[A-Za-z0-9_\-]{20,}"),
     // Telegram bot tokens: <digits>:<>=30 url-safe chars>, with optional "bot" prefix.
