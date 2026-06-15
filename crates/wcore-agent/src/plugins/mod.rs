@@ -17,6 +17,7 @@ pub mod runner;
 pub mod sig_verifier;
 pub mod skill_delivery;
 pub mod subprocess_adapter; // v0.6.5 Task 2.7 — synthesizer for subprocess plugins
+pub mod var_subst; // Lane D (G3) — ${CLAUDE_PLUGIN_ROOT|DATA}/${CLAUDE_PROJECT_DIR} subst
 pub mod wasm_adapter; // v0.6.5 Task 2.7 — synthesizer for WASM plugins
 
 pub use adapters::plugin_tool_adapter::PluginToolAdapter;

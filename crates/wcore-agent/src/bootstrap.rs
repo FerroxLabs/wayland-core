@@ -368,6 +368,7 @@ impl AgentBootstrap {
                 plugin_name,
                 tool_namespace,
                 handle,
+                manifest_path,
                 ..
             } = record;
             match handle {
@@ -413,7 +414,21 @@ impl AgentBootstrap {
                     // `applied.plugin_mcp_servers`; the existing C1 dispatcher
                     // binds plugin→server and fires the hooks.
                     plugin_outcome.hooks.extend(hooks);
-                    if let Some(spec) = mcp_server {
+                    if let Some(mut spec) = mcp_server {
+                        // Lane D (G3): resolve ${CLAUDE_PLUGIN_ROOT|DATA} and
+                        // ${CLAUDE_PROJECT_DIR} against the install dir / per-
+                        // plugin data dir / workspace BEFORE probing. Marketplace
+                        // plugins reference their own install dir this way; an
+                        // unresolved placeholder would fail the reachability
+                        // probe and the server would be silently skipped.
+                        if let Some(install_dir) = manifest_path.parent() {
+                            let ctx = crate::plugins::var_subst::PluginPathCtx::for_plugin(
+                                install_dir,
+                                &plugin_name,
+                                cwd_path,
+                            );
+                            crate::plugins::var_subst::substitute_spec(&mut spec, &ctx);
+                        }
                         // Reachability gate mirroring the compiled-in IJFW
                         // plugin: a stdio server whose command isn't launchable
                         // is skipped (info-log) so boot never hangs. SSE/HTTP
