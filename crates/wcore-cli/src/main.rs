@@ -1581,7 +1581,16 @@ async fn run_tui_mode(
         bootstrap = bootstrap.resume(session);
     }
 
-    let result = bootstrap.build().await?;
+    // Enter the TUI terminal up front so the engine build — which connects
+    // every configured + installed-plugin MCP server (bounded per-server) on
+    // the boot critical path — runs behind a branded splash instead of a blank
+    // terminal. Single alt-screen entry; the SAME terminal is handed to
+    // `run_attached` below (entering it twice would corrupt the screen). The
+    // RAII guard restores the terminal on any `?`-early-return between here and
+    // `run_attached`.
+    let mcp_count = bootstrap.config().mcp.servers.len();
+    let (mut boot_terminal, boot_guard) = tui::enter()?;
+    let result = tui::splash_while(&mut boot_terminal, mcp_count, bootstrap.build()).await?;
     let mut engine = result.engine;
 
     // L2 / D016 boot parity: fold the `[default] user` display name into the
@@ -1696,7 +1705,9 @@ async fn run_tui_mode(
         restored_turns,
         restored_tool_cards,
     };
-    tui::run(Some(session)).await?;
+    // Hand the splash terminal (already in the alt-screen) + its guard to the
+    // main loop — no second alt-screen entry.
+    tui::run_attached(boot_terminal, boot_guard, Some(session)).await?;
 
     // The TUI has exited — shut MCP servers down cleanly.
     for mgr in &result.mcp_managers {
