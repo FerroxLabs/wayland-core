@@ -18,3 +18,6 @@ workspace-hack = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
+# Available to integration tests so they can prove the generated plugin.toml
+# round-trips through PluginManifest::from_toml_str.
+wcore-plugin-api = { workspace = true }

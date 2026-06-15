@@ -50,9 +50,10 @@ pub struct InstallPlan {
 }
 
 impl InstallPlan {
-    /// Build a plan from a lowered draft. Pure: no IO, no spawn.
+    /// Build a plan from a lowered draft. Pure: no IO, no spawn. Borrows the
+    /// draft so it survives for the commit step.
     pub fn from_draft(
-        draft: CanonicalDraft,
+        draft: &CanonicalDraft,
         marketplace: &str,
         store_path: impl Into<PathBuf>,
     ) -> Self {
@@ -82,11 +83,11 @@ impl InstallPlan {
 
         Self {
             marketplace: marketplace.to_string(),
-            plugin: draft.name,
-            resolved_version: draft.version,
+            plugin: draft.name.clone(),
+            resolved_version: draft.version.clone(),
             adds,
             spawns,
-            ignored: draft.ignored,
+            ignored: draft.ignored.clone(),
             namespace_collisions: Vec::new(),
             grade,
             store_path: store_path.into(),

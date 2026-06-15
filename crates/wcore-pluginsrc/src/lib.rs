@@ -7,6 +7,7 @@
 
 pub mod adapter;
 pub mod claude_code;
+pub mod commit;
 pub mod error;
 pub mod mcp_registry;
 pub mod model;
@@ -16,6 +17,7 @@ pub use adapter::{PluginFormatAdapter, detect_format};
 pub use error::{PluginSrcError, Result};
 // Re-exported so consumers can name/match MCP transports without depending on
 // wcore-plugin-api directly.
+pub use commit::{CommitMeta, Provenance, commit_plan};
 pub use model::{
     AgentAsset, CanonicalDraft, CommandAsset, CompatibilityGrade, IgnoredFeature, McpServerDraft,
     ResolvedVersion, SkillAsset, SourceEntry, SourceKind,

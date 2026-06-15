@@ -18,6 +18,8 @@ pub enum PluginSrcError {
     Json(#[from] serde_json::Error),
     #[error("yaml: {0}")]
     Yaml(#[from] serde_yaml::Error),
+    #[error("toml serialize: {0}")]
+    TomlSer(#[from] toml::ser::Error),
 }
 
 pub type Result<T> = std::result::Result<T, PluginSrcError>;

@@ -26,7 +26,7 @@ fn draft() -> CanonicalDraft {
 
 #[test]
 fn plan_lists_spawns_and_grades_hooks_ignored() {
-    let plan = InstallPlan::from_draft(draft(), "acme", "/store/acme/db/1");
+    let plan = InstallPlan::from_draft(&draft(), "acme", "/store/acme/db/1");
 
     // A plugin that drops hooks can never grade above HooksIgnored.
     assert_eq!(plan.grade, CompatibilityGrade::HooksIgnored);
@@ -55,7 +55,7 @@ fn plan_lists_spawns_and_grades_hooks_ignored() {
 fn dry_run_plan_is_pure_no_store_written() {
     // store_path points at a path that does not exist; from_draft must not
     // create it (the plan is pure — commit happens elsewhere).
-    let plan = InstallPlan::from_draft(draft(), "acme", "/nonexistent/store/x");
+    let plan = InstallPlan::from_draft(&draft(), "acme", "/nonexistent/store/x");
     assert!(!std::path::Path::new("/nonexistent/store/x").exists());
     assert_eq!(plan.plugin, "db");
 }
