@@ -38,9 +38,38 @@ struct McpServer {
     supports_resources: bool,
 }
 
+/// The connect-time outcome for one server, kept on the manager so the cause of
+/// a failure survives boot instead of vanishing into a `tracing::warn`.
+///
+/// Every server name ever *attempted* (config or plugin) gets exactly one entry
+/// in [`McpManager::health`], even the ones that never produced a live
+/// [`McpServer`]. This is the source of truth for the `/doctor` MCP section and
+/// the `McpFailed` protocol event — `servers` stays the source of truth for
+/// *live tools*.
+#[derive(Debug, Clone)]
+pub enum McpServerHealth {
+    /// Connected and serving `tool_count` tools.
+    Ready { tool_count: usize },
+    /// Connect attempt returned a clean error (transport/init/handshake).
+    Failed { reason: String },
+    /// Connect attempt exceeded the per-server budget before erroring.
+    TimedOut { after: Duration },
+}
+
+/// Internal: the three-way result of one bounded connect attempt. Lets the
+/// connect loop record `TimedOut` vs `Failed` distinctly (the boundary between
+/// them is lost once flattened to a single `McpError`).
+enum ConnectOutcome {
+    Ok(Box<McpServer>),
+    Failed(String),
+    TimedOut(Duration),
+}
+
 /// Manages connections to multiple MCP servers
 pub struct McpManager {
     servers: HashMap<String, McpServer>,
+    /// Per-server connect outcome (every attempted server, including failures).
+    health: HashMap<String, McpServerHealth>,
     /// Monotonically increasing request ID counter for all JSON-RPC calls
     next_id: AtomicU64,
 }
@@ -67,53 +96,66 @@ impl McpManager {
         connect_timeout: Duration,
     ) -> Result<Self, McpError> {
         let connect_futures = configs.iter().map(|(name, config)| async move {
-            let result = Self::connect_server_bounded(name, config, connect_timeout).await;
-            (name.clone(), result)
+            let outcome = Self::connect_server_outcome(name, config, connect_timeout).await;
+            (name.clone(), outcome)
         });
 
         let results = futures::future::join_all(connect_futures).await;
 
         let mut servers = HashMap::new();
-        for (name, result) in results {
-            match result {
-                Ok(server) => {
+        let mut health = HashMap::new();
+        for (name, outcome) in results {
+            match outcome {
+                ConnectOutcome::Ok(server) => {
                     eprintln!(
                         "[mcp] Connected to '{}': {} tools, resources={}",
                         name,
                         server.tools.len(),
                         server.supports_resources,
                     );
-                    servers.insert(name, server);
+                    health.insert(
+                        name.clone(),
+                        McpServerHealth::Ready {
+                            tool_count: server.tools.len(),
+                        },
+                    );
+                    servers.insert(name, *server);
                 }
-                Err(e) => {
-                    // Non-fatal: continue with other servers.
-                    tracing::warn!(target: "mcp.manager", server = %name, error = %e, "failed to connect MCP server");
+                ConnectOutcome::Failed(reason) => {
+                    // Non-fatal: continue with other servers, but keep the
+                    // cause so `/doctor` can surface it (was: log-and-forget).
+                    tracing::warn!(target: "mcp.manager", server = %name, error = %reason, "failed to connect MCP server");
+                    health.insert(name, McpServerHealth::Failed { reason });
+                }
+                ConnectOutcome::TimedOut(after) => {
+                    tracing::warn!(target: "mcp.manager", server = %name, ?after, "MCP server connect timed out");
+                    health.insert(name, McpServerHealth::TimedOut { after });
                 }
             }
         }
 
         Ok(Self {
             servers,
+            health,
             next_id: AtomicU64::new(10),
         })
     }
 
-    /// `connect_server` wrapped in a connect-budget timeout (audit C2). On
-    /// elapse, returns a transport error so the caller skips the server
+    /// `connect_server` wrapped in a connect-budget timeout (audit C2),
+    /// returning a three-way [`ConnectOutcome`] so the caller can record
+    /// `TimedOut` vs `Failed` distinctly. On elapse the server is skipped
     /// exactly as if it had failed to connect.
-    async fn connect_server_bounded(
+    async fn connect_server_outcome(
         name: &str,
         config: &McpServerConfig,
         connect_timeout: Duration,
-    ) -> Result<McpServer, McpError> {
+    ) -> ConnectOutcome {
         match timeout(connect_timeout, Self::connect_server(name, config)).await {
-            Ok(result) => result,
+            Ok(Ok(server)) => ConnectOutcome::Ok(Box::new(server)),
+            Ok(Err(e)) => ConnectOutcome::Failed(e.to_string()),
             Err(_) => {
                 warn!(server = %name, "[mcp] connect timed out — skipping server");
-                Err(McpError::Transport(format!(
-                    "connect to '{}' timed out after {:?}",
-                    name, connect_timeout
-                )))
+                ConnectOutcome::TimedOut(connect_timeout)
             }
         }
     }
@@ -129,16 +171,41 @@ impl McpManager {
         name: String,
         config: &McpServerConfig,
     ) -> Result<Vec<String>, McpError> {
-        let server = Self::connect_server_bounded(&name, config, CONNECT_TIMEOUT).await?;
-        let tool_names: Vec<String> = server.tools.iter().map(|t| t.name.clone()).collect();
-        eprintln!(
-            "[mcp] Connected to '{}': {} tools, resources={}",
-            name,
-            server.tools.len(),
-            server.supports_resources,
-        );
-        self.servers.insert(name, server);
-        Ok(tool_names)
+        match Self::connect_server_outcome(&name, config, CONNECT_TIMEOUT).await {
+            ConnectOutcome::Ok(server) => {
+                let tool_names: Vec<String> = server.tools.iter().map(|t| t.name.clone()).collect();
+                eprintln!(
+                    "[mcp] Connected to '{}': {} tools, resources={}",
+                    name,
+                    server.tools.len(),
+                    server.supports_resources,
+                );
+                self.health.insert(
+                    name.clone(),
+                    McpServerHealth::Ready {
+                        tool_count: server.tools.len(),
+                    },
+                );
+                self.servers.insert(name, *server);
+                Ok(tool_names)
+            }
+            ConnectOutcome::Failed(reason) => {
+                self.health.insert(
+                    name,
+                    McpServerHealth::Failed {
+                        reason: reason.clone(),
+                    },
+                );
+                Err(McpError::Transport(reason))
+            }
+            ConnectOutcome::TimedOut(after) => {
+                self.health
+                    .insert(name.clone(), McpServerHealth::TimedOut { after });
+                Err(McpError::Transport(format!(
+                    "connect to '{name}' timed out after {after:?}"
+                )))
+            }
+        }
     }
 
     /// Connect to a single MCP server: create transport, initialize, discover tools
@@ -338,6 +405,13 @@ impl McpManager {
         self.servers.keys().cloned().collect()
     }
 
+    /// Per-server connect outcomes (every *attempted* server, including those
+    /// that failed or timed out and have no live entry in `servers`). The
+    /// source of truth for the `/doctor` MCP section — keyed by server name.
+    pub fn health(&self) -> &HashMap<String, McpServerHealth> {
+        &self.health
+    }
+
     /// Whether this manager hosts a connected server named `name`. No
     /// allocation (unlike `server_names`, which clones every key) — preferred
     /// for hot per-dispatch lookups.
@@ -429,7 +503,9 @@ impl McpManager {
         entries: Vec<(&str, bool, Box<dyn super::transport::McpTransport>)>,
     ) -> Self {
         let mut servers = HashMap::new();
+        let mut health = HashMap::new();
         for (name, supports_resources, transport) in entries {
+            health.insert(name.to_string(), McpServerHealth::Ready { tool_count: 0 });
             servers.insert(
                 name.to_string(),
                 McpServer {
@@ -442,6 +518,7 @@ impl McpManager {
         }
         Self {
             servers,
+            health,
             next_id: AtomicU64::new(10),
         }
     }
@@ -452,7 +529,14 @@ impl McpManager {
     #[cfg(any(test, feature = "test-utils"))]
     pub fn new_for_test_with_tools(entries: Vec<TestServerEntry>) -> Self {
         let mut servers = HashMap::new();
+        let mut health = HashMap::new();
         for (name, supports_resources, transport, tools) in entries {
+            health.insert(
+                name.to_string(),
+                McpServerHealth::Ready {
+                    tool_count: tools.len(),
+                },
+            );
             servers.insert(
                 name.to_string(),
                 McpServer {
@@ -465,6 +549,7 @@ impl McpManager {
         }
         Self {
             servers,
+            health,
             next_id: AtomicU64::new(10),
         }
     }
@@ -895,6 +980,131 @@ mod tests {
         // The healthy server connected; the hung one was skipped.
         let names = manager.server_names();
         assert_eq!(names, vec!["healthy".to_string()], "got {names:?}");
+    }
+
+    // -----------------------------------------------------------------------
+    // Health capture (Slice A1) — every *attempted* server gets exactly one
+    // `health()` entry, with the failure cause preserved (was log-and-forget).
+    // -----------------------------------------------------------------------
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn health_records_timeout_for_a_hung_server() {
+        use wcore_config::config::TransportType;
+
+        let hung = McpServerConfig {
+            transport: TransportType::Stdio,
+            command: Some("sh".into()),
+            args: Some(vec!["-c".into(), "sleep 60".into()]),
+            env: None,
+            url: None,
+            headers: None,
+            deferred: None,
+        };
+        let mut configs = HashMap::new();
+        configs.insert("hung".to_string(), hung);
+
+        let manager =
+            McpManager::connect_all_with_connect_timeout(&configs, Duration::from_millis(300))
+                .await
+                .expect("connect_all ok");
+
+        // No live server, but the timeout is recorded with its cause.
+        assert!(manager.server_names().is_empty());
+        match manager.health().get("hung") {
+            Some(McpServerHealth::TimedOut { after }) => {
+                assert_eq!(*after, Duration::from_millis(300));
+            }
+            other => panic!("expected TimedOut, got {other:?}"),
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn health_records_failure_for_an_unspawnable_server() {
+        use wcore_config::config::TransportType;
+
+        // A command that cannot spawn → clean transport error, not a timeout.
+        let broken = McpServerConfig {
+            transport: TransportType::Stdio,
+            command: Some("/nonexistent/wayland-mcp-binary-xyz".into()),
+            args: None,
+            env: None,
+            url: None,
+            headers: None,
+            deferred: None,
+        };
+        let mut configs = HashMap::new();
+        configs.insert("broken".to_string(), broken);
+
+        let manager =
+            McpManager::connect_all_with_connect_timeout(&configs, Duration::from_secs(5))
+                .await
+                .expect("connect_all ok");
+
+        assert!(manager.server_names().is_empty());
+        match manager.health().get("broken") {
+            Some(McpServerHealth::Failed { reason }) => {
+                assert!(!reason.is_empty(), "failure reason must be preserved");
+            }
+            other => panic!("expected Failed, got {other:?}"),
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn health_records_ready_with_tool_count_and_covers_every_attempt() {
+        use wcore_config::config::TransportType;
+
+        // Healthy fixture advertising exactly one tool.
+        let healthy_script = r#"
+            while IFS= read -r line; do
+              case "$line" in
+                *initialize*) printf '{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2025-03-26","capabilities":{}}}\n' ;;
+                *tools/list*) printf '{"jsonrpc":"2.0","id":2,"result":{"tools":[{"name":"echo","description":"e","inputSchema":{"type":"object"}}]}}\n' ;;
+              esac
+            done
+        "#;
+        let healthy = McpServerConfig {
+            transport: TransportType::Stdio,
+            command: Some("sh".into()),
+            args: Some(vec!["-c".into(), healthy_script.into()]),
+            env: None,
+            url: None,
+            headers: None,
+            deferred: None,
+        };
+        let hung = McpServerConfig {
+            transport: TransportType::Stdio,
+            command: Some("sh".into()),
+            args: Some(vec!["-c".into(), "sleep 60".into()]),
+            env: None,
+            url: None,
+            headers: None,
+            deferred: None,
+        };
+        let mut configs = HashMap::new();
+        configs.insert("healthy".to_string(), healthy);
+        configs.insert("hung".to_string(), hung);
+
+        let manager =
+            McpManager::connect_all_with_connect_timeout(&configs, Duration::from_millis(600))
+                .await
+                .expect("connect_all ok");
+
+        // Every attempted server is in `health` — even the one with no live entry.
+        assert_eq!(manager.health().len(), 2, "both attempts recorded");
+        match manager.health().get("healthy") {
+            Some(McpServerHealth::Ready { tool_count }) => assert_eq!(*tool_count, 1),
+            other => panic!("expected Ready{{1}}, got {other:?}"),
+        }
+        assert!(
+            matches!(
+                manager.health().get("hung"),
+                Some(McpServerHealth::TimedOut { .. })
+            ),
+            "hung attempt must still be recorded"
+        );
     }
 
     // -----------------------------------------------------------------------
