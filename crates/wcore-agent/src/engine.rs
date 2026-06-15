@@ -3611,8 +3611,17 @@ impl AgentEngine {
             if let Some(diagnostic) = self.cache_detector.check_response(cache_stats) {
                 match &diagnostic {
                     CacheDiagnostic::FullMiss { cause } => {
-                        self.output
-                            .emit_error(&format!("Cache full miss: {cause:?}"), false);
+                        // #101: a full cache miss is diagnostic telemetry, NOT a
+                        // user error. A `TtlExpiry` (the prompt cache's TTL lapsed
+                        // because the user paused between turns) is expected, and
+                        // surfacing it as an error mid-chat alarms users over
+                        // normal behaviour. Gate it behind the same
+                        // `cache_diagnostics` debug flag as the partial/healthy
+                        // arms so only operators who opt in ever see it.
+                        if self.compact_config.cache_diagnostics {
+                            self.output
+                                .emit_info(&format!("Cache full miss (cause: {cause:?})"));
+                        }
                     }
                     CacheDiagnostic::PartialMiss { hit_rate, cause } => {
                         if self.compact_config.cache_diagnostics {
