@@ -106,7 +106,19 @@ pub async fn connect_plugin_mcp_servers(
         .map(|s| (s.name.clone(), translate_mcp_server_spec(s)))
         .collect();
 
-    match wcore_mcp::manager::McpManager::connect_all(&configs).await {
+    // Plugin MCP servers are third-party code from installed marketplace
+    // plugins; a broken one must not dominate boot. Give them a tighter
+    // connect budget than config-declared servers (which keep the 30s default
+    // in `connect_all`) so a wedged plugin server caps the boot delay at 8s
+    // instead of 30s. The cause of any skip is still preserved in the
+    // manager's health() map (surfaced in /doctor).
+    const PLUGIN_CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(8);
+    match wcore_mcp::manager::McpManager::connect_all_with_connect_timeout(
+        &configs,
+        PLUGIN_CONNECT_TIMEOUT,
+    )
+    .await
+    {
         Ok(mgr) => {
             let mgr = Arc::new(mgr);
             wcore_mcp::tool_proxy::register_mcp_tools(tool_registry, &mgr, builtin_names, &configs);

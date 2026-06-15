@@ -263,6 +263,21 @@ pub fn context_view_from(config: &wcore_config::config::Config) -> app::ContextV
 /// on a clean quit. The terminal is restored on every exit path — clean
 /// return, error, or panic.
 pub async fn run(session: Option<TuiSession>) -> Result<()> {
+    let (terminal, guard) = enter()?;
+    run_attached(terminal, guard, session).await
+}
+
+/// Enter the full-screen TUI: raw mode, the alt-screen (+ bracketed paste,
+/// focus reporting, mouse capture), the panic-restore hook, and the RAII
+/// terminal guard. Returns the live `Terminal` and its guard so the caller
+/// can render a boot splash on it *before* a session exists, then hand both
+/// to [`run_attached`]. Entering the alt-screen exactly once here is what lets
+/// the splash and the main loop share one terminal — entering it twice
+/// corrupts the screen.
+pub fn enter() -> Result<(
+    Terminal<CrosstermBackend<Stdout>>,
+    terminal_guard::TerminalGuard,
+)> {
     enable_raw_mode().context("failed to enable terminal raw mode")?;
     // Enter the alt-screen and ask the terminal to bracket pastes. With
     // bracketed paste on, a paste arrives as one `Event::Paste` blob the
@@ -298,18 +313,96 @@ pub async fn run(session: Option<TuiSession>) -> Result<()> {
     // every non-panic exit path, including the `?`-bubble below if
     // `Terminal::new` fails. The panic path is covered by
     // `install_panic_hook` above.
-    let _guard = terminal_guard::TerminalGuard::new();
+    let guard = terminal_guard::TerminalGuard::new();
 
     let backend = CrosstermBackend::new(stdout());
-    let mut terminal = Terminal::new(backend).context("failed to initialize terminal")?;
+    let terminal = Terminal::new(backend).context("failed to initialize terminal")?;
+    Ok((terminal, guard))
+}
 
-    // Run the loop, capturing its result so the terminal is always
-    // restored before `run` returns regardless of how the loop ended.
-    // `_guard`'s Drop will also call `restore_terminal()` when this
-    // function returns, which is idempotent (see `restore_terminal`).
+/// Run the render/poll loop on an already-entered terminal (see [`enter`]),
+/// restoring it on every exit path. Split from [`run`] so the boot path can
+/// render a splash on the same terminal while the engine builds.
+pub async fn run_attached(
+    mut terminal: Terminal<CrosstermBackend<Stdout>>,
+    guard: terminal_guard::TerminalGuard,
+    session: Option<TuiSession>,
+) -> Result<()> {
+    // Run the loop, capturing its result so the terminal is always restored
+    // before returning regardless of how the loop ended. `guard`'s Drop also
+    // calls `restore_terminal()` (idempotent).
     let loop_result = run_loop(&mut terminal, session).await;
-    drop(_guard);
+    drop(guard);
     loop_result
+}
+
+/// Render a branded boot splash on `terminal` while `fut` (the engine build)
+/// runs, returning `fut`'s output the instant it completes. The splash is
+/// driven by a `select!` against a frame ticker — `fut` is polled in place
+/// (no `tokio::spawn`, so it needs no `'static`/`Send`), and the spinner
+/// animates at ~11fps so a multi-second MCP connect shows live progress
+/// instead of a blank terminal.
+pub async fn splash_while<F: std::future::Future>(
+    terminal: &mut Terminal<CrosstermBackend<Stdout>>,
+    mcp_count: usize,
+    fut: F,
+) -> F::Output {
+    let theme = theme::Theme::detect();
+    tokio::pin!(fut);
+    let mut ticker = tokio::time::interval(std::time::Duration::from_millis(90));
+    let mut frame: u64 = 0;
+    loop {
+        tokio::select! {
+            out = &mut fut => return out,
+            _ = ticker.tick() => {
+                let _ = terminal.draw(|f| draw_splash(f, &theme, mcp_count, frame));
+                frame = frame.wrapping_add(1);
+            }
+        }
+    }
+}
+
+/// Paint one frame of the boot splash: the wordmark centred over a spinner
+/// line. `mcp_count` is the *config-declared* server count known before the
+/// connect runs (installed-plugin servers are discovered during build, so the
+/// copy stays honest by not claiming a total).
+fn draw_splash(f: &mut ratatui::Frame, theme: &theme::Theme, mcp_count: usize, frame: u64) {
+    use ratatui::layout::{Alignment, Constraint, Layout};
+    use ratatui::style::{Modifier, Style};
+    use ratatui::text::{Line, Span};
+    use ratatui::widgets::{Block, Paragraph};
+
+    let area = f.area();
+    let bg = Style::default().bg(theme.bg);
+    f.render_widget(Block::default().style(bg), area);
+
+    let spinner = widgets::spinner_frame(frame);
+    let sub = if mcp_count > 0 {
+        format!(
+            "{spinner}  starting engine · connecting {mcp_count} MCP server{}…",
+            if mcp_count == 1 { "" } else { "s" }
+        )
+    } else {
+        format!("{spinner}  starting engine · connecting tools & MCP servers…")
+    };
+    let lines = vec![
+        Line::from(Span::styled(
+            "WAYLAND CORE",
+            bg.fg(theme.orange).add_modifier(Modifier::BOLD),
+        )),
+        Line::from(""),
+        Line::from(Span::styled(sub, bg.fg(theme.text_muted))),
+    ];
+    let [_, mid, _] = Layout::vertical([
+        Constraint::Percentage(45),
+        Constraint::Length(3),
+        Constraint::Min(0),
+    ])
+    .areas(area);
+    f.render_widget(
+        Paragraph::new(lines).alignment(Alignment::Center).style(bg),
+        mid,
+    );
 }
 
 /// The async draw/poll loop. Hosts the engine event bridge alongside the
@@ -382,6 +475,34 @@ async fn run_loop(
             if !s.restored_turns.is_empty() {
                 guard.session.turns = s.restored_turns;
                 guard.session.tool_cards = s.restored_tool_cards;
+            }
+            // Seed mcp_status from the boot health snapshot so `/doctor` shows
+            // MCP server health the first time it opens. Boot-time MCP connect
+            // does NOT emit McpReady/McpFailed to the TUI (only the inventory
+            // snapshot carries it); live `/mcp add` events update these entries
+            // afterward through the same map.
+            for info in &s.engine.inventory().mcp_servers {
+                let status = match &info.health {
+                    wcore_mcp::manager::McpServerHealth::Ready { tool_count } => {
+                        app::McpServerStatus::Ready {
+                            tool_count: *tool_count,
+                        }
+                    }
+                    wcore_mcp::manager::McpServerHealth::Failed { reason } => {
+                        app::McpServerStatus::Failed {
+                            reason: reason.clone(),
+                        }
+                    }
+                    wcore_mcp::manager::McpServerHealth::TimedOut { .. } => {
+                        app::McpServerStatus::TimedOut
+                    }
+                    wcore_mcp::manager::McpServerHealth::Skipped { reason } => {
+                        app::McpServerStatus::Skipped {
+                            reason: reason.clone(),
+                        }
+                    }
+                };
+                guard.mcp_status.insert(info.name.clone(), status);
             }
         }
         spawn_bridge(s.events, app.clone(), wake.clone());

@@ -96,6 +96,10 @@ pub struct BootstrapResult {
         tokio::task::JoinHandle<()>,
         tokio::sync::watch::Sender<bool>,
     )>,
+    /// Servers dropped by a pre-connect gate (e.g. an unreachable stdio
+    /// command). They never reached connect_all/health(), so they are
+    /// carried here so the boot snapshot can render a skipped (⊘) row.
+    pub skipped_mcp_servers: Vec<(String, String)>,
 }
 
 /// Wave OL: plugin-provider router. Called after plugin discovery + init
@@ -354,6 +358,11 @@ impl AgentBootstrap {
             )
             .await;
         let mut plugin_runtime_keepalives: Vec<crate::plugins::LoadedRuntimeHandle> = Vec::new();
+        // A4c: declarative stdio MCP servers dropped by the pre-connect
+        // reachability gate are collected here (name, reason) so the boot
+        // snapshot can render a skipped (⊘) row in /mcp and /doctor instead
+        // of dropping them silently into an info-log.
+        let mut skipped_mcp_servers: Vec<(String, String)> = Vec::new();
         for record in plugin_loader.take_on_disk_dispatches() {
             if let Err(reason) = &record.load_result {
                 tracing::warn!(
@@ -428,6 +437,10 @@ impl AgentBootstrap {
                                 "declarative plugin MCP server did not start cleanly — \
                                  skipping registration (hooks stay log-only)"
                             );
+                            skipped_mcp_servers.push((
+                                spec.name.clone(),
+                                "stdio command not launchable — skipped before connect (check the plugin command/PATH)".to_string(),
+                            ));
                         }
                     }
                 }
@@ -2523,6 +2536,7 @@ impl AgentBootstrap {
             cron_runner,
             inbound_subscriber,
             inbound_webhook,
+            skipped_mcp_servers,
         })
     }
 }
@@ -2711,4 +2725,27 @@ fn build_fallback_providers(config: &Config) -> Vec<(String, Arc<dyn LlmProvider
         fallbacks.push((entry.to_string(), provider));
     }
     fallbacks
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashMap;
+    use wcore_plugin_api::{McpServerSpec, McpTransport};
+
+    /// A4c: a declarative stdio MCP server whose command cannot be launched
+    /// must fail the reachability gate. This is the only pre-connect skip on
+    /// this branch, and a `false` here is what feeds the skipped (⊘) row.
+    #[test]
+    fn unreachable_stdio_command_is_not_reachable() {
+        let spec = McpServerSpec {
+            name: "bogus-server".to_string(),
+            transport: McpTransport::Stdio {
+                command: "wayland-nonexistent-mcp-command-xyz".to_string(),
+                args: Vec::new(),
+            },
+            env: HashMap::new(),
+        };
+        assert!(!declarative_mcp_server_is_reachable(&spec));
+    }
 }

@@ -86,7 +86,7 @@ pub async fn collect() -> DoctorReport {
 /// Public entry point invoked from `main.rs` when the `--doctor` flag
 /// is passed. Performs all checks, prints the report, returns the
 /// platform-appropriate exit code.
-pub async fn run() -> ExitCode {
+pub async fn run(probe_mcp: bool) -> ExitCode {
     let report = collect().await;
     let version = &report.version;
     println!("wayland-core doctor v{version}\n");
@@ -134,6 +134,10 @@ pub async fn run() -> ExitCode {
         "\nSummary: {passed} passed, {failed} missing, {warned} warning, \
          {skipped} skipped, {manual} manual"
     );
+
+    // A4b: list declared MCP servers (and optionally probe). Informational
+    // only — never flips the exit code below.
+    print_mcp_section(probe_mcp).await;
 
     if failed > 0 {
         ExitCode::from(1)
@@ -364,6 +368,122 @@ async fn check_ollama() -> CheckResult {
                 "or set OLLAMA_BASE_URL=<endpoint> to point at a remote daemon".into(),
             ],
         },
+    }
+}
+
+// -- A4b: MCP section ---------------------------------------------------
+
+/// A4b: print the CLI-only MCP section AFTER the standard doctor summary.
+///
+/// Bare `--doctor` (`probe == false`) is side-effect-free: it only LISTS
+/// declared MCP servers (config-cascaded + on-disk plugin manifests) by
+/// reading config and files — it never spawns a stdio command or dials a
+/// URL. `--probe-mcp` (`probe == true`) opts into a real connect-test of
+/// the config-declared servers via [`wcore_mcp::manager::McpManager`].
+///
+/// This section is informational and best-effort: every fallible step is
+/// matched and degraded to a printed note, so it can NEVER panic or flip
+/// the doctor exit code (which is computed by the caller from the check
+/// rows, not from anything printed here). It is deliberately kept out of
+/// [`collect`]/[`CheckResult`] so it does NOT duplicate the live MCP
+/// section the TUI `/doctor` surface already renders.
+async fn print_mcp_section(probe: bool) {
+    println!();
+    println!("MCP servers (declared):");
+
+    // --- config-declared servers (cascaded), best-effort load ---
+    match wcore_config::config::Config::resolve(&wcore_config::config::CliArgs::default()) {
+        Ok(cfg) => {
+            if cfg.mcp.servers.is_empty() {
+                println!("  (none declared in config)");
+            } else {
+                let mut names: Vec<&String> = cfg.mcp.servers.keys().collect();
+                names.sort();
+                for name in names {
+                    let s = &cfg.mcp.servers[name];
+                    let transport = format!("{:?}", s.transport).to_lowercase();
+                    let target = s
+                        .command
+                        .clone()
+                        .or_else(|| s.url.clone())
+                        .unwrap_or_default();
+                    println!("  [config] {name:<20} {transport:<14} {target}");
+                }
+            }
+        }
+        Err(e) => println!("  (config not loaded: {e})"),
+    }
+
+    // --- plugin-declared servers (scan on-disk manifests, NO spawn) ---
+    // Plugin install root = dirs::data_dir()/wayland-core/plugins (matches
+    // `plugin::run`'s default install root in plugin/mod.rs).
+    if let Some(base) = dirs::data_dir() {
+        let plugins_root = base.join("wayland-core").join("plugins");
+        let mut found_any = false;
+        if let Ok(entries) = std::fs::read_dir(&plugins_root) {
+            let mut manifests: Vec<std::path::PathBuf> = entries
+                .flatten()
+                .map(|e| e.path().join("plugin.toml"))
+                .filter(|p| p.is_file())
+                .collect();
+            manifests.sort();
+            for manifest_path in manifests {
+                if let Ok(text) = std::fs::read_to_string(&manifest_path)
+                    && let Ok(m) = toml::from_str::<wcore_plugin_api::PluginManifest>(&text)
+                    && let Some(spec) = &m.mcp_server
+                {
+                    if !found_any {
+                        println!("MCP servers (plugin-declared):");
+                        found_any = true;
+                    }
+                    let transport = format!("{:?}", spec.transport).to_lowercase();
+                    let plugin = manifest_path
+                        .parent()
+                        .and_then(|p| p.file_name())
+                        .and_then(|s| s.to_str())
+                        .unwrap_or("?")
+                        .to_string();
+                    println!("  [plugin:{plugin}] {:<20} {transport}", spec.name);
+                }
+            }
+        }
+    }
+
+    // --- optional probe ---
+    if probe {
+        println!();
+        println!("Probing config-declared MCP servers (connect-test)...");
+        match wcore_config::config::Config::resolve(&wcore_config::config::CliArgs::default()) {
+            Ok(cfg) if !cfg.mcp.servers.is_empty() => {
+                match wcore_mcp::manager::McpManager::connect_all(&cfg.mcp.servers).await {
+                    Ok(mgr) => {
+                        let mut names: Vec<&String> = mgr.health().keys().collect();
+                        names.sort();
+                        for name in names {
+                            use wcore_mcp::manager::McpServerHealth::*;
+                            let line = match &mgr.health()[name] {
+                                Ready { tool_count } => {
+                                    format!("  ● {name:<20} ready ({tool_count} tools)")
+                                }
+                                Failed { reason } => format!("  ✕ {name:<20} failed: {reason}"),
+                                TimedOut { after } => {
+                                    format!("  ⏱ {name:<20} timed out after {after:?}")
+                                }
+                                Skipped { reason } => format!("  ⊘ {name:<20} skipped: {reason}"),
+                            };
+                            println!("{line}");
+                        }
+                    }
+                    Err(e) => println!("  (probe failed: {e})"),
+                }
+            }
+            Ok(_) => println!("  (no config-declared servers to probe)"),
+            Err(e) => println!("  (config not loaded: {e})"),
+        }
+        println!("  Note: plugin-declared servers are probed at session boot, not here.");
+    } else {
+        println!();
+        println!("Run with --probe-mcp to connect-test the config-declared servers.");
     }
 }
 

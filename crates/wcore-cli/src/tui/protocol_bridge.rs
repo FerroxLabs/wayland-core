@@ -714,6 +714,29 @@ fn apply_event_inner(app: &mut App, event: ProtocolEvent) {
                 }
             });
         }
+        ProtocolEvent::McpFailed { name, reason } => {
+            // Companion to McpReady: record the failure (with its cause) on
+            // `mcp_status` so `/doctor` can surface *why* the server's tools
+            // never appeared, plus a transient toast. Not a transcript turn —
+            // a broken server is a status concern, not conversation.
+            let toast_msg = format!("{name} failed · {reason}");
+            let now = Instant::now();
+            app.set_transient(|prev| {
+                let mut mcp_status = prev.mcp_status.clone();
+                mcp_status.insert(
+                    name.clone(),
+                    crate::tui::app::McpServerStatus::Failed {
+                        reason: reason.clone(),
+                    },
+                );
+                crate::tui::state::TransientSlice {
+                    toast: Some(toast_msg.clone()),
+                    toast_at: Some(now),
+                    mcp_status,
+                    ..prev.clone()
+                }
+            });
+        }
         ProtocolEvent::BudgetExceeded {
             reason,
             observed,
@@ -2890,7 +2913,41 @@ mod tests {
             crate::tui::app::McpServerStatus::Ready { tool_count } => {
                 assert_eq!(*tool_count, 2);
             }
+            other => panic!("expected Ready, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn mcp_failed_records_the_cause_on_status_without_a_transcript_turn() {
+        // A3: a failed MCP server must surface its cause on `mcp_status`
+        // (so `/doctor` can show *why* the tools never appeared) and a
+        // transient toast — never a transcript turn.
+        let mut app = App::new();
+        apply_event(
+            &mut app,
+            ProtocolEvent::McpFailed {
+                name: "stripe".into(),
+                reason: "spawn node: ENOENT".into(),
+            },
+        );
+        assert_eq!(
+            app.session.turns.len(),
+            0,
+            "McpFailed must not create a transcript turn"
+        );
+        match app
+            .mcp_status
+            .get("stripe")
+            .expect("app.mcp_status should record the failed server")
+        {
+            crate::tui::app::McpServerStatus::Failed { reason } => {
+                assert_eq!(reason, "spawn node: ENOENT");
+            }
+            other => panic!("expected Failed, got {other:?}"),
+        }
+        let toast = app.toast.as_ref().expect("McpFailed should set a toast");
+        assert!(toast.contains("stripe"), "toast names the server: {toast}");
+        assert!(toast.contains("failed"), "toast marks the failure: {toast}");
     }
 
     #[test]

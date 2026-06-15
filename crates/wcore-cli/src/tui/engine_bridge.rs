@@ -540,12 +540,24 @@ pub struct SkillInfo {
     pub user_invocable: bool,
 }
 
-/// One configured MCP server in the [`EngineInventory`] snapshot.
+/// One *attempted* MCP server in the [`EngineInventory`] snapshot — including
+/// servers that failed or timed out at connect (they never become live but the
+/// user still needs to see *why* in `/mcp` and `/doctor`).
 #[derive(Debug, Clone)]
 pub struct McpServerInfo {
     pub name: String,
-    /// Live transport state captured at snapshot time.
-    pub alive: bool,
+    /// Connect outcome captured at snapshot time (Ready / Failed / TimedOut).
+    pub health: wcore_mcp::manager::McpServerHealth,
+}
+
+impl McpServerInfo {
+    /// Whether the server is connected and serving tools.
+    pub fn is_connected(&self) -> bool {
+        matches!(
+            self.health,
+            wcore_mcp::manager::McpServerHealth::Ready { .. }
+        )
+    }
 }
 
 /// One registered hook in the [`EngineInventory`] snapshot.
@@ -1498,17 +1510,52 @@ impl TuiEngine {
             let manager = match wcore_mcp::manager::McpManager::connect_all(&single).await {
                 Ok(mgr) => std::sync::Arc::new(mgr),
                 Err(e) => {
+                    let reason = format!("{e}");
+                    let _ = tx.send(ProtocolEvent::McpFailed {
+                        name: name.clone(),
+                        reason: reason.clone(),
+                    });
                     let _ = tx.send(ProtocolEvent::Error {
                         msg_id: None,
                         error: ErrorInfo {
                             code: "mcp_add".to_string(),
-                            message: format!("Couldn't connect MCP server '{name}': {e}"),
+                            message: format!("Couldn't connect MCP server '{name}': {reason}"),
                             retryable: false,
                         },
                     });
                     return;
                 }
             };
+            // `connect_all` is non-fatal per-server: a server that failed or
+            // timed out still returns `Ok` with the cause recorded in
+            // `health()`, not `Err`. Surface that honestly instead of falling
+            // through and reporting "connected, 0 tools".
+            use wcore_mcp::manager::McpServerHealth;
+            match manager.health().get(&name) {
+                Some(McpServerHealth::Ready { .. }) => {}
+                other => {
+                    let reason = match other {
+                        Some(McpServerHealth::Failed { reason }) => reason.clone(),
+                        Some(McpServerHealth::TimedOut { after }) => {
+                            format!("connect timed out after {after:?}")
+                        }
+                        _ => "server did not connect".to_string(),
+                    };
+                    let _ = tx.send(ProtocolEvent::McpFailed {
+                        name: name.clone(),
+                        reason: reason.clone(),
+                    });
+                    let _ = tx.send(ProtocolEvent::Error {
+                        msg_id: None,
+                        error: ErrorInfo {
+                            code: "mcp_add".to_string(),
+                            message: format!("MCP server '{name}' failed to connect: {reason}"),
+                            retryable: false,
+                        },
+                    });
+                    return;
+                }
+            }
             // Register the freshly discovered tools onto the LIVE registry.
             // `registry_mut` only hands out a `&mut` when the registry Arc is
             // uncontended — a turn in flight holds a clone, so we report busy
@@ -1525,11 +1572,21 @@ impl TuiEngine {
                         &builtin_names,
                         config.deferred.unwrap_or(true),
                     );
-                    let tool_count = manager
+                    let tool_names: Vec<String> = manager
                         .all_tools()
                         .iter()
                         .filter(|(sn, _)| *sn == name.as_str())
-                        .count();
+                        .map(|(_, t)| t.name.clone())
+                        .collect();
+                    let tool_count = tool_names.len();
+                    // Update the TUI's live mcp_status (so /doctor reflects the
+                    // add) — the bridge's McpReady arm records Ready{tool_count}.
+                    // Previously this path emitted only Info, leaving mcp_status
+                    // stale after a live `/mcp add`.
+                    let _ = tx.send(ProtocolEvent::McpReady {
+                        name: name.clone(),
+                        tools: tool_names,
+                    });
                     format!(
                         "MCP server '{name}' connected. {tool_count} tool(s) available now. \
                          Type /mcp to see all servers."

@@ -90,6 +90,30 @@ fn doctor_exit_code_is_deterministic() {
 }
 
 #[test]
+fn doctor_prints_mcp_section_and_does_not_probe_by_default() {
+    // A4b: bare `--doctor` must render the CLI-only MCP section AND, since
+    // it is side-effect-free by default, print the `--probe-mcp` hint
+    // instead of connect-testing anything. The presence of the hint (and
+    // the absence of the "Probing ..." banner) proves the default path did
+    // NOT spawn any stdio command or dial any URL.
+    let out = run_doctor();
+    let stdout = String::from_utf8_lossy(&out.stdout);
+
+    assert!(
+        stdout.contains("MCP servers (declared):"),
+        "stdout missing MCP section header:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("Run with --probe-mcp"),
+        "bare --doctor must print the probe hint (proving it did not probe):\n{stdout}"
+    );
+    assert!(
+        !stdout.contains("Probing config-declared MCP servers"),
+        "bare --doctor must NOT connect-test (no probe banner expected):\n{stdout}"
+    );
+}
+
+#[test]
 fn doctor_marks_macos_accessibility_correctly_for_platform() {
     // On macOS the row is rendered as MANUAL; on every other platform
     // it is SKIPPED. Either way the label must appear.

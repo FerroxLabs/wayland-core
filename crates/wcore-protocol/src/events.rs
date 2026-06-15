@@ -91,6 +91,15 @@ pub enum ProtocolEvent {
         name: String,
         tools: Vec<String>,
     },
+    /// An MCP server failed (or timed out) at connect. The companion to
+    /// [`McpReady`]: it carries the preserved failure cause so a host /
+    /// the TUI `/doctor` view can tell the user *why* a server's tools never
+    /// appeared, instead of the server silently vanishing. Additive — hosts
+    /// that don't recognise it drop it per the W0 decoder contract.
+    McpFailed {
+        name: String,
+        reason: String,
+    },
     /// W1: F9 structured trace for one turn. Gated by the W0-reserved
     /// `capabilities.structured_traces` flag — the engine only emits this
     /// variant when the corresponding ProtocolSink builder was configured

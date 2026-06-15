@@ -262,6 +262,24 @@ fn wedged_mcp_server_does_not_hang_boot() {
     let start = Instant::now();
     let h = PtyHarness::spawn(home.path(), &[]);
 
+    // (a0) BOOT SPLASH (B1) — the user must see branded "connecting MCP
+    // servers…" progress, NOT a blank terminal, while the wedged server burns
+    // its 30s connect budget. The splash paints within a couple seconds (long
+    // before the connect resolves); pre-B1 the screen was blank until
+    // `build()` returned. This is the regression guard for the blank-screen
+    // failure mode the user reported.
+    let splashed = h.wait_for(
+        |s| s.contains("starting engine") || s.contains("connecting"),
+        Duration::from_secs(6),
+        "boot splash to paint while the wedged MCP server is still connecting",
+    );
+    assert!(
+        splashed,
+        "boot splash did NOT paint within 6s — blank-screen regression.\n\
+         --- last screen ---\n{}\n--- end ---",
+        h.screen_text()
+    );
+
     // (a) BOOT TERMINATES — the TUI must render the WAYLAND wordmark
     // within 35s despite the wedged server. The bound is chosen as
     // 30s (CONNECT_TIMEOUT) + 5s slack; any longer and a regression

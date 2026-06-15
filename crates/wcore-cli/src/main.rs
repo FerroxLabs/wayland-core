@@ -317,6 +317,12 @@ struct Cli {
     #[arg(long)]
     doctor: bool,
 
+    /// A4b: when running --doctor, actually CONNECT-TEST each declared MCP
+    /// server (spawns stdio commands / dials URLs) instead of only listing
+    /// them. Off by default so bare --doctor stays side-effect-free.
+    #[arg(long, requires = "doctor")]
+    probe_mcp: bool,
+
     /// W4 F19: run the skills audit. Writes JSON to
     /// .wayland-core/skills-audit.json and renders Markdown to stdout.
     #[arg(long)]
@@ -939,7 +945,7 @@ async fn run() -> anyhow::Result<ExitCode> {
     // mode so a misconfigured environment can be diagnosed without
     // touching config files, OAuth, or the engine bootstrap.
     if cli.doctor {
-        return Ok(doctor::run().await);
+        return Ok(doctor::run(cli.probe_mcp).await);
     }
 
     // Handle --config-path
@@ -1581,7 +1587,16 @@ async fn run_tui_mode(
         bootstrap = bootstrap.resume(session);
     }
 
-    let result = bootstrap.build().await?;
+    // Enter the TUI terminal up front so the engine build — which connects
+    // every configured + installed-plugin MCP server (bounded per-server) on
+    // the boot critical path — runs behind a branded splash instead of a blank
+    // terminal. Single alt-screen entry; the SAME terminal is handed to
+    // `run_attached` below (entering it twice would corrupt the screen). The
+    // RAII guard restores the terminal on any `?`-early-return between here and
+    // `run_attached`.
+    let mcp_count = bootstrap.config().mcp.servers.len();
+    let (mut boot_terminal, boot_guard) = tui::enter()?;
+    let result = tui::splash_while(&mut boot_terminal, mcp_count, bootstrap.build()).await?;
     let mut engine = result.engine;
 
     // L2 / D016 boot parity: fold the `[default] user` display name into the
@@ -1658,12 +1673,27 @@ async fn run_tui_mode(
                 .collect()
         })
         .unwrap_or_default();
+    // Snapshot EVERY attempted server (from `health()`), not just the live ones
+    // (`server_names()`): a server that failed or timed out at connect has no
+    // live entry but the user still needs to see why in `/mcp` and `/doctor`.
     let mut mcp_snapshot: Vec<tui::McpServerInfo> = Vec::new();
     for mgr in &result.mcp_managers {
-        for name in mgr.server_names() {
-            let alive = mgr.server_is_alive(&name);
-            mcp_snapshot.push(tui::McpServerInfo { name, alive });
+        for (name, health) in mgr.health() {
+            mcp_snapshot.push(tui::McpServerInfo {
+                name: name.clone(),
+                health: health.clone(),
+            });
         }
+    }
+    // A4c: servers dropped by the pre-connect reachability gate never reach a
+    // manager's `health()`, so surface them here as a distinct skipped (⊘) row.
+    for (name, reason) in &result.skipped_mcp_servers {
+        mcp_snapshot.push(tui::McpServerInfo {
+            name: name.clone(),
+            health: wcore_mcp::manager::McpServerHealth::Skipped {
+                reason: reason.clone(),
+            },
+        });
     }
 
     // The `TuiEngine` controller keeps the last `tx` clone so it can
@@ -1691,7 +1721,9 @@ async fn run_tui_mode(
         restored_turns,
         restored_tool_cards,
     };
-    tui::run(Some(session)).await?;
+    // Hand the splash terminal (already in the alt-screen) + its guard to the
+    // main loop — no second alt-screen entry.
+    tui::run_attached(boot_terminal, boot_guard, Some(session)).await?;
 
     // The TUI has exited — shut MCP servers down cleanly.
     for mgr in &result.mcp_managers {
@@ -2432,7 +2464,16 @@ async fn run_json_stream_mode(
                     }
                     Err(e) => {
                         eprintln!("[mcp] connect_one failed for '{name}': {e:#}");
-                        output.emit_error(&format!("AddMcpServer '{name}' failed: {e:#}"), false);
+                        let reason = format!("{e:#}");
+                        output
+                            .emit_error(&format!("AddMcpServer '{name}' failed: {reason}"), false);
+                        // Companion to the McpReady success emit: tell the host /
+                        // TUI *why* this server's tools never appeared so /doctor
+                        // can surface it, instead of the failure only hitting stderr.
+                        let _ = writer.emit(&ProtocolEvent::McpFailed {
+                            name: name.clone(),
+                            reason,
+                        });
                     }
                 }
             }
