@@ -556,6 +556,162 @@ mod w8_cache_tier_producer_tests {
     }
 }
 
+/// Runaway-loop circuit breaker, local to a single `run()` call.
+///
+/// Tracks the signature of the most recent (tool name + arguments + outcome)
+/// tuple and the length of the current back-to-back repeat streak. The run is
+/// terminated when the SAME signature repeats `threshold` times *consecutively*
+/// — i.e. the agent is stuck retrying one call to no effect (a network-blocked
+/// command, re-reading an unchanged file, …).
+///
+/// Detection is consecutive (not windowed) on purpose: ANY intervening call
+/// with a different signature — a different tool, different args, or the same
+/// call producing a *different* result (e.g. `cargo test` after an edit) —
+/// resets the streak. This makes legitimate *varied* repetition immune: an
+/// agent productively cycling several tools (the pattern skill-drafting
+/// recognises, e.g. `Grep, Glob, Grep, Glob, Grep`) never builds a long
+/// back-to-back run of one signature, so it is never cut.
+///
+/// This is the backstop the `max_turns = None` design decision (see the run
+/// loop) leaves open for *no-progress loops*: the budget cap and context
+/// ceiling bound per-turn size and total spend, not the loop itself. The
+/// threshold is read once per run from `WAYLAND_MAX_REPEATED_TOOL_CALLS`
+/// (default 10); `0` disables the breaker.
+///
+/// The default is deliberately conservative. The cheap, common loop — re-reading
+/// an unchanged file — is already neutralised by Read's content dedup (it
+/// returns a tiny stub), so the breaker's real job is the *expensive*
+/// command-retry loop (a network-blocked `npm install` retried over and over),
+/// which retries far more than 10 times before a human would notice. Ten
+/// identical, no-progress calls in a row is an unambiguous stuck loop with
+/// little false-positive surface.
+struct LoopGuard {
+    last_sig: Option<u64>,
+    count: u32,
+    threshold: u32,
+}
+
+impl LoopGuard {
+    fn from_env() -> Self {
+        let threshold = std::env::var("WAYLAND_MAX_REPEATED_TOOL_CALLS")
+            .ok()
+            .and_then(|v| v.trim().parse::<u32>().ok())
+            .unwrap_or(10);
+        Self {
+            last_sig: None,
+            count: 0,
+            threshold,
+        }
+    }
+
+    /// Record one tool call+outcome signature. Returns `Some(count)` once the
+    /// same signature has repeated `>= threshold` times in a row. Any different
+    /// signature resets the streak to 1.
+    fn observe(&mut self, sig: u64) -> Option<u32> {
+        if self.threshold == 0 {
+            return None;
+        }
+        if self.last_sig == Some(sig) {
+            self.count = self.count.saturating_add(1);
+        } else {
+            self.last_sig = Some(sig);
+            self.count = 1;
+        }
+        (self.count >= self.threshold).then_some(self.count)
+    }
+}
+
+/// Signature of a tool call + its outcome for [`LoopGuard`]:
+/// hash of `(tool name, canonical args, is_error, content prefix)`. A repeated
+/// call that yields a different result hashes differently; only identical
+/// call→identical result repetition accumulates.
+fn loop_call_signature(
+    tool_name: &str,
+    args: &serde_json::Value,
+    is_error: bool,
+    content: &str,
+) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    tool_name.hash(&mut h);
+    serde_json::to_string(args).unwrap_or_default().hash(&mut h);
+    is_error.hash(&mut h);
+    // Hash only a prefix so a large tool output is not fully re-hashed each
+    // turn; a byte slice avoids any UTF-8 char-boundary panic.
+    let bytes = content.as_bytes();
+    bytes[..bytes.len().min(512)].hash(&mut h);
+    h.finish()
+}
+
+#[cfg(test)]
+mod loop_guard_tests {
+    use super::{LoopGuard, loop_call_signature};
+    use serde_json::json;
+
+    fn guard(threshold: u32) -> LoopGuard {
+        LoopGuard {
+            last_sig: None,
+            count: 0,
+            threshold,
+        }
+    }
+
+    #[test]
+    fn trips_on_consecutive_identical_calls() {
+        let mut g = guard(3);
+        assert_eq!(g.observe(1), None);
+        assert_eq!(g.observe(1), None);
+        assert_eq!(
+            g.observe(1),
+            Some(3),
+            "3rd consecutive identical call must trip"
+        );
+    }
+
+    #[test]
+    fn interleaved_calls_reset_the_streak() {
+        // A,B,A,B,A — an alternating/varied sequence (the skill-drafting
+        // pattern) must NEVER trip: any different signature resets the streak.
+        let mut g = guard(3);
+        for s in [10u64, 20, 10, 20, 10, 20, 10] {
+            assert_eq!(g.observe(s), None, "varied sequence must not trip");
+        }
+    }
+
+    #[test]
+    fn a_different_result_breaks_the_streak() {
+        // Same call, but the result changes on the 3rd (progress) — streak
+        // resets, so the following repeats start over and do not trip early.
+        let mut g = guard(3);
+        assert_eq!(g.observe(1), None); // A
+        assert_eq!(g.observe(1), None); // A (streak 2)
+        assert_eq!(g.observe(2), None); // different result -> reset to 1
+        assert_eq!(g.observe(1), None); // back to A, streak 1
+        assert_eq!(g.observe(1), None); // streak 2 — still below threshold
+    }
+
+    #[test]
+    fn threshold_zero_disables_the_breaker() {
+        let mut g = guard(0);
+        for _ in 0..100 {
+            assert_eq!(g.observe(7), None);
+        }
+    }
+
+    #[test]
+    fn signature_stable_for_identical_calls_varies_on_change() {
+        let a = loop_call_signature("Read", &json!({"file_path": "/x"}), true, "err");
+        let b = loop_call_signature("Read", &json!({"file_path": "/x"}), true, "err");
+        assert_eq!(a, b, "identical call+outcome must hash equal");
+        // Changed result (progress) -> different signature -> streak resets.
+        let changed_result = loop_call_signature("Read", &json!({"file_path": "/x"}), false, "ok");
+        assert_ne!(a, changed_result);
+        // Different args -> different signature.
+        let changed_args = loop_call_signature("Read", &json!({"file_path": "/y"}), true, "err");
+        assert_ne!(a, changed_args);
+    }
+}
+
 pub struct AgentEngine {
     provider: Arc<dyn LlmProvider>,
     /// Wave OR: the tool registry is Arc-shared so per-turn
@@ -3075,6 +3231,10 @@ impl AgentEngine {
             return Ok(result);
         }
 
+        // Runaway-loop breaker (per-run): the engine-side backstop for the
+        // no-progress loops that `max_turns = None` leaves unguarded. Terminates
+        // the run if the same tool call keeps producing the same result.
+        let mut loop_guard = LoopGuard::from_env();
         let mut turn: usize = 0;
         loop {
             // AUDIT A2 — cooperative cancellation check between turns.
@@ -4080,6 +4240,9 @@ impl AgentEngine {
             // below — before read-once dedup.
             let mut bash_compactions: std::collections::HashMap<String, String> =
                 std::collections::HashMap::new();
+            // Runaway-loop breaker: set to the offending (tool, repeat-count) the
+            // first time a call+outcome signature trips the window threshold.
+            let mut loop_break: Option<(String, u32)> = None;
             // Display tool results AND populate the matching ToolCallTrace.
             for result in &outcome.results {
                 if let ContentBlock::ToolResult {
@@ -4099,6 +4262,28 @@ impl AgentEngine {
                             None
                         })
                         .unwrap_or("unknown");
+
+                    // Runaway-loop breaker: signature this call+outcome and trip
+                    // if the same (tool, args, result) has repeated consecutively
+                    // past the threshold. Checked once; the first trip wins.
+                    if loop_break.is_none() {
+                        let tool_input = tool_calls.iter().find_map(|c| match c {
+                            ContentBlock::ToolUse { id, input, .. } if id == tool_use_id => {
+                                Some(input)
+                            }
+                            _ => None,
+                        });
+                        let sig = loop_call_signature(
+                            tool_name,
+                            tool_input.unwrap_or(&serde_json::Value::Null),
+                            *is_error,
+                            content,
+                        );
+                        if let Some(count) = loop_guard.observe(sig) {
+                            loop_break = Some((tool_name.to_string(), count));
+                        }
+                    }
+
                     self.output.emit_tool_result(tool_name, *is_error, content);
 
                     // B7 writer-side wiring: bump the per-tool call counter in
@@ -4180,6 +4365,27 @@ impl AgentEngine {
                         }
                     }
                 }
+            }
+
+            // Runaway-loop breaker tripped: the agent is repeating the same tool
+            // call to no effect. Stop the run cleanly with guidance instead of
+            // looping and burning tokens. Mirrors the budget-cap termination
+            // path: repair the assistant's now-unanswered tool_use blocks, emit a
+            // user-visible error, and finish (tool results for this turn were not
+            // committed to history yet, hence `turn + 1`).
+            if let Some((looping_tool, count)) = loop_break {
+                self.repair_orphaned_tool_use();
+                self.output.emit_error(
+                    &format!(
+                        "Run stopped: the `{looping_tool}` tool was called with the same \
+                         arguments and produced the same result {count} times in a row — \
+                         this is a no-progress loop. Change approach (different \
+                         arguments/command, or a different tool) instead of repeating the \
+                         same call. (Tune or disable via WAYLAND_MAX_REPEATED_TOOL_CALLS.)"
+                    ),
+                    false,
+                );
+                return self.finish_run_terminated(user_input, turn + 1).await;
             }
 
             // W1 F9: emit one TurnTrace per turn. Hosts that opt in via
