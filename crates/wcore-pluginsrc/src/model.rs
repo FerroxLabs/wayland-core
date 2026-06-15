@@ -100,6 +100,10 @@ pub struct SourceEntry {
     pub kind: SourceKind,
     pub strict: bool,
     pub declared_version: Option<String>,
+    /// Human-readable blurb from the marketplace catalog, if it declares one.
+    /// Used by the browse UI; not needed for install resolution.
+    #[serde(default)]
+    pub description: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

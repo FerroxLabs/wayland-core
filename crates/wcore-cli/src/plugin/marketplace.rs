@@ -16,7 +16,7 @@ use wcore_pluginsrc::{
 };
 
 use crate::plugin::error::{PluginCliError, Result};
-use crate::plugin::{known, lockfile, quarantine};
+use crate::plugin::{catalog, known, lockfile, quarantine};
 
 /// Top-level metadata from a `.claude-plugin/marketplace.json` catalog.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -89,6 +89,10 @@ pub fn parse_marketplace(json: &str) -> Result<(MarketplaceMeta, Vec<SourceEntry
             .get("version")
             .and_then(Value::as_str)
             .map(str::to_string);
+        let description = pe
+            .get("description")
+            .and_then(Value::as_str)
+            .map(str::to_string);
         let source = pe.get("source").ok_or_else(|| {
             PluginCliError::Quarantine(format!(
                 "marketplace.json: plugin '{pname}' missing 'source'"
@@ -100,6 +104,7 @@ pub fn parse_marketplace(json: &str) -> Result<(MarketplaceMeta, Vec<SourceEntry
             kind,
             strict,
             declared_version,
+            description,
         });
     }
 
@@ -418,7 +423,7 @@ pub fn add_marketplace_source(
         .map_err(|_| {
             PluginCliError::Quarantine("source has no .claude-plugin/marketplace.json".into())
         })?;
-    let (meta, _entries) = parse_marketplace(&mjson)?;
+    let (meta, entries) = parse_marketplace(&mjson)?;
     known::add_marketplace(
         plugins_root,
         known::MarketplaceRef {
@@ -427,6 +432,18 @@ pub fn add_marketplace_source(
             official: false,
         },
     )?;
+    // Cache the plugin catalog so the browse UI can list this marketplace's
+    // plugins without re-cloning it. Display metadata only — installs still
+    // re-resolve the live source.
+    let catalog = entries
+        .iter()
+        .map(|e| catalog::CatalogEntry {
+            name: e.name.clone(),
+            version: e.declared_version.clone(),
+            description: e.description.clone(),
+        })
+        .collect();
+    catalog::save_catalog(plugins_root, &meta.name, catalog)?;
     Ok(meta)
 }
 

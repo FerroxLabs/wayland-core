@@ -39,6 +39,7 @@ fn commit_writes_self_contained_native_plugin() {
         kind: SourceKind::RelativePath("./db".into()),
         strict: true,
         declared_version: None,
+        description: None,
     };
     let draft = ClaudeCodeAdapter.lower("acme", &entry, root).unwrap();
 
@@ -101,6 +102,7 @@ fn reinstall_replaces_existing_directory() {
         kind: SourceKind::RelativePath("./p".into()),
         strict: true,
         declared_version: None,
+        description: None,
     };
     let store = tempdir().unwrap();
     let meta = CommitMeta {

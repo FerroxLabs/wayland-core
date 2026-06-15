@@ -12,6 +12,7 @@
 // Install root defaults to `dirs::data_dir()/wayland-core/plugins`,
 // overridable via `--install-root` (handy for tests + sandbox setups).
 
+pub mod catalog;
 pub mod error;
 pub mod index;
 pub mod install;
@@ -237,6 +238,7 @@ pub fn run(args: PluginArgs) -> anyhow::Result<()> {
             }
             MarketplaceCmd::Remove { name } => {
                 if known::remove_marketplace(&marketplace_root, &name)? {
+                    catalog::remove_catalog(&marketplace_root, &name)?;
                     println!("removed marketplace '{name}'");
                 } else {
                     println!("no such marketplace '{name}'");

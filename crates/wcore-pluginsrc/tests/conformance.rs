@@ -35,6 +35,7 @@ fn entry(name: &str) -> SourceEntry {
         kind: SourceKind::RelativePath(format!("./{name}").into()),
         strict: true,
         declared_version: None,
+        description: None,
     }
 }
 
