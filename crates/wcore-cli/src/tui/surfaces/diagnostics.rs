@@ -913,7 +913,37 @@ impl DiagnosticsSurface {
             lines.push(status_row(state, &row.name, &detail, t));
         }
 
-        // ── 4. Recent engine errors ─────────────────────────────────
+        // ── 4. MCP servers ──────────────────────────────────────────
+        // Seeded at boot from the connect-health snapshot (tui::run) and
+        // updated live by McpReady / McpFailed events. A failed or timed-out
+        // server is the answer to "why aren't my plugin's tools showing up".
+        lines.push(Line::from(""));
+        push_section_header(&mut lines, t, "MCP SERVERS");
+        if app.mcp_status.is_empty() {
+            lines.push(Line::from(Span::styled(
+                "  none configured",
+                Style::default().fg(t.text_muted),
+            )));
+        } else {
+            let mut names: Vec<&String> = app.mcp_status.keys().collect();
+            names.sort();
+            for name in names {
+                let (state, detail) = match &app.mcp_status[name] {
+                    crate::tui::app::McpServerStatus::Ready { tool_count } => {
+                        (HealthState::Ok, format!("ready · {tool_count} tools"))
+                    }
+                    crate::tui::app::McpServerStatus::Failed { reason } => {
+                        (HealthState::Fail, format!("failed · {reason}"))
+                    }
+                    crate::tui::app::McpServerStatus::TimedOut => {
+                        (HealthState::Fail, "timed out at connect".to_string())
+                    }
+                };
+                lines.push(status_row(state, name, &detail, t));
+            }
+        }
+
+        // ── 5. Recent engine errors ─────────────────────────────────
         lines.push(Line::from(""));
         push_section_header(&mut lines, t, "RECENT ERRORS");
         let errors = collect_recent_errors(app);
@@ -934,7 +964,7 @@ impl DiagnosticsSurface {
             }
         }
 
-        // ── 5. Token budget ─────────────────────────────────────────
+        // ── 6. Token budget ─────────────────────────────────────────
         lines.push(Line::from(""));
         push_section_header(&mut lines, t, "TOKEN BUDGET");
         let budget = token_budget_view(app);
@@ -1778,6 +1808,48 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn doctor_shows_an_mcp_section_with_ready_and_failed_servers() {
+        // A4: the MCP SERVERS section answers "why aren't my plugin's tools
+        // showing up" — a ready server shows its tool count, a failed one its
+        // preserved cause. Tall terminal so the section is not below the fold.
+        let mut s = DiagnosticsSurface::new();
+        let mut app = App::new();
+        app.mcp_status.insert(
+            "notion".into(),
+            crate::tui::app::McpServerStatus::Ready { tool_count: 6 },
+        );
+        app.mcp_status.insert(
+            "claude-mem".into(),
+            crate::tui::app::McpServerStatus::Failed {
+                reason: "spawn node".into(),
+            },
+        );
+        s.on_enter(&mut app);
+        let out = render_tall(&mut s, &app);
+        assert!(
+            out.contains("MCP SERVERS"),
+            "section header missing:\n{out}"
+        );
+        assert!(out.contains("notion"), "ready server missing:\n{out}");
+        assert!(out.contains("ready"), "ready state missing:\n{out}");
+        assert!(out.contains("claude-mem"), "failed server missing:\n{out}");
+        assert!(out.contains("failed"), "failure state missing:\n{out}");
+    }
+
+    #[test]
+    fn doctor_mcp_section_reads_none_configured_when_empty() {
+        let mut s = DiagnosticsSurface::new();
+        let mut app = App::new(); // empty mcp_status
+        s.on_enter(&mut app);
+        let out = render_tall(&mut s, &app);
+        assert!(out.contains("MCP SERVERS"));
+        assert!(
+            out.contains("none configured"),
+            "empty state missing:\n{out}"
+        );
     }
 
     #[test]

@@ -383,6 +383,29 @@ async fn run_loop(
                 guard.session.turns = s.restored_turns;
                 guard.session.tool_cards = s.restored_tool_cards;
             }
+            // Seed mcp_status from the boot health snapshot so `/doctor` shows
+            // MCP server health the first time it opens. Boot-time MCP connect
+            // does NOT emit McpReady/McpFailed to the TUI (only the inventory
+            // snapshot carries it); live `/mcp add` events update these entries
+            // afterward through the same map.
+            for info in &s.engine.inventory().mcp_servers {
+                let status = match &info.health {
+                    wcore_mcp::manager::McpServerHealth::Ready { tool_count } => {
+                        app::McpServerStatus::Ready {
+                            tool_count: *tool_count,
+                        }
+                    }
+                    wcore_mcp::manager::McpServerHealth::Failed { reason } => {
+                        app::McpServerStatus::Failed {
+                            reason: reason.clone(),
+                        }
+                    }
+                    wcore_mcp::manager::McpServerHealth::TimedOut { .. } => {
+                        app::McpServerStatus::TimedOut
+                    }
+                };
+                guard.mcp_status.insert(info.name.clone(), status);
+            }
         }
         spawn_bridge(s.events, app.clone(), wake.clone());
         router = router.with_engine(s.engine);
