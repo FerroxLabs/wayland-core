@@ -404,6 +404,12 @@ hyper-util = { version = "0.1", features = ["server", "tokio"] }
 open       = "5"
 urlencoding = "2"
 subtle      = "2.6"
+# Dual-stack loopback bind for OAuth callbacks: a single `[::]` socket with
+# IPV6_V6ONLY=false accepts both `::1` and v4-mapped `127.0.0.1`, so a
+# browser that resolves the advertised `localhost` to either family reaches
+# the listener (ChatGPT's Codex client requires `localhost`). Already pinned
+# in the lockfile transitively via tokio/hyper — adds no new transitive dep.
+socket2    = "0.6"
 
 # Wave SD: OS keyring backend for CredentialsStore (feature-gated in wcore-config)
 # v0.7.0 1.D.2: exact-pinned (OS-keychain trust-boundary).

@@ -141,6 +141,9 @@ axum = "0.7"
 open.workspace         = true
 urlencoding.workspace  = true
 subtle.workspace       = true
+# Dual-stack loopback callback bind (see workspace Cargo.toml note): used by
+# `OAuthFlow::bind_callback_listener` when the redirect host is `localhost`.
+socket2.workspace      = true
 rand.workspace         = true
 # B2 egress policy: registrable-domain (eTLD+1) extraction for allowlist
 # matching + URL parsing for the exfil-shape classifier.

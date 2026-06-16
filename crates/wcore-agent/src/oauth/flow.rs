@@ -53,6 +53,16 @@ pub struct OAuthFlow {
     pub pkce_mode: PkceMode,
     /// Idle timeout on the callback listener. Defaults to 5 minutes.
     pub listener_idle_timeout: Duration,
+    /// Provider-specific authorize-URL query params appended after the
+    /// standard ones (e.g. ChatGPT's `id_token_add_organizations`,
+    /// `codex_cli_simplified_flow`, `originator`). Empty by default.
+    pub extra_auth_params: Vec<(String, String)>,
+    /// Host used to build the `redirect_uri` string. Defaults to
+    /// `127.0.0.1`. ChatGPT's Codex client requires `localhost`.
+    pub redirect_host: String,
+    /// Path used to build the `redirect_uri` string. Defaults to
+    /// `/callback`. ChatGPT's Codex client requires `/auth/callback`.
+    pub callback_path: String,
 }
 
 impl OAuthFlow {
@@ -74,6 +84,9 @@ impl OAuthFlow {
             redirect_strategy: RedirectStrategy::default(),
             pkce_mode: PkceMode::S256,
             listener_idle_timeout: Duration::from_secs(300),
+            extra_auth_params: Vec::new(),
+            redirect_host: "127.0.0.1".to_string(),
+            callback_path: "/callback".to_string(),
         }
     }
 
@@ -95,6 +108,32 @@ impl OAuthFlow {
     /// Override the redirect strategy.
     pub fn with_redirect_strategy(mut self, strategy: RedirectStrategy) -> Self {
         self.redirect_strategy = strategy;
+        self
+    }
+
+    /// Append provider-specific authorize-URL query params (e.g. ChatGPT's
+    /// `id_token_add_organizations`, `codex_cli_simplified_flow`,
+    /// `originator`). Emitted after the standard params; values are
+    /// URL-encoded by [`build_authorize_url`].
+    pub fn with_extra_auth_params(mut self, params: Vec<(String, String)>) -> Self {
+        self.extra_auth_params = params;
+        self
+    }
+
+    /// Override the redirect host and callback path used to construct
+    /// `redirect_uri` (default `127.0.0.1` + `/callback`). ChatGPT's Codex
+    /// client requires `localhost` + `/auth/callback`. The socket still
+    /// binds to a loopback IP; only the redirect_uri STRING uses
+    /// `redirect_host`. When `redirect_host == "localhost"` the listener
+    /// binds dual-stack (both `127.0.0.1` and `::1`) so a browser that
+    /// resolves `localhost` to either family reaches a listening socket.
+    pub fn with_redirect_uri_parts(
+        mut self,
+        host: impl Into<String>,
+        path: impl Into<String>,
+    ) -> Self {
+        self.redirect_host = host.into();
+        self.callback_path = path.into();
         self
     }
 
@@ -127,6 +166,11 @@ impl OAuthFlow {
         if let Some(p) = pkce.as_ref() {
             params.push(("code_challenge".into(), p.challenge.clone()));
             params.push(("code_challenge_method".into(), p.method_str().to_string()));
+        }
+        // Provider-specific extras, appended after the standard params and
+        // PKCE challenge. Encoded by the shared join below.
+        for (k, v) in &self.extra_auth_params {
+            params.push((k.clone(), v.clone()));
         }
         let qs = params
             .iter()
@@ -222,13 +266,18 @@ pub fn parse_callback_query(request_target: &str) -> CallbackParams {
 }
 
 impl OAuthFlow {
-    /// Resolve the bind address for this flow's redirect strategy.
-    fn bind_addr(&self) -> SocketAddr {
-        let port = match self.redirect_strategy {
+    /// The port this flow's redirect strategy binds (`0` = OS-assigned
+    /// ephemeral for `DynamicPort`).
+    fn bind_port(&self) -> u16 {
+        match self.redirect_strategy {
             RedirectStrategy::DynamicPort => 0,
             RedirectStrategy::FixedPort(p) => p,
-        };
-        SocketAddr::from(([127, 0, 0, 1], port))
+        }
+    }
+
+    /// IPv4 loopback bind address for this flow's redirect strategy.
+    fn bind_addr(&self) -> SocketAddr {
+        SocketAddr::from(([127, 0, 0, 1], self.bind_port()))
     }
 
     /// Validate a parsed callback against the expected CSRF `state` and
@@ -340,6 +389,10 @@ impl OAuthFlow {
                 .get("scope")
                 .and_then(|v| v.as_str())
                 .map(str::to_string),
+            id_token: raw
+                .get("id_token")
+                .and_then(|v| v.as_str())
+                .map(str::to_string),
         })
     }
 
@@ -349,19 +402,71 @@ impl OAuthFlow {
     /// the *actual* bound port (important for `DynamicPort`) before the
     /// browser is opened.
     ///
-    /// Binds `127.0.0.1` only — never a routable interface — so the
+    /// Binds a loopback interface only — never a routable interface — so the
     /// redirect can only be delivered by a process on this machine.
+    ///
+    /// The redirect_uri STRING is built from `redirect_host` + `callback_path`
+    /// (defaults `127.0.0.1` + `/callback`). The socket itself binds loopback:
+    /// for the default `127.0.0.1` host a plain IPv4 loopback socket; for the
+    /// `localhost` host a DUAL-STACK `[::]` socket (`IPV6_V6ONLY=false`) so a
+    /// browser that resolves `localhost` to either `::1` or `127.0.0.1`
+    /// (v4-mapped) reaches the same listener. Without this, advertising
+    /// `localhost` while binding only IPv4 lets the callback hit an
+    /// unlistened `[::1]:<port>` and hang to the idle timeout.
     pub async fn bind_callback_listener(
         &self,
     ) -> Result<(String, tokio::net::TcpListener), CallbackError> {
-        let listener = tokio::net::TcpListener::bind(self.bind_addr())
-            .await
-            .map_err(|e| CallbackError::Bind(e.to_string()))?;
+        let listener = if self.redirect_host == "localhost" {
+            self.bind_dual_stack_listener()?
+        } else {
+            tokio::net::TcpListener::bind(self.bind_addr())
+                .await
+                .map_err(|e| CallbackError::Bind(e.to_string()))?
+        };
         let local = listener
             .local_addr()
             .map_err(|e| CallbackError::Bind(e.to_string()))?;
-        let redirect_uri = format!("http://127.0.0.1:{}/callback", local.port());
+        let redirect_uri = format!(
+            "http://{}:{}{}",
+            self.redirect_host,
+            local.port(),
+            self.callback_path
+        );
         Ok((redirect_uri, listener))
+    }
+
+    /// Bind a single dual-stack loopback socket (`[::]:<port>` with
+    /// `IPV6_V6ONLY=false`) and convert it to a tokio listener. Accepts both
+    /// native IPv6 `::1` connections and IPv4 `127.0.0.1` connections (as
+    /// v4-mapped addresses), so the advertised `localhost` reaches the
+    /// listener regardless of which family the browser resolves first.
+    fn bind_dual_stack_listener(&self) -> Result<tokio::net::TcpListener, CallbackError> {
+        use socket2::{Domain, Protocol, Socket, Type};
+
+        let socket = Socket::new(Domain::IPV6, Type::STREAM, Some(Protocol::TCP))
+            .map_err(|e| CallbackError::Bind(e.to_string()))?;
+        // Accept v4-mapped IPv4 connections too — this is what makes the
+        // single socket dual-stack.
+        socket
+            .set_only_v6(false)
+            .map_err(|e| CallbackError::Bind(e.to_string()))?;
+        // Avoid TIME_WAIT collisions on the fixed Codex port across retries.
+        socket
+            .set_reuse_address(true)
+            .map_err(|e| CallbackError::Bind(e.to_string()))?;
+        let addr: SocketAddr = (std::net::Ipv6Addr::UNSPECIFIED, self.bind_port()).into();
+        socket
+            .bind(&addr.into())
+            .map_err(|e| CallbackError::Bind(e.to_string()))?;
+        socket
+            .listen(128)
+            .map_err(|e| CallbackError::Bind(e.to_string()))?;
+        socket
+            .set_nonblocking(true)
+            .map_err(|e| CallbackError::Bind(e.to_string()))?;
+        let std_listener: std::net::TcpListener = socket.into();
+        tokio::net::TcpListener::from_std(std_listener)
+            .map_err(|e| CallbackError::Bind(e.to_string()))
     }
 
     /// Accept exactly one redirect on `listener`, validate the CSRF
@@ -477,6 +582,11 @@ pub struct OAuthTokens {
     pub token_type: String,
     #[serde(default)]
     pub scope: Option<String>,
+    /// OIDC `id_token` (a JWT) when the provider returns one. Informational
+    /// for ChatGPT (the account id comes from the ACCESS token), but
+    /// persisted for plan/identity display.
+    #[serde(default)]
+    pub id_token: Option<String>,
 }
 
 fn default_token_type() -> String {
@@ -712,6 +822,7 @@ mod tests {
             expires_at_unix_secs: Some(0),
             token_type: "Bearer".into(),
             scope: None,
+            id_token: None,
         }
     }
 
@@ -820,6 +931,10 @@ mod tests {
             token_type: raw["token_type"].as_str().unwrap().to_string(),
             scope: raw
                 .get("scope")
+                .and_then(|v| v.as_str())
+                .map(str::to_string),
+            id_token: raw
+                .get("id_token")
                 .and_then(|v| v.as_str())
                 .map(str::to_string),
         };
@@ -1120,5 +1235,165 @@ mod tests {
         assert!(!OAuthFlow::validate_state(&a, &b));
         let same = a.clone();
         assert!(OAuthFlow::validate_state(&a, &same));
+    }
+
+    // ── Phase 1: provider-specific authorize params (Task 1.1) ───────
+
+    #[test]
+    fn authorize_url_includes_extra_params_after_standard_ones() {
+        let flow = OAuthFlow::new(
+            "cid",
+            None,
+            "https://auth.openai.com/oauth/authorize",
+            "https://auth.openai.com/oauth/token",
+            vec!["openid".into()],
+        )
+        .with_extra_auth_params(vec![
+            ("id_token_add_organizations".into(), "true".into()),
+            ("originator".into(), "wayland".into()),
+        ]);
+        let (url, _state, _pkce) =
+            flow.build_authorize_url("http://localhost:1455/auth/callback");
+        assert!(url.contains("id_token_add_organizations=true"), "url={url}");
+        assert!(url.contains("originator=wayland"), "url={url}");
+        assert!(url.contains("code_challenge_method=S256"));
+        // The extras must come AFTER the standard params + PKCE challenge.
+        let extra_at = url.find("id_token_add_organizations").unwrap();
+        let challenge_at = url.find("code_challenge_method=S256").unwrap();
+        assert!(
+            extra_at > challenge_at,
+            "extras must be appended after the standard params: {url}"
+        );
+    }
+
+    #[test]
+    fn authorize_url_has_no_extra_params_by_default() {
+        // Default empty vec → no behaviour change for existing callers.
+        let flow = sample_flow();
+        let (url, _state, _pkce) =
+            flow.build_authorize_url("http://127.0.0.1:0/callback");
+        assert!(!url.contains("originator="));
+        assert!(!url.contains("id_token_add_organizations"));
+    }
+
+    // ── Phase 1: configurable redirect host + path (Task 1.2 / C2) ───
+
+    #[tokio::test]
+    async fn bind_listener_honors_custom_host_and_path() {
+        let flow = OAuthFlow::new(
+            "cid",
+            None,
+            "https://auth.openai.com/oauth/authorize",
+            "https://auth.openai.com/oauth/token",
+            vec![],
+        )
+        .with_redirect_uri_parts("localhost", "/auth/callback");
+        let (redirect_uri, listener) =
+            flow.bind_callback_listener().await.expect("bind");
+        assert!(
+            redirect_uri.starts_with("http://localhost:"),
+            "uri={redirect_uri}"
+        );
+        assert!(
+            redirect_uri.ends_with("/auth/callback"),
+            "uri={redirect_uri}"
+        );
+        drop(listener);
+    }
+
+    /// A5 regression: google_meet (and every existing caller) uses the
+    /// defaults — host `127.0.0.1`, path `/callback`. The new redirect-uri
+    /// parts must NOT change that default.
+    #[tokio::test]
+    async fn default_redirect_uri_is_unchanged_for_existing_callers() {
+        let flow = sample_flow();
+        assert_eq!(flow.redirect_host, "127.0.0.1");
+        assert_eq!(flow.callback_path, "/callback");
+        let (redirect_uri, listener) =
+            flow.bind_callback_listener().await.expect("bind");
+        assert!(
+            redirect_uri.starts_with("http://127.0.0.1:"),
+            "default host must stay 127.0.0.1: {redirect_uri}"
+        );
+        assert!(
+            redirect_uri.ends_with("/callback"),
+            "default path must stay /callback: {redirect_uri}"
+        );
+        drop(listener);
+    }
+
+    /// C2: when the advertised host is `localhost`, the listener must accept
+    /// callbacks on BOTH the IPv4 (`127.0.0.1`) and IPv6 (`::1`) loopback
+    /// addresses — otherwise a browser that resolves `localhost` to `::1`
+    /// hits an unlistened socket and the flow hangs to the idle timeout.
+    #[tokio::test]
+    async fn dual_stack_localhost_accepts_both_ipv4_and_ipv6_callbacks() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        async fn fire_and_collect(
+            flow: &OAuthFlow,
+            connect_addr: std::net::SocketAddr,
+        ) -> String {
+            let state = new_state_token();
+            let (_redirect_uri, listener) =
+                flow.bind_callback_listener().await.expect("bind");
+            let port = listener.local_addr().unwrap().port();
+            let target = std::net::SocketAddr::new(connect_addr.ip(), port);
+            let state_for_client = state.clone();
+            let client = tokio::spawn(async move {
+                let mut s = tokio::net::TcpStream::connect(target)
+                    .await
+                    .expect("connect to loopback callback");
+                let req = format!(
+                    "GET /auth/callback?code=dual-{}&state={} HTTP/1.1\r\nHost: localhost\r\n\r\n",
+                    target.ip(),
+                    state_for_client
+                );
+                s.write_all(req.as_bytes()).await.unwrap();
+                let mut resp = Vec::new();
+                let _ = s.read_to_end(&mut resp).await;
+            });
+            let code = flow.wait_for_code(listener, &state).await.expect("code");
+            let _ = client.await;
+            code
+        }
+
+        let flow = OAuthFlow::new(
+            "cid",
+            None,
+            "https://auth.openai.com/oauth/authorize",
+            "https://auth.openai.com/oauth/token",
+            vec![],
+        )
+        .with_redirect_uri_parts("localhost", "/auth/callback")
+        .with_listener_idle_timeout(Duration::from_secs(5));
+
+        // IPv4 loopback callback.
+        let v4_code =
+            fire_and_collect(&flow, "127.0.0.1:0".parse().unwrap()).await;
+        assert_eq!(v4_code, "dual-127.0.0.1");
+
+        // IPv6 loopback callback — the family the default IPv4-only bind
+        // would have missed.
+        let v6_code = fire_and_collect(&flow, "[::1]:0".parse().unwrap()).await;
+        assert_eq!(v6_code, "dual-::1");
+    }
+
+    // ── Phase 1: id_token capture (Task 1.3) ─────────────────────────
+
+    #[test]
+    fn parse_token_response_captures_id_token() {
+        let body = r#"{"access_token":"at","refresh_token":"rt","expires_in":3600,"id_token":"idjwt","token_type":"Bearer"}"#;
+        let toks = OAuthFlow::parse_token_response(body).expect("parse");
+        assert_eq!(toks.id_token.as_deref(), Some("idjwt"));
+        assert_eq!(toks.access_token, "at");
+    }
+
+    #[test]
+    fn parse_token_response_id_token_is_none_when_absent() {
+        let body =
+            r#"{"access_token":"at","refresh_token":"rt","expires_in":3600,"token_type":"Bearer"}"#;
+        let toks = OAuthFlow::parse_token_response(body).expect("parse");
+        assert!(toks.id_token.is_none());
     }
 }

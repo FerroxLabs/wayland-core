@@ -146,6 +146,7 @@ mod tests {
             expires_at_unix_secs: Some(1_700_000_000),
             token_type: "Bearer".into(),
             scope: Some("scope1 scope2".into()),
+            id_token: None,
         }
     }
 
