@@ -153,8 +153,16 @@ impl OpenAIChatGptProvider {
     /// provider-neutral).
     ///
     /// * A2 — strip `max_output_tokens` (the Codex backend rejects it).
-    /// * D2 — request encrypted reasoning so reasoning items can round-trip
-    ///   across multi-turn tool use (`include: ["reasoning.encrypted_content"]`).
+    /// * D2 — we deliberately do NOT request
+    ///   `include: ["reasoning.encrypted_content"]`. Codex seals each
+    ///   `reasoning` item to the `function_call` that follows it; if we
+    ///   requested encrypted reasoning we would have to replay that item ahead
+    ///   of the paired function_call on the next turn, or the backend rejects
+    ///   turn 2 of a tool loop with `missing_following_item`. We don't yet
+    ///   round-trip reasoning (`ContentBlock::Thinking` is a bare string and
+    ///   `push_assistant_items` drops reasoning), so NOT requesting it keeps the
+    ///   multi-turn history self-consistent. Full reasoning round-trip (carry
+    ///   the encrypted blob paired with each function_call) is a follow-up.
     /// * D4 — ensure `instructions` is always present.
     /// * D5 — when tools are present, send `tool_choice: "auto"` +
     ///   `parallel_tool_calls: true` (matches both references).
@@ -163,11 +171,6 @@ impl OpenAIChatGptProvider {
         if let Some(obj) = body.as_object_mut() {
             // A2: Codex rejects max_output_tokens on this backend.
             obj.remove("max_output_tokens");
-            // D2: encrypted reasoning round-trip.
-            obj.insert(
-                "include".to_string(),
-                json!(["reasoning.encrypted_content"]),
-            );
             // D4: instructions is unconditional on Codex.
             if !obj.contains_key("instructions") {
                 obj.insert("instructions".to_string(), json!(DEFAULT_INSTRUCTIONS));
@@ -311,9 +314,12 @@ mod tests {
     }
 
     #[test]
-    fn body_requests_encrypted_reasoning() {
+    fn body_does_not_request_encrypted_reasoning_until_round_trip_exists() {
+        // We must NOT request `include: ["reasoning.encrypted_content"]` while
+        // we cannot replay the sealed reasoning item — doing so 400s turn 2 of
+        // a tool loop (`missing_following_item`). Lock that decision in.
         let body = provider().build_codex_body(&request_with_tools(vec![]));
-        assert_eq!(body["include"], json!(["reasoning.encrypted_content"]));
+        assert!(body.get("include").is_none(), "include must be absent: {body}");
     }
 
     #[test]
