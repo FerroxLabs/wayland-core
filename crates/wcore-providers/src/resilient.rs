@@ -28,7 +28,7 @@ use wcore_config::circuit_breaker::{
 use wcore_types::llm::{LlmEvent, LlmRequest};
 
 use crate::cooldown::CooldownClass;
-use crate::{LlmProvider, ProviderError, classify_failover};
+use crate::{LlmProvider, ModelInfo, ProviderError, classify_failover};
 
 /// Classify a retryable `ProviderError` and decide whether it should count
 /// against the circuit breaker.
@@ -141,6 +141,21 @@ impl ResilientProvider {
 
 #[async_trait]
 impl LlmProvider for ResilientProvider {
+    /// Delegate to the wrapped primary so callers that introspect the
+    /// provider (e.g. the `/model` picker's default `list_models` fallback)
+    /// see the real alias key, not the blanket `""`. The breaker only guards
+    /// `stream`; metadata is always answered by the primary.
+    fn alias_key(&self) -> &str {
+        self.primary.alias_key()
+    }
+
+    /// Delegate model listing to the primary. Without this the trait default
+    /// runs against `alias_key()` — which, before the delegation above,
+    /// returned `""` and yielded an empty `/model` list for every provider.
+    async fn list_models(&self) -> anyhow::Result<Vec<ModelInfo>> {
+        self.primary.list_models().await
+    }
+
     async fn stream(
         &self,
         request: &LlmRequest,
@@ -225,6 +240,10 @@ mod tests {
     struct AlwaysOk;
     #[async_trait]
     impl LlmProvider for AlwaysOk {
+        // Report a real alias key + catalog so the delegation can be asserted.
+        fn alias_key(&self) -> &str {
+            "openai-chatgpt"
+        }
         async fn stream(&self, _: &LlmRequest) -> Result<mpsc::Receiver<LlmEvent>, ProviderError> {
             let (_tx, rx) = mpsc::channel(1);
             Ok(rx)
@@ -509,6 +528,34 @@ mod tests {
                 .iter()
                 .any(|(_, _, s)| *s == CircuitState::Open),
             "semantic errors must not trip the breaker"
+        );
+    }
+
+    /// Regression: the wrap is metadata-transparent. `alias_key` and
+    /// `list_models` must reflect the wrapped primary — not the blanket trait
+    /// defaults (`""` → empty catalog), which made `/model` return nothing for
+    /// every provider since every provider is wrapped in `ResilientProvider`.
+    #[tokio::test]
+    async fn delegates_alias_key_and_list_models_to_primary() {
+        let resilient = ResilientProvider::new(
+            "primary",
+            Arc::new(AlwaysOk),
+            vec![],
+            CircuitConfig::default(),
+            Arc::new(NoOpCircuitReporter),
+        );
+        assert_eq!(
+            resilient.alias_key(),
+            "openai-chatgpt",
+            "alias_key must come from the primary, not the trait default \"\""
+        );
+        let models = resilient
+            .list_models()
+            .await
+            .expect("list_models must not error");
+        assert!(
+            !models.is_empty(),
+            "list_models must yield the primary's alias catalog, not an empty list"
         );
     }
 }
