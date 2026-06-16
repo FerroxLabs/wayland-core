@@ -210,6 +210,48 @@ fn is_http_4xx_error(reason: &str) -> bool {
     false
 }
 
+/// FluxRouter web_search grounding (contract §5.4): render the "Sources" block
+/// appended after a grounded answer. The answer text already carries inline
+/// `[n]` markers; this maps `[n]` → `citations[n-1]` (1-indexed) and lists the
+/// richer `search_results` cards beneath. Returns an empty string when there is
+/// nothing to render, so the caller can append unconditionally.
+fn render_grounding_sources(
+    citations: &[String],
+    search_results: &[wcore_types::llm::FluxSearchResult],
+) -> String {
+    if citations.is_empty() && search_results.is_empty() {
+        return String::new();
+    }
+    let mut out = String::from("\n\nSources:\n");
+    // Inline-marker map: `[1]` → first citation URL, etc.
+    for (i, url) in citations.iter().enumerate() {
+        out.push_str(&format!("[{}] {}\n", i + 1, url));
+    }
+    // Richer source cards (title + url + snippet). Only rendered when present;
+    // a card with an empty title falls back to its URL so the line is never
+    // blank.
+    if !search_results.is_empty() {
+        out.push('\n');
+        for r in search_results {
+            let label = if r.title.is_empty() { &r.url } else { &r.title };
+            out.push_str(&format!("- {label}"));
+            if !r.url.is_empty() && !r.title.is_empty() {
+                out.push_str(&format!(" — {}", r.url));
+            }
+            if let Some(date) = &r.date
+                && !date.is_empty()
+            {
+                out.push_str(&format!(" ({date})"));
+            }
+            out.push('\n');
+            if !r.snippet.is_empty() {
+                out.push_str(&format!("  {}\n", r.snippet));
+            }
+        }
+    }
+    out
+}
+
 /// GAP-5/7 — upper bound on live workflow synthesis (up to 3 LLM round-trips).
 /// Past this the gate falls through to a normal turn rather than stalling the
 /// session on a hung synthesis call. Generous so legitimate multi-round-trip
@@ -363,6 +405,39 @@ mod v0911_engine_recovery_tests {
         assert!(!is_http_4xx_error(""));
         assert!(!is_http_4xx_error("4"));
         assert!(!is_http_4xx_error("40"));
+    }
+
+    #[test]
+    fn render_grounding_sources_empty_is_blank() {
+        assert_eq!(render_grounding_sources(&[], &[]), "");
+    }
+
+    #[test]
+    fn render_grounding_sources_maps_markers_to_urls() {
+        let cites = vec![
+            "https://a.example".to_string(),
+            "https://b.example".to_string(),
+        ];
+        let out = render_grounding_sources(&cites, &[]);
+        assert!(out.contains("Sources:"));
+        assert!(out.contains("[1] https://a.example"));
+        assert!(out.contains("[2] https://b.example"));
+    }
+
+    #[test]
+    fn render_grounding_sources_includes_search_result_cards() {
+        let results = vec![wcore_types::llm::FluxSearchResult {
+            title: "JWST".into(),
+            url: "https://science.nasa.gov/jwst".into(),
+            date: Some("2026-06-15".into()),
+            last_updated: None,
+            snippet: "new image".into(),
+            source: "web".into(),
+        }];
+        let out = render_grounding_sources(&["https://science.nasa.gov/jwst".into()], &results);
+        assert!(out.contains("- JWST — https://science.nasa.gov/jwst"));
+        assert!(out.contains("(2026-06-15)"));
+        assert!(out.contains("new image"));
     }
 }
 
@@ -746,6 +821,13 @@ pub struct AgentEngine {
     user_model_pin: Option<String>,
     max_tokens: u32,
     max_turns: Option<usize>,
+    /// FluxRouter web_search grounding (contract §5): when `true`, each turn's
+    /// `LlmRequest` carries `web_search: true` so the provider attaches the
+    /// grounding tool. Set by the CLI `--search` flag via [`set_web_search`];
+    /// defaults to `false` so non-Flux sessions are unaffected. Grounding only
+    /// actually fires when the live model is a Flux tier alias (the provider
+    /// guards on `is_flux_tier_alias`).
+    web_search: bool,
     total_usage: TokenUsage,
     thinking: Option<wcore_types::llm::ThinkingConfig>,
     /// Resolved provider compat settings (for capability validation)
@@ -1335,6 +1417,7 @@ impl AgentEngine {
             // C1 / A2 — no SessionStart prelude applied at construction.
             session_start_injected_len: 0,
             // No hook actions have fired before the first turn.
+            web_search: false,
             pending_hook_actions: Vec::new(),
         }
     }
@@ -1496,6 +1579,7 @@ impl AgentEngine {
             // the session-start prelude path is skipped; baseline stays 0.
             session_start_injected_len: 0,
             // No hook actions have fired before the first turn.
+            web_search: false,
             pending_hook_actions: Vec::new(),
         }
     }
@@ -1952,6 +2036,15 @@ impl AgentEngine {
         let model = model.into();
         self.user_model_pin = Some(model.clone());
         self.model = model;
+    }
+
+    /// FluxRouter web_search grounding (contract §5): enable/disable attaching
+    /// the `web_search` tool to every turn. Wired by the CLI `--search` flag.
+    /// Grounding still only fires when the live model is a Flux tier alias —
+    /// the provider guards on `is_flux_tier_alias`, so enabling this on a
+    /// non-Flux model is a harmless no-op.
+    pub fn set_web_search(&mut self, enabled: bool) {
+        self.web_search = enabled;
     }
 
     /// D014: release the explicit user model pin set by [`set_model`], so a
@@ -3428,6 +3521,7 @@ impl AgentEngine {
                 cache_tier,
                 routing_hint: None,
                 stop_sequences,
+                web_search: self.web_search,
             };
 
             // Cache-stability (token-opt): inject the per-turn skill-router
@@ -3542,6 +3636,12 @@ impl AgentEngine {
                 let mut attempt_usage = TokenUsage::default();
                 let mut done_seen = false;
                 let mut stream_error: Option<String> = None;
+                // FluxRouter web_search grounding (contract §5.4): per-attempt
+                // accumulators for the end-of-stream Citations / SearchResults
+                // events. Reset each retry alongside the other accumulators.
+                let mut grounding_citations: Vec<String> = Vec::new();
+                let mut grounding_search_results: Vec<wcore_types::llm::FluxSearchResult> =
+                    Vec::new();
 
                 // P1 Bug#3 — `stream()` runs `builder_send_with_retry`
                 // internally and can surface a *retryable*
@@ -3613,6 +3713,16 @@ impl AgentEngine {
                             stream_error = Some(e);
                             break;
                         }
+                        LlmEvent::Citations(urls) => {
+                            // FluxRouter web_search grounding (contract §5.4):
+                            // capture the citation URL list so the Sources block
+                            // is rendered after the answer once both grounding
+                            // events have arrived (SearchResults follows).
+                            grounding_citations = urls;
+                        }
+                        LlmEvent::SearchResults(results) => {
+                            grounding_search_results = results;
+                        }
                     }
                 }
 
@@ -3621,6 +3731,23 @@ impl AgentEngine {
                 // OR a channel that closed with no `Done` (truncated /
                 // dropped stream) is a FAILED attempt.
                 if done_seen && stream_error.is_none() {
+                    // FluxRouter web_search grounding (contract §5.4): render
+                    // the "Sources" block after a SUCCESSFUL grounded answer.
+                    // Done only on the committed attempt (inside the success
+                    // gate, before `break 'stream`) so a failed-then-retried
+                    // attempt never double-emits sources. The answer text
+                    // already carries inline `[n]` markers; map `[n]` →
+                    // `citations[n-1]` and append the richer source cards.
+                    // Emitted via the assistant text stream so every sink (TUI,
+                    // REPL, json-stream) shows it with no new trait method.
+                    if !grounding_citations.is_empty() || !grounding_search_results.is_empty() {
+                        let block = render_grounding_sources(
+                            &grounding_citations,
+                            &grounding_search_results,
+                        );
+                        self.output.emit_text_delta(&block, &self.current_msg_id);
+                        assistant_text.push_str(&block);
+                    }
                     stop_reason = attempt_stop_reason;
                     finish_reason = attempt_finish_reason;
                     turn_usage = attempt_usage;
@@ -6493,6 +6620,7 @@ mod set_config_tests {
             config: wcore_config::config::Config::default(),
             compaction_floor: 0,
             session_start_injected_len: 0,
+            web_search: false,
             pending_hook_actions: Vec::new(),
         }
     }
@@ -7217,6 +7345,7 @@ mod phase6_tests {
             config: wcore_config::config::Config::default(),
             compaction_floor: 0,
             session_start_injected_len: 0,
+            web_search: false,
             pending_hook_actions: Vec::new(),
         }
     }
@@ -7500,6 +7629,7 @@ mod compact_tests {
             config: wcore_config::config::Config::default(),
             compaction_floor: 0,
             session_start_injected_len: 0,
+            web_search: false,
             pending_hook_actions: Vec::new(),
         }
     }
@@ -8522,6 +8652,7 @@ mod plan_mode_tests {
             config: wcore_config::config::Config::default(),
             compaction_floor: 0,
             session_start_injected_len: 0,
+            web_search: false,
             pending_hook_actions: Vec::new(),
         }
     }
@@ -8938,6 +9069,7 @@ mod hook_integration_tests {
             config: wcore_config::config::Config::default(),
             compaction_floor: 0,
             session_start_injected_len: 0,
+            web_search: false,
             pending_hook_actions: Vec::new(),
         }
     }
@@ -9645,6 +9777,7 @@ mod approval_bridge_engine_tests {
             config: wcore_config::config::Config::default(),
             compaction_floor: 0,
             session_start_injected_len: 0,
+            web_search: false,
             pending_hook_actions: Vec::new(),
         }
     }
@@ -9866,6 +9999,7 @@ mod user_model_writeback_tests {
             config: wcore_config::config::Config::default(),
             compaction_floor: 0,
             session_start_injected_len: 0,
+            web_search: false,
             pending_hook_actions: Vec::new(),
         }
     }

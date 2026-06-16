@@ -405,6 +405,14 @@ struct Cli {
     #[arg(long)]
     no_memory: bool,
 
+    /// FluxRouter web_search grounding (contract §5): attach a server-side
+    /// `web_search` tool to every turn so Flux grounds the answer via
+    /// Perplexity Sonar and renders citations. Only fires when the active
+    /// model is a Flux tier alias (`flux-auto` / `flux-fast` / `flux-standard`
+    /// / `flux-reasoning`) — a no-op on other models. Paid-only on Flux.
+    #[arg(long)]
+    search: bool,
+
     /// Initial prompt (if omitted, enters interactive REPL mode)
     #[arg(trailing_var_arg = true)]
     prompt: Vec<String>,
@@ -922,8 +930,8 @@ async fn run() -> anyhow::Result<ExitCode> {
                 let config = Config::default();
                 let cwd = std::env::current_dir()?.to_string_lossy().to_string();
                 // Setup subcommand never honours --force: the onboarding
-                // flow makes no tool calls.
-                run_tui_mode(config, &cwd, None, None, true, false).await?;
+                // flow makes no tool calls. web_search is irrelevant here.
+                run_tui_mode(config, &cwd, None, None, true, false, false).await?;
                 // B3: explicitly disarm the crash sentinel on normal TUI
                 // exit so it isn't present if the process is still alive
                 // during post-TUI cleanup (MCP shutdown, etc.) and then
@@ -1200,6 +1208,7 @@ async fn run() -> anyhow::Result<ExitCode> {
                     cli.session_id.clone(),
                     true,
                     cli.force,
+                    cli.search,
                 )
                 .await?;
                 if let Some(ref mut g) = _sentinel_guard {
@@ -1269,7 +1278,16 @@ async fn run() -> anyhow::Result<ExitCode> {
     let tui_capable = std::io::IsTerminal::is_terminal(&std::io::stdout())
         && std::env::var("TERM").map(|t| t != "dumb").unwrap_or(true);
     if prompt.is_empty() && !cli.no_tui && tui_capable {
-        run_tui_mode(config, &cwd, resume, cli.session_id, false, cli.force).await?;
+        run_tui_mode(
+            config,
+            &cwd,
+            resume,
+            cli.session_id,
+            false,
+            cli.force,
+            cli.search,
+        )
+        .await?;
         // B3: disarm the crash sentinel at the earliest known-clean point.
         // The Drop impl on `_sentinel_guard` also fires when `main` returns,
         // but an explicit early disarm closes the window between TUI exit
@@ -1325,6 +1343,13 @@ async fn run() -> anyhow::Result<ExitCode> {
 
     let result = bootstrap.build().await?;
     let mut engine = result.engine;
+
+    // FluxRouter web_search grounding (contract §5): enable per-turn grounding
+    // when `--search` is set. A no-op unless the active model is a Flux tier
+    // alias (the provider guards on `is_flux_tier_alias`).
+    if cli.search {
+        engine.set_web_search(true);
+    }
 
     if resume.is_none() {
         engine.init_session(&provider_name, &cwd, cli.session_id.as_deref())?;
@@ -1531,6 +1556,7 @@ async fn run_tui_mode(
     session_id: Option<String>,
     force_onboarding: bool,
     force: bool,
+    web_search: bool,
 ) -> anyhow::Result<()> {
     use wcore_cli::tui;
 
@@ -1622,6 +1648,12 @@ async fn run_tui_mode(
     let (mut boot_terminal, boot_guard) = tui::enter()?;
     let result = tui::splash_while(&mut boot_terminal, mcp_count, bootstrap.build()).await?;
     let mut engine = result.engine;
+
+    // FluxRouter web_search grounding (contract §5): honour `--search`. A no-op
+    // unless the active model is a Flux tier alias (provider-side guard).
+    if web_search {
+        engine.set_web_search(true);
+    }
 
     // L2 / D016 boot parity: fold the `[default] user` display name into the
     // boot system prompt BEFORE the first turn, using the SAME helper +
@@ -3002,5 +3034,16 @@ mod tests {
             config.memory.enabled,
             "without --no-memory the config's memory.enabled must survive"
         );
+    }
+
+    /// FluxRouter web_search grounding (contract §5): `--search` parses to a
+    /// bool and defaults to false when omitted.
+    #[test]
+    fn test_search_flag_parses() {
+        let cli = Cli::parse_from(["wayland-core", "--search", "latest JWST news"]);
+        assert!(cli.search, "--search must parse to true");
+
+        let cli = Cli::parse_from(["wayland-core", "hello"]);
+        assert!(!cli.search, "--search defaults to false when omitted");
     }
 }
