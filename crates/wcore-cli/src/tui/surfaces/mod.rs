@@ -4086,13 +4086,19 @@ mod tests {
         assert!(list.contains("○ openai"));
         assert!(list.contains("/model switches models"));
         // Known-provider swaps are live now — no stale "restart" advice.
-        assert!(!list.contains("restart"), "stale restart copy leaked: {list}");
+        assert!(
+            !list.contains("restart"),
+            "stale restart copy leaked: {list}"
+        );
 
         // `/provider <known>` fallback copy points at the live `/provider`
         // verb, not the old restart/--profile workaround.
         let switch = render_provider("anthropic", Some("openai"));
         assert!(switch.contains("live"), "got: {switch}");
-        assert!(!switch.contains("restart, not a live swap"), "got: {switch}");
+        assert!(
+            !switch.contains("restart, not a live swap"),
+            "got: {switch}"
+        );
 
         // Unknown provider: honest miss listing the known set.
         let miss = render_provider("anthropic", Some("nonesuch"));

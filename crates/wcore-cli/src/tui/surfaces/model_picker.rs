@@ -167,9 +167,7 @@ impl ModelPickerSurface {
     /// The highlighted model row, if the selection points at one.
     fn selected_model(&self) -> Option<(&'static str, &'static str)> {
         match self.rows.get(self.selected) {
-            Some(ModelRow::Model {
-                provider, role, ..
-            }) => Some((*provider, *role)),
+            Some(ModelRow::Model { provider, role, .. }) => Some((*provider, *role)),
             _ => None,
         }
     }
@@ -441,7 +439,11 @@ fn render_row(row: &RowView, theme: &Theme) -> Line<'static> {
                 Span::styled(prefix, Style::default().fg(theme.orange)),
                 Span::styled(
                     mark,
-                    Style::default().fg(if *active { theme.orange } else { theme.text_muted }),
+                    Style::default().fg(if *active {
+                        theme.orange
+                    } else {
+                        theme.text_muted
+                    }),
                 ),
                 Span::styled(
                     format!("{label:<18}"),
@@ -487,9 +489,7 @@ mod tests {
         p.rows
             .iter()
             .filter_map(|r| match r {
-                ModelRow::Model {
-                    provider, role, ..
-                } => Some((*provider, *role)),
+                ModelRow::Model { provider, role, .. } => Some((*provider, *role)),
                 ModelRow::Heading(_) => None,
             })
             .collect()

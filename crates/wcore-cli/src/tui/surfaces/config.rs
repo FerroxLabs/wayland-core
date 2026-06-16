@@ -3393,7 +3393,10 @@ mod tests {
         );
         // The save must signal a live rebind so the engine sees the change.
         assert!(
-            matches!(app.rebind_request, crate::tui::app::RebindRequest::Tier1Save),
+            matches!(
+                app.rebind_request,
+                crate::tui::app::RebindRequest::Tier1Save
+            ),
             "saving a dirty overview must raise the Tier1Save rebind signal"
         );
         // And it must have been written to disk.
