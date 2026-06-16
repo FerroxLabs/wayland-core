@@ -705,6 +705,7 @@ mod tests {
             cache_tier: tier,
             routing_hint: None,
             stop_sequences: Vec::new(),
+            web_search: false,
         }
     }
 
