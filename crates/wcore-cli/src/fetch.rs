@@ -60,8 +60,9 @@ pub async fn run_with_config_path(args: FetchArgs, config_path: &Path) -> Result
     }
 
     let doc = load_doc(config_path)?;
-    let api_key = resolve_key(&args.api_key, &doc)
-        .context("no Flux API key (set --api-key, $FLUX_API_KEY, or [providers.flux-router] in config)")?;
+    let api_key = resolve_key(&args.api_key, &doc).context(
+        "no Flux API key (set --api-key, $FLUX_API_KEY, or [providers.flux-router] in config)",
+    )?;
     let base_url = resolve_base_url(&args.base_url, &doc);
 
     let request = FetchRequest::new(args.url.trim()).with_render(args.render);
