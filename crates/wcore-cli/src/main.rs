@@ -487,6 +487,11 @@ enum TopCmd {
         #[command(subcommand)]
         cmd: wcore_cli::auth::AuthCmd,
     },
+    /// FluxRouter image generation (`POST /v1/images/generations`).
+    /// Writes the decoded image to `--out` (or stdout when piped). A
+    /// free / paid-but-uncleared Flux key returns a `premium_locked`
+    /// message — image generation is a paid-only capability.
+    Image(wcore_cli::image::ImageArgs),
 }
 
 /// F-089: `models` sub-subcommands.
@@ -930,6 +935,13 @@ async fn run() -> anyhow::Result<ExitCode> {
                 Ok(()) => Ok(ExitCode::SUCCESS),
                 Err(e) => {
                     eprintln!("wayland-core auth: {e:#}");
+                    Ok(ExitCode::FAILURE)
+                }
+            },
+            TopCmd::Image(args) => match wcore_cli::image::run(args).await {
+                Ok(()) => Ok(ExitCode::SUCCESS),
+                Err(e) => {
+                    eprintln!("wayland-core image: {e:#}");
                     Ok(ExitCode::FAILURE)
                 }
             },
