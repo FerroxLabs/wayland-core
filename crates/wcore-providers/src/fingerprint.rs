@@ -424,7 +424,11 @@ mod tests {
         assert_eq!(fp.kind, CredentialKind::BearerKey);
         assert_eq!(slugs(&fp), vec!["openai", "deepseek"]);
         assert!(!fp.is_unambiguous());
-        assert!(fp.candidates.iter().all(|c| c.confidence == Confidence::Ambiguous));
+        assert!(
+            fp.candidates
+                .iter()
+                .all(|c| c.confidence == Confidence::Ambiguous)
+        );
     }
 
     #[test]
@@ -446,7 +450,10 @@ mod tests {
 
     #[test]
     fn surrounding_quotes_and_whitespace_are_stripped() {
-        assert_eq!(fingerprint_key("  'sk-ant-api03-xyz'  ").normalized, "sk-ant-api03-xyz");
+        assert_eq!(
+            fingerprint_key("  'sk-ant-api03-xyz'  ").normalized,
+            "sk-ant-api03-xyz"
+        );
         assert_eq!(fingerprint_key("\"xai-abc\"").normalized, "xai-abc");
     }
 
@@ -469,7 +476,10 @@ mod tests {
         let fp = fingerprint_key("AKIAIOSFODNN7EXAMPLE");
         assert_eq!(fp.kind, CredentialKind::AwsAccessKeyId);
         assert_eq!(slugs(&fp), vec!["bedrock"]);
-        assert!(fp.needs_completion, "a lone access-key id can't be validated alone");
+        assert!(
+            fp.needs_completion,
+            "a lone access-key id can't be validated alone"
+        );
     }
 
     #[test]
@@ -506,7 +516,10 @@ mod tests {
     fn jwt_is_classified_without_candidates() {
         let fp = fingerprint_key("eyJhbGciOiJI.eyJzdWIiOiIx.sigpart");
         assert_eq!(fp.kind, CredentialKind::Jwt);
-        assert!(fp.candidates.is_empty(), "JWT routing is decided by the caller");
+        assert!(
+            fp.candidates.is_empty(),
+            "JWT routing is decided by the caller"
+        );
         assert!(fp.needs_completion);
     }
 
