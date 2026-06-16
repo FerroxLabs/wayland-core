@@ -1540,10 +1540,14 @@ impl ConfigSurface {
                 SurfaceAction::None
             }
             KeyCode::Esc => {
-                // Save is invisible, undo is loud: `esc` reverts every
-                // unsaved edit. With nothing to revert it closes the
-                // surface back to the workspace.
-                if self.revert() {
+                // `esc` saves & closes — the footer's contract. A dirty edit
+                // (e.g. toggling long-term memory) is persisted: `save`
+                // advances `baseline`, which the `handle_key` seam detects to
+                // raise the Tier1Save rebind so the change applies live. We
+                // stay on the surface so the saved/now-live affordance shows.
+                // With nothing dirty, `esc` closes back to the workspace.
+                if self.is_dirty() {
+                    self.save();
                     SurfaceAction::None
                 } else {
                     SurfaceAction::Switch(SurfaceId::Workspace)
@@ -1736,7 +1740,7 @@ impl ConfigSurface {
             Span::styled("save & close", Style::default().fg(t.text_dim)),
         ]);
         let promise = Line::from(Span::styled(
-            " Changes save to your global config.toml · esc reverts unsaved edits",
+            " esc saves & closes · changes save to your global config.toml and apply live",
             Style::default().fg(t.text_muted),
         ));
         frame.render_widget(Paragraph::new(vec![hints, promise]), footer_area);
@@ -3341,6 +3345,85 @@ mod tests {
         assert!(
             !frame.contains("⏎ save · esc cancel"),
             "the edit hint must be gone after esc, got:\n{frame}"
+        );
+    }
+
+    #[test]
+    fn overview_esc_saves_pending_toggle_instead_of_reverting() {
+        // Regression: toggling Long-term memory then pressing `esc` must SAVE
+        // the edit (persist + advance baseline + signal a live rebind) and
+        // stay on the surface — not silently revert it. Hermetic via
+        // WAYLAND_HOME under the shared env lock (the save writes config.toml).
+        let _guard = EXPERT_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = tempfile::tempdir().expect("tempdir");
+        let prev = std::env::var_os("WAYLAND_HOME");
+        // SAFETY: process-global env mutation is serialised by EXPERT_ENV_LOCK;
+        // the previous value is restored before the lock is released.
+        unsafe { std::env::set_var("WAYLAND_HOME", dir.path()) };
+
+        let mut app = App::new();
+        app.config.memory_enabled = false; // start with long-term memory off
+        let mut surface = ConfigSurface::new();
+        surface.on_enter(&mut app);
+        assert!(!surface.current.long_term_memory);
+        assert!(!surface.is_dirty(), "a fresh seed must be clean");
+
+        // Focus the Long-term row (FOCUSABLE index 4) and toggle it on.
+        for _ in 0..4 {
+            surface.handle_key(key(KeyCode::Down), &mut app);
+        }
+        assert_eq!(surface.focused_row(), Row::LongTerm);
+        surface.handle_key(key(KeyCode::Char(' ')), &mut app);
+        assert!(surface.current.long_term_memory, "space must toggle it on");
+        assert!(surface.is_dirty(), "the toggle must be a pending edit");
+
+        // `esc` on a dirty overview must SAVE, not revert.
+        let action = surface.handle_key(key(KeyCode::Esc), &mut app);
+        assert!(
+            matches!(action, SurfaceAction::None),
+            "dirty esc must stay on the surface, not switch away"
+        );
+        assert!(
+            surface.current.long_term_memory,
+            "the toggle must survive esc — not be reverted"
+        );
+        assert!(
+            !surface.is_dirty(),
+            "after save the edit is no longer pending (baseline advanced)"
+        );
+        // The save must signal a live rebind so the engine sees the change.
+        assert!(
+            matches!(app.rebind_request, crate::tui::app::RebindRequest::Tier1Save),
+            "saving a dirty overview must raise the Tier1Save rebind signal"
+        );
+        // And it must have been written to disk.
+        let written = std::fs::read_to_string(dir.path().join("config.toml"))
+            .expect("config.toml should have been written");
+        assert!(
+            written.contains("[memory]") && written.contains("enabled"),
+            "the memory toggle must persist to [memory].enabled, got:\n{written}"
+        );
+
+        // SAFETY: restore the prior env under the same lock.
+        unsafe {
+            match prev {
+                Some(v) => std::env::set_var("WAYLAND_HOME", v),
+                None => std::env::remove_var("WAYLAND_HOME"),
+            }
+        }
+    }
+
+    #[test]
+    fn overview_esc_closes_when_nothing_is_dirty() {
+        // With no pending edits, `esc` closes back to the workspace.
+        let mut app = App::new();
+        let mut surface = ConfigSurface::new();
+        surface.on_enter(&mut app);
+        assert!(!surface.is_dirty());
+        let action = surface.handle_key(key(KeyCode::Esc), &mut app);
+        assert!(
+            matches!(action, SurfaceAction::Switch(SurfaceId::Workspace)),
+            "a clean esc must close to the workspace"
         );
     }
 
