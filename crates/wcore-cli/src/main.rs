@@ -492,6 +492,11 @@ enum TopCmd {
     /// free / paid-but-uncleared Flux key returns a `premium_locked`
     /// message — image generation is a paid-only capability.
     Image(wcore_cli::image::ImageArgs),
+    /// FluxRouter web_fetch (`POST /v1/fetch`): fetch a URL and print it
+    /// as markdown. `--render` selects the JS-rendered premium arm. A
+    /// free / paid-but-uncleared Flux key returns an `upgrade_required`
+    /// message — web_fetch is a paid-only capability.
+    Fetch(wcore_cli::fetch::FetchArgs),
 }
 
 /// F-089: `models` sub-subcommands.
@@ -942,6 +947,13 @@ async fn run() -> anyhow::Result<ExitCode> {
                 Ok(()) => Ok(ExitCode::SUCCESS),
                 Err(e) => {
                     eprintln!("wayland-core image: {e:#}");
+                    Ok(ExitCode::FAILURE)
+                }
+            },
+            TopCmd::Fetch(args) => match wcore_cli::fetch::run(args).await {
+                Ok(()) => Ok(ExitCode::SUCCESS),
+                Err(e) => {
+                    eprintln!("wayland-core fetch: {e:#}");
                     Ok(ExitCode::FAILURE)
                 }
             },

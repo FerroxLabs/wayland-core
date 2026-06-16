@@ -102,3 +102,8 @@ pub mod auth;
 // (`POST /v1/images/generations`). Lives in the lib so credential
 // resolution + path numbering are unit-testable.
 pub mod image;
+
+// CLI surface: `wayland-core fetch` — FluxRouter web_fetch
+// (`POST /v1/fetch`). Lives in the lib so credential resolution is
+// unit-testable; reuses the same Flux key/base resolution as `image`.
+pub mod fetch;

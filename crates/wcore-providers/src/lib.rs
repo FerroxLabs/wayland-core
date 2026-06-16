@@ -13,6 +13,7 @@ pub mod cooldown;
 pub mod deepseek;
 pub mod failover;
 pub mod fireworks;
+pub mod flux_fetch;
 pub mod flux_image;
 pub mod flux_router;
 pub mod gemini;
