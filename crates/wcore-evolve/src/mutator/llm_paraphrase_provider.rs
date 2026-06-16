@@ -208,10 +208,13 @@ async fn collect_text(
             LlmEvent::TextDelta(chunk) => buf.push_str(&chunk),
             LlmEvent::Done { .. } => return Ok(buf),
             LlmEvent::Error(message) => return Err(LlmParaphraseError::ProviderEvent(message)),
-            // Ignore: model may emit thinking deltas (Anthropic) or stray
-            // tool-use blocks (every provider, on prompt non-compliance);
-            // neither belongs in the paraphrased body.
-            LlmEvent::ThinkingDelta(_) | LlmEvent::ToolUse { .. } => {}
+            // Ignore: model may emit thinking deltas (Anthropic), stray
+            // tool-use blocks (every provider, on prompt non-compliance), or
+            // Flux web-search citations/results — none belong in a paraphrase.
+            LlmEvent::ThinkingDelta(_)
+            | LlmEvent::ToolUse { .. }
+            | LlmEvent::Citations(_)
+            | LlmEvent::SearchResults(_) => {}
         }
     }
     Err(LlmParaphraseError::StreamEndedEarly)

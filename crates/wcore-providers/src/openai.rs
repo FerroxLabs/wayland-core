@@ -828,10 +828,10 @@ impl LlmProvider for OpenAIProvider {
             // 402 surface. Map the recognised codes to typed entitlement errors
             // so the CLI can message a feature lock vs an account-needs-payment
             // state distinctly; unrecognised 402s fall through to `Api`.
-            if status.as_u16() == 402 {
-                if let Some(err) = parse_flux_402(&body_text) {
-                    return Err(err);
-                }
+            if status.as_u16() == 402
+                && let Some(err) = parse_flux_402(&body_text)
+            {
+                return Err(err);
             }
             return Err(ProviderError::Api {
                 status: status.as_u16(),
@@ -997,9 +997,7 @@ pub(crate) async fn process_sse_stream(
                     // after the answer text. Skipped when grounding never fired
                     // (both empty), so non-Flux turns are unaffected.
                     if !state.citations.is_empty() {
-                        let _ = tx
-                            .send(LlmEvent::Citations(state.citations.clone()))
-                            .await;
+                        let _ = tx.send(LlmEvent::Citations(state.citations.clone())).await;
                     }
                     if !state.search_results.is_empty() {
                         let _ = tx
@@ -2030,7 +2028,13 @@ mod tests {
                 "{alias} must match case-insensitively"
             );
         }
-        for concrete in ["gpt-5", "kimi-k2-6", "claude-sonnet-4", "flux-pinned-sonar", ""] {
+        for concrete in [
+            "gpt-5",
+            "kimi-k2-6",
+            "claude-sonnet-4",
+            "flux-pinned-sonar",
+            "",
+        ] {
             assert!(
                 !is_flux_tier_alias(concrete),
                 "{concrete} must NOT be treated as a tier alias"
@@ -2147,7 +2151,11 @@ mod tests {
         let _ = parse_sse_chunk(&frame, &mut state);
         let _ = parse_sse_chunk(&frame, &mut state);
         assert_eq!(state.citations.len(), 2, "duplicate URLs collapse");
-        assert_eq!(state.search_results.len(), 1, "duplicate cards collapse on url");
+        assert_eq!(
+            state.search_results.len(),
+            1,
+            "duplicate cards collapse on url"
+        );
     }
 
     /// A normal (ungrounded) frame leaves the grounding accumulators empty, so

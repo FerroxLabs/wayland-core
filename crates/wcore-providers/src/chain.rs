@@ -57,6 +57,12 @@ fn is_chain_retryable(e: &ProviderError) -> bool {
         // Missing credential is a config error the user must fix; failing over
         // would only mask it. Terminal.
         ProviderError::MissingApiKey => false,
+        // Flux capability / entitlement gates (402): terminal — surface the
+        // typed message. Another provider can't grant a Flux-only capability
+        // or resolve this account's spend ceiling.
+        ProviderError::PremiumLocked { .. }
+        | ProviderError::UpgradeRequired { .. }
+        | ProviderError::SpendCeilingUnresolved { .. } => false,
     }
 }
 

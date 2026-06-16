@@ -247,10 +247,10 @@ impl FluxImageClient {
             // `price_exceeds_max_price` and the shared error envelope are
             // recognised there. `premium_locked` is mapped to
             // `PremiumLocked { capability: "image generation", .. }`.
-            if status.as_u16() == 402 {
-                if let Some(err) = crate::openai::parse_flux_402(&body_text) {
-                    return Err(err);
-                }
+            if status.as_u16() == 402
+                && let Some(err) = crate::openai::parse_flux_402(&body_text)
+            {
+                return Err(err);
             }
             return Err(ProviderError::Api {
                 status: status.as_u16(),
@@ -382,7 +382,8 @@ mod tests {
 
     #[test]
     fn deserialize_together_flux_url_response_has_no_b64() {
-        let raw = r#"{ "created": 1, "data": [ { "url": "https://cdn.example/x.png", "index": 0 } ] }"#;
+        let raw =
+            r#"{ "created": 1, "data": [ { "url": "https://cdn.example/x.png", "index": 0 } ] }"#;
         let resp: ImageResponse = serde_json::from_str(raw).expect("parses");
         assert_eq!(
             resp.data[0].url.as_deref(),
@@ -429,9 +430,15 @@ mod tests {
     #[test]
     fn endpoint_appends_path_and_tolerates_trailing_slash() {
         let c = FluxImageClient::new("k", "https://api.fluxrouter.ai/v1");
-        assert_eq!(c.endpoint(), "https://api.fluxrouter.ai/v1/images/generations");
+        assert_eq!(
+            c.endpoint(),
+            "https://api.fluxrouter.ai/v1/images/generations"
+        );
         let c = FluxImageClient::new("k", "https://api.fluxrouter.ai/v1/");
-        assert_eq!(c.endpoint(), "https://api.fluxrouter.ai/v1/images/generations");
+        assert_eq!(
+            c.endpoint(),
+            "https://api.fluxrouter.ai/v1/images/generations"
+        );
     }
 
     #[tokio::test]

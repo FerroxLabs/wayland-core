@@ -213,7 +213,9 @@ mod tests {
 
     #[test]
     fn render_true_serializes_as_json_bool() {
-        let body = FetchRequest::new("https://x.test").with_render(true).to_body();
+        let body = FetchRequest::new("https://x.test")
+            .with_render(true)
+            .to_body();
         assert_eq!(body["render"], serde_json::Value::Bool(true));
     }
 
@@ -232,9 +234,9 @@ mod tests {
         let req = FetchRequest::new("https://x.test").with_request_id("stable-id-123");
         assert_eq!(req.request_id, "stable-id-123");
         // A blank override keeps the generated id (still a 36-char uuid).
-        let gen = FetchRequest::new("https://x.test");
-        let original = gen.request_id.clone();
-        let kept = gen.with_request_id("   ");
+        let made = FetchRequest::new("https://x.test");
+        let original = made.request_id.clone();
+        let kept = made.with_request_id("   ");
         assert_eq!(kept.request_id, original);
     }
 
