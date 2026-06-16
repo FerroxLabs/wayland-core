@@ -42,6 +42,12 @@ mod diagnostics;
 mod marketplace; // Lane F2 — the /plugins marketplace overlay
 mod model_picker; // arrow-key /model + /provider pickers
 mod onboarding;
+// Paste-to-detect provider setup: state machine + view-model (slice S4a). The
+// `Surface` wiring (draw, async detect spawn, storage write + rebind, slash
+// command) lands in S4b; until then its items are exercised only by unit tests,
+// so allow dead_code on this staged module.
+#[allow(dead_code)]
+mod paste_detect_modal;
 mod palette;
 mod plan_review;
 mod plugins;
