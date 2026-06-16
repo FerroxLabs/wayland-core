@@ -17,12 +17,14 @@
 //! [`discovery_enabled`] before invoking a live fetch path.
 
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use wcore_config::config::{Config, ProviderType, connected_providers, provider_type_slug};
 
-use crate::ModelInfo;
+use crate::{LlmProvider, ModelInfo, alias_models, create_native_provider};
 
 /// Default cache lifetime: model lists change rarely, so a 24h TTL keeps the
 /// `/model` picker snappy without serving stale catalogs for long.
@@ -98,6 +100,77 @@ pub fn save(provider: &str, models: &[ModelInfo]) -> std::io::Result<()> {
         std::fs::create_dir_all(parent)?;
     }
     std::fs::write(&path, json)
+}
+
+/// Refresh the on-disk model cache for every connected provider, fetching a
+/// live model list where possible and falling back to the static alias catalog
+/// otherwise.
+///
+/// For each provider reported by [`connected_providers`]
+/// (`wcore-config` — the single credential source of truth):
+///
+/// - **Disabled**: when `WAYLAND_MODEL_DISCOVERY=off` ([`discovery_enabled`] is
+///   false) the whole refresh is a no-op; the static alias catalog is served as
+///   the live floor by each provider's `list_models`, so there's nothing to
+///   pre-warm.
+/// - **Fresh cache**: providers whose cache is present and within
+///   [`DEFAULT_TTL`] are skipped — no network, no rewrite.
+/// - **ChatGPT** (`openai-chatgpt`): the Codex backend has no `/models`
+///   endpoint and `create_native_provider` panics for it (it is constructed in
+///   `bootstrap` with an OAuth bearer source), so we snapshot the static alias
+///   catalog directly and skip the live path.
+/// - **Everything else**: a per-provider discovery [`Config`] is derived from
+///   `base` ([`Config::for_provider_discovery`]), a native provider is built,
+///   and its `list_models` result is snapshotted. `list_models` upholds the
+///   engine invariant (never `Err` — it floors to the alias catalog on any
+///   HTTP/parse/auth failure), so the worst case still writes a usable cache.
+///
+/// Best-effort throughout: a cache-write error for one provider is logged-by-
+/// omission (the stale/alias entry stays) and never aborts the others. This is
+/// fire-and-forget warm-up — callers do not await per-provider success.
+pub async fn refresh_connected(base: &Config) {
+    if !discovery_enabled() {
+        return;
+    }
+    for provider in connected_providers() {
+        refresh_one(base, provider, create_native_provider).await;
+    }
+}
+
+/// Refresh a single `provider`'s cache, building the live provider via `build`.
+///
+/// Split out (and generic over `build`) so tests can inject a fake provider
+/// without a network call or the `create_native_provider` panic for
+/// ChatGPT. The ChatGPT special-case and the staleness skip live here so both
+/// the production path and tests share them.
+async fn refresh_one<F>(base: &Config, provider: ProviderType, build: F)
+where
+    F: FnOnce(&Config) -> Arc<dyn LlmProvider>,
+{
+    let slug = provider_type_slug(provider);
+
+    // Only refresh a stale/missing cache — a fresh snapshot is served as-is.
+    if load_cached(slug, DEFAULT_TTL).is_some() {
+        return;
+    }
+
+    // ChatGPT Codex has no live model endpoint and cannot be built via
+    // `create_native_provider` (it panics — constructed in bootstrap). Snapshot
+    // the static alias catalog so the picker still has a warm cache entry.
+    if provider == ProviderType::OpenAIChatGpt {
+        let _ = save(slug, &alias_models(slug));
+        return;
+    }
+
+    let cfg = base.for_provider_discovery(provider);
+    let live = build(&cfg);
+    // `list_models` never errors today (the invariant floors to the alias
+    // catalog). The `Err` path is still handled defensively so a future
+    // fallible override degrades to "keep the stale/alias cache" rather than
+    // panicking; an `Err` simply leaves whatever cache already exists in place.
+    if let Ok(models) = live.list_models().await {
+        let _ = save(slug, &models);
+    }
 }
 
 #[cfg(test)]
@@ -223,5 +296,100 @@ mod tests {
                 None => std::env::remove_var(DISCOVERY_ENV),
             }
         }
+    }
+
+    // -------------------------------------------------------------------------
+    // refresh_one() — per-provider live-discovery write path (fake-provider seam)
+    // -------------------------------------------------------------------------
+
+    use async_trait::async_trait;
+    use tokio::sync::mpsc;
+    use wcore_types::llm::{LlmEvent, LlmRequest};
+
+    use crate::{LlmProvider, ProviderError};
+
+    /// A hermetic `LlmProvider` whose `list_models` returns a fixed list and
+    /// whose `stream` is never exercised — lets the refresh service be tested
+    /// without a network call or the real `create_native_provider`.
+    struct FakeProvider {
+        models: Vec<ModelInfo>,
+    }
+
+    #[async_trait]
+    impl LlmProvider for FakeProvider {
+        async fn stream(
+            &self,
+            _request: &LlmRequest,
+        ) -> Result<mpsc::Receiver<LlmEvent>, ProviderError> {
+            unreachable!("refresh_one only calls list_models")
+        }
+        async fn list_models(&self) -> anyhow::Result<Vec<ModelInfo>> {
+            Ok(self.models.clone())
+        }
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn refresh_one_writes_live_models_to_cache() {
+        let _guard = HomeGuard::new();
+        let base = Config::default();
+        let live = vec![ModelInfo {
+            id: "gpt-5-live".into(),
+            display: "GPT-5 (live)".into(),
+        }];
+        let live_for_closure = live.clone();
+        refresh_one(&base, ProviderType::OpenAI, move |_cfg| {
+            Arc::new(FakeProvider {
+                models: live_for_closure.clone(),
+            })
+        })
+        .await;
+        let cached = load_cached("openai", DEFAULT_TTL).expect("refresh must write a cache entry");
+        assert_eq!(cached, live, "the live model list must be snapshotted verbatim");
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn refresh_one_skips_fresh_cache() {
+        let _guard = HomeGuard::new();
+        // Pre-seed a fresh cache; refresh must not overwrite it.
+        let seeded = vec![ModelInfo {
+            id: "seeded".into(),
+            display: "Seeded".into(),
+        }];
+        save("openai", &seeded).unwrap();
+        refresh_one(&Config::default(), ProviderType::OpenAI, |_cfg| {
+            // If this ran, it would write a DIFFERENT list — the assertion below
+            // would catch the unwanted overwrite.
+            Arc::new(FakeProvider {
+                models: vec![ModelInfo {
+                    id: "overwritten".into(),
+                    display: "Overwritten".into(),
+                }],
+            })
+        })
+        .await;
+        let cached = load_cached("openai", DEFAULT_TTL).unwrap();
+        assert_eq!(cached, seeded, "a fresh cache must not be refreshed");
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn refresh_one_chatgpt_writes_alias_catalog_without_building() {
+        let _guard = HomeGuard::new();
+        // The closure must NEVER run for ChatGPT — create_native_provider
+        // panics for it, so refresh_one snapshots the alias catalog directly.
+        refresh_one(&Config::default(), ProviderType::OpenAIChatGpt, |_cfg| {
+            panic!("ChatGPT must not be built via the live path");
+        })
+        .await;
+        let cached =
+            load_cached("openai-chatgpt", DEFAULT_TTL).expect("ChatGPT alias catalog must be cached");
+        assert_eq!(
+            cached,
+            alias_models("openai-chatgpt"),
+            "ChatGPT cache must be the static alias catalog"
+        );
+        assert!(!cached.is_empty(), "alias catalog is non-empty for ChatGPT");
     }
 }
