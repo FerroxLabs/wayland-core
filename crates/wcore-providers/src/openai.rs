@@ -764,6 +764,15 @@ impl LlmProvider for OpenAIProvider {
                     retry_after_ms: crate::retry::resolve_retry_after_ms(&headers, &body_text),
                 });
             }
+            // FluxRouter folds its paid-only gating into the OpenAI-compatible
+            // 402 surface. Map the recognised codes to typed entitlement errors
+            // so the CLI can message a feature lock vs an account-needs-payment
+            // state distinctly; unrecognised 402s fall through to `Api`.
+            if status.as_u16() == 402 {
+                if let Some(err) = parse_flux_402(&body_text) {
+                    return Err(err);
+                }
+            }
             return Err(ProviderError::Api {
                 status: status.as_u16(),
                 message: body_text,
@@ -1287,6 +1296,97 @@ pub(crate) fn map_openai_finish_reason(raw: &str) -> FinishReason {
     }
 }
 
+/// Parse a FluxRouter 402 body into a typed entitlement error.
+///
+/// Flux folds its paid-only gating into the OpenAI-compatible 402 surface and
+/// the body arrives in several shapes (contract §2 / §3.6 / §4.6 / §5.6):
+///
+/// - **image** `premium_locked`:
+///   `{"error":{"message":"image generation requires a paid plan","code":"premium_locked"}}`
+/// - **web_fetch** `upgrade_required`:
+///   `{"error":"upgrade_required","message":"web_fetch is a paid capability; ..."}`
+/// - **chat money-axis** `spend_ceiling_unresolved` — DOUBLY WRAPPED in the
+///   LiteLLM envelope: the outer `error.message` is a *stringified* JSON whose
+///   inner object is
+///   `{"error":"spend_ceiling_unresolved","reason":"no_account_id","message":"...","upgrade_url":"..."}`.
+///
+/// Strategy: read the recognised code/reason from BOTH the outer envelope
+/// (`error` may be a string code, or an object with `code`) AND, when the outer
+/// `message`/`error` is itself a JSON string, the inner object. Returns `None`
+/// for an unrecognised 402 so the caller falls back to [`ProviderError::Api`].
+pub(crate) fn parse_flux_402(body: &str) -> Option<ProviderError> {
+    let outer: Value = serde_json::from_str(body).ok()?;
+
+    // The inner (recovered) object, if the envelope double-wraps JSON in a
+    // string. Try the LiteLLM `error.message` first, then a top-level
+    // `error`/`message` that happens to be a stringified JSON object.
+    let inner: Option<Value> = outer
+        .get("error")
+        .and_then(|e| e.get("message"))
+        .and_then(Value::as_str)
+        .or_else(|| outer.get("error").and_then(Value::as_str))
+        .or_else(|| outer.get("message").and_then(Value::as_str))
+        .and_then(|s| serde_json::from_str::<Value>(s).ok())
+        .filter(Value::is_object);
+
+    // The recognised code can live in several spots; check inner first (it is
+    // the authoritative Flux body when present), then the outer envelope.
+    let code = inner
+        .as_ref()
+        .and_then(|v| v.get("error"))
+        .and_then(Value::as_str)
+        .or_else(|| {
+            outer
+                .get("error")
+                .and_then(|e| e.get("code"))
+                .and_then(Value::as_str)
+        })
+        .or_else(|| outer.get("error").and_then(Value::as_str))?;
+
+    // Human-readable message: prefer the most specific available.
+    let message = inner
+        .as_ref()
+        .and_then(|v| v.get("message"))
+        .and_then(Value::as_str)
+        .or_else(|| {
+            outer
+                .get("error")
+                .and_then(|e| e.get("message"))
+                .and_then(Value::as_str)
+        })
+        .or_else(|| outer.get("message").and_then(Value::as_str))
+        .unwrap_or(code)
+        .to_string();
+
+    match code {
+        "premium_locked" => Some(ProviderError::PremiumLocked {
+            capability: "image generation".to_string(),
+            message,
+        }),
+        "upgrade_required" => Some(ProviderError::UpgradeRequired { message }),
+        "spend_ceiling_unresolved" => {
+            let reason = inner
+                .as_ref()
+                .and_then(|v| v.get("reason"))
+                .and_then(Value::as_str)
+                .or_else(|| outer.get("reason").and_then(Value::as_str))
+                .unwrap_or("unknown")
+                .to_string();
+            let upgrade_url = inner
+                .as_ref()
+                .and_then(|v| v.get("upgrade_url"))
+                .and_then(Value::as_str)
+                .or_else(|| outer.get("upgrade_url").and_then(Value::as_str))
+                .map(str::to_string);
+            Some(ProviderError::SpendCeilingUnresolved {
+                reason,
+                upgrade_url,
+            })
+        }
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1294,6 +1394,163 @@ mod tests {
 
     fn no_compat() -> ProviderCompat {
         ProviderCompat::default()
+    }
+
+    // --- FluxRouter typed 402 / entitlement error parsing -----------------
+
+    /// image `premium_locked`: code lives in the envelope `error.code`, the
+    /// message in `error.message`. → `PremiumLocked`. (contract §2 / §3.6)
+    #[test]
+    fn parse_flux_402_premium_locked_image() {
+        let body = r#"{"error":{"message":"image generation requires a paid plan","code":"premium_locked"}}"#;
+        match parse_flux_402(body) {
+            Some(ProviderError::PremiumLocked {
+                capability,
+                message,
+            }) => {
+                assert_eq!(capability, "image generation");
+                assert_eq!(message, "image generation requires a paid plan");
+            }
+            other => panic!("expected PremiumLocked, got {other:?}"),
+        }
+    }
+
+    /// web_fetch `upgrade_required`: code is the top-level `error` STRING, the
+    /// message a sibling `message`. → `UpgradeRequired`. (contract §2 / §4.6)
+    #[test]
+    fn parse_flux_402_upgrade_required_fetch() {
+        let body = r#"{"error":"upgrade_required","message":"web_fetch is a paid capability; upgrade or clear a charge"}"#;
+        match parse_flux_402(body) {
+            Some(ProviderError::UpgradeRequired { message }) => {
+                assert_eq!(
+                    message,
+                    "web_fetch is a paid capability; upgrade or clear a charge"
+                );
+            }
+            other => panic!("expected UpgradeRequired, got {other:?}"),
+        }
+    }
+
+    /// money-axis chat gate `spend_ceiling_unresolved`, DOUBLY WRAPPED in the
+    /// LiteLLM envelope: outer `error.message` is a *stringified* JSON object.
+    /// The parser must recover the inner `error`/`reason`/`upgrade_url`. A
+    /// free/no-account chat returns exactly this. (contract §2 / §5.6)
+    #[test]
+    fn parse_flux_402_spend_ceiling_unresolved_double_wrapped() {
+        // The inner object, exactly as Flux emits it, stringified into the
+        // LiteLLM envelope's `error.message`.
+        let inner = r#"{"error":"spend_ceiling_unresolved","reason":"no_account_id","message":"This request requires a resolvable account spend ceiling. Add a payment method or contact billing@ferroxlabs.com.","upgrade_url":"https://fluxrouter.ai/home/billing"}"#;
+        let body = serde_json::json!({
+            "error": { "message": inner, "code": "402" }
+        })
+        .to_string();
+        match parse_flux_402(&body) {
+            Some(ProviderError::SpendCeilingUnresolved {
+                reason,
+                upgrade_url,
+            }) => {
+                assert_eq!(reason, "no_account_id");
+                assert_eq!(
+                    upgrade_url.as_deref(),
+                    Some("https://fluxrouter.ai/home/billing")
+                );
+            }
+            other => panic!("expected SpendCeilingUnresolved, got {other:?}"),
+        }
+    }
+
+    /// A `spend_ceiling_unresolved` body that is NOT double-wrapped (flat
+    /// top-level shape) must still parse — the parser reads inner-or-outer.
+    #[test]
+    fn parse_flux_402_spend_ceiling_unresolved_flat() {
+        let body = r#"{"error":"spend_ceiling_unresolved","reason":"no_account_id","message":"Add a payment method.","upgrade_url":"https://fluxrouter.ai/home/billing"}"#;
+        match parse_flux_402(body) {
+            Some(ProviderError::SpendCeilingUnresolved {
+                reason,
+                upgrade_url,
+            }) => {
+                assert_eq!(reason, "no_account_id");
+                assert_eq!(
+                    upgrade_url.as_deref(),
+                    Some("https://fluxrouter.ai/home/billing")
+                );
+            }
+            other => panic!("expected SpendCeilingUnresolved, got {other:?}"),
+        }
+    }
+
+    /// An unrecognised 402 (e.g. `price_exceeds_max_price`) returns `None` so
+    /// the caller falls back to the generic `ProviderError::Api`.
+    #[test]
+    fn parse_flux_402_unrecognized_returns_none() {
+        let body = r#"{"error":{"message":"final price exceeds max_price","code":"price_exceeds_max_price"}}"#;
+        assert!(parse_flux_402(body).is_none());
+    }
+
+    /// A non-JSON 402 body returns `None` (falls back to `Api`).
+    #[test]
+    fn parse_flux_402_non_json_returns_none() {
+        assert!(parse_flux_402("not json at all").is_none());
+    }
+
+    /// The typed variants render DISTINCT Display messages: the two feature
+    /// locks vs the account-needs-payment state must be separable by the CLI.
+    #[test]
+    fn flux_402_variants_render_distinct_messages() {
+        let locked = ProviderError::PremiumLocked {
+            capability: "image generation".into(),
+            message: "requires a paid plan".into(),
+        }
+        .to_string();
+        let upgrade = ProviderError::UpgradeRequired {
+            message: "web_fetch is paid".into(),
+        }
+        .to_string();
+        let spend = ProviderError::SpendCeilingUnresolved {
+            reason: "no_account_id".into(),
+            upgrade_url: Some("https://fluxrouter.ai/home/billing".into()),
+        }
+        .to_string();
+
+        // Feature locks read as a plan/upgrade requirement.
+        assert!(locked.contains("paid Flux plan"), "got: {locked}");
+        assert!(upgrade.contains("requires an upgrade"), "got: {upgrade}");
+        // The account state reads as "add a payment method" and surfaces the URL.
+        assert!(spend.contains("needs a payment method"), "got: {spend}");
+        assert!(
+            spend.contains("https://fluxrouter.ai/home/billing"),
+            "got: {spend}"
+        );
+        // The three messages are mutually distinct.
+        assert_ne!(locked, upgrade);
+        assert_ne!(locked, spend);
+        assert_ne!(upgrade, spend);
+    }
+
+    /// All three Flux 402 entitlement errors are terminal (not retryable):
+    /// retrying the same request on the same key 402s again.
+    #[test]
+    fn flux_402_errors_are_not_retryable() {
+        assert!(
+            !ProviderError::PremiumLocked {
+                capability: "image generation".into(),
+                message: String::new(),
+            }
+            .is_retryable()
+        );
+        assert!(
+            !ProviderError::UpgradeRequired {
+                message: String::new(),
+            }
+            .is_retryable()
+        );
+        assert!(
+            !ProviderError::SpendCeilingUnresolved {
+                reason: "no_account_id".into(),
+                upgrade_url: None,
+            }
+            .is_retryable()
+        );
     }
 
     // --- D008: live /model library — /v1/models parse + url derivation ----

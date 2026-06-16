@@ -156,6 +156,31 @@ pub enum ProviderError {
         "No API key. Set an api_key via --api-key, the config file, or an API-key environment variable."
     )]
     MissingApiKey,
+    /// FluxRouter 402 — a paid-only capability was requested on a key that is
+    /// not entitled to it (free or paid-but-uncleared). This is a FEATURE lock,
+    /// not an account state: the user must be on a paid plan with a cleared
+    /// charge. `capability` is the capability name when the body carried one
+    /// (image/web_fetch), else a generic label.
+    #[error("{capability} requires a paid Flux plan: {message}")]
+    PremiumLocked { capability: String, message: String },
+    /// FluxRouter 402 `upgrade_required` — a paid-only capability (web_fetch)
+    /// on a non-entitled key. Like [`ProviderError::PremiumLocked`] this is a
+    /// FEATURE lock (upgrade the plan / clear a charge), not an account state.
+    #[error("This Flux capability requires an upgrade: {message}")]
+    UpgradeRequired { message: String },
+    /// FluxRouter 402 `spend_ceiling_unresolved` — an ACCOUNT state, not a
+    /// feature lock: the key has no resolvable account/spend ceiling, so even a
+    /// plain chat is refused. The fix is to add a payment method (see
+    /// `upgrade_url`), distinct from the capability-not-entitled variants above.
+    #[error(
+        "This Flux account needs a payment method before it can make requests ({reason}). \
+         Add one{}.",
+        upgrade_url.as_ref().map(|u| format!(" at {u}")).unwrap_or_default()
+    )]
+    SpendCeilingUnresolved {
+        reason: String,
+        upgrade_url: Option<String>,
+    },
 }
 
 impl ProviderError {
@@ -181,7 +206,13 @@ impl ProviderError {
             | ProviderError::Parse(_)
             | ProviderError::PromptTooLong(_)
             // Missing credential is terminal — no retry will conjure a token.
-            | ProviderError::MissingApiKey => false,
+            | ProviderError::MissingApiKey
+            // Flux 402 entitlement failures are terminal: the same request on
+            // the same (unentitled / no-account) key will 402 again. The user
+            // must change plan / clear a charge / add a payment method first.
+            | ProviderError::PremiumLocked { .. }
+            | ProviderError::UpgradeRequired { .. }
+            | ProviderError::SpendCeilingUnresolved { .. } => false,
             // Egress transport timeouts/connects are pre-mapped to Connection
             // by provider code (like Http); a Denied is terminal. Both false here.
             ProviderError::Egress(_) => false,
