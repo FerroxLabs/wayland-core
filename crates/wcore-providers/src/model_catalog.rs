@@ -264,7 +264,17 @@ where
     // fallible override degrades to "keep the stale/alias cache" rather than
     // panicking; an `Err` simply leaves whatever cache already exists in place.
     if let Ok(models) = live.list_models().await {
-        let _ = save(slug, &models);
+        // `list_models` returns `Ok` even when it floored to the alias catalog
+        // (HTTP/auth/parse failure), so a bare `Live` tag would mislabel the
+        // built-in list as a "synced" live snapshot. The floor returns exactly
+        // `alias_models(alias_key)` (== `alias_models(slug)`), so an equal
+        // result means the live fetch did not actually succeed → tag BuiltIn.
+        let source = if models == alias_models(slug) {
+            ModelSource::BuiltIn
+        } else {
+            ModelSource::Live
+        };
+        let _ = save_with_source(slug, &models, source);
     }
 }
 
@@ -448,10 +458,40 @@ mod tests {
             })
         })
         .await;
-        let cached = load_cached("openai", DEFAULT_TTL).expect("refresh must write a cache entry");
+        let meta =
+            load_cached_meta("openai", DEFAULT_TTL).expect("refresh must write a cache entry");
         assert_eq!(
-            cached, live,
+            meta.models, live,
             "the live model list must be snapshotted verbatim"
+        );
+        assert_eq!(
+            meta.source,
+            ModelSource::Live,
+            "a result distinct from the alias catalog is a real live fetch"
+        );
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn refresh_one_tags_floored_alias_as_built_in() {
+        let _guard = HomeGuard::new();
+        // `list_models` floors to the alias catalog on failure but still returns
+        // Ok — refresh_one must recognise that (result == alias catalog) and tag
+        // the snapshot BuiltIn, not mislabel it as a live "synced" fetch.
+        let aliases = alias_models("openai");
+        let aliases_for_closure = aliases.clone();
+        refresh_one(&Config::default(), ProviderType::OpenAI, move |_cfg| {
+            Arc::new(FakeProvider {
+                models: aliases_for_closure.clone(),
+            })
+        })
+        .await;
+        let meta = load_cached_meta("openai", DEFAULT_TTL).expect("cache written");
+        assert_eq!(meta.models, aliases);
+        assert_eq!(
+            meta.source,
+            ModelSource::BuiltIn,
+            "a result equal to the alias catalog is a floored fetch → BuiltIn"
         );
     }
 
