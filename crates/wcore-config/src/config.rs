@@ -1121,9 +1121,13 @@ pub fn provider_type_slug(provider: ProviderType) -> &'static str {
 /// a cheap path existence test, not a token load. The `chatgpt` provider slug
 /// is the OAuth-store key (distinct from the `openai-chatgpt` catalog slug).
 ///
-/// Returns `None` only when the home directory cannot be resolved.
-fn chatgpt_oauth_token_path() -> Option<PathBuf> {
-    dirs::home_dir().map(|home| home.join(".wayland").join("oauth").join("chatgpt.json"))
+/// Resolved under [`profile_home`] so it honours `WAYLAND_HOME` exactly like the
+/// token *writer* (`OAuthStorage::from_home`) — the two must agree or a
+/// sandboxed run would look for the token in the wrong place. Identical to the
+/// old `dirs::home_dir()/.wayland/oauth/chatgpt.json` when `WAYLAND_HOME` is
+/// unset.
+fn chatgpt_oauth_token_path() -> PathBuf {
+    profile_home().join("oauth").join("chatgpt.json")
 }
 
 /// Whether `provider`'s credential is present right now, decided synchronously
@@ -1152,9 +1156,7 @@ pub fn provider_connected(provider: ProviderType) -> bool {
         ProviderType::Bedrock => aws_ambient_credentials_present(),
         ProviderType::Vertex => gcp_ambient_credentials_present(),
         // OAuth-backed — the stored login token is the credential.
-        ProviderType::OpenAIChatGpt => chatgpt_oauth_token_path()
-            .map(|p| p.exists())
-            .unwrap_or(false),
+        ProviderType::OpenAIChatGpt => chatgpt_oauth_token_path().exists(),
         // API-key providers: resolved key must be present and non-empty.
         _ => {
             let storage = crate::credentials::CredentialsStorageConfig::default();
@@ -4804,7 +4806,10 @@ skills_lifecycle = true
         /// where `wcore_agent::oauth::OAuthStorage::from_home` would
         /// (`~/.wayland/oauth/chatgpt.json`).
         fn write_chatgpt_token(&self) {
-            let dir = self._home.path().join(".wayland").join("oauth");
+            // Write where `chatgpt_oauth_token_path` reads — under the guarded
+            // `WAYLAND_HOME` (via `profile_home`), so detection is hermetic on
+            // every platform (Windows' `dirs::home_dir()` ignores `HOME`).
+            let dir = crate::config::profile_home().join("oauth");
             std::fs::create_dir_all(&dir).unwrap();
             std::fs::write(dir.join("chatgpt.json"), "{\"access_token\":\"t\"}").unwrap();
         }
@@ -4830,6 +4835,14 @@ skills_lifecycle = true
         let guard = CredEnvGuard::new();
         // Keyed provider: Anthropic via its env var.
         unsafe { std::env::set_var("ANTHROPIC_API_KEY", "sk-ant-test") };
+        // Ambient cloud: provide real credential sources via env (no home
+        // dependency, so this is hermetic on Windows too where dirs::home_dir()
+        // ignores HOME) — AWS static keys for Bedrock, an ADC path for Vertex.
+        unsafe {
+            std::env::set_var("AWS_ACCESS_KEY_ID", "AKIAEXAMPLE");
+            std::env::set_var("AWS_SECRET_ACCESS_KEY", "secret");
+            std::env::set_var("GOOGLE_APPLICATION_CREDENTIALS", "/tmp/sa.json");
+        }
         // OAuth provider: present token file = connected.
         guard.write_chatgpt_token();
 
@@ -4840,14 +4853,14 @@ skills_lifecycle = true
             connected.contains(&ProviderType::Anthropic),
             "Anthropic with ANTHROPIC_API_KEY set must be connected: {connected:?}"
         );
-        // Ambient cloud is always connected (no API key needed).
+        // Ambient cloud is connected when a credential source is present.
         assert!(
             connected.contains(&ProviderType::Bedrock),
-            "ambient Bedrock must always be connected: {connected:?}"
+            "Bedrock with AWS credentials must be connected: {connected:?}"
         );
         assert!(
             connected.contains(&ProviderType::Vertex),
-            "ambient Vertex must always be connected: {connected:?}"
+            "Vertex with GOOGLE_APPLICATION_CREDENTIALS must be connected: {connected:?}"
         );
         // OAuth provider with a stored token file is connected.
         assert!(
@@ -4869,15 +4882,15 @@ skills_lifecycle = true
     #[serial_test::serial(wayland_home_env)]
     fn provider_connected_oauth_false_without_token_file() {
         let _guard = CredEnvGuard::new();
-        // No token file written → ChatGPT is not connected.
+        // No token file written → ChatGPT is not connected. (Ambient-cloud
+        // connection is covered hermetically by
+        // `ambient_cloud_connection_reflects_real_credentials`, which overrides
+        // the AWS shared-file paths rather than relying on the home dir — the
+        // only way to make it deterministic on Windows.)
         assert!(
             !provider_connected(ProviderType::OpenAIChatGpt),
             "ChatGPT without a stored token file must be unconnected"
         );
-        // Ambient cloud is connected only with a real credential source — none
-        // exists in this hermetic env (creds cleared, HOME sandboxed), so
-        // Bedrock is now correctly unconnected.
-        assert!(!provider_connected(ProviderType::Bedrock));
     }
 
     #[test]

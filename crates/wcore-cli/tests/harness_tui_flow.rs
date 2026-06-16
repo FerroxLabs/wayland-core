@@ -517,6 +517,23 @@ fn agent_turn_streams_mock_assistant_text_into_the_transcript() {
         "mock-scripted assistant text to render in the transcript after a real agent turn",
     );
 
+    // `/provider` (bare) opens the arrow-key picker OVERLAY — reaching its real
+    // handler, not the LLM. Drive it through the palette, assert the picker
+    // paints a provider row, then `esc` to close before the shutdown path.
+    h.send(b"/");
+    std::thread::sleep(Duration::from_millis(400));
+    h.send(b"provider");
+    std::thread::sleep(Duration::from_millis(300));
+    h.send(b"\r");
+    std::thread::sleep(Duration::from_millis(500));
+    h.wait_for(
+        |s| s.to_lowercase().contains("anthropic"),
+        Duration::from_secs(6),
+        "/provider to open the provider picker overlay",
+    );
+    h.send(b"\x1b"); // esc closes the overlay
+    std::thread::sleep(Duration::from_millis(300));
+
     // Clean shutdown via the proven palette quit path. `rt`/`server` drop
     // naturally at end of scope, after the assertion above.
     h.send(b"/");
@@ -1049,7 +1066,10 @@ fn newly_wired_slash_commands_reach_real_handlers_not_the_llm() {
         ("hooks", "hooks registered"),
         ("resume", "saved sessions"),
         ("profile", "profiles configured"),
-        ("provider", "providers"),
+        // NOTE: `/provider` is NOT in this text-anchor loop — it opens the
+        // arrow-key picker OVERLAY (D022), not a text listing, so it is driven
+        // separately after the loop (an open overlay would also swallow the
+        // next iteration's `/`).
         ("replay", "--replay"),
         ("rewind", "no checkpoints"),
         ("repomap", "indexing the project"),

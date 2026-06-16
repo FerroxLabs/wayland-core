@@ -3018,10 +3018,21 @@ mod tests {
         );
     }
 
-    // ── esc reverts an unsaved change ───────────────────────────────────
+    // ── esc saves an unsaved change ─────────────────────────────────────
 
     #[test]
-    fn esc_reverts_an_unsaved_toggle() {
+    fn esc_saves_an_unsaved_toggle() {
+        // `esc` over a dirty overview SAVES the edit and stays on the surface
+        // (the footer's "saves & closes" contract). Reverting on esc was the
+        // bug Sean hit — "I hit Escape to save and close, it didn't do shit".
+        // Hermetic via WAYLAND_HOME so the save writes a throwaway config.toml.
+        let _guard = EXPERT_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = tempfile::tempdir().expect("tempdir");
+        let prev = std::env::var_os("WAYLAND_HOME");
+        // SAFETY: process-global env mutation is serialised by EXPERT_ENV_LOCK;
+        // the previous value is restored before the lock is released.
+        unsafe { std::env::set_var("WAYLAND_HOME", dir.path()) };
+
         let mut app = App::new();
         let mut surface = ConfigSurface::new();
         surface.on_enter(&mut app);
@@ -3036,14 +3047,27 @@ mod tests {
             "space should flip the toggle"
         );
         assert!(surface.is_dirty(), "an unsaved edit should be dirty");
-        // `esc` over a dirty model reverts it and stays on the surface.
+
+        // `esc` over a dirty model SAVES it (keeps the flip) and stays on the
+        // surface so the saved/now-live affordance can show — it never reverts.
         let action = surface.handle_key(key(KeyCode::Esc), &mut app);
-        assert!(matches!(action, SurfaceAction::None));
-        assert_eq!(
-            surface.current.long_term_memory, before,
-            "esc must revert the unsaved toggle"
+        assert!(
+            matches!(action, SurfaceAction::None),
+            "esc on a dirty surface stays put (saves, not closes)"
         );
-        assert!(!surface.is_dirty(), "after revert the model is clean");
+        assert_ne!(
+            surface.current.long_term_memory, before,
+            "esc must SAVE the toggle, not revert it"
+        );
+        assert!(!surface.is_dirty(), "after the save the model is clean");
+
+        // SAFETY: restore the prior env under the same lock.
+        unsafe {
+            match prev {
+                Some(v) => std::env::set_var("WAYLAND_HOME", v),
+                None => std::env::remove_var("WAYLAND_HOME"),
+            }
+        }
     }
 
     #[test]

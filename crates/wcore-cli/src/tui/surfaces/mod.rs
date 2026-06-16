@@ -2581,8 +2581,8 @@ fn render_provider(active: &str, arg: Option<&str>) -> String {
             // defensive fallback, so it points at the live verb rather than the
             // stale "that's a restart" advice.
             return format!(
-                "`{n}` is a known provider — run `/provider {n}` to switch to it live (no \
-                 restart). `/model` switches models within the current provider."
+                "`{n}` is a known provider — run `/provider {n}` to switch to it live. \
+                 `/model` switches models within the current provider."
             );
         }
         return format!(
@@ -2595,7 +2595,7 @@ fn render_provider(active: &str, arg: Option<&str>) -> String {
         let mark = if *p == active { "●" } else { "○" };
         out.push_str(&format!("  {mark} {p}\n"));
     }
-    out.push_str("\n/model switches models within the current provider (no restart).");
+    out.push_str("\n/model switches models within the current provider — applied live.");
     out
 }
 

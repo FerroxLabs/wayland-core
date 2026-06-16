@@ -849,10 +849,18 @@ mod tests {
     #[serial_test::serial]
     fn enter_on_different_provider_emits_qualified_command() {
         // Empty cache → the static alias rows are deterministic. Target
-        // `bedrock` (ambient cloud → always Connected, so the connection-aware
-        // filter always lists it) for a stable cross-provider row regardless of
-        // the machine's API keys / OAuth login.
+        // `bedrock` for a stable cross-provider row; give it AWS creds so the
+        // connection-aware filter lists it (the active provider, anthropic, is
+        // always listed regardless).
         let _home = ModelHomeGuard::new();
+        let prev_id = std::env::var_os("AWS_ACCESS_KEY_ID");
+        let prev_sec = std::env::var_os("AWS_SECRET_ACCESS_KEY");
+        // SAFETY: #[serial] test — set before building the picker (which reads
+        // connection status at construction), reverted before return.
+        unsafe {
+            std::env::set_var("AWS_ACCESS_KEY_ID", "AKIA");
+            std::env::set_var("AWS_SECRET_ACCESS_KEY", "secret");
+        }
         // Active provider differs from the selected model's provider → the
         // two-arg `/model <provider> <role>` form so the dispatch routes the
         // swap through apply_provider_swap (OAuth precheck) before the set.
@@ -867,7 +875,20 @@ mod tests {
             .position(|r| matches!(r, ModelRow::Model { provider, role, .. } if *provider == "bedrock" && *role == "sonnet"))
             .expect("bedrock:sonnet row must exist");
         p.selected = target;
-        match p.handle_key(key(KeyCode::Enter), &mut app) {
+        let action = p.handle_key(key(KeyCode::Enter), &mut app);
+        // SAFETY: restore the prior env before asserting (so a failure can't
+        // leak the creds into the next serial test).
+        unsafe {
+            match prev_id {
+                Some(v) => std::env::set_var("AWS_ACCESS_KEY_ID", v),
+                None => std::env::remove_var("AWS_ACCESS_KEY_ID"),
+            }
+            match prev_sec {
+                Some(v) => std::env::set_var("AWS_SECRET_ACCESS_KEY", v),
+                None => std::env::remove_var("AWS_SECRET_ACCESS_KEY"),
+            }
+        }
+        match action {
             SurfaceAction::Command(line) => {
                 assert_eq!(line, "/model bedrock sonnet");
             }
@@ -1042,6 +1063,18 @@ mod tests {
             "GEMINI_API_KEY",
             "GOOGLE_API_KEY",
             "API_KEY",
+            // Ambient-cloud credential sources, so "clean" really means no
+            // Bedrock/Vertex creds either (the sandboxed HOME below also clears
+            // the `~/.aws` and gcloud-ADC file fallbacks on these unix tests).
+            "AWS_ACCESS_KEY_ID",
+            "AWS_SECRET_ACCESS_KEY",
+            "AWS_PROFILE",
+            "AWS_CONTAINER_CREDENTIALS_RELATIVE_URI",
+            "AWS_CONTAINER_CREDENTIALS_FULL_URI",
+            "AWS_WEB_IDENTITY_TOKEN_FILE",
+            "AWS_SHARED_CREDENTIALS_FILE",
+            "AWS_CONFIG_FILE",
+            "GOOGLE_APPLICATION_CREDENTIALS",
         ];
         let tmp = tempfile::tempdir().expect("tempdir");
         if seed_chatgpt_token {
@@ -1085,13 +1118,11 @@ mod tests {
     #[test]
     #[serial_test::serial]
     fn provider_rows_partition_into_connected_and_not_configured() {
-        // No API keys, signed in to ChatGPT: the ambient-cloud providers
-        // (bedrock, vertex) and the signed-in OAuth provider are Connected;
-        // the key-only providers (anthropic, openai, gemini) need a key.
+        // No API keys, no AWS/GCP creds, signed in to ChatGPT: only the OAuth
+        // login is Connected; every key/cred-less provider — including the
+        // ambient-cloud ones with no credentials — is not-configured.
         let (connected, needs_key) =
             with_clean_provider_env(true, || provider_partition(&ProviderPickerSurface::new("")));
-        assert!(connected.contains(&"bedrock"), "bedrock uses ambient creds");
-        assert!(connected.contains(&"vertex"), "vertex uses ambient creds");
         assert!(
             connected.contains(&"openai-chatgpt"),
             "a stored ChatGPT login is connected"
@@ -1099,9 +1130,12 @@ mod tests {
         assert!(needs_key.contains(&"anthropic"), "no ANTHROPIC_API_KEY");
         assert!(needs_key.contains(&"openai"), "no OPENAI_API_KEY");
         assert!(needs_key.contains(&"gemini"), "no GEMINI_API_KEY");
-        // bedrock/vertex are NEVER in the not-configured section.
-        assert!(!needs_key.contains(&"bedrock"));
-        assert!(!needs_key.contains(&"vertex"));
+        // No AWS/GCP credentials → ambient cloud is NOT connected; it must show
+        // up under not-configured, never as Connected.
+        assert!(needs_key.contains(&"bedrock"), "no AWS credentials");
+        assert!(needs_key.contains(&"vertex"), "no GCP credentials");
+        assert!(!connected.contains(&"bedrock"));
+        assert!(!connected.contains(&"vertex"));
     }
 
     #[cfg(unix)]
@@ -1109,14 +1143,14 @@ mod tests {
     #[serial_test::serial]
     fn provider_status_helper_classifies_each_credential_class() {
         with_clean_provider_env(false, || {
-            // Ambient cloud: always connected, no key needed.
+            // Ambient cloud with NO AWS/GCP credentials → needs configuring.
             assert_eq!(
                 super::super::provider_connection_status("bedrock"),
-                super::super::ProviderConnection::Connected
+                super::super::ProviderConnection::NeedsKey
             );
             assert_eq!(
                 super::super::provider_connection_status("vertex"),
-                super::super::ProviderConnection::Connected
+                super::super::ProviderConnection::NeedsKey
             );
             // OAuth, no token seeded → needs a login.
             assert_eq!(
@@ -1139,6 +1173,22 @@ mod tests {
             );
             unsafe { std::env::remove_var("ANTHROPIC_API_KEY") };
         });
+        // With AWS credentials, the ambient-cloud provider is connected.
+        with_clean_provider_env(false, || {
+            // SAFETY: still inside the serialised env guard.
+            unsafe {
+                std::env::set_var("AWS_ACCESS_KEY_ID", "AKIA");
+                std::env::set_var("AWS_SECRET_ACCESS_KEY", "secret");
+            }
+            assert_eq!(
+                super::super::provider_connection_status("bedrock"),
+                super::super::ProviderConnection::Connected
+            );
+            unsafe {
+                std::env::remove_var("AWS_ACCESS_KEY_ID");
+                std::env::remove_var("AWS_SECRET_ACCESS_KEY");
+            }
+        });
     }
 
     // ── provider picker: Enter routing ─────────────────────────────────
@@ -1147,8 +1197,15 @@ mod tests {
     #[test]
     #[serial_test::serial]
     fn provider_enter_on_connected_emits_swap_command() {
-        // bedrock is always connected (ambient creds) → Enter swaps live.
+        // A credentialed provider → Enter swaps live. Give bedrock AWS creds so
+        // it's Connected (the surface reads connection status at construction,
+        // so set the creds BEFORE building the picker).
         with_clean_provider_env(false, || {
+            // SAFETY: still inside the serialised env guard.
+            unsafe {
+                std::env::set_var("AWS_ACCESS_KEY_ID", "AKIA");
+                std::env::set_var("AWS_SECRET_ACCESS_KEY", "secret");
+            }
             let mut app = App::new();
             let mut p = ProviderPickerSurface::new("bedrock");
             let (name, connected) = p.selected_provider().expect("a provider selected");
@@ -1157,6 +1214,10 @@ mod tests {
             match p.handle_key(key(KeyCode::Enter), &mut app) {
                 SurfaceAction::Command(line) => assert_eq!(line, "/provider bedrock"),
                 other => panic!("expected a /provider command, got {other:?}"),
+            }
+            unsafe {
+                std::env::remove_var("AWS_ACCESS_KEY_ID");
+                std::env::remove_var("AWS_SECRET_ACCESS_KEY");
             }
         });
     }

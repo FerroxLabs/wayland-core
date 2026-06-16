@@ -19,8 +19,6 @@ pub enum OAuthStorageError {
     Io(#[from] std::io::Error),
     #[error("json error: {0}")]
     Json(#[from] serde_json::Error),
-    #[error("home directory unresolvable")]
-    NoHome,
 }
 
 /// File-backed storage for OAuth tokens. Each provider gets its own
@@ -30,11 +28,19 @@ pub struct OAuthStorage {
 }
 
 impl OAuthStorage {
-    /// Construct using the user's home directory. Creates `~/.wayland/oauth/`
-    /// with mode 0700 on Unix on first use.
+    /// Construct under the canonical Wayland profile home. Creates
+    /// `~/.wayland/oauth/` (or `$WAYLAND_HOME/oauth/`) with mode 0700 on Unix on
+    /// first use.
+    ///
+    /// Resolves via [`wcore_config::config::profile_home`] so the OAuth token
+    /// store honours `WAYLAND_HOME` like the rest of Wayland's state: a hermetic
+    /// sandbox (e.g. an auditor subprocess that sets `WAYLAND_HOME`) keeps its
+    /// tokens inside the sandbox instead of reading/writing the real
+    /// `~/.wayland` — the F-019 leak class. Identical to the previous
+    /// `dirs::home_dir()/.wayland` path when `WAYLAND_HOME` is unset, so normal
+    /// runs are unaffected.
     pub fn from_home() -> Result<Self, OAuthStorageError> {
-        let home = dirs::home_dir().ok_or(OAuthStorageError::NoHome)?;
-        Self::at_root(home.join(".wayland").join("oauth"))
+        Self::at_root(wcore_config::config::profile_home().join("oauth"))
     }
 
     /// Construct at an explicit root (used in tests).
