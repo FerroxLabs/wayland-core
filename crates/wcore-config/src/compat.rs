@@ -331,6 +331,29 @@ impl ProviderCompat {
         Self::openai_compat_provider("azure-openai")
     }
 
+    /// Defaults for "Sign in with ChatGPT" (the Codex backend).
+    ///
+    /// Built on `openai_compat_provider("openai-chatgpt")` so cost attribution
+    /// is labelled `"openai-chatgpt"` (catalog-resolved). Two Codex-specific
+    /// overrides on top of the OpenAI-compat base:
+    /// - `uses_responses_api = Some(true)`: the Codex backend speaks ONLY the
+    ///   Responses wire format, so force it unconditionally rather than deferring
+    ///   to the per-model family predicate.
+    /// - `supports_effort` + `effort_levels`: Codex models are reasoning models
+    ///   that accept `reasoning_effort`.
+    ///
+    /// NOTE: `max_output_tokens` is rejected by the Codex backend but is NOT
+    /// suppressed here — the provider strips it from the request body directly
+    /// (no new `ProviderCompat` field, so `merge()` is untouched).
+    pub fn chatgpt_defaults() -> Self {
+        Self {
+            uses_responses_api: Some(true),
+            supports_effort: Some(true),
+            effort_levels: Some(vec!["low".into(), "medium".into(), "high".into()]),
+            ..Self::openai_compat_provider("openai-chatgpt")
+        }
+    }
+
     /// Defaults for Together AI (open-weight model host).
     pub fn together_defaults() -> Self {
         // Base URL ends in `/v1`; pin `api_path` to `/chat/completions` so the
@@ -932,6 +955,21 @@ mod cache_breakpoint_tests {
     }
 
     #[test]
+    fn chatgpt_defaults_force_responses_and_tag_provider() {
+        let c = ProviderCompat::chatgpt_defaults();
+        // Codex speaks only the Responses wire format — forced unconditionally.
+        assert_eq!(c.uses_responses_api(), Some(true));
+        // Cost attribution carries the real provider id, not "openai".
+        assert_eq!(c.provider_type(), "openai-chatgpt");
+        // Reasoning-effort capability is advertised.
+        assert_eq!(c.supports_effort, Some(true));
+        assert_eq!(
+            c.effort_levels,
+            Some(vec!["low".into(), "medium".into(), "high".into()])
+        );
+    }
+
+    #[test]
     fn openai_defaults_do_not_enable_cache_message_breakpoints() {
         let compat = ProviderCompat::openai_defaults();
         // None or Some(false) both resolve to false through the accessor —
@@ -998,6 +1036,7 @@ mod cache_breakpoint_tests {
             // compiling as the ProviderType enum grows.
             ProviderType::Mistral => ProviderCompat::mistral_defaults(),
             ProviderType::Cohere => ProviderCompat::cohere_defaults(),
+            ProviderType::OpenAIChatGpt => ProviderCompat::chatgpt_defaults(),
         };
         assert_eq!(
             resolved.cache_message_breakpoints,
