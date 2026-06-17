@@ -652,6 +652,7 @@ fn mcp_config_from_target(target: &str) -> Result<wcore_config::config::McpServe
             url: Some(target.to_string()),
             headers: None,
             deferred: Some(false),
+            allow_local: false,
         });
     }
     let mut parts = target.split_whitespace();
@@ -669,6 +670,7 @@ fn mcp_config_from_target(target: &str) -> Result<wcore_config::config::McpServe
         url: None,
         headers: None,
         deferred: Some(false),
+        allow_local: false,
     })
 }
 

@@ -232,14 +232,14 @@ impl McpManager {
                     .as_deref()
                     .ok_or_else(|| McpError::InitFailed("SSE transport requires 'url'".into()))?;
                 let headers = config.headers.as_ref().unwrap_or(&empty_map);
-                Box::new(SseTransport::connect(url, headers).await?)
+                Box::new(SseTransport::connect(url, headers, config.allow_local).await?)
             }
             TransportType::StreamableHttp => {
                 let url = config.url.as_deref().ok_or_else(|| {
                     McpError::InitFailed("streamable-http transport requires 'url'".into())
                 })?;
                 let headers = config.headers.as_ref().unwrap_or(&empty_map);
-                Box::new(StreamableHttpTransport::connect(url, headers).await?)
+                Box::new(StreamableHttpTransport::connect(url, headers, config.allow_local).await?)
             }
         };
 
@@ -916,6 +916,7 @@ mod tests {
             url: None,
             headers: None,
             deferred: None,
+            allow_local: false,
         };
         let mut configs = HashMap::new();
         configs.insert("hung-server".to_string(), hung);
@@ -953,6 +954,7 @@ mod tests {
             url: None,
             headers: None,
             deferred: None,
+            allow_local: false,
         };
         // A real MCP handshake fixture: answer initialize + tools/list.
         let healthy_script = r#"
@@ -971,6 +973,7 @@ mod tests {
             url: None,
             headers: None,
             deferred: None,
+            allow_local: false,
         };
         let mut configs = HashMap::new();
         configs.insert("hung".to_string(), hung);
@@ -1004,6 +1007,7 @@ mod tests {
             url: None,
             headers: None,
             deferred: None,
+            allow_local: false,
         };
         let mut configs = HashMap::new();
         configs.insert("hung".to_string(), hung);
@@ -1037,6 +1041,7 @@ mod tests {
             url: None,
             headers: None,
             deferred: None,
+            allow_local: false,
         };
         let mut configs = HashMap::new();
         configs.insert("broken".to_string(), broken);
@@ -1077,6 +1082,7 @@ mod tests {
             url: None,
             headers: None,
             deferred: None,
+            allow_local: false,
         };
         let hung = McpServerConfig {
             transport: TransportType::Stdio,
@@ -1086,6 +1092,7 @@ mod tests {
             url: None,
             headers: None,
             deferred: None,
+            allow_local: false,
         };
         let mut configs = HashMap::new();
         configs.insert("healthy".to_string(), healthy);

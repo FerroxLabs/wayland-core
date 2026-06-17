@@ -2153,6 +2153,7 @@ fn to_mcp_server_config(
         url,
         headers,
         deferred: Some(false),
+        allow_local: false,
     })
 }
 

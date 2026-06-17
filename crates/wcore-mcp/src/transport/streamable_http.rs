@@ -28,11 +28,25 @@ pub struct StreamableHttpTransport {
 
 impl StreamableHttpTransport {
     /// Create a new Streamable HTTP transport
-    pub async fn connect(url: &str, headers: &HashMap<String, String>) -> Result<Self, McpError> {
+    pub async fn connect(
+        url: &str,
+        headers: &HashMap<String, String>,
+        allow_local: bool,
+    ) -> Result<Self, McpError> {
         // M-13 (SSRF) — validate the configured URL before attaching any
         // secret-bearing header. `is_safe_url` fails closed on
         // private/internal/metadata targets and on DNS failure.
-        if !wcore_tools::url_safety::is_safe_url(url) {
+        //
+        // `allow_local` (per-server config) relaxes the LOOPBACK block only,
+        // for trusted user-configured local MCP servers — an MCP endpoint is
+        // trusted configuration, not a model-driven URL. Every other private/
+        // internal/metadata range stays blocked.
+        let url_ok = if allow_local {
+            wcore_tools::url_safety::is_safe_url_allow_loopback(url)
+        } else {
+            wcore_tools::url_safety::is_safe_url(url)
+        };
+        if !url_ok {
             return Err(McpError::Transport(format!(
                 "Streamable-HTTP MCP url rejected — resolves to a private or \
                  internal network address (SSRF guard): {url}"
@@ -70,14 +84,28 @@ impl StreamableHttpTransport {
         // re-resolves the host at connect time; `SsrfSafeResolver` makes
         // reqwest dial only validated public IPs (no check→connect rebind
         // window) for the initial request and every redirect hop.
-        let client = wcore_egress::EgressClient::builder()
+        // When allow_local is set, use the loopback-permitting redirect policy
+        // and resolver so reqwest can actually dial 127.0.0.1/::1 (the default
+        // SsrfSafeResolver drops loopback at connect time). Both variants keep
+        // every non-loopback SSRF protection intact.
+        let builder = wcore_egress::EgressClient::builder()
             .pool_idle_timeout(std::time::Duration::from_secs(5))
             .connect_timeout(std::time::Duration::from_secs(15))
-            .timeout(std::time::Duration::from_secs(120))
-            .redirect(wcore_tools::url_safety::ssrf_safe_redirect_policy())
-            .dns_resolver(std::sync::Arc::new(
-                wcore_tools::url_safety::SsrfSafeResolver,
-            ))
+            .timeout(std::time::Duration::from_secs(120));
+        let builder = if allow_local {
+            builder
+                .redirect(wcore_tools::url_safety::ssrf_safe_redirect_policy_allow_loopback())
+                .dns_resolver(std::sync::Arc::new(
+                    wcore_tools::url_safety::LoopbackOkResolver,
+                ))
+        } else {
+            builder
+                .redirect(wcore_tools::url_safety::ssrf_safe_redirect_policy())
+                .dns_resolver(std::sync::Arc::new(
+                    wcore_tools::url_safety::SsrfSafeResolver,
+                ))
+        };
+        let client = builder
             .build()
             .unwrap_or_else(|_| wcore_egress::EgressClient::new());
 
@@ -307,7 +335,7 @@ mod tests {
     #[tokio::test]
     async fn connect_rejects_metadata_ip_url() {
         let headers = HashMap::new();
-        let err = StreamableHttpTransport::connect("http://169.254.169.254/mcp", &headers)
+        let err = StreamableHttpTransport::connect("http://169.254.169.254/mcp", &headers, false)
             .await
             .expect_err("metadata-IP url must be rejected at connect");
         let msg = err.to_string();
@@ -317,14 +345,32 @@ mod tests {
         );
     }
 
-    /// M-13 — a loopback URL is likewise rejected (SSRF to localhost
-    /// services).
+    /// M-13 — a loopback URL is rejected by default (allow_local = false).
     #[tokio::test]
     async fn connect_rejects_loopback_url() {
         let headers = HashMap::new();
-        let err = StreamableHttpTransport::connect("http://127.0.0.1:8080/mcp", &headers)
+        let err = StreamableHttpTransport::connect("http://127.0.0.1:8080/mcp", &headers, false)
             .await
-            .expect_err("loopback url must be rejected at connect");
+            .expect_err("loopback url must be rejected at connect when allow_local=false");
+        assert!(
+            err.to_string().contains("private or internal") || err.to_string().contains("SSRF")
+        );
+    }
+
+    /// allow_local = true: a loopback URL passes the SSRF gate (connect does no
+    /// network I/O, so it returns Ok), enabling trusted local MCP servers like
+    /// Agent Vault on 127.0.0.1. A metadata/private IP must STILL be rejected
+    /// even with allow_local set.
+    #[tokio::test]
+    async fn connect_allows_loopback_when_allow_local() {
+        let headers = HashMap::new();
+        StreamableHttpTransport::connect("http://127.0.0.1:3456/mcp", &headers, true)
+            .await
+            .expect("loopback url must be accepted at connect when allow_local=true");
+
+        let err = StreamableHttpTransport::connect("http://169.254.169.254/mcp", &headers, true)
+            .await
+            .expect_err("metadata IP must stay blocked even when allow_local=true");
         assert!(
             err.to_string().contains("private or internal") || err.to_string().contains("SSRF")
         );

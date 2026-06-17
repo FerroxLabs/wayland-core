@@ -126,10 +126,23 @@ fn ip_is_cloud_metadata(ip: IpAddr) -> bool {
 
 /// Return true if the IP should be blocked for SSRF protection.
 fn is_blocked_ip(ip: IpAddr) -> bool {
+    is_blocked_ip_with(ip, false)
+}
+
+/// Return true if the IP should be blocked for SSRF protection.
+///
+/// `allow_loopback` relaxes the loopback block ONLY (IPv4 127.0.0.0/8, IPv6
+/// `::1`, and IPv4-mapped/compatible loopback). It is used for trusted,
+/// user-configured *local* targets (e.g. a local MCP server the user added by
+/// hand) where a connection to the user's own machine is not the SSRF threat
+/// the guard exists to stop. Every other range — private LAN, link-local,
+/// CGNAT, multicast, unspecified, documentation, IPv6 ULA, cloud-metadata —
+/// stays blocked regardless.
+fn is_blocked_ip_with(ip: IpAddr, allow_loopback: bool) -> bool {
     match ip {
         IpAddr::V4(v4) => {
-            if v4.is_private()
-                || v4.is_loopback()
+            if (!allow_loopback && v4.is_loopback())
+                || v4.is_private()
                 || v4.is_link_local()
                 || v4.is_broadcast()
                 || v4.is_multicast()
@@ -144,7 +157,7 @@ fn is_blocked_ip(ip: IpAddr) -> bool {
             false
         }
         IpAddr::V6(v6) => {
-            if v6.is_loopback() || v6.is_multicast() || v6.is_unspecified() {
+            if (!allow_loopback && v6.is_loopback()) || v6.is_multicast() || v6.is_unspecified() {
                 return true;
             }
             // Unique local fc00::/7
@@ -158,13 +171,13 @@ fn is_blocked_ip(ip: IpAddr) -> bool {
             }
             // IPv4-mapped IPv6 — unwrap and re-check using IPv4 rules.
             if let Some(mapped) = v6.to_ipv4_mapped() {
-                return is_blocked_ip(IpAddr::V4(mapped));
+                return is_blocked_ip_with(IpAddr::V4(mapped), allow_loopback);
             }
             // IPv4-compatible (deprecated): ::a.b.c.d
             if let Some(compat) = v6.to_ipv4() {
-                // Reject the all-zeros and loopback aliases at minimum; the
-                // mapping path above already handles the modern form.
-                if compat.is_unspecified() || compat.is_loopback() {
+                // Reject the all-zeros (and loopback aliases unless explicitly
+                // allowed); the mapping path above handles the modern form.
+                if compat.is_unspecified() || (!allow_loopback && compat.is_loopback()) {
                     return true;
                 }
             }
@@ -269,6 +282,16 @@ pub fn is_safe_url(url: &str) -> bool {
     is_safe_url_with(url, system_resolver)
 }
 
+/// Like [`is_safe_url`] but permits LOOPBACK targets (127.0.0.0/8, `::1`,
+/// `localhost`). For trusted, user-configured local endpoints only — e.g. a
+/// local MCP server the user added by hand. Every other private/internal/
+/// metadata range stays blocked. An MCP server URL is trusted configuration,
+/// not a model-driven fetch, so the SSRF guard's loopback block (meant for
+/// untrusted URLs) should not apply to it.
+pub fn is_safe_url_allow_loopback(url: &str) -> bool {
+    is_safe_url_with_opts(url, system_resolver, true)
+}
+
 /// Resolve `url`'s host once and return the validated, SSRF-safe IPs so the
 /// HTTP-client layer can **pin** them into the connection and close the
 /// DNS-rebinding TOCTOU described on [`is_safe_url`].
@@ -315,6 +338,10 @@ fn safe_url_pinned_ips_with(url: &str, resolve: Resolver) -> Option<Vec<IpAddr>>
 }
 
 fn is_safe_url_with(url: &str, resolve: Resolver) -> bool {
+    is_safe_url_with_opts(url, resolve, false)
+}
+
+fn is_safe_url_with_opts(url: &str, resolve: Resolver, allow_loopback: bool) -> bool {
     let Some(hostname) = extract_hostname(url) else {
         return false;
     };
@@ -325,14 +352,15 @@ fn is_safe_url_with(url: &str, resolve: Resolver) -> bool {
     }
 
     // Explicit cloud-metadata check — reject before falling through to the
-    // general private-IP block so the log line names the threat.
+    // general private-IP block so the log line names the threat. (Loopback is
+    // never a metadata endpoint, so this gate is unaffected by allow_loopback.)
     if is_cloud_metadata_url_with(url, resolve) {
         return false;
     }
 
     // Literal IP — skip DNS.
     if let Ok(ip) = hostname.parse::<IpAddr>() {
-        return !is_blocked_ip(ip);
+        return !is_blocked_ip_with(ip, allow_loopback);
     }
 
     let addrs = resolve(&hostname);
@@ -342,7 +370,7 @@ fn is_safe_url_with(url: &str, resolve: Resolver) -> bool {
         return false;
     }
 
-    !addrs.into_iter().any(is_blocked_ip)
+    !addrs.into_iter().any(|ip| is_blocked_ip_with(ip, allow_loopback))
 }
 
 /// Build the SSRF-resistant `reqwest` redirect policy shared by every
@@ -386,6 +414,27 @@ pub fn ssrf_safe_redirect_policy() -> Policy {
     })
 }
 
+/// Loopback-permitting variant of [`ssrf_safe_redirect_policy`] for trusted
+/// local endpoints. Re-validates every hop with [`is_safe_url_allow_loopback`],
+/// so loopback hops are followed but all other private/internal/metadata
+/// redirect targets are still blocked. Pair with [`LoopbackOkResolver`].
+pub fn ssrf_safe_redirect_policy_allow_loopback() -> Policy {
+    Policy::custom(|attempt| {
+        if attempt.previous().len() >= 10 {
+            return attempt.error("too many redirects");
+        }
+        let url = attempt.url().to_string();
+        if is_safe_url_allow_loopback(&url) {
+            attempt.follow()
+        } else {
+            attempt.error(format!(
+                "redirect blocked — target URL is a private or internal \
+                 network address: {url}"
+            ))
+        }
+    })
+}
+
 /// Resolve `host` and return the SSRF-safe socket addresses to dial (port `0`;
 /// reqwest sets the real port per the URL/scheme). Returns empty — i.e. "do
 /// not connect", failing closed — for a cloud-metadata hostname, a literal
@@ -393,18 +442,26 @@ pub fn ssrf_safe_redirect_policy() -> Policy {
 /// is private/internal (no split-horizon). Mirrors [`safe_url_pinned_ips`] but
 /// keyed on the bare hostname, which is all a [`Resolve`] impl receives.
 fn ssrf_safe_socket_addrs_with(host: &str, resolve: Resolver) -> Vec<SocketAddr> {
+    ssrf_safe_socket_addrs_with_opts(host, resolve, false)
+}
+
+fn ssrf_safe_socket_addrs_with_opts(
+    host: &str,
+    resolve: Resolver,
+    allow_loopback: bool,
+) -> Vec<SocketAddr> {
     if CLOUD_METADATA_HOSTNAMES.contains(&host) {
         return Vec::new();
     }
     if let Ok(ip) = host.parse::<IpAddr>() {
-        return if is_blocked_ip(ip) {
+        return if is_blocked_ip_with(ip, allow_loopback) {
             Vec::new()
         } else {
             vec![SocketAddr::new(ip, 0)]
         };
     }
     let addrs = resolve(host);
-    if addrs.is_empty() || addrs.iter().copied().any(is_blocked_ip) {
+    if addrs.is_empty() || addrs.iter().copied().any(|ip| is_blocked_ip_with(ip, allow_loopback)) {
         return Vec::new();
     }
     addrs.into_iter().map(|ip| SocketAddr::new(ip, 0)).collect()
@@ -450,6 +507,33 @@ impl Resolve for SsrfSafeResolver {
     }
 }
 
+/// Loopback-permitting counterpart to [`SsrfSafeResolver`]. Returns loopback
+/// IPs (in addition to safe public IPs) so reqwest can dial a trusted local
+/// endpoint, while still dropping every other private/internal/metadata
+/// address. Use ONLY for user-configured local targets (e.g. local MCP
+/// servers), paired with [`ssrf_safe_redirect_policy_allow_loopback`].
+#[derive(Debug, Clone, Copy, Default)]
+pub struct LoopbackOkResolver;
+
+impl Resolve for LoopbackOkResolver {
+    fn resolve(&self, name: Name) -> Resolving {
+        let host = name.as_str().to_string();
+        Box::pin(async move {
+            let safe = tokio::task::spawn_blocking(move || {
+                ssrf_safe_socket_addrs_with_opts(&host, system_resolver, true)
+            })
+            .await
+            .unwrap_or_default();
+            if safe.is_empty() {
+                return Err(Box::<dyn std::error::Error + Send + Sync>::from(
+                    "SSRF guard: host has no safe address to dial (loopback allowed)",
+                ));
+            }
+            Ok(Box::new(safe.into_iter()) as Addrs)
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -472,6 +556,42 @@ mod tests {
         assert!(is_safe_url_with("https://example.com/path", fake_resolver));
         assert!(is_safe_url_with("http://example.com:8080/", fake_resolver));
         assert!(is_safe_url_with("https://ipv6-pub.example/", fake_resolver));
+    }
+
+    // allow_local / loopback opt-in: a trusted user-configured local MCP server
+    // (e.g. Agent Vault at http://127.0.0.1:3456/mcp) must be reachable, while
+    // EVERY other private/internal/metadata range stays blocked.
+    #[test]
+    fn allow_loopback_permits_loopback_but_still_blocks_others() {
+        // Loopback now allowed (literal IPs skip the resolver).
+        assert!(is_safe_url_with_opts(
+            "http://127.0.0.1:3456/mcp",
+            fake_resolver,
+            true
+        ));
+        assert!(is_safe_url_with_opts("http://127.0.0.1/", fake_resolver, true));
+        // A hostname that resolves to loopback is allowed too (covers localhost
+        // and IPv6 `::1` via the resolver path). `myhost.local` -> 127.0.0.1.
+        assert!(is_safe_url_with_opts("http://myhost.local/", fake_resolver, true));
+        // Note: a *bracketed* IPv6 literal (`http://[::1]/`) is parsed with the
+        // brackets retained and so routes through the resolver rather than the
+        // literal-IP fast path — a pre-existing behavior of `extract_hostname`,
+        // unchanged here. Use a hostname (e.g. `localhost`) for IPv6 loopback.
+
+        // Non-loopback ranges remain blocked even with allow_loopback=true.
+        assert!(!is_safe_url_with_opts("http://169.254.169.254/", fake_resolver, true));
+        assert!(!is_safe_url_with_opts("http://10.0.0.5/", fake_resolver, true));
+        assert!(!is_safe_url_with_opts("http://192.168.1.1/", fake_resolver, true));
+        assert!(!is_safe_url_with_opts("http://172.16.0.1/", fake_resolver, true));
+        assert!(!is_safe_url_with_opts("http://100.64.0.1/", fake_resolver, true));
+        // intranet.local resolves to 10.0.0.5 — still blocked.
+        assert!(!is_safe_url_with_opts("http://intranet.local/", fake_resolver, true));
+        // Public still fine.
+        assert!(is_safe_url_with_opts("https://example.com/", fake_resolver, true));
+
+        // The DEFAULT path (allow_loopback=false) still blocks loopback.
+        assert!(!is_safe_url_with("http://127.0.0.1/", fake_resolver));
+        assert!(is_safe_url_allow_loopback("http://127.0.0.1:3456/mcp"));
     }
 
     // H-1-broad — the SSRF-safe DNS resolver is the connect-time half that

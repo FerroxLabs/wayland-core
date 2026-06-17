@@ -196,6 +196,7 @@ async fn handshake_success_discovers_tools() {
             url: None,
             headers: None,
             deferred: None,
+            allow_local: false,
         },
     );
 
@@ -245,6 +246,7 @@ async fn handshake_init_transport_error_propagates() {
             url: None,
             headers: None,
             deferred: None,
+            allow_local: false,
         },
     );
 

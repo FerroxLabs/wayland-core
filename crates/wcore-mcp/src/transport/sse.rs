@@ -39,8 +39,12 @@ pub struct SseTransport {
 
 impl SseTransport {
     /// Connect to an SSE MCP server.
-    pub async fn connect(url: &str, headers: &HashMap<String, String>) -> Result<Self, McpError> {
-        Self::connect_with_timeout(url, headers, SSE_REQUEST_TIMEOUT).await
+    pub async fn connect(
+        url: &str,
+        headers: &HashMap<String, String>,
+        allow_local: bool,
+    ) -> Result<Self, McpError> {
+        Self::connect_with_timeout(url, headers, SSE_REQUEST_TIMEOUT, allow_local).await
     }
 
     /// [`connect`](Self::connect) with an explicit per-request timeout.
@@ -50,6 +54,7 @@ impl SseTransport {
         url: &str,
         headers: &HashMap<String, String>,
         request_timeout: std::time::Duration,
+        allow_local: bool,
     ) -> Result<Self, McpError> {
         // M-13 (SSRF) — validate the configured URL before we attach any
         // secret-bearing header and open a connection to it. `is_safe_url`
@@ -57,7 +62,16 @@ impl SseTransport {
         // failure, so a server configured at `http://169.254.169.254/...`
         // (or a hostname that resolves there) is rejected at connect time
         // rather than becoming an SSRF primitive.
-        if !wcore_tools::url_safety::is_safe_url(url) {
+        //
+        // `allow_local` (per-server config) relaxes the LOOPBACK block only,
+        // for trusted user-configured local MCP servers. Every other private/
+        // internal/metadata range stays blocked.
+        let url_ok = if allow_local {
+            wcore_tools::url_safety::is_safe_url_allow_loopback(url)
+        } else {
+            wcore_tools::url_safety::is_safe_url(url)
+        };
+        if !url_ok {
             return Err(McpError::Transport(format!(
                 "SSE MCP url rejected — resolves to a private or internal \
                  network address (SSRF guard): {url}"
@@ -97,13 +111,26 @@ impl SseTransport {
         // re-resolves the host at connect time; `SsrfSafeResolver` makes
         // reqwest dial only validated public IPs (no check→connect rebind
         // window) for the initial GET and every redirect hop.
-        let client = wcore_egress::EgressClient::builder()
+        // allow_local swaps in the loopback-permitting redirect policy +
+        // resolver so reqwest can dial 127.0.0.1/::1 for a trusted local SSE
+        // server; both variants keep every non-loopback SSRF protection.
+        let builder = wcore_egress::EgressClient::builder()
             .pool_idle_timeout(std::time::Duration::from_secs(5))
-            .connect_timeout(std::time::Duration::from_secs(15))
-            .redirect(wcore_tools::url_safety::ssrf_safe_redirect_policy())
-            .dns_resolver(std::sync::Arc::new(
-                wcore_tools::url_safety::SsrfSafeResolver,
-            ))
+            .connect_timeout(std::time::Duration::from_secs(15));
+        let builder = if allow_local {
+            builder
+                .redirect(wcore_tools::url_safety::ssrf_safe_redirect_policy_allow_loopback())
+                .dns_resolver(std::sync::Arc::new(
+                    wcore_tools::url_safety::LoopbackOkResolver,
+                ))
+        } else {
+            builder
+                .redirect(wcore_tools::url_safety::ssrf_safe_redirect_policy())
+                .dns_resolver(std::sync::Arc::new(
+                    wcore_tools::url_safety::SsrfSafeResolver,
+                ))
+        };
+        let client = builder
             .build()
             .unwrap_or_else(|_| wcore_egress::EgressClient::new());
 

@@ -84,6 +84,14 @@ pub struct McpServerConfig {
     /// Defaults to true when omitted — MCP tools are deferred by default to reduce
     /// input token usage. Set to `false` to send full schemas eagerly.
     pub deferred: Option<bool>,
+    /// Allow this MCP server's URL to resolve to a loopback address
+    /// (127.0.0.0/8, ::1, localhost). MCP endpoints are trusted user config,
+    /// not model-driven URLs, so the SSRF guard should not block a user's own
+    /// local MCP server. Off by default. Other private/LAN/link-local/CGNAT/
+    /// cloud-metadata ranges and internal hostnames remain blocked even when
+    /// enabled. No effect on stdio transport.
+    #[serde(default)]
+    pub allow_local: bool,
 }
 
 /// Collection of MCP server configurations

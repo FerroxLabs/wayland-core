@@ -60,6 +60,33 @@ deferred = true    # Don't load tool schemas at startup
 
 Use `deferred = true` for MCP servers with many tools to keep the initial system prompt small.
 
+## Local (loopback) MCP servers — `allow_local`
+
+For safety, the HTTP transports (`sse`, `streamable-http`) refuse to connect to
+URLs that resolve to private/internal addresses — an SSRF guard that stops a
+compromised or model-driven URL from reaching `169.254.169.254`, your LAN, etc.
+By default this also blocks **loopback** (`127.0.0.1`, `::1`, `localhost`).
+
+An MCP server you configure by hand is *trusted configuration*, not a
+model-supplied URL, so to connect to a local MCP server (e.g. a desktop app
+exposing tools on `127.0.0.1`) set `allow_local = true`. This relaxes the
+**loopback block only** — every other private/LAN/link-local/CGNAT/cloud-metadata
+range stays blocked even when enabled.
+
+```toml
+# Example: connect to Agent Vault (desktop) running a local MCP server.
+[mcp.servers.agent-vault]
+transport = "streamable-http"
+url = "http://127.0.0.1:3456/mcp"
+allow_local = true
+headers = { Authorization = "Bearer <AGENT_VAULT_MCP_TOKEN>" }
+```
+
+| `allow_local` | Behavior |
+|---------------|----------|
+| `false` (default) | Loopback and all private/internal targets are rejected at connect time |
+| `true` | Loopback (`127.0.0.0/8`, `::1`, `localhost`) is permitted; all other private/internal/metadata ranges remain blocked |
+
 ## Tool Naming
 
 - MCP tool names are used directly when there's no conflict

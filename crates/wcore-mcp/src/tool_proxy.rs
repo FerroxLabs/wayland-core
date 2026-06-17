@@ -289,6 +289,7 @@ mod tests {
             url: None,
             headers: None,
             deferred,
+            allow_local: false,
         }
     }
 
