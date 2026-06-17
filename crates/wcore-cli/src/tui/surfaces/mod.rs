@@ -1241,13 +1241,22 @@ impl Router {
                         // so the next `/config` `on_enter` re-seeds from the
                         // just-saved truth instead of snapping back to the
                         // pre-save values. Provider/model/force are owned by
-                        // other paths (onboarding / CLI), so only the five
-                        // Tier-1 settings are mirrored here.
+                        // other paths (onboarding / CLI), so only the Tier-1
+                        // settings (plus the S5 Tools/Wallet fields below) are
+                        // mirrored here.
                         app.config.max_turns = applied.config_view.max_turns;
                         app.config.approval = applied.config_view.approval;
                         app.config.compaction = applied.config_view.compaction;
                         app.config.memory_enabled = applied.config_view.memory_enabled;
                         app.config.plan_first = applied.config_view.plan_first;
+                        // S5 Essentials: mirror the saved Tools + Wallet fields
+                        // so the next `/config` on_enter reseeds from the just-
+                        // saved truth, same as the five settings above.
+                        app.config.tools_auto_approve = applied.config_view.tools_auto_approve;
+                        app.config.tools_allow_count = applied.config_view.tools_allow_count;
+                        app.config.tools_verify_edits = applied.config_view.tools_verify_edits;
+                        app.config.budget_max_cost_usd = applied.config_view.budget_max_cost_usd;
+                        app.config.budget_max_wall_secs = applied.config_view.budget_max_wall_secs;
                         // The live apply succeeded — clear any prior degraded
                         // flag so `/config` shows the honest "now live" copy.
                         app.config_apply_failed = false;

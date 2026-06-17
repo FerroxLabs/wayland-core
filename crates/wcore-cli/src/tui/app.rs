@@ -1228,6 +1228,23 @@ pub struct ConfigView {
     /// to the provider preset. Carried so the Config surface's Expert tier
     /// seeds + persists the real pricing values instead of placeholders.
     pub compat_costs: CompatCosts,
+    /// `[tools] auto_approve` — every tool call is auto-approved without a
+    /// per-call prompt. Surfaced by the Essentials Tools row.
+    pub tools_auto_approve: bool,
+    /// Number of entries in `[tools] allow_list` (the pre-approved tools).
+    /// Carried as a count (not the Vec) because the Essentials row shows
+    /// "N allowed"; the full editor is an Advanced/collection slice.
+    pub tools_allow_count: usize,
+    /// `[tools] verify_edits` — re-read files after Write/Edit and feed a
+    /// verification-failed note back into the next turn.
+    pub tools_verify_edits: bool,
+    /// `[budget] max_cost_usd` — the per-session spend cap, or `None` for no
+    /// cap. The Essentials Wallet row shows + edits this; real session spend
+    /// comes from `App::cost` (never fabricated).
+    pub budget_max_cost_usd: Option<f64>,
+    /// `[budget] max_wall_time_secs` — the runaway wall-clock guard, or
+    /// `None`. Shown on the Safety row alongside the turn ceiling.
+    pub budget_max_wall_secs: Option<u64>,
 }
 
 /// The four `ProviderCompat` cost-per-token overrides surfaced by the

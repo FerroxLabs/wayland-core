@@ -240,6 +240,13 @@ pub fn config_view_from(config: &wcore_config::config::Config) -> app::ConfigVie
             cache_read: config.compat.cost_per_cache_read_token,
             cache_write: config.compat.cost_per_cache_write_token,
         },
+        // S5 Essentials: tools posture + budget cap, read straight from the
+        // resolved config so the home shows the live values.
+        tools_auto_approve: config.tools.auto_approve,
+        tools_allow_count: config.tools.allow_list.len(),
+        tools_verify_edits: config.tools.verify_edits,
+        budget_max_cost_usd: config.budget.max_cost_usd,
+        budget_max_wall_secs: config.budget.max_wall_time_secs,
     }
 }
 

@@ -211,6 +211,22 @@ struct SettingsModel {
     compaction: Compaction,
     /// Whether long-term cross-session memory is on.
     long_term_memory: bool,
+    // TOOLS (`[tools]`) ---------------------------------------------------
+    /// `auto_approve` — approve every tool call without a per-call prompt.
+    /// The Tools row's editable toggle.
+    tools_auto_approve: bool,
+    /// Count of pre-approved tools (`allow_list` length). Read-out only on
+    /// the Tools row; the full list editor is a later collection slice.
+    tools_allow_count: usize,
+    /// `verify_edits` — re-read files after writes. Read-out on the Tools row.
+    tools_verify_edits: bool,
+    // SPENDING (`[budget]`) -----------------------------------------------
+    /// `max_cost_usd` — per-session spend cap. `None` = no cap. The Wallet
+    /// row's editable value; real spend comes from `App::cost`, never here.
+    budget_max_cost_usd: Option<f64>,
+    /// `max_wall_time_secs` — runaway wall-clock guard. Read-out on the
+    /// Safety (Stop after) row alongside the turn ceiling.
+    budget_max_wall_secs: Option<u64>,
     // EXPERT (provider tuning) --------------------------------------------
     /// The four editable `ProviderCompat` cost-per-token overrides for the
     /// active provider (Expert tier). Each `None` = "no override set".
@@ -244,6 +260,11 @@ impl SettingsModel {
             stop_after_turns: cv.max_turns.map(|n| n as u32).unwrap_or(25),
             compaction: Compaction::from_view_str(&cv.compaction),
             long_term_memory: cv.memory_enabled,
+            tools_auto_approve: cv.tools_auto_approve,
+            tools_allow_count: cv.tools_allow_count,
+            tools_verify_edits: cv.tools_verify_edits,
+            budget_max_cost_usd: cv.budget_max_cost_usd,
+            budget_max_wall_secs: cv.budget_max_wall_secs,
             compat_costs: cv.compat_costs,
         }
     }
@@ -265,12 +286,16 @@ enum Row {
     Approval,
     /// HOW WAYLAND ACTS · Plan first.
     PlanFirst,
+    /// HOW WAYLAND ACTS · Tool auto-approval (`[tools]`).
+    Tools,
     /// HOW WAYLAND ACTS · Stop after N turns.
     StopAfter,
     /// MEMORY & CONTEXT · Compaction level.
     Compaction,
     /// MEMORY & CONTEXT · Long-term memory.
     LongTerm,
+    /// SPENDING · per-session budget cap (`[budget]`).
+    Wallet,
     /// The expert-mode entry row below the rule.
     Expert,
 }
@@ -280,26 +305,30 @@ impl Row {
     /// Provider and Model render here as read-only connection read-outs;
     /// they are not in `FOCUSABLE` (you change them with `/provider` and
     /// `/model`), so `↑↓` skip past them and `⏎` never lands on them.
-    const ALL: [Row; 8] = [
+    const ALL: [Row; 10] = [
         Row::Provider,
         Row::Model,
         Row::Approval,
         Row::PlanFirst,
+        Row::Tools,
         Row::StopAfter,
         Row::Compaction,
         Row::LongTerm,
+        Row::Wallet,
         Row::Expert,
     ];
 
     /// The rows the focus ring walks, in display order. Provider and Model
     /// are deliberately excluded: they are read-outs, not editors, so
     /// keeping them out of the ring means `⏎` is never inert on them.
-    const FOCUSABLE: [Row; 6] = [
+    const FOCUSABLE: [Row; 8] = [
         Row::Approval,
         Row::PlanFirst,
+        Row::Tools,
         Row::StopAfter,
         Row::Compaction,
         Row::LongTerm,
+        Row::Wallet,
         Row::Expert,
     ];
 
@@ -308,8 +337,11 @@ impl Row {
     fn section(self) -> Option<&'static str> {
         match self {
             Row::Provider | Row::Model => Some("CONNECTION"),
-            Row::Approval | Row::PlanFirst | Row::StopAfter => Some("HOW WAYLAND ACTS"),
+            Row::Approval | Row::PlanFirst | Row::Tools | Row::StopAfter => {
+                Some("HOW WAYLAND ACTS")
+            }
             Row::Compaction | Row::LongTerm => Some("MEMORY & CONTEXT"),
+            Row::Wallet => Some("SPENDING"),
             Row::Expert => None,
         }
     }
@@ -455,6 +487,8 @@ impl ConfigSurface {
         let memory_enabled = self.current.long_term_memory;
         let approval_mode = self.current.approval.to_config();
         let plan_first = self.current.plan_first;
+        let tools_auto_approve = self.current.tools_auto_approve;
+        let budget_cap = self.current.budget_max_cost_usd;
         wcore_config::config::patch_global_config(|f| {
             f.default.max_turns = max_turns;
             f.default.approval_mode = approval_mode;
@@ -466,6 +500,12 @@ impl ConfigSurface {
                 .get_or_insert_with(wcore_config::config::MemoryConfig::default)
                 .enabled = memory_enabled;
             f.plan.plan_first = plan_first;
+            // S5 Essentials: the Tools auto-approve toggle and the Wallet spend
+            // cap. `[tools]`/`[budget]` are non-Option tables on `ConfigFile`,
+            // so set the fields directly; every other key is preserved by the
+            // partial-merge writer.
+            f.tools.auto_approve = tools_auto_approve;
+            f.budget.max_cost_usd = budget_cap;
         })
         .map(|_| ())
         .map_err(|e| format!("{e:#}"))
@@ -512,6 +552,7 @@ impl ConfigSurface {
                 self.current.approval = ApprovalMode::ALL[next];
             }
             Row::PlanFirst => self.current.plan_first = !self.current.plan_first,
+            Row::Tools => self.current.tools_auto_approve = !self.current.tools_auto_approve,
             Row::Compaction => {
                 let len = Compaction::ALL.len();
                 let idx = Compaction::ALL
@@ -522,9 +563,9 @@ impl ConfigSurface {
                 self.current.compaction = Compaction::ALL[next];
             }
             Row::LongTerm => self.current.long_term_memory = !self.current.long_term_memory,
-            // Text / navigation rows: cycling is inert. Provider/Model are
-            // not in the focus ring, so they never reach this match.
-            Row::Provider | Row::Model | Row::StopAfter | Row::Expert => {}
+            // Text / navigation rows: cycling is inert (StopAfter + Wallet are
+            // ⏎-to-edit). Provider/Model are not in the focus ring.
+            Row::Provider | Row::Model | Row::StopAfter | Row::Wallet | Row::Expert => {}
         }
     }
 
@@ -537,6 +578,23 @@ impl ConfigSurface {
                 // Begin an in-place numeric text edit.
                 let input = Input::new(self.current.stop_after_turns.to_string());
                 self.editor = Some((Row::StopAfter, input));
+            }
+            Row::Wallet => {
+                // Begin an in-place dollar edit, seeded from the current cap
+                // (blank when there is none).
+                let seed = self
+                    .current
+                    .budget_max_cost_usd
+                    .map(|c| format!("{c:.2}"))
+                    .unwrap_or_default();
+                self.editor = Some((Row::Wallet, Input::new(seed)));
+            }
+            // Tools opens the full Tools & Providers tier (the same surface as
+            // `p`) — the headline auto-approve toggle is `space` on the row.
+            Row::Tools => {
+                self.tier = Tier::Providers;
+                self.providers_focus = 0;
+                self.credentials_modal = None;
             }
             // Provider/Model are read-out rows, not editors — you change
             // them with `/provider` and `/model`. They are not in the focus
@@ -552,11 +610,25 @@ impl ConfigSurface {
     /// unparseable / zero value is rejected and the edit is dropped
     /// without changing the setting.
     fn commit_edit(&mut self) {
-        if let Some((Row::StopAfter, input)) = self.editor.take()
-            && let Ok(n) = input.value().trim().parse::<u32>()
-            && n > 0
-        {
-            self.current.stop_after_turns = n;
+        match self.editor.take() {
+            Some((Row::StopAfter, input)) => {
+                if let Ok(n) = input.value().trim().parse::<u32>()
+                    && n > 0
+                {
+                    self.current.stop_after_turns = n;
+                }
+            }
+            Some((Row::Wallet, input)) => {
+                // Dollars; a leading `$` is tolerated. Blank or non-positive
+                // means "no cap"; an unparseable value drops the edit.
+                let raw = input.value().trim().trim_start_matches('$').trim();
+                if raw.is_empty() {
+                    self.current.budget_max_cost_usd = None;
+                } else if let Ok(v) = raw.parse::<f64>() {
+                    self.current.budget_max_cost_usd = (v > 0.0).then_some(v);
+                }
+            }
+            _ => {}
         }
     }
 
@@ -1423,10 +1495,13 @@ impl Surface for ConfigSurface {
         // engine kept its prior binding. The overview context line reads this
         // to show "live apply skipped" instead of a false "now live".
         let apply_failed = app.config_apply_failed;
+        // S5 Essentials: real session spend for the health/cost line — `None`
+        // when no turn has run yet (we show "—", never a fabricated number).
+        let spent = app.cost.as_ref().map(|c| c.total_cost_usd);
         match self.tier {
-            Tier::Overview => self.render_overview(frame, area, theme, apply_failed),
+            Tier::Overview => self.render_overview(frame, area, theme, apply_failed, spent),
             Tier::Detail => {
-                self.render_overview(frame, area, theme, apply_failed);
+                self.render_overview(frame, area, theme, apply_failed, spent);
                 self.render_detail(frame, area, theme);
             }
             Tier::Expert => self.render_expert(frame, area, theme),
@@ -1623,7 +1698,14 @@ impl ConfigSurface {
 
     /// Draw the Tier-1 overview: the four sections, the eight settings,
     /// the expert-entry row, and the footer hint line.
-    fn render_overview(&self, frame: &mut Frame, area: Rect, t: &Theme, apply_failed: bool) {
+    fn render_overview(
+        &self,
+        frame: &mut Frame,
+        area: Rect,
+        t: &Theme,
+        apply_failed: bool,
+        spent_usd: Option<f64>,
+    ) {
         let block = panel("Wayland · Settings", t);
         let inner = block.inner(area);
         frame.render_widget(block, area);
@@ -1631,9 +1713,12 @@ impl ConfigSurface {
             return;
         }
 
-        // Split: a context line, the body, then the two-line footer.
-        let [ctx_area, body_area, footer_area] = Layout::vertical([
+        // Split: a context line, the at-a-glance posture + health strip, the
+        // body, then the two-line footer. The strip is the Essentials "read it
+        // in one glance" summary; the body is the editable rows.
+        let [ctx_area, strip_area, body_area, footer_area] = Layout::vertical([
             Constraint::Length(1),
+            Constraint::Length(2),
             Constraint::Min(1),
             Constraint::Length(2),
         ])
@@ -1683,6 +1768,52 @@ impl ConfigSurface {
             Paragraph::new(Line::from(Span::styled(scope, scope_style))),
             ctx_area,
         );
+
+        // Posture + health strip — the one-glance Essentials summary. Every
+        // value is real: posture from the live settings, health from the
+        // resolved provider/model/key, spend from `App::cost` (or "—").
+        let posture = Line::from(vec![
+            Span::styled("Posture  ", Style::default().fg(t.text_dim)),
+            Span::styled(
+                self.current.approval.label().to_string(),
+                Style::default().fg(t.text),
+            ),
+            Span::styled(" · plan-first ", Style::default().fg(t.text_dim)),
+            Span::styled(
+                if self.current.plan_first { "on" } else { "off" }.to_string(),
+                Style::default().fg(t.text),
+            ),
+            Span::styled(" · tools ", Style::default().fg(t.text_dim)),
+            Span::styled(
+                if self.current.tools_auto_approve {
+                    "auto-approve"
+                } else {
+                    "ask each"
+                }
+                .to_string(),
+                Style::default().fg(t.text),
+            ),
+        ]);
+        let key_span = if self.current.key_set {
+            Span::styled("key ✓", Style::default().fg(t.success))
+        } else {
+            Span::styled("no key", Style::default().fg(t.warning))
+        };
+        let spend = match spent_usd {
+            Some(c) => format!("${c:.2} this session"),
+            None => "— this session".to_string(),
+        };
+        let health = Line::from(vec![
+            Span::styled("Health   ", Style::default().fg(t.text_dim)),
+            Span::styled(self.current.provider.clone(), Style::default().fg(t.text)),
+            Span::styled(" · ", Style::default().fg(t.text_dim)),
+            Span::styled(self.current.model.clone(), Style::default().fg(t.text)),
+            Span::styled("   ", Style::default().fg(t.text_dim)),
+            key_span,
+            Span::styled(" · spent ", Style::default().fg(t.text_dim)),
+            Span::styled(spend, Style::default().fg(t.text)),
+        ]);
+        frame.render_widget(Paragraph::new(vec![posture, health]), strip_area);
 
         // Body — every section + setting row. Provider/Model render here as
         // read-outs but are outside the focus ring, so highlight is keyed on
@@ -1797,6 +1928,29 @@ impl ConfigSurface {
                 t,
             ),
             Row::PlanFirst => toggle_strip(self.current.plan_first, "off", "on for big changes", t),
+            Row::Tools => {
+                // `space` toggles auto-approve (the headline tool-safety switch);
+                // the allowed-tool count + verify-edits are real read-outs.
+                let mut v = toggle_strip(
+                    self.current.tools_auto_approve,
+                    "ask each",
+                    "auto-approve",
+                    t,
+                );
+                v.push(Span::styled(
+                    format!(
+                        "   {} allowed · verify-edits {}",
+                        self.current.tools_allow_count,
+                        if self.current.tools_verify_edits {
+                            "on"
+                        } else {
+                            "off"
+                        }
+                    ),
+                    Style::default().fg(t.text_muted),
+                ));
+                v
+            }
             Row::StopAfter => {
                 // While editing, render the live `tui-input` buffer.
                 if let Some((Row::StopAfter, input)) = &self.editor {
@@ -1811,11 +1965,13 @@ impl ConfigSurface {
                         ),
                     ]
                 } else {
+                    // The turn ceiling, plus the wall-clock guard when one is set.
+                    let value = match self.current.budget_max_wall_secs {
+                        Some(s) => format!("{} turns · {s}s wall", self.current.stop_after_turns),
+                        None => format!("{} turns", self.current.stop_after_turns),
+                    };
                     vec![
-                        Span::styled(
-                            format!("{} turns", self.current.stop_after_turns),
-                            Style::default().fg(t.text),
-                        ),
+                        Span::styled(value, Style::default().fg(t.text)),
                         Span::styled("   ▸ edit  (runaway guard)", disclosure(focused, t)),
                     ]
                 }
@@ -1834,6 +1990,32 @@ impl ConfigSurface {
                 "remembers across sessions",
                 t,
             ),
+            Row::Wallet => {
+                // While editing, render the live dollar buffer; otherwise the
+                // configured cap (real spend is shown on the health line below,
+                // never fabricated here).
+                if let Some((Row::Wallet, input)) = &self.editor {
+                    vec![
+                        Span::styled(
+                            format!("${}_", input.value()),
+                            Style::default().fg(t.orange).add_modifier(Modifier::BOLD),
+                        ),
+                        Span::styled(
+                            "  per session  (⏎ save · esc cancel · blank = no cap)",
+                            Style::default().fg(t.text_muted),
+                        ),
+                    ]
+                } else {
+                    let cap = match self.current.budget_max_cost_usd {
+                        Some(c) => format!("${c:.2} per session"),
+                        None => "no cap".to_string(),
+                    };
+                    vec![
+                        Span::styled(cap, Style::default().fg(t.text)),
+                        Span::styled("   ▸ edit  (spend ceiling)", disclosure(focused, t)),
+                    ]
+                }
+            }
             Row::Expert => vec![Span::styled(
                 "x  expert settings (provider tuning, budgets, traces)",
                 if focused {
@@ -1930,7 +2112,10 @@ impl ConfigSurface {
                     Style::default().fg(t.text_muted),
                 )));
             }
-            Row::StopAfter | Row::Expert => {
+            // StopAfter + Wallet edit in place from the overview; Tools opens
+            // the Providers tier; Expert has its own tier. None reach a radio
+            // detail pane, so this arm only guards the match's exhaustiveness.
+            Row::StopAfter | Row::Wallet | Row::Tools | Row::Expert => {
                 lines.push(Line::from(Span::styled(
                     "  Edit this from the overview.",
                     Style::default().fg(t.text_muted),
@@ -2364,9 +2549,11 @@ fn row_label(row: Row) -> &'static str {
         Row::Model => "Model",
         Row::Approval => "Approval",
         Row::PlanFirst => "Plan first",
+        Row::Tools => "Tools",
         Row::StopAfter => "Stop after",
         Row::Compaction => "Compaction",
         Row::LongTerm => "Long-term",
+        Row::Wallet => "Wallet",
         Row::Expert => "",
     }
 }
@@ -2381,6 +2568,8 @@ fn detail_intro(row: Row) -> &'static str {
         Row::Provider => "The LLM provider Wayland connects to:",
         Row::Model => "The model Wayland uses for this provider:",
         Row::StopAfter => "The runaway guard — how many turns before Wayland halts:",
+        Row::Tools => "What tools Wayland may run without asking:",
+        Row::Wallet => "The per-session spend ceiling:",
         Row::Expert => "",
     }
 }
@@ -3392,8 +3581,9 @@ mod tests {
         assert!(!surface.current.long_term_memory);
         assert!(!surface.is_dirty(), "a fresh seed must be clean");
 
-        // Focus the Long-term row (FOCUSABLE index 4) and toggle it on.
-        for _ in 0..4 {
+        // Focus the Long-term row (FOCUSABLE index 5 after S5 added Tools +
+        // Wallet) and toggle it on.
+        for _ in 0..5 {
             surface.handle_key(key(KeyCode::Down), &mut app);
         }
         assert_eq!(surface.focused_row(), Row::LongTerm);
@@ -3429,6 +3619,134 @@ mod tests {
         assert!(
             written.contains("[memory]") && written.contains("enabled"),
             "the memory toggle must persist to [memory].enabled, got:\n{written}"
+        );
+
+        // SAFETY: restore the prior env under the same lock.
+        unsafe {
+            match prev {
+                Some(v) => std::env::set_var("WAYLAND_HOME", v),
+                None => std::env::remove_var("WAYLAND_HOME"),
+            }
+        }
+    }
+
+    #[test]
+    fn overview_strip_shows_posture_and_real_or_dash_spend() {
+        // S5 Essentials: the at-a-glance strip shows posture from the live
+        // settings and the health line from the resolved provider/model/key.
+        // Spend is real-or-nothing — an em-dash until a turn has actually cost
+        // something, never a fabricated number.
+        let mut app = App::new();
+        app.config.provider = "anthropic".into();
+        app.config.model = "claude-opus-4-8".into();
+        let mut surface = ConfigSurface::new();
+        surface.on_enter(&mut app);
+
+        let text = render_text(&mut surface, &app);
+        assert!(text.contains("Posture"), "posture line missing");
+        assert!(text.contains("Health"), "health line missing");
+        assert!(
+            text.contains("anthropic"),
+            "provider missing from health line"
+        );
+        assert!(
+            text.contains("— this session"),
+            "with no cost the spend must read an em-dash, not $0.00:\n{text}"
+        );
+
+        // With real session cost, the health line shows the actual figure.
+        app.cost = Some(crate::tui::app::SessionCostView {
+            session_id: "s1".into(),
+            total_cost_usd: 0.42,
+            per_turn: vec![],
+        });
+        let text = render_text(&mut surface, &app);
+        assert!(
+            text.contains("$0.42 this session"),
+            "real session spend must surface on the health line:\n{text}"
+        );
+    }
+
+    #[test]
+    fn tools_row_space_toggles_and_persists_auto_approve() {
+        // S5: the Tools row's `space` flips `[tools] auto_approve`; `esc` saves
+        // it to disk. Hermetic via WAYLAND_HOME under the shared env lock.
+        let _guard = EXPERT_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = tempfile::tempdir().expect("tempdir");
+        let prev = std::env::var_os("WAYLAND_HOME");
+        // SAFETY: serialised by EXPERT_ENV_LOCK; restored before unlock.
+        unsafe { std::env::set_var("WAYLAND_HOME", dir.path()) };
+
+        let mut app = App::new();
+        app.config.tools_auto_approve = false;
+        let mut surface = ConfigSurface::new();
+        surface.on_enter(&mut app);
+        // Tools is FOCUSABLE index 2.
+        for _ in 0..2 {
+            surface.handle_key(key(KeyCode::Down), &mut app);
+        }
+        assert_eq!(surface.focused_row(), Row::Tools);
+        surface.handle_key(key(KeyCode::Char(' ')), &mut app);
+        assert!(
+            surface.current.tools_auto_approve,
+            "space must toggle auto-approve on"
+        );
+        assert!(surface.is_dirty(), "the toggle must be a pending edit");
+
+        surface.handle_key(key(KeyCode::Esc), &mut app);
+        assert!(!surface.is_dirty(), "esc must save the toggle");
+        let written = std::fs::read_to_string(dir.path().join("config.toml"))
+            .expect("config.toml should have been written");
+        assert!(
+            written.contains("[tools]") && written.contains("auto_approve"),
+            "the tools toggle must persist to [tools].auto_approve, got:\n{written}"
+        );
+
+        // SAFETY: restore the prior env under the same lock.
+        unsafe {
+            match prev {
+                Some(v) => std::env::set_var("WAYLAND_HOME", v),
+                None => std::env::remove_var("WAYLAND_HOME"),
+            }
+        }
+    }
+
+    #[test]
+    fn wallet_row_edits_and_persists_budget_cap() {
+        // S5: the Wallet row opens a dollar editor on `⏎`; committing then
+        // saving persists `[budget] max_cost_usd`.
+        let _guard = EXPERT_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = tempfile::tempdir().expect("tempdir");
+        let prev = std::env::var_os("WAYLAND_HOME");
+        // SAFETY: serialised by EXPERT_ENV_LOCK; restored before unlock.
+        unsafe { std::env::set_var("WAYLAND_HOME", dir.path()) };
+
+        let mut app = App::new();
+        let mut surface = ConfigSurface::new();
+        surface.on_enter(&mut app);
+        // Wallet is FOCUSABLE index 6.
+        for _ in 0..6 {
+            surface.handle_key(key(KeyCode::Down), &mut app);
+        }
+        assert_eq!(surface.focused_row(), Row::Wallet);
+        surface.handle_key(key(KeyCode::Enter), &mut app); // open the editor
+        for ch in "5.50".chars() {
+            surface.handle_key(key(KeyCode::Char(ch)), &mut app);
+        }
+        surface.handle_key(key(KeyCode::Enter), &mut app); // commit
+        assert_eq!(
+            surface.current.budget_max_cost_usd,
+            Some(5.5),
+            "the dollar edit must parse into the cap"
+        );
+
+        surface.handle_key(key(KeyCode::Esc), &mut app); // save
+        assert!(!surface.is_dirty(), "esc must save the cap");
+        let written = std::fs::read_to_string(dir.path().join("config.toml"))
+            .expect("config.toml should have been written");
+        assert!(
+            written.contains("[budget]") && written.contains("max_cost_usd"),
+            "the cap must persist to [budget].max_cost_usd, got:\n{written}"
         );
 
         // SAFETY: restore the prior env under the same lock.
