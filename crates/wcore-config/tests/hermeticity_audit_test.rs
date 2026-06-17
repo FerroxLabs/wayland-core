@@ -31,6 +31,13 @@ const ALLOWLIST: &[&str] = &[
     // The canonical helper — this is the one legitimate call site, the
     // platform-native fallback inside `wayland_config_dir()` itself.
     "crates/wcore-config/src/config.rs",
+    // S11 self-configure discovery (`/doctor` DISCOVERED): counts MCP servers
+    // in the REAL machine's Claude-Desktop config at
+    // `<config_dir>/Claude/claude_desktop_config.json`. This deliberately
+    // probes the actual OS config dir (not `WAYLAND_HOME`) — routing it through
+    // `wayland_config_dir()` would make it look in the sandbox and never find
+    // the user's real Claude install. Read-only; writes no Wayland state.
+    "crates/wcore-cli/src/tui/surfaces/diagnostics.rs",
 ];
 
 fn workspace_root() -> PathBuf {
