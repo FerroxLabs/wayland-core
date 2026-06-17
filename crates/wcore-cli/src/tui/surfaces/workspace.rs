@@ -2292,11 +2292,13 @@ fn render_idle_hero(frame: &mut Frame, area: Rect, theme: &Theme) {
     // any ambient cloud credentials already on this machine, so the user sees
     // "you can use these right now" instead of dead space.
     let detected = detect_boot_providers();
+    let forge = detect_forge_servers();
 
-    // Rows: subtitle + blank + [detected?] + 3 prompts + blank-lead. Reserve
-    // them only when the pane can spare the rows after the banner's headroom;
-    // on a short pane the banner takes the whole area and the copy is dropped.
-    let hero_rows: u16 = if detected.is_empty() { 6 } else { 7 };
+    // Rows: subtitle + blank + [detected?] + [forge?] + 3 prompts + blank-lead.
+    // Reserve them only when the pane can spare the rows after the banner's
+    // headroom; on a short pane the banner takes the whole area and the copy is
+    // dropped.
+    let hero_rows: u16 = 6 + u16::from(!detected.is_empty()) + u16::from(!forge.is_empty());
     let show_hero = area.height >= hero_rows + 8;
     if !show_hero {
         wayland_banner(frame, area, theme);
@@ -2322,6 +2324,18 @@ fn render_idle_hero(frame: &mut Frame, area: Rect, theme: &Theme) {
             Span::styled(detected.join(" · "), Style::default().fg(theme.text)),
             Span::styled(
                 "  ·  /provider to use",
+                Style::default().fg(theme.text_muted),
+            ),
+        ]));
+    }
+    // Slice 3b — a discovered Forge MCP server (e.g. Agent Vault) is one
+    // command from connected; surface it next to the provider line.
+    if !forge.is_empty() {
+        lines.push(Line::from(vec![
+            Span::styled("Forge MCP: ", Style::default().fg(theme.success)),
+            Span::styled(forge.join(" · "), Style::default().fg(theme.text)),
+            Span::styled(
+                "  ·  /mcp connect to link",
                 Style::default().fg(theme.text_muted),
             ),
         ]));
@@ -2353,6 +2367,13 @@ fn render_idle_hero(frame: &mut Frame, area: Rect, theme: &Theme) {
 /// single source of truth `provider_connected` (sync, no network): AWS for
 /// Bedrock, GCP ADC for Vertex, and a stored ChatGPT OAuth login. Returns the
 /// human labels of the connected ones, in a stable order.
+fn detect_forge_servers() -> Vec<String> {
+    wcore_config::forge_discovery::read_discovered_servers()
+        .into_iter()
+        .map(|s| s.label().to_string())
+        .collect()
+}
+
 fn detect_boot_providers() -> Vec<&'static str> {
     use wcore_config::config::{ProviderType, provider_connected};
     let mut found = Vec::new();

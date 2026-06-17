@@ -511,6 +511,11 @@ pub struct Discovery {
     pub available: bool,
     /// A one-line detail: what was found, or how to enable it.
     pub detail: String,
+    /// Slice 3b — when `Some(name)`, this row is an actionable Forge MCP
+    /// server: the DISCOVERED cursor can select it and Enter runs
+    /// `/mcp connect <name>`. `None` for passive capability rows (Ollama,
+    /// AWS, etc.), which are display-only.
+    pub connect_name: Option<String>,
 }
 
 /// The Claude Desktop config path on this platform
@@ -550,6 +555,7 @@ fn scan_environment(ollama_available: bool) -> Vec<Discovery> {
         } else {
             "not found — install ollama or set OLLAMA_BASE_URL".to_string()
         },
+        connect_name: None,
     });
 
     let aws = provider_connected(ProviderType::Bedrock);
@@ -561,6 +567,7 @@ fn scan_environment(ollama_available: bool) -> Vec<Discovery> {
         } else {
             "no AWS credentials (env / ~/.aws / role)".to_string()
         },
+        connect_name: None,
     });
 
     let gcp = provider_connected(ProviderType::Vertex);
@@ -572,6 +579,7 @@ fn scan_environment(ollama_available: bool) -> Vec<Discovery> {
         } else {
             "no GCP credentials (GOOGLE_APPLICATION_CREDENTIALS / ADC)".to_string()
         },
+        connect_name: None,
     });
 
     let chatgpt = provider_connected(ProviderType::OpenAIChatGpt);
@@ -583,6 +591,7 @@ fn scan_environment(ollama_available: bool) -> Vec<Discovery> {
         } else {
             "not signed in — run `wayland auth login chatgpt`".to_string()
         },
+        connect_name: None,
     });
 
     let mcp = count_mcp_servers_in(&claude_desktop_config_path());
@@ -596,6 +605,7 @@ fn scan_environment(ollama_available: bool) -> Vec<Discovery> {
             ),
             _ => "no Claude Desktop MCP config found".to_string(),
         },
+        connect_name: None,
     });
 
     // Slice 3 — Forge-suite local MCP servers advertised in the cross-app
@@ -606,7 +616,8 @@ fn scan_environment(ollama_available: bool) -> Vec<Discovery> {
         rows.push(Discovery {
             label: format!("Forge MCP: {}", s.label()),
             available: true,
-            detail: format!("discovered at {} — run /mcp connect to link", s.url),
+            detail: format!("discovered at {} — ⏎ to connect", s.url),
+            connect_name: Some(s.name.clone()),
         });
     }
 
@@ -815,6 +826,11 @@ pub struct DiagnosticsSurface {
     /// on this machine (ambient cloud creds, local Ollama, Claude Desktop MCP)
     /// the user could wire up. Rendered as the DISCOVERED section of `/doctor`.
     discovered: Vec<Discovery>,
+    /// Slice 3b — cursor over the *connectable* DISCOVERED rows (Forge MCP
+    /// servers, those with `connect_name`). `Up`/`Down` move it in Doctor mode;
+    /// `Enter` runs `/mcp connect <name>` for the selected one. Clamped whenever
+    /// `discovered` is rescanned. Indexes the connectable subset, not all rows.
+    discovered_cursor: usize,
     /// In-flight handle for the async system + provider-health probe. `Some`
     /// while either probe is running (started by `on_enter` / the `r` key);
     /// `tick` polls it and clears it back to `None` once both results land.
@@ -861,6 +877,7 @@ impl DiagnosticsSurface {
             effective_scroll: 0,
             channels: Vec::new(),
             discovered: Vec::new(),
+            discovered_cursor: 0,
             health_pending: None,
             health_collected: false,
             probe_started: None,
@@ -949,6 +966,9 @@ impl DiagnosticsSurface {
                 }
             }
         }
+        // Keep the DISCOVERED connect cursor valid after a rescan changed the
+        // connectable set (done here, outside the `rx` borrow held by the loop).
+        self.clamp_discovered_cursor();
         // UI-side timeout: a stalled provider-health probe (egress layer
         // holding the connection past its own cap) must not show "probing…"
         // forever. Give up waiting on it and report a timeout. The detached
@@ -994,6 +1014,32 @@ impl DiagnosticsSurface {
         // A re-scan changes the list under the cursor; never carry a stale
         // delete arm across it.
         self.delete_armed = None;
+    }
+
+    /// The names of the connectable (Forge) DISCOVERED rows, in display order.
+    fn connectable_forge_names(&self) -> Vec<String> {
+        self.discovered
+            .iter()
+            .filter_map(|d| d.connect_name.clone())
+            .collect()
+    }
+
+    /// Keep `discovered_cursor` within the connectable subset after a rescan
+    /// (the set shrinks when a server stops advertising).
+    fn clamp_discovered_cursor(&mut self) {
+        let n = self.connectable_forge_names().len();
+        self.discovered_cursor = self.discovered_cursor.min(n.saturating_sub(1));
+    }
+
+    /// Move the DISCOVERED connect cursor by `delta`, clamped to the connectable
+    /// rows. No-op when nothing connectable is discovered.
+    fn move_discovered_cursor(&mut self, delta: isize) {
+        let n = self.connectable_forge_names().len();
+        if n == 0 {
+            return;
+        }
+        let last = n as isize - 1;
+        self.discovered_cursor = (self.discovered_cursor as isize + delta).clamp(0, last) as usize;
     }
 
     /// Move the `/memory` selection cursor by `delta`, clamped to the
@@ -1200,6 +1246,28 @@ impl Surface for DiagnosticsSurface {
             KeyCode::Char('r') if self.mode == DiagMode::Doctor => {
                 self.refresh_doctor(app);
                 SurfaceAction::None
+            }
+            // Slice 3b — DISCOVERED connect cursor: navigate the connectable
+            // Forge rows and connect the selected one. Inert when nothing
+            // connectable is discovered (the keys fall through to no-op).
+            KeyCode::Up | KeyCode::Char('k')
+                if self.mode == DiagMode::Doctor && !self.connectable_forge_names().is_empty() =>
+            {
+                self.move_discovered_cursor(-1);
+                SurfaceAction::None
+            }
+            KeyCode::Down | KeyCode::Char('j')
+                if self.mode == DiagMode::Doctor && !self.connectable_forge_names().is_empty() =>
+            {
+                self.move_discovered_cursor(1);
+                SurfaceAction::None
+            }
+            KeyCode::Enter if self.mode == DiagMode::Doctor => {
+                let names = self.connectable_forge_names();
+                match names.get(self.discovered_cursor) {
+                    Some(name) => SurfaceAction::Command(format!("/mcp connect {name}")),
+                    None => SurfaceAction::None,
+                }
             }
             // `/memory` list navigation.
             KeyCode::Up | KeyCode::Char('k') if self.mode == DiagMode::Memory => {
@@ -1472,8 +1540,14 @@ impl DiagnosticsSurface {
         if self.discovered.is_empty() && system_probing {
             lines.push(probing_line());
         }
+        let mut conn_idx = 0usize;
         for d in &self.discovered {
-            let (glyph, glyph_color, label_color) = if d.available {
+            // Slice 3b — the selected connectable Forge row paints in the accent
+            // color with a ▸ caret (same 2-char width, so alignment holds).
+            let selected = d.connect_name.is_some() && conn_idx == self.discovered_cursor;
+            let (glyph, glyph_color, label_color) = if selected {
+                ("▸ ", t.orange, t.orange)
+            } else if d.available {
                 ("● ", t.success, t.text)
             } else {
                 ("○ ", t.text_dim, t.text_dim)
@@ -1483,6 +1557,15 @@ impl DiagnosticsSurface {
                 Span::styled(format!("{:<22}", d.label), Style::default().fg(label_color)),
                 Span::styled(d.detail.clone(), Style::default().fg(t.text_muted)),
             ]));
+            if d.connect_name.is_some() {
+                conn_idx += 1;
+            }
+        }
+        if self.discovered.iter().any(|d| d.connect_name.is_some()) {
+            lines.push(Line::from(Span::styled(
+                "  ↑↓ select · ⏎ connect a discovered server",
+                Style::default().fg(t.text_muted),
+            )));
         }
 
         // ── 8. Recent engine errors ─────────────────────────────────
@@ -2731,11 +2814,13 @@ mod tests {
                 label: "Ollama (local models)".to_string(),
                 available: true,
                 detail: "detected — route local models with `ollama:<model>`".to_string(),
+                connect_name: None,
             },
             Discovery {
                 label: "AWS / Bedrock".to_string(),
                 available: false,
                 detail: "no AWS credentials (env / ~/.aws / role)".to_string(),
+                connect_name: None,
             },
         ];
         let app = App::new();
@@ -2748,6 +2833,92 @@ mod tests {
         assert!(
             out.contains("AWS / Bedrock") && out.contains("no AWS credentials"),
             "absent capability + hint missing:\n{out}"
+        );
+    }
+
+    fn forge_row(label: &str, name: &str) -> Discovery {
+        Discovery {
+            label: label.to_string(),
+            available: true,
+            detail: "discovered — ⏎ to connect".to_string(),
+            connect_name: Some(name.to_string()),
+        }
+    }
+
+    fn passive_row(label: &str) -> Discovery {
+        Discovery {
+            label: label.to_string(),
+            available: true,
+            detail: "x".to_string(),
+            connect_name: None,
+        }
+    }
+
+    #[test]
+    fn discovered_enter_connects_the_selected_forge_server() {
+        use ratatui::crossterm::event::{KeyCode, KeyEvent};
+        let mut s = DiagnosticsSurface::new();
+        // A passive row sits between the connectable ones; the cursor must
+        // index only the connectable subset, skipping Ollama.
+        s.discovered = vec![
+            passive_row("Ollama"),
+            forge_row("Forge MCP: A", "agent-vault"),
+            forge_row("Forge MCP: B", "foundry"),
+        ];
+        let mut app = App::new();
+        assert_eq!(
+            s.connectable_forge_names(),
+            vec!["agent-vault".to_string(), "foundry".to_string()]
+        );
+
+        // Down selects the second connectable; Enter runs its connect command.
+        let _ = s.handle_key(KeyEvent::from(KeyCode::Down), &mut app);
+        if let SurfaceAction::Command(cmd) = s.handle_key(KeyEvent::from(KeyCode::Enter), &mut app)
+        {
+            assert_eq!(cmd, "/mcp connect foundry");
+        } else {
+            panic!("Enter on a connectable row must yield a /mcp connect command");
+        }
+    }
+
+    #[test]
+    fn discovered_enter_is_inert_without_a_connectable_row() {
+        use ratatui::crossterm::event::{KeyCode, KeyEvent};
+        let mut s = DiagnosticsSurface::new();
+        s.discovered = vec![passive_row("Ollama"), passive_row("AWS / Bedrock")];
+        let mut app = App::new();
+        assert!(matches!(
+            s.handle_key(KeyEvent::from(KeyCode::Enter), &mut app),
+            SurfaceAction::None
+        ));
+    }
+
+    #[test]
+    fn discovered_cursor_clamps_when_servers_disappear() {
+        let mut s = DiagnosticsSurface::new();
+        s.discovered = vec![forge_row("A", "a"), forge_row("B", "b")];
+        s.move_discovered_cursor(1);
+        assert_eq!(s.discovered_cursor, 1);
+        // A rescan that drops both servers must not leave a dangling cursor.
+        s.discovered.clear();
+        s.clamp_discovered_cursor();
+        assert_eq!(s.discovered_cursor, 0);
+    }
+
+    #[test]
+    fn discovered_renders_caret_and_connect_hint_for_forge_rows() {
+        let mut s = DiagnosticsSurface::new();
+        s.doctor_collected = true;
+        s.discovered = vec![forge_row("Forge MCP: Agent Vault", "agent-vault")];
+        let app = App::new();
+        let out = render_tall(&mut s, &app);
+        assert!(
+            out.contains("Forge MCP: Agent Vault"),
+            "forge row missing:\n{out}"
+        );
+        assert!(
+            out.contains("connect a discovered server"),
+            "connect hint missing:\n{out}"
         );
     }
 
