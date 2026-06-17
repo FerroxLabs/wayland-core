@@ -38,6 +38,13 @@ const ALLOWLIST: &[&str] = &[
     // `wayland_config_dir()` would make it look in the sandbox and never find
     // the user's real Claude install. Read-only; writes no Wayland state.
     "crates/wcore-cli/src/tui/surfaces/diagnostics.rs",
+    // Forge cross-app MCP discovery: the `<config_dir>/forge/mcp-servers.json`
+    // file is a convention written by *other* Forge-suite apps (Agent Vault,
+    // future Foundry tools) about the REAL machine — deliberately NOT
+    // `WAYLAND_HOME`-scoped, exactly like the Claude-Desktop MCP discovery. It
+    // is read-only and never writes Wayland state, so it does not break
+    // hermeticity. See the module doc in `forge_discovery.rs` for the rationale.
+    "crates/wcore-config/src/forge_discovery.rs",
 ];
 
 fn workspace_root() -> PathBuf {
