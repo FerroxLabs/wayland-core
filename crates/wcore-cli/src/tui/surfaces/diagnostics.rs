@@ -472,6 +472,108 @@ fn scan_config_health(app: &App) -> Vec<HealthCheck> {
     rows
 }
 
+/// S11: one "here's what I found" discovery row — a latent capability on this
+/// machine the user could wire up (ambient cloud creds, a local Ollama daemon,
+/// an existing Claude Desktop MCP config). Read-only: detection only, never
+/// mutates config.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Discovery {
+    /// Short capability label (e.g. `AWS / Bedrock`).
+    pub label: String,
+    /// Whether the capability was detected on this host.
+    pub available: bool,
+    /// A one-line detail: what was found, or how to enable it.
+    pub detail: String,
+}
+
+/// The Claude Desktop config path on this platform
+/// (`<config-dir>/Claude/claude_desktop_config.json`). Uses the real OS config
+/// dir — Claude Desktop is an external app, so this deliberately does NOT honor
+/// `WAYLAND_HOME` (we are discovering the actual machine).
+fn claude_desktop_config_path() -> std::path::PathBuf {
+    dirs::config_dir()
+        .unwrap_or_default()
+        .join("Claude")
+        .join("claude_desktop_config.json")
+}
+
+/// Count the MCP servers declared in a Claude Desktop config file. Returns
+/// `None` if the file is absent/unreadable/unparseable or has no `mcpServers`
+/// object — the discovery row reads that as "not detected".
+fn count_mcp_servers_in(path: &std::path::Path) -> Option<usize> {
+    let body = std::fs::read_to_string(path).ok()?;
+    let json: serde_json::Value = serde_json::from_str(&body).ok()?;
+    Some(json.get("mcpServers")?.as_object()?.len())
+}
+
+/// S11: probe the machine for latent capabilities Wayland could use. Reuses the
+/// single-source-of-truth ambient/OAuth detection in
+/// [`wcore_config::config::provider_connected`] and the already-collected
+/// Ollama doctor signal; the only fresh probe is the Claude Desktop config scan.
+fn scan_environment(ollama_available: bool) -> Vec<Discovery> {
+    use wcore_config::config::{ProviderType, provider_connected};
+
+    let mut rows = Vec::new();
+
+    rows.push(Discovery {
+        label: "Ollama (local models)".to_string(),
+        available: ollama_available,
+        detail: if ollama_available {
+            "detected — route local models with `ollama:<model>`".to_string()
+        } else {
+            "not found — install ollama or set OLLAMA_BASE_URL".to_string()
+        },
+    });
+
+    let aws = provider_connected(ProviderType::Bedrock);
+    rows.push(Discovery {
+        label: "AWS / Bedrock".to_string(),
+        available: aws,
+        detail: if aws {
+            "ambient AWS credentials detected — Bedrock is ready".to_string()
+        } else {
+            "no AWS credentials (env / ~/.aws / role)".to_string()
+        },
+    });
+
+    let gcp = provider_connected(ProviderType::Vertex);
+    rows.push(Discovery {
+        label: "GCP / Vertex".to_string(),
+        available: gcp,
+        detail: if gcp {
+            "ambient GCP credentials detected — Vertex is ready".to_string()
+        } else {
+            "no GCP credentials (GOOGLE_APPLICATION_CREDENTIALS / ADC)".to_string()
+        },
+    });
+
+    let chatgpt = provider_connected(ProviderType::OpenAIChatGpt);
+    rows.push(Discovery {
+        label: "ChatGPT (OAuth)".to_string(),
+        available: chatgpt,
+        detail: if chatgpt {
+            "stored ChatGPT login detected".to_string()
+        } else {
+            "not signed in — run `wayland auth login chatgpt`".to_string()
+        },
+    });
+
+    let mcp = count_mcp_servers_in(&claude_desktop_config_path());
+    rows.push(Discovery {
+        label: "Claude Desktop MCP".to_string(),
+        available: mcp.is_some_and(|n| n > 0),
+        detail: match mcp {
+            Some(n) if n > 0 => format!(
+                "{n} MCP server{} configured — importable",
+                if n == 1 { "" } else { "s" }
+            ),
+            _ => "no Claude Desktop MCP config found".to_string(),
+        },
+    });
+
+    rows
+}
+
 /// Extract the last 10 engine errors from the session transcript.
 /// The protocol bridge pushes each `ProtocolEvent::Error` as a
 /// `TurnRole::System` turn whose first markdown element starts with
@@ -670,6 +772,10 @@ pub struct DiagnosticsSurface {
     /// `channels_dir()` on `on_enter` + the `r` key, rendered as the CHANNELS
     /// section of `/doctor`.
     channels: Vec<wcore_channels_registry::ChannelSummary>,
+    /// S11 — "here's what I found" environment discovery: latent capabilities
+    /// on this machine (ambient cloud creds, local Ollama, Claude Desktop MCP)
+    /// the user could wire up. Rendered as the DISCOVERED section of `/doctor`.
+    discovered: Vec<Discovery>,
 }
 
 impl Default for DiagnosticsSurface {
@@ -697,6 +803,7 @@ impl DiagnosticsSurface {
             effective_toml: String::new(),
             effective_scroll: 0,
             channels: Vec::new(),
+            discovered: Vec::new(),
         }
     }
 
@@ -715,6 +822,14 @@ impl DiagnosticsSurface {
         self.config_checks = scan_config_health(app);
         // S10: surface the on-disk channel configs (read-only, secret-free).
         self.channels = wcore_channels_registry::scan_user_channels();
+        // S11: "here's what I found" — reuse the just-collected Ollama doctor
+        // signal so we don't re-probe it asynchronously here.
+        let ollama_available = self
+            .doctor
+            .checks
+            .iter()
+            .any(|c| c.label == "ollama" && c.state == HealthState::Ok);
+        self.discovered = scan_environment(ollama_available);
         self.doctor_collected = true;
     }
 
@@ -1183,7 +1298,26 @@ impl DiagnosticsSurface {
             }
         }
 
-        // ── 7. Recent engine errors ─────────────────────────────────
+        // ── 7. Discovered capabilities (S11) ────────────────────────
+        // "Here's what I found" — latent capabilities on this machine the user
+        // could wire up. A found capability paints green; an absent one is a
+        // dim line with the how-to hint (absence is not a problem, so no Warn).
+        lines.push(Line::from(""));
+        push_section_header(&mut lines, t, "DISCOVERED");
+        for d in &self.discovered {
+            let (glyph, glyph_color, label_color) = if d.available {
+                ("● ", t.success, t.text)
+            } else {
+                ("○ ", t.text_dim, t.text_dim)
+            };
+            lines.push(Line::from(vec![
+                Span::styled(glyph.to_string(), Style::default().fg(glyph_color)),
+                Span::styled(format!("{:<22}", d.label), Style::default().fg(label_color)),
+                Span::styled(d.detail.clone(), Style::default().fg(t.text_muted)),
+            ]));
+        }
+
+        // ── 8. Recent engine errors ─────────────────────────────────
         lines.push(Line::from(""));
         push_section_header(&mut lines, t, "RECENT ERRORS");
         let errors = collect_recent_errors(app);
@@ -1204,7 +1338,7 @@ impl DiagnosticsSurface {
             }
         }
 
-        // ── 8. Token budget ─────────────────────────────────────────
+        // ── 9. Token budget ─────────────────────────────────────────
         lines.push(Line::from(""));
         push_section_header(&mut lines, t, "TOKEN BUDGET");
         let budget = token_budget_view(app);
@@ -2311,6 +2445,62 @@ mod tests {
         assert!(
             out.contains("weird") && out.contains("unknown platform"),
             "unknown-platform channel must read 'won't load':\n{out}"
+        );
+    }
+
+    #[test]
+    fn count_mcp_servers_in_parses_claude_desktop_config() {
+        // S11: the only greenfield probe — count `mcpServers` in a Claude
+        // Desktop config; absent file / absent key / bad JSON all read None.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let ok = dir.path().join("claude_desktop_config.json");
+        std::fs::write(&ok, r#"{"mcpServers":{"notion":{},"github":{}}}"#).unwrap();
+        assert_eq!(count_mcp_servers_in(&ok), Some(2));
+
+        assert_eq!(
+            count_mcp_servers_in(&dir.path().join("missing.json")),
+            None,
+            "absent file must read None"
+        );
+
+        let no_key = dir.path().join("empty.json");
+        std::fs::write(&no_key, "{}").unwrap();
+        assert_eq!(
+            count_mcp_servers_in(&no_key),
+            None,
+            "config without mcpServers must read None"
+        );
+    }
+
+    #[test]
+    fn doctor_discovered_section_shows_found_and_absent_rows() {
+        // S11: the DISCOVERED section paints found capabilities prominently and
+        // absent ones as dim how-to hints. Injecting rows keeps the test
+        // hermetic; `doctor_collected` forces the body to render.
+        let mut s = DiagnosticsSurface::new();
+        s.doctor_collected = true;
+        s.discovered = vec![
+            Discovery {
+                label: "Ollama (local models)".to_string(),
+                available: true,
+                detail: "detected — route local models with `ollama:<model>`".to_string(),
+            },
+            Discovery {
+                label: "AWS / Bedrock".to_string(),
+                available: false,
+                detail: "no AWS credentials (env / ~/.aws / role)".to_string(),
+            },
+        ];
+        let app = App::new();
+        let out = render_tall(&mut s, &app);
+        assert!(out.contains("DISCOVERED"), "section header missing:\n{out}");
+        assert!(
+            out.contains("Ollama") && out.contains("detected"),
+            "found capability missing:\n{out}"
+        );
+        assert!(
+            out.contains("AWS / Bedrock") && out.contains("no AWS credentials"),
+            "absent capability + hint missing:\n{out}"
         );
     }
 
