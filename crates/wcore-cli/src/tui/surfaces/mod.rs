@@ -1816,6 +1816,31 @@ impl Router {
                                     ),
                                 }
                             }
+                            Some("connect") => {
+                                // Slice 3: zero-config connect to a discovered
+                                // Forge MCP server (Agent Vault). Reads the Forge
+                                // discovery file → live-probe → grant (triggers
+                                // the Approve prompt in the producer's window) →
+                                // connect, all off-thread; progress arrives as
+                                // Info/Error turns. `connect <name>` disambiguates
+                                // when more than one server is discovered.
+                                let target = parts.next().map(str::to_string);
+                                match self.engine.as_ref() {
+                                    Some(engine) => {
+                                        engine.connect_forge_discovered(target);
+                                        push_system(
+                                            app,
+                                            "Looking for a Forge MCP server to connect…"
+                                                .to_string(),
+                                        );
+                                    }
+                                    None => push_system(
+                                        app,
+                                        "No engine attached. /mcp connect needs a live session."
+                                            .to_string(),
+                                    ),
+                                }
+                            }
                             _ => {
                                 let inv = self.engine.as_ref().map(|e| e.inventory());
                                 push_system(app, render_mcp_list(inv));

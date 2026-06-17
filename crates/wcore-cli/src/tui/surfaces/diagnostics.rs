@@ -598,6 +598,18 @@ fn scan_environment(ollama_available: bool) -> Vec<Discovery> {
         },
     });
 
+    // Slice 3 — Forge-suite local MCP servers advertised in the cross-app
+    // discovery file (e.g. Agent Vault). These are hints, not liveness — the
+    // live probe + grant happen on `/mcp connect`, so this row just surfaces
+    // that one is available to link. One row per discovered server.
+    for s in wcore_config::forge_discovery::read_discovered_servers() {
+        rows.push(Discovery {
+            label: format!("Forge MCP: {}", s.label()),
+            available: true,
+            detail: format!("discovered at {} — run /mcp connect to link", s.url),
+        });
+    }
+
     rows
 }
 
