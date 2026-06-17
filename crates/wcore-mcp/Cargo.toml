@@ -42,3 +42,6 @@ wcore-mcp = { path = ".", features = ["test-utils"] }
 tokio-util.workspace = true
 tempfile.workspace = true
 serial_test.workspace = true
+# Slice 3 — forge_grant.rs mocks the producer's /.well-known/mcp + /grant
+# endpoints to verify the liveness probe + grant status mapping.
+wiremock.workspace = true
