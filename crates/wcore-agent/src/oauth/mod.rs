@@ -23,6 +23,7 @@ pub mod chatgpt;
 pub mod flow;
 pub mod pkce;
 pub mod storage;
+pub mod xai;
 
 pub use chatgpt::{
     ChatGptLoginStatus, ChatGptTokenManager, CodexClaims, build_chatgpt_flow, decode_codex_claims,

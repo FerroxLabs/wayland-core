@@ -1151,6 +1151,23 @@ fn chatgpt_oauth_token_path() -> PathBuf {
     profile_home().join("oauth").join("chatgpt.json")
 }
 
+/// Whether an xAI (Grok) OAuth credential exists to authenticate out-of-band:
+/// the engine's own store (`~/.wayland/oauth/xai.json`) or the Grok CLI's
+/// `~/.grok/auth.json` (`$GROK_HOME/auth.json` when set). File-existence only —
+/// the actual parse + refresh lives in `wcore_agent::oauth::xai` (config can't
+/// depend on agent), mirroring how the ChatGPT presence check is split.
+fn xai_oauth_credentials_present() -> bool {
+    if profile_home().join("oauth").join("xai.json").exists() {
+        return true;
+    }
+    let grok = std::env::var("GROK_HOME")
+        .ok()
+        .filter(|d| !d.trim().is_empty())
+        .map(|d| PathBuf::from(d).join("auth.json"))
+        .or_else(|| dirs::home_dir().map(|h| h.join(".grok").join("auth.json")));
+    grok.is_some_and(|p| p.exists())
+}
+
 /// Whether `provider`'s credential is present right now, decided synchronously
 /// with no network. The single source of truth shared by the `/provider`
 /// picker (`wcore-cli`) and the model-catalog refresh service
@@ -1909,6 +1926,14 @@ fn resolve_api_key(
             }
         }
         ProviderType::Xai => {
+            // Grok "Sign in with X" authenticates via OAuth tokens resolved
+            // out-of-band by the bootstrap-built bearer source (same shape as
+            // ChatGPT). Exempt from the api-key gate when an xAI OAuth
+            // credential exists — otherwise a plain `xai` API key still works
+            // via XAI_API_KEY below.
+            if xai_oauth_credentials_present() {
+                return Ok(String::new());
+            }
             if let Ok(key) = std::env::var("XAI_API_KEY") {
                 return Ok(key);
             }

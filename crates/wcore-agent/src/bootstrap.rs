@@ -2886,9 +2886,58 @@ pub fn build_native_or_chatgpt_provider(config: &Config) -> anyhow::Result<Arc<d
             config.compat.clone(),
             config.debug.clone(),
         )))
+    } else if matches!(config.provider, ProviderType::Xai) && xai_oauth_available() {
+        // "Sign in with X (Grok)": when refreshable OAuth credentials exist
+        // (engine store or the Grok CLI's ~/.grok/auth.json), drive the xAI
+        // provider over a bearer that refreshes near expiry — so a Grok session
+        // survives the ~6h token lifetime instead of dying mid-turn on a stale
+        // snapshot. Falls through to the static-key path below when no OAuth
+        // credential is present (a plain `xai` API key still works unchanged).
+        // NOTE: keyed on `ProviderType::Xai`, so an embedding app must spawn
+        // Grok as `--provider xai` (not `--provider openai`) to get this AND the
+        // grok-4.3 stop-param fix that lives in `xai_defaults`.
+        let storage = crate::oauth::OAuthStorage::from_home()
+            .map_err(|e| anyhow::anyhow!("xai oauth storage: {e}"))?;
+        let mgr = Arc::new(crate::oauth::xai::XaiTokenManager::new(storage));
+        let bearer: wcore_providers::AsyncTokenSource = {
+            let mgr = mgr.clone();
+            Arc::new(move || {
+                let mgr = mgr.clone();
+                Box::pin(async move {
+                    mgr.get()
+                        .await
+                        .map_err(wcore_providers::ProviderError::Connection)
+                })
+            })
+        };
+        let base_url = if config.base_url.is_empty() {
+            wcore_providers::xai::XAI_DEFAULT_BASE_URL.to_string()
+        } else {
+            config.base_url.clone()
+        };
+        Ok(Arc::new(wcore_providers::xai::XaiProvider::with_bearer(
+            bearer,
+            &base_url,
+            config.compat.clone(),
+            config.debug.clone(),
+        )))
     } else {
         Ok(wcore_providers::create_native_provider(config))
     }
+}
+
+/// True when xAI OAuth credentials are available to refresh from — either the
+/// engine's own store (`~/.wayland/oauth/xai.json`) or the Grok CLI's
+/// `~/.grok/auth.json`. Gates the OAuth path so a plain `xai` API key still
+/// flows through the static-key provider unchanged.
+fn xai_oauth_available() -> bool {
+    if crate::oauth::xai::read_grok_cli_tokens().is_some() {
+        return true;
+    }
+    crate::oauth::OAuthStorage::from_home()
+        .ok()
+        .and_then(|s| s.load(crate::oauth::xai::PROVIDER).ok().flatten())
+        .is_some()
 }
 
 /// OAuth-aware analogue of [`wcore_providers::create_provider`].
