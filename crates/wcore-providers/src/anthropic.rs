@@ -33,6 +33,11 @@ pub struct AnthropicProvider {
     alias_key: String,
     compat: ProviderCompat,
     debug: DebugConfig,
+    /// Once a `compat.auth_fallback_base_url` retry authenticates (region-locked
+    /// key failover), the working host is pinned here so every subsequent
+    /// request tries it first instead of re-paying the primary's 401. `None`
+    /// until a fallback has succeeded.
+    pinned_base_url: Arc<Mutex<Option<String>>>,
 }
 
 impl AnthropicProvider {
@@ -45,6 +50,7 @@ impl AnthropicProvider {
             alias_key: "anthropic".to_string(),
             compat,
             debug,
+            pinned_base_url: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -96,6 +102,82 @@ impl AnthropicProvider {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .mark_failure(key);
+    }
+
+    /// The host to try first: a fallback that previously authenticated this
+    /// session (region-locked-key failover) if one is pinned, else the
+    /// configured primary `base_url`.
+    fn effective_base_url(&self) -> String {
+        self.pinned_base_url
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
+            .unwrap_or_else(|| self.base_url.clone())
+    }
+
+    /// Remember the host that authenticated so subsequent requests skip the
+    /// primary's certain 401.
+    fn pin_base_url(&self, url: &str) {
+        *self
+            .pinned_base_url
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(url.to_string());
+    }
+
+    /// Send one streaming request to a specific `base_url`. Returns the event
+    /// receiver on 2xx, or the mapped [`ProviderError`] on any failure. Region
+    /// failover (retrying an alternate host) is the caller's concern — this
+    /// method targets exactly the host it is given.
+    async fn try_stream(
+        &self,
+        base_url: &str,
+        key: &str,
+        body: &Value,
+    ) -> Result<mpsc::Receiver<LlmEvent>, ProviderError> {
+        let url = format!("{}/v1/messages", base_url);
+        let response = builder_send_with_retry(
+            self.client
+                .post(&url)
+                .headers(self.build_headers(key)?)
+                .json(body),
+        )
+        .await?;
+
+        let status = response.status();
+        if !status.is_success() {
+            // Demote this key on auth / rate-limit failures so the next request
+            // rotates to another key in the pool (no-op for a single key).
+            if matches!(status.as_u16(), 401 | 403 | 429) {
+                self.mark_key_failure(key);
+            }
+            // E-H1 / L3: capture headers before `.text()` consumes the body
+            // so a 429 can honour `Retry-After` (header, then nested body).
+            let headers = response.headers().clone();
+            let body_text = response.text().await.unwrap_or_default();
+            if status.as_u16() == 429 {
+                return Err(ProviderError::RateLimited {
+                    retry_after_ms: crate::retry::resolve_retry_after_ms(&headers, &body_text),
+                });
+            }
+            return Err(ProviderError::Api {
+                status: status.as_u16(),
+                message: body_text,
+            });
+        }
+
+        // 2xx: this key works — make it sticky for subsequent requests.
+        self.mark_key_success(key);
+
+        let (tx, rx) = mpsc::channel(64);
+        let debug = self.debug.clone();
+
+        tokio::spawn(async move {
+            if let Err(e) = anthropic_shared::process_sse_stream(response, &tx, &debug).await {
+                let _ = tx.send(LlmEvent::Error(e.to_string())).await;
+            }
+        });
+
+        Ok(rx)
     }
 
     /// Build request headers authenticating with the supplied `key`. Anthropic
@@ -256,56 +338,44 @@ impl LlmProvider for AnthropicProvider {
         &self,
         request: &LlmRequest,
     ) -> Result<mpsc::Receiver<LlmEvent>, ProviderError> {
-        let url = format!("{}/v1/messages", self.base_url);
         let body = self.build_request_body(request);
 
         dump_request_body(&self.debug, &body);
         reset_response_dump(&self.debug);
 
+        // Select the key ONCE and reuse it across the failover attempt: the same
+        // credential is tried against both hosts (a region-locked key is valid on
+        // exactly one), so re-selecting — which could rotate or hit a cooldown —
+        // would defeat the retry.
         let key = self.select_key()?;
-        let response = builder_send_with_retry(
-            self.client
-                .post(&url)
-                .headers(self.build_headers(&key)?)
-                .json(&body),
-        )
-        .await?;
+        let primary = self.effective_base_url();
 
-        let status = response.status();
-        if !status.is_success() {
-            // Demote this key on auth / rate-limit failures so the next request
-            // rotates to another key in the pool (no-op for a single key).
-            if matches!(status.as_u16(), 401 | 403 | 429) {
-                self.mark_key_failure(&key);
+        match self.try_stream(&primary, &key, &body).await {
+            Ok(rx) => Ok(rx),
+            // Region-locked-key failover: a credential rejected here (401/403)
+            // may belong to the provider's alternate platform. When a fallback
+            // host is configured and we haven't already pinned to it, retry the
+            // SAME key there; pin it for the session on success so later requests
+            // skip the primary's certain 401. See `compat.auth_fallback_base_url`.
+            Err(ProviderError::Api { status, .. })
+                if matches!(status, 401 | 403)
+                    && self
+                        .compat
+                        .auth_fallback_base_url
+                        .as_deref()
+                        .is_some_and(|fb| fb != primary) =>
+            {
+                let fallback = self
+                    .compat
+                    .auth_fallback_base_url
+                    .clone()
+                    .expect("is_some_and guarantees Some");
+                let rx = self.try_stream(&fallback, &key, &body).await?;
+                self.pin_base_url(&fallback);
+                Ok(rx)
             }
-            // E-H1 / L3: capture headers before `.text()` consumes the body
-            // so a 429 can honour `Retry-After` (header, then nested body).
-            let headers = response.headers().clone();
-            let body_text = response.text().await.unwrap_or_default();
-            if status.as_u16() == 429 {
-                return Err(ProviderError::RateLimited {
-                    retry_after_ms: crate::retry::resolve_retry_after_ms(&headers, &body_text),
-                });
-            }
-            return Err(ProviderError::Api {
-                status: status.as_u16(),
-                message: body_text,
-            });
+            Err(e) => Err(e),
         }
-
-        // 2xx: this key works — make it sticky for subsequent requests.
-        self.mark_key_success(&key);
-
-        let (tx, rx) = mpsc::channel(64);
-        let debug = self.debug.clone();
-
-        tokio::spawn(async move {
-            if let Err(e) = anthropic_shared::process_sse_stream(response, &tx, &debug).await {
-                let _ = tx.send(LlmEvent::Error(e.to_string())).await;
-            }
-        });
-
-        Ok(rx)
     }
 
     fn alias_key(&self) -> &str {

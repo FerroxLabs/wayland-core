@@ -161,6 +161,18 @@ pub struct ProviderCompat {
     /// Set via `[compat] azure_auth_mode = "aad-bearer"`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub azure_auth_mode: Option<crate::config::AzureAuthMode>,
+
+    /// Alternate API base URL to retry against when the primary `base_url`
+    /// rejects the credential with a 401. Some providers run two region-locked
+    /// platforms that share the wire protocol but NOT the key namespace, so a
+    /// valid key issued on one platform 401s on the other's host. MiniMax is the
+    /// motivating case (`api.minimax.io` vs `api.minimaxi.com` — a key works on
+    /// exactly one, verified live 2026-06-18). When set, a 401 on the primary
+    /// transparently retries the same key against this host and pins whichever
+    /// authenticates for the rest of the session, so the user never has to know
+    /// which region issued their key. `None` (the default) disables failover.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auth_fallback_base_url: Option<String>,
 }
 
 impl ProviderCompat {
@@ -239,6 +251,11 @@ impl ProviderCompat {
             cost_per_output_token: Some(0.0),
             cost_per_cache_read_token: None,
             cost_per_cache_write_token: None,
+            // MiniMax runs two region-locked platforms with separate key
+            // namespaces. The default `base_url` targets `api.minimax.io`; a key
+            // issued on the other platform 401s there, so on a 401 retry the same
+            // key against `api.minimaxi.com` and pin whichever authenticates.
+            auth_fallback_base_url: Some("https://api.minimaxi.com/anthropic".into()),
             ..Self::anthropic_defaults()
         }
     }
@@ -578,6 +595,9 @@ impl ProviderCompat {
                 .uses_max_completion_tokens
                 .or(defaults.uses_max_completion_tokens),
             azure_auth_mode: user.azure_auth_mode.or(defaults.azure_auth_mode),
+            auth_fallback_base_url: user
+                .auth_fallback_base_url
+                .or(defaults.auth_fallback_base_url),
         }
     }
 
@@ -763,6 +783,13 @@ mod tests {
         assert_eq!(compat.cost_per_input_token, Some(0.0));
         assert_eq!(compat.cost_per_output_token, Some(0.0));
         assert_eq!(compat.cost_per_cache_read_token, None);
+        // Region-locked-key failover: a 401 on the default `api.minimax.io`
+        // host retries `api.minimaxi.com` so a key from either MiniMax platform
+        // works without the user knowing which region issued it.
+        assert_eq!(
+            compat.auth_fallback_base_url.as_deref(),
+            Some("https://api.minimaxi.com/anthropic")
+        );
     }
 
     #[test]

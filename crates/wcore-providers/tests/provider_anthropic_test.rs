@@ -732,3 +732,129 @@ async fn test_anthropic_429_honours_retry_after_header() {
         e => panic!("expected RateLimited, got: {e:?}"),
     }
 }
+
+// ---------------------------------------------------------------------------
+// Region-locked-key failover (compat.auth_fallback_base_url)
+// ---------------------------------------------------------------------------
+
+/// A 401 on the primary host with a configured `auth_fallback_base_url` must
+/// transparently retry the SAME key against the fallback host and succeed.
+/// Motivating case: MiniMax's two region-locked platforms (`api.minimax.io`
+/// vs `api.minimaxi.com`) — a valid key works on exactly one.
+#[tokio::test]
+async fn test_anthropic_region_failover_retries_alternate_host_on_401() {
+    let primary = MockServer::start().await;
+    let fallback = MockServer::start().await;
+
+    // Primary rejects the key.
+    Mock::given(method("POST"))
+        .and(path("/v1/messages"))
+        .respond_with(ResponseTemplate::new(401).set_body_string(
+            r#"{"type":"error","error":{"type":"authentication_error","message":"invalid api key"}}"#,
+        ))
+        .mount(&primary)
+        .await;
+
+    // Fallback accepts the same key.
+    Mock::given(method("POST"))
+        .and(path("/v1/messages"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_raw(text_sse_body("from fallback"), "text/event-stream"),
+        )
+        .mount(&fallback)
+        .await;
+
+    let mut compat = ProviderCompat::anthropic_defaults();
+    compat.auth_fallback_base_url = Some(fallback.uri());
+
+    let provider = AnthropicProvider::new(
+        "region-locked-key",
+        &primary.uri(),
+        compat,
+        DebugConfig::default(),
+    )
+    .with_cache(false);
+
+    let rx = provider
+        .stream(&minimal_request())
+        .await
+        .expect("failover to the fallback host must succeed");
+    let events = collect_events(rx).await;
+
+    let got_text = events
+        .iter()
+        .any(|e| matches!(e, LlmEvent::TextDelta(t) if t == "from fallback"));
+    assert!(
+        got_text,
+        "expected the fallback host's response; got: {events:?}"
+    );
+}
+
+/// Once the fallback authenticates it is PINNED: a second request goes straight
+/// to the fallback and does not re-pay the primary's certain 401.
+#[tokio::test]
+async fn test_anthropic_region_failover_pins_working_host() {
+    let primary = MockServer::start().await;
+    let fallback = MockServer::start().await;
+
+    Mock::given(method("POST"))
+        .and(path("/v1/messages"))
+        .respond_with(ResponseTemplate::new(401).set_body_string("nope"))
+        .mount(&primary)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/v1/messages"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_raw(text_sse_body("ok"), "text/event-stream"),
+        )
+        .mount(&fallback)
+        .await;
+
+    let mut compat = ProviderCompat::anthropic_defaults();
+    compat.auth_fallback_base_url = Some(fallback.uri());
+    let provider = AnthropicProvider::new("k", &primary.uri(), compat, DebugConfig::default())
+        .with_cache(false);
+
+    // First request: primary 401 -> fallback 200, pins the fallback.
+    collect_events(provider.stream(&minimal_request()).await.unwrap()).await;
+    // Second request: must resolve on the pinned fallback only.
+    collect_events(provider.stream(&minimal_request()).await.unwrap()).await;
+
+    let primary_hits = primary.received_requests().await.unwrap().len();
+    assert_eq!(
+        primary_hits, 1,
+        "after pinning, the primary host must not be retried"
+    );
+    let fallback_hits = fallback.received_requests().await.unwrap().len();
+    assert_eq!(
+        fallback_hits, 2,
+        "both requests must resolve on the pinned fallback host"
+    );
+}
+
+/// With NO fallback configured (the default for ordinary Anthropic providers),
+/// a 401 surfaces as the error unchanged — no behavior drift.
+#[tokio::test]
+async fn test_anthropic_no_failover_without_fallback_configured() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/messages"))
+        .respond_with(ResponseTemplate::new(401).set_body_string("denied"))
+        .mount(&server)
+        .await;
+
+    // anthropic_defaults() leaves auth_fallback_base_url = None.
+    let provider = AnthropicProvider::new(
+        "k",
+        &server.uri(),
+        ProviderCompat::anthropic_defaults(),
+        DebugConfig::default(),
+    )
+    .with_cache(false);
+
+    match provider.stream(&minimal_request()).await {
+        Err(ProviderError::Api { status, .. }) => assert_eq!(status, 401),
+        other => panic!("expected Api(401) with no failover, got: {other:?}"),
+    }
+}
