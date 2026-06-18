@@ -3411,9 +3411,14 @@ impl AgentEngine {
             // only when the route optimizes client-side. On router-optimized
             // routes the server already trims output, so we leave the Vec
             // empty and providers emit no stop field.
-            let stop_sequences = if self.compat.input_optimization() == "client" {
+            let stop_sequences = if self.compat.input_optimization() == "client"
+                && self.compat.supports_stop_param()
+            {
                 FLUFF_STOP_SEQUENCES.iter().map(|s| s.to_string()).collect()
             } else {
+                // Either the route is router-optimized (server trims output) or
+                // the provider rejects `stop` (e.g. xAI grok-4.3 400s on it) —
+                // leave empty so providers emit no `stop` field.
                 Vec::new()
             };
 

@@ -173,6 +173,16 @@ pub struct ProviderCompat {
     /// which region issued their key. `None` (the default) disables failover.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auth_fallback_base_url: Option<String>,
+
+    /// Whether the provider accepts the OpenAI `stop` parameter. The engine
+    /// attaches "fluff" stop sequences as an output token-optimization on
+    /// client-optimized routes; some providers' reasoning models reject the
+    /// `stop` parameter outright with a 400 (xAI's `grok-4.3`: *"Model grok-4.3
+    /// does not support parameter stop"*, verified live 2026-06-18). Set
+    /// `false` to suppress the optimization so those models work. `None`
+    /// defaults to `true` — every existing provider keeps sending `stop`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub supports_stop_param: Option<bool>,
 }
 
 impl ProviderCompat {
@@ -482,6 +492,10 @@ impl ProviderCompat {
         // Base URL ends in `/v1`; pin `api_path` to avoid `/v1/v1`.
         Self {
             api_path: Some("/chat/completions".into()),
+            // grok-4.3 (a reasoning model) 400s on the `stop` parameter, which
+            // the engine otherwise attaches as a client-side output
+            // optimization — suppress it so Grok models actually run.
+            supports_stop_param: Some(false),
             ..Self::openai_compat_provider("xai")
         }
     }
@@ -598,6 +612,7 @@ impl ProviderCompat {
             auth_fallback_base_url: user
                 .auth_fallback_base_url
                 .or(defaults.auth_fallback_base_url),
+            supports_stop_param: user.supports_stop_param.or(defaults.supports_stop_param),
         }
     }
 
@@ -633,6 +648,12 @@ impl ProviderCompat {
 
     pub fn api_path(&self) -> &str {
         self.api_path.as_deref().unwrap_or("/v1/chat/completions")
+    }
+
+    /// Whether to send the OpenAI `stop` parameter. Defaults to `true`; xAI
+    /// sets it `false` because `grok-4.3` (a reasoning model) 400s on `stop`.
+    pub fn supports_stop_param(&self) -> bool {
+        self.supports_stop_param.unwrap_or(true)
     }
 
     pub fn supports_thinking(&self) -> bool {
@@ -834,6 +855,20 @@ mod tests {
         ] {
             assert_eq!(compat.api_path(), "/chat/completions");
         }
+    }
+
+    #[test]
+    fn xai_suppresses_stop_param_but_others_keep_it() {
+        // grok-4.3 400s on `stop`, so xAI must report supports_stop_param=false;
+        // every other provider keeps the default true (engine still attaches the
+        // fluff-stop output optimization on client-optimized routes).
+        assert!(
+            !ProviderCompat::xai_defaults().supports_stop_param(),
+            "xAI must suppress the stop parameter (grok-4.3 rejects it)"
+        );
+        assert!(ProviderCompat::openai_defaults().supports_stop_param());
+        assert!(ProviderCompat::anthropic_defaults().supports_stop_param());
+        assert!(ProviderCompat::groq_defaults().supports_stop_param());
     }
 
     #[test]
