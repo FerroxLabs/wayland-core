@@ -1033,3 +1033,92 @@ async fn test_openai_unterminated_sse_frame_is_capped() {
         events.len()
     );
 }
+
+// ---------------------------------------------------------------------------
+// Region-locked-key failover (compat.auth_fallback_base_url) on the
+// OpenAI-compatible path — motivating case: Moonshot's `api.moonshot.ai`
+// (international) vs `api.moonshot.cn` (China), a key works on exactly one.
+// ---------------------------------------------------------------------------
+
+/// A 401 on the primary host with a configured `auth_fallback_base_url` must
+/// transparently retry the SAME key against the fallback host and succeed.
+#[tokio::test]
+async fn openai_region_failover_retries_alternate_host_on_401() {
+    let primary = MockServer::start().await;
+    let fallback = MockServer::start().await;
+
+    // Primary rejects the key.
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .respond_with(ResponseTemplate::new(401).set_body_string(
+            r#"{"error":{"message":"invalid api key","type":"authentication_error"}}"#,
+        ))
+        .mount(&primary)
+        .await;
+
+    // Fallback accepts the same key and returns a normal text stream.
+    let chunk = json!({
+        "id": "c1", "object": "chat.completion.chunk",
+        "choices": [{"index": 0, "delta": {"content": "from fallback"}, "finish_reason": null}]
+    })
+    .to_string();
+    let stop = json!({
+        "id": "c1", "object": "chat.completion.chunk",
+        "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}],
+        "usage": {"prompt_tokens": 1, "completion_tokens": 2, "total_tokens": 3}
+    })
+    .to_string();
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_raw(build_sse_body(&[&chunk, &stop]), "text/event-stream"),
+        )
+        .mount(&fallback)
+        .await;
+
+    let mut compat = ProviderCompat::openai_defaults();
+    compat.auth_fallback_base_url = Some(fallback.uri());
+
+    let provider = OpenAIProvider::new(
+        "region-locked-key",
+        &primary.uri(),
+        compat,
+        DebugConfig::default(),
+    );
+    let rx = provider
+        .stream(&make_request())
+        .await
+        .expect("failover to the fallback host must succeed");
+    let events = collect_events(rx).await;
+
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, LlmEvent::TextDelta(t) if t == "from fallback")),
+        "expected the fallback host's response; got: {events:?}"
+    );
+}
+
+/// With NO fallback configured (the default), a 401 surfaces unchanged — no
+/// behavior drift for ordinary OpenAI-compatible providers.
+#[tokio::test]
+async fn openai_no_failover_without_fallback_configured() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .respond_with(ResponseTemplate::new(401).set_body_string("denied"))
+        .mount(&server)
+        .await;
+
+    let provider = OpenAIProvider::new(
+        "k",
+        &server.uri(),
+        ProviderCompat::openai_defaults(),
+        DebugConfig::default(),
+    );
+    match provider.stream(&make_request()).await {
+        Err(wcore_providers::ProviderError::Api { status, .. }) => assert_eq!(status, 401),
+        other => panic!("expected Api(401) with no failover, got: {other:?}"),
+    }
+}

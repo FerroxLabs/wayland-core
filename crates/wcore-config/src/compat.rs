@@ -510,6 +510,11 @@ impl ProviderCompat {
         // Base URL ends in `/v1`; pin `api_path` to avoid `/v1/v1`.
         Self {
             api_path: Some("/chat/completions".into()),
+            // Moonshot (Kimi) runs two region-locked platforms with separate key
+            // namespaces, like MiniMax. The default base URL targets the
+            // international host (`api.moonshot.ai`); a mainland-China key 401s
+            // there, so on a 401 retry the same key against `api.moonshot.cn`.
+            auth_fallback_base_url: Some("https://api.moonshot.cn/v1".into()),
             ..Self::openai_compat_provider("moonshot")
         }
     }
@@ -869,6 +874,31 @@ mod tests {
         assert!(ProviderCompat::openai_defaults().supports_stop_param());
         assert!(ProviderCompat::anthropic_defaults().supports_stop_param());
         assert!(ProviderCompat::groq_defaults().supports_stop_param());
+    }
+
+    #[test]
+    fn dual_region_providers_set_auth_fallback() {
+        // Moonshot (Kimi) and MiniMax both run two region-locked platforms with
+        // separate key namespaces, so a key from the other region 401s on the
+        // default host and must fail over.
+        assert_eq!(
+            ProviderCompat::moonshot_defaults()
+                .auth_fallback_base_url
+                .as_deref(),
+            Some("https://api.moonshot.cn/v1")
+        );
+        assert_eq!(
+            ProviderCompat::minimax_defaults()
+                .auth_fallback_base_url
+                .as_deref(),
+            Some("https://api.minimaxi.com/anthropic")
+        );
+        // Single-region providers leave it unset.
+        assert!(
+            ProviderCompat::openai_defaults()
+                .auth_fallback_base_url
+                .is_none()
+        );
     }
 
     #[test]

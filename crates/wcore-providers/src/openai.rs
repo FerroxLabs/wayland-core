@@ -45,6 +45,11 @@ pub struct OpenAIProvider {
     /// pool is empty in that case and `select_key` is never consulted.
     bearer: Option<AsyncTokenSource>,
     base_url: String,
+    /// Once a `compat.auth_fallback_base_url` retry authenticates (region-locked
+    /// key failover), the working host is pinned here so every later request
+    /// tries it first. `None` until a fallback has succeeded. Mirrors the same
+    /// field on `AnthropicProvider`.
+    pinned_base_url: Arc<Mutex<Option<String>>>,
     compat: ProviderCompat,
     debug: DebugConfig,
 }
@@ -56,6 +61,7 @@ impl OpenAIProvider {
             keys: Arc::new(Mutex::new(KeyPool::new(split_keys(api_key)))),
             bearer: None,
             base_url: base_url.to_string(),
+            pinned_base_url: Arc::new(Mutex::new(None)),
             compat,
             debug,
         }
@@ -76,6 +82,7 @@ impl OpenAIProvider {
             keys: Arc::new(Mutex::new(KeyPool::new(Vec::new()))),
             bearer: Some(bearer),
             base_url: base_url.to_string(),
+            pinned_base_url: Arc::new(Mutex::new(None)),
             compat,
             debug,
         }
@@ -379,8 +386,94 @@ impl OpenAIProvider {
     /// path and append `/responses` so the Responses request shares the `/v1`
     /// API root. When the path has no such suffix (an unusual override) fall
     /// back to the canonical `/v1/responses` under the base URL.
-    fn responses_url(&self) -> String {
-        let base = self.base_url.trim_end_matches('/');
+    /// The host to try first: a fallback that previously authenticated this
+    /// session (region-locked-key failover) if pinned, else the configured
+    /// primary `base_url`.
+    fn effective_base_url(&self) -> String {
+        self.pinned_base_url
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
+            .unwrap_or_else(|| self.base_url.clone())
+    }
+
+    /// Remember the host that authenticated so later requests skip the primary's
+    /// certain 401.
+    fn pin_base_url(&self, url: &str) {
+        *self
+            .pinned_base_url
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(url.to_string());
+    }
+
+    /// Build the request URL for a specific `base_url` (chat-completions or, for
+    /// the gpt-5 family, the Responses API). Separated from `self.base_url` so
+    /// the region-failover path can target an alternate host.
+    fn url_for(&self, base_url: &str, use_responses: bool) -> String {
+        if use_responses {
+            self.responses_url_for(base_url)
+        } else {
+            format!("{}{}", base_url, self.compat.api_path())
+        }
+    }
+
+    /// Send one streaming request to a specific `base_url` and return the 2xx
+    /// response, or the mapped [`ProviderError`]. Region failover (retrying an
+    /// alternate host on a 401/403) is the caller's concern — this targets
+    /// exactly the host it is given. `key` is resolved once by the caller and
+    /// reused across hosts (a region-locked key is valid on exactly one).
+    async fn try_send(
+        &self,
+        base_url: &str,
+        use_responses: bool,
+        body: &Value,
+        key: &str,
+        using_bearer: bool,
+    ) -> Result<reqwest::Response, ProviderError> {
+        let url = self.url_for(base_url, use_responses);
+        let response = builder_send_with_retry(
+            self.client
+                .post(&url)
+                .headers(self.build_headers(key)?)
+                .json(body),
+        )
+        .await?;
+
+        let status = response.status();
+        if !status.is_success() {
+            // Demote this key on auth / rate-limit failures so the next request
+            // rotates to another key in the pool (no-op for a single key, and
+            // skipped for the OAuth bearer path which holds one credential).
+            if !using_bearer && matches!(status.as_u16(), 401 | 403 | 429) {
+                self.mark_key_failure(key);
+            }
+            // E-H1 / L3: capture headers before `.text()` consumes the body
+            // so a 429 can honour `Retry-After` (header, then nested body).
+            let headers = response.headers().clone();
+            let body_text = response
+                .text()
+                .await
+                .unwrap_or_else(|e| format!("<body read failed: {e}>"));
+            if status.as_u16() == 429 {
+                return Err(ProviderError::RateLimited {
+                    retry_after_ms: crate::retry::resolve_retry_after_ms(&headers, &body_text),
+                });
+            }
+            return Err(ProviderError::Api {
+                status: status.as_u16(),
+                message: body_text,
+            });
+        }
+
+        // 2xx: this key works — make it sticky for subsequent requests.
+        if !using_bearer {
+            self.mark_key_success(key);
+        }
+        Ok(response)
+    }
+
+    fn responses_url_for(&self, base_url: &str) -> String {
+        let base = base_url.trim_end_matches('/');
         let path = self.compat.api_path();
         match path.strip_suffix("/chat/completions") {
             Some(root) => format!("{base}{root}/responses"),
@@ -767,69 +860,58 @@ impl LlmProvider for OpenAIProvider {
         // `/v1/chat/completions` and MUST use the Responses API. Everything
         // else keeps the chat path unchanged. See `uses_responses_api`.
         let use_responses = self.uses_responses_api(request);
-        let (url, body) = if use_responses {
-            (
-                self.responses_url(),
-                openai_responses::build_responses_body(request, &self.compat),
-            )
+        let body = if use_responses {
+            openai_responses::build_responses_body(request, &self.compat)
         } else {
-            (
-                format!("{}{}", self.base_url, self.compat.api_path()),
-                self.build_request_body(request),
-            )
+            self.build_request_body(request)
         };
 
         dump_request_body(&self.debug, &body);
         reset_response_dump(&self.debug);
 
         // OAuth providers resolve (and refresh near expiry) a fresh bearer per
-        // request; static-key providers select from the rotation pool. The
-        // key-pool demote/promote bookkeeping below only applies to the static
-        // path — for OAuth there is one credential and the token source owns
-        // refresh, so the `mark_key_*` calls are skipped.
+        // request; static-key providers select from the rotation pool. The key
+        // is resolved ONCE and reused across the failover attempt — the same
+        // credential is tried against both hosts (a region-locked key is valid
+        // on exactly one).
         let using_bearer = self.bearer.is_some();
         let key = match &self.bearer {
             Some(src) => (src)().await?,
             None => self.select_key()?,
         };
-        let response = builder_send_with_retry(
-            self.client
-                .post(&url)
-                .headers(self.build_headers(&key)?)
-                .json(&body),
-        )
-        .await?;
 
-        let status = response.status();
-        if !status.is_success() {
-            // Demote this key on auth / rate-limit failures so the next request
-            // rotates to another key in the pool (no-op for a single key).
-            if !using_bearer && matches!(status.as_u16(), 401 | 403 | 429) {
-                self.mark_key_failure(&key);
+        let primary = self.effective_base_url();
+        let response = match self
+            .try_send(&primary, use_responses, &body, &key, using_bearer)
+            .await
+        {
+            Ok(resp) => resp,
+            // Region-locked-key failover: a credential rejected here (401/403)
+            // may belong to the provider's alternate platform (e.g. Moonshot's
+            // `api.moonshot.cn` vs `.ai`). When a fallback host is configured
+            // and we haven't already pinned it, retry the SAME key there; pin it
+            // for the session on success. See `compat.auth_fallback_base_url`.
+            Err(ProviderError::Api { status, .. })
+                if matches!(status, 401 | 403)
+                    && self
+                        .compat
+                        .auth_fallback_base_url
+                        .as_deref()
+                        .is_some_and(|fb| fb != primary) =>
+            {
+                let fallback = self
+                    .compat
+                    .auth_fallback_base_url
+                    .clone()
+                    .expect("is_some_and guarantees Some");
+                let resp = self
+                    .try_send(&fallback, use_responses, &body, &key, using_bearer)
+                    .await?;
+                self.pin_base_url(&fallback);
+                resp
             }
-            // E-H1 / L3: capture headers before `.text()` consumes the body
-            // so a 429 can honour `Retry-After` (header, then nested body).
-            let headers = response.headers().clone();
-            let body_text = response
-                .text()
-                .await
-                .unwrap_or_else(|e| format!("<body read failed: {e}>"));
-            if status.as_u16() == 429 {
-                return Err(ProviderError::RateLimited {
-                    retry_after_ms: crate::retry::resolve_retry_after_ms(&headers, &body_text),
-                });
-            }
-            return Err(ProviderError::Api {
-                status: status.as_u16(),
-                message: body_text,
-            });
-        }
-
-        // 2xx: this key works — make it sticky for subsequent requests.
-        // (No-op for the OAuth bearer path, which holds a single credential.)
-        if !using_bearer {
-            self.mark_key_success(&key);
-        }
+            Err(e) => return Err(e),
+        };
 
         let (tx, rx) = mpsc::channel(64);
         let debug = self.debug.clone();
@@ -1454,7 +1536,10 @@ mod tests {
             openai_compat(),
             DebugConfig::default(),
         );
-        assert_eq!(p.responses_url(), "https://api.openai.com/v1/responses");
+        assert_eq!(
+            p.responses_url_for(&p.base_url),
+            "https://api.openai.com/v1/responses"
+        );
     }
 
     #[test]
@@ -1471,7 +1556,10 @@ mod tests {
             compat,
             DebugConfig::default(),
         );
-        assert_eq!(p.responses_url(), "https://api.example.com/v1/responses");
+        assert_eq!(
+            p.responses_url_for(&p.base_url),
+            "https://api.example.com/v1/responses"
+        );
     }
 
     #[test]
