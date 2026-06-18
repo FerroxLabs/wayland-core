@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.12.1](https://github.com/FerroxLabs/wayland-core/compare/v0.12.1-rc.2...v0.12.1) (2026-06-18)
+
+
+### Build System
+
+* **release:** promote 0.12.1 stable ([d50bfbb](https://github.com/FerroxLabs/wayland-core/commit/d50bfbb1f19d173d4fb56350d8ae633d583e7686))
+
 ## [0.12.1-rc.2](https://github.com/FerroxLabs/wayland-core/compare/v0.12.1-rc.1...v0.12.1-rc.2) (2026-06-18)
 
 
