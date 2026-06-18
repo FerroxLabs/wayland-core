@@ -26,6 +26,10 @@ jobs:
   bench-regression:
     name: Bench regression (linux)
     runs-on: ubuntu-latest
+    # A healthy run is ~4 min. Without a cap, a stalled hosted runner sits
+    # "in_progress" under GitHub's 6h default instead of failing fast, which
+    # blocks merges on an orphaned check (seen on #42). Fail fast → re-run.
+    timeout-minutes: 20
 
     steps:
       - uses: actions/checkout@v6
