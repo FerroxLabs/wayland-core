@@ -44,6 +44,21 @@ impl XaiProvider {
     pub fn with_defaults(api_key: &str, compat: ProviderCompat, debug: DebugConfig) -> Self {
         Self::new(api_key, XAI_DEFAULT_BASE_URL, compat, debug)
     }
+
+    /// Construct over an async OAuth bearer source (Grok "Sign in with X").
+    /// The token is refreshed near expiry on every turn, so a Grok session
+    /// survives the ~6h access-token lifetime without the host re-spawning —
+    /// matching how the engine already handles "Sign in with ChatGPT".
+    pub fn with_bearer(
+        bearer: crate::AsyncTokenSource,
+        base_url: &str,
+        compat: ProviderCompat,
+        debug: DebugConfig,
+    ) -> Self {
+        Self {
+            inner: OpenAIProvider::with_bearer(bearer, base_url, compat, debug),
+        }
+    }
 }
 
 #[async_trait]

@@ -1,3 +1,5 @@
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
@@ -20,6 +22,16 @@ use crate::{
 use wcore_config::compat::ProviderCompat;
 use wcore_config::debug::DebugConfig;
 
+/// An async source of a fresh bearer token, resolved once per request. Returns
+/// the raw token string to place in `Authorization: Bearer …`. Used by OAuth
+/// providers (e.g. xAI/Grok) whose access token must be refreshed near expiry
+/// — the closure owns the refresh round-trip, so the provider always sends a
+/// live credential without the engine snapshotting a token that goes stale.
+/// Distinct from a static API key: when set it fully replaces the key pool.
+pub type AsyncTokenSource = Arc<
+    dyn Fn() -> Pin<Box<dyn Future<Output = Result<String, ProviderError>> + Send>> + Send + Sync,
+>;
+
 pub struct OpenAIProvider {
     client: wcore_egress::EgressClient,
     /// Rotation pool over one-or-more API keys. A single configured key yields
@@ -28,6 +40,10 @@ pub struct OpenAIProvider {
     /// here, so this seam covers the whole family at once. Wrapped in
     /// `Arc<Mutex<…>>` so `&self` request methods can rotate/demote keys.
     keys: Arc<Mutex<KeyPool>>,
+    /// When set, the per-request credential comes from this async source
+    /// (OAuth, refreshed near expiry) instead of the static `keys` pool. The
+    /// pool is empty in that case and `select_key` is never consulted.
+    bearer: Option<AsyncTokenSource>,
     base_url: String,
     compat: ProviderCompat,
     debug: DebugConfig,
@@ -38,6 +54,27 @@ impl OpenAIProvider {
         Self {
             client: crate::http_client::build(),
             keys: Arc::new(Mutex::new(KeyPool::new(split_keys(api_key)))),
+            bearer: None,
+            base_url: base_url.to_string(),
+            compat,
+            debug,
+        }
+    }
+
+    /// Build over an async OAuth bearer source instead of a static API key.
+    /// Every request resolves (and, if near expiry, refreshes) the token via
+    /// `bearer` before sending — so an OAuth session never dies mid-turn on a
+    /// stale snapshot. The key pool is empty; `select_key` is never used.
+    pub fn with_bearer(
+        bearer: AsyncTokenSource,
+        base_url: &str,
+        compat: ProviderCompat,
+        debug: DebugConfig,
+    ) -> Self {
+        Self {
+            client: crate::http_client::build(),
+            keys: Arc::new(Mutex::new(KeyPool::new(Vec::new()))),
+            bearer: Some(bearer),
             base_url: base_url.to_string(),
             compat,
             debug,
@@ -745,7 +782,16 @@ impl LlmProvider for OpenAIProvider {
         dump_request_body(&self.debug, &body);
         reset_response_dump(&self.debug);
 
-        let key = self.select_key()?;
+        // OAuth providers resolve (and refresh near expiry) a fresh bearer per
+        // request; static-key providers select from the rotation pool. The
+        // key-pool demote/promote bookkeeping below only applies to the static
+        // path — for OAuth there is one credential and the token source owns
+        // refresh, so the `mark_key_*` calls are skipped.
+        let using_bearer = self.bearer.is_some();
+        let key = match &self.bearer {
+            Some(src) => (src)().await?,
+            None => self.select_key()?,
+        };
         let response = builder_send_with_retry(
             self.client
                 .post(&url)
@@ -758,7 +804,7 @@ impl LlmProvider for OpenAIProvider {
         if !status.is_success() {
             // Demote this key on auth / rate-limit failures so the next request
             // rotates to another key in the pool (no-op for a single key).
-            if matches!(status.as_u16(), 401 | 403 | 429) {
+            if !using_bearer && matches!(status.as_u16(), 401 | 403 | 429) {
                 self.mark_key_failure(&key);
             }
             // E-H1 / L3: capture headers before `.text()` consumes the body
@@ -780,7 +826,10 @@ impl LlmProvider for OpenAIProvider {
         }
 
         // 2xx: this key works — make it sticky for subsequent requests.
-        self.mark_key_success(&key);
+        // (No-op for the OAuth bearer path, which holds a single credential.)
+        if !using_bearer {
+            self.mark_key_success(&key);
+        }
 
         let (tx, rx) = mpsc::channel(64);
         let debug = self.debug.clone();
