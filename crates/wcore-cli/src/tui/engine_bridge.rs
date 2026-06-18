@@ -1649,6 +1649,18 @@ impl TuiEngine {
             .await
             {
                 wcore_mcp::forge_grant::GrantOutcome::Granted { token, .. } => {
+                    // F12: the granted bearer token must never be sent off-box.
+                    // Refuse to store/persist/connect unless the server URL is
+                    // strictly loopback (SSRF guard) — a tampered discovery file
+                    // could otherwise point url at an attacker host.
+                    if !wcore_tools::url_safety::is_loopback_url(&server.url) {
+                        report_err(format!(
+                            "refusing to connect Forge server '{}': its url '{}' is not loopback \
+                             — the granted token must not be sent off-box (SSRF guard)",
+                            server.name, server.url
+                        ));
+                        return;
+                    }
                     match Self::store_and_persist_forge(&server.name, &server.url, &token) {
                         Ok(cfg) => {
                             Self::connect_and_register_mcp(engine, tx2, server.name, cfg).await

@@ -148,7 +148,16 @@ pub async fn request_grant(
     }
 
     let body = serde_json::json!({ "client_name": client_name, "scopes": scopes });
-    let resp = match client.post(grant_url).json(&body).send().await {
+    // F29: the producer holds the grant POST open until the human clicks Approve,
+    // which routinely takes longer than the client's 10s metadata-probe timeout.
+    // Override the per-request timeout so a slow human approval doesn't fail.
+    let resp = match client
+        .post(grant_url)
+        .json(&body)
+        .timeout(std::time::Duration::from_secs(120))
+        .send()
+        .await
+    {
         Ok(r) => r,
         Err(e) => return GrantOutcome::Error(format!("grant request failed: {e}")),
     };
@@ -156,6 +165,11 @@ pub async fn request_grant(
     let status = resp.status().as_u16();
     match status {
         200 => match resp.json::<GrantBody>().await {
+            // F30: a 200 with an empty token is unusable — reject it rather than
+            // storing/sending a blank bearer.
+            Ok(g) if g.token.trim().is_empty() => {
+                GrantOutcome::Error("grant returned a 200 but an empty token".to_string())
+            }
             Ok(g) => GrantOutcome::Granted {
                 token: g.token,
                 scopes: g.scopes,

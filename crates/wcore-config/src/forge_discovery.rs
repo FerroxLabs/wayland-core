@@ -96,9 +96,16 @@ pub fn read_discovered_servers() -> Vec<DiscoveredMcpServer> {
 
 /// [`read_discovered_servers`] against an explicit path (testable).
 pub fn read_discovered_servers_at(path: &std::path::Path) -> Vec<DiscoveredMcpServer> {
-    let Ok(raw) = std::fs::read_to_string(path) else {
+    use std::io::Read;
+    // F31: this file is cross-application and writable by any local app, so cap
+    // the read to defend against an oversized/garbage file exhausting memory.
+    const MAX_DISCOVERY_FILE_BYTES: u64 = 256 * 1024;
+    let mut raw = String::new();
+    let read = std::fs::File::open(path)
+        .and_then(|f| f.take(MAX_DISCOVERY_FILE_BYTES).read_to_string(&mut raw));
+    if read.is_err() {
         return Vec::new();
-    };
+    }
     match serde_json::from_str::<DiscoveryFile>(&raw) {
         Ok(file) => file.servers,
         Err(_) => Vec::new(),

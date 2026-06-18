@@ -292,6 +292,31 @@ pub fn is_safe_url_allow_loopback(url: &str) -> bool {
     is_safe_url_with_opts(url, system_resolver, true)
 }
 
+/// True only when `url`'s host is a LOOPBACK target (127.0.0.0/8, ::1, or a
+/// name that resolves exclusively to loopback). Stricter than
+/// [`is_safe_url_allow_loopback`], which also accepts public hosts: this is for
+/// endpoints that MUST be local — e.g. the Forge MCP suite, whose granted
+/// bearer token must never be sent off-box. Fails closed on an unparseable
+/// host, empty resolution, or any non-loopback address in the resolved set.
+pub fn is_loopback_url(url: &str) -> bool {
+    is_loopback_url_with(url, system_resolver)
+}
+
+fn is_loopback_url_with(url: &str, resolve: Resolver) -> bool {
+    let Some(hostname) = extract_hostname(url) else {
+        return false;
+    };
+    // The `url` crate returns bracketed IPv6 hosts (e.g. "[::1]"); strip the
+    // brackets so an IPv6 loopback literal parses instead of falling through
+    // to DNS resolution (which would reject a legitimate `http://[::1]` URL).
+    let literal = hostname.trim_start_matches('[').trim_end_matches(']');
+    if let Ok(ip) = literal.parse::<IpAddr>() {
+        return ip.is_loopback();
+    }
+    let addrs = resolve(&hostname);
+    !addrs.is_empty() && addrs.iter().all(|ip| ip.is_loopback())
+}
+
 /// Resolve `url`'s host once and return the validated, SSRF-safe IPs so the
 /// HTTP-client layer can **pin** them into the connection and close the
 /// DNS-rebinding TOCTOU described on [`is_safe_url`].
@@ -827,6 +852,40 @@ mod tests {
         assert!(safe_url_pinned_ips_with("http://nxdomain.invalid/", fake_resolver).is_none());
         // Unparseable.
         assert!(safe_url_pinned_ips_with("not a url", fake_resolver).is_none());
+    }
+
+    // F12: the loopback-ONLY predicate gates the Forge granted-token egress.
+    // It must accept loopback literals and loopback-only resolutions, and
+    // reject public, private, mixed, and unparseable hosts (fails closed).
+    #[test]
+    fn is_loopback_url_accepts_only_loopback() {
+        // Loopback literals (IPv4 + bracketed IPv6).
+        assert!(is_loopback_url_with("http://127.0.0.1:3456", fake_resolver));
+        assert!(is_loopback_url_with("http://[::1]:80", fake_resolver));
+        // Private (not loopback) → false.
+        assert!(!is_loopback_url_with("http://10.0.0.5", fake_resolver));
+        // Public host (resolver returns a public IP) → false.
+        let public = |host: &str| match host {
+            "evil.example.com" => vec![IpAddr::V4(Ipv4Addr::new(93, 184, 216, 34))],
+            _ => Vec::new(),
+        };
+        assert!(!is_loopback_url_with("https://evil.example.com", public));
+        // Host resolving to a MIX of loopback + public → false (all must be loopback).
+        let mixed = |host: &str| match host {
+            "mixed.local" => vec![
+                IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)),
+                IpAddr::V4(Ipv4Addr::new(93, 184, 216, 34)),
+            ],
+            _ => Vec::new(),
+        };
+        assert!(!is_loopback_url_with("http://mixed.local", mixed));
+        // Unparseable → false.
+        assert!(!is_loopback_url_with("not a url", fake_resolver));
+        // Empty resolution → false (fail closed).
+        assert!(!is_loopback_url_with(
+            "http://nxdomain.invalid",
+            fake_resolver
+        ));
     }
 
     #[test]

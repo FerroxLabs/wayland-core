@@ -198,7 +198,7 @@ impl SseTransport {
                     // configured url's origin — for absolute and relative
                     // payloads alike. The resolved URL is then re-checked
                     // through the SSRF guard before we ever attach headers.
-                    let endpoint = resolve_endpoint(url, &event_data)?;
+                    let endpoint = resolve_endpoint(url, &event_data, allow_local)?;
                     post_url = Some(endpoint);
                     break;
                 }
@@ -429,7 +429,11 @@ fn whatwg_tuple_origin(url: &str) -> Option<reqwest::Url> {
 /// `https://vendor` + `@attacker/x` parses to host `attacker`.) The resolved
 /// URL is then re-checked through the SSRF guard (M-13) before it is
 /// returned.
-fn resolve_endpoint(configured_url: &str, event_data: &str) -> Result<String, McpError> {
+fn resolve_endpoint(
+    configured_url: &str,
+    event_data: &str,
+    allow_local: bool,
+) -> Result<String, McpError> {
     // Parse the configured base with the SAME WHATWG parser reqwest dials
     // with (`reqwest::Url` is `url::Url`); fail closed on a hostless/opaque
     // configured url.
@@ -458,7 +462,17 @@ fn resolve_endpoint(configured_url: &str, event_data: &str) -> Result<String, Mc
     let endpoint = resolved.to_string();
 
     // Defense-in-depth: re-run the SSRF guard on the resolved POST URL.
-    if !wcore_tools::url_safety::is_safe_url(&endpoint) {
+    // F28 — mirror `connect()`'s predicate choice: a trusted local SSE server
+    // (allow_local) is same-origin with the configured loopback url, so the
+    // resolved endpoint must pass the loopback-permitting guard rather than the
+    // loopback-BLOCKING `is_safe_url`. The same-origin gate above already pins
+    // the endpoint to the configured (loopback) origin.
+    let endpoint_ok = if allow_local {
+        wcore_tools::url_safety::is_safe_url_allow_loopback(&endpoint)
+    } else {
+        wcore_tools::url_safety::is_safe_url(&endpoint)
+    };
+    if !endpoint_ok {
         return Err(McpError::Transport(format!(
             "SSE endpoint rejected — resolves to a private or internal \
              network address (SSRF guard): {endpoint}"
@@ -746,6 +760,7 @@ mod tests {
         let err = resolve_endpoint(
             "https://vendor.example/mcp",
             r"https://attacker.example\@vendor.example/collect",
+            false,
         )
         .expect_err("backslash-@ host smuggle must be rejected cross-origin");
         let msg = err.to_string();
@@ -758,7 +773,7 @@ mod tests {
     /// H-5 — a same-origin relative endpoint joins onto the base.
     #[test]
     fn resolve_endpoint_relative_same_origin_ok() {
-        let resolved = resolve_endpoint("https://example.com/mcp/sse", "/messages")
+        let resolved = resolve_endpoint("https://example.com/mcp/sse", "/messages", false)
             .expect("relative endpoint should resolve");
         assert_eq!(resolved, "https://example.com/messages");
     }
@@ -769,6 +784,7 @@ mod tests {
         let resolved = resolve_endpoint(
             "https://example.com/mcp/sse",
             "https://example.com/messages/abc",
+            false,
         )
         .expect("same-origin absolute endpoint should resolve");
         assert_eq!(resolved, "https://example.com/messages/abc");
@@ -782,6 +798,7 @@ mod tests {
         let err = resolve_endpoint(
             "https://vendor.example/mcp",
             "https://attacker.example/collect",
+            false,
         )
         .expect_err("cross-origin endpoint must be rejected");
         let msg = err.to_string();
@@ -805,7 +822,7 @@ mod tests {
         // what rejects — this isolates the join-vs-concat behavior. Under
         // the old concat resolver the host became `attacker.evil.test`; the
         // join resolver keeps it on `8.8.8.8`.
-        let resolved = resolve_endpoint("http://8.8.8.8/mcp", "@attacker.evil.test/x")
+        let resolved = resolve_endpoint("http://8.8.8.8/mcp", "@attacker.evil.test/x", false)
             .expect("userinfo-relative payload must resolve on-origin, not smuggle a host");
         let host = reqwest::Url::parse(&resolved)
             .unwrap()
@@ -828,6 +845,7 @@ mod tests {
         let err = resolve_endpoint(
             "http://169.254.169.254/mcp",
             "http://169.254.169.254/latest/meta-data/",
+            false,
         )
         .expect_err("metadata-IP endpoint must be rejected by the SSRF guard");
         let msg = err.to_string();
