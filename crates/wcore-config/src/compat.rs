@@ -204,6 +204,32 @@ impl ProviderCompat {
         }
     }
 
+    /// Defaults for MiniMax via its Anthropic-compatible endpoint.
+    ///
+    /// MiniMax's `/anthropic` surface speaks the native Anthropic wire protocol
+    /// (verified live 2026-06-18), so this inherits the Anthropic behavioural
+    /// flags (`ensure_alternation`, `merge_same_role`, `auto_tool_id`,
+    /// `supports_thinking`) and overrides only:
+    /// - `provider_type` → `"minimax"` for distinct cost/trace attribution.
+    /// - cost → `$0` sentinel (real-or-nothing: no published per-call price is
+    ///   wired, so report an honest zero rather than a fabricated rate; users
+    ///   override via `wcore.toml`). Mirrors the `openai_defaults()` sentinel.
+    /// - `cache_message_breakpoints` → `false`: MiniMax's support for the
+    ///   Anthropic prompt-caching beta is unverified (the factory also builds
+    ///   this provider with caching off), so do not inject `cache_control`
+    ///   blocks the endpoint may reject.
+    pub fn minimax_defaults() -> Self {
+        Self {
+            provider_type: Some("minimax".into()),
+            cache_message_breakpoints: Some(false),
+            cost_per_input_token: Some(0.0),
+            cost_per_output_token: Some(0.0),
+            cost_per_cache_read_token: None,
+            cost_per_cache_write_token: None,
+            ..Self::anthropic_defaults()
+        }
+    }
+
     /// Defaults for native Google Gemini (Generative Language API).
     ///
     /// Distinct from `vertex_defaults()` — Vertex routes through the
@@ -698,6 +724,24 @@ mod tests {
     }
 
     #[test]
+    fn test_minimax_defaults() {
+        let compat = ProviderCompat::minimax_defaults();
+        // Inherits the Anthropic-wire behavioural flags...
+        assert!(compat.ensure_alternation());
+        assert!(compat.merge_same_role());
+        assert!(compat.auto_tool_id());
+        assert!(compat.supports_thinking());
+        // ...but is attributed to MiniMax, not Anthropic.
+        assert_eq!(compat.provider_type(), "minimax");
+        // Caching off (unverified) and real-or-nothing $0 cost sentinel — NOT
+        // the Anthropic list price, which would mis-bill every MiniMax call.
+        assert!(!compat.cache_message_breakpoints());
+        assert_eq!(compat.cost_per_input_token, Some(0.0));
+        assert_eq!(compat.cost_per_output_token, Some(0.0));
+        assert_eq!(compat.cost_per_cache_read_token, None);
+    }
+
+    #[test]
     fn test_bedrock_defaults() {
         let compat = ProviderCompat::bedrock_defaults();
         assert!(compat.ensure_alternation());
@@ -1037,6 +1081,7 @@ mod cache_breakpoint_tests {
             ProviderType::Mistral => ProviderCompat::mistral_defaults(),
             ProviderType::Cohere => ProviderCompat::cohere_defaults(),
             ProviderType::OpenAIChatGpt => ProviderCompat::chatgpt_defaults(),
+            ProviderType::MiniMax => ProviderCompat::minimax_defaults(),
         };
         assert_eq!(
             resolved.cache_message_breakpoints,

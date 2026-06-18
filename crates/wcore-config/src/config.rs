@@ -956,6 +956,14 @@ pub enum ProviderType {
     /// source that lives in `wcore-agent` (layering). Distinct from `OpenAI`,
     /// which is API-key auth against `api.openai.com`.
     OpenAIChatGpt,
+    /// MiniMax via its Anthropic-compatible endpoint
+    /// (`https://api.minimax.io/anthropic`). Speaks the native Anthropic wire
+    /// protocol — `x-api-key` auth, `/v1/messages`, `/v1/models`, SSE, and
+    /// Anthropic error envelopes (verified live 2026-06-18) — so it reuses
+    /// `wcore_providers::anthropic::AnthropicProvider` rather than a duplicate
+    /// struct, distinguished only by base URL, `provider_type` cost label, and
+    /// the offline model-alias fallback key. Default model: `MiniMax-M2`.
+    MiniMax,
 }
 
 impl ProviderType {
@@ -1019,7 +1027,8 @@ pub fn openai_model_accepts_effort(model: &str) -> bool {
 /// a one-line edit in that module (closes debt B.4 / HC-3-followup).
 pub(crate) fn default_model_for(provider: ProviderType) -> &'static str {
     use wcore_types::model_aliases::{
-        ANTHROPIC_SONNET, BEDROCK_SONNET, OPENAI_GPT4O, VERTEX_GEMINI_PRO, VERTEX_SONNET,
+        ANTHROPIC_SONNET, BEDROCK_SONNET, MINIMAX_M2, OPENAI_GPT4O, VERTEX_GEMINI_PRO,
+        VERTEX_SONNET,
     };
     match provider {
         ProviderType::Anthropic => ANTHROPIC_SONNET,
@@ -1049,6 +1058,9 @@ pub(crate) fn default_model_for(provider: ProviderType) -> &'static str {
         // ChatGPT Codex default: gpt-5.5 (the headline Codex model). See
         // `wcore_types::model_aliases` codex consts for the full catalog.
         ProviderType::OpenAIChatGpt => "gpt-5.5",
+        // MiniMax has a single documented headline model, so — unlike the
+        // heterogeneous Tier-2 catalogs above — it gets a sensible default.
+        ProviderType::MiniMax => MINIMAX_M2,
     }
 }
 
@@ -1119,6 +1131,7 @@ pub fn provider_type_slug(provider: ProviderType) -> &'static str {
         ProviderType::Mistral => "mistral",
         ProviderType::Cohere => "cohere",
         ProviderType::OpenAIChatGpt => "openai-chatgpt",
+        ProviderType::MiniMax => "minimax",
     }
 }
 
@@ -1274,6 +1287,9 @@ pub fn default_base_url_for(provider: ProviderType) -> String {
         // appends `/responses` to this base. Mirrors
         // `wcore_providers::openai_chatgpt::CODEX_BASE_URL`.
         ProviderType::OpenAIChatGpt => "https://chatgpt.com/backend-api/codex".into(),
+        // MiniMax's Anthropic-compatible endpoint. The reused AnthropicProvider
+        // appends `/v1/messages` (and `/v1/models`) to this base.
+        ProviderType::MiniMax => "https://api.minimax.io/anthropic".into(),
     }
 }
 
@@ -1309,6 +1325,7 @@ pub fn compat_defaults_for(provider: ProviderType) -> ProviderCompat {
         // ChatGPT Codex: OpenAI Responses wire format, effort levels,
         // provider id "openai-chatgpt" for cost attribution.
         ProviderType::OpenAIChatGpt => ProviderCompat::chatgpt_defaults(),
+        ProviderType::MiniMax => ProviderCompat::minimax_defaults(),
     }
 }
 
@@ -1668,6 +1685,9 @@ fn parse_builtin_provider(s: &str) -> Option<ProviderType> {
         // "Sign in with ChatGPT" — OAuth-backed Codex backend. "chatgpt" is the
         // natural short alias; "openai-chatgpt" is the canonical id.
         "openai-chatgpt" | "chatgpt" => Some(ProviderType::OpenAIChatGpt),
+        // MiniMax via its Anthropic-compatible endpoint. "minimaxi" mirrors the
+        // domain spelling some of MiniMax's own docs/SDKs use.
+        "minimax" | "minimaxi" => Some(ProviderType::MiniMax),
         _ => None,
     }
 }
@@ -1923,6 +1943,11 @@ fn resolve_api_key(
                 return Ok(key);
             }
         }
+        ProviderType::MiniMax => {
+            if let Ok(key) = std::env::var("MINIMAX_API_KEY") {
+                return Ok(key);
+            }
+        }
     }
 
     Err(MissingApiKey.into())
@@ -1979,6 +2004,7 @@ pub fn credentials_store_key(provider: ProviderType) -> Option<String> {
         // F-025: Mistral + Cohere key resolution from credentials store.
         ProviderType::Mistral => "providers.mistral.api_key",
         ProviderType::Cohere => "providers.cohere.api_key",
+        ProviderType::MiniMax => "providers.minimax.api_key",
     };
     Some(key.to_string())
 }
@@ -3287,6 +3313,41 @@ mod tests {
         assert_eq!(default_model_for(ProviderType::OpenAIChatGpt), "gpt-5.5");
         // It rides OpenAI-compat plumbing (A7).
         assert!(ProviderType::OpenAIChatGpt.is_openai_compatible());
+    }
+
+    #[test]
+    fn minimax_provider_maps_to_anthropic_wire_endpoint() {
+        // Canonical id and the `minimaxi` domain-spelling alias both resolve.
+        assert_eq!(
+            parse_builtin_provider("minimax"),
+            Some(ProviderType::MiniMax)
+        );
+        assert_eq!(
+            parse_builtin_provider("minimaxi"),
+            Some(ProviderType::MiniMax)
+        );
+        // Slug round-trips (read==write key for the credentials/catalog paths).
+        assert_eq!(provider_type_slug(ProviderType::MiniMax), "minimax");
+        // Base URL is MiniMax's Anthropic-compatible endpoint (verified live);
+        // the reused AnthropicProvider appends `/v1/messages` to it.
+        assert_eq!(
+            default_base_url_for(ProviderType::MiniMax),
+            "https://api.minimax.io/anthropic"
+        );
+        // Unlike the heterogeneous Tier-2 catalogs, MiniMax has a headline
+        // default model so onboarding never lands in the no-model dead-end.
+        assert_eq!(default_model_for(ProviderType::MiniMax), "MiniMax-M2");
+        // It authenticates with a plain API key in the credentials store...
+        assert_eq!(
+            credentials_store_key(ProviderType::MiniMax).as_deref(),
+            Some("providers.minimax.api_key")
+        );
+        // ...and is Anthropic-wire, NOT OpenAI-compatible (cost/plumbing path).
+        assert!(!ProviderType::MiniMax.is_openai_compatible());
+        assert_eq!(
+            compat_defaults_for(ProviderType::MiniMax).provider_type(),
+            "minimax"
+        );
     }
 
     #[test]

@@ -25,6 +25,12 @@ pub struct AnthropicProvider {
     keys: Arc<Mutex<KeyPool>>,
     base_url: String,
     cache_enabled: bool,
+    /// Provider key used to look up the offline `/model` fallback catalog
+    /// (`wcore_types::model_aliases::models_for_provider`) when live model
+    /// discovery fails. Defaults to `"anthropic"`; Anthropic-wire third parties
+    /// that reuse this provider (e.g. MiniMax) set their own key via
+    /// [`with_alias_key`] so the picker never falls back to Claude models.
+    alias_key: String,
     compat: ProviderCompat,
     debug: DebugConfig,
 }
@@ -36,6 +42,7 @@ impl AnthropicProvider {
             keys: Arc::new(Mutex::new(KeyPool::new(split_keys(api_key)))),
             base_url: base_url.to_string(),
             cache_enabled: true,
+            alias_key: "anthropic".to_string(),
             compat,
             debug,
         }
@@ -43,6 +50,15 @@ impl AnthropicProvider {
 
     pub fn with_cache(mut self, enabled: bool) -> Self {
         self.cache_enabled = enabled;
+        self
+    }
+
+    /// Override the offline model-fallback catalog key (default `"anthropic"`).
+    /// Used by Anthropic-wire third parties (e.g. MiniMax) that reuse this
+    /// provider but must surface their own models — not Claude — when live
+    /// `GET /v1/models` discovery is unavailable.
+    pub fn with_alias_key(mut self, key: &str) -> Self {
+        self.alias_key = key.to_string();
         self
     }
 
@@ -287,7 +303,7 @@ impl LlmProvider for AnthropicProvider {
     }
 
     fn alias_key(&self) -> &str {
-        "anthropic"
+        &self.alias_key
     }
 
     /// Live model discovery via Anthropic's `GET /v1/models` endpoint. On any
@@ -400,6 +416,38 @@ mod tests {
         // Missing `data` array → Err so the caller uses the alias fallback.
         assert!(parse_anthropic_models(r#"{"error":"nope"}"#).is_err());
         assert!(parse_anthropic_models("garbage").is_err());
+    }
+
+    /// `with_alias_key` overrides the offline `/model` fallback catalog so an
+    /// Anthropic-wire reuse (e.g. MiniMax) surfaces its own models when live
+    /// `GET /v1/models` discovery is unavailable — never Claude models.
+    #[test]
+    fn with_alias_key_overrides_offline_fallback_catalog() {
+        let default = AnthropicProvider::new(
+            "k",
+            "https://api.anthropic.com",
+            ProviderCompat::anthropic_defaults(),
+            DebugConfig::default(),
+        );
+        assert_eq!(default.alias_key(), "anthropic");
+
+        let minimax = AnthropicProvider::new(
+            "k",
+            "https://api.minimax.io/anthropic",
+            ProviderCompat::minimax_defaults(),
+            DebugConfig::default(),
+        )
+        .with_alias_key("minimax");
+        assert_eq!(minimax.alias_key(), "minimax");
+
+        // The offline fallback now resolves MiniMax models, never Claude.
+        let models = crate::alias_models(minimax.alias_key());
+        assert!(!models.is_empty(), "minimax must list fallback models");
+        assert!(
+            models.iter().all(|m| m.id.starts_with("MiniMax-")),
+            "every fallback model id must be a MiniMax model, got {:?}",
+            models.iter().map(|m| &m.id).collect::<Vec<_>>()
+        );
     }
 
     /// A configured API key authenticates the request via the `x-api-key`

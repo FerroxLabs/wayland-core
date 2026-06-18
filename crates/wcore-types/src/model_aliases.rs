@@ -235,8 +235,40 @@ pub fn expand_short_form(model: &str) -> Option<&'static str> {
         }
         ("openai-chatgpt", "5.3-codex") => Some(OPENAI_CODEX_GPT53_CODEX),
         ("openai-chatgpt", "5.3-codex-spark") => Some(OPENAI_CODEX_GPT53_CODEX_SPARK),
+        // MiniMax — Anthropic-wire endpoint. Short handles for the `/model`
+        // picker; the role token is the bare generation id (`m2`, `m2.5`, `m3`).
+        ("minimax", "m2") => Some(MINIMAX_M2),
+        ("minimax", "m2.5") => Some(MINIMAX_M2_5),
+        ("minimax", "m3") => Some(MINIMAX_M3),
         _ => None,
     }
+}
+
+// ── MiniMax (Anthropic-wire endpoint) ───────────────────────────────────────
+//
+// MiniMax's `/anthropic` endpoint speaks the native Anthropic wire protocol
+// (`x-api-key` auth, `/v1/messages`, `/v1/messages/count_tokens`, `/v1/models`,
+// SSE, Anthropic error envelopes), verified live 2026-06-18. The provider
+// therefore reuses `AnthropicProvider` rather than a duplicate struct. These
+// ids mirror what `GET /anthropic/v1/models` advertises and are the offline
+// fallback for the `/model` picker when the live list is unreachable.
+
+/// MiniMax M2 — the documented headline model and the per-provider default.
+pub const MINIMAX_M2: &str = "MiniMax-M2";
+pub fn minimax_m2() -> String {
+    from_env_or(MINIMAX_M2, "E2E_MINIMAX_M2")
+}
+
+/// MiniMax M2.5 — mid-generation refresh.
+pub const MINIMAX_M2_5: &str = "MiniMax-M2.5";
+pub fn minimax_m2_5() -> String {
+    from_env_or(MINIMAX_M2_5, "E2E_MINIMAX_M2_5")
+}
+
+/// MiniMax M3 — newest generation.
+pub const MINIMAX_M3: &str = "MiniMax-M3";
+pub fn minimax_m3() -> String {
+    from_env_or(MINIMAX_M3, "E2E_MINIMAX_M3")
 }
 
 /// The selectable models for a provider, as `(short_form, resolved_id)`
@@ -304,6 +336,12 @@ pub fn models_for_provider(provider: &str) -> &'static [(&'static str, &'static 
                 OPENAI_CODEX_GPT53_CODEX_SPARK,
             ),
         ],
+        // MiniMax — Anthropic-wire endpoint. Most-capable / newest first.
+        "minimax" => &[
+            ("minimax:m3", MINIMAX_M3),
+            ("minimax:m2.5", MINIMAX_M2_5),
+            ("minimax:m2", MINIMAX_M2),
+        ],
         _ => &[],
     }
 }
@@ -331,6 +369,7 @@ mod tests {
             "vertex",
             "gemini",
             "openai-chatgpt",
+            "minimax",
         ] {
             let models = models_for_provider(provider);
             assert!(!models.is_empty(), "{provider} must list models");

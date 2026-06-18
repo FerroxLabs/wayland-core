@@ -446,6 +446,17 @@ pub fn create_native_provider(config: &Config) -> Arc<dyn LlmProvider> {
                  be reached for the chatgpt provider"
             )
         }
+        // MiniMax's `/anthropic` endpoint speaks the native Anthropic wire
+        // protocol, so it reuses `AnthropicProvider` verbatim — only the base
+        // URL (from `default_base_url_for`, overridable), the `provider_type`
+        // cost label (via `minimax_defaults`), and the offline model-fallback
+        // key differ. Caching is off: MiniMax's support for the Anthropic
+        // prompt-caching beta header is unverified, so we don't send it.
+        ProviderType::MiniMax => Arc::new(
+            anthropic::AnthropicProvider::new(&config.api_key, &config.base_url, compat, debug)
+                .with_cache(false)
+                .with_alias_key("minimax"),
+        ),
     }
 }
 
