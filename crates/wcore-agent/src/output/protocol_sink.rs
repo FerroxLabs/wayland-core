@@ -555,10 +555,17 @@ impl OutputSink for ProtocolSink {
     }
 
     fn emit_error(&self, msg: &str, retryable: bool) {
+        // Distinguish auth failures with a machine-readable code so the host can
+        // branch (prompt re-auth, or refresh an OAuth token and re-spawn the
+        // turn) instead of string-parsing the message or treating a stale-token
+        // 401 as a generic dead turn. `retryable` is left untouched: a 401 is
+        // NOT engine-retryable (re-sending the same doomed credential just burns
+        // the budget) — the host drives the refresh+retry off the `code`.
+        let code = auth_error_code(msg).unwrap_or("engine_error");
         let _ = self.writer.emit(&ProtocolEvent::Error {
             msg_id: None,
             error: ErrorInfo {
-                code: "engine_error".to_string(),
+                code: code.to_string(),
                 message: msg.to_string(),
                 retryable,
             },
@@ -804,6 +811,37 @@ impl OutputSink for ProtocolSink {
     }
 }
 
+/// Map a provider error message to a distinguishable auth error `code`, or
+/// `None` for non-auth errors (which stay `engine_error`). A 401 is a
+/// refreshable credential failure (`auth_required` — the host can re-auth or
+/// refresh an OAuth token and retry); a 403 is a hard permission failure
+/// (`auth_invalid`). Detection mirrors the provider-error shapes the engine
+/// formats elsewhere ("API 401: …", "API error 401: …", "status: 401",
+/// "401 Unauthorized", "(401)"), staying conservative to avoid tagging an
+/// unrelated message that merely contains the digits.
+fn auth_error_code(msg: &str) -> Option<&'static str> {
+    if message_carries_status(msg, "401") {
+        Some("auth_required")
+    } else if message_carries_status(msg, "403") {
+        Some("auth_invalid")
+    } else {
+        None
+    }
+}
+
+/// True when `msg` carries `code` as an HTTP status in one of the provider
+/// error shapes the engine emits, rather than as an incidental substring.
+fn message_carries_status(msg: &str, code: &str) -> bool {
+    msg.contains(&format!("API error {code}"))
+        || msg.contains(&format!("API {code}:"))
+        || msg.contains(&format!("API {code} "))
+        || msg.contains(&format!("status: {code}"))
+        || msg.contains(&format!("status code {code}"))
+        || msg.contains(&format!("({code})"))
+        || msg.contains(&format!("{code} Unauthorized"))
+        || msg.contains(&format!("{code} Forbidden"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -920,5 +958,47 @@ mod tests {
             "a hard error must report retryable=false: {:?}",
             snap[0]
         );
+    }
+
+    #[test]
+    fn auth_error_code_tags_401_as_auth_required() {
+        // The shapes the engine actually formats for a provider 401 — the host
+        // needs a stable `code` to drive token-refresh/re-auth, not the prose.
+        for msg in [
+            "API 401: invalid api key",
+            "API error 401: authentication_error",
+            "Provider stream failed after retries: API 401: token expired",
+            "The inference provider rejected the API key (401)",
+            "401 Unauthorized",
+        ] {
+            assert_eq!(
+                auth_error_code(msg),
+                Some("auth_required"),
+                "a 401 must map to auth_required: {msg:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn auth_error_code_tags_403_as_auth_invalid() {
+        assert_eq!(
+            auth_error_code("API 403: permission_error"),
+            Some("auth_invalid")
+        );
+        assert_eq!(auth_error_code("403 Forbidden"), Some("auth_invalid"));
+    }
+
+    #[test]
+    fn auth_error_code_none_for_non_auth() {
+        // A 400/500 (and messages that merely contain the digits) must NOT be
+        // mistaken for auth — they stay engine_error.
+        for msg in [
+            "API 400: invalid_request_error",
+            "Provider stream failed after retries: API 500: internal error",
+            "request id 4015 timed out",
+            "provider stream closed before a Done event (truncated response)",
+        ] {
+            assert_eq!(auth_error_code(msg), None, "non-auth must be None: {msg:?}");
+        }
     }
 }
