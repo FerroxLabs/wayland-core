@@ -830,6 +830,7 @@ mod posture_inheritance_tests {
                 allow_list,
                 skills: wcore_config::config::SkillsPermissionConfig::default(),
                 verify_edits: false,
+                windows_shell: None,
             },
             ..Default::default()
         }
