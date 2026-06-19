@@ -57,16 +57,48 @@ impl Session {
     /// Calling `launch()` more than once on the same session re-uses the same
     /// home directory (the binary reads whatever config/state is there), which
     /// is how *relaunch* journeys are tested.
+    ///
+    /// If `ConfigState::EnvKeysOnly.materialize(home)` was called before this
+    /// launch, the `.proving-ground-env` sidecar written by `materialize` is
+    /// read and its `KEY=VALUE` pairs are injected into the child's environment
+    /// so the binary sees the fake provider key without a real credential.
     #[cfg(unix)]
     pub fn launch(&self) -> Pty {
-        Pty::spawn(self.home.path())
+        let env_overrides = self.read_env_sidecar();
+        if env_overrides.is_empty() {
+            Pty::spawn(self.home.path())
+        } else {
+            Pty::spawn_with_env(self.home.path(), 40, 120, &env_overrides)
+        }
+    }
+
+    /// Read key=value pairs from the `.proving-ground-env` sidecar file, if
+    /// present.  Returns an empty vec when the file does not exist.
+    #[cfg(unix)]
+    fn read_env_sidecar(&self) -> Vec<(String, String)> {
+        let path = self.home.path().join(ENV_SIDECAR);
+        let Ok(contents) = std::fs::read_to_string(&path) else {
+            return Vec::new();
+        };
+        contents
+            .lines()
+            .filter_map(|line| {
+                let (k, v) = line.split_once('=')?;
+                Some((k.trim().to_string(), v.trim().to_string()))
+            })
+            .collect()
     }
 
     /// Spawn the real binary against this session's home with a specific
     /// terminal size. Task 4 uses this for layout/wrapping tests.
     #[cfg(unix)]
     pub fn launch_sized(&self, term: TermShape) -> Pty {
-        Pty::spawn_sized(self.home.path(), term.rows, term.cols)
+        let env_overrides = self.read_env_sidecar();
+        if env_overrides.is_empty() {
+            Pty::spawn_sized(self.home.path(), term.rows, term.cols)
+        } else {
+            Pty::spawn_with_env(self.home.path(), term.rows, term.cols, &env_overrides)
+        }
     }
 }
 
@@ -101,16 +133,33 @@ pub enum ConfigState {
     CorruptConfig,
 }
 
+/// Name of the side-channel env file that `ConfigState::EnvKeysOnly`
+/// writes so `Session::launch()` can inject env vars without the caller
+/// needing to change the `launch()` call site.
+pub const ENV_SIDECAR: &str = ".proving-ground-env";
+
 impl ConfigState {
     /// Write (or not write) the config file for this state into `home`.
+    ///
+    /// For `EnvKeysOnly`, writes a side-channel env file (`ENV_SIDECAR`)
+    /// so that `Session::launch()` can inject the fake provider key into
+    /// the child process without the test needing to call a different
+    /// spawn method.  This is how `session.launch()` can see the key even
+    /// though the caller only calls `materialize(session.home())`.
     pub fn materialize(&self, home: &Path) {
         match self {
             ConfigState::Fresh => {
                 // No config file — leave the home directory empty.
             }
             ConfigState::EnvKeysOnly => {
-                // No config file — env injection happens at spawn time via
-                // `env_overrides()`. Nothing to write here.
+                // Write the env sidecar so Session::launch() picks it up.
+                // The fake key is safe to write to disk: it is a
+                // well-known test sentinel with no real credentials.
+                std::fs::write(
+                    home.join(ENV_SIDECAR),
+                    "OPENAI_API_KEY=sk-test-harness-envonly-00000000\n",
+                )
+                .expect("write .proving-ground-env");
             }
             ConfigState::ConfiguredOpenAi => {
                 // Dummy base_url points at a port that is not listening; the
