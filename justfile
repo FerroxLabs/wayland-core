@@ -183,3 +183,8 @@ check-no-assertion-todos:
 # Run: `just smoke`
 smoke:
     scripts/smoke.sh
+
+# Wayland Proving Ground — deterministic spine (unix, hermetic, $0)
+proving-ground:
+    vx cargo nextest run -p wcore-cli --test proving_ground --test build_provenance
+    vx cargo nextest run -p wcore-providers --test detection_registry
