@@ -31,9 +31,7 @@ pub fn redact(s: &str) -> String {
     // next whitespace or end-of-string.  Using a simple loop instead of a
     // regex dep keeps the implementation self-contained and matches the
     // project's "no new deps for one function" rule.
-    const PREFIXES: &[&str] = &[
-        "sk-ant-", "sk-or-", "sk-", "xai-", "r8_", "gsk_", "eyJ",
-    ];
+    const PREFIXES: &[&str] = &["sk-ant-", "sk-or-", "sk-", "xai-", "r8_", "gsk_", "eyJ"];
 
     let mut out = String::with_capacity(s.len());
     let bytes = s.as_bytes();
@@ -133,7 +131,11 @@ impl RunRecord {
         let exit = pty
             .wait_for_exit(std::time::Duration::from_millis(100))
             .and_then(|status| {
-                if status.success() { Some(0i32) } else { Some(1i32) }
+                if status.success() {
+                    Some(0i32)
+                } else {
+                    Some(1i32)
+                }
             });
 
         Self {
