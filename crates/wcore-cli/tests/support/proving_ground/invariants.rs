@@ -6,7 +6,6 @@
 //!
 //! Invariants are composable: a cell can assert several of them in
 //! sequence so the diagnostic message points at the specific violation.
-#![allow(dead_code)]
 
 use super::record::RunRecord;
 

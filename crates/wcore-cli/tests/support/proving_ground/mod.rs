@@ -132,6 +132,11 @@ pub enum ConfigState {
     /// `config.toml` is written with deliberately invalid TOML bytes.
     /// Tests the "corrupt config" error path.
     CorruptConfig,
+
+    /// No config file, but BOTH `OPENAI_API_KEY` and `ANTHROPIC_API_KEY` are
+    /// present in the child's environment.  Tests the "connect-all env-keys"
+    /// path (the `a` shortcut that collects ≥2 detected env keys at once).
+    MultiEnvKeys,
 }
 
 /// Name of the side-channel env file that `ConfigState::EnvKeysOnly`
@@ -178,6 +183,14 @@ impl ConfigState {
                 std::fs::write(home.join("config.toml"), b"this is not valid toml {{{")
                     .expect("write corrupt config.toml");
             }
+            ConfigState::MultiEnvKeys => {
+                // Write both keys to the env sidecar — no config.toml written.
+                std::fs::write(
+                    home.join(ENV_SIDECAR),
+                    "OPENAI_API_KEY=sk-test-harness-envonly-00000000\nANTHROPIC_API_KEY=sk-ant-harness-envonly-00000000\n",
+                )
+                .expect("write .proving-ground-env for MultiEnvKeys");
+            }
         }
     }
 
@@ -187,6 +200,10 @@ impl ConfigState {
     pub fn env_overrides(&self) -> &[(&'static str, &'static str)] {
         match self {
             ConfigState::EnvKeysOnly => &[("OPENAI_API_KEY", "sk-test-harness-envonly-00000000")],
+            ConfigState::MultiEnvKeys => &[
+                ("OPENAI_API_KEY", "sk-test-harness-envonly-00000000"),
+                ("ANTHROPIC_API_KEY", "sk-ant-harness-envonly-00000000"),
+            ],
             _ => &[],
         }
     }
