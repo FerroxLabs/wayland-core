@@ -7,11 +7,15 @@
 
 ## 1. Layer map
 
-Wayland-Core is a Cargo workspace of 19 internal `wcore-*` crates plus 5
-`wayland-*` plugin crates (24 total). Dependencies flow **downward** in the
+Wayland-Core is a Cargo workspace of ~49 internal `wcore-*` crates plus 5
+`wayland-*` plugin crates (54 total). Dependencies flow **downward** in the
 diagram below — never introduce circular or upward references. The full
 crate table with one-line responsibilities lives in
 [AGENTS.md §Crate Map](../AGENTS.md#crate-map).
+
+> The diagram below shows only the **load-bearing spine** plus the substrate
+> band — it is not an exhaustive crate listing. For the live, complete set run
+> `cargo metadata` or read [AGENTS.md §10](../AGENTS.md#10-project-context--wayland-core).
 
 ```
                            ┌──────────────────┐
@@ -47,6 +51,21 @@ crate table with one-line responsibilities lives in
               │  zero internal deps)             │
               └──────────────────────────────────┘
 
+  Substrate band (peers of the mid tier, grouped by concern — not every
+  crate is drawn on the spine above):
+    security/sandbox  : wcore-sandbox, wcore-egress, wcore-safety,
+                        wcore-permissions
+    economics         : wcore-budget, wcore-pricing
+    messaging/channels: wcore-channels, wcore-channels-registry, and the
+                        wcore-channel-* connectors (discord, email,
+                        imessage, matrix, msteams, signal, slack, sms,
+                        telegram, whatsapp)
+    plugin runtimes   : wcore-plugin-subprocess, wcore-plugin-wasm
+    host integration  : wcore-acp, wcore-dispatch, wcore-swarm
+    misc              : wcore-cron, wcore-replay, wcore-user-model,
+                        wcore-eval-scenarios, wcore-fixture-harness,
+                        wcore-honcho-adapter, wcore-agents-pack
+
   wcore-repomap is a deliberate island — NO internal `wcore-*` deps.
 
   Plugins (wayland-ollama, wayland-browser, wayland-cua, wayland-ijfw,
@@ -59,6 +78,11 @@ The mid-tier crates fan out from `wcore-agent` and converge on
 `wcore-config` / `wcore-protocol` / `wcore-types` at the bottom. New
 functionality must land in the **lowest crate where it semantically
 belongs** — see [§4 Where to put new code](#4-where-to-put-new-code).
+
+`wcore-agent` also hosts the **ForgeFlows (Dynamic Workflows)** engine
+(`crates/wcore-agent/src/orchestration/workflow/`): declarative RON lowers
+to the existing `GraphConfig` IR and executes via `WorkflowRunner` over the
+spawner path — see [docs/workflows.md](workflows.md).
 
 ## 2. Cross-crate invariants
 
@@ -214,6 +238,10 @@ not subsume each other.
 | A new evaluation metric | `wcore-eval` |
 | A new prompt mutator (GEPA) | `wcore-evolve/src/mutator/` |
 | A new permission rule | `wcore-permissions` |
+| A new channel connector | `wcore-channel-<name>` (register via `wcore-channels-registry`) |
+| A new shell sandbox backend | `wcore-sandbox` |
+| A new egress / network rule | `wcore-egress` |
+| A budget cap or pricing entry | `wcore-budget` / `wcore-pricing` |
 | A new observability span / sink | `wcore-observability` |
 | A new shell helper or platform-specific path | `wcore-config` (centralize, then call from anywhere) |
 | A new JSON stream event type | `wcore-protocol` (and mirror in `wcore-plugin-api` if plugins need it) |
@@ -232,5 +260,6 @@ is the most common source of subsequent refactors.
 - [docs/mcp.md](mcp.md) — MCP server integration, transport types, deferred loading
 - [docs/advanced.md](advanced.md) — sub-agents, hooks, memory, plan mode, context compression
 - [docs/json-stream-protocol.md](json-stream-protocol.md) — JSON Lines protocol for host integration (e.g. the Wayland desktop app)
+- [docs/workflows.md](workflows.md) — ForgeFlows (Dynamic Workflows): RON → `GraphConfig` IR → `WorkflowRunner`
 - [docs/wcore-evolve.md](wcore-evolve.md) — GEPA evolution loop deep dive
 - [docs/troubleshooting.md](troubleshooting.md) — common errors and solutions

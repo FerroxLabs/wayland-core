@@ -16,6 +16,46 @@ Provide an API key via any of: config file, `--api-key` flag, or environment var
 
 Verify your API key is correct and active.
 
+## MiniMax / Moonshot 401
+
+```
+[error] API error: API error 401: ...
+```
+
+Usually a region-locked key. MiniMax and Moonshot each run two platforms with
+separate key namespaces (`api.minimax.io` ↔ `api.minimaxi.com`, `api.moonshot.ai`
+↔ `api.moonshot.cn`). The engine auto-retries the same key against the alternate
+host and pins the winner, so a 401-then-success is normal. A **persistent** 401
+means the key is invalid on both regions — issue a key on the other region's
+console.
+
+## Perplexity 401 referencing platform.openai.com
+
+```
+[error] API error: API error 401: ... platform.openai.com ...
+```
+
+The session was started as `--provider openai`, so requests went to
+`api.openai.com` instead of `api.perplexity.ai`. Use `--provider perplexity`
+(env `PERPLEXITY_API_KEY`).
+
+## Grok signed in but 401, or "grok-4.3 does not support parameter stop"
+
+```
+[error] API error: API error 401: ...
+[error] API error: API error 400: Model grok-4.3 does not support parameter stop
+```
+
+Grok must run as `--provider xai`. Spawned as `--provider openai` it ignores the
+OAuth token files (`~/.grok/auth.json`, `~/.wayland/oauth/xai.json`) and sends an
+unsupported `stop` parameter. Under `--provider xai` the stop suppression is
+automatic.
+
+## OpenRouter model "vanishes" after one turn
+
+This is an **app-side** issue (the desktop app's model curator), not a core
+engine fault — there is no core fix. The engine keeps the selected model bound.
+
 ## Profile Not Found
 
 ```

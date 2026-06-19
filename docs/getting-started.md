@@ -2,11 +2,28 @@
 
 ## Installation
 
-```bash
-# Build from source
-cargo build --release
+**npm** (recommended — pulls the right prebuilt binary for your platform):
 
-# Binary location
+```bash
+npm install -g @ferroxlabs/wayland-core
+wayland-core --version
+
+# or run it once with no install
+npx @ferroxlabs/wayland-core "summarize the TODOs in this repo"
+```
+
+**Prebuilt signed binaries** for macOS (arm64/x64), Linux (arm64/x64), and
+Windows (arm64/x64) are on the
+[Releases](https://github.com/FerroxLabs/wayland-core/releases) page, each
+verifiable against `wayland-core-checksums.txt`.
+
+**From source** (Rust 1.95+):
+
+```bash
+cargo install --git https://github.com/FerroxLabs/wayland-core wcore-cli
+
+# or build the workspace directly
+cargo build --release
 ./target/release/wayland-core
 ```
 
@@ -26,13 +43,62 @@ wayland-core [OPTIONS] [PROMPT]...
 | Parameter | Description |
 |-----------|-------------|
 | `--provider <name>` | Provider: `anthropic`, `openai`, `bedrock`, `vertex`, or a custom alias |
-| `--model <id>` | Model name |
+| `--model <id>`, `-m` | Model name |
+| `--api-key <key>`, `-k` | API key (overrides config / env) |
+| `--base-url <url>`, `-b` | Base URL for the API |
 | `--profile <name>` | Named profile from config file |
+| `--agent <name>` | Built-in agent persona to inherit (e.g. `architect`, `debugger`) |
+| `--list-agents` | List built-in agent personas and exit |
+| `--max-tokens <n>` | Max output tokens per response |
+| `--max-turns <n>` | Max agent loop turns |
+| `--system-prompt <text>` | Custom system prompt |
+| `--force` | Approve every tool call without prompting (aliases: `--yolo`, `--dangerously-skip-permissions`) |
+| `--auto-approve` | Skip all tool confirmations |
+| `--project-dir <path>` | Directory to load the project `.wayland-core.toml` from (defaults to CWD) |
+| `--continue`, `-c` | Resume the most-recent session |
+| `--resume <id>` | Resume a previous session |
+| `--session-id <id>` | Use a specific session ID instead of auto-generating one |
+| `--list-sessions` | List saved sessions and exit |
+| `--no-tui` | Fall back to the line-based REPL instead of the TUI |
+| `--no-memory` | Run stateless — disable long-term memory for this run |
+| `--json-stream` | JSON Lines mode for host integration |
 | `--compaction <level>` | Output compaction: `off`, `safe` (default), `full` |
 | `--toon` | Enable TOON tabular encoding (with `full` compaction) |
-| `--auto-approve` | Skip all tool confirmations |
-| `--json-stream` | JSON Lines mode for host integration |
-| `--resume <id>` | Resume a previous session |
+| `--init-config` | Generate a default config file and exit |
+| `--config-path` | Print the config file path and exit |
+| `--doctor` | Run the system-dependency / provider health doctor |
+
+Diagnostic and replay flags (`--skills-audit`, `--replay`, `--memory-show`,
+`--probe-mcp`, …) are intentionally omitted here — run `wayland-core --help`
+for the full set.
+
+---
+
+## Subcommands
+
+Beyond the flag-driven agent/REPL path, `wayland-core` exposes a set of
+verb subcommands. The headline ones:
+
+| Subcommand | Purpose |
+|------------|---------|
+| `auth` | Manage provider API keys and OAuth sign-in (see [Authentication](#authentication)) |
+| `setup` | Re-run the interactive onboarding (connect / configure) flow |
+| `self-update` | Update to the latest signed release (`--check-only` to just compare versions) |
+| `models list` | Print known models from the bundled catalog (`--provider` to filter) |
+| `mcp-serve` | Serve the engine's own tools as an MCP server (stdio / SSE) for other clients |
+
+The rest:
+
+| Subcommand | Purpose |
+|------------|---------|
+| `plugin` | Install / list / remove plugins |
+| `swarm` | Dispatch a worktree-isolated worker swarm |
+| `workflow` (alias `forgeflows`) | Validate / list / run saved `.ron` workflows |
+| `project-context` | Print the resolved project context (WAYLAND.md / AGENTS.md / CLAUDE.md) |
+| `init` | Scaffold `.wayland/config.toml` + `WAYLAND.md` in the current directory |
+| `acp` | ACP server / client surface |
+| `agent` | Manage user-defined agents (create / list / show / edit / delete) |
+| `cron` | Manage scheduled cron jobs (add / list / remove / enable / disable) |
 
 ---
 
@@ -163,6 +229,42 @@ plan_directory = ".wayland-core/plans"
 > with your ChatGPT subscription via `wayland-core auth login chatgpt`, then run
 > with `--provider openai-chatgpt`. See [Sign in with ChatGPT](providers.md#sign-in-with-chatgpt).
 
+### Authentication
+
+The `auth` subcommand manages provider credentials directly against the global
+`config.toml` — the lightweight alternative to the full onboarding flow:
+
+```bash
+# List every configured provider with a masked key
+wayland-core auth list
+
+# Add (or replace) a key — validated live against the provider before it is
+# written. Use `autodetect` to infer the provider from the key's prefix.
+wayland-core auth add anthropic sk-ant-xxx
+wayland-core auth add autodetect sk-or-v1-xxx
+wayland-core auth add openai sk-xxx --no-validate   # skip the live check
+
+# Remove a provider's key
+wayland-core auth remove openai
+```
+
+**OAuth sign-in.** The only OAuth sign-in is ChatGPT — sign in with your
+ChatGPT subscription instead of an OpenAI API key:
+
+```bash
+wayland-core auth login chatgpt            # opens a browser (loopback PKCE)
+wayland-core auth login chatgpt --device   # headless device-code flow (SSH/remote)
+wayland-core auth login chatgpt --import-codex  # import an existing Codex CLI login
+wayland-core auth status                   # show signed-in provider, plan, token expiry
+wayland-core auth logout chatgpt           # delete the stored OAuth token
+```
+
+After signing in, run with `--provider openai-chatgpt`.
+
+> xAI / Grok is **not** an OAuth sign-in — it is an API-key provider. Add the
+> key (`wayland-core auth add xai <key>`) and run with `--provider xai`; the
+> engine refreshes any internal OAuth tokens on its own.
+
 ### Custom Provider Alias
 
 If a backend is compatible with a built-in provider's protocol, you can declare an alias under `providers.<alias>`:
@@ -186,7 +288,16 @@ base_url = "https://my-service.example.com/api/openai"
 
 ## Quick Start
 
-### 1. Initialize and Configure
+### 1. Connect a Provider (paste-to-connect)
+
+The fastest path is to just run `wayland-core` (or `wayland-core setup`) and
+paste an API key when prompted. It fingerprints the provider from the key's
+shape, validates it live against the provider's model endpoint (a confidence
+ladder: Detected → CanListModels → Ready), stores it (OS keyring by default,
+plaintext fallback), and makes it the default provider — with no restart. You
+can also paste a key from inside the TUI at any time with `/connect`.
+
+Prefer to edit the config by hand instead:
 
 ```bash
 wayland-core --init-config
@@ -237,6 +348,23 @@ wayland-core "List all Rust files in this project"
 
 ---
 
+## TUI commands
+
+Inside the full-screen TUI, slash commands drive configuration and inspection.
+Type `/` from any surface to open a command palette. The high-value ones:
+
+| Command | What it does |
+|---------|--------------|
+| `/connect` | Paste an API key to fingerprint, live-validate, and connect a provider |
+| `/config` | All settings — Essentials and Advanced editors |
+| `/doctor` | Provider / key / MCP health, plus DISCOVERED rows for connectable providers |
+| `/effective` | View the resolved config, with secrets redacted |
+| `/model` | Switch model (arrow-key picker, cross-provider) |
+| `/provider` | Switch provider (arrow-key picker) |
+| `/mcp` | List MCP servers; `/mcp connect` to connect a discovered one |
+
+---
+
 ## Tool Confirmation
 
 Destructive tools (Write, Edit, Bash) prompt for confirmation before execution:
@@ -267,6 +395,9 @@ Sessions auto-save to `.wayland-core/sessions/`.
 # List saved sessions
 wayland-core --list-sessions
 
+# Resume the most-recent session (shortcut for --resume <latest-id>)
+wayland-core --continue          # or -c
+
 # Resume the latest session
 wayland-core --resume latest
 
@@ -277,6 +408,7 @@ wayland-core --resume a1b2c3
 wayland-core --session-id my-conv-123
 ```
 
+- `--continue` / `-c` resumes the most-recent session; it is mutually exclusive with `--resume` and `--session-id`
 - `--session-id` and `--resume` are mutually exclusive
 - `--session-id` errors if the ID already exists
 - Both flags work in interactive and `--json-stream` mode

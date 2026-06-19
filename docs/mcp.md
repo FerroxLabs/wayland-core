@@ -33,6 +33,60 @@ url = "https://tools.example.com/mcp"
 headers = { Authorization = "Bearer xxx" }
 ```
 
+## Zero-config discovery (Forge local servers)
+
+Forge-suite desktop apps (e.g. Agent Vault) advertise a loopback MCP server by
+writing a shared file at `<OS config dir>/forge/mcp-servers.json` — the *real*
+config dir (`dirs::config_dir()`), NOT `WAYLAND_HOME`, since it is a
+cross-application convention written by *other* apps about the actual machine.
+Wayland Core auto-detects those entries and surfaces them as **DISCOVERED** rows
+in `/doctor`. Nothing connects automatically: a discovery entry is a **hint, not
+liveness** (a producer crash leaves a stale entry behind), so you connect a row
+explicitly with `/mcp connect [name]` (or by selecting the row and pressing
+Enter).
+
+On connect, the engine runs the two-step bootstrap:
+
+1. **Liveness probe** — `GET <metadata_url>`. The connect is only offered when a
+   `200` comes back *and* the server's reported `name` matches the discovery
+   entry. A mismatch (or any non-200) is treated as a stale/impostor entry and
+   rejected.
+2. **Grant** — `POST <grant_url>`. This pops an **Approve** prompt in the
+   producer app; the call only returns successfully after the user clicks
+   Approve. The response maps to a structured outcome:
+
+   | Status | Outcome |
+   |--------|---------|
+   | `200` | Granted — a scoped bearer token is returned and stored, and the server connects live |
+   | `403` | Denied (user declined, no UI, or timed out) |
+   | `400` | Bad scopes — surfaced with the server's message |
+   | `429` | Rate-limited — back off |
+
+The token is stored out of `config.toml` via a credential reference (see
+[Token storage](#token-storage-cred-references) below).
+
+### Token storage (`${cred:}` references)
+
+The scoped bearer token is never written into `config.toml`. Instead the
+persisted `Authorization` header carries a `${cred:KEY}` reference, with the key
+convention `mcp:<server>:token`. The literal `${cred:...}` stays on disk; the
+real secret is looked up from the credentials store and substituted in **at the
+connect boundary, on a clone** of the server map — so an accidental re-serialize
+of the in-memory config can't leak the token back to disk. Resolution **fails
+closed**: a missing key aborts the whole header value rather than emitting a
+blank or half-resolved bearer.
+
+The on-disk shape for a discovered Forge server:
+
+```toml
+[mcp.servers.agent-vault]
+transport = "streamable-http"
+url = "http://127.0.0.1:3456/mcp"
+allow_local = true
+[mcp.servers.agent-vault.headers]
+Authorization = "Bearer ${cred:mcp:agent-vault:token}"
+```
+
 ## Transport Types
 
 | Transport | Description | Use Case |
@@ -40,6 +94,12 @@ headers = { Authorization = "Bearer xxx" }
 | `stdio` | Launch local subprocess, communicate via stdin/stdout | Local MCP servers (npx, uvx) |
 | `sse` | GET for SSE event stream, POST for requests | Remote MCP servers |
 | `streamable-http` | HTTP POST, supports SSE streaming responses | Remote MCP servers |
+
+> **Windows stdio resolution.** On Windows, a `stdio` server launched by bare
+> name (`npx`, `uvx`, `node`) resolves through `cmd /C` so that `.cmd`/`.bat`
+> PATHEXT shims (`npx.cmd`, `node.cmd`) — which raw `CreateProcess` refuses to
+> find on `PATH` — are resolved correctly. This is automatic; no host action or
+> config knob is needed.
 
 ## Deferred Loading
 
@@ -86,6 +146,11 @@ headers = { Authorization = "Bearer <AGENT_VAULT_MCP_TOKEN>" }
 |---------------|----------|
 | `false` (default) | Loopback and all private/internal targets are rejected at connect time |
 | `true` | Loopback (`127.0.0.0/8`, `::1`, `localhost`) is permitted; all other private/internal/metadata ranges remain blocked |
+
+To keep the bearer token out of `config.toml`, a header value may use a
+`${cred:KEY}` reference (e.g. `Authorization = "Bearer ${cred:mcp:agent-vault:token}"`)
+— the literal reference is stored on disk and the secret is resolved from the
+credentials store at connect time. See [Token storage](#token-storage-cred-references).
 
 ## Tool Naming
 

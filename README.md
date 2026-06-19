@@ -37,6 +37,8 @@ One command. The agent reads the file, runs `grep`/`glob` across the tree, reaso
 
 </div>
 
+**Paste a key, get a provider.** Paste an API key (or run `/connect` in the TUI) and the engine fingerprints the provider from the key's shape, validates it live, and stores it in your OS keyring. From there, `/config` exposes Essentials and Advanced editors, `/doctor` shows provider, key, and MCP health, and `/effective` prints the resolved config with secrets redacted.
+
 ## What it is
 
 - **A standalone engine.** The engine is the product, not a feature bolted onto an editor and not a wrapper around one vendor's API.
@@ -89,8 +91,10 @@ wayland-core --help
 
 Most terminal agents are married to one vendor. Wayland Core is built provider-neutral from the foundation up: the engine only ever sees provider-neutral types, and every vendor's quirks are pushed into a configuration layer instead of the code.
 
-- **~20 first-class provider integrations**, written in-tree: Anthropic, OpenAI, Google Gemini, Google Vertex AI, AWS Bedrock (real SigV4 signing and event-stream framing), Cohere, Azure OpenAI, plus Groq, DeepSeek, Mistral, Together, Fireworks, xAI, Qwen, Moonshot, Nvidia, Cerebras, Perplexity, OpenRouter, and Ollama for local models.
+- **~20 first-class provider integrations**, written in-tree: Anthropic, OpenAI, Google Gemini, Google Vertex AI, AWS Bedrock (real SigV4 signing and event-stream framing), Cohere, Azure OpenAI, plus Groq, DeepSeek, Mistral, Together, Fireworks, xAI, Qwen, Moonshot, MiniMax, Nvidia, Cerebras, Perplexity, OpenRouter, and Ollama for local models.
+- **Sign in with ChatGPT** (OAuth, no API key): `wayland-core auth login chatgpt`, then run with `--provider openai-chatgpt`.
 - **A 104-entry [models.dev](https://models.dev) catalog** on top of those, so 100+ more endpoints are selectable by id with no code change.
+- **Live model discovery** for connected providers — Bedrock `ListFoundationModels`, Gemini, and OpenAI-compatible `list_models` — cached on disk for 24h and surfaced in the arrow-key `/model` and `/provider` pickers.
 - **Switching vendors is a config change, not a fork.** There is no `if base_url.contains("openai.com")` anywhere in the codebase.
 
 **ProviderCompat** is the rule that makes that true. Point `base_url` at any OpenAI-compatible endpoint and describe its differences as data:

@@ -115,6 +115,32 @@ With caching enabled, stats show cache data:
 
 ---
 
+## OAuth Providers
+
+Two providers authenticate via OAuth rather than a raw API key, with tokens
+managed entirely by the engine:
+
+- **Sign in with ChatGPT** — interactive subscription login. Run
+  `wayland-core auth login chatgpt` (loopback PKCE flow; `--device` for a
+  headless device-code flow, `--import-codex` to reuse an existing Codex CLI
+  login). This is the only wired `auth login` verb.
+- **Grok (xAI)** — there is no `auth login` verb for Grok. Use it with
+  `--provider xai`; the engine refreshes its OAuth tokens automatically. Grok
+  CLI logins are importable: if `~/.grok/auth.json` exists, the engine reads
+  and keeps it fresh.
+
+### Token Storage & Security
+
+- Tokens are stored encrypted at `~/.wayland/oauth/{provider}.json`, with
+  directory mode `0700` and file mode `0600` on Unix.
+- PKCE (S256) and a CSRF `state` token are mandatory on the login flow; the
+  callback compares `state` in constant time.
+- Refresh is engine-managed: concurrent refreshes coalesce into a single
+  network round-trip (single-flight), and tokens renew automatically before
+  expiry — no manual re-login.
+
+---
+
 ## VCR Recording & Replay
 
 Record real API interactions and replay them in tests — no API key or network needed.
@@ -225,6 +251,11 @@ export WCORE_MEMORY_DIR=/custom/path
 The legacy `AIONRS_MEMORY_DIR` is still honored as a backward-compat alias —
 useful if you're migrating from an older `aionrs` configuration. When both are
 set, `WCORE_MEMORY_DIR` wins.
+
+On Windows, `WAYLAND_BASH_SHELL=powershell` (Windows PowerShell 5.1) or
+`WAYLAND_BASH_SHELL=pwsh` (PowerShell 7+) switches the BashTool interpreter
+from the default `cmd`. It is a no-op on Unix. See
+[docs/tools.md](tools.md) for details.
 
 ### How It Works
 

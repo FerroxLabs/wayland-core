@@ -2,13 +2,51 @@
 
 ## Supported Providers
 
-| Provider | Auth Method | Notes |
-|----------|------------|-------|
-| Anthropic | API Key | Prompt caching, streaming, vision |
-| OpenAI | API Key | Compatible with DeepSeek, Qwen, Ollama, vLLM |
-| OpenAI (ChatGPT) | OAuth (Sign in with ChatGPT) | Routes through the ChatGPT Codex backend on your subscription — see [Sign in with ChatGPT](#sign-in-with-chatgpt) |
-| AWS Bedrock | SigV4 | Regional endpoints, AWS credential chain |
-| Google Vertex AI | GCP OAuth2 / Service Account | Metadata server auto-detection |
+Pass any of these to `--provider` (or set `provider` in config). Aliases resolve
+to the same built-in. The canonical list lives in `BUILTIN_PROVIDER_NAMES`
+(`crates/wcore-config/src/config.rs`).
+
+| Provider | Slug (aliases) | Notes |
+|----------|----------------|-------|
+| Anthropic | `anthropic` | Native wire — prompt caching, streaming, vision |
+| OpenAI | `openai` | Chat-completions wire; base for most OpenAI-compatible providers |
+| AWS Bedrock | `bedrock` | Hosts Claude; SigV4 + AWS credential chain |
+| Google Vertex AI | `vertex` | Hosts Claude; GCP OAuth2 / service account |
+| Google Gemini | `gemini` (`google`) | Native Gemini wire (functionDeclarations, thoughtSignature) |
+| Azure OpenAI | `azure-openai` (`azure`) | Azure-hosted OpenAI deployments |
+| Together | `together` | OpenAI-compatible |
+| Fireworks | `fireworks` | OpenAI-compatible |
+| NVIDIA | `nvidia` | OpenAI-compatible (NIM) |
+| Perplexity | `perplexity` | OpenAI-compatible; `sonar` online-search models. Env `PERPLEXITY_API_KEY` |
+| Cerebras | `cerebras` | OpenAI-compatible, fast inference |
+| OpenRouter | `openrouter` | OpenAI-compatible router (100+ models) |
+| Flux Router | `flux-router` (`flux`) | OpenAI-compatible router |
+| DeepSeek | `deepseek` | OpenAI-compatible |
+| xAI / Grok | `xai` (`grok`) | OpenAI-compatible; OAuth or `XAI_API_KEY` — see [Sign in with Grok](#sign-in-with-grok-xai) |
+| Groq | `groq` | OpenAI-compatible, LPU inference |
+| Moonshot / Kimi | `moonshot` (`kimi`) | OpenAI-compatible, region-locked keys |
+| Qwen | `qwen` (`alibaba`, `dashscope`) | DashScope OpenAI-compat mode |
+| Mistral | `mistral` | OpenAI-compatible |
+| Cohere | `cohere` | OpenAI-compatible |
+| OpenAI (ChatGPT) | `openai-chatgpt` (`chatgpt`) | OAuth — routes through the ChatGPT Codex backend on your subscription. See [Sign in with ChatGPT](#sign-in-with-chatgpt) |
+| MiniMax | `minimax` (`minimaxi`) | Anthropic-wire provider; region-locked keys |
+
+---
+
+## Host integration: pick the right `--provider`
+
+An embedding app must spawn each provider under its **own** `--provider`, not
+under `--provider openai`. The `ProviderType` is what keys OAuth refresh, the
+`grok-4.3` stop-param suppression, and the correct `base_url`:
+
+- **Grok** → `--provider xai`. Spawned as `openai` it ignores the xAI OAuth
+  token files, sends the unsupported `stop` parameter, and hits
+  `api.openai.com` (401).
+- **Perplexity** → `--provider perplexity`. Spawned as `openai` it targets
+  `api.openai.com` instead of `api.perplexity.ai` and 401s.
+
+The same holds for every entry in the table above: the slug selects the wire,
+base URL, and compat preset.
 
 ---
 
@@ -31,7 +69,7 @@ Rules:
 
 - `provider = "my-service"` is a config-layer alias
 - `[providers.my-service].provider` must point at an underlying built-in provider
-- The underlying provider must currently be one of `anthropic`, `openai`, `bedrock`, `vertex`
+- The underlying provider must be one of the built-in provider slugs listed under [Supported Providers](#supported-providers)
 - The alias entry's `model`, `api_key`, `base_url`, and `compat` override the underlying provider's defaults
 
 This fits scenarios like DeepSeek gateways and internal OpenAI-compatible services.
@@ -54,6 +92,39 @@ include_usage_in_stream = false   # omit stream_options for picky OpenAI-compati
 
 The trade-off is no in-stream token counts for that provider. An empty stream now also
 surfaces a visible error instead of a silent no-op.
+
+A related compat field is `supports_stop_param` (default `true`). The engine
+attaches "fluff" stop sequences as a client-side output token-optimization, but
+some reasoning models / endpoints reject the OpenAI `stop` parameter outright
+with a 400 (xAI's `grok-4.3`: *"Model grok-4.3 does not support parameter
+stop"*). Set it `false` to suppress the optimization so those models run — xAI
+sets this by default:
+
+```toml
+[providers.my-reasoning-endpoint.compat]
+supports_stop_param = false
+```
+
+---
+
+## Region-locked keys (MiniMax, Moonshot)
+
+MiniMax and Moonshot each run **two** region-locked platforms that share the
+wire protocol but **not** the key namespace — a key issued on one host 401s on
+the other:
+
+| Provider | Default host | Alternate host |
+|----------|--------------|----------------|
+| MiniMax | `api.minimax.io` | `api.minimaxi.com` |
+| Moonshot | `api.moonshot.ai` | `api.moonshot.cn` |
+
+On a 401/403 the engine retries the **same** key against the alternate host and
+pins whichever authenticates for the rest of the session — no user action and no
+config required. This is driven by the `auth_fallback_base_url` compat field
+(set by `minimax_defaults` / `moonshot_defaults` in
+`crates/wcore-config/src/compat.rs`; the retry-and-pin lives in
+`wcore-providers` `anthropic.rs` / `openai.rs`). If a key 401s on **both**
+regions it is simply invalid — issue one on the other region's console.
 
 ---
 
@@ -310,6 +381,43 @@ the open-source Codex/OpenClaw clients do and is **tolerated in practice today**
 but there is no cited explicit permission; "allowed in practice" is an
 observation, not a guarantee. If OpenAI tightens client/originator/edge checks,
 this path may break — API-key auth is the supported, always-works alternative.
+
+---
+
+## Sign in with Grok (xAI)
+
+Grok runs under `--provider xai` (alias `grok`). There is **no** `auth login`
+command for it — connect one of two ways:
+
+**API key.** Set `XAI_API_KEY` (or `api_key` in `[providers.xai]`) and run:
+
+```bash
+wayland-core --provider xai --model grok-4.3 "explain this repo"
+```
+
+**OAuth refresh.** The engine refreshes xAI OAuth tokens itself, at parity with
+[Sign in with ChatGPT](#sign-in-with-chatgpt) (load / refresh / persist over the
+~6h access-token lifetime, no host re-spawn). It does **not** start a browser
+login flow — it reads tokens that already exist on disk, from whichever source
+is **fresher**:
+
+```
+~/.grok/auth.json            # the Grok CLI's credential file ($GROK_HOME/auth.json when set)
+~/.wayland/oauth/xai.json    # the engine's own store (written by an app or a prior refresh)
+```
+
+Preferring the fresher file avoids racing the Grok CLI for the **single-use,
+rotating** refresh token (xAI rotates it on every refresh). Access tokens last
+~6h. When OAuth credentials are present, the `xai` API-key gate is exempt, so no
+`XAI_API_KEY` is needed. The OAuth client id is pinned but overridable at runtime
+via `WAYLAND_XAI_OAUTH_CLIENT_ID` (no rebuild). Evidence:
+`crates/wcore-agent/src/oauth/xai.rs`, `crates/wcore-config/src/config.rs`
+(`xai_oauth_credentials_present`).
+
+> Spawn Grok as `--provider xai`, never `--provider openai` — see
+> [Host integration: pick the right `--provider`](#host-integration-pick-the-right---provider).
+> Under `openai` the OAuth token files are ignored and the unsupported `stop`
+> parameter is sent.
 
 ---
 

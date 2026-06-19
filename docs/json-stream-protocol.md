@@ -262,11 +262,16 @@ An error occurred. The agent may or may not continue depending on severity.
 
 | Error Code | Description |
 |------------|-------------|
-| `provider_error` | LLM API error (rate limit, auth, etc.) |
+| `provider_error` | LLM API error (rate limit, etc.) |
+| `auth_required` | Provider rejected the credential (HTTP 401). Refreshable — the host should re-auth / refresh the OAuth token and re-send the turn. `retryable` is left as the engine set it (typically `false`, since re-sending the same credential just burns budget), so hosts drive retry off the **code**, not the flag. |
+| `auth_invalid` | Provider denied access (HTTP 403). Hard failure — do not retry. |
 | `tool_error` | Built-in tool execution error |
 | `config_error` | Configuration or initialization error |
 | `protocol_error` | Invalid command from client |
 | `internal_error` | Unexpected internal error |
+| `engine_error` | Fallback code for any error not matched to a more specific code above. |
+
+> Hosts should branch on `error.code`, not parse `error.message`.
 
 ### 1.11 `info`
 
@@ -661,6 +666,26 @@ Agent should emit error and let the conversation continue if possible:
     "code": "provider_error",
     "message": "Rate limit exceeded. Retry after 30s.",
     "retryable": true
+  }
+}
+```
+
+**Auth failures** carry a distinct code so the host can branch without parsing
+the message. A `401` becomes `auth_required` — refreshable: the host should
+re-auth (or refresh the OAuth token) and re-send the turn. A `403` becomes
+`auth_invalid` — a hard failure the host must not retry. For both, the engine
+leaves `retryable` as-is (typically `false`, since re-sending the same
+credential just burns budget); hosts drive retry off `error.code`, not the flag.
+Any error not matched to a specific code falls back to `engine_error`.
+
+```json
+{
+  "type": "error",
+  "msg_id": "m3",
+  "error": {
+    "code": "auth_required",
+    "message": "API error 401: invalid x-api-key",
+    "retryable": false
   }
 }
 ```
