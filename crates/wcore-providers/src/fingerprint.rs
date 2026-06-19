@@ -140,6 +140,14 @@ fn slug_for_env_var(name: &str) -> Option<&'static str> {
     Some(slug)
 }
 
+/// Returns the full prefix→slug registry as a slice.
+///
+/// Exposed for invariant tests that verify every registered prefix resolves
+/// correctly (network-free registry-completeness oracle).
+pub fn declared_prefixes() -> &'static [(&'static str, &'static str)] {
+    UNIQUE_PREFIXES
+}
+
 /// Fingerprint a pasted credential into ranked provider candidates.
 ///
 /// Never makes a network call. The returned [`Fingerprint::candidates`] are a
