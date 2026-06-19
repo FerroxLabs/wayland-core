@@ -19,3 +19,14 @@ fn sk_flux_is_a_declared_prefix() {
         "the Flux Router prefix must be registered (regression: it was missing)"
     );
 }
+
+#[test]
+fn every_declared_prefix_slug_parses_as_a_known_provider() {
+    use wcore_config::config::provider_type_from_slug;
+    for (prefix, slug) in declared_prefixes() {
+        assert!(
+            provider_type_from_slug(slug).is_some(),
+            "slug {slug:?} from prefix {prefix:?} has no ProviderType — add it to parse_builtin_provider"
+        );
+    }
+}
