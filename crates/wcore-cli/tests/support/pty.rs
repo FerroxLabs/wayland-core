@@ -8,6 +8,11 @@
 //! in headless GHA runners — see the module doc in `smoke_p0.rs`).
 //! `write_config`, `harden_child_env`, and `STRIPPED_PROVIDER_ENV` are
 //! cross-platform.
+//!
+//! This is a shared support module included into multiple integration test
+//! binaries.  Each binary uses only a subset of the items, so dead-code
+//! warnings per-binary are expected and suppressed here.
+#![allow(dead_code)]
 
 use std::path::Path;
 
@@ -109,10 +114,31 @@ pub struct Pty {
 #[cfg(unix)]
 impl Pty {
     pub fn spawn(home: &Path) -> Self {
+        Self::spawn_sized(home, 40, 120)
+    }
+
+    /// Spawn the binary against `home` with an explicit terminal size.
+    /// Used by the Proving Ground cell runner so each cell can declare its
+    /// own `TermShape` (e.g. narrow columns for wrapping tests).
+    pub fn spawn_sized(home: &Path, rows: u16, cols: u16) -> Self {
+        let no_extra: &[(&str, &str)] = &[];
+        Self::spawn_with_env(home, rows, cols, no_extra)
+    }
+
+    /// Spawn the binary against `home` with explicit terminal size and
+    /// additional environment variable overrides injected into the child.
+    /// Used by `run_cell` when `ConfigState::EnvKeysOnly` needs to inject
+    /// `OPENAI_API_KEY` without writing a config file.
+    pub fn spawn_with_env(
+        home: &Path,
+        rows: u16,
+        cols: u16,
+        extra_env: &[(impl AsRef<str>, impl AsRef<str>)],
+    ) -> Self {
         let pty = native_pty_system()
             .openpty(PtySize {
-                rows: 40,
-                cols: 120,
+                rows,
+                cols,
                 pixel_width: 0,
                 pixel_height: 0,
             })
@@ -128,12 +154,18 @@ impl Pty {
         for key in STRIPPED_PROVIDER_ENV {
             cmd.env_remove(key);
         }
+        // Apply caller-supplied env overrides (e.g. OPENAI_API_KEY for EnvKeysOnly).
+        // These are applied AFTER the strip pass so they intentionally survive
+        // the hermetic strip (they are test-supplied, not developer credentials).
+        for (k, v) in extra_env {
+            cmd.env(k.as_ref(), v.as_ref());
+        }
         cmd.cwd(home);
         let child = pty.slave.spawn_command(cmd).expect("spawn wayland-core");
 
         let mut reader = pty.master.try_clone_reader().expect("clone PTY reader");
         let parser =
-            std::sync::Arc::new(std::sync::Mutex::new(vt100::Parser::new(40, 120, 0)));
+            std::sync::Arc::new(std::sync::Mutex::new(vt100::Parser::new(rows, cols, 0)));
         let parser_for_thread = std::sync::Arc::clone(&parser);
         let reader_handle = std::thread::spawn(move || {
             let mut buf = [0u8; 8192];

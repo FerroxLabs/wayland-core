@@ -4,3 +4,6 @@
 
 pub mod mock_llm;
 pub mod pty;
+
+#[cfg(unix)]
+pub mod proving_ground;
