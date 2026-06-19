@@ -107,17 +107,41 @@ fn connect_all_env_keys_persists_across_relaunch() {
         SECS_10,
         "name-step",
     );
-    p1.send(b"\r"); // accept default name (or empty, whatever is pre-filled)
+    p1.send(b"\r"); // accept default name → finish_with_config → Ready step
+    // Wait for Ready, then press ⏎ to enter the Workspace so quit() can
+    // send the palette /exit command cleanly (it requires the Workspace surface).
+    p1.wait_for(
+        |t| t.contains("Press") && t.contains("workspace"),
+        SECS_10,
+        "ready-step",
+    );
+    p1.send(b"\r"); // advance to Workspace
+    p1.wait_for(
+        |t| t.contains("Workspace") && !t.contains("connect a provider to begin"),
+        SECS_10,
+        "workspace-after-onboarding",
+    );
 
     let final_screen_p1 = record::redact(&p1.screen_text());
     p1.quit();
     let rec1 = RunRecord::capture_post_quit(session.home(), &mut p1, final_screen_p1);
 
-    // config.toml MUST now exist with at least one provider slug.
+    assert!(
+        !rec1.dirty_death,
+        "first launch must exit cleanly (no force-kill sentinel)"
+    );
+
+    // config.toml MUST now exist with BOTH provider slugs — proves the full
+    // multi-provider config was written, not just the single-provider stub
+    // that connect_all_env_keys persists as an early mid-flow checkpoint.
     let cfg = std::fs::read_to_string(session.home().join("config.toml")).unwrap_or_default();
     assert!(
-        cfg.contains("openai") || cfg.contains("anthropic"),
-        "connect-all must persist a provider to config.toml; got: {cfg}"
+        cfg.contains("openai"),
+        "connect-all must write openai to config.toml; got: {cfg}"
+    );
+    assert!(
+        cfg.contains("anthropic"),
+        "connect-all must write anthropic to config.toml; got: {cfg}"
     );
 
     // Second launch (same home): MUST land on Workspace, not Onboarding.
