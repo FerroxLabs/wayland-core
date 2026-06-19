@@ -405,6 +405,12 @@ struct Cli {
     #[arg(long)]
     no_memory: bool,
 
+    /// Print build provenance (version + embedded source git SHA) and exit.
+    /// Catches stale-build issues: the SHA must match the HEAD the binary
+    /// was compiled from. Used by the build-provenance integration test.
+    #[arg(long)]
+    build_info: bool,
+
     /// Initial prompt (if omitted, enters interactive REPL mode)
     #[arg(trailing_var_arg = true)]
     prompt: Vec<String>,
@@ -957,6 +963,16 @@ async fn run() -> anyhow::Result<ExitCode> {
     // touching config files, OAuth, or the engine bootstrap.
     if cli.doctor {
         return Ok(doctor::run(cli.probe_mcp).await);
+    }
+
+    // Handle --build-info: print version + embedded source SHA and exit.
+    if cli.build_info {
+        println!(
+            "wayland-core {} (source {})",
+            env!("CARGO_PKG_VERSION"),
+            env!("WAYLAND_SOURCE_SHA")
+        );
+        return Ok(ExitCode::SUCCESS);
     }
 
     // Handle --config-path
