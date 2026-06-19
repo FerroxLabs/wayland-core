@@ -814,6 +814,9 @@ pub struct DiagnosticsSurface {
     /// mode, built on `on_enter` via `wcore_config::config::effective_config_toml`.
     /// Holds an error message string if the render failed.
     effective_toml: String,
+    /// Vertical scroll offset for the `/doctor` view (the full report can
+    /// exceed the viewport at short terminal heights). Clamped on render.
+    doctor_scroll: u16,
     /// Vertical scroll offset for the `/effective` view (the TOML can exceed
     /// the viewport). Clamped on `Up`/`Down`/`PageUp`/`PageDown`.
     effective_scroll: u16,
@@ -874,6 +877,7 @@ impl DiagnosticsSurface {
             tool_status: Vec::new(),
             config_checks: Vec::new(),
             effective_toml: String::new(),
+            doctor_scroll: 0,
             effective_scroll: 0,
             channels: Vec::new(),
             discovered: Vec::new(),
@@ -1160,6 +1164,7 @@ impl Surface for DiagnosticsSurface {
     /// Refresh both the doctor probe and the memory scan when the surface
     /// becomes active, so re-entering the screen always shows live data.
     fn on_enter(&mut self, app: &mut App) {
+        self.doctor_scroll = 0;
         self.refresh_doctor(app);
         self.refresh_memory();
         self.refresh_effective();
@@ -1234,6 +1239,40 @@ impl Surface for DiagnosticsSurface {
             }
             KeyCode::PageDown if self.mode == DiagMode::Effective => {
                 self.effective_scroll = self.effective_scroll.saturating_add(10);
+                SurfaceAction::None
+            }
+            // `/doctor` scroll — the full report can exceed the viewport at
+            // short terminal heights. Up/Down/j/k are only claimed for scroll
+            // when no connectable Forge rows are present (otherwise they drive
+            // the discovered cursor, handled below). PageUp/PageDown/Home/G
+            // always scroll, regardless of discovered state.
+            KeyCode::Up | KeyCode::Char('k')
+                if self.mode == DiagMode::Doctor && self.connectable_forge_names().is_empty() =>
+            {
+                self.doctor_scroll = self.doctor_scroll.saturating_sub(1);
+                SurfaceAction::None
+            }
+            KeyCode::Down | KeyCode::Char('j')
+                if self.mode == DiagMode::Doctor && self.connectable_forge_names().is_empty() =>
+            {
+                self.doctor_scroll = self.doctor_scroll.saturating_add(1);
+                SurfaceAction::None
+            }
+            KeyCode::PageUp if self.mode == DiagMode::Doctor => {
+                self.doctor_scroll = self.doctor_scroll.saturating_sub(10);
+                SurfaceAction::None
+            }
+            KeyCode::PageDown if self.mode == DiagMode::Doctor => {
+                self.doctor_scroll = self.doctor_scroll.saturating_add(10);
+                SurfaceAction::None
+            }
+            KeyCode::Home if self.mode == DiagMode::Doctor => {
+                self.doctor_scroll = 0;
+                SurfaceAction::None
+            }
+            KeyCode::Char('G') if self.mode == DiagMode::Doctor => {
+                // Jump to the bottom — clamped in render_doctor.
+                self.doctor_scroll = u16::MAX;
                 SurfaceAction::None
             }
             KeyCode::Tab => {
@@ -1641,13 +1680,19 @@ impl DiagnosticsSurface {
 
         lines.push(Line::from(""));
         lines.push(Line::from(Span::styled(
-            "  r re-run · 1 doctor · 2 cost · 3 memory · esc workspace",
+            "  r re-run · ↑↓/j/k scroll · G end · 1 doctor · 2 cost · 3 memory · esc workspace",
             Style::default().fg(t.text_muted),
         )));
 
+        // Clamp the scroll so it cannot exceed the total content height.
+        let total_lines = lines.len() as u16;
+        let viewport = inner.height;
+        let max_scroll = total_lines.saturating_sub(viewport);
+        let scroll = self.doctor_scroll.min(max_scroll);
+
         let para = Paragraph::new(lines)
             .style(Style::default().bg(t.surface))
-            .wrap(Wrap { trim: true });
+            .scroll((scroll, 0));
         frame.render_widget(para, inner);
     }
 
