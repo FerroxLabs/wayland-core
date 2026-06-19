@@ -666,6 +666,66 @@ mod tests {
         assert_eq!(result[0]["role"], "user");
     }
 
+    /// wayland#161 accept criterion: a history that was truncated mid-thinking
+    /// and then CONTINUED ON A DIFFERENT MODEL replays cleanly — no thinking
+    /// block (whose signature would belong to the prior model) reaches the wire,
+    /// so Anthropic never returns the `thinking.signature` 400 that strands the
+    /// conversation. The engine never captures a signature, so every historical
+    /// thinking block is dropped regardless of which model produced it; this
+    /// test pins that invariant across the model-switch path specifically.
+    #[test]
+    fn test_build_messages_drops_thinking_across_model_switch() {
+        let messages = vec![
+            Message::new(
+                Role::User,
+                vec![ContentBlock::Text {
+                    text: "long task".to_string(),
+                }],
+            ),
+            // Turn truncated mid-thinking under the OLD model (budget ran out).
+            Message::new(
+                Role::Assistant,
+                vec![ContentBlock::Thinking {
+                    thinking: "reasoning minted by the previous model...".to_string(),
+                }],
+            ),
+            // User continues; the session is now on a DIFFERENT model.
+            Message::new(
+                Role::User,
+                vec![ContentBlock::Text {
+                    text: "continue".to_string(),
+                }],
+            ),
+            // The new model's turn also carries thinking + text.
+            Message::new(
+                Role::Assistant,
+                vec![
+                    ContentBlock::Thinking {
+                        thinking: "new model reasoning...".to_string(),
+                    },
+                    ContentBlock::Text {
+                        text: "done".to_string(),
+                    },
+                ],
+            ),
+        ];
+        let result = build_messages(&messages, &default_compat());
+        // No `thinking` block may appear in ANY message sent to the provider.
+        for msg in &result {
+            if let Some(content) = msg["content"].as_array() {
+                assert!(
+                    content.iter().all(|b| b["type"] != "thinking"),
+                    "no thinking block may survive a model switch (wayland#161): {msg}"
+                );
+            }
+        }
+        // The truncated thinking-only turn collapsed away; the surviving
+        // assistant turn keeps only its text.
+        let last = result.last().expect("a turn must survive");
+        assert_eq!(last["role"], "assistant");
+        assert_eq!(last["content"][0]["text"], "done");
+    }
+
     // --- compat-driven behavior tests ---
 
     #[test]
