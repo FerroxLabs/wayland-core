@@ -15,8 +15,8 @@
 //! Token source. Two places hold xAI credentials, and the manager prefers
 //! whichever is FRESHER so it rarely has to refresh itself (which avoids
 //! racing the Grok CLI for the single-use, rotating refresh token):
-//! - the engine's own store `~/.wayland/oauth/xai.json` (written by
-//!   `wayland auth login grok`, by an embedding app, or by a prior refresh);
+//! - the engine's own store `~/.wayland/oauth/xai.json` (written by the Wayland
+//!   app's "Sign in with X (Grok)" flow or by a prior refresh);
 //! - the Grok CLI's `~/.grok/auth.json` (the CLI keeps it fresh), whose `key`
 //!   field is the access token, nested under a `"https://auth.x.ai::<cid>"`
 //!   wrapper.
@@ -39,7 +39,9 @@ pub const PROVIDER: &str = "xai";
 /// doc at `https://auth.x.ai/.well-known/openid-configuration`.
 const XAI_TOKEN_URL: &str = "https://auth.x.ai/oauth2/token";
 
-/// xAI OIDC authorize endpoint (browser PKCE login — used by `auth login grok`).
+/// xAI OIDC authorize endpoint (browser PKCE login). Carried on the flow for
+/// completeness; engine-side we only run the refresh grant — interactive Grok
+/// login lives in the Wayland app's "Sign in with X (Grok)", not a CLI verb.
 const XAI_AUTH_URL: &str = "https://auth.x.ai/oauth2/authorize";
 
 /// Public desktop PKCE client_id (no secret). Verified live: this id refreshes
@@ -234,8 +236,8 @@ impl XaiTokenManager {
     /// Return the access token, refreshing if near expiry.
     pub async fn get(&self) -> Result<String, String> {
         let tokens = self.load_active().await?.ok_or_else(|| {
-            "not signed in to Grok — sign in with X in the app, install the Grok CLI, \
-             or run `wayland auth login grok`"
+            "not signed in to Grok — use \"Sign in with X (Grok)\" in the Wayland app, \
+             sign in with the Grok CLI (creates ~/.grok/auth.json), or set XAI_API_KEY"
                 .to_string()
         })?;
         let tokens = if Self::token_is_fresh(&tokens) {
@@ -252,7 +254,7 @@ impl XaiTokenManager {
     /// rotated the refresh token but failed to persist is a HARD error.
     async fn refresh(&self, current: OAuthTokens) -> Result<OAuthTokens, String> {
         let refresh_token = current.refresh_token.clone().ok_or(
-            "no refresh_token for Grok — sign in with X again or run `wayland auth login grok`",
+            "no refresh_token for Grok — sign in with X (Grok) again in the Wayland app or via the Grok CLI",
         )?;
         let client = self.client.clone();
         let token_url = self.flow.token_url.clone();
