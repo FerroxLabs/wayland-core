@@ -102,6 +102,7 @@ impl Fingerprint {
 /// is `(prefix, slug)` and yields a [`Confidence::High`] bearer candidate.
 const UNIQUE_PREFIXES: &[(&str, &str)] = &[
     ("sk-ant-", "anthropic"),
+    ("sk-flux-", "flux-router"),
     ("sk-proj-", "openai"),
     ("sk-svcacct-", "openai"),
     ("sk-admin-", "openai"),
@@ -121,6 +122,7 @@ const UNIQUE_PREFIXES: &[(&str, &str)] = &[
 fn slug_for_env_var(name: &str) -> Option<&'static str> {
     let slug = match name {
         "ANTHROPIC_API_KEY" => "anthropic",
+        "FLUX_API_KEY" => "flux-router",
         "OPENAI_API_KEY" => "openai",
         "OPENROUTER_API_KEY" => "openrouter",
         "GROQ_API_KEY" => "groq",
