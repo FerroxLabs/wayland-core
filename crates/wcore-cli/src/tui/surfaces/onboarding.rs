@@ -572,17 +572,33 @@ impl OnboardingSurface {
         }
     }
 
-    /// Connect the environment key at `idx`: load its value into the key
-    /// field and validate it against its provider's endpoint — the same
-    /// path a pasted key takes, so an env key with a stale value is
-    /// still rejected honestly.
+    /// Connect the environment key at `idx`.
+    ///
+    /// Persists the provider choice to `config.toml` immediately (without the
+    /// key — the key stays in the environment variable and is read by the
+    /// engine on the next boot).  This persistence is the fix for the
+    /// "onboarding re-runs on every relaunch" bug: the first-run gate checks
+    /// for the existence of `config.toml`, so writing it here ensures the
+    /// next launch lands on Workspace instead of re-entering onboarding.
+    ///
+    /// Validation is advisory for env keys: the provider selection is already
+    /// trusted (it came from a variable the user explicitly exported), so we
+    /// skip the live network round-trip and advance straight to the Ready
+    /// step.  This keeps the connect path offline-safe and hermetic.
     fn connect_env_key(&mut self, idx: usize) {
         let Some(env) = self.env_keys.get(idx).cloned() else {
             return;
         };
-        self.key = Input::default().with_value(env.value);
-        self.editing_key = false;
-        self.start_validation(env.provider);
+        // Persist the provider choice on disk now — before showing Ready —
+        // so a mid-flow quit still leaves the selection.  The key is NOT
+        // written; the engine reads it from the environment on next boot.
+        crate::tui::engine_bridge::persist_env_provider_selection(env.provider.slug());
+        // Record the provider so the Ready step can name it.
+        if !self.providers.iter().any(|(p, _)| *p == env.provider) {
+            self.providers.push((env.provider, String::new()));
+        }
+        self.completed_via = Some(Path::ApiKey);
+        self.step = Step::Ready;
     }
 
     /// Connect EVERY detected environment key at once. A convenience
