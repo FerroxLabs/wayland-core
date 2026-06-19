@@ -235,6 +235,12 @@ pub struct OnboardingSurface {
     /// Receiver half of the Ollama-probe channel — drained each frame in
     /// `render`. `None` until the probe is first spawned.
     ollama_probe_rx: Option<Receiver<bool>>,
+    /// Whether `config.toml` already existed at the moment this surface was
+    /// constructed.  Captured once and used by `finish_with_config` to decide
+    /// whether to show the Overwrite / Keep prompt.  Gating on this snapshot
+    /// instead of a live `path.exists()` check avoids a spurious conflict
+    /// dialog when `connect_all_env_keys` pre-writes the file mid-flow.
+    config_existed_at_start: bool,
 }
 
 impl Default for OnboardingSurface {
@@ -255,6 +261,7 @@ impl OnboardingSurface {
     /// environment keys — the test seam for the env-detection UI without
     /// mutating the real process environment.
     fn with_env_keys(env_keys: Vec<EnvKey>) -> Self {
+        let config_existed_at_start = crate::tui::engine_bridge::onboarding_config_path().exists();
         Self {
             step: Step::Connect,
             selected: Path::ApiKey,
@@ -273,6 +280,7 @@ impl OnboardingSurface {
             validation_rx: None,
             ollama_reachable: None,
             ollama_probe_rx: None,
+            config_existed_at_start,
         }
     }
 
@@ -424,20 +432,25 @@ impl OnboardingSurface {
 
     /// Complete the API-key flow after the Name step.
     ///
-    /// On a true first run (no config on disk) the config is written
-    /// straight away. When a config already exists onboarding does NOT
-    /// clobber it silently — it advances to the Ready step with an
-    /// explicit Overwrite / Keep choice instead.
+    /// On a true first run (no config on disk when onboarding started) the
+    /// config is written straight away.  When a config genuinely pre-existed
+    /// before onboarding began, the Ready step shows an explicit Overwrite /
+    /// Keep choice instead of silently clobbering it.
+    ///
+    /// The check uses `config_existed_at_start` (captured at construction)
+    /// rather than a live `path.exists()` call so that the pre-write performed
+    /// by `connect_all_env_keys` does not trigger a spurious conflict dialog.
     fn finish_with_config(&mut self) -> SurfaceAction {
         self.completed_via = Some(Path::ApiKey);
-        let path = crate::tui::engine_bridge::onboarding_config_path();
-        if path.exists() {
-            // Defer the write — let the user choose on the Ready step.
+        if self.config_existed_at_start {
+            // A config was already on disk when the user launched — defer the
+            // write and let them decide on the Ready step.
+            let path = crate::tui::engine_bridge::onboarding_config_path();
             self.existing_config = Some((path, ReadyChoice::Keep));
             self.write_result = None;
         } else {
             self.existing_config = None;
-            self.write_config(false);
+            self.write_config(true); // overwrite=true: we own this file (we wrote the stub)
         }
         self.step = Step::Ready;
         SurfaceAction::None
