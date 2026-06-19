@@ -619,6 +619,12 @@ impl OnboardingSurface {
         if self.providers.is_empty() {
             return SurfaceAction::None;
         }
+        // Persist the first provider's slug now — same rationale as
+        // `connect_env_key`: the first-run gate checks for config.toml, so
+        // writing it here ensures a mid-flow quit still leaves a valid
+        // selection and the next launch lands on Workspace.
+        let first_slug = self.providers[0].0.slug();
+        crate::tui::engine_bridge::persist_env_provider_selection(first_slug);
         self.step = Step::Name;
         SurfaceAction::None
     }
