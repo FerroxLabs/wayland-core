@@ -49,7 +49,8 @@ pub const CANONICAL_REVEAL_KEYS: &[&[u8]] = &[
 /// screen). Returns `true` the instant the target appears, `false` if it never
 /// does within the budget.
 ///
-/// `per_key` is the sleep duration between each key send and screen check.
+/// `per_key` is the sleep duration **per key** (not total): after each key
+/// send the harness sleeps `per_key` before re-reading the screen.
 /// A value of ~300 ms gives the TUI time to redraw between each key event.
 #[cfg(unix)]
 pub fn reach_text(

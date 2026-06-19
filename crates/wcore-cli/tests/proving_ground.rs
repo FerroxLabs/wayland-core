@@ -17,7 +17,6 @@ use support::proving_ground::{
 };
 
 const SECS_10: Duration = Duration::from_secs(10);
-const SECS_5: Duration = Duration::from_secs(5);
 
 #[cfg(unix)]
 #[test]
@@ -153,8 +152,12 @@ fn doctor_content_reachable_at_short_height() {
     p.send(b"/doctor\r");
     p.wait_for(|t| t.contains("SYSTEM"), SECS_10, "doctor");
     // The TOKEN BUDGET section must be reachable via the canonical reveal keys.
-    let reached =
-        support::proving_ground::reach_text(&mut p, "TOKEN BUDGET", CANONICAL_REVEAL_KEYS, SECS_5);
+    let reached = support::proving_ground::reach_text(
+        &mut p,
+        "TOKEN BUDGET",
+        CANONICAL_REVEAL_KEYS,
+        Duration::from_millis(300),
+    );
     assert!(
         reached,
         "/doctor must scroll to its TOKEN BUDGET section at 24-row height"
