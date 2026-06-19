@@ -26,6 +26,53 @@ pub mod invariants;
 pub mod record;
 pub use record::RunRecord;
 
+/// The canonical set of reveal keys for scroll/navigation tests.
+///
+/// Sent in order (and cycled) by [`reach_text`] to expose off-screen content:
+/// - `\x1b[B`  — VT100 Down arrow
+/// - `\x1b[6~` — VT100 Page Down
+/// - `j`       — vi-style down
+/// - `G`       — vi-style jump-to-end
+#[cfg(unix)]
+pub const CANONICAL_REVEAL_KEYS: &[&[u8]] = &[
+    b"\x1b[B",  // Down arrow
+    b"\x1b[6~", // Page Down
+    b"j",       // vi down
+    b"G",       // vi end
+];
+
+/// Send scroll/reveal keys to `pty` until `screen_text()` contains `target`.
+///
+/// If the target is already visible on the initial screen, returns `true`
+/// immediately without sending any keys. Otherwise, cycles through `keys` for
+/// up to 6 full rounds (sending each key, sleeping briefly, re-reading the
+/// screen). Returns `true` the instant the target appears, `false` if it never
+/// does within the budget.
+///
+/// `per_key` is the sleep duration between each key send and screen check.
+/// A value of ~300 ms gives the TUI time to redraw between each key event.
+#[cfg(unix)]
+pub fn reach_text(
+    pty: &mut Pty,
+    target: &str,
+    keys: &[&[u8]],
+    per_key: std::time::Duration,
+) -> bool {
+    if pty.screen_text().contains(target) {
+        return true;
+    }
+    for _ in 0..6 {
+        for &key in keys {
+            pty.send(key);
+            std::thread::sleep(per_key);
+            if pty.screen_text().contains(target) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
 use std::path::Path;
 use tempfile::TempDir;
 
@@ -222,7 +269,10 @@ pub struct TermShape {
 
 impl Default for TermShape {
     fn default() -> Self {
-        Self { rows: 40, cols: 120 }
+        Self {
+            rows: 40,
+            cols: 120,
+        }
     }
 }
 
@@ -275,7 +325,12 @@ pub fn run_cell(cell: &Cell) -> RunRecord {
     let mut pty = if env_overrides.is_empty() {
         Pty::spawn_sized(session.home(), cell.term.rows, cell.term.cols)
     } else {
-        Pty::spawn_with_env(session.home(), cell.term.rows, cell.term.cols, &env_overrides)
+        Pty::spawn_with_env(
+            session.home(),
+            cell.term.rows,
+            cell.term.cols,
+            &env_overrides,
+        )
     };
 
     (cell.script)(&mut pty, &session);

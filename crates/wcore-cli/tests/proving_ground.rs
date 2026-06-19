@@ -10,11 +10,14 @@ mod support;
 
 use std::time::Duration;
 
-use support::proving_ground::{Cell, ConfigState, Session, TermShape, run_cell};
 use support::proving_ground::invariants;
 use support::proving_ground::record::{self, RunRecord};
+use support::proving_ground::{
+    CANONICAL_REVEAL_KEYS, Cell, ConfigState, Session, TermShape, run_cell,
+};
 
 const SECS_10: Duration = Duration::from_secs(10);
+const SECS_5: Duration = Duration::from_secs(5);
 
 #[cfg(unix)]
 #[test]
@@ -47,7 +50,11 @@ fn onboarding_persists_across_relaunch() {
 
     // First launch: connect the detected env key (press '1'), complete the flow.
     let mut p1 = session.launch();
-    p1.wait_for(|t| t.contains("Detected in your environment"), SECS_10, "onboarding");
+    p1.wait_for(
+        |t| t.contains("Detected in your environment"),
+        SECS_10,
+        "onboarding",
+    );
     p1.send(b"1"); // connect OpenAI
     // Item 2 fix: wait for "Ready" only — "Workspace" appears in the chrome
     // tab bar on every frame and would resolve before '1' is even processed.
@@ -61,7 +68,10 @@ fn onboarding_persists_across_relaunch() {
 
     // config.toml MUST now exist with the provider.
     let cfg = std::fs::read_to_string(session.home().join("config.toml")).unwrap_or_default();
-    assert!(cfg.contains("openai"), "connect must persist a provider to config.toml");
+    assert!(
+        cfg.contains("openai"),
+        "connect must persist a provider to config.toml"
+    );
 
     // Second launch (same home): MUST land on Workspace, not Onboarding.
     let mut p2 = session.launch();
@@ -86,10 +96,18 @@ fn connect_all_env_keys_persists_across_relaunch() {
 
     // First launch: connect all detected env keys at once (press 'a').
     let mut p1 = session.launch();
-    p1.wait_for(|t| t.contains("Detected in your environment"), SECS_10, "onboarding");
+    p1.wait_for(
+        |t| t.contains("Detected in your environment"),
+        SECS_10,
+        "onboarding",
+    );
     p1.send(b"a"); // connect all env keys
     // 'a' routes to Step::Name which renders "What should I call you?"
-    p1.wait_for(|t| t.contains("What should I call you?"), SECS_10, "name-step");
+    p1.wait_for(
+        |t| t.contains("What should I call you?"),
+        SECS_10,
+        "name-step",
+    );
     p1.send(b"\r"); // accept default name (or empty, whatever is pre-filled)
 
     let final_screen_p1 = record::redact(&p1.screen_text());
@@ -116,4 +134,32 @@ fn connect_all_env_keys_persists_across_relaunch() {
 
     // Wire the config_persists invariant.
     invariants::config_persists(&[rec1, rec2]).unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn doctor_content_reachable_at_short_height() {
+    let session = Session::new();
+    ConfigState::ConfiguredOpenAi.materialize(session.home());
+    // 24-row height forces overflow: the /doctor report spans SYSTEM ·
+    // PROVIDERS · CONFIG · TOOLS · MCP SERVERS · CHANNELS · DISCOVERED ·
+    // RECENT ERRORS · TOKEN BUDGET — more than 24 lines — so TOKENS is
+    // below the fold without scrolling.
+    let mut p = session.launch_sized(TermShape {
+        rows: 24,
+        cols: 100,
+    });
+    p.wait_for(|t| t.contains("Workspace"), SECS_10, "workspace");
+    p.send(b"/doctor\r");
+    p.wait_for(|t| t.contains("SYSTEM"), SECS_10, "doctor");
+    // The TOKEN BUDGET section must be reachable via the canonical reveal keys.
+    let reached =
+        support::proving_ground::reach_text(&mut p, "TOKEN BUDGET", CANONICAL_REVEAL_KEYS, SECS_5);
+    assert!(
+        reached,
+        "/doctor must scroll to its TOKEN BUDGET section at 24-row height"
+    );
+    // Wire the content_reachable invariant.
+    invariants::content_reachable("TOKEN BUDGET", reached);
+    p.quit();
 }

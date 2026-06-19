@@ -9,6 +9,26 @@
 
 use super::record::RunRecord;
 
+/// Assert that a scroll/reveal key sequence was able to bring `target` into
+/// view.
+///
+/// `reached` is the result of [`super::reach_text`] — `true` if the target
+/// appeared on screen after sending the reveal keys, `false` if it never did.
+///
+/// This is a thin wrapper so invariant failures report the target label and a
+/// consistent message rather than a bare `assert!` with no context.
+///
+/// # Panics
+///
+/// Panics when `reached` is `false`, with a message naming the target.
+pub fn content_reachable(target: &str, reached: bool) {
+    assert!(
+        reached,
+        "content_reachable: '{target}' was not found on screen after sending \
+         the canonical reveal keys — the surface may not be scrollable"
+    );
+}
+
 /// Assert that after a connect run, a relaunch record lands on Workspace.
 ///
 /// Specifically checks:

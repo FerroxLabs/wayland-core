@@ -184,8 +184,7 @@ impl Pty {
         let child = pty.slave.spawn_command(cmd).expect("spawn wayland-core");
 
         let mut reader = pty.master.try_clone_reader().expect("clone PTY reader");
-        let parser =
-            std::sync::Arc::new(std::sync::Mutex::new(vt100::Parser::new(rows, cols, 0)));
+        let parser = std::sync::Arc::new(std::sync::Mutex::new(vt100::Parser::new(rows, cols, 0)));
         let parser_for_thread = std::sync::Arc::clone(&parser);
         let reader_handle = std::thread::spawn(move || {
             let mut buf = [0u8; 8192];
