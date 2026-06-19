@@ -22,6 +22,7 @@ pub use super::pty::Pty;
 // The PTY path (`Pty::spawn_with_env`) does its own STRIPPED_PROVIDER_ENV
 // strip directly; `harden_child_env` is for `std::process::Command` children.
 pub use super::pty::harden_child_env;
+pub mod invariants;
 pub mod record;
 pub use record::RunRecord;
 
