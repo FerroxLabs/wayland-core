@@ -34,12 +34,15 @@ const WELL_KNOWN_DOMAINS: &[&str] = &[
     "voyageai.com",
     "moonshot.cn",
     "moonshot.ai",
+    "nvidia.com",  // NVIDIA NIM: integrate.api.nvidia.com
+    "cerebras.ai", // Cerebras: api.cerebras.ai
     // First-party Wayland router + shipped providers whose default base URL is
     // internal to the provider crate, so `config.base_url` is empty and the host
     // is NOT auto-derived below. Without these, configuring the provider blocks
     // its very first request under the default egress policy.
     "fluxrouter.ai",
     "minimax.io",
+    "minimaxi.com", // MiniMax's second region + 401 region-failover target
     // built-in tool backends (web search / code hosts / docs APIs)
     "tavily.com",
     "brave.com",
@@ -98,6 +101,16 @@ pub fn build_allowlist(config: &Config) -> AllowList {
     // is on `auth.openai.com`, covered separately by the openai.com well-known).
     if config.provider == ProviderType::OpenAIChatGpt {
         allow.allow_domain("chatgpt.com");
+    }
+
+    // Qwen's default base_url is empty (the provider crate supplies the internal
+    // DashScope host), so it is not auto-derived above. Its host lives on Alibaba
+    // Cloud (`*.aliyuncs.com`), so allow the EXACT DashScope endpoints off the
+    // provider type rather than apex-allowing all of aliyuncs.com. Covers both
+    // the international default and the mainland-China host.
+    if config.provider == ProviderType::Qwen {
+        allow.allow_host("dashscope-intl.aliyuncs.com");
+        allow.allow_host("dashscope.aliyuncs.com");
     }
 
     // Operator additions.
@@ -181,6 +194,72 @@ mod tests {
             ),
             EgressVerdict::Allow,
             "flux-router must be reachable out of the box (empty base_url)"
+        );
+    }
+
+    #[test]
+    fn native_providers_with_internal_default_base_url_are_reachable() {
+        // nvidia / cerebras / qwen / minimax all resolve to an EMPTY
+        // config.base_url (the provider crate supplies the host), so they must be
+        // covered explicitly or their first request is blocked out of the box.
+        // Regression for the NVIDIA NIM egress finding (2026-06-19).
+        let allow = build_allowlist(&cfg("", &[]));
+        for url in [
+            "https://integrate.api.nvidia.com/v1/chat/completions",
+            "https://api.cerebras.ai/v1/chat/completions",
+        ] {
+            assert_eq!(
+                classify(&Method::POST, &u(url), &allow),
+                EgressVerdict::Allow,
+                "{url} must be reachable out of the box (empty base_url)"
+            );
+        }
+    }
+
+    #[test]
+    fn minimax_region_failover_host_is_allowlisted() {
+        // MiniMax's 401 region-failover retries `api.minimaxi.com` (a different
+        // registrable domain from the default `api.minimax.io`), pinned at runtime
+        // — not via config.base_url — so it must be in the well-known list or the
+        // failover is dead under the egress policy.
+        let allow = build_allowlist(&cfg("", &[]));
+        assert_eq!(
+            classify(
+                &Method::POST,
+                &u("https://api.minimaxi.com/anthropic/v1/messages"),
+                &allow
+            ),
+            EgressVerdict::Allow,
+            "MiniMax failover host api.minimaxi.com must be reachable"
+        );
+    }
+
+    #[test]
+    fn qwen_dashscope_host_is_allowlisted_for_qwen_provider() {
+        // Qwen lives on shared `*.aliyuncs.com`, so its host is allowed off the
+        // provider TYPE (exact host), not by apex-allowing all of Alibaba Cloud.
+        let mut c = cfg("", &[]);
+        c.provider = ProviderType::Qwen;
+        let allow = build_allowlist(&c);
+        assert_eq!(
+            classify(
+                &Method::POST,
+                &u("https://dashscope-intl.aliyuncs.com/compatible-mode/v1/chat/completions"),
+                &allow
+            ),
+            EgressVerdict::Allow,
+            "Qwen DashScope host must be reachable when provider == Qwen"
+        );
+        // And it must NOT broadly allow other aliyuncs.com hosts (no apex over-allow).
+        let allow_other = build_allowlist(&cfg("", &[]));
+        assert_ne!(
+            classify(
+                &Method::POST,
+                &u("https://oss-cn-hangzhou.aliyuncs.com/bucket/key"),
+                &allow_other
+            ),
+            EgressVerdict::Allow,
+            "Qwen allow must not apex-allow all of aliyuncs.com"
         );
     }
 
