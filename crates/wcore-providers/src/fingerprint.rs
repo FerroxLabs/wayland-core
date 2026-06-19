@@ -107,6 +107,7 @@ const UNIQUE_PREFIXES: &[(&str, &str)] = &[
     ("sk-admin-", "openai"),
     ("sk-or-v1-", "openrouter"),
     ("sk-or-", "openrouter"),
+    ("sk-flux-", "flux-router"),
     ("csk-", "cerebras"),
     ("gsk_", "groq"),
     ("xai-", "xai"),
@@ -123,6 +124,7 @@ fn slug_for_env_var(name: &str) -> Option<&'static str> {
         "ANTHROPIC_API_KEY" => "anthropic",
         "OPENAI_API_KEY" => "openai",
         "OPENROUTER_API_KEY" => "openrouter",
+        "FLUX_API_KEY" => "flux-router",
         "GROQ_API_KEY" => "groq",
         "XAI_API_KEY" => "xai",
         "DEEPSEEK_API_KEY" => "deepseek",
@@ -390,6 +392,7 @@ mod tests {
             ("sk-proj-abcDEF123", "openai"),
             ("sk-svcacct-xyz", "openai"),
             ("sk-or-v1-deadbeef", "openrouter"),
+            ("sk-flux-BNWd_abc1234", "flux-router"),
             ("csk-1234567890", "cerebras"),
             ("gsk_abcd1234", "groq"),
             ("xai-abcd1234", "xai"),
@@ -416,6 +419,23 @@ mod tests {
         // The longest-prefix rule must put sk-ant- ahead of the sk- fallback.
         let fp = fingerprint_key("sk-ant-api03-zzz");
         assert_eq!(slugs(&fp), vec!["anthropic"]);
+    }
+
+    #[test]
+    fn flux_router_wins_over_bare_sk_bucket() {
+        // Regression: `sk-flux-…` is the Flux Router (our own router), not the
+        // ambiguous bare-`sk-` OpenAI/DeepSeek bucket. Reported symptom:
+        // onboarding rejected a valid Flux key with "we don't recognize that".
+        let fp = fingerprint_key("sk-flux-BNWd_V5abc1234");
+        assert!(fp.is_unambiguous(), "got {:?}", fp.candidates);
+        assert_eq!(slugs(&fp), vec!["flux-router"]);
+    }
+
+    #[test]
+    fn flux_env_var_hints_flux_router() {
+        let fp = fingerprint_key("export FLUX_API_KEY=\"sk-flux-abc123\"");
+        assert_eq!(fp.env_var_hint, Some("flux-router"));
+        assert_eq!(fp.best().unwrap().slug, "flux-router");
     }
 
     #[test]
