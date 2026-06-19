@@ -82,8 +82,8 @@ pub struct RunRecord {
     /// (after `pty.quit()`). Credential shapes are masked.
     pub final_screen: String,
 
-    /// The process exit code, if the PTY child had exited by capture time.
-    /// `None` if the process was still running or the status was unavailable.
+    /// 0 on clean exit, 1 on any non-zero exit (portable_pty does not expose
+    /// the raw code), None if still running.
     pub exit: Option<i32>,
 
     /// The contents of `<home>/config.toml` at capture time, if it exists.

@@ -45,13 +45,33 @@ pub fn write_config(home: &Path, provider: &str, model: Option<&str>, base_url: 
 /// (the concrete vars Bedrock/Vertex auth reads), not by glob.
 pub const STRIPPED_PROVIDER_ENV: &[&str] = &[
     "API_KEY",
+    // Core providers.
     "ANTHROPIC_API_KEY",
     "OPENAI_API_KEY",
+    "AZURE_OPENAI_API_KEY",
     "GEMINI_API_KEY",
     "GOOGLE_API_KEY",
     "OPENROUTER_API_KEY",
     "DEEPSEEK_API_KEY",
     "GROQ_API_KEY",
+    "XAI_API_KEY",
+    "MISTRAL_API_KEY",
+    "COHERE_API_KEY",
+    "PERPLEXITY_API_KEY",
+    "CEREBRAS_API_KEY",
+    "TOGETHER_API_KEY",
+    "FIREWORKS_API_KEY",
+    "NVIDIA_API_KEY",
+    "FLUX_API_KEY",
+    "MOONSHOT_API_KEY",
+    "DASHSCOPE_API_KEY",
+    "ALIBABA_API_KEY",
+    "MINIMAX_API_KEY",
+    // Token-style credentials (not _API_KEY suffix).
+    "REPLICATE_API_TOKEN",
+    "HF_TOKEN",
+    "HUGGINGFACE_API_KEY",
+    "HUGGING_FACE_HUB_TOKEN",
     // AWS (Bedrock) — concrete vars the provider auth chain reads.
     "AWS_ACCESS_KEY_ID",
     "AWS_SECRET_ACCESS_KEY",

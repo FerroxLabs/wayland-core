@@ -18,7 +18,10 @@
 #[cfg(unix)]
 pub use super::pty::Pty;
 #[allow(unused_imports)]
-pub use super::pty::harden_child_env; // re-exported for future Task cells
+// Re-exported for non-PTY (headless / json-stream) spawns only.
+// The PTY path (`Pty::spawn_with_env`) does its own STRIPPED_PROVIDER_ENV
+// strip directly; `harden_child_env` is for `std::process::Command` children.
+pub use super::pty::harden_child_env;
 pub mod record;
 pub use record::RunRecord;
 
