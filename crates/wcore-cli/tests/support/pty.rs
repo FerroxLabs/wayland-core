@@ -99,11 +99,11 @@ fn binary() -> &'static str {
 /// binaries and cannot share a non-`support` module.
 #[cfg(unix)]
 pub struct Pty {
-    pub writer: Box<dyn Write + Send>,
-    pub parser: std::sync::Arc<std::sync::Mutex<vt100::Parser>>,
-    pub _master: Box<dyn MasterPty + Send>,
-    pub child: Box<dyn portable_pty::Child + Send + Sync>,
-    pub _reader: std::thread::JoinHandle<()>,
+    writer: Box<dyn Write + Send>,
+    parser: std::sync::Arc<std::sync::Mutex<vt100::Parser>>,
+    _master: Box<dyn MasterPty + Send>,
+    child: Box<dyn portable_pty::Child + Send + Sync>,
+    _reader: std::thread::JoinHandle<()>,
 }
 
 #[cfg(unix)]
