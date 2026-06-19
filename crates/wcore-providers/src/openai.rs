@@ -307,6 +307,12 @@ impl OpenAIProvider {
             dedup_tool_results(&mut result);
         }
 
+        // #170 defense-in-depth: an empty/missing tool_call id is invalid on
+        // every strict OpenAI endpoint (DeepSeek 400s the whole request on a
+        // null `tool_call_id`). This is NOT gated by a compat flag — an empty id
+        // is never valid anywhere — and is a no-op when all ids are present.
+        strip_empty_tool_call_ids(&mut result);
+
         // Clean orphans in BOTH directions. OpenAI-format APIs 400 on either a
         // `tool` result with no parent `tool_calls` entry OR an assistant
         // `tool_calls` entry with no answering result. Strip results-without-a-
@@ -684,6 +690,56 @@ fn clean_orphaned_tool_results(messages: &mut Vec<Value>) {
             true
         }
     });
+}
+
+/// #170 defense-in-depth: strip any tool-call / tool-result whose id is empty
+/// or missing.
+///
+/// A tool-role message must carry a non-empty `tool_call_id`, and an assistant
+/// `tool_calls[].id` must be non-empty — strict OpenAI endpoints (DeepSeek in
+/// particular) reject the WHOLE request with a 400 on a null/empty id, which
+/// hard-strands the conversation. This happens when an upstream router (e.g.
+/// Flux on the DeepSeek leg) drops the streamed tool-call id; the engine
+/// faithfully echoes the empty value back, and the next request 400s.
+///
+/// Rather than send a guaranteed-400 request, drop the empty-id tool exchange
+/// so the conversation degrades gracefully (it loses one tool round-trip)
+/// instead of dying. A `warn!` is emitted whenever anything is stripped so the
+/// upstream defect stays VISIBLE — this guard masks the symptom but must never
+/// silently hide the root cause (see the Flux handoff for the real fix).
+fn strip_empty_tool_call_ids(messages: &mut Vec<Value>) {
+    let is_empty_id = |v: &Value| v.as_str().map(str::is_empty).unwrap_or(true);
+    let mut stripped = 0usize;
+
+    // 1. Drop empty-id entries from assistant `tool_calls`.
+    for msg in messages.iter_mut() {
+        if msg["role"].as_str() == Some("assistant")
+            && let Some(tcs) = msg["tool_calls"].as_array_mut()
+        {
+            let before = tcs.len();
+            tcs.retain(|tc| !is_empty_id(&tc["id"]));
+            stripped += before - tcs.len();
+            if tcs.is_empty() {
+                // Same invariant as clean_orphaned_tool_calls: a message with a
+                // `tool_calls` array is an object.
+                msg.as_object_mut().unwrap().remove("tool_calls");
+            }
+        }
+    }
+
+    // 2. Drop tool-role messages with an empty/missing `tool_call_id`.
+    let before = messages.len();
+    messages.retain(|m| !(m["role"].as_str() == Some("tool") && is_empty_id(&m["tool_call_id"])));
+    stripped += before - messages.len();
+
+    if stripped > 0 {
+        tracing::warn!(
+            stripped,
+            "stripped {stripped} tool message(s) with an empty/missing tool_call_id before \
+             sending to the provider — an upstream router likely dropped the streamed \
+             tool-call id (FerroxLabs/wayland#170); the request would otherwise 400",
+        );
+    }
 }
 
 /// Remove tool_call entries from assistant messages that have no corresponding tool result
@@ -2194,6 +2250,75 @@ mod tests {
         let tool_msgs: Vec<_> = result.iter().filter(|m| m["role"] == "tool").collect();
         assert_eq!(tool_msgs.len(), 1);
         assert_eq!(tool_msgs[0]["content"], "second");
+    }
+
+    // --- #170: empty tool_call_id guard ---
+
+    #[test]
+    fn strips_empty_tool_call_ids_keeps_valid_ones() {
+        // An upstream router dropped the id on one tool call (empty id on both
+        // the assistant tool_call AND its result). A second exchange is intact.
+        let messages = vec![
+            Message::new(
+                Role::Assistant,
+                vec![ContentBlock::ToolUse {
+                    id: "".into(), // upstream-dropped id
+                    name: "bash".into(),
+                    input: json!({}),
+                    extra: None,
+                }],
+            ),
+            Message::new(
+                Role::Tool,
+                vec![ContentBlock::ToolResult {
+                    tool_use_id: "".into(),
+                    content: "orphaned".into(),
+                    is_error: false,
+                }],
+            ),
+            Message::new(
+                Role::Assistant,
+                vec![ContentBlock::ToolUse {
+                    id: "tc_good".into(),
+                    name: "bash".into(),
+                    input: json!({}),
+                    extra: None,
+                }],
+            ),
+            Message::new(
+                Role::Tool,
+                vec![ContentBlock::ToolResult {
+                    tool_use_id: "tc_good".into(),
+                    content: "kept".into(),
+                    is_error: false,
+                }],
+            ),
+        ];
+        let result = OpenAIProvider::build_messages(&messages, "", &openai_compat());
+
+        // No tool message may carry an empty/missing tool_call_id (would 400).
+        for m in &result {
+            if m["role"] == "tool" {
+                let id = m["tool_call_id"].as_str().unwrap_or("");
+                assert!(!id.is_empty(), "empty tool_call_id must be stripped: {m}");
+            }
+        }
+        // No assistant tool_call may carry an empty id either.
+        for m in &result {
+            if let Some(tcs) = m["tool_calls"].as_array() {
+                for tc in tcs {
+                    assert!(
+                        !tc["id"].as_str().unwrap_or("").is_empty(),
+                        "empty tool_call id must be stripped: {tc}"
+                    );
+                }
+            }
+        }
+        // The intact exchange survives.
+        let tool_msgs: Vec<_> = result.iter().filter(|m| m["role"] == "tool").collect();
+        assert_eq!(tool_msgs.len(), 1);
+        assert_eq!(tool_msgs[0]["tool_call_id"], "tc_good");
+        assert_eq!(tool_msgs[0]["content"], "kept");
     }
 
     // --- usage token parsing ---
