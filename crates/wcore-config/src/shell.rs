@@ -41,6 +41,50 @@ pub fn shell_info() -> ShellInfo {
     }
 }
 
+/// Shell argv prefix for the agent **Bash tool**, honoring an optional
+/// Windows PowerShell override.
+///
+/// Returns the program + flag(s) that precede the command string in the
+/// BashTool argv: `["sh", "-c"]` on Unix and `["cmd", "/C"]` on Windows by
+/// default. On Windows ONLY, `WAYLAND_BASH_SHELL` switches the interpreter:
+/// `powershell` → `["powershell", "-NoProfile", "-Command"]` (Windows
+/// PowerShell 5.1, always present) and `pwsh` → the same with `pwsh`
+/// (PowerShell 7+, if installed). Any other value falls back to `cmd /C`.
+///
+/// Scope is deliberately the BashTool only — the hook, MCP-stdio, and skill
+/// shell paths keep `cmd /C` so their established quoting/shim contracts are
+/// unchanged. This does not alter the injection surface: BashTool already
+/// runs an LLM-supplied string through a shell interpreter (its contract);
+/// this only chooses which interpreter, and the denylist + sandbox still
+/// apply to the resulting argv. See issue: PowerShell-on-Windows request.
+pub fn bash_shell_argv_prefix() -> Vec<String> {
+    bash_shell_prefix_for(
+        cfg!(windows),
+        std::env::var("WAYLAND_BASH_SHELL").ok().as_deref(),
+    )
+}
+
+/// Pure core of [`bash_shell_argv_prefix`], split out so every branch —
+/// including the Windows/PowerShell ones — is unit-testable on any host.
+fn bash_shell_prefix_for(is_windows: bool, win_shell: Option<&str>) -> Vec<String> {
+    if !is_windows {
+        return vec!["sh".to_string(), "-c".to_string()];
+    }
+    match win_shell.map(|s| s.trim().to_ascii_lowercase()).as_deref() {
+        Some("powershell") => vec![
+            "powershell".to_string(),
+            "-NoProfile".to_string(),
+            "-Command".to_string(),
+        ],
+        Some("pwsh") => vec![
+            "pwsh".to_string(),
+            "-NoProfile".to_string(),
+            "-Command".to_string(),
+        ],
+        _ => vec!["cmd".to_string(), "/C".to_string()],
+    }
+}
+
 /// Shell-string mode: run `sh -c <str>` (Unix) / `cmd /C <str>` (Windows).
 ///
 /// Returns an unstarted `tokio::process::Command` so callers can attach
@@ -151,6 +195,48 @@ mod tests {
             assert_eq!(info.program, "sh");
             assert_eq!(info.flag, "-c");
         }
+    }
+
+    #[test]
+    fn bash_prefix_unix_is_sh_dash_c_regardless_of_env() {
+        // The PowerShell override is Windows-only; on Unix it is ignored.
+        assert_eq!(bash_shell_prefix_for(false, None), vec!["sh", "-c"]);
+        assert_eq!(
+            bash_shell_prefix_for(false, Some("powershell")),
+            vec!["sh", "-c"]
+        );
+    }
+
+    #[test]
+    fn bash_prefix_windows_defaults_to_cmd() {
+        assert_eq!(bash_shell_prefix_for(true, None), vec!["cmd", "/C"]);
+        // An unrecognized value falls back to cmd, never an empty/invalid argv.
+        assert_eq!(bash_shell_prefix_for(true, Some("bash")), vec!["cmd", "/C"]);
+    }
+
+    #[test]
+    fn bash_prefix_windows_powershell_override() {
+        assert_eq!(
+            bash_shell_prefix_for(true, Some("powershell")),
+            vec!["powershell", "-NoProfile", "-Command"]
+        );
+        // Case-insensitive and whitespace-tolerant.
+        assert_eq!(
+            bash_shell_prefix_for(true, Some("  PowerShell ")),
+            vec!["powershell", "-NoProfile", "-Command"]
+        );
+        assert_eq!(
+            bash_shell_prefix_for(true, Some("pwsh")),
+            vec!["pwsh", "-NoProfile", "-Command"]
+        );
+    }
+
+    #[test]
+    fn bash_prefix_default_branches_match_shell_info() {
+        // Guard against drift between the prefix defaults and shell_info().
+        let info = shell_info();
+        let expected = vec![info.program.to_string(), info.flag.to_string()];
+        assert_eq!(bash_shell_prefix_for(cfg!(windows), None), expected);
     }
 
     #[tokio::test]

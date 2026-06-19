@@ -44,6 +44,10 @@ Execute a shell command and return the result.
 
 - Default timeout: 120 seconds, max 600 seconds
 - Returns exit code, stdout, and stderr
+- Interpreter: `sh -c` on Unix, `cmd /C` on Windows. **Windows override:** set
+  `WAYLAND_BASH_SHELL=powershell` to run commands through Windows PowerShell
+  (`powershell -NoProfile -Command`), or `=pwsh` for PowerShell 7+. Affects the
+  Bash tool only — hook, MCP, and skill shells are unchanged.
 
 ## Grep
 

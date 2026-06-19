@@ -5,7 +5,7 @@ use async_trait::async_trait;
 use regex::RegexSet;
 use serde_json::{Value, json};
 
-use wcore_config::shell::shell_info;
+use wcore_config::shell::bash_shell_argv_prefix;
 use wcore_protocol::events::ToolCategory;
 use wcore_sandbox::{
     NetworkPolicy, SandboxChunk, SandboxCommand, SandboxManifest, SandboxOutput, SyscallPolicy,
@@ -67,12 +67,10 @@ const MAX_TIMEOUT_MS: u64 = 600_000;
 /// escape: the env is already secret-scrubbed and the network now defaults
 /// closed.
 fn build_sandbox_pieces(command: &str) -> (SandboxManifest, SandboxCommand) {
-    let info = shell_info();
-    let argv = vec![
-        info.program.to_string(),
-        info.flag.to_string(),
-        command.to_string(),
-    ];
+    // Shell prefix honors the Windows `WAYLAND_BASH_SHELL=powershell|pwsh`
+    // override (BashTool only); defaults to `sh -c` / `cmd /C`.
+    let mut argv = bash_shell_argv_prefix();
+    argv.push(command.to_string());
     let manifest = SandboxManifest {
         network: default_bash_network_policy(),
         // Curated env — secrets excluded, see the doc-comment above.
