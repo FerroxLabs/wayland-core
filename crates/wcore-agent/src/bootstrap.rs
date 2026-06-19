@@ -578,6 +578,10 @@ impl AgentBootstrap {
             reporter,
         ));
 
+        // #182: honor `[tools] windows_shell` for the BashTool interpreter on
+        // Windows (set once at boot; WAYLAND_BASH_SHELL env still overrides).
+        wcore_config::shell::set_bash_shell_config(self.config.tools.windows_shell.clone());
+
         registry.register(Box::new(wcore_tools::read::ReadTool::new(
             file_cache.clone(),
         )));

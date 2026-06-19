@@ -40,6 +40,7 @@ fn anthropic_config(api_key: &str) -> Config {
             allow_list: vec![],
             skills: wcore_config::config::SkillsPermissionConfig::default(),
             verify_edits: false,
+            windows_shell: None,
         },
         session: SessionConfig {
             enabled: false,

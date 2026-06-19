@@ -19,8 +19,25 @@
 //! See `AGENTS.md` "Shell Execution" for the policy and migration guidance.
 
 use std::process::Output;
+use std::sync::OnceLock;
 
 use tokio::process::Command;
+
+/// Process-global Bash-tool shell override, sourced from `[tools] windows_shell`
+/// in config and set once at boot by the host via [`set_bash_shell_config`].
+/// Read by [`bash_shell_argv_prefix`]; the `WAYLAND_BASH_SHELL` env var takes
+/// precedence over it. A process-global (rather than a `BashTool` field) keeps
+/// the choice in one place: it is the same for every `BashTool` instance and
+/// every spawned sub-agent in the process, and avoids threading config through
+/// the tool factories.
+static BASH_SHELL_CONFIG: OnceLock<Option<String>> = OnceLock::new();
+
+/// Record the configured Bash-tool shell (`[tools] windows_shell`). Call once at
+/// boot before any Bash command runs. Idempotent — the first call wins, so a
+/// re-bootstrap in the same process cannot flip the shell mid-session.
+pub fn set_bash_shell_config(value: Option<String>) {
+    let _ = BASH_SHELL_CONFIG.set(value);
+}
 
 pub struct ShellInfo {
     pub program: &'static str,
@@ -46,10 +63,14 @@ pub fn shell_info() -> ShellInfo {
 ///
 /// Returns the program + flag(s) that precede the command string in the
 /// BashTool argv: `["sh", "-c"]` on Unix and `["cmd", "/C"]` on Windows by
-/// default. On Windows ONLY, `WAYLAND_BASH_SHELL` switches the interpreter:
-/// `powershell` → `["powershell", "-NoProfile", "-Command"]` (Windows
-/// PowerShell 5.1, always present) and `pwsh` → the same with `pwsh`
-/// (PowerShell 7+, if installed). Any other value falls back to `cmd /C`.
+/// default. On Windows ONLY, the interpreter can be switched to `powershell` →
+/// `["powershell", "-NoProfile", "-Command"]` (Windows PowerShell 5.1, always
+/// present) or `pwsh` → the same with `pwsh` (PowerShell 7+, if installed). Any
+/// other value falls back to `cmd /C`.
+///
+/// The choice resolves with precedence **`WAYLAND_BASH_SHELL` env (runtime
+/// override) > `[tools] windows_shell` config > default `cmd`**. The config key
+/// is the path the desktop app writes; the env var is the runtime escape hatch.
 ///
 /// Scope is deliberately the BashTool only — the hook, MCP-stdio, and skill
 /// shell paths keep `cmd /C` so their established quoting/shim contracts are
@@ -58,10 +79,11 @@ pub fn shell_info() -> ShellInfo {
 /// this only chooses which interpreter, and the denylist + sandbox still
 /// apply to the resulting argv. See issue: PowerShell-on-Windows request.
 pub fn bash_shell_argv_prefix() -> Vec<String> {
-    bash_shell_prefix_for(
-        cfg!(windows),
-        std::env::var("WAYLAND_BASH_SHELL").ok().as_deref(),
-    )
+    let choice = std::env::var("WAYLAND_BASH_SHELL")
+        .ok()
+        .filter(|s| !s.trim().is_empty())
+        .or_else(|| BASH_SHELL_CONFIG.get().cloned().flatten());
+    bash_shell_prefix_for(cfg!(windows), choice.as_deref())
 }
 
 /// Pure core of [`bash_shell_argv_prefix`], split out so every branch —

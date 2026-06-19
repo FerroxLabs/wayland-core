@@ -633,6 +633,13 @@ pub struct ToolsConfig {
     /// finding 7); renaming once is cheaper than renaming twice.
     #[serde(default = "default_true")]
     pub verify_edits: bool,
+    /// Windows-only: select the interpreter the Bash tool runs commands
+    /// through. `"powershell"` (Windows PowerShell 5.1) or `"pwsh"`
+    /// (PowerShell 7+); unset / any other value keeps the default `cmd`.
+    /// No-op on Unix. The `WAYLAND_BASH_SHELL` env var overrides this at
+    /// runtime. The host (desktop app) writes this key from its shell toggle.
+    #[serde(default)]
+    pub windows_shell: Option<String>,
 }
 
 impl Default for ToolsConfig {
@@ -642,6 +649,7 @@ impl Default for ToolsConfig {
             allow_list: default_allow_list(),
             skills: SkillsPermissionConfig::default(),
             verify_edits: true,
+            windows_shell: None,
         }
     }
 }
@@ -2715,6 +2723,8 @@ fn merge_config_files(global: ConfigFile, project: ConfigFile) -> ConfigFile {
             },
             // W6 F15 — project overrides global for the verify-edits flag.
             verify_edits: project.tools.verify_edits || global.tools.verify_edits,
+            // #182 — project overrides global for the Windows shell selector.
+            windows_shell: project.tools.windows_shell.or(global.tools.windows_shell),
         }
     } else {
         ToolsConfig {
@@ -2725,6 +2735,7 @@ fn merge_config_files(global: ConfigFile, project: ConfigFile) -> ConfigFile {
                 allow: [global.tools.skills.allow, project.tools.skills.allow].concat(),
             },
             verify_edits: project.tools.verify_edits || global.tools.verify_edits,
+            windows_shell: project.tools.windows_shell.or(global.tools.windows_shell),
         }
     };
 
@@ -3905,6 +3916,17 @@ allow = ["commit", "review-pr", "db:*"]
         let config: ConfigFile = toml::from_str("").unwrap();
         assert!(config.tools.skills.deny.is_empty());
         assert!(config.tools.skills.allow.is_empty());
+    }
+
+    #[test]
+    fn tools_windows_shell_deserializes_and_defaults_none() {
+        // #182: the desktop writes `[tools] windows_shell = "powershell"`.
+        let config: ConfigFile =
+            toml::from_str("[tools]\nwindows_shell = \"powershell\"\n").unwrap();
+        assert_eq!(config.tools.windows_shell.as_deref(), Some("powershell"));
+        // Absent → None (default `cmd` shell on Windows).
+        let bare: ConfigFile = toml::from_str("").unwrap();
+        assert_eq!(bare.tools.windows_shell, None);
     }
 
     #[test]
