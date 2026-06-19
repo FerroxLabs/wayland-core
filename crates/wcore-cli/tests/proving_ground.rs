@@ -137,6 +137,39 @@ fn connect_all_env_keys_persists_across_relaunch() {
 
 #[cfg(unix)]
 #[test]
+fn same_cell_yields_same_verdicts_twice() {
+    let cell = Cell {
+        name: "replay-determinism",
+        config: ConfigState::ConfiguredOpenAi,
+        term: TermShape::default(),
+        script: |pty, _s| {
+            pty.wait_for(
+                |t| t.contains("Workspace"),
+                std::time::Duration::from_secs(10),
+                "workspace",
+            );
+        },
+    };
+    let a = run_cell(&cell);
+    let b = run_cell(&cell);
+    assert_eq!(
+        a.dirty_death, b.dirty_death,
+        "dirty_death verdict must be stable across runs"
+    );
+    assert_eq!(
+        a.final_screen.contains("Workspace"),
+        b.final_screen.contains("Workspace"),
+        "Workspace-reached verdict must be stable across runs"
+    );
+    assert_eq!(
+        a.config_toml.is_some(),
+        b.config_toml.is_some(),
+        "config-present verdict must be stable across runs"
+    );
+}
+
+#[cfg(unix)]
+#[test]
 fn doctor_content_reachable_at_short_height() {
     let session = Session::new();
     ConfigState::ConfiguredOpenAi.materialize(session.home());
