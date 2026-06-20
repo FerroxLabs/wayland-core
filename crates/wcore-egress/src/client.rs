@@ -169,7 +169,17 @@ impl EgressClientBuilder {
         Self {
             // The single sanctioned raw-reqwest construction in the workspace.
             #[allow(clippy::disallowed_methods)]
-            inner: reqwest::Client::builder(),
+            inner: reqwest::Client::builder()
+                // Connection-pool hygiene. Half-closed idle sockets are the
+                // root of intermittent "error decoding response body" under
+                // bursty LLM load: reqwest reuses a pooled connection the
+                // server already dropped, and the next request fails mid-body.
+                // Expire idle pooled connections quickly and probe liveness
+                // with TCP keepalives so a dead socket is retired before reuse.
+                // (Only affects IDLE pooled connections — an in-flight stream
+                // holds its connection and is unaffected.)
+                .pool_idle_timeout(Some(Duration::from_secs(20)))
+                .tcp_keepalive(Some(Duration::from_secs(15))),
             policy: None,
         }
     }

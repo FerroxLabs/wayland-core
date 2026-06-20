@@ -25,7 +25,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use tokio::sync::RwLock;
 use tracing::{debug, info, warn};
-use wcore_channels::{ChannelManager, OutgoingMessage};
+use wcore_channels::{ChannelError, ChannelManager, OutgoingMessage};
 use wcore_cron::{CronError, JobHandler, Target};
 
 /// Sink for slash-command dispatch.
@@ -130,10 +130,17 @@ impl JobHandler for EngineJobHandler {
                 // field; v0.8.1 uses one-room semantics.
                 let msg = OutgoingMessage::text(channel_name.clone(), text.clone());
                 let guard = mgr.read().await;
-                guard
-                    .send_to(channel_name, msg)
-                    .await
-                    .map_err(|e| CronError::Dispatch(format!("channel send: {e}")))?;
+                guard.send_to(channel_name, msg).await.map_err(|e| match e {
+                    // A `Config` error (e.g. "unknown channel: X") is permanent:
+                    // the channel is not registered in this process and won't be
+                    // without a reconfigure. Map it to NoDispatcher so the runner
+                    // advances `last_fired` (anti-hot-loop) and stages the fire,
+                    // instead of re-firing every tick forever (the source of the
+                    // "unknown channel: desktop" 30s retry storm). Genuine
+                    // transient send failures stay `Dispatch` → retried.
+                    ChannelError::Config(_) => CronError::NoDispatcher,
+                    other => CronError::Dispatch(format!("channel send: {other}")),
+                })?;
                 debug!(
                     target: "wcore_agent::cron",
                     channel = %channel_name,
@@ -400,6 +407,32 @@ mod tests {
         .unwrap();
 
         // Stop cleanly.
+        mgr_arc.write().await.stop_all().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn channel_unknown_returns_no_dispatcher_not_dispatch() {
+        // A channel cron targeting an UNREGISTERED channel must map to
+        // NoDispatcher (permanent → runner stages the fire + advances
+        // last_fired) rather than Dispatch (transient → re-fired every tick
+        // forever — the source of the "unknown channel: desktop" 30s storm).
+        let mut mgr = ChannelManager::new().with_poll_interval(Duration::from_millis(50));
+        mgr.register(Box::new(MockChannel::new("alpha"))).await;
+        mgr.start_all().await.unwrap();
+        let mgr_arc = Arc::new(AsyncRwLock::new(mgr));
+
+        let h = EngineJobHandler::new(Some(mgr_arc.clone()), None, None);
+        let result = h
+            .dispatch(&Target::Channel {
+                channel_name: "desktop".into(),
+                text: "ping".into(),
+            })
+            .await;
+        match result {
+            Err(CronError::NoDispatcher) => {}
+            other => panic!("expected NoDispatcher for unknown channel, got {other:?}"),
+        }
+
         mgr_arc.write().await.stop_all().await.unwrap();
     }
 

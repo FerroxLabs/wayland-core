@@ -76,11 +76,13 @@ where
 /// that builds and sends the request each time. Transient connection-level
 /// reqwest errors (`is_timeout()`, `is_connect()`) are mapped to
 /// [`ProviderError::Connection`] so they satisfy `is_retryable()` and the
-/// loop retries them. `is_request()` is intentionally excluded: it covers
+/// loop retries them. Body/decode errors (`is_body()`/`is_decode()`, i.e.
+/// "error decoding response body" from a stale pooled socket) are also treated
+/// as transient. `is_request()` is intentionally excluded: it covers
 /// non-transient client-side errors (invalid URL, invalid header value) that
-/// will always fail and must not be retried. All other reqwest errors
-/// (redirect loops, decode failures) fall through as `ProviderError::Http`
-/// and are returned immediately.
+/// will always fail and must not be retried. Remaining reqwest errors
+/// (redirect loops, status) fall through as `ProviderError::Http` and are
+/// returned immediately.
 pub async fn send_with_retry<F, Fut>(f: F) -> Result<reqwest::Response, ProviderError>
 where
     F: Fn() -> Fut,
@@ -102,7 +104,12 @@ where
 /// the error before it is ever formatted or stored. Timeout/connect errors map
 /// to the retryable `Connection` variant; everything else is `Http`.
 fn provider_error_from_reqwest(e: reqwest::Error) -> ProviderError {
-    let is_transient = e.is_timeout() || e.is_connect();
+    // `is_body()`/`is_decode()` cover "error decoding response body" — almost
+    // always a half-closed pooled connection dropped mid-body under bursty
+    // load, which is transient and succeeds on a fresh connection. Treat them
+    // as retryable alongside timeout/connect. `is_request()` stays excluded
+    // (invalid URL/header — permanent, must not retry).
+    let is_transient = e.is_timeout() || e.is_connect() || e.is_body() || e.is_decode();
     let e = e.without_url();
     if is_transient {
         ProviderError::Connection(e.to_string())
