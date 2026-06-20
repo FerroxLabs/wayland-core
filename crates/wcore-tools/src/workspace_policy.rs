@@ -154,9 +154,13 @@ impl WorkspacePolicy {
             if SECRET_BASENAMES.contains(&name) {
                 return true;
             }
-            // service-account*.json and *-key.json / *key.json
+            // service-account*.json, bare key.json, and separator-bounded *-key.json / *_key.json.
+            // Does NOT match monkey.json, turnkey.json, hotkey.json (no false positives).
             if name.ends_with(".json")
-                && (name.starts_with("service-account") || name.ends_with("key.json"))
+                && (name.starts_with("service-account")
+                    || name == "key.json"
+                    || name.ends_with("-key.json")
+                    || name.ends_with("_key.json"))
             {
                 return true;
             }
@@ -215,6 +219,13 @@ mod tests {
         let p = WorkspacePolicy::trusted_local(dir.path());
         assert_eq!(p.trust(), WorkspaceTrust::Trusted);
         assert!(p.writable_roots().iter().any(|w| w == p.root()));
+        // Root identity: writable_roots()[0] must equal the canonicalized tmpdir.
+        assert_eq!(
+            p.root(),
+            std::fs::canonicalize(dir.path())
+                .unwrap_or_else(|_| dir.path().to_path_buf())
+                .as_path()
+        );
         // Trusted reuses the user's global caches — no redirect.
         assert!(p.cache_env().is_empty());
     }
@@ -292,6 +303,35 @@ mod tests {
             assert!(
                 !p.is_secret_path(&root.join(rel)),
                 "{rel} must NOT be secret"
+            );
+        }
+    }
+
+    #[test]
+    fn is_secret_path_does_not_overmatch_json() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let p = WorkspacePolicy::contained(root);
+
+        // These must NOT be flagged — they share a suffix but are not credentials.
+        for not_secret in ["monkey.json", "package.json", "config.json"] {
+            assert!(
+                !p.is_secret_path(&root.join(not_secret)),
+                "{not_secret} must NOT be secret"
+            );
+        }
+
+        // These MUST be flagged — bounded credential patterns.
+        for secret in [
+            "service-account.json",
+            "service-account-prod.json",
+            "ci-key.json",
+            "app_key.json",
+            "key.json",
+        ] {
+            assert!(
+                p.is_secret_path(&root.join(secret)),
+                "{secret} must be secret"
             );
         }
     }
