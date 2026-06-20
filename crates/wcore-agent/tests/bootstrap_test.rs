@@ -575,3 +575,28 @@ async fn w2_v063_bootstrap_skips_kg_when_disabled() {
     unsafe { std::env::remove_var(wcore_memory::kg::ENV_KG) };
     assert!(!enabled, "WAYLAND_KG=off must disable KG init in bootstrap");
 }
+
+/// Task 5: a plain (non-channel) bootstrap session must install a Trusted
+/// WorkspacePolicy on the registry so BashTool's OS sandbox is rooted at
+/// the workspace directory.
+#[tokio::test]
+async fn bootstrap_workspace_policy_installed_trusted() {
+    let config = minimal_config();
+    let workdir = tempfile::TempDir::new().expect("workdir");
+    let mut result = AgentBootstrap::new(config, workdir.path().to_str().unwrap(), null_output())
+        .build()
+        .await
+        .expect("bootstrap should succeed");
+
+    let policy = result
+        .engine
+        .tools()
+        .workspace_policy()
+        .expect("workspace_policy must be Some after bootstrap");
+
+    assert_eq!(
+        policy.trust(),
+        wcore_tools::workspace_policy::WorkspaceTrust::Trusted,
+        "non-channel session must get a Trusted workspace policy"
+    );
+}

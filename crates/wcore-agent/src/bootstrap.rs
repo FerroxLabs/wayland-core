@@ -1950,6 +1950,22 @@ impl AgentBootstrap {
             );
         }
 
+        // Every session gets a workspace policy so BashTool's OS sandbox is
+        // rooted at the workspace (fixes the empty-allowlist / cwd:None pain
+        // that broke local + desktop builds). A channel `Workspace` posture
+        // already installed a `Contained` policy via `apply_posture`; for
+        // every other path (local CLI / TUI / json-stream / ACP / `Full`
+        // channel) install a `Trusted` policy derived from this session's
+        // working directory.
+        if registry.workspace_policy().is_none() {
+            let policy = std::sync::Arc::new(
+                wcore_tools::workspace_policy::WorkspacePolicy::trusted_local(
+                    std::path::PathBuf::from(&self.workspace),
+                ),
+            );
+            registry.set_workspace_policy(policy);
+        }
+
         let mut engine = if let Some(session) = self.resume_session {
             AgentEngine::resume_with_provider(
                 provider.clone(),
