@@ -112,11 +112,17 @@ pub fn apply_posture(registry: &mut ToolRegistry, scope: &ChannelToolScope) {
         registry.retain(|t| keep_under(posture, t));
     }
     if scope.posture == ChannelToolPosture::Workspace {
+        let policy = Arc::new(wcore_tools::workspace_policy::WorkspacePolicy::contained(
+            scope.workspace_root.clone(),
+        ));
+        // SecretDenyFs INNER so it inspects the canonical path SandboxedFs
+        // produces (catches symlinks-to-secrets resolving inside the root).
         let jail = wcore_tools::vfs::SandboxedFs::new(
-            wcore_tools::vfs::RealFs,
+            wcore_tools::vfs::SecretDenyFs::new(wcore_tools::vfs::RealFs, Arc::clone(&policy)),
             scope.workspace_root.clone(),
         );
         registry.set_tool_vfs(Arc::new(jail));
+        registry.set_workspace_policy(policy);
     }
 }
 
@@ -335,5 +341,29 @@ mod tests {
             reg.tool_vfs().is_none(),
             "conversational posture installs no vfs (fs tools are dropped, not jailed)"
         );
+    }
+
+    #[test]
+    fn workspace_posture_still_drops_bash() {
+        // Deferred: Bash stays out of Workspace until OS-layer secret-read-deny
+        // exists (else `cat .env` exfiltrates past SecretDenyFs).
+        assert!(!WORKSPACE_FS_TOOLS.contains(&"Bash"));
+    }
+
+    #[test]
+    fn apply_posture_workspace_installs_contained_policy_and_jail() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut registry = ToolRegistry::new();
+        registry.register(Box::new(wcore_tools::read::ReadTool::new(None)));
+        let scope = ChannelToolScope {
+            posture: ChannelToolPosture::Workspace,
+            workspace_root: dir.path().to_path_buf(),
+        };
+        apply_posture(&mut registry, &scope);
+        assert!(registry.tool_vfs().is_some());
+        let policy = registry
+            .workspace_policy()
+            .expect("Workspace installs a policy");
+        assert_eq!(policy.trust(), wcore_tools::WorkspaceTrust::Contained);
     }
 }
