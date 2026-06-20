@@ -583,7 +583,7 @@ async fn w2_v063_bootstrap_skips_kg_when_disabled() {
 async fn bootstrap_workspace_policy_installed_trusted() {
     let config = minimal_config();
     let workdir = tempfile::TempDir::new().expect("workdir");
-    let mut result = AgentBootstrap::new(config, workdir.path().to_str().unwrap(), null_output())
+    let result = AgentBootstrap::new(config, workdir.path().to_str().unwrap(), null_output())
         .build()
         .await
         .expect("bootstrap should succeed");
