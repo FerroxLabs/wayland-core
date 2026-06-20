@@ -39,6 +39,8 @@ pub enum VfsError {
     OutsideSandbox { path: PathBuf, root: PathBuf },
     #[error("path {path:?} not found")]
     NotFound { path: PathBuf },
+    #[error("refused: {path} is a protected secret path")]
+    SecretDenied { path: PathBuf },
 }
 
 /// Provider-neutral filesystem the agent runs against.
@@ -330,5 +332,112 @@ impl<F: VirtualFs + 'static> VirtualFs for SandboxedFs<F> {
     }
     fn root(&self) -> Option<&Path> {
         Some(&self.root)
+    }
+}
+
+/// Wraps a `VirtualFs` and refuses any op whose path is a secret per the
+/// active `WorkspacePolicy`. Layer INSIDE `SandboxedFs`
+/// (`SandboxedFs::new(SecretDenyFs::new(RealFs, p), root)`) so it inspects
+/// the canonicalized path and catches symlinks-to-secrets inside the root.
+pub struct SecretDenyFs<F: VirtualFs> {
+    inner: F,
+    policy: std::sync::Arc<crate::workspace_policy::WorkspacePolicy>,
+}
+
+impl<F: VirtualFs> SecretDenyFs<F> {
+    pub fn new(inner: F, policy: std::sync::Arc<crate::workspace_policy::WorkspacePolicy>) -> Self {
+        Self { inner, policy }
+    }
+    fn guard(&self, path: &Path) -> Result<(), VfsError> {
+        if self.policy.is_secret_path(path) {
+            return Err(VfsError::SecretDenied {
+                path: path.to_path_buf(),
+            });
+        }
+        Ok(())
+    }
+}
+
+#[async_trait]
+impl<F: VirtualFs + 'static> VirtualFs for SecretDenyFs<F> {
+    async fn read(&self, path: &Path) -> Result<Vec<u8>, VfsError> {
+        self.guard(path)?;
+        self.inner.read(path).await
+    }
+    async fn write(&self, path: &Path, contents: &[u8]) -> Result<(), VfsError> {
+        self.guard(path)?;
+        self.inner.write(path, contents).await
+    }
+    async fn exists(&self, path: &Path) -> Result<bool, VfsError> {
+        self.guard(path)?;
+        self.inner.exists(path).await
+    }
+    async fn list(&self, dir: &Path) -> Result<Vec<PathBuf>, VfsError> {
+        self.guard(dir)?;
+        self.inner.list(dir).await
+    }
+    async fn remove_file(&self, path: &Path) -> Result<(), VfsError> {
+        self.guard(path)?;
+        self.inner.remove_file(path).await
+    }
+    async fn metadata(&self, path: &Path) -> Result<VfsMetadata, VfsError> {
+        self.guard(path)?;
+        self.inner.metadata(path).await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn secret_deny_fs_blocks_and_passes() {
+        use crate::workspace_policy::WorkspacePolicy;
+        use std::sync::Arc;
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::write(root.join(".env"), b"TOKEN=abc").unwrap();
+        let policy = Arc::new(WorkspacePolicy::contained(root));
+        let fs = SecretDenyFs::new(RealFs, Arc::clone(&policy));
+
+        assert!(matches!(
+            fs.read(&root.join(".env")).await,
+            Err(VfsError::SecretDenied { .. })
+        ));
+        assert!(matches!(
+            fs.write(&root.join(".env"), b"x").await,
+            Err(VfsError::SecretDenied { .. })
+        ));
+
+        fs.write(&root.join("main.rs"), b"fn main(){}")
+            .await
+            .unwrap();
+        assert_eq!(
+            fs.read(&root.join("main.rs")).await.unwrap(),
+            b"fn main(){}"
+        );
+    }
+
+    #[tokio::test]
+    async fn secret_deny_catches_symlink_to_secret_when_inner() {
+        // Load-bearing: SecretDenyFs must be layered INSIDE SandboxedFs so it
+        // sees the canonical (symlink-resolved) path. A benign-named symlink
+        // pointing at .env must be denied.
+        use crate::workspace_policy::WorkspacePolicy;
+        use std::sync::Arc;
+        let dir = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(dir.path()).unwrap();
+        std::fs::write(root.join(".env"), b"TOKEN=abc").unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(root.join(".env"), root.join("notes.txt")).unwrap();
+        #[cfg(not(unix))]
+        return; // symlink test is unix-only
+
+        let policy = Arc::new(WorkspacePolicy::contained(&root));
+        let jail = SandboxedFs::new(SecretDenyFs::new(RealFs, Arc::clone(&policy)), root.clone());
+        assert!(matches!(
+            jail.read(&root.join("notes.txt")).await,
+            Err(VfsError::SecretDenied { .. })
+        ));
     }
 }
