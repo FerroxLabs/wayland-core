@@ -250,7 +250,63 @@ not subsume each other.
 When in doubt, prefer the lower layer. Functionality at the wrong layer
 is the most common source of subsequent refactors.
 
-## 5. Further reading
+## 5. Unified WorkspacePolicy
+
+`WorkspacePolicy` (`crates/wcore-tools/src/workspace_policy.rs`) is the
+single source of truth for a session's filesystem and network containment.
+All sandbox decisions (Bash OS-sandbox manifest, VFS jail) derive from one
+policy object, set once at engine bootstrap.
+
+### Two trust modes
+
+| Mode | When | File tools | Bash sandbox | Caches |
+|------|------|-----------|--------------|--------|
+| **`Trusted`** | Local CLI / desktop sessions on the user's own machine | `RealFs` (no jail) | Rooted at workspace; toolchain dirs + global caches readable | Reused from `~/.cargo`, `~/.npm`, etc. — no redirect |
+| **`Contained`** | Remote `Workspace` posture | `SandboxedFs ∘ SecretDenyFs` (write-scoped + secret deny) | Rooted at workspace; tight write scope; toolchain read-only | Redirected into `<root>/.wcache/{cargo,npm,pip}` |
+
+Both modes seed network policy from `default_bash_network_policy()`, which
+honors the `WAYLAND_BASH_ALLOW_NETWORK` env var. Network access is never
+hardcoded inside `WorkspacePolicy`.
+
+### Two enforcement adapters
+
+1. **`SandboxManifest`** (`wcore-tools`) — the Bash OS-sandbox adapter.
+   `build_sandbox_pieces()` in `bash.rs` accepts an optional `&WorkspacePolicy`
+   and derives the `SandboxManifest` (cwd, writable roots, readable roots,
+   cache-env injections, network policy) that `wcore-sandbox` enforces on
+   every Bash tool invocation.
+
+2. **VFS jail** (Contained only) — the in-process file-tool adapter.
+   `SandboxedFs ∘ SecretDenyFs` wraps `RealFs`: writes outside the workspace
+   root are rejected; reads of secret paths (`.env`, `.aws/credentials`, SSH
+   keys, TLS certs, Terraform state, service-account JSON, etc.) are denied
+   even when the path is inside the workspace.
+
+### Install points
+
+| Where | What | Why |
+|-------|------|-----|
+| `wcore-agent/src/bootstrap.rs` | `WorkspacePolicy::trusted_local(cwd)` installed on every session | Local sessions need sandbox roots without a VFS jail |
+| `wcore-agent` `apply_posture` | `WorkspacePolicy::contained(workspace_root)` + `SecretDenyFs` applied | Remote Workspace posture tightens the boundary |
+
+### Deferred follow-ups (not in scope for this PR)
+
+1. **OS-sandbox secret-read-deny across macOS / Linux / Windows backends +
+   malicious-fixture matrix** — the VFS layer denies reads in-process, but
+   the OS sandbox (bwrap / sandbox-exec / AppContainer) does not yet enforce
+   the secret-path list as a readdir deny rule. Until this lands, a contained
+   Bash invocation can still `cat ~/.aws/credentials` at the OS level.
+
+2. **Contained Bash-in-Workspace** — depends on #1. Bash is explicitly
+   dropped from the `Workspace` posture today (`workspace_posture_still_drops_bash`
+   test guards this). Once the OS-sandbox deny layer covers secrets, Bash can
+   be re-admitted under `Contained` with the deny list enforced by the kernel.
+
+3. **MCP child-process coverage** — MCP stdio servers launched inside a
+   Workspace posture inherit the parent environment but are not yet subject
+   to the `WorkspacePolicy` sandbox manifest.
+
+## 6. Further reading
 
 - [AGENTS.md](../AGENTS.md) — full conventions, build commands, code style, crate map
 - [docs/getting-started.md](getting-started.md) — installation, CLI usage, config cascading precedence
