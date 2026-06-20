@@ -5,7 +5,7 @@ use async_trait::async_trait;
 use regex::RegexSet;
 use serde_json::{Value, json};
 
-use wcore_config::shell::shell_info;
+use wcore_config::shell::bash_shell_argv_prefix;
 use wcore_protocol::events::ToolCategory;
 use wcore_sandbox::{
     NetworkPolicy, SandboxChunk, SandboxCommand, SandboxManifest, SandboxOutput, SyscallPolicy,
@@ -70,12 +70,10 @@ fn build_sandbox_pieces(
     command: &str,
     policy: Option<&crate::workspace_policy::WorkspacePolicy>,
 ) -> (SandboxManifest, SandboxCommand) {
-    let info = shell_info();
-    let argv = vec![
-        info.program.to_string(),
-        info.flag.to_string(),
-        command.to_string(),
-    ];
+    // Shell prefix honors the Windows WAYLAND_BASH_SHELL=powershell|pwsh override
+    // (BashTool only); defaults to sh -c / cmd /C.
+    let mut argv = bash_shell_argv_prefix();
+    argv.push(command.to_string());
     let mut manifest = SandboxManifest {
         network: default_bash_network_policy(),
         // Curated env — secrets excluded, see the doc-comment above.
@@ -1025,6 +1023,10 @@ mod tests {
         assert!(cmd.cwd.is_none());
         assert!(m.fs_write_allow.is_empty());
         assert_eq!(m.network, default_bash_network_policy());
+        // Regression: argv must come from bash_shell_argv_prefix (honors the
+        // WAYLAND_BASH_SHELL Windows override), NOT from the hardcoded shell_info().
+        #[cfg(unix)]
+        assert_eq!(cmd.argv.first().map(|s| s.as_str()), Some("sh"));
     }
 
     #[test]
