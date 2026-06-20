@@ -2309,6 +2309,13 @@ async fn run_json_stream_mode(
             .with_sub_agent_traces(true),
     );
     let approval_manager = Arc::new(ToolApprovalManager::new());
+    // Seed the initial approval posture from config (`[default] approval_mode`)
+    // — the TUI path does this at boot, but the json-stream path historically
+    // only honored `--force`, so a config-set `approval_mode = "force"` had NO
+    // effect for hosts/apps (which run json-stream). That left the session at
+    // Default, gating every mutating tool behind an `approval_required` the
+    // host may never answer. `--force` still overrides to Force below.
+    approval_manager.set_mode(approval_mode_to_session(config.approval_mode));
     // F-002: plumb --force into json-stream mode. In the TUI path the
     // approval manager is flipped to Force before the engine boots; the
     // json-stream path was missing the same step, causing every mutating

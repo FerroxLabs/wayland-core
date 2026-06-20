@@ -714,7 +714,15 @@ fn default_provider() -> String {
     "anthropic".to_string()
 }
 fn default_max_tokens() -> u32 {
-    8192
+    // Output-token CAP (not a target — only generated tokens are billed). 8192
+    // truncated real build turns: a single full-HTML generation needed ~19k
+    // output tokens and got cut off, after which the engine choked on the
+    // broken file. 32000 covers large code/doc generations with headroom and
+    // is within every frontier model's output limit (the primary targets).
+    // NOTE: this is a flat default; a per-model cap (clamped to the model's
+    // output limit, à la hermes `chat_completions` / deepcode `get_safe_max`)
+    // is the proper follow-up for small-output models.
+    32000
 }
 fn default_allow_list() -> Vec<String> {
     // Read-only info-gathering tools — no destructive action, safe to
@@ -3078,7 +3086,7 @@ const DEFAULT_CONFIG_TEMPLATE: &str = r#"# wayland-core configuration
 [default]
 provider = "anthropic"            # built-in provider or custom alias from [providers.<name>]
 # model = "claude-sonnet-4-6"      # default; see default_model_for() in this crate
-max_tokens = 8192
+max_tokens = 32000                # output-token cap; raise for large build turns, lower for small-output models
 # max_turns = 30                  # optional: omit for unlimited turns
 # system_prompt = "..."          # optional custom system prompt
 
@@ -3586,7 +3594,7 @@ mod tests {
             },
             ..Default::default()
         };
-        // Project stays at built-in defaults (provider = "anthropic", max_tokens = 8192, max_turns = None)
+        // Project stays at built-in defaults (provider = "anthropic", max_tokens = 32000, max_turns = None)
         let project = ConfigFile::default();
 
         let merged = merge_config_files(global, project);
@@ -3974,7 +3982,7 @@ allow = ["commit", "review-pr", "db:*"]
         let config: ConfigFile = toml::from_str("").unwrap();
 
         assert_eq!(config.default.provider, "anthropic");
-        assert_eq!(config.default.max_tokens, 8192);
+        assert_eq!(config.default.max_tokens, 32000);
         assert_eq!(config.default.max_turns, None);
         assert!(config.default.model.is_none());
         assert!(config.providers.is_empty());
