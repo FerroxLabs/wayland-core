@@ -531,7 +531,12 @@ impl OpenAIProvider {
         }
         body[max_tokens_field] = json!(request.max_tokens);
 
-        if !request.tools.is_empty() {
+        // Attach tools, but gate on the model family: Groq's agentic Compound
+        // models reject a caller-supplied `tools` array with a 400 that kills
+        // the turn (they do their own internal tool use). Per-request, since one
+        // provider serves many models in a session — mirrors the
+        // `reasoning_effort` gate below.
+        if !request.tools.is_empty() && openai_compat::model_supports_tool_calling(&request.model) {
             body["tools"] = json!(Self::build_tools(&request.tools));
         }
 
@@ -1858,6 +1863,44 @@ mod tests {
             body["stop"],
             json!(["\n\nLet me know if", "\n\nFeel free to"]),
             "OpenAI must emit stops under the `stop` key as an array"
+        );
+    }
+
+    // --- Groq Compound: tools omitted for agentic models -------------------
+
+    fn one_tool() -> Vec<ToolDef> {
+        vec![ToolDef {
+            name: "Read".into(),
+            description: "Read a file".into(),
+            input_schema: json!({"type": "object", "properties": {"path": {"type": "string"}}}),
+            deferred: false,
+        }]
+    }
+
+    #[test]
+    fn build_request_body_emits_tools_for_normal_model() {
+        let mut req = stop_req();
+        req.tools = one_tool();
+        let body = stop_provider().build_request_body(&req);
+        assert!(
+            body.get("tools")
+                .and_then(|t| t.as_array())
+                .is_some_and(|a| a.len() == 1),
+            "a normal model must carry the caller's tools"
+        );
+    }
+
+    #[test]
+    fn build_request_body_omits_tools_for_groq_compound() {
+        // Groq Compound 400s on a `tools` array — the engine must omit it so the
+        // turn succeeds instead of breaking.
+        let mut req = stop_req();
+        req.model = "compound-beta".into();
+        req.tools = one_tool();
+        let body = stop_provider().build_request_body(&req);
+        assert!(
+            body.get("tools").is_none(),
+            "Groq Compound must receive NO `tools` field (it rejects tool calling)"
         );
     }
 
