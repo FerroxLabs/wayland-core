@@ -399,7 +399,7 @@ async fn load_skill_file(
     // variable substitution in skill content.
     let skill_root = Some(skill_dir.to_string_lossy().into_owned());
 
-    let metadata = parse_skill_fields(
+    let mut metadata = parse_skill_fields(
         &parsed.frontmatter,
         &parsed.content,
         &resolved_name,
@@ -408,12 +408,38 @@ async fn load_skill_file(
         skill_root.as_deref(),
     );
 
+    // Auto-drafted skills carry a sibling `manifest.json` written by the
+    // SkillDrafter. Until a human reviews one (`needs_review: true`), it must
+    // NOT be advertised to the model: an unreviewed draft in the catalog makes
+    // models notice it and narrate skipping it into user-facing output (e.g. a
+    // skill drafted from trivial test turns). Keep it LOADED — so the user can
+    // still review or explicitly invoke it — but hide it from model invocation.
+    if draft_needs_review(skill_dir).await {
+        metadata.disable_model_invocation = true;
+    }
+
     let resolved_path = try_canonicalize(file_path).unwrap_or_else(|| file_path.to_owned());
 
     Some(LoadedSkill {
         metadata,
         resolved_path,
     })
+}
+
+/// True when `skill_dir` holds an auto-drafted skill that has not been reviewed
+/// yet — a sibling `manifest.json` with `"needs_review": true` (written by the
+/// `SkillDrafter`). Best-effort: a missing, unreadable, or malformed manifest,
+/// or one without the flag, means "not a pending draft" (`false`), so
+/// hand-authored skills are completely unaffected.
+async fn draft_needs_review(skill_dir: &Path) -> bool {
+    let manifest = skill_dir.join("manifest.json");
+    let Ok(bytes) = tokio::fs::read(&manifest).await else {
+        return false;
+    };
+    serde_json::from_slice::<serde_json::Value>(&bytes)
+        .ok()
+        .and_then(|v| v.get("needs_review").and_then(serde_json::Value::as_bool))
+        .unwrap_or(false)
 }
 
 // ---------------------------------------------------------------------------

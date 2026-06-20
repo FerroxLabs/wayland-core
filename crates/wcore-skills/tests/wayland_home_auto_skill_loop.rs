@@ -102,3 +102,65 @@ async fn auto_drafted_skill_appears_in_catalog() {
         hit.unwrap().file_path
     );
 }
+
+/// Write an auto-drafted skill WITH the `SkillDrafter`'s sibling `manifest.json`.
+fn write_auto_skill_with_manifest(home: &Path, name: &str, needs_review: bool) {
+    let dir = home.join("skills").join("auto").join(name);
+    fs::create_dir_all(&dir).unwrap();
+    fs::write(
+        dir.join("SKILL.md"),
+        format!("---\nname: {name}\ndescription: Auto-drafted recall skill\n---\n\nBody.\n"),
+    )
+    .unwrap();
+    fs::write(
+        dir.join("manifest.json"),
+        format!("{{\"auto_drafted\":true,\"needs_review\":{needs_review},\"name\":\"{name}\"}}"),
+    )
+    .unwrap();
+}
+
+#[tokio::test]
+#[serial(wayland_home_env)]
+async fn unreviewed_auto_draft_loads_but_is_hidden_from_the_model() {
+    // Regression: an auto-drafted skill the drafter wrote from trivial/test
+    // turns leaked into the model's catalog and got narrated in user-facing
+    // output. An unreviewed draft (`needs_review: true`) must NOT be
+    // model-invocable, yet must still LOAD so the user can review/invoke it.
+    let home = TempDir::new().unwrap();
+    let _guard = WaylandHomeGuard::set(home.path());
+    write_auto_skill_with_manifest(home.path(), "auto-needs-review", true);
+
+    let cwd = TempDir::new().unwrap();
+    let skills = load_all_skills(cwd.path(), &[], false, None).await;
+
+    let hit = skills
+        .iter()
+        .find(|s| s.name.ends_with("auto-needs-review"))
+        .expect("an unreviewed draft must still be loaded (for review/invocation)");
+    assert!(
+        hit.disable_model_invocation,
+        "an unreviewed auto-draft (needs_review=true) must be hidden from the model"
+    );
+}
+
+#[tokio::test]
+#[serial(wayland_home_env)]
+async fn reviewed_auto_draft_is_visible_to_the_model() {
+    // Once a human reviews a draft (`needs_review: false`) it becomes a normal
+    // model-visible skill — the gate keys off the flag, not on auto_drafted.
+    let home = TempDir::new().unwrap();
+    let _guard = WaylandHomeGuard::set(home.path());
+    write_auto_skill_with_manifest(home.path(), "auto-reviewed", false);
+
+    let cwd = TempDir::new().unwrap();
+    let skills = load_all_skills(cwd.path(), &[], false, None).await;
+
+    let hit = skills
+        .iter()
+        .find(|s| s.name.ends_with("auto-reviewed"))
+        .expect("a reviewed draft loads");
+    assert!(
+        !hit.disable_model_invocation,
+        "a reviewed draft (needs_review=false) stays model-visible"
+    );
+}
