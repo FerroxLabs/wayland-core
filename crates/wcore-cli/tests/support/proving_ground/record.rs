@@ -130,13 +130,7 @@ impl RunRecord {
         // should return immediately with a status.
         let exit = pty
             .wait_for_exit(std::time::Duration::from_millis(100))
-            .and_then(|status| {
-                if status.success() {
-                    Some(0i32)
-                } else {
-                    Some(1i32)
-                }
-            });
+            .map(|status| if status.success() { 0i32 } else { 1i32 });
 
         Self {
             final_screen,

@@ -34,9 +34,7 @@ fn binary_matches_repo_head() {
         // not a git repo (box gate, tarball build) — skip
         return;
     }
-    let head = String::from_utf8_lossy(&head_out.stdout)
-        .trim()
-        .to_string();
+    let head = String::from_utf8_lossy(&head_out.stdout).trim().to_string();
     if head.is_empty() {
         return;
     }
@@ -88,9 +86,7 @@ fn binary_matches_repo_head() {
     // Enabled when CI or PROVING_GROUND_STRICT_PROVENANCE is set (any
     // non-empty value).  Only safe in environments where the binary is
     // freshly built at HEAD immediately before the test run.
-    let strict = std::env::var("CI")
-        .map(|v| !v.is_empty())
-        .unwrap_or(false)
+    let strict = std::env::var("CI").map(|v| !v.is_empty()).unwrap_or(false)
         || std::env::var("PROVING_GROUND_STRICT_PROVENANCE")
             .map(|v| !v.is_empty())
             .unwrap_or(false);
