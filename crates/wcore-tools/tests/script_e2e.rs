@@ -130,6 +130,7 @@ async fn script_step_inherits_parent_vfs_sandbox() {
         source_agent: None,
         sink: Arc::new(wcore_tools::NullToolOutputSink),
         file_write_notifier: None,
+        workspace: None,
     };
 
     let disp = ctx_aware_dispatcher();

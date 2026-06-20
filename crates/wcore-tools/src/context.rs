@@ -23,6 +23,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::file_write_notifier::FileWriteNotifier;
 use crate::vfs::{RealFs, VirtualFs};
+use crate::workspace_policy::WorkspacePolicy;
 use crate::{NullToolOutputSink, ToolOutputSink};
 
 /// Per-tool-call context. Cheap to construct in tests via
@@ -62,6 +63,13 @@ pub struct ToolContext {
     /// without a live watcher) means the tools skip the notify call and
     /// behave exactly as before.
     pub file_write_notifier: Option<Arc<dyn FileWriteNotifier>>,
+
+    /// Contained-or-trusted workspace policy for this session. `None` (the
+    /// pure test default) means unconfined legacy behaviour. When set,
+    /// BashTool derives its OS-sandbox manifest (cwd, allowlists, cache env,
+    /// network) from it; in `Contained` mode the dispatcher also installs a
+    /// `SandboxedFs ∘ SecretDenyFs` jail as `vfs`.
+    pub workspace: Option<Arc<WorkspacePolicy>>,
 }
 
 impl ToolContext {
@@ -75,6 +83,7 @@ impl ToolContext {
             source_agent: None,
             sink: Arc::new(NullToolOutputSink),
             file_write_notifier: None,
+            workspace: None,
         }
     }
 
@@ -96,6 +105,7 @@ impl ToolContext {
             source_agent,
             sink,
             file_write_notifier: None,
+            workspace: None,
         }
     }
 
@@ -107,6 +117,11 @@ impl ToolContext {
         self.file_write_notifier = Some(n);
         self
     }
+
+    pub fn with_workspace(mut self, policy: Arc<WorkspacePolicy>) -> Self {
+        self.workspace = Some(policy);
+        self
+    }
 }
 
 #[cfg(test)]
@@ -116,6 +131,18 @@ mod tests {
     use async_trait::async_trait;
     use std::path::{Path, PathBuf};
     use std::sync::Arc;
+
+    #[test]
+    fn workspace_defaults_none_and_attaches() {
+        use crate::workspace_policy::WorkspacePolicy;
+        use std::sync::Arc;
+        let ctx = ToolContext::test_default();
+        assert!(ctx.workspace.is_none());
+        let dir = tempfile::tempdir().unwrap();
+        let policy = Arc::new(WorkspacePolicy::trusted_local(dir.path()));
+        let ctx = ctx.with_workspace(Arc::clone(&policy));
+        assert_eq!(ctx.workspace.as_ref().unwrap().root(), policy.root());
+    }
 
     #[derive(Default)]
     struct CountingNotifier {
