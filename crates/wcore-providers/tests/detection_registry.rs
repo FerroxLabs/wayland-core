@@ -20,14 +20,15 @@ fn sk_flux_is_a_declared_prefix() {
     );
 }
 
-/// Detection-only slugs: declared in the fingerprint prefix table but NOT (yet)
-/// connectable `ProviderType`s. The Proving Ground SURFACED this inconsistency —
-/// a pasted `r8_…`/`hf_…` key detects as replicate/huggingface, then fails to
-/// connect because no such provider exists. Tracked as a finding (resolve by
-/// either adding the ProviderType or removing the prefix). Until then they are an
-/// explicit known-exception set, so this invariant still gates any NEW undeclared
-/// slug while documenting the known gap.
-const DETECTION_ONLY_SLUGS: &[&str] = &["replicate", "huggingface"];
+/// Detection-only slugs: prefixes declared in the fingerprint table that do NOT
+/// map to a connectable `ProviderType`. Intentionally EMPTY — every advertised
+/// prefix must be connectable, or we make a broken promise to the user (detect a
+/// key, then fail to connect). The Proving Ground surfaced `r8_`/`hf_`
+/// (replicate/huggingface) as exactly this; they were removed rather than left
+/// detectable-but-dead. If you add a prefix for a provider that isn't wired yet,
+/// the invariant below will fail — wire the `ProviderType`, or don't declare the
+/// prefix until it connects.
+const DETECTION_ONLY_SLUGS: &[&str] = &[];
 
 #[test]
 fn every_declared_prefix_slug_parses_or_is_known_detection_only() {

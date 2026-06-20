@@ -112,8 +112,6 @@ const UNIQUE_PREFIXES: &[(&str, &str)] = &[
     ("gsk_", "groq"),
     ("xai-", "xai"),
     ("pplx-", "perplexity"),
-    ("r8_", "replicate"),
-    ("hf_", "huggingface"),
     ("AIza", "gemini"),
 ];
 
@@ -134,9 +132,7 @@ fn slug_for_env_var(name: &str) -> Option<&'static str> {
         "TOGETHER_API_KEY" => "together",
         "FIREWORKS_API_KEY" => "fireworks-ai",
         "COHERE_API_KEY" => "cohere",
-        "REPLICATE_API_TOKEN" => "replicate",
         "GEMINI_API_KEY" | "GOOGLE_API_KEY" => "gemini",
-        "HF_TOKEN" | "HUGGINGFACE_API_KEY" | "HUGGING_FACE_HUB_TOKEN" => "huggingface",
         _ => return None,
     };
     Some(slug)
@@ -404,8 +400,6 @@ mod tests {
             ("gsk_abcd1234", "groq"),
             ("xai-abcd1234", "xai"),
             ("pplx-abcd1234", "perplexity"),
-            ("r8_abcd1234", "replicate"),
-            ("hf_abcd1234", "huggingface"),
             ("AIzaSyA1234567890abcdefghijklmnopqrst", "gemini"),
         ];
         for (key, want) in cases {
