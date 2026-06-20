@@ -665,18 +665,121 @@ impl Tool for BashTool {
     /// W8a A.4: ctx-aware streaming path. Same select-on-cancel as
     /// `execute_with_ctx` but preserves W7's chunk-streaming behaviour
     /// when the cancellation token never fires.
+    ///
+    /// Crucially, this builds the sandbox manifest from `ctx.workspace`
+    /// (cwd, allowlists, cache-env, network) exactly as `execute_with_ctx`
+    /// does, so the streamed command runs inside the WorkspacePolicy rather
+    /// than with the policy-less `None` fallback that the non-ctx
+    /// `execute_streaming` uses.
     async fn execute_streaming_with_ctx(
         &self,
         input: Value,
         ctx: &ToolContext,
         sink: &dyn ToolOutputSink,
     ) -> ToolResult {
+        let Some(command) = input["command"].as_str() else {
+            return ToolResult {
+                content: "Missing required parameter: command".to_string(),
+                is_error: true,
+            };
+        };
+
+        if let Some(reason) = check_denylist(command) {
+            return ToolResult {
+                content: reason.to_string(),
+                is_error: true,
+            };
+        }
+
+        let timeout_ms = input["timeout"]
+            .as_u64()
+            .unwrap_or(DEFAULT_TIMEOUT_MS)
+            .min(MAX_TIMEOUT_MS);
+        let timeout = Duration::from_millis(timeout_ms);
+
+        let backend: Arc<dyn SandboxBackend> = Arc::from(default_for_platform());
+        let (manifest, cmd) = build_sandbox_pieces(command, ctx.workspace.as_deref());
+        let net = manifest.network.clone();
+
+        let mut rx = match backend.execute_streaming(&manifest, cmd) {
+            Ok(rx) => rx,
+            Err(e) => {
+                return ToolResult {
+                    content: format!("Failed to execute command: {}", e),
+                    is_error: true,
+                };
+            }
+        };
+
+        let mut stdout_buf = String::new();
+        let mut stderr_buf = String::new();
+        let mut exit_code: Option<i32> = None;
+
+        fn drain_lines(bytes: &[u8], sink: &dyn ToolOutputSink, buf: &mut String) {
+            let text = String::from_utf8_lossy(bytes);
+            for line in text.lines() {
+                sink.emit_chunk(line);
+                buf.push_str(line);
+                buf.push('\n');
+            }
+        }
+
+        let run = async {
+            while let Some(chunk) = rx.recv().await {
+                match chunk {
+                    SandboxChunk::Stdout(bytes) => {
+                        drain_lines(&bytes, sink, &mut stdout_buf);
+                    }
+                    SandboxChunk::Stderr(bytes) => {
+                        drain_lines(&bytes, sink, &mut stderr_buf);
+                    }
+                    SandboxChunk::Exit {
+                        exit_code: code, ..
+                    } => {
+                        exit_code = Some(code);
+                    }
+                }
+            }
+        };
+
+        let timed = tokio::time::timeout(timeout, run);
+
         tokio::select! {
             _ = ctx.cancel.cancelled() => ToolResult {
                 content: "Bash command cancelled by cancellation token".to_string(),
                 is_error: true,
             },
-            result = self.execute_streaming(input, sink) => result,
+            res = timed => {
+                if res.is_err() {
+                    return ToolResult {
+                        content: format!("Command timed out after {}ms", timeout_ms),
+                        is_error: true,
+                    };
+                }
+                let Some(exit_code) = exit_code else {
+                    let detail = if stderr_buf.is_empty() {
+                        "sandbox produced no exit status".to_string()
+                    } else {
+                        stderr_buf.trim_end().to_string()
+                    };
+                    return ToolResult {
+                        content: format!("Failed to execute command: {}", detail),
+                        is_error: true,
+                    };
+                };
+                let content = format!(
+                    "Exit code: {}\nSTDOUT:\n{}\nSTDERR:\n{}",
+                    exit_code, stdout_buf, stderr_buf
+                );
+                annotate_network_block(
+                    command,
+                    net,
+                    ToolResult {
+                        content,
+                        is_error: exit_code != 0,
+                    },
+                )
+            }
         }
     }
 
@@ -1052,6 +1155,52 @@ mod tests {
         let policy = WorkspacePolicy::contained(dir.path());
         let (m, _cmd) = build_sandbox_pieces("echo hi", Some(&policy));
         assert!(m.env.iter().any(|(k, _)| k == "CARGO_HOME"));
+    }
+
+    /// Regression: `execute_streaming_with_ctx` must thread `ctx.workspace`
+    /// into `build_sandbox_pieces` so the streamed command runs with the
+    /// WorkspacePolicy's cwd. Previously it delegated to `execute_streaming`
+    /// which always passed `None`, discarding the policy on the streaming path.
+    #[cfg(unix)]
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn streaming_with_ctx_threads_workspace_policy_cwd() {
+        // SAFETY: test-only env mutation; #[serial] prevents races.
+        unsafe {
+            std::env::set_var("WAYLAND_SANDBOX", "none");
+            std::env::set_var("WAYLAND_ALLOW_NO_SANDBOX", "1");
+        }
+        use crate::context::ToolContext;
+        use crate::workspace_policy::WorkspacePolicy;
+        use std::sync::{Arc, Mutex};
+        struct Cap(Mutex<Vec<String>>);
+        impl crate::ToolOutputSink for Cap {
+            fn emit_chunk(&self, chunk: &str) {
+                self.0.lock().unwrap().push(chunk.into());
+            }
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(dir.path()).unwrap();
+        let policy = Arc::new(WorkspacePolicy::trusted_local(&root));
+        let ctx = ToolContext::test_default().with_workspace(policy);
+        let cap = Cap(Mutex::new(Vec::new()));
+        let result = BashTool
+            .execute_streaming_with_ctx(serde_json::json!({"command": "pwd"}), &ctx, &cap)
+            .await;
+
+        assert!(
+            !result.is_error,
+            "streaming_with_ctx failed: {}",
+            result.content
+        );
+        let root_str = root.to_string_lossy();
+        assert!(
+            result.content.contains(root_str.as_ref()),
+            "expected cwd {} in output, got: {}",
+            root_str,
+            result.content
+        );
     }
 
     // Live cwd/write behaviour requires a real sandbox backend. Ignored by

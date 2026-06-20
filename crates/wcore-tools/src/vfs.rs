@@ -39,7 +39,7 @@ pub enum VfsError {
     OutsideSandbox { path: PathBuf, root: PathBuf },
     #[error("path {path:?} not found")]
     NotFound { path: PathBuf },
-    #[error("refused: {path} is a protected secret path")]
+    #[error("refused: {path:?} is a protected secret path")]
     SecretDenied { path: PathBuf },
 }
 
