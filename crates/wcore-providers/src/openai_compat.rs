@@ -113,6 +113,20 @@ pub fn accepts_temperature(model: &str) -> bool {
     !is_o_series(&m)
 }
 
+/// True when the model accepts caller-supplied tool-calling parameters
+/// (the `tools` array) on the Chat Completions request.
+///
+/// Groq's **Compound** / **Compound Mini** are agentic models that perform
+/// their own internal tool use and REJECT a caller `tools` array with a 400
+/// `` `tool calling` is not supported ``, which kills the whole turn. Every
+/// other model served over the OpenAI-compatible surface accepts tools, so
+/// default to true and special-case only the Groq Compound family. Like the
+/// sibling predicates this is per-request (one `OpenAIProvider` serves many
+/// models in a session) and case-insensitive.
+pub fn model_supports_tool_calling(model: &str) -> bool {
+    !is_groq_compound(&lower(model))
+}
+
 /// `o1`, `o1-mini`, `o1-preview`, `o3`, `o3-mini`, ... — match exactly the
 /// `o<digit>` prefix so we don't accidentally catch unrelated model names
 /// like `octo-7b`.
@@ -135,6 +149,16 @@ fn is_o_series(lower_model: &str) -> bool {
 /// correct as long as future `gpt-5*` releases keep the family shape.
 fn is_gpt5(lower_model: &str) -> bool {
     lower_model.starts_with("gpt-5")
+}
+
+/// Groq's agentic Compound family: `compound-beta`, `compound-beta-mini`, and
+/// the namespaced `groq/compound*` catalog ids. Strip any `provider/` prefix and
+/// match by leading `compound` so we don't catch unrelated models that merely
+/// contain the substring (e.g. `octo-compound-7b`). These models reject the
+/// `tools` parameter.
+fn is_groq_compound(lower_model: &str) -> bool {
+    let id = lower_model.rsplit('/').next().unwrap_or(lower_model);
+    id.starts_with("compound")
 }
 
 #[cfg(test)]
@@ -364,5 +388,41 @@ mod tests {
     fn accepts_temperature_case_insensitive() {
         assert!(!accepts_temperature("O1"));
         assert!(accepts_temperature("GPT-4o"));
+    }
+
+    // --- model_supports_tool_calling (Groq Compound) ----------------------
+
+    #[test]
+    fn compound_family_rejects_tool_calling() {
+        // Groq's agentic Compound ids: bare, beta, mini, and namespaced.
+        assert!(!model_supports_tool_calling("compound-beta"));
+        assert!(!model_supports_tool_calling("compound-beta-mini"));
+        assert!(!model_supports_tool_calling("compound"));
+        assert!(!model_supports_tool_calling("compound-mini"));
+        assert!(!model_supports_tool_calling("groq/compound-beta"));
+    }
+
+    #[test]
+    fn compound_predicate_is_case_insensitive() {
+        assert!(!model_supports_tool_calling("Compound-Beta"));
+        assert!(!model_supports_tool_calling("GROQ/COMPOUND"));
+    }
+
+    #[test]
+    fn normal_models_support_tool_calling() {
+        // Plain Groq + every other openai-compat model accept tools.
+        assert!(model_supports_tool_calling("openai/gpt-oss-120b"));
+        assert!(model_supports_tool_calling("llama-3.3-70b-versatile"));
+        assert!(model_supports_tool_calling("gpt-4o"));
+        assert!(model_supports_tool_calling("gpt-5"));
+        assert!(model_supports_tool_calling("deepseek-chat"));
+    }
+
+    #[test]
+    fn compound_predicate_is_not_overgreedy() {
+        // A model that merely CONTAINS "compound" but doesn't lead with it must
+        // keep tools — only the Compound family is special-cased.
+        assert!(model_supports_tool_calling("octo-compound-7b"));
+        assert!(model_supports_tool_calling("acme/super-compound"));
     }
 }
