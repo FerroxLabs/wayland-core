@@ -594,24 +594,31 @@ impl OnboardingSurface {
     /// for the existence of `config.toml`, so writing it here ensures the
     /// next launch lands on Workspace instead of re-entering onboarding.
     ///
-    /// Validation is advisory for env keys: the provider selection is already
-    /// trusted (it came from a variable the user explicitly exported), so we
-    /// skip the live network round-trip and advance straight to the Ready
-    /// step.  This keeps the connect path offline-safe and hermetic.
+    /// Env keys skip the live network round-trip a pasted key takes: the
+    /// provider was explicitly exported by the user and the engine validates
+    /// it on first real use, so onboarding stays **offline-safe** (important
+    /// for local/air-gapped setups).  The flow still lands on the **AddMore**
+    /// step — never straight to Name/Ready — so a user with several exported
+    /// keys can connect the others (mirrors the validated-key path in
+    /// `poll_validation`).
     fn connect_env_key(&mut self, idx: usize) {
         let Some(env) = self.env_keys.get(idx).cloned() else {
             return;
         };
-        // Persist the provider choice on disk now — before showing Ready —
+        // Persist the provider choice on disk now — before showing AddMore —
         // so a mid-flow quit still leaves the selection.  The key is NOT
         // written; the engine reads it from the environment on next boot.
         crate::tui::engine_bridge::persist_env_provider_selection(env.provider.slug());
-        // Record the provider so the Ready step can name it.
+        // Record the provider (empty key — it lives in the env var, never on
+        // disk) so the AddMore / Name / Ready cards can name it and
+        // `has_unconnected_env_keys` sees it as connected.
         if !self.providers.iter().any(|(p, _)| *p == env.provider) {
             self.providers.push((env.provider, String::new()));
         }
-        self.completed_via = Some(Path::ApiKey);
-        self.step = Step::Ready;
+        // Default the AddMore cursor to "Add another" while keys remain,
+        // "Continue" otherwise — same as the validated-key path.
+        self.add_more = self.default_add_more_choice();
+        self.step = Step::AddMore;
     }
 
     /// Connect EVERY detected environment key at once. A convenience
@@ -1989,10 +1996,21 @@ mod tests {
         )]);
         let mut app = App::new();
         surface.handle_key(char('1'), &mut app);
-        // The env key is loaded into the field and validation starts.
-        assert_eq!(surface.step, Step::Validating);
-        assert_eq!(surface.validating_provider, Some(Provider::Anthropic));
-        assert_eq!(surface.key.value(), "sk-ant-env");
+        // Env keys connect offline — the provider is recorded and the flow
+        // lands on AddMore with no network-validation round-trip. The key
+        // VALUE is never loaded into the field (it stays in the env var).
+        assert_eq!(surface.step, Step::AddMore);
+        assert!(
+            surface
+                .providers
+                .iter()
+                .any(|(p, _)| *p == Provider::Anthropic),
+            "the matching provider must be recorded"
+        );
+        assert!(
+            surface.key.value().is_empty(),
+            "env key VALUE must not be loaded into the field"
+        );
     }
 
     #[test]
@@ -2005,12 +2023,14 @@ mod tests {
             env_key("OPENAI_API_KEY", Provider::OpenAi, "sk-proj-env"),
         ]);
         let mut app = App::new();
-        // Connect env key #1.
+        // Connect env key #1. Env keys connect offline, so there is no
+        // intermediate Validating step — it lands on AddMore directly.
         surface.handle_key(char('1'), &mut app);
-        assert_eq!(surface.step, Step::Validating);
-        surface.inject_validation_for_test(Provider::Anthropic, ValidationOutcome::Ok);
         assert_eq!(surface.step, Step::AddMore, "env key skipped AddMore");
         assert_ne!(surface.step, Step::Name, "env key jumped to Name");
+        // A second key remains unconnected, so the cursor nudges the user
+        // toward "Add another" rather than skipping the other key.
+        assert_eq!(surface.add_more, AddMoreChoice::AddAnother);
     }
 
     #[test]

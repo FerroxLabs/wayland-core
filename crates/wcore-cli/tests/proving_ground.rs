@@ -4,6 +4,12 @@
 //! and a script closure that drives the PTY. `run_cell` materializes the
 //! config, launches the binary, runs the script, captures a `RunRecord`,
 //! and cleans up the tempdir.
+//!
+//! The whole harness is PTY-driven and therefore Unix-only — gate the entire
+//! test crate so it compiles to an empty binary on Windows (the
+//! `support::proving_ground` module is itself `#[cfg(unix)]`, so a file-scope
+//! `use` of it would otherwise fail to resolve on Windows).
+#![cfg(unix)]
 
 #[path = "support/mod.rs"]
 mod support;
@@ -54,11 +60,15 @@ fn onboarding_persists_across_relaunch() {
         SECS_10,
         "onboarding",
     );
-    p1.send(b"1"); // connect OpenAI
-    // Item 2 fix: wait for "Ready" only — "Workspace" appears in the chrome
-    // tab bar on every frame and would resolve before '1' is even processed.
-    p1.wait_for(|t| t.contains("Ready"), SECS_10, "connected");
-    p1.send(b"\r"); // finish
+    p1.send(b"1"); // connect OpenAI (offline) -> AddMore ("Keys saved")
+    // Env keys connect without a network round-trip and land on AddMore; the
+    // single detected key means the cursor defaults to "Continue".
+    p1.wait_for(|t| t.contains("Keys saved"), SECS_10, "keys-saved");
+    p1.send(b"\r"); // AddMore: Continue -> Name ("Almost done")
+    p1.wait_for(|t| t.contains("Almost done"), SECS_10, "name-step");
+    p1.send(b"\r"); // Name: finish -> Ready
+    p1.wait_for(|t| t.contains("Ready"), SECS_10, "ready");
+    p1.send(b"\r"); // finish -> Workspace
 
     // Item 4: snapshot screen BEFORE quit so final_screen reflects the UI state.
     let final_screen_p1 = record::redact(&p1.screen_text());
