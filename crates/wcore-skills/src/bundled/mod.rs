@@ -1,3 +1,8 @@
+// `hello` is a framework-validation fixture (see `hello.rs`) — compiled and
+// registered ONLY under `cfg(test)` so it never reaches the shipped skill
+// catalog. In production it leaked: models saw it in every session's catalog
+// and narrated skipping it into user-facing output.
+#[cfg(test)]
 mod hello;
 
 use std::path::PathBuf;
@@ -108,6 +113,13 @@ pub async fn prepare_bundled_skills() -> Vec<SkillMetadata> {
 /// times (useful in tests).
 pub fn init_bundled_skills() {
     clear_bundled_skills_inner();
+    // The only bundled skill today is the `hello` test fixture, which must NOT
+    // ship in the production catalog (models notice it and narrate skipping
+    // it). Register it solely under `cfg(test)` so the bundled-skill framework
+    // stays exercised by TC-10.04 / TC-10.28 without leaking to users. In a
+    // shipped build this clears the registry and registers nothing — correct,
+    // since no production bundled skills exist yet.
+    #[cfg(test)]
     hello::register_hello_skill();
 }
 
