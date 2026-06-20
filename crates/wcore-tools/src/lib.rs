@@ -243,6 +243,11 @@ pub mod homeassistant_tool;
 // `wayland_introspection` toolset disables as a unit.
 pub mod wayland_introspection;
 pub mod write;
+// Unified workspace containment policy — filesystem + network scope for a
+// session. Two presets: `trusted_local` (local CLI) and `contained` (remote
+// Workspace posture). Secret predicate for `SecretDenyFs` integration.
+pub mod workspace_policy;
+pub use workspace_policy::{WorkspacePolicy, WorkspaceTrust};
 
 pub use moa::{
     MoaError, MoaInput, MoaOutput, MoaTool, ProposerCaller, ProposerOutput, ProposerSpec,

@@ -85,7 +85,7 @@ fn build_sandbox_pieces(command: &str) -> (SandboxManifest, SandboxCommand) {
 /// Network policy for agent-initiated Bash. Defaults to
 /// [`NetworkPolicy::Deny`]; `WAYLAND_BASH_ALLOW_NETWORK=1` opts back into
 /// full host network (`Inherit`) for network-dependent workflows.
-fn default_bash_network_policy() -> NetworkPolicy {
+pub(crate) fn default_bash_network_policy() -> NetworkPolicy {
     match std::env::var("WAYLAND_BASH_ALLOW_NETWORK") {
         Ok(v) if v == "1" || v.eq_ignore_ascii_case("true") => NetworkPolicy::Inherit,
         _ => NetworkPolicy::Deny,
