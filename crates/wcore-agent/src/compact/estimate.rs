@@ -8,8 +8,32 @@ const CHARS_PER_TOKEN_JSON: usize = 3;
 /// Estimate the total token count for a slice of messages.
 ///
 /// Intentionally conservative (slightly over-estimates) to ensure
-/// compaction triggers rather than being skipped.
+/// compaction triggers rather than being skipped. Counts historical
+/// thinking blocks — use this for the EMERGENCY hard-stop watermark,
+/// which must never undercount.
 pub fn estimate_tokens_from_messages(messages: &[Message]) -> u64 {
+    estimate_tokens_from_messages_inner(messages, true)
+}
+
+/// Finding #174 — estimate token count, excluding historical thinking
+/// blocks when the provider does NOT replay them in history
+/// (`count_thinking = false`).
+///
+/// Anthropic/Bedrock/Vertex drop historical thinking at the wire
+/// (`ContentBlock::Thinking => None`), so those tokens cost zero real
+/// input on the next turn. Counting them inflates the estimate and
+/// fires the AUTO-compaction trigger earlier than real token pressure
+/// warrants. Pass `count_thinking = compat.replays_thinking_in_history()`
+/// so the AUTO watermark tracks real billing. The EMERGENCY path still
+/// uses `estimate_tokens_from_messages` (thinking counted, conservative).
+pub fn estimate_tokens_from_messages_with_thinking(
+    messages: &[Message],
+    count_thinking: bool,
+) -> u64 {
+    estimate_tokens_from_messages_inner(messages, count_thinking)
+}
+
+fn estimate_tokens_from_messages_inner(messages: &[Message], count_thinking: bool) -> u64 {
     let mut total_chars: usize = 0;
     let mut json_chars: usize = 0;
 
@@ -20,7 +44,9 @@ pub fn estimate_tokens_from_messages(messages: &[Message]) -> u64 {
                     total_chars += text.len();
                 }
                 ContentBlock::Thinking { thinking } => {
-                    total_chars += thinking.len();
+                    if count_thinking {
+                        total_chars += thinking.len();
+                    }
                 }
                 ContentBlock::ToolUse { name, input, .. } => {
                     let input_str = input.to_string();
@@ -155,6 +181,41 @@ mod tests {
         let thinking = "t".repeat(4000);
         let msg = Message::new(Role::Assistant, vec![ContentBlock::Thinking { thinking }]);
         assert_eq!(estimate_tokens_from_messages(&[msg]), 1000);
+    }
+
+    // Finding #174 — for providers that DROP historical thinking at the
+    // wire (`count_thinking = false`), the estimate must NOT charge for it.
+    // Without the exclusion the estimate over-counts by the thinking size,
+    // which is what fired the AUTO trigger prematurely.
+    #[test]
+    fn thinking_excluded_when_not_replayed() {
+        let thinking = "t".repeat(40_000); // 10k tokens if counted
+        let text = "x".repeat(400); // 100 real text tokens
+        let msg = Message::new(
+            Role::Assistant,
+            vec![
+                ContentBlock::Thinking { thinking },
+                ContentBlock::Text { text },
+            ],
+        );
+
+        // count_thinking=false (Anthropic/Bedrock/Vertex): only the text counts.
+        assert_eq!(
+            estimate_tokens_from_messages_with_thinking(std::slice::from_ref(&msg), false),
+            100,
+            "wire-dropped thinking must not inflate the estimate"
+        );
+        // count_thinking=true (DeepSeek/Moonshot replay): thinking IS billed.
+        assert_eq!(
+            estimate_tokens_from_messages_with_thinking(std::slice::from_ref(&msg), true),
+            100 + 10_000,
+            "replaying providers must still count thinking (no regression)"
+        );
+        // The conservative emergency-path entry point always counts thinking.
+        assert_eq!(
+            estimate_tokens_from_messages(std::slice::from_ref(&msg)),
+            100 + 10_000,
+        );
     }
 
     #[test]

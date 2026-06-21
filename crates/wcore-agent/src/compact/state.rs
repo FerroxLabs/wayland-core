@@ -8,8 +8,17 @@ use wcore_config::compact::CompactConfig;
 pub struct CompactState {
     /// Number of consecutive autocompact failures.
     pub consecutive_failures: u32,
-    /// Input token count from the last API call (used as the watermark).
+    /// CONSERVATIVE watermark: `max(provider_reported, local_estimate)`,
+    /// with historical thinking counted. Drives the EMERGENCY hard-stop,
+    /// which must over-estimate so it never blows the context window.
     pub last_input_tokens: u64,
+    /// Finding #174 — REAL-pressure watermark for the AUTO-compaction
+    /// trigger. Prefers the provider-reported billed input; falls back to
+    /// the local estimate (with wire-dropped thinking EXCLUDED) only when
+    /// real usage isn't known yet (e.g. the first turn). Tracking real
+    /// pressure here — rather than the inflated `max()` — stops auto
+    /// compaction from firing prematurely.
+    pub last_real_input_tokens: u64,
 }
 
 impl CompactState {
@@ -17,6 +26,7 @@ impl CompactState {
         Self {
             consecutive_failures: 0,
             last_input_tokens: 0,
+            last_real_input_tokens: 0,
         }
     }
 
@@ -107,5 +117,6 @@ mod tests {
         let b = CompactState::default();
         assert_eq!(a.consecutive_failures, b.consecutive_failures);
         assert_eq!(a.last_input_tokens, b.last_input_tokens);
+        assert_eq!(a.last_real_input_tokens, b.last_real_input_tokens);
     }
 }

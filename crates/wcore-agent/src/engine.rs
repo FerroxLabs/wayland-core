@@ -3838,12 +3838,36 @@ impl AgentEngine {
                 }
             }
 
-            // Track per-turn input tokens for compaction watermark.
-            // Use max(provider_reported, local_estimate) as a safety net:
-            // some providers (e.g. DeepSeek with prefix caching) underreport
-            // prompt_tokens, causing compaction to never trigger.
+            // Track per-turn input tokens for compaction watermarks.
+            //
+            // EMERGENCY watermark (conservative): max(provider_reported,
+            // local_estimate) with historical thinking COUNTED. This is the
+            // safety net for the hard-stop — some providers (e.g. DeepSeek
+            // with prefix caching) underreport prompt_tokens, so over-
+            // estimating here ensures we never blow the context window.
             let local_estimate = estimate::estimate_tokens_from_messages(&self.messages);
             let effective_watermark = turn_usage.input_tokens.max(local_estimate);
+
+            // AUTO-trigger watermark (finding #174): track REAL token
+            // pressure so auto-compaction doesn't fire prematurely. The
+            // local estimate over-counts vs real billing because it prices
+            // history at face value (no prompt-cache reads) and counts
+            // thinking blocks that non-replaying providers (Anthropic/
+            // Bedrock/Vertex) DROP at the wire — those cost zero real input.
+            // Prefer the provider-reported billed input when known; fall
+            // back to a thinking-aware estimate only on the first turn
+            // (before any usage is reported). Do NOT take max() here — that
+            // is exactly what made the inflated estimate win and trigger
+            // the summarizer earlier than warranted.
+            let auto_estimate = estimate::estimate_tokens_from_messages_with_thinking(
+                &self.messages,
+                self.compat.replays_thinking_in_history(),
+            );
+            let auto_watermark = if turn_usage.input_tokens > 0 {
+                turn_usage.input_tokens
+            } else {
+                auto_estimate
+            };
 
             // v0.9.1.2 F-watermark: watermark-override is TELEMETRY, never
             // transcript content. Each per-turn LLM round-trip can re-trip
@@ -3870,6 +3894,7 @@ impl AgentEngine {
             }
 
             self.compact_state.last_input_tokens = effective_watermark;
+            self.compact_state.last_real_input_tokens = auto_watermark;
 
             // Cache break detection
             let cache_stats = CacheStats {
@@ -5063,8 +5088,14 @@ impl AgentEngine {
 
         // 2. Autocompact (LLM summarization)
         let mut compacted = false;
-        let should_compact =
-            auto::should_autocompact(self.compact_state.last_input_tokens, &self.compact_config);
+        // Finding #174 — the AUTO trigger reads the REAL-pressure watermark
+        // (provider-reported billed input, thinking excluded for non-
+        // replaying providers), NOT the conservative `last_input_tokens`
+        // the EMERGENCY hard-stop uses. This stops premature compaction.
+        let should_compact = auto::should_autocompact(
+            self.compact_state.last_real_input_tokens,
+            &self.compact_config,
+        );
         if should_compact && !self.compact_state.is_circuit_broken(&self.compact_config) {
             let provider = Arc::clone(&self.provider);
             // AUDIT A4 — `run_compaction` runs at the TOP of the turn
@@ -5151,7 +5182,7 @@ impl AgentEngine {
             self.output.emit_info(&format!(
                 "Autocompact: skipped (circuit breaker tripped after {} consecutive failures, \
                  last_input_tokens={})",
-                self.compact_state.consecutive_failures, self.compact_state.last_input_tokens
+                self.compact_state.consecutive_failures, self.compact_state.last_real_input_tokens
             ));
         } else if !self.compact_config.enabled {
             let threshold = self
@@ -5159,7 +5190,7 @@ impl AgentEngine {
                 .context_window
                 .saturating_sub(self.compact_config.output_reserve)
                 .saturating_sub(self.compact_config.autocompact_buffer);
-            if self.compact_state.last_input_tokens as usize >= threshold {
+            if self.compact_state.last_real_input_tokens as usize >= threshold {
                 self.output.emit_info(&format!(
                     "Autocompact: disabled (compact.enabled=false, \
                      last_input_tokens={}, threshold={})",
@@ -8418,6 +8449,130 @@ mod compact_tests {
         assert!(engine.run_compaction().await.is_ok());
     }
 
+    // -- Finding #174: AUTO trigger tracks REAL pressure, not the
+    //    thinking-inflated conservative watermark --
+
+    /// A non-replaying provider's history carries large historical thinking
+    /// blocks. The conservative watermark (`last_input_tokens`,
+    /// max(real, estimate-with-thinking)) is pushed over the 167k auto
+    /// threshold purely by that thinking — but the REAL billed input
+    /// (`last_real_input_tokens`) is well under it, because Anthropic drops
+    /// the thinking at the wire. Auto compaction must NOT fire: that is the
+    /// premature-trigger bug. Pre-fix, `should_autocompact` read the
+    /// conservative watermark and would summarize early.
+    #[tokio::test]
+    async fn auto_does_not_fire_on_thinking_inflated_watermark() {
+        let config = CompactConfig {
+            context_window: 200_000,
+            ..Default::default()
+        };
+        let mut state = CompactState::new();
+        // Conservative watermark inflated past the 167k auto threshold by
+        // historical thinking (and still below the 197k emergency limit).
+        state.last_input_tokens = 180_000;
+        // Real billed input is far below the auto threshold.
+        state.last_real_input_tokens = 90_000;
+
+        let messages = vec![
+            Message::new(
+                Role::Assistant,
+                vec![ContentBlock::Thinking {
+                    thinking: "reasoning ".repeat(10_000),
+                }],
+            ),
+            Message::new(
+                Role::User,
+                vec![ContentBlock::Text {
+                    text: "the live task".into(),
+                }],
+            ),
+        ];
+        let before = messages.clone();
+
+        // SummaryProvider would SUCCEED if autocompact ran — so if the
+        // messages are untouched, the trigger genuinely did not fire.
+        let mut engine = make_compact_engine(config, state, messages);
+        engine.provider = Arc::new(SummaryProvider);
+
+        assert!(engine.run_compaction().await.is_ok());
+        assert_eq!(
+            engine.messages, before,
+            "auto compaction must not fire on a thinking-inflated watermark \
+             when real billed input is below the threshold"
+        );
+    }
+
+    /// When the provider-reported REAL input (`last_real_input_tokens`) is
+    /// itself over the 167k threshold, the AUTO trigger fires — proving it
+    /// keys off real pressure, not just the conservative path.
+    #[tokio::test]
+    async fn auto_fires_on_real_usage_over_threshold() {
+        let config = CompactConfig {
+            context_window: 200_000,
+            ..Default::default()
+        };
+        let mut state = CompactState::new();
+        // Conservative and real watermarks both above 167k, below emergency.
+        state.last_input_tokens = 180_000;
+        state.last_real_input_tokens = 180_000;
+
+        let messages = vec![
+            Message::new(
+                Role::Assistant,
+                vec![ContentBlock::Text {
+                    text: "old reply".into(),
+                }],
+            ),
+            Message::new(
+                Role::User,
+                vec![ContentBlock::Text {
+                    text: "the live task".into(),
+                }],
+            ),
+        ];
+        let before = messages.clone();
+
+        let mut engine = make_compact_engine(config, state, messages);
+        engine.provider = Arc::new(SummaryProvider);
+
+        assert!(engine.run_compaction().await.is_ok());
+        assert_ne!(
+            engine.messages, before,
+            "auto compaction must fire when real billed input exceeds the threshold"
+        );
+    }
+
+    /// The EMERGENCY hard-stop stays conservative: it fires off
+    /// `last_input_tokens` even when the REAL watermark
+    /// (`last_real_input_tokens`) is low. This guards against ever blowing
+    /// the context window. Behaviour here is unchanged by finding #174.
+    #[tokio::test]
+    async fn emergency_stays_conservative_ignoring_real_watermark() {
+        let config = CompactConfig {
+            context_window: 200_000,
+            emergency_buffer: 3_000,
+            // Disable auto so ONLY emergency can act, isolating its path.
+            enabled: false,
+            ..Default::default()
+        };
+        let mut state = CompactState::new();
+        state.last_input_tokens = 198_000; // >= 197k emergency limit
+        state.last_real_input_tokens = 10_000; // low real pressure — irrelevant
+
+        let mut engine = make_compact_engine(config, state, vec![]);
+        let result = engine.run_compaction().await;
+
+        match result {
+            Err(super::AgentError::ContextTooLong { input_tokens, .. }) => {
+                assert_eq!(
+                    input_tokens, 198_000,
+                    "emergency must use the conservative watermark, not the real one"
+                );
+            }
+            other => panic!("expected ContextTooLong from emergency, got: {other:?}"),
+        }
+    }
+
     // -- Microcompact runs when count trigger fires --
 
     #[tokio::test]
@@ -8619,7 +8774,10 @@ mod compact_tests {
         };
         let mut state = CompactState::new();
         // Above the autocompact threshold (167k) but below emergency.
+        // Finding #174 — the AUTO trigger reads `last_real_input_tokens`,
+        // so set it too; `last_input_tokens` alone now only drives emergency.
         state.last_input_tokens = 180_000;
+        state.last_real_input_tokens = 180_000;
 
         // History: some prior turns, then the LIVE user instruction.
         let messages = vec![
@@ -8685,6 +8843,7 @@ mod compact_tests {
         };
         let mut state = CompactState::new();
         state.last_input_tokens = 180_000;
+        state.last_real_input_tokens = 180_000;
 
         let messages = vec![
             Message::new(
@@ -8731,6 +8890,7 @@ mod compact_tests {
         let mut state = CompactState::new();
         // Above the autocompact threshold (167k), below emergency.
         state.last_input_tokens = 180_000;
+        state.last_real_input_tokens = 180_000;
 
         // Three leading messages (indices 0,1,2 — the ones that collapse)
         // plus a trailing LIVE user turn. `run_compaction` pops the live
@@ -8806,6 +8966,7 @@ mod compact_tests {
         };
         let mut state = CompactState::new();
         state.last_input_tokens = 180_000;
+        state.last_real_input_tokens = 180_000;
         let messages = vec![
             Message::new(
                 Role::User,
@@ -8920,7 +9081,8 @@ mod compact_tests {
             ..Default::default()
         };
         let mut state = CompactState::new();
-        state.last_input_tokens = 198_000; // triggers both auto and emergency
+        state.last_input_tokens = 198_000; // triggers emergency
+        state.last_real_input_tokens = 198_000; // would trigger auto (but circuit broken)
         state.consecutive_failures = 3; // circuit broken
 
         let mut engine = make_compact_engine(config, state, vec![]);
