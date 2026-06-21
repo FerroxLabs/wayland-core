@@ -34,16 +34,10 @@ use std::path::Path;
 use std::process::Stdio;
 use std::sync::Once;
 
-/// System directories bound read-only into every bwrap sandbox. They are ALSO
-/// granted to the Landlock ruleset in `execute`: the bwrap binary and its shared
-/// libraries live here, and Landlock — applied via `pre_exec` BEFORE `execve()`
-/// of bwrap and handling EXECUTE access — would otherwise deny the bwrap exec
-/// itself the moment `fs_read_allow` is non-empty. Kept as one const so the two
-/// use-sites cannot drift (drift would silently re-break the bwrap exec).
+/// System directories bound read-only into every bwrap sandbox so the inner
+/// command can find standard binaries and their shared libraries.
 const SYSTEM_RO_DIRS: [&str; 6] = ["/usr", "/lib", "/lib64", "/bin", "/sbin", "/etc"];
 
-#[cfg(all(target_os = "linux", feature = "landlock"))]
-static LANDLOCK_UNSUPPORTED_WARN: Once = Once::new();
 #[cfg(all(target_os = "linux", feature = "seccomp"))]
 static SECCOMP_UNAVAILABLE_WARN: Once = Once::new();
 /// Warns once if a manifest asks for `SyscallPolicy::Strict` but this
@@ -297,51 +291,18 @@ impl SandboxBackend for BubblewrapBackend {
             // --die-with-parent then tears down the inner sandboxed process.
             .kill_on_drop(true);
 
-        // S3 — Landlock (feature-gated, Linux-only). Apply the ruleset
-        // inside the child via `pre_exec` so it propagates across execve()
-        // of the bwrap binary. Landlock requires PR_SET_NO_NEW_PRIVS; we
-        // set it idempotently here to support both code paths (direct
-        // exec, and bwrap which also sets it).
-        #[cfg(all(target_os = "linux", feature = "landlock"))]
-        {
-            // Landlock is enforced in `pre_exec` BEFORE execve() of
-            // /usr/bin/bwrap and handles EXECUTE access AND is inherited by
-            // bwrap itself. When the manifest engages Landlock (non-empty
-            // fs_read_allow), the ruleset must therefore grant everything bwrap
-            // touches on the host to set up the sandbox: the bwrap binary +
-            // shared libraries (the system dirs bound read-only above), plus
-            // /proc (bwrap reads /proc/sys/kernel/overflow{uid,gid}) and /dev
-            // (e.g. /dev/null for read-deny overlays). Without these, bwrap is
-            // denied EACCES before the inner command runs. An EMPTY fs_read_allow
-            // leaves read_paths empty, so Landlock stays disengaged exactly as
-            // before — we never newly restrict a default manifest. Read access
-            // to system paths is benign and does not weaken bwrap's namespace
-            // containment (bwrap re-mounts inside its own namespace).
-            let mut read_paths = manifest.fs_read_allow.clone();
-            if !read_paths.is_empty() {
-                for sys in SYSTEM_RO_DIRS.iter().copied().chain(["/proc", "/dev"]) {
-                    if Path::new(sys).exists() {
-                        read_paths.push(std::path::PathBuf::from(sys));
-                    }
-                }
-            }
-            let write_paths = manifest.fs_write_allow.clone();
-            // SAFETY: pre_exec closures must be async-signal-safe. The
-            // landlock and prctl syscalls used here are async-signal-safe.
-            unsafe {
-                command.pre_exec(move || {
-                    let rc = libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0);
-                    if rc == -1 {
-                        return Err(std::io::Error::last_os_error());
-                    }
-                    match super::bwrap_landlock::restrict_self_from_paths(&read_paths, &write_paths)
-                    {
-                        Ok(_) => Ok(()),
-                        Err(e) => Err(std::io::Error::other(format!("landlock: {e}"))),
-                    }
-                });
-            }
-        }
+        // NOTE: Landlock is deliberately NOT applied around the bwrap backend.
+        // A `pre_exec` ruleset is inherited by bwrap and confines bwrap's OWN
+        // privileged setup (writing /proc/self/uid_map to build its user
+        // namespace), which fails with EACCES the moment the allowlist is
+        // non-empty. bwrap's `--unshare-all` + the constructive `--ro-bind`
+        // set already provide a deny-by-default filesystem view that is a strict
+        // superset of any Landlock allowlist built from the same paths, and the
+        // secret-read-deny enforcement rides on the `--ro-bind /dev/null` /
+        // `--tmpfs` overlays above — not on Landlock. bwrap sets NO_NEW_PRIVS
+        // itself. The `landlock` feature + `bwrap_landlock.rs` remain compiled
+        // (exercised by --all-features CI) as the foundation for a future
+        // inner-command re-exec shim, but production runs seccomp-only.
 
         let child = command
             .spawn()
@@ -350,8 +311,6 @@ impl SandboxBackend for BubblewrapBackend {
         // Now safe to drop the BPF tempfile — bwrap has read the fd into
         // its child setup. Holding it longer wastes a fd until return.
         drop(seccomp_file);
-        #[cfg(all(target_os = "linux", feature = "landlock"))]
-        let _ = &LANDLOCK_UNSUPPORTED_WARN;
 
         // 6. Timeout + wait.
         let timeout = manifest

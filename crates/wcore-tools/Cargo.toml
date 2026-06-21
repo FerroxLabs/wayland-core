@@ -107,14 +107,16 @@ kamadak-exif = { workspace = true, optional = true }
 
 workspace-hack.workspace = true
 
-# D.1 Round 1 (S3/S4): on Linux, request the `seccomp` + `landlock` features
-# of wcore-sandbox so the bwrap backend actually applies the seccomp-bpf
-# filter and Landlock ruleset for `SyscallPolicy::Strict`. These features
-# pull a Linux-only native lib (libseccomp) at link time, so they MUST NOT
-# be requested on macOS/Windows — the plain workspace dep above covers those
-# platforms with namespace-/profile-only isolation.
+# D.1 Round 1 (S4): on Linux, request the `seccomp` feature of wcore-sandbox so
+# the bwrap backend actually applies the seccomp-bpf filter for
+# `SyscallPolicy::Strict`. This pulls a Linux-only native lib (libseccomp) at
+# link time, so it MUST NOT be requested on macOS/Windows — the plain workspace
+# dep above covers those platforms with namespace-/profile-only isolation.
+# NOTE: `landlock` is intentionally NOT requested — applying a Landlock ruleset
+# around the bwrap backend confines bwrap's own privileged setup (uid_map) and
+# breaks it; bwrap's namespace + bind-mount view already enforces containment.
 [target.'cfg(target_os = "linux")'.dependencies]
-wcore-sandbox = { workspace = true, features = ["seccomp", "landlock"] }
+wcore-sandbox = { workspace = true, features = ["seccomp"] }
 
 [features]
 default = ["pdf", "image-inspect"]

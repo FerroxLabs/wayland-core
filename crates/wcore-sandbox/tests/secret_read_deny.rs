@@ -7,7 +7,9 @@
 //!
 //! **Cases:**
 //! (a) Pre-existing project secret under allowed root → secret bytes absent.
-//! (b) Symlink `link -> .env` (both enumerated) → reading `link` yields no secret bytes.
+//! (b) Symlink `link -> .env`; deny the resolved target `.env` → reading
+//!     through `link` yields no secret bytes (production denies the canonical
+//!     target, not the raw symlink path).
 //! (c) Symlink `ext -> <external non-secret>` (external, NOT a secret) → readable.
 //!     Proves the sandbox does not over-deny files reached via symlinks that cross
 //!     the primary allowed root boundary.  Documents the symlink-to-external-SECRET
@@ -92,6 +94,16 @@ async fn secret_read_deny_case_a_project_env_under_allowed_root() {
         .await
         .expect("execute must not error");
 
+    // Non-vacuous deny: a `bwrap:` stderr prefix is bwrap's own setup-failure
+    // channel. Its absence proves the inner `cat` actually ran, so empty
+    // stdout is a real read-deny — not bwrap dying before the command. The
+    // marker never appears on macOS sandbox-exec, so this is cross-platform.
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        !stderr.contains("bwrap: "),
+        "(a) bwrap must complete setup for a non-vacuous deny; bwrap error: {stderr}",
+    );
+
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(
         !stdout.contains("SECRET_TOKEN"),
@@ -102,8 +114,8 @@ async fn secret_read_deny_case_a_project_env_under_allowed_root() {
 }
 
 // ===========================================================================
-// (b) Symlink `link -> .env` (both in deny list) → reading `link` yields no
-//     secret bytes.
+// (b) Symlink `link -> .env`; deny the resolved target `.env` → reading
+//     through `link` yields no secret bytes.
 // ===========================================================================
 
 #[tokio::test]
@@ -125,12 +137,15 @@ async fn secret_read_deny_case_b_symlink_to_env() {
     std::fs::write(&secret, b"SECRET_TOKEN=hunter2").expect("write secret");
     std::os::unix::fs::symlink(&secret, &link).expect("create symlink");
 
-    // Deny both the secret itself and the symlink (simulating what
-    // compute_secret_deny does when it detects a symlink whose resolved
-    // target is a secret).
+    // compute_secret_deny canonicalizes (symlink-resolves) every candidate, so
+    // it denies the RESOLVED target (.env) — never the raw symlink path. Feed
+    // bwrap the same production-faithful deny list (just the target) and read
+    // THROUGH the symlink: the read resolves to the masked .env and yields no
+    // secret bytes. (Overlaying /dev/null directly onto a symlink path is not
+    // something production ever emits, and bwrap cannot bind onto it.)
     let manifest = SandboxManifest {
         fs_read_allow: vec![root.clone()],
-        fs_read_deny: vec![secret.clone(), link.clone()],
+        fs_read_deny: vec![secret.clone()],
         env: vec![("PATH".into(), "/usr/bin:/bin".into())],
         ..Default::default()
     };
@@ -145,6 +160,13 @@ async fn secret_read_deny_case_b_symlink_to_env() {
         )
         .await
         .expect("execute must not error");
+
+    // Non-vacuous deny (see case (a) for rationale).
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        !stderr.contains("bwrap: "),
+        "(b) bwrap must complete setup for a non-vacuous deny; bwrap error: {stderr}",
+    );
 
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(
@@ -285,6 +307,13 @@ async fn secret_read_deny_case_d_credential_dir_deny() {
         )
         .await
         .expect("execute must not error");
+
+    // Non-vacuous deny (see case (a) for rationale).
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        !stderr.contains("bwrap: "),
+        "(d) bwrap must complete setup for a non-vacuous deny; bwrap error: {stderr}",
+    );
 
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(
