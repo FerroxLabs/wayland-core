@@ -8,8 +8,10 @@
 //! **Cases:**
 //! (a) Pre-existing project secret under allowed root → secret bytes absent.
 //! (b) Symlink `link -> .env` (both enumerated) → reading `link` yields no secret bytes.
-//! (c) Non-secret file under allowed root, adjacent to a denied `.env` → readable (no over-deny).
-//!     Documents the symlink-to-external-SECRET residual (backstopped by network-Deny).
+//! (c) Symlink `ext -> <external non-secret>` (external, NOT a secret) → readable.
+//!     Proves the sandbox does not over-deny files reached via symlinks that cross
+//!     the primary allowed root boundary.  Documents the symlink-to-external-SECRET
+//!     residual (backstopped by network-Deny).
 //! (d) Credential-dir style deny (synthesized `creds/` under root) → bytes absent.
 //! (e) Ordinary `src/main.rs` under the root → readable (no over-deny).
 //!
@@ -154,19 +156,28 @@ async fn secret_read_deny_case_b_symlink_to_env() {
 }
 
 // ===========================================================================
-// (c) Non-secret file under allowed root, adjacent to a denied `.env` →
-//     readable. Proves that denying `.env` does NOT over-deny a neighbour
-//     file at the same tree level.
+// (c) Symlink `ext -> <external_non_secret>` (external, NOT a secret) →
+//     readable. Proves that denying the workspace `.env` does NOT over-deny
+//     a file reached via a symlink that crosses the primary allowed root
+//     into a separately-allowed external location.
 //
-//     NOTE (residual): a symlink whose resolved target is an external SECRET
-//     that is NOT itself in `fs_read_deny` is a known limitation — the
-//     allowlist + network-Deny contain the blast radius. That case is NOT
-//     what this test covers; testing it here would require a predictable
-//     external secret path, which is environment-specific.
+//     The external target lives in a second tempdir (`ext_root`) that is
+//     added to `fs_read_allow` independently of the primary workspace root.
+//     On macOS sandbox-exec, SBPL resolves the symlink to the real target
+//     and checks the target path; on Linux bwrap, the `--ro-bind` for
+//     `ext_root` makes the target accessible in the namespace.  Both code
+//     paths exercise symlink-resolution behavior at the sandbox boundary —
+//     which is the behaviour that differs from a plain neighbour file.
+//
+//     RESIDUAL (documented, not tested here): a symlink whose resolved
+//     target is an external SECRET that is NOT itself in `fs_read_deny` is a
+//     known limitation — the allowlist + network-Deny contain the blast
+//     radius.  A predictable external secret path is environment-specific,
+//     so the no-over-deny half (symlink to a non-secret) is what we prove.
 // ===========================================================================
 
 #[tokio::test]
-async fn secret_read_deny_case_c_non_secret_neighbour_is_readable() {
+async fn secret_read_deny_case_c_symlink_to_external_non_secret_is_readable() {
     let Some(backend) = host_backend() else {
         eprintln!("skip: host sandbox backend not available");
         return;
@@ -176,19 +187,28 @@ async fn secret_read_deny_case_c_non_secret_neighbour_is_readable() {
         return;
     };
 
+    // Primary workspace root: contains the secret.
     let tmp = tempfile::tempdir().expect("tempdir");
     let root = std::fs::canonicalize(tmp.path()).expect("canonicalize root");
-
-    // The secret — in the deny list.
     let secret = root.join(".env");
     std::fs::write(&secret, b"SECRET_TOKEN=hunter2").expect("write secret");
 
-    // An ordinary neighbour file — NOT in the deny list.
-    let neighbour = root.join("README.md");
-    std::fs::write(&neighbour, b"hello from README").expect("write README");
+    // External (second) root: holds a non-secret file.  This root is
+    // outside the workspace but explicitly added to fs_read_allow, so the
+    // sandbox can reach it when the symlink is followed.
+    let ext_tmp = tempfile::tempdir().expect("ext tempdir");
+    let ext_root = std::fs::canonicalize(ext_tmp.path()).expect("canonicalize ext_root");
+    let ext_file = ext_root.join("non_secret.txt");
+    std::fs::write(&ext_file, b"external non-secret data").expect("write ext file");
+
+    // Symlink inside the workspace root that points to the external file.
+    // Reading through this symlink crosses the primary allowed root boundary.
+    let link = root.join("ext");
+    std::os::unix::fs::symlink(&ext_file, &link).expect("create symlink ext -> ext_file");
 
     let manifest = SandboxManifest {
-        fs_read_allow: vec![root.clone()],
+        // Both roots in the allow list; only the workspace secret is denied.
+        fs_read_allow: vec![root.clone(), ext_root.clone()],
         fs_read_deny: vec![secret.clone()],
         env: vec![("PATH".into(), "/usr/bin:/bin".into())],
         ..Default::default()
@@ -198,26 +218,29 @@ async fn secret_read_deny_case_c_non_secret_neighbour_is_readable() {
         .execute(
             &manifest,
             SandboxCommand {
-                argv: vec![cat.into(), neighbour.to_string_lossy().into_owned()],
+                // Read through the symlink, not the target directly.
+                argv: vec![cat.into(), link.to_string_lossy().into_owned()],
                 cwd: None,
             },
         )
         .await
         .expect("execute must not error");
 
-    // Behavioural proof: the neighbour must be readable — exit 0 and
-    // content present — even though .env is denied at the same root level.
+    // Behavioural proof: the symlink to a non-secret external file must be
+    // readable — exit 0 and expected bytes present — even though .env is
+    // denied in the same workspace root.
     assert_eq!(
         out.exit_code,
         0,
-        "(c) non-secret neighbour must be readable (no over-deny); exit={} stderr={:?}",
+        "(c) symlink to external non-secret must be readable (no over-deny); \
+         exit={} stderr={:?}",
         out.exit_code,
         String::from_utf8_lossy(&out.stderr),
     );
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(
-        stdout.contains("hello from README"),
-        "(c) non-secret neighbour content must be present (no over-deny); stdout={:?}",
+        stdout.contains("external non-secret data"),
+        "(c) symlink content must be present (no over-deny); stdout={:?}",
         stdout,
     );
 }
