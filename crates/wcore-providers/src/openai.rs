@@ -138,15 +138,26 @@ impl OpenAIProvider {
     fn build_messages(messages: &[Message], system: &str, compat: &ProviderCompat) -> Vec<Value> {
         let mut result: Vec<Value> = Vec::new();
 
-        // Check if any assistant message in the conversation has thinking content.
-        // If so, DeepSeek API requires ALL assistant messages to include
-        // reasoning_content (even if empty string).
-        let has_any_thinking = messages.iter().any(|m| {
-            m.role == Role::Assistant
-                && m.content
-                    .iter()
-                    .any(|b| matches!(b, ContentBlock::Thinking { .. }))
-        });
+        // Replay historical assistant `reasoning_content` ONLY for the strict
+        // reasoner endpoints (DeepSeek Reasoner, Moonshot/Kimi) that 400 the
+        // request unless every assistant message carries reasoning_content once
+        // any turn produced thinking. For every other OpenAI-family provider this
+        // flag is false, so historical thinking is dropped at the wire — it is
+        // billed as fresh input each turn but the model does not need it, so
+        // re-sending it is pure recurring cost (finding #174). This matches the
+        // Anthropic/Bedrock/Vertex adapters, which drop historical thinking.
+        //
+        // NOTE: this is the Chat Completions path. The Responses API path
+        // (`openai_responses.rs`) drops ALL reasoning items unconditionally
+        // because there they are protocol-linked to encrypted ids we do not
+        // persist; that path is intentionally left untouched.
+        let replay_thinking = compat.replays_thinking_in_history()
+            && messages.iter().any(|m| {
+                m.role == Role::Assistant
+                    && m.content
+                        .iter()
+                        .any(|b| matches!(b, ContentBlock::Thinking { .. }))
+            });
 
         // System message first
         if !system.is_empty() {
@@ -204,24 +215,25 @@ impl OpenAIProvider {
                 Role::Assistant => {
                     let mut msg_json = json!({ "role": "assistant" });
 
-                    // Preserve reasoning_content for models with thinking mode
-                    // (e.g. DeepSeek Reasoner, Kimi K2.5). The API requires
-                    // ALL assistant messages to include reasoning_content once
-                    // any message in the conversation has it.
-                    let thinking: String = msg
-                        .content
-                        .iter()
-                        .filter_map(|b| {
-                            if let ContentBlock::Thinking { thinking } = b {
-                                Some(thinking.as_str())
-                            } else {
-                                None
-                            }
-                        })
-                        .collect::<Vec<_>>()
-                        .join("");
-
-                    if has_any_thinking {
+                    // Preserve reasoning_content ONLY for the strict reasoner
+                    // endpoints (DeepSeek Reasoner, Kimi) that require ALL
+                    // assistant messages to include reasoning_content once any
+                    // message in the conversation has it. For every other
+                    // provider `replay_thinking` is false, so historical thinking
+                    // is dropped here and never re-billed as input (finding #174).
+                    if replay_thinking {
+                        let thinking: String = msg
+                            .content
+                            .iter()
+                            .filter_map(|b| {
+                                if let ContentBlock::Thinking { thinking } = b {
+                                    Some(thinking.as_str())
+                                } else {
+                                    None
+                                }
+                            })
+                            .collect::<Vec<_>>()
+                            .join("");
                         msg_json["reasoning_content"] = json!(thinking);
                     }
 
@@ -2051,6 +2063,102 @@ mod tests {
         let result = OpenAIProvider::build_messages(&messages, "", &no_compat());
         let assistant_msgs: Vec<_> = result.iter().filter(|m| m["role"] == "assistant").collect();
         assert_eq!(assistant_msgs.len(), 2);
+    }
+
+    // --- replays_thinking_in_history (finding #174) ---
+
+    /// A history with a prior-turn assistant thinking block must NOT re-emit
+    /// that thinking as `reasoning_content` on the default OpenAI chat path —
+    /// historical thinking the model does not need is billed as fresh input
+    /// every turn, so we drop it at the wire (matching Anthropic). DeepSeek/Kimi
+    /// are the only providers that opt back in via the compat flag.
+    ///
+    /// Without the fix this test FAILS: the old code set `has_any_thinking` from
+    /// any assistant Thinking block and unconditionally wrote `reasoning_content`
+    /// onto EVERY assistant message, so the assertion that no assistant message
+    /// carries `reasoning_content` would not hold for the default OpenAI preset.
+    #[test]
+    fn historical_thinking_dropped_on_default_openai_path() {
+        let messages = vec![
+            // Prior assistant turn that produced thinking + text.
+            Message::new(
+                Role::Assistant,
+                vec![
+                    ContentBlock::Thinking {
+                        thinking: "secret prior-turn reasoning".into(),
+                    },
+                    ContentBlock::Text {
+                        text: "answer one".into(),
+                    },
+                ],
+            ),
+            // Follow-up user turn (forces the prior assistant turn to be history).
+            Message::new(
+                Role::User,
+                vec![ContentBlock::Text {
+                    text: "and again?".into(),
+                }],
+            ),
+        ];
+
+        let result = OpenAIProvider::build_messages(&messages, "", &openai_compat());
+
+        // No assistant message may carry reasoning_content on the default path,
+        // and the historical thinking text must not appear anywhere in the body.
+        for m in &result {
+            if m["role"] == "assistant" {
+                assert!(
+                    m.get("reasoning_content").is_none(),
+                    "default OpenAI path must not replay historical reasoning_content: {m:?}"
+                );
+            }
+        }
+        let serialized = serde_json::to_string(&result).unwrap();
+        assert!(
+            !serialized.contains("secret prior-turn reasoning"),
+            "historical thinking must not be re-sent (re-billed) as input"
+        );
+        // Sanity: the actual assistant text is still carried.
+        assert!(serialized.contains("answer one"));
+    }
+
+    /// DeepSeek/Kimi require the replay (their API 400s without it), so the
+    /// compat flag re-enables emission of `reasoning_content` on every assistant
+    /// message once any turn has thinking. This guards the strict-reasoner path
+    /// from regressing when we drop historical thinking everywhere else.
+    #[test]
+    fn historical_thinking_replayed_for_deepseek() {
+        let messages = vec![
+            Message::new(
+                Role::Assistant,
+                vec![
+                    ContentBlock::Thinking {
+                        thinking: "prior reasoning".into(),
+                    },
+                    ContentBlock::Text {
+                        text: "answer one".into(),
+                    },
+                ],
+            ),
+            Message::new(
+                Role::User,
+                vec![ContentBlock::Text {
+                    text: "again?".into(),
+                }],
+            ),
+        ];
+
+        let compat = ProviderCompat::deepseek_defaults();
+        let result = OpenAIProvider::build_messages(&messages, "", &compat);
+
+        let assistant = result
+            .iter()
+            .find(|m| m["role"] == "assistant")
+            .expect("assistant message present");
+        assert_eq!(
+            assistant["reasoning_content"], "prior reasoning",
+            "DeepSeek must replay historical reasoning_content (API requires it)"
+        );
     }
 
     // --- clean_orphan_tool_calls ---

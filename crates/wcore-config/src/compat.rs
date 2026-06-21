@@ -183,6 +183,25 @@ pub struct ProviderCompat {
     /// defaults to `true` — every existing provider keeps sending `stop`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub supports_stop_param: Option<bool>,
+
+    /// Whether the provider's chat-completions API *requires* every historical
+    /// assistant message to carry `reasoning_content` once any turn produced
+    /// thinking. The strict reasoner endpoints (DeepSeek Reasoner, Moonshot/Kimi)
+    /// 400 the request otherwise, so for them we must replay prior-turn thinking.
+    ///
+    /// `None`/`Some(false)` (the default) DROPS historical thinking blocks at the
+    /// wire — they are billed as fresh input every turn but the model does not
+    /// need them, so re-sending them is pure recurring cost (finding #174). This
+    /// matches the Anthropic/Bedrock/Vertex adapters, which already drop
+    /// historical thinking. Only set `Some(true)` for providers whose API
+    /// rejects the request without the replay.
+    ///
+    /// Note: this governs the Chat Completions path only. The Responses API path
+    /// (`openai_responses.rs`) drops ALL reasoning items unconditionally, because
+    /// there reasoning items are protocol-linked to encrypted ids we do not
+    /// persist and re-sending them triggers validation errors.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub replays_thinking_in_history: Option<bool>,
 }
 
 impl ProviderCompat {
@@ -484,7 +503,13 @@ impl ProviderCompat {
 
     /// v0.8.1 U10b — Defaults for DeepSeek (OpenAI-compatible chat surface).
     pub fn deepseek_defaults() -> Self {
-        Self::openai_compat_provider("deepseek")
+        Self {
+            // DeepSeek Reasoner 400s unless EVERY historical assistant message
+            // carries `reasoning_content` once any turn produced thinking, so we
+            // must replay prior-turn thinking here (finding #174 exception).
+            replays_thinking_in_history: Some(true),
+            ..Self::openai_compat_provider("deepseek")
+        }
     }
 
     /// v0.8.1 U10b — Defaults for xAI / Grok (OpenAI-compatible chat surface).
@@ -515,6 +540,10 @@ impl ProviderCompat {
             // international host (`api.moonshot.ai`); a mainland-China key 401s
             // there, so on a 401 retry the same key against `api.moonshot.cn`.
             auth_fallback_base_url: Some("https://api.moonshot.cn/v1".into()),
+            // Kimi mirrors DeepSeek's strict-reasoner contract: once any turn has
+            // thinking, every historical assistant message must carry
+            // `reasoning_content` or the request 400s — so replay it here.
+            replays_thinking_in_history: Some(true),
             ..Self::openai_compat_provider("moonshot")
         }
     }
@@ -618,6 +647,9 @@ impl ProviderCompat {
                 .auth_fallback_base_url
                 .or(defaults.auth_fallback_base_url),
             supports_stop_param: user.supports_stop_param.or(defaults.supports_stop_param),
+            replays_thinking_in_history: user
+                .replays_thinking_in_history
+                .or(defaults.replays_thinking_in_history),
         }
     }
 
@@ -659,6 +691,14 @@ impl ProviderCompat {
     /// sets it `false` because `grok-4.3` (a reasoning model) 400s on `stop`.
     pub fn supports_stop_param(&self) -> bool {
         self.supports_stop_param.unwrap_or(true)
+    }
+
+    /// Whether to replay historical assistant `reasoning_content` on the Chat
+    /// Completions path. Defaults to `false`: historical thinking is dropped at
+    /// the wire (no recurring input billing, matching Anthropic — finding #174).
+    /// DeepSeek/Moonshot set `true` because their API 400s without the replay.
+    pub fn replays_thinking_in_history(&self) -> bool {
+        self.replays_thinking_in_history.unwrap_or(false)
     }
 
     pub fn supports_thinking(&self) -> bool {
