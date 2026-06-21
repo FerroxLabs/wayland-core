@@ -86,6 +86,7 @@ fn build_sandbox_pieces(
     if let Some(p) = policy {
         manifest.fs_write_allow = p.writable_roots();
         manifest.fs_read_allow = p.readable_roots();
+        manifest.fs_read_deny = p.secret_deny_paths().to_vec();
         manifest.env.extend(p.cache_env().iter().cloned());
         manifest.network = p.network();
         cwd = Some(p.root().to_path_buf());
@@ -1200,6 +1201,56 @@ mod tests {
             "expected cwd {} in output, got: {}",
             root_str,
             result.content
+        );
+    }
+
+    // ── Task 7: build_sandbox_pieces populates fs_read_deny from WorkspacePolicy ──
+
+    /// Contained policy → manifest.fs_read_deny is populated (project .env is denied).
+    #[test]
+    fn build_sandbox_pieces_contained_populates_fs_read_deny() {
+        use crate::workspace_policy::WorkspacePolicy;
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        // Create a .env file so secret_deny_paths() will include it.
+        std::fs::write(root.join(".env"), "SECRET=hunter2").unwrap();
+        let policy = WorkspacePolicy::contained(root);
+        let (m, _cmd) = build_sandbox_pieces("echo hi", Some(&policy));
+        // In Contained mode the workspace .env must appear in fs_read_deny.
+        let env_path = std::fs::canonicalize(root.join(".env")).unwrap();
+        assert!(
+            m.fs_read_deny.contains(&env_path),
+            "Contained policy must deny the workspace .env; got: {:?}",
+            m.fs_read_deny
+        );
+    }
+
+    /// None policy → manifest.fs_read_deny is empty (today's behavior preserved).
+    #[test]
+    fn build_sandbox_pieces_no_policy_fs_read_deny_empty() {
+        let (m, _cmd) = build_sandbox_pieces("echo hi", None);
+        assert!(
+            m.fs_read_deny.is_empty(),
+            "no-policy path must leave fs_read_deny empty; got: {:?}",
+            m.fs_read_deny
+        );
+    }
+
+    /// Trusted policy → manifest.fs_read_deny does NOT contain the workspace .env
+    /// (trusted mode doesn't deny project secrets, only credential stores).
+    #[test]
+    fn build_sandbox_pieces_trusted_does_not_deny_project_env() {
+        use crate::workspace_policy::WorkspacePolicy;
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::write(root.join(".env"), "SECRET=hunter2").unwrap();
+        let policy = WorkspacePolicy::trusted_local(root);
+        let (m, _cmd) = build_sandbox_pieces("echo hi", Some(&policy));
+        let env_path = std::fs::canonicalize(root.join(".env")).unwrap();
+        assert!(
+            !m.fs_read_deny.contains(&env_path),
+            "Trusted policy must NOT deny the workspace .env (trusted mode); got: {:?}",
+            m.fs_read_deny
         );
     }
 
