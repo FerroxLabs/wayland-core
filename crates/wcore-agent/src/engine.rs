@@ -5215,7 +5215,7 @@ impl AgentEngine {
         } else if should_compact {
             self.output.emit_info(&format!(
                 "Autocompact: skipped (circuit breaker tripped after {} consecutive failures, \
-                 last_input_tokens={})",
+                 last_real_input_tokens={})",
                 self.compact_state.consecutive_failures, self.compact_state.last_real_input_tokens
             ));
         } else if !self.compact_config.enabled {
@@ -5227,7 +5227,7 @@ impl AgentEngine {
             if self.compact_state.last_real_input_tokens as usize >= threshold {
                 self.output.emit_info(&format!(
                     "Autocompact: disabled (compact.enabled=false, \
-                     last_input_tokens={}, threshold={})",
+                     last_real_input_tokens={}, threshold={})",
                     self.compact_state.last_input_tokens, threshold
                 ));
             }
@@ -8521,16 +8521,18 @@ mod compact_tests {
                 }],
             ),
         ];
-        let before = messages.clone();
+        let len_before = messages.len();
 
         // SummaryProvider would SUCCEED if autocompact ran — so if the
-        // messages are untouched, the trigger genuinely did not fire.
+        // message count is untouched, the trigger genuinely did not fire
+        // (a fired compaction replaces history with a summary, dropping len).
         let mut engine = make_compact_engine(config, state, messages);
         engine.provider = Arc::new(SummaryProvider);
 
         assert!(engine.run_compaction().await.is_ok());
         assert_eq!(
-            engine.messages, before,
+            engine.messages.len(),
+            len_before,
             "auto compaction must not fire on a thinking-inflated watermark \
              when real billed input is below the threshold"
         );
@@ -8564,14 +8566,17 @@ mod compact_tests {
                 }],
             ),
         ];
-        let before = messages.clone();
+        let len_before = messages.len();
 
         let mut engine = make_compact_engine(config, state, messages);
         engine.provider = Arc::new(SummaryProvider);
 
         assert!(engine.run_compaction().await.is_ok());
+        // A fired compaction replaces history with a summary, changing the
+        // message count; an unchanged len would mean the trigger never fired.
         assert_ne!(
-            engine.messages, before,
+            engine.messages.len(),
+            len_before,
             "auto compaction must fire when real billed input exceeds the threshold"
         );
     }
