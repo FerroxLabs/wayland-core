@@ -176,7 +176,14 @@ fn parse_input(input: &Value) -> Result<(Vec<Task>, usize), String> {
 /// Mirror of hermes `_build_child_system_prompt`. Kept intentionally
 /// terse — the persona / workspace-hint extensions live in
 /// `wcore-agent` where the engine knows the real session cwd.
-fn build_child_prompt(goal: &str, context: Option<&str>) -> String {
+///
+/// Exposed (`pub`) so the `Spawn` tool in `wcore-agent` can reuse the
+/// same focused-subagent prompt instead of letting its children inherit
+/// the parent's full framework system prompt (intro + tool guidance +
+/// AGENTS.md + memory + skills index). Sharing this one helper keeps the
+/// two delegation surfaces (Delegate / Spawn) on an identical trimmed
+/// prompt and avoids duplicating prompt-assembly logic across crates.
+pub fn build_child_prompt(goal: &str, context: Option<&str>) -> String {
     let mut parts = Vec::with_capacity(4);
     parts.push("You are a focused subagent working on a specific delegated task.".to_string());
     parts.push(String::new());
