@@ -5,3 +5,4 @@ Base: feat/workspace-policy HEAD e90d638a. Branch: feat/os-secret-deny.
 PR placement (stacked vs extend #59) DEFERRED to Sean — DO NOT push, DO NOT touch PR.
 
 - Task 1: b3e65085 — DONE — fs_read_deny field (#[serde(default)]) + SandboxBackend::enforces_read_deny() (default false) + 5 tests (37 pass, 0 warnings)
+- Task 2: 7e446c4a — DONE — macOS SBPL read-deny after allows (last-match-wins) + enforces_read_deny()=true + 4 tests incl. live denial (41 pass, 0 code warnings)
