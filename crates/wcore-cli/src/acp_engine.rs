@@ -575,6 +575,27 @@ impl EngineSession {
             guard.set_cancel_token(turn_cancel.clone());
             match guard.run(&text, &msg_id).await {
                 Ok(result) => {
+                    if result.finish_reason == FinishReason::Error {
+                        // FerroxLabs/wayland#200: a turn can end Ok with finish_reason=Error when
+                        // the provider returned a Done event carrying an unrecognized/empty
+                        // finish_reason (mapped to FinishReason::Error) — e.g. an OpenAI model
+                        // whose finish_reason string the engine doesn't map yet. The engine
+                        // classifies that as success, so without this the host would emit a
+                        // contentless stream_end and the turn would fail SILENTLY. Surface it.
+                        let _ = tx.send(ProtocolEvent::Error {
+                            msg_id: Some(msg_id.clone()),
+                            error: wcore_protocol::events::ErrorInfo {
+                                code: "finish_reason_error".to_string(),
+                                message: "The model ended the turn with an error and no output \
+                                    (finish_reason=error). The provider likely returned an empty \
+                                    response or an unrecognized completion status. Check the engine \
+                                    log for an 'unrecognized finish_reason' warning, and verify the \
+                                    model name and provider."
+                                    .to_string(),
+                                retryable: false,
+                            },
+                        });
+                    }
                     let _ = tx.send(stream_end_event(&msg_id, &result));
                     term.disarm();
                 }
