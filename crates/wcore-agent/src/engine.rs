@@ -3450,6 +3450,22 @@ impl AgentEngine {
                 last.content.push(ContentBlock::Text { text: hint });
             }
 
+            // Cache-stability (token-opt, finding #174): inject the current date
+            // as a transient text block on the request's last user-role message
+            // instead of the cached system prefix. The date value changes daily /
+            // across cross-midnight restarts; keeping it out of the prefix lets
+            // the cached system+tools prefix stay byte-stable, so Anthropic prompt
+            // caching survives cold starts. `request.messages` is a clone, so this
+            // never persists into history. Skipped unless the tail is user-role
+            // (never orphans a tool_use or creates adjacent user messages).
+            if let Some(last) = request.messages.last_mut()
+                && matches!(last.role, Role::User)
+            {
+                last.content.push(ContentBlock::Text {
+                    text: crate::context::current_date_block(&crate::context::today_string()),
+                });
+            }
+
             // C1 / Task A3: fire PrePrompt plugin hooks once per turn and apply
             // their contributions to the request's last user-role message. Done
             // here — after the skill hint and BEFORE `mark_cache_boundaries`, but
