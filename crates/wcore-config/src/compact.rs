@@ -59,6 +59,17 @@ pub struct CompactConfig {
 
     #[serde(default)]
     pub toon: bool,
+
+    /// Model id used for autocompact summarization.
+    ///
+    /// Summarization is a cheap-model task; running it on the live premium
+    /// model costs ~15-20x more than necessary. When set, the autocompact
+    /// LLM request targets this model instead of the live conversation model.
+    /// The id is a plain provider-served model string (no provider assumed).
+    ///
+    /// Default: `None` — use the live model, preserving prior behavior.
+    #[serde(default)]
+    pub compaction_model: Option<String>,
 }
 
 impl Default for CompactConfig {
@@ -76,6 +87,7 @@ impl Default for CompactConfig {
             cache_diagnostics: false,
             compaction: wcore_compact::CompactionLevel::default(),
             toon: false,
+            compaction_model: None,
         }
     }
 }
