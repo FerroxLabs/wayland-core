@@ -463,6 +463,18 @@ mod fail_closed_tests {
     }
 
     #[test]
+    fn fail_closed_backend_does_not_enforce_read_deny() {
+        // FailClosedBackend never enforces deny rules (it refuses all
+        // execution), so enforces_read_deny() must stay on the trait default
+        // of false. The Bash capability gate depends on this being truthful.
+        let backend = FailClosedBackend::new();
+        assert!(
+            !backend.enforces_read_deny(),
+            "FailClosedBackend must not claim to enforce secret-read-deny"
+        );
+    }
+
+    #[test]
     fn opt_in_parsing_accepts_1_and_true() {
         let _lock = ENV_LOCK.lock().unwrap();
         let _g = EnvGuard::capture();

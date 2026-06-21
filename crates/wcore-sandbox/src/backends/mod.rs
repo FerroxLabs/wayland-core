@@ -103,4 +103,12 @@ pub trait SandboxBackend: Send + Sync + 'static {
     /// `default_for_platform` to pick a fallback when the preferred
     /// backend is unavailable.
     fn is_available(&self) -> bool;
+
+    /// True if this backend enforces `manifest.fs_read_deny` at the OS layer.
+    /// The agent uses this to decide whether `Bash` may run in the untrusted
+    /// `Workspace` posture. Default `false` — a backend opts in by overriding
+    /// AND actually implementing the deny.
+    fn enforces_read_deny(&self) -> bool {
+        false
+    }
 }
