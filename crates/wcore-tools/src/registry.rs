@@ -33,6 +33,11 @@ pub struct ToolRegistry {
     /// `execute_*` call — to avoid plumbing a new parameter through the
     /// whole dispatch stack.
     tool_vfs: Option<Arc<dyn crate::vfs::VirtualFs>>,
+
+    /// Session workspace policy, installed at bootstrap (`Trusted`) or by the
+    /// `Workspace` posture (`Contained`). Threaded onto every dispatched
+    /// `ToolContext` so BashTool can root its OS sandbox at the workspace.
+    workspace_policy: Option<Arc<crate::workspace_policy::WorkspacePolicy>>,
 }
 
 impl Default for ToolRegistry {
@@ -46,6 +51,7 @@ impl ToolRegistry {
             tools: Vec::new(),
             breakers: Arc::new(RwLock::new(HashMap::new())),
             tool_vfs: None,
+            workspace_policy: None,
         }
     }
 
@@ -60,6 +66,14 @@ impl ToolRegistry {
     /// one was installed. `None` means use the default `RealFs`.
     pub fn tool_vfs(&self) -> Option<Arc<dyn crate::vfs::VirtualFs>> {
         self.tool_vfs.clone()
+    }
+
+    pub fn set_workspace_policy(&mut self, policy: Arc<crate::workspace_policy::WorkspacePolicy>) {
+        self.workspace_policy = Some(policy);
+    }
+
+    pub fn workspace_policy(&self) -> Option<Arc<crate::workspace_policy::WorkspacePolicy>> {
+        self.workspace_policy.clone()
     }
 
     /// Drop every registered tool for which `keep` returns `false`.
@@ -301,6 +315,18 @@ mod tests {
     use async_trait::async_trait;
     use wcore_protocol::events::ToolCategory;
     use wcore_types::tool::ToolResult;
+
+    #[test]
+    fn workspace_policy_defaults_none_and_sets() {
+        use crate::workspace_policy::WorkspacePolicy;
+        use std::sync::Arc;
+        let mut reg = ToolRegistry::new();
+        assert!(reg.workspace_policy().is_none());
+        let dir = tempfile::tempdir().unwrap();
+        let policy = Arc::new(WorkspacePolicy::trusted_local(dir.path()));
+        reg.set_workspace_policy(Arc::clone(&policy));
+        assert_eq!(reg.workspace_policy().unwrap().root(), policy.root());
+    }
 
     /// A minimal Tool implementation used only in tests
     struct MockTool {

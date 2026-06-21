@@ -14,7 +14,11 @@
 //!      tool survives.
 //!   3. `Workspace` — `Read` is present but the engine's tool `vfs` is a
 //!      `SandboxedFs` jail: a read inside the workspace root succeeds, a
-//!      read outside it is refused. `Bash` (non-jailable) stays gone.
+//!      read outside it is refused. `Grep`/`Glob` (which shell out and
+//!      escape the VFS jail) stay gone. `Bash` is present if and only if
+//!      the platform's sandbox backend reports `enforces_read_deny()=true`
+//!      — on those platforms the OS sandbox enforces the secret-path deny
+//!      list so Bash is safe to expose in the Workspace posture.
 
 use std::sync::Arc;
 
@@ -117,14 +121,24 @@ async fn workspace_posture_jails_filesystem_reads() {
     // Vfs-jailable fs tools come back…
     assert!(names.iter().any(|n| n == "Read"), "workspace exposes Read");
     assert!(names.iter().any(|n| n == "Edit"), "workspace exposes Edit");
-    // …but non-jailable shell/exec tools stay gone — including Grep/Glob,
-    // which shell out and would escape the jail with a default `path="."`.
-    for gone in ["Bash", "Grep", "Glob"] {
+    // Grep and Glob shell out and would escape the VFS jail — always gone.
+    for gone in ["Grep", "Glob"] {
         assert!(
             !names.iter().any(|n| n == gone),
             "workspace must NOT expose non-jailable tool '{gone}', got: {names:?}"
         );
     }
+    // Bash is exposed if and only if the platform sandbox enforces secret-read-deny.
+    // On platforms where `default_for_platform().enforces_read_deny()` is true
+    // (macOS sandbox-exec, Linux bwrap, Windows AppContainer), the OS-level deny
+    // list protects secrets so Bash may safely run in the Workspace posture.
+    let enforces = wcore_tools::bash::platform_enforces_read_deny();
+    assert_eq!(
+        names.iter().any(|n| n == "Bash"),
+        enforces,
+        "Bash presence in workspace must match platform enforces_read_deny ({enforces}), \
+         got tools: {names:?}"
+    );
 
     // The engine's tool vfs is a SandboxedFs jailed to the workspace root.
     let ctx = result.engine.current_tool_context();

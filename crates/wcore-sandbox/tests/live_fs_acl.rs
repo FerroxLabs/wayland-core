@@ -126,3 +126,64 @@ async fn granted_path_is_readable_then_revoked() {
         "AppContainer grant must be revoked after the run (no host ACL leak); icacls:\n{acl_after}"
     );
 }
+
+/// Task 4: A secret file under a granted parent directory is unreadable when
+/// its path is in `fs_read_deny` (DENY ACE overrides the parent ALLOW grant),
+/// and the DENY ACE is revoked after the spawn completes.
+#[tokio::test(flavor = "current_thread")]
+async fn denied_secret_under_granted_parent_is_unreadable_and_revoked() {
+    if !live() {
+        return;
+    }
+    let (dir, _) = seed_file("deny-parent");
+    // Place the secret inside the granted parent.
+    let secret_file = dir.join("secret.env");
+    std::fs::write(&secret_file, "SECRET_TOKEN=supersecret").expect("write secret");
+
+    let backend = AppContainerBackend::new();
+    if !backend.is_available() {
+        let _ = std::fs::remove_dir_all(&dir);
+        return;
+    }
+
+    // Grant the PARENT directory (so the AppContainer can traverse it) but
+    // deny the specific secret file. The DENY ACE overrides the ALLOW.
+    let manifest = SandboxManifest {
+        timeout: Some(Duration::from_secs(10)),
+        fs_read_allow: vec![dir.clone()],
+        fs_read_deny: vec![secret_file.clone()],
+        ..Default::default()
+    };
+    let out = backend
+        .execute(
+            &manifest,
+            SandboxCommand {
+                argv: vec![
+                    "cmd.exe".into(),
+                    "/c".into(),
+                    "type".into(),
+                    secret_file.display().to_string(),
+                ],
+                cwd: None,
+            },
+        )
+        .await
+        .expect("execute");
+
+    let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
+    // Capture DACL while file still exists, before cleanup.
+    let acl_after = icacls(&secret_file);
+    let _ = std::fs::remove_dir_all(&dir);
+
+    // The secret bytes must not appear in stdout (access denied → empty / error).
+    assert!(
+        !stdout.contains("SECRET_TOKEN"),
+        "secret bytes must not be readable when path is in fs_read_deny; stdout={stdout:?}"
+    );
+    // The DENY ACE must be revoked after the run — no permanent host ACL leak.
+    let acl_lower = acl_after.to_lowercase();
+    assert!(
+        !acl_after.contains("S-1-15-2-") && !acl_lower.contains("wcoresandbox"),
+        "AppContainer DENY ACE must be revoked after the run; icacls:\n{acl_after}"
+    );
+}
