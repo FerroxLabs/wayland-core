@@ -3647,6 +3647,20 @@ impl AgentEngine {
                 let mut attempt_usage = TokenUsage::default();
                 let mut done_seen = false;
                 let mut stream_error: Option<String> = None;
+                // Finding #174 (nested re-bill): set ONLY when `stream()` itself
+                // returns a retryable `Err` — i.e. the provider's HTTP ring
+                // (`builder_send_with_retry`, up to 3 sends) already spent its
+                // full retry budget on this exact request before surfacing the
+                // error here. A mid-stream `LlmEvent::Error` or a truncated
+                // stream does NOT set this: those arrive AFTER `stream()`
+                // returned `Ok(rx)` (the HTTP ring succeeded; the failure is in
+                // the SSE body), so they keep the full engine retry budget and
+                // their retryability is unchanged. When this IS set, granting a
+                // fresh full engine budget on top of an already-exhausted HTTP
+                // ring stacks 3×3=9 full-input re-sends for one logical turn;
+                // we cap the engine ring at a single retry instead (see the
+                // budget guard below).
+                let mut http_ring_exhausted = false;
 
                 // P1 Bug#3 — `stream()` runs `builder_send_with_retry`
                 // internally and can surface a *retryable*
@@ -3657,14 +3671,20 @@ impl AgentEngine {
                 // circuited the whole turn here, bypassing the bounded
                 // `'stream` retry loop below even though the identical error
                 // arriving mid-stream WOULD be retried. Funnel a retryable
-                // provider error into the same failed-attempt classifier so
-                // it gets the existing MAX_STREAM_RETRIES + backoff budget.
+                // provider error into the same failed-attempt classifier — but
+                // (finding #174) with a capped engine budget, since the HTTP
+                // ring already exhausted its own retries on this request (see
+                // `http_ring_exhausted` and the budget guard below).
                 // Non-retryable errors (auth/4xx/parse/prompt-too-long)
                 // propagate immediately, exactly as before.
                 let mut rx = match self.provider.stream(&request).await {
                     Ok(rx) => rx,
                     Err(e) if e.is_retryable() => {
                         stream_error = Some(e.to_string());
+                        // The provider's HTTP ring already retried this exact
+                        // request to exhaustion before surfacing `Err` — mark it
+                        // so the engine ring does not stack a fresh full budget.
+                        http_ring_exhausted = true;
                         // Skip the recv loop; fall through to the
                         // classifier, which retries or fails the turn.
                         // An already-closed empty receiver makes the
@@ -3744,13 +3764,27 @@ impl AgentEngine {
                 // bounded retry for 5xx / truncated streams / network
                 // drops where the next attempt has a real chance.
                 let is_client_error = is_http_4xx_error(&reason);
-                if !is_client_error && stream_attempt < MAX_STREAM_RETRIES {
+                // Finding #174 (nested re-bill cap): when the failure was an
+                // already-HTTP-exhausted provider `Err` (3 sends spent), grant
+                // the engine ring exactly ONE retry instead of the full
+                // `MAX_STREAM_RETRIES` (2). This still retries a genuinely
+                // transient single failure once — the common case — but stops
+                // the engine ring from stacking 3 attempts × 3 HTTP sends = 9
+                // full-input re-sends for one logical turn. A mid-stream error /
+                // truncated stream never sets `http_ring_exhausted`, so its
+                // retryability and budget are unchanged.
+                let effective_max_retries = if http_ring_exhausted {
+                    MAX_STREAM_RETRIES.min(1)
+                } else {
+                    MAX_STREAM_RETRIES
+                };
+                if !is_client_error && stream_attempt < effective_max_retries {
                     stream_attempt += 1;
                     // Linear backoff: 500ms, 1000ms.
                     let backoff = std::time::Duration::from_millis(500 * stream_attempt as u64);
                     self.output.emit_info(&format!(
                         "Provider stream failed ({reason}); retrying \
-                         (attempt {stream_attempt}/{MAX_STREAM_RETRIES})…"
+                         (attempt {stream_attempt}/{effective_max_retries})…"
                     ));
                     tokio::time::sleep(backoff).await;
                     continue 'stream;
@@ -11415,6 +11449,94 @@ mod audit_2026_05_22_tests {
             counter.load(std::sync::atomic::Ordering::SeqCst),
             3,
             "1 initial attempt + 2 retries = 3 provider calls"
+        );
+    }
+
+    // --- Finding #174: nested re-bill cap on an HTTP-ring-exhausted Err ----
+
+    /// Models the engine entry point that triggers the worst nesting:
+    /// `stream()` itself returns `Err(ProviderError::Connection)` — i.e. the
+    /// provider's HTTP ring (`builder_send_with_retry`) already spent its full
+    /// 3-send budget on this request before surfacing the error. Returns that
+    /// `Err` for the first `fail_calls` calls, then a clean `Done` stream.
+    struct StreamErrProvider {
+        fail_calls: usize,
+        calls: Arc<std::sync::atomic::AtomicUsize>,
+    }
+    impl StreamErrProvider {
+        fn new(fail_calls: usize) -> Self {
+            Self {
+                fail_calls,
+                calls: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            }
+        }
+        fn call_counter(&self) -> Arc<std::sync::atomic::AtomicUsize> {
+            Arc::clone(&self.calls)
+        }
+    }
+    #[async_trait]
+    impl LlmProvider for StreamErrProvider {
+        async fn stream(
+            &self,
+            _: &LlmRequest,
+        ) -> Result<tokio::sync::mpsc::Receiver<LlmEvent>, ProviderError> {
+            let n = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if n < self.fail_calls {
+                // A retryable Connection error surfaced from `stream()` itself:
+                // the HTTP ring already exhausted its budget on this request.
+                return Err(ProviderError::Connection("http ring exhausted".into()));
+            }
+            let (tx, rx) = tokio::sync::mpsc::channel(16);
+            tokio::spawn(async move {
+                let _ = tx.send(LlmEvent::TextDelta("recovered".into())).await;
+                let _ = tx.send(done_endturn()).await;
+            });
+            Ok(rx)
+        }
+    }
+
+    #[tokio::test]
+    async fn http_exhausted_stream_err_grants_only_one_engine_retry() {
+        // Finding #174 — when `stream()` returns a retryable `Err` (the HTTP
+        // ring already spent its 3-send budget), the engine ring must NOT stack
+        // a fresh full `MAX_STREAM_RETRIES` budget on top. Without the cap a
+        // permanent HTTP-exhausted failure would drive 3 engine attempts (1 +
+        // 2 retries); with the cap it is bounded to 2 (1 + 1 retry), each of
+        // which would re-enter the HTTP ring's 3 sends — so the worst case
+        // drops from 9 full-input re-sends to 6 for one logical turn.
+        let provider = Arc::new(StreamErrProvider::new(usize::MAX)); // always fails
+        let counter = provider.call_counter();
+        let mut engine = engine_with(provider);
+        let result = engine.run("task", "m-1").await;
+        assert!(
+            matches!(result, Err(super::AgentError::ApiError(_))),
+            "a permanent HTTP-exhausted failure must fail the turn, got {result:?}"
+        );
+        assert_eq!(
+            counter.load(std::sync::atomic::Ordering::SeqCst),
+            2,
+            "an HTTP-ring-exhausted Err must get exactly 1 engine retry \
+             (2 attempts), NOT the full 3 — that is the nested re-bill cap"
+        );
+    }
+
+    #[tokio::test]
+    async fn http_exhausted_stream_err_still_retries_a_single_transient_failure() {
+        // Finding #174 normal-case guard — the cap must NOT kill resilience for
+        // a genuinely transient single failure. One HTTP-exhausted `Err`
+        // followed by a clean stream must still be retried and recover.
+        let provider = Arc::new(StreamErrProvider::new(1)); // fail once, then ok
+        let counter = provider.call_counter();
+        let mut engine = engine_with(provider);
+        let result = engine
+            .run("task", "m-1")
+            .await
+            .expect("a single transient HTTP-exhausted failure must still recover");
+        assert_eq!(result.text, "recovered");
+        assert_eq!(
+            counter.load(std::sync::atomic::Ordering::SeqCst),
+            2,
+            "1 initial attempt + 1 retry recovers the single transient failure"
         );
     }
 
