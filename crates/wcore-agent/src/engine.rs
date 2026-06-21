@@ -802,7 +802,11 @@ pub struct AgentEngine {
     /// turns — a per-turn re-curation otherwise rewrites the cached prefix at
     /// the cache-WRITE rate every MCP turn. Reset only when the MCP tool
     /// inventory itself changes (server connect/disconnect / plugin reload).
-    mcp_curation_cache: Option<(u64, std::collections::HashSet<String>)>,
+    /// Stored as a `Vec` in FIRST-ADD order (not a `HashSet`) so a newly
+    /// unioned tool is APPENDED at the end and never reorders already-kept
+    /// tools — keeping the emitted tool-zone prefix byte-stable (a cache-safe
+    /// append) on every union-growth turn instead of a mid-array insert.
+    mcp_curation_cache: Option<(u64, Vec<String>)>,
     /// Token-opt (diff-resend): handle to the shared file-state cache (the same
     /// `Arc` the Read/Edit/Write tools hold). Used only to bump the cache's
     /// compaction generation after a compaction pass, so stale read bases stop
@@ -6071,24 +6075,37 @@ impl AgentEngine {
                 tools: &triples,
                 recent_usage: &usage,
             });
-        let this_turn: std::collections::HashSet<String> =
-            ranked.into_iter().map(|r| r.tool_name).collect();
+        // This turn's pick, in rank order (already deduped by the curator).
+        let this_turn: Vec<String> = ranked.into_iter().map(|r| r.tool_name).collect();
 
-        // Union into the inventory-keyed cache (reset on inventory change).
-        let keep_names = match self.mcp_curation_cache.as_mut() {
-            Some((hash, set)) if *hash == inventory_hash => {
-                set.extend(this_turn);
-                set.clone()
+        // Union into the inventory-keyed cache (reset on inventory change),
+        // APPEND-ONLY: a name already in the kept order keeps its position; a
+        // newly-surfaced name is pushed at the END. This makes every
+        // union-growth turn a cache-safe append (stable prefix) rather than a
+        // mid-array insert that would invalidate the cached tool-zone prefix.
+        let keep_order: &Vec<String> = match self.mcp_curation_cache.as_mut() {
+            Some((hash, order)) if *hash == inventory_hash => {
+                for name in this_turn {
+                    if !order.contains(&name) {
+                        order.push(name);
+                    }
+                }
+                &*order
             }
             _ => {
-                self.mcp_curation_cache = Some((inventory_hash, this_turn.clone()));
-                this_turn
+                self.mcp_curation_cache = Some((inventory_hash, this_turn));
+                &self.mcp_curation_cache.as_ref().expect("just set").1
             }
         };
 
-        for t in mcp_tools {
-            if keep_names.contains(&t.name) {
-                keep.push(t);
+        // Emit kept MCP tools in FIRST-ADD order (not registry-iteration
+        // order). Built-in/non-MCP tools in `keep` retain their original
+        // relative position ahead of the MCP block.
+        let by_name: std::collections::HashMap<&str, &wcore_types::tool::ToolDef> =
+            mcp_tools.iter().map(|t| (t.name.as_str(), t)).collect();
+        for name in keep_order {
+            if let Some(t) = by_name.get(name.as_str()) {
+                keep.push((*t).clone());
             }
         }
         keep
@@ -6595,6 +6612,98 @@ mod set_config_tests {
         engine.messages = user("echo fresh tool");
         let after_change = names(engine.apply_mcp_curation(tools2));
         assert!(after_change.contains(&"mcp__srv__echo".to_string()));
+    }
+
+    /// Cache-stability regression (token-opt, finding #174): when turn 2
+    /// unions in a tool that sorts EARLIER in registry-iteration order than an
+    /// already-kept tool, the kept set must stay APPEND-ONLY — the new tool
+    /// lands AFTER the already-kept tools, never ahead of them. Inserting a
+    /// tool earlier in the `tools` array would invalidate the Anthropic
+    /// prompt-cache prefix from that point through the rest of the tools zone.
+    ///
+    /// Pre-fix, the final emission iterated `mcp_tools` in registry order and
+    /// kept any name present in an unordered `HashSet`, so a newly-unioned tool
+    /// reappeared at its REGISTRY position (here `alpha`, index 0) ahead of the
+    /// turn-1 keep (`zulu`, index 1) — a mid-array insert that busts the cache.
+    #[test]
+    fn mcp_curation_union_is_append_only_not_registry_order() {
+        use wcore_types::message::{ContentBlock, Message, Role};
+
+        fn mcp_tool(name: &str, desc: &str) -> wcore_types::tool::ToolDef {
+            wcore_types::tool::ToolDef {
+                name: name.to_string(),
+                description: desc.to_string(),
+                input_schema: serde_json::json!({"type": "object"}),
+                deferred: false,
+            }
+        }
+        // Registry order: alpha sits at index 0, ahead of zulu/yankee. Turn 1
+        // surfaces zulu + yankee (both positive keyword overlap, filling the
+        // k=2 picks); alpha scores zero on turn 1 so it is NOT kept yet. Turn 2
+        // surfaces alpha — which sits BEFORE zulu/yankee in registry order.
+        // Append-only ordering must keep zulu/yankee first and append alpha.
+        let tools = vec![
+            mcp_tool("mcp__srv__alpha", "search alpha database records"),
+            mcp_tool("mcp__srv__zulu", "compile zulu reports"),
+            mcp_tool("mcp__srv__yankee", "compile yankee reports"),
+            mcp_tool("mcp__srv__bravo", "send bravo email messages"),
+        ];
+        let names = |v: Vec<wcore_types::tool::ToolDef>| -> Vec<String> {
+            v.into_iter().map(|t| t.name).collect()
+        };
+        let user = |text: &str| {
+            vec![Message::new(
+                Role::User,
+                vec![ContentBlock::Text {
+                    text: text.to_string(),
+                }],
+            )]
+        };
+
+        let mut engine = make_engine("m");
+        engine.mcp_curation = wcore_config::config::McpCurationPolicy::TopK { k: 2 };
+        engine.audit_log = None; // keyword-only ranking → deterministic
+
+        // Turn 1: "compile reports" surfaces zulu + yankee (both score 2);
+        // alpha scores 0 and is NOT kept. zulu lands ahead of the later union.
+        engine.messages = user("compile reports");
+        let turn1 = names(engine.apply_mcp_curation(tools.clone()));
+        assert!(turn1.contains(&"mcp__srv__zulu".to_string()));
+        assert!(
+            !turn1.contains(&"mcp__srv__alpha".to_string()),
+            "alpha must not be surfaced on turn 1 (precondition for the union-growth check)"
+        );
+        let zulu_pos_1 = turn1.iter().position(|n| n == "mcp__srv__zulu");
+
+        // Turn 2: "alpha database" surfaces. alpha is unioned in. Despite alpha
+        // sitting at registry index 0 (ahead of zulu's index 1), append-only
+        // ordering must place alpha AFTER the already-kept zulu.
+        engine.messages = user("alpha database query");
+        let turn2 = names(engine.apply_mcp_curation(tools.clone()));
+
+        let zulu_pos_2 = turn2
+            .iter()
+            .position(|n| n == "mcp__srv__zulu")
+            .expect("zulu must still be kept (monotonic union)");
+        let alpha_pos_2 = turn2
+            .iter()
+            .position(|n| n == "mcp__srv__alpha")
+            .expect("alpha must be unioned in on turn 2");
+
+        // The append-only invariant: the newly-unioned alpha lands AFTER zulu.
+        // Pre-fix this fails — alpha (registry idx 0) emits ahead of zulu.
+        assert!(
+            zulu_pos_2 < alpha_pos_2,
+            "newly-unioned tool must APPEND after already-kept tools, not \
+             insert ahead of them (zulu at {zulu_pos_2}, alpha at {alpha_pos_2})"
+        );
+
+        // And the prefix is byte-stable: zulu keeps its turn-1 position.
+        assert_eq!(
+            zulu_pos_1,
+            Some(zulu_pos_2),
+            "already-kept tool must retain its position across the union-growth turn"
+        );
     }
 
     // --- Cycle 1 tests (updated signature) ---
