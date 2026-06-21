@@ -92,7 +92,7 @@ fn bash_shell_prefix_for(is_windows: bool, win_shell: Option<&str>) -> Vec<Strin
     if !is_windows {
         return vec!["sh".to_string(), "-c".to_string()];
     }
-    match win_shell.map(|s| s.trim().to_ascii_lowercase()).as_deref() {
+    match win_shell.map(normalize_win_shell).as_deref() {
         Some("powershell") => vec![
             "powershell".to_string(),
             "-NoProfile".to_string(),
@@ -105,6 +105,21 @@ fn bash_shell_prefix_for(is_windows: bool, win_shell: Option<&str>) -> Vec<Strin
         ],
         _ => vec!["cmd".to_string(), "/C".to_string()],
     }
+}
+
+/// Normalize a `WAYLAND_BASH_SHELL` / `[tools] windows_shell` value to its
+/// lowercased program stem so the selector accepts not only `pwsh` / `powershell`
+/// but also `pwsh.exe`, `powershell.exe`, and absolute or relative paths such as
+/// `C:\Program Files\PowerShell\7\pwsh.exe` (FerroxLabs/wayland#197 — the selector
+/// was previously an exact, length-only match that silently fell back to `cmd /C`
+/// for any of these, which also contradicted the sandbox allowlist that *requires*
+/// the `.exe`/absolute form). Splits on both `/` and `\` regardless of host OS —
+/// this runs on Windows in production but is unit-tested on every platform — then
+/// strips a trailing `.exe`.
+fn normalize_win_shell(s: &str) -> String {
+    let base = s.trim().rsplit(['/', '\\']).next().unwrap_or("");
+    let base = base.to_ascii_lowercase();
+    base.strip_suffix(".exe").unwrap_or(&base).to_string()
 }
 
 /// Shell-string mode: run `sh -c <str>` (Unix) / `cmd /C <str>` (Windows).
@@ -250,6 +265,44 @@ mod tests {
         assert_eq!(
             bash_shell_prefix_for(true, Some("pwsh")),
             vec!["pwsh", "-NoProfile", "-Command"]
+        );
+    }
+
+    #[test]
+    fn bash_prefix_windows_accepts_exe_and_absolute_paths() {
+        // FerroxLabs/wayland#197: the selector must accept `.exe` suffixes and
+        // absolute/relative paths, not only the bare `pwsh`/`powershell` tokens —
+        // previously any of these silently fell back to `cmd /C`.
+        let powershell = vec!["powershell", "-NoProfile", "-Command"];
+        let pwsh = vec!["pwsh", "-NoProfile", "-Command"];
+        for v in [
+            "pwsh.exe",
+            "PWSH.EXE",
+            r"C:\Program Files\PowerShell\7\pwsh.exe",
+            "/usr/bin/pwsh",
+        ] {
+            assert_eq!(
+                bash_shell_prefix_for(true, Some(v)),
+                pwsh,
+                "{v} should select pwsh"
+            );
+        }
+        for v in [
+            "powershell.exe",
+            "PowerShell.exe",
+            r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe",
+        ] {
+            assert_eq!(
+                bash_shell_prefix_for(true, Some(v)),
+                powershell,
+                "{v} should select powershell"
+            );
+        }
+        // A path to an unrelated shell still falls back to cmd (only pwsh/powershell
+        // are sandbox-supported selectors).
+        assert_eq!(
+            bash_shell_prefix_for(true, Some(r"C:\Program Files\Git\bin\bash.exe")),
+            vec!["cmd", "/C"]
         );
     }
 
