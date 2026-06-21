@@ -8,6 +8,8 @@
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
+use wcore_skills::paths::stop_boundary;
+
 /// File names checked at each ancestor directory.
 pub const CONTEXT_FILE_NAMES: &[&str] = &[
     "WAYLAND.md",
@@ -56,6 +58,19 @@ pub fn scan(start: &Path) -> std::io::Result<ProjectContext> {
     // symlink) we fall through and skip insertion — the file won't be
     // readable anyway.
     let mut seen: HashSet<PathBuf> = HashSet::new();
+
+    // Bound the ancestor walk to the *project*, mirroring `collect_agents_md`:
+    // stop at the nearest git root, or the user home directory when there is
+    // no repo. Without this, the walk runs to the filesystem root and slurps
+    // context files (WAYLAND.md / AGENTS.md / .wayland/context.md / CLAUDE.md)
+    // that happen to live in unrelated ancestor directories — which is both
+    // wrong product behavior (PROJECT context should be project-scoped; the
+    // global ~/.claude/CLAUDE.md is read elsewhere) and a source of
+    // platform-dependent flakiness: on Windows the temp dir lives under the
+    // user profile (`C:\Users\<u>\AppData\Local\Temp`), so an unbounded walk
+    // reaches home-level context files, whereas on Linux/mac `/tmp` is not
+    // under `$HOME`.
+    let boundary = stop_boundary(start);
     let mut cursor: Option<&Path> = Some(start);
     while let Some(dir) = cursor {
         for name in CONTEXT_FILE_NAMES {
@@ -72,6 +87,12 @@ pub fn scan(start: &Path) -> std::io::Result<ProjectContext> {
                 Err(e) => return Err(e),
             }
         }
+        // Stop once we've processed the boundary directory itself; never walk
+        // above it. If the boundary is unreachable (e.g. on a different drive
+        // from `start`), fall back to walking to the filesystem root.
+        if Some(dir) == boundary.as_deref() {
+            break;
+        }
         cursor = dir.parent();
     }
     Ok(ctx)
@@ -85,6 +106,13 @@ mod tests {
     #[test]
     fn finds_no_files_when_none_exist() {
         let dir = tempfile::tempdir().expect("tempdir");
+        // Plant a `.git` marker so the ancestor walk is bounded to this
+        // tempdir (its git root) and cannot reach context files in ambient
+        // ancestor directories. Without this the scan walks to the filesystem
+        // root; on Windows runners the temp dir lives under the user profile,
+        // so it would pick up home-level context files and the assertion below
+        // would fail.
+        fs::create_dir(dir.path().join(".git")).expect("git marker");
         let ctx = scan(dir.path()).expect("scan");
         assert!(ctx.files.is_empty());
         assert!(ctx.rendered().is_none());
@@ -93,6 +121,10 @@ mod tests {
     #[test]
     fn finds_closest_ancestor_first() {
         let root = tempfile::tempdir().expect("tempdir");
+        // `.git` at the intended project root bounds the walk here, so the
+        // scan sees exactly the two files this test plants and nothing from
+        // ambient ancestors.
+        fs::create_dir(root.path().join(".git")).expect("git marker");
         let child = root.path().join("a").join("b").join("c");
         fs::create_dir_all(&child).expect("create_dir_all");
         fs::write(root.path().join("WAYLAND.md"), "ROOT").expect("root");
@@ -108,6 +140,9 @@ mod tests {
     #[test]
     fn rendered_concatenates_with_headers() {
         let root = tempfile::tempdir().expect("tempdir");
+        // Bound the walk to this tempdir so ambient ancestor context files
+        // cannot leak into `rendered()` on any platform.
+        fs::create_dir(root.path().join(".git")).expect("git marker");
         fs::write(root.path().join("WAYLAND.md"), "alpha\n").expect("file");
         let ctx = scan(root.path()).expect("scan");
         let rendered = ctx.rendered().expect("rendered");
@@ -118,6 +153,7 @@ mod tests {
     #[test]
     fn nested_wayland_dir_context_discovered() {
         let root = tempfile::tempdir().expect("tempdir");
+        fs::create_dir(root.path().join(".git")).expect("git marker");
         let wayland = root.path().join(".wayland");
         fs::create_dir_all(&wayland).expect("mkdir");
         fs::write(wayland.join("context.md"), "wayland-ctx").expect("write");
@@ -133,6 +169,7 @@ mod tests {
     #[test]
     fn no_duplicates_when_scanning_from_dot() {
         let root = tempfile::tempdir().expect("tempdir");
+        fs::create_dir(root.path().join(".git")).expect("git marker");
         let file_path = root.path().join("WAYLAND.md");
         fs::write(&file_path, "dedup-check").expect("write");
 

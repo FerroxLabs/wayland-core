@@ -136,11 +136,25 @@ impl Tool for GlobTool {
         // unchanged.
         if let Some(pattern) = input["pattern"].as_str() {
             let pattern_path = Path::new(pattern);
-            if pattern_path.is_absolute()
-                || pattern_path
-                    .components()
-                    .any(|c| matches!(c, std::path::Component::ParentDir))
-            {
+            // Reject any pattern that anchors outside the relative jail.
+            // `is_absolute()` alone is insufficient: on Windows a leading
+            // `/` or `\` (e.g. `/etc/**`) is NOT absolute (no drive letter),
+            // so it would slip past and escape the sandbox. Inspecting the
+            // path components catches every anchor shape on every platform:
+            //   - `Prefix`     — Windows drive (`C:`) or UNC root
+            //   - `RootDir`    — a leading `/` or `\` (yielded on Unix AND
+            //                    Windows for root-relative patterns)
+            //   - `ParentDir`  — a `..` traversal segment
+            // Legitimate relative patterns (`*.rs`, `**/*.rs`, `src/**/*.ts`)
+            // contain only `Normal`/`CurDir` components and pass through.
+            if pattern_path.components().any(|c| {
+                matches!(
+                    c,
+                    std::path::Component::Prefix(_)
+                        | std::path::Component::RootDir
+                        | std::path::Component::ParentDir
+                )
+            }) {
                 return ToolResult {
                     content: format!(
                         "Glob refused: pattern {pattern:?} is absolute or contains `..` traversal, \

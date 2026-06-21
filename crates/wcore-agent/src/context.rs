@@ -694,6 +694,14 @@ mod tests {
         let tmp = tempfile::TempDir::new().unwrap();
         let cwd = tmp.path();
 
+        // Plant a `.git` marker so `collect_agents_md` bounds its ancestor
+        // walk to this tempdir. Otherwise the boundary falls back to the home
+        // directory, and on Windows runners the temp dir lives *under* the
+        // user profile — so the walk would reach a home-level AGENTS.md and
+        // inject "(project instructions)", failing the assertions below. On
+        // Linux/mac the temp dir is outside `$HOME`, which masked the bug.
+        std::fs::create_dir(cwd.join(".git")).unwrap();
+
         // Only CLAUDE.md exists, no AGENTS.md
         std::fs::write(cwd.join("CLAUDE.md"), "SHOULD_NOT_APPEAR").unwrap();
 
