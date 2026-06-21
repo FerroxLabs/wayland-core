@@ -5228,7 +5228,7 @@ impl AgentEngine {
                 self.output.emit_info(&format!(
                     "Autocompact: disabled (compact.enabled=false, \
                      last_real_input_tokens={}, threshold={})",
-                    self.compact_state.last_input_tokens, threshold
+                    self.compact_state.last_real_input_tokens, threshold
                 ));
             }
         }
