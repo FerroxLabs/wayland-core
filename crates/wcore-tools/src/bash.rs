@@ -66,12 +66,15 @@ const MAX_TIMEOUT_MS: u64 = 600_000;
 /// threaded through. This is a documented defense-in-depth gap, not an
 /// escape: the env is already secret-scrubbed and the network now defaults
 /// closed.
-fn build_sandbox_pieces(command: &str) -> (SandboxManifest, SandboxCommand) {
-    // Shell prefix honors the Windows `WAYLAND_BASH_SHELL=powershell|pwsh`
-    // override (BashTool only); defaults to `sh -c` / `cmd /C`.
+fn build_sandbox_pieces(
+    command: &str,
+    policy: Option<&crate::workspace_policy::WorkspacePolicy>,
+) -> (SandboxManifest, SandboxCommand) {
+    // Shell prefix honors the Windows WAYLAND_BASH_SHELL=powershell|pwsh override
+    // (BashTool only); defaults to sh -c / cmd /C.
     let mut argv = bash_shell_argv_prefix();
     argv.push(command.to_string());
-    let manifest = SandboxManifest {
+    let mut manifest = SandboxManifest {
         network: default_bash_network_policy(),
         // Curated env — secrets excluded, see the doc-comment above.
         env: crate::env_passthrough::build_sandboxed_env(&[]),
@@ -79,13 +82,33 @@ fn build_sandbox_pieces(command: &str) -> (SandboxManifest, SandboxCommand) {
         syscall_policy: SyscallPolicy::Inherit,
         ..Default::default()
     };
-    (manifest, SandboxCommand { argv, cwd: None })
+    let mut cwd = None;
+    if let Some(p) = policy {
+        manifest.fs_write_allow = p.writable_roots();
+        manifest.fs_read_allow = p.readable_roots();
+        manifest.fs_read_deny = p.secret_deny_paths().to_vec();
+        manifest.env.extend(p.cache_env().iter().cloned());
+        manifest.network = p.network();
+        cwd = Some(p.root().to_path_buf());
+    }
+    (manifest, SandboxCommand { argv, cwd })
+}
+
+/// Whether the platform's default sandbox backend enforces secret-read-deny
+/// at the OS layer (`SandboxBackend::enforces_read_deny()`).
+///
+/// Used by `wcore-agent` bootstrap to gate the Workspace-posture `Bash` UX
+/// drop without requiring `wcore-agent` to take a direct dep on
+/// `wcore-sandbox`. This is the identical probe `default_for_platform()`
+/// uses at exec time — calling it at bootstrap is a UX-only signal.
+pub fn platform_enforces_read_deny() -> bool {
+    default_for_platform().enforces_read_deny()
 }
 
 /// Network policy for agent-initiated Bash. Defaults to
 /// [`NetworkPolicy::Deny`]; `WAYLAND_BASH_ALLOW_NETWORK=1` opts back into
 /// full host network (`Inherit`) for network-dependent workflows.
-fn default_bash_network_policy() -> NetworkPolicy {
+pub(crate) fn default_bash_network_policy() -> NetworkPolicy {
     match std::env::var("WAYLAND_BASH_ALLOW_NETWORK") {
         Ok(v) if v == "1" || v.eq_ignore_ascii_case("true") => NetworkPolicy::Inherit,
         _ => NetworkPolicy::Deny,
@@ -471,7 +494,7 @@ impl Tool for BashTool {
         let timeout = Duration::from_millis(timeout_ms);
 
         let backend = default_for_platform();
-        let (manifest, cmd) = build_sandbox_pieces(command);
+        let (manifest, cmd) = build_sandbox_pieces(command, None);
 
         let result = tokio::time::timeout(timeout, backend.execute(&manifest, cmd)).await;
 
@@ -531,7 +554,7 @@ impl Tool for BashTool {
         // `execute_streaming` takes `self: Arc<Self>` so the backend can
         // own a handle in its background task — wrap the boxed backend.
         let backend: Arc<dyn SandboxBackend> = Arc::from(default_for_platform());
-        let (manifest, cmd) = build_sandbox_pieces(command);
+        let (manifest, cmd) = build_sandbox_pieces(command, None);
 
         let mut rx = match backend.execute_streaming(&manifest, cmd) {
             Ok(rx) => rx,
@@ -613,36 +636,193 @@ impl Tool for BashTool {
         )
     }
 
-    /// W8a A.4: ctx-aware non-streaming path. Races
-    /// `ctx.cancel.cancelled()` against the buffered shell_command call
-    /// so `Bash sleep 30` is interruptible in <500ms when the agent
-    /// signals cancel (S2). Returns a cancelled-shaped ToolResult so
-    /// the orchestration trace shows "cancelled" rather than "timed out".
+    /// W8a A.4 / Task-4: ctx-aware non-streaming path. Derives the OS-sandbox
+    /// manifest from `ctx.workspace` (cwd, allowlists, cache env, network), then
+    /// races cancel against the buffered backend execute with a timeout, so
+    /// `Bash sleep 30` is interruptible in <500ms when the agent signals cancel (S2).
     async fn execute_with_ctx(&self, input: Value, ctx: &ToolContext) -> ToolResult {
+        let Some(command) = input["command"].as_str() else {
+            return ToolResult {
+                content: "Missing required parameter: command".to_string(),
+                is_error: true,
+            };
+        };
+        if let Some(reason) = check_denylist(command) {
+            return ToolResult {
+                content: reason.to_string(),
+                is_error: true,
+            };
+        }
+        let timeout_ms = input["timeout"]
+            .as_u64()
+            .unwrap_or(DEFAULT_TIMEOUT_MS)
+            .min(MAX_TIMEOUT_MS);
+        let timeout = Duration::from_millis(timeout_ms);
+        let backend = default_for_platform();
+        // Task 8 — exec-time capability gate (TOCTOU-free boundary). The same
+        // `default_for_platform()` that would run the command decides whether it
+        // may run. A bootstrap-only probe would be bypassable because
+        // default_for_platform() re-resolves on each call.
+        if let Some(p) = ctx.workspace.as_deref()
+            && p.trust() == crate::workspace_policy::WorkspaceTrust::Contained
+            && !backend.enforces_read_deny()
+        {
+            return ToolResult {
+                content: "Refused: shell is unavailable in the contained workspace \
+                          because the active sandbox backend cannot enforce \
+                          secret-read-deny."
+                    .to_string(),
+                is_error: true,
+            };
+        }
+        let (manifest, cmd) = build_sandbox_pieces(command, ctx.workspace.as_deref());
+        let net = manifest.network.clone();
         tokio::select! {
             _ = ctx.cancel.cancelled() => ToolResult {
                 content: "Bash command cancelled by cancellation token".to_string(),
                 is_error: true,
             },
-            result = self.execute(input) => result,
+            result = tokio::time::timeout(timeout, backend.execute(&manifest, cmd)) => match result {
+                Ok(Ok(output)) => annotate_network_block(command, net, output_to_result(output)),
+                Ok(Err(e)) => ToolResult { content: format!("Failed to execute command: {e}"), is_error: true },
+                Err(_) => ToolResult { content: format!("Command timed out after {timeout_ms}ms"), is_error: true },
+            },
         }
     }
 
     /// W8a A.4: ctx-aware streaming path. Same select-on-cancel as
     /// `execute_with_ctx` but preserves W7's chunk-streaming behaviour
     /// when the cancellation token never fires.
+    ///
+    /// Crucially, this builds the sandbox manifest from `ctx.workspace`
+    /// (cwd, allowlists, cache-env, network) exactly as `execute_with_ctx`
+    /// does, so the streamed command runs inside the WorkspacePolicy rather
+    /// than with the policy-less `None` fallback that the non-ctx
+    /// `execute_streaming` uses.
     async fn execute_streaming_with_ctx(
         &self,
         input: Value,
         ctx: &ToolContext,
         sink: &dyn ToolOutputSink,
     ) -> ToolResult {
+        let Some(command) = input["command"].as_str() else {
+            return ToolResult {
+                content: "Missing required parameter: command".to_string(),
+                is_error: true,
+            };
+        };
+
+        if let Some(reason) = check_denylist(command) {
+            return ToolResult {
+                content: reason.to_string(),
+                is_error: true,
+            };
+        }
+
+        let timeout_ms = input["timeout"]
+            .as_u64()
+            .unwrap_or(DEFAULT_TIMEOUT_MS)
+            .min(MAX_TIMEOUT_MS);
+        let timeout = Duration::from_millis(timeout_ms);
+
+        // Task 8 — exec-time capability gate (streaming path, same logic as
+        // execute_with_ctx). Must check BEFORE wrapping in Arc.
+        let backend_probe = default_for_platform();
+        if let Some(p) = ctx.workspace.as_deref()
+            && p.trust() == crate::workspace_policy::WorkspaceTrust::Contained
+            && !backend_probe.enforces_read_deny()
+        {
+            return ToolResult {
+                content: "Refused: shell is unavailable in the contained workspace \
+                          because the active sandbox backend cannot enforce \
+                          secret-read-deny."
+                    .to_string(),
+                is_error: true,
+            };
+        }
+        let backend: Arc<dyn SandboxBackend> = Arc::from(backend_probe);
+        let (manifest, cmd) = build_sandbox_pieces(command, ctx.workspace.as_deref());
+        let net = manifest.network.clone();
+
+        let mut rx = match backend.execute_streaming(&manifest, cmd) {
+            Ok(rx) => rx,
+            Err(e) => {
+                return ToolResult {
+                    content: format!("Failed to execute command: {}", e),
+                    is_error: true,
+                };
+            }
+        };
+
+        let mut stdout_buf = String::new();
+        let mut stderr_buf = String::new();
+        let mut exit_code: Option<i32> = None;
+
+        fn drain_lines(bytes: &[u8], sink: &dyn ToolOutputSink, buf: &mut String) {
+            let text = String::from_utf8_lossy(bytes);
+            for line in text.lines() {
+                sink.emit_chunk(line);
+                buf.push_str(line);
+                buf.push('\n');
+            }
+        }
+
+        let run = async {
+            while let Some(chunk) = rx.recv().await {
+                match chunk {
+                    SandboxChunk::Stdout(bytes) => {
+                        drain_lines(&bytes, sink, &mut stdout_buf);
+                    }
+                    SandboxChunk::Stderr(bytes) => {
+                        drain_lines(&bytes, sink, &mut stderr_buf);
+                    }
+                    SandboxChunk::Exit {
+                        exit_code: code, ..
+                    } => {
+                        exit_code = Some(code);
+                    }
+                }
+            }
+        };
+
+        let timed = tokio::time::timeout(timeout, run);
+
         tokio::select! {
             _ = ctx.cancel.cancelled() => ToolResult {
                 content: "Bash command cancelled by cancellation token".to_string(),
                 is_error: true,
             },
-            result = self.execute_streaming(input, sink) => result,
+            res = timed => {
+                if res.is_err() {
+                    return ToolResult {
+                        content: format!("Command timed out after {}ms", timeout_ms),
+                        is_error: true,
+                    };
+                }
+                let Some(exit_code) = exit_code else {
+                    let detail = if stderr_buf.is_empty() {
+                        "sandbox produced no exit status".to_string()
+                    } else {
+                        stderr_buf.trim_end().to_string()
+                    };
+                    return ToolResult {
+                        content: format!("Failed to execute command: {}", detail),
+                        is_error: true,
+                    };
+                };
+                let content = format!(
+                    "Exit code: {}\nSTDOUT:\n{}\nSTDERR:\n{}",
+                    exit_code, stdout_buf, stderr_buf
+                );
+                annotate_network_block(
+                    command,
+                    net,
+                    ToolResult {
+                        content,
+                        is_error: exit_code != 0,
+                    },
+                )
+            }
         }
     }
 
@@ -867,7 +1047,7 @@ mod tests {
             std::env::var("WAYLAND_BASH_ALLOW_NETWORK").is_err(),
             "test env must not pre-set the opt-in var"
         );
-        let (manifest, _cmd) = build_sandbox_pieces("echo hi");
+        let (manifest, _cmd) = build_sandbox_pieces("echo hi", None);
         assert_eq!(
             manifest.network,
             NetworkPolicy::Deny,
@@ -979,5 +1159,161 @@ mod tests {
         };
         let r = annotate_network_block("curl -sL https://x.y", NetworkPolicy::Deny, ok);
         assert!(!r.content.contains("NO NETWORK"), "no hint on success");
+    }
+
+    // ── Task 4: build_sandbox_pieces derives manifest from WorkspacePolicy ──
+
+    #[test]
+    fn build_sandbox_pieces_no_policy_is_legacy() {
+        let (m, cmd) = build_sandbox_pieces("echo hi", None);
+        assert!(cmd.cwd.is_none());
+        assert!(m.fs_write_allow.is_empty());
+        assert_eq!(m.network, default_bash_network_policy());
+        // Regression: argv must come from bash_shell_argv_prefix (honors the
+        // WAYLAND_BASH_SHELL Windows override), NOT from the hardcoded shell_info().
+        #[cfg(unix)]
+        assert_eq!(cmd.argv.first().map(|s| s.as_str()), Some("sh"));
+    }
+
+    #[test]
+    fn build_sandbox_pieces_trusted_sets_cwd_and_no_cache_redirect() {
+        use crate::workspace_policy::WorkspacePolicy;
+        let dir = tempfile::tempdir().unwrap();
+        let policy = WorkspacePolicy::trusted_local(dir.path());
+        let (m, cmd) = build_sandbox_pieces("echo hi", Some(&policy));
+        assert_eq!(cmd.cwd.as_deref(), Some(policy.root()));
+        assert!(m.fs_write_allow.iter().any(|p| p == policy.root()));
+        // Trusted preserves the network opt-in default (Deny) and injects no
+        // CARGO_HOME redirect.
+        assert_eq!(m.network, default_bash_network_policy());
+        assert!(!m.env.iter().any(|(k, _)| k == "CARGO_HOME"));
+        // secrets still stripped from base env (unchanged)
+        assert!(!m.env.iter().any(|(k, _)| k.contains("TOKEN")));
+    }
+
+    #[test]
+    fn build_sandbox_pieces_contained_injects_cache_redirect() {
+        use crate::workspace_policy::WorkspacePolicy;
+        let dir = tempfile::tempdir().unwrap();
+        let policy = WorkspacePolicy::contained(dir.path());
+        let (m, _cmd) = build_sandbox_pieces("echo hi", Some(&policy));
+        assert!(m.env.iter().any(|(k, _)| k == "CARGO_HOME"));
+    }
+
+    /// Regression: `execute_streaming_with_ctx` must thread `ctx.workspace`
+    /// into `build_sandbox_pieces` so the streamed command runs with the
+    /// WorkspacePolicy's cwd. Previously it delegated to `execute_streaming`
+    /// which always passed `None`, discarding the policy on the streaming path.
+    #[cfg(unix)]
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn streaming_with_ctx_threads_workspace_policy_cwd() {
+        // SAFETY: test-only env mutation; #[serial] prevents races.
+        unsafe {
+            std::env::set_var("WAYLAND_SANDBOX", "none");
+            std::env::set_var("WAYLAND_ALLOW_NO_SANDBOX", "1");
+        }
+        use crate::context::ToolContext;
+        use crate::workspace_policy::WorkspacePolicy;
+        use std::sync::{Arc, Mutex};
+        struct Cap(Mutex<Vec<String>>);
+        impl crate::ToolOutputSink for Cap {
+            fn emit_chunk(&self, chunk: &str) {
+                self.0.lock().unwrap().push(chunk.into());
+            }
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(dir.path()).unwrap();
+        let policy = Arc::new(WorkspacePolicy::trusted_local(&root));
+        let ctx = ToolContext::test_default().with_workspace(policy);
+        let cap = Cap(Mutex::new(Vec::new()));
+        let result = BashTool
+            .execute_streaming_with_ctx(serde_json::json!({"command": "pwd"}), &ctx, &cap)
+            .await;
+
+        assert!(
+            !result.is_error,
+            "streaming_with_ctx failed: {}",
+            result.content
+        );
+        let root_str = root.to_string_lossy();
+        assert!(
+            result.content.contains(root_str.as_ref()),
+            "expected cwd {} in output, got: {}",
+            root_str,
+            result.content
+        );
+    }
+
+    // ── Task 7: build_sandbox_pieces populates fs_read_deny from WorkspacePolicy ──
+
+    /// Contained policy → manifest.fs_read_deny is populated (project .env is denied).
+    #[test]
+    fn build_sandbox_pieces_contained_populates_fs_read_deny() {
+        use crate::workspace_policy::WorkspacePolicy;
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        // Create a .env file so secret_deny_paths() will include it.
+        std::fs::write(root.join(".env"), "SECRET=hunter2").unwrap();
+        let policy = WorkspacePolicy::contained(root);
+        let (m, _cmd) = build_sandbox_pieces("echo hi", Some(&policy));
+        // In Contained mode the workspace .env must appear in fs_read_deny.
+        let env_path = std::fs::canonicalize(root.join(".env")).unwrap();
+        assert!(
+            m.fs_read_deny.contains(&env_path),
+            "Contained policy must deny the workspace .env; got: {:?}",
+            m.fs_read_deny
+        );
+    }
+
+    /// None policy → manifest.fs_read_deny is empty (today's behavior preserved).
+    #[test]
+    fn build_sandbox_pieces_no_policy_fs_read_deny_empty() {
+        let (m, _cmd) = build_sandbox_pieces("echo hi", None);
+        assert!(
+            m.fs_read_deny.is_empty(),
+            "no-policy path must leave fs_read_deny empty; got: {:?}",
+            m.fs_read_deny
+        );
+    }
+
+    /// Trusted policy → manifest.fs_read_deny does NOT contain the workspace .env
+    /// (trusted mode doesn't deny project secrets, only credential stores).
+    #[test]
+    fn build_sandbox_pieces_trusted_does_not_deny_project_env() {
+        use crate::workspace_policy::WorkspacePolicy;
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::write(root.join(".env"), "SECRET=hunter2").unwrap();
+        let policy = WorkspacePolicy::trusted_local(root);
+        let (m, _cmd) = build_sandbox_pieces("echo hi", Some(&policy));
+        let env_path = std::fs::canonicalize(root.join(".env")).unwrap();
+        assert!(
+            !m.fs_read_deny.contains(&env_path),
+            "Trusted policy must NOT deny the workspace .env (trusted mode); got: {:?}",
+            m.fs_read_deny
+        );
+    }
+
+    // Live cwd/write behaviour requires a real sandbox backend. Ignored by
+    // default (run manually on a host with sandbox-exec/bwrap). Under
+    // WAYLAND_SANDBOX=none the NoSandboxBackend honours cwd but NOT
+    // fs_write_allow/network, so this only proves cwd — kept as a manual smoke.
+    #[tokio::test]
+    #[ignore]
+    async fn bash_runs_inside_workspace_with_policy() {
+        use crate::context::ToolContext;
+        use crate::workspace_policy::WorkspacePolicy;
+        use std::sync::Arc;
+        let dir = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(dir.path()).unwrap();
+        let policy = Arc::new(WorkspacePolicy::trusted_local(&root));
+        let ctx = ToolContext::test_default().with_workspace(policy);
+        let input = serde_json::json!({ "command": "pwd && echo data > out.txt && cat out.txt" });
+        let result = BashTool.execute_with_ctx(input, &ctx).await;
+        assert!(!result.is_error, "bash failed: {}", result.content);
+        assert!(result.content.contains(&root.to_string_lossy().to_string()));
+        assert!(root.join("out.txt").exists());
     }
 }

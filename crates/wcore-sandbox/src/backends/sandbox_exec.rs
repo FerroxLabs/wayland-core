@@ -155,6 +155,18 @@ impl SandboxExecBackend {
             p.push_str(&format!("(allow file-read* (subpath \"{escaped}\"))\n"));
             p.push_str(&format!("(allow file-write* (subpath \"{escaped}\"))\n"));
         }
+        // Secret-read-deny: emitted AFTER all allows so SBPL last-match-wins
+        // semantics make the deny authoritative even under an allowed subtree.
+        // Paths must be canonicalized by the caller (WorkspacePolicy) before
+        // they reach the manifest. The reject+escape pipeline matches the
+        // allow-list paths above.
+        for path in &manifest.fs_read_deny {
+            reject_unsafe_path(path)?;
+            p.push_str(&format!(
+                "(deny file-read* (subpath \"{}\"))\n",
+                escape_sbpl_string(&path.to_string_lossy())
+            ));
+        }
         // Network policy.
         match &manifest.network {
             NetworkPolicy::Inherit => {
@@ -183,6 +195,10 @@ impl Default for SandboxExecBackend {
 impl SandboxBackend for SandboxExecBackend {
     fn name(&self) -> &'static str {
         "sandbox_exec"
+    }
+
+    fn enforces_read_deny(&self) -> bool {
+        true
     }
 
     fn is_available(&self) -> bool {
@@ -291,6 +307,156 @@ impl SandboxBackend for SandboxExecBackend {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── Task 2 tests ──────────────────────────────────────────────────────────
+
+    #[test]
+    fn profile_emits_read_deny_after_allows() {
+        // Deny rules must appear AFTER the allow rules for the same subtree so
+        // SBPL last-match-wins semantics make the deny authoritative.
+        let m = SandboxManifest {
+            fs_read_allow: vec!["/tmp/workspace".into()],
+            fs_write_allow: vec!["/tmp/scratch".into()],
+            fs_read_deny: vec!["/tmp/workspace/.env".into()],
+            ..Default::default()
+        };
+        let p = SandboxExecBackend::build_profile(&m).expect("profile builds");
+
+        // All three rules must be present.
+        assert!(
+            p.contains("(allow file-read* (subpath \"/tmp/workspace\"))"),
+            "read-allow must be present"
+        );
+        assert!(
+            p.contains("(allow file-write* (subpath \"/tmp/scratch\"))"),
+            "write-allow must be present"
+        );
+        assert!(
+            p.contains("(deny file-read* (subpath \"/tmp/workspace/.env\"))"),
+            "read-deny must be present"
+        );
+
+        // The deny line must appear AFTER the allow line in the profile string
+        // (SBPL is last-match-wins).
+        let allow_pos = p
+            .find("(allow file-read* (subpath \"/tmp/workspace\"))")
+            .expect("allow line must exist");
+        let deny_pos = p
+            .find("(deny file-read* (subpath \"/tmp/workspace/.env\"))")
+            .expect("deny line must exist");
+        assert!(
+            deny_pos > allow_pos,
+            "deny rule must appear AFTER the allow rule (last-match-wins); \
+             allow_pos={allow_pos} deny_pos={deny_pos}"
+        );
+    }
+
+    #[test]
+    fn profile_read_deny_escapes_paths() {
+        // A path containing a double-quote in the deny list must be escaped
+        // in the same way as an allow-list path — no SBPL injection possible.
+        let m = SandboxManifest {
+            fs_read_deny: vec![
+                "/tmp/secret\") (allow default) (allow file-read* (subpath \"/x".into(),
+            ],
+            ..Default::default()
+        };
+        let p = SandboxExecBackend::build_profile(&m).expect("profile builds");
+
+        // The injected `(allow default)` substring must NOT appear as an
+        // unescaped directive in the profile.
+        let deny_line = p
+            .lines()
+            .find(|l| l.contains("deny file-read*") && l.contains("allow default"))
+            .expect("the deny line must be present");
+
+        // Verify every `"` in the deny line is either a delimiter or escaped.
+        let bytes: Vec<char> = deny_line.chars().collect();
+        for (i, &c) in bytes.iter().enumerate() {
+            if c == '"' {
+                let escaped = i > 0 && bytes[i - 1] == '\\';
+                let is_open =
+                    deny_line[..deny_line.char_indices().nth(i).unwrap().0].ends_with("(subpath ");
+                let is_close =
+                    deny_line[deny_line.char_indices().nth(i).unwrap().0..].starts_with("\"))");
+                assert!(
+                    escaped || is_open || is_close,
+                    "unescaped, non-delimiter quote at index {i} — SBPL injection possible: {deny_line}"
+                );
+            }
+        }
+        // Sanity: the path's quote really was escaped.
+        assert!(
+            deny_line.contains("\\\""),
+            "expected escaped quote in: {deny_line}"
+        );
+    }
+
+    #[test]
+    fn enforces_read_deny_is_true() {
+        // The capability override must be set to true on this backend.
+        let backend = SandboxExecBackend::new();
+        assert!(
+            backend.enforces_read_deny(),
+            "SandboxExecBackend must report enforces_read_deny() = true"
+        );
+    }
+
+    #[tokio::test]
+    #[cfg_attr(not(target_os = "macos"), ignore = "macOS only")]
+    async fn sandbox_exec_denies_read_of_secret_under_allowed_root() {
+        // Live test: a file is read-allowed via fs_read_allow (the parent
+        // directory), but its path is also in fs_read_deny. The SBPL
+        // last-match-wins deny should prevent the file from being read.
+        let backend = SandboxExecBackend::new();
+        if !backend.is_available() {
+            return;
+        }
+
+        // Create a temp dir with a secret file.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root = tmp.path();
+        let secret = root.join(".env");
+        std::fs::write(&secret, b"SECRET=hunter2").expect("write secret");
+
+        // Canonicalize both for the manifest.
+        let canon_root = std::fs::canonicalize(root).expect("canonicalize root");
+        let canon_secret = std::fs::canonicalize(&secret).expect("canonicalize secret");
+
+        let m = SandboxManifest {
+            fs_read_allow: vec![canon_root.clone()],
+            fs_read_deny: vec![canon_secret.clone()],
+            env: vec![("PATH".into(), "/usr/bin:/bin".into())],
+            ..Default::default()
+        };
+
+        // Attempt to cat the secret — should be denied (non-zero exit or empty).
+        let out = backend
+            .execute(
+                &m,
+                SandboxCommand {
+                    argv: vec![
+                        "/bin/cat".into(),
+                        canon_secret.to_string_lossy().into_owned(),
+                    ],
+                    cwd: None,
+                },
+            )
+            .await
+            .expect("execute returns Ok");
+
+        // The sandbox should deny the read: either non-zero exit code or
+        // empty stdout (no secret bytes readable).
+        let stdout_str = String::from_utf8_lossy(&out.stdout);
+        assert!(
+            out.exit_code != 0 || !stdout_str.contains("SECRET"),
+            "secret bytes must not be readable; exit={} stdout={:?}",
+            out.exit_code,
+            stdout_str
+        );
+    }
+
+    // ── End Task 2 tests ──────────────────────────────────────────────────────
 
     #[test]
     fn profile_includes_tahoe_fix() {

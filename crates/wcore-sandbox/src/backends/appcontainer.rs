@@ -77,8 +77,9 @@ mod windows_impl {
         WAIT_OBJECT_0, WAIT_TIMEOUT,
     };
     use windows_sys::Win32::Security::Authorization::{
-        EXPLICIT_ACCESS_W, GRANT_ACCESS, GetNamedSecurityInfoW, REVOKE_ACCESS, SE_FILE_OBJECT,
-        SetEntriesInAclW, SetNamedSecurityInfoW, TRUSTEE_IS_SID, TRUSTEE_IS_UNKNOWN,
+        DENY_ACCESS, EXPLICIT_ACCESS_W, GRANT_ACCESS, GetNamedSecurityInfoW, REVOKE_ACCESS,
+        SE_FILE_OBJECT, SetEntriesInAclW, SetNamedSecurityInfoW, TRUSTEE_IS_SID,
+        TRUSTEE_IS_UNKNOWN,
     };
     use windows_sys::Win32::Security::Isolation::{
         CreateAppContainerProfile, DeriveAppContainerSidFromAppContainerName,
@@ -658,6 +659,10 @@ mod windows_impl {
             result
         }
 
+        fn enforces_read_deny(&self) -> bool {
+            true
+        }
+
         async fn execute(
             &self,
             manifest: &SandboxManifest,
@@ -805,31 +810,44 @@ mod windows_impl {
             // first (reverse declaration order) and revokes while the SID is
             // still valid. Grants happen BEFORE CreateProcess so the child sees
             // them at image-load time.
-            let _dacl_guard =
-                if manifest.fs_read_allow.is_empty() && manifest.fs_write_allow.is_empty() {
-                    None
-                } else {
-                    let read_paths =
-                        grant_appcontainer_dacl(&manifest.fs_read_allow, sid_ptr, ACL_READ_MASK)?;
-                    // If the write grants fail, the read grants we already applied
-                    // must be rolled back before we bail.
-                    let write_paths = match grant_appcontainer_dacl(
-                        &manifest.fs_write_allow,
-                        sid_ptr,
-                        ACL_WRITE_MASK,
-                    ) {
-                        Ok(p) => p,
-                        Err(e) => {
-                            revoke_appcontainer_dacl(&read_paths, sid_ptr);
-                            return Err(e);
-                        }
-                    };
-                    Some(DaclGrantGuard {
-                        read_paths,
-                        write_paths,
-                        sid: sid_ptr,
-                    })
+            let _dacl_guard = if manifest.fs_read_allow.is_empty()
+                && manifest.fs_write_allow.is_empty()
+                && manifest.fs_read_deny.is_empty()
+            {
+                None
+            } else {
+                let read_paths =
+                    grant_appcontainer_dacl(&manifest.fs_read_allow, sid_ptr, ACL_READ_MASK)?;
+                // If the write grants fail, the read grants we already applied
+                // must be rolled back before we bail.
+                let write_paths = match grant_appcontainer_dacl(
+                    &manifest.fs_write_allow,
+                    sid_ptr,
+                    ACL_WRITE_MASK,
+                ) {
+                    Ok(p) => p,
+                    Err(e) => {
+                        revoke_appcontainer_dacl(&read_paths, sid_ptr);
+                        return Err(e);
+                    }
                 };
+                // Apply DENY ACEs after allows. If deny fails, revoke
+                // grants before bailing.
+                let deny_paths = match deny_appcontainer_dacl(&manifest.fs_read_deny, sid_ptr) {
+                    Ok(p) => p,
+                    Err(e) => {
+                        revoke_appcontainer_dacl(&read_paths, sid_ptr);
+                        revoke_appcontainer_dacl(&write_paths, sid_ptr);
+                        return Err(e);
+                    }
+                };
+                Some(DaclGrantGuard {
+                    read_paths,
+                    write_paths,
+                    deny_paths,
+                    sid: sid_ptr,
+                })
+            };
 
             // ---- 2. Restricted token ----
             //
@@ -1565,6 +1583,39 @@ mod windows_impl {
         Ok(granted)
     }
 
+    /// Add a DENY ACE for `sid` on the DACL of each path. The DENY ACE is
+    /// placed via `SetEntriesInAclW` with `DENY_ACCESS`; Windows evaluates DENY
+    /// before ALLOW, so this overrides any parent-directory grant. Returns the
+    /// paths actually denied, so the caller can revoke them in `Drop`. On the
+    /// first hard failure, revokes what was already denied and returns the error.
+    unsafe fn deny_appcontainer_dacl(
+        paths: &[std::path::PathBuf],
+        sid: *mut core::ffi::c_void,
+    ) -> Result<Vec<std::path::PathBuf>> {
+        let mut denied: Vec<std::path::PathBuf> = Vec::new();
+        for path in paths {
+            if !acl_path_is_safe(path) {
+                unsafe { revoke_appcontainer_dacl(&denied, sid) };
+                return Err(SandboxError::ExecFailed(format!(
+                    "fs deny path must be absolute and local (no UNC/device): {}",
+                    path.display()
+                )));
+            }
+            let ea = unsafe { explicit_access_for_sid(sid, ACL_READ_MASK, DENY_ACCESS) };
+            if let Err(e) = unsafe { apply_explicit_access(path, &ea) } {
+                unsafe { revoke_appcontainer_dacl(&denied, sid) };
+                return Err(e);
+            }
+            tracing::debug!(
+                target: "wcore_sandbox",
+                path = %path.display(),
+                "applied AppContainer DACL deny ACE"
+            );
+            denied.push(path.clone());
+        }
+        Ok(denied)
+    }
+
     /// Remove the AppContainer `sid`'s ACE from each path's DACL. Best-effort:
     /// a revoke failure is logged but never returned, so it cannot mask the
     /// real execution result. `REVOKE_ACCESS` removes ALL ACEs for the trustee.
@@ -1582,15 +1633,18 @@ mod windows_impl {
         }
     }
 
-    /// RAII: revokes the DACL grants when the spawn finishes (success, timeout,
-    /// or error). Declared AFTER `SidGuard` at the call site so it drops FIRST,
-    /// while the SID pointer is still valid. The only way a grant outlives the
-    /// process is a hard crash/kill between grant and this drop — and the SID
-    /// belongs to a per-PID profile (`WCoreSandbox-<pid>`), so a leaked ACE
-    /// grants a dead profile, not a live principal.
+    /// RAII: revokes the DACL grants and deny ACEs when the spawn finishes
+    /// (success, timeout, or error). Declared AFTER `SidGuard` at the call site
+    /// so it drops FIRST, while the SID pointer is still valid. The only way a
+    /// grant outlives the process is a hard crash/kill between grant and this
+    /// drop — and the SID belongs to a per-PID profile (`WCoreSandbox-<pid>`),
+    /// so a leaked ACE grants a dead profile, not a live principal.
     struct DaclGrantGuard {
         read_paths: Vec<std::path::PathBuf>,
         write_paths: Vec<std::path::PathBuf>,
+        /// Paths where a DENY ACE was added; revoked in Drop so the host DACL
+        /// is restored to its pre-spawn state after the sandboxed child exits.
+        deny_paths: Vec<std::path::PathBuf>,
         sid: *mut core::ffi::c_void,
     }
     impl Drop for DaclGrantGuard {
@@ -1598,6 +1652,8 @@ mod windows_impl {
             unsafe {
                 revoke_appcontainer_dacl(&self.read_paths, self.sid);
                 revoke_appcontainer_dacl(&self.write_paths, self.sid);
+                // REVOKE_ACCESS removes all ACEs for this SID, incl. DENY ACEs.
+                revoke_appcontainer_dacl(&self.deny_paths, self.sid);
             }
         }
     }

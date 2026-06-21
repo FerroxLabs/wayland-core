@@ -34,8 +34,10 @@ use std::path::Path;
 use std::process::Stdio;
 use std::sync::Once;
 
-#[cfg(all(target_os = "linux", feature = "landlock"))]
-static LANDLOCK_UNSUPPORTED_WARN: Once = Once::new();
+/// System directories bound read-only into every bwrap sandbox so the inner
+/// command can find standard binaries and their shared libraries.
+const SYSTEM_RO_DIRS: [&str; 6] = ["/usr", "/lib", "/lib64", "/bin", "/sbin", "/etc"];
+
 #[cfg(all(target_os = "linux", feature = "seccomp"))]
 static SECCOMP_UNAVAILABLE_WARN: Once = Once::new();
 /// Warns once if a manifest asks for `SyscallPolicy::Strict` but this
@@ -75,6 +77,10 @@ impl SandboxBackend for BubblewrapBackend {
         self.bwrap_path.is_some()
     }
 
+    fn enforces_read_deny(&self) -> bool {
+        true
+    }
+
     async fn execute(
         &self,
         manifest: &SandboxManifest,
@@ -92,11 +98,12 @@ impl SandboxBackend for BubblewrapBackend {
             SandboxError::ExecFailed("bwrap not in PATH; install bubblewrap".into())
         })?;
 
-        // 3. Validate every fs_read_allow / fs_write_allow path is absolute.
+        // 3. Validate every fs_read_allow / fs_write_allow / fs_read_deny path is absolute.
         for p in manifest
             .fs_read_allow
             .iter()
             .chain(manifest.fs_write_allow.iter())
+            .chain(manifest.fs_read_deny.iter())
         {
             if !p.is_absolute() {
                 return Err(SandboxError::PathDenied(format!(
@@ -143,7 +150,7 @@ impl SandboxBackend for BubblewrapBackend {
 
         // Standard system mounts (best-effort: skip silently if the path does
         // not exist on this host, e.g. /lib64 on pure-multilib distros).
-        for sys in ["/usr", "/lib", "/lib64", "/bin", "/sbin", "/etc"] {
+        for sys in SYSTEM_RO_DIRS {
             if Path::new(sys).exists() {
                 bwrap_argv.push("--ro-bind".into());
                 bwrap_argv.push(sys.into());
@@ -163,6 +170,27 @@ impl SandboxBackend for BubblewrapBackend {
             bwrap_argv.push("--bind".into());
             bwrap_argv.push(s.clone());
             bwrap_argv.push(s);
+        }
+
+        // Secret-read-deny overlays, after the positive binds so later-arg-wins
+        // mount ordering shadows them. Caller (secret_deny_paths) emits ONLY
+        // paths under a mounted root, so the parent always exists in the
+        // namespace and the bind cannot fail-spawn. Stat at bind time to pick
+        // file (mask with /dev/null) vs dir (mask with empty tmpfs); a vanished
+        // path is skipped (nothing to read).
+        for p in &manifest.fs_read_deny {
+            match std::fs::symlink_metadata(p) {
+                Ok(md) if md.is_dir() => {
+                    bwrap_argv.push("--tmpfs".into());
+                    bwrap_argv.push(p.to_string_lossy().into_owned());
+                }
+                Ok(_) => {
+                    bwrap_argv.push("--ro-bind".into());
+                    bwrap_argv.push("/dev/null".into());
+                    bwrap_argv.push(p.to_string_lossy().into_owned());
+                }
+                Err(_) => { /* path gone since enumeration — nothing to mask */ }
+            }
         }
 
         // Env injection (manifest-only; host env is dropped by --clearenv).
@@ -263,31 +291,18 @@ impl SandboxBackend for BubblewrapBackend {
             // --die-with-parent then tears down the inner sandboxed process.
             .kill_on_drop(true);
 
-        // S3 — Landlock (feature-gated, Linux-only). Apply the ruleset
-        // inside the child via `pre_exec` so it propagates across execve()
-        // of the bwrap binary. Landlock requires PR_SET_NO_NEW_PRIVS; we
-        // set it idempotently here to support both code paths (direct
-        // exec, and bwrap which also sets it).
-        #[cfg(all(target_os = "linux", feature = "landlock"))]
-        {
-            let read_paths = manifest.fs_read_allow.clone();
-            let write_paths = manifest.fs_write_allow.clone();
-            // SAFETY: pre_exec closures must be async-signal-safe. The
-            // landlock and prctl syscalls used here are async-signal-safe.
-            unsafe {
-                command.pre_exec(move || {
-                    let rc = libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0);
-                    if rc == -1 {
-                        return Err(std::io::Error::last_os_error());
-                    }
-                    match super::bwrap_landlock::restrict_self_from_paths(&read_paths, &write_paths)
-                    {
-                        Ok(_) => Ok(()),
-                        Err(e) => Err(std::io::Error::other(format!("landlock: {e}"))),
-                    }
-                });
-            }
-        }
+        // NOTE: Landlock is deliberately NOT applied around the bwrap backend.
+        // A `pre_exec` ruleset is inherited by bwrap and confines bwrap's OWN
+        // privileged setup (writing /proc/self/uid_map to build its user
+        // namespace), which fails with EACCES the moment the allowlist is
+        // non-empty. bwrap's `--unshare-all` + the constructive `--ro-bind`
+        // set already provide a deny-by-default filesystem view that is a strict
+        // superset of any Landlock allowlist built from the same paths, and the
+        // secret-read-deny enforcement rides on the `--ro-bind /dev/null` /
+        // `--tmpfs` overlays above — not on Landlock. bwrap sets NO_NEW_PRIVS
+        // itself. The `landlock` feature + `bwrap_landlock.rs` remain compiled
+        // (exercised by --all-features CI) as the foundation for a future
+        // inner-command re-exec shim, but production runs seccomp-only.
 
         let child = command
             .spawn()
@@ -296,8 +311,6 @@ impl SandboxBackend for BubblewrapBackend {
         // Now safe to drop the BPF tempfile — bwrap has read the fd into
         // its child setup. Holding it longer wastes a fd until return.
         drop(seccomp_file);
-        #[cfg(all(target_os = "linux", feature = "landlock"))]
-        let _ = &LANDLOCK_UNSUPPORTED_WARN;
 
         // 6. Timeout + wait.
         let timeout = manifest
@@ -384,6 +397,50 @@ mod tests {
             .await;
         // Could fail if /bin not bound; this is informational.
         let _ = out;
+    }
+
+    #[tokio::test]
+    #[cfg_attr(not(target_os = "linux"), ignore = "bwrap is Linux-only")]
+    async fn bwrap_denies_read_of_secret_under_allowed_root() {
+        let backend = BubblewrapBackend::new();
+        if !backend.is_available() {
+            eprintln!("bwrap not available; skipping");
+            return;
+        }
+        // Create a temp dir with a secret file inside it.
+        let root = tempfile::tempdir().expect("tempdir");
+        let secret_path = root.path().join(".env");
+        std::fs::write(&secret_path, "SECRET=supersecret").expect("write secret");
+
+        let manifest = SandboxManifest {
+            fs_read_allow: vec![root.path().to_path_buf()],
+            fs_read_deny: vec![secret_path.clone()],
+            ..Default::default()
+        };
+        // cat of a /dev/null-overlaid file exits 0 with empty output.
+        // Assert secret bytes are absent — NOT non-zero exit.
+        let denied = backend
+            .execute(
+                &manifest,
+                SandboxCommand {
+                    argv: vec!["cat".into(), secret_path.to_string_lossy().into()],
+                    cwd: None,
+                },
+            )
+            .await
+            .unwrap();
+        assert!(
+            !String::from_utf8_lossy(&denied.stdout).contains("secret"),
+            "secret bytes must not be readable; got: {:?}",
+            String::from_utf8_lossy(&denied.stdout)
+        );
+    }
+
+    #[tokio::test]
+    #[cfg_attr(not(target_os = "linux"), ignore = "bwrap is Linux-only")]
+    async fn bwrap_enforces_read_deny_returns_true() {
+        let backend = BubblewrapBackend::new();
+        assert!(backend.enforces_read_deny());
     }
 
     #[tokio::test]

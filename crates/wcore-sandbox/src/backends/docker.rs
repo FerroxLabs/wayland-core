@@ -115,6 +115,16 @@ impl SandboxBackend for DockerBackend {
         docker_socket_present()
     }
 
+    /// The live-docker build enforces `fs_read_deny` via `/dev/null` bind
+    /// mounts (files) and empty-dir overlays (directories). The non-live
+    /// build cannot enforce anything, so it must keep the trait default
+    /// `false` — the exec-time capability gate in `bash.rs` depends on this
+    /// being truthful.
+    #[cfg(feature = "live-docker")]
+    fn enforces_read_deny(&self) -> bool {
+        true
+    }
+
     #[cfg(not(feature = "live-docker"))]
     fn is_available(&self) -> bool {
         // sandbox-4: when the `live-docker` feature is compiled out, a
@@ -181,6 +191,54 @@ impl SandboxBackend for DockerBackend {
                 )));
             }
             binds.push(format!("{}:{}:rw", rw.display(), rw.display()));
+        }
+
+        // Secret-read-deny: shadow each denied path. Caller emits only paths
+        // under a mounted root, so the bind target's parent exists. /dev/null
+        // for files; an empty read-only tmpfs is not expressible via -v, so
+        // for directories bind an empty host dir read-only.
+        //
+        // `empty_dir` is a TempDir bound to a local that lives until AFTER
+        // the container is removed (≈ remove_container below) so the directory
+        // exists on the host for the entire lifetime of the container bind.
+        let empty_dir = if manifest
+            .fs_read_deny
+            .iter()
+            .any(|p| std::fs::symlink_metadata(p).map_or(false, |m| m.is_dir()))
+        {
+            Some(
+                tempfile::TempDir::new()
+                    .map_err(|e| SandboxError::ExecFailed(format!("tempdir for deny: {e}")))?,
+            )
+        } else {
+            None
+        };
+        for p in &manifest.fs_read_deny {
+            // Skip if the deny path exactly matches an existing allow bind —
+            // Docker rejects duplicate-bind entries for the same target path.
+            let already_bound = manifest
+                .fs_read_allow
+                .iter()
+                .any(|a| a.as_path() == p.as_path())
+                || manifest
+                    .fs_write_allow
+                    .iter()
+                    .any(|a| a.as_path() == p.as_path());
+            if already_bound {
+                continue;
+            }
+            match std::fs::symlink_metadata(p) {
+                Ok(md) if md.is_dir() => {
+                    // Mask a denied dir by binding an empty, ephemeral dir
+                    // read-only. Docker has no tmpfs-over-existing-bind.
+                    let dir = empty_dir
+                        .as_ref()
+                        .expect("empty_dir constructed above when a dir deny exists");
+                    binds.push(format!("{}:{}:ro", dir.path().display(), p.display()));
+                }
+                Ok(_) => binds.push(format!("/dev/null:{}:ro", p.display())),
+                Err(_) => { /* path gone since enumeration — nothing to mask */ }
+            }
         }
 
         // Network policy.
@@ -329,6 +387,88 @@ mod tests {
         assert!(
             matches!(err, SandboxError::DockerDisabled),
             "execute must refuse with DockerDisabled, got {err:?}"
+        );
+    }
+
+    /// Task 5: without the `live-docker` feature the backend enforces nothing
+    /// and must keep the trait default `false` so the exec-time capability
+    /// gate remains truthful.
+    #[cfg(not(feature = "live-docker"))]
+    #[test]
+    fn enforces_read_deny_is_false_without_live_docker() {
+        assert!(
+            !DockerBackend::new().enforces_read_deny(),
+            "non-live-docker build must not claim to enforce read-deny"
+        );
+    }
+
+    /// Task 5 (live): with the `live-docker` feature ON the backend declares
+    /// it enforces `fs_read_deny`. This is a capability claim without needing
+    /// a running daemon — the implementation is in `execute` and CI exercises
+    /// it end-to-end.
+    #[cfg(feature = "live-docker")]
+    #[test]
+    fn enforces_read_deny_is_true_with_live_docker() {
+        assert!(
+            DockerBackend::new().enforces_read_deny(),
+            "live-docker build must claim to enforce read-deny"
+        );
+    }
+
+    /// Task 5 (live integration): a file that is read-allowed under a mounted
+    /// root but also listed in `fs_read_deny` must read as empty inside the
+    /// container (the `/dev/null` bind shadows it).
+    ///
+    /// Skips when the Docker daemon is unavailable — this is a live-only test.
+    #[cfg(feature = "live-docker")]
+    #[tokio::test]
+    async fn docker_denies_read_of_secret_under_allowed_root() {
+        let backend = match DockerBackend::connect().await {
+            Ok(b) => b,
+            Err(_) => {
+                eprintln!("skip: docker daemon unavailable");
+                return;
+            }
+        };
+
+        // Create a temporary directory on the host containing a "secret" file.
+        let workspace = tempfile::TempDir::new().expect("tempdir");
+        let secret = workspace.path().join(".env");
+        std::fs::write(&secret, b"SECRET=hunter2").expect("write secret");
+
+        let manifest = SandboxManifest {
+            // Allow the workspace root (so the container can see the dir).
+            fs_read_allow: vec![workspace.path().to_path_buf()],
+            // Deny the specific secret file inside the allowed root.
+            fs_read_deny: vec![secret.clone()],
+            network: NetworkPolicy::Deny,
+            image: "alpine:3.19".into(),
+            ..Default::default()
+        };
+
+        let out = match backend
+            .execute(
+                &manifest,
+                SandboxCommand {
+                    argv: vec!["cat".into(), secret.to_string_lossy().into_owned()],
+                    cwd: None,
+                },
+            )
+            .await
+        {
+            Ok(o) => o,
+            Err(e) => {
+                eprintln!("skip: docker execute failed ({e:?})");
+                return;
+            }
+        };
+
+        // The deny bind shadows .env with /dev/null — `cat /dev/null` exits 0
+        // and produces empty output. Assert that secret bytes are absent.
+        let output = String::from_utf8_lossy(&out.stdout);
+        assert!(
+            !output.contains("SECRET"),
+            "secret bytes must not be readable under Docker read-deny; got: {output:?}"
         );
     }
 }

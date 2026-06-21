@@ -50,6 +50,10 @@ pub struct SandboxManifest {
     /// Write-allowed paths.
     #[serde(default)]
     pub fs_write_allow: Vec<PathBuf>,
+    /// Read-DENIED paths (absolute, canonicalized). Backends deny reads even
+    /// under an `fs_read_allow` subtree. Empty = today's behavior.
+    #[serde(default)]
+    pub fs_read_deny: Vec<PathBuf>,
     /// Network policy.
     #[serde(default)]
     pub network: NetworkPolicy,
@@ -82,4 +86,44 @@ pub struct SandboxManifest {
 
 fn default_image() -> String {
     "ghcr.io/tradecanyon/wcore-sandbox:base".into()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn fs_read_deny_defaults_empty() {
+        let m = SandboxManifest::default();
+        assert!(
+            m.fs_read_deny.is_empty(),
+            "fs_read_deny must default to empty (today's behavior)"
+        );
+    }
+
+    #[test]
+    fn fs_read_deny_roundtrips_toml() {
+        let m = SandboxManifest {
+            fs_read_deny: vec![
+                PathBuf::from("/tmp/secret.env"),
+                PathBuf::from("/home/user/.ssh/id_rsa"),
+            ],
+            ..Default::default()
+        };
+        let serialized = toml::to_string(&m).expect("serialize");
+        let back: SandboxManifest = toml::from_str(&serialized).expect("deserialize");
+        assert_eq!(m.fs_read_deny, back.fs_read_deny);
+    }
+
+    #[test]
+    fn fs_read_deny_missing_from_toml_defaults_empty() {
+        // A serialized manifest without the field (old schema) must still
+        // deserialize cleanly with an empty deny list.
+        let toml_str = "";
+        let m: SandboxManifest = toml::from_str(toml_str).expect("deserialize");
+        assert!(
+            m.fs_read_deny.is_empty(),
+            "missing fs_read_deny in old schema must default to empty"
+        );
+    }
 }
