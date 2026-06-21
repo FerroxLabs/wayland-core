@@ -75,6 +75,10 @@ impl SandboxBackend for BubblewrapBackend {
         self.bwrap_path.is_some()
     }
 
+    fn enforces_read_deny(&self) -> bool {
+        true
+    }
+
     async fn execute(
         &self,
         manifest: &SandboxManifest,
@@ -92,11 +96,12 @@ impl SandboxBackend for BubblewrapBackend {
             SandboxError::ExecFailed("bwrap not in PATH; install bubblewrap".into())
         })?;
 
-        // 3. Validate every fs_read_allow / fs_write_allow path is absolute.
+        // 3. Validate every fs_read_allow / fs_write_allow / fs_read_deny path is absolute.
         for p in manifest
             .fs_read_allow
             .iter()
             .chain(manifest.fs_write_allow.iter())
+            .chain(manifest.fs_read_deny.iter())
         {
             if !p.is_absolute() {
                 return Err(SandboxError::PathDenied(format!(
@@ -163,6 +168,27 @@ impl SandboxBackend for BubblewrapBackend {
             bwrap_argv.push("--bind".into());
             bwrap_argv.push(s.clone());
             bwrap_argv.push(s);
+        }
+
+        // Secret-read-deny overlays, after the positive binds so later-arg-wins
+        // mount ordering shadows them. Caller (secret_deny_paths) emits ONLY
+        // paths under a mounted root, so the parent always exists in the
+        // namespace and the bind cannot fail-spawn. Stat at bind time to pick
+        // file (mask with /dev/null) vs dir (mask with empty tmpfs); a vanished
+        // path is skipped (nothing to read).
+        for p in &manifest.fs_read_deny {
+            match std::fs::symlink_metadata(p) {
+                Ok(md) if md.is_dir() => {
+                    bwrap_argv.push("--tmpfs".into());
+                    bwrap_argv.push(p.to_string_lossy().into_owned());
+                }
+                Ok(_) => {
+                    bwrap_argv.push("--ro-bind".into());
+                    bwrap_argv.push("/dev/null".into());
+                    bwrap_argv.push(p.to_string_lossy().into_owned());
+                }
+                Err(_) => { /* path gone since enumeration — nothing to mask */ }
+            }
         }
 
         // Env injection (manifest-only; host env is dropped by --clearenv).
@@ -384,6 +410,50 @@ mod tests {
             .await;
         // Could fail if /bin not bound; this is informational.
         let _ = out;
+    }
+
+    #[tokio::test]
+    #[cfg_attr(not(target_os = "linux"), ignore = "bwrap is Linux-only")]
+    async fn bwrap_denies_read_of_secret_under_allowed_root() {
+        let backend = BubblewrapBackend::new();
+        if !backend.is_available() {
+            eprintln!("bwrap not available; skipping");
+            return;
+        }
+        // Create a temp dir with a secret file inside it.
+        let root = tempfile::tempdir().expect("tempdir");
+        let secret_path = root.path().join(".env");
+        std::fs::write(&secret_path, "SECRET=supersecret").expect("write secret");
+
+        let manifest = SandboxManifest {
+            fs_read_allow: vec![root.path().to_path_buf()],
+            fs_read_deny: vec![secret_path.clone()],
+            ..Default::default()
+        };
+        // cat of a /dev/null-overlaid file exits 0 with empty output.
+        // Assert secret bytes are absent — NOT non-zero exit.
+        let denied = backend
+            .execute(
+                &manifest,
+                SandboxCommand {
+                    argv: vec!["cat".into(), secret_path.to_string_lossy().into()],
+                    cwd: None,
+                },
+            )
+            .await
+            .unwrap();
+        assert!(
+            !String::from_utf8_lossy(&denied.stdout).contains("secret"),
+            "secret bytes must not be readable; got: {:?}",
+            String::from_utf8_lossy(&denied.stdout)
+        );
+    }
+
+    #[tokio::test]
+    #[cfg_attr(not(target_os = "linux"), ignore = "bwrap is Linux-only")]
+    async fn bwrap_enforces_read_deny_returns_true() {
+        let backend = BubblewrapBackend::new();
+        assert!(backend.enforces_read_deny());
     }
 
     #[tokio::test]
