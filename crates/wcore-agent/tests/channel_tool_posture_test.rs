@@ -30,7 +30,6 @@ use wcore_agent::output::null_sink::NullSink;
 use wcore_channels::ChannelToolPosture;
 use wcore_config::compat::ProviderCompat;
 use wcore_config::config::{Config, ProviderType};
-use wcore_tools;
 
 fn bootstrap_config() -> Config {
     // Dead URL: `build()` never connects, the tests only inspect the engine.
