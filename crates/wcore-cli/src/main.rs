@@ -2610,6 +2610,20 @@ async fn run_json_stream_mode(
                             result = &mut engine_fut => {
                                 match result {
                                     Ok(result) => {
+                                        if result.finish_reason == FinishReason::Error {
+                                            // FerroxLabs/wayland#200: a turn can end Ok with finish_reason=Error when
+                                            // the provider returned a Done event carrying an unrecognized/empty
+                                            // finish_reason (mapped to FinishReason::Error) — e.g. an OpenAI model
+                                            // whose finish_reason string the engine doesn't map yet. The engine
+                                            // classifies that as success, so without this the host would emit a
+                                            // contentless stream_end and the turn would fail SILENTLY. Surface it.
+                                            output.emit_error(
+                                                "The model ended the turn with an error and no output (finish_reason=error). \
+                                                 The provider likely returned an empty response or an unrecognized completion status. \
+                                                 Check the engine log for an 'unrecognized finish_reason' warning, and verify the model name and provider.",
+                                                false,
+                                            );
+                                        }
                                         output.emit_stream_end(
                                             &msg_id,
                                             result.turns,
