@@ -418,6 +418,10 @@ mod tests {
         );
     }
 
+    // Unix-only: exercises `std::os::unix::fs::symlink`. Gating the whole test
+    // with `#[cfg(unix)]` (rather than an inner `#[cfg(not(unix))] return;`)
+    // avoids an `unreachable_code` error on Windows under `-D warnings`.
+    #[cfg(unix)]
     #[tokio::test]
     async fn secret_deny_catches_symlink_to_secret_when_inner() {
         // Load-bearing: SecretDenyFs must be layered INSIDE SandboxedFs so it
@@ -428,10 +432,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let root = std::fs::canonicalize(dir.path()).unwrap();
         std::fs::write(root.join(".env"), b"TOKEN=abc").unwrap();
-        #[cfg(unix)]
         std::os::unix::fs::symlink(root.join(".env"), root.join("notes.txt")).unwrap();
-        #[cfg(not(unix))]
-        return; // symlink test is unix-only
 
         let policy = Arc::new(WorkspacePolicy::contained(&root));
         let jail = SandboxedFs::new(SecretDenyFs::new(RealFs, Arc::clone(&policy)), root.clone());
