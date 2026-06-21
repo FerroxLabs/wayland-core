@@ -2218,6 +2218,50 @@ pub fn onboarding_config_path() -> std::path::PathBuf {
     wcore_config::config::global_config_path()
 }
 
+/// Write a minimal provider-choice record (`[default] provider = "<slug>"`)
+/// to `config.toml` without storing any API key on disk.
+///
+/// Used by the env-key connect path: the provider selection is persisted the
+/// moment the user presses the number key so a relaunch sees the choice and
+/// lands on the Workspace surface instead of re-running onboarding.  The key
+/// itself remains in the environment variable and is read by the engine on the
+/// next boot — nothing secret is written to disk.
+///
+/// Silently skips the write if `config.toml` already exists (the user's
+/// existing config must never be clobbered by this lightweight write).
+/// Returns `true` when a file was written, `false` when it was skipped.
+pub fn persist_env_provider_selection(slug: &str) -> bool {
+    use std::io::Write;
+
+    let path = wcore_config::config::global_config_path();
+    if path.exists() {
+        return false;
+    }
+    let Some(parent) = path.parent() else {
+        return false;
+    };
+    if std::fs::create_dir_all(parent).is_err() {
+        return false;
+    }
+    // Write the minimal TOML: just [default] with the provider choice.
+    // Include the default model when one is known so the first prompt does
+    // not land in the no-model dead-end (mirrors render_onboarding_config).
+    let model = wcore_config::config::default_model_for_slug(slug);
+    let mut content = format!("[default]\nprovider = \"{slug}\"\n");
+    if !model.is_empty() {
+        content.push_str(&format!("model = \"{model}\"\n"));
+    }
+    let Ok(mut f) = std::fs::File::create(&path) else {
+        return false;
+    };
+    if f.write_all(content.as_bytes()).is_err() {
+        return false;
+    }
+    // Best-effort 0o600 hardening — same as write_onboarding_config.
+    let _ = wcore_config::credentials::secure_credential_file(&path);
+    true
+}
+
 /// Write the onboarding-chosen providers + display name into the global
 /// `config.toml`.
 ///

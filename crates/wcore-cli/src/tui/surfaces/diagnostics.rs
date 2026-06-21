@@ -814,6 +814,9 @@ pub struct DiagnosticsSurface {
     /// mode, built on `on_enter` via `wcore_config::config::effective_config_toml`.
     /// Holds an error message string if the render failed.
     effective_toml: String,
+    /// Vertical scroll offset for the `/doctor` view (the full report can
+    /// exceed the viewport at short terminal heights). Clamped on render.
+    doctor_scroll: u16,
     /// Vertical scroll offset for the `/effective` view (the TOML can exceed
     /// the viewport). Clamped on `Up`/`Down`/`PageUp`/`PageDown`.
     effective_scroll: u16,
@@ -874,6 +877,7 @@ impl DiagnosticsSurface {
             tool_status: Vec::new(),
             config_checks: Vec::new(),
             effective_toml: String::new(),
+            doctor_scroll: 0,
             effective_scroll: 0,
             channels: Vec::new(),
             discovered: Vec::new(),
@@ -1160,6 +1164,7 @@ impl Surface for DiagnosticsSurface {
     /// Refresh both the doctor probe and the memory scan when the surface
     /// becomes active, so re-entering the screen always shows live data.
     fn on_enter(&mut self, app: &mut App) {
+        self.doctor_scroll = 0;
         self.refresh_doctor(app);
         self.refresh_memory();
         self.refresh_effective();
@@ -1234,6 +1239,40 @@ impl Surface for DiagnosticsSurface {
             }
             KeyCode::PageDown if self.mode == DiagMode::Effective => {
                 self.effective_scroll = self.effective_scroll.saturating_add(10);
+                SurfaceAction::None
+            }
+            // `/doctor` scroll — the full report can exceed the viewport at
+            // short terminal heights. Up/Down/j/k are only claimed for scroll
+            // when no connectable Forge rows are present (otherwise they drive
+            // the discovered cursor, handled below). PageUp/PageDown/Home/G
+            // always scroll, regardless of discovered state.
+            KeyCode::Up | KeyCode::Char('k')
+                if self.mode == DiagMode::Doctor && self.connectable_forge_names().is_empty() =>
+            {
+                self.doctor_scroll = self.doctor_scroll.saturating_sub(1);
+                SurfaceAction::None
+            }
+            KeyCode::Down | KeyCode::Char('j')
+                if self.mode == DiagMode::Doctor && self.connectable_forge_names().is_empty() =>
+            {
+                self.doctor_scroll = self.doctor_scroll.saturating_add(1);
+                SurfaceAction::None
+            }
+            KeyCode::PageUp if self.mode == DiagMode::Doctor => {
+                self.doctor_scroll = self.doctor_scroll.saturating_sub(10);
+                SurfaceAction::None
+            }
+            KeyCode::PageDown if self.mode == DiagMode::Doctor => {
+                self.doctor_scroll = self.doctor_scroll.saturating_add(10);
+                SurfaceAction::None
+            }
+            KeyCode::Home if self.mode == DiagMode::Doctor => {
+                self.doctor_scroll = 0;
+                SurfaceAction::None
+            }
+            KeyCode::Char('G') if self.mode == DiagMode::Doctor => {
+                // Jump to the bottom — clamped in render_doctor.
+                self.doctor_scroll = u16::MAX;
                 SurfaceAction::None
             }
             KeyCode::Tab => {
@@ -1367,6 +1406,107 @@ fn status_row(state: HealthState, label: &str, detail: &str, t: &Theme) -> Line<
     ])
 }
 
+/// Push one or more `Line`s for a status row, pre-wrapping the detail string
+/// when it exceeds `avail_detail` columns so content is not clipped.
+///
+/// The prefix (glyph + label) occupies 25 columns: `" ● " (3) + label<22 (22)`.
+/// Continuation lines are indented by the same 25 columns so the detail text
+/// aligns under the first segment.
+fn push_wrapped_status_rows(
+    lines: &mut Vec<Line<'static>>,
+    state: HealthState,
+    label: &str,
+    detail: &str,
+    t: &Theme,
+    avail_detail: usize,
+) {
+    if avail_detail == 0 || detail.len() <= avail_detail {
+        lines.push(status_row(state, label, detail, t));
+        return;
+    }
+    // Split the detail into segments that fit within avail_detail columns.
+    let mut rest = detail;
+    let mut first = true;
+    while !rest.is_empty() {
+        let (seg, tail) = if rest.len() <= avail_detail {
+            (rest, "")
+        } else {
+            // Break at the last space within avail_detail, or hard-break if
+            // there is none (long unbreakable token).
+            let boundary = rest[..avail_detail]
+                .rfind(' ')
+                .map(|i| i + 1)
+                .unwrap_or(avail_detail);
+            (&rest[..boundary], rest[boundary..].trim_start_matches(' '))
+        };
+        if first {
+            lines.push(status_row(state, label, seg, t));
+            first = false;
+        } else {
+            // Continuation: 25-space indent, then the remaining detail segment.
+            lines.push(Line::from(vec![Span::styled(
+                format!("{:25}{}", "", seg),
+                Style::default().fg(t.text_dim),
+            )]));
+        }
+        rest = tail;
+    }
+}
+
+/// Push one or more `Line`s for a DISCOVERED capability row, pre-wrapping the
+/// detail string when it exceeds `avail_detail` columns.
+///
+/// The prefix (glyph + label) occupies 24 columns: `"● " (2) + label<22 (22)`.
+/// Continuation lines are indented by 24 columns.
+///
+/// `glyph_style` is `(glyph_str, glyph_color, label_color)`.
+fn push_wrapped_discovered_rows(
+    lines: &mut Vec<Line<'static>>,
+    glyph_style: (&'static str, ratatui::style::Color, ratatui::style::Color),
+    label: &str,
+    detail: &str,
+    t: &Theme,
+    avail_detail: usize,
+) {
+    let (glyph, glyph_color, label_color) = glyph_style;
+    let first_line = Line::from(vec![
+        Span::styled(glyph.to_string(), Style::default().fg(glyph_color)),
+        Span::styled(format!("{:<22}", label), Style::default().fg(label_color)),
+        Span::styled(detail.to_string(), Style::default().fg(t.text_muted)),
+    ]);
+    if avail_detail == 0 || detail.len() <= avail_detail {
+        lines.push(first_line);
+        return;
+    }
+    let mut rest = detail;
+    let mut first = true;
+    while !rest.is_empty() {
+        let (seg, tail) = if rest.len() <= avail_detail {
+            (rest, "")
+        } else {
+            let boundary = rest[..avail_detail]
+                .rfind(' ')
+                .map(|i| i + 1)
+                .unwrap_or(avail_detail);
+            (&rest[..boundary], rest[boundary..].trim_start_matches(' '))
+        };
+        if first {
+            lines.push(Line::from(vec![
+                Span::styled(glyph.to_string(), Style::default().fg(glyph_color)),
+                Span::styled(format!("{:<22}", label), Style::default().fg(label_color)),
+                Span::styled(seg.to_string(), Style::default().fg(t.text_muted)),
+            ]));
+            first = false;
+        } else {
+            lines.push(Line::from(vec![Span::styled(
+                format!("{:24}{}", "", seg),
+                Style::default().fg(t.text_muted),
+            )]));
+        }
+        rest = tail;
+    }
+}
+
 impl DiagnosticsSurface {
     /// Render the `/doctor` screen — five stacked sections inside one
     /// panel:
@@ -1400,6 +1540,11 @@ impl DiagnosticsSurface {
             ))
         };
 
+        // Available columns for the detail portion of a status_row (prefix = 25)
+        // and a discovered row (prefix = 24).  Guards against zero-width areas.
+        let avail_status = (inner.width as usize).saturating_sub(25);
+        let avail_disc = (inner.width as usize).saturating_sub(24);
+
         let mut lines: Vec<Line> = Vec::new();
 
         // ── 1. System dependency rows ───────────────────────────────
@@ -1408,7 +1553,14 @@ impl DiagnosticsSurface {
             lines.push(probing_line());
         } else {
             for check in &self.doctor.checks {
-                lines.push(status_row(check.state, &check.label, &check.detail, t));
+                push_wrapped_status_rows(
+                    &mut lines,
+                    check.state,
+                    &check.label,
+                    &check.detail,
+                    t,
+                    avail_status,
+                );
             }
         }
 
@@ -1431,12 +1583,14 @@ impl DiagnosticsSurface {
             });
         } else {
             for ph in &self.provider_health {
-                lines.push(status_row(
+                push_wrapped_status_rows(
+                    &mut lines,
                     health_state_from_status(ph.status),
                     &ph.name,
                     &ph.detail,
                     t,
-                ));
+                    avail_status,
+                );
             }
         }
 
@@ -1447,7 +1601,14 @@ impl DiagnosticsSurface {
         lines.push(Line::from(""));
         push_section_header(&mut lines, t, "CONFIG");
         for check in &self.config_checks {
-            lines.push(status_row(check.state, &check.label, &check.detail, t));
+            push_wrapped_status_rows(
+                &mut lines,
+                check.state,
+                &check.label,
+                &check.detail,
+                t,
+                avail_status,
+            );
         }
 
         // ── 4. Per-tool backend status ──────────────────────────────
@@ -1464,7 +1625,7 @@ impl DiagnosticsSurface {
             } else {
                 format!("{label} · set {} to enable", row.env_var)
             };
-            lines.push(status_row(state, &row.name, &detail, t));
+            push_wrapped_status_rows(&mut lines, state, &row.name, &detail, t, avail_status);
         }
 
         // ── 5. MCP servers ──────────────────────────────────────────
@@ -1496,7 +1657,7 @@ impl DiagnosticsSurface {
                         (HealthState::Warn, format!("⊘ skipped · {reason}"))
                     }
                 };
-                lines.push(status_row(state, name, &detail, t));
+                push_wrapped_status_rows(&mut lines, state, name, &detail, t, avail_status);
             }
         }
 
@@ -1538,7 +1699,7 @@ impl DiagnosticsSurface {
                         format!("{} · enabled{opts}{secrets}", ch.platform),
                     )
                 };
-                lines.push(status_row(state, &ch.name, &detail, t));
+                push_wrapped_status_rows(&mut lines, state, &ch.name, &detail, t, avail_status);
             }
         }
 
@@ -1563,11 +1724,14 @@ impl DiagnosticsSurface {
             } else {
                 ("○ ", t.text_dim, t.text_dim)
             };
-            lines.push(Line::from(vec![
-                Span::styled(glyph.to_string(), Style::default().fg(glyph_color)),
-                Span::styled(format!("{:<22}", d.label), Style::default().fg(label_color)),
-                Span::styled(d.detail.clone(), Style::default().fg(t.text_muted)),
-            ]));
+            push_wrapped_discovered_rows(
+                &mut lines,
+                (glyph, glyph_color, label_color),
+                &d.label,
+                &d.detail,
+                t,
+                avail_disc,
+            );
             if d.connect_name.is_some() {
                 conn_idx += 1;
             }
@@ -1641,13 +1805,19 @@ impl DiagnosticsSurface {
 
         lines.push(Line::from(""));
         lines.push(Line::from(Span::styled(
-            "  r re-run · 1 doctor · 2 cost · 3 memory · esc workspace",
+            "  r re-run · ↑↓/j/k scroll · G end · 1 doctor · 2 cost · 3 memory · esc workspace",
             Style::default().fg(t.text_muted),
         )));
 
+        // Clamp the scroll so it cannot exceed the total content height.
+        let total_lines = lines.len() as u16;
+        let viewport = inner.height;
+        let max_scroll = total_lines.saturating_sub(viewport);
+        let scroll = self.doctor_scroll.min(max_scroll);
+
         let para = Paragraph::new(lines)
             .style(Style::default().bg(t.surface))
-            .wrap(Wrap { trim: true });
+            .scroll((scroll, 0));
         frame.render_widget(para, inner);
     }
 

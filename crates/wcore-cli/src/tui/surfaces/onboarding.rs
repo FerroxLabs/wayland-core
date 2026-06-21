@@ -235,6 +235,12 @@ pub struct OnboardingSurface {
     /// Receiver half of the Ollama-probe channel — drained each frame in
     /// `render`. `None` until the probe is first spawned.
     ollama_probe_rx: Option<Receiver<bool>>,
+    /// Whether `config.toml` already existed at the moment this surface was
+    /// constructed.  Captured once and used by `finish_with_config` to decide
+    /// whether to show the Overwrite / Keep prompt.  Gating on this snapshot
+    /// instead of a live `path.exists()` check avoids a spurious conflict
+    /// dialog when `connect_all_env_keys` pre-writes the file mid-flow.
+    config_existed_at_start: bool,
 }
 
 impl Default for OnboardingSurface {
@@ -255,6 +261,7 @@ impl OnboardingSurface {
     /// environment keys — the test seam for the env-detection UI without
     /// mutating the real process environment.
     fn with_env_keys(env_keys: Vec<EnvKey>) -> Self {
+        let config_existed_at_start = crate::tui::engine_bridge::onboarding_config_path().exists();
         Self {
             step: Step::Connect,
             selected: Path::ApiKey,
@@ -273,6 +280,7 @@ impl OnboardingSurface {
             validation_rx: None,
             ollama_reachable: None,
             ollama_probe_rx: None,
+            config_existed_at_start,
         }
     }
 
@@ -424,20 +432,25 @@ impl OnboardingSurface {
 
     /// Complete the API-key flow after the Name step.
     ///
-    /// On a true first run (no config on disk) the config is written
-    /// straight away. When a config already exists onboarding does NOT
-    /// clobber it silently — it advances to the Ready step with an
-    /// explicit Overwrite / Keep choice instead.
+    /// On a true first run (no config on disk when onboarding started) the
+    /// config is written straight away.  When a config genuinely pre-existed
+    /// before onboarding began, the Ready step shows an explicit Overwrite /
+    /// Keep choice instead of silently clobbering it.
+    ///
+    /// The check uses `config_existed_at_start` (captured at construction)
+    /// rather than a live `path.exists()` call so that the pre-write performed
+    /// by `connect_all_env_keys` does not trigger a spurious conflict dialog.
     fn finish_with_config(&mut self) -> SurfaceAction {
         self.completed_via = Some(Path::ApiKey);
-        let path = crate::tui::engine_bridge::onboarding_config_path();
-        if path.exists() {
-            // Defer the write — let the user choose on the Ready step.
+        if self.config_existed_at_start {
+            // A config was already on disk when the user launched — defer the
+            // write and let them decide on the Ready step.
+            let path = crate::tui::engine_bridge::onboarding_config_path();
             self.existing_config = Some((path, ReadyChoice::Keep));
             self.write_result = None;
         } else {
             self.existing_config = None;
-            self.write_config(false);
+            self.write_config(true); // overwrite=true: we own this file (we wrote the stub)
         }
         self.step = Step::Ready;
         SurfaceAction::None
@@ -572,17 +585,40 @@ impl OnboardingSurface {
         }
     }
 
-    /// Connect the environment key at `idx`: load its value into the key
-    /// field and validate it against its provider's endpoint — the same
-    /// path a pasted key takes, so an env key with a stale value is
-    /// still rejected honestly.
+    /// Connect the environment key at `idx`.
+    ///
+    /// Persists the provider choice to `config.toml` immediately (without the
+    /// key — the key stays in the environment variable and is read by the
+    /// engine on the next boot).  This persistence is the fix for the
+    /// "onboarding re-runs on every relaunch" bug: the first-run gate checks
+    /// for the existence of `config.toml`, so writing it here ensures the
+    /// next launch lands on Workspace instead of re-entering onboarding.
+    ///
+    /// Env keys skip the live network round-trip a pasted key takes: the
+    /// provider was explicitly exported by the user and the engine validates
+    /// it on first real use, so onboarding stays **offline-safe** (important
+    /// for local/air-gapped setups).  The flow still lands on the **AddMore**
+    /// step — never straight to Name/Ready — so a user with several exported
+    /// keys can connect the others (mirrors the validated-key path in
+    /// `poll_validation`).
     fn connect_env_key(&mut self, idx: usize) {
         let Some(env) = self.env_keys.get(idx).cloned() else {
             return;
         };
-        self.key = Input::default().with_value(env.value);
-        self.editing_key = false;
-        self.start_validation(env.provider);
+        // Persist the provider choice on disk now — before showing AddMore —
+        // so a mid-flow quit still leaves the selection.  The key is NOT
+        // written; the engine reads it from the environment on next boot.
+        crate::tui::engine_bridge::persist_env_provider_selection(env.provider.slug());
+        // Record the provider (empty key — it lives in the env var, never on
+        // disk) so the AddMore / Name / Ready cards can name it and
+        // `has_unconnected_env_keys` sees it as connected.
+        if !self.providers.iter().any(|(p, _)| *p == env.provider) {
+            self.providers.push((env.provider, String::new()));
+        }
+        // Default the AddMore cursor to "Add another" while keys remain,
+        // "Continue" otherwise — same as the validated-key path.
+        self.add_more = self.default_add_more_choice();
+        self.step = Step::AddMore;
     }
 
     /// Connect EVERY detected environment key at once. A convenience
@@ -603,6 +639,12 @@ impl OnboardingSurface {
         if self.providers.is_empty() {
             return SurfaceAction::None;
         }
+        // Persist the first provider's slug now — same rationale as
+        // `connect_env_key`: the first-run gate checks for config.toml, so
+        // writing it here ensures a mid-flow quit still leaves a valid
+        // selection and the next launch lands on Workspace.
+        let first_slug = self.providers[0].0.slug();
+        crate::tui::engine_bridge::persist_env_provider_selection(first_slug);
         self.step = Step::Name;
         SurfaceAction::None
     }
@@ -1954,10 +1996,21 @@ mod tests {
         )]);
         let mut app = App::new();
         surface.handle_key(char('1'), &mut app);
-        // The env key is loaded into the field and validation starts.
-        assert_eq!(surface.step, Step::Validating);
-        assert_eq!(surface.validating_provider, Some(Provider::Anthropic));
-        assert_eq!(surface.key.value(), "sk-ant-env");
+        // Env keys connect offline — the provider is recorded and the flow
+        // lands on AddMore with no network-validation round-trip. The key
+        // VALUE is never loaded into the field (it stays in the env var).
+        assert_eq!(surface.step, Step::AddMore);
+        assert!(
+            surface
+                .providers
+                .iter()
+                .any(|(p, _)| *p == Provider::Anthropic),
+            "the matching provider must be recorded"
+        );
+        assert!(
+            surface.key.value().is_empty(),
+            "env key VALUE must not be loaded into the field"
+        );
     }
 
     #[test]
@@ -1970,12 +2023,14 @@ mod tests {
             env_key("OPENAI_API_KEY", Provider::OpenAi, "sk-proj-env"),
         ]);
         let mut app = App::new();
-        // Connect env key #1.
+        // Connect env key #1. Env keys connect offline, so there is no
+        // intermediate Validating step — it lands on AddMore directly.
         surface.handle_key(char('1'), &mut app);
-        assert_eq!(surface.step, Step::Validating);
-        surface.inject_validation_for_test(Provider::Anthropic, ValidationOutcome::Ok);
         assert_eq!(surface.step, Step::AddMore, "env key skipped AddMore");
         assert_ne!(surface.step, Step::Name, "env key jumped to Name");
+        // A second key remains unconnected, so the cursor nudges the user
+        // toward "Add another" rather than skipping the other key.
+        assert_eq!(surface.add_more, AddMoreChoice::AddAnother);
     }
 
     #[test]
