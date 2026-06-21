@@ -245,12 +245,25 @@ fn parse_tasks(input: &Value) -> Result<(Vec<SubAgentConfig>, Vec<Option<String>
             .to_string();
         let agent = task.get("agent").and_then(|v| v.as_str()).map(String::from);
 
+        // Finding #174 (Spawn sub-agent overhead): give the child a trimmed,
+        // task-focused system prompt instead of `None`. With `None`,
+        // `AgentSpawner::child_config` leaves `config.system_prompt` as the
+        // parent's FULL framework prompt (intro + tool guidance + AGENTS.md +
+        // memory + skills index, ~3-6k tokens), so every Spawn child re-pays
+        // that overhead — a 5-way spawn wastes ~15-30k input tokens. Spawn
+        // children are unconditionally read-only (every dispatch path calls
+        // `build_tool_registry(&[])` → Read/Grep/Glob only; Spawn never plumbs
+        // `allowed_tools`), so they have no need for project-convention context
+        // and the trim is always safe. Reuses `Delegate`'s `build_child_prompt`
+        // so both delegation surfaces share one focused-prompt template.
+        let system_prompt = wcore_tools::delegate::build_child_prompt(&prompt, None);
+
         configs.push(SubAgentConfig {
             name,
             prompt,
             max_turns: DEFAULT_SUB_AGENT_MAX_TURNS,
             max_tokens: DEFAULT_SUB_AGENT_MAX_TOKENS,
-            system_prompt: None,
+            system_prompt: Some(system_prompt),
         });
         agent_names.push(agent);
     }
@@ -371,6 +384,68 @@ impl SpawnTool {
         }
 
         results
+    }
+}
+
+#[cfg(test)]
+mod child_prompt_trim_tests {
+    //! Finding #174 — a `Spawn`-created child must carry a TRIMMED, task-focused
+    //! system prompt, not inherit the parent's full framework prompt (intro +
+    //! tool guidance + AGENTS.md + memory + skills index). Without the fix,
+    //! `parse_tasks` set `system_prompt: None`, so `child_config` left the
+    //! child's `config.system_prompt` as the parent's full prompt and every
+    //! spawned child re-paid ~3-6k tokens of framework overhead.
+    use super::parse_tasks;
+    use serde_json::json;
+
+    /// Stable markers that ONLY appear in the full parent framework prompt
+    /// assembled by `crate::context::build_system_prompt` — never in the trimmed
+    /// `build_child_prompt` output.
+    const FULL_PROMPT_TOOL_GUIDANCE_MARKER: &str = "# Using your tools";
+    const FULL_PROMPT_INTRO_MARKER: &str = "You are an AI assistant that can use tools";
+    /// The skills index is wrapped in this reminder tag in the full prompt.
+    const FULL_PROMPT_SKILLS_MARKER: &str = "The following skills are available for use";
+
+    #[test]
+    fn spawn_child_system_prompt_is_trimmed_not_full_framework() {
+        let (configs, _agent_names) = parse_tasks(&json!({
+            "tasks": [
+                { "name": "search-mod", "prompt": "Find all callers of build_system_prompt" }
+            ]
+        }))
+        .expect("valid single-task spawn input must parse");
+
+        assert_eq!(configs.len(), 1);
+        let sp = configs[0]
+            .system_prompt
+            .as_deref()
+            .expect("Spawn child must get an explicit trimmed system prompt, not None");
+
+        // It DOES carry the focused-subagent framing + the spawn task context.
+        assert!(
+            sp.contains("You are a focused subagent working on a specific delegated task."),
+            "trimmed prompt must carry the focused-subagent framing; got: {sp}"
+        );
+        assert!(
+            sp.contains("Find all callers of build_system_prompt"),
+            "trimmed prompt must embed the spawn task prompt as the child's task; got: {sp}"
+        );
+
+        // It does NOT carry the parent's full framework sections. These markers
+        // come only from `build_system_prompt`; their presence would prove the
+        // child inherited the parent's full prompt (the pre-fix `None` behaviour).
+        assert!(
+            !sp.contains(FULL_PROMPT_TOOL_GUIDANCE_MARKER),
+            "trimmed prompt must NOT carry the parent's tool-guidance section; got: {sp}"
+        );
+        assert!(
+            !sp.contains(FULL_PROMPT_INTRO_MARKER),
+            "trimmed prompt must NOT carry the parent's intro section; got: {sp}"
+        );
+        assert!(
+            !sp.contains(FULL_PROMPT_SKILLS_MARKER),
+            "trimmed prompt must NOT carry the parent's skills index; got: {sp}"
+        );
     }
 }
 

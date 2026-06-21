@@ -97,6 +97,13 @@ pub async fn autocompact(
     let pre_compact_tokens = state.last_input_tokens;
     let messages_summarized = messages.len();
 
+    // Summarization is the canonical cheap-model task. When a dedicated
+    // compaction model is configured, target it instead of the live
+    // (premium) conversation model; otherwise fall back to the live model,
+    // preserving prior behavior exactly. The id is a plain provider-served
+    // string — no provider is assumed.
+    let compact_model = config.compaction_model.as_deref().unwrap_or(model);
+
     // Build messages for the compact LLM call: conversation + summary prompt
     let prompt = build_compact_prompt();
     let mut conv_messages = messages.to_vec();
@@ -109,7 +116,7 @@ pub async fn autocompact(
 
     let summary_text = loop {
         let request = LlmRequest {
-            model: model.to_string(),
+            model: compact_model.to_string(),
             system: COMPACT_SYSTEM_PROMPT.to_string(),
             messages: conv_messages.clone(),
             tools: vec![],
@@ -290,10 +297,117 @@ pub fn extract_compact_metadata(message: &Message) -> Option<CompactMetadata> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{Arc, Mutex};
     use wcore_types::compact::CompactTrigger;
+    use wcore_types::message::{FinishReason, StopReason};
 
     fn default_config() -> CompactConfig {
         CompactConfig::default()
+    }
+
+    /// Fake provider that records the model id from the request it is given,
+    /// then returns a minimal valid `<summary>` stream so autocompact succeeds.
+    struct ModelCapturingProvider {
+        seen_model: Arc<Mutex<Option<String>>>,
+    }
+
+    #[async_trait::async_trait]
+    impl LlmProvider for ModelCapturingProvider {
+        async fn stream(
+            &self,
+            request: &LlmRequest,
+        ) -> Result<mpsc::Receiver<LlmEvent>, ProviderError> {
+            *self.seen_model.lock().unwrap() = Some(request.model.clone());
+            let (tx, rx) = mpsc::channel(4);
+            tx.send(LlmEvent::TextDelta("<summary>ok</summary>".to_string()))
+                .await
+                .unwrap();
+            tx.send(LlmEvent::Done {
+                stop_reason: StopReason::EndTurn,
+                finish_reason: FinishReason::Stop,
+                usage: TokenUsage::default(),
+            })
+            .await
+            .unwrap();
+            Ok(rx)
+        }
+    }
+
+    fn sample_messages() -> Vec<Message> {
+        vec![
+            Message::new(
+                Role::User,
+                vec![ContentBlock::Text {
+                    text: "earlier question".to_string(),
+                }],
+            ),
+            Message::new(
+                Role::Assistant,
+                vec![ContentBlock::Text {
+                    text: "earlier answer".to_string(),
+                }],
+            ),
+        ]
+    }
+
+    /// When `compaction_model` is configured, the compaction LLM request must
+    /// carry the configured model, NOT the live conversation model.
+    ///
+    /// Fails without the fix because `autocompact` hardcodes `model.to_string()`
+    /// into the request — it never consults config, so the live model "premium"
+    /// would be sent regardless of the configured "cheap" model.
+    #[tokio::test]
+    async fn uses_configured_compaction_model() {
+        let seen = Arc::new(Mutex::new(None));
+        let provider = ModelCapturingProvider {
+            seen_model: Arc::clone(&seen),
+        };
+        let config = CompactConfig {
+            compaction_model: Some("cheap-model".to_string()),
+            ..default_config()
+        };
+        let mut state = CompactState::new();
+
+        autocompact(
+            &provider,
+            &sample_messages(),
+            "premium-model",
+            &config,
+            &mut state,
+        )
+        .await
+        .expect("autocompact should succeed");
+
+        assert_eq!(seen.lock().unwrap().as_deref(), Some("cheap-model"));
+    }
+
+    /// With `compaction_model` unset (the default), the compaction request must
+    /// carry the live model exactly as before — proving zero behavior change for
+    /// existing users.
+    ///
+    /// Fails if a future change made the cheap model the default: the live model
+    /// "premium-model" would no longer be the one sent.
+    #[tokio::test]
+    async fn defaults_to_live_model() {
+        let seen = Arc::new(Mutex::new(None));
+        let provider = ModelCapturingProvider {
+            seen_model: Arc::clone(&seen),
+        };
+        let config = default_config();
+        assert!(config.compaction_model.is_none());
+        let mut state = CompactState::new();
+
+        autocompact(
+            &provider,
+            &sample_messages(),
+            "premium-model",
+            &config,
+            &mut state,
+        )
+        .await
+        .expect("autocompact should succeed");
+
+        assert_eq!(seen.lock().unwrap().as_deref(), Some("premium-model"));
     }
 
     // ── should_autocompact (TC-2.4-01..03, TC-2.4-14) ──────────────────

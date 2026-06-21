@@ -21,6 +21,25 @@ use crate::plan::prompt as plan_prompt;
 pub const TERSENESS_DIRECTIVE: &str = "Be concise. Lead with the answer or the \
     action; skip restating the question and ceremonial preamble/closing.";
 
+/// Today's date as `YYYY-MM-DD` in local time.
+///
+/// Read once per turn by the engine and fed to [`current_date_block`]. Kept as
+/// a thin wrapper over `chrono::Local::now()` so tests can build the volatile
+/// date block deterministically without touching the clock.
+pub fn today_string() -> String {
+    chrono::Local::now().format("%Y-%m-%d").to_string()
+}
+
+/// Render the volatile per-turn current-date block.
+///
+/// This is injected into the request's volatile message tail every turn — NOT
+/// into the cached system prefix — so the cached system+tools prefix stays
+/// byte-stable across days and process restarts (finding #174). The intro's
+/// authoritative-date instruction refers to this block.
+pub fn current_date_block(today: &str) -> String {
+    format!("Current date: {today}")
+}
+
 /// Session-scoped cache for system prompt sections.
 ///
 /// Each section (intro, tool guidance, AGENTS.md, memory, skills) is cached
@@ -186,18 +205,25 @@ pub fn build_system_prompt(
     let mut parts = Vec::new();
 
     // Section: intro (session permanent)
+    //
+    // The literal current date is deliberately NOT rendered here. This intro is
+    // assembled once at bootstrap and stored as the cached system prefix; baking
+    // a date value into it would make the cached prefix change every day / every
+    // cross-midnight process restart, busting the Anthropic prompt cache on cold
+    // start (finding #174). The authoritative-date *instruction* stays in the
+    // cached prefix; the volatile date *value* is injected per turn into the
+    // message tail by the engine (see `current_date_block`).
     let intro = cache.sections.entry("intro").or_insert_with(|| {
-        let today = chrono::Local::now().format("%Y-%m-%d");
         format!(
             "You are an AI assistant that can use tools to help with tasks.\n\
              You are powered by the model {model}.\n\
              Working directory: {cwd}\n\
-             Current date: {today}\n\
              When constructing time-bound queries (web searches, news, \
-             releases \"this week\"), use the Current date above as the \
-             authoritative \"today\". Do NOT substitute a different month \
-             or year — your training cutoff is older than the Current \
-             date, and guessing a future month produces wrong queries."
+             releases \"this week\"), use the current date provided in this \
+             turn as the authoritative \"today\". Do NOT substitute a \
+             different month or year — your training cutoff is older than \
+             the current date, and guessing a future month produces wrong \
+             queries."
         )
     });
     parts.push(intro.clone());
@@ -1563,6 +1589,72 @@ mod tests {
         assert!(
             !result.contains(TERSENESS_DIRECTIVE),
             "terse_enabled=false must omit the directive (router-optimized route)"
+        );
+    }
+
+    // --- Current date moved out of cached prefix (finding #174) ------------
+
+    /// The cached system prefix must NOT carry a date value, and must be
+    /// byte-identical no matter what "today" is. The date lives in the volatile
+    /// per-turn block instead. Before the fix the intro rendered
+    /// `Current date: <today>` straight into this cached prefix, so the prefix
+    /// changed every day and busted the prompt cache on cold start. This test
+    /// pins the new behavior: build the prompt twice and assert it is stable and
+    /// contains no `Current date:` value.
+    #[test]
+    fn current_date_absent_from_cached_system_prefix() {
+        let build = || {
+            build_system_prompt(
+                &mut SystemPromptCache::new(),
+                None,
+                "/tmp",
+                "test-model",
+                &[],
+                None,
+                None,
+                false,
+                false,
+                &[],
+                false,
+            )
+        };
+        let first = build();
+        let second = build();
+        // Cache-stability: identical across builds (the clock advancing between
+        // them must not perturb the cached prefix).
+        assert_eq!(
+            first, second,
+            "cached system prefix must be byte-identical across builds"
+        );
+        // The literal date label must not appear in the cached prefix — only the
+        // authoritative-date *instruction* may remain. This is the assertion that
+        // FAILS without the fix (the old intro rendered `Current date: <today>`).
+        assert!(
+            !first.contains("Current date:"),
+            "cached system prefix must not carry the date value"
+        );
+        // The authoritative-date instruction stays in the cached prefix.
+        assert!(
+            first.contains("authoritative"),
+            "authoritative-date instruction must remain in the cached prefix"
+        );
+    }
+
+    /// The current date must still reach the model — now via the volatile
+    /// per-turn block. `current_date_block` carries the value, and two different
+    /// "today" dates produce two different blocks (proving the value lives in the
+    /// volatile region, not a frozen cached prefix).
+    #[test]
+    fn current_date_block_carries_volatile_date() {
+        let day1 = current_date_block("2026-06-21");
+        let day2 = current_date_block("2026-06-22");
+        assert!(
+            day1.contains("2026-06-21"),
+            "date block must contain the injected date"
+        );
+        assert_ne!(
+            day1, day2,
+            "different dates must produce different volatile blocks"
         );
     }
 }

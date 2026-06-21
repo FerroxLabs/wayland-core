@@ -128,6 +128,50 @@ fn resolve_turn_cost_usd(
     })
 }
 
+/// Finding #174 — does this turn carry image/vision content that forbids a
+/// tier downgrade?
+///
+/// The `wcore-types` `ContentBlock` enum has no image variant today, so there
+/// is no real vision content to detect and this returns `false`. It is kept as
+/// the single chokepoint for the vision signal: when a future image
+/// `ContentBlock` lands, only this function must change for the smart-routing
+/// guard (and the router's `requires_vision` shape input) to start respecting
+/// it. The router independently promotes any vision turn to Premium, which
+/// [`select_tier_model`] already refuses to swap; this is belt-and-suspenders.
+fn message_requires_vision(_messages: &[Message]) -> bool {
+    false
+}
+
+/// Finding #174 — decide whether to swap to a configured tier model, and to
+/// which, given a routing decision.
+///
+/// Returns `Some(model_id)` ONLY when ALL hold:
+/// 1. the hinted tier is `Cheap` or `Balanced` (a `Premium` hint is never
+///    downgraded — returns `None`);
+/// 2. the turn does NOT require vision content (`requires_vision == false`);
+/// 3. the user configured a `[compat.tier_models]` model for that tier.
+///
+/// Otherwise returns `None` and the caller keeps the originally requested
+/// model. With no `tier_models` map configured (the default) this always
+/// returns `None`, so behaviour is unchanged for users who have not opted in.
+fn select_tier_model(
+    decision: &wcore_providers::RoutingDecision,
+    requires_vision: bool,
+    compat: &wcore_config::compat::ProviderCompat,
+) -> Option<String> {
+    // Never downgrade a vision turn, regardless of tier.
+    if requires_vision {
+        return None;
+    }
+    let tier = match decision.tier {
+        wcore_providers::RoutingTier::Cheap => "cheap",
+        wcore_providers::RoutingTier::Balanced => "balanced",
+        // Premium is never downgraded.
+        wcore_providers::RoutingTier::Premium => return None,
+    };
+    compat.tier_model(tier).map(str::to_string)
+}
+
 /// v0.9.1.1 B6 — true when `reason` is an HTTP 4xx (client) error from
 /// a provider. The engine retries 5xx + network drops + truncated
 /// streams (real chance the next attempt succeeds), but a 4xx — the
@@ -802,7 +846,11 @@ pub struct AgentEngine {
     /// turns — a per-turn re-curation otherwise rewrites the cached prefix at
     /// the cache-WRITE rate every MCP turn. Reset only when the MCP tool
     /// inventory itself changes (server connect/disconnect / plugin reload).
-    mcp_curation_cache: Option<(u64, std::collections::HashSet<String>)>,
+    /// Stored as a `Vec` in FIRST-ADD order (not a `HashSet`) so a newly
+    /// unioned tool is APPENDED at the end and never reorders already-kept
+    /// tools — keeping the emitted tool-zone prefix byte-stable (a cache-safe
+    /// append) on every union-growth turn instead of a mid-array insert.
+    mcp_curation_cache: Option<(u64, Vec<String>)>,
     /// Token-opt (diff-resend): handle to the shared file-state cache (the same
     /// `Arc` the Read/Edit/Write tools hold). Used only to bump the cache's
     /// compaction generation after a compaction pass, so stale read bases stop
@@ -3422,6 +3470,12 @@ impl AgentEngine {
                 Vec::new()
             };
 
+            // Finding #174: the model actually dispatched this turn. Starts as
+            // the user's configured model and is rewritten below if a routing
+            // hint selects a configured tier model. Cost/usage accounting reads
+            // THIS (not `self.model`) so attribution follows any swap.
+            let mut effective_model = self.model.clone();
+
             let mut request = LlmRequest {
                 model: self.model.clone(),
                 system,
@@ -3448,6 +3502,22 @@ impl AgentEngine {
                 && matches!(last.role, Role::User)
             {
                 last.content.push(ContentBlock::Text { text: hint });
+            }
+
+            // Cache-stability (token-opt, finding #174): inject the current date
+            // as a transient text block on the request's last user-role message
+            // instead of the cached system prefix. The date value changes daily /
+            // across cross-midnight restarts; keeping it out of the prefix lets
+            // the cached system+tools prefix stay byte-stable, so Anthropic prompt
+            // caching survives cold starts. `request.messages` is a clone, so this
+            // never persists into history. Skipped unless the tail is user-role
+            // (never orphans a tool_use or creates adjacent user messages).
+            if let Some(last) = request.messages.last_mut()
+                && matches!(last.role, Role::User)
+            {
+                last.content.push(ContentBlock::Text {
+                    text: crate::context::current_date_block(&crate::context::today_string()),
+                });
             }
 
             // C1 / Task A3: fire PrePrompt plugin hooks once per turn and apply
@@ -3478,11 +3548,13 @@ impl AgentEngine {
 
             // W1 v0.6.3: stamp a smart-routing hint onto the request so
             // `ProviderChain` can surface the router's decision in dispatch
-            // observability. `input_tokens`, `max_output_tokens`, and
-            // `tool_call_count` are real; `code_ratio`/`requires_vision`
-            // are conservatively zero/false (the message model has no
-            // vision block, and a code-ratio scanner is out of scope), so
-            // this producer emits only the large-context / tool-heavy /
+            // observability. Finding #174: ALSO act on the hint — swap the
+            // model to a configured tier model (cheap/balanced) before
+            // dispatch. `input_tokens`, `max_output_tokens`, and
+            // `tool_call_count` are real; `code_ratio` is conservatively zero
+            // (no code-ratio scanner) and `requires_vision` comes from
+            // `message_requires_vision` (false until an image ContentBlock
+            // exists), so this producer emits only large-context / tool-heavy /
             // simple decisions — never a wrong hint.
             {
                 let tool_call_count = self
@@ -3491,16 +3563,44 @@ impl AgentEngine {
                     .flat_map(|m| &m.content)
                     .filter(|b| matches!(b, ContentBlock::ToolUse { .. }))
                     .count() as u32;
+                // Vision guard input: a turn that carries image/vision content
+                // must never be downgraded (the cheap tier may not be
+                // vision-capable). The `wcore-types` message model has no image
+                // block today, so this is conservatively `false` from real
+                // content; the routing classifier promotes any vision turn to
+                // Premium anyway, which `select_tier_model` also refuses to
+                // swap. Routed through one flag so a future image ContentBlock
+                // only needs to flip this.
+                let requires_vision = message_requires_vision(&self.messages);
                 let shape = wcore_providers::RequestShape {
                     input_tokens: input_token_estimate,
                     max_output_tokens: request.max_tokens as usize,
                     code_ratio: 0.0,
                     tool_call_count,
-                    requires_vision: false,
+                    requires_vision,
                 };
                 let decision =
                     wcore_providers::route(&shape, &wcore_providers::RoutingHeuristics::default());
                 request.routing_hint = Some(decision.to_hint());
+
+                // Finding #174: act on the hint. Opt-in + guarded — see
+                // `select_tier_model`. Only Cheap/Balanced hints with a
+                // configured tier model and no vision content swap the model;
+                // everything else leaves `request.model` (and `effective_model`)
+                // as the user's configured model.
+                if let Some(tier_model) =
+                    select_tier_model(&decision, requires_vision, &self.compat)
+                {
+                    tracing::debug!(
+                        target: "wcore_agent::routing",
+                        from = %self.model,
+                        to = %tier_model,
+                        hint = %decision.to_hint().0,
+                        "smart-routing tier swap"
+                    );
+                    request.model = tier_model.clone();
+                    effective_model = tier_model;
+                }
             }
 
             // AUDIT A3 / E-C2 — bounded stream-level retry loop.
@@ -3547,6 +3647,20 @@ impl AgentEngine {
                 let mut attempt_usage = TokenUsage::default();
                 let mut done_seen = false;
                 let mut stream_error: Option<String> = None;
+                // Finding #174 (nested re-bill): set ONLY when `stream()` itself
+                // returns a retryable `Err` — i.e. the provider's HTTP ring
+                // (`builder_send_with_retry`, up to 3 sends) already spent its
+                // full retry budget on this exact request before surfacing the
+                // error here. A mid-stream `LlmEvent::Error` or a truncated
+                // stream does NOT set this: those arrive AFTER `stream()`
+                // returned `Ok(rx)` (the HTTP ring succeeded; the failure is in
+                // the SSE body), so they keep the full engine retry budget and
+                // their retryability is unchanged. When this IS set, granting a
+                // fresh full engine budget on top of an already-exhausted HTTP
+                // ring stacks 3×3=9 full-input re-sends for one logical turn;
+                // we cap the engine ring at a single retry instead (see the
+                // budget guard below).
+                let mut http_ring_exhausted = false;
 
                 // P1 Bug#3 — `stream()` runs `builder_send_with_retry`
                 // internally and can surface a *retryable*
@@ -3557,14 +3671,20 @@ impl AgentEngine {
                 // circuited the whole turn here, bypassing the bounded
                 // `'stream` retry loop below even though the identical error
                 // arriving mid-stream WOULD be retried. Funnel a retryable
-                // provider error into the same failed-attempt classifier so
-                // it gets the existing MAX_STREAM_RETRIES + backoff budget.
+                // provider error into the same failed-attempt classifier — but
+                // (finding #174) with a capped engine budget, since the HTTP
+                // ring already exhausted its own retries on this request (see
+                // `http_ring_exhausted` and the budget guard below).
                 // Non-retryable errors (auth/4xx/parse/prompt-too-long)
                 // propagate immediately, exactly as before.
                 let mut rx = match self.provider.stream(&request).await {
                     Ok(rx) => rx,
                     Err(e) if e.is_retryable() => {
                         stream_error = Some(e.to_string());
+                        // The provider's HTTP ring already retried this exact
+                        // request to exhaustion before surfacing `Err` — mark it
+                        // so the engine ring does not stack a fresh full budget.
+                        http_ring_exhausted = true;
                         // Skip the recv loop; fall through to the
                         // classifier, which retries or fails the turn.
                         // An already-closed empty receiver makes the
@@ -3644,13 +3764,27 @@ impl AgentEngine {
                 // bounded retry for 5xx / truncated streams / network
                 // drops where the next attempt has a real chance.
                 let is_client_error = is_http_4xx_error(&reason);
-                if !is_client_error && stream_attempt < MAX_STREAM_RETRIES {
+                // Finding #174 (nested re-bill cap): when the failure was an
+                // already-HTTP-exhausted provider `Err` (3 sends spent), grant
+                // the engine ring exactly ONE retry instead of the full
+                // `MAX_STREAM_RETRIES` (2). This still retries a genuinely
+                // transient single failure once — the common case — but stops
+                // the engine ring from stacking 3 attempts × 3 HTTP sends = 9
+                // full-input re-sends for one logical turn. A mid-stream error /
+                // truncated stream never sets `http_ring_exhausted`, so its
+                // retryability and budget are unchanged.
+                let effective_max_retries = if http_ring_exhausted {
+                    MAX_STREAM_RETRIES.min(1)
+                } else {
+                    MAX_STREAM_RETRIES
+                };
+                if !is_client_error && stream_attempt < effective_max_retries {
                     stream_attempt += 1;
                     // Linear backoff: 500ms, 1000ms.
                     let backoff = std::time::Duration::from_millis(500 * stream_attempt as u64);
                     self.output.emit_info(&format!(
                         "Provider stream failed ({reason}); retrying \
-                         (attempt {stream_attempt}/{MAX_STREAM_RETRIES})…"
+                         (attempt {stream_attempt}/{effective_max_retries})…"
                     ));
                     tokio::time::sleep(backoff).await;
                     continue 'stream;
@@ -3705,9 +3839,13 @@ impl AgentEngine {
                     .input_tokens
                     .saturating_add(turn_usage.output_tokens);
                 let provider = self.compat.provider_type.as_deref().unwrap_or("");
+                // Finding #174: charge the budget against the model ACTUALLY
+                // dispatched (`effective_model`), so a tier-swapped cheap turn
+                // is billed at the cheap model's catalog rate, not the premium
+                // model's.
                 let catalog_cost = pricing_turn_cost_usd(
                     provider,
-                    &self.model,
+                    &effective_model,
                     turn_usage.input_tokens,
                     turn_usage.output_tokens,
                 );
@@ -3717,7 +3855,7 @@ impl AgentEngine {
                     // covers log files; this makes it visible in --json-stream output.
                     self.output.emit_info(&format!(
                         "cost-catalog miss for {provider}/{model} — billing at compat-fallback rate; add to pricing.toml",
-                        model = &self.model,
+                        model = &effective_model,
                     ));
                 }
                 let turn_cost = catalog_cost.unwrap_or_else(|| {
@@ -3734,12 +3872,36 @@ impl AgentEngine {
                 }
             }
 
-            // Track per-turn input tokens for compaction watermark.
-            // Use max(provider_reported, local_estimate) as a safety net:
-            // some providers (e.g. DeepSeek with prefix caching) underreport
-            // prompt_tokens, causing compaction to never trigger.
+            // Track per-turn input tokens for compaction watermarks.
+            //
+            // EMERGENCY watermark (conservative): max(provider_reported,
+            // local_estimate) with historical thinking COUNTED. This is the
+            // safety net for the hard-stop — some providers (e.g. DeepSeek
+            // with prefix caching) underreport prompt_tokens, so over-
+            // estimating here ensures we never blow the context window.
             let local_estimate = estimate::estimate_tokens_from_messages(&self.messages);
             let effective_watermark = turn_usage.input_tokens.max(local_estimate);
+
+            // AUTO-trigger watermark (finding #174): track REAL token
+            // pressure so auto-compaction doesn't fire prematurely. The
+            // local estimate over-counts vs real billing because it prices
+            // history at face value (no prompt-cache reads) and counts
+            // thinking blocks that non-replaying providers (Anthropic/
+            // Bedrock/Vertex) DROP at the wire — those cost zero real input.
+            // Prefer the provider-reported billed input when known; fall
+            // back to a thinking-aware estimate only on the first turn
+            // (before any usage is reported). Do NOT take max() here — that
+            // is exactly what made the inflated estimate win and trigger
+            // the summarizer earlier than warranted.
+            let auto_estimate = estimate::estimate_tokens_from_messages_with_thinking(
+                &self.messages,
+                self.compat.replays_thinking_in_history(),
+            );
+            let auto_watermark = if turn_usage.input_tokens > 0 {
+                turn_usage.input_tokens
+            } else {
+                auto_estimate
+            };
 
             // v0.9.1.2 F-watermark: watermark-override is TELEMETRY, never
             // transcript content. Each per-turn LLM round-trip can re-trip
@@ -3766,6 +3928,7 @@ impl AgentEngine {
             }
 
             self.compact_state.last_input_tokens = effective_watermark;
+            self.compact_state.last_real_input_tokens = auto_watermark;
 
             // Cache break detection
             let cache_stats = CacheStats {
@@ -3883,7 +4046,11 @@ impl AgentEngine {
                 // single-turn sessions still produce exactly one TurnTrace.
                 let trace = TurnTrace {
                     turn,
-                    model: self.model.clone(),
+                    // Finding #174: attribute to the model ACTUALLY dispatched
+                    // (`effective_model`), which equals `self.model` unless a
+                    // tier swap fired this turn — so cost is never mis-charged
+                    // to the premium model when a cheap model was used.
+                    model: effective_model.clone(),
                     provider: self.compat.provider_type().to_string(),
                     input_tokens: turn_usage.input_tokens,
                     output_tokens: turn_usage.output_tokens,
@@ -3899,7 +4066,7 @@ impl AgentEngine {
                     // openai_defaults() now at $0/$0 sentinel, that always returned $0.
                     cost_usd: resolve_turn_cost_usd(
                         self.compat.provider_type(),
-                        &self.model,
+                        &effective_model,
                         turn_usage.input_tokens,
                         turn_usage.output_tokens,
                         turn_usage.cache_read_tokens,
@@ -4408,7 +4575,9 @@ impl AgentEngine {
             // terminal / null sinks default to no-op via the trait).
             let trace = TurnTrace {
                 turn,
-                model: self.model.clone(),
+                // Finding #174: attribute to the dispatched model (see the
+                // no-tool-calls path above for rationale).
+                model: effective_model.clone(),
                 provider: self.compat.provider_type().to_string(),
                 input_tokens: turn_usage.input_tokens,
                 output_tokens: turn_usage.output_tokens,
@@ -4421,7 +4590,7 @@ impl AgentEngine {
                 // Fix(pricing-audit-2026-05-24): catalog-first cost resolution.
                 cost_usd: resolve_turn_cost_usd(
                     self.compat.provider_type(),
-                    &self.model,
+                    &effective_model,
                     turn_usage.input_tokens,
                     turn_usage.output_tokens,
                     turn_usage.cache_read_tokens,
@@ -4953,8 +5122,14 @@ impl AgentEngine {
 
         // 2. Autocompact (LLM summarization)
         let mut compacted = false;
-        let should_compact =
-            auto::should_autocompact(self.compact_state.last_input_tokens, &self.compact_config);
+        // Finding #174 — the AUTO trigger reads the REAL-pressure watermark
+        // (provider-reported billed input, thinking excluded for non-
+        // replaying providers), NOT the conservative `last_input_tokens`
+        // the EMERGENCY hard-stop uses. This stops premature compaction.
+        let should_compact = auto::should_autocompact(
+            self.compact_state.last_real_input_tokens,
+            &self.compact_config,
+        );
         if should_compact && !self.compact_state.is_circuit_broken(&self.compact_config) {
             let provider = Arc::clone(&self.provider);
             // AUDIT A4 — `run_compaction` runs at the TOP of the turn
@@ -5040,8 +5215,8 @@ impl AgentEngine {
         } else if should_compact {
             self.output.emit_info(&format!(
                 "Autocompact: skipped (circuit breaker tripped after {} consecutive failures, \
-                 last_input_tokens={})",
-                self.compact_state.consecutive_failures, self.compact_state.last_input_tokens
+                 last_real_input_tokens={})",
+                self.compact_state.consecutive_failures, self.compact_state.last_real_input_tokens
             ));
         } else if !self.compact_config.enabled {
             let threshold = self
@@ -5049,11 +5224,11 @@ impl AgentEngine {
                 .context_window
                 .saturating_sub(self.compact_config.output_reserve)
                 .saturating_sub(self.compact_config.autocompact_buffer);
-            if self.compact_state.last_input_tokens as usize >= threshold {
+            if self.compact_state.last_real_input_tokens as usize >= threshold {
                 self.output.emit_info(&format!(
                     "Autocompact: disabled (compact.enabled=false, \
-                     last_input_tokens={}, threshold={})",
-                    self.compact_state.last_input_tokens, threshold
+                     last_real_input_tokens={}, threshold={})",
+                    self.compact_state.last_real_input_tokens, threshold
                 ));
             }
         }
@@ -6055,24 +6230,37 @@ impl AgentEngine {
                 tools: &triples,
                 recent_usage: &usage,
             });
-        let this_turn: std::collections::HashSet<String> =
-            ranked.into_iter().map(|r| r.tool_name).collect();
+        // This turn's pick, in rank order (already deduped by the curator).
+        let this_turn: Vec<String> = ranked.into_iter().map(|r| r.tool_name).collect();
 
-        // Union into the inventory-keyed cache (reset on inventory change).
-        let keep_names = match self.mcp_curation_cache.as_mut() {
-            Some((hash, set)) if *hash == inventory_hash => {
-                set.extend(this_turn);
-                set.clone()
+        // Union into the inventory-keyed cache (reset on inventory change),
+        // APPEND-ONLY: a name already in the kept order keeps its position; a
+        // newly-surfaced name is pushed at the END. This makes every
+        // union-growth turn a cache-safe append (stable prefix) rather than a
+        // mid-array insert that would invalidate the cached tool-zone prefix.
+        let keep_order: &Vec<String> = match self.mcp_curation_cache.as_mut() {
+            Some((hash, order)) if *hash == inventory_hash => {
+                for name in this_turn {
+                    if !order.contains(&name) {
+                        order.push(name);
+                    }
+                }
+                &*order
             }
             _ => {
-                self.mcp_curation_cache = Some((inventory_hash, this_turn.clone()));
-                this_turn
+                self.mcp_curation_cache = Some((inventory_hash, this_turn));
+                &self.mcp_curation_cache.as_ref().expect("just set").1
             }
         };
 
-        for t in mcp_tools {
-            if keep_names.contains(&t.name) {
-                keep.push(t);
+        // Emit kept MCP tools in FIRST-ADD order (not registry-iteration
+        // order). Built-in/non-MCP tools in `keep` retain their original
+        // relative position ahead of the MCP block.
+        let by_name: std::collections::HashMap<&str, &wcore_types::tool::ToolDef> =
+            mcp_tools.iter().map(|t| (t.name.as_str(), t)).collect();
+        for name in keep_order {
+            if let Some(t) = by_name.get(name.as_str()) {
+                keep.push((*t).clone());
             }
         }
         keep
@@ -6352,6 +6540,383 @@ fn truncate_for_trace(s: &str, max: usize) -> String {
 }
 
 // ---------------------------------------------------------------------------
+// Finding #174 — smart-routing tier model swap (select_tier_model)
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tier_routing_tests {
+    use super::{message_requires_vision, select_tier_model};
+    use wcore_config::compat::{ProviderCompat, TierModels};
+    use wcore_providers::{RequestShape, RoutingHeuristics, route};
+
+    /// A shape that classifies to Cheap (simple turn): small context, no tools,
+    /// no code, no vision.
+    fn cheap_shape() -> RequestShape {
+        RequestShape {
+            input_tokens: 100,
+            max_output_tokens: 1024,
+            code_ratio: 0.0,
+            tool_call_count: 0,
+            requires_vision: false,
+        }
+    }
+
+    fn compat_with_cheap_model() -> ProviderCompat {
+        ProviderCompat {
+            tier_models: Some(TierModels {
+                cheap: Some("cheap-model".into()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        }
+    }
+
+    /// Cheap hint + configured tier_models + no vision → swaps to cheap model.
+    ///
+    /// Fails without the fix because nothing reads the routing hint: the engine
+    /// would dispatch (and bill) the premium `self.model` on every cheap turn.
+    #[test]
+    fn cheap_hint_with_config_swaps_model() {
+        let decision = route(&cheap_shape(), &RoutingHeuristics::default());
+        let swapped = select_tier_model(&decision, false, &compat_with_cheap_model());
+        assert_eq!(swapped.as_deref(), Some("cheap-model"));
+    }
+
+    /// Cheap hint but tier_models unconfigured (default) → no swap (opt-in).
+    ///
+    /// Fails if the feature were on-by-default: proves the presence of the map
+    /// is the enable switch and default behaviour is unchanged.
+    #[test]
+    fn cheap_hint_without_config_keeps_model() {
+        let decision = route(&cheap_shape(), &RoutingHeuristics::default());
+        let swapped = select_tier_model(&decision, false, &ProviderCompat::default());
+        assert_eq!(swapped, None);
+    }
+
+    /// Cheap hint + vision content → no swap (vision guard).
+    ///
+    /// Fails without the guard because the cheap tier may not be
+    /// vision-capable; a naive swap would drop image content to a text-only
+    /// model. (`message_requires_vision` is the live signal; here we assert the
+    /// guard directly.)
+    #[test]
+    fn cheap_hint_with_vision_keeps_model() {
+        let decision = route(&cheap_shape(), &RoutingHeuristics::default());
+        // requires_vision = true even though the tier classified Cheap.
+        let swapped = select_tier_model(&decision, true, &compat_with_cheap_model());
+        assert_eq!(swapped, None);
+    }
+
+    /// Premium hint → no swap, even with a premium model configured.
+    ///
+    /// Fails without the tier check because a premium turn (vision /
+    /// large-context / tool-heavy) must keep the strongest model.
+    #[test]
+    fn premium_hint_keeps_model() {
+        let mut shape = cheap_shape();
+        // Large context routes to Premium.
+        shape.input_tokens = RoutingHeuristics::default().large_context_tokens + 1;
+        let decision = route(&shape, &RoutingHeuristics::default());
+        let compat = ProviderCompat {
+            tier_models: Some(TierModels {
+                cheap: Some("cheap-model".into()),
+                premium: Some("premium-model".into()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        assert_eq!(select_tier_model(&decision, false, &compat), None);
+    }
+
+    /// The vision signal helper returns false today (no image ContentBlock in
+    /// the type system) — documents the current chokepoint behaviour so a
+    /// future image variant has a failing test to update.
+    #[test]
+    fn vision_helper_is_false_without_image_blocks() {
+        assert!(!message_requires_vision(&[]));
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Finding #174 — end-to-end: the tier swap reaches the DISPATCHED request and
+// cost attribution follows.
+//
+// The `tier_routing_tests` above exercise `select_tier_model` in isolation.
+// They prove the GUARD logic, but nothing drives the real turn loop — so they
+// cannot catch a regression that leaves the swap inert at the dispatch seam
+// (e.g. someone deletes the `request.model = tier_model` assignment, or bills
+// `self.model` instead of `effective_model`). These tests close that gap: a
+// capturing provider records the `request.model` it is actually handed, and a
+// capturing sink records the emitted `TurnTrace.model` and the per-turn
+// `TurnCost.model` carried in the session-cost payload.
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tier_routing_e2e_tests {
+    use std::sync::{Arc, Mutex};
+
+    use async_trait::async_trait;
+    use serde_json::Value;
+    use wcore_config::compat::{ProviderCompat, TierModels};
+    use wcore_config::config::{Config, ProviderType};
+    use wcore_providers::{LlmProvider, ProviderError};
+    use wcore_tools::registry::ToolRegistry;
+    use wcore_types::llm::{LlmEvent, LlmRequest};
+    use wcore_types::message::{FinishReason, StopReason, TokenUsage};
+
+    use crate::output::OutputSink;
+
+    /// A provider that records the `model` field of every `LlmRequest` it is
+    /// dispatched, then replays a single clean text turn. This is the only way
+    /// to observe what the engine ACTUALLY put on the wire — the stock
+    /// `test_utils::ScriptedProvider` ignores the request entirely.
+    struct CapturingProvider {
+        dispatched_models: Arc<Mutex<Vec<String>>>,
+    }
+
+    impl CapturingProvider {
+        fn new() -> (Self, Arc<Mutex<Vec<String>>>) {
+            let dispatched_models = Arc::new(Mutex::new(Vec::new()));
+            (
+                Self {
+                    dispatched_models: Arc::clone(&dispatched_models),
+                },
+                dispatched_models,
+            )
+        }
+    }
+
+    #[async_trait]
+    impl LlmProvider for CapturingProvider {
+        async fn stream(
+            &self,
+            request: &LlmRequest,
+        ) -> Result<tokio::sync::mpsc::Receiver<LlmEvent>, ProviderError> {
+            // Record the dispatched model BEFORE replaying the turn — this is
+            // the load-bearing observation: it is `request.model` after the
+            // engine's tier-swap seam has (or has not) run.
+            self.dispatched_models
+                .lock()
+                .expect("CapturingProvider mutex")
+                .push(request.model.clone());
+            let (tx, rx) = tokio::sync::mpsc::channel(2);
+            tokio::spawn(async move {
+                let _ = tx.send(LlmEvent::TextDelta("done".into())).await;
+                let _ = tx
+                    .send(LlmEvent::Done {
+                        stop_reason: StopReason::EndTurn,
+                        finish_reason: FinishReason::Stop,
+                        usage: TokenUsage::default(),
+                    })
+                    .await;
+            });
+            Ok(rx)
+        }
+    }
+
+    /// A sink that captures the two cost-attribution signals the engine emits:
+    /// every `TurnTrace` JSON (via `emit_trace`) and the aggregate session-cost
+    /// payload (via `emit_session_cost`, whose `per_turn` array carries each
+    /// `TurnCost`). The default `OutputSink` impls for both are no-ops, so a
+    /// dedicated sink is required to observe them. All other methods are no-ops.
+    #[derive(Default)]
+    struct CostCapturingSink {
+        traces: Arc<Mutex<Vec<Value>>>,
+        session_costs: Arc<Mutex<Vec<Value>>>,
+    }
+
+    impl OutputSink for CostCapturingSink {
+        fn emit_text_delta(&self, _: &str, _: &str) {}
+        fn emit_thinking(&self, _: &str, _: &str) {}
+        fn emit_tool_call(&self, _: &str, _: &str) {}
+        fn emit_tool_result(&self, _: &str, _: bool, _: &str) {}
+        fn emit_stream_start(&self, _: &str) {}
+        fn emit_stream_end(
+            &self,
+            _: &str,
+            _: usize,
+            _: u64,
+            _: u64,
+            _: u64,
+            _: u64,
+            _: FinishReason,
+        ) {
+        }
+        fn emit_error(&self, _: &str, _: bool) {}
+        fn emit_info(&self, _: &str) {}
+        fn emit_trace(&self, _: &str, trace_json: &Value) {
+            self.traces
+                .lock()
+                .expect("trace mutex")
+                .push(trace_json.clone());
+        }
+        fn emit_session_cost(&self, _: &str, cost_payload: &Value) {
+            self.session_costs
+                .lock()
+                .expect("session-cost mutex")
+                .push(cost_payload.clone());
+        }
+    }
+
+    /// Build an anthropic-flavoured Config with `cheap` wired to `cheap-model`.
+    fn config_with_cheap_tier() -> Config {
+        Config {
+            provider_label: "anthropic".into(),
+            provider: ProviderType::Anthropic,
+            api_key: "sk-test".into(),
+            base_url: "http://localhost:0".into(),
+            model: "premium-model".into(),
+            max_tokens: 1024,
+            max_turns: Some(1),
+            compat: ProviderCompat {
+                tier_models: Some(TierModels {
+                    cheap: Some("cheap-model".into()),
+                    ..Default::default()
+                }),
+                ..ProviderCompat::anthropic_defaults()
+            },
+            ..Default::default()
+        }
+    }
+
+    /// The same Config with NO tier_models configured — the default, opt-out
+    /// state where the engine must dispatch + bill the configured model.
+    fn config_without_tier() -> Config {
+        Config {
+            provider_label: "anthropic".into(),
+            provider: ProviderType::Anthropic,
+            api_key: "sk-test".into(),
+            base_url: "http://localhost:0".into(),
+            model: "premium-model".into(),
+            max_tokens: 1024,
+            max_turns: Some(1),
+            compat: ProviderCompat::anthropic_defaults(),
+            ..Default::default()
+        }
+    }
+
+    /// Drive one synthetic turn and return (dispatched models, trace JSONs,
+    /// session-cost JSONs).
+    async fn drive_turn(config: Config) -> (Vec<String>, Vec<Value>, Vec<Value>) {
+        let (provider, dispatched) = CapturingProvider::new();
+        let sink = Arc::new(CostCapturingSink::default());
+        let traces = Arc::clone(&sink.traces);
+        let session_costs = Arc::clone(&sink.session_costs);
+
+        let mut engine = super::AgentEngine::new_with_provider(
+            Arc::new(provider),
+            config,
+            ToolRegistry::new(),
+            sink,
+        );
+
+        // A short, tool-free prompt classifies to the Cheap tier (input far
+        // below the 8000-token large-context threshold, zero tool calls).
+        engine
+            .run("hi", "m-routing-e2e")
+            .await
+            .expect("synthetic turn should succeed");
+
+        let dispatched = dispatched.lock().expect("dispatched mutex").clone();
+        let traces = traces.lock().expect("trace mutex").clone();
+        let session_costs = session_costs.lock().expect("session-cost mutex").clone();
+        (dispatched, traces, session_costs)
+    }
+
+    /// POSITIVE: a Cheap-classified turn with `tier_models.cheap` configured
+    /// must (a) dispatch `cheap-model` on the wire, AND (b) attribute the
+    /// emitted TurnTrace.model and TurnCost.model to `cheap-model`.
+    ///
+    /// Fails if the swap is inert: without `request.model = tier_model` at the
+    /// dispatch seam the provider would record `premium-model`. Fails if cost
+    /// attribution regressed (billing `self.model` instead of
+    /// `effective_model`): TurnTrace.model / TurnCost.model would read
+    /// `premium-model` even though `cheap-model` was dispatched.
+    #[tokio::test]
+    async fn cheap_turn_swaps_dispatched_model_and_cost() {
+        let (dispatched, traces, session_costs) = drive_turn(config_with_cheap_tier()).await;
+
+        assert_eq!(
+            dispatched,
+            vec!["cheap-model".to_string()],
+            "the swap must reach the wire: provider should have been handed cheap-model"
+        );
+
+        // TurnTrace.model — the per-turn observability record.
+        let trace_models: Vec<String> = traces
+            .iter()
+            .filter_map(|t| t.get("model").and_then(Value::as_str).map(str::to_string))
+            .collect();
+        assert!(
+            trace_models.iter().any(|m| m == "cheap-model"),
+            "TurnTrace.model must follow the swap, got {trace_models:?}"
+        );
+        assert!(
+            !trace_models.iter().any(|m| m == "premium-model"),
+            "no TurnTrace may be billed to premium-model on a swapped turn, got {trace_models:?}"
+        );
+
+        // TurnCost.model — carried in the session-cost payload's per_turn array.
+        let cost_models: Vec<String> = session_costs
+            .iter()
+            .filter_map(|c| c.get("per_turn").and_then(Value::as_array))
+            .flatten()
+            .filter_map(|t| t.get("model").and_then(Value::as_str).map(str::to_string))
+            .collect();
+        assert!(
+            !cost_models.is_empty(),
+            "a session-cost payload with at least one per-turn cost must be emitted"
+        );
+        assert!(
+            cost_models.iter().all(|m| m == "cheap-model"),
+            "every TurnCost.model must be cheap-model so billing follows the swap, got {cost_models:?}"
+        );
+    }
+
+    /// NEGATIVE: with NO tier_models configured (the default), the same
+    /// Cheap-classified turn must dispatch + bill the engine's configured
+    /// `premium-model` — proving default behaviour is unchanged end-to-end and
+    /// the swap is genuinely opt-in.
+    ///
+    /// Fails if the feature were on-by-default (provider would record a swapped
+    /// model with no configuration present).
+    #[tokio::test]
+    async fn default_turn_keeps_dispatched_model_and_cost() {
+        let (dispatched, traces, session_costs) = drive_turn(config_without_tier()).await;
+
+        assert_eq!(
+            dispatched,
+            vec!["premium-model".to_string()],
+            "with no tier_models the configured model must be dispatched unchanged"
+        );
+
+        let trace_models: Vec<String> = traces
+            .iter()
+            .filter_map(|t| t.get("model").and_then(Value::as_str).map(str::to_string))
+            .collect();
+        assert!(
+            trace_models.iter().all(|m| m == "premium-model"),
+            "TurnTrace.model must stay premium-model with no tier configured, got {trace_models:?}"
+        );
+
+        let cost_models: Vec<String> = session_costs
+            .iter()
+            .filter_map(|c| c.get("per_turn").and_then(Value::as_array))
+            .flatten()
+            .filter_map(|t| t.get("model").and_then(Value::as_str).map(str::to_string))
+            .collect();
+        assert!(
+            !cost_models.is_empty(),
+            "a session-cost payload with at least one per-turn cost must be emitted"
+        );
+        assert!(
+            cost_models.iter().all(|m| m == "premium-model"),
+            "every TurnCost.model must stay premium-model with no tier configured, got {cost_models:?}"
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
 // set_config tests — apply_config_update()
 // ---------------------------------------------------------------------------
 
@@ -6579,6 +7144,98 @@ mod set_config_tests {
         engine.messages = user("echo fresh tool");
         let after_change = names(engine.apply_mcp_curation(tools2));
         assert!(after_change.contains(&"mcp__srv__echo".to_string()));
+    }
+
+    /// Cache-stability regression (token-opt, finding #174): when turn 2
+    /// unions in a tool that sorts EARLIER in registry-iteration order than an
+    /// already-kept tool, the kept set must stay APPEND-ONLY — the new tool
+    /// lands AFTER the already-kept tools, never ahead of them. Inserting a
+    /// tool earlier in the `tools` array would invalidate the Anthropic
+    /// prompt-cache prefix from that point through the rest of the tools zone.
+    ///
+    /// Pre-fix, the final emission iterated `mcp_tools` in registry order and
+    /// kept any name present in an unordered `HashSet`, so a newly-unioned tool
+    /// reappeared at its REGISTRY position (here `alpha`, index 0) ahead of the
+    /// turn-1 keep (`zulu`, index 1) — a mid-array insert that busts the cache.
+    #[test]
+    fn mcp_curation_union_is_append_only_not_registry_order() {
+        use wcore_types::message::{ContentBlock, Message, Role};
+
+        fn mcp_tool(name: &str, desc: &str) -> wcore_types::tool::ToolDef {
+            wcore_types::tool::ToolDef {
+                name: name.to_string(),
+                description: desc.to_string(),
+                input_schema: serde_json::json!({"type": "object"}),
+                deferred: false,
+            }
+        }
+        // Registry order: alpha sits at index 0, ahead of zulu/yankee. Turn 1
+        // surfaces zulu + yankee (both positive keyword overlap, filling the
+        // k=2 picks); alpha scores zero on turn 1 so it is NOT kept yet. Turn 2
+        // surfaces alpha — which sits BEFORE zulu/yankee in registry order.
+        // Append-only ordering must keep zulu/yankee first and append alpha.
+        let tools = vec![
+            mcp_tool("mcp__srv__alpha", "search alpha database records"),
+            mcp_tool("mcp__srv__zulu", "compile zulu reports"),
+            mcp_tool("mcp__srv__yankee", "compile yankee reports"),
+            mcp_tool("mcp__srv__bravo", "send bravo email messages"),
+        ];
+        let names = |v: Vec<wcore_types::tool::ToolDef>| -> Vec<String> {
+            v.into_iter().map(|t| t.name).collect()
+        };
+        let user = |text: &str| {
+            vec![Message::new(
+                Role::User,
+                vec![ContentBlock::Text {
+                    text: text.to_string(),
+                }],
+            )]
+        };
+
+        let mut engine = make_engine("m");
+        engine.mcp_curation = wcore_config::config::McpCurationPolicy::TopK { k: 2 };
+        engine.audit_log = None; // keyword-only ranking → deterministic
+
+        // Turn 1: "compile reports" surfaces zulu + yankee (both score 2);
+        // alpha scores 0 and is NOT kept. zulu lands ahead of the later union.
+        engine.messages = user("compile reports");
+        let turn1 = names(engine.apply_mcp_curation(tools.clone()));
+        assert!(turn1.contains(&"mcp__srv__zulu".to_string()));
+        assert!(
+            !turn1.contains(&"mcp__srv__alpha".to_string()),
+            "alpha must not be surfaced on turn 1 (precondition for the union-growth check)"
+        );
+        let zulu_pos_1 = turn1.iter().position(|n| n == "mcp__srv__zulu");
+
+        // Turn 2: "alpha database" surfaces. alpha is unioned in. Despite alpha
+        // sitting at registry index 0 (ahead of zulu's index 1), append-only
+        // ordering must place alpha AFTER the already-kept zulu.
+        engine.messages = user("alpha database query");
+        let turn2 = names(engine.apply_mcp_curation(tools.clone()));
+
+        let zulu_pos_2 = turn2
+            .iter()
+            .position(|n| n == "mcp__srv__zulu")
+            .expect("zulu must still be kept (monotonic union)");
+        let alpha_pos_2 = turn2
+            .iter()
+            .position(|n| n == "mcp__srv__alpha")
+            .expect("alpha must be unioned in on turn 2");
+
+        // The append-only invariant: the newly-unioned alpha lands AFTER zulu.
+        // Pre-fix this fails — alpha (registry idx 0) emits ahead of zulu.
+        assert!(
+            zulu_pos_2 < alpha_pos_2,
+            "newly-unioned tool must APPEND after already-kept tools, not \
+             insert ahead of them (zulu at {zulu_pos_2}, alpha at {alpha_pos_2})"
+        );
+
+        // And the prefix is byte-stable: zulu keeps its turn-1 position.
+        assert_eq!(
+            zulu_pos_1,
+            Some(zulu_pos_2),
+            "already-kept tool must retain its position across the union-growth turn"
+        );
     }
 
     // --- Cycle 1 tests (updated signature) ---
@@ -7824,6 +8481,135 @@ mod compact_tests {
         assert!(engine.run_compaction().await.is_ok());
     }
 
+    // -- Finding #174: AUTO trigger tracks REAL pressure, not the
+    //    thinking-inflated conservative watermark --
+
+    /// A non-replaying provider's history carries large historical thinking
+    /// blocks. The conservative watermark (`last_input_tokens`,
+    /// max(real, estimate-with-thinking)) is pushed over the 167k auto
+    /// threshold purely by that thinking — but the REAL billed input
+    /// (`last_real_input_tokens`) is well under it, because Anthropic drops
+    /// the thinking at the wire. Auto compaction must NOT fire: that is the
+    /// premature-trigger bug. Pre-fix, `should_autocompact` read the
+    /// conservative watermark and would summarize early.
+    #[tokio::test]
+    async fn auto_does_not_fire_on_thinking_inflated_watermark() {
+        let config = CompactConfig {
+            context_window: 200_000,
+            ..Default::default()
+        };
+        let mut state = CompactState::new();
+        // Conservative watermark inflated past the 167k auto threshold by
+        // historical thinking (and still below the 197k emergency limit).
+        state.last_input_tokens = 180_000;
+        // Real billed input is far below the auto threshold.
+        state.last_real_input_tokens = 90_000;
+
+        let messages = vec![
+            Message::new(
+                Role::Assistant,
+                vec![ContentBlock::Thinking {
+                    thinking: "reasoning ".repeat(10_000),
+                }],
+            ),
+            Message::new(
+                Role::User,
+                vec![ContentBlock::Text {
+                    text: "the live task".into(),
+                }],
+            ),
+        ];
+        let len_before = messages.len();
+
+        // SummaryProvider would SUCCEED if autocompact ran — so if the
+        // message count is untouched, the trigger genuinely did not fire
+        // (a fired compaction replaces history with a summary, dropping len).
+        let mut engine = make_compact_engine(config, state, messages);
+        engine.provider = Arc::new(SummaryProvider);
+
+        assert!(engine.run_compaction().await.is_ok());
+        assert_eq!(
+            engine.messages.len(),
+            len_before,
+            "auto compaction must not fire on a thinking-inflated watermark \
+             when real billed input is below the threshold"
+        );
+    }
+
+    /// When the provider-reported REAL input (`last_real_input_tokens`) is
+    /// itself over the 167k threshold, the AUTO trigger fires — proving it
+    /// keys off real pressure, not just the conservative path.
+    #[tokio::test]
+    async fn auto_fires_on_real_usage_over_threshold() {
+        let config = CompactConfig {
+            context_window: 200_000,
+            ..Default::default()
+        };
+        let mut state = CompactState::new();
+        // Conservative and real watermarks both above 167k, below emergency.
+        state.last_input_tokens = 180_000;
+        state.last_real_input_tokens = 180_000;
+
+        let messages = vec![
+            Message::new(
+                Role::Assistant,
+                vec![ContentBlock::Text {
+                    text: "old reply".into(),
+                }],
+            ),
+            Message::new(
+                Role::User,
+                vec![ContentBlock::Text {
+                    text: "the live task".into(),
+                }],
+            ),
+        ];
+        let len_before = messages.len();
+
+        let mut engine = make_compact_engine(config, state, messages);
+        engine.provider = Arc::new(SummaryProvider);
+
+        assert!(engine.run_compaction().await.is_ok());
+        // A fired compaction replaces history with a summary, changing the
+        // message count; an unchanged len would mean the trigger never fired.
+        assert_ne!(
+            engine.messages.len(),
+            len_before,
+            "auto compaction must fire when real billed input exceeds the threshold"
+        );
+    }
+
+    /// The EMERGENCY hard-stop stays conservative: it fires off
+    /// `last_input_tokens` even when the REAL watermark
+    /// (`last_real_input_tokens`) is low. This guards against ever blowing
+    /// the context window. Behaviour here is unchanged by finding #174.
+    #[tokio::test]
+    async fn emergency_stays_conservative_ignoring_real_watermark() {
+        let config = CompactConfig {
+            context_window: 200_000,
+            emergency_buffer: 3_000,
+            // Disable auto so ONLY emergency can act, isolating its path.
+            enabled: false,
+            ..Default::default()
+        };
+        let mut state = CompactState::new();
+        state.last_input_tokens = 198_000; // >= 197k emergency limit
+        state.last_real_input_tokens = 10_000; // low real pressure — irrelevant
+
+        let mut engine = make_compact_engine(config, state, vec![]);
+        let result = engine.run_compaction().await;
+
+        match result {
+            Err(super::AgentError::ContextTooLong { input_tokens, .. }) => {
+                assert_eq!(
+                    input_tokens, 198_000,
+                    "emergency must use the conservative watermark, not the real one"
+                );
+            }
+            other => panic!("expected ContextTooLong from emergency, got: {other:?}"),
+        }
+    }
+
     // -- Microcompact runs when count trigger fires --
 
     #[tokio::test]
@@ -8025,7 +8811,10 @@ mod compact_tests {
         };
         let mut state = CompactState::new();
         // Above the autocompact threshold (167k) but below emergency.
+        // Finding #174 — the AUTO trigger reads `last_real_input_tokens`,
+        // so set it too; `last_input_tokens` alone now only drives emergency.
         state.last_input_tokens = 180_000;
+        state.last_real_input_tokens = 180_000;
 
         // History: some prior turns, then the LIVE user instruction.
         let messages = vec![
@@ -8091,6 +8880,7 @@ mod compact_tests {
         };
         let mut state = CompactState::new();
         state.last_input_tokens = 180_000;
+        state.last_real_input_tokens = 180_000;
 
         let messages = vec![
             Message::new(
@@ -8137,6 +8927,7 @@ mod compact_tests {
         let mut state = CompactState::new();
         // Above the autocompact threshold (167k), below emergency.
         state.last_input_tokens = 180_000;
+        state.last_real_input_tokens = 180_000;
 
         // Three leading messages (indices 0,1,2 — the ones that collapse)
         // plus a trailing LIVE user turn. `run_compaction` pops the live
@@ -8212,6 +9003,7 @@ mod compact_tests {
         };
         let mut state = CompactState::new();
         state.last_input_tokens = 180_000;
+        state.last_real_input_tokens = 180_000;
         let messages = vec![
             Message::new(
                 Role::User,
@@ -8326,7 +9118,8 @@ mod compact_tests {
             ..Default::default()
         };
         let mut state = CompactState::new();
-        state.last_input_tokens = 198_000; // triggers both auto and emergency
+        state.last_input_tokens = 198_000; // triggers emergency
+        state.last_real_input_tokens = 198_000; // would trigger auto (but circuit broken)
         state.consecutive_failures = 3; // circuit broken
 
         let mut engine = make_compact_engine(config, state, vec![]);
@@ -10659,6 +11452,94 @@ mod audit_2026_05_22_tests {
             counter.load(std::sync::atomic::Ordering::SeqCst),
             3,
             "1 initial attempt + 2 retries = 3 provider calls"
+        );
+    }
+
+    // --- Finding #174: nested re-bill cap on an HTTP-ring-exhausted Err ----
+
+    /// Models the engine entry point that triggers the worst nesting:
+    /// `stream()` itself returns `Err(ProviderError::Connection)` — i.e. the
+    /// provider's HTTP ring (`builder_send_with_retry`) already spent its full
+    /// 3-send budget on this request before surfacing the error. Returns that
+    /// `Err` for the first `fail_calls` calls, then a clean `Done` stream.
+    struct StreamErrProvider {
+        fail_calls: usize,
+        calls: Arc<std::sync::atomic::AtomicUsize>,
+    }
+    impl StreamErrProvider {
+        fn new(fail_calls: usize) -> Self {
+            Self {
+                fail_calls,
+                calls: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            }
+        }
+        fn call_counter(&self) -> Arc<std::sync::atomic::AtomicUsize> {
+            Arc::clone(&self.calls)
+        }
+    }
+    #[async_trait]
+    impl LlmProvider for StreamErrProvider {
+        async fn stream(
+            &self,
+            _: &LlmRequest,
+        ) -> Result<tokio::sync::mpsc::Receiver<LlmEvent>, ProviderError> {
+            let n = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if n < self.fail_calls {
+                // A retryable Connection error surfaced from `stream()` itself:
+                // the HTTP ring already exhausted its budget on this request.
+                return Err(ProviderError::Connection("http ring exhausted".into()));
+            }
+            let (tx, rx) = tokio::sync::mpsc::channel(16);
+            tokio::spawn(async move {
+                let _ = tx.send(LlmEvent::TextDelta("recovered".into())).await;
+                let _ = tx.send(done_endturn()).await;
+            });
+            Ok(rx)
+        }
+    }
+
+    #[tokio::test]
+    async fn http_exhausted_stream_err_grants_only_one_engine_retry() {
+        // Finding #174 — when `stream()` returns a retryable `Err` (the HTTP
+        // ring already spent its 3-send budget), the engine ring must NOT stack
+        // a fresh full `MAX_STREAM_RETRIES` budget on top. Without the cap a
+        // permanent HTTP-exhausted failure would drive 3 engine attempts (1 +
+        // 2 retries); with the cap it is bounded to 2 (1 + 1 retry), each of
+        // which would re-enter the HTTP ring's 3 sends — so the worst case
+        // drops from 9 full-input re-sends to 6 for one logical turn.
+        let provider = Arc::new(StreamErrProvider::new(usize::MAX)); // always fails
+        let counter = provider.call_counter();
+        let mut engine = engine_with(provider);
+        let result = engine.run("task", "m-1").await;
+        assert!(
+            matches!(result, Err(super::AgentError::ApiError(_))),
+            "a permanent HTTP-exhausted failure must fail the turn, got {result:?}"
+        );
+        assert_eq!(
+            counter.load(std::sync::atomic::Ordering::SeqCst),
+            2,
+            "an HTTP-ring-exhausted Err must get exactly 1 engine retry \
+             (2 attempts), NOT the full 3 — that is the nested re-bill cap"
+        );
+    }
+
+    #[tokio::test]
+    async fn http_exhausted_stream_err_still_retries_a_single_transient_failure() {
+        // Finding #174 normal-case guard — the cap must NOT kill resilience for
+        // a genuinely transient single failure. One HTTP-exhausted `Err`
+        // followed by a clean stream must still be retried and recover.
+        let provider = Arc::new(StreamErrProvider::new(1)); // fail once, then ok
+        let counter = provider.call_counter();
+        let mut engine = engine_with(provider);
+        let result = engine
+            .run("task", "m-1")
+            .await
+            .expect("a single transient HTTP-exhausted failure must still recover");
+        assert_eq!(result.text, "recovered");
+        assert_eq!(
+            counter.load(std::sync::atomic::Ordering::SeqCst),
+            2,
+            "1 initial attempt + 1 retry recovers the single transient failure"
         );
     }
 
