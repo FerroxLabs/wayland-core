@@ -319,11 +319,9 @@ mod tests {
         ) -> Result<mpsc::Receiver<LlmEvent>, ProviderError> {
             *self.seen_model.lock().unwrap() = Some(request.model.clone());
             let (tx, rx) = mpsc::channel(4);
-            tx.send(LlmEvent::TextDelta(
-                "<summary>ok</summary>".to_string(),
-            ))
-            .await
-            .unwrap();
+            tx.send(LlmEvent::TextDelta("<summary>ok</summary>".to_string()))
+                .await
+                .unwrap();
             tx.send(LlmEvent::Done {
                 stop_reason: StopReason::EndTurn,
                 finish_reason: FinishReason::Stop,
@@ -370,9 +368,15 @@ mod tests {
         };
         let mut state = CompactState::new();
 
-        autocompact(&provider, &sample_messages(), "premium-model", &config, &mut state)
-            .await
-            .expect("autocompact should succeed");
+        autocompact(
+            &provider,
+            &sample_messages(),
+            "premium-model",
+            &config,
+            &mut state,
+        )
+        .await
+        .expect("autocompact should succeed");
 
         assert_eq!(seen.lock().unwrap().as_deref(), Some("cheap-model"));
     }
@@ -393,9 +397,15 @@ mod tests {
         assert!(config.compaction_model.is_none());
         let mut state = CompactState::new();
 
-        autocompact(&provider, &sample_messages(), "premium-model", &config, &mut state)
-            .await
-            .expect("autocompact should succeed");
+        autocompact(
+            &provider,
+            &sample_messages(),
+            "premium-model",
+            &config,
+            &mut state,
+        )
+        .await
+        .expect("autocompact should succeed");
 
         assert_eq!(seen.lock().unwrap().as_deref(), Some("premium-model"));
     }

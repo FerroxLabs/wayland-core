@@ -6797,9 +6797,7 @@ mod tier_routing_e2e_tests {
 
     /// Drive one synthetic turn and return (dispatched models, trace JSONs,
     /// session-cost JSONs).
-    async fn drive_turn(
-        config: Config,
-    ) -> (Vec<String>, Vec<Value>, Vec<Value>) {
+    async fn drive_turn(config: Config) -> (Vec<String>, Vec<Value>, Vec<Value>) {
         let (provider, dispatched) = CapturingProvider::new();
         let sink = Arc::new(CostCapturingSink::default());
         let traces = Arc::clone(&sink.traces);
