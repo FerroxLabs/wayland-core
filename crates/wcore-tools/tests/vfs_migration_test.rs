@@ -26,6 +26,7 @@ fn sandboxed_ctx(root: &std::path::Path) -> ToolContext {
         source_agent: None,
         sink: Arc::new(wcore_tools::NullToolOutputSink),
         file_write_notifier: None,
+        workspace: None,
     }
 }
 
@@ -196,6 +197,7 @@ fn ctx_with_notifier(
         source_agent: None,
         sink: Arc::new(wcore_tools::NullToolOutputSink),
         file_write_notifier: Some(notifier.clone() as Arc<dyn FileWriteNotifier>),
+        workspace: None,
     };
     (ctx, notifier)
 }

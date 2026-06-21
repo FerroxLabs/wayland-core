@@ -250,7 +250,125 @@ not subsume each other.
 When in doubt, prefer the lower layer. Functionality at the wrong layer
 is the most common source of subsequent refactors.
 
-## 5. Further reading
+## 5. Unified WorkspacePolicy
+
+`WorkspacePolicy` (`crates/wcore-tools/src/workspace_policy.rs`) is the
+single source of truth for a session's filesystem and network containment.
+All sandbox decisions (Bash OS-sandbox manifest, VFS jail) derive from one
+policy object, set once at engine bootstrap.
+
+### Two trust modes
+
+| Mode | When | File tools | Bash sandbox | Caches |
+|------|------|-----------|--------------|--------|
+| **`Trusted`** | Local CLI / desktop sessions on the user's own machine | `RealFs` (no jail) | Rooted at workspace; toolchain dirs + global caches readable | Reused from `~/.cargo`, `~/.npm`, etc. — no redirect |
+| **`Contained`** | Remote `Workspace` posture | `SandboxedFs ∘ SecretDenyFs` (write-scoped + secret deny) | Rooted at workspace; tight write scope; toolchain read-only | Redirected into `<root>/.wcache/{cargo,npm,pip}` |
+
+Both modes seed network policy from `default_bash_network_policy()`, which
+honors the `WAYLAND_BASH_ALLOW_NETWORK` env var. Network access is never
+hardcoded inside `WorkspacePolicy`.
+
+### Two enforcement adapters
+
+1. **`SandboxManifest`** (`wcore-tools`) — the Bash OS-sandbox adapter.
+   `build_sandbox_pieces()` in `bash.rs` accepts an optional `&WorkspacePolicy`
+   and derives the `SandboxManifest` (cwd, writable roots, readable roots,
+   cache-env injections, network policy, **`fs_read_deny` secret-path deny
+   list**) that `wcore-sandbox` enforces on every Bash tool invocation.
+
+2. **VFS jail** (Contained only) — the in-process file-tool adapter.
+   `SandboxedFs ∘ SecretDenyFs` wraps `RealFs`: writes outside the workspace
+   root are rejected; reads of secret paths (`.env`, `.aws/credentials`, SSH
+   keys, TLS certs, Terraform state, service-account JSON, etc.) are denied
+   even when the path is inside the workspace.
+
+### Install points
+
+| Where | What | Why |
+|-------|------|-----|
+| `wcore-agent/src/bootstrap.rs` | `WorkspacePolicy::trusted_local(cwd)` installed on every session | Local sessions need sandbox roots without a VFS jail |
+| `wcore-agent` `apply_posture` | `WorkspacePolicy::contained(workspace_root)` + `SecretDenyFs` applied | Remote Workspace posture tightens the boundary |
+
+### OS-sandbox secret-read-deny (Implemented)
+
+`WorkspacePolicy` computes a `secret_deny_paths()` list at construction time
+(once per session) and populates `SandboxManifest.fs_read_deny`. Every Bash
+invocation under a `WorkspacePolicy` passes that list to the OS sandbox, which
+enforces read-denial at the kernel level — below any in-process bypass.
+
+**What `fs_read_deny` covers:**
+- *User credential stores* (both `Trusted` and `Contained` modes):
+  `~/.ssh`, `~/.aws`, `~/.kube`, `~/.docker`, `~/.config/gcloud`,
+  `~/.config/gh`, `~/.npmrc`, `~/.netrc`, `~/.pgpass`, `~/.git-credentials`,
+  and others (see `CREDENTIAL_STORES` in `workspace_policy.rs`).
+- *Always-mounted system credential paths* the backends grant
+  unconditionally (macOS: `/Library/Keychains`; Linux: `/etc/docker`,
+  `/etc/kubernetes`). These are emitted regardless of `readable_roots()`
+  because the OS sandbox mounts them by default.
+- *Workspace-internal committed secrets* (`Contained` mode only):
+  any file under the project root that matches `is_secret_path` (`.env`,
+  Terraform state, service-account JSON, TLS certs, etc.).
+- *Symlinks whose resolved target is a secret* are denied at the link's
+  own path too (second-pass walk).
+
+**Primary boundary:** the allowlist is the true boundary for `$HOME` and
+user credential stores — `Contained` posture never mounts `$HOME` at all,
+so those files are physically unreadable regardless of any deny rule.
+**`fs_read_deny` is load-bearing for:** workspace-internal secrets under the
+project root, user credential stores in `Trusted` (local) mode where `$HOME`
+is mounted, and the short list of always-mounted system credential paths.
+**Network-Deny is the exfil backstop** — even if a secret is read, it cannot
+be transmitted outside the allowed egress set.
+
+**Exec-time capability gate:** `SandboxBackend::enforces_read_deny()` reports
+`true` only for backends that actually enforce `fs_read_deny` at the OS level
+(macOS sandbox-exec, Linux bwrap, Windows AppContainer, Docker with
+`live-docker` feature). The authoritative gate lives inside `bash.rs`
+`execute_with_ctx` / `execute_streaming_with_ctx` — checked on the same
+`default_for_platform()` instance that will run the command (TOCTOU-free). A
+bootstrap UX gate in `channel_tools.rs::keep_under` additionally drops `Bash`
+from the `Workspace` tool-set when the active backend does not report `true`,
+so the model never sees a tool it cannot safely invoke.
+
+**Backend coverage:**
+
+| Backend | Mechanism | `enforces_read_deny()` |
+|---------|-----------|------------------------|
+| macOS sandbox-exec | `(deny file-read* (subpath …))` SBPL rules after allows (last-match-wins) | `true` |
+| Linux bwrap | `--ro-bind /dev/null <file>` / `--tmpfs <dir>` overlay after positive binds | `true` |
+| Windows AppContainer | `DENY_ACCESS` DACL ACE with `SUB_CONTAINERS_AND_OBJECTS_INHERIT` (real impl only; stub stays `false`) | `true` (real) |
+| Docker (`live-docker`) | `/dev/null:<path>:ro` bind / empty-dir bind after mounts | `true` |
+| `no_sandbox` / `FailClosed` | Not enforced | `false` (default) |
+
+**Residuals (each backstopped by network-Deny):**
+
+1. **Hardlinks to a secret** — path-based deny is inode-blind on Linux and
+   macOS (the deny covers the enumerated path, not the inode). Windows
+   AppContainer shares the Security Descriptor across hard links, so it is
+   covered there.
+2. **Symlink whose resolved target is an external secret not itself
+   enumerated** — reachable via the always-on `/etc` / `/Library` system
+   mounts. The deny covers the link's own path when its target is in the
+   enumerated list; a target beyond that list is a DAC + network-Deny
+   residual (the agent-user may own the target file, so DAC alone is not
+   sufficient).
+3. **Secret created after the cached per-session walk** (including
+   out-of-band writes by a parallel build process) — the walk runs once at
+   policy construction; files added later in the session are not covered.
+   This is wider than a per-command walk would be, and is the price of the
+   performance fix (Task 6).
+4. **Broad always-on system mounts beyond enumerated credential paths** —
+   `fs_read_deny` covers the known high-value paths within `/etc`, `/Library`,
+   `/System`, `/usr`; it does not claim to deny every file under those trees.
+   DAC + network-Deny contain the remainder.
+
+### Deferred follow-ups
+
+1. **MCP child-process coverage** — MCP stdio servers launched inside a
+   Workspace posture inherit the parent environment but are not yet subject
+   to the `WorkspacePolicy` sandbox manifest.
+
+## 6. Further reading
 
 - [AGENTS.md](../AGENTS.md) — full conventions, build commands, code style, crate map
 - [docs/getting-started.md](getting-started.md) — installation, CLI usage, config cascading precedence

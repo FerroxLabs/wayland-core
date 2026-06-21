@@ -1942,12 +1942,35 @@ impl AgentBootstrap {
         // tools survive every posture, so post-construction MCP wiring is
         // unaffected.
         if let Some(scope) = self.channel_tool_posture.as_ref() {
-            crate::channel_tools::apply_posture(&mut registry, scope);
+            // Task 8 — bootstrap UX gate. Probe whether the platform's
+            // sandbox backend enforces secret-read-deny; if not, suppress
+            // Bash from the Workspace schema so the LLM isn't offered a
+            // tool that would always refuse at exec time. The exec-time
+            // gate in bash.rs remains the authoritative boundary.
+            let enforces = wcore_tools::bash::platform_enforces_read_deny();
+            crate::channel_tools::apply_posture(&mut registry, scope, enforces);
             tracing::info!(
                 target: "wcore_agent::bootstrap",
                 posture = ?scope.posture,
+                sandbox_enforces_read_deny = enforces,
                 "channel engine tool posture applied"
             );
+        }
+
+        // Every session gets a workspace policy so BashTool's OS sandbox is
+        // rooted at the workspace (fixes the empty-allowlist / cwd:None pain
+        // that broke local + desktop builds). A channel `Workspace` posture
+        // already installed a `Contained` policy via `apply_posture`; for
+        // every other path (local CLI / TUI / json-stream / ACP / `Full`
+        // channel) install a `Trusted` policy derived from this session's
+        // working directory.
+        if registry.workspace_policy().is_none() {
+            let policy = std::sync::Arc::new(
+                wcore_tools::workspace_policy::WorkspacePolicy::trusted_local(
+                    std::path::PathBuf::from(&self.workspace),
+                ),
+            );
+            registry.set_workspace_policy(policy);
         }
 
         let mut engine = if let Some(session) = self.resume_session {
