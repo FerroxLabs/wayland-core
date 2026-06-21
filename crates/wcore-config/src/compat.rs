@@ -4,6 +4,55 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+/// Concrete model ids to substitute for each smart-routing tier.
+///
+/// Finding #174: the engine classifies every turn into a `RoutingTier`
+/// (`cheap` / `balanced` / `premium`) and stamps `LlmRequest::routing_hint`,
+/// but nothing acted on it — every turn ran on the user's premium model. This
+/// map is the opt-in that lets a `cheap` (or `balanced`) hint actually swap to
+/// a smaller, cheaper model before dispatch.
+///
+/// Each field is `Option<String>` so the user can configure only the tiers they
+/// care about (e.g. just `cheap`). A tier left `None` means "no swap for this
+/// tier — keep the originally requested model". The presence of a configured
+/// entry for the hinted tier is itself the enable switch: with the whole map
+/// absent (the default), behaviour is unchanged for every existing user.
+///
+/// `premium` is accepted for completeness/symmetry but the engine never
+/// downgrades a `premium` hint, so configuring it has no effect on routing; it
+/// exists so a user can document the full mapping in one place.
+#[derive(Debug, Clone, Deserialize, Serialize, Default, PartialEq, Eq)]
+pub struct TierModels {
+    /// Model id used when the router classifies the turn as `cheap`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cheap: Option<String>,
+    /// Model id used when the router classifies the turn as `balanced`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub balanced: Option<String>,
+    /// Model id for the `premium` tier. Documentation-only: the engine never
+    /// downgrades a premium hint, so this is not consulted for routing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub premium: Option<String>,
+}
+
+impl TierModels {
+    /// Resolve the configured model id for a routing-tier label, if any.
+    ///
+    /// `tier` is the lowercase tier name as produced by
+    /// `RoutingTier`'s serde rename / `RoutingDecision::to_hint` (`"cheap"`,
+    /// `"balanced"`, `"premium"`). Returns `None` for the premium tier and for
+    /// any tier that has no configured model — both mean "no swap".
+    pub fn model_for_tier(&self, tier: &str) -> Option<&str> {
+        match tier {
+            "cheap" => self.cheap.as_deref(),
+            "balanced" => self.balanced.as_deref(),
+            // Premium is intentionally never returned for routing: the engine
+            // must not downgrade (or "swap") a premium turn.
+            _ => None,
+        }
+    }
+}
+
 /// Provider-level compatibility settings.
 /// Each field is Option — None means "use provider-type default".
 #[derive(Debug, Clone, Deserialize, Serialize, Default)]
@@ -202,6 +251,21 @@ pub struct ProviderCompat {
     /// persist and re-sending them triggers validation errors.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub replays_thinking_in_history: Option<bool>,
+
+    /// Finding #174: per-tier model substitution for smart routing.
+    ///
+    /// The engine classifies every turn into a `RoutingTier` and stamps a
+    /// `routing_hint`; when this map is set and configures a model for the
+    /// hinted tier, the engine rewrites `LlmRequest::model` to that tier model
+    /// before dispatch (cheap/balanced only, never premium, never for
+    /// image/vision turns). Token/cost accounting is attributed to the swapped
+    /// model.
+    ///
+    /// `None` (the default) means no swap ever happens — behaviour is unchanged
+    /// for every user who has not opted in. Configure via:
+    /// `[compat.tier_models] cheap = "claude-haiku-4" balanced = "..."`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tier_models: Option<TierModels>,
 }
 
 impl ProviderCompat {
@@ -650,7 +714,19 @@ impl ProviderCompat {
             replays_thinking_in_history: user
                 .replays_thinking_in_history
                 .or(defaults.replays_thinking_in_history),
+            tier_models: user.tier_models.or(defaults.tier_models),
         }
+    }
+
+    /// Finding #174: resolve the configured tier-substitution model for a
+    /// routing-tier label (`"cheap"` / `"balanced"` / `"premium"`).
+    ///
+    /// Returns `None` when (a) no `[compat.tier_models]` map is configured —
+    /// the default, i.e. the feature is OFF, (b) the map has no entry for this
+    /// tier, or (c) the tier is `premium` (never downgraded). When this returns
+    /// `Some`, the engine swaps `LlmRequest::model` to it for the turn.
+    pub fn tier_model(&self, tier: &str) -> Option<&str> {
+        self.tier_models.as_ref()?.model_for_tier(tier)
     }
 
     // --- Resolved accessors (Option<bool> → bool with false default) ---
@@ -1270,6 +1346,65 @@ mod w6_provider_type_and_cost_tests {
         assert_eq!(ProviderCompat::openai_defaults().provider_type(), "openai");
         assert_eq!(ProviderCompat::vertex_defaults().provider_type(), "vertex");
         assert_eq!(ProviderCompat::ollama_defaults().provider_type(), "ollama");
+    }
+
+    /// Finding #174: with no `[compat.tier_models]` configured, the accessor
+    /// returns `None` for every tier — proving the feature is OFF by default and
+    /// the engine performs no swap (default behaviour unchanged).
+    #[test]
+    fn tier_model_is_none_by_default() {
+        let c = ProviderCompat::anthropic_defaults();
+        assert!(c.tier_models.is_none());
+        assert_eq!(c.tier_model("cheap"), None);
+        assert_eq!(c.tier_model("balanced"), None);
+        assert_eq!(c.tier_model("premium"), None);
+    }
+
+    /// A configured cheap model resolves; an unconfigured balanced tier stays
+    /// `None` (per-tier opt-in).
+    #[test]
+    fn tier_model_resolves_configured_cheap_only() {
+        let c = ProviderCompat {
+            tier_models: Some(TierModels {
+                cheap: Some("haiku".into()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        assert_eq!(c.tier_model("cheap"), Some("haiku"));
+        assert_eq!(c.tier_model("balanced"), None);
+    }
+
+    /// Premium is never returned for routing even when a premium model is
+    /// configured — the engine must not downgrade a premium turn.
+    #[test]
+    fn tier_model_never_returns_premium() {
+        let c = ProviderCompat {
+            tier_models: Some(TierModels {
+                cheap: Some("haiku".into()),
+                premium: Some("opus".into()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        assert_eq!(c.tier_model("premium"), None);
+    }
+
+    /// `[compat.tier_models]` parses from TOML and survives merge (user wins).
+    #[test]
+    fn tier_models_deserialize_and_merge() {
+        let toml_str = r#"
+[tier_models]
+cheap = "claude-haiku-4"
+balanced = "claude-sonnet-4"
+"#;
+        let user: ProviderCompat = toml::from_str(toml_str).unwrap();
+        assert_eq!(user.tier_model("cheap"), Some("claude-haiku-4"));
+        assert_eq!(user.tier_model("balanced"), Some("claude-sonnet-4"));
+
+        // Preset has no tier_models; user's map wins through merge.
+        let merged = ProviderCompat::merge(ProviderCompat::anthropic_defaults(), user);
+        assert_eq!(merged.tier_model("cheap"), Some("claude-haiku-4"));
     }
 
     #[test]

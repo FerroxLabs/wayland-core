@@ -128,6 +128,50 @@ fn resolve_turn_cost_usd(
     })
 }
 
+/// Finding #174 — does this turn carry image/vision content that forbids a
+/// tier downgrade?
+///
+/// The `wcore-types` `ContentBlock` enum has no image variant today, so there
+/// is no real vision content to detect and this returns `false`. It is kept as
+/// the single chokepoint for the vision signal: when a future image
+/// `ContentBlock` lands, only this function must change for the smart-routing
+/// guard (and the router's `requires_vision` shape input) to start respecting
+/// it. The router independently promotes any vision turn to Premium, which
+/// [`select_tier_model`] already refuses to swap; this is belt-and-suspenders.
+fn message_requires_vision(_messages: &[Message]) -> bool {
+    false
+}
+
+/// Finding #174 — decide whether to swap to a configured tier model, and to
+/// which, given a routing decision.
+///
+/// Returns `Some(model_id)` ONLY when ALL hold:
+/// 1. the hinted tier is `Cheap` or `Balanced` (a `Premium` hint is never
+///    downgraded — returns `None`);
+/// 2. the turn does NOT require vision content (`requires_vision == false`);
+/// 3. the user configured a `[compat.tier_models]` model for that tier.
+///
+/// Otherwise returns `None` and the caller keeps the originally requested
+/// model. With no `tier_models` map configured (the default) this always
+/// returns `None`, so behaviour is unchanged for users who have not opted in.
+fn select_tier_model(
+    decision: &wcore_providers::RoutingDecision,
+    requires_vision: bool,
+    compat: &wcore_config::compat::ProviderCompat,
+) -> Option<String> {
+    // Never downgrade a vision turn, regardless of tier.
+    if requires_vision {
+        return None;
+    }
+    let tier = match decision.tier {
+        wcore_providers::RoutingTier::Cheap => "cheap",
+        wcore_providers::RoutingTier::Balanced => "balanced",
+        // Premium is never downgraded.
+        wcore_providers::RoutingTier::Premium => return None,
+    };
+    compat.tier_model(tier).map(str::to_string)
+}
+
 /// v0.9.1.1 B6 — true when `reason` is an HTTP 4xx (client) error from
 /// a provider. The engine retries 5xx + network drops + truncated
 /// streams (real chance the next attempt succeeds), but a 4xx — the
@@ -3426,6 +3470,12 @@ impl AgentEngine {
                 Vec::new()
             };
 
+            // Finding #174: the model actually dispatched this turn. Starts as
+            // the user's configured model and is rewritten below if a routing
+            // hint selects a configured tier model. Cost/usage accounting reads
+            // THIS (not `self.model`) so attribution follows any swap.
+            let mut effective_model = self.model.clone();
+
             let mut request = LlmRequest {
                 model: self.model.clone(),
                 system,
@@ -3498,11 +3548,13 @@ impl AgentEngine {
 
             // W1 v0.6.3: stamp a smart-routing hint onto the request so
             // `ProviderChain` can surface the router's decision in dispatch
-            // observability. `input_tokens`, `max_output_tokens`, and
-            // `tool_call_count` are real; `code_ratio`/`requires_vision`
-            // are conservatively zero/false (the message model has no
-            // vision block, and a code-ratio scanner is out of scope), so
-            // this producer emits only the large-context / tool-heavy /
+            // observability. Finding #174: ALSO act on the hint — swap the
+            // model to a configured tier model (cheap/balanced) before
+            // dispatch. `input_tokens`, `max_output_tokens`, and
+            // `tool_call_count` are real; `code_ratio` is conservatively zero
+            // (no code-ratio scanner) and `requires_vision` comes from
+            // `message_requires_vision` (false until an image ContentBlock
+            // exists), so this producer emits only large-context / tool-heavy /
             // simple decisions — never a wrong hint.
             {
                 let tool_call_count = self
@@ -3511,16 +3563,44 @@ impl AgentEngine {
                     .flat_map(|m| &m.content)
                     .filter(|b| matches!(b, ContentBlock::ToolUse { .. }))
                     .count() as u32;
+                // Vision guard input: a turn that carries image/vision content
+                // must never be downgraded (the cheap tier may not be
+                // vision-capable). The `wcore-types` message model has no image
+                // block today, so this is conservatively `false` from real
+                // content; the routing classifier promotes any vision turn to
+                // Premium anyway, which `select_tier_model` also refuses to
+                // swap. Routed through one flag so a future image ContentBlock
+                // only needs to flip this.
+                let requires_vision = message_requires_vision(&self.messages);
                 let shape = wcore_providers::RequestShape {
                     input_tokens: input_token_estimate,
                     max_output_tokens: request.max_tokens as usize,
                     code_ratio: 0.0,
                     tool_call_count,
-                    requires_vision: false,
+                    requires_vision,
                 };
                 let decision =
                     wcore_providers::route(&shape, &wcore_providers::RoutingHeuristics::default());
                 request.routing_hint = Some(decision.to_hint());
+
+                // Finding #174: act on the hint. Opt-in + guarded — see
+                // `select_tier_model`. Only Cheap/Balanced hints with a
+                // configured tier model and no vision content swap the model;
+                // everything else leaves `request.model` (and `effective_model`)
+                // as the user's configured model.
+                if let Some(tier_model) =
+                    select_tier_model(&decision, requires_vision, &self.compat)
+                {
+                    tracing::debug!(
+                        target: "wcore_agent::routing",
+                        from = %self.model,
+                        to = %tier_model,
+                        hint = %decision.to_hint().0,
+                        "smart-routing tier swap"
+                    );
+                    request.model = tier_model.clone();
+                    effective_model = tier_model;
+                }
             }
 
             // AUDIT A3 / E-C2 — bounded stream-level retry loop.
@@ -3725,9 +3805,13 @@ impl AgentEngine {
                     .input_tokens
                     .saturating_add(turn_usage.output_tokens);
                 let provider = self.compat.provider_type.as_deref().unwrap_or("");
+                // Finding #174: charge the budget against the model ACTUALLY
+                // dispatched (`effective_model`), so a tier-swapped cheap turn
+                // is billed at the cheap model's catalog rate, not the premium
+                // model's.
                 let catalog_cost = pricing_turn_cost_usd(
                     provider,
-                    &self.model,
+                    &effective_model,
                     turn_usage.input_tokens,
                     turn_usage.output_tokens,
                 );
@@ -3737,7 +3821,7 @@ impl AgentEngine {
                     // covers log files; this makes it visible in --json-stream output.
                     self.output.emit_info(&format!(
                         "cost-catalog miss for {provider}/{model} — billing at compat-fallback rate; add to pricing.toml",
-                        model = &self.model,
+                        model = &effective_model,
                     ));
                 }
                 let turn_cost = catalog_cost.unwrap_or_else(|| {
@@ -3903,7 +3987,11 @@ impl AgentEngine {
                 // single-turn sessions still produce exactly one TurnTrace.
                 let trace = TurnTrace {
                     turn,
-                    model: self.model.clone(),
+                    // Finding #174: attribute to the model ACTUALLY dispatched
+                    // (`effective_model`), which equals `self.model` unless a
+                    // tier swap fired this turn — so cost is never mis-charged
+                    // to the premium model when a cheap model was used.
+                    model: effective_model.clone(),
                     provider: self.compat.provider_type().to_string(),
                     input_tokens: turn_usage.input_tokens,
                     output_tokens: turn_usage.output_tokens,
@@ -3919,7 +4007,7 @@ impl AgentEngine {
                     // openai_defaults() now at $0/$0 sentinel, that always returned $0.
                     cost_usd: resolve_turn_cost_usd(
                         self.compat.provider_type(),
-                        &self.model,
+                        &effective_model,
                         turn_usage.input_tokens,
                         turn_usage.output_tokens,
                         turn_usage.cache_read_tokens,
@@ -4428,7 +4516,9 @@ impl AgentEngine {
             // terminal / null sinks default to no-op via the trait).
             let trace = TurnTrace {
                 turn,
-                model: self.model.clone(),
+                // Finding #174: attribute to the dispatched model (see the
+                // no-tool-calls path above for rationale).
+                model: effective_model.clone(),
                 provider: self.compat.provider_type().to_string(),
                 input_tokens: turn_usage.input_tokens,
                 output_tokens: turn_usage.output_tokens,
@@ -4441,7 +4531,7 @@ impl AgentEngine {
                 // Fix(pricing-audit-2026-05-24): catalog-first cost resolution.
                 cost_usd: resolve_turn_cost_usd(
                     self.compat.provider_type(),
-                    &self.model,
+                    &effective_model,
                     turn_usage.input_tokens,
                     turn_usage.output_tokens,
                     turn_usage.cache_read_tokens,
@@ -6382,6 +6472,104 @@ fn truncate_for_trace(s: &str, max: usize) -> String {
     let mut out = s[..end].to_string();
     out.push_str("…[truncated]");
     out
+}
+
+// ---------------------------------------------------------------------------
+// Finding #174 — smart-routing tier model swap (select_tier_model)
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tier_routing_tests {
+    use super::{message_requires_vision, select_tier_model};
+    use wcore_config::compat::{ProviderCompat, TierModels};
+    use wcore_providers::{RequestShape, RoutingHeuristics, route};
+
+    /// A shape that classifies to Cheap (simple turn): small context, no tools,
+    /// no code, no vision.
+    fn cheap_shape() -> RequestShape {
+        RequestShape {
+            input_tokens: 100,
+            max_output_tokens: 1024,
+            code_ratio: 0.0,
+            tool_call_count: 0,
+            requires_vision: false,
+        }
+    }
+
+    fn compat_with_cheap_model() -> ProviderCompat {
+        ProviderCompat {
+            tier_models: Some(TierModels {
+                cheap: Some("cheap-model".into()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        }
+    }
+
+    /// Cheap hint + configured tier_models + no vision → swaps to cheap model.
+    ///
+    /// Fails without the fix because nothing reads the routing hint: the engine
+    /// would dispatch (and bill) the premium `self.model` on every cheap turn.
+    #[test]
+    fn cheap_hint_with_config_swaps_model() {
+        let decision = route(&cheap_shape(), &RoutingHeuristics::default());
+        let swapped = select_tier_model(&decision, false, &compat_with_cheap_model());
+        assert_eq!(swapped.as_deref(), Some("cheap-model"));
+    }
+
+    /// Cheap hint but tier_models unconfigured (default) → no swap (opt-in).
+    ///
+    /// Fails if the feature were on-by-default: proves the presence of the map
+    /// is the enable switch and default behaviour is unchanged.
+    #[test]
+    fn cheap_hint_without_config_keeps_model() {
+        let decision = route(&cheap_shape(), &RoutingHeuristics::default());
+        let swapped = select_tier_model(&decision, false, &ProviderCompat::default());
+        assert_eq!(swapped, None);
+    }
+
+    /// Cheap hint + vision content → no swap (vision guard).
+    ///
+    /// Fails without the guard because the cheap tier may not be
+    /// vision-capable; a naive swap would drop image content to a text-only
+    /// model. (`message_requires_vision` is the live signal; here we assert the
+    /// guard directly.)
+    #[test]
+    fn cheap_hint_with_vision_keeps_model() {
+        let decision = route(&cheap_shape(), &RoutingHeuristics::default());
+        // requires_vision = true even though the tier classified Cheap.
+        let swapped = select_tier_model(&decision, true, &compat_with_cheap_model());
+        assert_eq!(swapped, None);
+    }
+
+    /// Premium hint → no swap, even with a premium model configured.
+    ///
+    /// Fails without the tier check because a premium turn (vision /
+    /// large-context / tool-heavy) must keep the strongest model.
+    #[test]
+    fn premium_hint_keeps_model() {
+        let mut shape = cheap_shape();
+        // Large context routes to Premium.
+        shape.input_tokens = RoutingHeuristics::default().large_context_tokens + 1;
+        let decision = route(&shape, &RoutingHeuristics::default());
+        let compat = ProviderCompat {
+            tier_models: Some(TierModels {
+                cheap: Some("cheap-model".into()),
+                premium: Some("premium-model".into()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        assert_eq!(select_tier_model(&decision, false, &compat), None);
+    }
+
+    /// The vision signal helper returns false today (no image ContentBlock in
+    /// the type system) — documents the current chokepoint behaviour so a
+    /// future image variant has a failing test to update.
+    #[test]
+    fn vision_helper_is_false_without_image_blocks() {
+        assert!(!message_requires_vision(&[]));
+    }
 }
 
 // ---------------------------------------------------------------------------
