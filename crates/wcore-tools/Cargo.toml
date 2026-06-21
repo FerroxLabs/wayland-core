@@ -41,6 +41,9 @@ flate2.workspace = true
 # SA Wave: BashTool credential-exfiltration denylist (compile-once regex set)
 regex.workspace       = true
 
+# Task 6: workspace directory walk for secret enumeration in Contained mode.
+ignore = "0.4"
+
 # W8a A.3: ToolContext cancellation + SandboxedFs/InMemoryFs interior state
 parking_lot.workspace = true
 tokio-util.workspace  = true

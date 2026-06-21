@@ -48,6 +48,46 @@ const CACHE_ENV_DIRS: &[(&str, &str)] = &[
     ("PIP_CACHE_DIR", "pip"),
 ];
 
+/// User credential stores, $HOME-relative. NOTE the `.config/*` entries —
+/// gcloud/gh/op live under ~/.config, NOT ~/.<name> (the v1 path bug).
+/// Cross-checked against the existing SECRET_SUFFIXES/SEGMENTS so OS-deny
+/// coverage is a superset of what the VFS `SecretDenyFs` already denies.
+const CREDENTIAL_STORES: &[&str] = &[
+    ".ssh",
+    ".gnupg",
+    ".aws",
+    ".azure",
+    ".kube",
+    ".docker",
+    ".npmrc",
+    ".netrc",
+    ".pgpass",
+    ".pypirc",
+    ".git-credentials",
+    ".m2/settings.xml",
+    ".gradle/gradle.properties",
+    ".cargo/credentials.toml",
+    ".terraform.d",
+    ".bash_history",
+    ".zsh_history",
+    ".config/gcloud",
+    ".config/gh",
+    ".config/glab-cli",
+    ".config/op",
+    ".config/doctl",
+];
+
+/// Always-mounted system credential paths the backends grant unconditionally
+/// (bwrap `--ro-bind /etc`; macOS allows `/Library`,`/System`). Emitted
+/// regardless of `readable_roots()` because they ARE mounted. Kept short and
+/// high-value — broad system reads remain a DAC + network-Deny residual.
+#[cfg(target_os = "macos")]
+const SYSTEM_CREDENTIAL_STORES: &[&str] = &["/Library/Keychains"];
+#[cfg(target_os = "linux")]
+const SYSTEM_CREDENTIAL_STORES: &[&str] = &["/etc/docker", "/etc/kubernetes"];
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+const SYSTEM_CREDENTIAL_STORES: &[&str] = &[];
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WorkspaceTrust {
     Trusted,
@@ -62,6 +102,10 @@ pub struct WorkspacePolicy {
     readable_extra: Vec<PathBuf>,
     network: NetworkPolicy,
     cache_env: Vec<(String, String)>,
+    /// Cached at construction time (once per session). Absolute, canonicalized
+    /// paths that the OS-sandbox backend must deny for reads. See
+    /// `secret_deny_paths()` / `compute_secret_deny()`.
+    secret_deny: Vec<PathBuf>,
 }
 
 impl WorkspacePolicy {
@@ -77,7 +121,18 @@ impl WorkspacePolicy {
                 writable_extra.push(home.join(sub));
             }
         }
-        let readable_extra = dirs::home_dir().into_iter().collect();
+        let readable_extra: Vec<PathBuf> = dirs::home_dir().into_iter().collect();
+
+        // Compute readable_canon from the same locals readable_roots() uses.
+        let mut readable_canon: Vec<PathBuf> = std::iter::once(root.clone())
+            .chain(writable_extra.iter().cloned())
+            .chain(readable_extra.iter().cloned())
+            .map(|p| std::fs::canonicalize(&p).unwrap_or(p))
+            .collect();
+        readable_canon.sort();
+        readable_canon.dedup();
+        let secret_deny = compute_secret_deny(WorkspaceTrust::Trusted, &root, &readable_canon);
+
         Self {
             root,
             trust: WorkspaceTrust::Trusted,
@@ -85,6 +140,7 @@ impl WorkspacePolicy {
             readable_extra,
             network: crate::bash::default_bash_network_policy(),
             cache_env: Vec::new(),
+            secret_deny,
         }
     }
 
@@ -104,13 +160,27 @@ impl WorkspacePolicy {
             })
             .collect();
         let readable_extra = minimal_toolchain_read_dirs();
+        // Hoist writable_extra so we can borrow it for readable_canon.
+        let writable_extra = scratch_dirs();
+
+        // Compute readable_canon from the same locals readable_roots() uses.
+        let mut readable_canon: Vec<PathBuf> = std::iter::once(root.clone())
+            .chain(writable_extra.iter().cloned())
+            .chain(readable_extra.iter().cloned())
+            .map(|p| std::fs::canonicalize(&p).unwrap_or(p))
+            .collect();
+        readable_canon.sort();
+        readable_canon.dedup();
+        let secret_deny = compute_secret_deny(WorkspaceTrust::Contained, &root, &readable_canon);
+
         Self {
             root,
             trust: WorkspaceTrust::Contained,
-            writable_extra: scratch_dirs(),
+            writable_extra,
             readable_extra,
             network: crate::bash::default_bash_network_policy(),
             cache_env,
+            secret_deny,
         }
     }
 
@@ -138,51 +208,146 @@ impl WorkspacePolicy {
         &self.cache_env
     }
 
+    /// Absolute, canonicalized paths that the OS-sandbox backend must deny
+    /// for reads. Computed once at construction (cached). Empty when no deny
+    /// applies (no `$HOME`, no workspace root, etc.) — empty = today's
+    /// behavior for callers that don't set `manifest.fs_read_deny`.
+    pub fn secret_deny_paths(&self) -> &[PathBuf] {
+        &self.secret_deny
+    }
+
     /// True if `path` is a secret that must stay denied even inside a
     /// writable root. Lexical; the VFS adapter calls this with the
     /// already-canonicalized path (see `SecretDenyFs`), so symlinks that
     /// resolve to a secret inside the root are caught.
     pub fn is_secret_path(&self, path: &Path) -> bool {
-        let s = path.to_string_lossy().replace('\\', "/");
+        is_secret_path_static(path)
+    }
+}
 
-        if let Some(ext) = path.extension().and_then(|e| e.to_str())
-            && SECRET_EXTENSIONS.contains(&ext.to_ascii_lowercase().as_str())
+/// Free-function body of `is_secret_path` (uses no `self` fields). Extracted
+/// so `compute_secret_deny` can call it without a `WorkspacePolicy` instance.
+fn is_secret_path_static(path: &Path) -> bool {
+    let s = path.to_string_lossy().replace('\\', "/");
+
+    if let Some(ext) = path.extension().and_then(|e| e.to_str())
+        && SECRET_EXTENSIONS.contains(&ext.to_ascii_lowercase().as_str())
+    {
+        return true;
+    }
+    if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+        if SECRET_BASENAMES.contains(&name) {
+            return true;
+        }
+        // service-account*.json, bare key.json, and separator-bounded *-key.json / *_key.json.
+        // Does NOT match monkey.json, turnkey.json, hotkey.json (no false positives).
+        if name.ends_with(".json")
+            && (name.starts_with("service-account")
+                || name == "key.json"
+                || name.ends_with("-key.json")
+                || name.ends_with("_key.json"))
         {
             return true;
         }
-        if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
-            if SECRET_BASENAMES.contains(&name) {
-                return true;
-            }
-            // service-account*.json, bare key.json, and separator-bounded *-key.json / *_key.json.
-            // Does NOT match monkey.json, turnkey.json, hotkey.json (no false positives).
-            if name.ends_with(".json")
-                && (name.starts_with("service-account")
-                    || name == "key.json"
-                    || name.ends_with("-key.json")
-                    || name.ends_with("_key.json"))
-            {
-                return true;
-            }
-            // terraform.tfstate and terraform.tfstate.backup (compound extension)
-            if name.contains(".tfstate") {
-                return true;
-            }
-        }
-        if SECRET_DIR_SEGMENTS.iter().any(|seg| s.contains(seg)) {
+        // terraform.tfstate and terraform.tfstate.backup (compound extension)
+        if name.contains(".tfstate") {
             return true;
         }
-        SECRET_SUFFIXES.iter().any(|frag| {
-            if frag.ends_with('/') {
-                s.contains(frag)
-            } else if let Some(idx) = s.rfind(frag) {
-                let after = &s[idx + frag.len()..];
-                after.is_empty() || after.starts_with('.') || after.starts_with('/')
-            } else {
-                false
-            }
-        })
     }
+    if SECRET_DIR_SEGMENTS.iter().any(|seg| s.contains(seg)) {
+        return true;
+    }
+    SECRET_SUFFIXES.iter().any(|frag| {
+        if frag.ends_with('/') {
+            s.contains(frag)
+        } else if let Some(idx) = s.rfind(frag) {
+            let after = &s[idx + frag.len()..];
+            after.is_empty() || after.starts_with('.') || after.starts_with('/')
+        } else {
+            false
+        }
+    })
+}
+
+/// Compute the set of paths that must be denied for reading in the OS sandbox.
+///
+/// `readable_canon` must be already-canonicalized readable roots (from the
+/// same locals that `readable_roots()` uses). BOTH sides of the under-mounted
+/// check are canonicalized to avoid macOS `/var` → `/private/var` mismatches
+/// (a fail-open bug if skipped).
+///
+/// Emits a path when it is under a readable/mounted root OR an always-on
+/// system mount. Sorted + deduped.
+fn compute_secret_deny(
+    trust: WorkspaceTrust,
+    root: &Path,
+    readable_canon: &[PathBuf],
+) -> Vec<PathBuf> {
+    // Always-on system credential mounts (unconditionally granted by backends).
+    let system_roots: Vec<PathBuf> = SYSTEM_CREDENTIAL_STORES.iter().map(PathBuf::from).collect();
+
+    // A path is mountable if it is under a readable root OR an always-on
+    // system mount. BOTH sides must already be canonicalized for this to be
+    // correct on macOS (where /var -> /private/var).
+    let under_mounted = |p: &Path| {
+        readable_canon.iter().any(|r| p.starts_with(r))
+            || system_roots.iter().any(|r| p.starts_with(r))
+    };
+
+    let mut out: Vec<PathBuf> = Vec::new();
+
+    // User credential stores (both Trusted and Contained modes).
+    if let Some(home) = dirs::home_dir() {
+        for rel in CREDENTIAL_STORES {
+            // Canonicalize the candidate path so both sides match.
+            if let Ok(c) = std::fs::canonicalize(home.join(rel))
+                && under_mounted(&c)
+            {
+                out.push(c);
+            }
+        }
+    }
+
+    // Always-mounted system credential stores (both modes). Emit if they
+    // exist on disk; canonicalize so the path is exact.
+    for s in &system_roots {
+        if let Ok(c) = std::fs::canonicalize(s) {
+            out.push(c);
+        }
+    }
+
+    // Contained mode also denies the workspace's own committed secrets.
+    if trust == WorkspaceTrust::Contained {
+        let walker = ignore::WalkBuilder::new(root)
+            .standard_filters(false) // a .gitignore'd .env must still be denied
+            .hidden(false)
+            .follow_links(false)
+            .build();
+        for entry in walker.flatten() {
+            let path = entry.path();
+            let Ok(canon) = std::fs::canonicalize(path) else {
+                continue;
+            };
+            // Direct secret files.
+            if entry.file_type().is_some_and(|t| t.is_file())
+                && is_secret_path_static(path)
+                && under_mounted(&canon)
+            {
+                out.push(canon.clone());
+            }
+            // Symlink whose RESOLVED target is a secret → deny the link's
+            // own (canonicalized) path so the read-through is masked.
+            // External-target residual (target not under a mounted root) is
+            // documented in the plan — backstopped by network-Deny.
+            if entry.path_is_symlink() && is_secret_path_static(&canon) && under_mounted(&canon) {
+                out.push(canon);
+            }
+        }
+    }
+
+    out.sort();
+    out.dedup();
+    out
 }
 
 fn canon(p: PathBuf) -> PathBuf {
@@ -334,5 +499,86 @@ mod tests {
                 "{secret} must be secret"
             );
         }
+    }
+
+    // ── Task 6 tests ──────────────────────────────────────────────────────────
+
+    /// Contained mode: a project `.env` under the workspace root is in the
+    /// deny list; `src/main.rs` is NOT.
+    #[test]
+    fn contained_includes_project_env_excludes_main_rs() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        // Create the file so canonicalize succeeds.
+        std::fs::write(root.join(".env"), b"SECRET=x").unwrap();
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::write(root.join("src/main.rs"), b"fn main() {}").unwrap();
+
+        let p = WorkspacePolicy::contained(root);
+        let deny = p.secret_deny_paths();
+
+        let env_canon = std::fs::canonicalize(root.join(".env")).unwrap();
+        assert!(
+            deny.contains(&env_canon),
+            ".env must be in deny list; deny={deny:?}"
+        );
+
+        let main_canon = std::fs::canonicalize(root.join("src/main.rs")).unwrap();
+        assert!(
+            !deny.contains(&main_canon),
+            "src/main.rs must NOT be in deny list"
+        );
+    }
+
+    /// Trusted mode: the project `.env` under the workspace root is NOT in
+    /// the deny list (Trusted only denies credential stores, not project files).
+    #[test]
+    fn trusted_excludes_project_env() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::write(root.join(".env"), b"SECRET=x").unwrap();
+
+        let p = WorkspacePolicy::trusted_local(root);
+        let deny = p.secret_deny_paths();
+
+        let env_canon = std::fs::canonicalize(root.join(".env")).unwrap();
+        assert!(
+            !deny.contains(&env_canon),
+            "Trusted must NOT deny project .env; deny={deny:?}"
+        );
+    }
+
+    /// Every emitted path is absolute.
+    #[test]
+    fn every_deny_path_is_absolute() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = WorkspacePolicy::contained(dir.path());
+        for path in p.secret_deny_paths() {
+            assert!(path.is_absolute(), "deny path must be absolute: {path:?}");
+        }
+    }
+
+    /// Symlink `notes.txt -> .env` (both inside the workspace) causes
+    /// `notes.txt`'s canonicalized path (= `.env`) to be denied in Contained
+    /// mode. Because `fs::canonicalize` resolves the symlink, the canonical
+    /// path equals `.env`'s canonical path and both end up in the deny list
+    /// (deduped to one entry).
+    #[cfg(unix)]
+    #[test]
+    fn contained_symlink_to_env_is_denied() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::write(root.join(".env"), b"SECRET=x").unwrap();
+        std::os::unix::fs::symlink(".env", root.join("notes.txt")).unwrap();
+
+        let p = WorkspacePolicy::contained(root);
+        let deny = p.secret_deny_paths();
+
+        // canonicalize(notes.txt) resolves to canonicalize(.env)
+        let env_canon = std::fs::canonicalize(root.join(".env")).unwrap();
+        assert!(
+            deny.contains(&env_canon),
+            "symlink target (.env canonical) must be in deny list; deny={deny:?}"
+        );
     }
 }
