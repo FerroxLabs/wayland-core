@@ -6573,6 +6573,287 @@ mod tier_routing_tests {
 }
 
 // ---------------------------------------------------------------------------
+// Finding #174 — end-to-end: the tier swap reaches the DISPATCHED request and
+// cost attribution follows.
+//
+// The `tier_routing_tests` above exercise `select_tier_model` in isolation.
+// They prove the GUARD logic, but nothing drives the real turn loop — so they
+// cannot catch a regression that leaves the swap inert at the dispatch seam
+// (e.g. someone deletes the `request.model = tier_model` assignment, or bills
+// `self.model` instead of `effective_model`). These tests close that gap: a
+// capturing provider records the `request.model` it is actually handed, and a
+// capturing sink records the emitted `TurnTrace.model` and the per-turn
+// `TurnCost.model` carried in the session-cost payload.
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tier_routing_e2e_tests {
+    use std::sync::{Arc, Mutex};
+
+    use async_trait::async_trait;
+    use serde_json::Value;
+    use wcore_config::compat::{ProviderCompat, TierModels};
+    use wcore_config::config::{Config, ProviderType};
+    use wcore_providers::{LlmProvider, ProviderError};
+    use wcore_tools::registry::ToolRegistry;
+    use wcore_types::llm::{LlmEvent, LlmRequest};
+    use wcore_types::message::{FinishReason, StopReason, TokenUsage};
+
+    use crate::output::OutputSink;
+
+    /// A provider that records the `model` field of every `LlmRequest` it is
+    /// dispatched, then replays a single clean text turn. This is the only way
+    /// to observe what the engine ACTUALLY put on the wire — the stock
+    /// `test_utils::ScriptedProvider` ignores the request entirely.
+    struct CapturingProvider {
+        dispatched_models: Arc<Mutex<Vec<String>>>,
+    }
+
+    impl CapturingProvider {
+        fn new() -> (Self, Arc<Mutex<Vec<String>>>) {
+            let dispatched_models = Arc::new(Mutex::new(Vec::new()));
+            (
+                Self {
+                    dispatched_models: Arc::clone(&dispatched_models),
+                },
+                dispatched_models,
+            )
+        }
+    }
+
+    #[async_trait]
+    impl LlmProvider for CapturingProvider {
+        async fn stream(
+            &self,
+            request: &LlmRequest,
+        ) -> Result<tokio::sync::mpsc::Receiver<LlmEvent>, ProviderError> {
+            // Record the dispatched model BEFORE replaying the turn — this is
+            // the load-bearing observation: it is `request.model` after the
+            // engine's tier-swap seam has (or has not) run.
+            self.dispatched_models
+                .lock()
+                .expect("CapturingProvider mutex")
+                .push(request.model.clone());
+            let (tx, rx) = tokio::sync::mpsc::channel(2);
+            tokio::spawn(async move {
+                let _ = tx.send(LlmEvent::TextDelta("done".into())).await;
+                let _ = tx
+                    .send(LlmEvent::Done {
+                        stop_reason: StopReason::EndTurn,
+                        finish_reason: FinishReason::Stop,
+                        usage: TokenUsage::default(),
+                    })
+                    .await;
+            });
+            Ok(rx)
+        }
+    }
+
+    /// A sink that captures the two cost-attribution signals the engine emits:
+    /// every `TurnTrace` JSON (via `emit_trace`) and the aggregate session-cost
+    /// payload (via `emit_session_cost`, whose `per_turn` array carries each
+    /// `TurnCost`). The default `OutputSink` impls for both are no-ops, so a
+    /// dedicated sink is required to observe them. All other methods are no-ops.
+    #[derive(Default)]
+    struct CostCapturingSink {
+        traces: Arc<Mutex<Vec<Value>>>,
+        session_costs: Arc<Mutex<Vec<Value>>>,
+    }
+
+    impl OutputSink for CostCapturingSink {
+        fn emit_text_delta(&self, _: &str, _: &str) {}
+        fn emit_thinking(&self, _: &str, _: &str) {}
+        fn emit_tool_call(&self, _: &str, _: &str) {}
+        fn emit_tool_result(&self, _: &str, _: bool, _: &str) {}
+        fn emit_stream_start(&self, _: &str) {}
+        fn emit_stream_end(
+            &self,
+            _: &str,
+            _: usize,
+            _: u64,
+            _: u64,
+            _: u64,
+            _: u64,
+            _: FinishReason,
+        ) {
+        }
+        fn emit_error(&self, _: &str, _: bool) {}
+        fn emit_info(&self, _: &str) {}
+        fn emit_trace(&self, _: &str, trace_json: &Value) {
+            self.traces
+                .lock()
+                .expect("trace mutex")
+                .push(trace_json.clone());
+        }
+        fn emit_session_cost(&self, _: &str, cost_payload: &Value) {
+            self.session_costs
+                .lock()
+                .expect("session-cost mutex")
+                .push(cost_payload.clone());
+        }
+    }
+
+    /// Build an anthropic-flavoured Config with `cheap` wired to `cheap-model`.
+    fn config_with_cheap_tier() -> Config {
+        Config {
+            provider_label: "anthropic".into(),
+            provider: ProviderType::Anthropic,
+            api_key: "sk-test".into(),
+            base_url: "http://localhost:0".into(),
+            model: "premium-model".into(),
+            max_tokens: 1024,
+            max_turns: Some(1),
+            compat: ProviderCompat {
+                tier_models: Some(TierModels {
+                    cheap: Some("cheap-model".into()),
+                    ..Default::default()
+                }),
+                ..ProviderCompat::anthropic_defaults()
+            },
+            ..Default::default()
+        }
+    }
+
+    /// The same Config with NO tier_models configured — the default, opt-out
+    /// state where the engine must dispatch + bill the configured model.
+    fn config_without_tier() -> Config {
+        Config {
+            provider_label: "anthropic".into(),
+            provider: ProviderType::Anthropic,
+            api_key: "sk-test".into(),
+            base_url: "http://localhost:0".into(),
+            model: "premium-model".into(),
+            max_tokens: 1024,
+            max_turns: Some(1),
+            compat: ProviderCompat::anthropic_defaults(),
+            ..Default::default()
+        }
+    }
+
+    /// Drive one synthetic turn and return (dispatched models, trace JSONs,
+    /// session-cost JSONs).
+    async fn drive_turn(
+        config: Config,
+    ) -> (Vec<String>, Vec<Value>, Vec<Value>) {
+        let (provider, dispatched) = CapturingProvider::new();
+        let sink = Arc::new(CostCapturingSink::default());
+        let traces = Arc::clone(&sink.traces);
+        let session_costs = Arc::clone(&sink.session_costs);
+
+        let mut engine = super::AgentEngine::new_with_provider(
+            Arc::new(provider),
+            config,
+            ToolRegistry::new(),
+            sink,
+        );
+
+        // A short, tool-free prompt classifies to the Cheap tier (input far
+        // below the 8000-token large-context threshold, zero tool calls).
+        engine
+            .run("hi", "m-routing-e2e")
+            .await
+            .expect("synthetic turn should succeed");
+
+        let dispatched = dispatched.lock().expect("dispatched mutex").clone();
+        let traces = traces.lock().expect("trace mutex").clone();
+        let session_costs = session_costs.lock().expect("session-cost mutex").clone();
+        (dispatched, traces, session_costs)
+    }
+
+    /// POSITIVE: a Cheap-classified turn with `tier_models.cheap` configured
+    /// must (a) dispatch `cheap-model` on the wire, AND (b) attribute the
+    /// emitted TurnTrace.model and TurnCost.model to `cheap-model`.
+    ///
+    /// Fails if the swap is inert: without `request.model = tier_model` at the
+    /// dispatch seam the provider would record `premium-model`. Fails if cost
+    /// attribution regressed (billing `self.model` instead of
+    /// `effective_model`): TurnTrace.model / TurnCost.model would read
+    /// `premium-model` even though `cheap-model` was dispatched.
+    #[tokio::test]
+    async fn cheap_turn_swaps_dispatched_model_and_cost() {
+        let (dispatched, traces, session_costs) = drive_turn(config_with_cheap_tier()).await;
+
+        assert_eq!(
+            dispatched,
+            vec!["cheap-model".to_string()],
+            "the swap must reach the wire: provider should have been handed cheap-model"
+        );
+
+        // TurnTrace.model — the per-turn observability record.
+        let trace_models: Vec<String> = traces
+            .iter()
+            .filter_map(|t| t.get("model").and_then(Value::as_str).map(str::to_string))
+            .collect();
+        assert!(
+            trace_models.iter().any(|m| m == "cheap-model"),
+            "TurnTrace.model must follow the swap, got {trace_models:?}"
+        );
+        assert!(
+            !trace_models.iter().any(|m| m == "premium-model"),
+            "no TurnTrace may be billed to premium-model on a swapped turn, got {trace_models:?}"
+        );
+
+        // TurnCost.model — carried in the session-cost payload's per_turn array.
+        let cost_models: Vec<String> = session_costs
+            .iter()
+            .filter_map(|c| c.get("per_turn").and_then(Value::as_array))
+            .flatten()
+            .filter_map(|t| t.get("model").and_then(Value::as_str).map(str::to_string))
+            .collect();
+        assert!(
+            !cost_models.is_empty(),
+            "a session-cost payload with at least one per-turn cost must be emitted"
+        );
+        assert!(
+            cost_models.iter().all(|m| m == "cheap-model"),
+            "every TurnCost.model must be cheap-model so billing follows the swap, got {cost_models:?}"
+        );
+    }
+
+    /// NEGATIVE: with NO tier_models configured (the default), the same
+    /// Cheap-classified turn must dispatch + bill the engine's configured
+    /// `premium-model` — proving default behaviour is unchanged end-to-end and
+    /// the swap is genuinely opt-in.
+    ///
+    /// Fails if the feature were on-by-default (provider would record a swapped
+    /// model with no configuration present).
+    #[tokio::test]
+    async fn default_turn_keeps_dispatched_model_and_cost() {
+        let (dispatched, traces, session_costs) = drive_turn(config_without_tier()).await;
+
+        assert_eq!(
+            dispatched,
+            vec!["premium-model".to_string()],
+            "with no tier_models the configured model must be dispatched unchanged"
+        );
+
+        let trace_models: Vec<String> = traces
+            .iter()
+            .filter_map(|t| t.get("model").and_then(Value::as_str).map(str::to_string))
+            .collect();
+        assert!(
+            trace_models.iter().all(|m| m == "premium-model"),
+            "TurnTrace.model must stay premium-model with no tier configured, got {trace_models:?}"
+        );
+
+        let cost_models: Vec<String> = session_costs
+            .iter()
+            .filter_map(|c| c.get("per_turn").and_then(Value::as_array))
+            .flatten()
+            .filter_map(|t| t.get("model").and_then(Value::as_str).map(str::to_string))
+            .collect();
+        assert!(
+            !cost_models.is_empty(),
+            "a session-cost payload with at least one per-turn cost must be emitted"
+        );
+        assert!(
+            cost_models.iter().all(|m| m == "premium-model"),
+            "every TurnCost.model must stay premium-model with no tier configured, got {cost_models:?}"
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
 // set_config tests — apply_config_update()
 // ---------------------------------------------------------------------------
 
