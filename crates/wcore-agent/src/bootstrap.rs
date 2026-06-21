@@ -1942,10 +1942,17 @@ impl AgentBootstrap {
         // tools survive every posture, so post-construction MCP wiring is
         // unaffected.
         if let Some(scope) = self.channel_tool_posture.as_ref() {
-            crate::channel_tools::apply_posture(&mut registry, scope);
+            // Task 8 — bootstrap UX gate. Probe whether the platform's
+            // sandbox backend enforces secret-read-deny; if not, suppress
+            // Bash from the Workspace schema so the LLM isn't offered a
+            // tool that would always refuse at exec time. The exec-time
+            // gate in bash.rs remains the authoritative boundary.
+            let enforces = wcore_tools::bash::platform_enforces_read_deny();
+            crate::channel_tools::apply_posture(&mut registry, scope, enforces);
             tracing::info!(
                 target: "wcore_agent::bootstrap",
                 posture = ?scope.posture,
+                sandbox_enforces_read_deny = enforces,
                 "channel engine tool posture applied"
             );
         }

@@ -94,6 +94,17 @@ fn build_sandbox_pieces(
     (manifest, SandboxCommand { argv, cwd })
 }
 
+/// Whether the platform's default sandbox backend enforces secret-read-deny
+/// at the OS layer (`SandboxBackend::enforces_read_deny()`).
+///
+/// Used by `wcore-agent` bootstrap to gate the Workspace-posture `Bash` UX
+/// drop without requiring `wcore-agent` to take a direct dep on
+/// `wcore-sandbox`. This is the identical probe `default_for_platform()`
+/// uses at exec time — calling it at bootstrap is a UX-only signal.
+pub fn platform_enforces_read_deny() -> bool {
+    default_for_platform().enforces_read_deny()
+}
+
 /// Network policy for agent-initiated Bash. Defaults to
 /// [`NetworkPolicy::Deny`]; `WAYLAND_BASH_ALLOW_NETWORK=1` opts back into
 /// full host network (`Inherit`) for network-dependent workflows.
@@ -648,6 +659,22 @@ impl Tool for BashTool {
             .min(MAX_TIMEOUT_MS);
         let timeout = Duration::from_millis(timeout_ms);
         let backend = default_for_platform();
+        // Task 8 — exec-time capability gate (TOCTOU-free boundary). The same
+        // `default_for_platform()` that would run the command decides whether it
+        // may run. A bootstrap-only probe would be bypassable because
+        // default_for_platform() re-resolves on each call.
+        if let Some(p) = ctx.workspace.as_deref()
+            && p.trust() == crate::workspace_policy::WorkspaceTrust::Contained
+            && !backend.enforces_read_deny()
+        {
+            return ToolResult {
+                content: "Refused: shell is unavailable in the contained workspace \
+                          because the active sandbox backend cannot enforce \
+                          secret-read-deny."
+                    .to_string(),
+                is_error: true,
+            };
+        }
         let (manifest, cmd) = build_sandbox_pieces(command, ctx.workspace.as_deref());
         let net = manifest.network.clone();
         tokio::select! {
@@ -698,7 +725,22 @@ impl Tool for BashTool {
             .min(MAX_TIMEOUT_MS);
         let timeout = Duration::from_millis(timeout_ms);
 
-        let backend: Arc<dyn SandboxBackend> = Arc::from(default_for_platform());
+        // Task 8 — exec-time capability gate (streaming path, same logic as
+        // execute_with_ctx). Must check BEFORE wrapping in Arc.
+        let backend_probe = default_for_platform();
+        if let Some(p) = ctx.workspace.as_deref()
+            && p.trust() == crate::workspace_policy::WorkspaceTrust::Contained
+            && !backend_probe.enforces_read_deny()
+        {
+            return ToolResult {
+                content: "Refused: shell is unavailable in the contained workspace \
+                          because the active sandbox backend cannot enforce \
+                          secret-read-deny."
+                    .to_string(),
+                is_error: true,
+            };
+        }
+        let backend: Arc<dyn SandboxBackend> = Arc::from(backend_probe);
         let (manifest, cmd) = build_sandbox_pieces(command, ctx.workspace.as_deref());
         let net = manifest.network.clone();
 

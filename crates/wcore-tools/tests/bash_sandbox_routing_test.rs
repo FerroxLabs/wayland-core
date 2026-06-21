@@ -329,3 +329,90 @@ async fn denylist_still_refuses_before_sandbox_dispatch() {
     );
     assert!(streamed.content.contains("denylist"));
 }
+
+// ── Task 8 — exec-time capability gate ────────────────────────────────────────
+//
+// With `WAYLAND_SANDBOX=none` + `WAYLAND_ALLOW_NO_SANDBOX=1`, the active
+// backend is `NoSandboxBackend`, which returns `enforces_read_deny()=false`.
+// A ctx carrying a `Contained` workspace policy must therefore be refused
+// at exec time — the TOCTOU-free boundary in bash.rs.
+
+/// Task 8: `execute_with_ctx` must refuse with a Contained policy when the
+/// active backend doesn't enforce secret-read-deny.
+#[tokio::test]
+#[serial]
+async fn exec_time_gate_contained_policy_no_enforcing_backend_refuses() {
+    // NoSandboxBackend: enforces_read_deny() = false.
+    force_no_sandbox();
+    let dir = tempfile::tempdir().unwrap();
+    let policy = std::sync::Arc::new(wcore_tools::workspace_policy::WorkspacePolicy::contained(
+        dir.path(),
+    ));
+    let ctx = ToolContext::test_default().with_workspace(policy);
+    let tool = BashTool;
+    let result = tool
+        .execute_with_ctx(json!({"command": "echo hello"}), &ctx)
+        .await;
+    assert!(
+        result.is_error,
+        "Contained + non-enforcing backend must refuse; got: {}",
+        result.content
+    );
+    assert!(
+        result.content.contains("secret-read-deny"),
+        "refusal message must mention secret-read-deny: {}",
+        result.content
+    );
+}
+
+/// Task 8: `execute_streaming_with_ctx` must also refuse with a Contained
+/// policy when the active backend doesn't enforce secret-read-deny.
+#[tokio::test]
+#[serial]
+async fn exec_time_gate_streaming_contained_policy_no_enforcing_backend_refuses() {
+    force_no_sandbox();
+    let dir = tempfile::tempdir().unwrap();
+    let policy = std::sync::Arc::new(wcore_tools::workspace_policy::WorkspacePolicy::contained(
+        dir.path(),
+    ));
+    let ctx = ToolContext::test_default().with_workspace(policy);
+    let tool = BashTool;
+    let sink = CapSink::new();
+    let result = tool
+        .execute_streaming_with_ctx(json!({"command": "echo hello"}), &ctx, &sink)
+        .await;
+    assert!(
+        result.is_error,
+        "Contained + non-enforcing backend must refuse on streaming path; got: {}",
+        result.content
+    );
+    assert!(
+        result.content.contains("secret-read-deny"),
+        "refusal message must mention secret-read-deny: {}",
+        result.content
+    );
+}
+
+/// Task 8: `execute_with_ctx` with a Trusted policy and non-enforcing backend
+/// must NOT refuse — the gate only applies to Contained mode.
+#[tokio::test]
+#[serial]
+async fn exec_time_gate_trusted_policy_passes_through() {
+    force_no_sandbox();
+    let dir = tempfile::tempdir().unwrap();
+    let policy = std::sync::Arc::new(
+        wcore_tools::workspace_policy::WorkspacePolicy::trusted_local(dir.path()),
+    );
+    let ctx = ToolContext::test_default().with_workspace(policy);
+    let tool = BashTool;
+    // echo is safe and not on the denylist — must reach the shell.
+    let result = tool
+        .execute_with_ctx(json!({"command": "echo trusted_ok"}), &ctx)
+        .await;
+    // The result content should NOT be the exec-time refusal.
+    assert!(
+        !result.content.contains("secret-read-deny"),
+        "Trusted policy must NOT trigger the exec-time gate: {}",
+        result.content
+    );
+}

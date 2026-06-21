@@ -13,7 +13,12 @@
 //! - **Workspace**: as Conversational, but add the vfs-jailable filesystem
 //!   tools ([`WORKSPACE_FS_TOOLS`]) back and pin a [`SandboxedFs`] jail on
 //!   the registry so they cannot escape the configured workspace root.
-//!   Shell/exec tools stay dropped — they bypass the jail.
+//!   `Bash` is additionally gated on the active sandbox backend enforcing
+//!   secret-read-deny (`read_deny_enforced` param to `apply_posture` /
+//!   `keep_under`) — without that OS-layer guarantee, `cat .env` would
+//!   bypass `SecretDenyFs`. The exec-time gate in `bash.rs` is the
+//!   authoritative boundary; this UX drop prevents advertising a tool that
+//!   would always refuse.
 //! - **Full**: no filtering, no jail — identical to a local CLI session.
 //!
 //! Enforcement is at the [`ToolRegistry`] (not just the LLM schema): a
@@ -70,10 +75,16 @@ const CONVERSATIONAL_SAFE: &[&str] = &[
 /// default `path="."` (or a symlink inside the workspace) would escape it.
 /// Until their subprocess cwd is pinned to the jail root and symlink
 /// following is disabled, they stay unavailable in `Workspace` (and `Full`
-/// remains the escape hatch for unconfined search). Likewise Bash, Git,
-/// RepoMap, pdf_extract, kubectl, gcloud, aws_cli, sql_query, Script touch
-/// the host fs/shell outside `ctx.vfs` and stay unavailable.
-const WORKSPACE_FS_TOOLS: &[&str] = &["Read", "Write", "Edit"];
+/// remains the escape hatch for unconfined search). Likewise Git, RepoMap,
+/// pdf_extract, kubectl, gcloud, aws_cli, sql_query, Script touch the host
+/// fs/shell outside `ctx.vfs` and stay unavailable.
+///
+/// `Bash` is listed here but is additionally gated in `keep_under` on
+/// `read_deny_enforced`: it is dropped when the active sandbox backend
+/// cannot provably enforce secret-read-deny at the OS layer (the exec-time
+/// gate in `bash.rs` is the authoritative boundary; this is the UX-drop
+/// companion that avoids advertising a tool that would always refuse).
+const WORKSPACE_FS_TOOLS: &[&str] = &["Read", "Write", "Edit", "Bash"];
 
 /// Operator-wired MCP tools are kept under restricted postures: they are
 /// deliberate, named extensions the operator installed, not ambient host
@@ -84,13 +95,23 @@ fn is_mcp(t: &dyn Tool) -> bool {
 }
 
 /// Whether `tool` survives under `posture`.
-fn keep_under(posture: ChannelToolPosture, tool: &dyn Tool) -> bool {
+///
+/// `read_deny_enforced`: the result of
+/// `wcore_sandbox::default_for_platform().enforces_read_deny()` at the time
+/// `apply_posture` is called (bootstrap UX gate). When `false`, `Bash` is
+/// dropped from `Workspace` posture because the active backend cannot
+/// provably enforce secret-read-deny at the OS layer — advertising it would
+/// only result in exec-time refusals from `bash.rs`.
+fn keep_under(posture: ChannelToolPosture, tool: &dyn Tool, read_deny_enforced: bool) -> bool {
     match posture {
         ChannelToolPosture::Full => true,
         ChannelToolPosture::Conversational => {
             CONVERSATIONAL_SAFE.contains(&tool.name()) || is_mcp(tool)
         }
         ChannelToolPosture::Workspace => {
+            if tool.name() == "Bash" && !read_deny_enforced {
+                return false;
+            }
             CONVERSATIONAL_SAFE.contains(&tool.name())
                 || WORKSPACE_FS_TOOLS.contains(&tool.name())
                 || is_mcp(tool)
@@ -102,14 +123,23 @@ fn keep_under(posture: ChannelToolPosture, tool: &dyn Tool) -> bool {
 /// the posture forbids and, for `Workspace`, install the `SandboxedFs` jail
 /// so the surviving filesystem tools cannot escape `scope.workspace_root`.
 ///
+/// `read_deny_enforced` is `wcore_sandbox::default_for_platform().enforces_read_deny()`
+/// computed by the caller (bootstrap). When `false`, `Bash` is dropped from
+/// `Workspace` posture — a UX gate so the LLM schema doesn't advertise a
+/// tool that would always refuse at exec time.
+///
 /// A no-op for [`ChannelToolPosture::Full`] (and never called for a local
 /// CLI engine, which has no scope). Must run AFTER the full toolset —
 /// including MCP tools — is registered, and BEFORE the registry is moved
 /// into the engine.
-pub fn apply_posture(registry: &mut ToolRegistry, scope: &ChannelToolScope) {
+pub fn apply_posture(
+    registry: &mut ToolRegistry,
+    scope: &ChannelToolScope,
+    read_deny_enforced: bool,
+) {
     if scope.posture != ChannelToolPosture::Full {
         let posture = scope.posture;
-        registry.retain(|t| keep_under(posture, t));
+        registry.retain(|t| keep_under(posture, t, read_deny_enforced));
     }
     if scope.posture == ChannelToolPosture::Workspace {
         let policy = Arc::new(wcore_tools::workspace_policy::WorkspacePolicy::contained(
@@ -247,8 +277,9 @@ mod tests {
     fn conversational_drops_every_host_tool() {
         for t in builtin_roster() {
             if HOST_TOOLS.contains(&t.name()) {
+                // read_deny_enforced doesn't affect Conversational posture.
                 assert!(
-                    !keep_under(ChannelToolPosture::Conversational, &t),
+                    !keep_under(ChannelToolPosture::Conversational, &t, true),
                     "host tool '{}' must be dropped in conversational posture",
                     t.name()
                 );
@@ -262,7 +293,7 @@ mod tests {
             if CONVERSATIONAL_SAFE.contains(&t.name()) || matches!(t.category(), ToolCategory::Mcp)
             {
                 assert!(
-                    keep_under(ChannelToolPosture::Conversational, &t),
+                    keep_under(ChannelToolPosture::Conversational, &t, false),
                     "safe/mcp tool '{}' must survive conversational posture",
                     t.name()
                 );
@@ -270,22 +301,56 @@ mod tests {
         }
     }
 
+    /// Task 8: `keep_under(Workspace, bash, false)` drops Bash.
     #[test]
-    fn workspace_adds_back_only_vfs_jailable_fs_tools() {
-        // The five vfs-jailable fs tools come back…
+    fn workspace_drops_bash_when_deny_not_enforced() {
+        assert!(
+            !keep_under(
+                ChannelToolPosture::Workspace,
+                &tool("Bash", ToolCategory::Exec),
+                false,
+            ),
+            "Bash must be dropped from Workspace when read_deny_enforced=false"
+        );
+    }
+
+    /// Task 8: `keep_under(Workspace, bash, true)` keeps Bash.
+    #[test]
+    fn workspace_keeps_bash_when_deny_enforced() {
+        assert!(
+            keep_under(
+                ChannelToolPosture::Workspace,
+                &tool("Bash", ToolCategory::Exec),
+                true,
+            ),
+            "Bash must survive Workspace when read_deny_enforced=true"
+        );
+    }
+
+    /// Task 8: WORKSPACE_FS_TOOLS now contains "Bash" (gated by read_deny_enforced).
+    #[test]
+    fn workspace_fs_tools_contains_bash() {
+        assert!(
+            WORKSPACE_FS_TOOLS.contains(&"Bash"),
+            "WORKSPACE_FS_TOOLS must list Bash (gated in keep_under by read_deny_enforced)"
+        );
+    }
+
+    #[test]
+    fn workspace_adds_back_vfs_and_bash_when_enforced() {
+        // With deny enforced, all WORKSPACE_FS_TOOLS (including Bash) survive.
         for name in WORKSPACE_FS_TOOLS {
             assert!(
                 keep_under(
                     ChannelToolPosture::Workspace,
-                    &tool(name, ToolCategory::Info)
+                    &tool(name, ToolCategory::Info),
+                    true,
                 ),
-                "workspace must expose vfs-jailable fs tool '{name}'"
+                "workspace (enforced) must expose vfs-jailable/bash tool '{name}'"
             );
         }
-        // …but shell/exec, non-vfs fs readers, AND the shell-out search
-        // tools (Grep/Glob — not confined by the vfs jail) stay dropped.
+        // Non-vfs tools still dropped even when deny is enforced.
         for name in [
-            "Bash",
             "Git",
             "RepoMap",
             "pdf_extract",
@@ -297,7 +362,51 @@ mod tests {
             assert!(
                 !keep_under(
                     ChannelToolPosture::Workspace,
-                    &tool(name, ToolCategory::Info)
+                    &tool(name, ToolCategory::Info),
+                    true,
+                ),
+                "workspace must NOT expose host-escaping tool '{name}'"
+            );
+        }
+    }
+
+    #[test]
+    fn workspace_adds_back_only_vfs_jailable_fs_tools_when_not_enforced() {
+        // With deny NOT enforced, Read/Write/Edit survive but Bash is dropped.
+        for name in ["Read", "Write", "Edit"] {
+            assert!(
+                keep_under(
+                    ChannelToolPosture::Workspace,
+                    &tool(name, ToolCategory::Info),
+                    false,
+                ),
+                "workspace must expose vfs-jailable fs tool '{name}'"
+            );
+        }
+        // Bash is specifically dropped when not enforced.
+        assert!(
+            !keep_under(
+                ChannelToolPosture::Workspace,
+                &tool("Bash", ToolCategory::Exec),
+                false,
+            ),
+            "workspace must NOT expose Bash when read_deny_enforced=false"
+        );
+        // Other host-escaping tools always dropped.
+        for name in [
+            "Git",
+            "RepoMap",
+            "pdf_extract",
+            "kubectl",
+            "Script",
+            "Grep",
+            "Glob",
+        ] {
+            assert!(
+                !keep_under(
+                    ChannelToolPosture::Workspace,
+                    &tool(name, ToolCategory::Info),
+                    false,
                 ),
                 "workspace must NOT expose host-escaping tool '{name}'"
             );
@@ -307,8 +416,9 @@ mod tests {
     #[test]
     fn full_keeps_everything() {
         for t in builtin_roster() {
+            // read_deny_enforced is irrelevant for Full posture.
             assert!(
-                keep_under(ChannelToolPosture::Full, &t),
+                keep_under(ChannelToolPosture::Full, &t, false),
                 "full posture keeps every tool, including '{}'",
                 t.name()
             );
@@ -322,7 +432,7 @@ mod tests {
             posture: ChannelToolPosture::Workspace,
             workspace_root: PathBuf::from("/tmp"),
         };
-        apply_posture(&mut reg, &scope);
+        apply_posture(&mut reg, &scope, false);
         assert!(
             reg.tool_vfs().is_some(),
             "workspace posture pins a SandboxedFs jail"
@@ -336,18 +446,11 @@ mod tests {
             posture: ChannelToolPosture::Conversational,
             workspace_root: PathBuf::from("/tmp"),
         };
-        apply_posture(&mut reg, &scope);
+        apply_posture(&mut reg, &scope, false);
         assert!(
             reg.tool_vfs().is_none(),
             "conversational posture installs no vfs (fs tools are dropped, not jailed)"
         );
-    }
-
-    #[test]
-    fn workspace_posture_still_drops_bash() {
-        // Deferred: Bash stays out of Workspace until OS-layer secret-read-deny
-        // exists (else `cat .env` exfiltrates past SecretDenyFs).
-        assert!(!WORKSPACE_FS_TOOLS.contains(&"Bash"));
     }
 
     #[test]
@@ -359,7 +462,7 @@ mod tests {
             posture: ChannelToolPosture::Workspace,
             workspace_root: dir.path().to_path_buf(),
         };
-        apply_posture(&mut registry, &scope);
+        apply_posture(&mut registry, &scope, false);
         assert!(registry.tool_vfs().is_some());
         let policy = registry
             .workspace_policy()
