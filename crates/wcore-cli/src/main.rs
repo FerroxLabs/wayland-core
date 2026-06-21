@@ -592,6 +592,35 @@ fn main() -> anyhow::Result<ExitCode> {
         .map_err(|_| anyhow::anyhow!("wcore-cli entry thread panicked"))?
 }
 
+/// Build a clear, actionable reason string for an engine init failure (#186).
+///
+/// Without this, a `--json-stream` host (the Wayland desktop app) only sees a
+/// bare non-zero exit code and renders a generic "wcore exited with code 1
+/// during init" — the real cause never surfaces. When the failure is a
+/// [`MissingApiKey`](wcore_config::config::MissingApiKey), the message also
+/// points local-model users at the `ollama:` prefix fix, since that is the
+/// common case behind this symptom (a local model selected without the prefix
+/// falls back to the default keyed provider).
+fn init_failure_message(err: &anyhow::Error, provider_label: &str) -> String {
+    let mut msg = format!("Engine failed to start during init: {err:#}");
+    let is_missing_api_key = err
+        .downcast_ref::<wcore_config::config::MissingApiKey>()
+        .is_some()
+        || err
+            .chain()
+            .any(|c| c.is::<wcore_config::config::MissingApiKey>());
+    if is_missing_api_key {
+        msg.push('\n');
+        msg.push_str(&format!(
+            "Provider '{provider_label}' requires an API key. To use a LOCAL model \
+             with Ollama, select a model id prefixed with `ollama:` (e.g. \
+             `ollama:qwen3-coder:30b`) — no API key is needed. Otherwise add a key \
+             via onboarding or set ANTHROPIC_API_KEY / OPENAI_API_KEY."
+        ));
+    }
+    msg
+}
+
 async fn run() -> anyhow::Result<ExitCode> {
     let cli = Cli::parse();
 
@@ -1095,6 +1124,15 @@ async fn run() -> anyhow::Result<ExitCode> {
         return Ok(ExitCode::SUCCESS);
     }
 
+    // #186: capture the requested provider label before `cli.provider` is
+    // moved into `CliArgs`, so an init-failure error event (below) can name
+    // the provider even when config resolution fails. Falls back to the
+    // engine default ("anthropic") when no provider was requested.
+    let provider_label_for_error = cli
+        .provider
+        .clone()
+        .unwrap_or_else(|| "anthropic".to_string());
+
     // Resolve config from files + CLI args + env vars
     let cli_args = CliArgs {
         provider: cli.provider,
@@ -1193,6 +1231,20 @@ async fn run() -> anyhow::Result<ExitCode> {
                     let _ = g.disarm();
                 }
                 return Ok(ExitCode::SUCCESS);
+            }
+            if cli.json_stream {
+                // #186: a json-stream host (desktop app) otherwise sees only a bare exit
+                // code and shows a generic "wcore exited with code 1 during init". Emit a
+                // structured error event so the real, actionable reason reaches the host UI.
+                let w = wcore_protocol::writer::ProtocolWriter::new();
+                let _ = w.emit(&wcore_protocol::events::ProtocolEvent::Error {
+                    msg_id: None,
+                    error: wcore_protocol::events::ErrorInfo {
+                        code: "init_failed".to_string(),
+                        message: init_failure_message(&e, &provider_label_for_error),
+                        retryable: false,
+                    },
+                });
             }
             return Err(e);
         }
@@ -2339,7 +2391,14 @@ async fn run_json_stream_mode(
         bootstrap = bootstrap.resume(session);
     }
 
-    let result = bootstrap.build().await?;
+    let result = match bootstrap.build().await {
+        Ok(r) => r,
+        Err(e) => {
+            // #186: surface init failure to the json-stream host instead of a bare exit.
+            output.emit_error(&init_failure_message(&e, &provider_name), false);
+            return Err(e);
+        }
+    };
     let mut engine = result.engine;
     let initial_has_mcp = result.has_mcp;
     let initial_has_plugins = result.has_plugins;
@@ -3013,6 +3072,53 @@ mod tests {
         assert!(
             config.memory.enabled,
             "without --no-memory the config's memory.enabled must survive"
+        );
+    }
+
+    /// #186: a plain (non-MissingApiKey) error yields the base init-failure
+    /// message and must NOT append the Ollama hint.
+    #[test]
+    fn test_init_failure_message_plain_error_has_no_ollama_hint() {
+        let err = anyhow::anyhow!("network unreachable");
+        let msg = init_failure_message(&err, "openai");
+        assert!(
+            msg.starts_with("Engine failed to start during init:"),
+            "must lead with the base reason, got: {msg}"
+        );
+        assert!(
+            !msg.contains("ollama:"),
+            "non-MissingApiKey errors must not carry the local-model hint, got: {msg}"
+        );
+    }
+
+    /// #186: a MissingApiKey error must append the actionable Ollama hint and
+    /// name the provider label.
+    #[test]
+    fn test_init_failure_message_missing_api_key_has_ollama_hint() {
+        let err = anyhow::Error::new(wcore_config::config::MissingApiKey);
+        let msg = init_failure_message(&err, "anthropic");
+        assert!(
+            msg.contains("ollama:"),
+            "MissingApiKey must surface the local-model hint, got: {msg}"
+        );
+        assert!(
+            msg.contains("anthropic"),
+            "hint must name the provider label, got: {msg}"
+        );
+    }
+
+    /// #186: the hint must also fire when MissingApiKey is buried in the error
+    /// chain via `.context(...)`, not only at the top level.
+    #[test]
+    fn test_init_failure_message_missing_api_key_in_chain() {
+        use anyhow::Context;
+        let err = Err::<(), _>(wcore_config::config::MissingApiKey)
+            .context("resolving provider credentials")
+            .unwrap_err();
+        let msg = init_failure_message(&err, "anthropic");
+        assert!(
+            msg.contains("ollama:"),
+            "a chained MissingApiKey must still surface the hint, got: {msg}"
         );
     }
 }
