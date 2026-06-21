@@ -113,6 +113,16 @@ pub fn build_allowlist(config: &Config) -> AllowList {
         allow.allow_host("dashscope.aliyuncs.com");
     }
 
+    // FerroxLabs/wayland#200: native Gemini's default base_url is empty (the
+    // provider crate supplies generativelanguage.googleapis.com internally), so
+    // the host is NOT auto-derived above. Allow the EXACT host off the provider
+    // TYPE so a default-configured Gemini user's first chat POST isn't blocked
+    // as exfil-shaped. Not WELL_KNOWN/apex: googleapis.com is shared-platform
+    // (hosts many Google services), so apex-allowing it would over-allow.
+    if config.provider == ProviderType::Gemini {
+        allow.allow_host("generativelanguage.googleapis.com");
+    }
+
     // Operator additions.
     for entry in &config.security.egress_allow {
         let e = entry.trim();
@@ -261,6 +271,46 @@ mod tests {
             EgressVerdict::Allow,
             "Qwen allow must not apex-allow all of aliyuncs.com"
         );
+    }
+
+    #[test]
+    fn native_gemini_host_is_allowlisted_for_gemini_provider() {
+        // FerroxLabs/wayland#200: native Gemini's default base_url is EMPTY (the
+        // provider crate supplies generativelanguage.googleapis.com internally),
+        // so the host is NOT auto-derived. Without an explicit allow off the
+        // provider TYPE, every chat POST is classified Exfil→Deny and Gemini is
+        // dead on arrival under the default egress policy.
+        let mut c = cfg("", &[]);
+        c.provider = ProviderType::Gemini;
+        let allow = build_allowlist(&c);
+        assert_eq!(
+            classify(
+                &Method::POST,
+                &u(
+                    "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:streamGenerateContent?alt=sse"
+                ),
+                &allow
+            ),
+            EgressVerdict::Allow,
+            "native Gemini host must be reachable out of the box (empty base_url)"
+        );
+    }
+
+    #[test]
+    fn non_gemini_provider_does_not_allow_gemini_host() {
+        // The native-Gemini allow is provider-scoped: a different active provider
+        // must NOT silently open generativelanguage.googleapis.com.
+        let allow = build_allowlist(&cfg("https://api.anthropic.com", &[]));
+        assert!(matches!(
+            classify(
+                &Method::POST,
+                &u(
+                    "https://generativelanguage.googleapis.com/v1beta/models/x:streamGenerateContent"
+                ),
+                &allow
+            ),
+            EgressVerdict::Exfil { .. }
+        ));
     }
 
     #[test]
