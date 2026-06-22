@@ -2064,8 +2064,12 @@ fn lookup_store_api_key(
 /// restart and without mutating process environment variables.
 ///
 /// The storage backend (keyring / plaintext-0600 / encrypted-file) is read
-/// from the on-disk `[storage.credentials]` block, exactly as resolution will
-/// read it. Returns an error for providers with no store slot
+/// from the on-disk `[storage.credentials]` block of the *profile-active*
+/// config — `load_global_config_file()` and `credentials_storage_path()` both
+/// honour `WAYLAND_HOME`, so under an isolated profile this reads that
+/// profile's config and writes into that profile's in-home store (the Auto
+/// default resolves to the in-home vault, never the shared keyring). Returns
+/// an error for providers with no store slot
 /// ([`credentials_store_key`] returns `None`) or on a store write failure. The
 /// value is never logged.
 pub fn store_provider_api_key(provider: ProviderType, api_key: &str) -> anyhow::Result<()> {

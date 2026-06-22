@@ -599,6 +599,65 @@ impl CredentialsStore for EncryptedFileCredentialsStore {
     }
 }
 
+/// Non-consuming check for whether vault unlock material is available
+/// out-of-band, so [`open_store`] can choose the encrypted vault WITHOUT
+/// triggering an interactive passphrase prompt on a headless/desktop spawn.
+///
+/// Mirrors the NON-INTERACTIVE prefixes of
+/// [`EncryptedFileCredentialsStore::read_passphrase`]: a passphrase FD (Unix
+/// only — file descriptors are not a portable Windows concept, and
+/// `read_passphrase` likewise `#[cfg(unix)]`-gates the FD path) or the legacy
+/// `WAYLAND_VAULT_PASSPHRASE` env var. The interactive `rpassword` prompt is
+/// deliberately NOT treated as "present": selecting the vault must never block
+/// a non-interactive launch on a TTY.
+///
+/// The Windows branch intentionally omits the FD check: a Windows caller that
+/// set only `WAYLAND_VAULT_PASSPHRASE_FD` correctly falls back to plaintext
+/// rather than being routed to the vault and then hitting `read_passphrase`'s
+/// interactive prompt (whose FD path is also unix-only). Do NOT "fix" this by
+/// adding an unconditional FD check — that reintroduces the Windows TTY block.
+fn vault_unlock_material_present() -> bool {
+    #[cfg(unix)]
+    if std::env::var_os("WAYLAND_VAULT_PASSPHRASE_FD").is_some() {
+        return true;
+    }
+    std::env::var_os("WAYLAND_VAULT_PASSPHRASE").is_some()
+}
+
+/// Derive the encrypted-vault file pair that sits beside the plaintext
+/// credentials path (i.e. inside the active `WAYLAND_HOME`). Co-locating them
+/// means the existing parent-dir hardening already covers them. The `"."`
+/// fallback is unreachable in practice — every caller passes
+/// `credentials_storage_path()`, which always has a real parent dir.
+fn default_vault_paths(plaintext_path: &Path) -> (PathBuf, PathBuf) {
+    let dir = plaintext_path.parent().unwrap_or_else(|| Path::new("."));
+    (
+        dir.join("credentials.enc"),
+        dir.join("credentials.kdf.json"),
+    )
+}
+
+/// Warn ONCE, to stderr, that an isolated profile is persisting secrets as a
+/// plaintext-0600 file because no vault unlock material was supplied. The D1
+/// "warned fallback": secrets are still `0o600` and in-home, but not encrypted
+/// at rest. `Once`-guarded because `open_store` is called repeatedly per run
+/// (once per provider key lookup) and an unguarded warning would spam stderr.
+fn warn_isolated_plaintext_fallback(path: &Path) {
+    static WARNED: std::sync::Once = std::sync::Once::new();
+    WARNED.call_once(|| {
+        eprintln!(
+            "warning: WAYLAND_HOME is set (isolated profile) but no vault \
+             passphrase was supplied; storing credentials as plaintext-0600 at \
+             {}. To encrypt at rest, set WAYLAND_VAULT_PASSPHRASE_FD (a \
+             passphrase file descriptor — preferred) or WAYLAND_VAULT_PASSPHRASE \
+             (env var, visible via /proc/<pid>/environ). Secrets in a legacy OS \
+             keyring are not auto-imported into isolated profiles — re-enter \
+             them for this profile.",
+            path.display()
+        );
+    });
+}
+
 /// Factory selecting the configured backend.
 pub fn open_store(
     cfg: &CredentialsStorageConfig,
@@ -608,6 +667,26 @@ pub fn open_store(
         // Default: keyring primary + plaintext fallback when a keyring exists;
         // a bare plaintext store on headless/CI hosts where it does not. (F16)
         CredentialsBackend::Auto => {
+            // Isolated-profile homes (WAYLAND_HOME set) must NOT use the OS
+            // keyring: the keyring service is a process-global constant
+            // ("wayland-core") that bleeds secrets across every profile on the
+            // host (C4 / D1). For an isolated home, prefer the in-home encrypted
+            // vault when unlock material is supplied out-of-band; otherwise fall
+            // back to a stderr-warned plaintext-0600 file in-home — never the
+            // keyring. The legacy single (non-profile) home is unchanged below.
+            if std::env::var_os("WAYLAND_HOME").is_some() {
+                if vault_unlock_material_present() {
+                    let (cipher_path, key_params_path) = default_vault_paths(plaintext_path);
+                    return Ok(Box::new(EncryptedFileCredentialsStore::new(
+                        cipher_path,
+                        key_params_path,
+                    )));
+                }
+                warn_isolated_plaintext_fallback(plaintext_path);
+                return Ok(Box::new(PlaintextCredentialsStore::new(
+                    plaintext_path.to_path_buf(),
+                )));
+            }
             let service = cfg
                 .service_name
                 .clone()
