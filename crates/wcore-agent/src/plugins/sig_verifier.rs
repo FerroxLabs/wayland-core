@@ -52,15 +52,19 @@ impl std::fmt::Display for KeySource {
 /// Resolve the trust-anchor directory.
 ///
 /// 1. `$WAYLAND_TRUSTED_KEYS_DIR` if set.
-/// 2. `~/.wayland/trusted-keys` otherwise.
-/// 3. `None` if neither is resolvable (no `$HOME`).
+/// 2. `<WAYLAND_HOME or ~/.wayland>/trusted-keys` otherwise.
+///
+/// Isolation: the fallback routes through `wcore_config::config::profile_home()`
+/// so each profile has its OWN trust-anchor set (a key trusted in profile A
+/// must not validate plugins in profile B). Byte-identical to
+/// `~/.wayland/trusted-keys` when `WAYLAND_HOME` is unset.
 pub fn trusted_keys_dir() -> Option<PathBuf> {
     if let Ok(d) = std::env::var(ENV_TRUSTED_KEYS_DIR)
         && !d.is_empty()
     {
         return Some(PathBuf::from(d));
     }
-    dirs::home_dir().map(|h| h.join(".wayland").join("trusted-keys"))
+    Some(wcore_config::config::profile_home().join("trusted-keys"))
 }
 
 /// Load every `*.pub` file in `dir` as a raw 32-byte ed25519 public key,
@@ -236,6 +240,48 @@ mod tests {
     use ed25519_dalek::{SigningKey, ed25519::signature::Signer};
     use rand::rngs::OsRng;
     use tempfile::TempDir;
+
+    /// Isolation (Phase 0): the trust-anchor dir follows `WAYLAND_HOME` so each
+    /// profile has its OWN trust set, and the explicit `$WAYLAND_TRUSTED_KEYS_DIR`
+    /// override still wins over it.
+    #[test]
+    #[serial_test::serial(wayland_home_env)]
+    fn trusted_keys_dir_follows_wayland_home_and_env_override() {
+        let wh = "WAYLAND_HOME";
+        let tk = ENV_TRUSTED_KEYS_DIR;
+        let prev_wh = std::env::var_os(wh);
+        let prev_tk = std::env::var_os(tk);
+        // 1. Fallback roots under WAYLAND_HOME (per-profile trust set).
+        unsafe {
+            std::env::remove_var(tk);
+            std::env::set_var(wh, "/tmp/wl-trust-test");
+        }
+        assert_eq!(
+            trusted_keys_dir(),
+            Some(PathBuf::from("/tmp/wl-trust-test").join("trusted-keys")),
+            "fallback must follow WAYLAND_HOME"
+        );
+        // 2. Explicit override still wins over WAYLAND_HOME.
+        unsafe {
+            std::env::set_var(tk, "/tmp/explicit-trust");
+        }
+        assert_eq!(
+            trusted_keys_dir(),
+            Some(PathBuf::from("/tmp/explicit-trust")),
+            "WAYLAND_TRUSTED_KEYS_DIR must win over WAYLAND_HOME"
+        );
+        // restore
+        unsafe {
+            match prev_wh {
+                Some(v) => std::env::set_var(wh, v),
+                None => std::env::remove_var(wh),
+            }
+            match prev_tk {
+                Some(v) => std::env::set_var(tk, v),
+                None => std::env::remove_var(tk),
+            }
+        }
+    }
 
     fn make_key() -> SigningKey {
         SigningKey::generate(&mut OsRng)

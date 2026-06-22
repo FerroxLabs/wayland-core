@@ -276,11 +276,13 @@ fn validate_voice_name(name: &str) -> Result<&str, TtsError> {
     Ok(name)
 }
 
-/// Canonical default voices directory: `~/.wayland/piper-voices/`.
-/// Returns `None` if the home directory cannot be resolved (extremely
-/// hostile environment).
+/// Canonical default voices directory: `<WAYLAND_HOME or ~/.wayland>/piper-voices/`.
+///
+/// Isolation: routes through `wcore_config::config::profile_home()` so the voice
+/// cache follows `WAYLAND_HOME`. Byte-identical to `~/.wayland/piper-voices`
+/// when `WAYLAND_HOME` is unset.
 fn default_voices_dir() -> Option<PathBuf> {
-    dirs::home_dir().map(|h| h.join(".wayland").join("piper-voices"))
+    Some(wcore_config::config::profile_home().join("piper-voices"))
 }
 
 // ---------------------------------------------------------------------
