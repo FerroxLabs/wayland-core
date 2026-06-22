@@ -239,3 +239,11 @@ output_per_mtok_usd = 6.40
 [qwen.qwen-max]
 input_per_mtok_usd = 0.40
 output_per_mtok_usd = 1.20
+
+# MiniMax — MiniMax-M2 via the Anthropic-compatible endpoint (#240). Official
+# pay-as-you-go list price (platform.minimax.io/docs/guides/pricing-paygo,
+# retrieved 2026-06-22): $0.30 / $1.20 per MTok. Without this entry, MiniMax
+# cost estimates fell back to the 0.0 heuristic.
+[minimax.MiniMax-M2]
+input_per_mtok_usd = 0.30
+output_per_mtok_usd = 1.20

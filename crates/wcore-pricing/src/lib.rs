@@ -130,6 +130,18 @@ output_per_mtok_usd = 15.0
         ));
     }
 
+    // #240: MiniMax-M2 must resolve from the bundled catalog so estimates use
+    // real per-token pricing ($0.30/$1.20 per MTok) instead of the heuristic.
+    #[test]
+    fn minimax_m2_in_bundled_catalog() {
+        let cat = PricingCatalog::load_default().expect("bundled catalog parses");
+        let p = cat
+            .get("minimax", "MiniMax-M2")
+            .expect("MiniMax-M2 must be in the bundled catalog");
+        assert!((p.input_per_mtok_usd - 0.30).abs() < 1e-9);
+        assert!((p.output_per_mtok_usd - 1.20).abs() < 1e-9);
+    }
+
     #[test]
     fn unknown_model_errors() {
         let cat = fixture_catalog();
