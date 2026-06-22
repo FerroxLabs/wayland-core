@@ -22,7 +22,7 @@
 //! skip the prompt.
 
 use std::collections::HashSet;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use parking_lot::Mutex;
@@ -147,16 +147,27 @@ impl CuaPolicy {
         self
     }
 
-    /// Default on-disk path for the seen-apps store.
-    /// `<data_dir>/wayland/cua/seen-apps.json` — falls back to
-    /// `<tmp_dir>/wayland/cua/seen-apps.json` when `dirs::data_dir`
-    /// returns None (rare; sandboxed test environments).
+    /// Default on-disk path for the seen-apps store, rooted under the
+    /// profile home so `WAYLAND_HOME` sandboxes it:
+    /// `<profile_home>/cua/seen-apps.json`.
+    ///
+    /// On first access a one-time, best-effort migration
+    /// ([`migrate_legacy_seen_apps`]) copies the pre-isolation
+    /// `<data_dir>/wayland/cua/seen-apps.json` here — but ONLY when
+    /// `WAYLAND_HOME` is unset. Under an explicit `WAYLAND_HOME` the user
+    /// opted into an isolated profile and MUST NOT inherit another
+    /// profile's HITL approval grants.
+    ///
+    /// NOTE (open risk O1): no production code currently calls this — the
+    /// host builds `CuaTool` without setting `seen_apps_path`, so the
+    /// store is in-memory only today. This function is the correct home
+    /// for the path + migration the moment persistence is wired.
     pub fn default_seen_apps_path() -> PathBuf {
-        dirs::data_dir()
-            .unwrap_or_else(std::env::temp_dir)
-            .join("wayland")
+        let path = wcore_config::config::profile_home()
             .join("cua")
-            .join("seen-apps.json")
+            .join("seen-apps.json");
+        migrate_legacy_seen_apps(&path);
+        path
     }
 
     /// Compose the composite key used in the seen-apps set:
@@ -467,10 +478,118 @@ fn matches_combo(forbidden: &str, normalized: &str) -> bool {
     }
 }
 
+/// One-time best-effort migration of the pre-isolation CUA seen-apps store
+/// into the `WAYLAND_HOME`-rooted location.
+///
+/// Gated, idempotent, atomic:
+///   * **Gate:** if `WAYLAND_HOME` is set, return immediately — an isolated
+///     profile must NOT inherit shared legacy approval grants;
+///   * if `new_path` already exists → no-op;
+///   * if the legacy `<data_dir>/wayland/cua/seen-apps.json` is absent or
+///     resolves to `new_path` → no-op;
+///   * otherwise copy legacy → a temp sibling, then atomic-`rename` into
+///     place so a concurrent reader never observes a torn file.
+///
+/// Every failure logs at `warn` and returns — a missing grant just
+/// re-prompts the user; it must never crash the engine.
+fn migrate_legacy_seen_apps(new_path: &Path) {
+    // Explicit-isolation profiles never inherit shared legacy state.
+    if std::env::var_os("WAYLAND_HOME").is_some() {
+        return;
+    }
+    if new_path.exists() {
+        return;
+    }
+    let Some(legacy) =
+        dirs::data_dir().map(|d| d.join("wayland").join("cua").join("seen-apps.json"))
+    else {
+        return;
+    };
+    if legacy == new_path || !legacy.exists() {
+        return;
+    }
+    let Some(parent) = new_path.parent() else {
+        return;
+    };
+    if let Err(e) = std::fs::create_dir_all(parent) {
+        tracing::warn!(error = %e, path = %new_path.display(),
+            "cua: failed to create dir for seen-apps migration");
+        return;
+    }
+    // Re-check after dir creation: a concurrent migrator may have won.
+    if new_path.exists() {
+        return;
+    }
+    // Atomic publish: copy to a temp sibling, then rename onto new_path so a
+    // reader sees either absent-or-complete, never a half-written file.
+    let tmp = parent.join(".seen-apps.json.migrating");
+    if let Err(e) = std::fs::copy(&legacy, &tmp) {
+        tracing::warn!(error = %e, from = %legacy.display(), to = %tmp.display(),
+            "cua: failed to stage legacy seen-apps migration");
+        let _ = std::fs::remove_file(&tmp);
+        return;
+    }
+    if let Err(e) = std::fs::rename(&tmp, new_path) {
+        tracing::warn!(error = %e, to = %new_path.display(),
+            "cua: failed to publish migrated seen-apps store");
+        let _ = std::fs::remove_file(&tmp);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::backend::{KeyMods, MouseButton};
+
+    #[test]
+    #[serial_test::serial]
+    fn default_seen_apps_path_roots_under_wayland_home() {
+        let tmp = tempfile::tempdir().unwrap();
+        let prev = std::env::var_os("WAYLAND_HOME");
+        unsafe { std::env::set_var("WAYLAND_HOME", tmp.path()) };
+        let p = CuaPolicy::default_seen_apps_path();
+        match prev {
+            Some(v) => unsafe { std::env::set_var("WAYLAND_HOME", v) },
+            None => unsafe { std::env::remove_var("WAYLAND_HOME") },
+        }
+        assert_eq!(p, tmp.path().join("cua").join("seen-apps.json"));
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn migration_skipped_when_wayland_home_set() {
+        // With WAYLAND_HOME set, migration must be an unconditional no-op
+        // (no inheritance of shared legacy grants) — even though new_path
+        // is absent.
+        let tmp = tempfile::tempdir().unwrap();
+        let new_path = tmp.path().join("cua").join("seen-apps.json");
+        let prev = std::env::var_os("WAYLAND_HOME");
+        unsafe { std::env::set_var("WAYLAND_HOME", tmp.path()) };
+        super::migrate_legacy_seen_apps(&new_path);
+        match prev {
+            Some(v) => unsafe { std::env::set_var("WAYLAND_HOME", v) },
+            None => unsafe { std::env::remove_var("WAYLAND_HOME") },
+        }
+        assert!(!new_path.exists());
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn migration_is_idempotent_and_does_not_clobber() {
+        // WAYLAND_HOME unset (single-profile upgrade case); new_path present
+        // → migration must be a no-op and must not overwrite existing data.
+        let tmp = tempfile::tempdir().unwrap();
+        let new_path = tmp.path().join("cua").join("seen-apps.json");
+        std::fs::create_dir_all(new_path.parent().unwrap()).unwrap();
+        std::fs::write(&new_path, br#"["existing"]"#).unwrap();
+        let prev = std::env::var_os("WAYLAND_HOME");
+        unsafe { std::env::remove_var("WAYLAND_HOME") };
+        super::migrate_legacy_seen_apps(&new_path);
+        if let Some(v) = prev {
+            unsafe { std::env::set_var("WAYLAND_HOME", v) }
+        }
+        assert_eq!(std::fs::read(&new_path).unwrap(), br#"["existing"]"#);
+    }
 
     fn click() -> CuaOp {
         CuaOp::LeftClick {

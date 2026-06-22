@@ -928,16 +928,15 @@ pub fn classify_runtime(
 ///    This is an explicit operator override: it REPLACES the default roots
 ///    (preserving the single-dir test isolation the on-disk discovery tests
 ///    rely on, and letting an operator pin discovery to one directory).
-/// 2. Otherwise → return both default roots, in order, de-duplicated:
-///    first [`PluginIdentity::default_plugin_root`]
-///    (`<data_dir>/wayland/plugins`), then `profile_home()/plugins` (the C3
-///    profile home, i.e. `~/.wayland/plugins`, where a declarative plugin
-///    installed by IJFW's installer lands).
+/// 2. Otherwise → resolve `default_plugin_root()` then `profile_home()/plugins`,
+///    de-duplicated. Post-isolation-sweep [`PluginIdentity::default_plugin_root`]
+///    is itself `<WAYLAND_HOME or ~/.wayland>/plugins`, so it coincides with
+///    `profile_home()/plugins` and the two collapse to a single root (where a
+///    declarative plugin installed by IJFW's installer lands).
 ///
 /// Each returned root is its OWN security anchor in [`PluginLoader::discover_on_disk`]:
 /// the per-root path-prefix gate + symlink defense apply identically to every
-/// root. The profile-home root is the same trust class (user-controlled home
-/// location) as the data-dir root.
+/// root (all are the same user-controlled-home trust class).
 ///
 /// May return an empty `Vec` only in the vanishingly rare case where the env
 /// var is unset AND `default_plugin_root()` somehow coincides after dedup with
@@ -1125,9 +1124,10 @@ mod tests {
     // `resolved_plugins_roots()` must:
     // - return ONLY the override dir when `$WAYLAND_PLUGINS_DIR` is set
     //   (preserving single-dir test isolation), and
-    // - return BOTH `default_plugin_root()` and `profile_home()/plugins`
-    //   when the override is unset (so an IJFW-installed declarative plugin
-    //   under `~/.wayland/plugins` is reachable).
+    // - resolve `default_plugin_root()` + `profile_home()/plugins` when the
+    //   override is unset; post-isolation-sweep these coincide and dedup to a
+    //   single `<WAYLAND_HOME or ~/.wayland>/plugins` root (so an IJFW-installed
+    //   declarative plugin under `~/.wayland/plugins` is reachable).
     // -----------------------------------------------------------------
 
     #[test]
@@ -1151,9 +1151,12 @@ mod tests {
 
     #[test]
     #[serial_test::serial]
-    fn resolved_plugins_roots_default_includes_data_dir_and_profile_home() {
-        // SAFETY: env mutation is serialized by `#[serial_test::serial]`.
-        // Both vars are saved + restored around the body.
+    fn resolved_plugins_roots_default_is_single_profile_home_root() {
+        // After the isolation sweep `default_plugin_root()` == `profile_home()/plugins`,
+        // so the two pushes in `resolved_plugins_roots()` collapse via `push_unique`
+        // to a SINGLE root rooted under WAYLAND_HOME.
+        // SAFETY: env mutation is serialized by `#[serial_test::serial]`; both vars
+        // are saved + restored around the body.
         let saved_plugins = std::env::var_os(ENV_PLUGINS_DIR);
         let saved_home = std::env::var_os("WAYLAND_HOME");
         let home = TempDir::new().unwrap();
@@ -1176,20 +1179,20 @@ mod tests {
             }
         }
 
-        let expected_data = PluginIdentity::default_plugin_root();
-        let expected_profile = home.path().join("plugins");
+        // Compute the expectation from the pinned home (NOT from
+        // default_plugin_root() after restore — its result now depends on the
+        // restored WAYLAND_HOME).
+        let expected = home.path().join("plugins");
         assert!(
-            roots.contains(&expected_data),
-            "default roots must include data-dir root {expected_data:?}; got {roots:?}"
+            roots.contains(&expected),
+            "default roots must include the profile-home plugins root {expected:?}; got {roots:?}"
         );
-        assert!(
-            roots.contains(&expected_profile),
-            "default roots must include profile-home root {expected_profile:?}; got {roots:?}"
+        // default_plugin_root() and profile_home()/plugins now coincide → deduped.
+        assert_eq!(
+            roots.iter().filter(|r| *r == &expected).count(),
+            1,
+            "the two former-distinct roots must dedup to ONE entry; got {roots:?}"
         );
-        // data_dir first, then profile_home (order preserved).
-        let di = roots.iter().position(|r| r == &expected_data).unwrap();
-        let pi = roots.iter().position(|r| r == &expected_profile).unwrap();
-        assert!(di < pi, "data-dir root must precede profile-home root");
     }
 
     // -----------------------------------------------------------------

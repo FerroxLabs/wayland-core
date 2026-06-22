@@ -81,7 +81,8 @@ fn path_prefix_refuses_nonexistent_path() {
 }
 
 #[test]
-fn default_plugin_root_is_under_data_dir() {
+fn default_plugin_root_is_under_profile_home() {
+    // Post-isolation-sweep the default root is `<WAYLAND_HOME or ~/.wayland>/plugins`.
     let root = PluginIdentity::default_plugin_root();
     let s = root.to_string_lossy();
     assert!(

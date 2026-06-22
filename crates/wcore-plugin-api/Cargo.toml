@@ -43,3 +43,4 @@ toml = { workspace = true }
 [dev-dependencies]
 rstest.workspace = true
 tempfile.workspace = true
+serial_test.workspace = true

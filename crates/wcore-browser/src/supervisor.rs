@@ -51,24 +51,12 @@ impl Default for SupervisorConfig {
 }
 
 fn home_pid_dir() -> PathBuf {
-    if let Some(home) = dirs_home() {
-        home.join(".wayland-core").join("browser").join("pids")
-    } else {
-        std::env::temp_dir()
-            .join("wayland-core")
-            .join("browser")
-            .join("pids")
-    }
-}
-
-fn dirs_home() -> Option<PathBuf> {
-    if let Some(h) = std::env::var_os("HOME") {
-        return Some(PathBuf::from(h));
-    }
-    if let Some(h) = std::env::var_os("USERPROFILE") {
-        return Some(PathBuf::from(h));
-    }
-    None
+    // isolation: route through profile_home() so browser PID tracking follows
+    // WAYLAND_HOME. PIDs are ephemeral; stale entries at the old location are
+    // harmless (the reaper only acts on PIDs it registered this session).
+    wcore_config::config::profile_home()
+        .join("browser")
+        .join("pids")
 }
 
 /// Tracked backend handle — session id + child PID + parent (host) PID. The
@@ -436,9 +424,24 @@ mod tests {
         let p = sup.pid_dir();
         let s = p.to_string_lossy();
         assert!(
-            s.contains("wayland-core") && s.contains("browser") && s.contains("pids"),
+            s.contains("browser") && s.contains("pids"),
             "unexpected pid dir: {s}"
         );
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn pid_dir_roots_under_wayland_home() {
+        let tmp = tempfile::tempdir().unwrap();
+        let prev = std::env::var_os("WAYLAND_HOME");
+        // SAFETY: serialized via serial_test; env restored below.
+        unsafe { std::env::set_var("WAYLAND_HOME", tmp.path()) };
+        let dir = super::home_pid_dir();
+        match prev {
+            Some(v) => unsafe { std::env::set_var("WAYLAND_HOME", v) },
+            None => unsafe { std::env::remove_var("WAYLAND_HOME") },
+        }
+        assert_eq!(dir, tmp.path().join("browser").join("pids"));
     }
 
     #[test]

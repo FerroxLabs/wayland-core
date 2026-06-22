@@ -135,14 +135,20 @@ impl PluginIdentity {
         })
     }
 
-    /// Default trusted root for dynamic plugins:
-    /// `<data_dir>/wayland/plugins/`. Falls back to the system temp
-    /// dir when `dirs::data_dir()` returns None.
+    /// Default trusted root for dynamic plugins, rooted under the profile
+    /// home so `WAYLAND_HOME` sandboxes it: `<profile_home>/plugins/`.
+    ///
+    /// SECURITY: this is a trust anchor — it becomes an `allowed_roots`
+    /// entry for path-prefix manifest validation
+    /// ([`PluginIdentity::from_path_prefix`]). `wcore-plugin-api` is the
+    /// plugin-isolation boundary and MUST NOT depend on `wcore-config`
+    /// (enforced by `build.rs` FORBIDDEN_CORE_IMPORTS), so the resolution
+    /// is replicated inline in [`profile_home_local`]. It MUST stay
+    /// byte-for-byte equivalent to `wcore_config::config::profile_home()`;
+    /// the cross-crate test `default_plugin_root_matches_canonical_resolver`
+    /// in `wcore-agent` pins that equality.
     pub fn default_plugin_root() -> PathBuf {
-        dirs::data_dir()
-            .unwrap_or_else(std::env::temp_dir)
-            .join("wayland")
-            .join("plugins")
+        profile_home_local().join("plugins")
     }
 
     /// True when this identity is anchored to the engine binary
@@ -481,5 +487,63 @@ fn validate_partition(p: &str, side: &str, plugin: &str) -> PluginResult<()> {
                 "{plugin}: memory_partitions_{side} contains invalid partition `{p}` (valid: P1..=P5)"
             ),
         }),
+    }
+}
+
+/// Inline mirror of `wcore_config::config::profile_home()`. Kept in sync by
+/// hand because the plugin-api isolation boundary forbids a `wcore-config`
+/// dep (`build.rs` FORBIDDEN_CORE_IMPORTS). MUST stay byte-for-byte equal:
+/// same env var, same control-char filter, same `~/.wayland` default, same
+/// CWD-relative last-resort fallback. Pinned by the cross-crate equality test
+/// `default_plugin_root_matches_canonical_resolver` in `wcore-agent`.
+fn profile_home_local() -> PathBuf {
+    // Reject an override carrying an ASCII control char (NUL/newline) — it
+    // can't be passed safely to a child env. Fall through to the default.
+    if let Ok(wh) = std::env::var("WAYLAND_HOME")
+        && !wh.chars().any(|c| c.is_control())
+    {
+        return PathBuf::from(wh);
+    }
+    dirs::home_dir()
+        .map(|h| h.join(".wayland"))
+        .unwrap_or_else(|| {
+            std::env::current_dir()
+                .map(|d| d.join(".wayland"))
+                .unwrap_or_else(|_| PathBuf::from(".wayland"))
+        })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    #[serial_test::serial]
+    fn default_plugin_root_honours_wayland_home() {
+        let tmp = tempfile::tempdir().unwrap();
+        let prev = std::env::var_os("WAYLAND_HOME");
+        unsafe { std::env::set_var("WAYLAND_HOME", tmp.path()) };
+        let root = PluginIdentity::default_plugin_root();
+        match prev {
+            Some(v) => unsafe { std::env::set_var("WAYLAND_HOME", v) },
+            None => unsafe { std::env::remove_var("WAYLAND_HOME") },
+        }
+        assert_eq!(root, tmp.path().join("plugins"));
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn default_plugin_root_rejects_control_char_override() {
+        let prev = std::env::var_os("WAYLAND_HOME");
+        unsafe { std::env::set_var("WAYLAND_HOME", "bad\nvalue") };
+        let root = PluginIdentity::default_plugin_root();
+        match prev {
+            Some(v) => unsafe { std::env::set_var("WAYLAND_HOME", v) },
+            None => unsafe { std::env::remove_var("WAYLAND_HOME") },
+        }
+        // Control-char override rejected → falls back to ~/.wayland/plugins,
+        // never the literal "bad\nvalue".
+        assert!(root.ends_with("plugins"));
+        assert!(!root.to_string_lossy().contains('\n'));
     }
 }
