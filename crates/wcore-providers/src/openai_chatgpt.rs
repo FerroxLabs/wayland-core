@@ -185,6 +185,77 @@ impl OpenAIChatGptProvider {
     }
 }
 
+/// #158 reactive fallback: turn a Codex backend rejection that is *clearly* a
+/// "your plan can't run this model" refusal into a clear, actionable message.
+///
+/// Returns `Some(message)` ONLY when the rejection body unambiguously concerns
+/// the model/plan (a recognised OpenAI error `code` such as `model_not_found` /
+/// `model_not_supported`, or a body phrase naming a model/access/plan problem).
+/// In every other case it returns `None` so the caller passes the raw body
+/// through unchanged — we do NOT fabricate plan-gate detection out of a generic
+/// 4xx, because the Codex backend's plan refusal is not cleanly distinguishable
+/// from other client errors by status alone.
+///
+/// When the plan tier is known (decoded from the OAuth bearer), the message also
+/// lists what that plan CAN run, reusing the same conservative catalog +
+/// [`is_model_available_for_plan`](wcore_config::chatgpt_catalog::is_model_available_for_plan)
+/// gate that drives the predictive hide — so the two never disagree.
+fn plan_gate_rejection_message(
+    status: u16,
+    body: &str,
+    model: &str,
+    plan_tier: Option<&str>,
+) -> Option<String> {
+    // Only 4xx client rejections are candidates — a 5xx/transient error is not a
+    // plan-gate refusal and must retain its retry semantics.
+    if !(400..500).contains(&status) {
+        return None;
+    }
+    let b = body.to_ascii_lowercase();
+    // Unambiguous model/plan signals only. OpenAI returns these for an unknown
+    // or not-entitled model; the message variants cover the human-readable
+    // "model ... does not exist or you do not have access" / plan phrasings.
+    let model_plan_signal = b.contains("model_not_found")
+        || b.contains("model_not_supported")
+        || b.contains("unsupported_model")
+        || b.contains("does not exist or you do not have access")
+        || b.contains("do not have access to")
+        || (b.contains(&model.to_ascii_lowercase())
+            && (b.contains("plan") || b.contains("not available") || b.contains("access")));
+    if !model_plan_signal {
+        return None;
+    }
+
+    // Compose the "you CAN run" list from the conservative catalog, filtered by
+    // the same plan-gate that drives the predictive hide. With no/unknown plan
+    // tier we can't claim a runnable set, so we keep the message model-scoped.
+    let catalog = crate::alias_models("openai-chatgpt");
+    match plan_tier {
+        Some(plan) => {
+            let runnable: Vec<&str> = catalog
+                .iter()
+                .filter(|m| {
+                    m.id != model
+                        && wcore_config::chatgpt_catalog::is_model_available_for_plan(
+                            Some(plan),
+                            &m.id,
+                        )
+                })
+                .map(|m| m.id.as_str())
+                .collect();
+            Some(format!(
+                "{model} isn't available on your ChatGPT plan ({plan}). \
+                 Models your plan can run: {}.",
+                runnable.join(", ")
+            ))
+        }
+        None => Some(format!(
+            "{model} isn't available on your current ChatGPT plan. \
+             Pick a different model with /model, or upgrade your ChatGPT subscription."
+        )),
+    }
+}
+
 #[async_trait]
 impl LlmProvider for OpenAIChatGptProvider {
     fn alias_key(&self) -> &str {
@@ -250,9 +321,24 @@ impl LlmProvider for OpenAIChatGptProvider {
             if status.as_u16() == 401 {
                 return Err(ProviderError::MissingApiKey);
             }
+            // #158 (reactive fallback) — if the backend clearly rejected the
+            // model BECAUSE the plan can't run it, replace the raw body with a
+            // message that names the model, the plan, and what the plan CAN run.
+            // Only fires when the body unambiguously signals a model/plan issue
+            // (see `plan_gate_rejection_message`); otherwise the body is passed
+            // through unchanged. The plan tier comes from the bearer we already
+            // resolved above.
+            let plan_tier = wcore_config::chatgpt_catalog::decode_plan_type(&creds.access_token);
+            let message = plan_gate_rejection_message(
+                status.as_u16(),
+                &text,
+                &request.model,
+                plan_tier.as_deref(),
+            )
+            .unwrap_or(text);
             return Err(ProviderError::Api {
                 status: status.as_u16(),
-                message: text,
+                message,
             });
         }
 
@@ -442,16 +528,37 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn list_models_with_known_plan_keeps_full_catalog_while_table_empty() {
-        // A signed-in "pro" plan resolves a tier, but the conservative gating
-        // table is empty, so the full Codex catalog is returned (no
-        // over-filtering, no regression).
+    async fn list_models_with_pro_plan_keeps_full_catalog() {
+        // A signed-in "pro" plan CAN run gpt-5.5-pro, so the full Codex catalog
+        // is returned (the gate only subtracts gpt-5.5-pro for `plus`).
         let p = OpenAIChatGptProvider::new(
             bearer_with_plan("pro"),
             ProviderCompat::default(),
             DebugConfig::default(),
         );
         assert_eq!(listed_ids(&p).await, full_catalog_ids());
+    }
+
+    #[tokio::test]
+    async fn list_models_with_plus_plan_hides_gpt_5_5_pro() {
+        // #158 grounded gate: `plus` cannot run gpt-5.5-pro, so the `/model`
+        // picker (which calls list_models) drops it — but keeps every other
+        // Codex model, in order.
+        let p = OpenAIChatGptProvider::new(
+            bearer_with_plan("plus"),
+            ProviderCompat::default(),
+            DebugConfig::default(),
+        );
+        let listed = listed_ids(&p).await;
+        assert!(
+            !listed.contains(&"gpt-5.5-pro".to_string()),
+            "plus must not be offered gpt-5.5-pro: {listed:?}"
+        );
+        let expected: Vec<String> = full_catalog_ids()
+            .into_iter()
+            .filter(|id| id != "gpt-5.5-pro")
+            .collect();
+        assert_eq!(listed, expected, "plus keeps all non-pro models in order");
     }
 
     #[tokio::test]
@@ -462,6 +569,53 @@ mod tests {
             DebugConfig::default(),
         );
         assert_eq!(listed_ids(&p).await, full_catalog_ids());
+    }
+
+    // --- #158 Task C: reactive plan-gate rejection message --------------
+
+    #[test]
+    fn rejection_with_model_code_and_known_plan_names_runnable_set() {
+        // OpenAI's "model not found / no access" envelope + a known plus plan →
+        // a clear message that names the model, the plan, and what plus CAN run.
+        let body = r#"{"error":{"message":"The model `gpt-5.5-pro` does not exist or you do not have access to it.","type":"invalid_request_error","code":"model_not_found"}}"#;
+        let msg =
+            plan_gate_rejection_message(404, body, "gpt-5.5-pro", Some("plus")).expect("plan-gate");
+        assert!(msg.contains("gpt-5.5-pro"));
+        assert!(msg.contains("plus"));
+        // plus can run gpt-5.5 but NOT gpt-5.5-pro — the runnable list reflects
+        // the same gate as the predictive hide.
+        assert!(msg.contains("gpt-5.5"));
+        assert!(
+            !msg.contains("gpt-5.5-pro,") && !msg.ends_with("gpt-5.5-pro."),
+            "the rejected model must not appear in the runnable set: {msg}"
+        );
+    }
+
+    #[test]
+    fn rejection_with_model_code_and_unknown_plan_is_model_scoped() {
+        // No plan tier → we can't claim a runnable set, but still improve the
+        // message (model-scoped + actionable) since the body clearly signals a
+        // model/plan issue.
+        let body = r#"{"error":{"code":"model_not_supported","message":"model not supported"}}"#;
+        let msg = plan_gate_rejection_message(403, body, "gpt-5.5-pro", None).expect("plan-gate");
+        assert!(msg.contains("gpt-5.5-pro"));
+        assert!(msg.contains("/model") || msg.contains("upgrade"));
+    }
+
+    #[test]
+    fn unrelated_4xx_is_left_unchanged() {
+        // A generic bad-request body that does NOT clearly concern the model/plan
+        // must NOT be rewritten — we don't fabricate plan-gate detection.
+        let body = r#"{"error":{"message":"Invalid value for 'temperature'.","type":"invalid_request_error","code":"invalid_value"}}"#;
+        assert!(plan_gate_rejection_message(400, body, "gpt-5.5", Some("plus")).is_none());
+    }
+
+    #[test]
+    fn server_error_is_never_treated_as_plan_gate() {
+        // A 5xx (even one that happens to mention the model) is transient and
+        // must retain retry semantics — never rewritten as a plan refusal.
+        let body = r#"{"error":{"message":"gpt-5.5-pro upstream had a plan glitch"}}"#;
+        assert!(plan_gate_rejection_message(503, body, "gpt-5.5-pro", Some("plus")).is_none());
     }
 
     #[tokio::test]
