@@ -17,6 +17,10 @@ pub mod browser;
 // Lets `--provider <id>` resolve any catalog entry through the OpenAI-compat
 // path with no per-provider `ProviderType` arm.
 pub mod catalog;
+// #158: conservative ChatGPT-subscription (OAuth) model-catalog filtering.
+// Tier→unavailable-models gating DATA + JWT plan-claim decode; consumed by
+// `wcore_providers::OpenAIChatGptProvider::list_models`.
+pub mod chatgpt_catalog;
 // W8c.2 F.1: CuaConfig TOML schema (consumed by wcore-cua::adapter::from_spec).
 pub mod compact;
 pub mod compat;

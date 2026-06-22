@@ -191,6 +191,41 @@ impl LlmProvider for OpenAIChatGptProvider {
         "openai-chatgpt"
     }
 
+    /// #158 — filter the Codex catalog to what the ChatGPT subscription's plan
+    /// tier can actually run, so the `/model` picker (via `engine_bridge`) does
+    /// not offer models that 4xx on use.
+    ///
+    /// Conservative by construction (never over-filters):
+    /// - We resolve the plan tier by decoding the live OAuth access token's
+    ///   `chatgpt_plan_type` claim. If the bearer fetch fails (offline / not
+    ///   signed in) or the claim is absent/undecodable, the tier is `None` and
+    ///   NOTHING is filtered — the full alias catalog is returned, matching the
+    ///   trait contract that `list_models` must floor to the alias catalog
+    ///   rather than error.
+    /// - The actual subtraction is driven by the conservative, currently-empty
+    ///   `wcore_config::chatgpt_catalog` gating table; an unrecognised tier or
+    ///   model is always shown.
+    ///
+    /// Only this OAuth-subscription provider filters. The API-key OpenAI path
+    /// (`OpenAIProvider`) and every other provider are untouched.
+    async fn list_models(&self) -> anyhow::Result<Vec<crate::ModelInfo>> {
+        let full = crate::alias_models(self.alias_key());
+        // Best-effort plan-tier resolution: any failure → None → show everything.
+        let plan_tier = (self.bearer)()
+            .await
+            .ok()
+            .and_then(|creds| wcore_config::chatgpt_catalog::decode_plan_type(&creds.access_token));
+        Ok(full
+            .into_iter()
+            .filter(|m| {
+                wcore_config::chatgpt_catalog::is_model_available_for_plan(
+                    plan_tier.as_deref(),
+                    &m.id,
+                )
+            })
+            .collect())
+    }
+
     async fn stream(
         &self,
         request: &LlmRequest,
@@ -254,6 +289,35 @@ mod tests {
             ProviderCompat::default(),
             DebugConfig::default(),
         )
+    }
+
+    /// A bearer whose access token is a JWT carrying the given plan claim. Used
+    /// by the #158 `list_models` tier-filter tests.
+    fn bearer_with_plan(plan: &'static str) -> AsyncBearerSource {
+        use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
+        let payload = serde_json::json!({
+            "https://api.openai.com/auth": {
+                "chatgpt_account_id": "acct_test",
+                "chatgpt_plan_type": plan
+            }
+        });
+        let body = URL_SAFE_NO_PAD.encode(serde_json::to_vec(&payload).unwrap());
+        let jwt = format!("h.{body}.s");
+        Arc::new(move || {
+            let jwt = jwt.clone();
+            Box::pin(async move {
+                Ok(BearerCreds {
+                    access_token: jwt,
+                    account_id: "acct_test".into(),
+                })
+            })
+        })
+    }
+
+    /// A bearer that always fails (offline / not signed in). `list_models` must
+    /// still floor to the full alias catalog rather than error.
+    fn failing_bearer() -> AsyncBearerSource {
+        Arc::new(|| Box::pin(async { Err(ProviderError::Connection("offline".into())) }))
     }
 
     fn request_with_tools(tools: Vec<ToolDef>) -> LlmRequest {
@@ -356,5 +420,63 @@ mod tests {
         assert_eq!(with_tools["tool_choice"], json!("auto"));
         assert_eq!(with_tools["parallel_tool_calls"], json!(true));
         assert!(with_tools["tools"].is_array());
+    }
+
+    // --- #158: plan-tier model-catalog filtering ------------------------
+
+    /// The full Codex alias catalog ids, most-capable first.
+    fn full_catalog_ids() -> Vec<String> {
+        crate::alias_models("openai-chatgpt")
+            .into_iter()
+            .map(|m| m.id)
+            .collect()
+    }
+
+    async fn listed_ids(p: &OpenAIChatGptProvider) -> Vec<String> {
+        p.list_models()
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|m| m.id)
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn list_models_with_known_plan_keeps_full_catalog_while_table_empty() {
+        // A signed-in "pro" plan resolves a tier, but the conservative gating
+        // table is empty, so the full Codex catalog is returned (no
+        // over-filtering, no regression).
+        let p = OpenAIChatGptProvider::new(
+            bearer_with_plan("pro"),
+            ProviderCompat::default(),
+            DebugConfig::default(),
+        );
+        assert_eq!(listed_ids(&p).await, full_catalog_ids());
+    }
+
+    #[tokio::test]
+    async fn list_models_with_unrecognised_plan_keeps_full_catalog() {
+        let p = OpenAIChatGptProvider::new(
+            bearer_with_plan("enterprise"),
+            ProviderCompat::default(),
+            DebugConfig::default(),
+        );
+        assert_eq!(listed_ids(&p).await, full_catalog_ids());
+    }
+
+    #[tokio::test]
+    async fn list_models_floors_to_full_catalog_when_bearer_fails() {
+        // Offline / not signed in: the bearer errors, the tier is unknown, and
+        // `list_models` must NOT error — it floors to the full alias catalog.
+        let p = OpenAIChatGptProvider::new(
+            failing_bearer(),
+            ProviderCompat::default(),
+            DebugConfig::default(),
+        );
+        assert_eq!(listed_ids(&p).await, full_catalog_ids());
+        assert!(
+            !full_catalog_ids().is_empty(),
+            "catalog must be non-empty so the picker never renders blank"
+        );
     }
 }
