@@ -93,7 +93,7 @@ pub fn is_model_available_for_plan(plan_tier: Option<&str>, model_id: &str) -> b
     let gated = PLAN_GATED_MODELS
         .iter()
         .filter(|g| g.plan_tier == tier)
-        .any(|g| g.gated_model_ids.iter().any(|m| *m == model_id));
+        .any(|g| g.gated_model_ids.contains(&model_id));
     !gated
 }
 
