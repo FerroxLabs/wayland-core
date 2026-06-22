@@ -130,17 +130,20 @@ impl JobHandler for EngineJobHandler {
                 // field; v0.8.1 uses one-room semantics.
                 let msg = OutgoingMessage::text(channel_name.clone(), text.clone());
                 let guard = mgr.read().await;
-                guard.send_to(channel_name, msg).await.map_err(|e| match e {
-                    // A `Config` error (e.g. "unknown channel: X") is permanent:
-                    // the channel is not registered in this process and won't be
-                    // without a reconfigure. Map it to NoDispatcher so the runner
-                    // advances `last_fired` (anti-hot-loop) and stages the fire,
-                    // instead of re-firing every tick forever (the source of the
-                    // "unknown channel: desktop" 30s retry storm). Genuine
-                    // transient send failures stay `Dispatch` → retried.
-                    ChannelError::Config(_) => CronError::NoDispatcher,
-                    other => CronError::Dispatch(format!("channel send: {other}")),
-                })?;
+                guard
+                    .send_to(channel_name, msg)
+                    .await
+                    .map_err(|e| match e {
+                        // A `Config` error (e.g. "unknown channel: X") is permanent:
+                        // the channel is not registered in this process and won't be
+                        // without a reconfigure. Map it to NoDispatcher so the runner
+                        // advances `last_fired` (anti-hot-loop) and stages the fire,
+                        // instead of re-firing every tick forever (the source of the
+                        // "unknown channel: desktop" 30s retry storm). Genuine
+                        // transient send failures stay `Dispatch` → retried.
+                        ChannelError::Config(_) => CronError::NoDispatcher,
+                        other => CronError::Dispatch(format!("channel send: {other}")),
+                    })?;
                 debug!(
                     target: "wcore_agent::cron",
                     channel = %channel_name,
