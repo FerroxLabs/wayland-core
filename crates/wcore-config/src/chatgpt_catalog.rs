@@ -15,16 +15,21 @@
 //! - Only a model whose id appears in the gating table for the *specific*
 //!   recognised plan tier is hidden.
 //!
-//! # Why the gating table is empty
+//! # Why the gating table is (almost) empty
 //!
 //! There is no authoritative entitled-model list anywhere in the OAuth token /
 //! claims (the JWT exposes only `chatgpt_plan_type`, a free-form string such as
-//! `"plus"` / `"pro"`), and the repository contains NO evidence grounding which
-//! Codex models a given plan tier may run. Per the #158 brief, a guessed
-//! whitelist must not ship. The mechanism is therefore wired end-to-end but seeds
-//! [`PLAN_GATED_MODELS`] EMPTY: today it hides nothing (byte-identical to the
-//! pre-#158 catalog for every tier), and a grounded entry can be added later
-//! without any code change — only data.
+//! `"plus"` / `"pro"`), and the repository contains NO evidence grounding most
+//! tier→model gating. Per the #158 brief, a guessed whitelist must not ship.
+//!
+//! The single grounded exception is the `-pro` model: `gpt-5.5-pro` needs a
+//! ChatGPT **Pro** subscription, so it is hidden for the one recognised paid
+//! tier we can prove cannot run it — `plus`. Every other tier (including
+//! unknown / `None` / `free`) still SHOWS it, and the reactive error
+//! (see [`is_model_available_for_plan`] callers in the provider) names the model
+//! and the plan when the backend rejects a model the plan cannot run. So the
+//! predictive hide here is a conservative single subtraction; the reactive
+//! fallback catches everything else.
 //!
 //! This module lives in `wcore-config` (the data / compat layer) rather than
 //! inline in provider code, per AGENTS.md "No Hardcoded Provider Quirks": the
@@ -42,8 +47,9 @@
 /// from the catalog *only* for an exact (case-insensitive) tier match.
 ///
 /// Add an entry ONLY with evidence that the named tier cannot run the named
-/// models. Absent evidence, leave this empty — showing a runnable model is the
-/// safe default; hiding one is the failure mode #158 forbids.
+/// models. Absent evidence, leave the model unlisted (shown) — showing a
+/// runnable model is the safe default; hiding one is the failure mode #158
+/// forbids.
 struct PlanGate {
     /// The `chatgpt_plan_type` claim value, lowercased (e.g. `"free"`).
     plan_tier: &'static str,
@@ -54,13 +60,21 @@ struct PlanGate {
 
 /// Conservative, evidence-grounded tier→unavailable-models table.
 ///
-/// EMPTY by design — see the module docs. No repo evidence grounds any
-/// tier→Codex-model gating, so shipping any entry here would be a guess, which
-/// #158 explicitly forbids. Populate only with grounded entries; the filter then
-/// activates with no further code change.
+/// One grounded entry: `gpt-5.5-pro` requires ChatGPT **Pro**, so it is hidden
+/// for the `plus` tier (the one recognised paid tier we can prove cannot run
+/// it). It is deliberately NOT listed for `free` — for free/unknown/None we
+/// still SHOW it and let the reactive backend error explain (the no-over-filter
+/// rule: over-filtering is the cardinal sin). Add further entries ONLY with the
+/// same kind of evidence; absent that, leave a model unlisted (shown) and rely
+/// on the reactive fallback.
 const PLAN_GATED_MODELS: &[PlanGate] = &[
-    // Example shape (commented out — NOT grounded, do not enable as-is):
-    // PlanGate { plan_tier: "free", gated_model_ids: &["gpt-5.5-pro"] },
+    // The `-pro` Codex model needs a ChatGPT Pro subscription; `plus` cannot run
+    // it. This is the one grounded gate — everything else is shown and the
+    // reactive fallback (clear error from the provider) catches the rest.
+    PlanGate {
+        plan_tier: "plus",
+        gated_model_ids: &["gpt-5.5-pro"],
+    },
 ];
 
 /// True iff `model_id` is available (runnable) on `plan_tier`.
@@ -87,8 +101,9 @@ pub fn is_model_available_for_plan(plan_tier: Option<&str>, model_id: &str) -> b
 ///
 /// `plan_tier` is the `chatgpt_plan_type` JWT claim (`None` when absent or
 /// undecodable). Preserves order; removes only *provably unavailable* models for
-/// a *recognised* tier. With the current empty [`PLAN_GATED_MODELS`] this is the
-/// identity function for every input — see the module docs.
+/// a *recognised* tier. With the current [`PLAN_GATED_MODELS`] this removes only
+/// `gpt-5.5-pro` for the `plus` tier; every other input is unchanged — see the
+/// module docs.
 ///
 /// Only the ChatGPT-OAuth-subscription provider must call this. The API-key
 /// OpenAI path and all other providers MUST NOT — their catalogs are unaffected.
@@ -150,30 +165,54 @@ mod tests {
     }
 
     #[test]
-    fn known_plan_with_empty_table_shows_full_catalog() {
-        // With the conservative empty gating table, even a "recognised"-looking
-        // tier hides nothing — the no-over-filter guarantee.
-        for plan in ["free", "plus", "pro", "team"] {
+    fn non_plus_paid_or_unknown_tiers_show_full_catalog() {
+        // The ONLY grounded gate is `plus` → hide `gpt-5.5-pro`. Every other
+        // tier — including the recognised Pro tiers and unknown strings — keeps
+        // the full catalog (no over-filter).
+        for plan in ["free", "pro", "team", "enterprise"] {
             let out = filter_model_ids(Some(plan), CATALOG);
-            assert_eq!(
-                out, CATALOG,
-                "plan {plan} must not filter while the gating table is empty"
-            );
+            assert_eq!(out, CATALOG, "plan {plan} must keep the full catalog");
         }
     }
 
     #[test]
+    fn plus_tier_hides_only_gpt_5_5_pro() {
+        // The grounded gate: `gpt-5.5-pro` requires ChatGPT Pro, so `plus`
+        // excludes it — but ALL other Codex models remain, in order.
+        let out = filter_model_ids(Some("plus"), CATALOG);
+        let expected: Vec<&str> = CATALOG
+            .iter()
+            .copied()
+            .filter(|m| *m != "gpt-5.5-pro")
+            .collect();
+        assert_eq!(out, expected, "plus hides only gpt-5.5-pro");
+        assert!(!out.contains(&"gpt-5.5-pro"));
+        assert!(out.contains(&"gpt-5.5"));
+    }
+
+    #[test]
     fn gating_is_conservative_and_data_driven() {
-        // The shipped table is empty, so nothing is gated for any tier/model.
+        // The one gate: `plus` cannot run `gpt-5.5-pro`.
         assert!(
-            is_model_available_for_plan(Some("free"), "gpt-5.5-pro"),
-            "shipped table is empty: nothing is gated"
+            !is_model_available_for_plan(Some("plus"), "gpt-5.5-pro"),
+            "plus is gated off gpt-5.5-pro"
         );
+        // Case-insensitive tier match — `PLUS` is the same gate.
+        assert!(!is_model_available_for_plan(Some("PLUS"), "gpt-5.5-pro"));
+        // free / unknown / None still SHOW gpt-5.5-pro (reactive fallback covers
+        // them — over-filtering is the cardinal sin).
+        assert!(is_model_available_for_plan(Some("free"), "gpt-5.5-pro"));
+        assert!(is_model_available_for_plan(
+            Some("enterprise"),
+            "gpt-5.5-pro"
+        ));
+        assert!(is_model_available_for_plan(None, "gpt-5.5-pro"));
+        // plus still shows every NON-pro model.
+        assert!(is_model_available_for_plan(Some("plus"), "gpt-5.5"));
+        assert!(is_model_available_for_plan(Some("plus"), "gpt-5.4-codex"));
         // Case-insensitive tier handling + unknown model = show.
         assert!(is_model_available_for_plan(Some("FREE"), "gpt-5.5"));
         assert!(is_model_available_for_plan(Some(""), "gpt-5.5"));
-        // Missing plan = show.
-        assert!(is_model_available_for_plan(None, "gpt-5.5-pro"));
     }
 
     #[test]
