@@ -24,6 +24,7 @@ tracing.workspace      = true
 dirs.workspace         = true
 url.workspace          = true
 base64.workspace       = true
+uuid.workspace         = true
 # aws_lc_rs CryptoProvider (NOT rust_crypto) so this crate's RS256 Vertex
 # service-account JWT *signing* never links the `rsa` crate (RUSTSEC-2023-0071).
 # Must be declared explicitly: previously this rode on wcore-channel-msteams's

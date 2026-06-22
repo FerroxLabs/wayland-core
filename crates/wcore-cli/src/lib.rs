@@ -97,3 +97,13 @@ pub mod provider_keys;
 // flow. Lives in the lib so the TOML CRUD is unit-testable against a
 // tempdir-backed config path.
 pub mod auth;
+
+// CLI surface: `wayland-core image` — FluxRouter image generation
+// (`POST /v1/images/generations`). Lives in the lib so credential
+// resolution + path numbering are unit-testable.
+pub mod image;
+
+// CLI surface: `wayland-core fetch` — FluxRouter web_fetch
+// (`POST /v1/fetch`). Lives in the lib so credential resolution is
+// unit-testable; reuses the same Flux key/base resolution as `image`.
+pub mod fetch;

@@ -477,6 +477,15 @@ impl OpenAIProvider {
                     retry_after_ms: crate::retry::resolve_retry_after_ms(&headers, &body_text),
                 });
             }
+            // FluxRouter folds its paid-only gating into the OpenAI-compatible
+            // 402 surface. Map the recognised codes to typed entitlement errors
+            // so the CLI can message a feature lock vs an account-needs-payment
+            // state distinctly; unrecognised 402s fall through to `Api`.
+            if status.as_u16() == 402
+                && let Some(err) = parse_flux_402(&body_text)
+            {
+                return Err(err);
+            }
             return Err(ProviderError::Api {
                 status: status.as_u16(),
                 message: body_text,
@@ -543,7 +552,19 @@ impl OpenAIProvider {
         }
         body[max_tokens_field] = json!(request.max_tokens);
 
-        if !request.tools.is_empty() {
+        // FluxRouter web_search grounding (contract §5.2 / §5.8). Grounding only
+        // fires when the model is a tier alias (the customer let Flux pick) AND
+        // no real function tools ride along (Sonar rejects tools — function tools
+        // SUPPRESS grounding). When the caller asked for `web_search` on a tier
+        // alias, prefer grounding semantics for the turn: emit ONLY the
+        // `{"type":"web_search"}` tool and drop any function tools. A concrete
+        // model id (or `web_search` unset) keeps the normal function-tool path —
+        // injecting the tool there would not ground and would only confuse the
+        // concrete model, so we skip it.
+        let ground_web_search = request.web_search && is_flux_tier_alias(&request.model);
+        if ground_web_search {
+            body["tools"] = json!([{ "type": "web_search" }]);
+        } else if !request.tools.is_empty() {
             body["tools"] = json!(Self::build_tools(&request.tools));
         }
 
@@ -866,6 +887,16 @@ struct StreamState {
     /// Deferred Done event: populated when finish_reason arrives, emitted on
     /// [DONE] so the final usage-only chunk has a chance to update token counts.
     pending_done: Option<LlmEvent>,
+    /// FluxRouter web_search grounding (contract §5.4). A grounded Sonar stream
+    /// carries `citations` (URL strings) and `search_results` (source cards) as
+    /// TOP-LEVEL fields on the streamed frames (alongside `choices`, NOT inside
+    /// `choices[].delta`). They may repeat across frames, so we accumulate +
+    /// dedupe here and emit a single `Citations` / `SearchResults` event at
+    /// end-of-stream. ⚠️ The EXACT streamed-frame placement is UNVERIFIED — the
+    /// contract documents the non-streaming body; a live `curl -N` capture must
+    /// confirm which frame(s) carry these (see `merge_flux_grounding`).
+    citations: Vec<String>,
+    search_results: Vec<wcore_types::llm::FluxSearchResult>,
 }
 
 impl StreamState {
@@ -876,6 +907,44 @@ impl StreamState {
             output_tokens: 0,
             cache_read_tokens: 0,
             pending_done: None,
+            citations: Vec::new(),
+            search_results: Vec::new(),
+        }
+    }
+
+    /// FluxRouter web_search grounding (contract §5.4): merge any TOP-LEVEL
+    /// `citations` / `search_results` arrays carried on a streamed frame into
+    /// the accumulator, de-duplicating. Citations dedupe on the URL string;
+    /// search results dedupe on `url`. Called per frame from `parse_sse_chunk`.
+    ///
+    /// ⚠️ UNVERIFIED frame placement: this reads the fields off the frame ROOT
+    /// (`json["citations"]` / `json["search_results"]`). If a live capture shows
+    /// Sonar nests them elsewhere on the streamed chunk, this is the single
+    /// one-line change point — adjust the two `json.get(...)` lookups.
+    fn merge_flux_grounding(&mut self, json: &Value) {
+        if let Some(cites) = json.get("citations").and_then(Value::as_array) {
+            for c in cites {
+                if let Some(url) = c.as_str()
+                    && !self.citations.iter().any(|existing| existing == url)
+                {
+                    self.citations.push(url.to_string());
+                }
+            }
+        }
+        if let Some(results) = json.get("search_results").and_then(Value::as_array) {
+            for r in results {
+                // Per-element: a malformed card is skipped, not fatal — grounding
+                // is best-effort metadata, never the turn's payload.
+                if let Ok(card) =
+                    serde_json::from_value::<wcore_types::llm::FluxSearchResult>(r.clone())
+                    && !self
+                        .search_results
+                        .iter()
+                        .any(|existing| existing.url == card.url && !card.url.is_empty())
+                {
+                    self.search_results.push(card);
+                }
+            }
         }
     }
 
@@ -1130,6 +1199,19 @@ pub(crate) async fn process_sse_stream(
             if let Some(data) = line.strip_prefix("data: ") {
                 dump_response_chunk(debug, data);
                 if data == "[DONE]" {
+                    // FluxRouter web_search grounding (contract §5.4): emit the
+                    // accumulated, deduped citations / source cards just before
+                    // the terminal Done, so a consumer renders the Sources block
+                    // after the answer text. Skipped when grounding never fired
+                    // (both empty), so non-Flux turns are unaffected.
+                    if !state.citations.is_empty() {
+                        let _ = tx.send(LlmEvent::Citations(state.citations.clone())).await;
+                    }
+                    if !state.search_results.is_empty() {
+                        let _ = tx
+                            .send(LlmEvent::SearchResults(state.search_results.clone()))
+                            .await;
+                    }
                     // Flush the deferred Done event now that the final
                     // usage-only chunk (choices:[]) has updated token counts.
                     if let Some(done) = state.flush_done() {
@@ -1304,6 +1386,13 @@ fn parse_sse_chunk(data: &str, state: &mut StreamState) -> Vec<LlmEvent> {
         events.push(LlmEvent::Error(msg));
         return events;
     }
+
+    // FluxRouter web_search grounding (contract §5.4): accumulate any top-level
+    // `citations` / `search_results` carried on THIS frame. Done before the
+    // `choices` extraction so a frame that carries grounding metadata but no
+    // choices (e.g. a final citations-only chunk) still contributes. The
+    // accumulated set is emitted once at end-of-stream (see `process_sse_stream`).
+    state.merge_flux_grounding(&json);
 
     // Extract usage if present
     if let Some(usage) = json.get("usage") {
@@ -1495,6 +1584,114 @@ pub(crate) fn map_openai_finish_reason(raw: &str) -> FinishReason {
     }
 }
 
+/// True when `model` is a FluxRouter **tier alias** — the only models on which
+/// `web_search` grounding fires (contract §5.2 / §5.8). A tier alias means the
+/// customer let Flux pick the upstream model; Flux then reroutes a grounded
+/// turn to Perplexity Sonar. A request naming a **concrete** model id (e.g.
+/// `gpt-5`, `kimi-k2-6`, `claude-*`) is treated as an explicit choice and is
+/// NOT rerouted, so attaching a web_search tool there would never ground.
+///
+/// Matched case-insensitively against the four documented aliases. This is the
+/// one place that quirk lives; callers consult it rather than string-matching
+/// inline.
+pub(crate) fn is_flux_tier_alias(model: &str) -> bool {
+    matches!(
+        model.to_ascii_lowercase().as_str(),
+        "flux-auto" | "flux-fast" | "flux-standard" | "flux-reasoning"
+    )
+}
+
+/// Parse a FluxRouter 402 body into a typed entitlement error.
+///
+/// Flux folds its paid-only gating into the OpenAI-compatible 402 surface and
+/// the body arrives in several shapes (contract §2 / §3.6 / §4.6 / §5.6):
+///
+/// - **image** `premium_locked`:
+///   `{"error":{"message":"image generation requires a paid plan","code":"premium_locked"}}`
+/// - **web_fetch** `upgrade_required`:
+///   `{"error":"upgrade_required","message":"web_fetch is a paid capability; ..."}`
+/// - **chat money-axis** `spend_ceiling_unresolved` — DOUBLY WRAPPED in the
+///   LiteLLM envelope: the outer `error.message` is a *stringified* JSON whose
+///   inner object is
+///   `{"error":"spend_ceiling_unresolved","reason":"no_account_id","message":"...","upgrade_url":"..."}`.
+///
+/// Strategy: read the recognised code/reason from BOTH the outer envelope
+/// (`error` may be a string code, or an object with `code`) AND, when the outer
+/// `message`/`error` is itself a JSON string, the inner object. Returns `None`
+/// for an unrecognised 402 so the caller falls back to [`ProviderError::Api`].
+pub(crate) fn parse_flux_402(body: &str) -> Option<ProviderError> {
+    let outer: Value = serde_json::from_str(body).ok()?;
+
+    // The inner (recovered) object, if the envelope double-wraps JSON in a
+    // string. Try the LiteLLM `error.message` first, then a top-level
+    // `error`/`message` that happens to be a stringified JSON object.
+    let inner: Option<Value> = outer
+        .get("error")
+        .and_then(|e| e.get("message"))
+        .and_then(Value::as_str)
+        .or_else(|| outer.get("error").and_then(Value::as_str))
+        .or_else(|| outer.get("message").and_then(Value::as_str))
+        .and_then(|s| serde_json::from_str::<Value>(s).ok())
+        .filter(Value::is_object);
+
+    // The recognised code can live in several spots; check inner first (it is
+    // the authoritative Flux body when present), then the outer envelope.
+    let code = inner
+        .as_ref()
+        .and_then(|v| v.get("error"))
+        .and_then(Value::as_str)
+        .or_else(|| {
+            outer
+                .get("error")
+                .and_then(|e| e.get("code"))
+                .and_then(Value::as_str)
+        })
+        .or_else(|| outer.get("error").and_then(Value::as_str))?;
+
+    // Human-readable message: prefer the most specific available.
+    let message = inner
+        .as_ref()
+        .and_then(|v| v.get("message"))
+        .and_then(Value::as_str)
+        .or_else(|| {
+            outer
+                .get("error")
+                .and_then(|e| e.get("message"))
+                .and_then(Value::as_str)
+        })
+        .or_else(|| outer.get("message").and_then(Value::as_str))
+        .unwrap_or(code)
+        .to_string();
+
+    match code {
+        "premium_locked" => Some(ProviderError::PremiumLocked {
+            capability: "image generation".to_string(),
+            message,
+        }),
+        "upgrade_required" => Some(ProviderError::UpgradeRequired { message }),
+        "spend_ceiling_unresolved" => {
+            let reason = inner
+                .as_ref()
+                .and_then(|v| v.get("reason"))
+                .and_then(Value::as_str)
+                .or_else(|| outer.get("reason").and_then(Value::as_str))
+                .unwrap_or("unknown")
+                .to_string();
+            let upgrade_url = inner
+                .as_ref()
+                .and_then(|v| v.get("upgrade_url"))
+                .and_then(Value::as_str)
+                .or_else(|| outer.get("upgrade_url").and_then(Value::as_str))
+                .map(str::to_string);
+            Some(ProviderError::SpendCeilingUnresolved {
+                reason,
+                upgrade_url,
+            })
+        }
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1502,6 +1699,163 @@ mod tests {
 
     fn no_compat() -> ProviderCompat {
         ProviderCompat::default()
+    }
+
+    // --- FluxRouter typed 402 / entitlement error parsing -----------------
+
+    /// image `premium_locked`: code lives in the envelope `error.code`, the
+    /// message in `error.message`. → `PremiumLocked`. (contract §2 / §3.6)
+    #[test]
+    fn parse_flux_402_premium_locked_image() {
+        let body = r#"{"error":{"message":"image generation requires a paid plan","code":"premium_locked"}}"#;
+        match parse_flux_402(body) {
+            Some(ProviderError::PremiumLocked {
+                capability,
+                message,
+            }) => {
+                assert_eq!(capability, "image generation");
+                assert_eq!(message, "image generation requires a paid plan");
+            }
+            other => panic!("expected PremiumLocked, got {other:?}"),
+        }
+    }
+
+    /// web_fetch `upgrade_required`: code is the top-level `error` STRING, the
+    /// message a sibling `message`. → `UpgradeRequired`. (contract §2 / §4.6)
+    #[test]
+    fn parse_flux_402_upgrade_required_fetch() {
+        let body = r#"{"error":"upgrade_required","message":"web_fetch is a paid capability; upgrade or clear a charge"}"#;
+        match parse_flux_402(body) {
+            Some(ProviderError::UpgradeRequired { message }) => {
+                assert_eq!(
+                    message,
+                    "web_fetch is a paid capability; upgrade or clear a charge"
+                );
+            }
+            other => panic!("expected UpgradeRequired, got {other:?}"),
+        }
+    }
+
+    /// money-axis chat gate `spend_ceiling_unresolved`, DOUBLY WRAPPED in the
+    /// LiteLLM envelope: outer `error.message` is a *stringified* JSON object.
+    /// The parser must recover the inner `error`/`reason`/`upgrade_url`. A
+    /// free/no-account chat returns exactly this. (contract §2 / §5.6)
+    #[test]
+    fn parse_flux_402_spend_ceiling_unresolved_double_wrapped() {
+        // The inner object, exactly as Flux emits it, stringified into the
+        // LiteLLM envelope's `error.message`.
+        let inner = r#"{"error":"spend_ceiling_unresolved","reason":"no_account_id","message":"This request requires a resolvable account spend ceiling. Add a payment method or contact billing@ferroxlabs.com.","upgrade_url":"https://fluxrouter.ai/home/billing"}"#;
+        let body = serde_json::json!({
+            "error": { "message": inner, "code": "402" }
+        })
+        .to_string();
+        match parse_flux_402(&body) {
+            Some(ProviderError::SpendCeilingUnresolved {
+                reason,
+                upgrade_url,
+            }) => {
+                assert_eq!(reason, "no_account_id");
+                assert_eq!(
+                    upgrade_url.as_deref(),
+                    Some("https://fluxrouter.ai/home/billing")
+                );
+            }
+            other => panic!("expected SpendCeilingUnresolved, got {other:?}"),
+        }
+    }
+
+    /// A `spend_ceiling_unresolved` body that is NOT double-wrapped (flat
+    /// top-level shape) must still parse — the parser reads inner-or-outer.
+    #[test]
+    fn parse_flux_402_spend_ceiling_unresolved_flat() {
+        let body = r#"{"error":"spend_ceiling_unresolved","reason":"no_account_id","message":"Add a payment method.","upgrade_url":"https://fluxrouter.ai/home/billing"}"#;
+        match parse_flux_402(body) {
+            Some(ProviderError::SpendCeilingUnresolved {
+                reason,
+                upgrade_url,
+            }) => {
+                assert_eq!(reason, "no_account_id");
+                assert_eq!(
+                    upgrade_url.as_deref(),
+                    Some("https://fluxrouter.ai/home/billing")
+                );
+            }
+            other => panic!("expected SpendCeilingUnresolved, got {other:?}"),
+        }
+    }
+
+    /// An unrecognised 402 (e.g. `price_exceeds_max_price`) returns `None` so
+    /// the caller falls back to the generic `ProviderError::Api`.
+    #[test]
+    fn parse_flux_402_unrecognized_returns_none() {
+        let body = r#"{"error":{"message":"final price exceeds max_price","code":"price_exceeds_max_price"}}"#;
+        assert!(parse_flux_402(body).is_none());
+    }
+
+    /// A non-JSON 402 body returns `None` (falls back to `Api`).
+    #[test]
+    fn parse_flux_402_non_json_returns_none() {
+        assert!(parse_flux_402("not json at all").is_none());
+    }
+
+    /// The typed variants render DISTINCT Display messages: the two feature
+    /// locks vs the account-needs-payment state must be separable by the CLI.
+    #[test]
+    fn flux_402_variants_render_distinct_messages() {
+        let locked = ProviderError::PremiumLocked {
+            capability: "image generation".into(),
+            message: "requires a paid plan".into(),
+        }
+        .to_string();
+        let upgrade = ProviderError::UpgradeRequired {
+            message: "web_fetch is paid".into(),
+        }
+        .to_string();
+        let spend = ProviderError::SpendCeilingUnresolved {
+            reason: "no_account_id".into(),
+            upgrade_url: Some("https://fluxrouter.ai/home/billing".into()),
+        }
+        .to_string();
+
+        // Feature locks read as a plan/upgrade requirement.
+        assert!(locked.contains("paid Flux plan"), "got: {locked}");
+        assert!(upgrade.contains("requires an upgrade"), "got: {upgrade}");
+        // The account state reads as "add a payment method" and surfaces the URL.
+        assert!(spend.contains("needs a payment method"), "got: {spend}");
+        assert!(
+            spend.contains("https://fluxrouter.ai/home/billing"),
+            "got: {spend}"
+        );
+        // The three messages are mutually distinct.
+        assert_ne!(locked, upgrade);
+        assert_ne!(locked, spend);
+        assert_ne!(upgrade, spend);
+    }
+
+    /// All three Flux 402 entitlement errors are terminal (not retryable):
+    /// retrying the same request on the same key 402s again.
+    #[test]
+    fn flux_402_errors_are_not_retryable() {
+        assert!(
+            !ProviderError::PremiumLocked {
+                capability: "image generation".into(),
+                message: String::new(),
+            }
+            .is_retryable()
+        );
+        assert!(
+            !ProviderError::UpgradeRequired {
+                message: String::new(),
+            }
+            .is_retryable()
+        );
+        assert!(
+            !ProviderError::SpendCeilingUnresolved {
+                reason: "no_account_id".into(),
+                upgrade_url: None,
+            }
+            .is_retryable()
+        );
     }
 
     // --- D008: live /model library — /v1/models parse + url derivation ----
@@ -1796,6 +2150,7 @@ mod tests {
             cache_tier: None,
             routing_hint: None,
             stop_sequences: Vec::new(),
+            web_search: false,
         };
         let body = provider.build_request_body(&req);
         assert_eq!(body["max_tokens"], 1024);
@@ -1825,6 +2180,7 @@ mod tests {
             cache_tier: None,
             routing_hint: None,
             stop_sequences: Vec::new(),
+            web_search: false,
         }
     }
 
@@ -1873,6 +2229,163 @@ mod tests {
         );
     }
 
+    // --- FluxRouter web_search grounding (contract §5) --------------------
+
+    /// The tier-alias guard accepts exactly the four documented aliases
+    /// (case-insensitive) and rejects concrete model ids (contract §5.2/§5.8).
+    #[test]
+    fn is_flux_tier_alias_accepts_only_the_four_aliases() {
+        for alias in ["flux-auto", "flux-fast", "flux-standard", "flux-reasoning"] {
+            assert!(is_flux_tier_alias(alias), "{alias} must be a tier alias");
+            assert!(
+                is_flux_tier_alias(&alias.to_uppercase()),
+                "{alias} must match case-insensitively"
+            );
+        }
+        for concrete in [
+            "gpt-5",
+            "kimi-k2-6",
+            "claude-sonnet-4",
+            "flux-pinned-sonar",
+            "",
+        ] {
+            assert!(
+                !is_flux_tier_alias(concrete),
+                "{concrete} must NOT be treated as a tier alias"
+            );
+        }
+    }
+
+    /// web_search on a tier-alias model injects the `{"type":"web_search"}`
+    /// tool and DROPS the function tools (function tools suppress grounding,
+    /// contract §5.8).
+    #[test]
+    fn web_search_injects_tool_on_tier_alias_and_drops_function_tools() {
+        let provider = stop_provider();
+        let mut req = stop_req();
+        req.model = "flux-auto".into();
+        req.web_search = true;
+        req.tools = vec![ToolDef {
+            name: "Read".into(),
+            description: "read a file".into(),
+            input_schema: json!({"type": "object"}),
+            deferred: false,
+        }];
+        let body = provider.build_request_body(&req);
+        let tools = body["tools"].as_array().expect("tools array present");
+        assert_eq!(tools.len(), 1, "only the web_search tool survives");
+        assert_eq!(tools[0]["type"], "web_search");
+        // The function tool must NOT be present (no `function` key anywhere).
+        assert!(
+            tools.iter().all(|t| t.get("function").is_none()),
+            "function tools must be dropped when grounding"
+        );
+    }
+
+    /// web_search on a CONCRETE model id does NOT inject the tool — grounding
+    /// would not fire there, so the normal function-tool path is preserved.
+    #[test]
+    fn web_search_absent_for_concrete_model() {
+        let provider = stop_provider();
+        let mut req = stop_req();
+        req.model = "gpt-4o".into();
+        req.web_search = true;
+        req.tools = vec![ToolDef {
+            name: "Read".into(),
+            description: "read a file".into(),
+            input_schema: json!({"type": "object"}),
+            deferred: false,
+        }];
+        let body = provider.build_request_body(&req);
+        let tools = body["tools"].as_array().expect("tools array present");
+        // The web_search tool must be ABSENT; the function tool is kept.
+        assert!(
+            tools.iter().all(|t| t["type"] != "web_search"),
+            "concrete model must not get a web_search tool"
+        );
+        assert!(
+            tools.iter().any(|t| t.get("function").is_some()),
+            "function tools are preserved on the concrete-model path"
+        );
+    }
+
+    /// web_search unset → no web_search tool even on a tier alias.
+    #[test]
+    fn web_search_unset_injects_nothing() {
+        let provider = stop_provider();
+        let mut req = stop_req();
+        req.model = "flux-auto".into();
+        req.web_search = false;
+        let body = provider.build_request_body(&req);
+        assert!(
+            body.get("tools").is_none(),
+            "no tools at all when web_search is off and no function tools given"
+        );
+    }
+
+    /// Contract §5.4: a synthetic streamed frame carrying TOP-LEVEL `citations`
+    /// / `search_results` (alongside `choices`) accumulates in StreamState and
+    /// emits `Citations` + `SearchResults` events when flushed at end-of-stream.
+    /// ⚠️ Frame placement here is the UNVERIFIED documented shape — see the
+    /// note on `StreamState::merge_flux_grounding`.
+    #[test]
+    fn parse_sse_chunk_accumulates_top_level_citations() {
+        let frame = json!({
+            "id": "x",
+            "object": "chat.completion.chunk",
+            "model": "perplexity/sonar",
+            "choices": [{ "index": 0, "delta": { "content": "JWST [1]" } }],
+            "citations": ["https://science.nasa.gov/jwst", "https://esawebb.org/news/"],
+            "search_results": [
+                { "title": "JWST", "url": "https://science.nasa.gov/jwst",
+                  "date": "2026-06-15", "snippet": "…", "source": "web" }
+            ]
+        })
+        .to_string();
+        let mut state = StreamState::new();
+        let _ = parse_sse_chunk(&frame, &mut state);
+        assert_eq!(state.citations.len(), 2);
+        assert_eq!(state.citations[0], "https://science.nasa.gov/jwst");
+        assert_eq!(state.search_results.len(), 1);
+        assert_eq!(state.search_results[0].title, "JWST");
+        assert_eq!(state.search_results[0].date.as_deref(), Some("2026-06-15"));
+    }
+
+    /// Citations / search_results repeated across frames are deduped: a second
+    /// frame re-sending the same URLs must not double them.
+    #[test]
+    fn parse_sse_chunk_dedupes_citations_across_frames() {
+        let frame = json!({
+            "choices": [],
+            "citations": ["https://a.example", "https://b.example"],
+            "search_results": [{ "title": "A", "url": "https://a.example", "snippet": "", "source": "web" }]
+        })
+        .to_string();
+        let mut state = StreamState::new();
+        let _ = parse_sse_chunk(&frame, &mut state);
+        let _ = parse_sse_chunk(&frame, &mut state);
+        assert_eq!(state.citations.len(), 2, "duplicate URLs collapse");
+        assert_eq!(
+            state.search_results.len(),
+            1,
+            "duplicate cards collapse on url"
+        );
+    }
+
+    /// A normal (ungrounded) frame leaves the grounding accumulators empty, so
+    /// non-Flux turns never emit Citations / SearchResults.
+    #[test]
+    fn parse_sse_chunk_ungrounded_frame_has_no_citations() {
+        let frame = json!({
+            "choices": [{ "index": 0, "delta": { "content": "hello" } }]
+        })
+        .to_string();
+        let mut state = StreamState::new();
+        let _ = parse_sse_chunk(&frame, &mut state);
+        assert!(state.citations.is_empty());
+        assert!(state.search_results.is_empty());
+    }
+
     #[test]
     fn test_max_tokens_field_custom() {
         let compat = ProviderCompat {
@@ -1892,6 +2405,7 @@ mod tests {
             cache_tier: None,
             routing_hint: None,
             stop_sequences: Vec::new(),
+            web_search: false,
         };
         let body = provider.build_request_body(&req);
         assert_eq!(body["max_completion_tokens"], 2048);
@@ -1926,6 +2440,7 @@ mod tests {
             cache_tier: None,
             routing_hint: None,
             stop_sequences: Vec::new(),
+            web_search: false,
         };
         let body = provider.build_request_body(&req);
         assert_eq!(body["max_completion_tokens"], 1024);
@@ -1956,6 +2471,7 @@ mod tests {
             cache_tier: None,
             routing_hint: None,
             stop_sequences: Vec::new(),
+            web_search: false,
         };
         let body = provider.build_request_body(&req);
         assert_eq!(body["max_tokens"], 1024);
@@ -1984,6 +2500,7 @@ mod tests {
             cache_tier: None,
             routing_hint: None,
             stop_sequences: Vec::new(),
+            web_search: false,
         };
         let body = provider.build_request_body(&req);
         assert!(
@@ -2012,6 +2529,7 @@ mod tests {
             cache_tier: None,
             routing_hint: None,
             stop_sequences: Vec::new(),
+            web_search: false,
         };
         let body = provider.build_request_body(&req);
         assert_eq!(body["reasoning_effort"], "medium");

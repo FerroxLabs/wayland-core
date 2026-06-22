@@ -64,6 +64,14 @@ pub struct LlmRequest {
     /// existing `..Default::default()` construction sites stay back-compatible
     /// and emit no stop field.
     pub stop_sequences: Vec<String>,
+    /// FluxRouter web_search grounding (contract §5). When `true`, the OpenAI
+    /// provider attaches a `{"type":"web_search"}` tool to the chat request so
+    /// Flux server-side-grounds the turn via Perplexity Sonar and streams back
+    /// `citations` / `search_results`. Grounding only fires on a **tier-alias**
+    /// model (`flux-auto` / `flux-fast` / `flux-standard` / `flux-reasoning`);
+    /// the provider skips injection for a concrete model id. `Default` is
+    /// `false`, so all existing construction sites stay ungrounded.
+    pub web_search: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -99,6 +107,35 @@ pub enum LlmEvent {
     },
     /// Error from the API
     Error(String),
+    /// FluxRouter web_search grounding (contract §5.4): the deduplicated set of
+    /// citation URL strings accumulated across the streamed Sonar frames, index-
+    /// aligned with the inline `[1]`/`[2]` markers in the answer text. Emitted
+    /// once at end-of-stream when grounding fired (empty otherwise → not sent).
+    Citations(Vec<String>),
+    /// FluxRouter web_search grounding (contract §5.4): the richer per-source
+    /// cards accompanying [`LlmEvent::Citations`]. Emitted once at end-of-stream.
+    SearchResults(Vec<FluxSearchResult>),
+}
+
+/// A single FluxRouter / Perplexity-Sonar web_search source card (contract
+/// §5.4). `date` / `last_updated` are frequently absent on a given result, so
+/// they deserialize as `None` rather than failing the whole array. `title`,
+/// `url`, `snippet`, and `source` default to empty strings when a result omits
+/// them (defensive — the live streamed shape is not yet captured).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct FluxSearchResult {
+    #[serde(default)]
+    pub title: String,
+    #[serde(default)]
+    pub url: String,
+    #[serde(default)]
+    pub date: Option<String>,
+    #[serde(default)]
+    pub last_updated: Option<String>,
+    #[serde(default)]
+    pub snippet: String,
+    #[serde(default)]
+    pub source: String,
 }
 
 #[cfg(test)]
@@ -208,6 +245,59 @@ mod tests {
     fn llm_request_default_has_empty_stop_sequences() {
         let req = LlmRequest::default();
         assert!(req.stop_sequences.is_empty());
+    }
+
+    #[test]
+    fn llm_request_default_has_web_search_false() {
+        let req = LlmRequest::default();
+        assert!(!req.web_search);
+    }
+
+    /// Contract §5.4: a full Sonar `search_results[]` element round-trips —
+    /// all six fields, including the optional `date`/`last_updated`.
+    #[test]
+    fn flux_search_result_full_round_trip() {
+        let raw = serde_json::json!({
+            "title": "JWST snaps a new image",
+            "url": "https://science.nasa.gov/jwst",
+            "date": "2026-06-15",
+            "last_updated": "2026-06-16",
+            "snippet": "The telescope captured…",
+            "source": "web"
+        });
+        let parsed: FluxSearchResult = serde_json::from_value(raw.clone()).unwrap();
+        assert_eq!(parsed.title, "JWST snaps a new image");
+        assert_eq!(parsed.url, "https://science.nasa.gov/jwst");
+        assert_eq!(parsed.date.as_deref(), Some("2026-06-15"));
+        assert_eq!(parsed.last_updated.as_deref(), Some("2026-06-16"));
+        assert_eq!(parsed.snippet, "The telescope captured…");
+        assert_eq!(parsed.source, "web");
+        // Re-serialize and re-parse to prove a clean round-trip.
+        let back: FluxSearchResult =
+            serde_json::from_value(serde_json::to_value(&parsed).unwrap()).unwrap();
+        assert_eq!(back, parsed);
+    }
+
+    /// Contract §5.4: `date`/`last_updated` are frequently absent on a given
+    /// result — a card missing them must deserialize with `None`, not error.
+    #[test]
+    fn flux_search_result_missing_optionals_defaults_to_none() {
+        let raw = serde_json::json!({
+            "title": "t", "url": "u", "snippet": "s", "source": "web"
+        });
+        let parsed: FluxSearchResult = serde_json::from_value(raw).unwrap();
+        assert!(parsed.date.is_none());
+        assert!(parsed.last_updated.is_none());
+        assert_eq!(parsed.url, "u");
+    }
+
+    #[test]
+    fn llm_event_citations_carries_urls() {
+        let event = LlmEvent::Citations(vec!["https://a.example".into()]);
+        match event {
+            LlmEvent::Citations(urls) => assert_eq!(urls, vec!["https://a.example".to_string()]),
+            _ => panic!("expected Citations"),
+        }
     }
 
     #[test]

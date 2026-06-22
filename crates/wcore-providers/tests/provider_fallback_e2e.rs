@@ -61,6 +61,7 @@ fn dummy_request() -> LlmRequest {
         cache_tier: None,
         routing_hint: None,
         stop_sequences: Vec::new(),
+        web_search: false,
     }
 }
 
