@@ -172,6 +172,101 @@ fn select_tier_model(
     compat.tier_model(tier).map(str::to_string)
 }
 
+/// Up-front output sizing (Layer 1). Returns the `max_tokens` to request so a
+/// normal turn finishes in ONE round, sized to the model's real output ceiling
+/// where known and clamped to the room left in the context window. This makes a
+/// generous `config_max` SAFE: a known model is clamped to what it actually
+/// allows (e.g. gpt-4o → 16384, never a 400), and an unknown model — an
+/// unlisted variant or a router alias like `flux-auto` whose served model is
+/// unknown per-request — is clamped to a conservative floor. `config_max` is the
+/// user's CAP and always binds; an explicit low value is respected.
+///
+/// `model` must be the FINAL model that will actually be sent — i.e. this is
+/// called AFTER the smart-routing tier swap (`request.model = tier_model`) so
+/// the clamp sees the post-swap model's real ceiling, never the pre-swap one.
+fn size_output_cap(config_max: u32, provider: &str, model: &str, est_input_tokens: usize) -> u32 {
+    /// Conservative cap for models with no known output ceiling. Safe for
+    /// essentially every modern model (gpt-4o is 16384). Never raised on
+    /// guesswork — that is what 400s.
+    const UNKNOWN_CAP: u32 = 8_192;
+    /// Headroom kept free in the window for prompt growth / safety margin.
+    const WINDOW_BUFFER: u32 = 512;
+
+    match wcore_config::limits::model_output_ceiling(provider, model) {
+        Some((out_ceiling, context_window)) => {
+            let est = u32::try_from(est_input_tokens).unwrap_or(u32::MAX);
+            let window_room = context_window
+                .saturating_sub(est)
+                .saturating_sub(WINDOW_BUFFER)
+                .max(1);
+            config_max.min(out_ceiling).min(window_room)
+        }
+        None => config_max.min(UNKNOWN_CAP),
+    }
+}
+
+#[cfg(test)]
+mod output_sizing_tests {
+    use super::size_output_cap;
+
+    #[test]
+    fn known_model_is_clamped_to_its_real_output_ceiling() {
+        // A generous config cap is clamped DOWN to the model's real ceiling,
+        // so a large default never 400s a model that allows less.
+        assert_eq!(
+            size_output_cap(64_000, "openai", "gpt-4o-mini", 1_000),
+            16_384,
+            "gpt-4o output ceiling binds"
+        );
+        assert_eq!(
+            size_output_cap(64_000, "anthropic", "claude-opus-4-7", 1_000),
+            32_000,
+            "opus 4.x output ceiling binds"
+        );
+        assert_eq!(
+            size_output_cap(64_000, "anthropic", "claude-sonnet-4-6", 1_000),
+            64_000,
+            "sonnet can use its full 64k"
+        );
+    }
+
+    #[test]
+    fn unknown_model_falls_back_to_conservative_cap_not_the_generous_default() {
+        // A router alias (served model unknown) must NOT receive the generous
+        // 64k — it could route to a small model and 400. Clamp to the floor.
+        assert_eq!(
+            size_output_cap(64_000, "flux-router", "flux-auto", 1_000),
+            8_192
+        );
+        assert_eq!(
+            size_output_cap(64_000, "ollama", "some-local-model", 1_000),
+            8_192
+        );
+    }
+
+    #[test]
+    fn explicit_low_user_cap_is_always_respected() {
+        // If the user sets a low max_tokens, it binds on known AND unknown.
+        assert_eq!(
+            size_output_cap(4_000, "anthropic", "claude-opus-4-7", 1_000),
+            4_000
+        );
+        assert_eq!(
+            size_output_cap(4_000, "flux-router", "flux-auto", 1_000),
+            4_000
+        );
+    }
+
+    #[test]
+    fn near_context_limit_input_shrinks_the_output_cap() {
+        // When the prompt nearly fills the window, the remaining room binds
+        // below the model's output ceiling (prevents an input+output overflow).
+        let cap = size_output_cap(64_000, "anthropic", "claude-opus-4-7", 199_000);
+        assert!(cap < 32_000, "window room must bind near the context limit");
+        assert!(cap >= 1, "never zero or negative");
+    }
+}
+
 /// v0.9.1.1 B6 — true when `reason` is an HTTP 4xx (client) error from
 /// a provider. The engine retries 5xx + network drops + truncated
 /// streams (real chance the next attempt succeeds), but a 4xx — the
@@ -3696,6 +3791,21 @@ impl AgentEngine {
                     effective_model = tier_model;
                 }
             }
+
+            // Up-front output sizing (Layer 1). Clamp `max_tokens` to the FINAL
+            // model's real output ceiling. Placed AFTER the smart-routing tier
+            // swap above so it sees `request.model` post-swap: a tier-swapped
+            // cheaper model is clamped to ITS ceiling, never over-asked at the
+            // premium model's. A known model is clamped to what it actually
+            // allows (so the generous default never 400s); an unknown/router
+            // model is clamped to a conservative floor. `self.max_tokens` is the
+            // user's CAP and always binds.
+            request.max_tokens = size_output_cap(
+                self.max_tokens,
+                self.compat.provider_type(),
+                &request.model,
+                input_token_estimate,
+            );
 
             // AUDIT A3 / E-C2 — bounded stream-level retry loop.
             //
