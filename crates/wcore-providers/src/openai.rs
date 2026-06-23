@@ -3,7 +3,7 @@ use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
-use reqwest::header::{AUTHORIZATION, CONTENT_TYPE, HeaderMap, HeaderValue};
+use reqwest::header::{AUTHORIZATION, CONTENT_TYPE, HeaderMap, HeaderName, HeaderValue};
 use serde_json::{Value, json};
 use tokio::sync::mpsc;
 
@@ -133,6 +133,44 @@ impl OpenAIProvider {
         headers.insert(AUTHORIZATION, auth);
         headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
         Ok(headers)
+    }
+
+    /// #282 contract V1 — append the Core→Flux context-aware-routing request
+    /// headers to `headers`, but ONLY when this turn targets a Flux **tier
+    /// alias** (`flux-auto`/`flux-fast`/`flux-standard`/`flux-reasoning`). A
+    /// concrete model id opts OUT (the customer pinned the upstream), so non-Flux
+    /// and concrete-model requests are left byte-for-byte unchanged.
+    ///
+    /// `OpenAIProvider` is shared by every OpenAI-compatible provider; the
+    /// `is_flux_tier_alias` gate is the one place that quirk lives, so the
+    /// headers can never leak onto a non-Flux deployment.
+    ///
+    /// Emits (all `x-wl-*`):
+    /// - `x-wl-context-tokens`  — assembled-prompt token estimate (skipped if absent)
+    /// - `x-wl-expected-output` — the output budget (`request.max_tokens`)
+    /// - `x-wl-context-managed` — literal `true` (opts into the managed path)
+    /// - `x-wl-conversation-id` — stable conversation id (skipped if absent)
+    fn apply_flux_context_headers(headers: &mut HeaderMap, request: &LlmRequest) {
+        if !is_flux_tier_alias(&request.model) {
+            return;
+        }
+        if let Some(tokens) = request.client_context_tokens
+            && let Ok(v) = HeaderValue::from_str(&tokens.to_string())
+        {
+            headers.insert(HeaderName::from_static("x-wl-context-tokens"), v);
+        }
+        if let Ok(v) = HeaderValue::from_str(&request.max_tokens.to_string()) {
+            headers.insert(HeaderName::from_static("x-wl-expected-output"), v);
+        }
+        headers.insert(
+            HeaderName::from_static("x-wl-context-managed"),
+            HeaderValue::from_static("true"),
+        );
+        if let Some(id) = request.conversation_id.as_deref()
+            && let Ok(v) = HeaderValue::from_str(id)
+        {
+            headers.insert(HeaderName::from_static("x-wl-conversation-id"), v);
+        }
     }
 
     fn build_messages(messages: &[Message], system: &str, compat: &ProviderCompat) -> Vec<Value> {
@@ -447,15 +485,15 @@ impl OpenAIProvider {
         body: &Value,
         key: &str,
         using_bearer: bool,
+        request: &LlmRequest,
     ) -> Result<reqwest::Response, ProviderError> {
         let url = self.url_for(base_url, use_responses);
-        let response = builder_send_with_retry(
-            self.client
-                .post(&url)
-                .headers(self.build_headers(key)?)
-                .json(body),
-        )
-        .await?;
+        // #282: attach the Core→Flux context-routing headers (gated to Flux
+        // tier aliases inside the helper); non-Flux requests are unchanged.
+        let mut headers = self.build_headers(key)?;
+        Self::apply_flux_context_headers(&mut headers, request);
+        let response =
+            builder_send_with_retry(self.client.post(&url).headers(headers).json(body)).await?;
 
         let status = response.status();
         if !status.is_success() {
@@ -483,6 +521,15 @@ impl OpenAIProvider {
             // state distinctly; unrecognised 402s fall through to `Api`.
             if status.as_u16() == 402
                 && let Some(err) = parse_flux_402(&body_text)
+            {
+                return Err(err);
+            }
+            // #282 contract V1: a managed Flux client that overflows the routed
+            // model's window gets a typed 409 `context_overflow`. Surface it as
+            // a typed error so the engine can compact-then-retry this same turn;
+            // an unrecognised 409 body falls through to the generic `Api` error.
+            if status.as_u16() == 409
+                && let Some(err) = parse_flux_409(&body_text)
             {
                 return Err(err);
             }
@@ -1027,7 +1074,7 @@ impl LlmProvider for OpenAIProvider {
 
         let primary = self.effective_base_url();
         let response = match self
-            .try_send(&primary, use_responses, &body, &key, using_bearer)
+            .try_send(&primary, use_responses, &body, &key, using_bearer, request)
             .await
         {
             Ok(resp) => resp,
@@ -1050,7 +1097,7 @@ impl LlmProvider for OpenAIProvider {
                     .clone()
                     .expect("is_some_and guarantees Some");
                 let resp = self
-                    .try_send(&fallback, use_responses, &body, &key, using_bearer)
+                    .try_send(&fallback, use_responses, &body, &key, using_bearer, request)
                     .await?;
                 self.pin_base_url(&fallback);
                 resp
@@ -1061,7 +1108,18 @@ impl LlmProvider for OpenAIProvider {
         let (tx, rx) = mpsc::channel(64);
         let debug = self.debug.clone();
 
+        // #282 contract V1: Flux SIGNALS-BACK via `x-flux-*` response headers on
+        // every response. Read them BEFORE `response` is moved into the body
+        // task (and before `bytes_stream()` consumes it), then emit a single
+        // `ProviderMeta` event at stream start. Non-Flux providers send none of
+        // these headers, so the parse yields `None` and nothing is emitted —
+        // the SSE body path is entirely unchanged.
+        let provider_meta = parse_flux_response_meta(response.headers());
+
         tokio::spawn(async move {
+            if let Some(meta) = provider_meta {
+                let _ = tx.send(meta).await;
+            }
             let result = if use_responses {
                 process_responses_sse_stream(response, &tx, &debug).await
             } else {
@@ -1602,7 +1660,7 @@ pub(crate) fn map_openai_finish_reason(raw: &str) -> FinishReason {
 /// Matched case-insensitively against the four documented aliases. This is the
 /// one place that quirk lives; callers consult it rather than string-matching
 /// inline.
-pub(crate) fn is_flux_tier_alias(model: &str) -> bool {
+pub fn is_flux_tier_alias(model: &str) -> bool {
     matches!(
         model.to_ascii_lowercase().as_str(),
         "flux-auto" | "flux-fast" | "flux-standard" | "flux-reasoning"
@@ -1698,6 +1756,79 @@ pub(crate) fn parse_flux_402(body: &str) -> Option<ProviderError> {
         }
         _ => None,
     }
+}
+
+/// Parse a FluxRouter 409 `context_overflow` body into a typed
+/// [`ProviderError::ContextOverflow`] (#282 contract V1, hard-overflow path).
+///
+/// The frozen body shape is a FLAT object whose `error` FIELD is the literal
+/// `"context_overflow"`:
+/// ```json
+/// {"error":"context_overflow","required_tokens":N,"model_window":M,
+///  "routed_model":"…","message":"…"}
+/// ```
+/// We match on the `error` FIELD (never the HTTP status alone, never a substring
+/// of the message) so an unrelated 409 cannot be misread as an overflow. Returns
+/// `None` when the body is not JSON, not the overflow shape, or is missing the
+/// numeric fields — the caller then falls back to [`ProviderError::Api`].
+pub(crate) fn parse_flux_409(body: &str) -> Option<ProviderError> {
+    let obj: Value = serde_json::from_str(body).ok()?;
+    if obj.get("error").and_then(Value::as_str)? != "context_overflow" {
+        return None;
+    }
+    let required_tokens = obj.get("required_tokens").and_then(Value::as_u64)?;
+    let model_window = obj.get("model_window").and_then(Value::as_u64)?;
+    let routed_model = obj
+        .get("routed_model")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string();
+    let message = obj
+        .get("message")
+        .and_then(Value::as_str)
+        .unwrap_or("context overflow")
+        .to_string();
+    Some(ProviderError::ContextOverflow {
+        required_tokens,
+        model_window,
+        routed_model,
+        message,
+    })
+}
+
+/// Parse the FluxRouter SIGNALS-BACK `x-flux-*` response headers (#282 contract
+/// V1) into a single [`LlmEvent::ProviderMeta`]. Returns `None` only when NONE
+/// of the four headers is present (a non-Flux provider), so the engine emits
+/// nothing on those routes. Each field is parsed independently — an absent or
+/// unparsable single header is `None`, never an error.
+///
+/// Headers:
+/// - `x-flux-routed-model`           → `routed_model`     (str)
+/// - `x-flux-model-window`           → `model_window`     (int)
+/// - `x-flux-context-pressure`       → `context_pressure` (float, REQUIRED/window)
+/// - `x-flux-context-tokens-counted` → `tokens_counted`   (int)
+fn parse_flux_response_meta(headers: &HeaderMap) -> Option<LlmEvent> {
+    let as_str = |name: &str| headers.get(name).and_then(|v| v.to_str().ok());
+    let routed_model = as_str("x-flux-routed-model").map(str::to_string);
+    let model_window = as_str("x-flux-model-window").and_then(|s| s.parse::<u64>().ok());
+    let context_pressure = as_str("x-flux-context-pressure").and_then(|s| s.parse::<f32>().ok());
+    let tokens_counted =
+        as_str("x-flux-context-tokens-counted").and_then(|s| s.parse::<u64>().ok());
+
+    // No Flux signal present at all → nothing to emit (non-Flux response).
+    if routed_model.is_none()
+        && model_window.is_none()
+        && context_pressure.is_none()
+        && tokens_counted.is_none()
+    {
+        return None;
+    }
+    Some(LlmEvent::ProviderMeta {
+        routed_model,
+        model_window,
+        context_pressure,
+        tokens_counted,
+    })
 }
 
 #[cfg(test)]
@@ -1804,6 +1935,136 @@ mod tests {
     #[test]
     fn parse_flux_402_non_json_returns_none() {
         assert!(parse_flux_402("not json at all").is_none());
+    }
+
+    // --- #282 FluxRouter typed 409 context_overflow parsing ----------------
+
+    /// A well-formed `context_overflow` body parses into the typed variant with
+    /// every field recovered (contract V1 hard-overflow path).
+    #[test]
+    fn parse_flux_409_context_overflow_full() {
+        let body = r#"{"error":"context_overflow","required_tokens":210000,"model_window":200000,"routed_model":"claude-sonnet-4","message":"prompt exceeds routed model window"}"#;
+        match parse_flux_409(body) {
+            Some(ProviderError::ContextOverflow {
+                required_tokens,
+                model_window,
+                routed_model,
+                message,
+            }) => {
+                assert_eq!(required_tokens, 210_000);
+                assert_eq!(model_window, 200_000);
+                assert_eq!(routed_model, "claude-sonnet-4");
+                assert_eq!(message, "prompt exceeds routed model window");
+            }
+            other => panic!("expected ContextOverflow, got {other:?}"),
+        }
+    }
+
+    /// We match on the `error` FIELD, never the status. A 409 whose `error` is
+    /// something else returns `None` so it falls through to the generic `Api`.
+    #[test]
+    fn parse_flux_409_wrong_error_value_returns_none() {
+        let body = r#"{"error":"conflict","required_tokens":1,"model_window":2,"routed_model":"x","message":"y"}"#;
+        assert!(parse_flux_409(body).is_none());
+    }
+
+    /// A `context_overflow` body missing the numeric fields is not the frozen
+    /// shape → `None` (fall back to `Api`), never a partial/zeroed variant.
+    #[test]
+    fn parse_flux_409_missing_numeric_fields_returns_none() {
+        let body = r#"{"error":"context_overflow","message":"oops"}"#;
+        assert!(parse_flux_409(body).is_none());
+    }
+
+    /// A malformed JSON 409 body returns `None`.
+    #[test]
+    fn parse_flux_409_non_json_returns_none() {
+        assert!(parse_flux_409("not json at all").is_none());
+    }
+
+    /// `ContextOverflow` is NOT provider-retryable: the unchanged request would
+    /// overflow again. The engine resolves it via compaction + an explicit
+    /// single retry, so the generic retry/backoff loop must skip it.
+    #[test]
+    fn context_overflow_is_not_retryable() {
+        let err = ProviderError::ContextOverflow {
+            required_tokens: 210_000,
+            model_window: 200_000,
+            routed_model: "claude-sonnet-4".into(),
+            message: "overflow".into(),
+        };
+        assert!(!err.is_retryable());
+    }
+
+    // --- #282 Flux SIGNALS-BACK x-flux-* response header parsing -----------
+
+    /// All four `x-flux-*` headers present → a fully-populated `ProviderMeta`.
+    #[test]
+    fn parse_flux_response_meta_full() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            HeaderName::from_static("x-flux-routed-model"),
+            HeaderValue::from_static("claude-sonnet-4"),
+        );
+        headers.insert(
+            HeaderName::from_static("x-flux-model-window"),
+            HeaderValue::from_static("200000"),
+        );
+        headers.insert(
+            HeaderName::from_static("x-flux-context-pressure"),
+            HeaderValue::from_static("0.42"),
+        );
+        headers.insert(
+            HeaderName::from_static("x-flux-context-tokens-counted"),
+            HeaderValue::from_static("84000"),
+        );
+        match parse_flux_response_meta(&headers) {
+            Some(LlmEvent::ProviderMeta {
+                routed_model,
+                model_window,
+                context_pressure,
+                tokens_counted,
+            }) => {
+                assert_eq!(routed_model.as_deref(), Some("claude-sonnet-4"));
+                assert_eq!(model_window, Some(200_000));
+                assert_eq!(context_pressure, Some(0.42));
+                assert_eq!(tokens_counted, Some(84_000));
+            }
+            other => panic!("expected ProviderMeta, got {other:?}"),
+        }
+    }
+
+    /// A non-Flux response (NONE of the headers) yields `None`, so the engine
+    /// emits nothing on non-Flux routes.
+    #[test]
+    fn parse_flux_response_meta_absent_returns_none() {
+        let headers = HeaderMap::new();
+        assert!(parse_flux_response_meta(&headers).is_none());
+    }
+
+    /// A partial signal (only the window) still emits a `ProviderMeta`; the
+    /// missing fields are `None`, never a parse error.
+    #[test]
+    fn parse_flux_response_meta_partial_window_only() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            HeaderName::from_static("x-flux-model-window"),
+            HeaderValue::from_static("128000"),
+        );
+        match parse_flux_response_meta(&headers) {
+            Some(LlmEvent::ProviderMeta {
+                routed_model,
+                model_window,
+                context_pressure,
+                tokens_counted,
+            }) => {
+                assert_eq!(model_window, Some(128_000));
+                assert!(routed_model.is_none());
+                assert!(context_pressure.is_none());
+                assert!(tokens_counted.is_none());
+            }
+            other => panic!("expected ProviderMeta, got {other:?}"),
+        }
     }
 
     /// The typed variants render DISTINCT Display messages: the two feature
@@ -2159,6 +2420,8 @@ mod tests {
             routing_hint: None,
             stop_sequences: Vec::new(),
             web_search: false,
+            conversation_id: None,
+            client_context_tokens: None,
         };
         let body = provider.build_request_body(&req);
         assert_eq!(body["max_tokens"], 1024);
@@ -2189,6 +2452,8 @@ mod tests {
             routing_hint: None,
             stop_sequences: Vec::new(),
             web_search: false,
+            conversation_id: None,
+            client_context_tokens: None,
         }
     }
 
@@ -2262,6 +2527,81 @@ mod tests {
                 "{concrete} must NOT be treated as a tier alias"
             );
         }
+    }
+
+    // --- #282 Core→Flux context-routing request headers -------------------
+
+    /// On a Flux **tier alias** the x-wl-* context-routing headers are emitted:
+    /// context tokens + expected output (= max_tokens) + the literal managed
+    /// opt-in + the conversation id. (#282 contract V1, emit side.)
+    #[test]
+    fn flux_context_headers_emitted_for_tier_alias() {
+        let mut req = stop_req();
+        req.model = "flux-auto".into();
+        req.max_tokens = 4096;
+        req.conversation_id = Some("conv-abc".into());
+        req.client_context_tokens = Some(123_456);
+
+        let mut headers = HeaderMap::new();
+        OpenAIProvider::apply_flux_context_headers(&mut headers, &req);
+
+        assert_eq!(
+            headers.get("x-wl-context-tokens").unwrap(),
+            "123456",
+            "context tokens header carries the assembled-prompt estimate"
+        );
+        assert_eq!(
+            headers.get("x-wl-expected-output").unwrap(),
+            "4096",
+            "expected-output header carries request.max_tokens"
+        );
+        assert_eq!(
+            headers.get("x-wl-context-managed").unwrap(),
+            "true",
+            "managed opt-in is the literal `true`"
+        );
+        assert_eq!(headers.get("x-wl-conversation-id").unwrap(), "conv-abc");
+    }
+
+    /// A CONCRETE model id (the customer pinned the upstream) opts OUT: NONE of
+    /// the x-wl-* headers are emitted, so non-Flux / pinned requests are
+    /// byte-for-byte unchanged. (#282 gating proof.)
+    #[test]
+    fn flux_context_headers_absent_for_concrete_model() {
+        let mut req = stop_req();
+        req.model = "gpt-4o".into();
+        req.conversation_id = Some("conv-abc".into());
+        req.client_context_tokens = Some(123_456);
+
+        let mut headers = HeaderMap::new();
+        OpenAIProvider::apply_flux_context_headers(&mut headers, &req);
+
+        assert!(headers.get("x-wl-context-tokens").is_none());
+        assert!(headers.get("x-wl-expected-output").is_none());
+        assert!(headers.get("x-wl-context-managed").is_none());
+        assert!(headers.get("x-wl-conversation-id").is_none());
+        assert!(
+            headers.is_empty(),
+            "a concrete-model request must carry no x-wl-* headers at all"
+        );
+    }
+
+    /// When the optional values are absent the header is SKIPPED (not emitted
+    /// empty), but the always-present managed opt-in + expected-output remain.
+    #[test]
+    fn flux_context_headers_skip_absent_optionals() {
+        let mut req = stop_req();
+        req.model = "flux-reasoning".into();
+        req.conversation_id = None;
+        req.client_context_tokens = None;
+
+        let mut headers = HeaderMap::new();
+        OpenAIProvider::apply_flux_context_headers(&mut headers, &req);
+
+        assert!(headers.get("x-wl-context-tokens").is_none());
+        assert!(headers.get("x-wl-conversation-id").is_none());
+        assert_eq!(headers.get("x-wl-context-managed").unwrap(), "true");
+        assert!(headers.get("x-wl-expected-output").is_some());
     }
 
     /// web_search on a tier-alias model injects the `{"type":"web_search"}`
@@ -2452,6 +2792,8 @@ mod tests {
             routing_hint: None,
             stop_sequences: Vec::new(),
             web_search: false,
+            conversation_id: None,
+            client_context_tokens: None,
         };
         let body = provider.build_request_body(&req);
         assert_eq!(body["max_completion_tokens"], 2048);
@@ -2487,6 +2829,8 @@ mod tests {
             routing_hint: None,
             stop_sequences: Vec::new(),
             web_search: false,
+            conversation_id: None,
+            client_context_tokens: None,
         };
         let body = provider.build_request_body(&req);
         assert_eq!(body["max_completion_tokens"], 1024);
@@ -2518,6 +2862,8 @@ mod tests {
             routing_hint: None,
             stop_sequences: Vec::new(),
             web_search: false,
+            conversation_id: None,
+            client_context_tokens: None,
         };
         let body = provider.build_request_body(&req);
         assert_eq!(body["max_tokens"], 1024);
@@ -2547,6 +2893,8 @@ mod tests {
             routing_hint: None,
             stop_sequences: Vec::new(),
             web_search: false,
+            conversation_id: None,
+            client_context_tokens: None,
         };
         let body = provider.build_request_body(&req);
         assert!(
@@ -2576,6 +2924,8 @@ mod tests {
             routing_hint: None,
             stop_sequences: Vec::new(),
             web_search: false,
+            conversation_id: None,
+            client_context_tokens: None,
         };
         let body = provider.build_request_body(&req);
         assert_eq!(body["reasoning_effort"], "medium");

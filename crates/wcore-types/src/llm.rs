@@ -72,6 +72,20 @@ pub struct LlmRequest {
     /// the provider skips injection for a concrete model id. `Default` is
     /// `false`, so all existing construction sites stay ungrounded.
     pub web_search: bool,
+    /// #282 contract V1: stable, per-session conversation id for Flux sticky
+    /// routing. Emitted as the `x-wl-conversation-id` request header ONLY on a
+    /// Flux tier-alias request; `None` (the default) skips the header, so all
+    /// existing `..Default::default()` construction sites stay back-compatible.
+    /// Minted once at engine construction with a v4 UUID and threaded onto every
+    /// request the engine builds.
+    pub conversation_id: Option<String>,
+    /// #282 contract V1: the full assembled-prompt token estimate for this turn
+    /// (system + tools + messages), as computed by the engine before the stream
+    /// call. Emitted as the `x-wl-context-tokens` request header ONLY on a Flux
+    /// tier-alias request; `None` (the default) skips the header. Kept as an
+    /// `Option` so providers/tests that don't supply an estimate stay
+    /// back-compatible via `..Default::default()`.
+    pub client_context_tokens: Option<u64>,
 }
 
 #[derive(Debug, Clone)]
@@ -115,6 +129,23 @@ pub enum LlmEvent {
     /// FluxRouter web_search grounding (contract §5.4): the richer per-source
     /// cards accompanying [`LlmEvent::Citations`]. Emitted once at end-of-stream.
     SearchResults(Vec<FluxSearchResult>),
+    /// #282 contract V1 — Flux SIGNALS-BACK response metadata, parsed from the
+    /// `x-flux-*` response headers and emitted ONCE at stream start (before any
+    /// text deltas). Every field is `Option` because a non-Flux provider never
+    /// sends these headers, so a missing/unparsable header is `None` rather than
+    /// a stream error. Consumed by the engine to reconcile the #255 context
+    /// gauge against the REAL served-model window and to stash live context
+    /// pressure for future scheduling (#280).
+    ProviderMeta {
+        /// `x-flux-routed-model` — the upstream model Flux actually routed to.
+        routed_model: Option<String>,
+        /// `x-flux-model-window` — the routed model's context window (tokens).
+        model_window: Option<u64>,
+        /// `x-flux-context-pressure` — `0.0..=1.0` = required / window.
+        context_pressure: Option<f32>,
+        /// `x-flux-context-tokens-counted` — Flux's own count of the prompt.
+        tokens_counted: Option<u64>,
+    },
 }
 
 /// A single FluxRouter / Perplexity-Sonar web_search source card (contract

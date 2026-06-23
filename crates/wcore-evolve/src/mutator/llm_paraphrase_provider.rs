@@ -137,6 +137,8 @@ impl LlmParaphraseProvider {
             routing_hint: None,
             stop_sequences: Vec::new(),
             web_search: false,
+            conversation_id: None,
+            client_context_tokens: None,
         }
     }
 
@@ -214,7 +216,8 @@ async fn collect_text(
             LlmEvent::ThinkingDelta(_)
             | LlmEvent::ToolUse { .. }
             | LlmEvent::Citations(_)
-            | LlmEvent::SearchResults(_) => {}
+            | LlmEvent::SearchResults(_)
+            | LlmEvent::ProviderMeta { .. } => {}
         }
     }
     Err(LlmParaphraseError::StreamEndedEarly)

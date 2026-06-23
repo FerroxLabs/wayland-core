@@ -174,6 +174,9 @@ fn classify_by_provider_error(err: &ProviderError) -> FailoverReason {
         // compact/route-to-larger-context-model, NOT swap provider. Per the
         // FailoverReason taxonomy doc at the top of this module.
         ProviderError::PromptTooLong(_) => FailoverReason::ContextOverflow,
+        // Flux 409 context_overflow — same recovery as PromptTooLong: compact
+        // and retry on the same provider, never swap.
+        ProviderError::ContextOverflow { .. } => FailoverReason::ContextOverflow,
         ProviderError::Connection(_) => FailoverReason::Timeout,
         ProviderError::Parse(_) => FailoverReason::Format,
         ProviderError::Http(_) => FailoverReason::Timeout,

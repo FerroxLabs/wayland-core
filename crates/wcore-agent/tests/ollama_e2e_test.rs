@@ -104,6 +104,8 @@ async fn ollama_provider_streams_text_delta_and_done() {
         routing_hint: None,
         stop_sequences: Vec::new(),
         web_search: false,
+        conversation_id: None,
+        client_context_tokens: None,
     };
 
     let mut rx = provider
@@ -225,6 +227,8 @@ async fn ollama_provider_maps_length_done_reason() {
         routing_hint: None,
         stop_sequences: Vec::new(),
         web_search: false,
+        conversation_id: None,
+        client_context_tokens: None,
     };
     let mut rx = provider.stream(&request).await.unwrap();
     while let Some(event) = rx.recv().await {
@@ -267,6 +271,8 @@ async fn ollama_provider_5xx_surfaces_as_api_error() {
         routing_hint: None,
         stop_sequences: Vec::new(),
         web_search: false,
+        conversation_id: None,
+        client_context_tokens: None,
     };
     let err = provider.stream(&request).await.unwrap_err();
     match err {
@@ -309,6 +315,8 @@ async fn ollama_live_smoke() {
         routing_hint: None,
         stop_sequences: Vec::new(),
         web_search: false,
+        conversation_id: None,
+        client_context_tokens: None,
     };
     let mut rx = provider.stream(&request).await.expect("ollama stream");
     let mut text = String::new();
