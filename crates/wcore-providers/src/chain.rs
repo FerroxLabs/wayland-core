@@ -54,6 +54,9 @@ fn is_chain_retryable(e: &ProviderError) -> bool {
         ProviderError::Parse(_) => false,
         // Request too large — won't shrink on a different provider
         ProviderError::PromptTooLong(_) => false,
+        // Flux 409 context_overflow — recovery is compact-then-retry on the
+        // SAME provider (the engine drives it), never failover. Terminal here.
+        ProviderError::ContextOverflow { .. } => false,
         // Missing credential is a config error the user must fix; failing over
         // would only mask it. Terminal.
         ProviderError::MissingApiKey => false,
