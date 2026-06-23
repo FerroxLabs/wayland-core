@@ -216,7 +216,8 @@ async fn collect_text(
             LlmEvent::ThinkingDelta(_)
             | LlmEvent::ToolUse { .. }
             | LlmEvent::Citations(_)
-            | LlmEvent::SearchResults(_) => {}
+            | LlmEvent::SearchResults(_)
+            | LlmEvent::ProviderMeta { .. } => {}
         }
     }
     Err(LlmParaphraseError::StreamEndedEarly)

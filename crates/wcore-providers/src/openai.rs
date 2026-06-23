@@ -1108,7 +1108,18 @@ impl LlmProvider for OpenAIProvider {
         let (tx, rx) = mpsc::channel(64);
         let debug = self.debug.clone();
 
+        // #282 contract V1: Flux SIGNALS-BACK via `x-flux-*` response headers on
+        // every response. Read them BEFORE `response` is moved into the body
+        // task (and before `bytes_stream()` consumes it), then emit a single
+        // `ProviderMeta` event at stream start. Non-Flux providers send none of
+        // these headers, so the parse yields `None` and nothing is emitted —
+        // the SSE body path is entirely unchanged.
+        let provider_meta = parse_flux_response_meta(response.headers());
+
         tokio::spawn(async move {
+            if let Some(meta) = provider_meta {
+                let _ = tx.send(meta).await;
+            }
             let result = if use_responses {
                 process_responses_sse_stream(response, &tx, &debug).await
             } else {
@@ -1649,7 +1660,7 @@ pub(crate) fn map_openai_finish_reason(raw: &str) -> FinishReason {
 /// Matched case-insensitively against the four documented aliases. This is the
 /// one place that quirk lives; callers consult it rather than string-matching
 /// inline.
-pub(crate) fn is_flux_tier_alias(model: &str) -> bool {
+pub fn is_flux_tier_alias(model: &str) -> bool {
     matches!(
         model.to_ascii_lowercase().as_str(),
         "flux-auto" | "flux-fast" | "flux-standard" | "flux-reasoning"
@@ -1782,6 +1793,41 @@ pub(crate) fn parse_flux_409(body: &str) -> Option<ProviderError> {
         model_window,
         routed_model,
         message,
+    })
+}
+
+/// Parse the FluxRouter SIGNALS-BACK `x-flux-*` response headers (#282 contract
+/// V1) into a single [`LlmEvent::ProviderMeta`]. Returns `None` only when NONE
+/// of the four headers is present (a non-Flux provider), so the engine emits
+/// nothing on those routes. Each field is parsed independently — an absent or
+/// unparsable single header is `None`, never an error.
+///
+/// Headers:
+/// - `x-flux-routed-model`           → `routed_model`     (str)
+/// - `x-flux-model-window`           → `model_window`     (int)
+/// - `x-flux-context-pressure`       → `context_pressure` (float, REQUIRED/window)
+/// - `x-flux-context-tokens-counted` → `tokens_counted`   (int)
+fn parse_flux_response_meta(headers: &HeaderMap) -> Option<LlmEvent> {
+    let as_str = |name: &str| headers.get(name).and_then(|v| v.to_str().ok());
+    let routed_model = as_str("x-flux-routed-model").map(str::to_string);
+    let model_window = as_str("x-flux-model-window").and_then(|s| s.parse::<u64>().ok());
+    let context_pressure = as_str("x-flux-context-pressure").and_then(|s| s.parse::<f32>().ok());
+    let tokens_counted =
+        as_str("x-flux-context-tokens-counted").and_then(|s| s.parse::<u64>().ok());
+
+    // No Flux signal present at all → nothing to emit (non-Flux response).
+    if routed_model.is_none()
+        && model_window.is_none()
+        && context_pressure.is_none()
+        && tokens_counted.is_none()
+    {
+        return None;
+    }
+    Some(LlmEvent::ProviderMeta {
+        routed_model,
+        model_window,
+        context_pressure,
+        tokens_counted,
     })
 }
 
@@ -1948,6 +1994,77 @@ mod tests {
             message: "overflow".into(),
         };
         assert!(!err.is_retryable());
+    }
+
+    // --- #282 Flux SIGNALS-BACK x-flux-* response header parsing -----------
+
+    /// All four `x-flux-*` headers present → a fully-populated `ProviderMeta`.
+    #[test]
+    fn parse_flux_response_meta_full() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            HeaderName::from_static("x-flux-routed-model"),
+            HeaderValue::from_static("claude-sonnet-4"),
+        );
+        headers.insert(
+            HeaderName::from_static("x-flux-model-window"),
+            HeaderValue::from_static("200000"),
+        );
+        headers.insert(
+            HeaderName::from_static("x-flux-context-pressure"),
+            HeaderValue::from_static("0.42"),
+        );
+        headers.insert(
+            HeaderName::from_static("x-flux-context-tokens-counted"),
+            HeaderValue::from_static("84000"),
+        );
+        match parse_flux_response_meta(&headers) {
+            Some(LlmEvent::ProviderMeta {
+                routed_model,
+                model_window,
+                context_pressure,
+                tokens_counted,
+            }) => {
+                assert_eq!(routed_model.as_deref(), Some("claude-sonnet-4"));
+                assert_eq!(model_window, Some(200_000));
+                assert_eq!(context_pressure, Some(0.42));
+                assert_eq!(tokens_counted, Some(84_000));
+            }
+            other => panic!("expected ProviderMeta, got {other:?}"),
+        }
+    }
+
+    /// A non-Flux response (NONE of the headers) yields `None`, so the engine
+    /// emits nothing on non-Flux routes.
+    #[test]
+    fn parse_flux_response_meta_absent_returns_none() {
+        let headers = HeaderMap::new();
+        assert!(parse_flux_response_meta(&headers).is_none());
+    }
+
+    /// A partial signal (only the window) still emits a `ProviderMeta`; the
+    /// missing fields are `None`, never a parse error.
+    #[test]
+    fn parse_flux_response_meta_partial_window_only() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            HeaderName::from_static("x-flux-model-window"),
+            HeaderValue::from_static("128000"),
+        );
+        match parse_flux_response_meta(&headers) {
+            Some(LlmEvent::ProviderMeta {
+                routed_model,
+                model_window,
+                context_pressure,
+                tokens_counted,
+            }) => {
+                assert_eq!(model_window, Some(128_000));
+                assert!(routed_model.is_none());
+                assert!(context_pressure.is_none());
+                assert!(tokens_counted.is_none());
+            }
+            other => panic!("expected ProviderMeta, got {other:?}"),
+        }
     }
 
     /// The typed variants render DISTINCT Display messages: the two feature

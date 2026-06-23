@@ -1316,6 +1316,15 @@ pub struct AgentEngine {
     /// the `x-wl-conversation-id` request header on tier-alias turns. Survives
     /// `/clear` and `/resume` so a continued session keeps routing affinity.
     conversation_id: String,
+    /// #282 contract V1: the REAL context window of the model Flux routed the
+    /// LAST turn to (`x-flux-model-window`). `None` until Flux signals back.
+    /// Used to reconcile the #255 pre-flight overflow guard against the actual
+    /// served-model window instead of the pre-route guess.
+    flux_served_window: Option<u64>,
+    /// #282 contract V1: the LAST-seen Flux context pressure
+    /// (`x-flux-context-pressure`, `0.0..=1.0` = required / window). Captured
+    /// for future #280 pressure-driven scheduling; not yet acted upon.
+    flux_context_pressure: Option<f32>,
 }
 
 impl Drop for AgentEngine {
@@ -1570,6 +1579,9 @@ impl AgentEngine {
             pending_hook_actions: Vec::new(),
             // #282: mint the stable Flux conversation id once per engine.
             conversation_id: uuid::Uuid::new_v4().to_string(),
+            // #282: no Flux signal-back seen yet at construction.
+            flux_served_window: None,
+            flux_context_pressure: None,
         }
     }
 
@@ -1735,6 +1747,9 @@ impl AgentEngine {
             // #282: mint the stable Flux conversation id once per engine. A
             // resumed session gets a fresh id (sticky routing is best-effort).
             conversation_id: uuid::Uuid::new_v4().to_string(),
+            // #282: no Flux signal-back seen yet at construction.
+            flux_served_window: None,
+            flux_context_pressure: None,
         }
     }
 
@@ -3809,12 +3824,21 @@ impl AgentEngine {
             // to the old `window > 0` skip; `size_output_cap`'s UNKNOWN_CAP and
             // the provider 400 are the backstops.
             {
-                let ctx = wcore_config::context_window::ContextWindow::resolve(
+                let mut ctx = wcore_config::context_window::ContextWindow::resolve(
                     input_token_estimate as u64,
                     self.compat.provider_type(),
                     &request.model,
                     self.compact_config.context_window as u64,
                 );
+                // #282 contract V1: once Flux has SIGNALLED-BACK the real served
+                // window (`x-flux-model-window`) on a prior turn of THIS Flux
+                // route, prefer it over the alias's pre-route guess so the guard
+                // measures against the model that will actually serve the turn.
+                if wcore_providers::is_flux_tier_alias(&request.model)
+                    && let Some(window) = self.flux_served_window
+                {
+                    ctx.window = Some(window);
+                }
                 if let Some(ceiling) = ctx.input_ceiling(
                     self.compact_config.output_reserve as u64,
                     self.compact_config.emergency_buffer as u64,
@@ -4038,6 +4062,38 @@ impl AgentEngine {
                         }
                         LlmEvent::SearchResults(results) => {
                             grounding_search_results = results;
+                        }
+                        LlmEvent::ProviderMeta {
+                            routed_model,
+                            model_window,
+                            context_pressure,
+                            tokens_counted,
+                        } => {
+                            // #282 contract V1: Flux SIGNALS-BACK. Capture the
+                            // pressure for future #280 scheduling (not yet acted
+                            // on) and the REAL served-model window so the #255
+                            // overflow guard measures against the model that
+                            // actually served this turn, not the pre-route guess.
+                            self.flux_context_pressure = context_pressure;
+                            self.flux_served_window = model_window;
+                            if let Some(window) = model_window {
+                                // Reconcile the #255 gauge through the kernel:
+                                // recompute the active-window fraction against the
+                                // REAL served window. `tokens_counted` is Flux's
+                                // own prompt count when present; fall back to our
+                                // pre-flight estimate otherwise.
+                                let used = tokens_counted.unwrap_or(input_token_estimate as u64);
+                                let ctx = wcore_config::context_window::ContextWindow {
+                                    used_tokens: used,
+                                    window: Some(window),
+                                };
+                                if let Some(pct) = ctx.percent() {
+                                    let routed = routed_model.as_deref().unwrap_or("flux-routed");
+                                    self.output.emit_info(&format!(
+                                        "Flux routed to {routed} ({pct}% of {window}-token window)"
+                                    ));
+                                }
+                            }
                         }
                     }
                 }
@@ -7384,6 +7440,8 @@ mod set_config_tests {
             web_search: false,
             pending_hook_actions: Vec::new(),
             conversation_id: String::new(),
+            flux_served_window: None,
+            flux_context_pressure: None,
         }
     }
 
@@ -8202,6 +8260,8 @@ mod phase6_tests {
             web_search: false,
             pending_hook_actions: Vec::new(),
             conversation_id: String::new(),
+            flux_served_window: None,
+            flux_context_pressure: None,
         }
     }
 
@@ -8487,6 +8547,8 @@ mod compact_tests {
             web_search: false,
             pending_hook_actions: Vec::new(),
             conversation_id: String::new(),
+            flux_served_window: None,
+            flux_context_pressure: None,
         }
     }
 
@@ -9647,6 +9709,8 @@ mod plan_mode_tests {
             web_search: false,
             pending_hook_actions: Vec::new(),
             conversation_id: String::new(),
+            flux_served_window: None,
+            flux_context_pressure: None,
         }
     }
 
@@ -10065,6 +10129,8 @@ mod hook_integration_tests {
             web_search: false,
             pending_hook_actions: Vec::new(),
             conversation_id: String::new(),
+            flux_served_window: None,
+            flux_context_pressure: None,
         }
     }
 
@@ -10774,6 +10840,8 @@ mod approval_bridge_engine_tests {
             web_search: false,
             pending_hook_actions: Vec::new(),
             conversation_id: String::new(),
+            flux_served_window: None,
+            flux_context_pressure: None,
         }
     }
 
@@ -10997,6 +11065,8 @@ mod user_model_writeback_tests {
             web_search: false,
             pending_hook_actions: Vec::new(),
             conversation_id: String::new(),
+            flux_served_window: None,
+            flux_context_pressure: None,
         }
     }
 
@@ -13199,6 +13269,156 @@ mod ijfw_session_start_e2e_tests {
         assert!(
             engine.messages.is_empty(),
             "an unmapped plugin must contribute no prelude"
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// #282 contract V1 — engine compact-and-retry on a Flux 409 context_overflow.
+//
+// A managed Flux client that overflows the routed window gets a typed
+// `ProviderError::ContextOverflow` from `provider.stream()`. The engine must
+// run ONE compaction pass and retry the SAME turn EXACTLY ONCE: a transient
+// overflow recovers, a persistent one terminates cleanly (no infinite loop).
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod overflow_retry_tests {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use async_trait::async_trait;
+    use wcore_config::config::{Config, ProviderType};
+    use wcore_providers::{LlmProvider, ProviderError};
+    use wcore_tools::registry::ToolRegistry;
+    use wcore_types::llm::{LlmEvent, LlmRequest};
+    use wcore_types::message::{FinishReason, StopReason, TokenUsage};
+
+    use crate::output::OutputSink;
+
+    struct NullOutput;
+    impl OutputSink for NullOutput {
+        fn emit_text_delta(&self, _: &str, _: &str) {}
+        fn emit_thinking(&self, _: &str, _: &str) {}
+        fn emit_tool_call(&self, _: &str, _: &str) {}
+        fn emit_tool_result(&self, _: &str, _: bool, _: &str) {}
+        fn emit_stream_start(&self, _: &str) {}
+        fn emit_stream_end(
+            &self,
+            _: &str,
+            _: usize,
+            _: u64,
+            _: u64,
+            _: u64,
+            _: u64,
+            _: FinishReason,
+        ) {
+        }
+        fn emit_error(&self, _: &str, _: bool) {}
+        fn emit_info(&self, _: &str) {}
+    }
+
+    /// A provider that returns `ContextOverflow` for its first `overflow_for`
+    /// `stream()` calls, then a clean one-line turn. The shared call counter
+    /// lets a test assert EXACTLY how many times the engine dispatched.
+    struct OverflowProvider {
+        calls: Arc<AtomicUsize>,
+        overflow_for: usize,
+    }
+
+    #[async_trait]
+    impl LlmProvider for OverflowProvider {
+        async fn stream(
+            &self,
+            _request: &LlmRequest,
+        ) -> Result<tokio::sync::mpsc::Receiver<LlmEvent>, ProviderError> {
+            let n = self.calls.fetch_add(1, Ordering::SeqCst);
+            if n < self.overflow_for {
+                return Err(ProviderError::ContextOverflow {
+                    required_tokens: 210_000,
+                    model_window: 200_000,
+                    routed_model: "claude-sonnet-4".into(),
+                    message: "prompt exceeds routed window".into(),
+                });
+            }
+            let (tx, rx) = tokio::sync::mpsc::channel(2);
+            tokio::spawn(async move {
+                let _ = tx.send(LlmEvent::TextDelta("ok".into())).await;
+                let _ = tx
+                    .send(LlmEvent::Done {
+                        stop_reason: StopReason::EndTurn,
+                        finish_reason: FinishReason::Stop,
+                        usage: TokenUsage::default(),
+                    })
+                    .await;
+            });
+            Ok(rx)
+        }
+    }
+
+    fn flux_config() -> Config {
+        Config {
+            provider_label: "flux-router".into(),
+            provider: ProviderType::FluxRouter,
+            api_key: "sk-flux-test".into(),
+            base_url: "http://localhost:0".into(),
+            model: "flux-auto".into(),
+            max_tokens: 1024,
+            max_turns: Some(1),
+            ..Default::default()
+        }
+    }
+
+    /// A SINGLE overflow recovers: the engine compacts and retries once, the
+    /// retry succeeds, and `run` returns Ok. The provider is dispatched exactly
+    /// twice (the overflowing attempt + the recovered retry).
+    #[tokio::test]
+    async fn single_overflow_compacts_and_retries_then_succeeds() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let provider = OverflowProvider {
+            calls: Arc::clone(&calls),
+            overflow_for: 1,
+        };
+        let mut engine = super::AgentEngine::new_with_provider(
+            Arc::new(provider),
+            flux_config(),
+            ToolRegistry::new(),
+            Arc::new(NullOutput),
+        );
+        let result = engine.run("hello", "m-overflow-ok").await;
+        assert!(result.is_ok(), "a single overflow must recover: {result:?}");
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            2,
+            "exactly one overflow-retry: one failed dispatch + one recovered"
+        );
+    }
+
+    /// A PERSISTENT overflow terminates: the engine retries exactly ONCE, and
+    /// when the retry still overflows it surfaces a terminal error instead of
+    /// looping forever. The provider is dispatched exactly twice.
+    #[tokio::test]
+    async fn persistent_overflow_retries_once_then_terminal_error() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let provider = OverflowProvider {
+            calls: Arc::clone(&calls),
+            overflow_for: usize::MAX,
+        };
+        let mut engine = super::AgentEngine::new_with_provider(
+            Arc::new(provider),
+            flux_config(),
+            ToolRegistry::new(),
+            Arc::new(NullOutput),
+        );
+        let result = engine.run("hello", "m-overflow-loop").await;
+        assert!(
+            result.is_err(),
+            "a persistent overflow must terminate, not loop"
+        );
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            2,
+            "the overflow-retry is bounded to ONE: one initial + one retry, then terminal"
         );
     }
 }

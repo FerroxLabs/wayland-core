@@ -129,6 +129,23 @@ pub enum LlmEvent {
     /// FluxRouter web_search grounding (contract §5.4): the richer per-source
     /// cards accompanying [`LlmEvent::Citations`]. Emitted once at end-of-stream.
     SearchResults(Vec<FluxSearchResult>),
+    /// #282 contract V1 — Flux SIGNALS-BACK response metadata, parsed from the
+    /// `x-flux-*` response headers and emitted ONCE at stream start (before any
+    /// text deltas). Every field is `Option` because a non-Flux provider never
+    /// sends these headers, so a missing/unparsable header is `None` rather than
+    /// a stream error. Consumed by the engine to reconcile the #255 context
+    /// gauge against the REAL served-model window and to stash live context
+    /// pressure for future scheduling (#280).
+    ProviderMeta {
+        /// `x-flux-routed-model` — the upstream model Flux actually routed to.
+        routed_model: Option<String>,
+        /// `x-flux-model-window` — the routed model's context window (tokens).
+        model_window: Option<u64>,
+        /// `x-flux-context-pressure` — `0.0..=1.0` = required / window.
+        context_pressure: Option<f32>,
+        /// `x-flux-context-tokens-counted` — Flux's own count of the prompt.
+        tokens_counted: Option<u64>,
+    },
 }
 
 /// A single FluxRouter / Perplexity-Sonar web_search source card (contract
