@@ -259,6 +259,411 @@ fn activate_for_launch_impl(args: impl Iterator<Item = String>) {
     }
 }
 
+// ===========================================================================
+// Phase 2: profile management control plane (CRUD + active-pointer writers +
+// export/import). EVERYTHING that reads OR writes the `active` pointer lives in
+// this file (D2 single-reader/writer lint); the CLI calls these helpers and
+// never touches the pointer file directly.
+// ===========================================================================
+
+/// Errors from profile management operations (CRUD, pointer writes,
+/// export/import). Distinct from [`ProfileError`] (pure name validation) because
+/// these wrap I/O — so this type is intentionally NOT `PartialEq`/`Eq`. A name
+/// problem surfaces through the `#[from] ProfileError` variant.
+#[derive(Debug, Error)]
+pub enum ProfileOpError {
+    /// The supplied name failed validation (C6); forwarded from
+    /// [`validate_profile_name`].
+    #[error(transparent)]
+    Name(#[from] ProfileError),
+
+    /// A profile with this (case-folded) name already exists on disk.
+    #[error("profile {0:?} already exists")]
+    AlreadyExists(String),
+
+    /// No profile with this (case-folded) name exists on disk.
+    #[error("profile {0:?} does not exist")]
+    NotFound(String),
+
+    /// An import/adopt source path escaped its expected root (path traversal,
+    /// absolute escape, or zip-slip-style `..`). C6 / SECURITY.
+    #[error("refusing unsafe path {path:?}: {reason}")]
+    UnsafePath { path: String, reason: &'static str },
+
+    /// Underlying filesystem error, tagged with the operation for context.
+    #[error("{op} failed: {source}")]
+    Io {
+        op: &'static str,
+        #[source]
+        source: std::io::Error,
+    },
+}
+
+impl ProfileOpError {
+    fn io(op: &'static str) -> impl FnOnce(std::io::Error) -> ProfileOpError {
+        move |source| ProfileOpError::Io { op, source }
+    }
+}
+
+/// Secret-bearing entries inside a profile home that must NEVER be exported
+/// (without an explicit opt-in) nor copied by `create --base`. Matched against
+/// each top-level entry's file name: an exact match for a directory (`oauth`)
+/// or a `credentials.*` / exact `credentials` prefix match for files. Keep this
+/// the single source of truth for "what is a secret in a profile home".
+const SECRET_DIR_NAMES: &[&str] = &["oauth"];
+const SECRET_FILE_PREFIX: &str = "credentials";
+
+/// Decide whether a top-level entry name within a profile home is a secret that
+/// the default (secret-excluding) export/copy path must skip. Directories named
+/// `oauth/` and any `credentials*` file (`credentials.toml`, `credentials.enc`,
+/// `credentials.kdf.json`) are secrets.
+///
+/// Assumption: secrets live at the profile-home ROOT (true today —
+/// `credentials*` resolves under `wayland_config_dir()` == `WAYLAND_HOME` and
+/// `oauth/` under `profile_home()` when a profile is active). The export filter
+/// only special-cases the top level; if the credential/oauth layout ever nests
+/// (e.g. `providers/<x>/credentials.toml`), update this set AND the copy depth
+/// handling together.
+fn is_secret_entry(file_name: &str) -> bool {
+    if SECRET_DIR_NAMES.contains(&file_name) {
+        return true;
+    }
+    // `credentials` exact, or `credentials.<ext>` — but NOT e.g.
+    // `credentials-notes` (defensive: only the dotted family is a secret).
+    file_name == SECRET_FILE_PREFIX
+        || file_name
+            .strip_prefix(SECRET_FILE_PREFIX)
+            .is_some_and(|rest| rest.starts_with('.'))
+}
+
+// --- active-pointer writers / display reader (D2: must live HERE) ----------
+
+/// Public, display-only reader of the active-profile name (e.g. for `profile
+/// list` / `profile show` to mark the active row). This is the ONLY sanctioned
+/// way for the CLI to learn the active profile WITHOUT touching the pointer file
+/// — the single-reader lint (`tests/active_pointer_single_reader_test.rs`) bans
+/// pointer access outside this module, so list/show call this instead. Returns
+/// the trimmed, case-folded name, or `None` if unset/empty/unreadable. Does NOT
+/// verify the profile still exists on disk (callers can cross-check against
+/// [`list_profiles`]); a dangling pointer is reported verbatim so the user can
+/// see and repair it.
+#[must_use]
+pub fn active_profile_name() -> Option<String> {
+    read_active_pointer().map(|n| n.to_ascii_lowercase())
+}
+
+/// Set the active profile by atomically writing its (validated, case-folded)
+/// name to [`active_pointer_path`]. The profile MUST already exist on disk
+/// (`profile set` does not create). Uses temp-file + rename ([`atomic_write`]),
+/// so a crash mid-write can never leave a half-written pointer that would
+/// mis-route the next launch (C2 / SECURITY: atomic pointer writes).
+///
+/// Errors: [`ProfileOpError::Name`] for an invalid name, [`NotFound`] if the
+/// profile directory is absent, [`Io`] on write failure.
+///
+/// [`NotFound`]: ProfileOpError::NotFound
+pub fn set_active_profile(name: &str) -> Result<(), ProfileOpError> {
+    let dir = profile_dir(name)?; // validates + case-folds
+    if !dir.is_dir() {
+        return Err(ProfileOpError::NotFound(name.to_ascii_lowercase()));
+    }
+    let lower = name.to_ascii_lowercase();
+    let ptr = active_pointer_path();
+    if let Some(parent) = ptr.parent() {
+        std::fs::create_dir_all(parent).map_err(ProfileOpError::io("create profiles root"))?;
+    }
+    // Newline-terminated to match what activation tolerates (read_active_pointer
+    // trims) and what a human `cat` expects.
+    crate::atomic_write(&ptr, format!("{lower}\n").as_bytes())
+        .map_err(ProfileOpError::io("write active pointer"))
+}
+
+/// Clear the active pointer (remove the file). Used when the active profile is
+/// deleted or renamed away, so the next launch falls through to the default
+/// home rather than chasing a dangling name. Removing a non-existent pointer is
+/// a no-op success (idempotent). Re-pointing on rename uses
+/// [`set_active_profile`] instead.
+pub fn clear_active_profile() -> Result<(), ProfileOpError> {
+    let ptr = active_pointer_path();
+    match std::fs::remove_file(&ptr) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(ProfileOpError::Io {
+            op: "clear active pointer",
+            source: e,
+        }),
+    }
+}
+
+/// True iff `name` is currently the active profile (case-folded compare). Reads
+/// the pointer via [`active_profile_name`] (the sanctioned display reader), so
+/// the CLI can refuse to delete/rename the active profile without `--force`
+/// without itself touching the pointer file.
+#[must_use]
+pub fn is_active(name: &str) -> bool {
+    match validate_profile_name(name) {
+        Ok(()) => active_profile_name().as_deref() == Some(name.to_ascii_lowercase().as_str()),
+        Err(_) => false,
+    }
+}
+
+// --- enumeration / existence ----------------------------------------------
+
+/// Enumerate the profiles under [`profiles_root`], sorted ascending. Returns the
+/// on-disk (already-lowercase) directory names that pass [`validate_profile_name`].
+/// Skips: the `active` pointer file, any non-directory entry, and any entry whose
+/// name fails validation (defensive — a manually-created junk dir never surfaces
+/// as a usable profile). A missing root yields an empty list, not an error.
+#[must_use]
+pub fn list_profiles() -> Vec<String> {
+    let root = profiles_root();
+    let Ok(entries) = std::fs::read_dir(&root) else {
+        return Vec::new();
+    };
+    let mut names: Vec<String> = entries
+        .flatten()
+        .filter(|e| e.file_type().is_ok_and(|t| t.is_dir()))
+        .filter_map(|e| e.file_name().into_string().ok())
+        .filter(|name| validate_profile_name(name).is_ok())
+        .collect();
+    names.sort();
+    names
+}
+
+/// True iff a profile directory for `name` exists (validated + case-folded). A
+/// validation failure returns `false` (an invalid name can have no profile).
+#[must_use]
+pub fn profile_exists(name: &str) -> bool {
+    match profile_dir(name) {
+        Ok(dir) => dir.is_dir(),
+        Err(_) => false,
+    }
+}
+
+// --- create / rename / delete ---------------------------------------------
+
+/// Create a new, empty profile directory under [`profiles_root`] and return its
+/// path. Errors with [`ProfileOpError::AlreadyExists`] if one is already there.
+///
+/// If `base` is supplied, it must name an existing profile; a `profile.toml`
+/// recording `base = "<base>"` is written inside the new dir. Inheritance is
+/// RESOLVED LATER (Phase 3) — create NEVER copies any state, and in particular
+/// never copies credentials or `oauth/` (SECURITY). The marker file is the only
+/// content written.
+pub fn create_profile(name: &str, base: Option<&str>) -> Result<PathBuf, ProfileOpError> {
+    let dir = profile_dir(name)?; // validates + case-folds
+    if dir.exists() {
+        return Err(ProfileOpError::AlreadyExists(name.to_ascii_lowercase()));
+    }
+    // Validate the base name (and its existence) BEFORE creating anything, so a
+    // bad --base leaves no half-made profile behind.
+    let base_lower = match base {
+        Some(b) => {
+            let base_dir = profile_dir(b)?;
+            if !base_dir.is_dir() {
+                return Err(ProfileOpError::NotFound(b.to_ascii_lowercase()));
+            }
+            Some(b.to_ascii_lowercase())
+        }
+        None => None,
+    };
+
+    std::fs::create_dir_all(&dir).map_err(ProfileOpError::io("create profile dir"))?;
+
+    if let Some(base_lower) = base_lower {
+        // Minimal, hand-written TOML — no serde round-trip needed for one key,
+        // and the base name is already validated (ASCII [A-Za-z0-9._-]) so it
+        // needs no TOML string escaping.
+        let marker = format!("base = \"{base_lower}\"\n");
+        crate::atomic_write(dir.join("profile.toml"), marker.as_bytes())
+            .map_err(ProfileOpError::io("write profile.toml"))?;
+    }
+    Ok(dir)
+}
+
+/// Rename a profile directory `old` → `new`. Both names are validated and
+/// case-folded. Errors: [`NotFound`] if `old` is absent, [`AlreadyExists`] if
+/// `new` is taken. On a same-name case-only rename (`work` → `Work`, identical
+/// on-disk path) this is a no-op success. If the active pointer currently names
+/// `old`, it is re-pointed to `new` (so the active selection follows the rename).
+///
+/// Non-atomicity: the directory move and the pointer re-point are two steps. If
+/// the pointer write fails AFTER the move succeeded, this returns `Err` even
+/// though the rename already happened, leaving the pointer naming the old (now
+/// absent) profile. That dangling pointer is harmless — activation warns and
+/// falls through to the default home — but the error does not convey that the
+/// rename itself succeeded.
+///
+/// [`NotFound`]: ProfileOpError::NotFound
+/// [`AlreadyExists`]: ProfileOpError::AlreadyExists
+pub fn rename_profile(old: &str, new: &str) -> Result<(), ProfileOpError> {
+    let old_dir = profile_dir(old)?;
+    let new_dir = profile_dir(new)?;
+    let old_lower = old.to_ascii_lowercase();
+    let new_lower = new.to_ascii_lowercase();
+
+    if old_dir == new_dir {
+        // Case-only "rename" maps to the same directory — nothing to move. The
+        // pointer (if it named old) already equals new case-folded.
+        return if old_dir.is_dir() {
+            Ok(())
+        } else {
+            Err(ProfileOpError::NotFound(old_lower))
+        };
+    }
+    if !old_dir.is_dir() {
+        return Err(ProfileOpError::NotFound(old_lower));
+    }
+    if new_dir.exists() {
+        return Err(ProfileOpError::AlreadyExists(new_lower));
+    }
+
+    // Capture active-status BEFORE the move (read via the sanctioned reader).
+    let was_active = is_active(&old_lower);
+
+    std::fs::rename(&old_dir, &new_dir).map_err(ProfileOpError::io("rename profile dir"))?;
+
+    if was_active {
+        // Re-point so the active selection follows the rename. The new dir now
+        // exists, so set_active_profile's existence check passes.
+        set_active_profile(&new_lower)?;
+    }
+    Ok(())
+}
+
+/// Remove a profile's directory tree. This is the low-level removal — it does
+/// NOT consult or clear the active pointer and does NOT refuse the active
+/// profile; the CLI layer decides that policy (via [`is_active`] + a `--force`
+/// flag) and is responsible for calling [`clear_active_profile`] afterward when
+/// it deletes the active one. Errors [`NotFound`] if the profile is absent.
+///
+/// [`NotFound`]: ProfileOpError::NotFound
+pub fn delete_profile_dir(name: &str) -> Result<(), ProfileOpError> {
+    let dir = profile_dir(name)?;
+    if !dir.is_dir() {
+        return Err(ProfileOpError::NotFound(name.to_ascii_lowercase()));
+    }
+    std::fs::remove_dir_all(&dir).map_err(ProfileOpError::io("remove profile dir"))
+}
+
+/// Delete a profile, clearing the active pointer first if this profile is the
+/// active one. Convenience wrapper over [`is_active`], [`clear_active_profile`],
+/// and [`delete_profile_dir`] for the common CLI path AFTER the handler has
+/// already confirmed intent (e.g. behind `--force`/`--yes` when active). The
+/// handler still owns the refuse-without-force decision — this function does not
+/// second-guess it, it just keeps the pointer consistent with the deletion.
+pub fn delete_profile(name: &str) -> Result<(), ProfileOpError> {
+    let lower = name.to_ascii_lowercase();
+    if is_active(&lower) {
+        clear_active_profile()?;
+    }
+    delete_profile_dir(&lower)
+}
+
+// --- export / import (recursive copy; secret-excluding by default) ----------
+
+/// Recursively copy `src` into `dst`, creating `dst` and parents. When
+/// `skip_secrets` is true, TOP-LEVEL secret entries ([`is_secret_entry`]) are
+/// skipped (we only special-case the top level, since `credentials*` / `oauth/`
+/// live directly in a profile home). Symlinks are NOT followed and NOT recreated
+/// (C6: no symlink/junction sharing) — a symlink encountered in the tree is
+/// skipped with no error, so a hostile symlink can never redirect the copy out
+/// of the tree.
+fn copy_tree_filtered(src: &Path, dst: &Path, skip_secrets: bool) -> Result<(), ProfileOpError> {
+    std::fs::create_dir_all(dst).map_err(ProfileOpError::io("create export dir"))?;
+    copy_tree_inner(src, dst, skip_secrets, true)
+}
+
+fn copy_tree_inner(
+    src: &Path,
+    dst: &Path,
+    skip_secrets: bool,
+    is_top_level: bool,
+) -> Result<(), ProfileOpError> {
+    for entry in std::fs::read_dir(src).map_err(ProfileOpError::io("read source dir"))? {
+        let entry = entry.map_err(ProfileOpError::io("read source entry"))?;
+        let name = entry.file_name();
+        let name_str = name.to_string_lossy();
+        if is_top_level && skip_secrets && is_secret_entry(&name_str) {
+            continue;
+        }
+        let from = entry.path();
+        // Use symlink_metadata so a symlink is detected as a symlink (not its
+        // target) and skipped — never followed (C6).
+        let meta = from
+            .symlink_metadata()
+            .map_err(ProfileOpError::io("stat source entry"))?;
+        let to = dst.join(&name);
+        if meta.file_type().is_symlink() {
+            continue;
+        }
+        if meta.is_dir() {
+            std::fs::create_dir_all(&to).map_err(ProfileOpError::io("create dir"))?;
+            copy_tree_inner(&from, &to, skip_secrets, false)?;
+        } else {
+            std::fs::copy(&from, &to).map_err(ProfileOpError::io("copy file"))?;
+        }
+    }
+    Ok(())
+}
+
+/// Export a profile's home tree to `dst_dir` (a plain directory the caller
+/// chooses). By default secrets are EXCLUDED ([`is_secret_entry`]); pass
+/// `include_secrets = true` to copy them too — the CLI MUST warn on stderr when
+/// it does. Returns the destination path. Errors [`NotFound`] if the profile is
+/// absent. `dst_dir` must not already exist as a non-empty target the caller
+/// cares about — we create it and copy into it (existing files with the same
+/// name are overwritten by `std::fs::copy`).
+///
+/// [`NotFound`]: ProfileOpError::NotFound
+pub fn export_profile(
+    name: &str,
+    dst_dir: &Path,
+    include_secrets: bool,
+) -> Result<PathBuf, ProfileOpError> {
+    let src = profile_dir(name)?;
+    if !src.is_dir() {
+        return Err(ProfileOpError::NotFound(name.to_ascii_lowercase()));
+    }
+    copy_tree_filtered(&src, dst_dir, !include_secrets)?;
+    Ok(dst_dir.to_path_buf())
+}
+
+/// Import (adopt) a directory tree `src_dir` as a NEW profile `name`. The new
+/// profile must not already exist ([`AlreadyExists`]). `src_dir` is validated
+/// against path-escape: it must be an existing directory, and after
+/// canonicalization every entry copied stays within it (the recursive copy never
+/// follows symlinks, which is the zip-slip / path-escape defense — C6 /
+/// SECURITY). Secrets in the source are NOT filtered on import (the user is
+/// adopting a tree they supplied); the caller decides whether the source was an
+/// exclude-secrets export. Returns the created profile dir.
+///
+/// [`AlreadyExists`]: ProfileOpError::AlreadyExists
+pub fn import_profile(name: &str, src_dir: &Path) -> Result<PathBuf, ProfileOpError> {
+    let dst = profile_dir(name)?; // validates + case-folds
+    if dst.exists() {
+        return Err(ProfileOpError::AlreadyExists(name.to_ascii_lowercase()));
+    }
+    // Reject a non-existent / non-dir / non-canonicalizable source up front.
+    let canonical_src = src_dir
+        .canonicalize()
+        .map_err(|_| ProfileOpError::UnsafePath {
+            path: src_dir.display().to_string(),
+            reason: "source path does not exist or cannot be resolved",
+        })?;
+    if !canonical_src.is_dir() {
+        return Err(ProfileOpError::UnsafePath {
+            path: src_dir.display().to_string(),
+            reason: "import source must be a directory",
+        });
+    }
+    // copy_tree_filtered with skip_secrets=false performs a full recursive copy.
+    // It never follows symlinks, so no entry in the source can redirect the
+    // copy outside `canonical_src` (zip-slip / `..` escape defense).
+    copy_tree_filtered(&canonical_src, &dst, false)?;
+    Ok(dst)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -551,5 +956,301 @@ mod tests {
         ]);
         activate_for_launch_impl(argv(&["wcore", "--profile", "../escape"]));
         assert_eq!(std::env::var_os("WAYLAND_HOME"), None);
+    }
+
+    // --- Phase 2 management helpers ----------------------------------------
+
+    /// Set WAYLAND_PROFILES_ROOT to a fresh tempdir and return (guard, dir).
+    /// All Phase-2 tests run serial because they mutate the process env.
+    fn rooted() -> (EnvGuard, tempfile::TempDir) {
+        let dir = tempdir().unwrap();
+        let g = EnvGuard::set(&[
+            ("WAYLAND_PROFILES_ROOT", Some(dir.path().to_str().unwrap())),
+            ("WAYLAND_HOME", None),
+        ]);
+        (g, dir)
+    }
+
+    #[test]
+    #[serial]
+    fn create_lists_and_exists() {
+        let (_g, root) = rooted();
+        assert!(!profile_exists("work"));
+        let dir = create_profile("work", None).unwrap();
+        assert_eq!(dir, root.path().join("work"));
+        assert!(dir.is_dir());
+        assert!(profile_exists("Work")); // case-folds
+        // No secrets / no marker for a base-less create.
+        assert!(!dir.join("profile.toml").exists());
+        assert!(!dir.join("credentials.toml").exists());
+
+        create_profile("client.acme", None).unwrap();
+        assert_eq!(list_profiles(), vec!["client.acme", "work"]); // sorted
+    }
+
+    #[test]
+    #[serial]
+    fn create_rejects_duplicate_and_invalid() {
+        let (_g, _root) = rooted();
+        create_profile("work", None).unwrap();
+        assert!(matches!(
+            create_profile("Work", None), // same on-disk dir
+            Err(ProfileOpError::AlreadyExists(_))
+        ));
+        assert!(matches!(
+            create_profile("../escape", None),
+            Err(ProfileOpError::Name(_))
+        ));
+    }
+
+    #[test]
+    #[serial]
+    fn create_with_base_writes_marker_and_never_copies_secrets() {
+        let (_g, root) = rooted();
+        let base = create_profile("base", None).unwrap();
+        // Plant a secret in the base; create --base must NOT copy it.
+        std::fs::write(base.join("credentials.toml"), "[secrets]\nx='y'\n").unwrap();
+        std::fs::create_dir_all(base.join("oauth")).unwrap();
+        std::fs::write(base.join("oauth/token.json"), "{}").unwrap();
+
+        let child = create_profile("child", Some("base")).unwrap();
+        let marker = std::fs::read_to_string(child.join("profile.toml")).unwrap();
+        assert_eq!(marker, "base = \"base\"\n");
+        // SECURITY: secrets are never inherited at create time.
+        assert!(!child.join("credentials.toml").exists());
+        assert!(!child.join("oauth").exists());
+        let _ = root;
+    }
+
+    #[test]
+    #[serial]
+    fn create_with_missing_base_errors_and_leaves_nothing() {
+        let (_g, root) = rooted();
+        assert!(matches!(
+            create_profile("child", Some("ghost")),
+            Err(ProfileOpError::NotFound(_))
+        ));
+        // The child dir must not have been created.
+        assert!(!root.path().join("child").exists());
+    }
+
+    #[test]
+    #[serial]
+    fn list_skips_pointer_and_nondirs() {
+        let (_g, root) = rooted();
+        create_profile("work", None).unwrap();
+        // The pointer file and a stray loose file must be skipped.
+        std::fs::write(root.path().join("active"), "work\n").unwrap();
+        std::fs::write(root.path().join("README"), "hi").unwrap();
+        // A junk dir with an invalid name must be skipped too.
+        std::fs::create_dir_all(root.path().join("..junk")).ok();
+        assert_eq!(list_profiles(), vec!["work"]);
+    }
+
+    #[test]
+    #[serial]
+    fn set_clear_and_active_name_roundtrip() {
+        let (_g, _root) = rooted();
+        create_profile("work", None).unwrap();
+        assert_eq!(active_profile_name(), None);
+        assert!(!is_active("work"));
+
+        set_active_profile("Work").unwrap(); // case-folds to "work"
+        assert_eq!(active_profile_name(), Some("work".to_string()));
+        assert!(is_active("work"));
+        assert!(is_active("WORK"));
+
+        clear_active_profile().unwrap();
+        assert_eq!(active_profile_name(), None);
+        // Clearing an already-absent pointer is idempotent.
+        clear_active_profile().unwrap();
+    }
+
+    #[test]
+    #[serial]
+    fn set_active_refuses_missing_profile() {
+        let (_g, _root) = rooted();
+        assert!(matches!(
+            set_active_profile("ghost"),
+            Err(ProfileOpError::NotFound(_))
+        ));
+        assert!(matches!(
+            set_active_profile("../escape"),
+            Err(ProfileOpError::Name(_))
+        ));
+    }
+
+    #[test]
+    #[serial]
+    fn rename_moves_dir_and_repoints_active() {
+        let (_g, root) = rooted();
+        create_profile("old", None).unwrap();
+        std::fs::write(root.path().join("old/marker"), "data").unwrap();
+        set_active_profile("old").unwrap();
+
+        rename_profile("old", "new").unwrap();
+        assert!(!root.path().join("old").exists());
+        assert!(root.path().join("new/marker").exists());
+        // Active selection follows the rename.
+        assert_eq!(active_profile_name(), Some("new".to_string()));
+    }
+
+    #[test]
+    #[serial]
+    fn rename_errors_on_missing_and_conflict() {
+        let (_g, _root) = rooted();
+        create_profile("a", None).unwrap();
+        create_profile("b", None).unwrap();
+        assert!(matches!(
+            rename_profile("ghost", "z"),
+            Err(ProfileOpError::NotFound(_))
+        ));
+        assert!(matches!(
+            rename_profile("a", "b"),
+            Err(ProfileOpError::AlreadyExists(_))
+        ));
+        // Case-only rename is a no-op success and leaves the dir intact.
+        rename_profile("a", "A").unwrap();
+        assert!(profile_exists("a"));
+    }
+
+    #[test]
+    #[serial]
+    fn delete_dir_does_not_touch_pointer() {
+        let (_g, root) = rooted();
+        create_profile("work", None).unwrap();
+        set_active_profile("work").unwrap();
+        // Low-level delete leaves the (now dangling) pointer for the CLI to handle.
+        delete_profile_dir("work").unwrap();
+        assert!(!root.path().join("work").exists());
+        assert_eq!(active_profile_name(), Some("work".to_string()));
+        assert!(matches!(
+            delete_profile_dir("work"),
+            Err(ProfileOpError::NotFound(_))
+        ));
+    }
+
+    #[test]
+    #[serial]
+    fn delete_profile_clears_pointer_when_active() {
+        let (_g, _root) = rooted();
+        create_profile("work", None).unwrap();
+        create_profile("other", None).unwrap();
+        set_active_profile("work").unwrap();
+
+        delete_profile("work").unwrap();
+        assert!(!profile_exists("work"));
+        assert_eq!(active_profile_name(), None, "active pointer cleared");
+
+        // Deleting a non-active profile leaves an unrelated pointer alone.
+        set_active_profile("other").unwrap();
+        create_profile("temp", None).unwrap();
+        delete_profile("temp").unwrap();
+        assert_eq!(active_profile_name(), Some("other".to_string()));
+    }
+
+    #[test]
+    #[serial]
+    fn export_excludes_secrets_by_default() {
+        let (_g, root) = rooted();
+        let p = create_profile("work", None).unwrap();
+        std::fs::write(p.join("config.toml"), "model='x'").unwrap();
+        std::fs::write(p.join("credentials.toml"), "secret").unwrap();
+        std::fs::write(p.join("credentials.enc"), "secret").unwrap();
+        std::fs::create_dir_all(p.join("oauth")).unwrap();
+        std::fs::write(p.join("oauth/t.json"), "{}").unwrap();
+        std::fs::create_dir_all(p.join("memory")).unwrap();
+        std::fs::write(p.join("memory/notes.md"), "keep").unwrap();
+
+        let out = tempdir().unwrap();
+        let dst = out.path().join("export");
+        export_profile("work", &dst, false).unwrap();
+
+        assert!(dst.join("config.toml").exists());
+        assert!(
+            dst.join("memory/notes.md").exists(),
+            "non-secret subtree copied"
+        );
+        assert!(!dst.join("credentials.toml").exists(), "secret excluded");
+        assert!(!dst.join("credentials.enc").exists(), "secret excluded");
+        assert!(!dst.join("oauth").exists(), "oauth excluded");
+        let _ = root;
+    }
+
+    #[test]
+    #[serial]
+    fn export_include_secrets_copies_them() {
+        let (_g, _root) = rooted();
+        let p = create_profile("work", None).unwrap();
+        std::fs::write(p.join("credentials.toml"), "secret").unwrap();
+        let out = tempdir().unwrap();
+        let dst = out.path().join("export");
+        export_profile("work", &dst, true).unwrap();
+        assert!(dst.join("credentials.toml").exists());
+    }
+
+    #[test]
+    #[serial]
+    fn import_creates_profile_from_tree() {
+        let (_g, _root) = rooted();
+        let src = tempdir().unwrap();
+        std::fs::write(src.path().join("config.toml"), "model='y'").unwrap();
+        std::fs::create_dir_all(src.path().join("skills")).unwrap();
+        std::fs::write(src.path().join("skills/s.md"), "skill").unwrap();
+
+        let dir = import_profile("imported", src.path()).unwrap();
+        assert!(dir.join("config.toml").exists());
+        assert!(dir.join("skills/s.md").exists());
+        assert!(profile_exists("imported"));
+    }
+
+    #[test]
+    #[serial]
+    fn import_rejects_existing_and_bad_source() {
+        let (_g, _root) = rooted();
+        create_profile("taken", None).unwrap();
+        let src = tempdir().unwrap();
+        assert!(matches!(
+            import_profile("taken", src.path()),
+            Err(ProfileOpError::AlreadyExists(_))
+        ));
+        // Non-existent source path is rejected as unsafe (cannot canonicalize).
+        let missing = src.path().join("does-not-exist");
+        assert!(matches!(
+            import_profile("fresh", &missing),
+            Err(ProfileOpError::UnsafePath { .. })
+        ));
+    }
+
+    #[test]
+    #[serial]
+    fn import_does_not_follow_symlinks() {
+        let (_g, _root) = rooted();
+        let src = tempdir().unwrap();
+        std::fs::write(src.path().join("real.txt"), "ok").unwrap();
+        // A symlink pointing outside the source must NOT be followed (C6).
+        let outside = tempdir().unwrap();
+        std::fs::write(outside.path().join("secret.txt"), "leak").unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(outside.path(), src.path().join("escape")).unwrap();
+
+        let dir = import_profile("safe", src.path()).unwrap();
+        assert!(dir.join("real.txt").exists());
+        // The symlink (and thus the outside file) was skipped, never recreated.
+        assert!(!dir.join("escape").exists());
+    }
+
+    #[test]
+    fn is_secret_entry_classification() {
+        assert!(is_secret_entry("credentials.toml"));
+        assert!(is_secret_entry("credentials.enc"));
+        assert!(is_secret_entry("credentials.kdf.json"));
+        assert!(is_secret_entry("credentials"));
+        assert!(is_secret_entry("oauth"));
+        // Not secrets:
+        assert!(!is_secret_entry("config.toml"));
+        assert!(!is_secret_entry("credentials-notes"));
+        assert!(!is_secret_entry("oauth-helper"));
+        assert!(!is_secret_entry("memory"));
     }
 }
