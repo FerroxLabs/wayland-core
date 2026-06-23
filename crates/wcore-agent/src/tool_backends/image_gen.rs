@@ -3,7 +3,7 @@
 //! Wires the existing `ImageGenerationBackend` trait (in
 //! `wcore-tools/src/image_generation_tool.rs`) to five real providers:
 //!
-//! 1. **OpenAI DALL-E 3** (`OPENAI_API_KEY`)
+//! 1. **OpenAI image** (`OPENAI_API_KEY`; `gpt-image-1` default, configurable)
 //! 2. **FAL FLUX schnell** (`FAL_API_KEY`)
 //! 3. **Gemini Imagen 3** (`GEMINI_API_KEY`)
 //! 4. **Hugging Face FLUX** (`HF_API_KEY`)
@@ -48,7 +48,7 @@ const HF_PER_CALL_TIMEOUT: Duration = Duration::from_secs(90);
 /// and config.
 ///
 /// Priority order (first match wins):
-/// 1. `OPENAI_API_KEY` → OpenAI DALL-E 3
+/// 1. `OPENAI_API_KEY` → OpenAI image (`gpt-image-1` default)
 /// 2. `FAL_API_KEY` → FAL FLUX schnell
 /// 3. `GEMINI_API_KEY` → Gemini Imagen 3
 /// 4. `HF_API_KEY` → Hugging Face FLUX
@@ -61,8 +61,12 @@ pub fn build_image_gen_backend(
     allow_pollinations: bool,
 ) -> Option<Arc<dyn ImageGenerationBackend>> {
     if let Some(key) = read_env_key("OPENAI_API_KEY") {
-        tracing::info!("image_gen: using OpenAI DALL-E 3 (OPENAI_API_KEY found)");
-        return Some(Arc::new(DalleBackend::new(key)));
+        let backend = DalleBackend::new(key);
+        tracing::info!(
+            "image_gen: using OpenAI {} (OPENAI_API_KEY found)",
+            backend.model
+        );
+        return Some(Arc::new(backend));
     }
     if let Some(key) = read_env_key("FAL_API_KEY") {
         tracing::info!("image_gen: using FAL FLUX schnell (FAL_API_KEY found)");
@@ -190,16 +194,38 @@ fn prompt_contains_email_pii(prompt: &str) -> bool {
 }
 
 // ---------------------------------------------------------------------
-// 1. OpenAI DALL-E 3
+// 1. OpenAI image generation (gpt-image-1 default; dall-e-3 configurable)
 // ---------------------------------------------------------------------
 
-/// OpenAI DALL-E 3 backend. Endpoint: `/v1/images/generations`. Supported
-/// sizes: `1024x1024` (square), `1792x1024` (landscape), `1024x1792`
-/// (portrait). Response shape: `{ "data": [{ "url": "..." }] }`.
+/// Default OpenAI image model. `gpt-image-1` is the current broadly-available
+/// model; `dall-e-3` is region/tier-gated and returns HTTP 400
+/// (`model does not exist`) on accounts that lack it (#265). Override per-account
+/// with the `OPENAI_IMAGE_MODEL` env var or [`DalleBackend::with_model`].
+pub const DEFAULT_OPENAI_IMAGE_MODEL: &str = "gpt-image-1";
+
+/// Resolve the OpenAI image model: the `OPENAI_IMAGE_MODEL` env var if set and
+/// non-empty, else [`DEFAULT_OPENAI_IMAGE_MODEL`]. Lets a user who only has
+/// `dall-e-3` (or a newer model) point the backend at it without a code change.
+fn openai_image_model_from_env() -> String {
+    std::env::var("OPENAI_IMAGE_MODEL")
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| DEFAULT_OPENAI_IMAGE_MODEL.to_string())
+}
+
+/// OpenAI image-generation backend. Endpoint: `/v1/images/generations`. The
+/// request size/quality and the response shape both depend on the model:
+/// `gpt-image-1` uses `1024x1024` / `1536x1024` / `1024x1536` and returns
+/// base64 (`data[0].b64_json`); `dall-e-3` uses `1024x1024` / `1792x1024` /
+/// `1024x1792`, accepts `quality`, and returns a URL (`data[0].url`). Both
+/// response shapes are handled.
 pub struct DalleBackend {
     client: Client,
     api_key: String,
     endpoint: String,
+    /// Model sent in the request body. Defaults via [`openai_image_model_from_env`].
+    model: String,
 }
 
 impl DalleBackend {
@@ -208,7 +234,14 @@ impl DalleBackend {
             client: build_ssrf_safe_tool_client(),
             api_key,
             endpoint: "https://api.openai.com/v1/images/generations".to_string(),
+            model: openai_image_model_from_env(),
         }
+    }
+
+    /// Override the model (e.g. `"dall-e-3"` for accounts that have it).
+    pub fn with_model(mut self, model: impl Into<String>) -> Self {
+        self.model = model.into();
+        self
     }
 
     #[cfg(test)]
@@ -217,23 +250,46 @@ impl DalleBackend {
             client: build_ssrf_safe_tool_client(),
             api_key,
             endpoint,
+            model: DEFAULT_OPENAI_IMAGE_MODEL.to_string(),
         }
     }
 
-    fn size_for(req: &ImageGenerationRequest) -> &'static str {
-        match req.aspect_ratio {
-            "square" => "1024x1024",
-            "portrait" => "1024x1792",
-            // landscape (default) or unknown
-            _ => "1792x1024",
+    /// `gpt-image-1` (and the `gpt-image-*` family) use a different size table
+    /// than `dall-e-*` and reject the `quality: "standard"` value.
+    fn is_gpt_image(&self) -> bool {
+        self.model.starts_with("gpt-image")
+    }
+
+    fn size_for(&self, req: &ImageGenerationRequest) -> &'static str {
+        if self.is_gpt_image() {
+            match req.aspect_ratio {
+                "square" => "1024x1024",
+                "portrait" => "1024x1536",
+                _ => "1536x1024",
+            }
+        } else {
+            match req.aspect_ratio {
+                "square" => "1024x1024",
+                "portrait" => "1024x1792",
+                // landscape (default) or unknown
+                _ => "1792x1024",
+            }
         }
     }
 
-    fn dimensions_for(req: &ImageGenerationRequest) -> (u32, u32) {
-        match req.aspect_ratio {
-            "square" => (1024, 1024),
-            "portrait" => (1024, 1792),
-            _ => (1792, 1024),
+    fn dimensions_for(&self, req: &ImageGenerationRequest) -> (u32, u32) {
+        if self.is_gpt_image() {
+            match req.aspect_ratio {
+                "square" => (1024, 1024),
+                "portrait" => (1024, 1536),
+                _ => (1536, 1024),
+            }
+        } else {
+            match req.aspect_ratio {
+                "square" => (1024, 1024),
+                "portrait" => (1024, 1792),
+                _ => (1792, 1024),
+            }
         }
     }
 }
@@ -244,15 +300,21 @@ impl ImageGenerationBackend for DalleBackend {
         &self,
         request: ImageGenerationRequest,
     ) -> Result<ImageGenerationResponse, ImageGenerationError> {
-        let size = Self::size_for(&request);
-        let (w, h) = Self::dimensions_for(&request);
-        let body = serde_json::json!({
-            "model": "dall-e-3",
+        let size = self.size_for(&request);
+        let (w, h) = self.dimensions_for(&request);
+        let mut body = serde_json::json!({
+            "model": self.model,
             "prompt": request.prompt,
             "size": size,
-            "quality": "standard",
             "n": 1,
         });
+        // `dall-e-*` accept `quality: "standard"|"hd"`; `gpt-image-1` rejects
+        // `"standard"` (it uses `low|medium|high|auto`, defaulting to auto), so
+        // only send the field for the dall-e family.
+        if !self.is_gpt_image() {
+            body["quality"] = serde_json::json!("standard");
+        }
+        let model = self.model.clone();
         let endpoint = self.endpoint.clone();
         let api_key = self.api_key.clone();
         let client = self.client.clone();
@@ -276,20 +338,32 @@ impl ImageGenerationBackend for DalleBackend {
                 return Err(map_http_error(status.as_u16(), &txt, "openai dall-e"));
             }
             let parsed: Value = serde_json::from_str(&txt).map_err(|e| {
-                ImageGenerationError::Other(format!("openai dall-e JSON parse: {e}"))
+                ImageGenerationError::Other(format!("openai image JSON parse: {e}"))
             })?;
-            let url = parsed
-                .pointer("/data/0/url")
+            // Response shape is model-dependent: dall-e-* return `data[0].url`,
+            // gpt-image-1 returns `data[0].b64_json` (base64, no URL). Accept
+            // either — a base64 payload is wrapped as a `data:` URI, matching the
+            // Gemini/HF backends.
+            let data0 = parsed.pointer("/data/0");
+            let image = if let Some(url) = data0
+                .and_then(|d| d.pointer("/url"))
                 .and_then(|v| v.as_str())
-                .map(str::to_string)
-                .ok_or_else(|| {
-                    ImageGenerationError::Other(
-                        "openai dall-e: missing data[0].url in response".to_string(),
-                    )
-                })?;
+            {
+                url.to_string()
+            } else if let Some(b64) = data0
+                .and_then(|d| d.pointer("/b64_json"))
+                .and_then(|v| v.as_str())
+            {
+                format!("data:image/png;base64,{b64}")
+            } else {
+                return Err(ImageGenerationError::Other(
+                    "openai image: missing both data[0].url and data[0].b64_json in response"
+                        .to_string(),
+                ));
+            };
             Ok(ImageGenerationResponse {
-                image: url,
-                used_provider: "OpenAI DALL-E 3".to_string(),
+                image,
+                used_provider: format!("OpenAI {model}"),
                 width: w,
                 height: h,
             })
@@ -786,9 +860,59 @@ mod tests {
             .await
             .expect("happy path");
         assert_eq!(resp.image, "https://example.com/dalle.png");
-        assert_eq!(resp.used_provider, "OpenAI DALL-E 3");
-        assert_eq!(resp.width, 1792);
+        // with_endpoint defaults to gpt-image-1; the `url` response path still
+        // works (any model that returns a URL is handled).
+        assert_eq!(resp.used_provider, "OpenAI gpt-image-1");
+        assert_eq!(resp.width, 1536);
         assert_eq!(resp.height, 1024);
+    }
+
+    #[tokio::test]
+    async fn openai_b64_json_response_wrapped_as_data_uri() {
+        // Regression for #265: gpt-image-1 returns base64, not a URL. The backend
+        // must wrap `data[0].b64_json` as a `data:` URI rather than error on the
+        // missing `url`.
+        let server = MockServer::start().await;
+        let b64 = base64::engine::general_purpose::STANDARD.encode(b"\x89PNG\r\n\x1a\nfake");
+        Mock::given(method("POST"))
+            .and(path("/v1/images/generations"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": [{ "b64_json": b64 }]
+            })))
+            .mount(&server)
+            .await;
+        let backend = DalleBackend::with_endpoint(
+            "sk-test".to_string(),
+            format!("{}/v1/images/generations", server.uri()),
+        );
+        let resp = backend
+            .generate(req("a sunset", "landscape"))
+            .await
+            .expect("b64_json path");
+        assert!(
+            resp.image.starts_with("data:image/png;base64,"),
+            "gpt-image-1 base64 must become a data URI, got: {}",
+            resp.image
+        );
+        assert_eq!(resp.used_provider, "OpenAI gpt-image-1");
+    }
+
+    #[test]
+    fn openai_default_model_is_gpt_image_1_and_overridable() {
+        // Regression for #265: the default must NOT be dall-e-3.
+        let backend = DalleBackend::with_endpoint(
+            "sk-test".to_string(),
+            "https://unused.example.com/v1/images/generations".to_string(),
+        );
+        assert_eq!(backend.model, DEFAULT_OPENAI_IMAGE_MODEL);
+        assert_eq!(backend.model, "gpt-image-1");
+        let overridden = DalleBackend::with_endpoint(
+            "sk-test".to_string(),
+            "https://unused.example.com/v1/images/generations".to_string(),
+        )
+        .with_model("dall-e-3");
+        assert_eq!(overridden.model, "dall-e-3");
+        assert!(!overridden.is_gpt_image());
     }
 
     #[tokio::test]
@@ -980,18 +1104,23 @@ mod tests {
 
     #[test]
     fn aspect_ratio_maps_correctly_per_provider() {
-        let cases: &[(&str, &str, &str)] = &[
-            // (input aspect, DALL-E expected size, FAL expected aspect)
-            ("square", "1024x1024", "square_hd"),
-            ("landscape", "1792x1024", "landscape_16_9"),
-            ("portrait", "1024x1792", "portrait_4_3"),
+        // gpt-image-1 and dall-e-3 use different size tables (#265).
+        let gpt = DalleBackend::with_endpoint("k".to_string(), "http://unused".to_string());
+        let dalle = DalleBackend::with_endpoint("k".to_string(), "http://unused".to_string())
+            .with_model("dall-e-3");
+        let cases: &[(&str, &str, &str, &str)] = &[
+            // (input aspect, gpt-image-1 size, dall-e-3 size, FAL aspect)
+            ("square", "1024x1024", "1024x1024", "square_hd"),
+            ("landscape", "1536x1024", "1792x1024", "landscape_16_9"),
+            ("portrait", "1024x1536", "1024x1792", "portrait_4_3"),
         ];
-        for (aspect, dalle_size, fal_aspect) in cases {
+        for (aspect, gpt_size, dalle_size, fal_aspect) in cases {
             let r = req("x", aspect);
+            assert_eq!(gpt.size_for(&r), *gpt_size, "gpt-image-1 size for {aspect}");
             assert_eq!(
-                DalleBackend::size_for(&r),
+                dalle.size_for(&r),
                 *dalle_size,
-                "DALL-E size for {aspect}"
+                "dall-e-3 size for {aspect}"
             );
             assert_eq!(
                 FalFluxBackend::fal_aspect(&r),
@@ -1018,18 +1147,15 @@ mod tests {
 
     #[test]
     fn dalle_dimensions_match_size_table() {
-        assert_eq!(
-            DalleBackend::dimensions_for(&req("x", "square")),
-            (1024, 1024)
-        );
-        assert_eq!(
-            DalleBackend::dimensions_for(&req("x", "landscape")),
-            (1792, 1024)
-        );
-        assert_eq!(
-            DalleBackend::dimensions_for(&req("x", "portrait")),
-            (1024, 1792)
-        );
+        let gpt = DalleBackend::with_endpoint("k".to_string(), "http://unused".to_string());
+        let dalle = DalleBackend::with_endpoint("k".to_string(), "http://unused".to_string())
+            .with_model("dall-e-3");
+        assert_eq!(gpt.dimensions_for(&req("x", "square")), (1024, 1024));
+        assert_eq!(gpt.dimensions_for(&req("x", "landscape")), (1536, 1024));
+        assert_eq!(gpt.dimensions_for(&req("x", "portrait")), (1024, 1536));
+        assert_eq!(dalle.dimensions_for(&req("x", "square")), (1024, 1024));
+        assert_eq!(dalle.dimensions_for(&req("x", "landscape")), (1792, 1024));
+        assert_eq!(dalle.dimensions_for(&req("x", "portrait")), (1024, 1792));
     }
 
     // -- FAL happy path --
