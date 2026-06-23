@@ -505,6 +505,12 @@ enum TopCmd {
     /// free / paid-but-uncleared Flux key returns an `upgrade_required`
     /// message — web_fetch is a paid-only capability.
     Fetch(wcore_cli::fetch::FetchArgs),
+    /// Manage isolated profiles — each is an independent `WAYLAND_HOME`-rooted
+    /// home with its own config, credentials, memory, and skills.
+    Profile {
+        #[command(subcommand)]
+        cmd: wcore_cli::profile::ProfileCmd,
+    },
 }
 
 /// F-089: `models` sub-subcommands.
@@ -1043,6 +1049,14 @@ async fn run() -> anyhow::Result<ExitCode> {
                 Ok(()) => Ok(ExitCode::SUCCESS),
                 Err(e) => {
                     eprintln!("wayland-core fetch: {e:#}");
+                    Ok(ExitCode::FAILURE)
+                }
+            },
+            // `profile::run` is synchronous — no `.await` (mirrors `TopCmd::Plugin`).
+            TopCmd::Profile { cmd } => match wcore_cli::profile::run(cmd) {
+                Ok(()) => Ok(ExitCode::SUCCESS),
+                Err(e) => {
+                    eprintln!("wayland-core profile: {e:#}");
                     Ok(ExitCode::FAILURE)
                 }
             },

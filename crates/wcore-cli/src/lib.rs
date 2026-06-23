@@ -98,6 +98,12 @@ pub mod provider_keys;
 // tempdir-backed config path.
 pub mod auth;
 
+// CLI surface: `wayland-core profile` — create / use / list / show / rename /
+// delete / export / import isolated profiles. Lives in the lib so every verb is
+// unit-testable against a tempdir-backed `WAYLAND_PROFILES_ROOT`. All
+// active-pointer access stays in `wcore_config::profile` (D2 single-reader lint).
+pub mod profile;
+
 // CLI surface: `wayland-core image` — FluxRouter image generation
 // (`POST /v1/images/generations`). Lives in the lib so credential
 // resolution + path numbering are unit-testable.
