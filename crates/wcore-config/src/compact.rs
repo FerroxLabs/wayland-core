@@ -70,6 +70,43 @@ pub struct CompactConfig {
     /// Default: `None` — use the live model, preserving prior behavior.
     #[serde(default)]
     pub compaction_model: Option<String>,
+
+    // --- #280 smart auto-compaction (default-OFF; soak before enabling) ---
+    /// MASTER GATE for #280 smart auto-compaction. When false (the default),
+    /// NOTHING in the smart path runs: the proactive pre-gate early-returns and
+    /// `run_compaction` behaves byte-for-byte as before this feature landed.
+    /// This is the default-OFF guarantee — flip to true only after a soak.
+    #[serde(default)]
+    pub smart_enabled: bool,
+
+    /// High-water active-window share that ARMS a proactive compact (#280).
+    /// Spec band 0.60–0.70; clamped to that band at the use site so an
+    /// out-of-band TOML value is corrected rather than firing at 1% or never.
+    #[serde(default = "default_smart_trigger_fraction")]
+    pub smart_trigger_fraction: f64,
+
+    /// Hysteresis low-water (#280). After a smart fire the trigger DISARMS and
+    /// re-arms only once a later turn's fraction drops below this. Forced to
+    /// `min(trigger - 0.05)` at the use site so it can never collapse hysteresis.
+    #[serde(default = "default_smart_release_fraction")]
+    pub smart_release_fraction: f64,
+
+    /// Minimum completed turns between two smart fires (#280). Belt-and-
+    /// suspenders for the post-stream watermark refresh lag.
+    #[serde(default = "default_smart_cooldown_turns")]
+    pub smart_cooldown_turns: u32,
+
+    /// Cannot-shrink terminal latch (#280): if a smart-triggered compact frees
+    /// fewer than this many tokens, smart compaction latches OFF for the rest
+    /// of the session (guards against "frees ~nothing, fire forever").
+    #[serde(default = "default_smart_min_shrink_tokens")]
+    pub smart_min_shrink_tokens: u64,
+
+    /// Write the non-destructive handoff Episode to long-term memory on a smart
+    /// fire (#280). Default true, but only reachable when `smart_enabled`. Lets
+    /// the memory write be soaked/disabled independently for NullMemory hosts.
+    #[serde(default = "default_true")]
+    pub smart_handoff_to_memory: bool,
 }
 
 impl Default for CompactConfig {
@@ -88,6 +125,12 @@ impl Default for CompactConfig {
             compaction: wcore_compact::CompactionLevel::default(),
             toon: false,
             compaction_model: None,
+            smart_enabled: false,
+            smart_trigger_fraction: default_smart_trigger_fraction(),
+            smart_release_fraction: default_smart_release_fraction(),
+            smart_cooldown_turns: default_smart_cooldown_turns(),
+            smart_min_shrink_tokens: default_smart_min_shrink_tokens(),
+            smart_handoff_to_memory: true,
         }
     }
 }
@@ -127,6 +170,18 @@ fn default_compactable_tools() -> Vec<String> {
 }
 fn default_true() -> bool {
     true
+}
+fn default_smart_trigger_fraction() -> f64 {
+    0.65
+}
+fn default_smart_release_fraction() -> f64 {
+    0.50
+}
+fn default_smart_cooldown_turns() -> u32 {
+    2
+}
+fn default_smart_min_shrink_tokens() -> u64 {
+    2_000
 }
 
 #[cfg(test)]
@@ -252,6 +307,58 @@ cache_diagnostics = true
         let toml_str = r#"toon = true"#;
         let cfg: CompactConfig = toml::from_str(toml_str).unwrap();
         assert!(cfg.toon);
+    }
+
+    #[test]
+    fn smart_compaction_defaults_off() {
+        // #280: the master gate is OFF by default and the band defaults sit in
+        // the spec band so the use-site clamp is a no-op for the defaults.
+        let cfg = CompactConfig::default();
+        assert!(!cfg.smart_enabled);
+        assert_eq!(cfg.smart_trigger_fraction, 0.65);
+        assert_eq!(cfg.smart_release_fraction, 0.50);
+        assert_eq!(cfg.smart_cooldown_turns, 2);
+        assert_eq!(cfg.smart_min_shrink_tokens, 2_000);
+        assert!(cfg.smart_handoff_to_memory);
+    }
+
+    #[test]
+    fn toml_empty_keeps_smart_off() {
+        // An empty [compact] block must leave smart compaction default-OFF so
+        // existing configs are byte-for-byte unaffected.
+        let cfg: CompactConfig = toml::from_str("").unwrap();
+        assert!(!cfg.smart_enabled);
+        assert!(cfg.smart_handoff_to_memory);
+    }
+
+    #[test]
+    fn toml_smart_partial_override_uses_defaults() {
+        // Only the master gate set; every other smart field keeps its default.
+        let cfg: CompactConfig = toml::from_str("smart_enabled = true").unwrap();
+        assert!(cfg.smart_enabled);
+        assert_eq!(cfg.smart_trigger_fraction, 0.65);
+        assert_eq!(cfg.smart_cooldown_turns, 2);
+        assert_eq!(cfg.smart_min_shrink_tokens, 2_000);
+        assert!(cfg.smart_handoff_to_memory);
+    }
+
+    #[test]
+    fn toml_smart_full_override() {
+        let toml_str = r#"
+smart_enabled = true
+smart_trigger_fraction = 0.68
+smart_release_fraction = 0.45
+smart_cooldown_turns = 4
+smart_min_shrink_tokens = 5000
+smart_handoff_to_memory = false
+"#;
+        let cfg: CompactConfig = toml::from_str(toml_str).unwrap();
+        assert!(cfg.smart_enabled);
+        assert_eq!(cfg.smart_trigger_fraction, 0.68);
+        assert_eq!(cfg.smart_release_fraction, 0.45);
+        assert_eq!(cfg.smart_cooldown_turns, 4);
+        assert_eq!(cfg.smart_min_shrink_tokens, 5_000);
+        assert!(!cfg.smart_handoff_to_memory);
     }
 
     #[test]

@@ -328,6 +328,47 @@ max_failures = 3            # Circuit breaker threshold
 micro_keep_recent = 5       # Keep N most recent tool results
 ```
 
+### Smart auto-compaction (#280)
+
+Smart auto-compaction is a **proactive** pre-gate that fires the existing
+autocompact path *early* — when the conversation reaches a configurable share of
+the **currently-active model's** context window (default ~65%), instead of
+waiting for the static `autocompact_buffer` threshold (~91% effective). On a
+fire it (1) writes a non-destructive handoff of the live conversation to
+long-term memory (a `compaction_handoff` Episode — nothing is lost even if the
+LLM summary later rewords prose), then (2) runs the normal autocompact and
+continues the turn seamlessly. It emits the same `CompactOffload` host event as
+ordinary compaction, with the reason `smart_window_pressure` so the host can
+label the "Compacted — kept X of Y" chip with smart provenance.
+
+The trigger is **Flux-aware**: it is computed against the active model's real
+window (preferring the served-model window Flux signals back) and re-evaluated
+every turn, so it tracks model swaps automatically rather than using a fixed
+token count.
+
+**Default-OFF.** Because it fires well below the static threshold, it runs the
+LLM summarizer more often (more cost/latency). Soak it before enabling.
+
+```toml
+[compact]
+smart_enabled = false            # MASTER GATE — default off; enable after a soak
+smart_trigger_fraction = 0.65    # Active-window share that arms a proactive compact
+                                 #   (clamped to the 0.60–0.70 band at runtime)
+smart_release_fraction = 0.50    # Hysteresis low-water: re-arm only after the
+                                 #   fraction drops below this (forced < trigger-0.05)
+smart_cooldown_turns = 2         # Minimum completed turns between two smart fires
+smart_min_shrink_tokens = 2000   # Cannot-shrink latch: if a smart compact frees
+                                 #   fewer tokens than this, smart compaction
+                                 #   latches OFF for the rest of the session
+smart_handoff_to_memory = true   # Write the non-destructive handoff Episode
+```
+
+`smart_trigger_fraction` is **clamped** into the 0.60–0.70 band at the use site,
+so an out-of-band value (e.g. `0.95`) is silently corrected rather than
+disabling the trigger. Anti-thrash is enforced by three independent latches
+(hysteresis arm/release, cooldown, and the terminal cannot-shrink latch); all
+must clear before the trigger can fire again.
+
 ---
 
 ## File State Cache
