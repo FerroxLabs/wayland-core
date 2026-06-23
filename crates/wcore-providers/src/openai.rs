@@ -525,11 +525,14 @@ impl OpenAIProvider {
                 return Err(err);
             }
             // #282 contract V1: a managed Flux client that overflows the routed
-            // model's window gets a typed 409 `context_overflow`. Surface it as
-            // a typed error so the engine can compact-then-retry this same turn;
-            // an unrecognised 409 body falls through to the generic `Api` error.
-            if status.as_u16() == 409
-                && let Some(err) = parse_flux_409(&body_text)
+            // model's window gets a typed context-overflow error. Surface it as
+            // `ProviderError::ContextOverflow` so the engine can compact-then-retry
+            // this same turn. Live Flux has shipped this as BOTH 409
+            // (`context_overflow`) and 413 (`context_window_exceeded`) across
+            // versions, so accept either status; an unrecognised body still falls
+            // through to the generic `Api` error.
+            if matches!(status.as_u16(), 409 | 413)
+                && let Some(err) = parse_flux_overflow(&body_text)
             {
                 return Err(err);
             }
@@ -1758,41 +1761,140 @@ pub(crate) fn parse_flux_402(body: &str) -> Option<ProviderError> {
     }
 }
 
-/// Parse a FluxRouter 409 `context_overflow` body into a typed
+/// Parse a FluxRouter hard-context-overflow body into a typed
 /// [`ProviderError::ContextOverflow`] (#282 contract V1, hard-overflow path).
 ///
-/// The frozen body shape is a FLAT object whose `error` FIELD is the literal
-/// `"context_overflow"`:
-/// ```json
-/// {"error":"context_overflow","required_tokens":N,"model_window":M,
-///  "routed_model":"…","message":"…"}
-/// ```
-/// We match on the `error` FIELD (never the HTTP status alone, never a substring
-/// of the message) so an unrelated 409 cannot be misread as an overflow. Returns
-/// `None` when the body is not JSON, not the overflow shape, or is missing the
-/// numeric fields — the caller then falls back to [`ProviderError::Api`].
-pub(crate) fn parse_flux_409(body: &str) -> Option<ProviderError> {
-    let obj: Value = serde_json::from_str(body).ok()?;
-    if obj.get("error").and_then(Value::as_str)? != "context_overflow" {
+/// Tolerant by necessity: live Flux has shipped this signal in three shapes
+/// across versions, and the body shape diverged from the frozen spec. We accept
+/// any of them, matching on the overflow `error` CODE (`context_overflow` or
+/// `context_window_exceeded`), never the HTTP status alone:
+///
+/// - A. flat (frozen spec): `{"error":"context_overflow","required_tokens":N,…}`
+/// - A'. FastAPI detail: `{"detail":{"error":"context_window_exceeded",…}}`
+/// - B. live prod envelope: `{"error":{"message":"{'error': 'context_overflow', …}"}}`
+///   — an OpenAI/LiteLLM envelope wrapping a Python dict *repr* with single quotes.
+///
+/// Numbers are also recovered by a digit scan so a quirky `message`/`reason`
+/// value can never hide the overflow. Returns `None` when the body is not an
+/// overflow signal — the caller then falls back to [`ProviderError::Api`].
+pub(crate) fn parse_flux_overflow(body: &str) -> Option<ProviderError> {
+    // Flux signals a hard context overflow under TWO error codes across versions:
+    // `context_overflow` (shipped on 409) and `context_window_exceeded` (the
+    // in-flight 413 path). Accept either; the engine treats both as compact-retry.
+    fn is_overflow(s: &str) -> bool {
+        s == "context_overflow" || s == "context_window_exceeded"
+    }
+    // Build a `ContextOverflow` from a recovered structured object. `message`
+    // falls back to `reason` (the 413 shape names it `reason`); the window /
+    // routed-model fields are absent on some shapes, so they default.
+    fn from_obj(obj: &Value) -> ProviderError {
+        ProviderError::ContextOverflow {
+            required_tokens: obj
+                .get("required_tokens")
+                .and_then(Value::as_u64)
+                .unwrap_or(0),
+            model_window: obj.get("model_window").and_then(Value::as_u64).unwrap_or(0),
+            routed_model: obj
+                .get("routed_model")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string(),
+            message: obj
+                .get("message")
+                .and_then(Value::as_str)
+                .or_else(|| obj.get("reason").and_then(Value::as_str))
+                .unwrap_or("context overflow")
+                .to_string(),
+        }
+    }
+
+    let outer: Value = serde_json::from_str(body).ok()?;
+
+    // Shape A — flat body (frozen spec): a top-level string `error` overflow code
+    // plus sibling fields: {"error":"context_overflow","required_tokens":N,...}.
+    if outer
+        .get("error")
+        .and_then(Value::as_str)
+        .is_some_and(is_overflow)
+    {
+        return Some(from_obj(&outer));
+    }
+    // Shape A' — FastAPI `HTTPException(detail={...})` raw shape, if not re-wrapped:
+    //   {"detail":{"error":"context_window_exceeded","required_tokens":N,...}}
+    if let Some(d) = outer.get("detail")
+        && d.get("error")
+            .and_then(Value::as_str)
+            .is_some_and(is_overflow)
+    {
+        return Some(from_obj(d));
+    }
+
+    // Shape B — what live api.fluxrouter.ai ACTUALLY returns (verified 2026-06-23):
+    // an OpenAI/LiteLLM error envelope wrapping the payload as a Python dict *repr*
+    // (single quotes) inside `error.message`:
+    //   {"error":{"message":"{'error': 'context_overflow', 'required_tokens': N, ...}",
+    //             "type":"None","code":"409"}}
+    // serde can't parse the single-quoted repr, so recover it by normalizing the
+    // Python literals to JSON; numbers are also scanned directly so a quirky
+    // message value can never hide the overflow signal.
+    let inner_str = outer
+        .get("error")
+        .and_then(|e| e.get("message"))
+        .and_then(Value::as_str)
+        .or_else(|| outer.get("error").and_then(Value::as_str))
+        .or_else(|| outer.get("message").and_then(Value::as_str))
+        .or_else(|| outer.get("detail").and_then(Value::as_str))?;
+    if !inner_str.contains("context_overflow") && !inner_str.contains("context_window_exceeded") {
         return None;
     }
-    let required_tokens = obj.get("required_tokens").and_then(Value::as_u64)?;
-    let model_window = obj.get("model_window").and_then(Value::as_u64)?;
-    let routed_model = obj
-        .get("routed_model")
-        .and_then(Value::as_str)
-        .unwrap_or_default()
-        .to_string();
-    let message = obj
-        .get("message")
-        .and_then(Value::as_str)
-        .unwrap_or("context overflow")
-        .to_string();
+    let recovered: Option<Value> = serde_json::from_str::<Value>(inner_str)
+        .ok()
+        .or_else(|| {
+            let normalized = inner_str
+                .replace('\'', "\"")
+                .replace("None", "null")
+                .replace("True", "true")
+                .replace("False", "false");
+            serde_json::from_str::<Value>(&normalized).ok()
+        })
+        .filter(Value::is_object);
+
+    // Digit-scan fallback: find `key` then the first run of ASCII digits after it.
+    let scan_u64 = |key: &str| -> u64 {
+        inner_str
+            .find(key)
+            .and_then(|i| {
+                inner_str[i + key.len()..]
+                    .split(|c: char| !c.is_ascii_digit())
+                    .find(|s| !s.is_empty())
+                    .and_then(|s| s.parse::<u64>().ok())
+            })
+            .unwrap_or(0)
+    };
+    if let Some(obj) = recovered.as_ref() {
+        // Recovered cleanly — but the window/model may still be absent (413
+        // shape), so backfill the numbers from the digit scan when missing.
+        let mut err = from_obj(obj);
+        if let ProviderError::ContextOverflow {
+            required_tokens,
+            model_window,
+            ..
+        } = &mut err
+        {
+            if *required_tokens == 0 {
+                *required_tokens = scan_u64("required_tokens");
+            }
+            if *model_window == 0 {
+                *model_window = scan_u64("model_window");
+            }
+        }
+        return Some(err);
+    }
     Some(ProviderError::ContextOverflow {
-        required_tokens,
-        model_window,
-        routed_model,
-        message,
+        required_tokens: scan_u64("required_tokens"),
+        model_window: scan_u64("model_window"),
+        routed_model: String::new(),
+        message: "context overflow".to_string(),
     })
 }
 
@@ -1944,7 +2046,7 @@ mod tests {
     #[test]
     fn parse_flux_409_context_overflow_full() {
         let body = r#"{"error":"context_overflow","required_tokens":210000,"model_window":200000,"routed_model":"claude-sonnet-4","message":"prompt exceeds routed model window"}"#;
-        match parse_flux_409(body) {
+        match parse_flux_overflow(body) {
             Some(ProviderError::ContextOverflow {
                 required_tokens,
                 model_window,
@@ -1965,21 +2067,99 @@ mod tests {
     #[test]
     fn parse_flux_409_wrong_error_value_returns_none() {
         let body = r#"{"error":"conflict","required_tokens":1,"model_window":2,"routed_model":"x","message":"y"}"#;
-        assert!(parse_flux_409(body).is_none());
+        assert!(parse_flux_overflow(body).is_none());
     }
 
-    /// A `context_overflow` body missing the numeric fields is not the frozen
-    /// shape → `None` (fall back to `Api`), never a partial/zeroed variant.
+    /// A `context_overflow` body missing the numeric fields is STILL an overflow:
+    /// the `error` field is authoritative, so we return `ContextOverflow` (with
+    /// zeroed counts) and let the engine compact-and-retry, rather than falling
+    /// through to a generic `Api` error that would kill the turn.
     #[test]
-    fn parse_flux_409_missing_numeric_fields_returns_none() {
+    fn parse_flux_409_missing_numeric_fields_still_overflows() {
         let body = r#"{"error":"context_overflow","message":"oops"}"#;
-        assert!(parse_flux_409(body).is_none());
+        match parse_flux_overflow(body) {
+            Some(ProviderError::ContextOverflow {
+                required_tokens,
+                model_window,
+                ..
+            }) => {
+                assert_eq!(required_tokens, 0);
+                assert_eq!(model_window, 0);
+            }
+            other => panic!("expected ContextOverflow, got {other:?}"),
+        }
+    }
+
+    /// REGRESSION (live E2E, captured from api.fluxrouter.ai 2026-06-23): the
+    /// production 409 body is NOT the frozen flat shape — it is an OpenAI/LiteLLM
+    /// error envelope wrapping the payload as a Python dict *repr* (single quotes)
+    /// inside `error.message`. The original strict parser silently dropped this
+    /// (so compact-and-retry never fired against live Flux). The parser must
+    /// recover the structured fields from this exact body.
+    #[test]
+    fn parse_flux_409_handles_live_wrapped_python_repr_body() {
+        let body = r#"{"error":{"message":"{'error': 'context_overflow', 'required_tokens': 100000256, 'model_window': 1000000, 'routed_model': 'qwen-3-coder-cerebras', 'message': 'request exceeds the window of every capable model; compact and retry'}","type":"None","param":"None","code":"409"}}"#;
+        match parse_flux_overflow(body) {
+            Some(ProviderError::ContextOverflow {
+                required_tokens,
+                model_window,
+                routed_model,
+                message,
+            }) => {
+                assert_eq!(required_tokens, 100_000_256);
+                assert_eq!(model_window, 1_000_000);
+                assert_eq!(routed_model, "qwen-3-coder-cerebras");
+                assert!(message.contains("compact and retry"));
+            }
+            other => panic!("expected ContextOverflow from live body, got {other:?}"),
+        }
+    }
+
+    /// The in-flight Flux 413 path raises `context_window_exceeded` via FastAPI
+    /// `HTTPException(detail={…})`, which arrives either raw (`{"detail":{…}}`)
+    /// or LiteLLM-wrapped. Both must classify as a context overflow so the
+    /// engine compact-retries when that deploy lands. (413 carries `reason`,
+    /// not `message`, and no window/routed-model — those default.)
+    #[test]
+    fn parse_flux_overflow_handles_413_context_window_exceeded() {
+        // Raw FastAPI detail shape.
+        let raw = r#"{"detail":{"error":"context_window_exceeded","reason":"Request needs ~250000 tokens but exceeds every eligible model.","required_tokens":250000}}"#;
+        match parse_flux_overflow(raw) {
+            Some(ProviderError::ContextOverflow {
+                required_tokens,
+                message,
+                ..
+            }) => {
+                assert_eq!(required_tokens, 250_000);
+                assert!(message.contains("exceeds every eligible model"));
+            }
+            other => panic!("expected ContextOverflow from raw 413 detail, got {other:?}"),
+        }
+        // LiteLLM-wrapped Python-repr of the same.
+        let wrapped = r#"{"error":{"message":"{'error': 'context_window_exceeded', 'reason': 'too big', 'required_tokens': 250000}","code":"413"}}"#;
+        match parse_flux_overflow(wrapped) {
+            Some(ProviderError::ContextOverflow {
+                required_tokens, ..
+            }) => {
+                assert_eq!(required_tokens, 250_000);
+            }
+            other => panic!("expected ContextOverflow from wrapped 413, got {other:?}"),
+        }
+    }
+
+    /// A non-overflow wrapped envelope (e.g. a generic upstream error) must NOT
+    /// be misread as an overflow.
+    #[test]
+    fn parse_flux_409_wrapped_non_overflow_returns_none() {
+        let body =
+            r#"{"error":{"message":"{'error': 'rate_limited', 'retry_after': 5}","code":"409"}}"#;
+        assert!(parse_flux_overflow(body).is_none());
     }
 
     /// A malformed JSON 409 body returns `None`.
     #[test]
     fn parse_flux_409_non_json_returns_none() {
-        assert!(parse_flux_409("not json at all").is_none());
+        assert!(parse_flux_overflow("not json at all").is_none());
     }
 
     /// `ContextOverflow` is NOT provider-retryable: the unchanged request would
