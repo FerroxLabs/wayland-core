@@ -335,7 +335,20 @@ impl ImageGenerationBackend for DalleBackend {
                 .await
                 .map_err(|e| ImageGenerationError::Other(format!("openai dall-e body: {e}")))?;
             if !status.is_success() {
-                return Err(map_http_error(status.as_u16(), &txt, "openai dall-e"));
+                let code = status.as_u16();
+                // gpt-image-1 (the new default) needs a verified OpenAI org; an
+                // account that only has dall-e-3 access gets 403 (or a 400 model
+                // error). Signpost the OPENAI_IMAGE_MODEL escape hatch so the user
+                // can switch back without reading the source (#265 follow-up).
+                if code == 403 || (code == 400 && txt.to_ascii_lowercase().contains("model")) {
+                    let preview: String = txt.chars().take(300).collect();
+                    return Err(ImageGenerationError::Other(format!(
+                        "openai image model {model:?} returned HTTP {code}: {preview}. If your \
+                         account lacks access to {model:?}, set OPENAI_IMAGE_MODEL to a model you \
+                         can use (e.g. dall-e-3)."
+                    )));
+                }
+                return Err(map_http_error(code, &txt, "openai image"));
             }
             let parsed: Value = serde_json::from_str(&txt).map_err(|e| {
                 ImageGenerationError::Other(format!("openai image JSON parse: {e}"))
@@ -746,7 +759,7 @@ impl ImageGenerationBackend for PollinationsBackend {
 mod tests {
     use super::*;
     use serial_test::serial;
-    use wiremock::matchers::{header, method, path};
+    use wiremock::matchers::{body_json, header, method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     // -- env-var hygiene ------------------------------------------------
@@ -913,6 +926,90 @@ mod tests {
         .with_model("dall-e-3");
         assert_eq!(overridden.model, "dall-e-3");
         assert!(!overridden.is_gpt_image());
+    }
+
+    #[tokio::test]
+    async fn openai_request_body_is_model_aware() {
+        // #265 root-cause assertion: the request body actually sent on the wire
+        // must be model-aware. wiremock `body_json` is an EXACT match, so the
+        // call only succeeds if the body is byte-for-byte what we assert — which
+        // also proves `quality` is OMITTED for gpt-image-1 (an extra field would
+        // fail the exact match) and PRESENT for dall-e-3.
+        let server = MockServer::start().await;
+        // gpt-image-1 (default): no `quality`, gpt-image size table.
+        Mock::given(method("POST"))
+            .and(path("/gpt/v1/images/generations"))
+            .and(body_json(serde_json::json!({
+                "model": "gpt-image-1",
+                "prompt": "a sunset",
+                "size": "1536x1024",
+                "n": 1,
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": [{ "url": "https://example.com/x.png" }]
+            })))
+            .mount(&server)
+            .await;
+        // dall-e-3: includes `quality: standard`, dall-e size table.
+        Mock::given(method("POST"))
+            .and(path("/dalle/v1/images/generations"))
+            .and(body_json(serde_json::json!({
+                "model": "dall-e-3",
+                "prompt": "a sunset",
+                "size": "1792x1024",
+                "quality": "standard",
+                "n": 1,
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": [{ "url": "https://example.com/y.png" }]
+            })))
+            .mount(&server)
+            .await;
+
+        let gpt = DalleBackend::with_endpoint(
+            "sk-test".to_string(),
+            format!("{}/gpt/v1/images/generations", server.uri()),
+        );
+        gpt.generate(req("a sunset", "landscape"))
+            .await
+            .expect("gpt-image-1 body must match exactly (no `quality`, 1536x1024)");
+
+        let dalle = DalleBackend::with_endpoint(
+            "sk-test".to_string(),
+            format!("{}/dalle/v1/images/generations", server.uri()),
+        )
+        .with_model("dall-e-3");
+        dalle
+            .generate(req("a sunset", "landscape"))
+            .await
+            .expect("dall-e-3 body must match exactly (quality=standard, 1792x1024)");
+    }
+
+    #[tokio::test]
+    async fn openai_403_surfaces_image_model_escape_hatch() {
+        // #265: an org without gpt-image-1 access gets 403; the error must point
+        // the user at OPENAI_IMAGE_MODEL rather than dead-ending.
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(
+                ResponseTemplate::new(403)
+                    .set_body_string("{\"error\":{\"message\":\"forbidden\"}}"),
+            )
+            .mount(&server)
+            .await;
+        let backend = DalleBackend::with_endpoint(
+            "sk-test".to_string(),
+            format!("{}/v1/images/generations", server.uri()),
+        );
+        let err = backend
+            .generate(req("a sunset", "landscape"))
+            .await
+            .expect_err("403 must surface as an error");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("OPENAI_IMAGE_MODEL"),
+            "403 error must signpost the OPENAI_IMAGE_MODEL escape hatch, got: {msg}"
+        );
     }
 
     #[tokio::test]
