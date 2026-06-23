@@ -3610,6 +3610,10 @@ impl AgentEngine {
     /// #280 — record ONE additive, non-destructive handoff Episode to long-term
     /// memory BEFORE `run_compaction` mutates the buffer, so the verbatim
     /// pre-compaction transcript survives even if the LLM summary rewords prose.
+    /// The transcript captures every load-bearing block — assistant/user text,
+    /// the `tool_use` name + args, the `tool_result` bodies (which carry the
+    /// bulk of a coding session's context), and thinking — so the spec's
+    /// "nothing lost" intent holds, not just prose.
     ///
     /// Non-destructive by construction: `record_episode` is a pure INSERT that
     /// never touches `self.messages`; a failure is logged-and-swallowed (never
@@ -3618,11 +3622,15 @@ impl AgentEngine {
     async fn write_smart_handoff(&self) {
         use wcore_memory::v2_types::{Episode, EpisodeId, EpisodeStatus, Tier};
 
-        // VERBATIM role-tagged concatenation of the current buffer's text blocks
-        // (the live conversation about to be summarized) — captured from the
-        // LIVE buffer, not the post-fold result, so nothing is lost.
+        // VERBATIM role-tagged concatenation of the current buffer (the live
+        // conversation about to be summarized), captured from the LIVE buffer
+        // (not the post-fold result). Every content-block kind is preserved —
+        // tool_result bodies are the bulk of real context and MUST survive, so
+        // a text-only handoff would silently drop most of what we promise to
+        // keep.
         let mut summary = String::new();
-        let mut live_user_text: Option<String> = None;
+        // The last USER message's text — the active task — for atomic_facts[0].
+        let mut last_user_text: Option<String> = None;
         for m in &self.messages {
             let role = match m.role {
                 Role::User => "user",
@@ -3630,18 +3638,42 @@ impl AgentEngine {
                 Role::System => "system",
                 Role::Tool => "tool",
             };
+            let mut this_user_text: Option<String> = None;
             for block in &m.content {
-                if let ContentBlock::Text { text } = block {
+                let line = match block {
+                    ContentBlock::Text { text } => {
+                        if matches!(m.role, Role::User) {
+                            this_user_text = Some(text.clone());
+                        }
+                        Some(text.clone())
+                    }
+                    ContentBlock::ToolUse { name, input, .. } => {
+                        Some(format!("tool_use({name}): {input}"))
+                    }
+                    ContentBlock::ToolResult {
+                        tool_use_id,
+                        content,
+                        is_error,
+                    } => Some(format!(
+                        "tool_result({tool_use_id}{}): {content}",
+                        if *is_error { " error" } else { "" }
+                    )),
+                    ContentBlock::Thinking { thinking } => Some(format!("thinking: {thinking}")),
+                };
+                if let Some(line) = line {
                     summary.push_str(role);
                     summary.push_str(": ");
-                    summary.push_str(text);
+                    summary.push_str(&line);
                     summary.push('\n');
-                    if matches!(m.role, Role::User) {
-                        live_user_text = Some(text.clone());
-                    }
                 }
             }
+            // Capture the LAST user message's text (the current task), not the
+            // last text block across all user messages.
+            if this_user_text.is_some() {
+                last_user_text = this_user_text;
+            }
         }
+        let live_user_text = last_user_text;
 
         // Cheap heuristic bullets — NO extra LLM call.
         let mut atomic_facts: Vec<String> = Vec::new();
@@ -11936,6 +11968,174 @@ mod approval_bridge_engine_tests {
         // Must not panic / propagate.
         engine.write_smart_handoff().await;
         assert_eq!(engine.messages.len(), 1);
+    }
+
+    // --- #280 smart compaction through run_compaction() (integration) ------
+
+    /// A provider that always returns a fixed, non-empty summary turn. Reused by
+    /// both run_compaction integration tests so autocompact's summary LLM call
+    /// succeeds deterministically (no live model). Mirrors the `summary_turn`
+    /// shape in `tests/engine_compact_test.rs`.
+    struct SummaryProvider {
+        summary: String,
+    }
+    #[async_trait::async_trait]
+    impl LlmProvider for SummaryProvider {
+        async fn stream(
+            &self,
+            _: &LlmRequest,
+        ) -> Result<tokio::sync::mpsc::Receiver<LlmEvent>, ProviderError> {
+            use wcore_types::message::{StopReason, TokenUsage};
+            let events = vec![
+                LlmEvent::TextDelta(self.summary.clone()),
+                LlmEvent::Done {
+                    stop_reason: StopReason::EndTurn,
+                    finish_reason: FinishReason::from_stop_reason(StopReason::EndTurn),
+                    usage: TokenUsage::default(),
+                },
+            ];
+            let (tx, rx) = tokio::sync::mpsc::channel(16);
+            tokio::spawn(async move {
+                for event in events {
+                    let _ = tx.send(event).await;
+                }
+            });
+            Ok(rx)
+        }
+    }
+
+    /// An OutputSink that captures every `emit_compaction` call so the
+    /// integration tests can read the `CompactOffload` reason string and the
+    /// tokens_freed the engine emitted. Every other method is a no-op.
+    #[derive(Default)]
+    struct CapturingCompactSink {
+        events: std::sync::Mutex<Vec<(String, u64)>>,
+    }
+    impl OutputSink for CapturingCompactSink {
+        fn emit_text_delta(&self, _: &str, _: &str) {}
+        fn emit_thinking(&self, _: &str, _: &str) {}
+        fn emit_tool_call(&self, _: &str, _: &str) {}
+        fn emit_tool_result(&self, _: &str, _: bool, _: &str) {}
+        fn emit_stream_start(&self, _: &str) {}
+        fn emit_stream_end(
+            &self,
+            _: &str,
+            _: usize,
+            _: u64,
+            _: u64,
+            _: u64,
+            _: u64,
+            _: FinishReason,
+        ) {
+        }
+        fn emit_error(&self, _: &str, _: bool) {}
+        fn emit_info(&self, _: &str) {}
+        fn emit_compaction(&self, _: &str, reason: &str, tokens_freed: u64, _: Option<u32>) {
+            self.events
+                .lock()
+                .unwrap()
+                .push((reason.to_string(), tokens_freed));
+        }
+    }
+
+    /// Positive path: `smart_compact_force = true` drives `run_compaction()`
+    /// through the smart branch. The emitted `CompactOffload` carries
+    /// `reason == "smart_window_pressure"`, and because the pre-compaction
+    /// total (`compact_state.last_input_tokens`) dwarfs the post-compaction
+    /// estimate, `tokens_freed >> smart_min_shrink_tokens` and the cannot-shrink
+    /// latch stays clear (`smart_compact_exhausted == false`).
+    #[tokio::test]
+    async fn smart_run_compaction_emits_smart_reason_and_does_not_exhaust() {
+        let mut engine = make_engine();
+        engine.provider = Arc::new(SummaryProvider {
+            summary: "Conversation summary of the prior turns.".into(),
+        });
+        let sink = Arc::new(CapturingCompactSink::default());
+        engine.output = sink.clone();
+
+        // A real, non-User buffer to summarize (a trailing User message would be
+        // popped out as the live turn). pre_compact_tokens == last_input_tokens.
+        engine.messages = vec![Message::now(
+            Role::Assistant,
+            vec![ContentBlock::Text {
+                text: "earlier assistant context that gets summarized".into(),
+            }],
+        )];
+        // Smart drove this pass; pre-compaction total is huge so the freed delta
+        // (pre − tiny post estimate) is far above the 2000-token floor.
+        engine.smart_compact_force = true;
+        engine.compact_state.last_input_tokens = 300_000;
+        assert_eq!(engine.compact_config.smart_min_shrink_tokens, 2_000);
+
+        engine
+            .run_compaction()
+            .await
+            .expect("compaction must succeed");
+
+        let events = sink.events.lock().unwrap();
+        assert_eq!(events.len(), 1, "exactly one CompactOffload emitted");
+        let (reason, tokens_freed) = &events[0];
+        assert_eq!(
+            reason.as_str(),
+            "smart_window_pressure",
+            "smart-driven pass must tag the offload with smart provenance"
+        );
+        assert!(
+            *tokens_freed > engine.compact_config.smart_min_shrink_tokens,
+            "tokens_freed {tokens_freed} must dwarf the {} floor",
+            engine.compact_config.smart_min_shrink_tokens
+        );
+        assert!(
+            !engine.smart_compact_exhausted,
+            "normal shrink must NOT arm the cannot-shrink latch"
+        );
+        // The one-shot force flag is consumed regardless of outcome.
+        assert!(!engine.smart_compact_force);
+    }
+
+    /// Negative path (cannot-shrink latch): a tiny pre-compaction total means the
+    /// freed delta falls below `smart_min_shrink_tokens`, so a smart-driven
+    /// `run_compaction()` arms the terminal `smart_compact_exhausted` latch. The
+    /// offload reason is still the smart string.
+    #[tokio::test]
+    async fn smart_run_compaction_latches_exhausted_when_cannot_shrink() {
+        let mut engine = make_engine();
+        engine.provider = Arc::new(SummaryProvider {
+            summary: "tiny summary".into(),
+        });
+        let sink = Arc::new(CapturingCompactSink::default());
+        engine.output = sink.clone();
+
+        engine.messages = vec![Message::now(
+            Role::Assistant,
+            vec![ContentBlock::Text {
+                text: "small context".into(),
+            }],
+        )];
+        engine.smart_compact_force = true;
+        // pre_compact_tokens far below the 2000 floor → freed delta < floor → the
+        // cannot-shrink latch must arm.
+        engine.compact_state.last_input_tokens = 100;
+        assert!(
+            engine.compact_state.last_input_tokens < engine.compact_config.smart_min_shrink_tokens
+        );
+
+        engine
+            .run_compaction()
+            .await
+            .expect("compaction must succeed");
+
+        assert!(
+            engine.smart_compact_exhausted,
+            "freeing fewer than smart_min_shrink_tokens must latch exhausted"
+        );
+        let events = sink.events.lock().unwrap();
+        assert_eq!(events.len(), 1, "exactly one CompactOffload emitted");
+        assert_eq!(
+            events[0].0.as_str(),
+            "smart_window_pressure",
+            "the cannot-shrink pass is still smart-driven"
+        );
     }
 }
 
