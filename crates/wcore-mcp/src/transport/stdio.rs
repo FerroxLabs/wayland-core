@@ -36,6 +36,14 @@ const FORWARDED_ENV_VARS: &[&str] = &[
     "LC_NUMERIC",
     "LC_TIME",
     "TMPDIR", // macOS: per-user temp dir used by many npm CLIs
+    // C3: the isolated-profile home. A wayland-aware MCP child (e.g. the IJFW
+    // memory server) must resolve the SAME profile as the parent — without this
+    // it falls back to the default ~/.wayland (cross-profile leak). Non-secret
+    // path; the vault passphrase (WAYLAND_VAULT_*) is never forwarded. This is
+    // distinct from the WAYLAND_PROFILE_HOME contract below (a resolved path for
+    // plugins that read it); WAYLAND_HOME drives the child's own
+    // wayland_config_dir() resolution.
+    "WAYLAND_HOME",
     // Windows essentials. Without these, cmd.exe / powershell.exe / .NET-based
     // MCP servers fail to initialise on Windows and the spawned child dies in
     // ~15ms before the first JSON-RPC request reaches it — diagnosed via
@@ -1180,6 +1188,10 @@ mod tests {
         assert!(
             FORWARDED_ENV_VARS.contains(&"LANG"),
             "LANG must be in the allowlist"
+        );
+        assert!(
+            FORWARDED_ENV_VARS.contains(&"WAYLAND_HOME"),
+            "WAYLAND_HOME must be forwarded for C3 profile propagation"
         );
 
         // Sensitive vars must NOT appear in the allowlist.

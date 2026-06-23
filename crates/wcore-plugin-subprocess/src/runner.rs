@@ -132,7 +132,9 @@ pub const CRASH_THRESHOLD: u8 = 3;
 
 /// Minimal env vars forwarded to subprocess plugin child processes after
 /// [`std::process::Command::env_clear`]. Everything else — including
-/// `OPENAI_API_KEY`, `WAYLAND_*`, `ANTHROPIC_*`, etc. — is withheld.
+/// `OPENAI_API_KEY`, `WAYLAND_VAULT_*`, `ANTHROPIC_*`, etc. — is withheld
+/// (`WAYLAND_HOME` is an intentional exception below, forwarded so the child
+/// resolves the same isolated profile — C3; the vault secret stays withheld).
 /// Kept minimal: just enough for CLI tools to locate executables and
 /// behave correctly under different locales on every supported OS.
 ///
@@ -156,6 +158,11 @@ pub(crate) const FORWARDED_ENV_VARS: &[&str] = &[
     "LC_NUMERIC",
     "LC_TIME",
     "TMPDIR",
+    // C3: the isolated-profile home. Engine-controlled children must resolve the
+    // SAME profile as the parent — without this they fall back to the default
+    // ~/.wayland (cross-profile leak). Non-secret path; the vault passphrase
+    // (WAYLAND_VAULT_*) is never forwarded.
+    "WAYLAND_HOME",
     // Windows essentials
     "SYSTEMROOT",
     "WINDIR",
@@ -1058,12 +1065,51 @@ mod tests {
         unsafe { std::env::remove_var(secret_var) };
     }
 
+    /// C3: WAYLAND_HOME is forwarded so an engine-spawned child resolves the
+    /// SAME isolated profile as the parent. Spawns a real `/bin/sh` that prints
+    /// $WAYLAND_HOME and asserts the child sees the parent's value.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn subprocess_forwards_wayland_home() {
+        use std::path::Path;
+        use tokio::io::AsyncReadExt;
+
+        // SAFETY: single-threaded serial test context; no concurrent env mutation.
+        unsafe { std::env::set_var("WAYLAND_HOME", "/tmp/isolated-profile-c3") };
+
+        let mut result = super::spawn_binary(
+            Path::new("/bin/sh"),
+            &[
+                "-c".to_string(),
+                "printf '%s' \"$WAYLAND_HOME\"".to_string(),
+            ],
+        )
+        .await
+        .expect("spawn /bin/sh failed");
+
+        let mut stdout_buf = String::new();
+        result.stdout.read_to_string(&mut stdout_buf).await.unwrap();
+        if let Some(mut child) = result.child {
+            let _ = child.wait().await;
+        }
+
+        // SAFETY: single-threaded serial test context.
+        unsafe { std::env::remove_var("WAYLAND_HOME") };
+
+        assert_eq!(
+            stdout_buf, "/tmp/isolated-profile-c3",
+            "child must inherit the parent's WAYLAND_HOME (C3)"
+        );
+    }
+
     #[test]
     fn forwarded_env_vars_contains_expected_minimum() {
         assert!(FORWARDED_ENV_VARS.contains(&"PATH"));
         assert!(FORWARDED_ENV_VARS.contains(&"HOME"));
         assert!(FORWARDED_ENV_VARS.contains(&"USER"));
         assert!(FORWARDED_ENV_VARS.contains(&"LANG"));
+        // C3 profile propagation.
+        assert!(FORWARDED_ENV_VARS.contains(&"WAYLAND_HOME"));
     }
 
     /// Audit rel-panic-68/M-21: the stdout reader must NOT buffer an unbounded

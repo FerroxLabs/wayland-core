@@ -68,6 +68,13 @@ const BASE_SANDBOX_ENV_ALLOWLIST: &[&str] = &[
     "XDG_CACHE_HOME",
     "XDG_CONFIG_HOME",
     "XDG_DATA_HOME",
+    // C3: the isolated-profile home, so a sandboxed command that itself invokes
+    // `wayland-core` (or reads its config) resolves the SAME profile as the
+    // parent rather than the default ~/.wayland. A non-secret path — exactly
+    // like HOME / XDG_*_HOME already forwarded above, from which the default
+    // home path is already inferable, so this exposes nothing new. The vault
+    // passphrase (`WAYLAND_VAULT_*`) is still dropped by `is_sensitive_env_var`.
+    "WAYLAND_HOME",
     // SSL trust-store discovery — needed by curl / git / CLIs to verify
     // TLS; the file *paths*, never a secret.
     "SSL_CERT_FILE",
@@ -490,6 +497,30 @@ mod tests {
                 "secret-shaped var {k} leaked into sandboxed env"
             );
         }
+    }
+
+    #[test]
+    #[serial]
+    fn build_sandboxed_env_forwards_wayland_home_not_vault() {
+        let _g = guard();
+        // C3: WAYLAND_HOME must reach a sandboxed child so a nested wayland-core
+        // invocation resolves the ACTIVE profile, not the default home. The
+        // vault passphrase must still be dropped by the secret filter.
+        unsafe {
+            std::env::set_var("WAYLAND_HOME", "/tmp/isolated-profile");
+            std::env::set_var("WAYLAND_VAULT_PASSPHRASE", "supersecret");
+        }
+        let env = build_sandboxed_env(&[]);
+        assert!(
+            env.iter()
+                .any(|(k, v)| k == "WAYLAND_HOME" && v == "/tmp/isolated-profile"),
+            "WAYLAND_HOME must be forwarded into the sandbox (C3 profile propagation)"
+        );
+        assert!(
+            !env.iter()
+                .any(|(k, _)| k.eq_ignore_ascii_case("WAYLAND_VAULT_PASSPHRASE")),
+            "the vault passphrase must never reach a sandboxed child"
+        );
     }
 
     #[test]
