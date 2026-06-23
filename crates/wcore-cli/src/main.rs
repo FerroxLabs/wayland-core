@@ -576,6 +576,38 @@ fn open_tui_log_file() -> std::io::Result<std::fs::File> {
         .open(log_dir.join("wayland-core.log"))
 }
 
+/// 3A / D3 fail-closed guard for `--json-stream` host mode.
+///
+/// A desktop host spawns `wayland-core --json-stream` and may drive a
+/// multi-profile UI. If it signals profile intent (`--profile`) but does NOT
+/// materialize the isolated home (`WAYLAND_HOME` unset — meaning
+/// [`wcore_config::profile::activate_for_launch`] could not resolve the profile
+/// to an existing home), refusing is the only safe choice: silently falling
+/// through to the SHARED default home would cross-write another account's
+/// credentials and memory — the Hermes #18594 corruption reproduced at the host
+/// boundary. Interactive CLI/TUI use is intentionally tolerant (it warns and
+/// falls through); only the host protocol is held to the strict contract.
+///
+/// Returns the loud error string when the run must be refused, else `Ok(())`.
+fn json_stream_profile_guard(
+    json_stream: bool,
+    profile: Option<&str>,
+    wayland_home_set: bool,
+) -> Result<(), String> {
+    if json_stream && profile.is_some() && !wayland_home_set {
+        return Err(format!(
+            "refusing to start --json-stream with --profile {:?} but no WAYLAND_HOME \
+             set. A host that drives profiles must set WAYLAND_HOME to the profile's \
+             isolated home before spawning the engine; otherwise the engine would \
+             write the shared default home and cross-write another profile's \
+             credentials and memory. Create the home with `wayland-core profile \
+             create`, or set WAYLAND_HOME per spawn.",
+            profile.unwrap_or("")
+        ));
+    }
+    Ok(())
+}
+
 fn main() -> anyhow::Result<ExitCode> {
     // Resolve the active isolated profile ONCE, here at process entry, and
     // materialize it into WAYLAND_HOME (C2). This MUST precede
@@ -1173,6 +1205,18 @@ async fn run() -> anyhow::Result<ExitCode> {
         .provider
         .clone()
         .unwrap_or_else(|| "anthropic".to_string());
+
+    // 3A / D3: fail closed BEFORE `cli.profile` is moved into CliArgs below. If
+    // the host signaled profile intent but no isolated home was materialized
+    // (WAYLAND_HOME was resolved once at process entry by activate_for_launch),
+    // refuse rather than silently writing the shared default home.
+    if let Err(msg) = json_stream_profile_guard(
+        cli.json_stream,
+        cli.profile.as_deref(),
+        std::env::var_os("WAYLAND_HOME").is_some(),
+    ) {
+        anyhow::bail!(msg);
+    }
 
     // Resolve config from files + CLI args + env vars
     let cli_args = CliArgs {
@@ -3003,6 +3047,36 @@ mod tests {
     use async_trait::async_trait;
     use serde_json::{Value, json};
     use wcore_mcp::manager::McpManager;
+
+    #[test]
+    fn json_stream_guard_blocks_profile_intent_without_home() {
+        // Host passed --profile but no WAYLAND_HOME materialized → refuse.
+        let err = json_stream_profile_guard(true, Some("work"), false)
+            .expect_err("must refuse profile intent without WAYLAND_HOME in json-stream");
+        assert!(
+            err.contains("WAYLAND_HOME"),
+            "message must name the fix: {err}"
+        );
+    }
+
+    #[test]
+    fn json_stream_guard_allows_when_home_set() {
+        // The host correctly set WAYLAND_HOME per spawn → proceed.
+        assert!(json_stream_profile_guard(true, Some("work"), true).is_ok());
+    }
+
+    #[test]
+    fn json_stream_guard_allows_without_profile_intent() {
+        // No --profile → default home is the legacy single-home contract.
+        assert!(json_stream_profile_guard(true, None, false).is_ok());
+    }
+
+    #[test]
+    fn json_stream_guard_is_noop_outside_json_stream() {
+        // Interactive CLI/TUI tolerates profile fall-through; only the host
+        // protocol is strict. Same inputs that block above must pass here.
+        assert!(json_stream_profile_guard(false, Some("work"), false).is_ok());
+    }
     use wcore_mcp::protocol::{JsonRpcRequest, JsonRpcResponse, McpToolDef};
     use wcore_mcp::transport::{McpError, McpTransport};
 
