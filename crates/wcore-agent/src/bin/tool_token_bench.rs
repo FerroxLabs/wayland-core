@@ -239,6 +239,7 @@ async fn drain_scripted_usage(provider: &ScriptedProvider) -> Usage {
         } else {
             None
         },
+        active_window_percent: None,
     }
 }
 

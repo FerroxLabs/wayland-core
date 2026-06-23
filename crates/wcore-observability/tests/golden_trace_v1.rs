@@ -67,6 +67,7 @@ fn golden_turn_trace_full_shape() {
         tool_calls: vec![tcc_full()],
         hook_actions: vec![],
         source_product: SOURCE_PRODUCT.to_string(),
+        agent_run_id: String::new(),
     };
     let got = serde_json::to_value(&turn).unwrap();
     let want = json!({

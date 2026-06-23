@@ -74,6 +74,11 @@ pub enum ProtocolEvent {
         finish_reason: FinishReason,
         #[serde(skip_serializing_if = "Option::is_none")]
         usage: Option<Usage>,
+        /// #279(c): stable per-run correlation handle grouping every event of
+        /// one agent run (survives multi-message / --resume). None on synthetic
+        /// stream-ends (slash/exit/stop) that aren't a model run.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        agent_run_id: Option<String>,
     },
     Error {
         #[serde(skip_serializing_if = "Option::is_none")]
@@ -406,6 +411,20 @@ pub enum ProtocolEvent {
         app: String,
         reason: String,
     },
+    /// W5 M6 / #279(d) + #280: a context compaction occurred. Gated by
+    /// capabilities.non_destructive_compact; hosts that don't recognise
+    /// compact_offload MUST drop it per the host decoder contract.
+    CompactOffload {
+        msg_id: String,
+        /// Why compaction fired (e.g. "window_pressure", "manual").
+        reason: String,
+        /// Tokens reclaimed. 0 when not measurable.
+        tokens_freed: u64,
+        /// Active-window fill AFTER compaction, same opaque 0..=100 u32 as
+        /// Usage.active_window_percent (from ContextWindow::percent()).
+        #[serde(skip_serializing_if = "Option::is_none")]
+        active_window_percent: Option<u32>,
+    },
     Pong,
 }
 
@@ -627,6 +646,12 @@ pub struct Usage {
     pub cache_read_tokens: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cache_write_tokens: Option<u64>,
+    /// #279(a): active-window fill 0..=100, sourced by the engine from
+    /// wcore_config::context_window::ContextWindow::percent() on the
+    /// POST-swap effective model. Opaque u32; wcore-protocol takes NO
+    /// wcore-config dep. None (omitted) when the window is unknown.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub active_window_percent: Option<u32>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -746,7 +771,9 @@ mod tests {
                 output_tokens: 50,
                 cache_read_tokens: Some(20),
                 cache_write_tokens: None,
+                active_window_percent: None,
             }),
+            agent_run_id: None,
         };
         let json = serde_json::to_value(&event).unwrap();
         assert_eq!(json["type"], "stream_end");
@@ -767,6 +794,7 @@ mod tests {
                 msg_id: "m1".to_string(),
                 finish_reason: variant,
                 usage: None,
+                agent_run_id: None,
             };
             let json = serde_json::to_value(&event).unwrap();
             assert_eq!(json["finish_reason"], expected, "variant {variant:?}");
@@ -780,6 +808,7 @@ mod tests {
             msg_id: "m1".to_string(),
             finish_reason: FinishReason::Length,
             usage: None,
+            agent_run_id: None,
         };
         let json = serde_json::to_value(&event).unwrap();
         assert!(

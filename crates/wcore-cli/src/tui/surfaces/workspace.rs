@@ -8346,6 +8346,7 @@ mod tests {
                 msg_id: "m1".into(),
                 finish_reason: FinishReason::Stop,
                 usage: None,
+                agent_run_id: None,
             },
         ];
 

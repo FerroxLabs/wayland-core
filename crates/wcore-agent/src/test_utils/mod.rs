@@ -203,7 +203,9 @@ impl OutputSink for TestSink {
                 } else {
                     None
                 },
+                active_window_percent: None,
             }),
+            agent_run_id: None,
         });
     }
     fn emit_error(&self, msg: &str, retryable: bool) {

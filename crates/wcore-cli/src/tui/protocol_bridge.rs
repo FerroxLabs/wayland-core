@@ -885,6 +885,7 @@ fn apply_event_inner(app: &mut App, event: ProtocolEvent) {
         | ProtocolEvent::CuaEvent { .. }
         | ProtocolEvent::Suspend { .. }
         | ProtocolEvent::ApprovalResume { .. }
+        | ProtocolEvent::CompactOffload { .. }
         | ProtocolEvent::Pong => {}
     }
 }
@@ -2017,6 +2018,7 @@ mod tests {
                 msg_id: "m1".into(),
                 finish_reason: wcore_protocol::events::FinishReason::Stop,
                 usage: None,
+                agent_run_id: None,
             },
         );
         assert!(!app.session.streaming_active);
@@ -2070,6 +2072,7 @@ mod tests {
                 msg_id: "m1".into(),
                 finish_reason: wcore_protocol::events::FinishReason::Stop,
                 usage: None,
+                agent_run_id: None,
             },
         );
         assert!(app.session.thinking.is_empty());
@@ -2114,7 +2117,9 @@ mod tests {
                     output_tokens: 42,
                     cache_read_tokens: None,
                     cache_write_tokens: None,
+                    active_window_percent: None,
                 }),
+                agent_run_id: None,
             },
         );
         assert_eq!(app.session.turns.len(), 1, "one assistant turn flushed");
@@ -2167,6 +2172,7 @@ mod tests {
                 msg_id: "m1".into(),
                 finish_reason: wcore_protocol::events::FinishReason::Stop,
                 usage: None,
+                agent_run_id: None,
             },
         );
         let elements = &app.session.turns[0].elements;
@@ -3005,6 +3011,7 @@ mod tests {
                 msg_id: "m1".into(),
                 finish_reason: wcore_protocol::events::FinishReason::Stop,
                 usage: None,
+                agent_run_id: None,
             },
         );
         assert!(
@@ -3066,6 +3073,7 @@ mod tests {
                 msg_id: "m1".into(),
                 finish_reason: wcore_protocol::events::FinishReason::Stop,
                 usage: None,
+                agent_run_id: None,
             },
         );
         apply_event(
@@ -3454,6 +3462,7 @@ mod tests {
                 msg_id: "m1".into(),
                 finish_reason: wcore_protocol::events::FinishReason::Stop,
                 usage: None,
+                agent_run_id: None,
             },
         );
     }
@@ -3538,6 +3547,7 @@ mod tests {
                 msg_id: "m1".into(),
                 finish_reason: wcore_protocol::events::FinishReason::Stop,
                 usage: None,
+                agent_run_id: None,
             },
         );
         let turn = app
@@ -3640,6 +3650,7 @@ mod tests {
                 msg_id: "m1".into(),
                 finish_reason: wcore_protocol::events::FinishReason::Stop,
                 usage: None,
+                agent_run_id: None,
             },
         );
         let turn = app
@@ -3720,6 +3731,7 @@ mod tests {
                 msg_id: "m1".into(),
                 finish_reason: wcore_protocol::events::FinishReason::Stop,
                 usage: None,
+                agent_run_id: None,
             },
         );
         let turn = app
@@ -3791,6 +3803,7 @@ mod tests {
                 msg_id: "m1".into(),
                 finish_reason: wcore_protocol::events::FinishReason::Stop,
                 usage: None,
+                agent_run_id: None,
             },
         );
         let turn = app
@@ -3859,6 +3872,7 @@ mod tests {
                 msg_id: "m1".into(),
                 finish_reason: wcore_protocol::events::FinishReason::Stop,
                 usage: None,
+                agent_run_id: None,
             },
         );
         // v0.9.1.2 F12: a `ToolRequest` opens an in-flight assistant
@@ -4054,6 +4068,7 @@ mod tests {
                 msg_id: "m1".into(),
                 finish_reason: wcore_protocol::events::FinishReason::Stop,
                 usage: None,
+                agent_run_id: None,
             },
         );
         assert_eq!(app.session.turns.len(), 1);
@@ -4146,6 +4161,7 @@ mod tests {
                 msg_id: "m1".into(),
                 finish_reason: wcore_protocol::events::FinishReason::Stop,
                 usage: None,
+                agent_run_id: None,
             },
         );
         // Now inject an EXTRA unreferenced card in `tool_cards` (the

@@ -114,6 +114,71 @@ fn host_drops_unknown_event_type_silently() {
     }
 }
 
+#[test]
+fn host_drops_compact_offload_when_capability_unknown_279() {
+    let line = json!({
+        "type": "compact_offload",
+        "msg_id": "m-1",
+        "reason": "window_pressure",
+        "tokens_freed": 4096,
+        "active_window_percent": 41
+    })
+    .to_string();
+    match host_decode(&line) {
+        DecodeOutcome::UnknownType(t) => assert_eq!(t, "compact_offload"),
+        other => panic!("expected UnknownType, got {other:?}"),
+    }
+}
+
+#[test]
+fn host_tolerates_unknown_fields_on_stream_end_279() {
+    let line = json!({
+        "type": "stream_end",
+        "msg_id": "m-1",
+        "finish_reason": "stop",
+        "usage": {"input_tokens": 10, "output_tokens": 5, "active_window_percent": 88},
+        "agent_run_id": "agent-run-xyz"
+    })
+    .to_string();
+    match host_decode(&line) {
+        DecodeOutcome::Known(v) => {
+            assert_eq!(v["type"], "stream_end");
+            assert_eq!(v["finish_reason"], "stop");
+            assert_eq!(v["usage"]["input_tokens"], 10);
+        }
+        other => panic!("expected Known(stream_end), got {other:?}"),
+    }
+}
+
+#[test]
+fn capability_aware_host_parses_compact_offload_279() {
+    fn decode_with_caps(line: &str, known_extra: &[&str]) -> DecodeOutcome {
+        let v: Value = serde_json::from_str(line).unwrap();
+        let t = v["type"].as_str().unwrap();
+        if V0_1_21_KNOWN_TYPES.contains(&t) || known_extra.contains(&t) {
+            DecodeOutcome::Known(v)
+        } else {
+            DecodeOutcome::UnknownType(t.to_string())
+        }
+    }
+    let line = json!({
+        "type": "compact_offload",
+        "msg_id": "m-1",
+        "reason": "window_pressure",
+        "tokens_freed": 4096,
+        "active_window_percent": 41
+    })
+    .to_string();
+    match decode_with_caps(&line, &["compact_offload"]) {
+        DecodeOutcome::Known(v) => {
+            assert_eq!(v["reason"], "window_pressure");
+            assert_eq!(v["tokens_freed"], 4096);
+            assert_eq!(v["active_window_percent"], 41);
+        }
+        other => panic!("capability-aware host must parse compact_offload, got {other:?}"),
+    }
+}
+
 /// W8a A.7 — `BudgetExceeded` ships as a host-tolerated additive variant
 /// per audit F5: no dedicated capability flag, always-emitted, dropped
 /// silently by hosts that don't know the `budget_exceeded` `type`

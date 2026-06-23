@@ -262,6 +262,12 @@ pub struct TurnTrace {
     /// an empty vector.
     pub hook_actions: Vec<HookActionRecord>,
     pub source_product: String,
+    /// #279(b)+(c): stable per-run id mirroring StreamEnd.agent_run_id.
+    /// #[serde(default)] so trace JSON written before this field existed
+    /// still deserializes; skip_serializing_if keeps the shape unchanged
+    /// when unset.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub agent_run_id: String,
 }
 
 impl TurnTrace {
@@ -956,5 +962,29 @@ mod tests {
         let s = summarize_workflow_detection(&[]);
         assert_eq!(s.count, 0);
         assert_eq!(s.mean_confidence, 0.0);
+    }
+
+    #[test]
+    fn turn_trace_without_agent_run_id_deserializes_to_empty_279() {
+        let old = serde_json::json!({
+            "turn": 0, "model": "claude-opus-4", "provider": "anthropic",
+            "input_tokens": 100, "output_tokens": 50, "cache_read": 0, "cache_write": 0,
+            "cache_hit_rate": 0.0, "cost_usd": 0.0, "tool_calls": [], "hook_actions": [],
+            "source_product": "wcore"
+        });
+        let parsed: TurnTrace =
+            serde_json::from_value(old).expect("old trace must still deserialize");
+        assert_eq!(
+            parsed.agent_run_id, "",
+            "missing agent_run_id defaults to empty"
+        );
+        let mut t = parsed.clone();
+        t.agent_run_id = "agent-run-abc".into();
+        assert!(serde_json::to_string(&t).unwrap().contains("agent-run-abc"));
+        assert!(
+            !serde_json::to_string(&parsed)
+                .unwrap()
+                .contains("agent_run_id")
+        );
     }
 }

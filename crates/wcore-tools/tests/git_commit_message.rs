@@ -17,6 +17,7 @@ fn synth_trace(touched: &[&str]) -> TurnTrace {
         tool_calls: vec![],
         hook_actions: vec![],
         source_product: "wayland-core".into(),
+        agent_run_id: String::new(),
     };
     for p in touched {
         t.tool_calls.push(ToolCallTrace::new(

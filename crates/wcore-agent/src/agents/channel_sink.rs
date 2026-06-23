@@ -183,6 +183,7 @@ impl OutputSink for ChannelSink {
             msg_id: msg_id.to_string(),
             finish_reason,
             usage: None,
+            agent_run_id: None,
         });
     }
     fn emit_error(&self, msg: &str, retryable: bool) {

@@ -564,7 +564,9 @@ mod tests {
                     output_tokens: 439,
                     cache_read_tokens: None,
                     cache_write_tokens: None,
+                    active_window_percent: None,
                 }),
+                agent_run_id: None,
             },
         );
         assert_eq!(app.session.phase, StreamingPhase::Idle);

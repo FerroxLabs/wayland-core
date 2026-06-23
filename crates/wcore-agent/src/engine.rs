@@ -977,6 +977,10 @@ pub struct AgentEngine {
     current_session: Option<Session>,
     output: Arc<dyn OutputSink>,
     current_msg_id: String,
+    /// #279(c): stable per-agent-run id, minted once per run() entry and
+    /// held across the run's turns. Distinct from internal spawn/workflow
+    /// run ids. None until the first run() of the session.
+    current_agent_run_id: Option<String>,
     approval_manager: Option<Arc<wcore_protocol::ToolApprovalManager>>,
     /// W7.1 S4-3.2: shared `ApprovalBridge` instance used to round-trip
     /// `approval_required` Script steps. `AgentBootstrap` creates one bridge
@@ -1477,6 +1481,7 @@ impl AgentEngine {
             current_session: None,
             output,
             current_msg_id: String::new(),
+            current_agent_run_id: None,
             approval_manager: None,
             approval_bridge: Arc::new(ApprovalBridge::new()),
             protocol_writer: None,
@@ -1641,6 +1646,7 @@ impl AgentEngine {
             current_session: Some(session),
             output,
             current_msg_id: String::new(),
+            current_agent_run_id: None,
             approval_manager: None,
             approval_bridge: Arc::new(ApprovalBridge::new()),
             protocol_writer: None,
@@ -2388,6 +2394,9 @@ impl AgentEngine {
     /// is preserved; only the user/assistant message buffer is cleared.
     pub fn clear_conversation(&mut self) {
         self.messages.clear();
+        // #279(c): a cleared session is a new agent run — drop the correlation
+        // id so the next run() mints a fresh one.
+        self.current_agent_run_id = None;
         // D014: a fresh conversation re-baselines the model. The prior
         // explicit `/model` pin no longer applies, so hook/skill switches
         // are honoured again until the user pins anew.
@@ -3341,7 +3350,28 @@ impl AgentEngine {
             finish_reason: FinishReason::Length,
             usage: self.total_usage.clone(),
             turns: turn,
+            active_window_percent: self.active_window_percent_now(&self.model, 0),
+            agent_run_id: self.current_agent_run_id.clone(),
         })
+    }
+
+    /// #279(a): the sole place the engine sources the active-window gauge.
+    /// Constructs the #255 ContextWindow kernel from the POST-swap effective
+    /// model and the per-turn `used_tokens` watermark the run loop already
+    /// computes, then returns `percent()` (0..=100), or `None` when the window
+    /// is unknown. The protocol/TUI NEVER recompute this.
+    ///
+    /// Real #255 kernel API: `ContextWindow::resolve(used_tokens, provider,
+    /// model, config_window) -> Self`, then `percent(&self) -> Option<u32>`.
+    fn active_window_percent_now(&self, effective_model: &str, used_tokens: u64) -> Option<u32> {
+        use wcore_config::context_window::ContextWindow;
+        ContextWindow::resolve(
+            used_tokens,
+            self.compat.provider_type(),
+            effective_model,
+            self.compact_config.context_window as u64,
+        )
+        .percent()
     }
 
     /// Run the agent loop with user input
@@ -3398,6 +3428,13 @@ impl AgentEngine {
             }
         }
         self.current_msg_id = msg_id.to_string();
+        // #279(c): mint a stable per-run correlation id on the first run()
+        // of the session and reuse it for every subsequent turn/message.
+        // Re-minted only when None (fresh engine / cleared session); persists
+        // across --resume because the resumed engine keeps the field.
+        if self.current_agent_run_id.is_none() {
+            self.current_agent_run_id = Some(format!("agent-run-{}", uuid::Uuid::new_v4()));
+        }
         self.output.emit_stream_start(msg_id);
         // Cross-session recall (v2 memory gap fix): on a cold first turn,
         // pre-inject durable facts relevant to this message BEFORE the user
@@ -4340,6 +4377,8 @@ impl AgentEngine {
                     // partial: populated in a future pass when a streaming-drain trigger exists
                     hook_actions: std::mem::take(&mut self.pending_hook_actions),
                     source_product: SOURCE_PRODUCT.to_string(),
+                    // #279(b)+(c): correlate this turn's trace to the run.
+                    agent_run_id: self.current_agent_run_id.clone().unwrap_or_default(),
                 };
                 if let Ok(trace_json) = serde_json::to_value(&trace) {
                     self.output.emit_trace(&self.current_msg_id, &trace_json);
@@ -4389,6 +4428,9 @@ impl AgentEngine {
                     finish_reason,
                     usage: self.total_usage.clone(),
                     turns: turn + 1,
+                    active_window_percent: self
+                        .active_window_percent_now(&effective_model, input_token_estimate as u64),
+                    agent_run_id: self.current_agent_run_id.clone(),
                 });
             }
 
@@ -4864,6 +4906,8 @@ impl AgentEngine {
                 // partial: populated in a future pass when a streaming-drain trigger exists
                 hook_actions: std::mem::take(&mut self.pending_hook_actions),
                 source_product: SOURCE_PRODUCT.to_string(),
+                // #279(b)+(c): correlate this turn's trace to the run.
+                agent_run_id: self.current_agent_run_id.clone().unwrap_or_default(),
             };
             if let Ok(trace_json) = serde_json::to_value(&trace) {
                 self.output.emit_trace(&self.current_msg_id, &trace_json);
@@ -5247,6 +5291,8 @@ impl AgentEngine {
             finish_reason: FinishReason::from_stop_reason(StopReason::EndTurn),
             usage: self.total_usage.clone(),
             turns: turn + 1,
+            active_window_percent: self.active_window_percent_now(&self.model, 0),
+            agent_run_id: self.current_agent_run_id.clone(),
         }
     }
 
@@ -5421,6 +5467,8 @@ impl AgentEngine {
                         "Autocompact: summarized {} messages ({} tokens → compact)",
                         result.messages_summarized, result.pre_compact_tokens
                     ));
+                    // #279(d): capture before `result` is moved into `folded`.
+                    let result_pre_compact_tokens = result.pre_compact_tokens;
                     // AUDIT A7 — `autocompact` returns `[boundary(User),
                     // summary(User)]`; appending the live user turn
                     // would then yield three consecutive `User`
@@ -5450,6 +5498,26 @@ impl AgentEngine {
                     self.compaction_floor += collapsed;
                     self.messages = vec![Message::now(Role::User, folded)];
                     compacted = true;
+                    // #279(d): signal the host a compaction fired. Gated host-side
+                    // by capabilities.non_destructive_compact; dormant unless the
+                    // sink was built with with_non_destructive_compact(true).
+                    //
+                    // tokens_freed is the ACTUAL delta: the API-reported
+                    // pre-compaction total minus a post-compaction estimate of the
+                    // folded buffer (the only post count available here — the
+                    // autocompact result carries no post_compact_tokens).
+                    // saturating_sub floors it at 0 ("0 when not measurable"),
+                    // never going negative if the estimate overshoots.
+                    let post_compact_tokens =
+                        estimate::estimate_tokens_from_messages(&self.messages);
+                    let tokens_freed =
+                        result_pre_compact_tokens.saturating_sub(post_compact_tokens);
+                    self.output.emit_compaction(
+                        &self.current_msg_id,
+                        "window_pressure",
+                        tokens_freed,
+                        self.active_window_percent_now(&self.model, post_compact_tokens),
+                    );
                     // Token-opt (diff-resend): autocompact collapsed the leading
                     // prefix, so any read base cached before now is no longer in
                     // the visible transcript. Invalidate diff bases.
@@ -7252,6 +7320,7 @@ mod set_config_tests {
             current_session: None,
             output: Arc::new(NullOutput),
             current_msg_id: String::new(),
+            current_agent_run_id: None,
             approval_manager: None,
             approval_bridge: Arc::new(ApprovalBridge::new()),
             protocol_writer: None,
@@ -8068,6 +8137,7 @@ mod phase6_tests {
             current_session: None,
             output: Arc::new(NullOutput),
             current_msg_id: String::new(),
+            current_agent_run_id: None,
             approval_manager: None,
             approval_bridge: Arc::new(ApprovalBridge::new()),
             protocol_writer: None,
@@ -8352,6 +8422,7 @@ mod compact_tests {
             current_session: None,
             output: Arc::new(NullOutput),
             current_msg_id: String::new(),
+            current_agent_run_id: None,
             approval_manager: None,
             approval_bridge: Arc::new(ApprovalBridge::new()),
             protocol_writer: None,
@@ -9511,6 +9582,7 @@ mod plan_mode_tests {
             current_session: None,
             output: Arc::new(NullOutput),
             current_msg_id: String::new(),
+            current_agent_run_id: None,
             approval_manager: None,
             approval_bridge: Arc::new(ApprovalBridge::new()),
             protocol_writer: None,
@@ -9928,6 +10000,7 @@ mod hook_integration_tests {
             current_session: None,
             output: Arc::new(NullOutput),
             current_msg_id: String::new(),
+            current_agent_run_id: None,
             approval_manager: None,
             approval_bridge: Arc::new(ApprovalBridge::new()),
             protocol_writer: None,
@@ -10558,6 +10631,11 @@ pub struct AgentResult {
     pub finish_reason: FinishReason,
     pub usage: TokenUsage,
     pub turns: usize,
+    /// #279(a): active-window fill (0..=100) from ContextWindow::percent()
+    /// on the post-swap effective model. None when the window is unknown.
+    pub active_window_percent: Option<u32>,
+    /// #279(c): the run's stable correlation id (clone of current_agent_run_id).
+    pub agent_run_id: Option<String>,
 }
 
 #[cfg(test)]
@@ -10636,6 +10714,7 @@ mod approval_bridge_engine_tests {
             current_session: None,
             output: Arc::new(NullOutput),
             current_msg_id: String::new(),
+            current_agent_run_id: None,
             approval_manager: None,
             approval_bridge: Arc::new(ApprovalBridge::new()),
             protocol_writer: None,
@@ -10865,6 +10944,7 @@ mod user_model_writeback_tests {
             current_session: None,
             output: Arc::new(NullOutput),
             current_msg_id: String::new(),
+            current_agent_run_id: None,
             approval_manager: None,
             approval_bridge: Arc::new(ApprovalBridge::new()),
             protocol_writer: None,

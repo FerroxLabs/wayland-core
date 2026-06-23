@@ -38,6 +38,33 @@ pub trait OutputSink: Send + Sync {
         cache_read_tokens: u64,
         finish_reason: FinishReason,
     );
+    /// #279(a)+(c): enriched stream-end carrying the engine-computed gauge
+    /// and run-correlation id. Default delegates to emit_stream_end (dropping
+    /// the extras) so existing sinks/mocks need no change; ProtocolSink
+    /// overrides to populate Usage.active_window_percent + StreamEnd.agent_run_id.
+    #[allow(clippy::too_many_arguments)]
+    fn emit_stream_end_full(
+        &self,
+        msg_id: &str,
+        turns: usize,
+        input_tokens: u64,
+        output_tokens: u64,
+        cache_creation_tokens: u64,
+        cache_read_tokens: u64,
+        finish_reason: FinishReason,
+        _active_window_percent: Option<u32>,
+        _agent_run_id: Option<&str>,
+    ) {
+        self.emit_stream_end(
+            msg_id,
+            turns,
+            input_tokens,
+            output_tokens,
+            cache_creation_tokens,
+            cache_read_tokens,
+            finish_reason,
+        );
+    }
     /// Display error.
     ///
     /// `retryable` is the protocol contract's honest signal to the host: `true`
@@ -173,6 +200,19 @@ pub trait OutputSink: Send + Sync {
         _surface: &str,
         _error_kind: &str,
         _message: &str,
+    ) {
+    }
+
+    /// #279(d) + #280: a context compaction occurred. Default no-op;
+    /// ProtocolSink overrides and gates on with_non_destructive_compact(true).
+    /// tokens_freed 0 when unmeasurable; active_window_percent is the
+    /// post-compaction fill from ContextWindow::percent() (None when unknown).
+    fn emit_compaction(
+        &self,
+        _msg_id: &str,
+        _reason: &str,
+        _tokens_freed: u64,
+        _active_window_percent: Option<u32>,
     ) {
     }
 }

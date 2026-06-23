@@ -467,6 +467,7 @@ mod tests {
             tool_calls,
             hook_actions: vec![],
             source_product: "test".into(),
+            agent_run_id: String::new(),
         }
     }
 

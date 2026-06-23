@@ -32,6 +32,7 @@ fn turn_with_calls(turn: usize, tools: Vec<&str>) -> TurnTrace {
             .collect(),
         hook_actions: vec![],
         source_product: "wcore-agent".into(),
+        agent_run_id: String::new(),
     }
 }
 

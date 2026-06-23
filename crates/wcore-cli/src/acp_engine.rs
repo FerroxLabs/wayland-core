@@ -296,6 +296,7 @@ impl Drop for TerminalGuard {
             msg_id: std::mem::take(&mut self.msg_id),
             finish_reason: FinishReason::Error,
             usage: None,
+            agent_run_id: None,
         });
     }
 }
@@ -326,7 +327,9 @@ fn stream_end_event(msg_id: &str, result: &AgentResult) -> ProtocolEvent {
                 .then_some(result.usage.cache_read_tokens),
             cache_write_tokens: (result.usage.cache_creation_tokens > 0)
                 .then_some(result.usage.cache_creation_tokens),
+            active_window_percent: result.active_window_percent,
         }),
+        agent_run_id: result.agent_run_id.clone(),
     }
 }
 
@@ -612,6 +615,7 @@ impl EngineSession {
                         msg_id: msg_id.clone(),
                         finish_reason: FinishReason::Error,
                         usage: None,
+                        agent_run_id: None,
                     });
                     term.disarm();
                 }
@@ -1018,6 +1022,7 @@ mod tests {
                 msg_id: "m".into(),
                 finish_reason: FinishReason::Length,
                 usage: None,
+                agent_run_id: None,
             },
             // Anything after the terminal frame must NOT appear.
             ProtocolEvent::TextDelta {
@@ -1072,6 +1077,7 @@ mod tests {
                 msg_id: "m".into(),
                 finish_reason: FinishReason::Stop,
                 usage: None,
+                agent_run_id: None,
             },
         ];
         let out = project_all(events).await;
@@ -1143,6 +1149,7 @@ mod tests {
                 msg_id: "m".into(),
                 finish_reason: FinishReason::Stop,
                 usage: None,
+                agent_run_id: None,
             })
             .unwrap();
 

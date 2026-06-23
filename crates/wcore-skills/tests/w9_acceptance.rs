@@ -28,6 +28,7 @@ fn turn(i: usize, tools: &[(&str, serde_json::Value)]) -> TurnTrace {
             .collect(),
         hook_actions: vec![],
         source_product: "wcore-agent".into(),
+        agent_run_id: String::new(),
     }
 }
 

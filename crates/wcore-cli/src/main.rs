@@ -2806,7 +2806,7 @@ async fn run_json_stream_mode(
                                                 false,
                                             );
                                         }
-                                        output.emit_stream_end(
+                                        output.emit_stream_end_full(
                                             &msg_id,
                                             result.turns,
                                             result.usage.input_tokens,
@@ -2814,6 +2814,8 @@ async fn run_json_stream_mode(
                                             result.usage.cache_creation_tokens,
                                             result.usage.cache_read_tokens,
                                             result.finish_reason,
+                                            result.active_window_percent,
+                                            result.agent_run_id.as_deref(),
                                         );
                                     }
                                     Err(e) => {

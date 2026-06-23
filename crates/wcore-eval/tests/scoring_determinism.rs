@@ -50,6 +50,7 @@ fn baseline_trace() -> TurnTrace {
         tool_calls: vec![ToolCallTrace::new("c1".into(), "Read".into(), json!({}))],
         hook_actions: vec![],
         source_product: "wayland-core".into(),
+        agent_run_id: String::new(),
     }
 }
 

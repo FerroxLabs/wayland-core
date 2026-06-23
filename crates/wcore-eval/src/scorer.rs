@@ -295,6 +295,7 @@ mod tests {
             tool_calls: vec![],
             hook_actions: vec![],
             source_product: "test".into(),
+            agent_run_id: String::new(),
         };
         assert_eq!(s.score_cost(&t), 1.0);
         t.cost_usd = 0.0;

@@ -167,6 +167,8 @@ pub struct ProtocolSink {
     /// W7 S4: gates Suspend / ApprovalRequired / ApprovalResume emission.
     /// Off by default.
     hitl_suspend_enabled: bool,
+    /// #279(d): gates CompactOffload emission. Off by default.
+    non_destructive_compact_enabled: bool,
     /// W6 F7 single-source authority for the cost-attribution gate
     /// (audit rev-2 finding 5). Bootstrap flips
     /// `AdvertisedCapabilitiesConfig.cost_attribution = true` when
@@ -203,6 +205,7 @@ impl ProtocolSink {
             sub_agent_traces_enabled: false,
             streaming_tools_enabled: false,
             hitl_suspend_enabled: false,
+            non_destructive_compact_enabled: false,
             advertised: Arc::new(AdvertisedCapabilitiesConfig::default()),
             user_model_backend: std::sync::OnceLock::new(),
             token_redactor: ActiveTokenRedactor::new(),
@@ -286,6 +289,14 @@ impl ProtocolSink {
     /// off per W0 contract.
     pub fn with_hitl_suspend(mut self, enabled: bool) -> Self {
         self.hitl_suspend_enabled = enabled;
+        self
+    }
+
+    /// #279(d) Builder: enable `CompactOffload` emission + advertise
+    /// `capabilities.non_destructive_compact = true`. Default off per W0
+    /// contract.
+    pub fn with_non_destructive_compact(mut self, enabled: bool) -> Self {
+        self.non_destructive_compact_enabled = enabled;
         self
     }
 
@@ -462,6 +473,8 @@ impl ProtocolSink {
             sub_agent_traces: self.sub_agent_traces_enabled,
             streaming_tools: self.streaming_tools_enabled,
             hitl_suspend: self.hitl_suspend_enabled,
+            // #279(d): advertised only when the sink opted in via the builder.
+            non_destructive_compact: self.non_destructive_compact_enabled,
             rpc_tool_script: advertised.rpc_tool_script,
             cost_attribution: advertised.cost_attribution,
             // F-093: surface the resolved backend tag. Cloned from OnceLock;
@@ -550,7 +563,44 @@ impl OutputSink for ProtocolSink {
                 } else {
                     None
                 },
+                active_window_percent: None,
             }),
+            agent_run_id: None,
+        });
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn emit_stream_end_full(
+        &self,
+        msg_id: &str,
+        _turns: usize,
+        input_tokens: u64,
+        output_tokens: u64,
+        cache_creation_tokens: u64,
+        cache_read_tokens: u64,
+        finish_reason: FinishReason,
+        active_window_percent: Option<u32>,
+        agent_run_id: Option<&str>,
+    ) {
+        let _ = self.writer.emit(&ProtocolEvent::StreamEnd {
+            msg_id: msg_id.to_string(),
+            finish_reason,
+            usage: Some(Usage {
+                input_tokens,
+                output_tokens,
+                cache_read_tokens: if cache_read_tokens > 0 {
+                    Some(cache_read_tokens)
+                } else {
+                    None
+                },
+                cache_write_tokens: if cache_creation_tokens > 0 {
+                    Some(cache_creation_tokens)
+                } else {
+                    None
+                },
+                active_window_percent,
+            }),
+            agent_run_id: agent_run_id.map(str::to_string),
         });
     }
 
@@ -681,6 +731,27 @@ impl OutputSink for ProtocolSink {
             reason: reason.to_string(),
             observed: observed.to_string(),
             limit: limit.to_string(),
+        });
+    }
+
+    /// #279(d): emit `ProtocolEvent::CompactOffload`. Gated — a guarded no-op
+    /// unless the sink was built with `with_non_destructive_compact(true)`,
+    /// so the wire shape stays byte-identical until a host opts in.
+    fn emit_compaction(
+        &self,
+        msg_id: &str,
+        reason: &str,
+        tokens_freed: u64,
+        active_window_percent: Option<u32>,
+    ) {
+        if !self.non_destructive_compact_enabled {
+            return;
+        }
+        let _ = self.writer.emit(&ProtocolEvent::CompactOffload {
+            msg_id: msg_id.to_string(),
+            reason: reason.to_string(),
+            tokens_freed,
+            active_window_percent,
         });
     }
 
@@ -1000,5 +1071,29 @@ mod tests {
         ] {
             assert_eq!(auth_error_code(msg), None, "non-auth must be None: {msg:?}");
         }
+    }
+
+    #[test]
+    fn protocol_sink_advertises_non_destructive_compact_only_when_built() {
+        let writer = Arc::new(ProtocolWriter::new());
+        let advertised = AdvertisedCapabilitiesConfig::default();
+        let compat = ProviderCompat::anthropic_defaults();
+        let off = ProtocolSink::new(Arc::clone(&writer));
+        assert!(
+            !off.build_capabilities(&compat, false, "default", false, &advertised)
+                .non_destructive_compact
+        );
+        let on = ProtocolSink::new(writer).with_non_destructive_compact(true);
+        assert!(
+            on.build_capabilities(&compat, false, "default", false, &advertised)
+                .non_destructive_compact
+        );
+    }
+
+    #[test]
+    fn protocol_sink_emit_compaction_noop_when_flag_off() {
+        let writer = Arc::new(ProtocolWriter::new());
+        let sink = ProtocolSink::new(writer);
+        sink.emit_compaction("m1", "window_pressure", 4096, Some(41));
     }
 }

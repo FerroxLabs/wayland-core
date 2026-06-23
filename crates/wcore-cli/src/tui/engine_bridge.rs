@@ -282,7 +282,9 @@ impl OutputSink for ChannelSink {
                 output_tokens,
                 cache_read_tokens: (cache_read_tokens > 0).then_some(cache_read_tokens),
                 cache_write_tokens: (cache_creation_tokens > 0).then_some(cache_creation_tokens),
+                active_window_percent: None,
             }),
+            agent_run_id: None,
         });
     }
 
@@ -523,6 +525,7 @@ impl Drop for TerminalGuard {
             msg_id: std::mem::take(&mut self.msg_id),
             finish_reason: FinishReason::Error,
             usage: None,
+            agent_run_id: None,
         });
     }
 }
@@ -978,7 +981,9 @@ impl TuiEngine {
                                 .then_some(result.usage.cache_read_tokens),
                             cache_write_tokens: (result.usage.cache_creation_tokens > 0)
                                 .then_some(result.usage.cache_creation_tokens),
+                            active_window_percent: result.active_window_percent,
                         }),
+                        agent_run_id: result.agent_run_id.clone(),
                     });
                     term.disarm();
                 }
@@ -995,6 +1000,7 @@ impl TuiEngine {
                         msg_id: msg_id.clone(),
                         finish_reason: FinishReason::Error,
                         usage: None,
+                        agent_run_id: None,
                     });
                     term.disarm();
                 }
@@ -1036,6 +1042,7 @@ impl TuiEngine {
                 msg_id: String::new(),
                 finish_reason: FinishReason::Error,
                 usage: None,
+                agent_run_id: None,
             });
         }
     }
@@ -2811,6 +2818,7 @@ mod tests {
                 msg_id,
                 finish_reason,
                 usage,
+                ..
             } => {
                 assert_eq!(msg_id, "m1");
                 assert_eq!(finish_reason, FinishReason::Stop);

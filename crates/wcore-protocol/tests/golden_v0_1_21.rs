@@ -106,7 +106,9 @@ fn golden_stream_end_stop_v0_1_21() {
             output_tokens: 50,
             cache_read_tokens: None,
             cache_write_tokens: None,
+            active_window_percent: None,
         }),
+        agent_run_id: None,
     };
     assert_eq!(
         serialize(&event),
@@ -129,6 +131,7 @@ fn golden_stream_end_length_v0_1_21() {
         msg_id: "m-1".into(),
         finish_reason: FinishReason::Length,
         usage: None,
+        agent_run_id: None,
     };
     assert_eq!(
         serialize(&event),
@@ -148,6 +151,7 @@ fn golden_stream_end_error_v0_1_21() {
         msg_id: "m-1".into(),
         finish_reason: FinishReason::Error,
         usage: None,
+        agent_run_id: None,
     };
     assert_eq!(
         serialize(&event),
@@ -175,6 +179,7 @@ fn golden_stream_end_every_finish_reason_serializes_snake_case() {
             msg_id: "m".into(),
             finish_reason: fr,
             usage: None,
+            agent_run_id: None,
         };
         let got = serialize(&event);
         assert_eq!(
@@ -197,7 +202,9 @@ fn golden_usage_with_full_cache_fields_v0_1_21() {
             output_tokens: 500,
             cache_read_tokens: Some(800),
             cache_write_tokens: Some(200),
+            active_window_percent: None,
         }),
+        agent_run_id: None,
     };
     assert_eq!(
         serialize(&event),
@@ -212,6 +219,68 @@ fn golden_usage_with_full_cache_fields_v0_1_21() {
                 "cache_write_tokens": 200
             }
         })
+    );
+}
+
+#[test]
+fn golden_stream_end_no_new_keys_when_unset_279() {
+    let event = ProtocolEvent::StreamEnd {
+        msg_id: "m-1".into(),
+        finish_reason: FinishReason::Stop,
+        usage: Some(Usage {
+            input_tokens: 1000,
+            output_tokens: 500,
+            cache_read_tokens: Some(800),
+            cache_write_tokens: Some(200),
+            active_window_percent: None,
+        }),
+        agent_run_id: None,
+    };
+    assert_eq!(
+        serialize(&event),
+        json!({
+            "type": "stream_end",
+            "msg_id": "m-1",
+            "finish_reason": "stop",
+            "usage": {
+                "input_tokens": 1000,
+                "output_tokens": 500,
+                "cache_read_tokens": 800,
+                "cache_write_tokens": 200
+            }
+        }),
+        "unset #279 fields must not appear on the wire"
+    );
+}
+
+#[test]
+fn golden_stream_end_with_new_keys_when_set_279() {
+    let event = ProtocolEvent::StreamEnd {
+        msg_id: "m-1".into(),
+        finish_reason: FinishReason::Stop,
+        usage: Some(Usage {
+            input_tokens: 1000,
+            output_tokens: 500,
+            cache_read_tokens: None,
+            cache_write_tokens: None,
+            active_window_percent: Some(73),
+        }),
+        agent_run_id: Some("agent-run-abc".into()),
+    };
+    assert_eq!(
+        serialize(&event),
+        json!({
+            "type": "stream_end",
+            "msg_id": "m-1",
+            "finish_reason": "stop",
+            "usage": {
+                "input_tokens": 1000,
+                "output_tokens": 500,
+                "active_window_percent": 73
+            },
+            "agent_run_id": "agent-run-abc"
+        }),
+        "set #279 fields appear only when present; rest unchanged"
     );
 }
 
