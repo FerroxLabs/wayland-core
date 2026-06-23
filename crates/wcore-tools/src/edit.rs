@@ -83,6 +83,43 @@ impl EditTool {
             return Ok((new_content, match_count));
         }
 
+        // CRLF reconciliation (issue #257). The Read tool emits file content via
+        // `str::lines()`, which strips the trailing `\r` of every CRLF line, so the
+        // model's `old_string` is LF-only even when the file on disk is CRLF. An
+        // LF pattern can never exact-match `\r\n` content, producing a spurious
+        // "old_string not found" loop on Windows-authored files. When the file is
+        // CRLF and the supplied pattern is LF-only, retry the match against a
+        // CRLF-translated copy of the pattern. The replacement is translated the
+        // same way so the file keeps its original line endings; we operate on the
+        // raw `content` (never re-normalized) so the surrounding bytes are intact.
+        if old_string.contains('\n') && !old_string.contains('\r') && content.contains("\r\n") {
+            let crlf_old = old_string.replace('\n', "\r\n");
+            let crlf_match_count = content.matches(crlf_old.as_str()).count();
+            if crlf_match_count == 1 || (crlf_match_count > 1 && replace_all) {
+                // Mirror the model's LF intent into CRLF for the replacement text
+                // so inserted/edited lines match the file's existing endings.
+                let crlf_new = if new_string.contains('\n') && !new_string.contains('\r') {
+                    new_string.replace('\n', "\r\n")
+                } else {
+                    new_string.to_string()
+                };
+                let new_content = if replace_all {
+                    content.replace(crlf_old.as_str(), &crlf_new)
+                } else {
+                    content.replacen(crlf_old.as_str(), &crlf_new, 1)
+                };
+                return Ok((new_content, crlf_match_count));
+            }
+            // Multiple CRLF matches without `replace_all`: mirror the exact-path
+            // "multiple matches" error rather than falling through to the
+            // misleading "old_string not found" (the LF `match_count` is 0).
+            if crlf_match_count > 1 {
+                return Err(format!(
+                    "Multiple matches found ({crlf_match_count}). Use replace_all or provide more context."
+                ));
+            }
+        }
+
         // Exact match failed. Fall back to fuzzy only when the gate is on.
         if self.fuzzy_fallback {
             let res = fuzzy_find_and_replace(content, old_string, new_string, replace_all);
@@ -726,5 +763,58 @@ mod tests {
         let mut c = cache.write().unwrap();
         let cached = c.get(&file_path).expect("file should be in cache");
         assert_eq!(cached.mtime_ms, disk_mtime);
+    }
+
+    // ── CRLF reconciliation (issue #257) ─────────────────────────────────
+    // The Read tool normalizes CRLF to LF via `str::lines()`, so the model's
+    // `old_string` is LF-only against a CRLF file on disk. compute_edit must
+    // still match, and must preserve the file's CRLF endings.
+
+    #[test]
+    fn compute_edit_matches_lf_pattern_against_crlf_file() {
+        let tool = EditTool::new(None);
+        let content = "line one\r\nline two\r\nline three\r\n";
+        // old_string as the Read tool would have shown it: LF-only.
+        let (out, count) = tool
+            .compute_edit(content, "line one\nline two", "line ONE\nline TWO", false)
+            .expect("LF pattern must match the CRLF file");
+        assert_eq!(count, 1);
+        assert_eq!(out, "line ONE\r\nline TWO\r\nline three\r\n");
+    }
+
+    #[test]
+    fn compute_edit_lf_file_unaffected_by_crlf_retry() {
+        let tool = EditTool::new(None);
+        let (out, count) = tool
+            .compute_edit("a\nb\nc\n", "a\nb", "X\nY", false)
+            .expect("LF happy path");
+        assert_eq!(count, 1);
+        assert_eq!(out, "X\nY\nc\n");
+    }
+
+    #[test]
+    fn compute_edit_crlf_missing_pattern_still_errors() {
+        let tool = EditTool::new(None);
+        let err = tool
+            .compute_edit("a\r\nb\r\n", "zzz\nyyy", "q", false)
+            .expect_err("genuinely-absent pattern must still error");
+        assert!(err.contains("not found"), "got: {err}");
+    }
+
+    #[test]
+    fn compute_edit_crlf_replace_all_multi() {
+        let tool = EditTool::new(None);
+        let content = "x\r\ny\r\nx\r\ny\r\n";
+        let (out, count) = tool
+            .compute_edit(content, "x\ny", "p\nq", true)
+            .expect("replace_all through the CRLF path");
+        assert_eq!(count, 2);
+        assert_eq!(out, "p\r\nq\r\np\r\nq\r\n");
+        // Same input without replace_all: the CRLF path reports multiple
+        // matches (not the misleading "old_string not found").
+        let err = tool
+            .compute_edit(content, "x\ny", "p\nq", false)
+            .expect_err("multiple CRLF matches without replace_all must error");
+        assert!(err.contains("Multiple matches"), "got: {err}");
     }
 }

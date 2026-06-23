@@ -240,6 +240,21 @@ mod windows_impl {
         p.starts_with("\\\\") || p.starts_with("//")
     }
 
+    /// True only for the Windows VERBATIM DISK form `\\?\X:\...` — an
+    /// extended-length spelling of an ordinary local drive-letter path.
+    /// `std::fs::canonicalize` returns this form for EVERY local path on
+    /// Windows, so the fs-allowlist guard must treat it as local, not as a
+    /// UNC/device path. Genuine UNC (`\\?\UNC\...`), device (`\\.\...`),
+    /// and other verbatim (`\\?\...`) prefixes are NOT VerbatimDisk and stay
+    /// rejected. The OS path parser handles slash/case variants for us.
+    fn is_verbatim_disk_path(path: &std::path::Path) -> bool {
+        use std::path::{Component, Prefix};
+        matches!(
+            path.components().next(),
+            Some(Component::Prefix(p)) if matches!(p.kind(), Prefix::VerbatimDisk(_))
+        )
+    }
+
     /// Resolve a program reference into an absolute UTF-16 path suitable for
     /// `lpApplicationName`. Hard-fails on any failure — the caller must
     /// propagate the error rather than fall back to a NULL `lpApplicationName`
@@ -1465,7 +1480,17 @@ mod windows_impl {
     /// relative paths are ambiguous, and UNC / `\\?\` / `\\.\` paths could name
     /// a network share whose DACL we must never touch.
     fn acl_path_is_safe(path: &std::path::Path) -> bool {
-        path.is_absolute() && !is_unc_or_device_path(&path.to_string_lossy())
+        if !path.is_absolute() {
+            return false;
+        }
+        // A canonicalized local path arrives as `\\?\X:\...` (verbatim disk),
+        // which `is_unc_or_device_path` would otherwise reject. Accept that
+        // form explicitly; everything else still goes through the UNC/device
+        // rejection.
+        if is_verbatim_disk_path(path) {
+            return true;
+        }
+        !is_unc_or_device_path(&path.to_string_lossy())
     }
 
     /// Build one `EXPLICIT_ACCESS_W` for the AppContainer `sid` with `mask`
@@ -1704,14 +1729,46 @@ mod windows_impl {
         #[test]
         fn acl_path_is_safe_rejects_unc_and_device() {
             // UNC/device paths are absolute but must never have their DACL
-            // touched (could be a remote share).
+            // touched (could be a remote share). The verbatim-disk form
+            // `\\?\X:\...` is the one exception and is covered by its own test.
             assert!(!acl_path_is_safe(std::path::Path::new(
                 r"\\server\share\file"
             )));
-            assert!(!acl_path_is_safe(std::path::Path::new(r"\\?\C:\x")));
             assert!(!acl_path_is_safe(std::path::Path::new(
                 r"\\.\PhysicalDrive0"
             )));
+            // Verbatim UNC stays rejected — it names a network share, not a
+            // local disk, so it is NOT VerbatimDisk.
+            assert!(!acl_path_is_safe(std::path::Path::new(
+                r"\\?\UNC\server\share"
+            )));
+        }
+
+        #[test]
+        fn acl_path_is_safe_accepts_verbatim_disk() {
+            // `std::fs::canonicalize` returns the verbatim-disk form for local
+            // paths on Windows (issue #267: a USB drive canonicalizes to
+            // `\\?\E:\...`). These must be accepted, not rejected as UNC.
+            assert!(acl_path_is_safe(std::path::Path::new(
+                r"\\?\E:\AIWorkspace\Wayland\wcore-temp-1782166469597"
+            )));
+            assert!(acl_path_is_safe(std::path::Path::new(
+                r"\\?\C:\Users\Public\work"
+            )));
+        }
+
+        #[test]
+        fn is_verbatim_disk_path_classifies_prefixes() {
+            assert!(is_verbatim_disk_path(std::path::Path::new(r"\\?\D:\data")));
+            // Verbatim-UNC, device, and genuine UNC are NOT verbatim-disk.
+            assert!(!is_verbatim_disk_path(std::path::Path::new(r"\\?\UNC\s\h")));
+            assert!(!is_verbatim_disk_path(std::path::Path::new(r"\\.\COM1")));
+            assert!(!is_verbatim_disk_path(std::path::Path::new(
+                r"\\server\share"
+            )));
+            // A plain drive path is Prefix::Disk, not VerbatimDisk; it is
+            // accepted by acl_path_is_safe via the is_absolute branch instead.
+            assert!(!is_verbatim_disk_path(std::path::Path::new(r"C:\plain")));
         }
 
         #[test]

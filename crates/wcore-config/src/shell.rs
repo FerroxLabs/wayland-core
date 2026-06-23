@@ -176,6 +176,46 @@ pub fn hook_shell_command_builder(command_str: &str) -> Command {
     cmd
 }
 
+/// Shell-string mode for the **MCP stdio transport**, whose caller assembles a
+/// command line that is ALREADY escaped for the target shell's parser.
+///
+/// PRECONDITION (load-bearing): on Windows, every token in `command_line` MUST
+/// already be escaped for cmd.exe's parser by the MCP transport
+/// (`windows_program_token` for the program, `windows_cmd_quote` for each arg).
+/// The MCP stdio transport is the ONLY sanctioned caller — do not reuse this
+/// for un-escaped input.
+///
+/// Differs from [`shell_command_builder`] in exactly one Windows-only way: it
+/// appends `command_line` via `raw_arg` instead of `Command::arg`.
+/// `Command::arg` would apply std's `CommandLineToArgvW` quoting ON TOP of the
+/// caller's cmd.exe escaping — a second, incompatible layer that wraps the
+/// spaced line in an outer `"..."` where cmd.exe ignores the caret/`\"`
+/// escaping, breaking quote parity so the child receives a split fragment
+/// (`"C:\Program` for a spaced program path; `pkg^"` for an npx/uvx arg) —
+/// issues #262 and #263. `raw_arg` hands the pre-escaped line to cmd.exe
+/// verbatim, which is cmd's documented non-`CommandLineToArgvW` contract for
+/// `/C`. On Unix the behaviour is byte-identical to [`shell_command_builder`]:
+/// `sh -c` takes the command line as one argument with no second re-quote.
+pub fn mcp_stdio_command_builder(command_line: &str) -> Command {
+    let info = shell_info();
+    let mut cmd = Command::new(info.program);
+    cmd.arg(info.flag);
+    // Append the pre-escaped line LITERALLY so std's CommandLineToArgvW quoting
+    // is not layered on top of the caller's caret/quote escaping (#262/#263).
+    // `raw_arg` is cfg(windows)-gated in tokio, so the call must be compile-time
+    // gated, not a runtime `cfg!(windows)` branch.
+    #[cfg(windows)]
+    {
+        cmd.raw_arg(command_line);
+    }
+    #[cfg(not(windows))]
+    {
+        cmd.arg(command_line);
+    }
+    cmd.kill_on_drop(true);
+    cmd
+}
+
 /// Argv mode: spawn `program` directly with each `arg` passed as a
 /// separate process-arg. No shell interpreter is invoked, so shell
 /// metacharacters in `args` are NEVER interpreted by a shell. The OS

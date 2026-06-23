@@ -9,7 +9,7 @@ use tokio::sync::{Mutex, oneshot};
 use tokio::task::JoinHandle;
 use tokio::time::{Duration, timeout};
 use tracing::{debug, error, warn};
-use wcore_config::shell::shell_command_builder;
+use wcore_config::shell::mcp_stdio_command_builder;
 
 use super::{McpError, McpTransport};
 use crate::protocol::{JsonRpcRequest, JsonRpcResponse};
@@ -432,7 +432,7 @@ impl StdioTransport {
                 parts.push(shell_quote(a));
             }
             let command_str = parts.join(" ");
-            shell_command_builder(&command_str)
+            mcp_stdio_command_builder(&command_str)
         };
         // Audit C8: stderr is `piped()`, not `inherit()`. An inherited stderr
         // writes the MCP server's diagnostics straight onto the parent's
@@ -1489,5 +1489,94 @@ mod windows_tests {
         assert_eq!(resp.result.as_ref().unwrap()["ok"], serde_json::json!(true));
 
         let _ = transport.close().await;
+    }
+
+    // ── #262 / #263: the production `else` branch builds `cmd /C <token>
+    // <args...>` and now hands it to cmd verbatim via `mcp_stdio_command_builder`
+    // (raw_arg). These spawn the SAME helper directly (full env inherited, so a
+    // `.bat` resolves via PATHEXT like npx.cmd/uvx.cmd) and assert the child
+    // sees clean argv. Spawning the helper directly — not `spawn_with_timeout`
+    // — avoids the env_clear/FORWARDED_ENV_VARS gap that the W-5 test documents.
+
+    /// #263 — a spaced absolute program path must resolve and NOT split at the
+    /// space. Before the fix, std's CommandLineToArgvW re-quoted the already
+    /// caret-escaped line, cmd lost quote parity, and the program token split
+    /// into `"C:\dir` + ` with space\...`, so cmd could not find the program.
+    #[tokio::test]
+    async fn w263_spaced_program_path_resolves() {
+        let base = tempfile::tempdir().expect("tempdir");
+        let spaced = base.path().join("dir with space");
+        std::fs::create_dir_all(&spaced).unwrap();
+        let bat = spaced.join("ok.bat");
+        std::fs::write(&bat, "@echo off\r\necho.OK\r\n").unwrap();
+
+        // Same assembly the transport uses: program token only.
+        let line = windows_program_token(&bat.to_string_lossy());
+        let out = mcp_stdio_command_builder(&line)
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .expect("spawn spaced-path .bat")
+            .wait_with_output()
+            .await
+            .expect("wait");
+        assert!(
+            out.status.success(),
+            "spaced program path must resolve; stdout={:?}",
+            String::from_utf8_lossy(&out.stdout)
+        );
+        assert!(
+            String::from_utf8_lossy(&out.stdout).contains("OK"),
+            "child must run from the spaced path"
+        );
+    }
+
+    /// #262 — npx/uvx-style package args must reach the child VERBATIM, and
+    /// (Aud-32) a `&` in an arg must stay a literal token, never a command
+    /// separator. The `.bat` echoes each arg inside quotes so the batch line
+    /// re-expansion cannot re-interpret a `&` at echo time.
+    #[tokio::test]
+    async fn w262_args_reach_child_verbatim_and_metachars_neutralized() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let bat = dir.path().join("echo_args.bat");
+        std::fs::write(
+            &bat,
+            "@echo off\r\necho.\"%~1\"\r\necho.\"%~2\"\r\necho.\"%~3\"\r\n",
+        )
+        .unwrap();
+
+        let parts = vec![
+            windows_program_token(&bat.to_string_lossy()),
+            windows_cmd_quote("@perplexity-ai/mcp-server"),
+            windows_cmd_quote("wikipedia-mcp"),
+            windows_cmd_quote("a&b"), // Aud-32: `&` must stay literal
+        ];
+        let line = parts.join(" ");
+        let out = mcp_stdio_command_builder(&line)
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .expect("spawn echo .bat")
+            .wait_with_output()
+            .await
+            .expect("wait");
+        let stdout = String::from_utf8_lossy(&out.stdout);
+
+        assert!(
+            stdout.contains("@perplexity-ai/mcp-server"),
+            "scoped-package arg corrupted: {stdout:?}"
+        );
+        assert!(
+            stdout.contains("wikipedia-mcp"),
+            "arg2 corrupted: {stdout:?}"
+        );
+        // The `&` arg arrived as one literal token (no second command ran).
+        assert!(
+            stdout.contains("a&b"),
+            "metachar arg must be one literal token, not split: {stdout:?}"
+        );
+        // No caret leaked into the child's view of the argument.
+        assert!(
+            !stdout.contains('^'),
+            "caret leaked into child argv: {stdout:?}"
+        );
     }
 }
