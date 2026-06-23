@@ -3605,30 +3605,12 @@ impl AgentEngine {
             // configs).
             let input_token_estimate =
                 estimate::estimate_request_tokens(&self.messages, &system, &tools) as usize;
-            // AUDIT A1 — context-token ceiling. `run_compaction` above
-            // already had its chance to shrink history; if the FULL
-            // request still exceeds a safe fraction of the model's
-            // context window, the next provider call would fail with a
-            // hard 400. Terminate the run cleanly with a user-visible
-            // reason instead — together with the budget cap (E-C1) this
-            // replaces the removed "unbounded when max_turns is None"
-            // behaviour.
-            {
-                let window = self.compact_config.context_window;
-                if window > 0 {
-                    let ceiling = window
-                        .saturating_sub(self.compact_config.output_reserve)
-                        .saturating_sub(self.compact_config.emergency_buffer);
-                    if input_token_estimate >= ceiling {
-                        self.output.emit_error(&format!(
-                            "Run stopped: estimated request size ({input_token_estimate} tokens) \
-                             reached the context-window ceiling ({ceiling}) and compaction \
-                             could not reduce it further.",
-                        ), false);
-                        return self.finish_run_terminated(user_input, turn).await;
-                    }
-                }
-            }
+            // AUDIT A1 / #255 — context-token overflow guard MOVED below, to
+            // immediately AFTER the smart-routing tier swap (so it measures the
+            // POST-swap effective model's REAL window via the wcore-config
+            // context_window kernel, not the stale CompactConfig 200k default).
+            // See the `ContextWindow::resolve(..)` block just before
+            // `size_output_cap`.
             let cache_tier = Some(wcore_providers::cache_tier::pick_cache_tier(
                 input_token_estimate,
                 AGENT_TURN_CACHE_REUSE_WINDOW_SECS,
@@ -3789,6 +3771,49 @@ impl AgentEngine {
                     );
                     request.model = tier_model.clone();
                     effective_model = tier_model;
+                }
+            }
+
+            // #255 — pre-flight context-window overflow guard, RECOMPUTED on the
+            // POST-swap effective model. `run_compaction` above already had its
+            // chance to shrink history; if the assembled request still exceeds a
+            // safe fraction of the model that will ACTUALLY serve this request,
+            // the provider call would 400. Terminate the run cleanly instead.
+            //
+            // The denominator comes from the kernel (`ContextWindow::resolve`),
+            // which reads the post-swap model's REAL window from
+            // `wcore_config::limits` — NOT the stale `CompactConfig` 200k
+            // default that the old guard used. After a Flux/tier swap to e.g.
+            // gpt-4o (128k) the ceiling is now computed against 128k, so the
+            // guard fires at the correct count (the #255 false-negative fix).
+            //
+            // `&request.model` is the same model arg fed to `size_output_cap`
+            // below, so guard and cap agree. When the window is unknown
+            // (`input_ceiling() == None`) the guard SKIPS — fail open, identical
+            // to the old `window > 0` skip; `size_output_cap`'s UNKNOWN_CAP and
+            // the provider 400 are the backstops.
+            {
+                let ctx = wcore_config::context_window::ContextWindow::resolve(
+                    input_token_estimate as u64,
+                    self.compat.provider_type(),
+                    &request.model,
+                    self.compact_config.context_window as u64,
+                );
+                if let Some(ceiling) = ctx.input_ceiling(
+                    self.compact_config.output_reserve as u64,
+                    self.compact_config.emergency_buffer as u64,
+                ) && ctx.used_tokens >= ceiling
+                {
+                    self.output.emit_error(
+                        &format!(
+                            "Run stopped: estimated request size ({} tokens) \
+                             reached the context-window ceiling ({ceiling}) for model \
+                             '{}' and compaction could not reduce it further.",
+                            ctx.used_tokens, request.model,
+                        ),
+                        false,
+                    );
+                    return self.finish_run_terminated(user_input, turn).await;
                 }
             }
 

@@ -25,6 +25,9 @@ pub mod chatgpt_catalog;
 pub mod compact;
 pub mod compat;
 pub mod config;
+// THE KERNEL (#255): single per-turn context-window computation. See the
+// module header. Co-located with `limits` (the per-model window table).
+pub mod context_window;
 // Wave SD: CredentialsStore trait + plaintext/keyring backends.
 pub mod credentials;
 pub mod cua;
