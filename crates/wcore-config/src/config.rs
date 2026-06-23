@@ -2140,6 +2140,18 @@ pub fn app_config_dir() -> Option<PathBuf> {
     Some(wayland_config_dir())
 }
 
+/// The OS-native config root (`dirs::config_dir()`), deliberately NOT
+/// `WAYLAND_HOME`-scoped. This is the single sanctioned bypass of
+/// [`wayland_config_dir`] for the profiles control plane: `profiles_root()`
+/// (see [`crate::profile`]) must resolve OUTSIDE any one profile home — a
+/// profile home is a *child* of the profiles root — so it cannot route through
+/// the `WAYLAND_HOME`-aware resolver without becoming self-referential. Kept
+/// here in `config.rs` (the one file allow-listed by the hermeticity audit for
+/// raw `dirs::config_dir()`), so the audit's single-call-site invariant holds.
+pub(crate) fn os_native_config_root() -> Option<PathBuf> {
+    dirs::config_dir()
+}
+
 /// Canonical `~/.wayland` profile home.
 ///
 /// This is the stable dot-directory that plugins and their helper processes
