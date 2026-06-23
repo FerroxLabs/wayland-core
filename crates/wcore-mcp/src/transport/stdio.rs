@@ -1544,7 +1544,7 @@ mod windows_tests {
         )
         .unwrap();
 
-        let parts = vec![
+        let parts = [
             windows_program_token(&bat.to_string_lossy()),
             windows_cmd_quote("@perplexity-ai/mcp-server"),
             windows_cmd_quote("wikipedia-mcp"),
