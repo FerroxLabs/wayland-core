@@ -4472,9 +4472,9 @@ dependencies = [
 
 [[package]]
 name = "memmap2"
-version = "0.9.10"
+version = "0.9.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "714098028fe011992e1c3962653c96b2d578c4b4bce9036e15ff220319b1e0e3"
+checksum = "d1219ed1b7f229ee7104d281dd01d6802fe28bb6e95d292942c4daacdeb798c0"
 dependencies = [
  "libc",
  "stable_deref_trait",
@@ -5993,9 +5993,9 @@ dependencies = [
 
 [[package]]
 name = "quinn-proto"
-version = "0.11.14"
+version = "0.11.15"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "434b42fec591c96ef50e21e886936e66d3cc3f737104fdb9b737c40ffb94c098"
+checksum = "4fcb935c5bec503c2f0e306bdd3e58bb9029dcb14fa8d9ac76e3a5256ac0763e"
 dependencies = [
  "bytes",
  "getrandom 0.3.4",
@@ -8934,7 +8934,7 @@ dependencies = [
 
 [[package]]
 name = "wayland-browser"
-version = "0.12.5"
+version = "0.12.6"
 dependencies = [
  "async-trait",
  "inventory",
@@ -8951,7 +8951,7 @@ dependencies = [
 
 [[package]]
 name = "wayland-cua"
-version = "0.12.5"
+version = "0.12.6"
 dependencies = [
  "async-trait",
  "inventory",
@@ -8968,7 +8968,7 @@ dependencies = [
 
 [[package]]
 name = "wayland-honcho"
-version = "0.12.5"
+version = "0.12.6"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -8989,7 +8989,7 @@ dependencies = [
 
 [[package]]
 name = "wayland-ijfw"
-version = "0.12.5"
+version = "0.12.6"
 dependencies = [
  "async-trait",
  "chrono",
@@ -9008,7 +9008,7 @@ dependencies = [
 
 [[package]]
 name = "wayland-ollama"
-version = "0.12.5"
+version = "0.12.6"
 dependencies = [
  "async-trait",
  "futures",
@@ -9029,7 +9029,7 @@ dependencies = [
 
 [[package]]
 name = "wcore-acp"
-version = "0.12.5"
+version = "0.12.6"
 dependencies = [
  "async-trait",
  "axum",
@@ -9052,7 +9052,7 @@ dependencies = [
 
 [[package]]
 name = "wcore-agent"
-version = "0.12.5"
+version = "0.12.6"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -9141,7 +9141,7 @@ dependencies = [
 
 [[package]]
 name = "wcore-agents-pack"
-version = "0.12.5"
+version = "0.12.6"
 dependencies = [
  "dirs",
  "serde",
@@ -9154,7 +9154,7 @@ dependencies = [
 
 [[package]]
 name = "wcore-browser"
-version = "0.12.5"
+version = "0.12.6"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -9184,7 +9184,7 @@ dependencies = [
 
 [[package]]
 name = "wcore-budget"
-version = "0.12.5"
+version = "0.12.6"
 dependencies = [
  "chrono",
  "parking_lot",
@@ -9197,7 +9197,7 @@ dependencies = [
 
 [[package]]
 name = "wcore-channel-discord"
-version = "0.12.5"
+version = "0.12.6"
 dependencies = [
  "async-trait",
  "chrono",
@@ -9218,7 +9218,7 @@ dependencies = [
 
 [[package]]
 name = "wcore-channel-email"
-version = "0.12.5"
+version = "0.12.6"
 dependencies = [
  "async-trait",
  "chrono",
@@ -9237,7 +9237,7 @@ dependencies = [
 
 [[package]]
 name = "wcore-channel-imessage"
-version = "0.12.5"
+version = "0.12.6"
 dependencies = [
  "async-trait",
  "chrono",
@@ -9254,7 +9254,7 @@ dependencies = [
 
 [[package]]
 name = "wcore-channel-matrix"
-version = "0.12.5"
+version = "0.12.6"
 dependencies = [
  "async-trait",
  "chrono",
@@ -9273,7 +9273,7 @@ dependencies = [
 
 [[package]]
 name = "wcore-channel-msteams"
-version = "0.12.5"
+version = "0.12.6"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -9294,7 +9294,7 @@ dependencies = [
 
 [[package]]
 name = "wcore-channel-signal"
-version = "0.12.5"
+version = "0.12.6"
 dependencies = [
  "async-trait",
  "chrono",
@@ -9309,7 +9309,7 @@ dependencies = [
 
 [[package]]
 name = "wcore-channel-slack"
-version = "0.12.5"
+version = "0.12.6"
 dependencies = [
  "async-trait",
  "chrono",
@@ -9332,7 +9332,7 @@ dependencies = [
 
 [[package]]
 name = "wcore-channel-sms"
-version = "0.12.5"
+version = "0.12.6"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -9355,7 +9355,7 @@ dependencies = [
 
 [[package]]
 name = "wcore-channel-telegram"
-version = "0.12.5"
+version = "0.12.6"
 dependencies = [
  "async-trait",
  "chrono",
@@ -9374,7 +9374,7 @@ dependencies = [
 
 [[package]]
 name = "wcore-channel-whatsapp"
-version = "0.12.5"
+version = "0.12.6"
 dependencies = [
  "async-trait",
  "chrono",
@@ -9397,7 +9397,7 @@ dependencies = [
 
 [[package]]
 name = "wcore-channels"
-version = "0.12.5"
+version = "0.12.6"
 dependencies = [
  "async-trait",
  "chrono",
@@ -9413,7 +9413,7 @@ dependencies = [
 
 [[package]]
 name = "wcore-channels-registry"
-version = "0.12.5"
+version = "0.12.6"
 dependencies = [
  "dirs",
  "serde",
@@ -9438,7 +9438,7 @@ dependencies = [
 
 [[package]]
 name = "wcore-cli"
-version = "0.12.5"
+version = "0.12.6"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -9519,7 +9519,7 @@ dependencies = [
 
 [[package]]
 name = "wcore-compact"
-version = "0.12.5"
+version = "0.12.6"
 dependencies = [
  "regex",
  "serde",
@@ -9528,7 +9528,7 @@ dependencies = [
 
 [[package]]
 name = "wcore-config"
-version = "0.12.5"
+version = "0.12.6"
 dependencies = [
  "anyhow",
  "argon2",
@@ -9565,7 +9565,7 @@ dependencies = [
 
 [[package]]
 name = "wcore-cron"
-version = "0.12.5"
+version = "0.12.6"
 dependencies = [
  "async-trait",
  "chrono",
@@ -9582,7 +9582,7 @@ dependencies = [
 
 [[package]]
 name = "wcore-cua"
-version = "0.12.5"
+version = "0.12.6"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -9618,7 +9618,7 @@ dependencies = [
 
 [[package]]
 name = "wcore-dispatch"
-version = "0.12.5"
+version = "0.12.6"
 dependencies = [
  "rand 0.9.4",
  "rand_distr",
@@ -9631,7 +9631,7 @@ dependencies = [
 
 [[package]]
 name = "wcore-egress"
-version = "0.12.5"
+version = "0.12.6"
 dependencies = [
  "async-trait",
  "http 1.4.1",
@@ -9644,7 +9644,7 @@ dependencies = [
 
 [[package]]
 name = "wcore-eval"
-version = "0.12.5"
+version = "0.12.6"
 dependencies = [
  "rstest",
  "serde",
@@ -9661,7 +9661,7 @@ dependencies = [
 
 [[package]]
 name = "wcore-eval-scenarios"
-version = "0.12.5"
+version = "0.12.6"
 dependencies = [
  "anyhow",
  "clap",
@@ -9681,7 +9681,7 @@ dependencies = [
 
 [[package]]
 name = "wcore-evolve"
-version = "0.12.5"
+version = "0.12.6"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -9721,7 +9721,7 @@ dependencies = [
 
 [[package]]
 name = "wcore-honcho-adapter"
-version = "0.12.5"
+version = "0.12.6"
 dependencies = [
  "async-trait",
  "serde",
@@ -9736,7 +9736,7 @@ dependencies = [
 
 [[package]]
 name = "wcore-mcp"
-version = "0.12.5"
+version = "0.12.6"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -9763,7 +9763,7 @@ dependencies = [
 
 [[package]]
 name = "wcore-memory"
-version = "0.12.5"
+version = "0.12.6"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -9804,7 +9804,7 @@ dependencies = [
 
 [[package]]
 name = "wcore-observability"
-version = "0.12.5"
+version = "0.12.6"
 dependencies = [
  "chrono",
  "opentelemetry",
@@ -9828,7 +9828,7 @@ dependencies = [
 
 [[package]]
 name = "wcore-permissions"
-version = "0.12.5"
+version = "0.12.6"
 dependencies = [
  "anyhow",
  "chrono",
@@ -9845,7 +9845,7 @@ dependencies = [
 
 [[package]]
 name = "wcore-plugin-api"
-version = "0.12.5"
+version = "0.12.6"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -9871,7 +9871,7 @@ dependencies = [
 
 [[package]]
 name = "wcore-plugin-subprocess"
-version = "0.12.5"
+version = "0.12.6"
 dependencies = [
  "anyhow",
  "serde",
@@ -9890,7 +9890,7 @@ dependencies = [
 
 [[package]]
 name = "wcore-plugin-wasm"
-version = "0.12.5"
+version = "0.12.6"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -9912,7 +9912,7 @@ dependencies = [
 
 [[package]]
 name = "wcore-pluginsrc"
-version = "0.12.5"
+version = "0.12.6"
 dependencies = [
  "serde",
  "serde_json",
@@ -9927,7 +9927,7 @@ dependencies = [
 
 [[package]]
 name = "wcore-pricing"
-version = "0.12.5"
+version = "0.12.6"
 dependencies = [
  "chrono",
  "dirs",
@@ -9946,7 +9946,7 @@ dependencies = [
 
 [[package]]
 name = "wcore-protocol"
-version = "0.12.5"
+version = "0.12.6"
 dependencies = [
  "rstest",
  "serde",
@@ -9958,7 +9958,7 @@ dependencies = [
 
 [[package]]
 name = "wcore-providers"
-version = "0.12.5"
+version = "0.12.6"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -9993,7 +9993,7 @@ dependencies = [
 
 [[package]]
 name = "wcore-replay"
-version = "0.12.5"
+version = "0.12.6"
 dependencies = [
  "serde",
  "serde_json",
@@ -10004,7 +10004,7 @@ dependencies = [
 
 [[package]]
 name = "wcore-repomap"
-version = "0.12.5"
+version = "0.12.6"
 dependencies = [
  "ignore",
  "regex",
@@ -10017,7 +10017,7 @@ dependencies = [
 
 [[package]]
 name = "wcore-safety"
-version = "0.12.5"
+version = "0.12.6"
 dependencies = [
  "async-trait",
  "regex",
@@ -10030,7 +10030,7 @@ dependencies = [
 
 [[package]]
 name = "wcore-sandbox"
-version = "0.12.5"
+version = "0.12.6"
 dependencies = [
  "async-trait",
  "bollard",
@@ -10050,7 +10050,7 @@ dependencies = [
 
 [[package]]
 name = "wcore-skills"
-version = "0.12.5"
+version = "0.12.6"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -10087,7 +10087,7 @@ dependencies = [
 
 [[package]]
 name = "wcore-swarm"
-version = "0.12.5"
+version = "0.12.6"
 dependencies = [
  "futures",
  "humantime-serde",
@@ -10106,7 +10106,7 @@ dependencies = [
 
 [[package]]
 name = "wcore-tools"
-version = "0.12.5"
+version = "0.12.6"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -10153,7 +10153,7 @@ dependencies = [
 
 [[package]]
 name = "wcore-types"
-version = "0.12.5"
+version = "0.12.6"
 dependencies = [
  "async-trait",
  "chrono",
@@ -10163,7 +10163,7 @@ dependencies = [
 
 [[package]]
 name = "wcore-user-model"
-version = "0.12.5"
+version = "0.12.6"
 dependencies = [
  "async-trait",
  "serde",
