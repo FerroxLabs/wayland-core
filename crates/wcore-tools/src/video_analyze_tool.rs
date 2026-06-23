@@ -1,6 +1,6 @@
 //! T3-3.5 (sub-wave 5): `video_analyze` tool — AI video analysis.
 //!
-//! Ported from `wayland-hermes/agent/tools/video_analyze_tool.py` (516 LOC).
+//! Ported from the prior Wayland Python engine.
 //!
 //! Sends a video (HTTP/HTTPS URL or local file) to a multimodal LLM
 //! through a **pluggable [`VideoAnalysisBackend`]**. The engine binds the

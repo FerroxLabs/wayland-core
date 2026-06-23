@@ -1,6 +1,6 @@
 //! T3-3.6 (sub-wave 6): `image_generate` tool — text-to-image generation.
 //!
-//! Ported from `wayland-hermes/agent/tools/image_generation_tool.py` (506 LOC).
+//! Ported from the prior Wayland Python engine.
 //!
 //! Sends a text prompt to a multimodal image-generation backend through a
 //! **pluggable [`ImageGenerationBackend`]**. The engine binds the real

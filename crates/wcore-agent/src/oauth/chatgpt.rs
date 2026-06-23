@@ -598,7 +598,7 @@ struct DeviceUserCode {
 }
 
 /// Parse the Step-1 usercode JSON. Accepts `user_code` or the `usercode`
-/// alias (OpenClaw observed both), requires a non-empty `device_auth_id`, and
+/// alias (both observed in the wild), requires a non-empty `device_auth_id`, and
 /// floors `interval` at [`DEVICE_POLL_MIN_INTERVAL`]. A missing/zero interval
 /// falls back to the floor.
 fn parse_device_usercode(body: &str) -> Result<DeviceUserCode, String> {
@@ -754,8 +754,7 @@ async fn poll_device_authorization(
             return Err("ChatGPT device sign-in timed out after 15 minutes".to_string());
         }
         // Wait BEFORE the first poll — the user needs time to type the code,
-        // and the server returns pending immediately otherwise (mirrors the
-        // Hermes/OpenClaw references).
+        // and the server returns pending immediately otherwise.
         tokio::time::sleep(user_code.interval).await;
 
         let res = tokio::time::timeout(
@@ -1265,7 +1264,7 @@ mod tests {
 
     #[test]
     fn parse_device_usercode_accepts_usercode_alias_and_string_interval() {
-        // OpenClaw observed the `usercode` alias; some servers send interval as a string.
+        // The `usercode` alias is observed in the wild; some servers send interval as a string.
         let parsed =
             parse_device_usercode(r#"{"usercode":"BBBB","device_auth_id":"dev","interval":"7"}"#)
                 .expect("parse");

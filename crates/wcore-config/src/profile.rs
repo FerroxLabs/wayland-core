@@ -207,7 +207,7 @@ fn profile_flag_from_args(args: impl Iterator<Item = String>) -> Option<String> 
 /// process entry, and materialize it into `WAYLAND_HOME`. After this returns,
 /// `WAYLAND_HOME` is the only thing any code (or child process) consults; the
 /// `active` pointer is never read again — the precise failure that corrupts
-/// Hermes (#18594), where a sticky pointer and the env var can disagree deep in
+/// that corruption bug, where a sticky pointer and the env var can disagree deep in
 /// the stack.
 ///
 /// Resolution order:

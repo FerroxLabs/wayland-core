@@ -1,6 +1,6 @@
 //! T4 (v0.6.3 Tier 2B) — GitLab REST API v4 operations tool.
 //!
-//! Ported from `wayland-hermes/agent/tools/gitlab_tool.py` and modeled
+//! Ported from the prior Wayland Python engine and modeled
 //! on `discord_tool.rs`. The Python original talks to GitLab's REST API
 //! directly (an HTTP client + a `PRIVATE-TOKEN` header). Wayland's
 //! engine MUST NOT initiate HTTP from inside `wcore-tools` — HTTP is a

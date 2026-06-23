@@ -1,6 +1,6 @@
 //! v0.6.3 Tier 2B T14 — read-only AWS CLI wrapper tool.
 //!
-//! Ported from `wayland-hermes/agent/tools/aws_cli_tool.py`. Wraps the
+//! Ported from the prior Wayland Python engine. Wraps the
 //! host `aws` CLI binary, restricted to **read-only** operations. The
 //! AWS CLI command form is `aws <service> <operation> [args...]`, e.g.
 //! `aws s3 ls`, `aws ec2 describe-instances`, `aws iam get-user`.

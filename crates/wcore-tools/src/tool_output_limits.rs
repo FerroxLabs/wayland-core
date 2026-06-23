@@ -1,8 +1,8 @@
 //! T3-3.3.3: Configurable tool-output truncation limits.
 //!
-//! Ported from `wayland-hermes/agent/tools/tool_output_limits.py` (which in
-//! turn ports `anomalyco/opencode` PR #23770 — *"feat(truncate): allow
-//! configuring tool output truncation limits"*).
+//! Ported from the prior Wayland Python engine (which in turn ports
+//! `anomalyco/opencode` PR #23770 — *"feat(truncate): allow configuring tool
+//! output truncation limits"*).
 //!
 //! ## Why a separate helper?
 //!
@@ -11,15 +11,16 @@
 //! truncation primitive. Neither of those is **user-configurable** at runtime,
 //! and neither covers the *per-line length* cap that file-ops tools need.
 //!
-//! Hermes centralises three user-tunable knobs behind a single `tool_output`
-//! config section so power users can tune them without patching the source:
+//! The predecessor centralises three user-tunable knobs behind a single
+//! `tool_output` config section so power users can tune them without patching
+//! the source:
 //!
 //! - `max_bytes` — terminal stdout/stderr cap (default 50_000)
 //! - `max_lines` — read_file pagination + truncation cap (default 2000)
 //! - `max_line_length` — per-line length cap before `... [truncated]`
 //!   (default 2000)
 //!
-//! The hermes Python module reads `tool_output` directly from
+//! The prior Python module reads `tool_output` directly from
 //! `wayland_cli.config.load_config()`. To avoid a circular `wcore-tools ↔
 //! wcore-config` dependency (and to keep this helper trivially testable),
 //! the Rust port accepts a `&serde_json::Value` config section pointer
@@ -55,13 +56,13 @@
 
 use serde_json::Value;
 
-/// Default terminal-tool byte cap (matches hermes `terminal_tool.MAX_OUTPUT_CHARS`).
+/// Default terminal-tool byte cap (matches the prior engine's `terminal_tool.MAX_OUTPUT_CHARS`).
 pub const DEFAULT_MAX_BYTES: usize = 50_000;
 
-/// Default file-ops line cap (matches hermes `file_operations.MAX_LINES`).
+/// Default file-ops line cap (matches the prior engine's `file_operations.MAX_LINES`).
 pub const DEFAULT_MAX_LINES: usize = 2_000;
 
-/// Default per-line length cap (matches hermes `file_operations.MAX_LINE_LENGTH`).
+/// Default per-line length cap (matches the prior engine's `file_operations.MAX_LINE_LENGTH`).
 pub const DEFAULT_MAX_LINE_LENGTH: usize = 2_000;
 
 /// Resolved tool-output truncation limits.
@@ -91,7 +92,7 @@ impl Default for ToolOutputLimits {
 impl ToolOutputLimits {
     /// Build limits from an optional `tool_output` config section.
     ///
-    /// Mirrors hermes `get_tool_output_limits()`:
+    /// Mirrors the prior engine's `get_tool_output_limits()`:
     ///
     /// - `None` (no `tool_output` section in config) → all defaults.
     /// - A non-object section (e.g. a string mistakenly assigned by the user)
@@ -118,8 +119,9 @@ impl ToolOutputLimits {
 /// Coerce a JSON value to a positive `usize`, falling back to `default` on
 /// any failure mode (missing, wrong type, ≤ 0, non-integral float, overflow).
 ///
-/// Mirrors hermes `_coerce_positive_int` but tightened for `usize`: a negative
-/// JSON integer or a `>usize::MAX` integer both fall through to `default`.
+/// Mirrors the prior engine's `_coerce_positive_int` but tightened for `usize`:
+/// a negative JSON integer or a `>usize::MAX` integer both fall through to
+/// `default`.
 fn coerce_positive_usize(value: Option<&Value>, default: usize) -> usize {
     let v = match value {
         Some(v) => v,
@@ -132,7 +134,7 @@ fn coerce_positive_usize(value: Option<&Value>, default: usize) -> usize {
             } else if let Some(i) = n.as_i64() {
                 if i > 0 { Some(i as u64) } else { None }
             } else if let Some(f) = n.as_f64() {
-                // Match hermes: `int(value)` on a float truncates toward zero;
+                // Match the prior engine: `int(value)` on a float truncates toward zero;
                 // values ≤ 0 fall through. Reject non-finite floats explicitly.
                 if f.is_finite() && f >= 1.0 {
                     Some(f as u64)
@@ -168,7 +170,7 @@ mod tests {
 
     #[test]
     fn defaults_when_section_is_not_object() {
-        // Mirrors hermes: non-dict `tool_output` (e.g. a string) is ignored.
+        // Mirrors the prior engine: non-dict `tool_output` (e.g. a string) is ignored.
         let bad = json!("oops not an object");
         let limits = ToolOutputLimits::from_section(Some(&bad));
         assert_eq!(limits, ToolOutputLimits::default());
@@ -213,7 +215,7 @@ mod tests {
 
     #[test]
     fn string_integers_are_coerced() {
-        // hermes uses `int(value)` which accepts numeric strings; mirror that.
+        // The prior engine uses `int(value)` which accepts numeric strings; mirror that.
         let section = json!({
             "max_bytes": "65536",
             "max_lines": "  10000  ",   // whitespace trimmed

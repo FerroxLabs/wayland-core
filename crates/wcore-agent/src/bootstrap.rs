@@ -595,7 +595,7 @@ impl AgentBootstrap {
         // T11: JsonlTool — large-file-friendly JSON Lines streaming tool.
         registry.register(Box::new(wcore_tools::jsonl_tool::JsonlTool::default()));
         // T3-3.1.1: ClarifyTool — structured user-clarification prompt
-        // (ported from wayland-hermes). The host layer intercepts
+        // (ported from the prior Wayland Python engine). The host layer intercepts
         // tool calls named `clarify` to perform the real UI interaction.
         registry.register(Box::new(wcore_tools::clarify::ClarifyTool::new()));
         // v0.9.3 W0.4: AskUserQuestionTool — structured multi-choice question.
@@ -608,7 +608,7 @@ impl AgentBootstrap {
             wcore_tools::ask_user_question::AskUserQuestionTool::new(),
         ));
         // T3-3.1.2: TodoTool — in-memory planning/task list ported from
-        // wayland-hermes. State is per-session (one `TodoTool` instance
+        // the prior Wayland Python engine. State is per-session (one `TodoTool` instance
         // per bootstrap → one list per agent session).
         registry.register(Box::new(wcore_tools::todo::TodoTool::new()));
         // T3-3.1.4: SendMessageTool — registered with the fail-loud
@@ -1743,7 +1743,7 @@ impl AgentBootstrap {
                 .with_parent_output(Arc::clone(&self.output)),
         ));
         // T3-3.1.3: DelegateTool — focused single-task / batch delegation
-        // surface ported from wayland-hermes. Sibling to SpawnTool (the
+        // surface ported from the prior Wayland Python engine. Sibling to SpawnTool (the
         // existing registry-aware multi-agent fan-out): Delegate provides
         // structured-JSON output + per-task `toolsets` whitelist + max
         // turns 50 default, while Spawn exposes registry-resolved named

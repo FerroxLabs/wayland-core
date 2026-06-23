@@ -1,5 +1,5 @@
-//! T3-3.3.3 — Tool-result persistence helper ported from
-//! `wayland-hermes/agent/tools/tool_result_storage.py`.
+//! T3-3.3.3 — Tool-result persistence helper ported from the prior
+//! Wayland Python engine.
 //!
 //! Defense against context-window overflow operates at three layers:
 //!

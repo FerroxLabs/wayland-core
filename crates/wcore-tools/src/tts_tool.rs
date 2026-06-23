@@ -1,7 +1,7 @@
 //! T3-3.6 (sub-wave 6): `text_to_speech` tool — multi-provider TTS via a
 //! pluggable [`TtsBackend`].
 //!
-//! Ported from `wayland-hermes/agent/tools/tts_tool.py` (1137 LOC).
+//! Ported from the prior Wayland Python engine.
 //!
 //! The Python original embeds six concrete provider integrations (Edge,
 //! ElevenLabs, OpenAI, MiniMax, xAI, Mistral, Piper) plus an ffmpeg

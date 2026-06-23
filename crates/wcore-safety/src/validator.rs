@@ -140,7 +140,7 @@ impl OutputValidator {
 }
 
 // ---------------------------------------------------------------------------
-// LLM-judge validator (T2-A2 port of wayland-hermes output_validator.py)
+// LLM-judge validator (T2-A2 port of the prior Wayland Python engine)
 //
 // Adds an LLM-as-judge layer over the existing regex/PII checks: scores an
 // output against a configurable set of criteria, charges spend against a
@@ -185,7 +185,7 @@ pub struct BudgetExhausted {
 
 /// What axis the LLM-judge scores the output against.
 ///
-/// Mirrors the hermes scoring axes (factuality / grounding / consistency)
+/// Mirrors the scoring axes (factuality / grounding / consistency)
 /// but generalised so callers can request a single axis or a custom one
 /// without needing to ship a code change. Serde-derived so judge prompts
 /// can embed the list verbatim.

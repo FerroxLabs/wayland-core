@@ -10,7 +10,7 @@
 //
 // F-091 (HIGH, D4 decision): `memory.enabled` default flipped from
 // `false` → `true`. Memory is the core value proposition ("memory is
-// the whole pitch" — Aud-6 HERMES-FANBOY-4). Users who want to opt out
+// the whole pitch"). Users who want to opt out
 // set `memory.enabled = false` in wcore.toml or pass `--no-memory`.
 // Test updated to reflect the new opt-out-by-config contract.
 

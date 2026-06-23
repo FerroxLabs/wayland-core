@@ -214,7 +214,7 @@ fn disclose_parallel_once() {
 }
 
 /// Pick the active `WebBackend`. Explicit `WAYLAND_WEB_BACKEND` wins; otherwise
-/// the first configured key (Hermes preference order) is used. Every selected
+/// the first configured key (the provider preference order) is used. Every selected
 /// primary is wrapped so it falls back to DuckDuckGo on failure — DDG is the
 /// floor for all tiers except an explicit `off`.
 ///
@@ -252,7 +252,7 @@ pub fn build_web_search_backend() -> Arc<dyn WebBackend> {
         WebBackendChoice::Auto => {}
     }
 
-    // 1..6 — Hermes preference order, first key present wins; each floors on DDG.
+    // 1..6 — the provider preference order, first key present wins; each floors on DDG.
     if let Some(key) = read_env_key("FIRECRAWL_API_KEY") {
         tracing::info!("web search: Firecrawl (FIRECRAWL_API_KEY found)");
         return chain(Arc::new(FirecrawlWebBackend::new(key)));

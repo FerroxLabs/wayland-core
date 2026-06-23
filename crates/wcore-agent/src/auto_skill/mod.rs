@@ -14,7 +14,7 @@
 //! hydrates the draft as a seed pair. The two paths are complementary:
 //! the detector captures execution patterns, U6 captures intent patterns.
 //!
-//! Hermes-parity bet: self-learning from runtime observation without RL.
+//! Self-learning from runtime observation without RL.
 
 pub mod bucketer;
 pub mod drafter;

@@ -1,6 +1,6 @@
 //! T3-3.8 — OSV (Open Source Vulnerabilities) malware check.
 //!
-//! Ported from `wayland-hermes/agent/tools/osv_check.py` (155 LOC).
+//! Ported from the prior Wayland Python engine.
 //!
 //! Before launching an MCP server via `npx` / `uvx` (or any analogous
 //! package-runner shim), this helper queries the OSV API to check

@@ -1,6 +1,6 @@
 //! T3-3.2.1 — Binary file extensions to skip for text-based operations.
 //!
-//! Ported from `wayland-hermes/agent/tools/binary_extensions.py`, which is
+//! Ported from the prior Wayland Python engine, which is
 //! itself a port of `free-code src/constants/files.ts`.
 //!
 //! These files can't be meaningfully compared as text and are often large.

@@ -1,6 +1,6 @@
 //! T3-3.2.7: Fuzzy find-and-replace helper for the Edit tool.
 //!
-//! Port of `wayland-hermes/agent/tools/fuzzy_match.py` — an 8/9-strategy
+//! Ported from the prior Wayland Python engine — an 8/9-strategy
 //! matching chain (inspired by OpenCode) used to robustly locate text in
 //! a file even when the LLM-supplied `old_string` differs from the on-disk
 //! content in whitespace, indentation, Unicode punctuation, or escape

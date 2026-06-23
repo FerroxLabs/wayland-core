@@ -590,7 +590,7 @@ fn open_tui_log_file() -> std::io::Result<std::fs::File> {
 /// [`wcore_config::profile::activate_for_launch`] could not resolve the profile
 /// to an existing home), refusing is the only safe choice: silently falling
 /// through to the SHARED default home would cross-write another account's
-/// credentials and memory — the Hermes #18594 corruption reproduced at the host
+/// credentials and memory — the credential/memory corruption bug reproduced at the host
 /// boundary. Interactive CLI/TUI use is intentionally tolerant (it warns and
 /// falls through); only the host protocol is held to the strict contract.
 ///

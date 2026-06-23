@@ -13,9 +13,9 @@
 //! Operational failures (spawn error, timeout, unknown exit code) respect the
 //! `fail_open` config setting.
 //!
-//! # Port divergence vs hermes
+//! # Port divergence vs the prior Wayland Python engine
 //!
-//! The Python source [`tirith_security.py`] additionally contains an
+//! The prior Python source additionally contains an
 //! **auto-installer** that downloads the `tirith` binary from GitHub releases,
 //! verifies it with cosign provenance + SHA-256 checksums, extracts a tarball,
 //! and persists a 24h failure-marker on disk. That heavy supply-chain logic
@@ -25,8 +25,6 @@
 //! needed. This module only resolves an already-present binary via PATH or
 //! `$WAYLAND_HOME/bin/tirith`, and surfaces the [`check_command_security`]
 //! main API.
-//!
-//! [`tirith_security.py`]: https://github.com/sheeki03/wayland-hermes/blob/main/agent/tools/tirith_security.py
 
 use std::env;
 use std::fs;
@@ -56,7 +54,7 @@ pub const MAX_SUMMARY_LEN: usize = 500;
 
 /// Security configuration for the tirith scanner.
 ///
-/// Mirrors the hermes `_load_security_config()` shape. In production callers
+/// Mirrors the prior Python engine's `_load_security_config()` shape. In production callers
 /// should populate this from their config layer; the [`SecurityConfig::from_env`]
 /// helper honours the `TIRITH_*` environment overrides the Python tool used.
 #[derive(Debug, Clone)]
@@ -90,7 +88,7 @@ impl Default for SecurityConfig {
 impl SecurityConfig {
     /// Construct a config with environment variable overrides applied.
     ///
-    /// Recognised vars (match hermes):
+    /// Recognised vars (match the prior Python engine):
     /// * `TIRITH_ENABLED`   (bool: `1`/`true`/`yes` enables)
     /// * `TIRITH_BIN`       (string path)
     /// * `TIRITH_TIMEOUT`   (integer seconds)
@@ -181,7 +179,7 @@ impl SecurityResult {
 /// Return the `$WAYLAND_HOME` directory.
 ///
 /// Honours the `WAYLAND_HOME` env var; falls back to `~/.wayland` (matching
-/// hermes' `wayland_constants.get_wayland_home`).
+/// the prior Python engine's `wayland_constants.get_wayland_home`).
 pub fn wayland_home() -> PathBuf {
     if let Ok(v) = env::var("WAYLAND_HOME") {
         return PathBuf::from(v);
@@ -299,7 +297,7 @@ pub enum PathResolution {
     /// Binary located at this path.
     Found(PathBuf),
     /// Could not locate a usable binary. The string is a short failure tag
-    /// matching the hermes vocabulary (e.g. `"explicit_path_missing"`,
+    /// matching the prior Python engine's vocabulary (e.g. `"explicit_path_missing"`,
     /// `"not_on_path"`).
     Missing(String),
 }
@@ -315,7 +313,7 @@ pub enum PathResolution {
 ///   * `$WAYLAND_HOME/bin/tirith`
 ///
 /// This intentionally does **NOT** trigger the network auto-installer that the
-/// hermes source performs. See the module-level docs.
+/// prior Python engine performs. See the module-level docs.
 pub fn resolve_tirith_path(configured_path: &str) -> PathResolution {
     let expanded = expand_user(configured_path);
     let explicit = is_explicit_path(configured_path);
@@ -350,7 +348,7 @@ pub fn resolve_tirith_path(configured_path: &str) -> PathResolution {
 
 /// Run a tirith security scan on `command` using the supplied configuration.
 ///
-/// Mirrors hermes' `check_command_security`. Returns a [`SecurityResult`]
+/// Mirrors the prior Python engine's `check_command_security`. Returns a [`SecurityResult`]
 /// whose `action` is determined by tirith's exit code; JSON stdout is parsed
 /// for `findings` / `summary` enrichment but never overrides the verdict.
 ///
@@ -436,7 +434,7 @@ pub async fn check_command_security(command: &str, cfg: &SecurityConfig) -> Secu
 }
 
 /// Parse tirith JSON stdout into a [`SecurityResult`], applying the truncation
-/// limits and degradation rules from hermes. The `action` parameter is the
+/// limits and degradation rules from the prior Python engine. The `action` parameter is the
 /// authoritative verdict from the exit code; JSON never overrides it.
 pub fn enrich_with_json(action: Action, stdout: &[u8]) -> SecurityResult {
     let text = std::str::from_utf8(stdout).unwrap_or("").trim();
@@ -561,7 +559,7 @@ mod tests {
         assert!(r.findings.is_empty());
         assert!(r.summary.is_empty());
 
-        // Whitespace-only is also "empty" per hermes' .strip() check.
+        // Whitespace-only is also "empty" per the prior Python engine's .strip() check.
         let r = enrich_with_json(Action::Allow, b"   \n\t  ");
         assert_eq!(r.action, Action::Allow);
         assert!(r.summary.is_empty());
@@ -605,7 +603,7 @@ mod tests {
     #[test]
     fn security_config_default_fail_closed() {
         // v0.6.2 cross-audit Round 1: default flipped from fail-open (matching
-        // hermes) to fail-closed. Operators who need the old behavior set
+        // the prior Python engine) to fail-closed. Operators who need the old behavior set
         // TIRITH_FAIL_OPEN=true.
         let cfg = SecurityConfig::default();
         assert!(cfg.tirith_enabled);

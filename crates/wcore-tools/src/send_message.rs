@@ -1,7 +1,7 @@
 //! T3-3.1.4 — `send_message` cross-channel messaging tool.
 //!
-//! Ported from `wayland-hermes/agent/tools/send_message_tool.py` (MIT
-//! © Nous Research). The Python original routes to ~17 external
+//! Ported from an upstream MIT-licensed library (see THIRD-PARTY-NOTICES.md). The Python original
+//! routes to ~17 external
 //! messaging platforms (Telegram, Discord, Slack, Matrix, Signal,
 //! Email, SMS, etc.). Wayland's engine has no adapters for any of
 //! those, so this port covers the **dispatch surface** only — schema,

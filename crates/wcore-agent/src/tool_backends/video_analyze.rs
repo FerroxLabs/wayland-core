@@ -3,8 +3,8 @@
 //! that produces a coherent video summary.
 //!
 //! No vendor exposes a viable "send-a-video, get-a-summary" REST API at
-//! a price point compatible with a free default. Hermes does not ship
-//! `video_analyze` at all. The Wayland strategy is a three-step pipeline:
+//! a price point compatible with a free default. The predecessor did not
+//! ship `video_analyze` at all. The Wayland strategy is a three-step pipeline:
 //!
 //! 1. Validate the input path under a strict whitelist (closes S-H5).
 //! 2. Extract N evenly-spaced frames via local `ffmpeg` into a

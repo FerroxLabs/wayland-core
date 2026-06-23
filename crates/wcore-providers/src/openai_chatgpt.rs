@@ -18,8 +18,7 @@
 //!
 //! ## Reference
 //!
-//! Wire details mirrored from OpenClaw (OpenAI-maintained Codex client) and
-//! Hermes — see `.planning/2026-06-16-CHATGPT-OAUTH-SPEC.md` §2.
+//! Wire details mirrored from the OpenAI-maintained Codex client.
 //!
 //! [`stream`]: OpenAIChatGptProvider::stream
 
@@ -67,7 +66,7 @@ pub const CODEX_BASE_URL: &str = "https://chatgpt.com/backend-api/codex";
 
 /// Default `instructions` injected when a request carries no system prompt.
 ///
-/// Codex (per both OpenClaw and Hermes) always sends a non-empty
+/// Codex always sends a non-empty
 /// `instructions` field; `build_responses_body` omits it when `request.system`
 /// is empty. D4: ensure it is always present.
 const DEFAULT_INSTRUCTIONS: &str = "You are a helpful assistant.";
@@ -165,7 +164,7 @@ impl OpenAIChatGptProvider {
     ///   the encrypted blob paired with each function_call) is a follow-up.
     /// * D4 — ensure `instructions` is always present.
     /// * D5 — when tools are present, send `tool_choice: "auto"` +
-    ///   `parallel_tool_calls: true` (matches both references).
+    ///   `parallel_tool_calls: true` (matches the reference client).
     fn build_codex_body(&self, request: &LlmRequest) -> serde_json::Value {
         let mut body = build_responses_body(request, &self.compat);
         if let Some(obj) = body.as_object_mut() {

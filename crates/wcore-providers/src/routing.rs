@@ -23,7 +23,7 @@
 //! The higher-level [`route`] returns a [`RoutingDecision`] that names the rule
 //! that fired, so the picker's behavior is visible in trace observability.
 //!
-//! Ported from `wayland-hermes/agent/agent/smart_model_routing.py`. The Python
+//! Ported from the prior Wayland Python engine's smart model routing. The Python
 //! version routed by parsing the raw user message; this Rust port lifts the
 //! decision to a typed request shape so callers — provider chain, agent
 //! engine — can supply structured inputs (token counts, vision flag) instead

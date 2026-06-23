@@ -1,6 +1,6 @@
 //! T3-3.3.3 — Website access policy helpers for URL-capable tools.
 //!
-//! Ported from `wayland-hermes/agent/tools/website_policy.py` (296 LOC).
+//! Ported from the prior Wayland Python engine.
 //!
 //! Loads a user-managed website blocklist from `~/.wayland-core/config.yaml`
 //! plus any referenced shared list files, and enforces it on URLs the

@@ -1,6 +1,6 @@
 //! V4A Patch Format Parser (HELPER module).
 //!
-//! Ported from `wayland-hermes/agent/tools/patch_parser.py` (sub-wave 2 of
+//! Ported from the prior Wayland Python engine (sub-wave 2 of
 //! T3-3). This module only parses the V4A patch format used by codex / cline
 //! and similar coding agents — application of the parsed operations lives
 //! elsewhere (the higher-level edit tooling).

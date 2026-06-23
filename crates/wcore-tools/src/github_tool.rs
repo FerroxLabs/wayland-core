@@ -1,6 +1,6 @@
 //! v0.6.3 Tier 2B T3 — GitHub REST API operations tool.
 //!
-//! Ported from `wayland-hermes/agent/tools/github_tool.py`. The Python
+//! Ported from the prior Wayland Python engine. The Python
 //! original talks to `api.github.com` directly (httpx + a `GITHUB_TOKEN`).
 //! Mirroring the established `wcore-tools` discipline (see
 //! [`discord_tool`](crate::discord_tool), [`web_tools`](crate::web_tools),

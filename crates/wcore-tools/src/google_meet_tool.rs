@@ -1,7 +1,7 @@
 //! T3-3.7 (sub-wave 7): `meet_*` tools — Google Meet integration via a
 //! pluggable [`GoogleMeetBackend`].
 //!
-//! Ported from `wayland-hermes/agent/tools/google_meet_tool.py` (754 LOC).
+//! Ported from the prior Wayland Python engine (754 LOC).
 //!
 //! The Python original spawns a detached Playwright + headless-Chromium
 //! subprocess that joins a Google Meet URL, scrapes live captions into a

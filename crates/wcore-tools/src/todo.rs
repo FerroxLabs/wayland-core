@@ -1,7 +1,6 @@
 //! Todo Tool — Planning & Task Management
 //!
-//! Ports `wayland-hermes/agent/tools/todo_tool.py` (MIT © Nous Research, Rust
-//! port by Sean) into the wcore-tools dispatch surface.
+//! Ported from an upstream MIT-licensed library (see THIRD-PARTY-NOTICES.md) into the wcore-tools dispatch surface.
 //!
 //! Provides an in-memory task list the agent uses to decompose complex tasks,
 //! track progress, and maintain focus across long conversations.

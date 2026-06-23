@@ -1,6 +1,6 @@
 //! T3-3.7 — `cronjob` scheduled-task management tool.
 //!
-//! Ported from `wayland-hermes/agent/tools/cronjob_tools.py`. The Python
+//! Ported from the prior Wayland Python engine. The Python
 //! original is a thin dispatch surface over `cron.jobs` (a JSON-file
 //! scheduler ticked by the gateway daemon). The engine has no such
 //! daemon, so this port covers the **dispatch surface** only — schema,

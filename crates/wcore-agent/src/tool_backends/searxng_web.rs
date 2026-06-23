@@ -2,7 +2,7 @@
 //! instance) — wayland-core ships the connector, not the instance.
 //!
 //! GETs `<SEARXNG_URL>/search?q=<query>&format=json` and maps the JSON
-//! `results[]` (sorted by `score` desc, per Hermes) into the engine shape.
+//! `results[]` (sorted by `score` desc) into the engine shape.
 //!
 //! ⚠️ The instance must be **publicly resolvable**: requests go through the
 //! SSRF-safe client, so a `SEARXNG_URL` pointing at `localhost`/a private IP is

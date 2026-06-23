@@ -2,8 +2,8 @@
 //!
 //! `detect_light_mode()` decides whether the host terminal is painting on a
 //! LIGHT background so `Theme::for_mode(ThemeMode::Auto)` can pick the light
-//! Hearth palette. The decision is a 5-tier fallback modelled on hermes
-//! `theme.ts:415-475`:
+//! Hearth palette. The decision is a 5-tier fallback modelled on the prior
+//! Wayland Python engine's theme detection:
 //!
 //! 1. **Explicit `/theme` setting** — handled by the caller (a `ThemeMode`
 //!    of `Light`/`Dark` never reaches this module; only `Auto` does).

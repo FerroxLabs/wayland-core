@@ -1,4 +1,4 @@
-//! T3-3.1.1 — clarify_tool port from `wayland-hermes/agent/tools/clarify_tool.py`.
+//! T3-3.1.1 — clarify_tool port from the prior Wayland Python engine.
 //!
 //! The `clarify` tool lets the agent surface a structured question (with up
 //! to 4 multiple-choice options, plus an implicit "Other" the UI appends)

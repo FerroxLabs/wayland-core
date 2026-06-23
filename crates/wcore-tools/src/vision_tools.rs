@@ -1,6 +1,6 @@
 //! T3-3.5 — `vision_analyze` AI vision tool.
 //!
-//! Ported from `wayland-hermes/agent/tools/vision_tools.py` (MIT).
+//! Ported from an upstream MIT-licensed library (see THIRD-PARTY-NOTICES.md).
 //! The Python original routes image URLs (or local paths) through a
 //! centralized auxiliary LLM router that supports OpenRouter, Codex,
 //! native Anthropic, or any OpenAI-compatible endpoint. Wayland's

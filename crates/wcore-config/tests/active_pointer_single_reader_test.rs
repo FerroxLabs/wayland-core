@@ -2,7 +2,7 @@
 //!
 //! C2/D2: the `active` profile pointer is resolved ONCE, at process entry
 //! (`profile::activate_for_launch`), and materialized into `WAYLAND_HOME`; it is
-//! never consulted again. The Hermes corruption bug (#18594) is precisely what
+//! never consulted again. The credential/memory corruption bug is precisely what
 //! happens when a sticky pointer is re-read deep in the stack and can disagree
 //! with the env var. To keep that discipline locally reviewable, ALL access to
 //! the pointer — via the path resolver AND via the raw `<root>/active` join —
@@ -16,7 +16,7 @@
 //! `join` on the `active` literal — from any file but the allow-listed module.
 //! A determined bypass (capturing the resolver as a fn-pointer, or reconstructing
 //! the path from raw string ops) is not detected; the goal is to stop accidental
-//! copy-paste, which is how the Hermes failure actually crept in.
+//! copy-paste, which is how that failure actually crept in.
 //!
 //! Mirrors `hermeticity_audit_test.rs`: shells out to `git grep`
 //! (dependency-free), skips comment-only mentions, and is skipped entirely if

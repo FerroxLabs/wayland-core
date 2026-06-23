@@ -1,7 +1,7 @@
 //! T3-3.8 — Wayland self-introspection toolset (`wayland_status` +
 //! `wayland_telemetry_query`).
 //!
-//! Ported from `wayland-hermes/agent/tools/wayland_introspection.py`
+//! Ported from the prior Wayland Python engine
 //! (PRD-1 §4.2 + §4.3). The Python original registers two read-only
 //! tools as a single `wayland_introspection` toolset so the model can
 //! reflectively answer "what's the runtime state right now?" and "what

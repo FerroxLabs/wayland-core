@@ -1,6 +1,6 @@
 //! T3-3.2.3 — Cross-agent file state coordination registry.
 //!
-//! Port of `agent/tools/file_state.py` from wayland-hermes. Prevents
+//! Ported from the prior Wayland Python engine. Prevents
 //! mangled edits when concurrent subagents (same process, same
 //! filesystem) touch the same file. Complements the single-agent
 //! [`crate::file_cache::FileStateCache`] — that module is a per-process

@@ -1,6 +1,6 @@
 //! T3-3.8 (sub-wave 8): Piper voice + binary downloader (HELPER).
 //!
-//! Ported from `wayland-hermes/agent/tools/piper_download.py`.
+//! Ported from the prior Wayland Python engine.
 //!
 //! The Python original performs three jobs:
 //!

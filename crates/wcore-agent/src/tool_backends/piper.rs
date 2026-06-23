@@ -72,7 +72,7 @@ const DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(120);
 
 /// Default voice id used when neither the request nor `PIPER_VOICE`
 /// supplies one. Matches the Python `DEFAULT_VOICE` constant in the
-/// Hermes original.
+/// original implementation.
 pub const DEFAULT_PIPER_VOICE: &str = "en_US-amy-medium";
 
 // ---------------------------------------------------------------------

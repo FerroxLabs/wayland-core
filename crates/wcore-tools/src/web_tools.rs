@@ -1,6 +1,6 @@
 //! T3-3.8 — `web_search` / `web_extract` / `web_crawl` tools.
 //!
-//! Ported from `wayland-hermes/agent/tools/web_tools.py` (2314 LOC). The
+//! Ported from the prior Wayland Python engine. The
 //! Python original is a multi-backend dispatcher across Exa / Firecrawl /
 //! Parallel / Tavily / DuckDuckGo / trafilatura, each with its own HTTP
 //! client, response normalizer, optional LLM-summarization pass, and
@@ -13,7 +13,7 @@
 //! ## What is in the port
 //!
 //! * A single [`WebTool`] with an `operation` discriminator that exposes
-//!   the three hermes entry points (`search`, `extract`, `crawl`) through
+//!   the three entry points (`search`, `extract`, `crawl`) through
 //!   one Tool. Tool name: `"web"`. The same backend instance handles all
 //!   three operations.
 //! * [`WebBackend`] — async trait the host implements once per real
@@ -26,7 +26,7 @@
 //!   `CapturingVisionBackend` / `CapturingTranscriptionBackend`.
 //! * SSRF + website-policy gating happens **before** the backend is
 //!   called, for *every* URL in the inputs. This matches the post-fix
-//!   layout in `web_tools.py` (lines 1236–1264) where the website
+//!   layout in the prior Wayland Python engine where the website
 //!   blocklist was moved out of the firecrawl branch so trafilatura and
 //!   the free fallback couldn't bypass it.
 //! * The two parameter validators ([`validate_search_query`],
@@ -55,10 +55,10 @@
 //! 1. URL list is rejected when **any** URL fails [`is_safe_url`] — the
 //!    backend is never called with a private-network / loopback URL.
 //! 2. URLs are screened by [`check_website_access`] (fail-open on
-//!    malformed config — same semantics as hermes / vision_tools).
+//!    malformed config — same semantics as vision_tools).
 //! 3. URLs are rejected up front if they contain what looks like an API
 //!    key prefix (`sk-`, `pk-`, percent-encoded variants). This mirrors
-//!    the secrets-in-URL guard at hermes lines 1204–1214 and prevents
+//!    the prior engine's secrets-in-URL guard and prevents
 //!    accidental exfiltration via the URL bar.
 //! 4. Search queries are length-bounded (4 KB) so an attacker can't
 //!    force a megabyte-of-junk request through the backend.
@@ -91,11 +91,11 @@ pub const WEB_MAX_URL_BYTES: usize = 4096;
 pub const WEB_DEFAULT_SEARCH_LIMIT: u32 = 5;
 
 /// Upper bound on `limit` accepted from the model. Anything larger is
-/// clamped (matches hermes `_tavily_request` which clamps at 20).
+/// clamped (matches the prior engine's Tavily request which clamps at 20).
 pub const WEB_MAX_SEARCH_LIMIT: u32 = 50;
 
-/// Inline key-prefix sniff. The full hermes redactor lives in
-/// `agent/redact.py`; here we keep a conservative subset that catches
+/// Inline key-prefix sniff. The full redactor lives in the prior
+/// Wayland Python engine; here we keep a conservative subset that catches
 /// the most common exfiltration vectors. Backends + the redact crate
 /// remain responsible for content-side scrubbing.
 fn url_contains_apparent_secret(url: &str) -> bool {
@@ -162,7 +162,7 @@ pub fn validate_search_query(query: &str) -> Result<&str, String> {
 /// Run every URL through SSRF + secret + length + website-policy gates
 /// and return the filtered safe list plus a parallel list of structured
 /// rejections (so the caller can return them as failed-row entries in
-/// the response — matching hermes' partial-success shape).
+/// the response — matching the prior engine's partial-success shape).
 ///
 /// `config_path = None` reads the cached website-policy bundle.
 pub fn validate_url_list(urls: &[String]) -> (Vec<String>, Vec<UrlRejection>) {
@@ -237,7 +237,7 @@ pub struct UrlRejection {
     pub reason: String,
 }
 
-/// Which hermes-original operation a [`WebTool::execute`] call should
+/// Which operation a [`WebTool::execute`] call should
 /// dispatch.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WebOperation {
@@ -268,14 +268,15 @@ impl WebOperation {
     }
 }
 
-/// Outcome of a backend call. Mirrors the JSON shape the hermes tool
-/// emits — the backend returns a structured value and the Tool wraps
+/// Outcome of a backend call. Mirrors the JSON shape the prior engine's
+/// tool emits — the backend returns a structured value and the Tool wraps
 /// it in `{success, data: …}` / `{success, results: …}`.
 #[derive(Debug, Clone)]
 pub enum WebOutcome {
     /// Successful response. `payload` is splice-merged into the final
     /// result object — backends should return `{"web":[…]}` for search
-    /// and `{"results":[…]}` for extract/crawl to match hermes shapes.
+    /// and `{"results":[…]}` for extract/crawl to match the prior engine's
+    /// shapes.
     Ok { payload: Value },
     /// Structured error. Becomes `{success:false, error:<message>}`.
     Err { message: String },
@@ -439,7 +440,8 @@ impl WebBackend for CapturingWebBackend {
     }
 }
 
-/// `web` tool — Wayland engine port of hermes' three web entry points.
+/// `web` tool — Wayland engine port of the prior engine's three web entry
+/// points.
 ///
 /// Single Tool with an `operation` discriminator (search / extract /
 /// crawl) that dispatches through a host-supplied [`WebBackend`]. Use
@@ -534,7 +536,7 @@ impl WebTool {
 
         let (safe, rejected) = validate_url_list(&urls);
         // If every URL was rejected, short-circuit without calling the
-        // backend — mirrors hermes returning a results-only response.
+        // backend — mirrors the prior engine returning a results-only response.
         if safe.is_empty() {
             return ok_result(json!({
                 "success": true,
@@ -550,7 +552,7 @@ impl WebTool {
         match self.backend.extract(req).await {
             WebOutcome::Ok { mut payload } => {
                 // Merge rejected URLs as failure rows into the backend
-                // results, mirroring hermes' partial-success format.
+                // results, mirroring the prior engine's partial-success format.
                 if !rejected.is_empty()
                     && let Some(results) = payload
                         .as_object_mut()
@@ -575,7 +577,7 @@ impl WebTool {
             Some(s) => s,
             None => return err_result("Missing required parameter: 'url'"),
         };
-        // Normalize scheme — hermes prepends https:// for bare hosts.
+        // Normalize scheme — the prior engine prepends https:// for bare hosts.
         let url_owned;
         let url = if raw_url.starts_with("http://") || raw_url.starts_with("https://") {
             raw_url
@@ -602,7 +604,7 @@ impl WebTool {
             .and_then(Value::as_str)
             .unwrap_or("basic")
             .to_string();
-        // Bound depth to the two values hermes recognizes.
+        // Bound depth to the two values the prior engine recognizes.
         if depth != "basic" && depth != "advanced" {
             return err_result("Parameter 'depth' must be 'basic' or 'advanced'");
         }
@@ -883,7 +885,7 @@ mod tests {
             }))
             .await;
         // All blocked → backend never called, response is success with
-        // every row marked as error (matches hermes partial-results).
+        // every row marked as error (matches the prior engine's partial-results).
         assert!(!r.is_error);
         assert_no_backend_calls(&backend);
         let v = parse(&r);

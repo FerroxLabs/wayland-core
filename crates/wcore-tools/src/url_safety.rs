@@ -1,6 +1,6 @@
 //! URL safety checks — block requests to private/internal network addresses.
 //!
-//! Ported from `wayland-hermes/agent/tools/url_safety.py` (T3-3.3 sub-wave 3).
+//! Ported from the prior Wayland Python engine (T3-3.3 sub-wave 3).
 //!
 //! Prevents SSRF (Server-Side Request Forgery) where a malicious prompt or
 //! skill could trick the agent into fetching internal resources like cloud

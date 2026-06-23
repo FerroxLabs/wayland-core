@@ -1,10 +1,10 @@
 //! Anthropic prompt cache tier picker (5m vs 1h ephemeral cache_control).
 //!
-//! Ported from wayland-hermes (MIT, Nous Research):
-//!   `agent/agent/prompt_caching.py` :: `apply_anthropic_cache_control`
+//! Ported from an upstream MIT-licensed library's (see THIRD-PARTY-NOTICES.md)
+//! `apply_anthropic_cache_control`.
 //!
-//! Hermes hard-codes `cache_ttl: "5m"` or `"1h"` at call sites. This module
-//! lifts the *selection* of the tier into a pure decision function so the
+//! The predecessor hard-codes `cache_ttl: "5m"` or `"1h"` at call sites. This
+//! module lifts the *selection* of the tier into a pure decision function so the
 //! Anthropic adapter (`anthropic.rs`) can choose the right marker per request
 //! based on expected reuse window and prompt size.
 //!
@@ -57,7 +57,7 @@ impl CacheTier {
 
 /// Tunable thresholds for [`pick_with_config`].
 ///
-/// Defaults match Anthropic's published minimums and Hermes' implicit
+/// Defaults match Anthropic's published minimums and the predecessor's implicit
 /// "longer than 5 minutes -> 1h" heuristic.
 #[derive(Debug, Clone, Copy)]
 pub struct CacheTierConfig {

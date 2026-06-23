@@ -1,5 +1,5 @@
-//! T3-3.4: Office-side skill enable/disable runtime — port of
-//! `wayland-hermes/agent/tools/office_runtime.py` (Stage 5 Task 7).
+//! T3-3.4: Office-side skill enable/disable runtime — ported from the
+//! prior Wayland Python engine (Stage 5 Task 7).
 //!
 //! HELPER module. The authoritative source of truth for which optional
 //! skills are enabled lives in the Wayland Desktop's `office.db`; the
@@ -10,7 +10,7 @@
 //!
 //! ## Divergence from the Python source
 //!
-//! The Python module imports three cross-module symbols at import time:
+//! The Python source imports three cross-module symbols at import time:
 //! - `wayland_constants.get_wayland_home()` — global Wayland home path.
 //! - `tools.skills_hub.OptionalSkillSource` — Python class with a
 //!   `fetch(slug) -> SkillBundle | None` method that returns a
@@ -37,8 +37,8 @@
 //! `dirs::home_dir()` cross-platform) but we don't depend on that crate
 //! here to avoid pulling `wcore-skills` into `wcore-tools`.
 //!
-//! Concurrency: hermes runs all four `office_runtime` entry points from
-//! the same `office_sync` async handler, but the in-memory sets are
+//! Concurrency: the Python source runs all four `office_runtime` entry
+//! points from the same `office_sync` async handler, but the in-memory sets are
 //! plain module globals. The Rust port wraps them in [`Mutex`] guards
 //! so a multi-threaded host (e.g. `wcore-agent` on Tokio's multi-thread
 //! runtime) can hit `is_enabled`/`is_office_origin` concurrently without
@@ -59,10 +59,10 @@ pub enum SkillFileContent {
 }
 
 /// A materializable skill bundle. Roughly equivalent to the
-/// `SkillBundle` returned by hermes' `OptionalSkillSource.fetch()` —
-/// just the `files` mapping is required here (other Python attributes
-/// like `version` / `description` are loader concerns that don't
-/// affect on-disk materialization).
+/// `SkillBundle` returned by the Python source's
+/// `OptionalSkillSource.fetch()` — just the `files` mapping is required
+/// here (other Python attributes like `version` / `description` are
+/// loader concerns that don't affect on-disk materialization).
 #[derive(Debug, Clone, Default)]
 pub struct SkillBundle {
     /// Relative path inside the skill dir → file content.
@@ -71,12 +71,12 @@ pub struct SkillBundle {
     pub files: BTreeMap<String, SkillFileContent>,
 }
 
-/// Source-of-bundles seam — mirrors hermes' `OptionalSkillSource.fetch`.
+/// Source-of-bundles seam — mirrors the Python `OptionalSkillSource.fetch`.
 pub trait SkillSource: Send + Sync {
     fn fetch(&self, slug: &str) -> Option<SkillBundle>;
 }
 
-/// Mirror-the-enabled-set seam — hermes calls
+/// Mirror-the-enabled-set seam — the Python source calls
 /// `office_sync.set_enabled(_enabled)` so the `/office/events` snapshot
 /// stays in sync with what the runtime knows about. The Rust port
 /// defaults this to a no-op when the host doesn't wire one in.
@@ -84,7 +84,7 @@ pub trait EnabledMirror: Send + Sync {
     fn mirror_enabled(&self, enabled: &HashSet<String>);
 }
 
-/// Authored-skill broadcast seam — hermes calls
+/// Authored-skill broadcast seam — the Python source calls
 /// `office_sync.emit_skill_authored(slug)` to fan a `skill-authored`
 /// event out to the Desktop Settings pane via the long-poll bridge.
 pub trait SkillAuthoredEmitter: Send + Sync {
@@ -119,10 +119,11 @@ impl LoadOutcome {
     }
 }
 
-/// Per-instance office runtime state. Hermes uses module-level globals;
-/// the Rust port encapsulates them so tests don't need to share state.
+/// Per-instance office runtime state. The Python source uses
+/// module-level globals; the Rust port encapsulates them so tests don't
+/// need to share state.
 pub struct OfficeRuntime {
-    /// Equivalent to hermes' `get_wayland_home() / "skills"` — root
+    /// Equivalent to the Python `get_wayland_home() / "skills"` — root
     /// directory under which `<slug>/` directories get materialized.
     skills_root: PathBuf,
     source: Box<dyn SkillSource>,
@@ -256,7 +257,7 @@ impl OfficeRuntime {
             .expect("office_origin mutex poisoned")
             .contains(slug);
         if !was_office_origin {
-            // Matches hermes' `_office_origin` gate — refuse to unload.
+            // Matches the Python `_office_origin` gate — refuse to unload.
             return;
         }
         let target = self.skills_root.join(slug);
@@ -452,7 +453,7 @@ mod tests {
     #[test]
     fn load_skill_rejects_path_traversal_in_bundle() {
         let tmp = TempDir::new().unwrap();
-        // Hermes is implicitly trusting; the Rust port adds containment.
+        // The Python source is implicitly trusting; the Rust port adds containment.
         let bundle = binary_bundle("../escape.txt", vec![1, 2, 3]);
         let (rt, _, _) = rt_with(tmp.path().to_path_buf(), vec![("evil", bundle)]);
         let outcome = rt.load_skill("evil");

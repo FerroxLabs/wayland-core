@@ -1,7 +1,6 @@
 //! T3-3.7 — `yuanbao_tools`: Tencent Yuanbao platform toolset.
 //!
-//! Ported from `wayland-hermes/agent/tools/yuanbao_tools.py` (MIT
-//! © Nous Research). The Python original registers five separate
+//! Ported from an upstream MIT-licensed library (see THIRD-PARTY-NOTICES.md). The Python original registers five separate
 //! tools — `yb_query_group_info`, `yb_query_group_members`,
 //! `yb_search_sticker`, `yb_send_sticker`, `yb_send_dm` — against a
 //! gateway-side Yuanbao adapter (`gateway.platforms.yuanbao`).
@@ -18,7 +17,7 @@
 //!
 //! Divergences from the Python original (intentional):
 //!
-//!   * Five separate hermes registry entries collapse into one engine
+//!   * Five separate registry entries collapse into one engine
 //!     `YuanbaoTool` with an `action` field. Schema parity holds:
 //!     every required parameter the Python tools declared is required
 //!     here for the matching action.
@@ -120,7 +119,7 @@ pub struct YuanbaoMedia {
 // ---------------------------------------------------------------------------
 
 /// Host-supplied Yuanbao adapter boundary. Mirrors the methods the
-/// hermes tool invokes against `gateway.platforms.yuanbao.get_active_adapter()`.
+/// Python tool invokes against `gateway.platforms.yuanbao.get_active_adapter()`.
 /// The engine never talks to Yuanbao directly; the host implements
 /// this trait and binds it at registration time.
 #[async_trait]
@@ -520,7 +519,7 @@ impl YuanbaoAction {
 // YuanbaoTool
 // ---------------------------------------------------------------------------
 
-/// `yuanbao` tool — Wayland engine port of the five hermes
+/// `yuanbao` tool — Wayland engine port of the five
 /// `yb_*` tools collapsed under a single `action` discriminator.
 pub struct YuanbaoTool {
     backend: Arc<dyn YuanbaoBackend>,
@@ -1129,7 +1128,7 @@ impl YuanbaoTool {
 }
 
 /// Parse the `media_files` parameter. Accepts either an array of
-/// objects `{"path": str, "is_voice": bool}` (the Python hermes
+/// objects `{"path": str, "is_voice": bool}` (the Python
 /// handler's primary shape) or an array of `[path, is_voice]` tuples
 /// (its fallback shape).
 fn parse_media_files(raw: Option<&Value>) -> Vec<YuanbaoMedia> {
@@ -1203,7 +1202,7 @@ mod tests {
             YuanbaoAction::from_name("query_group_info"),
             Some(YuanbaoAction::QueryGroupInfo)
         );
-        // Hermes registry-style names also accepted.
+        // Legacy `yb_*` registry-style names also accepted.
         assert_eq!(
             YuanbaoAction::from_name("yb_send_dm"),
             Some(YuanbaoAction::SendDm)

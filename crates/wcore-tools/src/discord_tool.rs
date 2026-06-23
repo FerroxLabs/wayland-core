@@ -1,7 +1,7 @@
 //! T3-3.7 — Discord server introspection / management tool.
 //!
-//! Ported from `wayland-hermes/agent/tools/discord_tool.py` (MIT
-//! © Nous Research). The Python original talks to Discord's REST API
+//! Ported from an upstream MIT-licensed library (see THIRD-PARTY-NOTICES.md).
+//! The Python original talks to Discord's REST API
 //! directly (urllib + bot token). Wayland's engine MUST NOT initiate
 //! HTTP from inside `wcore-tools` (HTTP is a `wcore-providers` /
 //! plugin / host concern), so this port covers the **dispatch surface

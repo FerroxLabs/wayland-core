@@ -22,7 +22,7 @@ static PATTERNS: &[(&str, &str)] = &[
     ),
     // Bearer token (header value style, >=20 chars of token material)
     ("BEARER_TOKEN", r"Bearer [A-Za-z0-9._\-]{20,}"),
-    // ── Hermes redact.py port — additional credential prefixes ──
+    // ── Prior Wayland Python engine redaction port — additional credential prefixes ──
     // GitHub personal access tokens (classic) and fine-grained.
     ("GITHUB_PAT", r"ghp_[A-Za-z0-9]{20,}"),
     ("GITHUB_PAT_FG", r"github_pat_[A-Za-z0-9_]{20,}"),
@@ -136,7 +136,7 @@ impl PIIScrubber {
 #[cfg(test)]
 mod tests {
     //! Per-pattern positive + negative coverage for the patterns ported from
-    //! the Hermes ``redact.py`` library (T3-4). Existing patterns
+    //! the prior Wayland Python engine's redaction library (T3-4). Existing patterns
     //! (AWS_*, OPENAI_API_KEY, ANTHROPIC_API_KEY, JWT, BEARER_TOKEN) are
     //! covered by ``crates/wcore-safety/tests/safety_tests.rs``.
     use super::PIIScrubber;

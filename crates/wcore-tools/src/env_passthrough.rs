@@ -1,5 +1,5 @@
 //! T3-3.4 (sub-wave 4): environment variable passthrough registry
-//! ported from `wayland-hermes/agent/tools/env_passthrough.py`.
+//! ported from the prior Wayland Python engine.
 //!
 //! Skills that declare `required_environment_variables` in their
 //! frontmatter need those vars available in sandboxed execution

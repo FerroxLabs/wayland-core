@@ -1,5 +1,5 @@
-//! T3-3.1.8 — Per-tool opt-in debug session (port of
-//! `hermes/agent/tools/debug_helpers.py`).
+//! T3-3.1.8 — Per-tool opt-in debug session (ported from the prior
+//! Wayland Python engine).
 //!
 //! This is intentionally narrow: a developer-debug shim that lets a
 //! specific tool (e.g. a future web_tools, vision_tools, or MOA port)
@@ -13,7 +13,7 @@
 //!
 //! Disabled-by-default discipline: every method is a no-op unless the
 //! configured env var is set to `"true"` (case-insensitive), matching
-//! the Hermes semantics. Construction is cheap (one `env::var` lookup,
+//! the predecessor's semantics. Construction is cheap (one `env::var` lookup,
 //! no allocation when disabled past the empty `Vec`).
 //!
 //! Log files land in `wayland_config_dir()/logs/` (e.g.
@@ -43,7 +43,7 @@ fn default_log_dir() -> Option<PathBuf> {
     Some(wcore_config::config::wayland_config_dir().join("logs"))
 }
 
-/// One recorded tool-call entry. Mirrors the Hermes JSON shape:
+/// One recorded tool-call entry. Mirrors the predecessor's JSON shape:
 /// `{ "timestamp": ..., "tool_name": ..., ...call_data }`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DebugCall {
@@ -57,8 +57,8 @@ pub struct DebugCall {
 }
 
 /// Summary returned by `DebugSession::session_info()`. Matches the
-/// shape the Hermes `get_debug_session_info()` helper exposed so the
-/// downstream protocol surface stays compatible if/when those tools
+/// shape the predecessor's `get_debug_session_info()` helper exposed so
+/// the downstream protocol surface stays compatible if/when those tools
 /// land in Rust.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DebugSessionInfo {

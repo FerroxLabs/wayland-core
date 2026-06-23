@@ -1,5 +1,5 @@
-//! T3-3.2.2 — Shared file-safety rules ported from
-//! `wayland-hermes/agent/tools/file_safety.py`.
+//! T3-3.2.2 — Shared file-safety rules ported from the prior Wayland
+//! Python engine.
 //!
 //! This is a *helper* module, not a tool. It exposes:
 //!

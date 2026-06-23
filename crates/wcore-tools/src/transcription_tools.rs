@@ -1,6 +1,6 @@
 //! T3-3.6 — `transcribe_audio` speech-to-text tool.
 //!
-//! Ported from `wayland-hermes/agent/tools/transcription_tools.py` (MIT).
+//! Ported from an upstream MIT-licensed library (see THIRD-PARTY-NOTICES.md).
 //! The Python original supports four backends (faster-whisper local,
 //! Groq Whisper, OpenAI Whisper, Mistral Voxtral) with provider
 //! auto-detection from env vars. Wayland's engine deliberately ships

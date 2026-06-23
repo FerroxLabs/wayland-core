@@ -1,7 +1,7 @@
 //! Semantic chunk-priority compression core.
 //!
-//! Ports the head/tail-protected, budget-bounded chunk selection from
-//! `wayland-hermes/agent/agent/context_compressor.py`. This module is the
+//! Ports the head/tail-protected, budget-bounded chunk selection from the
+//! prior Wayland Python engine. This module is the
 //! T2-B1 *core* lift: chunk-priority scoring, stable selection within a token
 //! budget, retention policies, and a `compress()` entry point.
 //!

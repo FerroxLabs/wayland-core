@@ -1,6 +1,6 @@
 //! T15: read-only PDF text-extraction tool.
 //!
-//! Ported in spirit from `wayland-hermes/agent/tools/pdf_tool.py`. Extracts
+//! Ported in spirit from the prior Wayland Python engine. Extracts
 //! plain text from a PDF file on the local filesystem — either the whole
 //! document or a contiguous page range.
 //!

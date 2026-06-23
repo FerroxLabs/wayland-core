@@ -1,8 +1,8 @@
-//! T3-3.1.3 — `DelegateTool` ported from hermes `delegate_tool.py`.
+//! T3-3.1.3 — `DelegateTool` ported from the prior Wayland Python engine.
 //!
-//! Hermes's `delegate_task` spawns one or more child `AIAgent` instances
-//! with isolated context, restricted toolsets, and their own terminal
-//! sessions; the parent only sees the final summary. Wayland already
+//! The predecessor's `delegate_task` spawns one or more child `AIAgent`
+//! instances with isolated context, restricted toolsets, and their own
+//! terminal sessions; the parent only sees the final summary. Wayland already
 //! exposes the same primitive via [`wcore_types::spawner::Spawner`],
 //! whose concrete implementation `AgentSpawner` lives in `wcore-agent`
 //! (one layer above this crate). The trait is intentionally hosted in
@@ -14,16 +14,16 @@
 //! construction time (the CLI bootstrap wires the concrete `AgentSpawner`
 //! through). The tool itself owns:
 //!   * input parsing (single `goal`/`context` mode and batch `tasks` mode),
-//!   * the focused child-prompt template (mirrors hermes
+//!   * the focused child-prompt template (mirrors the predecessor's
 //!     `_build_child_system_prompt`),
-//!   * fan-out via `futures::future::join_all` (mirrors hermes's
+//!   * fan-out via `futures::future::join_all` (mirrors the predecessor's
 //!     `ThreadPoolExecutor`), and
 //!   * the JSON result envelope returned to the parent agent.
 //!
 //! The Wayland `Spawner` trait exposes a single-task `spawn_fork`
 //! entry point; batch parallelism is implemented here by joining one
 //! call per task. The blocked-tools / depth-limit / credential-pool
-//! machinery from hermes does NOT cross the boundary in this port —
+//! machinery from the predecessor does NOT cross the boundary in this port —
 //! those concerns are already enforced inside `wcore-agent`
 //! (`SpawnTool` + `AgentSpawner`) so duplicating them here would be
 //! redundant and risk drift.
@@ -44,7 +44,7 @@ use crate::Tool;
 /// consistent across the two surfaces.
 pub const DELEGATE_MAX_TASKS: usize = 5;
 
-/// Default per-child conversation turn budget (mirrors hermes
+/// Default per-child conversation turn budget (mirrors the predecessor's
 /// `DEFAULT_MAX_ITERATIONS = 50`).
 pub const DELEGATE_DEFAULT_MAX_TURNS: usize = 50;
 
@@ -59,7 +59,7 @@ pub const DELEGATE_DEFAULT_MAX_TOKENS: u32 = 4096;
 /// The tool stays callable even when no spawner is wired (e.g. tests
 /// that construct the tool without an engine) — invocations in that
 /// state return an `is_error: true` `ToolResult` whose `content`
-/// surfaces the configuration gap, matching hermes's
+/// surfaces the configuration gap, matching the predecessor's
 /// "delegate_task requires a parent agent context" error shape.
 pub struct DelegateTool {
     spawner: Option<Arc<dyn Spawner>>,
@@ -92,7 +92,7 @@ struct Task {
 }
 
 fn parse_input(input: &Value) -> Result<(Vec<Task>, usize), String> {
-    // Batch mode wins when both are present (matches hermes contract).
+    // Batch mode wins when both are present (matches the predecessor contract).
     let max_turns = input
         .get("max_iterations")
         .and_then(|v| v.as_u64())
@@ -173,7 +173,7 @@ fn parse_input(input: &Value) -> Result<(Vec<Task>, usize), String> {
     Err("Provide either 'goal' (single task) or 'tasks' (batch).".to_string())
 }
 
-/// Mirror of hermes `_build_child_system_prompt`. Kept intentionally
+/// Mirror of the predecessor's `_build_child_system_prompt`. Kept intentionally
 /// terse — the persona / workspace-hint extensions live in
 /// `wcore-agent` where the engine knows the real session cwd.
 ///
@@ -469,7 +469,7 @@ mod tests {
         );
 
         // 2c: unwired tool surfaces the configuration-gap error
-        // (analogue of hermes "requires a parent agent context").
+        // (analogue of the predecessor's "requires a parent agent context").
         let unwired = DelegateTool::unwired();
         let result = unwired.execute(json!({"goal": "noop"})).await;
         assert!(result.is_error);

@@ -1,6 +1,6 @@
 //! T3-3.6 — `voice_mode` session helper.
 //!
-//! Ported from `wayland-hermes/agent/tools/voice_mode.py` (1017 LOC, MIT).
+//! Ported from the prior Wayland Python engine (1017 LOC).
 //!
 //! ## Classification: **Helper, NOT a Tool**
 //!
