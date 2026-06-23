@@ -577,6 +577,15 @@ fn open_tui_log_file() -> std::io::Result<std::fs::File> {
 }
 
 fn main() -> anyhow::Result<ExitCode> {
+    // Resolve the active isolated profile ONCE, here at process entry, and
+    // materialize it into WAYLAND_HOME (C2). This MUST precede
+    // load_wayland_env_file() below — that reads $WAYLAND_HOME/.env, so the home
+    // must be settled first — and runs while main() is still single-threaded
+    // (the Tokio runtime is built later, on the entry thread), so the set_var
+    // inside is sound. After this returns, WAYLAND_HOME is the sole source of
+    // truth; the active pointer is never read again.
+    wcore_config::profile::activate_for_launch();
+
     // Load ~/.wayland/.env (or $WAYLAND_HOME/.env) into the process environment
     // before ANY threads spawn. The Config TUI writes provider keys there
     // (surfaces/config.rs save); without this they never reach credential

@@ -93,6 +93,11 @@ pub fn validate_profile_name(name: &str) -> Result<(), ProfileError> {
     if name.starts_with('.') {
         return Err(invalid("name must not start with '.'"));
     }
+    if name.starts_with('-') {
+        // A leading '-' makes the name look like a CLI flag (e.g. `--profile
+        // --help` would otherwise resolve the name "--help"); reject it.
+        return Err(invalid("name must not start with '-'"));
+    }
     if name.ends_with('.') {
         return Err(invalid("name must not end with '.'"));
     }
@@ -159,10 +164,106 @@ pub fn active_pointer_path() -> PathBuf {
     profiles_root().join("active")
 }
 
+/// Read the `active` pointer file. This is the SOLE place the pointer is read
+/// for the launch decision (C2 / D2) — the `active_pointer_path` single-reader
+/// CI lint (`tests/active_pointer_single_reader_test.rs`) keeps it that way.
+/// Returns the trimmed profile name, or `None` if the file is absent, empty, or
+/// unreadable (a corrupt pointer must never abort launch — it falls through to
+/// the default home).
+fn read_active_pointer() -> Option<String> {
+    let raw = std::fs::read_to_string(active_pointer_path()).ok()?;
+    let name = raw.trim();
+    if name.is_empty() {
+        None
+    } else {
+        Some(name.to_string())
+    }
+}
+
+/// Extract the value of `--profile <name>` or `--profile=<name>` from a raw
+/// argv iterator, WITHOUT a full clap parse (which cannot run before the home
+/// is resolved). Returns the first occurrence. Scanning stops at `--`
+/// (end-of-options), so a literal `--profile` inside a user prompt after `--`
+/// is not mistaken for the flag.
+fn profile_flag_from_args(args: impl Iterator<Item = String>) -> Option<String> {
+    let mut args = args;
+    // Skip argv[0] (the program name).
+    let _ = args.next();
+    while let Some(arg) = args.next() {
+        if arg == "--" {
+            break;
+        }
+        if let Some(val) = arg.strip_prefix("--profile=") {
+            return Some(val.to_string());
+        }
+        if arg == "--profile" {
+            return args.next();
+        }
+    }
+    None
+}
+
+/// THE single source-of-truth resolver (C2). Resolve the active profile ONCE, at
+/// process entry, and materialize it into `WAYLAND_HOME`. After this returns,
+/// `WAYLAND_HOME` is the only thing any code (or child process) consults; the
+/// `active` pointer is never read again — the precise failure that corrupts
+/// Hermes (#18594), where a sticky pointer and the env var can disagree deep in
+/// the stack.
+///
+/// Resolution order:
+///   1. `WAYLAND_HOME` already set → an explicit override always wins; return.
+///   2. `--profile <name>` / `--profile=<name>` on argv.
+///   3. else the `active` pointer file.
+///
+/// A resolved name whose [`profile_dir`] exists is set as `WAYLAND_HOME`. An
+/// invalid name, or a name whose directory does not exist, warns to stderr and
+/// falls through to the legacy default home (NEVER aborts — `--help` must run).
+///
+/// # Panics / threading
+/// Calls [`std::env::set_var`], which is sound ONLY while the process is
+/// single-threaded. The sole caller is `wcore-cli`'s `main()`, immediately
+/// before `load_wayland_env_file()` and before any thread (or the Tokio
+/// runtime) is spawned.
+pub fn activate_for_launch() {
+    activate_for_launch_impl(std::env::args());
+}
+
+/// Testable core of [`activate_for_launch`] — argv is injected so tests can
+/// exercise the `--profile` path without mutating the real process arguments.
+fn activate_for_launch_impl(args: impl Iterator<Item = String>) {
+    // 1. Explicit WAYLAND_HOME wins — never override it.
+    if std::env::var_os("WAYLAND_HOME").is_some() {
+        return;
+    }
+
+    // 2. --profile on argv, else 3. the active pointer.
+    let Some(name) = profile_flag_from_args(args).or_else(read_active_pointer) else {
+        return;
+    };
+
+    match profile_dir(&name) {
+        Ok(dir) if dir.is_dir() => {
+            // SAFETY: single-threaded at process entry (see the doc comment and
+            // the `main()` call site). No other thread can observe the env race.
+            unsafe { std::env::set_var("WAYLAND_HOME", &dir) };
+        }
+        Ok(dir) => {
+            eprintln!(
+                "warning: profile {name:?} not found at {} — using the default home",
+                dir.display()
+            );
+        }
+        Err(e) => {
+            eprintln!("warning: ignoring invalid profile selection: {e}");
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use serial_test::serial;
+    use tempfile::tempdir;
 
     /// RAII env guard — restores prior values on drop so env-mutating tests stay
     /// hermetic even under a thread-per-test `cargo test` runner.
@@ -212,7 +313,7 @@ mod tests {
     fn rejects_traversal_and_separators() {
         for bad in [
             "", "..", ".", "...", "a/b", "a\\b", "../etc", "a\0b", "a b", "a:b", "foo.", "café",
-            "a/../b", ".hidden", ".", "..foo",
+            "a/../b", ".hidden", ".", "..foo", "-foo", "--help", "-",
         ] {
             assert!(validate_profile_name(bad).is_err(), "should reject {bad:?}");
         }
@@ -323,5 +424,132 @@ mod tests {
         let ptr = active_pointer_path();
         assert_eq!(ptr, PathBuf::from("/tmp/p/active"));
         assert!(!ptr.starts_with("/tmp/some-home"));
+    }
+
+    fn argv(parts: &[&str]) -> std::vec::IntoIter<String> {
+        parts
+            .iter()
+            .map(|s| s.to_string())
+            .collect::<Vec<_>>()
+            .into_iter()
+    }
+
+    #[test]
+    fn profile_flag_parsing() {
+        assert_eq!(
+            profile_flag_from_args(argv(&["wcore", "--profile", "work"])),
+            Some("work".to_string())
+        );
+        assert_eq!(
+            profile_flag_from_args(argv(&["wcore", "--profile=work"])),
+            Some("work".to_string())
+        );
+        assert_eq!(profile_flag_from_args(argv(&["wcore", "run"])), None);
+        // First occurrence wins.
+        assert_eq!(
+            profile_flag_from_args(argv(&["wcore", "--profile", "a", "--profile", "b"])),
+            Some("a".to_string())
+        );
+        // A `--profile` after `--` (end-of-options) is NOT the flag.
+        assert_eq!(
+            profile_flag_from_args(argv(&["wcore", "--", "--profile", "x"])),
+            None
+        );
+        // argv[0] named --profile is skipped.
+        assert_eq!(profile_flag_from_args(argv(&["--profile"])), None);
+        // A trailing --profile with no value resolves to None (falls through).
+        assert_eq!(profile_flag_from_args(argv(&["wcore", "--profile"])), None);
+    }
+
+    #[test]
+    #[serial]
+    fn activate_respects_existing_wayland_home() {
+        let root = tempdir().unwrap();
+        std::fs::create_dir_all(root.path().join("work")).unwrap();
+        let _g = EnvGuard::set(&[
+            ("WAYLAND_PROFILES_ROOT", Some(root.path().to_str().unwrap())),
+            ("WAYLAND_HOME", Some("/explicit/home")),
+        ]);
+        activate_for_launch_impl(argv(&["wcore", "--profile", "work"]));
+        // Explicit WAYLAND_HOME must win — never overridden by --profile.
+        assert_eq!(std::env::var("WAYLAND_HOME").unwrap(), "/explicit/home");
+    }
+
+    #[test]
+    #[serial]
+    fn activate_sets_home_from_profile_flag() {
+        let root = tempdir().unwrap();
+        let work = root.path().join("work");
+        std::fs::create_dir_all(&work).unwrap();
+        let _g = EnvGuard::set(&[
+            ("WAYLAND_PROFILES_ROOT", Some(root.path().to_str().unwrap())),
+            ("WAYLAND_HOME", None),
+        ]);
+        activate_for_launch_impl(argv(&["wcore", "--profile", "Work"])); // case-folds
+        assert_eq!(
+            std::env::var_os("WAYLAND_HOME"),
+            Some(work.into_os_string())
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn activate_reads_pointer_when_no_flag() {
+        let root = tempdir().unwrap();
+        let work = root.path().join("work");
+        std::fs::create_dir_all(&work).unwrap();
+        std::fs::write(root.path().join("active"), "work\n").unwrap();
+        let _g = EnvGuard::set(&[
+            ("WAYLAND_PROFILES_ROOT", Some(root.path().to_str().unwrap())),
+            ("WAYLAND_HOME", None),
+        ]);
+        activate_for_launch_impl(argv(&["wcore"]));
+        assert_eq!(
+            std::env::var_os("WAYLAND_HOME"),
+            Some(work.into_os_string())
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn activate_flag_wins_over_pointer() {
+        let root = tempdir().unwrap();
+        std::fs::create_dir_all(root.path().join("flagged")).unwrap();
+        std::fs::create_dir_all(root.path().join("pointed")).unwrap();
+        std::fs::write(root.path().join("active"), "pointed").unwrap();
+        let _g = EnvGuard::set(&[
+            ("WAYLAND_PROFILES_ROOT", Some(root.path().to_str().unwrap())),
+            ("WAYLAND_HOME", None),
+        ]);
+        activate_for_launch_impl(argv(&["wcore", "--profile", "flagged"]));
+        assert_eq!(
+            std::env::var_os("WAYLAND_HOME"),
+            Some(root.path().join("flagged").into_os_string())
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn activate_falls_through_on_missing_dir() {
+        let root = tempdir().unwrap();
+        let _g = EnvGuard::set(&[
+            ("WAYLAND_PROFILES_ROOT", Some(root.path().to_str().unwrap())),
+            ("WAYLAND_HOME", None),
+        ]);
+        activate_for_launch_impl(argv(&["wcore", "--profile", "ghost"]));
+        // Missing profile dir → warn + fall through; WAYLAND_HOME stays unset.
+        assert_eq!(std::env::var_os("WAYLAND_HOME"), None);
+    }
+
+    #[test]
+    #[serial]
+    fn activate_falls_through_on_invalid_name() {
+        let root = tempdir().unwrap();
+        let _g = EnvGuard::set(&[
+            ("WAYLAND_PROFILES_ROOT", Some(root.path().to_str().unwrap())),
+            ("WAYLAND_HOME", None),
+        ]);
+        activate_for_launch_impl(argv(&["wcore", "--profile", "../escape"]));
+        assert_eq!(std::env::var_os("WAYLAND_HOME"), None);
     }
 }
