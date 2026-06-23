@@ -56,6 +56,21 @@ pub fn model_output_ceiling(_provider: &str, model: &str) -> Option<(u32, u32)> 
         return Some((64_000, 131_072));
     }
 
+    // --- DeepSeek V4-Flash family (1,000,000-token context) ---
+    // Fixes #255: with no entry, deepseek-v4-flash fell to the unknown-model
+    // floor (8_192 output) and its 1M context window was never consulted.
+    // Verified against api-docs.deepseek.com (2026-06-23): deepseek-v4-flash is
+    // the canonical id; `deepseek-chat` / `deepseek-reasoner` are its (deprecated)
+    // non-thinking / thinking aliases that map to the SAME model, so all three
+    // share the 1,000,000 context window. Output ceiling is held at the
+    // conservative 8_192 — the documented max is far higher, but this table errs
+    // LOW on purpose (undersizing costs a continuation round; over-claiming 400s
+    // — see the module header). Exact id checks (not a bare `deepseek` prefix)
+    // so `deepseek-v4-pro` / a future `deepseek-v5` won't inherit these limits.
+    if m.contains("deepseek-v4-flash") || m == "deepseek-chat" || m == "deepseek-reasoner" {
+        return Some((8_192, 1_000_000));
+    }
+
     None
 }
 
@@ -107,5 +122,30 @@ mod tests {
         assert_eq!(model_output_ceiling("flux-router", "flux-standard"), None);
         assert_eq!(model_output_ceiling("openai", "some-future-model"), None);
         assert_eq!(model_output_ceiling("ollama", "llama3.1"), None);
+    }
+
+    #[test]
+    fn deepseek_v4_flash_family_uses_1m_context_window() {
+        // #255: the canonical id and both deprecated aliases share the 1M window.
+        for id in ["deepseek-v4-flash", "deepseek-chat", "deepseek-reasoner"] {
+            assert_eq!(
+                model_output_ceiling("deepseek", id),
+                Some((8_192, 1_000_000)),
+                "{id} must report the 1,000,000-token context window"
+            );
+        }
+        // Case-insensitive match (the lookup lowercases first).
+        assert_eq!(
+            model_output_ceiling("deepseek", "DeepSeek-V4-Flash"),
+            Some((8_192, 1_000_000))
+        );
+    }
+
+    #[test]
+    fn deepseek_unmapped_variants_fail_open() {
+        // v4-pro is a distinct model; a future v5 is unknown — neither may
+        // inherit v4-flash's limits (the id checks are intentionally specific).
+        assert_eq!(model_output_ceiling("deepseek", "deepseek-v4-pro"), None);
+        assert_eq!(model_output_ceiling("deepseek", "deepseek-v5"), None);
     }
 }
