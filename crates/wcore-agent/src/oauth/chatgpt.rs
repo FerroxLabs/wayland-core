@@ -416,20 +416,37 @@ impl ChatGptTokenManager {
         exp <= now
     }
 
-    /// Load the cached token from disk on first call, then keep it in memory.
-    /// A cache miss returns `Ok(None)` so the caller can surface login
-    /// guidance rather than an opaque error.
+    /// Load the active token on first call, then keep it in memory. Reads the
+    /// engine store first and, ONLY when it holds no token, falls back to the
+    /// Codex CLI's `~/.codex/auth.json`. A miss on both returns `Ok(None)` so
+    /// the caller can surface login guidance rather than an opaque error.
+    ///
+    /// The Codex-CLI fallback is the non-interactive desktop contract (#293):
+    /// "Sign in with ChatGPT" in the Wayland app writes a valid login to
+    /// `~/.codex/auth.json` but does not populate the engine store, and there is
+    /// no `auth login chatgpt` subcommand to trigger an import — so a present,
+    /// valid Codex auth doc must authenticate `--provider openai-chatgpt` on its
+    /// own. (The xAI manager has the twin fallback for the Grok CLI file.)
+    /// Store-first, rather than xAI's "fresher of the two", keeps a token the
+    /// engine already owns authoritative and consults the CLI file only as the
+    /// genuine no-engine-token fallback this contract requires.
     async fn load_cached(&self) -> Result<Option<OAuthTokens>, String> {
         let mut guard = self.cached.lock().await;
         if guard.is_some() {
             return Ok(guard.clone());
         }
-        let from_disk = self
+        let mut tokens = self
             .storage
             .load(PROVIDER)
             .map_err(|e| format!("oauth storage load failed: {e}"))?;
-        *guard = from_disk.clone();
-        Ok(from_disk)
+        if tokens.is_none() {
+            // A malformed/absent/untrusted Codex file is "no CLI token", not a
+            // hard error: fall through to the not-signed-in guidance instead of
+            // failing the load.
+            tokens = import_codex_cli_tokens().ok();
+        }
+        *guard = tokens.clone();
+        Ok(tokens)
     }
 
     /// Clear the in-memory token cache. Logout calls this so a live manager
@@ -1130,6 +1147,87 @@ mod tests {
         assert_eq!(tokens.refresh_token.as_deref(), Some("rt-codex"));
         assert_eq!(tokens.id_token.as_deref(), Some("id-codex"));
         assert_eq!(tokens.expires_at_unix_secs, Some(exp));
+    }
+
+    /// #293: with an EMPTY engine store but a valid `~/.codex/auth.json`, the
+    /// manager authenticates non-interactively from the Codex CLI file instead
+    /// of failing `--provider openai-chatgpt` with "not signed in". This is the
+    /// desktop contract (the app writes the Codex file; there is no interactive
+    /// `auth login chatgpt` to populate the engine store).
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn get_falls_back_to_codex_cli_when_engine_store_empty() {
+        let tmp = TempDir::new().unwrap();
+        // Empty engine store — nothing ever persisted to it.
+        let mgr = manager_at(tmp.path().join("oauth"));
+
+        let home = tmp.path().join("codex");
+        let access = jwt_with_account_and_exp("acct_codex", far_future());
+        write_codex_auth(
+            &home,
+            serde_json::json!({
+                "OPENAI_API_KEY": serde_json::Value::Null,
+                "tokens": {
+                    "access_token": access,
+                    "refresh_token": "rt-codex",
+                    "id_token": "id-codex",
+                }
+            }),
+        );
+
+        // SAFETY: serial test; env reverted before the assertions run.
+        let saved = std::env::var_os("CODEX_HOME");
+        unsafe { std::env::set_var("CODEX_HOME", &home) };
+        let result = mgr.get().await;
+        match saved {
+            Some(v) => unsafe { std::env::set_var("CODEX_HOME", v) },
+            None => unsafe { std::env::remove_var("CODEX_HOME") },
+        }
+
+        let (token, account_id) = result.expect("codex-CLI fallback should authenticate");
+        assert_eq!(token, access);
+        assert_eq!(account_id, "acct_codex");
+    }
+
+    /// Guard the store-first precedence: a token in the engine store is used
+    /// as-is and the Codex CLI file is NOT consulted (so existing engine logins
+    /// keep working and can't be silently shadowed by a stale Codex file).
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn engine_store_token_takes_precedence_over_codex_cli() {
+        let tmp = TempDir::new().unwrap();
+        let mut mgr = manager_at(tmp.path().join("oauth"));
+        // Fresh stored token → get() must return it without refreshing, so a
+        // dead token_url proves no network/refresh happened.
+        mgr.flow = Arc::new(build_chatgpt_flow_with_token_url(
+            "http://127.0.0.1:1/never",
+        ));
+        let stored = jwt_with_account_and_exp("acct_store", far_future());
+        mgr.storage
+            .store(PROVIDER, &token(&stored, Some("rt"), Some(far_future())))
+            .unwrap();
+
+        let home = tmp.path().join("codex");
+        let codex = jwt_with_account_and_exp("acct_codex", far_future());
+        write_codex_auth(
+            &home,
+            serde_json::json!({ "tokens": { "access_token": codex, "refresh_token": "rt-codex" } }),
+        );
+
+        let saved = std::env::var_os("CODEX_HOME");
+        unsafe { std::env::set_var("CODEX_HOME", &home) };
+        let result = mgr.get().await;
+        match saved {
+            Some(v) => unsafe { std::env::set_var("CODEX_HOME", v) },
+            None => unsafe { std::env::remove_var("CODEX_HOME") },
+        }
+
+        let (token, account_id) = result.expect("engine store token");
+        assert_eq!(
+            token, stored,
+            "engine store must win over the Codex CLI file"
+        );
+        assert_eq!(account_id, "acct_store");
     }
 
     #[test]
