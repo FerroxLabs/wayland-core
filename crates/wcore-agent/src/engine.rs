@@ -1327,8 +1327,28 @@ pub struct AgentEngine {
     flux_served_window: Option<u64>,
     /// #282 contract V1: the LAST-seen Flux context pressure
     /// (`x-flux-context-pressure`, `0.0..=1.0` = required / window). Captured
-    /// for future #280 pressure-driven scheduling; not yet acted upon.
+    /// for #280 pressure-driven scheduling (see `smart_compact_fraction`).
     flux_context_pressure: Option<f32>,
+    /// #280 smart auto-compaction — anti-thrash + one-shot wiring. ALL inert
+    /// unless `compact_config.smart_enabled` (the single chokepoint is
+    /// `smart_compact_fraction`, which returns `None` before touching any of
+    /// these when the gate is off).
+    ///
+    /// HYSTERESIS arm flag: true = a proactive compact may fire when the
+    /// fraction crosses the trigger. Flips false on a fire and re-arms only
+    /// once a later turn's fraction drops below the release low-water.
+    smart_compact_armed: bool,
+    /// COOLDOWN watermark: the last turn index a smart compact fired, so two
+    /// fires are spaced at least `smart_cooldown_turns` apart (absorbs the
+    /// post-stream watermark refresh lag).
+    smart_compact_last_turn: Option<u32>,
+    /// TERMINAL cannot-shrink latch: once a smart-forced compact frees fewer
+    /// than `smart_min_shrink_tokens`, smart compaction is OFF for the session.
+    smart_compact_exhausted: bool,
+    /// One-shot: set true by the turn-top pre-gate when a smart compact should
+    /// fire, then consumed via `std::mem::take` inside `run_compaction` so the
+    /// existing autocompact path runs even though the static threshold is unmet.
+    smart_compact_force: bool,
 }
 
 impl Drop for AgentEngine {
@@ -1587,6 +1607,11 @@ impl AgentEngine {
             // #282: no Flux signal-back seen yet at construction.
             flux_served_window: None,
             flux_context_pressure: None,
+            // #280: smart auto-compaction starts armed; latches seeded clear.
+            smart_compact_armed: true,
+            smart_compact_last_turn: None,
+            smart_compact_exhausted: false,
+            smart_compact_force: false,
         }
     }
 
@@ -1756,6 +1781,11 @@ impl AgentEngine {
             // #282: no Flux signal-back seen yet at construction.
             flux_served_window: None,
             flux_context_pressure: None,
+            // #280: smart auto-compaction starts armed; latches seeded clear.
+            smart_compact_armed: true,
+            smart_compact_last_turn: None,
+            smart_compact_exhausted: false,
+            smart_compact_force: false,
         }
     }
 
@@ -3476,6 +3506,181 @@ impl AgentEngine {
         .percent()
     }
 
+    /// #280 — the SINGLE chokepoint for smart auto-compaction. Returns the
+    /// Flux-aware active-window fraction (0.0..) of the CURRENTLY-active model,
+    /// or `None` when the feature is disabled OR the window is unknown.
+    ///
+    /// Default-OFF guarantee: when `smart_enabled` is false this returns `None`
+    /// on its first line, before reading any state — so the turn-top pre-gate
+    /// never touches memory or the force flag and `run_compaction` is byte-for-
+    /// byte unchanged.
+    ///
+    /// Re-eval-on-swap is STRUCTURAL: this reads `self.model` /
+    /// `flux_served_window` / `flux_context_pressure` fresh each turn (the model
+    /// swap was already applied by `apply_pre_turn_outcome`), so there is no
+    /// stored trigger state to invalidate.
+    fn smart_compact_fraction(&self) -> Option<f64> {
+        // Chokepoint: nothing below runs unless explicitly enabled.
+        if !self.compact_config.smart_enabled {
+            return None;
+        }
+        use wcore_config::context_window::ContextWindow;
+        // Finding #174 — the same REAL-pressure watermark the static auto
+        // trigger trusts. On turn 1 it is 0 → fraction 0.0 → never fires before
+        // any stream completes.
+        let used_tokens = self.compact_state.last_real_input_tokens;
+
+        // Flux-aware denominator, mirroring the pre-flight guard + #282
+        // reconciliation: prefer the REAL served-model window when Flux signalled
+        // it back for a tier alias; else the #255 kernel resolution.
+        let kernel_fraction: Option<f64> = if wcore_providers::is_flux_tier_alias(&self.model)
+            && self.flux_served_window.is_some()
+        {
+            ContextWindow {
+                used_tokens,
+                window: self.flux_served_window,
+            }
+            .fraction()
+        } else {
+            ContextWindow::resolve(
+                used_tokens,
+                self.compat.provider_type(),
+                &self.model,
+                self.compact_config.context_window as u64,
+            )
+            .fraction()
+        };
+
+        // The Flux-signalled pressure header is served-model ground truth; it
+        // only ADDS fires via max() so an overload trips even when the local
+        // token estimate lags.
+        let pressure_candidate: Option<f64> = self.flux_context_pressure.map(|p| p as f64);
+
+        match (kernel_fraction, pressure_candidate) {
+            (Some(k), Some(p)) => Some(k.max(p)),
+            (Some(k), None) => Some(k),
+            // Kernel window unknown but Flux gave pressure → use pressure alone.
+            (None, Some(p)) => Some(p),
+            // Fail open: never fabricate a denominator.
+            (None, None) => None,
+        }
+    }
+
+    /// #280 — anti-thrash decision. Three independent latches; ALL must clear to
+    /// re-fire. The arm flag flips and the cooldown watermark stamps HERE (at the
+    /// decision point), not inside `run_compaction`, so a circuit-broken or
+    /// erroring autocompact cannot hot-loop the failing summarization every turn.
+    fn smart_compact_should_fire(&mut self, turn: u32, frac: f64) -> bool {
+        // TERMINAL cannot-shrink latch.
+        if self.smart_compact_exhausted {
+            return false;
+        }
+        let trigger = self.compact_config.smart_trigger_fraction.clamp(0.60, 0.70);
+        // A mis-set release >= trigger can never collapse hysteresis.
+        let release = self
+            .compact_config
+            .smart_release_fraction
+            .min(trigger - 0.05);
+
+        // HYSTERESIS RE-ARM: while disarmed we only re-arm (never fire the same
+        // turn, since release < trigger).
+        if !self.smart_compact_armed {
+            if frac < release {
+                self.smart_compact_armed = true;
+            }
+            return false;
+        }
+
+        // COOLDOWN: min completed turns between two fires.
+        if let Some(last) = self.smart_compact_last_turn
+            && turn.saturating_sub(last) < self.compact_config.smart_cooldown_turns
+        {
+            return false;
+        }
+
+        // FIRE TEST.
+        if self.smart_compact_armed && frac >= trigger {
+            self.smart_compact_armed = false;
+            self.smart_compact_last_turn = Some(turn);
+            return true;
+        }
+        false
+    }
+
+    /// #280 — record ONE additive, non-destructive handoff Episode to long-term
+    /// memory BEFORE `run_compaction` mutates the buffer, so the verbatim
+    /// pre-compaction transcript survives even if the LLM summary rewords prose.
+    ///
+    /// Non-destructive by construction: `record_episode` is a pure INSERT that
+    /// never touches `self.messages`; a failure is logged-and-swallowed (never
+    /// propagated) so a memory outage cannot abort or alter the turn. With
+    /// `NullMemory` installed this is a no-op stub.
+    async fn write_smart_handoff(&self) {
+        use wcore_memory::v2_types::{Episode, EpisodeId, EpisodeStatus, Tier};
+
+        // VERBATIM role-tagged concatenation of the current buffer's text blocks
+        // (the live conversation about to be summarized) — captured from the
+        // LIVE buffer, not the post-fold result, so nothing is lost.
+        let mut summary = String::new();
+        let mut live_user_text: Option<String> = None;
+        for m in &self.messages {
+            let role = match m.role {
+                Role::User => "user",
+                Role::Assistant => "assistant",
+                Role::System => "system",
+                Role::Tool => "tool",
+            };
+            for block in &m.content {
+                if let ContentBlock::Text { text } = block {
+                    summary.push_str(role);
+                    summary.push_str(": ");
+                    summary.push_str(text);
+                    summary.push('\n');
+                    if matches!(m.role, Role::User) {
+                        live_user_text = Some(text.clone());
+                    }
+                }
+            }
+        }
+
+        // Cheap heuristic bullets — NO extra LLM call.
+        let mut atomic_facts: Vec<String> = Vec::new();
+        if let Some(t) = live_user_text {
+            atomic_facts.push(t);
+        }
+        let pre_estimate = self.compact_state.last_real_input_tokens;
+        atomic_facts.push(format!("pre_compact_estimate: {pre_estimate}"));
+        if let Some(pct) = self.active_window_percent_now(&self.model, pre_estimate) {
+            atomic_facts.push(format!("active_window_percent: {pct}"));
+        }
+
+        let ep = Episode {
+            id: EpisodeId::new(),
+            tier: Tier::Session,
+            ts: wcore_memory::audit::now_secs(),
+            episode_type: "compaction_handoff".into(),
+            summary,
+            atomic_facts,
+            source: "smart_compact".into(),
+            source_product: "wcore-compact".into(),
+            session_id: Some(self.conversation_id.clone()),
+            project_root: None,
+            decay_score: 1.0,
+            status: EpisodeStatus::Active,
+        };
+        if let Err(e) = self
+            .memory_api
+            .record_episode(ep, wcore_memory::AccessToken::MainAgent)
+            .await
+        {
+            tracing::warn!(
+                target: "wcore_agent::memory",
+                error = %e,
+                "#280 smart handoff record_episode failed; continuing"
+            );
+        }
+    }
+
     /// Run the agent loop with user input
     pub async fn run(&mut self, user_input: &str, msg_id: &str) -> Result<AgentResult, AgentError> {
         // methodology #27: production caller for StyleDetector::observe (Task 1.B.3)
@@ -3668,6 +3873,30 @@ impl AgentEngine {
                 let outcome = hook_engine.run_pre_compact(turn, self.messages.len()).await;
                 for line in outcome.hook_trace {
                     tracing::debug!(target: "wcore_agent::hooks", "{line}");
+                }
+            }
+
+            // #280 — smart auto-compaction pre-gate. Boundary-fire ONLY: this is
+            // the turn-loop top (the tool loop lives below provider.stream in the
+            // same iteration), and the model swap was already applied above, so
+            // the Flux-aware fraction is computed against the CURRENTLY-active
+            // model. Default-OFF: `smart_compact_fraction` returns `None` on its
+            // first line when disabled, so neither memory nor the force flag is
+            // touched and `run_compaction` below behaves exactly as before. On a
+            // fire we (1) persist a non-destructive handoff Episode, then (2) set
+            // the one-shot force flag and fall straight through into the existing
+            // `run_compaction` — no new summarization / fold / emit code.
+            let smart_fired = match self.smart_compact_fraction() {
+                Some(frac) => self.smart_compact_should_fire(turn as u32, frac),
+                None => false,
+            };
+            if smart_fired {
+                self.smart_compact_force = true;
+                if self.compact_config.smart_handoff_to_memory {
+                    // Persist BEFORE run_compaction mutates the buffer so the
+                    // verbatim pre-compaction transcript is durable; errors are
+                    // swallowed and never abort the turn.
+                    self.write_smart_handoff().await;
                 }
             }
 
@@ -5629,10 +5858,17 @@ impl AgentEngine {
         // (provider-reported billed input, thinking excluded for non-
         // replaying providers), NOT the conservative `last_input_tokens`
         // the EMERGENCY hard-stop uses. This stops premature compaction.
-        let should_compact = auto::should_autocompact(
-            self.compact_state.last_real_input_tokens,
-            &self.compact_config,
-        );
+        // #280 — consume the one-shot smart force flag (set by the turn-top
+        // pre-gate). `std::mem::take` makes it strictly one-shot per arming and
+        // consumes it whether or not the circuit breaker lets the compact run,
+        // so a tripped breaker can't latch it. `smart_drove` is reused below for
+        // the CompactOffload reason string and the cannot-shrink latch.
+        let smart_drove = std::mem::take(&mut self.smart_compact_force);
+        let should_compact = smart_drove
+            || auto::should_autocompact(
+                self.compact_state.last_real_input_tokens,
+                &self.compact_config,
+            );
         if should_compact && !self.compact_state.is_circuit_broken(&self.compact_config) {
             let provider = Arc::clone(&self.provider);
             // AUDIT A4 — `run_compaction` runs at the TOP of the turn
@@ -5735,9 +5971,21 @@ impl AgentEngine {
                         estimate::estimate_tokens_from_messages(&self.messages);
                     let tokens_freed =
                         result_pre_compact_tokens.saturating_sub(post_compact_tokens);
+                    // #280 — when the smart trigger drove this pass, tag the host
+                    // chip with smart provenance (free-form String field, forward-
+                    // compatible) and arm the cannot-shrink terminal latch if the
+                    // compaction freed less than the configured floor.
+                    if smart_drove && tokens_freed < self.compact_config.smart_min_shrink_tokens {
+                        self.smart_compact_exhausted = true;
+                    }
+                    let reason = if smart_drove {
+                        "smart_window_pressure"
+                    } else {
+                        "window_pressure"
+                    };
                     self.output.emit_compaction(
                         &self.current_msg_id,
-                        "window_pressure",
+                        reason,
                         tokens_freed,
                         self.active_window_percent_now(&self.model, post_compact_tokens),
                     );
@@ -7622,6 +7870,10 @@ mod set_config_tests {
             conversation_id: String::new(),
             flux_served_window: None,
             flux_context_pressure: None,
+            smart_compact_armed: true,
+            smart_compact_last_turn: None,
+            smart_compact_exhausted: false,
+            smart_compact_force: false,
         }
     }
 
@@ -8443,6 +8695,10 @@ mod phase6_tests {
             conversation_id: String::new(),
             flux_served_window: None,
             flux_context_pressure: None,
+            smart_compact_armed: true,
+            smart_compact_last_turn: None,
+            smart_compact_exhausted: false,
+            smart_compact_force: false,
         }
     }
 
@@ -8731,6 +8987,10 @@ mod compact_tests {
             conversation_id: String::new(),
             flux_served_window: None,
             flux_context_pressure: None,
+            smart_compact_armed: true,
+            smart_compact_last_turn: None,
+            smart_compact_exhausted: false,
+            smart_compact_force: false,
         }
     }
 
@@ -10049,6 +10309,10 @@ mod plan_mode_tests {
             conversation_id: String::new(),
             flux_served_window: None,
             flux_context_pressure: None,
+            smart_compact_armed: true,
+            smart_compact_last_turn: None,
+            smart_compact_exhausted: false,
+            smart_compact_force: false,
         }
     }
 
@@ -10470,6 +10734,10 @@ mod hook_integration_tests {
             conversation_id: String::new(),
             flux_served_window: None,
             flux_context_pressure: None,
+            smart_compact_armed: true,
+            smart_compact_last_turn: None,
+            smart_compact_exhausted: false,
+            smart_compact_force: false,
         }
     }
 
@@ -11044,6 +11312,8 @@ mod approval_bridge_engine_tests {
     use wcore_tools::registry::ToolRegistry;
     use wcore_types::llm::{LlmEvent, LlmRequest};
     use wcore_types::message::FinishReason;
+    // #280 smart-compaction tests construct conversation messages directly.
+    use wcore_types::message::{ContentBlock, Message, Role};
 
     use crate::approval::{ApprovalBridge, ApprovalOutcome, ApprovalRequest};
     use crate::compact::state::CompactState;
@@ -11187,6 +11457,10 @@ mod approval_bridge_engine_tests {
             conversation_id: String::new(),
             flux_served_window: None,
             flux_context_pressure: None,
+            smart_compact_armed: true,
+            smart_compact_last_turn: None,
+            smart_compact_exhausted: false,
+            smart_compact_force: false,
         }
     }
 
@@ -11247,6 +11521,421 @@ mod approval_bridge_engine_tests {
             )
             .await;
         assert!(!resolved);
+    }
+
+    // --- #280 smart auto-compaction ---------------------------------------
+
+    /// Default-OFF: with `smart_enabled` false, `smart_compact_fraction` returns
+    /// `None` even at extreme pressure — the single chokepoint that keeps the
+    /// whole feature inert and `run_compaction` byte-for-byte unchanged.
+    #[test]
+    fn smart_default_off_fraction_is_none_at_any_pressure() {
+        let mut engine = make_engine();
+        // Slam the watermark well past any window; gate is still off by default.
+        engine.compact_state.last_real_input_tokens = 10_000_000;
+        assert!(!engine.compact_config.smart_enabled);
+        assert_eq!(engine.smart_compact_fraction(), None);
+    }
+
+    /// When enabled, the fraction is computed against the active model's window.
+    /// "test-model" is unknown → resolves to the config window (200k), so 130k
+    /// used ≈ 0.65. At a small fill it must be well under the trigger.
+    #[test]
+    fn smart_fraction_uses_config_window_for_unknown_model() {
+        let mut engine = make_engine();
+        engine.compact_config.smart_enabled = true;
+        engine.compact_config.context_window = 200_000;
+        engine.compact_state.last_real_input_tokens = 130_000;
+        let frac = engine.smart_compact_fraction().expect("window known");
+        assert!((frac - 0.65).abs() < 0.01, "frac was {frac}");
+        engine.compact_state.last_real_input_tokens = 60_000;
+        let low = engine.smart_compact_fraction().expect("window known");
+        assert!(low < 0.35, "low frac was {low}");
+    }
+
+    /// Flux-aware denominator: a tier-alias model with a served window prefers
+    /// that window; a Flux pressure header forces a higher effective fraction
+    /// via the max() path even when the local estimate lags.
+    #[test]
+    fn smart_fraction_prefers_flux_served_window_and_pressure() {
+        let mut engine = make_engine();
+        engine.compact_config.smart_enabled = true;
+        // A Flux tier alias so the served-window branch is taken.
+        engine.model = "flux-auto".into();
+        engine.flux_served_window = Some(280_000);
+        engine.compact_state.last_real_input_tokens = 200_000;
+        // 200k / 280k ≈ 0.714.
+        let frac = engine.smart_compact_fraction().expect("served window set");
+        assert!((frac - 0.714).abs() < 0.01, "frac was {frac}");
+
+        // Larger served window lowers the fraction.
+        engine.flux_served_window = Some(400_000);
+        let lower = engine.smart_compact_fraction().expect("served window set");
+        assert!(lower < 0.55, "lower frac was {lower}");
+
+        // A high pressure header forces a higher effective fraction via max()
+        // even though the kernel fraction (200k/400k = 0.5) is lower.
+        engine.flux_context_pressure = Some(0.70);
+        let forced = engine.smart_compact_fraction().expect("pressure set");
+        // The f32 pressure header (≈0.70) wins over the kernel fraction (0.50)
+        // via max(); allow for f32→f64 rounding.
+        assert!(forced > 0.69, "forced frac was {forced}");
+    }
+
+    /// Fire test + the band clamp: an out-of-band trigger (0.95) is clamped to
+    /// 0.70; a fraction at/above the clamped trigger fires once and disarms.
+    #[test]
+    fn smart_should_fire_clamps_trigger_and_disarms() {
+        let mut engine = make_engine();
+        engine.compact_config.smart_trigger_fraction = 0.95; // → clamped 0.70
+        // 0.69 is below the clamped 0.70 trigger → no fire.
+        assert!(!engine.smart_compact_should_fire(1, 0.69));
+        assert!(engine.smart_compact_armed);
+        // 0.72 >= clamped 0.70 → fire, then disarm.
+        assert!(engine.smart_compact_should_fire(1, 0.72));
+        assert!(!engine.smart_compact_armed);
+        assert_eq!(engine.smart_compact_last_turn, Some(1));
+    }
+
+    /// Hysteresis: across turns the trigger fires, stays disarmed through the
+    /// dead band, re-arms only once the fraction drops below release, then fires
+    /// again — exactly two fires.
+    #[test]
+    fn smart_hysteresis_two_fires_across_turns() {
+        let mut engine = make_engine();
+        engine.compact_config.smart_trigger_fraction = 0.65;
+        engine.compact_config.smart_release_fraction = 0.50;
+        engine.compact_config.smart_cooldown_turns = 0; // isolate hysteresis
+        let fracs = [0.66_f64, 0.62, 0.55, 0.48, 0.66];
+        let mut fires = 0;
+        for (i, f) in fracs.iter().enumerate() {
+            if engine.smart_compact_should_fire(i as u32 + 1, *f) {
+                fires += 1;
+            }
+        }
+        assert_eq!(fires, 2, "expected fires at turns 1 and 5 only");
+    }
+
+    /// Cooldown: with cooldown 2 and the fraction held above the trigger, fires
+    /// are spaced at least 2 turns apart. Re-arm each turn to isolate cooldown
+    /// from hysteresis.
+    #[test]
+    fn smart_cooldown_spaces_fires() {
+        let mut engine = make_engine();
+        engine.compact_config.smart_trigger_fraction = 0.65;
+        engine.compact_config.smart_cooldown_turns = 2;
+        let mut fire_turns = Vec::new();
+        for turn in 1..=6u32 {
+            engine.smart_compact_armed = true; // bypass hysteresis
+            if engine.smart_compact_should_fire(turn, 0.80) {
+                fire_turns.push(turn);
+            }
+        }
+        // First fire at turn 1; next allowed at turn >= 3, then >= 5.
+        assert_eq!(fire_turns, vec![1, 3, 5]);
+    }
+
+    /// Cannot-shrink terminal latch: once exhausted, the trigger never fires
+    /// again even at extreme pressure and after release would otherwise re-arm.
+    #[test]
+    fn smart_exhausted_latch_is_terminal() {
+        let mut engine = make_engine();
+        engine.compact_config.smart_trigger_fraction = 0.65;
+        engine.compact_config.smart_cooldown_turns = 0;
+        engine.smart_compact_exhausted = true;
+        for turn in 1..=5u32 {
+            engine.smart_compact_armed = true;
+            assert!(!engine.smart_compact_should_fire(turn, 0.99));
+        }
+    }
+
+    /// Giant-buffer / stays-above-release case: a fraction permanently above
+    /// release fires exactly once, then the trigger stays disarmed forever.
+    #[test]
+    fn smart_stays_disarmed_when_above_release() {
+        let mut engine = make_engine();
+        engine.compact_config.smart_trigger_fraction = 0.65;
+        engine.compact_config.smart_release_fraction = 0.50;
+        engine.compact_config.smart_cooldown_turns = 0;
+        let mut fires = 0;
+        for turn in 1..=6u32 {
+            // Held at 0.80: above both trigger and release every turn.
+            if engine.smart_compact_should_fire(turn, 0.80) {
+                fires += 1;
+            }
+        }
+        assert_eq!(fires, 1, "must fire once then stay disarmed");
+    }
+
+    /// Handoff write: a smart handoff records exactly one Episode tagged
+    /// compaction_handoff/Session/smart_compact via MainAgent, and the
+    /// conversation buffer is left intact (non-destructive).
+    #[tokio::test]
+    async fn smart_handoff_records_one_session_episode_non_destructively() {
+        use std::sync::Mutex as StdMutex;
+        use wcore_memory::v2_types::Episode;
+
+        // Capture episodes; delegate every other MemoryApi method to NullMemory
+        // so the stub stays a complete, correct impl without re-stubbing 13
+        // methods.
+        #[derive(Default)]
+        struct CapturingMemory {
+            episodes: StdMutex<Vec<Episode>>,
+            inner: wcore_memory::NullMemory,
+        }
+        #[async_trait::async_trait]
+        impl wcore_memory::MemoryApi for CapturingMemory {
+            async fn record_episode(
+                &self,
+                ep: Episode,
+                tok: wcore_memory::AccessToken,
+            ) -> wcore_memory::error::Result<wcore_memory::v2_types::EpisodeId> {
+                self.episodes.lock().unwrap().push(ep.clone());
+                self.inner.record_episode(ep, tok).await
+            }
+            async fn assert_fact(
+                &self,
+                f: wcore_memory::v2_types::Fact,
+                tok: wcore_memory::AccessToken,
+            ) -> wcore_memory::error::Result<wcore_memory::v2_types::FactId> {
+                self.inner.assert_fact(f, tok).await
+            }
+            async fn upsert_procedure(
+                &self,
+                p: wcore_memory::v2_types::Procedure,
+                tok: wcore_memory::AccessToken,
+            ) -> wcore_memory::error::Result<wcore_memory::v2_types::ProcedureId> {
+                self.inner.upsert_procedure(p, tok).await
+            }
+            async fn list_procedures(
+                &self,
+                tier: wcore_memory::v2_types::Tier,
+                tok: wcore_memory::AccessToken,
+            ) -> wcore_memory::error::Result<Vec<wcore_memory::v2_types::Procedure>> {
+                self.inner.list_procedures(tier, tok).await
+            }
+            async fn update_user_model(
+                &self,
+                key: &str,
+                val: serde_json::Value,
+                tok: wcore_memory::AccessToken,
+            ) -> wcore_memory::error::Result<()> {
+                self.inner.update_user_model(key, val, tok).await
+            }
+            async fn search(
+                &self,
+                q: wcore_memory::v2_types::Query,
+                tok: wcore_memory::AccessToken,
+            ) -> wcore_memory::error::Result<Vec<wcore_memory::v2_types::Hit>> {
+                self.inner.search(q, tok).await
+            }
+            async fn get_episode(
+                &self,
+                id: &wcore_memory::v2_types::EpisodeId,
+                tok: wcore_memory::AccessToken,
+            ) -> wcore_memory::error::Result<Episode> {
+                self.inner.get_episode(id, tok).await
+            }
+            async fn user_model(
+                &self,
+                tok: wcore_memory::AccessToken,
+            ) -> wcore_memory::error::Result<wcore_memory::v2_types::UserModel> {
+                self.inner.user_model(tok).await
+            }
+            async fn dream_now(
+                &self,
+            ) -> wcore_memory::error::Result<wcore_memory::v2_types::DreamReport> {
+                self.inner.dream_now().await
+            }
+            async fn compact(
+                &self,
+                target_tokens: u64,
+            ) -> wcore_memory::error::Result<wcore_memory::v2_types::CompactReport> {
+                self.inner.compact(target_tokens).await
+            }
+            async fn record_skill_use(
+                &self,
+                name: &str,
+                succeeded: bool,
+                latency_ms: u64,
+            ) -> wcore_memory::error::Result<()> {
+                self.inner
+                    .record_skill_use(name, succeeded, latency_ms)
+                    .await
+            }
+            async fn top_procedures(
+                &self,
+                tier: wcore_memory::v2_types::Tier,
+                k: usize,
+                min_uses: u64,
+                tok: wcore_memory::AccessToken,
+            ) -> wcore_memory::error::Result<Vec<wcore_memory::v2_types::Procedure>> {
+                self.inner.top_procedures(tier, k, min_uses, tok).await
+            }
+            async fn kg_ingest_facts(
+                &self,
+                transcript: &str,
+            ) -> wcore_memory::error::Result<usize> {
+                self.inner.kg_ingest_facts(transcript).await
+            }
+        }
+
+        let mut engine = make_engine();
+        let mem = Arc::new(CapturingMemory::default());
+        engine.memory_api = mem.clone();
+        engine.conversation_id = "conv-280".into();
+        engine.messages = vec![
+            Message::now(
+                Role::User,
+                vec![ContentBlock::Text {
+                    text: "fix the failing test".into(),
+                }],
+            ),
+            Message::now(
+                Role::Assistant,
+                vec![ContentBlock::Text {
+                    text: "looking into it".into(),
+                }],
+            ),
+        ];
+        let before = engine.messages.len();
+
+        engine.write_smart_handoff().await;
+
+        let eps = mem.episodes.lock().unwrap();
+        assert_eq!(eps.len(), 1, "exactly one episode recorded");
+        let ep = &eps[0];
+        assert_eq!(ep.episode_type, "compaction_handoff");
+        assert_eq!(ep.source, "smart_compact");
+        assert_eq!(ep.tier, wcore_memory::v2_types::Tier::Session);
+        assert_eq!(ep.session_id.as_deref(), Some("conv-280"));
+        assert!(ep.summary.contains("fix the failing test"));
+        assert!(ep.summary.contains("looking into it"));
+        // Non-destructive: the buffer was not touched.
+        assert_eq!(engine.messages.len(), before);
+    }
+
+    /// A memory backend that errors must NOT abort the handoff path — the error
+    /// is swallowed so the turn proceeds.
+    #[tokio::test]
+    async fn smart_handoff_swallows_memory_errors() {
+        // record_episode errors; everything else delegates to NullMemory. The
+        // handoff path must swallow the error and never abort the turn.
+        #[derive(Default)]
+        struct FailingMemory {
+            inner: wcore_memory::NullMemory,
+        }
+        #[async_trait::async_trait]
+        impl wcore_memory::MemoryApi for FailingMemory {
+            async fn record_episode(
+                &self,
+                _ep: wcore_memory::v2_types::Episode,
+                _tok: wcore_memory::AccessToken,
+            ) -> wcore_memory::error::Result<wcore_memory::v2_types::EpisodeId> {
+                Err(wcore_memory::error::MemoryError::AccessDenied {
+                    partition: "test".into(),
+                    tier: "session".into(),
+                    reason: "boom".into(),
+                })
+            }
+            async fn assert_fact(
+                &self,
+                f: wcore_memory::v2_types::Fact,
+                tok: wcore_memory::AccessToken,
+            ) -> wcore_memory::error::Result<wcore_memory::v2_types::FactId> {
+                self.inner.assert_fact(f, tok).await
+            }
+            async fn upsert_procedure(
+                &self,
+                p: wcore_memory::v2_types::Procedure,
+                tok: wcore_memory::AccessToken,
+            ) -> wcore_memory::error::Result<wcore_memory::v2_types::ProcedureId> {
+                self.inner.upsert_procedure(p, tok).await
+            }
+            async fn list_procedures(
+                &self,
+                tier: wcore_memory::v2_types::Tier,
+                tok: wcore_memory::AccessToken,
+            ) -> wcore_memory::error::Result<Vec<wcore_memory::v2_types::Procedure>> {
+                self.inner.list_procedures(tier, tok).await
+            }
+            async fn update_user_model(
+                &self,
+                key: &str,
+                val: serde_json::Value,
+                tok: wcore_memory::AccessToken,
+            ) -> wcore_memory::error::Result<()> {
+                self.inner.update_user_model(key, val, tok).await
+            }
+            async fn search(
+                &self,
+                q: wcore_memory::v2_types::Query,
+                tok: wcore_memory::AccessToken,
+            ) -> wcore_memory::error::Result<Vec<wcore_memory::v2_types::Hit>> {
+                self.inner.search(q, tok).await
+            }
+            async fn get_episode(
+                &self,
+                id: &wcore_memory::v2_types::EpisodeId,
+                tok: wcore_memory::AccessToken,
+            ) -> wcore_memory::error::Result<wcore_memory::v2_types::Episode> {
+                self.inner.get_episode(id, tok).await
+            }
+            async fn user_model(
+                &self,
+                tok: wcore_memory::AccessToken,
+            ) -> wcore_memory::error::Result<wcore_memory::v2_types::UserModel> {
+                self.inner.user_model(tok).await
+            }
+            async fn dream_now(
+                &self,
+            ) -> wcore_memory::error::Result<wcore_memory::v2_types::DreamReport> {
+                self.inner.dream_now().await
+            }
+            async fn compact(
+                &self,
+                target_tokens: u64,
+            ) -> wcore_memory::error::Result<wcore_memory::v2_types::CompactReport> {
+                self.inner.compact(target_tokens).await
+            }
+            async fn record_skill_use(
+                &self,
+                name: &str,
+                succeeded: bool,
+                latency_ms: u64,
+            ) -> wcore_memory::error::Result<()> {
+                self.inner
+                    .record_skill_use(name, succeeded, latency_ms)
+                    .await
+            }
+            async fn top_procedures(
+                &self,
+                tier: wcore_memory::v2_types::Tier,
+                k: usize,
+                min_uses: u64,
+                tok: wcore_memory::AccessToken,
+            ) -> wcore_memory::error::Result<Vec<wcore_memory::v2_types::Procedure>> {
+                self.inner.top_procedures(tier, k, min_uses, tok).await
+            }
+            async fn kg_ingest_facts(
+                &self,
+                transcript: &str,
+            ) -> wcore_memory::error::Result<usize> {
+                self.inner.kg_ingest_facts(transcript).await
+            }
+        }
+
+        let mut engine = make_engine();
+        engine.memory_api = Arc::new(FailingMemory::default());
+        engine.messages = vec![Message::now(
+            Role::User,
+            vec![ContentBlock::Text {
+                text: "hello".into(),
+            }],
+        )];
+        // Must not panic / propagate.
+        engine.write_smart_handoff().await;
+        assert_eq!(engine.messages.len(), 1);
     }
 }
 
@@ -11413,6 +12102,10 @@ mod user_model_writeback_tests {
             conversation_id: String::new(),
             flux_served_window: None,
             flux_context_pressure: None,
+            smart_compact_armed: true,
+            smart_compact_last_turn: None,
+            smart_compact_exhausted: false,
+            smart_compact_force: false,
         }
     }
 

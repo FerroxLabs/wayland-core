@@ -67,6 +67,36 @@ context_window = 128000
     assert!(config.compact.enabled);
 }
 
+/// #280: smart auto-compaction is default-OFF and back-compatible. A config
+/// with no smart_* keys must leave the master gate false and the handoff on.
+#[test]
+fn smart_compaction_default_off_in_config_file() {
+    let toml_str = r#"
+[compact]
+context_window = 100000
+"#;
+    let config: ConfigFile = toml::from_str(toml_str).unwrap();
+    assert!(!config.compact.smart_enabled);
+    assert_eq!(config.compact.smart_trigger_fraction, 0.65);
+    assert!(config.compact.smart_handoff_to_memory);
+}
+
+/// #280: an out-of-band smart_trigger_fraction parses verbatim (the spec band
+/// clamp is applied at the engine use site, not at deserialization, to keep
+/// config back-compat — see advanced.md). This documents the raw-parse contract.
+#[test]
+fn smart_trigger_fraction_out_of_band_parses_verbatim() {
+    let toml_str = r#"
+[compact]
+smart_enabled = true
+smart_trigger_fraction = 0.95
+"#;
+    let config: ConfigFile = toml::from_str(toml_str).unwrap();
+    // Raw value is preserved; the engine clamps it into 0.60..=0.70 when it
+    // evaluates the trigger.
+    assert_eq!(config.compact.smart_trigger_fraction, 0.95);
+}
+
 /// TC-2.2-07: Config TOML with [compact] section parses completely.
 #[test]
 fn tc_2_2_07_config_with_compact_section() {
