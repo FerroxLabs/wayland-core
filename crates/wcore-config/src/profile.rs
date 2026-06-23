@@ -597,6 +597,19 @@ fn copy_tree_inner(
         if meta.file_type().is_symlink() {
             continue;
         }
+        // On Windows, an NTFS directory JUNCTION (and any other reparse point) is
+        // NOT classified as a symlink by `is_symlink()`, yet it redirects just
+        // like one — and a junction needs no special privilege to create. Skip
+        // any reparse point by its file attribute so a hostile/import tree cannot
+        // redirect the copy out of the source via a junction (C6 / zip-slip).
+        #[cfg(windows)]
+        {
+            use std::os::windows::fs::MetadataExt;
+            const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
+            if meta.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+                continue;
+            }
+        }
         if meta.is_dir() {
             std::fs::create_dir_all(&to).map_err(ProfileOpError::io("create dir"))?;
             copy_tree_inner(&from, &to, skip_secrets, false)?;
