@@ -794,15 +794,30 @@ mod tests {
         );
     }
 
+    /// An absolute path valid on BOTH Unix (`/tmp/<seg>`) and Windows
+    /// (`C:\<seg>`). `profiles_root()` rejects non-absolute overrides, and a
+    /// Unix `/tmp/...` is NOT absolute on Windows — so hardcoding it makes these
+    /// path-resolution tests fail under Windows CI (the override is rejected and
+    /// resolution falls through to the real config dir).
+    fn abs_root(seg: &str) -> String {
+        if cfg!(windows) {
+            format!("C:\\{seg}")
+        } else {
+            format!("/tmp/{seg}")
+        }
+    }
+
     #[test]
     #[serial]
     fn profiles_root_honors_explicit_override() {
-        let _g = EnvGuard::set(&[("WAYLAND_PROFILES_ROOT", Some("/tmp/custom-profiles"))]);
-        assert_eq!(profiles_root(), PathBuf::from("/tmp/custom-profiles"));
+        let root = abs_root("custom-profiles");
+        let _g = EnvGuard::set(&[("WAYLAND_PROFILES_ROOT", Some(root.as_str()))]);
+        assert_eq!(profiles_root(), PathBuf::from(&root));
 
         // A control-char-bearing override is ignored (falls through to default).
-        let _g2 = EnvGuard::set(&[("WAYLAND_PROFILES_ROOT", Some("/tmp/bad\nroot"))]);
-        assert_ne!(profiles_root(), PathBuf::from("/tmp/bad\nroot"));
+        let bad = format!("{}\nroot", abs_root("bad"));
+        let _g2 = EnvGuard::set(&[("WAYLAND_PROFILES_ROOT", Some(bad.as_str()))]);
+        assert_ne!(profiles_root(), PathBuf::from(&bad));
 
         // A RELATIVE override is ignored — would make every home CWD-dependent.
         let _g3 = EnvGuard::set(&[("WAYLAND_PROFILES_ROOT", Some("relative/profiles"))]);
@@ -817,17 +832,19 @@ mod tests {
     #[test]
     #[serial]
     fn profile_dir_case_folds_to_same_path() {
-        let _g = EnvGuard::set(&[("WAYLAND_PROFILES_ROOT", Some("/tmp/p"))]);
+        let root = abs_root("p");
+        let _g = EnvGuard::set(&[("WAYLAND_PROFILES_ROOT", Some(root.as_str()))]);
         let upper = profile_dir("Work").unwrap();
         let lower = profile_dir("work").unwrap();
         assert_eq!(upper, lower, "Work and work must map to the same directory");
-        assert_eq!(lower, PathBuf::from("/tmp/p/work"));
+        assert_eq!(lower, PathBuf::from(&root).join("work"));
     }
 
     #[test]
     #[serial]
     fn profile_dir_rejects_invalid_name() {
-        let _g = EnvGuard::set(&[("WAYLAND_PROFILES_ROOT", Some("/tmp/p"))]);
+        let root = abs_root("p");
+        let _g = EnvGuard::set(&[("WAYLAND_PROFILES_ROOT", Some(root.as_str()))]);
         assert!(profile_dir("../escape").is_err());
         assert!(profile_dir("a/b").is_err());
     }
@@ -835,13 +852,15 @@ mod tests {
     #[test]
     #[serial]
     fn active_pointer_is_under_root_not_in_a_home() {
+        let root = abs_root("p");
+        let home = abs_root("some-home");
         let _g = EnvGuard::set(&[
-            ("WAYLAND_PROFILES_ROOT", Some("/tmp/p")),
-            ("WAYLAND_HOME", Some("/tmp/some-home")),
+            ("WAYLAND_PROFILES_ROOT", Some(root.as_str())),
+            ("WAYLAND_HOME", Some(home.as_str())),
         ]);
         let ptr = active_pointer_path();
-        assert_eq!(ptr, PathBuf::from("/tmp/p/active"));
-        assert!(!ptr.starts_with("/tmp/some-home"));
+        assert_eq!(ptr, PathBuf::from(&root).join("active"));
+        assert!(!ptr.starts_with(&home));
     }
 
     fn argv(parts: &[&str]) -> std::vec::IntoIter<String> {
