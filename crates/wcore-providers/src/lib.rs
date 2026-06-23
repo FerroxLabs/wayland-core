@@ -190,6 +190,23 @@ pub enum ProviderError {
         reason: String,
         upgrade_url: Option<String>,
     },
+    /// FluxRouter 409 `context_overflow` (#282 contract V1) — a managed client's
+    /// assembled prompt exceeds the routed model's context window even after
+    /// Flux's server-side structuring. This is NOT a provider-level retry: the
+    /// engine must compact the conversation, then retry the SAME turn. Marked
+    /// non-retryable in [`ProviderError::is_retryable`] so the generic
+    /// retry/backoff loop does not resend the unchanged (still-overflowing)
+    /// request; the engine handles the compact-then-retry explicitly.
+    #[error(
+        "Flux context overflow: {required_tokens} tokens required > {model_window} window \
+         on {routed_model}: {message}"
+    )]
+    ContextOverflow {
+        required_tokens: u64,
+        model_window: u64,
+        routed_model: String,
+        message: String,
+    },
 }
 
 impl ProviderError {
@@ -221,7 +238,10 @@ impl ProviderError {
             // must change plan / clear a charge / add a payment method first.
             | ProviderError::PremiumLocked { .. }
             | ProviderError::UpgradeRequired { .. }
-            | ProviderError::SpendCeilingUnresolved { .. } => false,
+            | ProviderError::SpendCeilingUnresolved { .. }
+            // #282: context overflow is resolved by engine-side compaction +
+            // an explicit single retry, NOT by a blind provider-level resend.
+            | ProviderError::ContextOverflow { .. } => false,
             // Egress transport timeouts/connects are pre-mapped to Connection
             // by provider code (like Http); a Denied is terminal. Both false here.
             ProviderError::Egress(_) => false,

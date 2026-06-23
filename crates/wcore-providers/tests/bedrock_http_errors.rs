@@ -73,6 +73,8 @@ fn cohere_request() -> LlmRequest {
         routing_hint: None,
         stop_sequences: Vec::new(),
         web_search: false,
+        conversation_id: None,
+        client_context_tokens: None,
     }
 }
 
@@ -95,6 +97,8 @@ fn anthropic_request() -> LlmRequest {
         routing_hint: None,
         stop_sequences: Vec::new(),
         web_search: false,
+        conversation_id: None,
+        client_context_tokens: None,
     }
 }
 

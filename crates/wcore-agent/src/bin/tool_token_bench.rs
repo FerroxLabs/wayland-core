@@ -217,6 +217,8 @@ async fn drain_scripted_usage(provider: &ScriptedProvider) -> Usage {
         routing_hint: None,
         stop_sequences: Vec::new(),
         web_search: false,
+        conversation_id: None,
+        client_context_tokens: None,
     };
     let mut rx = provider.stream(&req).await.expect("scripted stream");
     let mut tu = TokenUsage::default();

@@ -1310,6 +1310,12 @@ pub struct AgentEngine {
     /// post-tool-use, and turn-end hook phases. Drained into the next
     /// `TurnTrace.hook_actions` via `std::mem::take` at each emission site.
     pending_hook_actions: Vec<wcore_observability::trace::HookActionRecord>,
+    /// #282 contract V1: stable per-session conversation id for Flux sticky
+    /// routing. Minted ONCE at construction with a v4 UUID and threaded onto
+    /// every `LlmRequest` as `conversation_id`; the Flux provider emits it as
+    /// the `x-wl-conversation-id` request header on tier-alias turns. Survives
+    /// `/clear` and `/resume` so a continued session keeps routing affinity.
+    conversation_id: String,
 }
 
 impl Drop for AgentEngine {
@@ -1562,6 +1568,8 @@ impl AgentEngine {
             // No hook actions have fired before the first turn.
             web_search: false,
             pending_hook_actions: Vec::new(),
+            // #282: mint the stable Flux conversation id once per engine.
+            conversation_id: uuid::Uuid::new_v4().to_string(),
         }
     }
 
@@ -1724,6 +1732,9 @@ impl AgentEngine {
             // No hook actions have fired before the first turn.
             web_search: false,
             pending_hook_actions: Vec::new(),
+            // #282: mint the stable Flux conversation id once per engine. A
+            // resumed session gets a fresh id (sticky routing is best-effort).
+            conversation_id: uuid::Uuid::new_v4().to_string(),
         }
     }
 
@@ -3658,6 +3669,11 @@ impl AgentEngine {
                 routing_hint: None,
                 stop_sequences,
                 web_search: self.web_search,
+                // #282: thread the stable conversation id + assembled-prompt
+                // token estimate so the Flux provider can emit the x-wl-*
+                // context-routing headers on tier-alias turns.
+                conversation_id: Some(self.conversation_id.clone()),
+                client_context_tokens: Some(input_token_estimate as u64),
             };
 
             // Cache-stability (token-opt): inject the per-turn skill-router
@@ -3862,6 +3878,13 @@ impl AgentEngine {
             let finish_reason: FinishReason;
             let turn_usage: TokenUsage;
             let mut stream_attempt: u32 = 0;
+            // #282 contract V1: a managed Flux client that overflows the routed
+            // model's window gets a typed 409 `ProviderError::ContextOverflow`.
+            // We compact the conversation and retry the SAME turn EXACTLY ONCE;
+            // this guard bounds it so a persistently-overflowing turn cannot
+            // infinite-loop. After the single retry, a recurring overflow is
+            // surfaced as a clean terminal error below.
+            let mut overflow_retried = false;
             'stream: loop {
                 // Reset per-attempt accumulators so a retry never
                 // double-commits text/tool-calls from a failed attempt.
@@ -3925,6 +3948,39 @@ impl AgentEngine {
                         // An already-closed empty receiver makes the
                         // `while rx.recv()` loop below a no-op.
                         tokio::sync::mpsc::channel(1).1
+                    }
+                    // #282: hard context overflow from a managed Flux route.
+                    // Compact the conversation, rebuild the request from the
+                    // compacted history, and retry this same turn ONCE. The
+                    // compaction itself hardens the tool-pair invariant (#285);
+                    // we only call `run_compaction` here, never duplicate it.
+                    Err(ProviderError::ContextOverflow {
+                        required_tokens,
+                        model_window,
+                        routed_model,
+                        ..
+                    }) if !overflow_retried => {
+                        overflow_retried = true;
+                        self.output.emit_info(&format!(
+                            "context overflow on {routed_model} ({required_tokens} tokens > \
+                             {model_window} window) — compacted and retrying"
+                        ));
+                        if let Err(e) = self.run_compaction().await {
+                            self.fire_on_session_end(turn).await;
+                            self.save_session();
+                            return Err(e);
+                        }
+                        // Rebuild the volatile request inputs from the compacted
+                        // history; the cached system/tool prefix is unchanged by
+                        // compaction, so only messages + the token estimate move.
+                        request.messages = self.messages.clone();
+                        let recount = estimate::estimate_request_tokens(
+                            &self.messages,
+                            &request.system,
+                            &request.tools,
+                        ) as u64;
+                        request.client_context_tokens = Some(recount);
+                        continue 'stream;
                     }
                     Err(e) => return Err(e.into()),
                 };
@@ -7327,6 +7383,7 @@ mod set_config_tests {
             session_start_injected_len: 0,
             web_search: false,
             pending_hook_actions: Vec::new(),
+            conversation_id: String::new(),
         }
     }
 
@@ -8144,6 +8201,7 @@ mod phase6_tests {
             session_start_injected_len: 0,
             web_search: false,
             pending_hook_actions: Vec::new(),
+            conversation_id: String::new(),
         }
     }
 
@@ -8428,6 +8486,7 @@ mod compact_tests {
             session_start_injected_len: 0,
             web_search: false,
             pending_hook_actions: Vec::new(),
+            conversation_id: String::new(),
         }
     }
 
@@ -9587,6 +9646,7 @@ mod plan_mode_tests {
             session_start_injected_len: 0,
             web_search: false,
             pending_hook_actions: Vec::new(),
+            conversation_id: String::new(),
         }
     }
 
@@ -10004,6 +10064,7 @@ mod hook_integration_tests {
             session_start_injected_len: 0,
             web_search: false,
             pending_hook_actions: Vec::new(),
+            conversation_id: String::new(),
         }
     }
 
@@ -10712,6 +10773,7 @@ mod approval_bridge_engine_tests {
             session_start_injected_len: 0,
             web_search: false,
             pending_hook_actions: Vec::new(),
+            conversation_id: String::new(),
         }
     }
 
@@ -10934,6 +10996,7 @@ mod user_model_writeback_tests {
             session_start_injected_len: 0,
             web_search: false,
             pending_hook_actions: Vec::new(),
+            conversation_id: String::new(),
         }
     }
 

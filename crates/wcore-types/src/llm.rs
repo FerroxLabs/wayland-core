@@ -72,6 +72,20 @@ pub struct LlmRequest {
     /// the provider skips injection for a concrete model id. `Default` is
     /// `false`, so all existing construction sites stay ungrounded.
     pub web_search: bool,
+    /// #282 contract V1: stable, per-session conversation id for Flux sticky
+    /// routing. Emitted as the `x-wl-conversation-id` request header ONLY on a
+    /// Flux tier-alias request; `None` (the default) skips the header, so all
+    /// existing `..Default::default()` construction sites stay back-compatible.
+    /// Minted once at engine construction with a v4 UUID and threaded onto every
+    /// request the engine builds.
+    pub conversation_id: Option<String>,
+    /// #282 contract V1: the full assembled-prompt token estimate for this turn
+    /// (system + tools + messages), as computed by the engine before the stream
+    /// call. Emitted as the `x-wl-context-tokens` request header ONLY on a Flux
+    /// tier-alias request; `None` (the default) skips the header. Kept as an
+    /// `Option` so providers/tests that don't supply an estimate stay
+    /// back-compatible via `..Default::default()`.
+    pub client_context_tokens: Option<u64>,
 }
 
 #[derive(Debug, Clone)]
