@@ -866,6 +866,34 @@ mod tests {
         ChatGptTokenManager::new(OAuthStorage::at_root(root).expect("storage"))
     }
 
+    /// Point `CODEX_HOME` at a guaranteed-empty (but existing) dir for the
+    /// guard's lifetime, restoring the prior value on drop. A "no engine token"
+    /// assertion must not be contaminated by a real `~/.codex/auth.json` on the
+    /// host — CI runners can carry a live Codex login, which the #293 fallback
+    /// would (correctly, in production) import. Pair with
+    /// `#[serial_test::serial]` since it mutates process-global env.
+    struct CodexHomeGuard {
+        _dir: TempDir,
+        saved: Option<std::ffi::OsString>,
+    }
+    impl CodexHomeGuard {
+        fn empty() -> Self {
+            let dir = TempDir::new().unwrap();
+            let saved = std::env::var_os("CODEX_HOME");
+            // SAFETY: serial test; reverted on drop.
+            unsafe { std::env::set_var("CODEX_HOME", dir.path()) };
+            Self { _dir: dir, saved }
+        }
+    }
+    impl Drop for CodexHomeGuard {
+        fn drop(&mut self) {
+            match &self.saved {
+                Some(v) => unsafe { std::env::set_var("CODEX_HOME", v) },
+                None => unsafe { std::env::remove_var("CODEX_HOME") },
+            }
+        }
+    }
+
     fn token(access: &str, refresh: Option<&str>, expires_at: Option<u64>) -> OAuthTokens {
         OAuthTokens {
             access_token: access.to_string(),
@@ -1047,7 +1075,11 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial]
     async fn errors_when_no_tokens_stored() {
+        // Isolate CODEX_HOME so the empty engine store can't be backfilled by a
+        // real Codex login on the host (the #293 fallback).
+        let _codex = CodexHomeGuard::empty();
         let tmp = TempDir::new().unwrap();
         let mgr = manager_at(tmp.path().join("oauth"));
         let err = mgr.get().await.unwrap_err();
@@ -1055,7 +1087,11 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial]
     async fn clear_cache_drops_in_memory_tokens() {
+        // After the backing file is removed the re-load must miss; isolate
+        // CODEX_HOME so the #293 Codex fallback can't satisfy it instead.
+        let _codex = CodexHomeGuard::empty();
         let tmp = TempDir::new().unwrap();
         let mgr = manager_at(tmp.path().join("oauth"));
         mgr.storage

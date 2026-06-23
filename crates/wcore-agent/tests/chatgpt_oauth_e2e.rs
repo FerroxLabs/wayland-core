@@ -352,6 +352,7 @@ async fn end_to_end_response_done_terminal_closes_cleanly() {
 /// "not signed in" guidance as a `ProviderError::Connection` BEFORE any HTTP
 /// request is attempted (the Codex mock is mounted with `expect(0)`).
 #[tokio::test]
+#[serial_test::serial]
 async fn end_to_end_no_token_surfaces_login_guidance() {
     let codex = MockServer::start().await;
     Mock::given(method("POST"))
@@ -363,15 +364,27 @@ async fn end_to_end_no_token_surfaces_login_guidance() {
 
     let tmp = TempDir::new().unwrap();
     let storage = OAuthStorage::at_root(tmp.path().join("oauth")).unwrap();
-    // Nothing stored.
+    // Nothing stored. Isolate CODEX_HOME to an empty dir so the #293 Codex-CLI
+    // fallback can't backfill the empty store from a real host login (CI runners
+    // may carry a live ~/.codex/auth.json). Restored before the assertions so a
+    // failure can't leak the env var to other serial tests.
+    let codex_home = tmp.path().join("codex-empty");
+    std::fs::create_dir_all(&codex_home).unwrap();
+    let saved_codex_home = std::env::var_os("CODEX_HOME");
+    // SAFETY: serial test; reverted below before any assertion.
+    unsafe { std::env::set_var("CODEX_HOME", &codex_home) };
 
     let mgr = Arc::new(ChatGptTokenManager::new(storage));
     let provider = provider_against(codex.uri(), bearer_over_manager(mgr));
 
-    let err = provider
-        .stream(&make_request())
-        .await
-        .expect_err("missing token must error before any HTTP call");
+    let result = provider.stream(&make_request()).await;
+
+    match saved_codex_home {
+        Some(v) => unsafe { std::env::set_var("CODEX_HOME", v) },
+        None => unsafe { std::env::remove_var("CODEX_HOME") },
+    }
+
+    let err = result.expect_err("missing token must error before any HTTP call");
     match err {
         ProviderError::Connection(msg) => {
             assert!(msg.contains("not signed in"), "msg={msg}");
