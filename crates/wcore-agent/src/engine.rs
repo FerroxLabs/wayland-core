@@ -3319,6 +3319,82 @@ impl AgentEngine {
         }
     }
 
+    /// Losslessly demote a `tool_result` block whose `tool_use` partner is
+    /// gone into a plain `text` block. The model keeps the result content as
+    /// context, but no dangling `tool_result` reaches the provider. Used by
+    /// both the pre-send repair (`repair_orphaned_tool_results`) and the
+    /// autocompact fold site, which can orphan a result by summarizing its
+    /// `tool_use` away.
+    fn neutralize_orphaned_tool_result(block: ContentBlock) -> ContentBlock {
+        match block {
+            ContentBlock::ToolResult { content, .. } => ContentBlock::Text {
+                text: format!("[tool result (call elided during compaction)]\n{content}"),
+            },
+            other => other,
+        }
+    }
+
+    /// #285 — the reverse of `repair_all_orphaned_tool_uses`: a
+    /// `tool_result` whose `tool_use_id` matches NO `tool_use` anywhere in
+    /// the history. DeepSeek (and other strict providers) reject the whole
+    /// conversation array with HTTP 400 `missing field tool_call_id` when
+    /// such an orphan is sent, bricking the session.
+    ///
+    /// The orphan is produced at autocompact time: the live user turn that
+    /// triggered compaction can carry `tool_result` blocks whose matching
+    /// `tool_use` lived in an assistant message the autocompact fold just
+    /// summarized into prose (engine.rs `run_compaction`). After the fold the
+    /// result is dangling, and the forward-direction repair — which only
+    /// scans assistant `tool_use` blocks — never sees it.
+    ///
+    /// This builds the set of every `tool_use` id present anywhere in
+    /// `self.messages`, then demotes any `tool_result` whose id is not in
+    /// that set to a plain `text` block (`neutralize_orphaned_tool_result`),
+    /// preserving the content. If neutralizing empties a message of all
+    /// blocks it leaves a single text placeholder rather than an empty
+    /// message (strict providers reject empty content too). Idempotent — a
+    /// clean history is left untouched. Called from `run()` immediately
+    /// before every provider request, alongside the forward repair.
+    fn repair_orphaned_tool_results(&mut self) {
+        use std::collections::HashSet;
+        let live_ids: HashSet<String> = self
+            .messages
+            .iter()
+            .flat_map(|m| &m.content)
+            .filter_map(|b| match b {
+                ContentBlock::ToolUse { id, .. } => Some(id.clone()),
+                _ => None,
+            })
+            .collect();
+        for msg in &mut self.messages {
+            let has_orphan = msg.content.iter().any(|b| {
+                matches!(b, ContentBlock::ToolResult { tool_use_id, .. }
+                    if !live_ids.contains(tool_use_id))
+            });
+            if !has_orphan {
+                continue;
+            }
+            let demoted: Vec<ContentBlock> = std::mem::take(&mut msg.content)
+                .into_iter()
+                .map(|b| match &b {
+                    ContentBlock::ToolResult { tool_use_id, .. }
+                        if !live_ids.contains(tool_use_id) =>
+                    {
+                        Self::neutralize_orphaned_tool_result(b)
+                    }
+                    _ => b,
+                })
+                .collect();
+            msg.content = if demoted.is_empty() {
+                vec![ContentBlock::Text {
+                    text: "[tool result elided during compaction]".to_string(),
+                }]
+            } else {
+                demoted
+            };
+        }
+    }
+
     /// AUDIT A1 / E-C1 / A2 — shared clean-termination path for the
     /// non-natural loop exits (turn cap, budget cap, context ceiling,
     /// host cancel).
@@ -3661,6 +3737,13 @@ impl AgentEngine {
             // reaper, partial-batch loss on cancel, system-message
             // injection between an assistant tool_use and its result.
             self.repair_all_orphaned_tool_uses();
+            // #285 — the reverse direction: a `tool_result` whose `tool_use`
+            // was summarized away by autocompact is orphaned and makes
+            // DeepSeek 400 the whole array. Run AFTER the forward repair so
+            // the synthetic results it just backfilled (which always have a
+            // matching tool_use) are untouched, and only true orphans are
+            // demoted to text.
+            self.repair_orphaned_tool_results();
 
             // Output-side optimization (Part A): attach fluff stop sequences
             // only when the route optimizes client-side. On router-optimized
@@ -5483,7 +5566,35 @@ impl AgentEngine {
                         .flat_map(|m| m.content)
                         .collect();
                     if let Some(turn) = live_user_turn {
-                        folded.extend(turn.content);
+                        // #285 (defense-in-depth) — the live turn that
+                        // triggered compaction may carry `tool_result`
+                        // blocks whose matching `tool_use` lived in the
+                        // prefix autocompact just summarized into prose. Any
+                        // such result is now orphaned. Demote it to text at
+                        // the fold so the malformed array never even forms;
+                        // the pre-send `repair_orphaned_tool_results` remains
+                        // the guarantee. `folded` here holds only summary
+                        // prose (no surviving `tool_use`), so every
+                        // `tool_result` in the live turn is an orphan.
+                        // Own the ids (not `&str` into `folded`) so the
+                        // `folded.push(..)` below isn't blocked by a live
+                        // immutable borrow (E0502).
+                        let surviving_ids: std::collections::HashSet<String> = folded
+                            .iter()
+                            .filter_map(|b| match b {
+                                ContentBlock::ToolUse { id, .. } => Some(id.to_string()),
+                                _ => None,
+                            })
+                            .collect();
+                        for block in turn.content {
+                            let keep = !matches!(&block, ContentBlock::ToolResult { tool_use_id, .. }
+                                if !surviving_ids.contains(tool_use_id.as_str()));
+                            if keep {
+                                folded.push(block);
+                            } else {
+                                folded.push(Self::neutralize_orphaned_tool_result(block));
+                            }
+                        }
                     }
                     // Token-opt compaction-floor: every message currently in
                     // `self.messages` is the prefix autocompact just summarized
@@ -8778,6 +8889,73 @@ mod compact_tests {
         assert_eq!(engine.messages.len(), after_first, "second pass no-op");
     }
 
+    // --- repair_orphaned_tool_results — #285 reverse-direction guard
+    //     against orphaned tool_result → DeepSeek 400.
+
+    #[test]
+    fn repair_results_demotes_orphan_to_text_preserving_content() {
+        // A tool_result whose tool_use_id matches no tool_use anywhere
+        // (the autocompact-summarized-away case): must become a text
+        // block that preserves the original content, and no orphaned
+        // tool_result may remain.
+        let mut engine = engine_with_history(vec![Message::new(
+            Role::User,
+            vec![ContentBlock::ToolResult {
+                tool_use_id: "t1".to_string(),
+                content: "the file said hello".to_string(),
+                is_error: false,
+            }],
+        )]);
+        engine.repair_orphaned_tool_results();
+
+        let live_ids: std::collections::HashSet<&str> = engine
+            .messages
+            .iter()
+            .flat_map(|m| &m.content)
+            .filter_map(|b| match b {
+                ContentBlock::ToolUse { id, .. } => Some(id.as_str()),
+                _ => None,
+            })
+            .collect();
+        // No tool_result with an unmatched id survives.
+        let dangling = engine.messages.iter().flat_map(|m| &m.content).any(|b| {
+            matches!(b, ContentBlock::ToolResult { tool_use_id, .. }
+                if !live_ids.contains(tool_use_id.as_str()))
+        });
+        assert!(!dangling, "orphaned tool_result must be neutralized");
+        // The content is preserved inside a text block.
+        let preserved = engine.messages.iter().flat_map(|m| &m.content).any(
+            |b| matches!(b, ContentBlock::Text { text } if text.contains("the file said hello")),
+        );
+        assert!(preserved, "tool_result content must be preserved as text");
+        // The message must not be left empty.
+        assert!(
+            engine.messages.iter().all(|m| !m.content.is_empty()),
+            "no message may be left with empty content"
+        );
+    }
+
+    #[test]
+    fn repair_results_keeps_matched_pair_and_is_idempotent() {
+        // A well-formed tool_use/tool_result pair must be left untouched,
+        // and a second pass must be a no-op.
+        let mut engine =
+            engine_with_history(vec![tool_use_msg("a", "Read"), tool_result_msg("a", "ok")]);
+        let before = format!("{:?}", engine.messages);
+        engine.repair_orphaned_tool_results();
+        assert_eq!(
+            format!("{:?}", engine.messages),
+            before,
+            "matched pair must be untouched (clean history is a no-op)"
+        );
+        engine.repair_orphaned_tool_results();
+        assert_eq!(
+            format!("{:?}", engine.messages),
+            before,
+            "second pass must also be a no-op (idempotent)"
+        );
+    }
+
     // -- Emergency check fires when at limit --
 
     #[tokio::test]
@@ -9202,6 +9380,94 @@ mod compact_tests {
                 engine.messages
             );
         }
+    }
+
+    #[tokio::test]
+    async fn autocompact_never_emits_orphaned_tool_result_285() {
+        // #285 regression — when the turn that triggers compaction is a
+        // tool-result turn, its matching tool_use lives in an earlier
+        // assistant message autocompact summarizes into prose. Pre-fix the
+        // folded buffer carried a dangling tool_result (id "t1") with no
+        // matching tool_use → DeepSeek rejected the whole array with HTTP
+        // 400 `missing field tool_call_id`. Post-fix the fold neutralizes
+        // it (and the pre-send `repair_orphaned_tool_results` is the
+        // belt-and-suspenders). Assert ZERO dangling tool_result remains.
+        let config = CompactConfig {
+            context_window: 200_000,
+            ..Default::default()
+        };
+        let mut state = CompactState::new();
+        state.last_input_tokens = 180_000;
+        state.last_real_input_tokens = 180_000;
+
+        let messages = vec![
+            Message::new(
+                Role::User,
+                vec![ContentBlock::Text {
+                    text: "read the config file".into(),
+                }],
+            ),
+            // Assistant tool_use — this gets summarized away by autocompact.
+            Message::new(
+                Role::Assistant,
+                vec![ContentBlock::ToolUse {
+                    id: "t1".into(),
+                    name: "Read".into(),
+                    input: json!({"path": "config.toml"}),
+                    extra: None,
+                }],
+            ),
+            // LIVE turn: the tool_result that triggers compaction. Its
+            // partner tool_use ("t1") is in the prefix above and will be
+            // collapsed into the summary, orphaning this result.
+            Message::new(
+                Role::User,
+                vec![ContentBlock::ToolResult {
+                    tool_use_id: "t1".into(),
+                    content: "port = 8080".into(),
+                    is_error: false,
+                }],
+            ),
+        ];
+
+        let mut engine = make_compact_engine(config, state, messages);
+        engine.provider = Arc::new(SummaryProvider);
+        engine.run_compaction().await.expect("autocompact succeeds");
+        // Run the same pre-send repairs the request-build path runs, so the
+        // assertion reproduces exactly what would reach the provider.
+        engine.repair_all_orphaned_tool_uses();
+        engine.repair_orphaned_tool_results();
+
+        let live_ids: std::collections::HashSet<&str> = engine
+            .messages
+            .iter()
+            .flat_map(|m| &m.content)
+            .filter_map(|b| match b {
+                ContentBlock::ToolUse { id, .. } => Some(id.as_str()),
+                _ => None,
+            })
+            .collect();
+        let dangling = engine.messages.iter().flat_map(|m| &m.content).any(|b| {
+            matches!(b, ContentBlock::ToolResult { tool_use_id, .. }
+                if !live_ids.contains(tool_use_id.as_str()))
+        });
+        assert!(
+            !dangling,
+            "no orphaned tool_result may survive compaction (the #285 \
+             DeepSeek 400); post-compact messages: {:?}",
+            engine.messages
+        );
+        // The result content must be preserved somewhere as context.
+        let preserved = engine
+            .messages
+            .iter()
+            .flat_map(|m| &m.content)
+            .any(|b| matches!(b, ContentBlock::Text { text } if text.contains("port = 8080")));
+        assert!(
+            preserved,
+            "the tool_result content must survive as text: {:?}",
+            engine.messages
+        );
     }
 
     #[tokio::test]
