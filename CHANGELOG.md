@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.12.8](https://github.com/FerroxLabs/wayland-core/compare/v0.12.7...v0.12.8) (2026-06-24)
+
+
+### Features
+
+* **providers:** add Sakana AI (Fugu) — OpenAI-compatible endpoint ([#82](https://github.com/FerroxLabs/wayland-core/issues/82)) ([a531f22](https://github.com/FerroxLabs/wayland-core/commit/a531f220d9ffbc089815b9dfb78478ff6affa4bd))
+
 ## [0.12.7](https://github.com/FerroxLabs/wayland-core/compare/v0.12.6...v0.12.7) (2026-06-23)
 
 
