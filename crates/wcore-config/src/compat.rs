@@ -447,7 +447,9 @@ impl ProviderCompat {
         // route — they leave this `None` (→ "client"). This is the single,
         // vendor-neutral place that classifies a router vs. a direct provider.
         let input_optimization = match provider_id {
-            "flux-router" | "openrouter" => Some("router".to_string()),
+            // Sakana/Fugu is a multi-agent orchestration layer that routes and
+            // optimizes upstream — same class as flux-router/openrouter.
+            "flux-router" | "openrouter" | "sakana" => Some("router".to_string()),
             _ => None,
         };
         Self {
@@ -562,6 +564,17 @@ impl ProviderCompat {
         Self {
             api_path: Some("/chat/completions".into()),
             ..Self::openai_compat_provider("flux-router")
+        }
+    }
+
+    /// Defaults for Sakana AI ("Fugu") — OpenAI-compat orchestration endpoint
+    /// at `https://api.sakana.ai/v1`. The base URL ends in `/v1`, so pin
+    /// `api_path` to avoid `/v1/v1`. Classified as a router (Fugu optimizes
+    /// upstream) via `openai_compat_provider("sakana")`.
+    pub fn sakana_defaults() -> Self {
+        Self {
+            api_path: Some("/chat/completions".into()),
+            ..Self::openai_compat_provider("sakana")
         }
     }
 
@@ -1314,6 +1327,7 @@ mod cache_breakpoint_tests {
             ProviderType::Cohere => ProviderCompat::cohere_defaults(),
             ProviderType::OpenAIChatGpt => ProviderCompat::chatgpt_defaults(),
             ProviderType::MiniMax => ProviderCompat::minimax_defaults(),
+            ProviderType::Sakana => ProviderCompat::sakana_defaults(),
         };
         assert_eq!(
             resolved.cache_message_breakpoints,

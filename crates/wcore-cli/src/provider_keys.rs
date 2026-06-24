@@ -39,12 +39,13 @@ pub enum Provider {
     Cerebras,
     Perplexity,
     Moonshot,
+    Sakana,
 }
 
 impl Provider {
     /// Every provider, in picker display order. Used to render the
     /// provider picker shown for ambiguous / unrecognized keys.
-    pub const ALL: [Provider; 13] = [
+    pub const ALL: [Provider; 14] = [
         Provider::Anthropic,
         Provider::OpenAi,
         Provider::OpenRouter,
@@ -58,6 +59,7 @@ impl Provider {
         Provider::Cerebras,
         Provider::Perplexity,
         Provider::Moonshot,
+        Provider::Sakana,
     ];
 
     /// Human-readable provider name. Shown on the detect line, the
@@ -77,6 +79,7 @@ impl Provider {
             Provider::Cerebras => "Cerebras",
             Provider::Perplexity => "Perplexity",
             Provider::Moonshot => "Moonshot",
+            Provider::Sakana => "Sakana",
         }
     }
 
@@ -98,6 +101,7 @@ impl Provider {
             Provider::Cerebras => "cerebras",
             Provider::Perplexity => "perplexity",
             Provider::Moonshot => "moonshot",
+            Provider::Sakana => "sakana",
         }
     }
 
@@ -169,6 +173,9 @@ pub fn detect_provider(key: &str) -> Detected {
         Detected::One(Provider::Perplexity)
     } else if key.starts_with("csk-") {
         Detected::One(Provider::Cerebras)
+    } else if key.starts_with("fish_") {
+        // Sakana AI keys are prefixed `fish_` (verified live).
+        Detected::One(Provider::Sakana)
     } else if is_deepseek_key(key) {
         // DeepSeek issues `sk-` + exactly 32 hex chars — a shape precise
         // enough to detect without guessing.
@@ -196,7 +203,7 @@ pub struct EnvKey {
 /// The environment variable → provider map onboarding scans on entry.
 /// Two variables map to Gemini (`GEMINI_API_KEY` and Google's older
 /// `GOOGLE_API_KEY`); the first one set wins.
-pub const ENV_VAR_MAP: [(&str, Provider); 13] = [
+pub const ENV_VAR_MAP: [(&str, Provider); 14] = [
     ("ANTHROPIC_API_KEY", Provider::Anthropic),
     ("OPENAI_API_KEY", Provider::OpenAi),
     ("OPENROUTER_API_KEY", Provider::OpenRouter),
@@ -210,6 +217,7 @@ pub const ENV_VAR_MAP: [(&str, Provider); 13] = [
     ("TOGETHER_API_KEY", Provider::Together),
     ("CEREBRAS_API_KEY", Provider::Cerebras),
     ("PERPLEXITY_API_KEY", Provider::Perplexity),
+    ("SAKANA_API_KEY", Provider::Sakana),
 ];
 
 /// Scan the process environment for known provider API-key variables.
@@ -315,6 +323,10 @@ pub fn validation_endpoint(provider: Provider, key: &str) -> (String, AuthStyle)
         ),
         Provider::Moonshot => (
             "https://api.moonshot.ai/v1/models".to_string(),
+            AuthStyle::Bearer,
+        ),
+        Provider::Sakana => (
+            "https://api.sakana.ai/v1/models".to_string(),
             AuthStyle::Bearer,
         ),
     }
@@ -460,6 +472,11 @@ mod tests {
         assert_eq!(
             detect_provider("csk-abcdef"),
             Detected::One(Provider::Cerebras)
+        );
+        // Sakana AI keys are prefixed `fish_`.
+        assert_eq!(
+            detect_provider("fish_f2570dfe4dac"),
+            Detected::One(Provider::Sakana)
         );
     }
 

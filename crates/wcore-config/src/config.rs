@@ -980,6 +980,12 @@ pub enum ProviderType {
     /// struct, distinguished only by base URL, `provider_type` cost label, and
     /// the offline model-alias fallback key. Default model: `MiniMax-M2`.
     MiniMax,
+    /// Sakana AI ("Fugu") — OpenAI-compatible chat-completions endpoint at
+    /// `https://api.sakana.ai/v1`. Bearer auth (keys are prefixed `fish_`).
+    /// Fugu is a multi-agent orchestration/routing layer; models: `fugu`
+    /// (default), `fugu-ultra`, `fugu-ultra-20260615`. Thin newtype over
+    /// `OpenAIProvider`.
+    Sakana,
 }
 
 impl ProviderType {
@@ -1009,6 +1015,7 @@ impl ProviderType {
                 // its compat preset is built on `openai_compat_provider`, so it
                 // belongs to the OpenAI-compatible family for plumbing purposes.
                 | ProviderType::OpenAIChatGpt
+                | ProviderType::Sakana
         )
     }
 }
@@ -1071,6 +1078,9 @@ pub(crate) fn default_model_for(provider: ProviderType) -> &'static str {
         ProviderType::Moonshot | ProviderType::Qwen => "",
         // F-025: Mistral + Cohere have heterogeneous model catalogs; user sets model.
         ProviderType::Mistral | ProviderType::Cohere => "",
+        // Sakana has a clear headline default — `fugu` routes across providers,
+        // so `--provider sakana` with no model just works.
+        ProviderType::Sakana => "fugu",
         // ChatGPT Codex default: gpt-5.5 (the headline Codex model). See
         // `wcore_types::model_aliases` codex consts for the full catalog.
         ProviderType::OpenAIChatGpt => "gpt-5.5",
@@ -1139,6 +1149,7 @@ pub fn provider_type_slug(provider: ProviderType) -> &'static str {
         ProviderType::Cerebras => "cerebras",
         ProviderType::OpenRouter => "openrouter",
         ProviderType::FluxRouter => "flux-router",
+        ProviderType::Sakana => "sakana",
         ProviderType::Deepseek => "deepseek",
         ProviderType::Xai => "xai",
         ProviderType::Groq => "groq",
@@ -1311,7 +1322,9 @@ pub fn default_base_url_for(provider: ProviderType) -> String {
         | ProviderType::Perplexity
         | ProviderType::Cerebras
         | ProviderType::OpenRouter
-        | ProviderType::FluxRouter => String::new(),
+        | ProviderType::FluxRouter
+        // Sakana's newtype falls back to SAKANA_DEFAULT_BASE_URL when empty.
+        | ProviderType::Sakana => String::new(),
         ProviderType::Deepseek | ProviderType::Xai | ProviderType::Groq => String::new(),
         ProviderType::Moonshot | ProviderType::Qwen => String::new(),
         // F-025: Mistral + Cohere fall back to their own default base URLs.
@@ -1347,6 +1360,7 @@ pub fn compat_defaults_for(provider: ProviderType) -> ProviderCompat {
         ProviderType::Cerebras => ProviderCompat::cerebras_defaults(),
         ProviderType::OpenRouter => ProviderCompat::openrouter_defaults(),
         ProviderType::FluxRouter => ProviderCompat::flux_router_defaults(),
+        ProviderType::Sakana => ProviderCompat::sakana_defaults(),
         ProviderType::Deepseek => ProviderCompat::deepseek_defaults(),
         ProviderType::Xai => ProviderCompat::xai_defaults(),
         ProviderType::Groq => ProviderCompat::groq_defaults(),
@@ -1700,6 +1714,9 @@ fn parse_builtin_provider(s: &str) -> Option<ProviderType> {
         // v0.8.1 U10a: router-class OpenAI-compatible endpoints.
         "openrouter" => Some(ProviderType::OpenRouter),
         "flux-router" | "flux" => Some(ProviderType::FluxRouter),
+        // Sakana AI ("Fugu") — OpenAI-compatible. "fugu" is the natural
+        // model-brand alias users reach for.
+        "sakana" | "fugu" => Some(ProviderType::Sakana),
         // v0.8.1 U10b: native OpenAI-compatible providers.
         "deepseek" => Some(ProviderType::Deepseek),
         "xai" | "grok" => Some(ProviderType::Xai),
@@ -1734,7 +1751,7 @@ pub const BUILTIN_PROVIDER_NAMES: &str = "anthropic, openai, bedrock, vertex, ge
      azure-openai (alias: azure), together, fireworks, nvidia, perplexity, \
      cerebras, openrouter, flux-router (alias: flux), deepseek, xai (alias: grok), \
      groq, moonshot (alias: kimi), qwen (aliases: alibaba, dashscope), \
-     mistral, cohere, openai-chatgpt (alias: chatgpt)";
+     mistral, cohere, openai-chatgpt (alias: chatgpt), sakana (alias: fugu)";
 
 fn merge_provider_configs(base: ProviderConfig, overlay: ProviderConfig) -> ProviderConfig {
     ProviderConfig {
@@ -1989,6 +2006,11 @@ fn resolve_api_key(
                 return Ok(key);
             }
         }
+        ProviderType::Sakana => {
+            if let Ok(key) = std::env::var("SAKANA_API_KEY") {
+                return Ok(key);
+            }
+        }
     }
 
     Err(MissingApiKey.into())
@@ -2046,6 +2068,7 @@ pub fn credentials_store_key(provider: ProviderType) -> Option<String> {
         ProviderType::Mistral => "providers.mistral.api_key",
         ProviderType::Cohere => "providers.cohere.api_key",
         ProviderType::MiniMax => "providers.minimax.api_key",
+        ProviderType::Sakana => "providers.sakana.api_key",
     };
     Some(key.to_string())
 }

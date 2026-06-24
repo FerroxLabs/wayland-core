@@ -240,6 +240,9 @@ pub fn expand_short_form(model: &str) -> Option<&'static str> {
         ("minimax", "m2") => Some(MINIMAX_M2),
         ("minimax", "m2.5") => Some(MINIMAX_M2_5),
         ("minimax", "m3") => Some(MINIMAX_M3),
+        // Sakana ("Fugu") carries NO hardcoded catalog — it relies on the live
+        // `/v1/models` fetch (like flux-router/groq), so there is nothing here
+        // to drift out of date.
         _ => None,
     }
 }
@@ -270,6 +273,12 @@ pub const MINIMAX_M3: &str = "MiniMax-M3";
 pub fn minimax_m3() -> String {
     from_env_or(MINIMAX_M3, "E2E_MINIMAX_M3")
 }
+
+// Sakana ("Fugu") deliberately has NO model-id constants or catalog here: its
+// `/model` picker is driven by the live `https://api.sakana.ai/v1/models`
+// fetch (`OpenAIProvider::list_models`), the same live-source pattern Hermes /
+// OpenClaw / the desktop app use (models.dev) — never a hand-typed list. The
+// per-provider default (`fugu`) lives in `wcore_config::default_model_for`.
 
 /// The selectable models for a provider, as `(short_form, resolved_id)`
 /// pairs in display order (most-capable first). The single source of truth
@@ -343,6 +352,8 @@ pub fn models_for_provider(provider: &str) -> &'static [(&'static str, &'static 
             ("minimax:m2.5", MINIMAX_M2_5),
             ("minimax:m2", MINIMAX_M2),
         ],
+        // NOTE: Sakana is intentionally absent — live `/v1/models` is its
+        // catalog (no hand-typed fallback to drift). Same for flux-router/groq.
         _ => &[],
     }
 }

@@ -22,6 +22,7 @@ pub mod groq;
 pub mod http_client;
 pub mod key_rotation;
 pub mod key_validation;
+pub mod sakana;
 // litellm, lmstudio, vllm: deleted per DECISIONS.md §D3 (Sean, 2026-05-23).
 // These were framework-shaped local-inference adapters shipped as code but
 // never wired to ProviderType arms. Revivable as plugins if needed.
@@ -406,6 +407,10 @@ pub fn create_native_provider(config: &Config) -> Arc<dyn LlmProvider> {
         ProviderType::FluxRouter => Arc::new(new_openai_compat(&config.base_url, |b| match b {
             Some(url) => flux_router::FluxRouterProvider::new(&config.api_key, url, compat, debug),
             None => flux_router::FluxRouterProvider::with_defaults(&config.api_key, compat, debug),
+        })),
+        ProviderType::Sakana => Arc::new(new_openai_compat(&config.base_url, |b| match b {
+            Some(url) => sakana::SakanaProvider::new(&config.api_key, url, compat, debug),
+            None => sakana::SakanaProvider::with_defaults(&config.api_key, compat, debug),
         })),
         // v0.8.1 U10b: 3 more OpenAI-compatible providers — DeepSeek, xAI, Groq.
         ProviderType::Deepseek => Arc::new(new_openai_compat(&config.base_url, |b| match b {
