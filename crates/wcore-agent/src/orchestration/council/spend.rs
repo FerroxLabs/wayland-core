@@ -53,6 +53,36 @@ pub struct ProviderSpend {
     pub priced: bool,
 }
 
+/// A conservative judge-inclusive pre-flight cost estimate for an auto council.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PreflightEstimate {
+    /// Worst-case microcents: every proposer at its turn×token output ceiling
+    /// plus the aggregator priced over ALL proposer outputs (the judge is the
+    /// dominant, N-scaled cost). Unpriceable members contribute 0 here — read
+    /// `fully_priced` before trusting this against a cap.
+    pub microcents: u64,
+    /// False if any proposer or the aggregator was unpriceable. A not-fully-
+    /// priced estimate UNDERcounts and must never be certified under a budget
+    /// cap — the auto Assembler excludes unpriceable members up front so a real
+    /// auto roster is always fully priced.
+    pub fully_priced: bool,
+}
+
+impl PreflightEstimate {
+    /// The estimate in USD.
+    pub fn usd(&self) -> f64 {
+        self.microcents as f64 / MICROCENTS_PER_USD
+    }
+
+    /// The microcents estimate ONLY when every member was priced. `None` when any
+    /// member was unpriceable — the estimate then undercounts, so a caller must
+    /// NOT certify it under a cap. Use this (not the raw `microcents`) to enforce
+    /// a budget ceiling so an undercount can never silently pass.
+    pub fn certified_microcents(&self) -> Option<u64> {
+        self.fully_priced.then_some(self.microcents)
+    }
+}
+
 /// Total + per-provider spend for a council run.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct CouncilSpend {
@@ -126,7 +156,7 @@ impl CouncilSpend {
         max_turns: usize,
         max_tokens: u32,
     ) -> u64 {
-        let out_worst = (max_turns.max(1) as u64) * (max_tokens as u64);
+        let out_worst = (max_turns.max(1) as u64).saturating_mul(max_tokens as u64);
         let in_worst = max_tokens as u64;
         members
             .iter()
@@ -140,6 +170,60 @@ impl CouncilSpend {
                     .unwrap_or(0)
             })
             .sum()
+    }
+
+    /// Judge-inclusive conservative pre-flight estimate for an AUTO council.
+    ///
+    /// Unlike the manual `estimate_worst_case_microcents` (proposers only, no
+    /// judge, non-flux pricing), this counts the aggregator — the dominant,
+    /// N-scaled cost — and prices every member through the flux-aware resolved
+    /// path × `markup`, so flux-pinned members are counted instead of silently $0.
+    ///
+    /// Each proposer is bounded at `max_turns × max_tokens` output + `max_tokens`
+    /// input. The aggregator reads EVERY proposal plus the task, so its input is
+    /// `(proposer_count × proposer_output_ceiling) + max_tokens` and its output is
+    /// `max_tokens`. An unpriceable member sets `fully_priced = false` (it never
+    /// counts as $0), so the caller never certifies an undercount under a cap.
+    pub fn estimate_preflight_microcents(
+        catalog: &PricingCatalog,
+        proposers: &[(&str, Option<&str>)],
+        aggregator: Option<(&str, Option<&str>)>,
+        max_turns: usize,
+        max_tokens: u32,
+        markup: f64,
+    ) -> PreflightEstimate {
+        let out_worst = (max_turns.max(1) as u64).saturating_mul(max_tokens as u64);
+        let in_worst = max_tokens as u64;
+        let mut microcents = 0u64;
+        let mut fully_priced = true;
+
+        for (provider, model) in proposers {
+            match model.and_then(|m| {
+                catalog.estimate_cost_microcents_resolved(provider, m, in_worst, out_worst, markup)
+            }) {
+                Some(c) => microcents = microcents.saturating_add(c),
+                None => fully_priced = false,
+            }
+        }
+
+        if let Some((provider, model)) = aggregator {
+            // The aggregator's input is every proposal (≈ Σ proposer outputs)
+            // plus the task prompt; its output is one synthesized answer.
+            let judge_in = (proposers.len() as u64)
+                .saturating_mul(out_worst)
+                .saturating_add(in_worst);
+            match model.and_then(|m| {
+                catalog.estimate_cost_microcents_resolved(provider, m, judge_in, in_worst, markup)
+            }) {
+                Some(c) => microcents = microcents.saturating_add(c),
+                None => fully_priced = false,
+            }
+        }
+
+        PreflightEstimate {
+            microcents,
+            fully_priced,
+        }
     }
 }
 
@@ -229,6 +313,89 @@ mod tests {
             CouncilSpend::estimate_worst_case_microcents(&members, 4, 4096),
             0
         );
+    }
+
+    #[test]
+    fn preflight_includes_judge_and_scales_with_proposer_count() {
+        let cat = PricingCatalog::load_default().unwrap();
+        let agg = Some(("anthropic", Some("claude-opus-4-7")));
+
+        let p3: Vec<(&str, Option<&str>)> = vec![("deepseek", Some("deepseek-v4-pro")); 3];
+        let pre3 = CouncilSpend::estimate_preflight_microcents(&cat, &p3, agg, 4, 4096, 1.0);
+        assert!(pre3.fully_priced);
+
+        // Proposer-only worst case (no judge) — the judge must add cost on top.
+        let prop_only = CouncilSpend::estimate_worst_case_microcents(&p3, 4, 4096);
+        assert!(
+            pre3.microcents > prop_only,
+            "judge cost must be included (pre {} vs proposer-only {})",
+            pre3.microcents,
+            prop_only
+        );
+
+        // 5 proposers: the judge reads more, so going 3→5 grows by MORE than two
+        // proposers' own cost — proving the judge input scales with N.
+        let p5: Vec<(&str, Option<&str>)> = vec![("deepseek", Some("deepseek-v4-pro")); 5];
+        let pre5 = CouncilSpend::estimate_preflight_microcents(&cat, &p5, agg, 4, 4096, 1.0);
+        let per_proposer = prop_only / 3;
+        assert!(
+            pre5.microcents - pre3.microcents > 2 * per_proposer,
+            "judge input must scale with proposer count beyond proposer cost alone"
+        );
+    }
+
+    #[test]
+    fn preflight_flags_unpriceable_member_never_zero() {
+        let cat = PricingCatalog::load_default().unwrap();
+        // An unknown model → not fully priced (must not pass a cap silently).
+        let members: Vec<(&str, Option<&str>)> = vec![("openai", Some("made-up-model"))];
+        let pre = CouncilSpend::estimate_preflight_microcents(&cat, &members, None, 4, 4096, 1.0);
+        assert!(
+            !pre.fully_priced,
+            "an unpriceable member must flag the estimate"
+        );
+        // A flux-pinned member WITH a native row is counted (judge-inclusive
+        // pricing sees flux-pinned, unlike the manual worst-case estimate).
+        let flux: Vec<(&str, Option<&str>)> = vec![("flux-router", Some("flux-pinned-gpt-5")); 2];
+        let pre_flux = CouncilSpend::estimate_preflight_microcents(
+            &cat,
+            &flux,
+            Some(("flux-router", Some("flux-pinned-gpt-5"))),
+            4,
+            4096,
+            1.0,
+        );
+        assert!(pre_flux.fully_priced && pre_flux.microcents > 0);
+    }
+
+    #[test]
+    fn certified_microcents_only_when_fully_priced() {
+        let cat = PricingCatalog::load_default().unwrap();
+        // Fully priced → certified value present and equal to microcents.
+        let priced: Vec<(&str, Option<&str>)> = vec![("deepseek", Some("deepseek-v4-pro")); 2];
+        let pre = CouncilSpend::estimate_preflight_microcents(&cat, &priced, None, 4, 4096, 1.0);
+        assert_eq!(pre.certified_microcents(), Some(pre.microcents));
+        // Any unpriceable member → no certified value (cannot certify a cap).
+        let mixed: Vec<(&str, Option<&str>)> = vec![
+            ("deepseek", Some("deepseek-v4-pro")),
+            ("openai", Some("made-up-model")),
+        ];
+        let pre2 = CouncilSpend::estimate_preflight_microcents(&cat, &mixed, None, 4, 4096, 1.0);
+        assert!(pre2.certified_microcents().is_none());
+    }
+
+    #[test]
+    fn manual_worst_case_is_unchanged_and_judge_exclusive() {
+        // Regression lock: the MANUAL pre-flight estimate prices proposers only
+        // (no judge) via the non-flux path, byte-identical to before Stage 3.
+        let cat = PricingCatalog::load_default().unwrap();
+        let members: Vec<(&str, Option<&str>)> = vec![("deepseek", Some("deepseek-v4-pro")); 3];
+        let manual = CouncilSpend::estimate_worst_case_microcents(&members, 4, 4096);
+        // Equals the sum of three priced proposers, no judge term.
+        let one = cat
+            .estimate_cost_microcents("deepseek", "deepseek-v4-pro", 4096, 4 * 4096)
+            .unwrap();
+        assert_eq!(manual, one * 3);
     }
 
     #[test]
