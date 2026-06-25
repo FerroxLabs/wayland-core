@@ -457,6 +457,12 @@ enum TopCmd {
     Crucible {
         /// The task for the council to work.
         task: String,
+        /// Gate the council: a cheap classifier decides whether the task
+        /// warrants convening (high-stakes / complex) or can be answered with a
+        /// single direct call (trivial). Without this flag the council always
+        /// convenes.
+        #[arg(long)]
+        auto: bool,
     },
     /// v0.7.0 Task 1.C.1: print resolved project context from WAYLAND.md /
     /// AGENTS.md / .wayland/context.md / CLAUDE.md walking up from cwd.
@@ -947,13 +953,15 @@ async fn run() -> anyhow::Result<ExitCode> {
                     Ok(ExitCode::FAILURE)
                 }
             },
-            TopCmd::Crucible { task } => match wcore_cli::crucible::run_crucible(&task).await {
-                Ok(()) => Ok(ExitCode::SUCCESS),
-                Err(e) => {
-                    eprintln!("wayland-core crucible: {e:#}");
-                    Ok(ExitCode::FAILURE)
+            TopCmd::Crucible { task, auto } => {
+                match wcore_cli::crucible::run_crucible(&task, auto).await {
+                    Ok(()) => Ok(ExitCode::SUCCESS),
+                    Err(e) => {
+                        eprintln!("wayland-core crucible: {e:#}");
+                        Ok(ExitCode::FAILURE)
+                    }
                 }
-            },
+            }
             // methodology #27: production caller for project_context::scan
             // (v0.7.0 Task 1.C.1).
             TopCmd::ProjectContext => {

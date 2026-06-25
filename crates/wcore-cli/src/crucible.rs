@@ -10,10 +10,15 @@
 use std::sync::Arc;
 
 use wcore_agent::orchestration::council::{
-    CouncilOutcome, CouncilProviderResolver, run_council, validate_and_build,
+    CouncilDecision, CouncilOutcome, CouncilProviderResolver, GateConfig, Roster, classify_task,
+    run_council, validate_and_build,
 };
-use wcore_agent::spawner::AgentSpawner;
+use wcore_agent::spawner::{AgentSpawner, SubAgentConfig};
 use wcore_config::config::{CliArgs, Config, load_merged_config_file};
+
+/// Per-proposer output-token budget for the gated direct path (mirrors the
+/// council executor's per-proposer cap).
+const DIRECT_MAX_TOKENS: u32 = 4096;
 
 /// The pricing catalog reports microcents; 1 USD = 100¢ = 100_000_000 µ¢.
 const MICROCENTS_PER_USD: f64 = 100_000_000.0;
@@ -64,8 +69,10 @@ pub fn render_provenance(outcome: &CouncilOutcome) -> String {
     out
 }
 
-/// Run the council over `task`, printing the fused answer to stdout.
-pub async fn run_crucible(task: &str) -> anyhow::Result<()> {
+/// Run the council over `task`, printing the fused answer to stdout. When
+/// `auto` is set, a cheap gate first decides whether the task warrants a council
+/// at all — a trivial ask is answered with a single direct call instead.
+pub async fn run_crucible(task: &str, auto: bool) -> anyhow::Result<()> {
     // The `[crucible]` + `[providers]` blocks live on the on-disk ConfigFile,
     // which `Config::resolve` consumes — load the merged file directly.
     let cf = load_merged_config_file(None)?;
@@ -106,6 +113,15 @@ pub async fn run_crucible(task: &str) -> anyhow::Result<()> {
     let spawner =
         AgentSpawner::new(provider, base.clone()).with_provider_resolver(Arc::new(resolver));
 
+    // Council gate (`--auto`): a cheap, deterministic classifier decides whether
+    // this task warrants the council's N× spend. A trivial ask is answered with
+    // a single direct call on the first proposer; only a high-stakes / complex
+    // task convenes the full council. Without `--auto` the council always runs.
+    if auto && let CouncilDecision::Direct { reason } = classify_task(task, &GateConfig::default())
+    {
+        return run_direct(task, &roster, &spawner, &reason).await;
+    }
+
     eprintln!(
         "crucible: convening {} proposer(s){}",
         roster.proposers.len(),
@@ -124,6 +140,43 @@ pub async fn run_crucible(task: &str) -> anyhow::Result<()> {
     eprint!("{}", render_provenance(&outcome));
 
     println!("{}", outcome.final_text);
+    Ok(())
+}
+
+/// The gated direct path: answer with a single call on the first roster member
+/// instead of convening the council. Used when `--auto` classifies the task as
+/// not worth the council premium.
+async fn run_direct(
+    task: &str,
+    roster: &Roster,
+    spawner: &AgentSpawner,
+    reason: &str,
+) -> anyhow::Result<()> {
+    // `validate_and_build` guarantees a non-empty roster.
+    let first = roster
+        .proposers
+        .first()
+        .expect("validated roster is non-empty");
+    eprintln!(
+        "crucible: direct mode ({reason}) — answering with '{}' instead of a council",
+        first.spec
+    );
+
+    let result = spawner
+        .spawn_one(SubAgentConfig {
+            name: first.spec.clone(),
+            prompt: task.to_string(),
+            max_turns: roster.proposer_max_turns,
+            max_tokens: DIRECT_MAX_TOKENS,
+            system_prompt: None,
+            provider: Some(first.spec.clone()),
+            model: first.model.clone(),
+        })
+        .await;
+    if result.is_error {
+        anyhow::bail!("direct call failed: {}", result.text);
+    }
+    println!("{}", result.text);
     Ok(())
 }
 

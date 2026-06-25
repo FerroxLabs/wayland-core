@@ -11,6 +11,7 @@
 //! sit above the leaf types crate.
 
 pub mod aggregator;
+pub mod gate;
 pub mod proposal;
 pub mod resolver;
 pub mod roster;
@@ -18,6 +19,7 @@ pub mod run;
 pub mod spend;
 
 pub use aggregator::{Aggregator, LlmSynthesisAggregator};
+pub use gate::{CouncilDecision, GateConfig, classify_task};
 pub use proposal::{AggregateResult, Proposal};
 pub use resolver::{CouncilProviderResolver, ProviderResolver, ResolveError};
 pub use roster::{CrucibleConfigError, ProposerSpec, Roster, validate_and_build};
