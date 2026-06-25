@@ -154,6 +154,7 @@ fn roster(
         min_proposers: min,
         proposer_max_turns: max_turns,
         proposer_deadline_s: 90,
+        global_deadline_s: 25,
         max_cost_usd,
     }
 }

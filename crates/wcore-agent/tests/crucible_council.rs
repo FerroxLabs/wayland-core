@@ -8,6 +8,7 @@ mod common;
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use tokio::sync::mpsc;
@@ -29,6 +30,21 @@ struct ErrorProvider;
 impl LlmProvider for ErrorProvider {
     async fn stream(&self, _r: &LlmRequest) -> Result<mpsc::Receiver<LlmEvent>, ProviderError> {
         Err(ProviderError::Connection("proposer boom".into()))
+    }
+}
+
+/// A provider whose `stream` sleeps before erroring — models a hung/slow
+/// proposer so the tail-latency cut (per-proposer deadline + global
+/// soft-deadline) can be exercised with a real timer.
+struct SlowProvider {
+    sleep_ms: u64,
+}
+
+#[async_trait]
+impl LlmProvider for SlowProvider {
+    async fn stream(&self, _r: &LlmRequest) -> Result<mpsc::Receiver<LlmEvent>, ProviderError> {
+        tokio::time::sleep(Duration::from_millis(self.sleep_ms)).await;
+        Err(ProviderError::Connection("slow proposer".into()))
     }
 }
 
@@ -84,6 +100,26 @@ fn roster(proposers: &[&str], aggregator: Option<&str>, min: usize) -> Roster {
         min_proposers: min,
         proposer_max_turns: 1,
         proposer_deadline_s: 90,
+        global_deadline_s: 25,
+        max_cost_usd: None,
+    }
+}
+
+/// Roster with explicit deadlines for the tail-latency tests.
+fn roster_with_deadlines(
+    proposers: &[&str],
+    aggregator: Option<&str>,
+    min: usize,
+    proposer_deadline_s: u64,
+    global_deadline_s: u64,
+) -> Roster {
+    Roster {
+        proposers: proposers.iter().map(|s| proposer(s)).collect(),
+        aggregator: aggregator.map(|s| s.to_string()),
+        min_proposers: min,
+        proposer_max_turns: 1,
+        proposer_deadline_s,
+        global_deadline_s,
         max_cost_usd: None,
     }
 }
@@ -168,6 +204,7 @@ async fn over_budget_roster_refused_before_spawn() {
         min_proposers: 1,
         proposer_max_turns: 4,
         proposer_deadline_s: 90,
+        global_deadline_s: 25,
         max_cost_usd: Some(0.0001), // 0.01¢ — far below Opus worst-case
     };
     let err = run_council("task", &roster, &spawner, &test_config())
@@ -294,6 +331,108 @@ async fn no_aggregator_returns_first_usable_proposal() {
     .expect("runs");
     assert_eq!(outcome.final_text, "FIRST");
     assert_eq!(outcome.chosen_from, vec!["openai"]);
+}
+
+#[tokio::test]
+async fn slow_proposer_hits_per_proposer_deadline() {
+    // A proposer that sleeps 10s with a 1s per-proposer deadline must NOT stall
+    // the council: the fast survivors form the outcome, the slow one is an
+    // errored proposal, and wall-clock is bounded by the deadline (~1s), proving
+    // the per-proposer timeout is enforced (without it the council waits ~10s).
+    let mut map: HashMap<String, Result<Arc<dyn LlmProvider>, ResolveError>> = HashMap::new();
+    map.insert(
+        "openai".into(),
+        Ok(Arc::new(MockLlmProvider::with_text_response("A"))),
+    );
+    map.insert(
+        "slow".into(),
+        Ok(Arc::new(SlowProvider { sleep_ms: 10_000 })),
+    );
+    map.insert(
+        "anthropic".into(),
+        Ok(Arc::new(MockLlmProvider::with_text_response("C"))),
+    );
+    map.insert(
+        "synth".into(),
+        Ok(Arc::new(MockLlmProvider::with_text_response("FUSED"))),
+    );
+    let spawner = spawner_with(map);
+
+    let start = Instant::now();
+    let outcome = run_council(
+        "task",
+        // global deadline (25s) >> per-proposer (1s): the per-proposer backstop
+        // is what cuts the slow member here.
+        &roster_with_deadlines(&["openai", "slow", "anthropic"], Some("synth"), 1, 1, 25),
+        &spawner,
+        &test_config(),
+    )
+    .await
+    .expect("quorum met by the fast survivors");
+    let elapsed = start.elapsed();
+
+    assert!(
+        elapsed < Duration::from_secs(5),
+        "council must not wait for the 10s proposer; took {elapsed:?}"
+    );
+    // Every member retains provenance, in roster order.
+    assert_eq!(outcome.proposals.len(), 3);
+    assert_eq!(outcome.proposals[0].provider, "openai");
+    assert_eq!(outcome.proposals[1].provider, "slow");
+    assert_eq!(outcome.proposals[2].provider, "anthropic");
+    // The slow member is an errored (timed-out) proposal, excluded from fusion.
+    assert!(outcome.proposals[1].is_error, "slow member must be errored");
+    assert!(!outcome.proposals[0].is_error);
+    assert!(!outcome.proposals[2].is_error);
+    assert_eq!(outcome.final_text, "FUSED");
+    let mut chosen: Vec<&str> = outcome.chosen_from.iter().map(|s| s.as_str()).collect();
+    chosen.sort();
+    assert_eq!(chosen, vec!["anthropic", "openai"]);
+}
+
+#[tokio::test]
+async fn global_soft_deadline_cancels_stragglers_after_quorum() {
+    // Quorum is met instantly by the fast proposer; the slow one (10s) still has
+    // a generous 25s per-proposer deadline, so ONLY the global soft-deadline (1s)
+    // can cut it. Proves: once quorum is met, stragglers are cancelled at the
+    // global deadline and still appear as errored proposals (no silent drop).
+    let mut map: HashMap<String, Result<Arc<dyn LlmProvider>, ResolveError>> = HashMap::new();
+    map.insert(
+        "openai".into(),
+        Ok(Arc::new(MockLlmProvider::with_text_response("FAST"))),
+    );
+    map.insert(
+        "slow".into(),
+        Ok(Arc::new(SlowProvider { sleep_ms: 10_000 })),
+    );
+    let spawner = spawner_with(map);
+
+    let start = Instant::now();
+    let outcome = run_council(
+        "task",
+        &roster_with_deadlines(&["openai", "slow"], None, 1, 25, 1),
+        &spawner,
+        &test_config(),
+    )
+    .await
+    .expect("quorum met by the fast proposer");
+    let elapsed = start.elapsed();
+
+    assert!(
+        elapsed < Duration::from_secs(5),
+        "global soft-deadline must cancel the straggler; took {elapsed:?}"
+    );
+    // Both members present (cancelled straggler retained for provenance).
+    assert_eq!(outcome.proposals.len(), 2);
+    assert_eq!(outcome.proposals[0].provider, "openai");
+    assert!(!outcome.proposals[0].is_error);
+    assert_eq!(outcome.proposals[1].provider, "slow");
+    assert!(
+        outcome.proposals[1].is_error,
+        "cancelled straggler must be errored, not dropped"
+    );
+    // No aggregator → fallback to first usable proposal.
+    assert_eq!(outcome.final_text, "FAST");
 }
 
 // ---- LlmSynthesisAggregator (real spawn) --------------------------------

@@ -32,7 +32,16 @@ pub struct Roster {
     pub aggregator: Option<String>,
     pub min_proposers: usize,
     pub proposer_max_turns: usize,
+    /// Per-proposer wall-clock deadline (seconds) — the hard backstop that cuts a
+    /// single hung proposer even before quorum is reached.
     pub proposer_deadline_s: u64,
+    /// Council-wide wall-clock soft-deadline (seconds), measured from council
+    /// start. Once `min_proposers` usable proposals are in, the run returns as
+    /// soon as this deadline has passed, cancelling still-running stragglers.
+    /// It binds only after quorum; before quorum each proposer is waited out to
+    /// `proposer_deadline_s`. Keep it below `proposer_deadline_s` (the hard
+    /// backstop) for the soft-deadline to have effect.
+    pub global_deadline_s: u64,
     /// Optional council-wide spend ceiling in USD (pre-flight cap).
     pub max_cost_usd: Option<f64>,
 }
@@ -127,6 +136,7 @@ pub fn validate_and_build(cfg: &CrucibleConfig) -> Result<Roster, CrucibleConfig
         min_proposers: cfg.min_proposers,
         proposer_max_turns: cfg.proposer_max_turns,
         proposer_deadline_s: cfg.proposer_deadline_s,
+        global_deadline_s: cfg.global_deadline_s,
         max_cost_usd: cfg.max_cost_usd,
     })
 }

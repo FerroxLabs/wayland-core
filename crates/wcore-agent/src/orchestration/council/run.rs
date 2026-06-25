@@ -14,10 +14,11 @@
 //! The proposers and the aggregator are all spawned read-only (no Bash / Write /
 //! Edit) — the council is a read-only-by-construction surface in Slice-1.
 
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
-use futures::future::join_all;
+use futures::stream::{FuturesUnordered, StreamExt};
 use wcore_config::config::Config;
+use wcore_types::message::TokenUsage;
 
 use super::aggregator::{Aggregator, LlmSynthesisAggregator};
 use super::proposal::Proposal;
@@ -116,34 +117,114 @@ pub async fn run_council(
     // 2. Spawn the survivors concurrently on their pinned providers, timing
     //    each. provider = the full spec so the resolver keys provider+model;
     //    model carries the resolved model so child_config + pricing line up.
-    let spawns = live.into_iter().map(|(p, model)| {
-        let cfg = SubAgentConfig {
-            name: p.spec.clone(),
-            prompt: task.to_string(),
-            max_turns: roster.proposer_max_turns,
-            max_tokens: DEFAULT_PROPOSER_MAX_TOKENS,
-            system_prompt: None,
-            provider: Some(p.spec.clone()),
-            model: model.clone(),
-        };
-        async move {
-            let start = Instant::now();
-            let result = spawner.spawn_one(cfg).await;
-            (p.provider.clone(), model, result, start.elapsed())
-        }
-    });
-    let results = join_all(spawns).await;
+    //
+    //    Tail-latency cut: each spawn is wrapped in a per-proposer hard deadline
+    //    (`proposer_deadline_s`), and the whole council is bounded by a global
+    //    wall-clock soft-deadline (`global_deadline_s`, measured from council
+    //    start): once QUORUM IS MET, the run returns as soon as that deadline
+    //    has passed, cancelling any still-running stragglers. Before quorum the
+    //    soft-deadline does not bite — each proposer is waited out to its
+    //    per-proposer hard deadline. A timed-out or cancelled member is retained
+    //    as an errored proposal (never silently dropped) so provenance and the
+    //    deterministic roster ordering are preserved.
+    let member_meta: Vec<(String, Option<String>)> = live
+        .iter()
+        .map(|(p, model)| (p.provider.clone(), model.clone()))
+        .collect();
+    let n = member_meta.len();
+    let proposer_deadline = Duration::from_secs(roster.proposer_deadline_s);
 
-    // 3. Build proposals with full provenance.
-    let proposals: Vec<Proposal> = results
+    let mut inflight: FuturesUnordered<_> = live
         .into_iter()
-        .map(|(provider, model, result, elapsed)| Proposal {
-            provider,
-            model,
-            text: result.text,
-            is_error: result.is_error,
-            usage: result.usage,
-            latency_ms: elapsed.as_millis() as u64,
+        .enumerate()
+        .map(|(i, (p, model))| {
+            let cfg = SubAgentConfig {
+                name: p.spec.clone(),
+                prompt: task.to_string(),
+                max_turns: roster.proposer_max_turns,
+                max_tokens: DEFAULT_PROPOSER_MAX_TOKENS,
+                system_prompt: None,
+                provider: Some(p.spec.clone()),
+                model: model.clone(),
+            };
+            let provider = p.provider.clone();
+            async move {
+                let start = Instant::now();
+                let result = tokio::time::timeout(proposer_deadline, spawner.spawn_one(cfg)).await;
+                (i, provider, model, result, start.elapsed())
+            }
+        })
+        .collect();
+
+    // Collect results as they complete, indexed by roster position so the final
+    // ordering is deterministic regardless of completion order.
+    let global = tokio::time::sleep(Duration::from_secs(roster.global_deadline_s));
+    tokio::pin!(global);
+    let mut slots: Vec<Option<Proposal>> = (0..n).map(|_| None).collect();
+    let mut usable_count = 0usize;
+
+    while slots.iter().any(|s| s.is_none()) {
+        // Only allow the global soft-deadline to cut the run once quorum is met;
+        // before quorum we wait out the per-proposer hard deadline instead.
+        let quorum_met = usable_count >= roster.min_proposers;
+        tokio::select! {
+            biased;
+            item = inflight.next() => {
+                match item {
+                    Some((i, provider, model, result, elapsed)) => {
+                        let proposal = match result {
+                            Ok(r) => Proposal {
+                                provider,
+                                model,
+                                text: r.text,
+                                is_error: r.is_error,
+                                usage: r.usage,
+                                latency_ms: elapsed.as_millis() as u64,
+                            },
+                            Err(_elapsed) => Proposal {
+                                provider,
+                                model,
+                                text: "proposer timed out (per-proposer deadline)".to_string(),
+                                is_error: true,
+                                usage: TokenUsage::default(),
+                                latency_ms: elapsed.as_millis() as u64,
+                            },
+                        };
+                        if proposal.is_usable() {
+                            usable_count += 1;
+                        }
+                        slots[i] = Some(proposal);
+                    }
+                    // All in-flight proposers have completed.
+                    None => break,
+                }
+            }
+            _ = &mut global, if quorum_met => {
+                // Quorum reached and the global soft-deadline elapsed → cancel
+                // the remaining stragglers (dropped when `inflight` goes away).
+                break;
+            }
+        }
+    }
+
+    // 3. Build proposals with full provenance. Any slot still empty is a
+    //    straggler cancelled by the global soft-deadline → an errored proposal.
+    let global_ms = roster.global_deadline_s.saturating_mul(1000);
+    let proposals: Vec<Proposal> = slots
+        .into_iter()
+        .enumerate()
+        .map(|(i, slot)| {
+            slot.unwrap_or_else(|| {
+                let (provider, model) = member_meta[i].clone();
+                Proposal {
+                    provider,
+                    model,
+                    text: "proposer cancelled after quorum (global soft-deadline)".to_string(),
+                    is_error: true,
+                    usage: TokenUsage::default(),
+                    latency_ms: global_ms,
+                }
+            })
         })
         .collect();
 
@@ -250,6 +331,7 @@ mod tests {
             min_proposers: 1,
             proposer_max_turns: 2,
             proposer_deadline_s: 90,
+            global_deadline_s: 25,
             max_cost_usd: None,
         }
     }

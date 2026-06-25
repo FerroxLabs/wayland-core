@@ -70,10 +70,12 @@ pub struct CrucibleConfig {
     /// `1.0` (default) prices flux-pinned models at their underlying native rate
     /// — a stopgap until Flux emits an authoritative cost (FerroxLabs/wayland#319).
     pub flux_markup: f64,
-    /// Global soft-deadline for the whole council, in seconds. Once `min_proposers`
-    /// usable proposals are in, stragglers get only until this deadline before they
-    /// are cancelled. This is the binding latency bound for the auto path;
-    /// `proposer_deadline_s` is the per-proposer hard backstop (kept larger).
+    /// Global wall-clock soft-deadline for the whole council, in seconds,
+    /// measured from council start. Once `min_proposers` usable proposals are in,
+    /// the run returns as soon as this deadline has passed, cancelling
+    /// still-running stragglers. It binds only after quorum; `proposer_deadline_s`
+    /// is the per-proposer hard backstop and is kept larger so the soft-deadline
+    /// is the binding latency bound once quorum is met.
     pub global_deadline_s: u64,
     /// Auto-path spend cap (USD) for a Low-stakes council.
     pub cap_low_usd: f64,
