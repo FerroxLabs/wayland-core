@@ -68,6 +68,11 @@ pub mod workflow;
 // unit-testable against a tempdir-backed `FileCronStore` without
 // touching the user's home dir.
 pub mod cron;
+
+// Crucible (Mixture-of-Providers): `wayland-core crucible "<task>"` runs the
+// cross-provider council — N pinned-provider proposers fused by a fenced,
+// read-only aggregator. Self-contained one-shot handler.
+pub mod crucible;
 // v0.8.1 U9: `wayland-core self-update` — pulls the latest signed
 // release artifact from GitHub Releases, verifies the .sig against the
 // pinned marketplace pubkey, and atomically swaps the running binary.

@@ -450,6 +450,14 @@ enum TopCmd {
         #[command(subcommand)]
         cmd: wcore_cli::workflow::WorkflowCmd,
     },
+    /// Crucible (Mixture-of-Providers): run the cross-provider council over a
+    /// task. N proposers (each pinned to its own provider from `[providers]`)
+    /// answer in parallel; a fenced, read-only aggregator fuses them. Requires
+    /// `[crucible] enabled = true` with a `proposers` roster in your config.
+    Crucible {
+        /// The task for the council to work.
+        task: String,
+    },
     /// v0.7.0 Task 1.C.1: print resolved project context from WAYLAND.md /
     /// AGENTS.md / .wayland/context.md / CLAUDE.md walking up from cwd.
     ProjectContext,
@@ -936,6 +944,13 @@ async fn run() -> anyhow::Result<ExitCode> {
                 Ok(()) => Ok(ExitCode::SUCCESS),
                 Err(e) => {
                     eprintln!("wayland-core workflow: {e:#}");
+                    Ok(ExitCode::FAILURE)
+                }
+            },
+            TopCmd::Crucible { task } => match wcore_cli::crucible::run_crucible(&task).await {
+                Ok(()) => Ok(ExitCode::SUCCESS),
+                Err(e) => {
+                    eprintln!("wayland-core crucible: {e:#}");
                     Ok(ExitCode::FAILURE)
                 }
             },

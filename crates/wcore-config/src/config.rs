@@ -2518,6 +2518,24 @@ fn project_config_path() -> PathBuf {
     }
 }
 
+/// Load + merge the global and project config files into a [`ConfigFile`]
+/// WITHOUT resolving them into a runtime [`Config`].
+///
+/// `Config::resolve` consumes the merged `ConfigFile` and drops the
+/// `ConfigFile`-only blocks (`[providers]`, `[crucible]`) once it has extracted
+/// the runtime fields. Consumers that need those blocks — e.g. the Crucible
+/// council, which keys per-provider credentials from `[providers]` — load the
+/// merged file directly here. `project_dir` defaults to the CWD's
+/// `.wayland-core.toml` when `None`.
+pub fn load_merged_config_file(project_dir: Option<&Path>) -> anyhow::Result<ConfigFile> {
+    let global = try_load_config_file(&global_config_path())?;
+    let project_path = project_dir
+        .map(|d| d.join(".wayland-core.toml"))
+        .unwrap_or_else(project_config_path);
+    let project = try_load_config_file(&project_path)?;
+    Ok(merge_config_files(global, project))
+}
+
 /// Read the configured profiles from the global `config.toml`, for the
 /// `/profile` listing. Returns `(name, provider, model)` sorted by name —
 /// `provider`/`model` are empty strings when the profile leaves them to
