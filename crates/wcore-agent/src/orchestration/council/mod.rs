@@ -19,7 +19,7 @@ pub mod run;
 pub mod spend;
 
 pub use aggregator::{Aggregator, LlmSynthesisAggregator};
-pub use gate::{CouncilDecision, GateConfig, classify_task};
+pub use gate::{CouncilDecision, GateConfig, Stakes, classify_task, member_count};
 pub use proposal::{AggregateResult, Proposal};
 pub use resolver::{CouncilProviderResolver, ProviderResolver, ResolveError};
 pub use roster::{CrucibleConfigError, ProposerSpec, Roster, validate_and_build};
