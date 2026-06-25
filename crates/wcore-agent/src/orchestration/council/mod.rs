@@ -11,6 +11,7 @@
 //! sit above the leaf types crate.
 
 pub mod aggregator;
+pub mod assembler;
 pub mod gate;
 pub mod proposal;
 pub mod resolver;
@@ -19,6 +20,7 @@ pub mod run;
 pub mod spend;
 
 pub use aggregator::{Aggregator, LlmSynthesisAggregator};
+pub use assembler::{AssemblyPlan, AssemblyPolicy, assemble};
 pub use gate::{CouncilDecision, GateConfig, Stakes, classify_task, member_count};
 pub use proposal::{AggregateResult, Proposal};
 pub use resolver::{CouncilProviderResolver, ProviderResolver, ResolveError, family};
