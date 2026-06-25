@@ -155,26 +155,39 @@ fn flux_vendor_to_catalog_provider(vendor: &str) -> Option<&'static str> {
         .map(|(_, p)| *p)
 }
 
+/// Extract the vendor token from a Flux pinned-tier spec — the family-grouping
+/// discriminator. Accepts an optional `flux-router:` prefix, requires the
+/// `flux-pinned-` prefix, and returns the first `-`-separated segment of the
+/// remainder (`claude`, `gpt`, `gemini`, `glm`, `kimi`, …).
+///
+/// Unlike [`flux_pinned_native`] this does NOT consult the pricing alias table,
+/// so it yields a token even for vendors with no catalog price (glm, kimi, …) —
+/// exactly what diversity grouping needs (each distinct vendor is its own
+/// family). Returns `None` for a non-flux-pinned spec or an empty remainder.
+pub fn flux_pinned_vendor(spec: &str) -> Option<String> {
+    let model = spec.strip_prefix("flux-router:").unwrap_or(spec);
+    let rest = model.strip_prefix("flux-pinned-")?;
+    let vendor = rest.split('-').next().filter(|v| !v.is_empty())?;
+    Some(vendor.to_string())
+}
+
 /// Derive the native `(catalog_provider, native_model)` for a Flux pinned-tier
 /// model spec so it can be priced against the catalog's underlying SKU.
 ///
 /// Accepts an optional `flux-router:` provider prefix, then REQUIRES the
-/// `flux-pinned-` model prefix (returns `None` otherwise). The first
-/// `-`-separated segment of the remainder is the vendor token, mapped to the
-/// catalog provider via [`flux_vendor_to_catalog_provider`]; the FULL remainder
-/// is the native model id, since catalog model ids carry the vendor prefix
-/// (`claude-opus-4-8`, `gpt-5`, `deepseek-v4-pro`, `gemini-3-1-pro`).
+/// `flux-pinned-` model prefix (returns `None` otherwise). The vendor token (via
+/// [`flux_pinned_vendor`]) is mapped to the catalog provider via
+/// [`flux_vendor_to_catalog_provider`]; the FULL remainder is the native model
+/// id, since catalog model ids carry the vendor prefix (`claude-opus-4-8`,
+/// `gpt-5`, `deepseek-v4-pro`, `gemini-3-1-pro`).
 ///
 /// Returns `None` for a non-flux-pinned spec, an empty remainder, or an unknown
 /// vendor token — it never guesses a model.
 pub fn flux_pinned_native(spec: &str) -> Option<(String, String)> {
     let model = spec.strip_prefix("flux-router:").unwrap_or(spec);
     let rest = model.strip_prefix("flux-pinned-")?;
-    let vendor = rest.split('-').next()?;
-    if vendor.is_empty() {
-        return None;
-    }
-    let provider = flux_vendor_to_catalog_provider(vendor)?;
+    let vendor = flux_pinned_vendor(spec)?;
+    let provider = flux_vendor_to_catalog_provider(&vendor)?;
     Some((provider.to_string(), rest.to_string()))
 }
 
@@ -334,6 +347,26 @@ output_per_mtok_usd = 15.0
         assert_eq!(g, ("gemini".to_string(), "gemini-3-1-pro".to_string()));
         let d = flux_pinned_native("flux-pinned-deepseek-v4-pro").unwrap();
         assert_eq!(d, ("deepseek".to_string(), "deepseek-v4-pro".to_string()));
+    }
+
+    #[test]
+    fn flux_pinned_vendor_extracts_token_even_for_unpriced_vendors() {
+        assert_eq!(
+            flux_pinned_vendor("flux-router:flux-pinned-claude-opus-4-8").as_deref(),
+            Some("claude")
+        );
+        // Unpriced vendors (no catalog row) still yield a token — family grouping
+        // needs this so a single-key Flux council groups by real vendor lineage.
+        assert_eq!(
+            flux_pinned_vendor("flux-pinned-glm-5-2").as_deref(),
+            Some("glm")
+        );
+        assert_eq!(
+            flux_pinned_vendor("flux-pinned-kimi-k2").as_deref(),
+            Some("kimi")
+        );
+        assert_eq!(flux_pinned_vendor("openai:gpt-5"), None);
+        assert_eq!(flux_pinned_vendor("flux-pinned-"), None);
     }
 
     #[test]

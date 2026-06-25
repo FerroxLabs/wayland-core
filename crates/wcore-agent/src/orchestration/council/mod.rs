@@ -21,7 +21,7 @@ pub mod spend;
 pub use aggregator::{Aggregator, LlmSynthesisAggregator};
 pub use gate::{CouncilDecision, GateConfig, Stakes, classify_task, member_count};
 pub use proposal::{AggregateResult, Proposal};
-pub use resolver::{CouncilProviderResolver, ProviderResolver, ResolveError};
+pub use resolver::{CouncilProviderResolver, ProviderResolver, ResolveError, family};
 pub use roster::{CrucibleConfigError, ProposerSpec, Roster, validate_and_build};
 pub use run::{CouncilError, CouncilOutcome, SkippedProposer, run_council};
 pub use spend::{CouncilSpend, PreflightEstimate, ProviderSpend, is_priceable};

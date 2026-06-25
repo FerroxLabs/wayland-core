@@ -34,7 +34,40 @@ use parking_lot::Mutex;
 use wcore_config::config::{
     Config, CouncilProviderError, ProviderConfig, resolve_council_provider,
 };
+use wcore_pricing::{flux_pinned_native, flux_pinned_vendor};
 use wcore_providers::{LlmProvider, create_provider};
+
+/// Derive a provider-family key for a spec at runtime — the discriminator the
+/// Assembler uses to maximize provider diversity in a council.
+///
+/// - A priceable Flux pinned-tier model maps to its CATALOG PROVIDER (so
+///   `flux-pinned-gpt-5` and `openai:gpt-5` share the family `openai` — the same
+///   underlying model never counts as two "diverse" picks).
+/// - An unpriced Flux vendor (no catalog row: glm, kimi, …) falls back to its
+///   vendor token, still a distinct family per vendor lineage.
+/// - A plain `provider` / `provider:model` spec → the provider token.
+/// - Anything else → the spec itself (a fail-open singleton family).
+///
+/// Runtime derivation, NOT a hardcoded provider enum (which would violate the
+/// No-Hardcoded-Provider-Quirks rule).
+pub fn family(spec: &str) -> String {
+    if let Some((provider, _model)) = flux_pinned_native(spec) {
+        return provider;
+    }
+    if let Some(vendor) = flux_pinned_vendor(spec) {
+        return vendor;
+    }
+    // Plain `provider` / `provider:model` → the provider token. A leading-colon
+    // spec (`:x`) would otherwise yield an empty token and collapse all such
+    // specs into one bogus family; degrade to the spec itself so it forms a
+    // fail-open singleton instead.
+    let token = spec.split(':').next().unwrap_or(spec);
+    if token.is_empty() {
+        spec.to_string()
+    } else {
+        token.to_string()
+    }
+}
 
 /// Errors raised while resolving a council provider spec.
 #[derive(Debug, thiserror::Error)]
@@ -111,6 +144,25 @@ impl CouncilProviderResolver {
         let provider = create_provider(&derived);
         cache.insert(spec.to_string(), provider.clone());
         Ok((provider, resolved_model))
+    }
+
+    /// Filter `candidates` (`provider` / `provider:model` specs) to those that
+    /// resolve to a keyed provider — dropping keyless (BYO-key) and unknown
+    /// specs. This is the auto Assembler's runnable candidate pool. Order-
+    /// preserving and deduplicated by the full spec string. Never logs a key.
+    ///
+    /// The pool is the set of `provider:model` specs (from `[crucible].proposers`
+    /// / `candidate_pool`), NOT the `[providers]` map keys: a Flux council shares
+    /// one provider (`flux-router`) across many models, so enumerating provider
+    /// keys would collapse to a single spec and destroy diversity.
+    pub fn resolvable_specs(&self, candidates: &[String]) -> Vec<String> {
+        let mut seen = std::collections::HashSet::new();
+        candidates
+            .iter()
+            .filter(|s| seen.insert((*s).clone()))
+            .filter(|s| self.resolve(s).is_ok())
+            .cloned()
+            .collect()
     }
 }
 
@@ -199,6 +251,50 @@ mod tests {
         let a = r.resolve("openai").unwrap().0;
         let b = r.resolve("openai").unwrap().0;
         assert!(Arc::ptr_eq(&a, &b));
+    }
+
+    #[test]
+    fn family_groups_by_vendor_and_is_cross_source_consistent() {
+        // Priced flux-pinned models map to their catalog provider.
+        assert_eq!(
+            family("flux-router:flux-pinned-claude-opus-4-8"),
+            "anthropic"
+        );
+        assert_eq!(family("flux-pinned-gpt-5"), "openai");
+        // Same underlying model via flux vs direct → SAME family (no false
+        // "diversity" from the same model on two sources).
+        assert_eq!(family("flux-pinned-gpt-5"), family("openai:gpt-5"));
+        // Unpriced flux vendors still get a distinct family from their token.
+        assert_eq!(family("flux-pinned-glm-5-2"), "glm");
+        assert_eq!(family("flux-pinned-kimi-k2"), "kimi");
+        assert_ne!(family("flux-pinned-glm-5-2"), family("flux-pinned-kimi-k2"));
+        // Plain specs use the provider token; unknown → fail-open singleton.
+        assert_eq!(family("anthropic"), "anthropic");
+        assert_eq!(family("totally-unknown:x"), "totally-unknown");
+        assert!(!family("totally-unknown:x").is_empty());
+        // A leading-colon spec degrades to a fail-open singleton, NOT a shared
+        // empty family that would mis-count diversity.
+        assert_eq!(family(":x"), ":x");
+    }
+
+    #[test]
+    fn resolvable_specs_keeps_keyed_drops_keyless_and_dedups() {
+        let r = CouncilProviderResolver::new(
+            Config::default(),
+            providers_with("openai", "sk-test", None),
+        );
+        let candidates = vec![
+            "openai".to_string(),
+            "openai".to_string(),       // duplicate → collapsed
+            "openai:gpt-5".to_string(), // distinct spec → kept (keyed via the map)
+            "cohere".to_string(),       // requires an inline key, none set → Keyless skip
+            "nope-xyz".to_string(),     // unknown → skip
+        ];
+        let runnable = r.resolvable_specs(&candidates);
+        assert_eq!(
+            runnable,
+            vec!["openai".to_string(), "openai:gpt-5".to_string()]
+        );
     }
 
     #[test]
