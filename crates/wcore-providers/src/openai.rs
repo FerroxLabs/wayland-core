@@ -14,6 +14,7 @@ use wcore_types::tool::{ToolDef, truncate_deferred_description};
 use crate::key_rotation::{KeyPool, split_keys};
 use crate::openai_compat;
 use crate::openai_responses;
+use crate::openai_tool_name::{decode_tool_name, encode_tool_name};
 use crate::retry::builder_send_with_retry;
 use crate::{
     LlmProvider, ModelInfo, ProviderError, alias_models, dump_request_body, dump_response_chunk,
@@ -304,7 +305,7 @@ impl OpenAIProvider {
                                     "id": id,
                                     "type": "function",
                                     "function": {
-                                        "name": name,
+                                        "name": encode_tool_name(name),
                                         "arguments": serde_json::to_string(input).unwrap_or_default()
                                     }
                                 });
@@ -393,7 +394,7 @@ impl OpenAIProvider {
                     json!({
                         "type": "function",
                         "function": {
-                            "name": t.name,
+                            "name": encode_tool_name(&t.name),
                             "description": format!(
                                 "(Deferred) {short_desc} — Use ToolSearch to load full schema before calling."
                             ),
@@ -407,7 +408,7 @@ impl OpenAIProvider {
                     json!({
                         "type": "function",
                         "function": {
-                            "name": t.name,
+                            "name": encode_tool_name(&t.name),
                             "description": t.description,
                             "parameters": normalize_tool_parameters(&t.input_schema)
                         }
@@ -1612,7 +1613,7 @@ fn parse_sse_chunk(data: &str, state: &mut StreamState) -> Vec<LlmEvent> {
                     };
                     events.push(LlmEvent::ToolUse {
                         id: tc.id,
-                        name: tc.name,
+                        name: decode_tool_name(&tc.name),
                         input,
                         extra: tc.extra,
                     });
@@ -3616,6 +3617,56 @@ mod tests {
         assert!(spawn_params["properties"].as_object().unwrap().is_empty());
         let spawn_desc = result[1]["function"]["description"].as_str().unwrap();
         assert!(spawn_desc.contains("ToolSearch"));
+    }
+
+    /// #297: WCore tool ids contain `:` / `::` / `.`, which OpenAI rejects with
+    /// `400 invalid_value` on `tools[N].function.name`. build_tools must emit
+    /// names matching `^[a-zA-Z0-9_-]+$`, and a clean snake_case name must be
+    /// left untouched (no blast radius for normal tools).
+    #[test]
+    fn build_tools_sanitizes_invalid_names_issue_297() {
+        let tools = vec![
+            ToolDef {
+                name: "Browser::execute".into(),
+                description: "b".into(),
+                input_schema: json!({"type": "object", "properties": {}}),
+                deferred: false,
+            },
+            ToolDef {
+                name: "ai.perplexity-perplexity-mcp".into(),
+                description: "p".into(),
+                input_schema: json!({"type": "object", "properties": {}}),
+                deferred: false,
+            },
+            ToolDef {
+                name: "get_weather".into(),
+                description: "w".into(),
+                input_schema: json!({"type": "object", "properties": {}}),
+                deferred: false,
+            },
+        ];
+        let result = OpenAIProvider::build_tools(&tools);
+        let wire_legal = |s: &str| {
+            !s.is_empty()
+                && s.bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+        };
+        for entry in &result {
+            let name = entry["function"]["name"].as_str().unwrap();
+            assert!(wire_legal(name), "emitted illegal wire name: {name}");
+        }
+        // Invalid names are wrapped; the clean snake_case one is verbatim.
+        assert_ne!(result[0]["function"]["name"], json!("Browser::execute"));
+        assert_eq!(result[2]["function"]["name"], json!("get_weather"));
+        // And they decode back to the canonical ids the engine dispatches on.
+        assert_eq!(
+            decode_tool_name(result[0]["function"]["name"].as_str().unwrap()),
+            "Browser::execute"
+        );
+        assert_eq!(
+            decode_tool_name(result[1]["function"]["name"].as_str().unwrap()),
+            "ai.perplexity-perplexity-mcp"
+        );
     }
 
     #[test]

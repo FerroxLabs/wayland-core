@@ -75,6 +75,7 @@
 
 use serde_json::{Value, json};
 
+use crate::openai_tool_name::{decode_tool_name, encode_tool_name};
 use wcore_config::compat::ProviderCompat;
 use wcore_types::llm::{LlmEvent, LlmRequest};
 use wcore_types::message::{ContentBlock, FinishReason, Message, Role, StopReason, TokenUsage};
@@ -233,7 +234,7 @@ fn push_assistant_items(input: &mut Vec<Value>, msg: &Message) {
             input.push(json!({
                 "type": "function_call",
                 "call_id": id,
-                "name": name,
+                "name": encode_tool_name(name),
                 "arguments": serde_json::to_string(args).unwrap_or_else(|_| "{}".to_string()),
             }));
         }
@@ -284,7 +285,7 @@ fn build_responses_tools(tools: &[ToolDef]) -> Vec<Value> {
                 let short_desc = truncate_deferred_description(&t.description);
                 json!({
                     "type": "function",
-                    "name": t.name,
+                    "name": encode_tool_name(&t.name),
                     "description": format!(
                         "(Deferred) {short_desc} — Use ToolSearch to load full schema before calling."
                     ),
@@ -293,7 +294,7 @@ fn build_responses_tools(tools: &[ToolDef]) -> Vec<Value> {
             } else {
                 json!({
                     "type": "function",
-                    "name": t.name,
+                    "name": encode_tool_name(&t.name),
                     "description": t.description,
                     "parameters": t.input_schema,
                 })
@@ -606,7 +607,7 @@ fn finalize_tool_call(item: &Value, state: &mut ResponsesStreamState) -> Option<
     state.saw_tool_call = true;
     Some(LlmEvent::ToolUse {
         id: call_id,
-        name,
+        name: decode_tool_name(&name),
         input,
         extra: None,
     })
