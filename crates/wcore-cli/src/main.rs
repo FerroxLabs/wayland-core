@@ -463,6 +463,24 @@ enum TopCmd {
         /// convenes.
         #[arg(long)]
         auto: bool,
+        /// Auto mode: pin the candidate pool to these specs (comma-separated).
+        #[arg(long, value_delimiter = ',')]
+        council: Vec<String>,
+        /// Auto mode: pin the aggregator to this spec.
+        #[arg(long)]
+        judge: Option<String>,
+        /// Auto mode: force a single direct answer.
+        #[arg(long)]
+        direct: bool,
+        /// Auto mode: force convening a council regardless of the gate.
+        #[arg(long)]
+        force_council: bool,
+        /// Auto mode: treat the task as High stakes (widest roster, top judge).
+        #[arg(long)]
+        deep: bool,
+        /// Auto mode: exclude these provider families (comma-separated).
+        #[arg(long, value_delimiter = ',')]
+        deny: Vec<String>,
     },
     /// v0.7.0 Task 1.C.1: print resolved project context from WAYLAND.md /
     /// AGENTS.md / .wayland/context.md / CLAUDE.md walking up from cwd.
@@ -953,8 +971,27 @@ async fn run() -> anyhow::Result<ExitCode> {
                     Ok(ExitCode::FAILURE)
                 }
             },
-            TopCmd::Crucible { task, auto } => {
-                match wcore_cli::crucible::run_crucible(&task, auto).await {
+            TopCmd::Crucible {
+                task,
+                auto,
+                council,
+                judge,
+                direct,
+                force_council,
+                deep,
+                deny,
+            } => {
+                let args = wcore_cli::crucible::CrucibleArgs {
+                    task,
+                    auto,
+                    council: (!council.is_empty()).then_some(council),
+                    judge,
+                    direct,
+                    force_council,
+                    deep,
+                    deny,
+                };
+                match wcore_cli::crucible::run_crucible(args).await {
                     Ok(()) => Ok(ExitCode::SUCCESS),
                     Err(e) => {
                         eprintln!("wayland-core crucible: {e:#}");

@@ -44,6 +44,11 @@ pub struct CrucibleConfig {
     /// Provider specs (`"provider"` or `"provider:model"`), one per council
     /// proposer. Each runs the task on its own provider.
     pub proposers: Vec<String>,
+    /// Extra `"provider:model"` specs the AUTO Assembler may draw from, beyond
+    /// `proposers`. Only consulted when `assembly = "auto"`; the Assembler picks a
+    /// cost-effective, provider-diverse subset from `proposers` ∪ `candidate_pool`.
+    /// Ignored on the manual path.
+    pub candidate_pool: Vec<String>,
     /// Provider spec for the aggregator that fuses the proposals. `None` ⇒ the
     /// caller falls back to a default (e.g. the first non-error proposal).
     pub aggregator: Option<String>,
@@ -90,6 +95,7 @@ impl Default for CrucibleConfig {
         Self {
             enabled: false,
             proposers: Vec::new(),
+            candidate_pool: Vec::new(),
             aggregator: None,
             min_proposers: 1,
             max_proposers: 5,
