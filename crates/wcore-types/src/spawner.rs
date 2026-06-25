@@ -44,6 +44,21 @@ pub struct SubAgentResult {
     pub is_error: bool,
 }
 
+impl SubAgentResult {
+    /// Build a terminal error result for a sub-agent that never ran (e.g. its
+    /// pinned provider could not be resolved). Zero usage, zero turns,
+    /// `is_error = true`.
+    pub fn error(name: &str, text: &str) -> Self {
+        Self {
+            name: name.to_string(),
+            text: text.to_string(),
+            usage: TokenUsage::default(),
+            turns: 0,
+            is_error: true,
+        }
+    }
+}
+
 /// Abstraction over fork-mode agent spawning — enables mock implementations in tests.
 #[async_trait]
 pub trait Spawner: Send + Sync {

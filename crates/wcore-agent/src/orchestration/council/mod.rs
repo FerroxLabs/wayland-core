@@ -12,4 +12,4 @@
 
 pub mod resolver;
 
-pub use resolver::{CouncilProviderResolver, ResolveError};
+pub use resolver::{CouncilProviderResolver, ProviderResolver, ResolveError};

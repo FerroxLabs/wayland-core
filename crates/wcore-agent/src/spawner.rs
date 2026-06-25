@@ -20,6 +20,7 @@ use wcore_types::message::TokenUsage;
 use crate::agents::bus::{AgentBus, AgentMessage, now_ms, preview};
 use crate::agents::channel_sink::ChannelSink;
 use crate::engine::AgentEngine;
+use crate::orchestration::council::ProviderResolver;
 use crate::output::OutputSink;
 use crate::output::null_sink::NullSink;
 
@@ -103,6 +104,14 @@ pub struct AgentSpawner {
     /// for legacy callers; production attaches the engine's token via
     /// `with_cancel(...)`.
     cancel: tokio_util::sync::CancellationToken,
+    /// Crucible (Mixture-of-Providers) — optional resolver that turns a
+    /// per-spawn `SubAgentConfig.provider` spec into a keyed provider. `None`
+    /// (the default) preserves single-provider behaviour: every child inherits
+    /// `self.provider`. Production bootstrap attaches a `CouncilProviderResolver`
+    /// via `with_provider_resolver(...)`. MUST be propagated by
+    /// `clone_for_spawn` or fleet/parallel proposers silently fall back to the
+    /// parent provider (the cross-provider-diversity guard catches this).
+    resolver: Option<Arc<dyn ProviderResolver>>,
 }
 
 impl AgentSpawner {
@@ -112,6 +121,7 @@ impl AgentSpawner {
             base_config: config,
             bus: None,
             cancel: tokio_util::sync::CancellationToken::new(),
+            resolver: None,
         }
     }
 
@@ -140,17 +150,56 @@ impl AgentSpawner {
         self.bus.as_ref()
     }
 
+    /// Crucible — attach a [`ProviderResolver`] so a `SubAgentConfig.provider`
+    /// pin resolves to a keyed provider (a different LLM provider per council
+    /// member). Builder pattern: production bootstrap constructs a
+    /// `CouncilProviderResolver` once and attaches it here.
+    pub fn with_provider_resolver(mut self, resolver: Arc<dyn ProviderResolver>) -> Self {
+        self.resolver = Some(resolver);
+        self
+    }
+
+    /// Resolve the provider a given sub-agent should run on.
+    ///
+    /// - **Unpinned** (`sub.provider == None`): inherit the parent provider —
+    ///   the single-provider default, regardless of whether a resolver is
+    ///   attached.
+    /// - **Pinned with a resolver**: resolve the spec to a keyed provider. A
+    ///   resolution failure (unknown / keyless) is fatal *for that sub-agent*
+    ///   and surfaces as an error [`SubAgentResult`] (the council skips
+    ///   keyless members when building the roster, before they reach here).
+    /// - **Pinned without a resolver**: a configuration error — a provider was
+    ///   pinned but nothing can resolve it. Fail that sub-agent loudly rather
+    ///   than silently running it on the parent provider.
+    fn provider_for(&self, sub: &SubAgentConfig) -> Result<Arc<dyn LlmProvider>, SubAgentResult> {
+        match (&sub.provider, &self.resolver) {
+            (None, _) => Ok(self.provider.clone()),
+            (Some(spec), Some(resolver)) => resolver
+                .resolve_provider(spec)
+                .map(|(provider, _model)| provider)
+                .map_err(|e| SubAgentResult::error(&sub.name, &format!("provider '{spec}': {e}"))),
+            (Some(spec), None) => Err(SubAgentResult::error(
+                &sub.name,
+                &format!("provider '{spec}' pinned but no provider resolver is attached"),
+            )),
+        }
+    }
+
     /// Spawn a single sub-agent and wait for result.
     pub async fn spawn_one(&self, sub_config: SubAgentConfig) -> SubAgentResult {
         // Security audit H-7 / M-9: `child_config` inherits the parent's
         // approval posture (no forced `auto_approve = true`), and
         // `build_tool_registry(&[])` defaults to a read-only toolset.
         let config = self.child_config(&sub_config);
+        // Crucible — resolve the per-spawn pinned provider (or inherit parent).
+        let provider = match self.provider_for(&sub_config) {
+            Ok(p) => p,
+            Err(result) => return result,
+        };
 
         let tools = build_tool_registry(&[]);
         let output: Arc<dyn OutputSink> = Arc::new(NullSink);
-        let mut engine =
-            AgentEngine::new_with_provider(self.provider.clone(), config, tools, output);
+        let mut engine = AgentEngine::new_with_provider(provider, config, tools, output);
         // Bind the child to the parent cancel token so a host cancel stops it.
         engine.set_cancel_token(self.cancel.child_token());
 
@@ -383,6 +432,14 @@ impl AgentSpawner {
         // a single `Delegate`/`Spawn` approval auto-run every child
         // Bash/Write/Edit call with no operator prompt.
         let config = self.child_config(&sub_config);
+        // Crucible — resolve the per-spawn pinned provider (or inherit parent).
+        // This is the path the fleet + parallel proposers funnel through, so a
+        // resolver that fails to propagate via `clone_for_spawn` surfaces here
+        // as a silent fall-back to the parent provider (guarded by tests).
+        let provider = match self.provider_for(&sub_config) {
+            Ok(p) => p,
+            Err(result) => return result,
+        };
 
         let tools = build_tool_registry(&[]);
         // v0.9.4 W1.1b: keep a clone of the sink BEFORE moving it into the
@@ -393,8 +450,7 @@ impl AgentSpawner {
             None => Arc::new(NullSink),                // legacy anonymous behaviour
         };
         let terminal_output = Arc::clone(&output);
-        let mut engine =
-            AgentEngine::new_with_provider(self.provider.clone(), config, tools, output);
+        let mut engine = AgentEngine::new_with_provider(provider, config, tools, output);
         // Bind the child to the parent cancel token so a host cancel stops it.
         engine.set_cancel_token(self.cancel.child_token());
 
@@ -461,6 +517,11 @@ impl AgentSpawner {
         if let Some(sp) = sub_config.system_prompt.clone() {
             config.system_prompt = Some(sp);
         }
+        // Crucible T2 — honor a per-spawn model override. The provider pin
+        // (T4) selects the upstream; this sets the model the child requests.
+        if let Some(model) = &sub_config.model {
+            config.model = model.clone();
+        }
         config.session.enabled = false;
         // FIX F — the shadow workflow-detection heuristic is a TOP-LEVEL,
         // user-initiated-turn signal. Sub-agents spawned by a workflow (or any
@@ -486,6 +547,12 @@ impl AgentSpawner {
             base_config: self.base_config.clone(),
             bus: self.bus.clone(),
             cancel: self.cancel.clone(),
+            // CRITICAL (crucible): the resolver MUST be carried into every
+            // cloned spawner. The fleet + parallel paths run each proposer on a
+            // `clone_for_spawn()` copy; dropping the resolver here would make
+            // pinned proposers silently fall back to the parent provider,
+            // collapsing the cross-provider council into a single-provider one.
+            resolver: self.resolver.clone(),
         }
     }
 
@@ -554,11 +621,15 @@ impl Spawner for AgentSpawner {
         if let Some(model) = overrides.model.clone() {
             config.model = model;
         }
+        // Crucible — resolve the per-fork pinned provider (or inherit parent).
+        let provider = match self.provider_for(&sub_config) {
+            Ok(p) => p,
+            Err(result) => return result,
+        };
 
         let tools = build_tool_registry(&overrides.allowed_tools);
         let output: Arc<dyn OutputSink> = Arc::new(NullSink);
-        let mut engine =
-            AgentEngine::new_with_provider(self.provider.clone(), config, tools, output);
+        let mut engine = AgentEngine::new_with_provider(provider, config, tools, output);
         // Bind the child to the parent cancel token so a host cancel stops it.
         engine.set_cancel_token(self.cancel.child_token());
         engine.set_initial_reasoning_effort(overrides.effort.clone());
@@ -709,6 +780,153 @@ fn build_tool_registry(allowed: &[String]) -> ToolRegistry {
         }
     }
     registry
+}
+
+#[cfg(test)]
+mod crucible_provider_resolution_tests {
+    //! Crucible T2/T4 — per-spawn provider resolution + model override.
+    //!
+    //! These guard the cross-provider council at the spawn layer: a pinned
+    //! `SubAgentConfig.provider` must resolve to *that* provider (not the
+    //! parent), an unpinned spawn must inherit the parent, and a cloned
+    //! spawner (the relay/fleet path) must still carry the resolver.
+
+    use std::collections::HashMap;
+    use std::sync::Arc;
+
+    use async_trait::async_trait;
+    use tokio::sync::mpsc;
+    use wcore_config::config::Config;
+    use wcore_providers::{LlmProvider, ProviderError};
+    use wcore_types::llm::{LlmEvent, LlmRequest};
+
+    use super::{AgentSpawner, SubAgentConfig};
+    use crate::orchestration::council::{ProviderResolver, ResolveError};
+
+    /// A provider that never streams — identity is all these tests check.
+    struct StubProvider;
+
+    #[async_trait]
+    impl LlmProvider for StubProvider {
+        async fn stream(
+            &self,
+            _request: &LlmRequest,
+        ) -> Result<mpsc::Receiver<LlmEvent>, ProviderError> {
+            Err(ProviderError::Connection("stub".into()))
+        }
+    }
+
+    /// Test resolver mapping a spec string to a specific provider `Arc`.
+    struct MapResolver {
+        map: HashMap<String, Arc<dyn LlmProvider>>,
+    }
+
+    impl ProviderResolver for MapResolver {
+        fn resolve_provider(
+            &self,
+            spec: &str,
+        ) -> Result<(Arc<dyn LlmProvider>, Option<String>), ResolveError> {
+            self.map
+                .get(spec)
+                .cloned()
+                .map(|p| (p, None))
+                .ok_or_else(|| ResolveError::Unknown(spec.to_string()))
+        }
+    }
+
+    fn sub(name: &str, provider: Option<&str>) -> SubAgentConfig {
+        SubAgentConfig {
+            name: name.into(),
+            prompt: "x".into(),
+            max_turns: 1,
+            max_tokens: 16,
+            system_prompt: None,
+            provider: provider.map(|s| s.into()),
+            model: None,
+        }
+    }
+
+    fn resolver_mapping(specs: &[(&str, Arc<dyn LlmProvider>)]) -> Arc<dyn ProviderResolver> {
+        let map = specs
+            .iter()
+            .map(|(s, p)| (s.to_string(), p.clone()))
+            .collect();
+        Arc::new(MapResolver { map })
+    }
+
+    #[test]
+    fn provider_for_unpinned_returns_parent() {
+        let parent: Arc<dyn LlmProvider> = Arc::new(StubProvider);
+        let spawner = AgentSpawner::new(parent.clone(), Config::default());
+        let got = spawner.provider_for(&sub("p", None)).expect("unpinned ok");
+        assert!(Arc::ptr_eq(&got, &parent));
+    }
+
+    #[test]
+    fn provider_for_pinned_returns_resolved_not_parent() {
+        let parent: Arc<dyn LlmProvider> = Arc::new(StubProvider);
+        let pinned: Arc<dyn LlmProvider> = Arc::new(StubProvider);
+        let spawner = AgentSpawner::new(parent.clone(), Config::default())
+            .with_provider_resolver(resolver_mapping(&[("openai", pinned.clone())]));
+        let got = spawner
+            .provider_for(&sub("p", Some("openai")))
+            .expect("pinned ok");
+        assert!(Arc::ptr_eq(&got, &pinned), "pinned provider must be used");
+        assert!(!Arc::ptr_eq(&got, &parent), "parent must NOT be used");
+    }
+
+    #[test]
+    fn provider_for_pinned_without_resolver_errors() {
+        let parent: Arc<dyn LlmProvider> = Arc::new(StubProvider);
+        let spawner = AgentSpawner::new(parent, Config::default());
+        // `Arc<dyn LlmProvider>` is not Debug, so match instead of expect_err.
+        let err = match spawner.provider_for(&sub("p", Some("openai"))) {
+            Err(e) => e,
+            Ok(_) => panic!("pinned-without-resolver must error"),
+        };
+        assert!(err.is_error);
+        assert!(err.text.contains("no provider resolver"));
+    }
+
+    #[test]
+    fn provider_for_unknown_pinned_errors() {
+        let parent: Arc<dyn LlmProvider> = Arc::new(StubProvider);
+        let spawner = AgentSpawner::new(parent, Config::default())
+            .with_provider_resolver(resolver_mapping(&[]));
+        let err = match spawner.provider_for(&sub("p", Some("nope"))) {
+            Err(e) => e,
+            Ok(_) => panic!("unknown pinned provider must error"),
+        };
+        assert!(err.is_error);
+    }
+
+    #[test]
+    fn clone_for_spawn_preserves_resolver() {
+        // The footgun guard: a cloned spawner (relay/fleet path) must still
+        // resolve pinned providers — else proposers silently use the parent.
+        let parent: Arc<dyn LlmProvider> = Arc::new(StubProvider);
+        let pinned: Arc<dyn LlmProvider> = Arc::new(StubProvider);
+        let spawner = AgentSpawner::new(parent, Config::default())
+            .with_provider_resolver(resolver_mapping(&[("openai", pinned.clone())]));
+        let cloned = spawner.clone_for_spawn();
+        let got = cloned
+            .provider_for(&sub("p", Some("openai")))
+            .expect("cloned spawner resolves");
+        assert!(
+            Arc::ptr_eq(&got, &pinned),
+            "cloned spawner must still resolve the pinned provider"
+        );
+    }
+
+    #[test]
+    fn child_config_applies_model_override() {
+        let parent: Arc<dyn LlmProvider> = Arc::new(StubProvider);
+        let spawner = AgentSpawner::new(parent, Config::default());
+        let mut c = sub("p", None);
+        c.model = Some("claude-opus-4-8".into());
+        let cfg = spawner.child_config(&c);
+        assert_eq!(cfg.model, "claude-opus-4-8");
+    }
 }
 
 #[cfg(test)]

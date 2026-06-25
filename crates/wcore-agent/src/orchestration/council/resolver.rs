@@ -114,6 +114,33 @@ impl CouncilProviderResolver {
     }
 }
 
+/// Abstraction over council provider resolution so the spawner can resolve a
+/// pinned provider spec without depending on the concrete
+/// [`CouncilProviderResolver`] — and so tests can inject a resolver that hands
+/// back mock providers (the cross-provider-diversity guard relies on this).
+///
+/// `CouncilProviderResolver` is the production implementation; bootstrap
+/// constructs one and attaches it to the `AgentSpawner` as
+/// `Arc<dyn ProviderResolver>`.
+pub trait ProviderResolver: Send + Sync {
+    /// Resolve a `"provider"` / `"provider:model"` spec to a keyed provider
+    /// plus the resolved model (the spec's model if pinned, else the provider
+    /// default when non-empty).
+    fn resolve_provider(
+        &self,
+        spec: &str,
+    ) -> Result<(Arc<dyn LlmProvider>, Option<String>), ResolveError>;
+}
+
+impl ProviderResolver for CouncilProviderResolver {
+    fn resolve_provider(
+        &self,
+        spec: &str,
+    ) -> Result<(Arc<dyn LlmProvider>, Option<String>), ResolveError> {
+        self.resolve(spec)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
