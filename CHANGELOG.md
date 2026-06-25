@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.12.9](https://github.com/FerroxLabs/wayland-core/compare/v0.12.8...v0.12.9) (2026-06-25)
+
+
+### Bug Fixes
+
+* OpenAI tool-name sanitization ([#297](https://github.com/FerroxLabs/wayland-core/issues/297)) + WSL canonicalize off-reactor ([#287](https://github.com/FerroxLabs/wayland-core/issues/287)) ([#84](https://github.com/FerroxLabs/wayland-core/issues/84)) ([af69bdc](https://github.com/FerroxLabs/wayland-core/commit/af69bdc046bef94671426a20a8a1fb7327c91d30))
+
 ## [0.12.8](https://github.com/FerroxLabs/wayland-core/compare/v0.12.7...v0.12.8) (2026-06-24)
 
 
