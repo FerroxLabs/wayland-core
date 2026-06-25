@@ -53,7 +53,7 @@ use std::collections::{HashMap, HashSet};
 use serde::Deserialize;
 
 use super::super::graph::{
-    AggregationStrategy, GraphConfig, InputMapper, NodeBudget, StateReducer,
+    AggregationStrategy, GraphConfig, InputMapper, NodeBudget, ProviderPin, StateReducer,
 };
 use super::error::WorkflowParseError;
 use super::limits;
@@ -182,6 +182,12 @@ pub struct AgentSpec {
     /// Optional model override (e.g. a cheaper Haiku-tier model).
     #[serde(default)]
     pub model: Option<String>,
+    /// Crucible — optional provider pin (`"openai"` or `"openai:gpt-5.5"`). When
+    /// set (or `model` is set), this node lowers a [`ProviderPin`] into the
+    /// graph's `node_providers` side-table so the runner spawns it on that
+    /// provider. `None` ⇒ the node inherits the spawner's provider.
+    #[serde(default)]
+    pub provider: Option<String>,
     /// Optional flat-key reference into the running state. When set, the
     /// node reads that key via [`InputMapper::Select`]; otherwise it
     /// receives the whole state via [`InputMapper::PassThrough`].
@@ -274,6 +280,7 @@ pub fn lower(workflow: Workflow) -> Result<(GraphConfig, WorkflowMeta), Workflow
     graph.edges = builder.edges;
     graph.state_reducers = builder.state_reducers;
     graph.node_budgets = builder.node_budgets;
+    graph.node_providers = builder.node_providers;
 
     Ok((graph, workflow.meta))
 }
@@ -290,6 +297,10 @@ struct Lowering<'a> {
     /// `AgentSpec` set `max_turns`/`max_tokens` get an entry; the runner falls
     /// back to its defaults for absent (or `None`-field) nodes.
     node_budgets: HashMap<String, NodeBudget>,
+    /// Crucible — per-node provider pins, keyed by node id. Only nodes whose
+    /// `AgentSpec` set `provider` and/or `model` get an entry; the runner
+    /// inherits the spawner's provider for absent nodes. Mirrors `node_budgets`.
+    node_providers: HashMap<String, ProviderPin>,
     /// Entry node of the whole graph (first node registered).
     entry: Option<String>,
     /// Terminal node ids of the previously-added step. The next step's
@@ -309,6 +320,7 @@ impl<'a> Lowering<'a> {
             edges: Vec::new(),
             state_reducers: HashMap::new(),
             node_budgets: HashMap::new(),
+            node_providers: HashMap::new(),
             entry: None,
             prev_terminals: Vec::new(),
             seen_ids: HashSet::new(),
@@ -389,6 +401,19 @@ impl<'a> Lowering<'a> {
                 NodeBudget {
                     max_turns: spec.max_turns,
                     max_tokens: spec.max_tokens,
+                },
+            );
+        }
+        // Crucible — record a per-node provider pin when the spec sets `provider`
+        // and/or `model`. This finally consumes `spec.model` at the graph level
+        // (previously parsed then dropped). Covers Agent, Pipeline-stage, and
+        // Parallel-branch nodes since all funnel through `push_agent`.
+        if spec.provider.is_some() || spec.model.is_some() {
+            self.node_providers.insert(
+                id.clone(),
+                ProviderPin {
+                    provider: spec.provider.clone(),
+                    model: spec.model.clone(),
                 },
             );
         }
@@ -696,6 +721,83 @@ Workflow(
         // A node with no override has no entry at all — the side-table stays
         // sparse and the runner uses DEFAULT_MAX_TURNS/DEFAULT_MAX_TOKENS.
         assert!(!g.node_budgets.contains_key("plain"));
+    }
+
+    #[test]
+    fn provider_and_model_lower_into_node_providers() {
+        // `both` pins provider+model, `prov` provider-only, `mdl` model-only,
+        // `plain` neither (so the side-table stays sparse).
+        let src = r#"
+Workflow(
+    meta: (name: "council"),
+    phases: [
+        Phase(title: "p", steps: [
+            Agent((id: "both", prompt: "x", provider: Some("openai"), model: Some("gpt-5.5"))),
+            Agent((id: "prov", prompt: "x", provider: Some("anthropic"))),
+            Agent((id: "mdl", prompt: "x", model: Some("claude-opus-4-8"))),
+            Agent((id: "plain", prompt: "x")),
+        ]),
+    ],
+)
+"#;
+        let (g, _meta) = parse_workflow(src).expect("should parse");
+
+        assert_eq!(
+            g.node_providers.get("both"),
+            Some(&ProviderPin {
+                provider: Some("openai".into()),
+                model: Some("gpt-5.5".into()),
+            }),
+        );
+        assert_eq!(
+            g.node_providers.get("prov"),
+            Some(&ProviderPin {
+                provider: Some("anthropic".into()),
+                model: None,
+            }),
+        );
+        assert_eq!(
+            g.node_providers.get("mdl"),
+            Some(&ProviderPin {
+                provider: None,
+                model: Some("claude-opus-4-8".into()),
+            }),
+        );
+        assert!(!g.node_providers.contains_key("plain"));
+    }
+
+    #[test]
+    fn parallel_branches_lower_provider_pins() {
+        // The council topology: a Parallel step whose branches each pin a
+        // different provider. All branches funnel through `push_agent`, so the
+        // pins must land in node_providers.
+        let src = r#"
+Workflow(
+    meta: (name: "council-fanout"),
+    phases: [
+        Phase(title: "p", steps: [
+            Parallel(id: "fuse", branches: [
+                (id: "p_openai", prompt: "answer", provider: Some("openai")),
+                (id: "p_anthropic", prompt: "answer", provider: Some("anthropic")),
+            ], join: Collect),
+        ]),
+    ],
+)
+"#;
+        let (g, _meta) = parse_workflow(src).expect("should parse");
+
+        assert_eq!(
+            g.node_providers
+                .get("p_openai")
+                .and_then(|p| p.provider.as_deref()),
+            Some("openai"),
+        );
+        assert_eq!(
+            g.node_providers
+                .get("p_anthropic")
+                .and_then(|p| p.provider.as_deref()),
+            Some("anthropic"),
+        );
     }
 
     #[test]
