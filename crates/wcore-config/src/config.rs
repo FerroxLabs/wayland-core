@@ -17,7 +17,10 @@ use wcore_types::llm::ThinkingConfig;
 // ---------------------------------------------------------------------------
 
 /// AWS Bedrock credentials configuration
-#[derive(Debug, Clone, Deserialize, Serialize, Default)]
+//
+// `Debug` is hand-written (not derived) so the long-lived AWS secrets never
+// land in a log/trace via `{:?}` — only their presence is shown.
+#[derive(Clone, Deserialize, Serialize, Default)]
 pub struct BedrockConfig {
     pub region: Option<String>,
     pub access_key_id: Option<String>,
@@ -26,13 +29,43 @@ pub struct BedrockConfig {
     pub profile: Option<String>,
 }
 
+impl std::fmt::Debug for BedrockConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let redact = |o: &Option<String>| o.as_ref().map(|_| "<redacted>");
+        f.debug_struct("BedrockConfig")
+            .field("region", &self.region)
+            .field("access_key_id", &redact(&self.access_key_id))
+            .field("secret_access_key", &redact(&self.secret_access_key))
+            .field("session_token", &redact(&self.session_token))
+            .field("profile", &self.profile)
+            .finish()
+    }
+}
+
 /// Google Vertex AI authentication configuration
-#[derive(Debug, Clone, Deserialize, Serialize, Default)]
+//
+// `Debug` is hand-written so the inline service-account key never leaks via
+// `{:?}` — only its presence is shown.
+#[derive(Clone, Deserialize, Serialize, Default)]
 pub struct VertexConfig {
     pub project_id: Option<String>,
     pub region: Option<String>,
     pub credentials_file: Option<String>,
     pub service_account_json: Option<String>,
+}
+
+impl std::fmt::Debug for VertexConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("VertexConfig")
+            .field("project_id", &self.project_id)
+            .field("region", &self.region)
+            .field("credentials_file", &self.credentials_file)
+            .field(
+                "service_account_json",
+                &self.service_account_json.as_ref().map(|_| "<redacted>"),
+            )
+            .finish()
+    }
 }
 
 /// Azure OpenAI authentication mode.
@@ -250,6 +283,15 @@ pub struct ConfigFile {
     /// bootstrap skips tracker installation, preserving pre-M5.3 behaviour.
     #[serde(default)]
     pub session_cap: Option<crate::budget::BudgetConfig>,
+
+    /// Crucible (Mixture-of-Providers) — opt-in `[crucible]` block defining the
+    /// cross-provider council roster + bounds. OFF by default (`enabled =
+    /// false`); validated into a runnable roster at bootstrap. Lives on
+    /// `ConfigFile` (the on-disk shape) rather than the resolved `Config` —
+    /// bootstrap reads it alongside the `[providers]` map (which is also
+    /// `ConfigFile`-only) to build the council.
+    #[serde(default)]
+    pub crucible: crate::crucible::CrucibleConfig,
 }
 
 /// Wave SD — top-level `[storage]` block in `config.toml`.
@@ -3159,6 +3201,16 @@ fn merge_config_files(global: ConfigFile, project: ConfigFile) -> ConfigFile {
         global.browser
     };
 
+    // Crucible: project overrides global when it set a non-default council
+    // (enabled, or a non-empty proposer roster). Mirrors the browser/memory
+    // "project overrides when non-default" strategy; preserves the OFF default
+    // when neither layer configures a council.
+    let crucible = if project.crucible.enabled || !project.crucible.proposers.is_empty() {
+        project.crucible
+    } else {
+        global.crucible
+    };
+
     ConfigFile {
         default,
         providers,
@@ -3182,6 +3234,7 @@ fn merge_config_files(global: ConfigFile, project: ConfigFile) -> ConfigFile {
         browser,
         security,
         session_cap,
+        crucible,
     }
 }
 
@@ -3857,6 +3910,70 @@ mod tests {
             cfg.max_tokens, 4242,
             "non-provider field must inherit from base"
         );
+    }
+
+    #[test]
+    fn bedrock_debug_redacts_secrets() {
+        let cfg = BedrockConfig {
+            region: Some("us-east-1".to_string()),
+            access_key_id: Some("AKIAEXAMPLE".to_string()),
+            secret_access_key: Some("super-secret-value".to_string()),
+            session_token: Some("token-value".to_string()),
+            profile: Some("default".to_string()),
+        };
+        let dbg = format!("{cfg:?}");
+        // Non-secret metadata stays visible.
+        assert!(dbg.contains("us-east-1"));
+        assert!(dbg.contains("default"));
+        // Secrets are masked, never printed verbatim.
+        assert!(dbg.contains("<redacted>"));
+        assert!(!dbg.contains("AKIAEXAMPLE"));
+        assert!(!dbg.contains("super-secret-value"));
+        assert!(!dbg.contains("token-value"));
+    }
+
+    #[test]
+    fn vertex_debug_redacts_inline_key() {
+        let cfg = VertexConfig {
+            project_id: Some("my-proj".to_string()),
+            region: Some("us-central1".to_string()),
+            credentials_file: Some("/path/to/key.json".to_string()),
+            service_account_json: Some("{\"private_key\":\"LEAK\"}".to_string()),
+        };
+        let dbg = format!("{cfg:?}");
+        assert!(dbg.contains("my-proj"));
+        assert!(dbg.contains("<redacted>"));
+        assert!(!dbg.contains("LEAK"));
+    }
+
+    #[test]
+    fn crucible_block_merges_project_over_global() {
+        let global = ConfigFile {
+            crucible: crate::crucible::CrucibleConfig {
+                enabled: true,
+                proposers: vec!["openai".to_string()],
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let project = ConfigFile {
+            crucible: crate::crucible::CrucibleConfig {
+                enabled: true,
+                proposers: vec!["anthropic".to_string(), "gemini".to_string()],
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let merged = merge_config_files(global, project);
+        // Project set a non-default council → it wins.
+        assert_eq!(merged.crucible.proposers, vec!["anthropic", "gemini"]);
+    }
+
+    #[test]
+    fn crucible_defaults_off_when_absent() {
+        let merged = merge_config_files(ConfigFile::default(), ConfigFile::default());
+        assert!(!merged.crucible.enabled);
+        assert!(merged.crucible.proposers.is_empty());
     }
 
     // -------------------------------------------------------------------------

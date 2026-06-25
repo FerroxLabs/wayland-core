@@ -11,5 +11,7 @@
 //! sit above the leaf types crate.
 
 pub mod resolver;
+pub mod roster;
 
 pub use resolver::{CouncilProviderResolver, ProviderResolver, ResolveError};
+pub use roster::{CrucibleConfigError, ProposerSpec, Roster, validate_and_build};
