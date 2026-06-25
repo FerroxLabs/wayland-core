@@ -1847,6 +1847,161 @@ fn resolve_provider_alias(
     })
 }
 
+/// Error raised while resolving a cross-provider council member.
+///
+/// The council treats these two cases differently: an [`Unknown`](Self::Unknown)
+/// provider id is a configuration error the caller should surface, whereas a
+/// [`Keyless`](Self::Keyless) provider is a BYO-key member the council simply
+/// *skips* (a user who hasn't supplied a key for one council provider should
+/// still get a council from the providers they have keyed).
+#[derive(Debug, thiserror::Error)]
+pub enum CouncilProviderError {
+    /// The provider id is neither a built-in provider, a `[providers]` alias,
+    /// nor a bundled catalog entry.
+    #[error("unknown council provider '{0}'")]
+    Unknown(String),
+    /// The provider resolved, but no usable api key could be found (inline
+    /// config, credentials store, or env var). Skip, don't fail.
+    #[error("council provider '{0}' has no usable api key")]
+    Keyless(String),
+}
+
+/// Resolve a council `spec` (`"provider"` or `"provider:model"`) into a fully
+/// keyed runtime [`Config`] for that provider, reusing the exact same alias /
+/// catalog / credential / compat resolution as [`Config::resolve`].
+///
+/// This is the keyed-provider helper the cross-provider council needs: unlike a
+/// resolver seeded from a single already-resolved `Config` (which carries only
+/// one provider's `api_key`), this consults the on-disk `[providers]` map so it
+/// can pull each council member's *own* credentials. Every non-provider runtime
+/// setting (max_tokens, max_turns, tools, storage, observability, …) is
+/// inherited verbatim from `base` so council members share the session's policy
+/// surface and differ only in provider identity, endpoint, model, and key.
+///
+/// Returns the derived `Config` plus the resolved model (the spec's pinned
+/// model if given, else the provider/config default when non-empty; `None` for
+/// catalog providers with no default — the API surfaces an honest error).
+pub fn resolve_council_provider(
+    providers: &HashMap<String, ProviderConfig>,
+    base: &Config,
+    spec: &str,
+) -> Result<(Config, Option<String>), CouncilProviderError> {
+    // Split on the FIRST ':' → (provider_id, model?). A bare "provider" has no
+    // model; "provider:model" pins the model.
+    let (provider_id, spec_model) = match spec.split_once(':') {
+        Some((id, model)) => (id, Some(model.to_string())),
+        None => (spec, None),
+    };
+
+    // Reuse the full alias + catalog + merge resolution. Any failure here means
+    // the id matched nothing resolvable → Unknown (the council surfaces it).
+    let resolved = resolve_provider_alias(providers, provider_id)
+        .map_err(|_| CouncilProviderError::Unknown(provider_id.to_string()))?;
+    let provider = resolved.provider_type;
+    let provider_config = resolved.effective_config;
+    let catalog_entry = resolved.catalog_entry;
+
+    let base_url = provider_config
+        .base_url
+        .clone()
+        .or_else(|| catalog_entry.as_ref().map(|e| e.base_url.clone()))
+        .unwrap_or_else(|| default_base_url_for(provider));
+
+    let raw_model = spec_model
+        .clone()
+        .or_else(|| provider_config.model.clone())
+        .unwrap_or_else(|| {
+            // Catalog providers host heterogeneous catalogs with no sensible
+            // default — mirror Config::resolve and leave it empty so the user
+            // must pin a model (an unset model surfaces as an honest API error).
+            if catalog_entry.is_some() {
+                String::new()
+            } else {
+                default_model_for(provider).to_string()
+            }
+        });
+    let model = wcore_types::model_aliases::expand_short_form(&raw_model)
+        .map(str::to_string)
+        .unwrap_or(raw_model);
+
+    // Credentials: inline config key → store → env var (per provider), plus the
+    // catalog entry's own env var as a fallback — exactly Config::resolve's
+    // chain, with no CLI key (the council never takes a CLI `--api-key`).
+    let catalog_env_key = provider_config
+        .api_key
+        .is_none()
+        .then(|| {
+            catalog_entry
+                .as_ref()
+                .and_then(|e| std::env::var(&e.env_var).ok())
+        })
+        .flatten();
+    let mut api_key = match resolve_api_key(
+        None,
+        provider_config.api_key.as_deref(),
+        provider,
+        &base.storage.credentials,
+    ) {
+        Ok(key) => key,
+        Err(_) => catalog_env_key.clone().unwrap_or_default(),
+    };
+    if api_key.is_empty()
+        && let Some(key) = catalog_env_key
+    {
+        api_key = key;
+    }
+
+    // BYO-key council member with no key → skip, not fatal.
+    if api_key.trim().is_empty() {
+        return Err(CouncilProviderError::Keyless(provider_id.to_string()));
+    }
+
+    let prompt_caching = provider_config
+        .prompt_caching
+        .unwrap_or(matches!(provider, ProviderType::Anthropic));
+
+    let compat_defaults = if let Some(entry) = catalog_entry.as_ref() {
+        ProviderCompat::from_catalog_entry(&entry.id, entry.api_path.as_deref())
+    } else {
+        compat_defaults_for(provider)
+    };
+    let user_compat = provider_config.compat.clone().unwrap_or_default();
+    let mut compat = ProviderCompat::merge(compat_defaults, user_compat.clone());
+
+    // F-088: align the advertised effort capability with what the resolved
+    // model actually accepts (only when the user hasn't pinned it explicitly).
+    if provider == ProviderType::OpenAI
+        && user_compat.supports_effort.is_none()
+        && compat.supports_effort.unwrap_or(false)
+        && !model.is_empty()
+        && !openai_model_accepts_effort(&model)
+    {
+        compat.supports_effort = Some(false);
+        compat.effort_levels = Some(vec![]);
+    }
+
+    let resolved_model = if model.is_empty() {
+        None
+    } else {
+        Some(model.clone())
+    };
+
+    // Inherit every non-provider runtime field from `base`; overwrite only the
+    // provider identity, endpoint, model, key, and provider-derived compat.
+    let derived = Config {
+        provider,
+        provider_label: resolved.requested_name.clone(),
+        api_key,
+        base_url,
+        model,
+        prompt_caching,
+        compat,
+        ..base.clone()
+    };
+
+    Ok((derived, resolved_model))
+}
+
 fn resolve_api_key(
     cli_key: Option<&str>,
     config_key: Option<&str>,
@@ -3569,6 +3724,106 @@ mod tests {
         assert!(msg.contains("my-service"));
         assert!(msg.contains("provider"));
         assert!(msg.contains("built-in type"));
+    }
+
+    // ---- resolve_council_provider (keyed cross-provider council) ------------
+
+    #[test]
+    fn council_resolves_each_provider_to_its_own_key() {
+        // The core cross-provider guarantee: two council members keyed to two
+        // different providers each get THEIR OWN credentials from the
+        // `[providers]` map — not one shared base key (the bug this fixes).
+        let mut providers = HashMap::new();
+        providers.insert(
+            "openai".to_string(),
+            ProviderConfig {
+                api_key: Some("sk-openai-aaa".to_string()),
+                ..Default::default()
+            },
+        );
+        providers.insert(
+            "anthropic".to_string(),
+            ProviderConfig {
+                api_key: Some("sk-ant-bbb".to_string()),
+                ..Default::default()
+            },
+        );
+        let base = Config::default();
+
+        let (oa, _) = resolve_council_provider(&providers, &base, "openai").expect("openai");
+        let (an, _) = resolve_council_provider(&providers, &base, "anthropic").expect("anthropic");
+
+        assert_eq!(oa.provider, ProviderType::OpenAI);
+        assert_eq!(oa.api_key, "sk-openai-aaa");
+        assert_eq!(an.provider, ProviderType::Anthropic);
+        assert_eq!(an.api_key, "sk-ant-bbb");
+        // Distinct keys — the single-base-key behavior would make these equal.
+        assert_ne!(oa.api_key, an.api_key);
+    }
+
+    #[test]
+    fn council_pins_model_from_spec() {
+        let mut providers = HashMap::new();
+        providers.insert(
+            "openai".to_string(),
+            ProviderConfig {
+                api_key: Some("sk-openai".to_string()),
+                ..Default::default()
+            },
+        );
+        let base = Config::default();
+        let (cfg, model) =
+            resolve_council_provider(&providers, &base, "openai:gpt-5.5").expect("resolve");
+        assert_eq!(cfg.model, "gpt-5.5");
+        assert_eq!(model.as_deref(), Some("gpt-5.5"));
+    }
+
+    #[test]
+    fn council_skips_keyless_provider() {
+        // Vertex resolves to an empty key when none is configured (it uses GCP
+        // credentials, not an inline API key), so the council treats it as a
+        // BYO-key member to skip — surfaced as Keyless, env-independent.
+        let providers = HashMap::new();
+        let base = Config::default();
+        let err = resolve_council_provider(&providers, &base, "vertex")
+            .expect_err("vertex has no inline key");
+        assert!(
+            matches!(err, CouncilProviderError::Keyless(_)),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn council_errors_unknown_provider() {
+        let providers = HashMap::new();
+        let base = Config::default();
+        let err = resolve_council_provider(&providers, &base, "definitely-not-a-provider")
+            .expect_err("unknown id");
+        assert!(
+            matches!(err, CouncilProviderError::Unknown(_)),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn council_inherits_non_provider_fields_from_base() {
+        let mut providers = HashMap::new();
+        providers.insert(
+            "openai".to_string(),
+            ProviderConfig {
+                api_key: Some("sk-openai".to_string()),
+                ..Default::default()
+            },
+        );
+        let base = Config {
+            max_tokens: 4242,
+            ..Default::default()
+        };
+        let (cfg, _) = resolve_council_provider(&providers, &base, "openai").expect("resolve");
+        assert_eq!(
+            cfg.max_tokens, 4242,
+            "non-provider field must inherit from base"
+        );
     }
 
     // -------------------------------------------------------------------------
