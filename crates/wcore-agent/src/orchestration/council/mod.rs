@@ -10,8 +10,14 @@
 //! `Arc<dyn LlmProvider>` requires `wcore-providers` + `wcore-config`, which
 //! sit above the leaf types crate.
 
+pub mod aggregator;
+pub mod proposal;
 pub mod resolver;
 pub mod roster;
+pub mod run;
 
+pub use aggregator::{Aggregator, LlmSynthesisAggregator};
+pub use proposal::{AggregateResult, Proposal};
 pub use resolver::{CouncilProviderResolver, ProviderResolver, ResolveError};
 pub use roster::{CrucibleConfigError, ProposerSpec, Roster, validate_and_build};
+pub use run::{CouncilError, CouncilOutcome, SkippedProposer, run_council};

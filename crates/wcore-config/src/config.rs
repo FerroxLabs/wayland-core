@@ -806,7 +806,10 @@ fn default_max_sessions() -> usize {
 
 // --- Resolved runtime config ---
 
-#[derive(Debug, Clone)]
+// `Debug` is hand-written (below) so the live `api_key` never lands in a log or
+// trace via `{:?}`. Every other field delegates to its own Debug (Bedrock/Vertex
+// sub-configs redact their own secrets).
+#[derive(Clone)]
 pub struct Config {
     pub provider_label: String,
     pub provider: ProviderType,
@@ -879,6 +882,54 @@ pub struct Config {
     /// on-disk surface is `ConfigFile.session_cap` which carries the
     /// `#[serde(default)]` attribute.
     pub session_cap: Option<wcore_budget::BudgetConfig>,
+}
+
+impl std::fmt::Debug for Config {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Config")
+            .field("provider_label", &self.provider_label)
+            .field("provider", &self.provider)
+            // SECURITY: never print the live api_key — only whether one is set.
+            .field(
+                "api_key",
+                &if self.api_key.is_empty() {
+                    "<none>"
+                } else {
+                    "<redacted>"
+                },
+            )
+            .field("base_url", &self.base_url)
+            .field("security", &self.security)
+            .field("model", &self.model)
+            .field("max_tokens", &self.max_tokens)
+            .field("max_turns", &self.max_turns)
+            .field("approval_mode", &self.approval_mode)
+            .field("system_prompt", &self.system_prompt)
+            .field("thinking", &self.thinking)
+            .field("prompt_caching", &self.prompt_caching)
+            .field("compat", &self.compat)
+            .field("tools", &self.tools)
+            .field("builtin_tools", &self.builtin_tools)
+            .field("advertised_capabilities", &self.advertised_capabilities)
+            .field("session", &self.session)
+            .field("inbound_webhook", &self.inbound_webhook)
+            .field("compact", &self.compact)
+            .field("plan", &self.plan)
+            .field("file_cache", &self.file_cache)
+            .field("hooks", &self.hooks)
+            .field("bedrock", &self.bedrock)
+            .field("vertex", &self.vertex)
+            .field("mcp", &self.mcp)
+            .field("debug", &self.debug)
+            .field("observability", &self.observability)
+            .field("provider_chain", &self.provider_chain)
+            .field("budget", &self.budget)
+            .field("storage", &self.storage)
+            .field("memory", &self.memory)
+            .field("browser", &self.browser)
+            .field("session_cap", &self.session_cap)
+            .finish()
+    }
 }
 
 impl Default for Config {
@@ -3944,6 +3995,31 @@ mod tests {
         assert!(dbg.contains("my-proj"));
         assert!(dbg.contains("<redacted>"));
         assert!(!dbg.contains("LEAK"));
+    }
+
+    #[test]
+    fn config_debug_redacts_api_key() {
+        let cfg = Config {
+            api_key: "sk-super-secret-LEAK".to_string(),
+            model: "gpt-5.5".to_string(),
+            ..Default::default()
+        };
+        let dbg = format!("{cfg:?}");
+        // The live key never appears; only the masked sentinel does.
+        assert!(
+            !dbg.contains("sk-super-secret-LEAK"),
+            "api_key must not leak via Debug"
+        );
+        assert!(dbg.contains("<redacted>"));
+        // Non-secret fields stay visible (Debug still useful).
+        assert!(dbg.contains("gpt-5.5"));
+    }
+
+    #[test]
+    fn config_debug_shows_none_for_empty_api_key() {
+        let cfg = Config::default(); // empty api_key
+        let dbg = format!("{cfg:?}");
+        assert!(dbg.contains("api_key: \"<none>\""));
     }
 
     #[test]

@@ -150,6 +150,13 @@ impl AgentSpawner {
         self.bus.as_ref()
     }
 
+    /// The attached council provider resolver, if any. The council executor
+    /// reads it from the spawner so there is a single resolver source (the one
+    /// that also keys per-proposer spawns) — no chance of a mismatched pair.
+    pub fn provider_resolver(&self) -> Option<&Arc<dyn ProviderResolver>> {
+        self.resolver.as_ref()
+    }
+
     /// Crucible — attach a [`ProviderResolver`] so a `SubAgentConfig.provider`
     /// pin resolves to a keyed provider (a different LLM provider per council
     /// member). Builder pattern: production bootstrap constructs a
