@@ -10,10 +10,59 @@
 use std::sync::Arc;
 
 use wcore_agent::orchestration::council::{
-    CouncilProviderResolver, run_council, validate_and_build,
+    CouncilOutcome, CouncilProviderResolver, run_council, validate_and_build,
 };
 use wcore_agent::spawner::AgentSpawner;
 use wcore_config::config::{CliArgs, Config, load_merged_config_file};
+
+/// The pricing catalog reports microcents; 1 USD = 100¢ = 100_000_000 µ¢.
+const MICROCENTS_PER_USD: f64 = 100_000_000.0;
+
+/// Render the human-readable provenance + spend block a council run prints to
+/// stderr (skipped members, fused providers, and the per-member token/cost
+/// rollup). Pure so the exact operator-facing shape is unit-testable without
+/// spawning a council. Each line is newline-terminated.
+pub fn render_provenance(outcome: &CouncilOutcome) -> String {
+    let mut out = String::new();
+
+    // Any members skipped before spawn (keyless / unknown), with the reason.
+    for s in &outcome.skipped {
+        out.push_str(&format!(
+            "crucible: skipped proposer '{}' ({})\n",
+            s.spec, s.reason
+        ));
+    }
+    out.push_str(&format!(
+        "crucible: fused {} proposal(s) from [{}]\n",
+        outcome.chosen_from.len(),
+        outcome.chosen_from.join(", ")
+    ));
+
+    // Spend rollup: total + per-member token/cost breakdown.
+    let spend = &outcome.spend;
+    out.push_str(&format!(
+        "crucible: spend = {} in + {} out tokens, ~${:.4} across {} member(s)\n",
+        spend.total_input_tokens,
+        spend.total_output_tokens,
+        spend.total_cost_usd(),
+        spend.per_provider.len()
+    ));
+    for ps in &spend.per_provider {
+        let cost = if ps.priced {
+            format!("${:.4}", ps.cost_microcents as f64 / MICROCENTS_PER_USD)
+        } else {
+            "unpriced".to_string()
+        };
+        out.push_str(&format!(
+            "crucible:   {} ({}): {} in / {} out → {cost}\n",
+            ps.provider,
+            ps.model.as_deref().unwrap_or("?"),
+            ps.input_tokens,
+            ps.output_tokens,
+        ));
+    }
+    out
+}
 
 /// Run the council over `task`, printing the fused answer to stdout.
 pub async fn run_crucible(task: &str) -> anyhow::Result<()> {
@@ -71,40 +120,106 @@ pub async fn run_crucible(task: &str) -> anyhow::Result<()> {
         .await
         .map_err(|e| anyhow::anyhow!("council failed: {e}"))?;
 
-    // Provenance + any skipped members to stderr; the answer to stdout.
-    for s in &outcome.skipped {
-        eprintln!("crucible: skipped proposer '{}' ({})", s.spec, s.reason);
-    }
-    eprintln!(
-        "crucible: fused {} proposal(s) from [{}]",
-        outcome.chosen_from.len(),
-        outcome.chosen_from.join(", ")
-    );
-
-    // Spend rollup (stderr): total + per-member token/cost breakdown.
-    let spend = &outcome.spend;
-    eprintln!(
-        "crucible: spend = {} in + {} out tokens, ~${:.4} across {} member(s)",
-        spend.total_input_tokens,
-        spend.total_output_tokens,
-        spend.total_cost_usd(),
-        spend.per_provider.len()
-    );
-    for ps in &spend.per_provider {
-        let cost = if ps.priced {
-            format!("${:.4}", ps.cost_microcents as f64 / 100_000_000.0)
-        } else {
-            "unpriced".to_string()
-        };
-        eprintln!(
-            "crucible:   {} ({}): {} in / {} out → {cost}",
-            ps.provider,
-            ps.model.as_deref().unwrap_or("?"),
-            ps.input_tokens,
-            ps.output_tokens,
-        );
-    }
+    // Provenance + spend to stderr; the fused answer to stdout.
+    eprint!("{}", render_provenance(&outcome));
 
     println!("{}", outcome.final_text);
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use wcore_agent::orchestration::council::{
+        CouncilSpend, Proposal, ProviderSpend, SkippedProposer,
+    };
+    use wcore_types::message::TokenUsage;
+
+    fn proposal(provider: &str, model: Option<&str>) -> Proposal {
+        Proposal {
+            provider: provider.to_string(),
+            model: model.map(str::to_string),
+            text: "answer".to_string(),
+            is_error: false,
+            usage: TokenUsage {
+                input_tokens: 100,
+                output_tokens: 50,
+                cache_creation_tokens: 0,
+                cache_read_tokens: 0,
+            },
+            latency_ms: 12,
+        }
+    }
+
+    #[test]
+    fn render_shows_skips_fusion_and_per_member_spend() {
+        let outcome = CouncilOutcome {
+            final_text: "FUSED".to_string(),
+            proposals: vec![
+                proposal("anthropic", Some("claude-opus-4-7")),
+                proposal("openai", Some("gpt-5")),
+            ],
+            skipped: vec![SkippedProposer {
+                spec: "vertex".to_string(),
+                reason: "provider 'vertex' has no usable api key".to_string(),
+            }],
+            chosen_from: vec!["anthropic".to_string(), "openai".to_string()],
+            spend: CouncilSpend {
+                per_provider: vec![
+                    ProviderSpend {
+                        provider: "anthropic".to_string(),
+                        model: Some("claude-opus-4-7".to_string()),
+                        input_tokens: 100,
+                        output_tokens: 50,
+                        cost_microcents: 200_000,
+                        priced: true,
+                    },
+                    ProviderSpend {
+                        provider: "ollama".to_string(),
+                        model: None,
+                        input_tokens: 80,
+                        output_tokens: 40,
+                        cost_microcents: 0,
+                        priced: false,
+                    },
+                ],
+                total_input_tokens: 180,
+                total_output_tokens: 90,
+                total_cost_microcents: 200_000,
+            },
+        };
+
+        let rendered = render_provenance(&outcome);
+
+        // Skip line names the member and its reason.
+        assert!(rendered.contains(
+            "crucible: skipped proposer 'vertex' (provider 'vertex' has no usable api key)"
+        ));
+        // Fusion line lists the fused providers.
+        assert!(rendered.contains("crucible: fused 2 proposal(s) from [anthropic, openai]"));
+        // Spend summary: totals + member count + USD (200_000 µ¢ = $0.0020).
+        assert!(
+            rendered
+                .contains("crucible: spend = 180 in + 90 out tokens, ~$0.0020 across 2 member(s)")
+        );
+        // Priced member shows a dollar figure; unpriced member shows "unpriced".
+        assert!(
+            rendered.contains("crucible:   anthropic (claude-opus-4-7): 100 in / 50 out → $0.0020")
+        );
+        assert!(rendered.contains("crucible:   ollama (?): 80 in / 40 out → unpriced"));
+    }
+
+    #[test]
+    fn render_handles_no_skips() {
+        let outcome = CouncilOutcome {
+            final_text: "x".to_string(),
+            proposals: vec![],
+            skipped: vec![],
+            chosen_from: vec!["openai".to_string()],
+            spend: CouncilSpend::default(),
+        };
+        let rendered = render_provenance(&outcome);
+        assert!(!rendered.contains("skipped"));
+        assert!(rendered.contains("crucible: fused 1 proposal(s) from [openai]"));
+    }
 }
