@@ -54,6 +54,9 @@ pub struct AggregateResult {
     pub chosen_from: Vec<String>,
     /// Optional aggregator-supplied rationale.
     pub rationale: Option<String>,
+    /// Token usage the aggregator's synthesis sub-agent consumed (for spend
+    /// accounting). Zero when the aggregator did not run (empty usable set).
+    pub usage: TokenUsage,
 }
 
 // ---- Fencing -------------------------------------------------------------

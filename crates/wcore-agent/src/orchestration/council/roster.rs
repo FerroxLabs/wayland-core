@@ -26,13 +26,15 @@ pub struct ProposerSpec {
 }
 
 /// A validated council roster, ready to lower into a ForgeFlow (T9).
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Roster {
     pub proposers: Vec<ProposerSpec>,
     pub aggregator: Option<String>,
     pub min_proposers: usize,
     pub proposer_max_turns: usize,
     pub proposer_deadline_s: u64,
+    /// Optional council-wide spend ceiling in USD (pre-flight cap).
+    pub max_cost_usd: Option<f64>,
 }
 
 /// Why a `[crucible]` roster failed validation.
@@ -125,6 +127,7 @@ pub fn validate_and_build(cfg: &CrucibleConfig) -> Result<Roster, CrucibleConfig
         min_proposers: cfg.min_proposers,
         proposer_max_turns: cfg.proposer_max_turns,
         proposer_deadline_s: cfg.proposer_deadline_s,
+        max_cost_usd: cfg.max_cost_usd,
     })
 }
 

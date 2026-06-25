@@ -80,6 +80,31 @@ pub async fn run_crucible(task: &str) -> anyhow::Result<()> {
         outcome.chosen_from.len(),
         outcome.chosen_from.join(", ")
     );
+
+    // Spend rollup (stderr): total + per-member token/cost breakdown.
+    let spend = &outcome.spend;
+    eprintln!(
+        "crucible: spend = {} in + {} out tokens, ~${:.4} across {} member(s)",
+        spend.total_input_tokens,
+        spend.total_output_tokens,
+        spend.total_cost_usd(),
+        spend.per_provider.len()
+    );
+    for ps in &spend.per_provider {
+        let cost = if ps.priced {
+            format!("${:.4}", ps.cost_microcents as f64 / 100_000_000.0)
+        } else {
+            "unpriced".to_string()
+        };
+        eprintln!(
+            "crucible:   {} ({}): {} in / {} out → {cost}",
+            ps.provider,
+            ps.model.as_deref().unwrap_or("?"),
+            ps.input_tokens,
+            ps.output_tokens,
+        );
+    }
+
     println!("{}", outcome.final_text);
     Ok(())
 }

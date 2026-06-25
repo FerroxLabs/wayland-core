@@ -15,9 +15,11 @@ pub mod proposal;
 pub mod resolver;
 pub mod roster;
 pub mod run;
+pub mod spend;
 
 pub use aggregator::{Aggregator, LlmSynthesisAggregator};
 pub use proposal::{AggregateResult, Proposal};
 pub use resolver::{CouncilProviderResolver, ProviderResolver, ResolveError};
 pub use roster::{CrucibleConfigError, ProposerSpec, Roster, validate_and_build};
 pub use run::{CouncilError, CouncilOutcome, SkippedProposer, run_council};
+pub use spend::{CouncilSpend, ProviderSpend};

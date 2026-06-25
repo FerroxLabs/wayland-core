@@ -84,6 +84,7 @@ fn roster(proposers: &[&str], aggregator: Option<&str>, min: usize) -> Roster {
         min_proposers: min,
         proposer_max_turns: 1,
         proposer_deadline_s: 90,
+        max_cost_usd: None,
     }
 }
 
@@ -139,6 +140,43 @@ async fn council_fuses_three_providers_with_provenance() {
     assert_eq!(by_provider.get("anthropic"), Some(&"B"));
     assert_eq!(by_provider.get("google"), Some(&"C"));
     assert!(outcome.skipped.is_empty());
+
+    // Spend rollup covers the 3 proposers + the aggregator, and counts tokens
+    // even though these mock models are unpriced.
+    assert_eq!(outcome.spend.per_provider.len(), 4);
+    assert!(outcome.spend.total_output_tokens > 0);
+    assert!(outcome.spend.total_input_tokens > 0);
+}
+
+#[tokio::test]
+async fn over_budget_roster_refused_before_spawn() {
+    // A tiny cap vs an Opus proposer's worst-case spend → refuse before any
+    // spawn (the mock is never invoked). Uses a real catalog-priced model.
+    let mut map: HashMap<String, Result<Arc<dyn LlmProvider>, ResolveError>> = HashMap::new();
+    map.insert(
+        "anthropic".into(),
+        Ok(Arc::new(MockLlmProvider::with_text_response("x"))),
+    );
+    let spawner = spawner_with(map);
+    let roster = Roster {
+        proposers: vec![ProposerSpec {
+            spec: "anthropic".into(),
+            provider: "anthropic".into(),
+            model: Some("claude-opus-4-7".into()),
+        }],
+        aggregator: None,
+        min_proposers: 1,
+        proposer_max_turns: 4,
+        proposer_deadline_s: 90,
+        max_cost_usd: Some(0.0001), // 0.01¢ — far below Opus worst-case
+    };
+    let err = run_council("task", &roster, &spawner, &test_config())
+        .await
+        .expect_err("over budget");
+    assert!(
+        matches!(err, CouncilError::OverBudget { .. }),
+        "got {err:?}"
+    );
 }
 
 #[tokio::test]

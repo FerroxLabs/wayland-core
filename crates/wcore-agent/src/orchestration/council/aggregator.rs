@@ -13,6 +13,7 @@ use async_trait::async_trait;
 
 use wcore_config::config::Config;
 use wcore_providers::LlmProvider;
+use wcore_types::message::TokenUsage;
 
 use super::proposal::{AggregateResult, Proposal, build_synthesis_prompt};
 use crate::spawner::{AgentSpawner, SubAgentConfig};
@@ -76,6 +77,7 @@ impl Aggregator for LlmSynthesisAggregator {
                 final_text: String::new(),
                 chosen_from,
                 rationale: None,
+                usage: TokenUsage::default(),
             };
         }
 
@@ -98,6 +100,10 @@ impl Aggregator for LlmSynthesisAggregator {
             })
             .await;
 
+        // The aggregator's synthesis sub-agent burned tokens whether it
+        // succeeded or errored — capture them for spend accounting.
+        let usage = result.usage;
+
         if result.is_error || result.text.trim().is_empty() {
             // Aggregator failed — fall back to the first usable proposal so a
             // transient synthesis error never sinks the whole council.
@@ -108,6 +114,7 @@ impl Aggregator for LlmSynthesisAggregator {
                     rationale: Some(
                         "aggregator failed; returned first usable proposal".to_string(),
                     ),
+                    usage,
                 };
             }
         }
@@ -116,6 +123,7 @@ impl Aggregator for LlmSynthesisAggregator {
             final_text: result.text,
             chosen_from,
             rationale: None,
+            usage,
         }
     }
 }

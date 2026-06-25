@@ -38,6 +38,11 @@ pub struct CrucibleConfig {
     pub proposer_max_turns: usize,
     /// Per-proposer wall-clock deadline, in seconds.
     pub proposer_deadline_s: u64,
+    /// Optional hard spend ceiling for the whole council, in USD. When set, the
+    /// council refuses to run if its worst-case pre-flight estimate exceeds this
+    /// (a council is N× the spend of one call, so a cap is the headline cost
+    /// control). `None` ⇒ no cap.
+    pub max_cost_usd: Option<f64>,
 }
 
 impl Default for CrucibleConfig {
@@ -50,6 +55,7 @@ impl Default for CrucibleConfig {
             max_proposers: 5,
             proposer_max_turns: 4,
             proposer_deadline_s: 90,
+            max_cost_usd: None,
         }
     }
 }

@@ -22,6 +22,7 @@ use wcore_config::config::Config;
 use super::aggregator::{Aggregator, LlmSynthesisAggregator};
 use super::proposal::Proposal;
 use super::roster::Roster;
+use super::spend::{CouncilSpend, MICROCENTS_PER_USD};
 use crate::spawner::{AgentSpawner, SubAgentConfig};
 
 /// Per-proposer output-token budget.
@@ -45,10 +46,12 @@ pub struct CouncilOutcome {
     pub skipped: Vec<SkippedProposer>,
     /// Provider ids whose proposals the aggregator fused.
     pub chosen_from: Vec<String>,
+    /// Token + cost rollup for the whole run (proposers + aggregator).
+    pub spend: CouncilSpend,
 }
 
 /// Why a council run could not produce a result.
-#[derive(Debug, thiserror::Error, PartialEq, Eq)]
+#[derive(Debug, thiserror::Error, PartialEq)]
 pub enum CouncilError {
     /// The spawner has no provider resolver, so no proposer can be keyed.
     #[error("no provider resolver attached to the spawner; cannot run a council")]
@@ -56,6 +59,9 @@ pub enum CouncilError {
     /// Fewer usable (non-error) proposals than `min_proposers` required.
     #[error("insufficient council proposals: {got} usable < {need} required")]
     InsufficientProposals { got: usize, need: usize },
+    /// The worst-case pre-flight spend estimate exceeds the configured cap.
+    #[error("council would exceed budget: est ${estimated_usd:.2} > cap ${cap_usd:.2}")]
+    OverBudget { estimated_usd: f64, cap_usd: f64 },
 }
 
 /// Run a council over `task` using the validated `roster`. `spawner` MUST carry
@@ -72,12 +78,13 @@ pub async fn run_council(
         .ok_or(CouncilError::NoResolver)?;
 
     // 1. Pre-filter: drop proposers whose provider cannot be keyed (keyless BYO
-    //    members / unknown ids) BEFORE spawning. Recorded with their reason.
+    //    members / unknown ids) BEFORE spawning. Capture the resolver's resolved
+    //    model so spend accounting can price each member.
     let mut live = Vec::new();
     let mut skipped = Vec::new();
     for p in &roster.proposers {
         match resolver.resolve_provider(&p.spec) {
-            Ok(_) => live.push(p),
+            Ok((_provider, model)) => live.push((p, model.or_else(|| p.model.clone()))),
             Err(e) => skipped.push(SkippedProposer {
                 spec: p.spec.clone(),
                 reason: e.to_string(),
@@ -85,10 +92,31 @@ pub async fn run_council(
         }
     }
 
+    // 1b. Pre-flight budget cap: refuse BEFORE spawning if the worst-case spend
+    //     would exceed the configured ceiling (a council is N× one call's cost).
+    if let Some(cap_usd) = roster.max_cost_usd {
+        let members: Vec<(&str, Option<&str>)> = live
+            .iter()
+            .map(|(p, model)| (p.provider.as_str(), model.as_deref()))
+            .collect();
+        let est = CouncilSpend::estimate_worst_case_microcents(
+            &members,
+            roster.proposer_max_turns,
+            DEFAULT_PROPOSER_MAX_TOKENS,
+        );
+        let estimated_usd = est as f64 / MICROCENTS_PER_USD;
+        if estimated_usd > cap_usd {
+            return Err(CouncilError::OverBudget {
+                estimated_usd,
+                cap_usd,
+            });
+        }
+    }
+
     // 2. Spawn the survivors concurrently on their pinned providers, timing
     //    each. provider = the full spec so the resolver keys provider+model;
-    //    model mirrors it so child_config sets the request model consistently.
-    let spawns = live.into_iter().map(|p| {
+    //    model carries the resolved model so child_config + pricing line up.
+    let spawns = live.into_iter().map(|(p, model)| {
         let cfg = SubAgentConfig {
             name: p.spec.clone(),
             prompt: task.to_string(),
@@ -96,12 +124,12 @@ pub async fn run_council(
             max_tokens: DEFAULT_PROPOSER_MAX_TOKENS,
             system_prompt: None,
             provider: Some(p.spec.clone()),
-            model: p.model.clone(),
+            model: model.clone(),
         };
         async move {
             let start = Instant::now();
             let result = spawner.spawn_one(cfg).await;
-            (p.provider.clone(), p.model.clone(), result, start.elapsed())
+            (p.provider.clone(), model, result, start.elapsed())
         }
     });
     let results = join_all(spawns).await;
@@ -130,9 +158,13 @@ pub async fn run_council(
 
     // 5. Synthesize. Resolve the aggregator provider; if none is configured or
     //    it cannot be keyed, fall back to the first usable proposal verbatim.
+    //    Capture the aggregator's (provider, model) for spend accounting.
+    let mut aggregator_provenance: Option<(String, Option<String>)> = None;
     let aggregate = match &roster.aggregator {
         Some(spec) => match resolver.resolve_provider(spec) {
             Ok((provider, model)) => {
+                let agg_provider = spec.split(':').next().unwrap_or(spec).to_string();
+                aggregator_provenance = Some((agg_provider, model.clone()));
                 let agg = LlmSynthesisAggregator::new(provider, model, base.clone());
                 Some(agg.aggregate(task, &proposals).await)
             }
@@ -140,6 +172,13 @@ pub async fn run_council(
         },
         None => None,
     };
+
+    // 6. Roll up spend (proposers + aggregator) BEFORE consuming `aggregate`.
+    let aggregator_spend = aggregator_provenance
+        .as_ref()
+        .zip(aggregate.as_ref())
+        .map(|((provider, model), agg)| (provider.as_str(), model.as_deref(), &agg.usage));
+    let spend = CouncilSpend::from_run(&proposals, aggregator_spend);
 
     let (final_text, chosen_from) = match aggregate {
         Some(a) if !a.final_text.trim().is_empty() => (a.final_text, a.chosen_from),
@@ -159,6 +198,7 @@ pub async fn run_council(
         proposals,
         skipped,
         chosen_from,
+        spend,
     })
 }
 
@@ -210,6 +250,7 @@ mod tests {
             min_proposers: 1,
             proposer_max_turns: 2,
             proposer_deadline_s: 90,
+            max_cost_usd: None,
         }
     }
 
