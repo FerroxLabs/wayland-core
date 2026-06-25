@@ -223,7 +223,7 @@ impl<F: VirtualFs> SandboxedFs<F> {
     ///      step 2's canonical prefix already starts with `self.root`,
     ///      so the suffix is allowed because no symlink can escape
     ///      through a not-yet-created node.
-    fn contain(&self, path: &Path) -> Result<PathBuf, VfsError> {
+    async fn contain(&self, path: &Path) -> Result<PathBuf, VfsError> {
         let normalized = lex_normalize(path, &self.root);
 
         // Walk up the path to the longest existing prefix, canonicalize
@@ -231,7 +231,7 @@ impl<F: VirtualFs> SandboxedFs<F> {
         // sits inside `self.root`. If the prefix canonicalizes to
         // somewhere outside the root, refuse — even if the trailing
         // not-yet-existing suffix is benign.
-        let (canon_prefix, suffix) = match canonicalize_existing_prefix(&normalized) {
+        let (canon_prefix, suffix) = match canonicalize_existing_prefix(&normalized).await {
             Some((prefix, suffix)) => (prefix, suffix),
             None => {
                 return Err(VfsError::OutsideSandbox {
@@ -266,10 +266,18 @@ impl<F: VirtualFs> SandboxedFs<F> {
 /// suffix. Returns `None` only when even `path.ancestors()` can't yield
 /// a real prefix (e.g. relative path with no anchor) — the caller
 /// should refuse such inputs.
-fn canonicalize_existing_prefix(path: &Path) -> Option<(PathBuf, PathBuf)> {
+async fn canonicalize_existing_prefix(path: &Path) -> Option<(PathBuf, PathBuf)> {
     let mut p: &Path = path;
     loop {
-        if let Ok(canon) = fs::canonicalize(p) {
+        // `tokio::fs::canonicalize` offloads the blocking `std::fs::canonicalize`
+        // syscall to the blocking pool. On a stalled network mount — e.g. a
+        // Windows `\\wsl$\` 9P share (FerroxLabs/wayland#287) — that syscall can
+        // hang indefinitely; keeping it OFF the runtime thread means the
+        // per-tool dispatch timeout still fires (an error result) instead of the
+        // worker wedging mid-poll and the tool hanging silently forever. A
+        // blocking syscall on the reactor cannot be preempted by
+        // `tokio::time::timeout`.
+        if let Ok(canon) = tokio::fs::canonicalize(p).await {
             // Suffix is the part of `path` that lives beyond `p`. When
             // `p == path` (the whole path exists and canonicalized
             // cleanly), the suffix is empty and the read target IS the
@@ -307,27 +315,27 @@ fn lex_normalize(path: &Path, base: &Path) -> PathBuf {
 #[async_trait]
 impl<F: VirtualFs + 'static> VirtualFs for SandboxedFs<F> {
     async fn read(&self, path: &Path) -> Result<Vec<u8>, VfsError> {
-        let p = self.contain(path)?;
+        let p = self.contain(path).await?;
         self.inner.read(&p).await
     }
     async fn write(&self, path: &Path, contents: &[u8]) -> Result<(), VfsError> {
-        let p = self.contain(path)?;
+        let p = self.contain(path).await?;
         self.inner.write(&p, contents).await
     }
     async fn exists(&self, path: &Path) -> Result<bool, VfsError> {
-        let p = self.contain(path)?;
+        let p = self.contain(path).await?;
         self.inner.exists(&p).await
     }
     async fn list(&self, dir: &Path) -> Result<Vec<PathBuf>, VfsError> {
-        let p = self.contain(dir)?;
+        let p = self.contain(dir).await?;
         self.inner.list(&p).await
     }
     async fn remove_file(&self, path: &Path) -> Result<(), VfsError> {
-        let p = self.contain(path)?;
+        let p = self.contain(path).await?;
         self.inner.remove_file(&p).await
     }
     async fn metadata(&self, path: &Path) -> Result<VfsMetadata, VfsError> {
-        let p = self.contain(path)?;
+        let p = self.contain(path).await?;
         self.inner.metadata(&p).await
     }
     fn root(&self) -> Option<&Path> {
