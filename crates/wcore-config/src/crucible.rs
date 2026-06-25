@@ -11,6 +11,24 @@
 
 use serde::{Deserialize, Serialize};
 
+/// How the council roster is chosen.
+///
+/// `Manual` (the default) is the shipped behavior: the roster comes verbatim
+/// from `[crucible].proposers` / `aggregator`. `Auto` opts into the deterministic
+/// `Assembler`, which selects a cost-effective, provider-diverse membership per
+/// task from the live keyed pool. `Manual` must stay byte-identical to the
+/// pre-assembler path, so this defaults to `Manual` and every auto-only code
+/// path is gated behind `Auto`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum AssemblyMode {
+    /// Roster comes verbatim from config — the shipped path.
+    #[default]
+    Manual,
+    /// Roster is chosen by the deterministic Assembler.
+    Auto,
+}
+
 /// The `[crucible]` configuration block.
 ///
 /// `#[serde(default)]` at the container level means any omitted field falls
@@ -43,6 +61,26 @@ pub struct CrucibleConfig {
     /// (a council is N× the spend of one call, so a cap is the headline cost
     /// control). `None` ⇒ no cap.
     pub max_cost_usd: Option<f64>,
+    /// Roster selection mode. `Manual` (default) keeps the shipped path; `Auto`
+    /// enables the deterministic Assembler. Every assembler-only behavior is
+    /// gated on this being `Auto`.
+    pub assembly: AssemblyMode,
+    /// Multiplier applied to the native-SKU price when pricing a
+    /// `flux-pinned-*` model (Flux's flat-rate / markup is not in the catalog).
+    /// `1.0` (default) prices flux-pinned models at their underlying native rate
+    /// — a stopgap until Flux emits an authoritative cost (FerroxLabs/wayland#319).
+    pub flux_markup: f64,
+    /// Global soft-deadline for the whole council, in seconds. Once `min_proposers`
+    /// usable proposals are in, stragglers get only until this deadline before they
+    /// are cancelled. This is the binding latency bound for the auto path;
+    /// `proposer_deadline_s` is the per-proposer hard backstop (kept larger).
+    pub global_deadline_s: u64,
+    /// Auto-path spend cap (USD) for a Low-stakes council.
+    pub cap_low_usd: f64,
+    /// Auto-path spend cap (USD) for a Med-stakes council.
+    pub cap_med_usd: f64,
+    /// Auto-path spend cap (USD) for a High-stakes council.
+    pub cap_high_usd: f64,
 }
 
 impl Default for CrucibleConfig {
@@ -56,6 +94,12 @@ impl Default for CrucibleConfig {
             proposer_max_turns: 4,
             proposer_deadline_s: 90,
             max_cost_usd: None,
+            assembly: AssemblyMode::Manual,
+            flux_markup: 1.0,
+            global_deadline_s: 25,
+            cap_low_usd: 0.02,
+            cap_med_usd: 0.05,
+            cap_high_usd: 0.15,
         }
     }
 }
@@ -97,5 +141,33 @@ proposers = ["openai", "anthropic"]
         let c: CrucibleConfig = toml::from_str("").expect("parse empty");
         assert!(!c.enabled);
         assert!(c.proposers.is_empty());
+    }
+
+    #[test]
+    fn assembly_defaults_to_manual() {
+        let c = CrucibleConfig::default();
+        assert_eq!(c.assembly, AssemblyMode::Manual);
+        assert_eq!(c.flux_markup, 1.0);
+        assert_eq!(c.global_deadline_s, 25);
+        assert_eq!(
+            (c.cap_low_usd, c.cap_med_usd, c.cap_high_usd),
+            (0.02, 0.05, 0.15)
+        );
+    }
+
+    #[test]
+    fn assembly_absent_parses_as_manual_and_auto_parses() {
+        // A table that never mentions `assembly` must default to Manual.
+        let toml = r#"
+enabled = true
+proposers = ["openai", "anthropic"]
+"#;
+        let c: CrucibleConfig = toml::from_str(toml).expect("parse without assembly");
+        assert_eq!(c.assembly, AssemblyMode::Manual);
+
+        // The lowercase rename means `assembly = "auto"` parses.
+        let c2: CrucibleConfig =
+            toml::from_str("assembly = \"auto\"").expect("parse assembly=auto");
+        assert_eq!(c2.assembly, AssemblyMode::Auto);
     }
 }
