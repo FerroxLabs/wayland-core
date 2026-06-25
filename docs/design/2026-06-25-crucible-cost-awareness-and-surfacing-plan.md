@@ -5,6 +5,23 @@ gate are built, gated-green, pushed, and **live-validated** via Flux Router
 (Claude Opus 4.8 + GPT-5 + Gemini 3.1 Pro fused by Opus). This plan covers the
 four threads Sean raised after the live run.
 
+> **UPDATE 2026-06-26 — AUTO-ASSEMBLY SHIPPED** (branch `feat/crucible-mop-slice1`,
+> tip `48cfcea1`, full-workspace gate green 9309 tests). The deterministic
+> Assembler (Stages 0–8 of `docs/superpowers/plans/2026-06-25-crucible-auto-assembly.md`)
+> is built and merged on the branch: flux-pinned pricing stopgap, tail-latency
+> cut, judge-inclusive pre-flight cap, stakes gate + member ladder, runtime
+> `family()`, the pure `assemble()` (diversity + price-floor + **decoupled** strong
+> judge + downshift ladder), CLI auto mode (`[crucible].assembly = "auto"` +
+> `--council/--judge/--direct/--force-council/--deep/--deny`), and opt-in
+> privacy-safe preference logging. Every stage was cross-audited + fixed; the
+> capstone audit confirmed no over-cap council, decoupled judge, manual path
+> byte-identical, no key leak. The CROSS-AUDIT REVISIONS below are all satisfied.
+> Deferred fast-follows (non-blocking): flag-conflict warnings, R3 pool-narrowing
+> note, `global_deadline_s < proposer_deadline_s` validation, `assembly="auto"`
+> manual-config-drop doc/notice, absolute cross-pool price floor, BetaScorer
+> learning (the logging is the day-one signal), and the authoritative Flux cost
+> (FerroxLabs/wayland#319) that replaces Stage 2's markup stopgap.
+
 ## What the live run exposed
 
 ```
