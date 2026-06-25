@@ -15,6 +15,12 @@ pub struct SubAgentConfig {
     pub max_tokens: u32,
     /// Optional system prompt override
     pub system_prompt: Option<String>,
+    /// Slice-1 MoP: pin this sub-agent to a named provider (resolved by
+    /// `CouncilProviderResolver`). `None` ⇒ inherit the spawner's provider.
+    pub provider: Option<String>,
+    /// Optional model override applied to the child engine config. `None` ⇒
+    /// inherit the (resolved) provider's default model.
+    pub model: Option<String>,
 }
 
 /// Overrides applied when spawning a fork-mode skill sub-agent.
@@ -43,4 +49,24 @@ pub struct SubAgentResult {
 pub trait Spawner: Send + Sync {
     /// Spawn a fork-mode sub-agent with optional overrides and wait for its result.
     async fn spawn_fork(&self, config: SubAgentConfig, overrides: ForkOverrides) -> SubAgentResult;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sub_agent_config_carries_optional_provider_and_model() {
+        let c = SubAgentConfig {
+            name: "p".into(),
+            prompt: "x".into(),
+            max_turns: 1,
+            max_tokens: 16,
+            system_prompt: None,
+            provider: Some("openai".into()),
+            model: Some("gpt-5.5".into()),
+        };
+        assert_eq!(c.provider.as_deref(), Some("openai"));
+        assert_eq!(c.model.as_deref(), Some("gpt-5.5"));
+    }
 }

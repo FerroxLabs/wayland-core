@@ -225,6 +225,8 @@ async fn run_item(
                 max_turns: dispatch.max_turns,
                 max_tokens: dispatch.max_tokens,
                 system_prompt: None,
+                provider: None,
+                model: None,
             })
             .await;
         drop(permit);

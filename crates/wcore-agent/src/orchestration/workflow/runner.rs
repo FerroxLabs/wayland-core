@@ -338,6 +338,8 @@ pub(crate) async fn resolve_stage_schema(
                         max_turns: dispatch.max_turns,
                         max_tokens: dispatch.max_tokens,
                         system_prompt: None,
+                        provider: None,
+                        model: None,
                     })
                     .await;
                 drop(permit);
@@ -1058,6 +1060,8 @@ impl<'a> WorkflowRunner<'a> {
                 max_turns: node_turn_budget(&plan.graph, id),
                 max_tokens: node_token_budget(&plan.graph, id),
                 system_prompt: None,
+                provider: None,
+                model: None,
             })
             .await
     }
@@ -1099,6 +1103,8 @@ impl<'a> WorkflowRunner<'a> {
                     max_turns: node_turn_budget(&plan.graph, id),
                     max_tokens: node_token_budget(&plan.graph, id),
                     system_prompt: None,
+                    provider: None,
+                    model: None,
                 },
             ));
         }
@@ -1529,6 +1535,8 @@ impl<'a> WorkflowRunner<'a> {
                     max_turns: node_turn_budget(&plan.graph, agent_name),
                     max_tokens: node_token_budget(&plan.graph, agent_name),
                     system_prompt: None,
+                    provider: None,
+                    model: None,
                 };
                 let result = self.spawner.spawn_one(cfg).await;
                 if result.is_error {

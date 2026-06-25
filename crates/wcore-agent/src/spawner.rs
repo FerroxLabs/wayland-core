@@ -784,6 +784,8 @@ mod phase7_tests {
             max_turns: 5,
             max_tokens: 1024,
             system_prompt: Some("you are helpful".to_string()),
+            provider: None,
+            model: None,
         };
         assert_eq!(config.name, "test-agent");
         assert_eq!(config.max_turns, 5);
@@ -843,6 +845,8 @@ mod posture_inheritance_tests {
             max_turns: 3,
             max_tokens: 512,
             system_prompt: None,
+            provider: None,
+            model: None,
         }
     }
 

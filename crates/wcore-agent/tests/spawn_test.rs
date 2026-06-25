@@ -18,6 +18,8 @@ fn make_sub_config(name: &str) -> SubAgentConfig {
         max_turns: 5,
         max_tokens: 1024,
         system_prompt: None,
+        provider: None,
+        model: None,
     }
 }
 

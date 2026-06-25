@@ -237,6 +237,21 @@ pub struct NodeBudget {
     pub max_tokens: Option<u32>,
 }
 
+/// A per-node provider pin, stored in [`GraphConfig::node_providers`] as a
+/// side-table (keyed by node id) so a workflow node can target a specific LLM
+/// provider/model without widening the [`Node`] enum. `provider` is
+/// `Option<String>` so a pin can carry a *model-only* override (no provider
+/// change). Both fields `None` ⇒ inherit the spawner's provider/model.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct ProviderPin {
+    /// Pin to a named provider (resolved by `CouncilProviderResolver`); `None`
+    /// ⇒ inherit the spawner's provider.
+    pub provider: Option<String>,
+    /// Optional model override; `None` ⇒ inherit the resolved provider's
+    /// default model.
+    pub model: Option<String>,
+}
+
 /// A buildable graph spec: nodes by id + directed edges + a single
 /// entry. Per-key state reducer overrides live alongside.
 pub struct GraphConfig {
@@ -250,6 +265,12 @@ pub struct GraphConfig {
     /// ignores this table (it dispatches through the `NodeExecutor` trait, not
     /// `SubAgentConfig`); only `WorkflowRunner` reads it.
     pub node_budgets: HashMap<String, NodeBudget>,
+    /// Per-node provider/model pins, keyed by node id. A node absent here
+    /// inherits the spawner's provider/model. Like [`Self::node_budgets`], the
+    /// `ExecutionGraph` walker ignores this table (it dispatches through the
+    /// `NodeExecutor` trait, not `SubAgentConfig`); only `WorkflowRunner` reads
+    /// it to set `SubAgentConfig.{provider,model}`.
+    pub node_providers: HashMap<String, ProviderPin>,
 }
 
 impl GraphConfig {
@@ -262,6 +283,7 @@ impl GraphConfig {
             entry: entry.into(),
             state_reducers: HashMap::new(),
             node_budgets: HashMap::new(),
+            node_providers: HashMap::new(),
         }
     }
 
@@ -332,6 +354,14 @@ impl GraphConfig {
             to: to.into(),
             when,
         });
+    }
+
+    /// Set the provider/model pin for a node id, inserting into the
+    /// [`Self::node_providers`] side-table. Mirrors how budgets are recorded.
+    /// `WorkflowRunner` reads this pin to set `SubAgentConfig.{provider,model}`
+    /// when dispatching the node.
+    pub fn set_node_provider(&mut self, id: &str, pin: ProviderPin) {
+        self.node_providers.insert(id.to_string(), pin);
     }
 
     /// Inspector — true if this config matches the shape produced by
@@ -405,9 +435,10 @@ impl ExecutionGraph {
             entry,
             state_reducers,
             // The walker dispatches via `NodeExecutor`, not `SubAgentConfig`,
-            // so per-node turn/token budgets do not apply here (only
-            // `WorkflowRunner` consumes them).
+            // so per-node turn/token budgets and provider pins do not apply
+            // here (only `WorkflowRunner` consumes them).
             node_budgets: _,
+            node_providers: _,
         } = config;
 
         // Validate entry up-front for clean error messaging.
