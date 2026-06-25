@@ -173,10 +173,13 @@ mod tests {
     }
 
     #[test]
-    fn resolve_skips_keyless_provider() {
-        // Vertex resolves to an empty key when unconfigured → Keyless (skip).
+    fn resolve_skips_genuinely_keyless_provider() {
+        // `cohere` REQUIRES an inline key; with none configured and
+        // COHERE_API_KEY unset, resolution is Keyless (skip). Out-of-band
+        // providers (vertex/bedrock/chatgpt) are NOT keyless — see the
+        // config-layer `council_resolves_out_of_band_provider` test.
         let r = CouncilProviderResolver::new(Config::default(), HashMap::new());
-        assert!(matches!(r.resolve("vertex"), Err(ResolveError::Keyless(_))));
+        assert!(matches!(r.resolve("cohere"), Err(ResolveError::Keyless(_))));
     }
 
     #[test]

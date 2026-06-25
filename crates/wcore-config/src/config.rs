@@ -1881,6 +1881,19 @@ pub enum CouncilProviderError {
 /// Returns the derived `Config` plus the resolved model (the spec's pinned
 /// model if given, else the provider/config default when non-empty; `None` for
 /// catalog providers with no default — the API surfaces an honest error).
+///
+/// Intentional divergences from [`Config::resolve`] (all by design, not bugs):
+/// - No CLI override rungs (`--provider`/`--model`/`--api-key`/`--base-url`) —
+///   the council never takes CLI args.
+/// - No `[default].model` fallback in model resolution. The session default
+///   model belongs to the *primary* provider; seeding it onto a different
+///   council provider (e.g. an Anthropic-shaped literal onto an OpenAI member)
+///   would be wrong. `base` is an already-resolved `Config`, so the on-disk
+///   `[default]` block isn't reachable here anyway.
+/// - `thinking` is inherited from `base` (whereas `Config::resolve` hard-sets
+///   `None`). Identical whenever `base` itself came from `Config::resolve`.
+/// - The F-088 OpenAI effort-capability gate uses the fully-resolved model
+///   string (more accurate than `Config::resolve`'s pre-expansion check).
 pub fn resolve_council_provider(
     providers: &HashMap<String, ProviderConfig>,
     base: &Config,
@@ -1936,25 +1949,31 @@ pub fn resolve_council_provider(
                 .and_then(|e| std::env::var(&e.env_var).ok())
         })
         .flatten();
-    let mut api_key = match resolve_api_key(
+    // The keyless decision keys off the Ok/Err *distinction*, NOT string
+    // emptiness. `resolve_api_key` returns `Ok("")` by design for providers
+    // that authenticate out-of-band — Bedrock/Vertex (cloud creds), ChatGPT
+    // (OAuth), xAI (when OAuth creds are present). Those are valid council
+    // members and MUST be built, not skipped. It returns `Err(MissingApiKey)`
+    // only when no credential was found anywhere; that case (with no catalog
+    // env var) is the genuine BYO-key-missing member the council skips.
+    let api_key = match resolve_api_key(
         None,
         provider_config.api_key.as_deref(),
         provider,
         &base.storage.credentials,
     ) {
-        Ok(key) => key,
-        Err(_) => catalog_env_key.clone().unwrap_or_default(),
+        // A real inline / store / env key.
+        Ok(key) if !key.is_empty() => key,
+        // Out-of-band auth → legitimately empty inline key; build it. (A catalog
+        // env var, if somehow set for this id, still wins — mirrors resolve().)
+        Ok(empty) => catalog_env_key.clone().unwrap_or(empty),
+        // Nothing found anywhere: honor a catalog env var, else this is a
+        // keyless BYO member the council skips (not fatal).
+        Err(_) => match catalog_env_key.clone() {
+            Some(key) => key,
+            None => return Err(CouncilProviderError::Keyless(provider_id.to_string())),
+        },
     };
-    if api_key.is_empty()
-        && let Some(key) = catalog_env_key
-    {
-        api_key = key;
-    }
-
-    // BYO-key council member with no key → skip, not fatal.
-    if api_key.trim().is_empty() {
-        return Err(CouncilProviderError::Keyless(provider_id.to_string()));
-    }
 
     let prompt_caching = provider_config
         .prompt_caching
@@ -3779,14 +3798,28 @@ mod tests {
     }
 
     #[test]
-    fn council_skips_keyless_provider() {
-        // Vertex resolves to an empty key when none is configured (it uses GCP
-        // credentials, not an inline API key), so the council treats it as a
-        // BYO-key member to skip — surfaced as Keyless, env-independent.
+    fn council_resolves_out_of_band_provider() {
+        // Vertex/Bedrock/ChatGPT authenticate out-of-band (GCP/AWS creds, OAuth)
+        // and resolve to an empty inline key BY DESIGN. They are valid council
+        // members and must NOT be skipped as keyless — that would drop exactly
+        // the enterprise providers a cross-provider council wants.
         let providers = HashMap::new();
         let base = Config::default();
-        let err = resolve_council_provider(&providers, &base, "vertex")
-            .expect_err("vertex has no inline key");
+        let (cfg, _model) = resolve_council_provider(&providers, &base, "vertex")
+            .expect("vertex (out-of-band auth) must resolve, not be skipped");
+        assert_eq!(cfg.provider, ProviderType::Vertex);
+    }
+
+    #[test]
+    fn council_skips_genuinely_keyless_provider() {
+        // A provider that REQUIRES an inline key but has none (no inline config,
+        // no env var) is the real keyless case → skip. `cohere` needs
+        // COHERE_API_KEY; with an empty providers map and that env var unset,
+        // resolve_api_key returns Err → Keyless.
+        let providers = HashMap::new();
+        let base = Config::default();
+        let err = resolve_council_provider(&providers, &base, "cohere")
+            .expect_err("cohere with no key must be keyless");
         assert!(
             matches!(err, CouncilProviderError::Keyless(_)),
             "got {err:?}"
