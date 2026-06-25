@@ -12,6 +12,7 @@
 
 pub mod aggregator;
 pub mod assembler;
+pub mod assembler_log;
 pub mod gate;
 pub mod proposal;
 pub mod resolver;
@@ -21,6 +22,7 @@ pub mod spend;
 
 pub use aggregator::{Aggregator, LlmSynthesisAggregator};
 pub use assembler::{AssemblyPlan, AssemblyPolicy, assemble};
+pub use assembler_log::{assembly_log_line, log_assembly};
 pub use gate::{CouncilDecision, GateConfig, Stakes, classify_task, member_count};
 pub use proposal::{AggregateResult, Proposal};
 pub use resolver::{CouncilProviderResolver, ProviderResolver, ResolveError, family};

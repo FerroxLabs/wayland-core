@@ -88,6 +88,12 @@ pub struct CrucibleConfig {
     pub cap_med_usd: f64,
     /// Auto-path spend cap (USD) for a High-stakes council.
     pub cap_high_usd: f64,
+    /// Opt-in (default `false`): append a privacy-safe preference line per auto
+    /// council to `crucible-assembly.jsonl` under the user config dir — stakes
+    /// class + provider-family mix + est-vs-actual cost ONLY, never task text or
+    /// model specs. The learning signal for a future BetaScorer; off until the
+    /// operator opts in.
+    pub log_assembly: bool,
 }
 
 impl Default for CrucibleConfig {
@@ -108,6 +114,7 @@ impl Default for CrucibleConfig {
             cap_low_usd: 0.02,
             cap_med_usd: 0.05,
             cap_high_usd: 0.15,
+            log_assembly: false,
         }
     }
 }

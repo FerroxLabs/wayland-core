@@ -16,8 +16,8 @@ use std::sync::Arc;
 
 use wcore_agent::orchestration::council::{
     AssemblyPlan, AssemblyPolicy, CouncilDecision, CouncilOutcome, CouncilProviderResolver,
-    CouncilSpend, GateConfig, ProposerSpec, Roster, Stakes, assemble, classify_task, run_council,
-    validate_and_build,
+    CouncilSpend, GateConfig, ProposerSpec, Roster, Stakes, assemble, classify_task, log_assembly,
+    run_council, validate_and_build,
 };
 use wcore_agent::spawner::{AgentSpawner, SubAgentConfig};
 use wcore_config::config::{CliArgs, Config, ConfigFile, load_merged_config_file};
@@ -264,6 +264,8 @@ async fn run_crucible_auto(args: &CrucibleArgs, cf: &ConfigFile) -> anyhow::Resu
             println!("{text}");
         }
         AutoRun::Council(outcome) => {
+            // Privacy-safe preference signal (opt-in; family-mix + cost only).
+            log_assembly(&plan, &outcome.spend, &cf.crucible, None);
             eprint!("{}", render_provenance(&outcome));
             println!("{}", outcome.final_text);
         }
