@@ -28,10 +28,12 @@ pub trait Aggregator: Send + Sync {
 }
 
 /// Per-aggregate turn budget. Synthesis is single-shot; a tiny budget keeps a
-/// stuck aggregator from burning the council's cost ceiling.
-const AGGREGATOR_MAX_TURNS: usize = 2;
-/// Per-aggregate output-token budget.
-const AGGREGATOR_MAX_TOKENS: u32 = 4096;
+/// stuck aggregator from burning the council's cost ceiling. `pub` so the
+/// pre-flight cost estimate prices the judge against the SAME ceiling the
+/// executor enforces (they must never drift, or the cap undercounts).
+pub const AGGREGATOR_MAX_TURNS: usize = 2;
+/// Per-aggregate output-token budget. `pub` for the same shared-ceiling reason.
+pub const AGGREGATOR_MAX_TOKENS: u32 = 4096;
 
 /// An aggregator that asks a pinned LLM to synthesize the proposals.
 pub struct LlmSynthesisAggregator {

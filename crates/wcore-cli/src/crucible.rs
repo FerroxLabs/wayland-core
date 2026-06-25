@@ -6,7 +6,9 @@
 //! - **Manual** (default, `assembly = "manual"`, no assembly flags): the roster
 //!   comes verbatim from `[crucible].proposers` / `aggregator`. With `--auto` a
 //!   cheap gate decides whether to convene at all. This path is byte-identical
-//!   to the shipped behavior.
+//!   to the shipped behavior in roster selection + fused output; the post-quorum
+//!   tail-latency cut (a hung straggler is cancelled at the global soft-deadline)
+//!   applies to all councils as a strict latency improvement.
 //! - **Auto** (`assembly = "auto"`, or any of `--council/--judge/--direct/
 //!   --force-council/--deep/--deny`): the deterministic [`assemble`] picks a
 //!   cost-effective, provider-diverse roster from the keyed candidate pool, and
@@ -87,6 +89,18 @@ pub fn render_provenance(outcome: &CouncilOutcome) -> String {
         outcome.chosen_from.len(),
         outcome.chosen_from.join(", ")
     ));
+
+    // Members that ran but did not contribute (errored, timed out, or cancelled
+    // post-quorum at the soft-deadline) — shown so a 3-of-5 council is never
+    // mistaken for a clean 5-of-5.
+    for p in outcome.proposals.iter().filter(|p| p.is_error) {
+        out.push_str(&format!(
+            "crucible: member '{}' did not contribute ({}, {}ms)\n",
+            p.provider,
+            p.text.trim(),
+            p.latency_ms
+        ));
+    }
 
     // Spend rollup: total + per-member token/cost breakdown.
     let spend = &outcome.spend;
@@ -561,6 +575,25 @@ mod tests {
             rendered.contains("crucible:   anthropic (claude-opus-4-7): 100 in / 50 out → $0.0020")
         );
         assert!(rendered.contains("crucible:   ollama (?): 80 in / 40 out → unpriced"));
+    }
+
+    #[test]
+    fn render_shows_non_contributing_members() {
+        let mut errored = proposal("slow", Some("m"));
+        errored.is_error = true;
+        errored.text = "proposer timed out (per-proposer deadline)".to_string();
+        errored.latency_ms = 1000;
+        let outcome = CouncilOutcome {
+            final_text: "FUSED".to_string(),
+            proposals: vec![proposal("openai", Some("gpt-5")), errored],
+            skipped: vec![],
+            chosen_from: vec!["openai".to_string()],
+            spend: CouncilSpend::default(),
+        };
+        let rendered = render_provenance(&outcome);
+        assert!(rendered.contains(
+            "crucible: member 'slow' did not contribute (proposer timed out (per-proposer deadline), 1000ms)"
+        ));
     }
 
     #[test]

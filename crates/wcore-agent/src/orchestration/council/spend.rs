@@ -10,6 +10,7 @@
 use wcore_pricing::{DEFAULT_CATALOG, PricingCatalog};
 use wcore_types::message::TokenUsage;
 
+use super::aggregator::{AGGREGATOR_MAX_TOKENS, AGGREGATOR_MAX_TURNS};
 use super::proposal::Proposal;
 
 /// Whether a `(provider, model)` resolves to a catalog price — either a literal
@@ -208,12 +209,19 @@ impl CouncilSpend {
 
         if let Some((provider, model)) = aggregator {
             // The aggregator's input is every proposal (≈ Σ proposer outputs)
-            // plus the task prompt; its output is one synthesized answer.
+            // plus the task prompt. Its OUTPUT ceiling is the aggregator's OWN
+            // budget (`AGGREGATOR_MAX_TURNS × AGGREGATOR_MAX_TOKENS`), NOT one
+            // proposer `max_tokens` — the judge is the dominant cost line, so
+            // undercounting it lets a council exceed its cap. These constants are
+            // the executor's source of truth (aggregator.rs), shared here so the
+            // cap bounds true worst-case spend.
             let judge_in = (proposers.len() as u64)
                 .saturating_mul(out_worst)
                 .saturating_add(in_worst);
+            let judge_out =
+                (AGGREGATOR_MAX_TURNS as u64).saturating_mul(AGGREGATOR_MAX_TOKENS as u64);
             match model.and_then(|m| {
-                catalog.estimate_cost_microcents_resolved(provider, m, judge_in, in_worst, markup)
+                catalog.estimate_cost_microcents_resolved(provider, m, judge_in, judge_out, markup)
             }) {
                 Some(c) => microcents = microcents.saturating_add(c),
                 None => fully_priced = false,
@@ -341,6 +349,32 @@ mod tests {
         assert!(
             pre5.microcents - pre3.microcents > 2 * per_proposer,
             "judge input must scale with proposer count beyond proposer cost alone"
+        );
+    }
+
+    #[test]
+    fn preflight_prices_judge_output_at_aggregator_ceiling() {
+        // The judge output must be priced at the aggregator's OWN ceiling
+        // (AGGREGATOR_MAX_TURNS × AGGREGATOR_MAX_TOKENS), not one proposer
+        // max_tokens — else the dominant cost line is undercounted and a council
+        // can exceed its cap. Hand-derive and lock it.
+        let cat = PricingCatalog::load_default().unwrap();
+        let proposers: Vec<(&str, Option<&str>)> = vec![("deepseek", Some("deepseek-v4-pro"))];
+        let agg = Some(("anthropic", Some("claude-opus-4-7")));
+        let pre = CouncilSpend::estimate_preflight_microcents(&cat, &proposers, agg, 1, 1000, 1.0);
+
+        let judge_in = 1000 + 1000; // proposers.len()(1) × out_worst(1000) + in_worst(1000)
+        let judge_out = (AGGREGATOR_MAX_TURNS as u64) * (AGGREGATOR_MAX_TOKENS as u64); // 8192
+        let judge = cat
+            .estimate_cost_microcents("anthropic", "claude-opus-4-7", judge_in, judge_out)
+            .unwrap();
+        let proposer = cat
+            .estimate_cost_microcents("deepseek", "deepseek-v4-pro", 1000, 1000)
+            .unwrap();
+        assert_eq!(
+            pre.microcents,
+            proposer + judge,
+            "judge output priced at the aggregator ceiling, not one max_tokens"
         );
     }
 

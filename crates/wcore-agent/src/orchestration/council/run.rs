@@ -228,13 +228,13 @@ pub async fn run_council(
         })
         .collect();
 
-    // 4. Quorum — at least `min_proposers` usable proposals.
+    // 4. Quorum — at least `min_proposers` usable proposals, but ALWAYS ≥ 1: the
+    //    synthesis fallback below expects a usable proposal, and a misconfigured
+    //    `min_proposers = 0` would otherwise pass an empty council into it.
+    let need = roster.min_proposers.max(1);
     let usable = proposals.iter().filter(|p| p.is_usable()).count();
-    if usable < roster.min_proposers {
-        return Err(CouncilError::InsufficientProposals {
-            got: usable,
-            need: roster.min_proposers,
-        });
+    if usable < need {
+        return Err(CouncilError::InsufficientProposals { got: usable, need });
     }
 
     // 5. Synthesize. Resolve the aggregator provider; if none is configured or
