@@ -7,10 +7,35 @@
 //! cost (the council never fails over a missing price row) and is flagged via
 //! `priced = false` so the operator can tell "free" from "unpriced".
 
-use wcore_pricing::DEFAULT_CATALOG;
+use wcore_pricing::{DEFAULT_CATALOG, PricingCatalog};
 use wcore_types::message::TokenUsage;
 
 use super::proposal::Proposal;
+
+/// Whether a `(provider, model)` resolves to a catalog price — either a literal
+/// key or, for a `flux-pinned-*` model, an exact native SKU (× `markup`). A
+/// member with no model is never priceable.
+///
+/// This is an ELIGIBILITY predicate, not a billing path. The Assembler (Stage 6)
+/// uses it to exclude unpriceable members from an *auto* roster, and the auto
+/// pre-flight estimate (Stage 3, `estimate_preflight_microcents`) prices the
+/// chosen members through the same resolved path — together those enforce the
+/// auto cap. It does NOT change the *manual* path: a manually-listed flux-pinned
+/// proposer still prices through the documented `price_one` soft-guard (unpriced
+/// ⇒ 0) until Flux emits an authoritative cost (FerroxLabs/wayland#319).
+pub fn is_priceable(
+    catalog: &PricingCatalog,
+    provider: &str,
+    model: Option<&str>,
+    markup: f64,
+) -> bool {
+    match model {
+        Some(m) => catalog
+            .estimate_cost_microcents_resolved(provider, m, 1, 1, markup)
+            .is_some(),
+        None => false,
+    }
+}
 
 /// The pricing catalog returns microcents; 1 USD = 100¢ = 100_000_000 µ¢.
 pub(crate) const MICROCENTS_PER_USD: f64 = 100_000_000.0;
@@ -204,5 +229,27 @@ mod tests {
             CouncilSpend::estimate_worst_case_microcents(&members, 4, 4096),
             0
         );
+    }
+
+    #[test]
+    fn is_priceable_distinguishes_known_from_unpriced() {
+        let cat = PricingCatalog::load_default().unwrap();
+        // Literal native key + flux-pinned with a native row are priceable.
+        assert!(is_priceable(&cat, "openai", Some("gpt-5"), 1.0));
+        assert!(is_priceable(
+            &cat,
+            "flux-router",
+            Some("flux-pinned-gpt-5"),
+            1.0
+        ));
+        // Unknown native SKU, no row, and no model are all unpriceable.
+        assert!(!is_priceable(
+            &cat,
+            "flux-router",
+            Some("flux-pinned-glm-5-2"),
+            1.0
+        ));
+        assert!(!is_priceable(&cat, "openai", Some("made-up-model"), 1.0));
+        assert!(!is_priceable(&cat, "openai", None, 1.0));
     }
 }
