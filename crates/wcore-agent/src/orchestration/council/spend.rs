@@ -381,20 +381,28 @@ mod tests {
     #[test]
     fn preflight_input_scales_with_turns() {
         // A multi-turn proposer re-sends growing context each turn, so its INPUT
-        // ceiling scales with turns too. With no judge, both output AND input
-        // scale with turns — doubling max_turns must MORE-than-double the
-        // estimate (pure-output scaling would give exactly 2×). Same catalog
-        // construction as the judge/proposer-count test above.
+        // ceiling scales with turns (max_turns × max_tokens), not one prompt.
+        // Hand-derive (like the judge-ceiling test below): turns=2 → input AND
+        // output are each 2×1000.
         let cat = PricingCatalog::load_default().unwrap();
         let proposers: Vec<(&str, Option<&str>)> = vec![("deepseek", Some("deepseek-v4-pro"))];
-        let one = CouncilSpend::estimate_preflight_microcents(&cat, &proposers, None, 1, 1000, 1.0)
-            .microcents;
         let two = CouncilSpend::estimate_preflight_microcents(&cat, &proposers, None, 2, 1000, 1.0)
             .microcents;
-        assert!(one > 0, "member was not priceable; fix the test catalog");
+        // With the fix, input scales with turns → priced at (2000 in, 2000 out).
+        let scaled_input = cat
+            .estimate_cost_microcents("deepseek", "deepseek-v4-pro", 2000, 2000)
+            .unwrap();
+        // The pre-fix bug pinned input at one max_tokens → (1000 in, 2000 out).
+        let fixed_input = cat
+            .estimate_cost_microcents("deepseek", "deepseek-v4-pro", 1000, 2000)
+            .unwrap();
+        assert_eq!(
+            two, scaled_input,
+            "turns=2 must price input at max_turns×max_tokens, not one prompt"
+        );
         assert!(
-            two > one.saturating_mul(2),
-            "input term did not scale with turns: {one} -> {two}"
+            two > fixed_input,
+            "input did not scale with turns: {two} vs fixed-input {fixed_input}"
         );
     }
 
