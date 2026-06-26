@@ -171,6 +171,7 @@ impl ProtocolEmitter for ChannelEmitter {
                 correlation_id: resume_token,
                 reason: reason.to_string(),
                 context,
+                plan: None,
             });
         }
 
@@ -400,6 +401,7 @@ impl OutputSink for ChannelSink {
             correlation_id: resume_token.to_string(),
             reason: reason.to_string(),
             context: context.to_string(),
+            plan: None,
         });
     }
 
@@ -2678,6 +2680,7 @@ mod tests {
                 correlation_id: "wf1".into(),
                 reason: "Run ForgeFlow `demo`?".into(),
                 context: "~2 agents".into(),
+                plan: None,
             })
             .expect("emit explicit ApprovalRequired");
 

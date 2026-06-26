@@ -30,6 +30,7 @@ fn approval_required_event_serializes_correctly() {
         correlation_id: "tok-xyz".to_string(),
         reason: "Bash wants to delete files".to_string(),
         context: "rm -rf /tmp/test".to_string(),
+        plan: None,
     };
 
     let json_str = serde_json::to_string(&event).expect("event must serialize");
@@ -115,6 +116,7 @@ fn resume_token_round_trip_from_event_to_command() {
         correlation_id: emitted_token.to_string(),
         reason: "needs approval".to_string(),
         context: "tool context".to_string(),
+        plan: None,
     };
     let event_json: Value = serde_json::to_value(&event).unwrap();
 

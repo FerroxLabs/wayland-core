@@ -2360,6 +2360,7 @@ mod tests {
                 correlation_id: "t".into(),
                 reason: "exec".into(),
                 context: "running x".into(),
+                plan: None,
             },
         );
         assert_eq!(
@@ -2379,6 +2380,7 @@ mod tests {
                 correlation_id: "t".into(),
                 reason: "exec".into(),
                 context: "ctx".into(),
+                plan: None,
             },
         );
         assert_eq!(app.session.turns.len(), 1);
@@ -3143,6 +3145,7 @@ mod tests {
                 correlation_id: String::new(),
                 reason: "writes a file".into(),
                 context: String::new(),
+                plan: None,
             },
         );
 
@@ -4224,6 +4227,7 @@ mod tests {
                 correlation_id: String::new(),
                 reason: "writes a file".into(),
                 context: String::new(),
+                plan: None,
             },
         );
         match &app.session.phase {
@@ -4260,6 +4264,7 @@ mod tests {
                 correlation_id: String::new(),
                 reason: "edits a file".into(),
                 context: String::new(),
+                plan: None,
             },
         );
         assert!(
@@ -4282,6 +4287,7 @@ mod tests {
                 correlation_id: String::new(),
                 reason: "Allow network access to `react.dev`? (data-less GET)".into(),
                 context: String::new(),
+                plan: None,
             },
         );
         let card = app
@@ -4313,6 +4319,7 @@ mod tests {
                 correlation_id: String::new(),
                 reason: "something".into(),
                 context: String::new(),
+                plan: None,
             },
         );
         assert_eq!(

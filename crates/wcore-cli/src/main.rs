@@ -2492,6 +2492,7 @@ impl ProtocolEmitter for GatingProtocolWriter {
                     correlation_id: call_id.clone(),
                     reason: reason.to_string(),
                     context: tool.description.clone(),
+                    plan: None,
                 })?;
             }
         }

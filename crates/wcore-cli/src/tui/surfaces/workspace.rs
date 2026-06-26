@@ -6652,6 +6652,7 @@ mod tests {
                 correlation_id: "tok-1".into(),
                 reason: "exec".into(),
                 context: "first call".into(),
+                plan: None,
             },
             ProtocolEvent::ToolRunning {
                 msg_id: "m1".into(),
@@ -6687,6 +6688,7 @@ mod tests {
                 correlation_id: "tok-2".into(),
                 reason: "writes a new file".into(),
                 context: "second call".into(),
+                plan: None,
             },
         ];
 
@@ -6786,6 +6788,7 @@ mod tests {
                 correlation_id: "t-1".into(),
                 reason: "exec".into(),
                 context: String::new(),
+                plan: None,
             },
         );
         assert!(
@@ -6825,6 +6828,7 @@ mod tests {
                 correlation_id: "t-2".into(),
                 reason: "write".into(),
                 context: String::new(),
+                plan: None,
             },
         );
         assert!(

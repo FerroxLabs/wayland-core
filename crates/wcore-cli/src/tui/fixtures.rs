@@ -75,6 +75,7 @@ pub fn tool_call_with_approval() -> Vec<ProtocolEvent> {
             correlation_id: "tok-1".into(),
             reason: "exec".into(),
             context: "run `cargo test`".into(),
+            plan: None,
         },
         ProtocolEvent::ToolRunning {
             msg_id: "m1".into(),

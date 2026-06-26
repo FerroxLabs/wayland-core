@@ -679,6 +679,7 @@ impl OutputSink for ProtocolSink {
             correlation_id: resume_token.to_string(),
             reason: reason.to_string(),
             context: context.to_string(),
+            plan: None,
         });
     }
 

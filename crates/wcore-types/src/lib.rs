@@ -3,6 +3,7 @@
 
 pub mod cache_tier;
 pub mod compact;
+pub mod crucible;
 pub mod file_state;
 pub mod llm;
 pub mod message;

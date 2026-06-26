@@ -5560,6 +5560,7 @@ impl AgentEngine {
             correlation_id: call_id.clone(),
             reason: format!("Run ForgeFlow `{}`?", plan.meta.name),
             context: summary,
+            plan: None,
         });
 
         // (e) Register the pending approval and await it, racing the await

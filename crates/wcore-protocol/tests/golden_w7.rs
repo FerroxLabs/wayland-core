@@ -110,6 +110,7 @@ fn golden_approval_required_w7() {
         correlation_id: String::new(),
         reason: "destructive shell command".into(),
         context: "rm -rf node_modules".into(),
+        plan: None,
     };
     let got = serde_json::to_value(&event).unwrap();
     assert_eq!(got["type"], "approval_required");
