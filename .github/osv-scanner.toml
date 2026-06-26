@@ -94,3 +94,26 @@ reason = "proc-macro-error: build-time proc-macro, no runtime surface; transitiv
 # not ignored — ratatui upgraded 0.29 -> 0.30, which moved lru to 0.16.x. The
 # vulnerable lru 0.12.5 is gone from the tree. (The migration was a single
 # `where B::Error: ...` bound; all wcore-cli tests stayed green.)
+
+# ── opentelemetry_sdk 0.27.1 (CVE-2026-48504, Medium 5.3) ─────────────────
+# Unbounded memory allocation in W3C Baggage propagation:
+# `BaggagePropagator::extract_with_context` parsed an attacker-controlled
+# inbound `baggage` HTTP header before enforcing the W3C size limits. The
+# attack surface is the RECEIVING side of context propagation — a server
+# extracting baggage from untrusted inbound requests.
+#
+# NOT REACHABLE in wayland-core: it is a CLI agent and an OTLP trace EXPORTER,
+# not a server that extracts baggage from untrusted inbound headers. The
+# `otlp` feature is optional and DEFAULT-OFF (crates/wcore-observability), the
+# opentelemetry crates enable only `features = ["trace"]` (no baggage
+# propagator), and the codebase never references `BaggagePropagator`,
+# `extract_with_context`, or `set_text_map_propagator` (`grep` -> 0 hits).
+# Newly published; surfaced on main's 2026-06-26 scan (pre-existing ambient
+# advisory, not a code change in this PR). The fix requires opentelemetry
+# 0.32.1 — a 5-crate (opentelemetry / -otlp / -proto / -http / _sdk) lockstep
+# major jump with breaking exporter-builder API churn; tracked as a fast-follow
+# bump rather than risked into a release. Revisit on the opentelemetry 0.32 bump.
+[[IgnoredVulns]]
+id = "GHSA-w9wp-h8wv-79jx"
+ignoreUntil = "2026-09-02T00:00:00Z"
+reason = "opentelemetry_sdk baggage-extract DoS: receiving-side only; wayland-core is an OTLP exporter, otlp feature default-off, only trace feature enabled, no BaggagePropagator usage (0 grep hits). Not reachable. Tracked; revisit on opentelemetry 0.32 bump."
