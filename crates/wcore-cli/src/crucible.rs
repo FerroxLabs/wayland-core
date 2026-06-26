@@ -17,19 +17,14 @@
 use std::sync::Arc;
 
 use wcore_agent::orchestration::council::{
-    AssemblyPlan, AssemblyPolicy, CouncilDecision, CouncilOutcome, CouncilProviderResolver,
-    CouncilSpend, DEFAULT_PROPOSER_MAX_TOKENS, GateConfig, ProposerSpec, Roster, Stakes, assemble,
-    classify_task, log_assembly, plan_to_card, run_council, validate_and_build,
+    AssemblyPlan, CouncilApprover, CouncilDecision, CouncilOutcome, CouncilOverrides,
+    CouncilProviderResolver, CouncilRunResult, DEFAULT_PROPOSER_MAX_TOKENS, GateConfig, Roster,
+    Stakes, classify_task, drive_council, log_assembly, run_council, validate_and_build,
 };
 use wcore_agent::spawner::{AgentSpawner, SubAgentConfig};
 use wcore_config::config::{CliArgs, Config, ConfigFile, load_merged_config_file};
 use wcore_config::crucible::{AssemblyMode, CrucibleConfig};
-use wcore_pricing::DEFAULT_CATALOG;
 use wcore_types::crucible::CrucibleDecision;
-
-/// Default intra-family price floor (fraction of a family's flagship price)
-/// below which a SKU is dropped as not-competent for a proposer slot.
-const DEFAULT_PRICE_FLOOR_FRAC: f64 = 0.25;
 
 /// A cap-less per-user/day spend accumulator for council charging, built when the
 /// council has a daily or per-run cap configured. The daily bound is enforced by
@@ -288,89 +283,54 @@ async fn run_crucible_auto(args: &CrucibleArgs, cf: &ConfigFile) -> anyhow::Resu
             .with_budget_identity(sess, user);
     }
 
-    let gate = build_gate(args);
-    let mut policy = build_policy(&cf.crucible, args);
-    let mut pool = runnable;
-    let mut plan = assemble(&args.task, &pool, &DEFAULT_CATALOG, &gate, &policy);
-    reapply_judge_override(&mut plan, args, &cf.crucible, &policy);
-
-    // The daily cap (USD → microcents) feeds the card's "today" line. day_spent is
-    // None here: a one-shot CLI process starts a fresh envelope (cross-process
-    // accumulation is a later stage), so showing a running total would be a lie.
-    let day_cap_microcents = cf
-        .crucible
-        .daily_cap_usd
-        .map(|u| (u * wcore_types::crucible::MICROCENTS_PER_USD) as u64);
-
-    // Assemble → decide → (re-assemble | execute) loop. The TTY only yields
-    // Approve/Cancel in 3a; Edit/ApprovePremium are reachable via a (future) typed
-    // non-TTY decision and re-assemble in place. No infinite-loop guard is needed:
-    // a TTY can always Cancel, and a non-TTY never returns Edit/Premium in 3a.
-    loop {
-        let card = plan_to_card(&plan, &policy, None, None, day_cap_microcents);
-        match decide(&card, cf.crucible.crucible_auto_spend)? {
-            CrucibleDecision::Approve => break,
-            CrucibleDecision::Cancel => {
-                eprintln!("crucible: cancelled — no spend.");
-                return Ok(());
-            }
-            CrucibleDecision::ApprovePremium { ceiling_usd } => {
-                // Raise every tier cap to the accepted ceiling and re-assemble: a
-                // higher budget lets the Assembler pick a stronger roster.
-                policy.cap_low_usd = ceiling_usd;
-                policy.cap_med_usd = ceiling_usd;
-                policy.cap_high_usd = ceiling_usd;
-                plan = assemble(&args.task, &pool, &DEFAULT_CATALOG, &gate, &policy);
-                reapply_judge_override(&mut plan, args, &cf.crucible, &policy);
-            }
-            CrucibleDecision::Edit { roster, budget_usd } => {
-                // Override the candidate pool and/or the caps, then re-assemble.
-                if let Some(specs) = roster {
-                    // Re-filter the edited roster to runnable (keyed) specs through a
-                    // fresh resolver — the original was moved into the spawner's Arc.
-                    let r = CouncilProviderResolver::new(base.clone(), cf.providers.clone());
-                    pool = r.resolvable_specs(&specs);
-                }
-                if let Some(b) = budget_usd {
-                    policy.cap_low_usd = b;
-                    policy.cap_med_usd = b;
-                    policy.cap_high_usd = b;
-                }
-                plan = assemble(&args.task, &pool, &DEFAULT_CATALOG, &gate, &policy);
-                reapply_judge_override(&mut plan, args, &cf.crucible, &policy);
-            }
+    // Roster-selection overrides for the shared driver (the task is passed
+    // separately). An edited roster is re-resolved to runnable specs through a
+    // fresh resolver — the original was moved into the spawner's Arc.
+    let ov = CouncilOverrides {
+        council: args.council.clone(),
+        judge: args.judge.clone(),
+        direct: args.direct,
+        force_council: args.force_council,
+        deep: args.deep,
+        deny: args.deny.clone(),
+    };
+    let refilter = {
+        let base = base.clone();
+        let providers = cf.providers.clone();
+        move |specs: &[String]| {
+            CouncilProviderResolver::new(base.clone(), providers.clone()).resolvable_specs(specs)
         }
-    }
+    };
 
-    match execute_plan(&plan, &args.task, &spawner, &base, &cf.crucible).await? {
-        AutoRun::Direct { spec, text } => {
+    match drive_council(
+        &args.task,
+        runnable,
+        &base,
+        &cf.crucible,
+        &ov,
+        &spawner,
+        &TtyApprover {
+            auto_spend: cf.crucible.crucible_auto_spend,
+        },
+        &refilter,
+    )
+    .await?
+    {
+        CouncilRunResult::Direct { spec, text } => {
             eprintln!("crucible: direct answer via {spec}");
             println!("{text}");
         }
-        AutoRun::Council(outcome) => {
+        CouncilRunResult::Council { plan, outcome } => {
             // Privacy-safe preference signal (opt-in; family-mix + cost only).
             log_assembly(&plan, &outcome.spend, &cf.crucible, None);
             eprint!("{}", render_provenance(&outcome));
             println!("{}", outcome.final_text);
         }
+        CouncilRunResult::Cancelled => {
+            eprintln!("crucible: cancelled — no spend.");
+        }
     }
     Ok(())
-}
-
-/// Apply the `--judge` override to a convening plan (re-prices + cap-checks). A
-/// no-op when no `--judge` was passed or the plan is Direct. Factored out so each
-/// re-assemble in the decide loop re-pins the deliberately-chosen judge.
-fn reapply_judge_override(
-    plan: &mut AssemblyPlan,
-    args: &CrucibleArgs,
-    cfg: &CrucibleConfig,
-    policy: &AssemblyPolicy,
-) {
-    if plan.convene
-        && let Some(j) = args.judge.as_deref()
-    {
-        apply_judge_override(plan, j, cfg, policy);
-    }
 }
 
 /// Render the typed [`CruciblePlan`] proposal card — the human-facing decision
@@ -423,213 +383,42 @@ fn render_card(card: &wcore_types::crucible::CruciblePlan) -> String {
     out
 }
 
-/// Decide how to proceed with a council plan. Interactive when stdin is a TTY;
-/// otherwise fail-closed unless `crucible_auto_spend` is set.
-fn decide(
-    card: &wcore_types::crucible::CruciblePlan,
+/// The CLI's TTY/headless decision surface for the shared [`drive_council`]
+/// driver. Renders the proposal card to stderr, then: interactive when stdin is a
+/// TTY (prompt Y/n); otherwise fail-closed unless `auto_spend` is set. The driver
+/// only re-assembles on Edit/ApprovePremium — a TTY never returns those, and a
+/// non-TTY only Approves (with `auto_spend`) or errors, so the CLI's behavior is
+/// byte-identical to the prior inline `decide` loop.
+struct TtyApprover {
     auto_spend: bool,
-) -> anyhow::Result<CrucibleDecision> {
-    use std::io::{IsTerminal, Write};
-    eprint!("{}", render_card(card));
-    if !std::io::stdin().is_terminal() {
-        if auto_spend {
-            eprintln!("crucible: non-interactive + crucible_auto_spend=true → auto-approving.");
-            return Ok(CrucibleDecision::Approve);
+}
+
+#[async_trait::async_trait]
+impl CouncilApprover for TtyApprover {
+    async fn approve(
+        &self,
+        card: &wcore_types::crucible::CruciblePlan,
+    ) -> anyhow::Result<CrucibleDecision> {
+        use std::io::{IsTerminal, Write};
+        eprint!("{}", render_card(card));
+        if !std::io::stdin().is_terminal() {
+            if self.auto_spend {
+                eprintln!("crucible: non-interactive + crucible_auto_spend=true → auto-approving.");
+                return Ok(CrucibleDecision::Approve);
+            }
+            anyhow::bail!(
+                "crucible: refusing to spend in a non-interactive session. Re-run in a terminal to \
+                 approve, or set `crucible_auto_spend = true` under [crucible] to allow headless runs."
+            );
         }
-        anyhow::bail!(
-            "crucible: refusing to spend in a non-interactive session. Re-run in a terminal to \
-             approve, or set `crucible_auto_spend = true` under [crucible] to allow headless runs."
-        );
-    }
-    eprint!("Proceed? [Y]es / [n]o (no spend): ");
-    std::io::stderr().flush().ok();
-    let mut line = String::new();
-    std::io::stdin().read_line(&mut line)?;
-    match line.trim().to_ascii_lowercase().as_str() {
-        "" | "y" | "yes" => Ok(CrucibleDecision::Approve),
-        _ => Ok(CrucibleDecision::Cancel),
-    }
-}
-
-/// Split a `provider` / `provider:model` spec into parts (empty model → `None`).
-fn split_spec(spec: &str) -> (&str, Option<&str>) {
-    match spec.split_once(':') {
-        Some((p, m)) if !m.is_empty() => (p, Some(m)),
-        _ => (spec, None),
-    }
-}
-
-/// The stakes-tier cap (USD) from config.
-fn cap_usd_for(cfg: &CrucibleConfig, stakes: Stakes) -> f64 {
-    match stakes {
-        Stakes::Low => cfg.cap_low_usd,
-        Stakes::Med => cfg.cap_med_usd,
-        Stakes::High => cfg.cap_high_usd,
-    }
-}
-
-/// Apply a `--judge` override to a convening plan: pin the aggregator and
-/// RE-PRICE the roster with the ACTUAL judge, so the surfaced est cost is honest
-/// and the tier cap is re-checked. The Assembler priced + cap-checked against
-/// ITS chosen judge; a pinned judge can cost more, so without this the est line
-/// would lie and the cap would be silently bypassed. The user pinned it
-/// deliberately, so we surface a warning in `trims` and proceed (never silently
-/// overspend, never silently mis-report).
-fn apply_judge_override(
-    plan: &mut AssemblyPlan,
-    judge: &str,
-    cfg: &CrucibleConfig,
-    policy: &AssemblyPolicy,
-) {
-    plan.aggregator = Some(judge.to_string());
-    let proposers: Vec<(&str, Option<&str>)> = plan.members.iter().map(|s| split_spec(s)).collect();
-    let est = CouncilSpend::estimate_preflight_microcents(
-        &DEFAULT_CATALOG,
-        &proposers,
-        Some(split_spec(judge)),
-        policy.proposer_max_turns,
-        policy.proposer_max_tokens,
-        policy.markup,
-    );
-    plan.est_cost_microcents = est.certified_microcents();
-    plan.trims.push(format!("judge pinned → {judge}"));
-    let cap = cap_usd_for(cfg, plan.stakes);
-    match est.certified_microcents() {
-        Some(c) if (c as f64 / wcore_types::crucible::MICROCENTS_PER_USD) > cap => {
-            plan.trims.push(format!(
-                "WARNING: pinned judge est ${:.4} exceeds the ${cap:.4} {:?} cap",
-                c as f64 / wcore_types::crucible::MICROCENTS_PER_USD,
-                plan.stakes
-            ))
+        eprint!("Proceed? [Y]es / [n]o (no spend): ");
+        std::io::stderr().flush().ok();
+        let mut line = String::new();
+        std::io::stdin().read_line(&mut line)?;
+        match line.trim().to_ascii_lowercase().as_str() {
+            "" | "y" | "yes" => Ok(CrucibleDecision::Approve),
+            _ => Ok(CrucibleDecision::Cancel),
         }
-        None => plan
-            .trims
-            .push("WARNING: pinned judge is unpriceable — cost not bounded".to_string()),
-        _ => {}
-    }
-}
-
-/// Map the gate to a [`CouncilDecision`], honoring the force flags.
-fn build_gate(args: &CrucibleArgs) -> CouncilDecision {
-    if args.direct {
-        return CouncilDecision::Direct {
-            reason: "forced --direct".to_string(),
-        };
-    }
-    if args.force_council {
-        return CouncilDecision::Council {
-            reason: "forced --force-council".to_string(),
-            stakes: if args.deep { Stakes::High } else { Stakes::Med },
-        };
-    }
-    let decision = classify_task(&args.task, &GateConfig::default());
-    // --deep escalates a convened council to High (widest roster + top judge).
-    if args.deep {
-        if let CouncilDecision::Council { reason, .. } = decision {
-            return CouncilDecision::Council {
-                reason: format!("{reason} (--deep → High)"),
-                stakes: Stakes::High,
-            };
-        }
-        // Even a would-be Direct is convened at High under --deep.
-        return CouncilDecision::Council {
-            reason: "forced --deep → High".to_string(),
-            stakes: Stakes::High,
-        };
-    }
-    decision
-}
-
-/// Build the Assembler policy from `[crucible]` config + CLI overrides.
-fn build_policy(cfg: &CrucibleConfig, args: &CrucibleArgs) -> AssemblyPolicy {
-    AssemblyPolicy {
-        deny_families: args.deny.clone(),
-        max_proposers: cfg.max_proposers,
-        markup: cfg.flux_markup,
-        cap_low_usd: cfg.cap_low_usd,
-        cap_med_usd: cfg.cap_med_usd,
-        cap_high_usd: cfg.cap_high_usd,
-        price_floor_frac: DEFAULT_PRICE_FLOOR_FRAC,
-        proposer_max_turns: cfg.proposer_max_turns,
-        proposer_max_tokens: DEFAULT_PROPOSER_MAX_TOKENS,
-    }
-}
-
-/// What an auto run produced.
-enum AutoRun {
-    Direct { spec: String, text: String },
-    Council(CouncilOutcome),
-}
-
-/// Execute an [`AssemblyPlan`]: a single direct call, or a built roster council.
-async fn execute_plan(
-    plan: &AssemblyPlan,
-    task: &str,
-    spawner: &AgentSpawner,
-    base: &Config,
-    cfg: &CrucibleConfig,
-) -> anyhow::Result<AutoRun> {
-    if !plan.convene {
-        let spec = plan
-            .members
-            .first()
-            .cloned()
-            .ok_or_else(|| anyhow::anyhow!("assembler produced no model to answer with"))?;
-        let result = spawner
-            .spawn_one(SubAgentConfig {
-                name: spec.clone(),
-                prompt: task.to_string(),
-                max_turns: cfg.proposer_max_turns,
-                max_tokens: DEFAULT_PROPOSER_MAX_TOKENS,
-                system_prompt: None,
-                provider: Some(spec.clone()),
-                model: spec.split_once(':').map(|(_, m)| m.to_string()),
-            })
-            .await;
-        if result.is_error {
-            anyhow::bail!("direct call failed: {}", result.text);
-        }
-        return Ok(AutoRun::Direct {
-            spec,
-            text: result.text,
-        });
-    }
-
-    let roster = roster_from_plan(&plan.members, plan.aggregator.clone(), cfg);
-    let outcome = run_council(task, &roster, spawner, base)
-        .await
-        .map_err(|e| anyhow::anyhow!("council failed: {e}"))?;
-    Ok(AutoRun::Council(outcome))
-}
-
-/// Build a runnable [`Roster`] from chosen member specs. The auto budget cap was
-/// enforced by the Assembler (judge-inclusive pre-flight) — and re-checked +
-/// surfaced if a `--judge` override raised it — so the roster's own
-/// `max_cost_usd` is left `None` to avoid a second, inconsistent (non-flux)
-/// ceiling.
-fn roster_from_plan(
-    members: &[String],
-    aggregator: Option<String>,
-    cfg: &CrucibleConfig,
-) -> Roster {
-    Roster {
-        proposers: members
-            .iter()
-            .map(|s| ProposerSpec {
-                spec: s.clone(),
-                provider: s.split(':').next().unwrap_or(s).to_string(),
-                model: s.split_once(':').map(|(_, m)| m.to_string()),
-            })
-            .collect(),
-        aggregator,
-        min_proposers: 1,
-        proposer_max_turns: cfg.proposer_max_turns,
-        proposer_concurrency: cfg.proposer_concurrency,
-        proposer_deadline_s: cfg.proposer_deadline_s,
-        global_deadline_s: cfg.global_deadline_s,
-        max_cost_usd: None,
-        flux_markup: cfg.flux_markup,
-        daily_cap_usd: cfg.daily_cap_usd,
     }
 }
 
@@ -866,80 +655,16 @@ mod tests {
     }
 
     #[test]
-    fn judge_override_reprices_and_warns_when_over_cap() {
-        // A cheap 1-proposer plan; pin an expensive judge under a tiny cap. The
-        // est must be re-priced to the ACTUAL judge and a cap warning surfaced.
-        let mut p = AssemblyPlan {
-            convene: true,
-            members: vec!["deepseek:deepseek-v4-pro".to_string()],
-            aggregator: Some("deepseek:deepseek-v4-pro".to_string()),
-            est_cost_microcents: Some(1),
-            stakes: Stakes::Med,
-            reason: "t".to_string(),
-            trims: vec![],
-        };
-        let cfg = CrucibleConfig {
-            cap_med_usd: 0.0001, // tiny → the opus judge will exceed it
-            ..Default::default()
-        };
-        let policy = AssemblyPolicy {
-            deny_families: vec![],
-            max_proposers: 5,
-            markup: 1.0,
-            cap_low_usd: 0.02,
-            cap_med_usd: 0.0001,
-            cap_high_usd: 0.15,
-            price_floor_frac: 0.25,
-            proposer_max_turns: 4,
-            proposer_max_tokens: 4096,
-        };
-        apply_judge_override(&mut p, "anthropic:claude-opus-4-7", &cfg, &policy);
-        assert_eq!(p.aggregator.as_deref(), Some("anthropic:claude-opus-4-7"));
-        // Re-priced to the real (opus) judge — strictly above the seeded 1µ¢.
-        assert!(p.est_cost_microcents.unwrap() > 1);
-        assert!(p.trims.iter().any(|t| t.contains("judge pinned")));
-        assert!(
-            p.trims
-                .iter()
-                .any(|t| t.contains("WARNING") && t.contains("exceeds")),
-            "an over-cap pinned judge must surface a warning: {:?}",
-            p.trims
-        );
-    }
-
-    #[test]
-    fn build_gate_honors_force_flags() {
-        let direct = build_gate(&CrucibleArgs {
-            direct: true,
-            ..Default::default()
-        });
-        assert!(!direct.is_council());
-
-        let forced = build_gate(&CrucibleArgs {
-            force_council: true,
-            ..Default::default()
-        });
-        assert!(forced.is_council());
-        assert_eq!(forced.stakes(), Stakes::Med);
-
-        let deep = build_gate(&CrucibleArgs {
-            force_council: true,
-            deep: true,
-            ..Default::default()
-        });
-        assert_eq!(deep.stakes(), Stakes::High);
-    }
-
-    #[test]
     fn build_policy_max_tokens_matches_council_default() {
         // The card is priced against `proposer_max_tokens`; the council spawns each
         // proposer with `DEFAULT_PROPOSER_MAX_TOKENS`. They MUST stay equal or the
-        // certified ceiling lies — a one-sided edit fails here.
-        let policy = build_policy(&CrucibleConfig::default(), &CrucibleArgs::default());
-        assert_eq!(
-            policy.proposer_max_tokens,
-            wcore_agent::orchestration::council::DEFAULT_PROPOSER_MAX_TOKENS
+        // certified ceiling lies. `build_policy` now lives in the shared driver; the
+        // CLI just confirms the wiring still pins the council default.
+        let policy = wcore_agent::orchestration::council::build_policy(
+            &CrucibleConfig::default(),
+            &CouncilOverrides::default(),
         );
+        assert_eq!(policy.proposer_max_tokens, DEFAULT_PROPOSER_MAX_TOKENS);
     }
 
     use wcore_types::crucible::{CouncilMemberCard, CouncilRole, CruciblePlan};

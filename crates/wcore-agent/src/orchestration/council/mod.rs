@@ -13,6 +13,7 @@
 pub mod aggregator;
 pub mod assembler;
 pub mod assembler_log;
+pub mod driver;
 pub mod gate;
 pub mod plan_card;
 pub mod proposal;
@@ -24,6 +25,10 @@ pub mod spend;
 pub use aggregator::{Aggregator, LlmSynthesisAggregator};
 pub use assembler::{AssemblyPlan, AssemblyPolicy, assemble};
 pub use assembler_log::{assembly_log_line, log_assembly};
+pub use driver::{
+    CouncilApprover, CouncilOverrides, CouncilRunResult, apply_judge_override, build_gate,
+    build_policy, drive_council, roster_from_plan,
+};
 pub use gate::{CouncilDecision, GateConfig, Stakes, classify_task, member_count};
 pub use plan_card::plan_to_card;
 pub use proposal::{AggregateResult, Proposal};
