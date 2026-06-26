@@ -75,7 +75,7 @@ impl LlmProvider for UsageProvider {
     async fn stream(&self, _r: &LlmRequest) -> Result<mpsc::Receiver<LlmEvent>, ProviderError> {
         let (tx, rx) = mpsc::channel(8);
         let reply = self.reply.clone();
-        let usage = self.usage;
+        let usage = self.usage.clone();
         tokio::spawn(async move {
             if !reply.is_empty() {
                 let _ = tx.send(LlmEvent::TextDelta(reply)).await;
