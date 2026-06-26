@@ -38,6 +38,29 @@ const MICROCENTS_PER_USD: f64 = 100_000_000.0;
 /// below which a SKU is dropped as not-competent for a proposer slot.
 const DEFAULT_PRICE_FLOOR_FRAC: f64 = 0.25;
 
+/// A cap-less per-user/day spend accumulator for council charging, built when the
+/// council has a daily or per-run cap configured. The daily bound is enforced by
+/// run_council's soft pre-check; this tracker must always record (no caps).
+/// NOTE: a one-shot `wcore crucible` process starts fresh, so the daily envelope
+/// binds within a process, not across invocations — cross-process persistence is
+/// a later stage.
+fn council_budget_tracker(
+    cf: &ConfigFile,
+) -> Option<std::sync::Arc<parking_lot::Mutex<wcore_budget::BudgetTracker>>> {
+    (cf.crucible.daily_cap_usd.is_some() || cf.crucible.max_cost_usd.is_some()).then(|| {
+        std::sync::Arc::new(parking_lot::Mutex::new(wcore_budget::BudgetTracker::new(
+            wcore_budget::BudgetCap::default(),
+        )))
+    })
+}
+
+/// The CLI council charge identity: WAYLAND_USER_ID (default "default"), and a
+/// per-process session id (cross-process daily accumulation is a later stage).
+fn cli_budget_identity() -> (String, String) {
+    let user = std::env::var("WAYLAND_USER_ID").unwrap_or_else(|_| "default".to_string());
+    ("cli".to_string(), user)
+}
+
 /// CLI arguments for the `crucible` subcommand.
 #[derive(Debug, Clone, Default)]
 pub struct CrucibleArgs {
@@ -199,8 +222,14 @@ pub async fn run_crucible(args: CrucibleArgs) -> anyhow::Result<()> {
     let provider = wcore_agent::bootstrap::create_provider_with_oauth(&base)?;
 
     let resolver = CouncilProviderResolver::new(base.clone(), cf.providers.clone());
-    let spawner =
+    let mut spawner =
         AgentSpawner::new(provider, base.clone()).with_provider_resolver(Arc::new(resolver));
+    if let Some(tracker) = council_budget_tracker(&cf) {
+        let (sess, user) = cli_budget_identity();
+        spawner = spawner
+            .with_budget_tracker(tracker)
+            .with_budget_identity(sess, user);
+    }
 
     if args.auto
         && let CouncilDecision::Direct { reason } =
@@ -254,8 +283,14 @@ async fn run_crucible_auto(args: &CrucibleArgs, cf: &ConfigFile) -> anyhow::Resu
              `[crucible]` (or pass --council) and ensure their providers are keyed."
         );
     }
-    let spawner =
+    let mut spawner =
         AgentSpawner::new(provider, base.clone()).with_provider_resolver(Arc::new(resolver));
+    if let Some(tracker) = council_budget_tracker(cf) {
+        let (sess, user) = cli_budget_identity();
+        spawner = spawner
+            .with_budget_tracker(tracker)
+            .with_budget_identity(sess, user);
+    }
 
     let gate = build_gate(args);
     let policy = build_policy(&cf.crucible, args);

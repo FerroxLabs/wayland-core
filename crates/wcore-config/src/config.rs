@@ -882,6 +882,14 @@ pub struct Config {
     /// on-disk surface is `ConfigFile.session_cap` which carries the
     /// `#[serde(default)]` attribute.
     pub session_cap: Option<wcore_budget::BudgetConfig>,
+
+    /// Crucible (Mixture-of-Providers) council config, carried onto the resolved
+    /// `Config` so the in-process bootstrap can gate the council's cap-less spend
+    /// accumulator on `crucible.daily_cap_usd` / `crucible.max_cost_usd` (the
+    /// CLI council path reads it from `ConfigFile` directly). Mirrors the
+    /// `ConfigFile.crucible` block; populated from the merged on-disk config in
+    /// `Config::resolve` and defaults to OFF (`CrucibleConfig::default()`).
+    pub crucible: crate::crucible::CrucibleConfig,
 }
 
 impl std::fmt::Debug for Config {
@@ -986,6 +994,7 @@ impl Default for Config {
             browser: BrowserConfig::default(),
             security: SecurityConfig::default(),
             session_cap: None,
+            crucible: crate::crucible::CrucibleConfig::default(),
         }
     }
 }
@@ -1763,6 +1772,7 @@ impl Config {
             browser: merged.browser,
             security: merged.security,
             session_cap: merged.session_cap,
+            crucible: merged.crucible,
         })
     }
 

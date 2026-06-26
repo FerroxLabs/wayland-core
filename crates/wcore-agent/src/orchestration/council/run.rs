@@ -255,7 +255,9 @@ pub async fn run_council(
                         if proposal.is_usable() {
                             usable_count += 1;
                         }
-                        if proposal.is_usable()
+                        let charged_tokens =
+                            proposal.usage.input_tokens + proposal.usage.output_tokens;
+                        if charged_tokens > 0
                             && let (Some(tracker), Some((sess, user))) =
                                 (spawner.budget_tracker(), spawner.budget_identity())
                         {
@@ -265,9 +267,10 @@ pub async fn run_council(
                                 &proposal.usage,
                                 roster.flux_markup,
                             );
-                            let total =
-                                proposal.usage.input_tokens + proposal.usage.output_tokens;
-                            let _ = tracker.lock().charge_for_user(sess, user, total, usd);
+                            // The council tracker is cap-less, so this always
+                            // commits (no reject-drop); accurate accounting keeps
+                            // the next council's pre-check honest.
+                            let _ = tracker.lock().charge_for_user(sess, user, charged_tokens, usd);
                         }
                         slots[i] = Some(proposal);
                     }
@@ -337,17 +340,22 @@ pub async fn run_council(
         .map(|((provider, model), agg)| (provider.as_str(), model.as_deref(), &agg.usage));
     let spend = CouncilSpend::from_run(&proposals, aggregator_spend);
 
-    // Charge the judge's real usage against the same per-session/day envelope.
+    // Charge the judge's real usage against the cap-less council accumulator.
     if let (Some(tracker), Some((sess, user)), Some((prov, model)), Some(agg)) = (
         spawner.budget_tracker(),
         spawner.budget_identity(),
         aggregator_provenance.as_ref(),
         aggregate.as_ref(),
     ) {
-        let usd =
-            CouncilSpend::usd_for_usage(prov, model.as_deref(), &agg.usage, roster.flux_markup);
         let total = agg.usage.input_tokens + agg.usage.output_tokens;
-        let _ = tracker.lock().charge_for_user(sess, user, total, usd);
+        if total > 0 {
+            let usd =
+                CouncilSpend::usd_for_usage(prov, model.as_deref(), &agg.usage, roster.flux_markup);
+            // The council tracker is cap-less, so this always commits (no
+            // reject-drop); accurate accounting keeps the next council's
+            // pre-check honest.
+            let _ = tracker.lock().charge_for_user(sess, user, total, usd);
+        }
     }
 
     let (final_text, chosen_from) = match aggregate {
