@@ -65,18 +65,27 @@ pub fn plan_to_card(
         None => true,
     };
 
-    // Certified judge-inclusive ceiling (None ⇒ not fully priceable).
+    // Certified judge-inclusive ceiling (None ⇒ not fully priceable). An empty
+    // roster (no proposers AND no aggregator — e.g. the pool resolved to zero
+    // runnable candidates, so the Assembler emitted a members-less Direct plan)
+    // is NOT a priced $0 council; it is an ABSENT roster. estimate_preflight
+    // would certify Some(0) for it, which the card contract forbids
+    // ("None ⇒ render 'price unknown', never $0"), so force None.
     let proposers: Vec<(&str, Option<&str>)> = plan.members.iter().map(|s| split_spec(s)).collect();
     let aggregator = plan.aggregator.as_deref().map(split_spec);
-    let ceiling_microcents = CouncilSpend::estimate_preflight_microcents(
-        &DEFAULT_CATALOG,
-        &proposers,
-        aggregator,
-        policy.proposer_max_turns,
-        policy.proposer_max_tokens,
-        policy.markup,
-    )
-    .certified_microcents();
+    let ceiling_microcents = if proposers.is_empty() && aggregator.is_none() {
+        None
+    } else {
+        CouncilSpend::estimate_preflight_microcents(
+            &DEFAULT_CATALOG,
+            &proposers,
+            aggregator,
+            policy.proposer_max_turns,
+            policy.proposer_max_tokens,
+            policy.markup,
+        )
+        .certified_microcents()
+    };
 
     // Single STRONG model alone, for the "one model alone ≈ $X" comparison. Use
     // the judge — the Assembler reserves the strongest family as the decoupled
@@ -175,6 +184,31 @@ mod tests {
         assert_eq!(card.single_model_baseline_microcents, judge_alone);
         // The full council ceiling exceeds one strong model alone.
         assert!(card.ceiling_microcents.unwrap() > card.single_model_baseline_microcents.unwrap());
+    }
+
+    #[test]
+    fn empty_roster_reports_price_unknown_not_zero() {
+        // When the candidate pool resolves to zero runnable specs, the Assembler
+        // emits a Direct plan with empty members. The card MUST report a None
+        // ceiling ("price unknown"), never a certified Some(0) that a host would
+        // render as a free "$0.00" council — the contract's no-$0-surprise rule.
+        let plan = AssemblyPlan {
+            convene: false,
+            members: vec![],
+            aggregator: None,
+            est_cost_microcents: None,
+            stakes: Stakes::Low,
+            reason: "no priceable candidates".into(),
+            trims: vec![],
+        };
+        let card = plan_to_card(&plan, &policy(), None, None, None);
+        assert_eq!(
+            card.ceiling_microcents, None,
+            "empty roster must render price-unknown, never a $0 ceiling"
+        );
+        assert_eq!(card.single_model_baseline_microcents, None);
+        assert!(card.members.is_empty());
+        assert!(!card.convene);
     }
 
     #[test]
