@@ -25,10 +25,11 @@
 use std::collections::BTreeMap;
 
 use wcore_pricing::PricingCatalog;
+use wcore_types::crucible::MICROCENTS_PER_USD;
 
 use super::gate::{CouncilDecision, Stakes, member_count};
 use super::resolver::family;
-use super::spend::{CouncilSpend, MICROCENTS_PER_USD};
+use super::spend::CouncilSpend;
 
 /// Reference token count used to rank candidate models by a stable unit price.
 /// Only relative ordering matters here, so any fixed value works.

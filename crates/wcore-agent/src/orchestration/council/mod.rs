@@ -29,5 +29,7 @@ pub use plan_card::plan_to_card;
 pub use proposal::{AggregateResult, Proposal};
 pub use resolver::{CouncilProviderResolver, ProviderResolver, ResolveError, family};
 pub use roster::{CrucibleConfigError, ProposerSpec, Roster, validate_and_build};
-pub use run::{CouncilError, CouncilOutcome, SkippedProposer, run_council};
+pub use run::{
+    CouncilError, CouncilOutcome, DEFAULT_PROPOSER_MAX_TOKENS, SkippedProposer, run_council,
+};
 pub use spend::{CouncilSpend, PreflightEstimate, ProviderSpend, is_priceable};

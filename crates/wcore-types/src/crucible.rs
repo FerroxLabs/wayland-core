@@ -59,7 +59,11 @@ pub struct CruciblePlan {
     pub trims: Vec<String>,
 }
 
-const MICROCENTS_PER_USD: f64 = 100_000_000.0;
+/// The canonical USD↔microcents conversion factor: 1 USD = 100¢ = 100_000_000 µ¢.
+/// The single source of truth for this constant across the workspace — every
+/// crate that prices microcents into USD (or USD into a microcents cap) references
+/// this instead of redeclaring it, so a one-sided edit can never desync them.
+pub const MICROCENTS_PER_USD: f64 = 100_000_000.0;
 
 impl CruciblePlan {
     /// The certified ceiling in USD, if priceable.
@@ -92,6 +96,14 @@ pub enum CrucibleDecision {
     },
     /// Abort — no spend.
     Cancel,
+}
+
+impl CrucibleDecision {
+    /// Parse a host decision from the approval outcome's `modifications` value.
+    /// `None`/absent ⇒ no typed decision was supplied (caller decides the default).
+    pub fn from_modifications(modifications: Option<&serde_json::Value>) -> Option<Self> {
+        modifications.and_then(|v| serde_json::from_value(v.clone()).ok())
+    }
 }
 
 #[cfg(test)]
@@ -152,5 +164,26 @@ mod tests {
         let v =
             serde_json::to_value(CrucibleDecision::ApprovePremium { ceiling_usd: 4.5 }).unwrap();
         assert_eq!(v["decision"], "approve_premium");
+    }
+
+    #[test]
+    fn from_modifications_parses_valid_and_rejects_garbage() {
+        // A valid bare-approve.
+        let v = serde_json::json!({ "decision": "approve" });
+        assert_eq!(
+            CrucibleDecision::from_modifications(Some(&v)),
+            Some(CrucibleDecision::Approve)
+        );
+        // approve_premium carries the accepted ceiling.
+        let v = serde_json::json!({ "decision": "approve_premium", "ceiling_usd": 4.5 });
+        assert_eq!(
+            CrucibleDecision::from_modifications(Some(&v)),
+            Some(CrucibleDecision::ApprovePremium { ceiling_usd: 4.5 })
+        );
+        // Absent modifications ⇒ no typed decision.
+        assert_eq!(CrucibleDecision::from_modifications(None), None);
+        // A malformed value (unknown tag) ⇒ None, not a panic.
+        let bad = serde_json::json!({ "decision": "explode" });
+        assert_eq!(CrucibleDecision::from_modifications(Some(&bad)), None);
     }
 }

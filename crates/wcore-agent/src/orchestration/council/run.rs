@@ -25,11 +25,15 @@ use wcore_pricing::DEFAULT_CATALOG;
 use super::aggregator::{Aggregator, LlmSynthesisAggregator};
 use super::proposal::Proposal;
 use super::roster::{ProposerSpec, Roster};
-use super::spend::{CouncilSpend, MICROCENTS_PER_USD};
+use super::spend::CouncilSpend;
 use crate::spawner::{AgentSpawner, SubAgentConfig};
+use wcore_types::crucible::MICROCENTS_PER_USD;
 
-/// Per-proposer output-token budget.
-const DEFAULT_PROPOSER_MAX_TOKENS: u32 = 4096;
+/// Per-proposer output-token budget. The single source of truth for what each
+/// council proposer (and the CLI's direct/auto path) is spawned with — the CLI
+/// prices its card against this exported value so the certified ceiling can never
+/// drift from what the council actually spends.
+pub const DEFAULT_PROPOSER_MAX_TOKENS: u32 = 4096;
 
 /// Pre-flight cap + daily-envelope gate. Certifies the judge-inclusive ceiling
 /// when any cap binds. The per-run `max_cost_usd` cap is STRICT (an unpriceable

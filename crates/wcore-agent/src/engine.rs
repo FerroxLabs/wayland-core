@@ -77,15 +77,13 @@ fn pricing_turn_cost_usd(
     input_tokens: u64,
     output_tokens: u64,
 ) -> Option<f64> {
-    /// Microcents per US dollar: 100 cents × 1e6 microcents/cent.
-    const MICROCENTS_PER_USD: f64 = 100_000_000.0;
     match wcore_pricing::DEFAULT_CATALOG.estimate_cost_microcents(
         provider,
         model,
         input_tokens,
         output_tokens,
     ) {
-        Ok(microcents) => Some(microcents as f64 / MICROCENTS_PER_USD),
+        Ok(microcents) => Some(microcents as f64 / wcore_types::crucible::MICROCENTS_PER_USD),
         Err(e) => {
             tracing::warn!(
                 provider,

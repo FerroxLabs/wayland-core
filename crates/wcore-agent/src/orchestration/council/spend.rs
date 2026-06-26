@@ -8,6 +8,7 @@
 //! `priced = false` so the operator can tell "free" from "unpriced".
 
 use wcore_pricing::{DEFAULT_CATALOG, PricingCatalog};
+use wcore_types::crucible::MICROCENTS_PER_USD;
 use wcore_types::message::TokenUsage;
 
 use super::aggregator::{AGGREGATOR_MAX_TOKENS, AGGREGATOR_MAX_TURNS};
@@ -37,9 +38,6 @@ pub fn is_priceable(
         None => false,
     }
 }
-
-/// The pricing catalog returns microcents; 1 USD = 100¢ = 100_000_000 µ¢.
-pub(crate) const MICROCENTS_PER_USD: f64 = 100_000_000.0;
 
 /// One member's (or the aggregator's) token + cost spend.
 #[derive(Debug, Clone, PartialEq)]

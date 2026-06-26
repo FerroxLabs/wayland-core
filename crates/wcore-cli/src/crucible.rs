@@ -18,21 +18,14 @@ use std::sync::Arc;
 
 use wcore_agent::orchestration::council::{
     AssemblyPlan, AssemblyPolicy, CouncilDecision, CouncilOutcome, CouncilProviderResolver,
-    CouncilSpend, GateConfig, ProposerSpec, Roster, Stakes, assemble, classify_task, log_assembly,
-    run_council, validate_and_build,
+    CouncilSpend, DEFAULT_PROPOSER_MAX_TOKENS, GateConfig, ProposerSpec, Roster, Stakes, assemble,
+    classify_task, log_assembly, plan_to_card, run_council, validate_and_build,
 };
 use wcore_agent::spawner::{AgentSpawner, SubAgentConfig};
 use wcore_config::config::{CliArgs, Config, ConfigFile, load_merged_config_file};
 use wcore_config::crucible::{AssemblyMode, CrucibleConfig};
 use wcore_pricing::DEFAULT_CATALOG;
-
-/// Per-proposer output-token budget. Mirrors the council executor's
-/// `DEFAULT_PROPOSER_MAX_TOKENS`, so the Assembler's cost estimate (which prices
-/// against this) matches what the council actually spends.
-const DIRECT_MAX_TOKENS: u32 = 4096;
-
-/// The pricing catalog reports microcents; 1 USD = 100¢ = 100_000_000 µ¢.
-const MICROCENTS_PER_USD: f64 = 100_000_000.0;
+use wcore_types::crucible::CrucibleDecision;
 
 /// Default intra-family price floor (fraction of a family's flagship price)
 /// below which a SKU is dropped as not-competent for a proposer slot.
@@ -136,7 +129,10 @@ pub fn render_provenance(outcome: &CouncilOutcome) -> String {
     ));
     for ps in &spend.per_provider {
         let cost = if ps.priced {
-            format!("${:.4}", ps.cost_microcents as f64 / MICROCENTS_PER_USD)
+            format!(
+                "${:.4}",
+                ps.cost_microcents as f64 / wcore_types::crucible::MICROCENTS_PER_USD
+            )
         } else {
             "unpriced".to_string()
         };
@@ -175,7 +171,7 @@ pub fn render_assembly_plan(plan: &AssemblyPlan) -> String {
     if let Some(c) = plan.est_cost_microcents {
         out.push_str(&format!(
             "crucible:   est cost ~${:.4}\n",
-            c as f64 / MICROCENTS_PER_USD
+            c as f64 / wcore_types::crucible::MICROCENTS_PER_USD
         ));
     }
     if !plan.trims.is_empty() {
@@ -293,19 +289,58 @@ async fn run_crucible_auto(args: &CrucibleArgs, cf: &ConfigFile) -> anyhow::Resu
     }
 
     let gate = build_gate(args);
-    let policy = build_policy(&cf.crucible, args);
-    let mut plan = assemble(&args.task, &runnable, &DEFAULT_CATALOG, &gate, &policy);
+    let mut policy = build_policy(&cf.crucible, args);
+    let mut pool = runnable;
+    let mut plan = assemble(&args.task, &pool, &DEFAULT_CATALOG, &gate, &policy);
+    reapply_judge_override(&mut plan, args, &cf.crucible, &policy);
 
-    // A --judge override is applied + RE-PRICED here (before rendering) so the
-    // surfaced est cost is honest and the cap is re-checked against the real judge.
-    if plan.convene
-        && let Some(j) = args.judge.as_deref()
-    {
-        apply_judge_override(&mut plan, j, &cf.crucible, &policy);
+    // The daily cap (USD → microcents) feeds the card's "today" line. day_spent is
+    // None here: a one-shot CLI process starts a fresh envelope (cross-process
+    // accumulation is a later stage), so showing a running total would be a lie.
+    let day_cap_microcents = cf
+        .crucible
+        .daily_cap_usd
+        .map(|u| (u * wcore_types::crucible::MICROCENTS_PER_USD) as u64);
+
+    // Assemble → decide → (re-assemble | execute) loop. The TTY only yields
+    // Approve/Cancel in 3a; Edit/ApprovePremium are reachable via a (future) typed
+    // non-TTY decision and re-assemble in place. No infinite-loop guard is needed:
+    // a TTY can always Cancel, and a non-TTY never returns Edit/Premium in 3a.
+    loop {
+        let card = plan_to_card(&plan, &policy, None, None, day_cap_microcents);
+        match decide(&card, cf.crucible.crucible_auto_spend)? {
+            CrucibleDecision::Approve => break,
+            CrucibleDecision::Cancel => {
+                eprintln!("crucible: cancelled — no spend.");
+                return Ok(());
+            }
+            CrucibleDecision::ApprovePremium { ceiling_usd } => {
+                // Raise every tier cap to the accepted ceiling and re-assemble: a
+                // higher budget lets the Assembler pick a stronger roster.
+                policy.cap_low_usd = ceiling_usd;
+                policy.cap_med_usd = ceiling_usd;
+                policy.cap_high_usd = ceiling_usd;
+                plan = assemble(&args.task, &pool, &DEFAULT_CATALOG, &gate, &policy);
+                reapply_judge_override(&mut plan, args, &cf.crucible, &policy);
+            }
+            CrucibleDecision::Edit { roster, budget_usd } => {
+                // Override the candidate pool and/or the caps, then re-assemble.
+                if let Some(specs) = roster {
+                    // Re-filter the edited roster to runnable (keyed) specs through a
+                    // fresh resolver — the original was moved into the spawner's Arc.
+                    let r = CouncilProviderResolver::new(base.clone(), cf.providers.clone());
+                    pool = r.resolvable_specs(&specs);
+                }
+                if let Some(b) = budget_usd {
+                    policy.cap_low_usd = b;
+                    policy.cap_med_usd = b;
+                    policy.cap_high_usd = b;
+                }
+                plan = assemble(&args.task, &pool, &DEFAULT_CATALOG, &gate, &policy);
+                reapply_judge_override(&mut plan, args, &cf.crucible, &policy);
+            }
+        }
     }
-
-    // Transparency: show the plan before running it.
-    eprint!("{}", render_assembly_plan(&plan));
 
     match execute_plan(&plan, &args.task, &spawner, &base, &cf.crucible).await? {
         AutoRun::Direct { spec, text } => {
@@ -320,6 +355,100 @@ async fn run_crucible_auto(args: &CrucibleArgs, cf: &ConfigFile) -> anyhow::Resu
         }
     }
     Ok(())
+}
+
+/// Apply the `--judge` override to a convening plan (re-prices + cap-checks). A
+/// no-op when no `--judge` was passed or the plan is Direct. Factored out so each
+/// re-assemble in the decide loop re-pins the deliberately-chosen judge.
+fn reapply_judge_override(
+    plan: &mut AssemblyPlan,
+    args: &CrucibleArgs,
+    cfg: &CrucibleConfig,
+    policy: &AssemblyPolicy,
+) {
+    if plan.convene
+        && let Some(j) = args.judge.as_deref()
+    {
+        apply_judge_override(plan, j, cfg, policy);
+    }
+}
+
+/// Render the typed [`CruciblePlan`] proposal card — the human-facing decision
+/// surface shown before any spend. Pure + unit-testable; each line is
+/// newline-terminated. A `None` cost ALWAYS renders "price unknown", never "$0".
+fn render_card(card: &wcore_types::crucible::CruciblePlan) -> String {
+    use wcore_types::crucible::CouncilRole;
+
+    let mut out = String::new();
+    out.push_str(if card.convene {
+        "crucible plan (council)\n"
+    } else {
+        "crucible plan (direct)\n"
+    });
+    out.push_str(&format!("crucible:   stakes: {}\n", card.stakes));
+    if let Some(focus) = &card.focus {
+        out.push_str(&format!("crucible:   focus: {focus}\n"));
+    }
+    for m in &card.members {
+        let role = match m.role {
+            CouncilRole::Proposer => "proposer",
+            CouncilRole::Judge => "judge",
+        };
+        out.push_str(&format!("crucible:   {role}  {}  ({})\n", m.spec, m.vendor));
+    }
+    match card.ceiling_usd() {
+        Some(c) => out.push_str(&format!("crucible:   ceiling ~ ${c:.4}\n")),
+        None => out.push_str("crucible:   ceiling: price unknown\n"),
+    }
+    if let Some(b) = card.baseline_usd() {
+        out.push_str(&format!("crucible:   one strong model alone ~ ${b:.4}\n"));
+    }
+    if card.convene {
+        out.push_str(if card.judge_independent {
+            "crucible:   judge: independent\n"
+        } else {
+            "crucible:   judge: shares a proposer vendor\n"
+        });
+    }
+    if let Some(cap) = card.day_cap_microcents {
+        let spent = card.day_spent_microcents.unwrap_or(0) as f64
+            / wcore_types::crucible::MICROCENTS_PER_USD;
+        let cap = cap as f64 / wcore_types::crucible::MICROCENTS_PER_USD;
+        out.push_str(&format!("crucible:   today: ${spent:.4} / ${cap:.4}\n"));
+    }
+    out.push_str(&format!("crucible:   reason: {}\n", card.reason));
+    for t in &card.trims {
+        out.push_str(&format!("crucible:   note: {t}\n"));
+    }
+    out
+}
+
+/// Decide how to proceed with a council plan. Interactive when stdin is a TTY;
+/// otherwise fail-closed unless `crucible_auto_spend` is set.
+fn decide(
+    card: &wcore_types::crucible::CruciblePlan,
+    auto_spend: bool,
+) -> anyhow::Result<CrucibleDecision> {
+    use std::io::{IsTerminal, Write};
+    eprint!("{}", render_card(card));
+    if !std::io::stdin().is_terminal() {
+        if auto_spend {
+            eprintln!("crucible: non-interactive + crucible_auto_spend=true → auto-approving.");
+            return Ok(CrucibleDecision::Approve);
+        }
+        anyhow::bail!(
+            "crucible: refusing to spend in a non-interactive session. Re-run in a terminal to \
+             approve, or set `crucible_auto_spend = true` under [crucible] to allow headless runs."
+        );
+    }
+    eprint!("Proceed? [Y]es / [n]o (no spend): ");
+    std::io::stderr().flush().ok();
+    let mut line = String::new();
+    std::io::stdin().read_line(&mut line)?;
+    match line.trim().to_ascii_lowercase().as_str() {
+        "" | "y" | "yes" => Ok(CrucibleDecision::Approve),
+        _ => Ok(CrucibleDecision::Cancel),
+    }
 }
 
 /// Split a `provider` / `provider:model` spec into parts (empty model → `None`).
@@ -366,11 +495,13 @@ fn apply_judge_override(
     plan.trims.push(format!("judge pinned → {judge}"));
     let cap = cap_usd_for(cfg, plan.stakes);
     match est.certified_microcents() {
-        Some(c) if (c as f64 / MICROCENTS_PER_USD) > cap => plan.trims.push(format!(
-            "WARNING: pinned judge est ${:.4} exceeds the ${cap:.4} {:?} cap",
-            c as f64 / MICROCENTS_PER_USD,
-            plan.stakes
-        )),
+        Some(c) if (c as f64 / wcore_types::crucible::MICROCENTS_PER_USD) > cap => {
+            plan.trims.push(format!(
+                "WARNING: pinned judge est ${:.4} exceeds the ${cap:.4} {:?} cap",
+                c as f64 / wcore_types::crucible::MICROCENTS_PER_USD,
+                plan.stakes
+            ))
+        }
         None => plan
             .trims
             .push("WARNING: pinned judge is unpriceable — cost not bounded".to_string()),
@@ -420,7 +551,7 @@ fn build_policy(cfg: &CrucibleConfig, args: &CrucibleArgs) -> AssemblyPolicy {
         cap_high_usd: cfg.cap_high_usd,
         price_floor_frac: DEFAULT_PRICE_FLOOR_FRAC,
         proposer_max_turns: cfg.proposer_max_turns,
-        proposer_max_tokens: DIRECT_MAX_TOKENS,
+        proposer_max_tokens: DEFAULT_PROPOSER_MAX_TOKENS,
     }
 }
 
@@ -449,7 +580,7 @@ async fn execute_plan(
                 name: spec.clone(),
                 prompt: task.to_string(),
                 max_turns: cfg.proposer_max_turns,
-                max_tokens: DIRECT_MAX_TOKENS,
+                max_tokens: DEFAULT_PROPOSER_MAX_TOKENS,
                 system_prompt: None,
                 provider: Some(spec.clone()),
                 model: spec.split_once(':').map(|(_, m)| m.to_string()),
@@ -523,7 +654,7 @@ async fn run_direct(
             name: first.spec.clone(),
             prompt: task.to_string(),
             max_turns: roster.proposer_max_turns,
-            max_tokens: DIRECT_MAX_TOKENS,
+            max_tokens: DEFAULT_PROPOSER_MAX_TOKENS,
             system_prompt: None,
             provider: Some(first.spec.clone()),
             model: first.model.clone(),
@@ -796,5 +927,134 @@ mod tests {
             ..Default::default()
         });
         assert_eq!(deep.stakes(), Stakes::High);
+    }
+
+    #[test]
+    fn build_policy_max_tokens_matches_council_default() {
+        // The card is priced against `proposer_max_tokens`; the council spawns each
+        // proposer with `DEFAULT_PROPOSER_MAX_TOKENS`. They MUST stay equal or the
+        // certified ceiling lies — a one-sided edit fails here.
+        let policy = build_policy(&CrucibleConfig::default(), &CrucibleArgs::default());
+        assert_eq!(
+            policy.proposer_max_tokens,
+            wcore_agent::orchestration::council::DEFAULT_PROPOSER_MAX_TOKENS
+        );
+    }
+
+    use wcore_types::crucible::{CouncilMemberCard, CouncilRole, CruciblePlan};
+
+    fn member(spec: &str, vendor: &str, role: CouncilRole) -> CouncilMemberCard {
+        CouncilMemberCard {
+            spec: spec.to_string(),
+            vendor: vendor.to_string(),
+            role,
+        }
+    }
+
+    #[test]
+    fn render_card_council_shows_roles_ceiling_baseline_and_judge() {
+        let card = CruciblePlan {
+            convene: true,
+            members: vec![
+                member(
+                    "deepseek:deepseek-v4-pro",
+                    "deepseek",
+                    CouncilRole::Proposer,
+                ),
+                member("openai:gpt-5", "openai", CouncilRole::Proposer),
+                member("anthropic:claude-opus-4-8", "anthropic", CouncilRole::Judge),
+            ],
+            stakes: "med".into(),
+            focus: Some("c-suite".into()),
+            ceiling_microcents: Some(210_000_000),
+            single_model_baseline_microcents: Some(45_000_000),
+            day_spent_microcents: None,
+            day_cap_microcents: None,
+            judge_independent: true,
+            reason: "diverse cross-vendor".into(),
+            trims: vec![],
+        };
+        let r = render_card(&card);
+        assert!(r.contains("crucible plan (council)"));
+        assert!(r.contains("stakes: med"));
+        assert!(r.contains("focus: c-suite"));
+        assert!(r.contains("proposer  deepseek:deepseek-v4-pro  (deepseek)"));
+        assert!(r.contains("judge  anthropic:claude-opus-4-8  (anthropic)"));
+        assert!(r.contains("ceiling ~ $2.1000"));
+        assert!(r.contains("one strong model alone ~ $0.4500"));
+        assert!(r.contains("judge: independent"));
+        assert!(r.contains("reason: diverse cross-vendor"));
+    }
+
+    #[test]
+    fn render_card_direct_plan_omits_judge_line() {
+        let card = CruciblePlan {
+            convene: false,
+            members: vec![member("openai:gpt-5-mini", "openai", CouncilRole::Proposer)],
+            stakes: "low".into(),
+            focus: None,
+            ceiling_microcents: Some(5_000_000),
+            single_model_baseline_microcents: None,
+            day_spent_microcents: None,
+            day_cap_microcents: None,
+            judge_independent: true,
+            reason: "single model suffices".into(),
+            trims: vec![],
+        };
+        let r = render_card(&card);
+        assert!(r.contains("crucible plan (direct)"));
+        assert!(r.contains("proposer  openai:gpt-5-mini  (openai)"));
+        assert!(r.contains("ceiling ~ $0.0500"));
+        // Direct plans never print a judge line and have no baseline here.
+        assert!(!r.contains("judge:"));
+        assert!(!r.contains("one strong model alone"));
+    }
+
+    #[test]
+    fn render_card_unpriceable_ceiling_says_price_unknown_not_zero() {
+        let card = CruciblePlan {
+            convene: true,
+            members: vec![member("flux:flux-pinned-x", "flux", CouncilRole::Proposer)],
+            stakes: "high".into(),
+            focus: None,
+            ceiling_microcents: None,
+            single_model_baseline_microcents: None,
+            day_spent_microcents: None,
+            day_cap_microcents: None,
+            judge_independent: true,
+            reason: "unpriced flux".into(),
+            trims: vec![],
+        };
+        let r = render_card(&card);
+        assert!(r.contains("ceiling: price unknown"));
+        // The no-$0-surprise rule: an unpriceable ceiling never renders as money.
+        assert!(!r.contains("$0"));
+        assert!(!r.contains("ceiling ~"));
+    }
+
+    #[test]
+    fn render_card_daily_line_present_only_with_cap() {
+        let base = CruciblePlan {
+            convene: false,
+            members: vec![member("openai:gpt-5", "openai", CouncilRole::Proposer)],
+            stakes: "low".into(),
+            focus: None,
+            ceiling_microcents: Some(1_000_000),
+            single_model_baseline_microcents: None,
+            day_spent_microcents: None,
+            day_cap_microcents: Some(2_000_000_000),
+            judge_independent: true,
+            reason: "x".into(),
+            trims: vec![],
+        };
+        // With a cap: the today line appears, spent defaulting to $0.0000.
+        let r = render_card(&base);
+        assert!(r.contains("today: $0.0000 / $20.0000"));
+        // Without a cap: the today line is omitted entirely.
+        let no_cap = CruciblePlan {
+            day_cap_microcents: None,
+            ..base
+        };
+        assert!(!render_card(&no_cap).contains("today:"));
     }
 }

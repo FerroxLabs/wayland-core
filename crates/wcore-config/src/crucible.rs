@@ -97,6 +97,12 @@ pub struct CrucibleConfig {
     /// model specs. The learning signal for a future BetaScorer; off until the
     /// operator opts in.
     pub log_assembly: bool,
+    /// Opt-in (default `false`): in a NON-interactive `wcore crucible` invocation
+    /// (stdin is not a TTY), auto-approve the council plan instead of failing
+    /// closed. Default `false` so a headless/piped invocation never spends without
+    /// an explicit human (or this opt-in) — the no-surprise-spend guarantee.
+    #[serde(default)]
+    pub crucible_auto_spend: bool,
 }
 
 impl Default for CrucibleConfig {
@@ -119,6 +125,7 @@ impl Default for CrucibleConfig {
             cap_med_usd: 0.05,
             cap_high_usd: 0.15,
             log_assembly: false,
+            crucible_auto_spend: false,
         }
     }
 }
@@ -170,6 +177,17 @@ proposers = ["openai", "anthropic"]
         let c: CrucibleConfig = toml::from_str("").expect("parse empty");
         assert!(!c.enabled);
         assert!(c.proposers.is_empty());
+    }
+
+    #[test]
+    fn crucible_auto_spend_defaults_to_false() {
+        // Headless/piped invocations must fail closed by default — never spend
+        // without an explicit human approval (or this opt-in being set).
+        let c = CrucibleConfig::default();
+        assert!(!c.crucible_auto_spend, "auto-spend must be OFF by default");
+        // An absent field in a partial table also yields false.
+        let c2: CrucibleConfig = toml::from_str("enabled = true").expect("parse partial");
+        assert!(!c2.crucible_auto_spend);
     }
 
     #[test]
