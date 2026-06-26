@@ -71,8 +71,8 @@ impl FetchBackend for HttpFetchBackend {
             Ok(outcome) => outcome,
             Err(_) => FetchOutcome::Err {
                 message: format!(
-                    "fetch exceeded wall-clock deadline of {}ms (HTTP, body decode, and \
-                     readability extraction combined)",
+                    "fetch timed out: exceeded wall-clock deadline of {}ms (HTTP, body \
+                     decode, and readability extraction combined)",
                     req.timeout_ms
                 ),
             },
