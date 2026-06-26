@@ -3841,6 +3841,23 @@ impl AgentEngine {
             return Ok(result);
         }
 
+        // Crucible Stage 3b — the `/crucible <task>` front door. A deterministic,
+        // zero-false-trigger prefix intercept: convene a cross-vendor council, gate
+        // spend on the typed proposal card, and return the council's answer as the
+        // turn output. Requires a host to confirm through (protocol_writer); a
+        // `/crucible` typed with no approver falls through to a normal turn ($0).
+        // Child engines (council members) carry no protocol_writer, so they can
+        // never re-enter this gate.
+        {
+            let trimmed = user_input.trim_start();
+            if (trimmed == "/crucible" || trimmed.starts_with("/crucible "))
+                && self.protocol_writer.is_some()
+                && let Some(result) = self.try_crucible_council(trimmed).await
+            {
+                return Ok(result);
+            }
+        }
+
         // Runaway-loop breaker (per-run): the engine-side backstop for the
         // no-progress loops that `max_turns = None` leaves unguarded. Terminates
         // the run if the same tool call keeps producing the same result.
@@ -5683,6 +5700,202 @@ impl AgentEngine {
                 });
                 None
             }
+        }
+    }
+
+    /// Engine-integrated `/crucible <task>` front door (Stage 3b). Pre-LLM
+    /// intercept mirroring `try_live_workflow`: assemble a cross-vendor council,
+    /// emit the typed `ApprovalRequired{plan}` card, await the host's typed
+    /// `CrucibleDecision` via the approval BRIDGE (the only channel carrying
+    /// structured `modifications`), run the council through the SHARED
+    /// `drive_council`, and surface the answer. Returns `None` (fall through to a
+    /// normal turn) when there is no host to confirm through.
+    async fn try_crucible_council(&self, user_input: &str) -> Option<AgentResult> {
+        use wcore_protocol::events::{
+            OutputType, ProtocolEvent, ToolCategory, ToolInfo, ToolStatus,
+        };
+
+        let writer = self.protocol_writer.as_ref()?;
+        let task = user_input.strip_prefix("/crucible")?.trim().to_string();
+        let cfg = self.config.crucible.clone();
+        // NOTE (gate): the engine retains the *resolved* `Config`, which has no
+        // on-disk `[providers]` map (that lives only on `ConfigFile`). Council
+        // members are resolved from the credential chain (env vars + credential
+        // store) via `resolve_council_provider`, so an empty providers map still
+        // keys every env-/store-credentialed provider. Wiring the inline
+        // `[providers]` map into the engine is a follow-up.
+        let base = self.config.clone();
+        let providers = std::collections::HashMap::new();
+
+        if task.is_empty() {
+            let msg = "Usage: /crucible <task> — convene a cross-vendor council to \
+                       cross-check an answer."
+                .to_string();
+            self.output.emit_text_delta(&msg, &self.current_msg_id);
+            return Some(self.crucible_result(msg));
+        }
+
+        // Candidate pool: configured proposers ∪ candidate_pool, filtered to
+        // runnable (keyed) specs. Empty-state Flux self-bootstrap is a later stage.
+        let mut candidates = cfg.proposers.clone();
+        candidates.extend(cfg.candidate_pool.clone());
+        let runnable = crate::orchestration::council::CouncilProviderResolver::new(
+            base.clone(),
+            providers.clone(),
+        )
+        .resolvable_specs(&candidates);
+        if runnable.is_empty() {
+            let msg = "crucible: no runnable council candidates — set `proposers` / \
+                       `candidate_pool` under `[crucible]` and ensure their providers \
+                       are keyed."
+                .to_string();
+            self.output.emit_text_delta(&msg, &self.current_msg_id);
+            return Some(self.crucible_result(msg));
+        }
+
+        // Transient spawner: parent provider + a council resolver, bound to the
+        // engine cancel token. Attach a cap-less council budget tracker when a cap
+        // is configured so multi-council daily aggregate stays bounded.
+        let mut spawner = crate::spawner::AgentSpawner::new(
+            std::sync::Arc::clone(&self.provider),
+            self.config.clone(),
+        )
+        .with_provider_resolver(std::sync::Arc::new(
+            crate::orchestration::council::CouncilProviderResolver::new(
+                base.clone(),
+                providers.clone(),
+            ),
+        ))
+        .with_cancel(self.cancel_token.clone());
+        if cfg.daily_cap_usd.is_some() || cfg.max_cost_usd.is_some() {
+            let tracker = std::sync::Arc::new(parking_lot::Mutex::new(
+                wcore_budget::BudgetTracker::new(wcore_budget::BudgetCap::default()),
+            ));
+            spawner = spawner
+                .with_budget_tracker(tracker)
+                .with_budget_identity("crucible".to_string(), "default".to_string());
+        }
+
+        // Open the tool card, then drive the council. The BridgeApprover emits the
+        // typed ApprovalRequired per decision round + awaits the bridge. Close the
+        // card with a terminal ToolResult/ToolCancelled so it never hangs in
+        // AwaitingApproval.
+        let call_id = uuid::Uuid::new_v4().to_string();
+        let _ = writer.emit(&ProtocolEvent::ToolRequest {
+            msg_id: self.current_msg_id.clone(),
+            call_id: call_id.clone(),
+            tool: ToolInfo {
+                name: "Crucible".to_string(),
+                category: ToolCategory::Exec,
+                args: serde_json::json!({ "task": task }),
+                description: "Convene a cross-vendor council".to_string(),
+            },
+        });
+
+        let approver = BridgeApprover {
+            writer: std::sync::Arc::clone(writer),
+            bridge: std::sync::Arc::clone(&self.approval_bridge),
+            cancel: self.cancel_token.clone(),
+            call_id: call_id.clone(),
+        };
+        let ov = crate::orchestration::council::CouncilOverrides::default();
+        let base_refilter = base.clone();
+        let providers_refilter = providers.clone();
+        let refilter = move |specs: &[String]| {
+            crate::orchestration::council::CouncilProviderResolver::new(
+                base_refilter.clone(),
+                providers_refilter.clone(),
+            )
+            .resolvable_specs(specs)
+        };
+
+        // Run on a DETACHED task whose future is type-ERASED behind a
+        // `Pin<Box<dyn Future>>` (see `run_crucible_owned`). `drive_council`
+        // transitively reaches `spawner.spawn_one` → a child `engine.run`, which
+        // the compiler cannot prove never re-enters this method; the boxed-dyn
+        // indirection severs the otherwise-infinite async-recursion type cycle
+        // (the same cut `run_workflow_owned` makes for the workflow path). A bare
+        // `tokio::spawn(async move {...})` does NOT suffice — its concrete future
+        // still embeds `drive_council`'s, so the cycle persists.
+        let drive = tokio::spawn(run_crucible_owned(
+            task, runnable, base, cfg, ov, spawner, approver, refilter,
+        ));
+        let outcome = match drive.await {
+            Ok(res) => res,
+            Err(join_err) => {
+                tracing::debug!(error = %join_err, "crucible: council task join failed");
+                Err(anyhow::anyhow!("crucible council was interrupted"))
+            }
+        };
+
+        use crate::orchestration::council::CouncilRunResult;
+        match outcome {
+            Ok(CouncilRunResult::Cancelled) => {
+                let _ = writer.emit(&ProtocolEvent::ToolCancelled {
+                    msg_id: self.current_msg_id.clone(),
+                    call_id,
+                    reason: "Crucible declined — no spend.".to_string(),
+                });
+                let msg = "crucible: cancelled — no spend.".to_string();
+                self.output.emit_text_delta(&msg, &self.current_msg_id);
+                Some(self.crucible_result(msg))
+            }
+            Ok(CouncilRunResult::Direct { spec, text }) => {
+                let _ = writer.emit(&ProtocolEvent::ToolResult {
+                    msg_id: self.current_msg_id.clone(),
+                    call_id,
+                    tool_name: "Crucible".to_string(),
+                    status: ToolStatus::Success,
+                    output: format!("Crucible direct answer via {spec}"),
+                    output_type: OutputType::Text,
+                    metadata: None,
+                });
+                self.output.emit_text_delta(&text, &self.current_msg_id);
+                Some(self.crucible_result(text))
+            }
+            Ok(CouncilRunResult::Council { plan: _, outcome }) => {
+                let _ = writer.emit(&ProtocolEvent::ToolResult {
+                    msg_id: self.current_msg_id.clone(),
+                    call_id,
+                    tool_name: "Crucible".to_string(),
+                    status: ToolStatus::Success,
+                    output: "Crucible council completed.".to_string(),
+                    output_type: OutputType::Text,
+                    metadata: None,
+                });
+                self.output
+                    .emit_text_delta(&outcome.final_text, &self.current_msg_id);
+                Some(self.crucible_result(outcome.final_text))
+            }
+            Err(e) => {
+                let msg = format!("crucible: {e}");
+                let _ = writer.emit(&ProtocolEvent::ToolResult {
+                    msg_id: self.current_msg_id.clone(),
+                    call_id,
+                    tool_name: "Crucible".to_string(),
+                    status: ToolStatus::Error,
+                    output: msg.clone(),
+                    output_type: OutputType::Text,
+                    metadata: None,
+                });
+                self.output.emit_text_delta(&msg, &self.current_msg_id);
+                Some(self.crucible_result(msg))
+            }
+        }
+    }
+
+    /// Minimal end-of-turn `AgentResult` for the Crucible front door, which
+    /// produces its answer outside the LLM turn loop. (The council's own token
+    /// spend is tracked via the budget envelope + provenance, not `total_usage`.)
+    fn crucible_result(&self, text: String) -> AgentResult {
+        AgentResult {
+            text,
+            stop_reason: StopReason::EndTurn,
+            finish_reason: FinishReason::from_stop_reason(StopReason::EndTurn),
+            usage: self.total_usage.clone(),
+            turns: 1,
+            active_window_percent: self.active_window_percent_now(&self.model, 0),
+            agent_run_id: self.current_agent_run_id.clone(),
         }
     }
 
@@ -11328,6 +11541,99 @@ pub struct AgentResult {
     pub active_window_percent: Option<u32>,
     /// #279(c): the run's stable correlation id (clone of current_agent_run_id).
     pub agent_run_id: Option<String>,
+}
+
+/// Run the shared `drive_council` over OWNED inputs behind a `Pin<Box<dyn Future>>`.
+/// The boxed-dyn return type ERASES the council future, which is what severs the
+/// `engine.run → try_crucible_council → drive_council → spawn_one → engine.run`
+/// async-recursion type cycle (mirrors `run_workflow_owned`). Spawned detached so
+/// the `Send + 'static` boundary is forced exactly once.
+#[allow(clippy::too_many_arguments)]
+fn run_crucible_owned(
+    task: String,
+    runnable: Vec<String>,
+    base: Config,
+    cfg: wcore_config::crucible::CrucibleConfig,
+    ov: crate::orchestration::council::CouncilOverrides,
+    spawner: crate::spawner::AgentSpawner,
+    approver: BridgeApprover,
+    refilter: impl Fn(&[String]) -> Vec<String> + Send + Sync + 'static,
+) -> std::pin::Pin<
+    Box<
+        dyn std::future::Future<
+                Output = anyhow::Result<crate::orchestration::council::CouncilRunResult>,
+            > + Send,
+    >,
+> {
+    Box::pin(async move {
+        crate::orchestration::council::drive_council(
+            &task, runnable, &base, &cfg, &ov, &spawner, &approver, &refilter,
+        )
+        .await
+    })
+}
+
+/// Engine-side [`CouncilApprover`] (Stage 3b): emits the typed `ApprovalRequired`
+/// card and awaits the host's typed `CrucibleDecision` via the approval bridge,
+/// so the `/crucible` front door drives through the SAME `drive_council` loop the
+/// CLI uses. A fresh `correlation_id` per round keeps bridge resolution
+/// unambiguous; a stable `call_id` ties the rounds to one host-side tool card.
+struct BridgeApprover {
+    writer: std::sync::Arc<dyn wcore_protocol::writer::ProtocolEmitter>,
+    bridge: std::sync::Arc<crate::approval::ApprovalBridge>,
+    cancel: tokio_util::sync::CancellationToken,
+    call_id: String,
+}
+
+#[async_trait::async_trait]
+impl crate::orchestration::council::CouncilApprover for BridgeApprover {
+    async fn approve(
+        &self,
+        card: &wcore_types::crucible::CruciblePlan,
+    ) -> anyhow::Result<wcore_types::crucible::CrucibleDecision> {
+        use wcore_protocol::events::ProtocolEvent;
+        use wcore_types::crucible::CrucibleDecision;
+
+        let ceiling = card
+            .ceiling_usd()
+            .map(|u| format!("${u:.4}"))
+            .unwrap_or_else(|| "price unknown".to_string());
+        let correlation_id = uuid::Uuid::new_v4().to_string();
+        // Register the pending entry BEFORE emitting the card so a fast host
+        // response can never arrive before the bridge can resolve it.
+        let rx = self
+            .bridge
+            .request_with_id(
+                correlation_id.clone(),
+                crate::approval::ApprovalRequest {
+                    call_id: self.call_id.clone(),
+                    reason: "Run Crucible council?".to_string(),
+                    context: format!("council ceiling {ceiling}"),
+                },
+            )
+            .await;
+        let _ = self.writer.emit(&ProtocolEvent::ApprovalRequired {
+            call_id: self.call_id.clone(),
+            resume_token: correlation_id.clone(),
+            correlation_id,
+            reason: "Run Crucible council?".to_string(),
+            context: format!("Crucible council — you're approving up to {ceiling}."),
+            plan: Some(card.clone()),
+        });
+        let outcome = tokio::select! {
+            biased;
+            _ = self.cancel.cancelled() => return Ok(CrucibleDecision::Cancel),
+            res = rx => res,
+        };
+        match outcome {
+            Ok(o) if o.approved => Ok(CrucibleDecision::from_modifications(
+                o.modifications.as_ref(),
+            )
+            .unwrap_or(CrucibleDecision::Approve)),
+            // Denied, cancelled, or a dropped channel (reaper/host crash) → no spend.
+            _ => Ok(CrucibleDecision::Cancel),
+        }
+    }
 }
 
 #[cfg(test)]
