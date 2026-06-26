@@ -2486,13 +2486,20 @@ impl ProtocolEmitter for GatingProtocolWriter {
                 if let Ok(mut seen) = self.synthesized.lock() {
                     seen.insert(call_id.clone());
                 }
+                // Crucible Stage 4: the typed proposal card rides the
+                // ToolRequest's `tool.args` (the explicit ApprovalRequired{plan}
+                // is suppressed by the dedupe above), so carry it into the
+                // host-visible synthesized frame. None for every other tool.
+                let plan = tool.args.get("plan").and_then(|v| {
+                    serde_json::from_value::<wcore_types::crucible::CruciblePlan>(v.clone()).ok()
+                });
                 self.inner.emit(&ProtocolEvent::ApprovalRequired {
                     call_id: call_id.clone(),
                     resume_token: call_id.clone(),
                     correlation_id: call_id.clone(),
                     reason: reason.to_string(),
                     context: tool.description.clone(),
-                    plan: None,
+                    plan,
                 })?;
             }
         }

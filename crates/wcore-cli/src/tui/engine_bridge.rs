@@ -165,13 +165,21 @@ impl ProtocolEmitter for ChannelEmitter {
             {
                 s.insert(call_id.clone());
             }
+            // Crucible Stage 4: carry the typed proposal card through the
+            // synthesized gate frame. The explicit ApprovalRequired{plan} is
+            // suppressed above, so the plan must ride the ToolRequest's
+            // `tool.args` (engine sets it for the Crucible council). Absent/
+            // unparseable for every other tool → None (unchanged behavior).
+            let plan = tool.args.get("plan").and_then(|v| {
+                serde_json::from_value::<wcore_types::crucible::CruciblePlan>(v.clone()).ok()
+            });
             let _ = self.tx.send(ProtocolEvent::ApprovalRequired {
                 call_id: call_id.clone(),
                 resume_token: resume_token.clone(),
                 correlation_id: resume_token,
                 reason: reason.to_string(),
                 context,
-                plan: None,
+                plan,
             });
         }
 
@@ -2705,6 +2713,60 @@ mod tests {
             rx.try_recv().is_err(),
             "explicit ApprovalRequired for an already-synthesized call_id must be suppressed"
         );
+    }
+
+    #[test]
+    fn channel_emitter_carries_crucible_plan_from_tool_args() {
+        // Crucible Stage 4: the engine puts the typed CruciblePlan in the
+        // ToolRequest args; the synthesized gate frame must carry it (the
+        // explicit ApprovalRequired{plan} is suppressed by the dedupe), else the
+        // TUI renders "plan unavailable" instead of the cost card.
+        use wcore_types::crucible::{CouncilMemberCard, CouncilRole, CruciblePlan};
+        let plan = CruciblePlan {
+            convene: true,
+            members: vec![CouncilMemberCard {
+                spec: "openai:gpt-5".into(),
+                vendor: "openai".into(),
+                role: CouncilRole::Proposer,
+            }],
+            stakes: "med".into(),
+            focus: None,
+            ceiling_microcents: Some(210_000_000),
+            single_model_baseline_microcents: None,
+            day_spent_microcents: None,
+            day_cap_microcents: None,
+            judge_independent: true,
+            reason: "x".into(),
+            trims: vec![],
+        };
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let emitter = ChannelEmitter::new(tx);
+        emitter
+            .emit(&ProtocolEvent::ToolRequest {
+                msg_id: "m1".into(),
+                call_id: "cru1".into(),
+                tool: wcore_protocol::events::ToolInfo {
+                    name: "Crucible".into(),
+                    category: wcore_protocol::events::ToolCategory::Exec,
+                    args: serde_json::json!({
+                        "task": "t",
+                        "plan": serde_json::to_value(&plan).unwrap(),
+                    }),
+                    description: "Convene a cross-vendor council".into(),
+                },
+            })
+            .expect("emit ToolRequest");
+        assert!(matches!(
+            rx.try_recv().unwrap(),
+            ProtocolEvent::ToolRequest { .. }
+        ));
+        match rx.try_recv().expect("synthesized ApprovalRequired") {
+            ProtocolEvent::ApprovalRequired { plan: Some(p), .. } => {
+                assert_eq!(p.ceiling_microcents, Some(210_000_000));
+                assert_eq!(p.members.len(), 1);
+            }
+            other => panic!("expected ApprovalRequired carrying the plan, got {other:?}"),
+        }
     }
 
     #[test]

@@ -5780,10 +5780,36 @@ impl AgentEngine {
                 .with_budget_identity("crucible".to_string(), "default".to_string());
         }
 
-        // Open the tool card, then drive the council. The BridgeApprover emits the
-        // typed ApprovalRequired per decision round + awaits the bridge. Close the
-        // card with a terminal ToolResult/ToolCancelled so it never hangs in
-        // AwaitingApproval.
+        // Build the proposal card UP FRONT so it can ride the ToolRequest's
+        // `tool.args`. The approval-emitter dedupe (engine_bridge ChannelEmitter +
+        // main GatingProtocolWriter) synthesizes the host-visible ApprovalRequired
+        // FROM the ToolRequest and SUPPRESSES the explicit one, so the typed plan
+        // MUST travel via args to reach the host (spec §3.1). assemble is pure, so
+        // this first plan matches the one drive_council re-derives below.
+        let ov = crate::orchestration::council::CouncilOverrides::default();
+        let card_gate = crate::orchestration::council::build_gate(&ov, &task);
+        let card_policy = crate::orchestration::council::build_policy(&cfg, &ov);
+        let first_plan = crate::orchestration::council::assemble(
+            &task,
+            &runnable,
+            &wcore_pricing::DEFAULT_CATALOG,
+            &card_gate,
+            &card_policy,
+        );
+        let day_cap_microcents = cfg
+            .daily_cap_usd
+            .map(|u| (u * wcore_types::crucible::MICROCENTS_PER_USD) as u64);
+        let first_card = crate::orchestration::council::plan_to_card(
+            &first_plan,
+            &card_policy,
+            None,
+            None,
+            day_cap_microcents,
+        );
+        let plan_arg = serde_json::to_value(&first_card).unwrap_or(serde_json::Value::Null);
+
+        // Open the tool card carrying the typed plan in args. Close it later with a
+        // terminal ToolResult/ToolCancelled so it never hangs in AwaitingApproval.
         let call_id = uuid::Uuid::new_v4().to_string();
         let _ = writer.emit(&ProtocolEvent::ToolRequest {
             msg_id: self.current_msg_id.clone(),
@@ -5791,7 +5817,7 @@ impl AgentEngine {
             tool: ToolInfo {
                 name: "Crucible".to_string(),
                 category: ToolCategory::Exec,
-                args: serde_json::json!({ "task": task }),
+                args: serde_json::json!({ "task": task, "plan": plan_arg }),
                 description: "Convene a cross-vendor council".to_string(),
             },
         });
@@ -5802,7 +5828,6 @@ impl AgentEngine {
             cancel: self.cancel_token.clone(),
             call_id: call_id.clone(),
         };
-        let ov = crate::orchestration::council::CouncilOverrides::default();
         let base_refilter = base.clone();
         let providers_refilter = providers.clone();
         let refilter = move |specs: &[String]| {
