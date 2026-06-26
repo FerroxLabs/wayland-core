@@ -31,13 +31,21 @@ pub fn truncate_deferred_description(desc: &str) -> String {
 }
 
 /// Definition of a tool for the API
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct ToolDef {
     pub name: String,
     pub description: String,
     pub input_schema: JsonSchema,
     /// Whether this tool's full schema is deferred (only name + stub sent to LLM).
     pub deferred: bool,
+    /// Provenance: `Some(server_name)` for a tool sourced from an MCP server,
+    /// `None` for a built-in / skill / spawn / plan tool. This is the REAL
+    /// classification signal — an MCP tool whose original name does NOT collide
+    /// with a built-in keeps its bare name (no `mcp__` prefix), so the name
+    /// alone cannot distinguish it from a built-in. Curation
+    /// (`apply_mcp_curation`) and the provider hard cap (`apply_provider_tool_cap`)
+    /// MUST classify on this field, not on the `mcp__` name prefix.
+    pub server: Option<String>,
 }
 
 /// Result from executing a tool
@@ -70,6 +78,7 @@ mod tests {
             description: "Run a shell command".to_string(),
             input_schema: schema.clone(),
             deferred: false,
+            server: None,
         };
         // assert
         assert_eq!(tool.name, "bash");
@@ -85,6 +94,7 @@ mod tests {
             description: "Does nothing".to_string(),
             input_schema: json!({}),
             deferred: false,
+            server: None,
         };
         // assert
         assert_eq!(tool.input_schema, json!({}));
@@ -137,6 +147,7 @@ mod tests {
             description: "desc".to_string(),
             input_schema: json!({}),
             deferred: false,
+            server: None,
         };
         assert!(!tool.deferred);
     }
@@ -148,6 +159,7 @@ mod tests {
             description: "desc".to_string(),
             input_schema: json!({}),
             deferred: true,
+            server: None,
         };
         assert!(tool.deferred);
     }

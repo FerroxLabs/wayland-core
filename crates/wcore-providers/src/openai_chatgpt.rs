@@ -501,6 +501,7 @@ mod tests {
             description: "Read a file".into(),
             input_schema: json!({ "type": "object", "properties": {} }),
             deferred: false,
+            server: None,
         }]));
         assert_eq!(with_tools["tool_choice"], json!("auto"));
         assert_eq!(with_tools["parallel_tool_calls"], json!(true));

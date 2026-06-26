@@ -517,6 +517,7 @@ async fn gemini_request_body_carries_tools_and_safety_settings() {
             "required": ["path"]
         }),
         deferred: false,
+        server: None,
     }];
     request.system = "Be terse.".into();
     request.messages.insert(

@@ -1197,6 +1197,7 @@ mod tests {
             description: "read a file".into(),
             input_schema: json!({"type": "object", "properties": {"path": {"type": "string"}}}),
             deferred: false,
+            server: None,
         }];
         let body = provider.build_request_body(&request);
         let decls = &body["tools"][0]["functionDeclarations"];
@@ -1554,6 +1555,7 @@ mod tests {
                 "additionalProperties": false
             }),
             deferred: false,
+            server: None,
         }];
         let decls = build_function_declarations(&tools);
         assert_eq!(decls.len(), 1);

@@ -729,6 +729,7 @@ mod tests {
                 description: "Read a file".into(),
                 input_schema: json!({ "type": "object", "properties": {} }),
                 deferred: false,
+                server: None,
             }],
             ..Default::default()
         };

@@ -136,18 +136,21 @@ mod tests {
                 description: "Read a file".into(),
                 input_schema: json!({"type": "object", "properties": {"path": {"type": "string"}}}),
                 deferred: false,
+                server: None,
             },
             ToolDef {
                 name: "SpawnTool".into(),
                 description: "Spawn sub-agents".into(),
                 input_schema: json!({"type": "object", "properties": {"agents": {"type": "array"}}}),
                 deferred: true,
+                server: None,
             },
             ToolDef {
                 name: "EnterPlanMode".into(),
                 description: "Enter plan mode".into(),
                 input_schema: json!({"type": "object", "properties": {}}),
                 deferred: true,
+                server: None,
             },
         ]
     }

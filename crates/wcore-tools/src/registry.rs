@@ -197,6 +197,7 @@ impl ToolRegistry {
                 description: t.description().to_string(),
                 input_schema: t.input_schema(),
                 deferred: t.is_deferred(),
+                server: t.mcp_server().map(str::to_string),
             })
             .collect()
     }
@@ -216,6 +217,7 @@ impl ToolRegistry {
                 description: t.description().to_string(),
                 input_schema: t.input_schema(),
                 deferred: t.is_deferred(),
+                server: t.mcp_server().map(str::to_string),
             })
             .collect()
     }

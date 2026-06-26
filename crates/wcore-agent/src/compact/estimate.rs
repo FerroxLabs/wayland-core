@@ -268,6 +268,7 @@ mod tests {
             description: "reads".into(),
             input_schema: json!({"type": "object"}),
             deferred: false,
+            server: None,
         }];
 
         let messages_only = estimate_tokens_from_messages(&messages);

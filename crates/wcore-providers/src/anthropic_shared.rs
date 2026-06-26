@@ -848,6 +848,7 @@ mod tests {
             description: "Run a shell command".to_string(),
             input_schema: schema.clone(),
             deferred: false,
+            server: None,
         }];
         // act
         let result = build_tools(&tools);
@@ -878,12 +879,14 @@ mod tests {
                 description: "Read a file".into(),
                 input_schema: json!({"type": "object", "properties": {"path": {"type": "string"}}}),
                 deferred: false,
+                server: None,
             },
             ToolDef {
                 name: "SpawnTool".into(),
                 description: "Spawn sub-agents".into(),
                 input_schema: json!({"type": "object", "properties": {"agents": {"type": "array"}}}),
                 deferred: true,
+                server: None,
             },
         ];
         let result = build_tools(&tools);
@@ -1059,6 +1062,7 @@ mod tests {
         let tool = ToolDef {
             name: "transcribe_audio".into(),
             description: "test".into(),
+            server: None,
             deferred: false,
             input_schema: json!({
                 "type": "object",
@@ -1091,6 +1095,7 @@ mod tests {
         let tool = ToolDef {
             name: "spotify".into(),
             description: "test".into(),
+            server: None,
             deferred: false,
             input_schema: json!({
                 "type": "object",

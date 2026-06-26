@@ -32,6 +32,7 @@ fn build_large_registry(n: usize) -> Vec<ToolDef> {
             ),
             input_schema: json!({"type": "object"}),
             deferred: true,
+            server: None,
         })
         .collect()
 }
@@ -153,6 +154,7 @@ async fn tool_search_still_works_without_cancel() {
         description: "Findable by query".into(),
         input_schema: json!({"type": "object"}),
         deferred: true,
+        server: None,
     });
     let tool = ToolSearchTool::new(defs);
 

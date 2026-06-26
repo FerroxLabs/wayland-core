@@ -177,6 +177,7 @@ mod tests {
             description: "Read a file".into(),
             input_schema: json!({"type": "object"}),
             deferred: false,
+            server: None,
         }]
     }
 
@@ -292,6 +293,7 @@ mod tests {
             description: "Write a file".into(),
             input_schema: json!({"type": "object"}),
             deferred: false,
+            server: None,
         }];
         detector.record_request("prompt", &new_tools);
         let diag = detector

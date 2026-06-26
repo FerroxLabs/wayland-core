@@ -125,6 +125,15 @@ impl Tool for McpToolProxy {
         ToolCategory::Mcp
     }
 
+    /// Provenance for curation / provider-cap classification. Returns the
+    /// originating MCP server name regardless of whether the display name was
+    /// prefixed (`mcp__{server}__{tool}` on collision) or kept bare. This is
+    /// what lets the engine classify a non-colliding (bare-named) MCP tool as
+    /// MCP instead of mistaking it for a built-in.
+    fn mcp_server(&self) -> Option<&str> {
+        Some(&self.server_name)
+    }
+
     fn describe(&self, input: &Value) -> String {
         format!(
             "MCP {}/{}: {}",

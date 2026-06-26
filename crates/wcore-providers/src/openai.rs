@@ -2799,6 +2799,7 @@ mod tests {
             description: "read a file".into(),
             input_schema: json!({"type": "object"}),
             deferred: false,
+            server: None,
         }];
         let body = provider.build_request_body(&req);
         let tools = body["tools"].as_array().expect("tools array present");
@@ -2824,6 +2825,7 @@ mod tests {
             description: "read a file".into(),
             input_schema: json!({"type": "object"}),
             deferred: false,
+            server: None,
         }];
         let body = provider.build_request_body(&req);
         let tools = body["tools"].as_array().expect("tools array present");
@@ -2923,6 +2925,7 @@ mod tests {
             description: "Read a file".into(),
             input_schema: json!({"type": "object", "properties": {"path": {"type": "string"}}}),
             deferred: false,
+            server: None,
         }]
     }
 
@@ -3598,12 +3601,14 @@ mod tests {
                 description: "Read a file".into(),
                 input_schema: json!({"type": "object", "properties": {"path": {"type": "string"}}}),
                 deferred: false,
+                server: None,
             },
             ToolDef {
                 name: "SpawnTool".into(),
                 description: "Spawn sub-agents".into(),
                 input_schema: json!({"type": "object", "properties": {"agents": {"type": "array"}}}),
                 deferred: true,
+                server: None,
             },
         ];
         let result = OpenAIProvider::build_tools(&tools);
@@ -3631,18 +3636,21 @@ mod tests {
                 description: "b".into(),
                 input_schema: json!({"type": "object", "properties": {}}),
                 deferred: false,
+                server: None,
             },
             ToolDef {
                 name: "ai.perplexity-perplexity-mcp".into(),
                 description: "p".into(),
                 input_schema: json!({"type": "object", "properties": {}}),
                 deferred: false,
+                server: None,
             },
             ToolDef {
                 name: "get_weather".into(),
                 description: "w".into(),
                 input_schema: json!({"type": "object", "properties": {}}),
                 deferred: false,
+                server: None,
             },
         ];
         let result = OpenAIProvider::build_tools(&tools);
@@ -3680,6 +3688,7 @@ mod tests {
                 description: "run a command".into(),
                 input_schema: json!({"type": "object"}),
                 deferred: false,
+                server: None,
             },
             ToolDef {
                 name: "ijfw_run".into(),
@@ -3687,12 +3696,14 @@ mod tests {
                 // arbitrary-object tool, still missing properties
                 input_schema: json!({"type": "object", "additionalProperties": true}),
                 deferred: false,
+                server: None,
             },
             ToolDef {
                 name: "Read".into(),
                 description: "read".into(),
                 input_schema: json!({"type": "object", "properties": {"path": {"type": "string"}}, "required": ["path"]}),
                 deferred: false,
+                server: None,
             },
         ];
         let result = OpenAIProvider::build_tools(&tools);

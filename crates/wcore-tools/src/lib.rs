@@ -397,6 +397,19 @@ pub trait Tool: Send + Sync {
     /// Tool category for protocol classification
     fn category(&self) -> ToolCategory;
 
+    /// Provenance: the MCP server this tool is sourced from, or `None` for a
+    /// built-in / skill / spawn / plan tool.
+    ///
+    /// This is the REAL MCP-classification signal. A non-colliding MCP tool
+    /// keeps its bare original name (no `mcp__{server}__` prefix — see
+    /// `wcore-mcp/src/tool_proxy.rs`), so the name alone cannot tell it apart
+    /// from a built-in. `McpToolProxy` overrides this to return `Some(server)`;
+    /// every built-in falls through to `None`. Surfaced onto `ToolDef::server`
+    /// by the registry so curation and the provider tool cap classify correctly.
+    fn mcp_server(&self) -> Option<&str> {
+        None
+    }
+
     /// AUDIT B-1 follow-up — per-input category override.
     ///
     /// The dispatch-timeout (see `orchestration::tool_dispatch_timeout`)
@@ -483,6 +496,9 @@ impl<T: Tool + ?Sized> Tool for std::sync::Arc<T> {
     }
     fn category(&self) -> ToolCategory {
         (**self).category()
+    }
+    fn mcp_server(&self) -> Option<&str> {
+        (**self).mcp_server()
     }
     fn category_for(&self, input: &Value) -> ToolCategory {
         (**self).category_for(input)
