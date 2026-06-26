@@ -358,7 +358,9 @@ psl = "2"
 
 # T15: pure-Rust PDF text extraction (no native deps). Optional —
 # wcore-tools gates it behind the default-on `pdf` cargo feature.
-pdf-extract = "0.10"
+# Pinned >=0.12 so the transitive lopdf is >=0.42, clearing
+# RUSTSEC-2026-0187 (stack overflow via deeply nested PDF objects).
+pdf-extract = "0.12"
 
 # T8: read-only image metadata inspection. `image` reads only the header
 # for dimensions — the full pixel buffer is never decoded; `kamadak-exif`

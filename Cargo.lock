@@ -1007,12 +1007,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "bytecount"
-version = "0.6.9"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "175812e0be2bccb6abe50bb8d566126198344f707e304f45c648fd8f2cc0365e"
-
-[[package]]
 name = "bytemuck"
 version = "1.25.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1249,9 +1243,9 @@ dependencies = [
 
 [[package]]
 name = "cff-parser"
-version = "0.1.0"
+version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "31f5b6e9141c036f3ff4ce7b2f7e432b0f00dee416ddcd4f17741d189ddc2e9d"
+checksum = "c5810ca1a2b5870df2aab1c03e11c40c361ba51d6e3e361e56310f1cb3b4e087"
 
 [[package]]
 name = "cfg-if"
@@ -3133,11 +3127,13 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0de51e6874e94e7bf76d726fc5d13ba782deca734ff60d5bb2fb2607c7406555"
 dependencies = [
  "cfg-if",
+ "js-sys",
  "libc",
  "r-efi 6.0.0",
  "rand_core 0.10.1",
  "wasip2",
  "wasip3",
+ "wasm-bindgen",
 ]
 
 [[package]]
@@ -3571,7 +3567,7 @@ dependencies = [
  "js-sys",
  "log",
  "wasm-bindgen",
- "windows-core 0.57.0",
+ "windows-core 0.61.2",
 ]
 
 [[package]]
@@ -4320,9 +4316,9 @@ checksum = "616ec5685824bcc94416c6d4a7a446eea774a31efd7062c8480ba6fd06d7a6e5"
 
 [[package]]
 name = "lopdf"
-version = "0.38.0"
+version = "0.42.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c7184fdea2bc3cd272a1acec4030c321a8f9875e877b3f92a53f2f6033fdc289"
+checksum = "25aab26d99567469098e64a02f42679f8965c6401263eefa31d8f2dcc37a221c"
 dependencies = [
  "aes",
  "bitflags 2.11.1",
@@ -4330,14 +4326,13 @@ dependencies = [
  "ecb",
  "encoding_rs",
  "flate2",
- "getrandom 0.3.4",
+ "getrandom 0.4.2",
  "indexmap 2.14.0",
  "itoa",
  "log",
  "md-5 0.10.6",
  "nom 8.0.0",
- "nom_locate",
- "rand 0.9.4",
+ "rand 0.10.1",
  "rangemap",
  "sha2 0.10.9",
  "stringprep",
@@ -4727,17 +4722,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "df9761775871bdef83bee530e60050f7e54b1105350d6884eb0fb4f46c2f9405"
 dependencies = [
  "memchr",
-]
-
-[[package]]
-name = "nom_locate"
-version = "5.0.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0b577e2d69827c4740cba2b52efaad1c4cc7c73042860b199710b3575c68438d"
-dependencies = [
- "bytecount",
- "memchr",
- "nom 8.0.0",
 ]
 
 [[package]]
@@ -5390,9 +5374,9 @@ checksum = "df94ce210e5bc13cb6651479fa48d14f601d9858cfe0467f43ae157023b938d3"
 
 [[package]]
 name = "pdf-extract"
-version = "0.10.0"
+version = "0.12.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1e28ba1758a3d3f361459645780e09570b573fc3c82637449e9963174c813a98"
+checksum = "417e8fdc940f1d5bc62c5f89864c3a2255f74f69aa353c98509213d67df61e73"
 dependencies = [
  "adobe-cmap-parser",
  "cff-parser",
@@ -5864,7 +5848,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8a56d757972c98b346a9b766e3f02746cde6dd1cd1d1d563472929fdd74bec4d"
 dependencies = [
  "anyhow",
- "itertools 0.10.5",
+ "itertools 0.14.0",
  "proc-macro2",
  "quote",
  "syn 2.0.117",
@@ -8934,7 +8918,7 @@ dependencies = [
 
 [[package]]
 name = "wayland-browser"
-version = "0.12.6"
+version = "0.12.9"
 dependencies = [
  "async-trait",
  "inventory",
@@ -8951,7 +8935,7 @@ dependencies = [
 
 [[package]]
 name = "wayland-cua"
-version = "0.12.6"
+version = "0.12.9"
 dependencies = [
  "async-trait",
  "inventory",
@@ -8968,7 +8952,7 @@ dependencies = [
 
 [[package]]
 name = "wayland-honcho"
-version = "0.12.6"
+version = "0.12.9"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -8989,7 +8973,7 @@ dependencies = [
 
 [[package]]
 name = "wayland-ijfw"
-version = "0.12.6"
+version = "0.12.9"
 dependencies = [
  "async-trait",
  "chrono",
@@ -9008,7 +8992,7 @@ dependencies = [
 
 [[package]]
 name = "wayland-ollama"
-version = "0.12.6"
+version = "0.12.9"
 dependencies = [
  "async-trait",
  "futures",
@@ -9029,7 +9013,7 @@ dependencies = [
 
 [[package]]
 name = "wcore-acp"
-version = "0.12.6"
+version = "0.12.9"
 dependencies = [
  "async-trait",
  "axum",
@@ -9052,7 +9036,7 @@ dependencies = [
 
 [[package]]
 name = "wcore-agent"
-version = "0.12.6"
+version = "0.12.9"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -9141,7 +9125,7 @@ dependencies = [
 
 [[package]]
 name = "wcore-agents-pack"
-version = "0.12.6"
+version = "0.12.9"
 dependencies = [
  "dirs",
  "serde",
@@ -9154,7 +9138,7 @@ dependencies = [
 
 [[package]]
 name = "wcore-browser"
-version = "0.12.6"
+version = "0.12.9"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -9184,7 +9168,7 @@ dependencies = [
 
 [[package]]
 name = "wcore-budget"
-version = "0.12.6"
+version = "0.12.9"
 dependencies = [
  "chrono",
  "parking_lot",
@@ -9197,7 +9181,7 @@ dependencies = [
 
 [[package]]
 name = "wcore-channel-discord"
-version = "0.12.6"
+version = "0.12.9"
 dependencies = [
  "async-trait",
  "chrono",
@@ -9218,7 +9202,7 @@ dependencies = [
 
 [[package]]
 name = "wcore-channel-email"
-version = "0.12.6"
+version = "0.12.9"
 dependencies = [
  "async-trait",
  "chrono",
@@ -9237,7 +9221,7 @@ dependencies = [
 
 [[package]]
 name = "wcore-channel-imessage"
-version = "0.12.6"
+version = "0.12.9"
 dependencies = [
  "async-trait",
  "chrono",
@@ -9254,7 +9238,7 @@ dependencies = [
 
 [[package]]
 name = "wcore-channel-matrix"
-version = "0.12.6"
+version = "0.12.9"
 dependencies = [
  "async-trait",
  "chrono",
@@ -9273,7 +9257,7 @@ dependencies = [
 
 [[package]]
 name = "wcore-channel-msteams"
-version = "0.12.6"
+version = "0.12.9"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -9294,7 +9278,7 @@ dependencies = [
 
 [[package]]
 name = "wcore-channel-signal"
-version = "0.12.6"
+version = "0.12.9"
 dependencies = [
  "async-trait",
  "chrono",
@@ -9309,7 +9293,7 @@ dependencies = [
 
 [[package]]
 name = "wcore-channel-slack"
-version = "0.12.6"
+version = "0.12.9"
 dependencies = [
  "async-trait",
  "chrono",
@@ -9332,7 +9316,7 @@ dependencies = [
 
 [[package]]
 name = "wcore-channel-sms"
-version = "0.12.6"
+version = "0.12.9"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -9355,7 +9339,7 @@ dependencies = [
 
 [[package]]
 name = "wcore-channel-telegram"
-version = "0.12.6"
+version = "0.12.9"
 dependencies = [
  "async-trait",
  "chrono",
@@ -9374,7 +9358,7 @@ dependencies = [
 
 [[package]]
 name = "wcore-channel-whatsapp"
-version = "0.12.6"
+version = "0.12.9"
 dependencies = [
  "async-trait",
  "chrono",
@@ -9397,7 +9381,7 @@ dependencies = [
 
 [[package]]
 name = "wcore-channels"
-version = "0.12.6"
+version = "0.12.9"
 dependencies = [
  "async-trait",
  "chrono",
@@ -9413,7 +9397,7 @@ dependencies = [
 
 [[package]]
 name = "wcore-channels-registry"
-version = "0.12.6"
+version = "0.12.9"
 dependencies = [
  "dirs",
  "serde",
@@ -9438,7 +9422,7 @@ dependencies = [
 
 [[package]]
 name = "wcore-cli"
-version = "0.12.6"
+version = "0.12.9"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -9519,7 +9503,7 @@ dependencies = [
 
 [[package]]
 name = "wcore-compact"
-version = "0.12.6"
+version = "0.12.9"
 dependencies = [
  "regex",
  "serde",
@@ -9528,7 +9512,7 @@ dependencies = [
 
 [[package]]
 name = "wcore-config"
-version = "0.12.6"
+version = "0.12.9"
 dependencies = [
  "anyhow",
  "argon2",
@@ -9565,7 +9549,7 @@ dependencies = [
 
 [[package]]
 name = "wcore-cron"
-version = "0.12.6"
+version = "0.12.9"
 dependencies = [
  "async-trait",
  "chrono",
@@ -9582,7 +9566,7 @@ dependencies = [
 
 [[package]]
 name = "wcore-cua"
-version = "0.12.6"
+version = "0.12.9"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -9618,7 +9602,7 @@ dependencies = [
 
 [[package]]
 name = "wcore-dispatch"
-version = "0.12.6"
+version = "0.12.9"
 dependencies = [
  "rand 0.9.4",
  "rand_distr",
@@ -9631,7 +9615,7 @@ dependencies = [
 
 [[package]]
 name = "wcore-egress"
-version = "0.12.6"
+version = "0.12.9"
 dependencies = [
  "async-trait",
  "http 1.4.1",
@@ -9644,7 +9628,7 @@ dependencies = [
 
 [[package]]
 name = "wcore-eval"
-version = "0.12.6"
+version = "0.12.9"
 dependencies = [
  "rstest",
  "serde",
@@ -9661,7 +9645,7 @@ dependencies = [
 
 [[package]]
 name = "wcore-eval-scenarios"
-version = "0.12.6"
+version = "0.12.9"
 dependencies = [
  "anyhow",
  "clap",
@@ -9681,7 +9665,7 @@ dependencies = [
 
 [[package]]
 name = "wcore-evolve"
-version = "0.12.6"
+version = "0.12.9"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -9721,7 +9705,7 @@ dependencies = [
 
 [[package]]
 name = "wcore-honcho-adapter"
-version = "0.12.6"
+version = "0.12.9"
 dependencies = [
  "async-trait",
  "serde",
@@ -9736,7 +9720,7 @@ dependencies = [
 
 [[package]]
 name = "wcore-mcp"
-version = "0.12.6"
+version = "0.12.9"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -9763,7 +9747,7 @@ dependencies = [
 
 [[package]]
 name = "wcore-memory"
-version = "0.12.6"
+version = "0.12.9"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -9804,7 +9788,7 @@ dependencies = [
 
 [[package]]
 name = "wcore-observability"
-version = "0.12.6"
+version = "0.12.9"
 dependencies = [
  "chrono",
  "opentelemetry",
@@ -9828,7 +9812,7 @@ dependencies = [
 
 [[package]]
 name = "wcore-permissions"
-version = "0.12.6"
+version = "0.12.9"
 dependencies = [
  "anyhow",
  "chrono",
@@ -9845,7 +9829,7 @@ dependencies = [
 
 [[package]]
 name = "wcore-plugin-api"
-version = "0.12.6"
+version = "0.12.9"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -9857,6 +9841,7 @@ dependencies = [
  "schemars 0.8.22",
  "serde",
  "serde_json",
+ "serial_test",
  "sha2 0.10.9",
  "tempfile",
  "thiserror 2.0.18",
@@ -9871,7 +9856,7 @@ dependencies = [
 
 [[package]]
 name = "wcore-plugin-subprocess"
-version = "0.12.6"
+version = "0.12.9"
 dependencies = [
  "anyhow",
  "serde",
@@ -9890,7 +9875,7 @@ dependencies = [
 
 [[package]]
 name = "wcore-plugin-wasm"
-version = "0.12.6"
+version = "0.12.9"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -9912,7 +9897,7 @@ dependencies = [
 
 [[package]]
 name = "wcore-pluginsrc"
-version = "0.12.6"
+version = "0.12.9"
 dependencies = [
  "serde",
  "serde_json",
@@ -9927,7 +9912,7 @@ dependencies = [
 
 [[package]]
 name = "wcore-pricing"
-version = "0.12.6"
+version = "0.12.9"
 dependencies = [
  "chrono",
  "dirs",
@@ -9946,7 +9931,7 @@ dependencies = [
 
 [[package]]
 name = "wcore-protocol"
-version = "0.12.6"
+version = "0.12.9"
 dependencies = [
  "rstest",
  "serde",
@@ -9958,7 +9943,7 @@ dependencies = [
 
 [[package]]
 name = "wcore-providers"
-version = "0.12.6"
+version = "0.12.9"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -9993,7 +9978,7 @@ dependencies = [
 
 [[package]]
 name = "wcore-replay"
-version = "0.12.6"
+version = "0.12.9"
 dependencies = [
  "serde",
  "serde_json",
@@ -10004,7 +9989,7 @@ dependencies = [
 
 [[package]]
 name = "wcore-repomap"
-version = "0.12.6"
+version = "0.12.9"
 dependencies = [
  "ignore",
  "regex",
@@ -10017,7 +10002,7 @@ dependencies = [
 
 [[package]]
 name = "wcore-safety"
-version = "0.12.6"
+version = "0.12.9"
 dependencies = [
  "async-trait",
  "regex",
@@ -10030,7 +10015,7 @@ dependencies = [
 
 [[package]]
 name = "wcore-sandbox"
-version = "0.12.6"
+version = "0.12.9"
 dependencies = [
  "async-trait",
  "bollard",
@@ -10050,7 +10035,7 @@ dependencies = [
 
 [[package]]
 name = "wcore-skills"
-version = "0.12.6"
+version = "0.12.9"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -10087,7 +10072,7 @@ dependencies = [
 
 [[package]]
 name = "wcore-swarm"
-version = "0.12.6"
+version = "0.12.9"
 dependencies = [
  "futures",
  "humantime-serde",
@@ -10106,7 +10091,7 @@ dependencies = [
 
 [[package]]
 name = "wcore-tools"
-version = "0.12.6"
+version = "0.12.9"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -10153,7 +10138,7 @@ dependencies = [
 
 [[package]]
 name = "wcore-types"
-version = "0.12.6"
+version = "0.12.9"
 dependencies = [
  "async-trait",
  "chrono",
@@ -10163,7 +10148,7 @@ dependencies = [
 
 [[package]]
 name = "wcore-user-model"
-version = "0.12.6"
+version = "0.12.9"
 dependencies = [
  "async-trait",
  "serde",
