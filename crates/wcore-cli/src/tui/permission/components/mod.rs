@@ -19,6 +19,8 @@ pub mod powershell;
 
 // W4 components.
 pub mod ask_user;
+// Crucible Stage 4a — the cross-vendor council proposal card.
+pub mod crucible;
 pub mod enter_plan;
 pub mod exit_plan;
 pub mod notebook;

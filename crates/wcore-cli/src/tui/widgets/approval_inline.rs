@@ -80,6 +80,7 @@ mod tests {
             input_pretty: String::new(),
             approval_reason: reason.to_string(),
             plan_body: None,
+            crucible_plan: None,
         }
     }
 

@@ -998,6 +998,9 @@ pub struct ToolCardModel {
     /// `None` for every non-`ExitPlanMode` tool. W4 populates it; S0
     /// scaffolds the field.
     pub plan_body: Option<String>,
+    /// Crucible Stage 4: the typed proposal card (Some only for a Crucible
+    /// council approval). Rendered by CrucibleComponent; None for all other tools.
+    pub crucible_plan: Option<wcore_types::crucible::CruciblePlan>,
 }
 
 /// Lifecycle status of a tool-call card. FROZEN Wave-0 contract.
@@ -1534,6 +1537,7 @@ mod tests {
             input_pretty: String::new(),
             approval_reason: String::new(),
             plan_body: None,
+            crucible_plan: None,
         });
         // Fill past the cap with plain turns so the orphan-owning turn rolls off.
         for i in 0..(TURN_HISTORY_CAP + 5) {

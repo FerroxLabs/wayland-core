@@ -4978,6 +4978,7 @@ mod tests {
             input_pretty: String::new(),
             approval_reason: "test".into(),
             plan_body: None,
+            crucible_plan: None,
         });
     }
 
@@ -4999,6 +5000,7 @@ mod tests {
             input_pretty: String::new(),
             approval_reason: String::new(),
             plan_body: None,
+            crucible_plan: None,
         };
 
         tool_card_cache_clear();
@@ -6098,6 +6100,7 @@ mod tests {
             input_pretty: "{}".into(),
             approval_reason: String::new(),
             plan_body: None,
+            crucible_plan: None,
         };
         let theme = Theme::hearth();
         let mut app = App::new();
@@ -6231,6 +6234,7 @@ mod tests {
             input_pretty: "{}".into(),
             approval_reason: String::new(),
             plan_body: None,
+            crucible_plan: None,
         };
         let mut ok_lines: Vec<Line<'static>> = Vec::new();
         push_tool_card_lines(
@@ -7157,6 +7161,7 @@ mod tests {
             approval_reason: String::new(),
             status: ToolCardStatus::Running,
             plan_body: None,
+            crucible_plan: None,
         };
         push_tool_card_lines(&mut lines, &card, &theme, true, &app, 80, None, 0, false);
         // The spinner glyph is one of `◐◓◑◒`; find whichever frame
@@ -7602,6 +7607,7 @@ mod tests {
             input_pretty: input_pretty.into(),
             approval_reason: String::new(),
             plan_body: None,
+            crucible_plan: None,
         });
     }
 
@@ -8498,6 +8504,7 @@ mod tests {
             input_pretty: String::new(),
             approval_reason: String::new(),
             plan_body: None,
+            crucible_plan: None,
         }];
         let fp_running = tool_cards_fingerprint(&cards);
 

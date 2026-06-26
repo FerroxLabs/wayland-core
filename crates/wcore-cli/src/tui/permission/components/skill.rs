@@ -140,6 +140,7 @@ mod tests {
             input_pretty: String::new(),
             approval_reason: String::new(),
             plan_body: None,
+            crucible_plan: None,
         }
     }
 

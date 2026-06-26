@@ -20,6 +20,7 @@ use super::components::filewrite::FileWriteComponent;
 use super::components::powershell::PowerShellComponent;
 // W4 components.
 use super::components::ask_user::AskUserQuestionComponent;
+use super::components::crucible::CrucibleComponent;
 use super::components::enter_plan::EnterPlanModeComponent;
 use super::components::exit_plan::ExitPlanModeComponent;
 use super::components::notebook::NotebookEditComponent;
@@ -55,6 +56,7 @@ pub fn permission_component_for(tool_name: &str) -> Box<dyn PermissionComponent>
         "ExitPlanMode" => Box::new(ExitPlanModeComponent),  // W4
         "Skill" => Box::new(SkillComponent),                // W4
         "AskUserQuestion" => Box::new(AskUserQuestionComponent), // W4
+        "Crucible" => Box::new(CrucibleComponent),          // Stage 4a
         #[cfg(feature = "workflow")]
         "Workflow" => Box::new(WorkflowComponent), // W4
         #[cfg(feature = "monitor")]

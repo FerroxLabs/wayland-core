@@ -254,6 +254,15 @@ impl CommandRegistry {
                 false,
             ),
             Command::new("/skills", ToolsExtensions, "browse and run skills", false),
+            // Crucible Stage 4a — convene a cross-vendor council to cross-check
+            // an answer. Non-destructive (it only spends, gated by an approval
+            // card showing the certified ceiling before any charge).
+            Command::new(
+                "/crucible",
+                ToolsExtensions,
+                "convene a cross-vendor council to cross-check an answer",
+                false,
+            ),
             Command::new(
                 "/plugins",
                 ToolsExtensions,
@@ -574,7 +583,8 @@ mod tests {
         // `/theme` is the 27th — light/dark/auto switch (v0.9.2 W8, §5).
         // `/connect` is the 28th — S4b paste-to-detect provider connect.
         // `/effective` is the 29th — S9 redacted effective-config preview.
-        assert_eq!(reg.len(), 29);
+        // `/crucible` is the 30th — Crucible Stage 4a cross-vendor council.
+        assert_eq!(reg.len(), 30);
         for name in [
             "/resume",
             "/rewind",
@@ -593,6 +603,7 @@ mod tests {
             "/mcp",
             "/auth",
             "/skills",
+            "/crucible",
             "/plugins",
             "/hooks",
             "/voice",
