@@ -78,19 +78,28 @@ pub fn plan_to_card(
     )
     .certified_microcents();
 
-    // Single-model baseline: the FIRST member alone, no judge.
-    let single_model_baseline_microcents =
-        plan.members.first().map(|s| split_spec(s)).and_then(|m| {
-            CouncilSpend::estimate_preflight_microcents(
-                &DEFAULT_CATALOG,
-                &[m],
-                None,
-                policy.proposer_max_turns,
-                policy.proposer_max_tokens,
-                policy.markup,
-            )
-            .certified_microcents()
-        });
+    // Single STRONG model alone, for the "one model alone ≈ $X" comparison. Use
+    // the judge — the Assembler reserves the strongest family as the decoupled
+    // judge — when convening; fall back to the single Direct model otherwise.
+    // NOT members.first(): the Assembler orders proposers cheapest-first, so the
+    // first member is the CHEAPEST SKU, and comparing the council against it
+    // would inflate the council's apparent value (and contradict this field's
+    // doc, "one strong model alone").
+    let baseline_spec = plan
+        .aggregator
+        .as_deref()
+        .or_else(|| plan.members.first().map(String::as_str));
+    let single_model_baseline_microcents = baseline_spec.map(split_spec).and_then(|m| {
+        CouncilSpend::estimate_preflight_microcents(
+            &DEFAULT_CATALOG,
+            &[m],
+            None,
+            policy.proposer_max_turns,
+            policy.proposer_max_tokens,
+            policy.markup,
+        )
+        .certified_microcents()
+    });
 
     CruciblePlan {
         convene: plan.convene,
@@ -152,8 +161,19 @@ mod tests {
         );
         // deepseek + opus-4-7 + gpt-5 are all priced under the default catalog.
         assert!(card.ceiling_microcents.is_some());
-        assert!(card.single_model_baseline_microcents.is_some());
-        // The full council ceiling exceeds a single model alone.
+        // The baseline is the JUDGE (the reserved strongest family) priced ALONE
+        // — never the cheapest proposer. Hand-derive to lock that.
+        let judge_alone = CouncilSpend::estimate_preflight_microcents(
+            &DEFAULT_CATALOG,
+            &[("openai", Some("gpt-5"))],
+            None,
+            4,
+            4096,
+            1.0,
+        )
+        .certified_microcents();
+        assert_eq!(card.single_model_baseline_microcents, judge_alone);
+        // The full council ceiling exceeds one strong model alone.
         assert!(card.ceiling_microcents.unwrap() > card.single_model_baseline_microcents.unwrap());
     }
 
