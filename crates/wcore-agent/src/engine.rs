@@ -5755,7 +5755,11 @@ impl AgentEngine {
 
         // Transient spawner: parent provider + a council resolver, bound to the
         // engine cancel token. Attach a cap-less council budget tracker when a cap
-        // is configured so multi-council daily aggregate stays bounded.
+        // is configured. NOTE: this tracker is fresh per /crucible call, so the
+        // per-run ceiling binds every invocation but the DAILY envelope does NOT
+        // yet aggregate across calls in a session — cross-session/process daily
+        // spend persistence is the Stage 6 deliverable (spec §9, "Cross-process
+        // daily-spend"). Until then each council is bounded by its per-run cap.
         let mut spawner = crate::spawner::AgentSpawner::new(
             std::sync::Arc::clone(&self.provider),
             self.config.clone(),
@@ -11603,13 +11607,17 @@ impl crate::orchestration::council::CouncilApprover for BridgeApprover {
         // response can never arrive before the bridge can resolve it.
         let rx = self
             .bridge
-            .request_with_id(
+            .request_with_id_and_ttl(
                 correlation_id.clone(),
                 crate::approval::ApprovalRequest {
                     call_id: self.call_id.clone(),
                     reason: "Run Crucible council?".to_string(),
                     context: format!("council ceiling {ceiling}"),
                 },
+                // Long/no-expire TTL (spec §7): a multi-vendor cost card is a
+                // deliberation-worthy decision and must not be reaped by the
+                // 5-minute default while the user reads it.
+                crate::approval::CRUCIBLE_APPROVAL_TTL,
             )
             .await;
         let _ = self.writer.emit(&ProtocolEvent::ApprovalRequired {

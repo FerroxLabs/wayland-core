@@ -43,6 +43,13 @@ pub const DEFAULT_APPROVAL_TTL: Duration = Duration::from_secs(300);
 /// the pending map; expired entries are auto-resolved as Cancelled.
 pub const DEFAULT_REAP_INTERVAL: Duration = Duration::from_secs(30);
 
+/// Long TTL for the Crucible proposal card. A multi-vendor cost card is a
+/// deliberation-worthy, expensive decision, so it must not be reaped mid-read
+/// by the 5-minute default (spec §7: long/no-expire approval TTL). 24h is
+/// effectively no-expire for a single sitting while still bounding the pending
+/// map; a closed channel (host crash) is still reaped immediately regardless.
+pub const CRUCIBLE_APPROVAL_TTL: Duration = Duration::from_secs(86_400);
+
 #[derive(Debug, Clone)]
 pub struct ApprovalRequest {
     pub call_id: String,
@@ -271,6 +278,29 @@ impl ApprovalBridge {
         rx
     }
 
+    /// Like [`request_with_id`](Self::request_with_id) but with an explicit TTL
+    /// instead of the bridge default. The Crucible front door uses this with
+    /// [`CRUCIBLE_APPROVAL_TTL`] so an expensive multi-vendor proposal card is
+    /// not auto-cancelled mid-deliberation by the 5-minute default (spec §7).
+    pub async fn request_with_id_and_ttl(
+        &self,
+        correlation_id: String,
+        _req: ApprovalRequest,
+        ttl: Duration,
+    ) -> oneshot::Receiver<ApprovalOutcome> {
+        let (tx, rx) = oneshot::channel();
+        let expires_at = Instant::now() + ttl;
+        self.pending.lock().await.insert(
+            correlation_id,
+            Pending {
+                sender: tx,
+                expires_at,
+            },
+        );
+        self.refresh_redactor().await;
+        rx
+    }
+
     /// Consumer side: called from the engine's command loop when
     /// `ApprovalResume` arrives. Returns false if the correlation id
     /// is unknown (host sent a stale or expired resume).
@@ -413,6 +443,60 @@ mod tests {
             resolver.await.unwrap(),
             "resolve must report a found pending request"
         );
+    }
+
+    #[tokio::test]
+    async fn request_with_id_and_ttl_honors_per_request_expiry() {
+        // The Crucible front door registers its card with CRUCIBLE_APPROVAL_TTL
+        // so a slow human decision is NOT reaped by the 5-minute default. Prove
+        // the per-request TTL is honored: a zero-TTL entry is reaped while a
+        // long-TTL entry survives the SAME reap.
+        let bridge = ApprovalBridge::new();
+        let rx_short = bridge
+            .request_with_id_and_ttl(
+                "short".into(),
+                ApprovalRequest {
+                    call_id: "c".into(),
+                    reason: "r".into(),
+                    context: "x".into(),
+                },
+                Duration::from_secs(0),
+            )
+            .await;
+        let rx_long = bridge
+            .request_with_id_and_ttl(
+                "long".into(),
+                ApprovalRequest {
+                    call_id: "c".into(),
+                    reason: "r".into(),
+                    context: "x".into(),
+                },
+                CRUCIBLE_APPROVAL_TTL,
+            )
+            .await;
+        let reaped = bridge.reap_now().await;
+        assert_eq!(
+            reaped, 1,
+            "only the already-expired short-TTL entry is reaped"
+        );
+        assert!(
+            !rx_short.await.unwrap().approved,
+            "the reaped entry resolves to cancelled (no spend)"
+        );
+        // The long-TTL crucible card must still be pending + resolvable.
+        assert!(
+            bridge
+                .resolve(
+                    "long",
+                    ApprovalOutcome {
+                        approved: true,
+                        modifications: None
+                    }
+                )
+                .await,
+            "the long-TTL card must survive a reap that expired the short one"
+        );
+        assert!(rx_long.await.unwrap().approved);
     }
 
     #[tokio::test]
