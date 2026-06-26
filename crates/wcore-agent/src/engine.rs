@@ -3965,6 +3965,12 @@ impl AgentEngine {
             // empty/keyword-only when self.audit_log is None.
             let tools = self.apply_mcp_curation(tools);
 
+            // #344/#359: enforce the provider's HARD tool-array cap (OpenAI =
+            // 128). MCP servers can push the total past the limit even after
+            // curation; this is the correctness guarantee, separate from the
+            // relevance trim above.
+            let tools = self.apply_provider_tool_cap(tools);
+
             // Build system prompt: append plan mode instructions when active
             let system = if self.plan_state.is_active {
                 format!(
@@ -7099,6 +7105,62 @@ impl AgentEngine {
         keep
     }
 
+    /// #344/#359 — provider-aware HARD cap on the total tool count. A provider
+    /// request's tool array must not exceed the provider's limit (OpenAI = 128);
+    /// MCP servers can push the array past it (222 > 128 -> API 400). Separate
+    /// from `apply_mcp_curation` (a relevance/token optimization): this is the
+    /// correctness guarantee. Keeps ALL non-MCP tools (built-ins, ToolSearch,
+    /// skills, plan) and fills the remaining budget with MCP tools in order,
+    /// truncating the MCP tail. Dropped MCP tools stay DISCOVERABLE via the
+    /// `ToolSearch` meta-tool (its registry is a full bootstrap snapshot).
+    /// `None` cap = no-op.
+    fn apply_provider_tool_cap(
+        &self,
+        tools: Vec<wcore_types::tool::ToolDef>,
+    ) -> Vec<wcore_types::tool::ToolDef> {
+        let limit = match self.compat.max_tools() {
+            Some(l) => l,
+            None => return tools,
+        };
+        if tools.len() <= limit {
+            return tools;
+        }
+        let non_mcp_count = tools
+            .iter()
+            .filter(|t| !t.name.starts_with("mcp__"))
+            .count();
+        let mcp_budget = limit.saturating_sub(non_mcp_count);
+        let mut kept = Vec::with_capacity(tools.len().min(limit.max(non_mcp_count)));
+        let mut mcp_taken = 0usize;
+        let mut mcp_total = 0usize;
+        for t in tools {
+            if t.name.starts_with("mcp__") {
+                mcp_total += 1;
+                if mcp_taken < mcp_budget {
+                    kept.push(t);
+                    mcp_taken += 1;
+                }
+            } else {
+                // Built-ins/ToolSearch/skills/plan are essential and few — always kept.
+                kept.push(t);
+            }
+        }
+        let hidden = mcp_total - mcp_taken;
+        if hidden > 0 {
+            tracing::info!(
+                target: "wcore_agent::engine",
+                "provider tool cap: {} tools exceeded the provider limit of {}; kept {} \
+                 (incl. all {} non-MCP), {} MCP tools hidden but reachable via ToolSearch",
+                non_mcp_count + mcp_total,
+                limit,
+                kept.len(),
+                non_mcp_count,
+                hidden
+            );
+        }
+        kept
+    }
+
     /// W6 F17 recency input for `McpCurator`. Reads the M2 audit log via the
     /// `recent_tool_uses` API. When `audit_log` is `None` the curator
     /// gracefully degrades to keyword-only ranking.
@@ -7986,6 +8048,114 @@ mod set_config_tests {
         engine.messages = user("echo fresh tool");
         let after_change = names(engine.apply_mcp_curation(tools2));
         assert!(after_change.contains(&"mcp__srv__echo".to_string()));
+    }
+
+    // --- #344/#359: provider-aware hard cap on the total tool count ---
+
+    /// Build a non-MCP/built-in `ToolDef` (name must NOT start with `mcp__`).
+    fn builtin_tool(name: &str) -> wcore_types::tool::ToolDef {
+        wcore_types::tool::ToolDef {
+            name: name.to_string(),
+            description: format!("{name} built-in tool"),
+            input_schema: serde_json::json!({"type": "object"}),
+            deferred: false,
+        }
+    }
+
+    /// Build an MCP `ToolDef` (`mcp__{server}__{tool}`).
+    fn cap_mcp_tool(name: &str) -> wcore_types::tool::ToolDef {
+        wcore_types::tool::ToolDef {
+            name: name.to_string(),
+            description: format!("{name} mcp tool"),
+            input_schema: serde_json::json!({"type": "object"}),
+            deferred: false,
+        }
+    }
+
+    #[test]
+    fn provider_tool_cap_truncates_total_to_limit() {
+        let mut engine = make_engine("m");
+        engine.compat.max_tools = Some(10);
+
+        let mut tools = vec![
+            builtin_tool("Read"),
+            builtin_tool("Write"),
+            builtin_tool("Bash"),
+            builtin_tool("ToolSearch"),
+        ];
+        for i in 0..20 {
+            tools.push(cap_mcp_tool(&format!("mcp__srv__tool{i:02}")));
+        }
+
+        let capped = engine.apply_provider_tool_cap(tools);
+        assert_eq!(capped.len(), 10, "total must be truncated to the limit");
+
+        let names: Vec<&str> = capped.iter().map(|t| t.name.as_str()).collect();
+        for b in ["Read", "Write", "Bash", "ToolSearch"] {
+            assert!(names.contains(&b), "built-in {b} must be kept");
+        }
+        let mcp_kept = capped
+            .iter()
+            .filter(|t| t.name.starts_with("mcp__"))
+            .count();
+        assert_eq!(mcp_kept, 6, "exactly (limit - non_mcp) MCP tools kept");
+    }
+
+    #[test]
+    fn provider_tool_cap_noop_when_unset() {
+        let mut engine = make_engine("m");
+        engine.compat.max_tools = None;
+
+        let tools: Vec<_> = (0..50)
+            .map(|i| cap_mcp_tool(&format!("mcp__srv__tool{i:02}")))
+            .collect();
+        let capped = engine.apply_provider_tool_cap(tools);
+        assert_eq!(capped.len(), 50, "no cap configured → unchanged");
+    }
+
+    #[test]
+    fn provider_tool_cap_noop_under_limit() {
+        let mut engine = make_engine("m");
+        engine.compat.max_tools = Some(128);
+
+        let tools: Vec<_> = (0..30)
+            .map(|i| cap_mcp_tool(&format!("mcp__srv__tool{i:02}")))
+            .collect();
+        let capped = engine.apply_provider_tool_cap(tools);
+        assert_eq!(capped.len(), 30, "under the limit → unchanged");
+    }
+
+    #[test]
+    fn provider_tool_cap_keeps_all_builtins_even_when_budget_tiny() {
+        let mut engine = make_engine("m");
+        engine.compat.max_tools = Some(3);
+
+        let mut tools = vec![
+            builtin_tool("Read"),
+            builtin_tool("Write"),
+            builtin_tool("Edit"),
+            builtin_tool("Bash"),
+            builtin_tool("Grep"),
+            builtin_tool("ToolSearch"),
+        ];
+        for i in 0..10 {
+            tools.push(cap_mcp_tool(&format!("mcp__srv__tool{i:02}")));
+        }
+
+        let capped = engine.apply_provider_tool_cap(tools);
+        let names: Vec<&str> = capped.iter().map(|t| t.name.as_str()).collect();
+        for b in ["Read", "Write", "Edit", "Bash", "Grep", "ToolSearch"] {
+            assert!(
+                names.contains(&b),
+                "built-in {b} must be kept even when built-ins alone exceed the cap"
+            );
+        }
+        let mcp_kept = capped
+            .iter()
+            .filter(|t| t.name.starts_with("mcp__"))
+            .count();
+        assert_eq!(mcp_kept, 0, "no MCP budget left → 0 MCP tools kept");
+        assert_eq!(capped.len(), 6, "correctness > strict limit for built-ins");
     }
 
     /// Cache-stability regression (token-opt, finding #174): when turn 2

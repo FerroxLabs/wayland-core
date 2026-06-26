@@ -266,6 +266,12 @@ pub struct ProviderCompat {
     /// `[compat.tier_models] cheap = "claude-haiku-4" balanced = "..."`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tier_models: Option<TierModels>,
+
+    /// #344/#359 — the provider's hard cap on the number of tools per request
+    /// (OpenAI's tool-array limit is 128). `None` = no cap. Enforced engine-side
+    /// after MCP curation, since MCP servers can push the array past the limit.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_tools: Option<usize>,
 }
 
 impl ProviderCompat {
@@ -417,6 +423,9 @@ impl ProviderCompat {
             // the pricing.toml catalog so they resolve correctly before reaching this fallback.
             cost_per_input_token: Some(0.0),
             cost_per_output_token: Some(0.0),
+            // #344/#359: OpenAI's hard tool-array limit is 128. Enforced
+            // engine-side after MCP curation so MCP servers can't push past it.
+            max_tools: Some(128),
             ..Default::default()
         }
     }
@@ -471,6 +480,9 @@ impl ProviderCompat {
             cost_per_output_token: Some(0.0),
             cost_per_cache_read_token: Some(0.0),
             cost_per_cache_write_token: Some(0.0),
+            // #344/#359: OpenAI-wire routers/providers (ChatGPT, Azure,
+            // flux-router, …) inherit the 128 tool-array hard cap.
+            max_tools: Some(128),
             ..Self::openai_defaults()
         }
     }
@@ -728,6 +740,7 @@ impl ProviderCompat {
                 .replays_thinking_in_history
                 .or(defaults.replays_thinking_in_history),
             tier_models: user.tier_models.or(defaults.tier_models),
+            max_tools: user.max_tools.or(defaults.max_tools),
         }
     }
 
@@ -848,6 +861,12 @@ impl ProviderCompat {
     /// (`wcore_providers::openai_compat::wants_max_completion_tokens`).
     pub fn uses_max_completion_tokens(&self) -> Option<bool> {
         self.uses_max_completion_tokens
+    }
+
+    /// #344/#359: the provider's hard cap on the number of tools per request.
+    /// `None` (the default for non-OpenAI wire protocols) means no cap.
+    pub fn max_tools(&self) -> Option<usize> {
+        self.max_tools
     }
 }
 
