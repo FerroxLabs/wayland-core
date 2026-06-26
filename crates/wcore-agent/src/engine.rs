@@ -1430,6 +1430,11 @@ const FLUFF_STOP_SEQUENCES: [&str; 4] = [
 /// `user_id = "default"`). Override via the `WAYLAND_USER_ID` env var.
 const DEFAULT_USER_MODEL_USER_ID: &str = "default";
 
+/// Stage 4c — one-shot, per-process suppression for the `/crucible` gate
+/// suggestion. Set after the hint is shown once, or pre-emptively via
+/// `/crucible off`.
+static CRUCIBLE_SUGGEST_SUPPRESSED: AtomicBool = AtomicBool::new(false);
+
 /// v0.8.0 Task M — resolve the user-id used for user-model
 /// observations. Reads `WAYLAND_USER_ID` once at engine construction;
 /// falls back to `DEFAULT_USER_MODEL_USER_ID` when unset or empty.
@@ -3850,12 +3855,28 @@ impl AgentEngine {
         // never re-enter this gate.
         {
             let trimmed = user_input.trim_start();
+            // Stage 4c — `/crucible off` silences the discovery suggestion for the
+            // rest of the process. Checked BEFORE the council dispatch because
+            // "/crucible off" also matches the `starts_with("/crucible ")` arm.
+            if trimmed == "/crucible off" {
+                CRUCIBLE_SUGGEST_SUPPRESSED.store(true, Ordering::Relaxed);
+                let msg = "Crucible suggestions off for this session.".to_string();
+                self.output.emit_text_delta(&msg, &self.current_msg_id);
+                return Ok(self.crucible_result(msg));
+            }
             if (trimmed == "/crucible" || trimmed.starts_with("/crucible "))
                 && self.protocol_writer.is_some()
                 && let Some(result) = self.try_crucible_council(trimmed).await
             {
                 return Ok(result);
             }
+        }
+
+        // Stage 4c — discovery nudge: if the input is HIGH-stakes and the user
+        // hasn't used (or silenced) `/crucible`, surface the council once.
+        if let Some(hint) = self.maybe_suggest_council(user_input) {
+            self.output.emit_text_delta(&hint, &self.current_msg_id);
+            CRUCIBLE_SUGGEST_SUPPRESSED.store(true, Ordering::Relaxed);
         }
 
         // Runaway-loop breaker (per-run): the engine-side backstop for the
@@ -5703,6 +5724,32 @@ impl AgentEngine {
         }
     }
 
+    /// Stage 4c — discovery nudge for users who don't know `/crucible` exists.
+    /// Returns a one-line hint to show ONCE per process when the user's input
+    /// classifies as a HIGH-stakes council (Med is too noisy), and only when a
+    /// host is wired to render it (`protocol_writer`). Returns `None` once
+    /// suppressed (after the first show, or via `/crucible off`).
+    fn maybe_suggest_council(&self, user_input: &str) -> Option<String> {
+        use crate::orchestration::council::gate::{
+            CouncilDecision, GateConfig, Stakes, classify_task,
+        };
+        self.protocol_writer.as_ref()?;
+        if CRUCIBLE_SUGGEST_SUPPRESSED.load(Ordering::Relaxed) {
+            return None;
+        }
+        match classify_task(user_input, &GateConfig::default()) {
+            CouncilDecision::Council {
+                stakes: Stakes::High,
+                ..
+            } => Some(
+                "This looks high-stakes — `/crucible` convenes a cross-vendor \
+                 council to cross-check it (you approve the cost first)."
+                    .to_string(),
+            ),
+            _ => None,
+        }
+    }
+
     /// Engine-integrated `/crucible <task>` front door (Stage 3b). Pre-LLM
     /// intercept mirroring `try_live_workflow`: assemble a cross-vendor council,
     /// emit the typed `ApprovalRequired{plan}` card, await the host's typed
@@ -5735,19 +5782,20 @@ impl AgentEngine {
             return Some(self.crucible_result(msg));
         }
 
-        // Candidate pool: configured proposers ∪ candidate_pool, filtered to
-        // runnable (keyed) specs. Empty-state Flux self-bootstrap is a later stage.
-        let mut candidates = cfg.proposers.clone();
-        candidates.extend(cfg.candidate_pool.clone());
+        // Candidate pool: configured proposers ∪ candidate_pool, or — when BOTH
+        // are empty (the default-config case) — the cross-vendor DEFAULT_FLUX_POOL
+        // (Stage 4c empty-state self-bootstrap), then filtered to runnable (keyed)
+        // specs.
+        let candidates = crate::orchestration::council::bootstrap_pool(&cfg);
         let runnable = crate::orchestration::council::CouncilProviderResolver::new(
             base.clone(),
             providers.clone(),
         )
         .resolvable_specs(&candidates);
         if runnable.is_empty() {
-            let msg = "crucible: no runnable council candidates — set `proposers` / \
-                       `candidate_pool` under `[crucible]` and ensure their providers \
-                       are keyed."
+            let msg = "crucible: no runnable council candidates — connect a provider \
+                       Crucible can run (e.g. a Flux key) or set `proposers` / \
+                       `candidate_pool` under `[crucible]` with keyed providers."
                 .to_string();
             self.output.emit_text_delta(&msg, &self.current_msg_id);
             return Some(self.crucible_result(msg));
@@ -11982,6 +12030,61 @@ mod approval_bridge_engine_tests {
             wcore_types::crucible::CrucibleDecision::Cancel,
             "a not-approved bridge outcome (TUI deny / host reject) must map to Cancel — no spend"
         );
+    }
+
+    /// Stage 4c — the `/crucible` discovery suggestion. Driven through the real
+    /// `maybe_suggest_council` predicate on a wired engine. The suppression flag
+    /// is process-global, so this single test saves/restores it and walks the
+    /// four gate conditions in order (writer present + not suppressed + High →
+    /// Some; Med → None; suppressed → None; no writer → None) rather than relying
+    /// on cross-test ordering of a shared static.
+    #[test]
+    fn maybe_suggest_council_fires_only_on_high_stakes_with_a_writer_once() {
+        use std::sync::atomic::Ordering;
+
+        let prev = super::CRUCIBLE_SUGGEST_SUPPRESSED.swap(false, Ordering::Relaxed);
+
+        let mut engine = make_engine();
+        engine.set_protocol_writer(Arc::new(NullEmitter));
+
+        // High-stakes input with a writer and not suppressed → a hint mentioning
+        // `/crucible`.
+        let hint = engine
+            .maybe_suggest_council("audit the security of this auth flow for vulnerabilities");
+        assert!(
+            hint.as_deref().is_some_and(|h| h.contains("/crucible")),
+            "a high-stakes input must surface the `/crucible` hint, got {hint:?}"
+        );
+
+        // A short / Med-stakes input must NOT nudge (Med is too noisy).
+        assert!(
+            engine
+                .maybe_suggest_council("rename this variable")
+                .is_none(),
+            "a low/med-stakes input must not surface the hint"
+        );
+
+        // Once suppressed, even a high-stakes input is silent.
+        super::CRUCIBLE_SUGGEST_SUPPRESSED.store(true, Ordering::Relaxed);
+        assert!(
+            engine
+                .maybe_suggest_council("audit the security of this auth flow for vulnerabilities")
+                .is_none(),
+            "after suppression the hint must not fire again"
+        );
+
+        // With no protocol writer there is no host to render the hint → None.
+        super::CRUCIBLE_SUGGEST_SUPPRESSED.store(false, Ordering::Relaxed);
+        engine.protocol_writer = None;
+        assert!(
+            engine
+                .maybe_suggest_council("audit the security of this auth flow for vulnerabilities")
+                .is_none(),
+            "without a protocol writer the hint must not fire"
+        );
+
+        // Restore the shared static so test ordering can't leak suppression.
+        super::CRUCIBLE_SUGGEST_SUPPRESSED.store(prev, Ordering::Relaxed);
     }
 
     #[tokio::test]

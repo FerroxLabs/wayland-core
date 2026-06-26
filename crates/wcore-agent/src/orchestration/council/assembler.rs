@@ -31,6 +31,33 @@ use super::gate::{CouncilDecision, Stakes, member_count};
 use super::resolver::family;
 use super::spend::CouncilSpend;
 
+/// Stage 4c — default cross-vendor Flux roster for empty-state self-bootstrap.
+/// Every spec MUST be priceable against the live catalog (an unpriced spec is
+/// dropped by the assembler eligibility filter, silently degrading the council),
+/// so a hard test below fails the build if any id drifts. Specs are
+/// `flux-router:flux-pinned-<model>` and resolve via `flux_pinned_native`.
+pub const DEFAULT_FLUX_POOL: &[&str] = &[
+    "flux-router:flux-pinned-gpt-5",
+    "flux-router:flux-pinned-claude-opus-4-7",
+    "flux-router:flux-pinned-deepseek-v4-pro",
+    "flux-router:flux-pinned-gemini-2-5-pro",
+];
+
+/// Stage 4c — the candidate pool for a `/crucible` run: the configured
+/// proposers ∪ candidate_pool, or the [`DEFAULT_FLUX_POOL`] when BOTH are empty
+/// (empty-state self-bootstrap so `/crucible` works out-of-the-box on a default
+/// config once a Flux key is connected). Returns the raw pool; the caller still
+/// runs `resolvable_specs` to filter to keyed specs.
+pub fn bootstrap_pool(cfg: &wcore_config::crucible::CrucibleConfig) -> Vec<String> {
+    if cfg.proposers.is_empty() && cfg.candidate_pool.is_empty() {
+        DEFAULT_FLUX_POOL.iter().map(|s| s.to_string()).collect()
+    } else {
+        let mut c = cfg.proposers.clone();
+        c.extend(cfg.candidate_pool.clone());
+        c
+    }
+}
+
 /// Reference token count used to rank candidate models by a stable unit price.
 /// Only relative ordering matters here, so any fixed value works.
 const RANK_REF_TOKENS: u64 = 1000;
@@ -576,6 +603,84 @@ mod tests {
         let a = assemble("design x", &pool(), &fixture(), &council("med"), &policy());
         let b = assemble("design x", &pool(), &fixture(), &council("med"), &policy());
         assert_eq!(a, b, "same inputs must produce an identical plan");
+    }
+
+    /// Stage 4c — HARD pricing guard for [`DEFAULT_FLUX_POOL`]. An unpriceable
+    /// spec is silently dropped by the assembler eligibility filter, degrading
+    /// the empty-state council; this test makes a drifted id a BUILD FAILURE.
+    /// For each spec: (a) `flux_pinned_native` must resolve a `(provider, model)`,
+    /// (b) that resolved pair must price against the live `DEFAULT_CATALOG` via
+    /// the same `estimate_cost_microcents_resolved`/`RANK_REF_TOKENS` path the
+    /// assembler's `unit_price` uses, and (c) the pool must span ≥2 distinct
+    /// vendor families (so the default really is cross-vendor).
+    #[test]
+    fn default_flux_pool_is_priceable_and_cross_vendor() {
+        use std::collections::HashSet;
+        use wcore_pricing::{DEFAULT_CATALOG, flux_pinned_native};
+
+        let mut families: HashSet<String> = HashSet::new();
+        for spec in DEFAULT_FLUX_POOL {
+            // (a) the flux-pinned spec must resolve to a native (provider, model).
+            let (provider, model) = flux_pinned_native(spec)
+                .unwrap_or_else(|| panic!("DEFAULT_FLUX_POOL spec {spec:?} must flux-resolve"));
+            // (b) that resolved native pair must carry a live catalog price.
+            assert!(
+                DEFAULT_CATALOG
+                    .estimate_cost_microcents_resolved(
+                        &provider,
+                        &model,
+                        RANK_REF_TOKENS,
+                        RANK_REF_TOKENS,
+                        1.0,
+                    )
+                    .is_some(),
+                "DEFAULT_FLUX_POOL spec {spec:?} → ({provider}, {model}) must price \
+                 against DEFAULT_CATALOG; an unpriced spec is silently dropped, \
+                 degrading the empty-state council"
+            );
+            // Same path the assembler ranks with — the spec itself must unit-price.
+            assert!(
+                unit_price(&DEFAULT_CATALOG, spec, 1.0).is_some(),
+                "DEFAULT_FLUX_POOL spec {spec:?} must unit_price like the assembler"
+            );
+            families.insert(family(spec));
+        }
+        assert!(
+            families.len() >= 2,
+            "DEFAULT_FLUX_POOL must span ≥2 distinct vendor families (got {families:?})"
+        );
+    }
+
+    #[test]
+    fn bootstrap_pool_uses_default_only_when_both_empty() {
+        use wcore_config::crucible::CrucibleConfig;
+        // Both empty → the default cross-vendor Flux pool.
+        let empty = CrucibleConfig::default();
+        assert_eq!(
+            bootstrap_pool(&empty),
+            DEFAULT_FLUX_POOL
+                .iter()
+                .map(|s| s.to_string())
+                .collect::<Vec<_>>()
+        );
+        // A configured proposer → the default is NOT used (config wins).
+        let configured = CrucibleConfig {
+            proposers: vec!["openai:gpt-5".to_string()],
+            ..CrucibleConfig::default()
+        };
+        assert_eq!(
+            bootstrap_pool(&configured),
+            vec!["openai:gpt-5".to_string()]
+        );
+        // candidate_pool alone also suppresses the default.
+        let pooled = CrucibleConfig {
+            candidate_pool: vec!["anthropic:claude-opus-4-7".to_string()],
+            ..CrucibleConfig::default()
+        };
+        assert_eq!(
+            bootstrap_pool(&pooled),
+            vec!["anthropic:claude-opus-4-7".to_string()]
+        );
     }
 
     #[test]

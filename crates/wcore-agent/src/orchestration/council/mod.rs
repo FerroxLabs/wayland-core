@@ -23,7 +23,7 @@ pub mod run;
 pub mod spend;
 
 pub use aggregator::{Aggregator, LlmSynthesisAggregator};
-pub use assembler::{AssemblyPlan, AssemblyPolicy, assemble};
+pub use assembler::{AssemblyPlan, AssemblyPolicy, DEFAULT_FLUX_POOL, assemble, bootstrap_pool};
 pub use assembler_log::{assembly_log_line, log_assembly};
 pub use driver::{
     CouncilApprover, CouncilOverrides, CouncilRunResult, apply_judge_override, build_gate,
