@@ -1081,6 +1081,15 @@ impl TuiEngine {
             self.resolve_egress(call_id, true, always);
             return;
         }
+        // Stage 4b — a Crucible council (`crucible:` call_id) also rides the
+        // ApprovalBridge, not the ToolApprovalManager. The in-process TUI offers
+        // a binary decision; approve → run the council (the bridge default maps
+        // approved + no modifications → `CrucibleDecision::Approve`). Without
+        // this the council task would hang until the 24h `CRUCIBLE_APPROVAL_TTL`.
+        if call_id.starts_with("crucible:") {
+            self.resolve_crucible(call_id, true);
+            return;
+        }
         // `ToolApprovalManager::approve` honours `ApprovalScope::Always`
         // by registering the tool's category for auto-approval; the
         // `answer` payload threads through to the resolved oneshot so
@@ -1092,6 +1101,13 @@ impl TuiEngine {
     pub fn deny(&self, call_id: &str, reason: String) {
         if call_id.starts_with("egress:") {
             self.resolve_egress(call_id, false, false);
+            return;
+        }
+        // Stage 4b — deny a Crucible council on the bridge (no spend). A
+        // not-approved outcome maps to `CrucibleDecision::Cancel` in
+        // `BridgeApprover::approve`.
+        if call_id.starts_with("crucible:") {
+            self.resolve_crucible(call_id, false);
             return;
         }
         self.approval
@@ -1115,6 +1131,30 @@ impl TuiEngine {
                     wcore_agent::approval::ApprovalOutcome {
                         approved,
                         modifications,
+                    },
+                )
+                .await;
+        });
+    }
+
+    /// Stage 4b — resolve a Crucible council approval on the `ApprovalBridge`.
+    /// `call_id` (the `crucible:`-prefixed id) is the bridge correlation key:
+    /// `BridgeApprover` registers it via `request_with_id_and_ttl`, and the
+    /// approval dedupe makes that call_id the only token any host can resolve.
+    /// The in-process TUI decision is binary: `approved` true → the council runs
+    /// (`BridgeApprover` maps approved + no modifications → `CrucibleDecision::
+    /// Approve`); false → no spend (`Cancel`). Spawned because `bridge.resolve`
+    /// is async while the render-loop decision path is sync.
+    fn resolve_crucible(&self, call_id: &str, approved: bool) {
+        let bridge = self.approval_bridge.clone();
+        let call_id = call_id.to_string();
+        tokio::spawn(async move {
+            bridge
+                .resolve(
+                    &call_id,
+                    wcore_agent::approval::ApprovalOutcome {
+                        approved,
+                        modifications: None,
                     },
                 )
                 .await;

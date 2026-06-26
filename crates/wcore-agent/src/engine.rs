@@ -5810,7 +5810,11 @@ impl AgentEngine {
 
         // Open the tool card carrying the typed plan in args. Close it later with a
         // terminal ToolResult/ToolCancelled so it never hangs in AwaitingApproval.
-        let call_id = uuid::Uuid::new_v4().to_string();
+        //
+        // Stage 4b: the `crucible:` prefix lets the in-process TUI decision path
+        // (`TuiEngine::approve`/`deny`) route this approval to the ApprovalBridge
+        // instead of the ToolApprovalManager — mirroring the `egress:` precedent.
+        let call_id = format!("crucible:{}", uuid::Uuid::new_v4());
         let _ = writer.emit(&ProtocolEvent::ToolRequest {
             msg_id: self.current_msg_id.clone(),
             call_id: call_id.clone(),
@@ -11627,13 +11631,22 @@ impl crate::orchestration::council::CouncilApprover for BridgeApprover {
             .ceiling_usd()
             .map(|u| format!("${u:.4}"))
             .unwrap_or_else(|| "price unknown".to_string());
-        let correlation_id = uuid::Uuid::new_v4().to_string();
+        // Stage 4b: key the bridge by the stable, `crucible:`-prefixed call_id —
+        // NOT a throwaway per-round uuid. The approval dedupe (TUI ChannelEmitter
+        // + JSON-stream GatingProtocolWriter) SUPPRESSES this explicit
+        // ApprovalRequired and keeps the ToolRequest-synthesized frame, whose
+        // `resume_token` IS the call_id. So every host can only resolve the
+        // bridge by call_id: the TUI via `resolve_crucible(call_id)` and the
+        // JSON host via `ApprovalResume{resume_token}` → `bridge.resolve(call_id)`
+        // (main.rs). Keying by a fresh uuid here left the council unresolvable on
+        // ALL hosts — it hung until the 24h TTL.
+        //
         // Register the pending entry BEFORE emitting the card so a fast host
         // response can never arrive before the bridge can resolve it.
         let rx = self
             .bridge
             .request_with_id_and_ttl(
-                correlation_id.clone(),
+                self.call_id.clone(),
                 crate::approval::ApprovalRequest {
                     call_id: self.call_id.clone(),
                     reason: "Run Crucible council?".to_string(),
@@ -11647,8 +11660,8 @@ impl crate::orchestration::council::CouncilApprover for BridgeApprover {
             .await;
         let _ = self.writer.emit(&ProtocolEvent::ApprovalRequired {
             call_id: self.call_id.clone(),
-            resume_token: correlation_id.clone(),
-            correlation_id,
+            resume_token: self.call_id.clone(),
+            correlation_id: self.call_id.clone(),
             reason: "Run Crucible council?".to_string(),
             context: format!("Crucible council — you're approving up to {ceiling}."),
             plan: Some(card.clone()),
@@ -11872,6 +11885,103 @@ mod approval_bridge_engine_tests {
         // And the original request future must complete with the resolved outcome.
         let outcome = rx.await.expect("oneshot must deliver");
         assert!(outcome.approved);
+    }
+
+    /// Stage 4b — a minimal, fully-`None` proposal card for approver round-trip
+    /// tests (the approver only reads `ceiling_usd()` for the prompt text).
+    fn crucible_test_plan() -> wcore_types::crucible::CruciblePlan {
+        wcore_types::crucible::CruciblePlan {
+            convene: true,
+            members: vec![],
+            stakes: "low".into(),
+            focus: None,
+            ceiling_microcents: None,
+            single_model_baseline_microcents: None,
+            day_spent_microcents: None,
+            day_cap_microcents: None,
+            judge_independent: false,
+            reason: String::new(),
+            trims: vec![],
+        }
+    }
+
+    struct NullEmitter;
+    impl wcore_protocol::writer::ProtocolEmitter for NullEmitter {
+        fn emit(&self, _e: &wcore_protocol::events::ProtocolEvent) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// Run `BridgeApprover::approve` on a fresh bridge, then have a "host" resolve
+    /// the council by the `crucible:` call_id (the only token any host can send,
+    /// since the approval dedupe collapses every resume token to the call_id).
+    /// Returns the decision the approver derived. Polls `resolve` so the test does
+    /// not race the spawned approve() before it registers the pending entry.
+    async fn drive_crucible_approver(
+        approved: bool,
+        modifications: Option<serde_json::Value>,
+    ) -> wcore_types::crucible::CrucibleDecision {
+        use crate::orchestration::council::CouncilApprover;
+        use tokio_util::sync::CancellationToken;
+
+        let bridge = Arc::new(ApprovalBridge::new());
+        let call_id = "crucible:fixed-id".to_string();
+        let writer: Arc<dyn wcore_protocol::writer::ProtocolEmitter> = Arc::new(NullEmitter);
+        let approver = super::BridgeApprover {
+            writer,
+            bridge: bridge.clone(),
+            cancel: CancellationToken::new(),
+            call_id: call_id.clone(),
+        };
+        let handle = tokio::spawn(async move { approver.approve(&crucible_test_plan()).await });
+
+        let mut resolved = false;
+        for _ in 0..512 {
+            if bridge
+                .resolve(
+                    &call_id,
+                    ApprovalOutcome {
+                        approved,
+                        modifications: modifications.clone(),
+                    },
+                )
+                .await
+            {
+                resolved = true;
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        assert!(
+            resolved,
+            "ApprovalBridge MUST be resolvable by the `crucible:` call_id — keying \
+             the bridge by a throwaway uuid (the pre-4b bug) makes every host's \
+             resolve-by-call_id miss and the council hangs until the 24h TTL"
+        );
+        handle
+            .await
+            .expect("approve task joins")
+            .expect("approve ok")
+    }
+
+    #[tokio::test]
+    async fn crucible_approver_keys_bridge_by_call_id_and_maps_approve() {
+        let decision = drive_crucible_approver(true, None).await;
+        assert_eq!(
+            decision,
+            wcore_types::crucible::CrucibleDecision::Approve,
+            "approved + no modifications must map to Approve"
+        );
+    }
+
+    #[tokio::test]
+    async fn crucible_approver_maps_denied_outcome_to_cancel() {
+        let decision = drive_crucible_approver(false, None).await;
+        assert_eq!(
+            decision,
+            wcore_types::crucible::CrucibleDecision::Cancel,
+            "a not-approved bridge outcome (TUI deny / host reject) must map to Cancel — no spend"
+        );
     }
 
     #[tokio::test]
