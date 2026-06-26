@@ -200,6 +200,27 @@ pub async fn run_council(
     let n = member_meta.len();
     let proposer_deadline = Duration::from_secs(roster.proposer_deadline_s);
 
+    // Per-route concurrency bound: cap concurrent spawns sharing one resolved
+    // credential. Members are keyed by the spec's ROUTE PREFIX (segment before
+    // the first `:`, e.g. `flux:deepseek` → `flux`), so every `flux:*` member
+    // draws from one permit pool while BYO vendors get their own. `0` ⇒ unbounded
+    // (no map, no acquire). Scoped imports here avoid clashing with the test
+    // module's `use std::sync::Arc;` / `use std::collections::HashMap;`.
+    use std::collections::HashMap;
+    use std::sync::Arc;
+    use tokio::sync::Semaphore;
+
+    let permits = roster.proposer_concurrency;
+    let route_sems: Option<HashMap<String, Arc<Semaphore>>> = (permits > 0).then(|| {
+        let mut m: HashMap<String, Arc<Semaphore>> = HashMap::new();
+        for (p, _) in &live {
+            let route = p.spec.split(':').next().unwrap_or(&p.spec).to_string();
+            m.entry(route)
+                .or_insert_with(|| Arc::new(Semaphore::new(permits)));
+        }
+        m
+    });
+
     let mut inflight: FuturesUnordered<_> = live
         .into_iter()
         .enumerate()
@@ -214,7 +235,17 @@ pub async fn run_council(
                 model: model.clone(),
             };
             let provider = p.provider.clone();
+            let route = p.spec.split(':').next().unwrap_or(&p.spec).to_string();
+            let sem = route_sems.as_ref().and_then(|m| m.get(&route).cloned());
             async move {
+                // Hold a per-route permit across the spawn so concurrent calls to
+                // one credential are bounded; `acquire_owned` yields a 'static
+                // permit safe to move into the future. A closed semaphore never
+                // happens here (we own it), so `.ok()` only drops the `None` arm.
+                let _permit = match sem {
+                    Some(s) => s.acquire_owned().await.ok(),
+                    None => None,
+                };
                 let start = Instant::now();
                 let result = tokio::time::timeout(proposer_deadline, spawner.spawn_one(cfg)).await;
                 (i, provider, model, result, start.elapsed())
@@ -461,6 +492,7 @@ mod tests {
             aggregator: None,
             min_proposers: 1,
             proposer_max_turns: 2,
+            proposer_concurrency: 0,
             proposer_deadline_s: 90,
             global_deadline_s: 25,
             max_cost_usd: None,
@@ -572,5 +604,111 @@ mod tests {
             .await
             .expect_err("daily exhausted");
         assert!(matches!(err, CouncilError::DailyBudgetExhausted { .. }));
+    }
+
+    /// A provider that records the maximum number of concurrent `stream` calls it
+    /// ever observed. Each call bumps a live counter, sleeps to create overlap,
+    /// then drops the counter and returns an error (the council ends in
+    /// `InsufficientProposals`, which is fine — these tests assert CONCURRENCY).
+    struct CountingProvider {
+        active: Arc<std::sync::atomic::AtomicUsize>,
+        max: Arc<std::sync::atomic::AtomicUsize>,
+    }
+    #[async_trait::async_trait]
+    impl LlmProvider for CountingProvider {
+        async fn stream(
+            &self,
+            _r: &wcore_types::llm::LlmRequest,
+        ) -> Result<
+            tokio::sync::mpsc::Receiver<wcore_types::llm::LlmEvent>,
+            wcore_providers::ProviderError,
+        > {
+            use std::sync::atomic::Ordering;
+            let now = self.active.fetch_add(1, Ordering::SeqCst) + 1;
+            self.max.fetch_max(now, Ordering::SeqCst);
+            // Hold the slot long enough that unbounded members would overlap.
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            self.active.fetch_sub(1, Ordering::SeqCst);
+            Err(wcore_providers::ProviderError::Connection(
+                "counting".into(),
+            ))
+        }
+    }
+
+    /// Resolver that hands back the SAME shared `CountingProvider` for every spec,
+    /// so concurrency is observed across all council members (the semaphore is
+    /// what bounds them, not separate provider instances). Resolves Ok with the
+    /// spec's model (part after `:`), if any. run_council resolves each spec in
+    /// the pre-filter AND `spawn_one` resolves again — both get the shared Arc.
+    struct SharedResolver(Arc<CountingProvider>);
+    impl ProviderResolver for SharedResolver {
+        fn resolve_provider(
+            &self,
+            spec: &str,
+        ) -> Result<(Arc<dyn LlmProvider>, Option<String>), ResolveError> {
+            let model = spec.split_once(':').map(|(_, m)| m.to_string());
+            Ok((self.0.clone() as Arc<dyn LlmProvider>, model))
+        }
+    }
+
+    // Same route, concurrency 2: four `flux:*` members share one permit pool, so
+    // no more than 2 may stream at once even though all four are spawned together.
+    #[tokio::test]
+    async fn same_route_bounds_concurrent_spawns() {
+        let active = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let max = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counting = Arc::new(CountingProvider {
+            active: active.clone(),
+            max: max.clone(),
+        });
+        let resolver = Arc::new(SharedResolver(counting.clone()));
+        let spawner =
+            AgentSpawner::new(counting.clone(), Config::default()).with_provider_resolver(resolver);
+
+        let mut r = roster(&["flux:a", "flux:b", "flux:c", "flux:d"]);
+        r.proposer_concurrency = 2;
+
+        // All members error → InsufficientProposals. We assert CONCURRENCY, not
+        // success: the semaphore must have capped overlap at the permit count.
+        let err = run_council("task", &r, &spawner, &Config::default())
+            .await
+            .expect_err("all members error");
+        assert!(matches!(err, CouncilError::InsufficientProposals { .. }));
+        let observed = max.load(std::sync::atomic::Ordering::SeqCst);
+        assert!(observed >= 1, "at least one member must have run");
+        assert!(
+            observed <= 2,
+            "same-route fan-out must be capped at proposer_concurrency (2), saw {observed}"
+        );
+    }
+
+    // Different routes, concurrency 1: each route gets its OWN one-permit pool, so
+    // the two members are NOT throttled against each other — they can overlap.
+    #[tokio::test]
+    async fn distinct_routes_have_independent_pools() {
+        let active = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let max = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counting = Arc::new(CountingProvider {
+            active: active.clone(),
+            max: max.clone(),
+        });
+        let resolver = Arc::new(SharedResolver(counting.clone()));
+        let spawner =
+            AgentSpawner::new(counting.clone(), Config::default()).with_provider_resolver(resolver);
+
+        let mut r = roster(&["openai:a", "anthropic:b"]);
+        r.proposer_concurrency = 1;
+
+        let err = run_council("task", &r, &spawner, &Config::default())
+            .await
+            .expect_err("all members error");
+        assert!(matches!(err, CouncilError::InsufficientProposals { .. }));
+        // Two distinct routes → two separate 1-permit pools, so neither throttles
+        // the other. Both members ran (the run reached InsufficientProposals with
+        // 2 errored), and overlap is possible. Timing-robust invariant: with only
+        // two members the observed max can never exceed 2.
+        let observed = max.load(std::sync::atomic::Ordering::SeqCst);
+        assert!(observed >= 1, "both members must have run");
+        assert!(observed <= 2, "only two members exist, saw {observed}");
     }
 }

@@ -32,6 +32,11 @@ pub struct Roster {
     pub aggregator: Option<String>,
     pub min_proposers: usize,
     pub proposer_max_turns: usize,
+    /// Max concurrent proposer spawns per resolved route/credential (keyed on the
+    /// spec's route prefix — all `flux:*` members share one permit pool). Bounds
+    /// fan-out so a large roster does not thundering-herd a single key. `0` =
+    /// unbounded (no semaphore is built).
+    pub proposer_concurrency: usize,
     /// Per-proposer wall-clock deadline (seconds) — the hard backstop that cuts a
     /// single hung proposer even before quorum is reached.
     pub proposer_deadline_s: u64,
@@ -141,6 +146,7 @@ pub fn validate_and_build(cfg: &CrucibleConfig) -> Result<Roster, CrucibleConfig
         aggregator: cfg.aggregator.clone(),
         min_proposers: cfg.min_proposers,
         proposer_max_turns: cfg.proposer_max_turns,
+        proposer_concurrency: cfg.proposer_concurrency,
         proposer_deadline_s: cfg.proposer_deadline_s,
         global_deadline_s: cfg.global_deadline_s,
         max_cost_usd: cfg.max_cost_usd,

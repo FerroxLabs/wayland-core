@@ -153,6 +153,7 @@ fn roster(
         aggregator: aggregator.map(|s| s.to_string()),
         min_proposers: min,
         proposer_max_turns: max_turns,
+        proposer_concurrency: 0,
         proposer_deadline_s: 90,
         global_deadline_s: 25,
         max_cost_usd,

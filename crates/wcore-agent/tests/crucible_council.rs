@@ -99,6 +99,7 @@ fn roster(proposers: &[&str], aggregator: Option<&str>, min: usize) -> Roster {
         aggregator: aggregator.map(|s| s.to_string()),
         min_proposers: min,
         proposer_max_turns: 1,
+        proposer_concurrency: 0,
         proposer_deadline_s: 90,
         global_deadline_s: 25,
         max_cost_usd: None,
@@ -120,6 +121,7 @@ fn roster_with_deadlines(
         aggregator: aggregator.map(|s| s.to_string()),
         min_proposers: min,
         proposer_max_turns: 1,
+        proposer_concurrency: 0,
         proposer_deadline_s,
         global_deadline_s,
         max_cost_usd: None,
@@ -207,6 +209,7 @@ async fn over_budget_roster_refused_before_spawn() {
         aggregator: None,
         min_proposers: 1,
         proposer_max_turns: 4,
+        proposer_concurrency: 0,
         proposer_deadline_s: 90,
         global_deadline_s: 25,
         max_cost_usd: Some(0.0001), // 0.01¢ — far below Opus worst-case

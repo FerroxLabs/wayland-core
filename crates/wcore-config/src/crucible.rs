@@ -11,6 +11,13 @@
 
 use serde::{Deserialize, Serialize};
 
+/// Default per-route proposer concurrency: a small fan-out that keeps a single
+/// credential (esp. a shared `flux:*` key) from being thundering-herded while
+/// still letting a council make progress. `0` would mean unbounded.
+fn default_proposer_concurrency() -> usize {
+    4
+}
+
 /// How the council roster is chosen.
 ///
 /// `Manual` (the default) is the shipped behavior: the roster comes verbatim
@@ -59,6 +66,11 @@ pub struct CrucibleConfig {
     pub max_proposers: usize,
     /// Per-proposer turn budget.
     pub proposer_max_turns: usize,
+    /// Max concurrent proposer spawns PER resolved route/credential (keyed on the
+    /// spec's route prefix — all `flux:*` members share one pool). Bounds council
+    /// fan-out so a large roster does not thundering-herd a single key. `0` = unbounded.
+    #[serde(default = "default_proposer_concurrency")]
+    pub proposer_concurrency: usize,
     /// Per-proposer wall-clock deadline, in seconds.
     pub proposer_deadline_s: u64,
     /// Optional hard spend ceiling for the whole council, in USD. When set, the
@@ -115,6 +127,7 @@ impl Default for CrucibleConfig {
             min_proposers: 1,
             max_proposers: 5,
             proposer_max_turns: 4,
+            proposer_concurrency: 4,
             proposer_deadline_s: 90,
             max_cost_usd: None,
             daily_cap_usd: Some(20.0),
@@ -143,6 +156,7 @@ mod tests {
         assert_eq!(c.min_proposers, 1);
         assert_eq!(c.max_proposers, 5);
         assert_eq!(c.proposer_max_turns, 4);
+        assert_eq!(c.proposer_concurrency, 4);
         assert_eq!(c.proposer_deadline_s, 90);
     }
 
@@ -177,6 +191,16 @@ proposers = ["openai", "anthropic"]
         let c: CrucibleConfig = toml::from_str("").expect("parse empty");
         assert!(!c.enabled);
         assert!(c.proposers.is_empty());
+    }
+
+    #[test]
+    fn proposer_concurrency_defaults_to_four() {
+        // Per-route fan-out bound defaults to 4 (small herd-protection window).
+        let c = CrucibleConfig::default();
+        assert_eq!(c.proposer_concurrency, 4);
+        // An absent field in a partial table also yields the named default of 4.
+        let c2: CrucibleConfig = toml::from_str("enabled = true").expect("parse partial");
+        assert_eq!(c2.proposer_concurrency, 4);
     }
 
     #[test]

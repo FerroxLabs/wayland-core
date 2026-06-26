@@ -624,6 +624,7 @@ fn roster_from_plan(
         aggregator,
         min_proposers: 1,
         proposer_max_turns: cfg.proposer_max_turns,
+        proposer_concurrency: cfg.proposer_concurrency,
         proposer_deadline_s: cfg.proposer_deadline_s,
         global_deadline_s: cfg.global_deadline_s,
         max_cost_usd: None,

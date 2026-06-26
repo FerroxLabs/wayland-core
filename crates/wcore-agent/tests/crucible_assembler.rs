@@ -105,6 +105,7 @@ fn roster_from_plan(members: &[String], aggregator: Option<String>) -> Roster {
         aggregator,
         min_proposers: 1,
         proposer_max_turns: 1,
+        proposer_concurrency: 0,
         proposer_deadline_s: 90,
         global_deadline_s: 25,
         max_cost_usd: None,
