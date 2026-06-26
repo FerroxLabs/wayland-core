@@ -20,14 +20,83 @@ use futures::stream::{FuturesUnordered, StreamExt};
 use wcore_config::config::Config;
 use wcore_types::message::TokenUsage;
 
+use wcore_pricing::DEFAULT_CATALOG;
+
 use super::aggregator::{Aggregator, LlmSynthesisAggregator};
 use super::proposal::Proposal;
-use super::roster::Roster;
+use super::roster::{ProposerSpec, Roster};
 use super::spend::{CouncilSpend, MICROCENTS_PER_USD};
 use crate::spawner::{AgentSpawner, SubAgentConfig};
 
 /// Per-proposer output-token budget.
 const DEFAULT_PROPOSER_MAX_TOKENS: u32 = 4096;
+
+/// Pre-flight cap + daily-envelope gate. Certifies the judge-inclusive ceiling
+/// when any cap binds. The per-run `max_cost_usd` cap is STRICT (an unpriceable
+/// roster under it is refused). The default-on daily envelope is SOFT — it binds
+/// only when the roster is priceable, so an unpriced Flux council (pre-#319) is
+/// never hard-refused; its spend accrues via soft-$0 actual-usage charging.
+fn preflight_governance(
+    roster: &Roster,
+    live: &[(&ProposerSpec, Option<String>)],
+    spawner: &AgentSpawner,
+) -> Result<(), CouncilError> {
+    let daily = spawner
+        .budget_tracker()
+        .zip(spawner.budget_identity())
+        .and_then(|(t, id)| roster.daily_cap_usd.map(|cap| (t, id, cap)));
+    if roster.max_cost_usd.is_none() && daily.is_none() {
+        return Ok(()); // no cap binds → nothing to certify
+    }
+    let proposers: Vec<(&str, Option<&str>)> = live
+        .iter()
+        .map(|(p, model)| (p.provider.as_str(), model.as_deref()))
+        .collect();
+    let aggregator = roster
+        .aggregator
+        .as_deref()
+        .map(|spec| match spec.split_once(':') {
+            Some((p, m)) if !m.is_empty() => (p, Some(m)),
+            _ => (spec, None),
+        });
+    let certified = CouncilSpend::estimate_preflight_microcents(
+        &DEFAULT_CATALOG,
+        &proposers,
+        aggregator,
+        roster.proposer_max_turns,
+        DEFAULT_PROPOSER_MAX_TOKENS,
+        roster.flux_markup,
+    )
+    .certified_microcents()
+    .map(|mc| mc as f64 / MICROCENTS_PER_USD);
+
+    // Per-run cap is STRICT: an explicit per-run ceiling refuses an unpriceable
+    // roster rather than run against a $0-soft undercount.
+    if let Some(cap_usd) = roster.max_cost_usd {
+        let c = certified.ok_or(CouncilError::UnpriceableRoster)?;
+        if c > cap_usd {
+            return Err(CouncilError::OverBudget {
+                estimated_usd: c,
+                cap_usd,
+            });
+        }
+    }
+    // Daily envelope is SOFT: it binds only when the roster is priceable. Flux is
+    // unpriced until FerroxLabs/wayland#319, so an unpriceable roster runs and
+    // accrues soft-$0 via actual-usage charging — it is never hard-refused here.
+    if let Some((tracker, (_sess, user), daily_cap)) = daily
+        && let Some(c) = certified
+    {
+        let spent = tracker.lock().user_daily_usd(user);
+        if spent + c > daily_cap {
+            return Err(CouncilError::DailyBudgetExhausted {
+                spent_usd: spent,
+                cap_usd: daily_cap,
+            });
+        }
+    }
+    Ok(())
+}
 
 /// A proposer that was skipped before spawning (keyless / unknown provider).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -63,6 +132,15 @@ pub enum CouncilError {
     /// The worst-case pre-flight spend estimate exceeds the configured cap.
     #[error("council would exceed budget: est ${estimated_usd:.2} > cap ${cap_usd:.2}")]
     OverBudget { estimated_usd: f64, cap_usd: f64 },
+    /// A council member has no verified price, so a budget ceiling cannot be
+    /// certified — refuse rather than run against an undercounted estimate.
+    #[error("council roster is not fully priced; cannot certify a budget ceiling")]
+    UnpriceableRoster,
+    /// The per-user/day aggregate envelope is exhausted for this user.
+    #[error(
+        "daily council budget exhausted: ${spent_usd:.2} spent + this council > cap ${cap_usd:.2}"
+    )]
+    DailyBudgetExhausted { spent_usd: f64, cap_usd: f64 },
 }
 
 /// Run a council over `task` using the validated `roster`. `spawner` MUST carry
@@ -93,26 +171,10 @@ pub async fn run_council(
         }
     }
 
-    // 1b. Pre-flight budget cap: refuse BEFORE spawning if the worst-case spend
-    //     would exceed the configured ceiling (a council is N× one call's cost).
-    if let Some(cap_usd) = roster.max_cost_usd {
-        let members: Vec<(&str, Option<&str>)> = live
-            .iter()
-            .map(|(p, model)| (p.provider.as_str(), model.as_deref()))
-            .collect();
-        let est = CouncilSpend::estimate_worst_case_microcents(
-            &members,
-            roster.proposer_max_turns,
-            DEFAULT_PROPOSER_MAX_TOKENS,
-        );
-        let estimated_usd = est as f64 / MICROCENTS_PER_USD;
-        if estimated_usd > cap_usd {
-            return Err(CouncilError::OverBudget {
-                estimated_usd,
-                cap_usd,
-            });
-        }
-    }
+    // 1b. Pre-flight governance: certify the JUDGE-INCLUSIVE worst case and refuse
+    //     before spawning if it exceeds the per-run cap, can't be priced, or would
+    //     exhaust the per-day envelope. Certification only runs when a cap binds.
+    preflight_governance(roster, &live, spawner)?;
 
     // 2. Spawn the survivors concurrently on their pinned providers, timing
     //    each. provider = the full spec so the resolver keys provider+model;
@@ -193,6 +255,20 @@ pub async fn run_council(
                         if proposal.is_usable() {
                             usable_count += 1;
                         }
+                        if proposal.is_usable()
+                            && let (Some(tracker), Some((sess, user))) =
+                                (spawner.budget_tracker(), spawner.budget_identity())
+                        {
+                            let usd = CouncilSpend::usd_for_usage(
+                                &proposal.provider,
+                                proposal.model.as_deref(),
+                                &proposal.usage,
+                                roster.flux_markup,
+                            );
+                            let total =
+                                proposal.usage.input_tokens + proposal.usage.output_tokens;
+                            let _ = tracker.lock().charge_for_user(sess, user, total, usd);
+                        }
                         slots[i] = Some(proposal);
                     }
                     // All in-flight proposers have completed.
@@ -261,6 +337,19 @@ pub async fn run_council(
         .map(|((provider, model), agg)| (provider.as_str(), model.as_deref(), &agg.usage));
     let spend = CouncilSpend::from_run(&proposals, aggregator_spend);
 
+    // Charge the judge's real usage against the same per-session/day envelope.
+    if let (Some(tracker), Some((sess, user)), Some((prov, model)), Some(agg)) = (
+        spawner.budget_tracker(),
+        spawner.budget_identity(),
+        aggregator_provenance.as_ref(),
+        aggregate.as_ref(),
+    ) {
+        let usd =
+            CouncilSpend::usd_for_usage(prov, model.as_deref(), &agg.usage, roster.flux_markup);
+        let total = agg.usage.input_tokens + agg.usage.output_tokens;
+        let _ = tracker.lock().charge_for_user(sess, user, total, usd);
+    }
+
     let (final_text, chosen_from) = match aggregate {
         Some(a) if !a.final_text.trim().is_empty() => (a.final_text, a.chosen_from),
         _ => {
@@ -317,6 +406,36 @@ mod tests {
         }
     }
 
+    /// A provider that never streams — identity-only for the governance tests
+    /// (no spawn ever reaches it because certification refuses first).
+    struct NeverProvider;
+    #[async_trait::async_trait]
+    impl LlmProvider for NeverProvider {
+        async fn stream(
+            &self,
+            _r: &wcore_types::llm::LlmRequest,
+        ) -> Result<
+            tokio::sync::mpsc::Receiver<wcore_types::llm::LlmEvent>,
+            wcore_providers::ProviderError,
+        > {
+            Err(wcore_providers::ProviderError::Connection("never".into()))
+        }
+    }
+
+    /// Resolver that always resolves Ok, handing back the spec's model (the part
+    /// after `:`) so a `provider:model` spec is priceable while a made-up model
+    /// stays uncertifiable. Members enter `live` without anything being spawned.
+    struct OkResolver;
+    impl ProviderResolver for OkResolver {
+        fn resolve_provider(
+            &self,
+            spec: &str,
+        ) -> Result<(Arc<dyn LlmProvider>, Option<String>), ResolveError> {
+            let model = spec.split_once(':').map(|(_, m)| m.to_string());
+            Ok((Arc::new(NeverProvider) as Arc<dyn LlmProvider>, model))
+        }
+    }
+
     fn roster(specs: &[&str]) -> Roster {
         Roster {
             proposers: specs
@@ -333,6 +452,8 @@ mod tests {
             proposer_deadline_s: 90,
             global_deadline_s: 25,
             max_cost_usd: None,
+            flux_markup: 1.0,
+            daily_cap_usd: None,
         }
     }
 
@@ -398,5 +519,46 @@ mod tests {
         .await
         .expect_err("all keyless");
         assert_eq!(err, CouncilError::InsufficientProposals { got: 0, need: 1 });
+    }
+
+    // Certified ceiling refuses an unpriceable roster under a cap (never $0-soft).
+    #[tokio::test]
+    async fn cap_set_but_unpriceable_roster_is_refused() {
+        let mut r = roster(&["totally-made-up:nope-model"]);
+        r.max_cost_usd = Some(5.0);
+        let resolver = Arc::new(OkResolver); // resolves Ok with the spec's model
+        let spawner = AgentSpawner::new(Arc::new(NeverProvider), Config::default())
+            .with_provider_resolver(resolver);
+        let err = run_council("t", &r, &spawner, &Config::default())
+            .await
+            .expect_err("unpriceable under cap");
+        assert_eq!(err, CouncilError::UnpriceableRoster);
+    }
+
+    // Daily envelope: prior spend + this council's certified ceiling > cap ⇒ refuse
+    // BEFORE spawning (the aggregate-bound that beats Fusion).
+    #[tokio::test]
+    async fn daily_envelope_exhausted_refuses_before_spawn() {
+        // A priceable roster so the ceiling certifies.
+        let mut r = roster(&["deepseek:deepseek-v4-pro"]);
+        r.max_cost_usd = None;
+        r.daily_cap_usd = Some(0.000_05); // tiny: prior spend + ceiling will exceed
+        let tracker = std::sync::Arc::new(parking_lot::Mutex::new(
+            wcore_budget::BudgetTracker::new(wcore_budget::BudgetCap {
+                per_user_daily_usd: Some(0.000_05),
+                ..Default::default()
+            }),
+        ));
+        // Pre-seed a sub-cap charge so this user already has same-day spend.
+        let _ = tracker.lock().charge_for_user("s", "u", 1, 0.000_02);
+        let resolver = Arc::new(OkResolver);
+        let spawner = AgentSpawner::new(Arc::new(NeverProvider), Config::default())
+            .with_provider_resolver(resolver)
+            .with_budget_tracker(tracker.clone())
+            .with_budget_identity("s", "u");
+        let err = run_council("t", &r, &spawner, &Config::default())
+            .await
+            .expect_err("daily exhausted");
+        assert!(matches!(err, CouncilError::DailyBudgetExhausted { .. }));
     }
 }

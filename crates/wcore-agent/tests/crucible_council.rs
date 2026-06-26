@@ -102,6 +102,8 @@ fn roster(proposers: &[&str], aggregator: Option<&str>, min: usize) -> Roster {
         proposer_deadline_s: 90,
         global_deadline_s: 25,
         max_cost_usd: None,
+        flux_markup: 1.0,
+        daily_cap_usd: None,
     }
 }
 
@@ -121,6 +123,8 @@ fn roster_with_deadlines(
         proposer_deadline_s,
         global_deadline_s,
         max_cost_usd: None,
+        flux_markup: 1.0,
+        daily_cap_usd: None,
     }
 }
 
@@ -206,6 +210,8 @@ async fn over_budget_roster_refused_before_spawn() {
         proposer_deadline_s: 90,
         global_deadline_s: 25,
         max_cost_usd: Some(0.0001), // 0.01¢ — far below Opus worst-case
+        flux_markup: 1.0,
+        daily_cap_usd: None,
     };
     let err = run_council("task", &roster, &spawner, &test_config())
         .await

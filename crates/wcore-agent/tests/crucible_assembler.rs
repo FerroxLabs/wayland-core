@@ -108,6 +108,8 @@ fn roster_from_plan(members: &[String], aggregator: Option<String>) -> Roster {
         proposer_deadline_s: 90,
         global_deadline_s: 25,
         max_cost_usd: None,
+        flux_markup: 1.0,
+        daily_cap_usd: None,
     }
 }
 

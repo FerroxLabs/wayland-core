@@ -66,6 +66,9 @@ pub struct CrucibleConfig {
     /// (a council is N× the spend of one call, so a cap is the headline cost
     /// control). `None` ⇒ no cap.
     pub max_cost_usd: Option<f64>,
+    /// Optional per-user/day aggregate spend ceiling in USD (the anti-"chatty
+    /// user fires many councils" bound). `None` ⇒ no daily cap.
+    pub daily_cap_usd: Option<f64>,
     /// Roster selection mode. `Manual` (default) keeps the shipped path; `Auto`
     /// enables the deterministic Assembler. Every assembler-only behavior is
     /// gated on this being `Auto`.
@@ -108,6 +111,7 @@ impl Default for CrucibleConfig {
             proposer_max_turns: 4,
             proposer_deadline_s: 90,
             max_cost_usd: None,
+            daily_cap_usd: Some(20.0),
             assembly: AssemblyMode::Manual,
             flux_markup: 1.0,
             global_deadline_s: 25,
@@ -133,6 +137,16 @@ mod tests {
         assert_eq!(c.max_proposers, 5);
         assert_eq!(c.proposer_max_turns, 4);
         assert_eq!(c.proposer_deadline_s, 90);
+    }
+
+    #[test]
+    fn crucible_defaults_have_daily_cap_and_no_default_per_run_cap() {
+        let c = CrucibleConfig::default();
+        // Per-run cap is OPT-IN (strict certification can't bind on unpriced Flux
+        // until #319, so a default per-run cap would block manual Flux councils).
+        assert_eq!(c.max_cost_usd, None);
+        // The default-on aggregate governance is the daily envelope (soft).
+        assert_eq!(c.daily_cap_usd, Some(20.0));
     }
 
     #[test]

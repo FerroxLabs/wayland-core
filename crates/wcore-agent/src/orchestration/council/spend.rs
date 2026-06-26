@@ -147,6 +147,29 @@ impl CouncilSpend {
         spend
     }
 
+    /// Actual USD for one member's real `TokenUsage`, via the flux-aware resolved
+    /// price × `markup`. Unpriceable ⇒ 0.0 (charging never fails over a missing
+    /// price row; the pre-flight certification already gated the cap).
+    pub fn usd_for_usage(
+        provider: &str,
+        model: Option<&str>,
+        usage: &TokenUsage,
+        markup: f64,
+    ) -> f64 {
+        model
+            .and_then(|m| {
+                DEFAULT_CATALOG.estimate_cost_microcents_resolved(
+                    provider,
+                    m,
+                    usage.input_tokens,
+                    usage.output_tokens,
+                    markup,
+                )
+            })
+            .map(|mc| mc as f64 / MICROCENTS_PER_USD)
+            .unwrap_or(0.0)
+    }
+
     /// Worst-case pre-flight cost estimate (microcents) for a roster: each
     /// member bounded by `max_turns × max_tokens` output + one prompt's worth of
     /// input. Used to show the ceiling before spawning and to enforce a
@@ -194,7 +217,10 @@ impl CouncilSpend {
         markup: f64,
     ) -> PreflightEstimate {
         let out_worst = (max_turns.max(1) as u64).saturating_mul(max_tokens as u64);
-        let in_worst = max_tokens as u64;
+        // A multi-turn agentic proposer re-sends its growing context each turn, so
+        // worst-case INPUT also scales with turns — not one prompt. Bound it at
+        // max_turns × max_tokens so a tool-looping proposer cannot exceed the cap.
+        let in_worst = (max_turns.max(1) as u64).saturating_mul(max_tokens as u64);
         let mut microcents = 0u64;
         let mut fully_priced = true;
 
@@ -349,6 +375,26 @@ mod tests {
         assert!(
             pre5.microcents - pre3.microcents > 2 * per_proposer,
             "judge input must scale with proposer count beyond proposer cost alone"
+        );
+    }
+
+    #[test]
+    fn preflight_input_scales_with_turns() {
+        // A multi-turn proposer re-sends growing context each turn, so its INPUT
+        // ceiling scales with turns too. With no judge, both output AND input
+        // scale with turns — doubling max_turns must MORE-than-double the
+        // estimate (pure-output scaling would give exactly 2×). Same catalog
+        // construction as the judge/proposer-count test above.
+        let cat = PricingCatalog::load_default().unwrap();
+        let proposers: Vec<(&str, Option<&str>)> = vec![("deepseek", Some("deepseek-v4-pro"))];
+        let one = CouncilSpend::estimate_preflight_microcents(&cat, &proposers, None, 1, 1000, 1.0)
+            .microcents;
+        let two = CouncilSpend::estimate_preflight_microcents(&cat, &proposers, None, 2, 1000, 1.0)
+            .microcents;
+        assert!(one > 0, "member was not priceable; fix the test catalog");
+        assert!(
+            two > one.saturating_mul(2),
+            "input term did not scale with turns: {one} -> {two}"
         );
     }
 

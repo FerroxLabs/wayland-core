@@ -112,6 +112,13 @@ pub struct AgentSpawner {
     /// `clone_for_spawn` or fleet/parallel proposers silently fall back to the
     /// parent provider (the cross-provider-diversity guard catches this).
     resolver: Option<Arc<dyn ProviderResolver>>,
+    /// Crucible cost governance — the per-session/per-day spend tracker shared
+    /// with the engine. `None` ⇒ no aggregate cap (the council enforces only its
+    /// per-run pin). MUST be propagated by `clone_for_spawn`.
+    budget_tracker: Option<Arc<parking_lot::Mutex<wcore_budget::BudgetTracker>>>,
+    /// (session_id, user_id) the council charges against — same envelope as the
+    /// parent turn. None ⇒ council spend is not charged. Propagated by clone_for_spawn.
+    budget_identity: Option<(String, String)>,
 }
 
 impl AgentSpawner {
@@ -122,6 +129,8 @@ impl AgentSpawner {
             bus: None,
             cancel: tokio_util::sync::CancellationToken::new(),
             resolver: None,
+            budget_tracker: None,
+            budget_identity: None,
         }
     }
 
@@ -164,6 +173,36 @@ impl AgentSpawner {
     pub fn with_provider_resolver(mut self, resolver: Arc<dyn ProviderResolver>) -> Self {
         self.resolver = Some(resolver);
         self
+    }
+
+    /// Crucible — attach the shared per-session/day [`BudgetTracker`] so council
+    /// member spend decrements the same envelope as the parent turn.
+    pub fn with_budget_tracker(
+        mut self,
+        tracker: Arc<parking_lot::Mutex<wcore_budget::BudgetTracker>>,
+    ) -> Self {
+        self.budget_tracker = Some(tracker);
+        self
+    }
+
+    /// The shared budget tracker, if one was attached.
+    pub fn budget_tracker(&self) -> Option<&Arc<parking_lot::Mutex<wcore_budget::BudgetTracker>>> {
+        self.budget_tracker.as_ref()
+    }
+
+    /// Crucible — the (session_id, user_id) the council charges against.
+    pub fn with_budget_identity(
+        mut self,
+        session_id: impl Into<String>,
+        user_id: impl Into<String>,
+    ) -> Self {
+        self.budget_identity = Some((session_id.into(), user_id.into()));
+        self
+    }
+
+    /// The (session_id, user_id) for council charging, if set.
+    pub fn budget_identity(&self) -> Option<&(String, String)> {
+        self.budget_identity.as_ref()
     }
 
     /// Resolve the provider a given sub-agent should run on.
@@ -560,6 +599,12 @@ impl AgentSpawner {
             // pinned proposers silently fall back to the parent provider,
             // collapsing the cross-provider council into a single-provider one.
             resolver: self.resolver.clone(),
+            // CRITICAL (crucible): the shared budget tracker MUST be carried into
+            // every cloned spawner. If it isn't propagated, council members run
+            // on the fleet/parallel `clone_for_spawn()` copies and silently lose
+            // the per-session/day envelope.
+            budget_tracker: self.budget_tracker.clone(),
+            budget_identity: self.budget_identity.clone(),
         }
     }
 
@@ -933,6 +978,17 @@ mod crucible_provider_resolution_tests {
         c.model = Some("claude-opus-4-8".into());
         let cfg = spawner.child_config(&c);
         assert_eq!(cfg.model, "claude-opus-4-8");
+    }
+
+    #[test]
+    fn budget_tracker_attaches_and_survives_clone_for_spawn() {
+        let tracker = std::sync::Arc::new(parking_lot::Mutex::new(
+            wcore_budget::BudgetTracker::new(wcore_budget::BudgetCap::default()),
+        ));
+        let parent: Arc<dyn LlmProvider> = Arc::new(StubProvider);
+        let s = AgentSpawner::new(parent, Config::default()).with_budget_tracker(tracker.clone());
+        assert!(s.budget_tracker().is_some());
+        assert!(s.clone_for_spawn().budget_tracker().is_some());
     }
 }
 

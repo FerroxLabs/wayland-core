@@ -156,6 +156,8 @@ fn roster(
         proposer_deadline_s: 90,
         global_deadline_s: 25,
         max_cost_usd,
+        flux_markup: 1.0,
+        daily_cap_usd: None,
     }
 }
 

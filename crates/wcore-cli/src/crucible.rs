@@ -461,6 +461,8 @@ fn roster_from_plan(
         proposer_deadline_s: cfg.proposer_deadline_s,
         global_deadline_s: cfg.global_deadline_s,
         max_cost_usd: None,
+        flux_markup: cfg.flux_markup,
+        daily_cap_usd: cfg.daily_cap_usd,
     }
 }
 

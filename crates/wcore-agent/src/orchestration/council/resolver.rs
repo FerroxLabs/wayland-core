@@ -51,6 +51,15 @@ use wcore_providers::{LlmProvider, create_provider};
 /// Runtime derivation, NOT a hardcoded provider enum (which would violate the
 /// No-Hardcoded-Provider-Quirks rule).
 pub fn family(spec: &str) -> String {
+    // BYO OpenRouter route: `openrouter:<upstream>/<model>`. Canonicalize to the
+    // UPSTREAM vendor so the same model via OpenRouter vs direct shares a family
+    // and judge-independence is not defeated by the routing prefix.
+    if let Some(rest) = spec.strip_prefix("openrouter:")
+        && let Some((upstream, _model)) = rest.split_once('/')
+        && !upstream.is_empty()
+    {
+        return upstream.to_string();
+    }
     if let Some((provider, _model)) = flux_pinned_native(spec) {
         return provider;
     }
@@ -275,6 +284,12 @@ mod tests {
         // A leading-colon spec degrades to a fail-open singleton, NOT a shared
         // empty family that would mis-count diversity.
         assert_eq!(family(":x"), ":x");
+        // BYO OpenRouter routes canonicalize to the UPSTREAM vendor, else an
+        // OpenRouter-routed Claude judge vs OpenRouter-routed GPT proposer both
+        // read as family "openrouter" (false same-vendor) and independence leaks.
+        assert_eq!(family("openrouter:anthropic/claude-opus-4-8"), "anthropic");
+        assert_eq!(family("openrouter:openai/gpt-5"), "openai");
+        assert_eq!(family("openrouter:openai/gpt-5"), family("openai:gpt-5"));
     }
 
     #[test]

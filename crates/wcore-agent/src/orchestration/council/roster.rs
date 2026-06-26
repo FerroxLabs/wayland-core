@@ -44,6 +44,12 @@ pub struct Roster {
     pub global_deadline_s: u64,
     /// Optional council-wide spend ceiling in USD (pre-flight cap).
     pub max_cost_usd: Option<f64>,
+    /// Flux pricing markup carried from `CrucibleConfig.flux_markup` so the
+    /// runtime cap can price flux-pinned members through the resolved path.
+    pub flux_markup: f64,
+    /// Optional per-user/day aggregate spend ceiling in USD. Charged + pre-checked
+    /// against the shared `BudgetTracker` so many councils in a day stay bounded.
+    pub daily_cap_usd: Option<f64>,
 }
 
 /// Why a `[crucible]` roster failed validation.
@@ -138,6 +144,8 @@ pub fn validate_and_build(cfg: &CrucibleConfig) -> Result<Roster, CrucibleConfig
         proposer_deadline_s: cfg.proposer_deadline_s,
         global_deadline_s: cfg.global_deadline_s,
         max_cost_usd: cfg.max_cost_usd,
+        flux_markup: cfg.flux_markup,
+        daily_cap_usd: cfg.daily_cap_usd,
     })
 }
 

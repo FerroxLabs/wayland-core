@@ -1663,10 +1663,29 @@ impl AgentBootstrap {
         // background-task vec so `Drop for AgentEngine` aborts it on
         // session shutdown.
         let agent_bus = Arc::new(crate::agents::bus::AgentBus::new(256));
-        let spawner = Arc::new(
+        // Crucible cost governance — build the shared per-session/day BudgetTracker
+        // BEFORE the spawner is wrapped in `Arc` (it is moved into the Spawn /
+        // Workflow / Delegate tools just below, so it can't be mutated afterwards).
+        // The cap-only tracker is attached to the spawner here; the later
+        // M5.bootstrap-wiring block reuses this SAME Arc to add the span-sink and
+        // install it on the engine, so the sink wiring stays intact. `None`
+        // session_cap leaves both spawner + engine tracker-less (pre-M5.3 behaviour).
+        let council_budget_tracker = self.config.session_cap.as_ref().map(|cap_cfg| {
+            let cap: wcore_budget::BudgetCap = cap_cfg.into();
+            Arc::new(parking_lot::Mutex::new(wcore_budget::BudgetTracker::new(
+                cap,
+            )))
+        });
+        let mut spawner_builder =
             crate::spawner::AgentSpawner::new(provider.clone(), self.config.clone())
-                .with_bus(Arc::clone(&agent_bus)),
-        );
+                .with_bus(Arc::clone(&agent_bus));
+        if let Some(tracker) = council_budget_tracker.as_ref() {
+            // TODO(stage3): use the live per-conversation session id.
+            spawner_builder = spawner_builder
+                .with_budget_tracker(Arc::clone(tracker))
+                .with_budget_identity("session", crate::engine::resolve_user_model_user_id());
+        }
+        let spawner = Arc::new(spawner_builder);
         // Lane D3 (G2/G4): register agents copied into installed marketplace
         // plugins (`<plugins-root>/<plugin>@<marketplace>/agents/*.yaml`),
         // namespaced `<marketplace>/<plugin>:<agent>` so agents from different
@@ -2243,16 +2262,22 @@ impl AgentBootstrap {
         // span channel. Without `session_cap`, the engine's
         // `budget_tracker` stays `None` and the per-turn charge call
         // in `engine.rs::run` is a no-op (matches pre-M5.3 behaviour).
-        if let Some(cap_cfg) = session_cap_cfg.as_ref() {
-            let cap: wcore_budget::BudgetCap = cap_cfg.into();
-            let mut tracker = wcore_budget::BudgetTracker::new(cap);
-            if let Some(sink) = span_sink_for_budget.as_ref() {
-                let bridge = Arc::new(
-                    wcore_observability::sink::ObservabilityBudgetEventBridge::new(sink.clone()),
-                );
-                tracker.set_event_sink(bridge);
+        if session_cap_cfg.is_some() {
+            // Crucible — reuse the SAME tracker already attached to the spawner
+            // (built before the spawner was Arc-wrapped above) so council member
+            // spend and the parent turn share one envelope. Add the span-sink
+            // bridge to it here, then install it on the engine.
+            if let Some(tracker) = council_budget_tracker.as_ref() {
+                if let Some(sink) = span_sink_for_budget.as_ref() {
+                    let bridge = Arc::new(
+                        wcore_observability::sink::ObservabilityBudgetEventBridge::new(
+                            sink.clone(),
+                        ),
+                    );
+                    tracker.lock().set_event_sink(bridge);
+                }
+                engine.set_budget_tracker(Arc::clone(tracker));
             }
-            engine.set_budget_tracker(Arc::new(parking_lot::Mutex::new(tracker)));
         }
 
         // W8a A.6/A.7: build the session-root ExecutionBudgetView from
