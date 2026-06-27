@@ -13,6 +13,24 @@ pub fn read_env_key(name: &str) -> Option<String> {
     std::env::var(name).ok().filter(|v| !v.trim().is_empty())
 }
 
+/// Canonical OpenAI API base URL. Used as the fallback for the
+/// OpenAI-family tool backends (`image_generate`, `text_to_speech`) when
+/// no provider `base_url` is available from `Config` — preserves the
+/// pre-#310 behavior of talking directly to `api.openai.com`.
+pub const OPENAI_API_BASE: &str = "https://api.openai.com/v1";
+
+/// Join an OpenAI-wire `base_url` (e.g. `https://api.fluxrouter.ai/v1`)
+/// with an API sub-path (e.g. `images/generations`) into a full
+/// endpoint. Tolerates a trailing slash on the base and a leading slash
+/// on the path so callers can pass either form. (#310)
+pub fn join_openai_endpoint(base_url: &str, path: &str) -> String {
+    format!(
+        "{}/{}",
+        base_url.trim_end_matches('/'),
+        path.trim_start_matches('/')
+    )
+}
+
 /// Minimal `application/x-www-form-urlencoded` encoder.
 ///
 /// Moved from the monolith `tool_backends.rs` during v0.9.0 B0 prep so
@@ -67,6 +85,25 @@ mod tests {
             Some("secret123".to_string())
         );
         unsafe { std::env::remove_var("WAYLAND_TEST_NONEMPTY_KEY_VAR") };
+    }
+
+    #[test]
+    fn join_openai_endpoint_tolerates_slashes() {
+        // No trailing/leading slash.
+        assert_eq!(
+            join_openai_endpoint("https://api.openai.com/v1", "images/generations"),
+            "https://api.openai.com/v1/images/generations"
+        );
+        // Trailing slash on base.
+        assert_eq!(
+            join_openai_endpoint("https://api.fluxrouter.ai/v1/", "audio/speech"),
+            "https://api.fluxrouter.ai/v1/audio/speech"
+        );
+        // Leading slash on path.
+        assert_eq!(
+            join_openai_endpoint("https://api.fluxrouter.ai/v1", "/images/generations"),
+            "https://api.fluxrouter.ai/v1/images/generations"
+        );
     }
 
     #[test]

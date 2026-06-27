@@ -775,7 +775,9 @@ impl AgentBootstrap {
         // arg defaults to `false` (opt-in only); a future config field at
         // `builtin_tools.image_gen.allow_pollinations_fallback` will surface
         // it to users without recompiling.
-        if let Some(b) = crate::tool_backends::image_gen::build_image_gen_backend(false) {
+        if let Some(b) =
+            crate::tool_backends::image_gen::build_image_gen_backend(&self.config, false)
+        {
             registry.register(Box::new(
                 wcore_tools::image_generation_tool::ImageGenerationTool::with_backend(b),
             ));
@@ -816,7 +818,7 @@ impl AgentBootstrap {
         // v0.9.0 W1 B2 — tts: OpenAI > ElevenLabs > (feature-gated piper).
         // Resolver returns None when no provider is configured; tool is then
         // hidden via `is_available() == false`.
-        if let Some(b) = crate::tool_backends::tts::build_tts_backend() {
+        if let Some(b) = crate::tool_backends::tts::build_tts_backend(&self.config) {
             registry.register(Box::new(wcore_tools::tts_tool::TtsTool::with_backend(b)));
         }
         // v0.9.0 W1 B10 — voice_mode: cpal-backed recorder + STT bridge.
