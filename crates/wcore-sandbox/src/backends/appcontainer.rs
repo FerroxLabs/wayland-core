@@ -23,7 +23,7 @@
 //!      SidsToDisable=[Administrators, Users, Authenticated Users]).
 //!   3. SetTokenInformation(TokenIntegrityLevel, S-1-16-4096 Low).
 //!   4. CreateJobObjectW + SetInformationJobObject:
-//!        - Extended limits: KILL_ON_JOB_CLOSE, ACTIVE_PROCESS=1,
+//!        - Extended limits: KILL_ON_JOB_CLOSE, ACTIVE_PROCESS=512,
 //!          DIE_ON_UNHANDLED_EXCEPTION, PRIORITY_CLASS=BELOW_NORMAL,
 //!          (BREAKAWAY_OK=0 / SILENT_BREAKAWAY_OK=0 default), plus
 //!          PROCESS_MEMORY / PROCESS_TIME from manifest if set.
@@ -68,7 +68,7 @@ mod windows_impl {
     use std::collections::BTreeMap;
     use std::ffi::OsStr;
     use std::mem;
-    use std::os::windows::ffi::OsStrExt;
+    use std::os::windows::ffi::{OsStrExt, OsStringExt};
     use std::ptr;
     use std::sync::{Mutex, OnceLock};
     use std::time::Duration;
@@ -203,30 +203,46 @@ mod windows_impl {
         out
     }
 
-    /// Allowlist of bare executable names the sandbox is permitted to spawn
-    /// without an absolute path. Restricted to canonical Windows shells so a
-    /// caller never accidentally pulls something from `PATH` whose resolution
-    /// is operator- or LLM-influenceable. Resolution goes through
-    /// `GetSystemDirectoryW` instead of `SearchPathW`, which always returns
-    /// `C:\Windows\System32` and excludes CWD/PATH from search.
+    /// Classification of a bare (non-absolute) `argv[0]`. Only `cmd` is
+    /// runnable under the Low-integrity restricted-token AppContainer; every
+    /// other shell is recognized solely so the resolver can return a clear,
+    /// actionable error instead of a cryptic `CreateProcessAsUserW 0x2`
+    /// (file-not-found, #323) or `0xC0000135` (DLL-not-found, #324) at spawn
+    /// time.
+    #[derive(PartialEq, Eq, Debug)]
+    enum BareShell {
+        /// `cmd` / `cmd.exe` — lives in `System32`, imports only the minimal
+        /// `System32` DLL set, and is the one shell that loads under this
+        /// sandbox token.
+        Cmd,
+        /// `powershell` / `pwsh` — NOT in `System32` (Windows PowerShell is in
+        /// `System32\WindowsPowerShell\v1.0\`, pwsh in `Program Files`), and
+        /// requires .NET / GAC assemblies that do not load under the Low-IL
+        /// restricted token (#324).
+        PowerShell,
+        /// `bash` / `sh` — git-bash needs `msys-2.0.dll` from `Program Files`,
+        /// and even static busybox-w32 links network/auth/UI DLLs the Low-IL
+        /// token cannot load (#324). Not resolvable from `System32` either.
+        Unsupported,
+    }
+
+    /// Classify a bare executable name against the canonical Windows shells.
+    /// Returns `None` for anything not recognized as a shell at all (those are
+    /// rejected with the generic "pass an absolute path" message). Resolution
+    /// of `cmd` goes through `GetSystemDirectoryW` (always `C:\Windows\System32`,
+    /// excluding CWD/PATH) — never `SearchPathW` — so a caller can never pull
+    /// something from `PATH` whose resolution is operator- or LLM-influenceable.
     ///
-    /// Both `cmd` and `cmd.exe` are accepted because Windows callers
-    /// conventionally omit `.exe` and rely on `PATHEXT` to resolve it; the
-    /// resolver appends `.exe` when it concatenates against `System32\`.
-    fn allowlisted_shell(name: &str) -> bool {
-        matches!(
-            name.to_ascii_lowercase().as_str(),
-            "cmd"
-                | "cmd.exe"
-                | "powershell"
-                | "powershell.exe"
-                | "pwsh"
-                | "pwsh.exe"
-                | "bash"
-                | "bash.exe"
-                | "sh"
-                | "sh.exe"
-        )
+    /// Both `cmd` and `cmd.exe` map to `Cmd` because Windows callers
+    /// conventionally omit `.exe`; the resolver appends it when concatenating
+    /// against `System32\`.
+    fn classify_bare_shell(name: &str) -> Option<BareShell> {
+        match name.to_ascii_lowercase().as_str() {
+            "cmd" | "cmd.exe" => Some(BareShell::Cmd),
+            "powershell" | "powershell.exe" | "pwsh" | "pwsh.exe" => Some(BareShell::PowerShell),
+            "bash" | "bash.exe" | "sh" | "sh.exe" => Some(BareShell::Unsupported),
+            _ => None,
+        }
     }
 
     /// Returns true for any UNC / device path: `\\server\share\…`, `\\?\…`,
@@ -271,7 +287,20 @@ mod windows_impl {
     /// Resolution rules:
     ///   * Absolute file → validated via `try_exists()` + `metadata()`,
     ///     returned widened.
-    ///   * Allowlisted bare shell → pinned to `C:\Windows\System32\<name>.exe`.
+    ///   * Bare `cmd` / `cmd.exe` → pinned to `C:\Windows\System32\cmd.exe`,
+    ///     whose existence is then validated (the bare-shell branch used to
+    ///     skip the existence check the absolute branch performs, so an
+    ///     unresolvable shell surfaced only as a cryptic spawn-time `0x2` —
+    ///     #323).
+    ///   * Bare `powershell` / `pwsh` → rejected with a clear message: these
+    ///     do NOT live in `System32` (the old code pinned them there, yielding
+    ///     `0x2`/file-not-found, #323) and cannot load their .NET/GAC
+    ///     dependencies under the Low-IL restricted-token AppContainer
+    ///     (`0xC0000135`, #324). The message names the real install locations
+    ///     and the supported alternative.
+    ///   * Bare `bash` / `sh` → rejected with a clear message: git-bash and
+    ///     busybox link DLLs the Low-IL token cannot load (#324), and they are
+    ///     not in `System32` to begin with.
     fn resolve_program(program: &str) -> Result<Vec<u16>> {
         if program.is_empty() {
             return Err(SandboxError::ExecFailed("argv[0] is empty".into()));
@@ -310,13 +339,43 @@ mod windows_impl {
                 }
             }
         }
-        if !allowlisted_shell(program) {
-            return Err(SandboxError::ExecFailed(format!(
-                "argv[0] {program:?} is not an absolute path and not in the AppContainer \
-                 shell allowlist (cmd.exe, powershell.exe, pwsh.exe, bash.exe, sh.exe). \
-                 Pass the absolute path to the executable."
-            )));
+        match classify_bare_shell(program) {
+            Some(BareShell::Cmd) => {}
+            Some(BareShell::PowerShell) => {
+                return Err(SandboxError::ExecFailed(format!(
+                    "argv[0] {program:?}: PowerShell is not supported under the Windows \
+                     AppContainer sandbox. powershell.exe lives in \
+                     C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\ and pwsh.exe in \
+                     C:\\Program Files\\PowerShell\\7\\ (neither is in System32), and both \
+                     require .NET / GAC assemblies that cannot load under the sandbox's \
+                     Low-integrity restricted token (they fail with STATUS_DLL_NOT_FOUND \
+                     0xC0000135). Use cmd as the sandbox shell, or pass an absolute path to \
+                     a sandbox-compatible executable."
+                )));
+            }
+            Some(BareShell::Unsupported) => {
+                return Err(SandboxError::ExecFailed(format!(
+                    "argv[0] {program:?}: this shell is not supported under the Windows \
+                     AppContainer sandbox. git-bash requires msys-2.0.dll from \
+                     C:\\Program Files\\Git, and even static busybox-w32 links \
+                     network/auth/UI DLLs (Secur32, WS2_32, bcrypt, USER32) that cannot \
+                     load under the sandbox's Low-integrity restricted token \
+                     (STATUS_DLL_NOT_FOUND 0xC0000135). Use cmd as the sandbox shell, or \
+                     pass an absolute path to a sandbox-compatible executable."
+                )));
+            }
+            None => {
+                return Err(SandboxError::ExecFailed(format!(
+                    "argv[0] {program:?} is not an absolute path and is not a recognized \
+                     sandbox shell. The only bare shell the AppContainer sandbox can run is \
+                     cmd (cmd.exe). Pass the absolute path to the executable."
+                )));
+            }
         }
+        // Bare `cmd` / `cmd.exe`: pin to System32\cmd.exe and validate it
+        // exists, mirroring the absolute-path branch's existence check so an
+        // unresolvable shell yields a descriptive error naming the path rather
+        // than a cryptic CreateProcessAsUserW 0x2 at spawn time (#323).
         let sysdir = system_directory()?;
         let mut buf = sysdir;
         if !buf.ends_with(&[b'\\' as u16]) {
@@ -328,6 +387,23 @@ mod windows_impl {
         if !program.to_ascii_lowercase().ends_with(".exe") {
             for u in OsStr::new(".exe").encode_wide() {
                 buf.push(u);
+            }
+        }
+        // Validate existence on the widened (NUL-free) path before returning.
+        let resolved = std::path::PathBuf::from(std::ffi::OsString::from_wide(&buf));
+        match resolved.try_exists() {
+            Ok(true) => {}
+            Ok(false) => {
+                return Err(SandboxError::ExecFailed(format!(
+                    "argv[0] {program:?} resolved to {} which does not exist",
+                    resolved.display()
+                )));
+            }
+            Err(e) => {
+                return Err(SandboxError::ExecFailed(format!(
+                    "argv[0] {program:?} resolved to {} which is unreadable: {e}",
+                    resolved.display()
+                )));
             }
         }
         buf.push(0);
@@ -408,6 +484,26 @@ mod windows_impl {
     /// `SECURITY_MANDATORY_LOW_RID` from the SDK — the SubAuthority of
     /// the Low Integrity Level SID (`S-1-16-4096`).
     const SECURITY_MANDATORY_LOW_RID: u32 = 0x1000;
+
+    /// Job Object `ActiveProcessLimit` — the maximum number of concurrently
+    /// active processes in the sandbox job (#321, #322). High enough for a
+    /// shell plus a parallel build's worker processes, low enough to bound a
+    /// runaway fork. This is NOT the primary fork-bomb guard: `KILL_ON_JOB_CLOSE`
+    /// plus the optional per-process memory cap are. It is a defense-in-depth
+    /// ceiling.
+    ///
+    /// The previous value of 1 was the root cause of BOTH #322 (the cap itself)
+    /// AND #321 (reported as "AppContainer cannot spawn child processes — Bash
+    /// runs only cmd builtins"). cmd.exe is process #1 in the job and is
+    /// assigned to the job before `ResumeThread`; with a cap of 1 every child
+    /// it tries to launch is process #2, which the kernel denies before the
+    /// child's image runs. cmd builtins (`echo`, `dir`) work because they
+    /// execute IN cmd's process; external programs (`git`, `node`, even
+    /// `cmd /c <abs cmd.exe> /c exit 42`) fail at the fork. #321's restricted-
+    /// token/CSRSS theory does not hold: the spawn is rejected by the job cap
+    /// before the child token is ever used, and the restricted token is left
+    /// untouched here so the `live_integrity.rs` boundary assertions still hold.
+    const SANDBOX_ACTIVE_PROCESS_LIMIT: u32 = 512;
 
     fn system_directory() -> Result<Vec<u16>> {
         let needed = unsafe { GetSystemDirectoryW(ptr::null_mut(), 0) };
@@ -976,7 +1072,7 @@ mod windows_impl {
             let mut limits: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = mem::zeroed();
             // Always-on hardening flags:
             //   KILL_ON_JOB_CLOSE        — child dies if engine drops job
-            //   ACTIVE_PROCESS=1         — fork-bomb prevention
+            //   ACTIVE_PROCESS=N         — runaway-fork cap (see below)
             //   DIE_ON_UNHANDLED_EXC.    — no WerFault popup
             //   PRIORITY_CLASS=BELOW_N.  — child can't starve the engine
             //   BREAKAWAY_OK=0           — CREATE_BREAKAWAY_FROM_JOB rejected
@@ -993,7 +1089,16 @@ mod windows_impl {
             // future Windows / driver toggles the default.
             limits.BasicLimitInformation.LimitFlags &=
                 !(JOB_OBJECT_LIMIT_BREAKAWAY_OK | JOB_OBJECT_LIMIT_SILENT_BREAKAWAY_OK);
-            limits.BasicLimitInformation.ActiveProcessLimit = 1;
+            // #322: an ActiveProcessLimit of 1 permits only the shell process
+            // and structurally blocks EVERY subprocess (git, node, npm, a
+            // parallel build), making the sandboxed Bash tool unusable for the
+            // build/run workflows it exists to serve. Raise the cap to a value
+            // high enough for normal command execution and parallel builds
+            // while still bounding a runaway fork. KILL_ON_JOB_CLOSE plus the
+            // optional PROCESS_MEMORY cap remain the meaningful fork-bomb
+            // guards (a fork bomb exhausts memory long before 512 PIDs), so the
+            // active-process cap can safely be raised off 1.
+            limits.BasicLimitInformation.ActiveProcessLimit = SANDBOX_ACTIVE_PROCESS_LIMIT;
             limits.BasicLimitInformation.PriorityClass = BELOW_NORMAL_PRIORITY_CLASS;
             if let Some(mem_bytes) = manifest.max_memory_bytes {
                 limits.BasicLimitInformation.LimitFlags |= JOB_OBJECT_LIMIT_PROCESS_MEMORY;
@@ -1366,7 +1471,39 @@ mod windows_impl {
                 )));
             }
             let stdout = drain_pipe(stdout_r.as_raw());
-            let stderr = drain_pipe(stderr_r.as_raw());
+            let mut stderr = drain_pipe(stderr_r.as_raw());
+
+            // #324: a child that loads a DLL the Low-IL restricted-token
+            // AppContainer cannot map (PowerShell's .NET/GAC, git-bash's
+            // msys-2.0.dll, busybox-w32's Secur32/WS2_32/bcrypt/USER32) dies at
+            // image initialization with NTSTATUS STATUS_DLL_NOT_FOUND and empty
+            // output — which surfaces to the user as "the command did nothing."
+            // Bare shells are rejected in `resolve_program`, but a caller can
+            // still reach here by passing such a shell as an ABSOLUTE path, so
+            // annotate the empty failure with an actionable diagnostic instead
+            // of leaving it silent. Annotate stderr (not an Err) so the exit
+            // code and any partial output are preserved for the caller.
+            const STATUS_DLL_NOT_FOUND: i32 = 0xC000_0135u32 as i32;
+            const STATUS_DLL_INIT_FAILED: i32 = 0xC000_0142u32 as i32;
+            if matches!(
+                exit_code as i32,
+                STATUS_DLL_NOT_FOUND | STATUS_DLL_INIT_FAILED
+            ) && stdout.is_empty()
+                && stderr.is_empty()
+            {
+                let hint = format!(
+                    "wcore-sandbox: the program exited at image initialization with \
+                     {ec:#010x} (STATUS_DLL_NOT_FOUND / STATUS_DLL_INIT_FAILED) and no \
+                     output. Under the Windows AppContainer sandbox's Low-integrity \
+                     restricted token, executables that depend on DLLs outside the minimal \
+                     System32 set (e.g. PowerShell's .NET/GAC assemblies, git-bash's \
+                     msys-2.0.dll, or even static busybox-w32's network/auth/UI imports) \
+                     cannot load. Use cmd as the sandbox shell, or run a sandbox-compatible \
+                     executable.\n",
+                    ec = exit_code,
+                );
+                stderr.extend_from_slice(hint.as_bytes());
+            }
 
             tracing::debug!(
                 target: "wcore_sandbox",
@@ -1933,9 +2070,53 @@ mod windows_impl {
             let err = resolve_program("notepad.exe").unwrap_err();
             let msg = format!("{err:?}");
             assert!(
-                msg.contains("not in the AppContainer shell allowlist"),
-                "expected allowlist rejection, got {msg}"
+                msg.contains("not a recognized") && msg.contains("Pass the absolute path"),
+                "expected unrecognized-shell rejection, got {msg}"
             );
+        }
+
+        #[test]
+        fn classify_bare_shell_buckets() {
+            assert_eq!(classify_bare_shell("cmd"), Some(BareShell::Cmd));
+            assert_eq!(classify_bare_shell("CMD.EXE"), Some(BareShell::Cmd));
+            assert_eq!(
+                classify_bare_shell("powershell"),
+                Some(BareShell::PowerShell)
+            );
+            assert_eq!(classify_bare_shell("pwsh.exe"), Some(BareShell::PowerShell));
+            assert_eq!(classify_bare_shell("bash"), Some(BareShell::Unsupported));
+            assert_eq!(classify_bare_shell("sh.exe"), Some(BareShell::Unsupported));
+            assert_eq!(classify_bare_shell("notepad.exe"), None);
+        }
+
+        #[test]
+        fn resolve_program_bare_powershell_rejected_with_actionable_message() {
+            // #323/#324: bare powershell/pwsh used to be pinned to System32
+            // (wrong path → cryptic 0x2) and would fail to load under the
+            // Low-IL token anyway (0xC0000135). Now rejected up front with a
+            // message that names the real locations and the cause.
+            for shell in ["powershell", "powershell.exe", "pwsh", "pwsh.exe"] {
+                let err = resolve_program(shell).unwrap_err();
+                let msg = format!("{err:?}");
+                assert!(
+                    msg.contains("PowerShell is not supported") && msg.contains("0xC0000135"),
+                    "expected actionable PowerShell rejection for {shell}, got {msg}"
+                );
+            }
+        }
+
+        #[test]
+        fn resolve_program_bare_bash_rejected_with_actionable_message() {
+            // #324: git-bash/busybox cannot load under the sandbox token.
+            for shell in ["bash", "bash.exe", "sh", "sh.exe"] {
+                let err = resolve_program(shell).unwrap_err();
+                let msg = format!("{err:?}");
+                assert!(
+                    msg.contains("not supported under the Windows AppContainer sandbox")
+                        && msg.contains("0xC0000135"),
+                    "expected actionable bash rejection for {shell}, got {msg}"
+                );
+            }
         }
 
         #[test]
