@@ -1871,6 +1871,49 @@ mod windows_impl {
             assert_eq!(quote_arg("hello"), "hello");
         }
 
+        // ---------- DACL grant/deny skip absent paths (#321-324 field fix) ----------
+
+        // A path that does not exist must be skipped, not treated as a hard
+        // failure: the local allowlist intentionally includes optional dev
+        // caches (~/.cache, ~/.cargo, ~/.npm, ~/.rustup) that are absent on
+        // non-developer machines. Before the fix, `GetNamedSecurityInfoW`
+        // returned ERROR_FILE_NOT_FOUND (0x2) for these, aborting every
+        // sandboxed command. The skip happens before the SID is ever used, so a
+        // null SID is safe here and proves we never reach the Win32 ACL calls.
+        #[test]
+        fn grant_skips_nonexistent_path_instead_of_failing() {
+            let missing =
+                std::path::PathBuf::from(r"C:\__wcore_nonexistent_grant_target__\nope.txt");
+            assert!(!missing.exists(), "test precondition: path must not exist");
+            let granted =
+                unsafe { grant_appcontainer_dacl(&[missing], std::ptr::null_mut(), ACL_READ_MASK) };
+            assert!(
+                granted.is_ok(),
+                "missing grant target must be skipped, got error: {:?}",
+                granted.as_ref().err()
+            );
+            assert!(
+                granted.unwrap().is_empty(),
+                "an absent path must not be reported as granted"
+            );
+        }
+
+        #[test]
+        fn deny_skips_nonexistent_path_instead_of_failing() {
+            let missing = std::path::PathBuf::from(r"C:\__wcore_nonexistent_deny_target__\secret");
+            assert!(!missing.exists(), "test precondition: path must not exist");
+            let denied = unsafe { deny_appcontainer_dacl(&[missing], std::ptr::null_mut()) };
+            assert!(
+                denied.is_ok(),
+                "missing deny target must be skipped, got error: {:?}",
+                denied.as_ref().err()
+            );
+            assert!(
+                denied.unwrap().is_empty(),
+                "an absent path must not be reported as denied"
+            );
+        }
+
         // ---------- acl_path_is_safe (R61 filesystem grants) ----------
 
         #[test]
