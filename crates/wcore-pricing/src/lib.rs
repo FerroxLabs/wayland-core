@@ -47,11 +47,23 @@ pub struct PricingCatalog {
 
 impl PricingCatalog {
     pub fn load_default() -> Result<Self, PricingError> {
-        if let Ok(path) = std::env::var("WAYLAND_PRICING_PATH") {
-            let raw = std::fs::read_to_string(&path)?;
-            return Ok(toml::from_str(&raw)?);
-        }
-        Ok(toml::from_str(BUNDLED_PRICING_TOML)?)
+        let raw = if let Ok(path) = std::env::var("WAYLAND_PRICING_PATH") {
+            std::fs::read_to_string(&path)?
+        } else {
+            BUNDLED_PRICING_TOML.to_string()
+        };
+        Self::from_toml_str(&raw)
+    }
+
+    /// Parse a catalog from a TOML string. Deserializes directly into the
+    /// provider→model map instead of going through `PricingCatalog`'s
+    /// `#[serde(flatten)]`, which the `toml` crate mishandles for
+    /// externally-supplied catalogs: a perfectly valid `WAYLAND_PRICING_PATH`
+    /// file whose first line is a bare `[provider.model]` table otherwise
+    /// fails to load with a spurious "TOML parse error at line 1, column 1".
+    pub fn from_toml_str(raw: &str) -> Result<Self, PricingError> {
+        let providers: HashMap<String, HashMap<String, ModelPrice>> = toml::from_str(raw)?;
+        Ok(Self { providers })
     }
 
     pub fn get(&self, provider: &str, model: &str) -> Result<&ModelPrice, PricingError> {
@@ -59,7 +71,21 @@ impl PricingCatalog {
             .providers
             .get(provider)
             .ok_or_else(|| PricingError::UnknownProvider(provider.into()))?;
-        prov.get(model).ok_or_else(|| PricingError::UnknownModel {
+        if let Some(p) = prov.get(model) {
+            return Ok(p);
+        }
+        // Live API model slugs use dots in the version segment
+        // (`gemini-2.5-flash`) while catalog keys use dashes
+        // (`gemini-2-5-flash`). Retry with dots→dashes so a dotted slug still
+        // resolves. Exact match is tried first, so dotted catalog keys
+        // (e.g. `gpt-4.1-mini`) are unaffected.
+        let normalized = model.replace('.', "-");
+        if normalized != model
+            && let Some(p) = prov.get(&normalized)
+        {
+            return Ok(p);
+        }
+        Err(PricingError::UnknownModel {
             provider: provider.into(),
             model: model.into(),
         })
@@ -203,6 +229,36 @@ pub static DEFAULT_CATALOG: Lazy<PricingCatalog> = Lazy::new(|| {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // Regression (#4): a custom catalog whose FIRST line is a bare
+    // `[provider.model]` table (no leading comment) must parse. The old
+    // `#[serde(flatten)]` load path failed here with "parse error line 1".
+    #[test]
+    fn from_toml_str_parses_leading_bare_table() {
+        let raw = "[anthropic.claude-opus-4-7]\ninput_per_mtok_usd = 5.0\noutput_per_mtok_usd = 25.0\n\n[openai.gpt-4o]\ninput_per_mtok_usd = 2.5\noutput_per_mtok_usd = 10.0\n";
+        let cat = PricingCatalog::from_toml_str(raw).expect("leading-table catalog parses");
+        assert_eq!(cat.providers.len(), 2);
+        assert!(cat.get("anthropic", "claude-opus-4-7").is_ok());
+    }
+
+    // Regression (#1): a dotted live API slug must resolve to the dashed
+    // catalog key. Exact match still wins for genuinely-dotted keys.
+    #[test]
+    fn dotted_api_slug_resolves_to_dashed_key() {
+        let raw = "[gemini.gemini-2-5-flash]\ninput_per_mtok_usd = 0.30\noutput_per_mtok_usd = 2.50\n\n[openai.\"gpt-4.1-mini\"]\ninput_per_mtok_usd = 0.40\noutput_per_mtok_usd = 1.60\n";
+        let cat = PricingCatalog::from_toml_str(raw).unwrap();
+        // dotted lookup resolves to the dashed key
+        assert!(cat.get("gemini", "gemini-2.5-flash").is_ok());
+        // exact (dashed) still works
+        assert!(cat.get("gemini", "gemini-2-5-flash").is_ok());
+        // a genuinely-dotted catalog key is matched exactly (not mangled)
+        assert!(cat.get("openai", "gpt-4.1-mini").is_ok());
+        // a real miss still errors
+        assert!(matches!(
+            cat.get("gemini", "ghost-9"),
+            Err(PricingError::UnknownModel { .. })
+        ));
+    }
 
     fn fixture_catalog() -> PricingCatalog {
         let raw = r#"

@@ -106,11 +106,19 @@ pub fn responses_api_override(model: &str, override_flag: Option<bool>) -> bool 
 }
 
 /// True when the model accepts an explicit `temperature`. False for the
-/// `o1*` / `o3*` reasoning families (which fix `temperature` at `1.0`),
+/// `o1*` / `o3*` reasoning families (which fix `temperature` at `1.0`) and
+/// Anthropic's Opus 4.x reasoning models (which reject an explicit value),
 /// true everywhere else — including `gpt-5*`, which still honors it.
 pub fn accepts_temperature(model: &str) -> bool {
     let m = lower(model);
-    !is_o_series(&m)
+    !is_o_series(&m) && !is_temperature_locked(&m)
+}
+
+/// Models that reject an explicit `temperature` outside the OpenAI o-series.
+/// Anthropic's Opus 4.x family returns HTTP 400 "temperature is deprecated
+/// for this model" when a value is sent, so it must be omitted for them.
+fn is_temperature_locked(lower_model: &str) -> bool {
+    lower_model.contains("opus-4")
 }
 
 /// Crucible #3: emit `body["temperature"]` for the request, but only when ALL
@@ -396,6 +404,22 @@ mod tests {
     #[test]
     fn accepts_temperature_o1_is_false() {
         assert!(!accepts_temperature("o1"));
+    }
+
+    // Anthropic Opus 4.x rejects an explicit temperature (HTTP 400).
+    #[test]
+    fn accepts_temperature_opus_4x_is_false() {
+        assert!(!accepts_temperature("claude-opus-4-7"));
+        assert!(!accepts_temperature("claude-opus-4-6"));
+        assert!(!accepts_temperature("claude-opus-4-8"));
+        assert!(!accepts_temperature("anthropic/claude-opus-4-7"));
+    }
+
+    // Sonnet/Haiku still honor temperature — only Opus 4.x is locked.
+    #[test]
+    fn accepts_temperature_non_opus_claude_is_true() {
+        assert!(accepts_temperature("claude-sonnet-4-6"));
+        assert!(accepts_temperature("claude-haiku-4-5"));
     }
 
     #[test]
