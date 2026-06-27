@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.12.12](https://github.com/FerroxLabs/wayland-core/compare/v0.12.11...v0.12.12) (2026-06-27)
+
+### Crucible reliability & cost accuracy
+
+This release hardens the Crucible (Mixture-of-Providers) council and the pricing engine behind it — every fix here was found by putting Crucible through a live, cross-vendor proof run and watching where it strained.
+
+- **Bring-your-own pricing catalogs now load.** A custom `WAYLAND_PRICING_PATH` catalog parses reliably, so you can price any model the bundled catalog doesn't yet cover — and Crucible can certify a real spend ceiling against it.
+- **Accurate Gemini pricing.** Gemini's live API slugs (e.g. `gemini-2.5-flash`) now resolve to the catalog correctly, so Gemini members are priced — and counted — when Crucible assembles a cost-diverse council.
+- **Broader Opus support in councils.** Anthropic's Opus 4.x models, which decline an explicit sampling temperature, are now handled cleanly both as proposers and as the fusing judge.
+
+Backed by new regression tests across `wcore-pricing` and `wcore-providers`.
+
 ## [0.12.11](https://github.com/FerroxLabs/wayland-core/compare/v0.12.10...v0.12.11) (2026-06-27)
 
 This release is headlined by **Crucible**, our cross-provider Mixture-of-Providers council — wayland-core's answer to single-model ceilings — folded together with two audited reliability and security fixes.
