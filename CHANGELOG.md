@@ -2,16 +2,21 @@
 
 ## [0.12.13](https://github.com/FerroxLabs/wayland-core/compare/v0.12.12...v0.12.13) (2026-06-27)
 
-### Reliability & hygiene
+A reliability-focused release: a new **capability-first tools gate** so models that can't do function calling degrade gracefully instead of failing the turn, a major Windows sandbox fix, and a round of audited provider- and config-layer hardening.
 
-A focused round of audited fixes across the sandbox, provider runtime, and configuration surface.
+### Highlights
 
-- **Windows sandbox runs real subprocesses again.** The AppContainer backend no longer caps active processes too aggressively (`ActiveProcessLimit` raised to 512), resolves the launch shell correctly, and emits clearer diagnostics when a shell can't be found. ([#321](https://github.com/FerroxLabs/wayland-core/issues/321), [#322](https://github.com/FerroxLabs/wayland-core/issues/322), [#323](https://github.com/FerroxLabs/wayland-core/issues/323), [#324](https://github.com/FerroxLabs/wayland-core/issues/324))
+- **Tool-incapable models just work now — across local and cloud backends.** Point Wayland Core at a model that doesn't support function calling and the turn no longer dies on a raw provider error. Ollama models are detected up front via `/api/show` and have their `tools` array dropped before the request is even sent. Any backend that rejects tools with a `400` — llama.cpp started without `--jinja` (`tools param requires --jinja flag`), or an Ollama model that 400s with `does not support tools` — is caught, retried without tools, and **remembered**, so every later turn for that model skips tools pre-emptively. Tool-incapable Bedrock models (DeepSeek-R1 reasoning, Stability image, Titan/Cohere embedding) are name-gated the same way. Tool-*capable* models are unaffected — they keep their tools and call them exactly as before. ([#389](https://github.com/FerroxLabs/wayland-core/issues/389))
+- **The Windows sandbox runs real subprocesses again.** The AppContainer backend no longer caps active processes too aggressively (`ActiveProcessLimit` raised to 512), resolves the launch shell correctly, and emits clearer diagnostics when a shell can't be found — so multi-step tool use works under the sandbox on Windows. ([#321](https://github.com/FerroxLabs/wayland-core/issues/321), [#322](https://github.com/FerroxLabs/wayland-core/issues/322), [#323](https://github.com/FerroxLabs/wayland-core/issues/323), [#324](https://github.com/FerroxLabs/wayland-core/issues/324))
+
+### Provider reliability
+
 - **Anthropic errors are classified correctly.** Non-credit Anthropic API errors are no longer misread as out-of-credit / billing failures, so genuine transient errors surface instead of a misleading "purchase credits" signal. ([#329](https://github.com/FerroxLabs/wayland-core/issues/329))
-- **Tool-incapable local models are handled gracefully (Ollama, llama.cpp, and other local backends).** Models that don't support function calling no longer fail the turn. An Ollama model is detected up front via `/api/show` and its `tools` array is dropped before the request is sent; any backend that rejects tools with a 400 — e.g. llama.cpp started without `--jinja` (`tools param requires --jinja flag`), or an Ollama model that 400s with `does not support tools` — is caught reactively, retried without tools, and remembered so subsequent turns drop tools pre-emptively. ([#389](https://github.com/FerroxLabs/wayland-core/issues/389))
-- **Bedrock non-tool models degrade to text instead of failing.** Tool-incapable Bedrock models (DeepSeek-R1 reasoning, Stability image, Titan/Cohere embedding) are name-gated so a `tools` block is dropped rather than triggering a `ValidationException` that kills the turn.
-- **Config hygiene.** `env_passthrough` is now wired through, unknown configuration keys produce a warning (via `serde_ignored`) instead of being silently dropped, and the sandbox configuration surface is exposed as a toggle. ([#325](https://github.com/FerroxLabs/wayland-core/issues/325), [#326](https://github.com/FerroxLabs/wayland-core/issues/326), [#327](https://github.com/FerroxLabs/wayland-core/issues/327))
 - **Flux reasoning summaries render as thinking.** A FluxRouter `reasoning_summary` is now decoded into a per-turn thinking subject, so reasoning summaries appear as proper thinking content. ([#318](https://github.com/FerroxLabs/wayland-core/issues/318))
+
+### Configuration & hygiene
+
+- **Config surface tightened.** `env_passthrough` is now wired through, unknown configuration keys produce a warning (via `serde_ignored`) instead of being silently dropped, and the sandbox configuration surface is exposed as a toggle. ([#325](https://github.com/FerroxLabs/wayland-core/issues/325), [#326](https://github.com/FerroxLabs/wayland-core/issues/326), [#327](https://github.com/FerroxLabs/wayland-core/issues/327))
 
 ## [0.12.12](https://github.com/FerroxLabs/wayland-core/compare/v0.12.11...v0.12.12) (2026-06-27)
 
