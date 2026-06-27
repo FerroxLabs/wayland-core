@@ -17,9 +17,10 @@
 use std::sync::Arc;
 
 use wcore_agent::orchestration::council::{
-    AssemblyPlan, CouncilApprover, CouncilDecision, CouncilOutcome, CouncilOverrides,
-    CouncilProviderResolver, CouncilRunResult, DEFAULT_PROPOSER_MAX_TOKENS, GateConfig, Roster,
-    Stakes, classify_task, drive_council, log_assembly, run_council, validate_and_build,
+    AssemblyPlan, COUNCIL_PROPOSER_SYSTEM_PROMPT, CouncilApprover, CouncilDecision, CouncilOutcome,
+    CouncilOverrides, CouncilProviderResolver, CouncilRunResult, DEFAULT_PROPOSER_MAX_TOKENS,
+    GateConfig, ProposerSpec, Roster, Stakes, classify_task, drive_council, log_assembly,
+    run_council, validate_and_build,
 };
 use wcore_agent::spawner::{AgentSpawner, SubAgentConfig};
 use wcore_config::config::{CliArgs, Config, ConfigFile, load_merged_config_file};
@@ -98,31 +99,55 @@ fn resolve_council_mode(cfg: &CrucibleConfig, args: &CrucibleArgs) -> anyhow::Re
 /// `Terminal` prints it and stops (the read-only surface). `Advisor` wraps it in
 /// the advisory envelope and runs the normal TRUSTED main agent loop over it —
 /// the council already produced `final_text` through the same gate/budget/
-/// approval path, so only the SINK changes here.
-async fn consume_outcome(mode: CouncilMode, task: &str, final_text: &str) -> anyhow::Result<()> {
+/// approval path, so only the SINK changes here. `session_cfg` is the resolved
+/// SESSION-DEFAULT config the advisor follow-on runs under (honoring the user's
+/// config-file model/max-tokens/etc., not a throwaway default).
+async fn consume_outcome(
+    mode: CouncilMode,
+    session_cfg: &Config,
+    task: &str,
+    final_text: &str,
+) -> anyhow::Result<()> {
     match mode {
         CouncilMode::Terminal => {
             println!("{final_text}");
             Ok(())
         }
-        CouncilMode::Advisor => run_advisor_loop(task, final_text).await,
+        CouncilMode::Advisor => run_advisor_loop(session_cfg, task, final_text).await,
     }
 }
 
-/// Advisor sink: inject the fused synthesis as private guidance at the TAIL of
-/// the user turn (cache-preserving) and run the normal trusted main agent loop.
+/// Advisor sink: inject the fused synthesis as fenced private guidance at the
+/// TAIL of the user turn and run the normal trusted main agent loop.
 ///
 /// This is the trusted main loop — NOT a read-only council sub-agent. Advisor
 /// mode's whole point is that the full-tool main agent acts on the synthesis,
 /// exactly as if the operator pasted the council answer back into a session.
-/// The council itself stayed read-only + fenced (unchanged); only the consumer
-/// is the trusted loop.
-async fn run_advisor_loop(task: &str, final_text: &str) -> anyhow::Result<()> {
+/// The council itself stayed read-only + fenced (unchanged); the synthesis is
+/// re-fenced as `[UNTRUSTED DATA]` for the trusted loop (`build_advisor_turn`).
+///
+/// `session_cfg` is the resolved SESSION-DEFAULT config — the advisor runs under
+/// the user's config (model/max-tokens/etc.), not a throwaway `CliArgs::default`.
+///
+/// NOTE (Crucible cost cap): this follow-on is a NORMAL agent run bounded by the
+/// usual session budget guards, NOT the `[crucible]` cost cap. That is
+/// intentional — the crucible cap covers the COUNCIL spend; the advisor follow-on
+/// is an ordinary agent turn under ordinary caps.
+async fn run_advisor_loop(
+    session_cfg: &Config,
+    task: &str,
+    final_text: &str,
+) -> anyhow::Result<()> {
     use wcore_agent::orchestration::council::build_advisor_turn;
 
-    // The trusted main loop resolves against the SESSION DEFAULT provider/model
-    // (the council members are pinned independently and already ran).
-    let config = Config::resolve(&CliArgs::default())?;
+    // Crucible #5: an empty/whitespace synthesis is nothing to act on — skip the
+    // whole main-loop turn rather than spend a turn over an empty advisory.
+    if final_text.trim().is_empty() {
+        eprintln!("crucible: advisor — empty synthesis, skipping the follow-on loop (no spend).");
+        return Ok(());
+    }
+
+    let config = session_cfg.clone();
     wcore_agent::egress::install_egress_policy(&config);
 
     let cwd = std::env::current_dir()
@@ -137,30 +162,39 @@ async fn run_advisor_loop(task: &str, final_text: &str) -> anyhow::Result<()> {
     let mut engine = result.engine;
     engine.init_session("crucible-advisor", &cwd, None)?;
 
-    // Cache-preserving: the advisory rides at the tail of the user turn so the
-    // main loop's cached prefix (the original task) stays byte-stable.
+    // The advisory rides at the tail of the user turn (the original task stays
+    // the prefix), equivalent to a user pasting the council answer below their
+    // request. The prefix is byte-stable, but the advisor runs in a FRESH
+    // session so there is no warmed prompt cache to preserve here.
     let user_turn = build_advisor_turn(task, final_text);
-    let run = engine
+    let run_result = engine
         .run(&user_turn, "")
         .await
-        .map_err(|e| anyhow::anyhow!("advisor loop failed: {e}"))?;
-    // The TerminalSink already streamed the answer during the run; close the
-    // turn the same way the headless `-p` path does (no double-print of text).
-    output.emit_stream_end(
-        "",
-        run.turns,
-        run.usage.input_tokens,
-        run.usage.output_tokens,
-        run.usage.cache_creation_tokens,
-        run.usage.cache_read_tokens,
-        run.finish_reason,
-    );
-    engine.run_stop_hooks().await;
+        .map_err(|e| anyhow::anyhow!("advisor loop failed: {e}"));
 
+    // Crucible #6: cleanup (stop hooks + stream-end + MCP shutdown) must run on
+    // BOTH the success and error paths — a bare `?` on the run would skip them
+    // and leak MCP child processes. Emit the close only on success (a failed run
+    // has no usage to report), but always run hooks + shutdown.
+    if let Ok(run) = &run_result {
+        // The TerminalSink already streamed the answer during the run; close the
+        // turn the same way the headless `-p` path does (no double-print).
+        output.emit_stream_end(
+            "",
+            run.turns,
+            run.usage.input_tokens,
+            run.usage.output_tokens,
+            run.usage.cache_creation_tokens,
+            run.usage.cache_read_tokens,
+            run.finish_reason,
+        );
+    }
+    engine.run_stop_hooks().await;
     for mgr in &result.mcp_managers {
         mgr.shutdown().await;
     }
-    Ok(())
+
+    run_result.map(|_| ())
 }
 
 /// Whether the auto Assembler should choose the roster (vs the manual path).
@@ -305,6 +339,11 @@ pub async fn run_crucible(args: CrucibleArgs) -> anyhow::Result<()> {
             ..CliArgs::default()
         })?
     };
+    // The advisor follow-on (if mode == Advisor) runs the trusted main loop on the
+    // SESSION DEFAULT provider/model — NOT the proposer-pinned `base` above. Resolve
+    // it once and thread it into `consume_outcome` so the follow-on honors the
+    // user's config-file model/max-tokens/etc.
+    let session_cfg = Config::resolve(&CliArgs::default())?;
     wcore_agent::egress::install_egress_policy(&base);
     let provider = wcore_agent::bootstrap::create_provider_with_oauth(&base)?;
 
@@ -322,7 +361,7 @@ pub async fn run_crucible(args: CrucibleArgs) -> anyhow::Result<()> {
         && let CouncilDecision::Direct { reason } =
             classify_task(&args.task, &GateConfig::default())
     {
-        return run_direct(&args.task, &roster, &spawner, &reason, mode).await;
+        return run_direct(&args.task, &roster, &spawner, &reason, mode, &session_cfg).await;
     }
 
     eprintln!(
@@ -340,7 +379,7 @@ pub async fn run_crucible(args: CrucibleArgs) -> anyhow::Result<()> {
         .map_err(|e| anyhow::anyhow!("council failed: {e}"))?;
 
     eprint!("{}", render_provenance(&outcome));
-    consume_outcome(mode, &args.task, &outcome.final_text).await
+    consume_outcome(mode, &session_cfg, &args.task, &outcome.final_text).await
 }
 
 /// The AUTO path: the Assembler chooses the roster from the keyed candidate pool.
@@ -417,13 +456,15 @@ async fn run_crucible_auto(
     {
         CouncilRunResult::Direct { spec, text } => {
             eprintln!("crucible: direct answer via {spec}");
-            consume_outcome(mode, &args.task, &text).await?;
+            // `base` is the SESSION DEFAULT config (auto premise: no roster pinned),
+            // so it is the right config for the advisor follow-on.
+            consume_outcome(mode, &base, &args.task, &text).await?;
         }
         CouncilRunResult::Council { plan, outcome } => {
             // Privacy-safe preference signal (opt-in; family-mix + cost only).
             log_assembly(&plan, &outcome.spend, &cf.crucible, None);
             eprint!("{}", render_provenance(&outcome));
-            consume_outcome(mode, &args.task, &outcome.final_text).await?;
+            consume_outcome(mode, &base, &args.task, &outcome.final_text).await?;
         }
         CouncilRunResult::Cancelled => {
             eprintln!("crucible: cancelled — no spend.");
@@ -529,6 +570,7 @@ async fn run_direct(
     spawner: &AgentSpawner,
     reason: &str,
     mode: CouncilMode,
+    session_cfg: &Config,
 ) -> anyhow::Result<()> {
     let first = roster
         .proposers
@@ -540,22 +582,32 @@ async fn run_direct(
     );
 
     let result = spawner
-        .spawn_one(SubAgentConfig {
-            name: first.spec.clone(),
-            prompt: task.to_string(),
-            max_turns: roster.proposer_max_turns,
-            max_tokens: DEFAULT_PROPOSER_MAX_TOKENS,
-            system_prompt: None,
-            provider: Some(first.spec.clone()),
-            model: first.model.clone(),
-            // Crucible #3: the gated direct path is a single proposer-tier call.
-            temperature: Some(roster.proposer_temperature),
-        })
+        .spawn_one(direct_subagent_config(task, roster, first))
         .await;
     if result.is_error {
         anyhow::bail!("direct call failed: {}", result.text);
     }
-    consume_outcome(mode, task, &result.text).await
+    consume_outcome(mode, session_cfg, task, &result.text).await
+}
+
+/// Build the `SubAgentConfig` for the gated MANUAL direct path. Factored out so
+/// the prompt-isolation choice is unit-testable without spawning.
+///
+/// Crucible #2 (trimming): the direct child is a single proposer-tier call, so
+/// it MUST carry the minimal council proposer prompt — `None` would inherit the
+/// full multi-K-token host system prompt (the bug this fixes).
+fn direct_subagent_config(task: &str, roster: &Roster, first: &ProposerSpec) -> SubAgentConfig {
+    SubAgentConfig {
+        name: first.spec.clone(),
+        prompt: task.to_string(),
+        max_turns: roster.proposer_max_turns,
+        max_tokens: DEFAULT_PROPOSER_MAX_TOKENS,
+        system_prompt: Some(COUNCIL_PROPOSER_SYSTEM_PROMPT.to_string()),
+        provider: Some(first.spec.clone()),
+        model: first.model.clone(),
+        // Crucible #3: the gated direct path is a single proposer-tier call.
+        temperature: Some(roster.proposer_temperature),
+    }
 }
 
 #[cfg(test)]
@@ -580,6 +632,28 @@ mod tests {
             },
             latency_ms: 12,
         }
+    }
+
+    #[test]
+    fn direct_subagent_config_carries_minimal_council_prompt() {
+        // Crucible #2 (trimming): the gated MANUAL direct child must NOT inherit
+        // the host system prompt — it carries the minimal council proposer prompt.
+        let roster = validate_and_build(&CrucibleConfig {
+            enabled: true,
+            proposers: vec!["openai:gpt-5".to_string()],
+            ..Default::default()
+        })
+        .expect("valid single-proposer roster");
+        let first = roster.proposers.first().unwrap();
+        let sub = direct_subagent_config("do the thing", &roster, first);
+        assert_eq!(
+            sub.system_prompt.as_deref(),
+            Some(COUNCIL_PROPOSER_SYSTEM_PROMPT),
+            "direct child must carry the minimal council prompt, not None"
+        );
+        assert_eq!(sub.prompt, "do the thing");
+        assert_eq!(sub.provider.as_deref(), Some("openai:gpt-5"));
+        assert_eq!(sub.temperature, Some(roster.proposer_temperature));
     }
 
     #[test]

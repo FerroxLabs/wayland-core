@@ -39,7 +39,7 @@ pub const DEFAULT_PROPOSER_MAX_TOKENS: u32 = 4096;
 /// system prompt the child would otherwise inherit via `child_config`. Avoids
 /// re-billing the multi-K-token host prompt × N members and leaking host tool
 /// scaffolding cross-provider (orphan-tool 400s). See spec §1.
-pub(crate) const COUNCIL_PROPOSER_SYSTEM_PROMPT: &str = "You are an expert council member. Answer the user's TASK directly, \
+pub const COUNCIL_PROPOSER_SYSTEM_PROMPT: &str = "You are an expert council member. Answer the user's TASK directly, \
      concisely, and on its own merits. Do not assume any host tools, project \
      context, or prior conversation beyond the TASK text.";
 

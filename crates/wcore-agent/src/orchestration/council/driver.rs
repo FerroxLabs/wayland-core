@@ -12,7 +12,7 @@ use crate::spawner::{AgentSpawner, SubAgentConfig};
 use super::assembler::{AssemblyPlan, AssemblyPolicy, assemble};
 use super::gate::{CouncilDecision, GateConfig, Stakes, classify_task};
 use super::plan_card::plan_to_card;
-use super::roster::{ProposerSpec, Roster};
+use super::roster::{ProposerSpec, Roster, clamp_temperature};
 use super::run::{
     COUNCIL_PROPOSER_SYSTEM_PROMPT, CouncilOutcome, DEFAULT_PROPOSER_MAX_TOKENS, run_council,
 };
@@ -201,8 +201,9 @@ pub fn roster_from_plan(
         max_cost_usd: None,
         flux_markup: cfg.flux_markup,
         daily_cap_usd: cfg.daily_cap_usd,
-        proposer_temperature: cfg.proposer_temperature,
-        aggregator_temperature: cfg.aggregator_temperature,
+        // Crucible #3: clamp to the accepted band (same as the manual roster).
+        proposer_temperature: clamp_temperature(cfg.proposer_temperature),
+        aggregator_temperature: clamp_temperature(cfg.aggregator_temperature),
     }
 }
 
@@ -230,7 +231,7 @@ async fn execute_assembled(
                 provider: Some(spec.clone()),
                 model: spec.split_once(':').map(|(_, m)| m.to_string()),
                 // Crucible #3: the Direct path is a single proposer-tier call.
-                temperature: Some(cfg.proposer_temperature),
+                temperature: Some(clamp_temperature(cfg.proposer_temperature)),
             })
             .await;
         if result.is_error {

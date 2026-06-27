@@ -156,9 +156,24 @@ pub fn validate_and_build(cfg: &CrucibleConfig) -> Result<Roster, CrucibleConfig
         max_cost_usd: cfg.max_cost_usd,
         flux_markup: cfg.flux_markup,
         daily_cap_usd: cfg.daily_cap_usd,
-        proposer_temperature: cfg.proposer_temperature,
-        aggregator_temperature: cfg.aggregator_temperature,
+        // Crucible #3: clamp temperatures to the provider-accepted band. A
+        // non-finite (NaN/±inf) or out-of-range config value would otherwise be
+        // forwarded raw to the wire and rejected (or silently mishandled) by the
+        // provider; clamping keeps the council runnable on a sane value.
+        proposer_temperature: clamp_temperature(cfg.proposer_temperature),
+        aggregator_temperature: clamp_temperature(cfg.aggregator_temperature),
     })
+}
+
+/// Sanitize a configured sampling temperature into the accepted `0.0..=2.0`
+/// band. Non-finite (NaN / ±inf) values collapse to `0.0`; finite values are
+/// clamped to the band. Centralized so every council path (manual roster + auto
+/// `roster_from_plan` + the auto direct spawn) sanitizes temps identically.
+pub(crate) fn clamp_temperature(t: f32) -> f32 {
+    if !t.is_finite() {
+        return 0.0;
+    }
+    t.clamp(0.0, 2.0)
 }
 
 #[cfg(test)]
@@ -189,6 +204,25 @@ mod tests {
         assert!(r.proposers[0].model.is_none());
         assert_eq!(r.proposers[1].provider, "anthropic");
         assert_eq!(r.proposers[1].model.as_deref(), Some("claude-opus-4-8"));
+    }
+
+    #[test]
+    fn temperatures_are_clamped_to_sane_band() {
+        // Crucible #3: NaN/negative/>2.0 config temps must be sanitized so a bad
+        // value never reaches the wire.
+        assert_eq!(clamp_temperature(f32::NAN), 0.0);
+        assert_eq!(clamp_temperature(f32::INFINITY), 0.0);
+        assert_eq!(clamp_temperature(-0.5), 0.0);
+        assert_eq!(clamp_temperature(3.5), 2.0);
+        assert!((clamp_temperature(0.7) - 0.7).abs() < 1e-6);
+
+        // End-to-end through the roster builder: an out-of-range config is clamped.
+        let mut c = cfg(&["openai"]);
+        c.proposer_temperature = 9.0;
+        c.aggregator_temperature = f32::NAN;
+        let r = validate_and_build(&c).expect("ok");
+        assert!((r.proposer_temperature - 2.0).abs() < 1e-6);
+        assert_eq!(r.aggregator_temperature, 0.0);
     }
 
     #[test]
