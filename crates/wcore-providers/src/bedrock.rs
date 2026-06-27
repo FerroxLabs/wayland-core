@@ -50,6 +50,33 @@ pub enum AwsCredentials {
     Environment,
 }
 
+/// Bedrock model-id substrings whose models cannot do tool / function calling.
+/// Sending a `tools` block to these returns a `ValidationException` that kills
+/// the turn, so we strip tools and let them answer in plain text instead.
+///
+/// Unlike local backends (Ollama `/api/show` probe) Bedrock has no capability
+/// endpoint, but its catalog is known and enumerable — so a static denylist is
+/// the right tool, mirroring the OpenAI-path Groq-Compound name-gate. Matched
+/// as case-insensitive substrings so regional id prefixes (`us.`, `eu.`, …)
+/// are tolerated, e.g. `us.deepseek.r1-v1:0` still matches `deepseek.r1`.
+const BEDROCK_NON_TOOL_MODEL_MARKERS: &[&str] = &[
+    "deepseek.r1",        // reasoning-only
+    "deepseek-r1",        // reasoning-only (alt id form)
+    "stability.",         // image generation
+    "cohere.embed",       // embeddings
+    "amazon.titan-embed", // embeddings
+];
+
+/// Whether a Bedrock model accepts a `tools` block (see
+/// [`BEDROCK_NON_TOOL_MODEL_MARKERS`]). Tool-capable models (Claude, Mistral
+/// Large, Command R/R+) are not listed and return `true`.
+fn bedrock_model_supports_tools(model: &str) -> bool {
+    let id = model.to_ascii_lowercase();
+    !BEDROCK_NON_TOOL_MODEL_MARKERS
+        .iter()
+        .any(|marker| id.contains(marker))
+}
+
 impl BedrockProvider {
     pub fn new(
         region: &str,
@@ -156,7 +183,7 @@ impl BedrockProvider {
             "messages": anthropic_shared::build_messages(&request.messages, &self.compat)
         });
 
-        if !request.tools.is_empty() {
+        if !request.tools.is_empty() && bedrock_model_supports_tools(&request.model) {
             let mut tools = anthropic_shared::build_tools(&request.tools);
             if self.compat.sanitize_schema() {
                 for tool in &mut tools {
@@ -2170,7 +2197,8 @@ mod tests {
     // -----------------------------------------------------------------------
     mod family_dispatch {
         use super::super::{
-            AwsCredentials, BedrockFamily, BedrockProvider, decode_buffered_response,
+            AwsCredentials, BedrockFamily, BedrockProvider, bedrock_model_supports_tools,
+            decode_buffered_response,
         };
         use wcore_config::compat::ProviderCompat;
         use wcore_config::debug::DebugConfig;
@@ -2226,6 +2254,66 @@ mod tests {
             assert_eq!(
                 BedrockFamily::classify("cohere.command-r-plus-v1:0"),
                 BedrockFamily::Cohere
+            );
+        }
+
+        #[test]
+        fn non_tool_bedrock_models_are_denylisted() {
+            // Reasoning / image / embedding models that 400 on a tools block —
+            // including regional-prefixed ids.
+            assert!(!bedrock_model_supports_tools("us.deepseek.r1-v1:0"));
+            assert!(!bedrock_model_supports_tools("deepseek-r1"));
+            assert!(!bedrock_model_supports_tools(
+                "stability.stable-diffusion-xl-v1"
+            ));
+            assert!(!bedrock_model_supports_tools("cohere.embed-english-v3"));
+            assert!(!bedrock_model_supports_tools(
+                "amazon.titan-embed-text-v2:0"
+            ));
+            assert!(!bedrock_model_supports_tools(
+                "us.amazon.titan-embed-text-v2:0"
+            ));
+            // Tool-capable models keep tools.
+            assert!(bedrock_model_supports_tools(
+                "anthropic.claude-3-5-sonnet-20241022-v2:0"
+            ));
+            assert!(bedrock_model_supports_tools(
+                "us.anthropic.claude-3-7-sonnet-20250219-v1:0"
+            ));
+            assert!(bedrock_model_supports_tools(
+                "mistral.mistral-large-2407-v1:0"
+            ));
+            assert!(bedrock_model_supports_tools("cohere.command-r-plus-v1:0"));
+        }
+
+        #[test]
+        fn denylisted_bedrock_model_omits_tools_in_body() {
+            let mk_tool = || wcore_types::tool::ToolDef {
+                name: "get_time".into(),
+                description: "x".into(),
+                input_schema: serde_json::json!({"type": "object", "properties": {}}),
+                deferred: false,
+                server: None,
+            };
+
+            // Claude is tool-capable → tools attached.
+            let mut claude = req("anthropic.claude-3-5-sonnet-20241022-v2:0");
+            claude.tools = vec![mk_tool()];
+            assert!(
+                provider()
+                    .build_request_body(&claude)
+                    .get("tools")
+                    .is_some(),
+                "a tool-capable Bedrock model must keep its tools"
+            );
+
+            // DeepSeek-R1 falls into the Anthropic builder but can't do tools →
+            // the block is stripped so the turn doesn't 400.
+            let mut r1 = req("us.deepseek.r1-v1:0");
+            r1.tools = vec![mk_tool()];
+            assert!(
+                provider().build_request_body(&r1).get("tools").is_none(),
+                "a denylisted Bedrock model must receive NO tools block"
             );
         }
 
