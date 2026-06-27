@@ -85,8 +85,14 @@ pub(crate) fn parse_tool_capability(show_response: &Value) -> Option<bool> {
 /// advisory and must stay cheap.
 ///
 /// Returns `None` on any failure (request error, non-success status, body
-/// parse failure, or unknown `capabilities`) so that a failed probe never
-/// blocks tool use — the caller stays optimistic.
+/// parse failure, timeout, or unknown `capabilities`) so that a failed probe
+/// never blocks tool use — the caller stays optimistic.
+///
+/// A hard 2s wall-clock cap wraps the whole probe. The shared streaming client
+/// deliberately has no request-level timeout (only a 300s between-bytes read
+/// timeout, tuned for token streaming), so without this cap a wedged or slow
+/// `/api/show` could stall the first turn for seconds. A probe is advisory and
+/// must stay cheap.
 pub(crate) async fn probe_ollama_tool_support(
     client: &EgressClient,
     base_url: &str,
@@ -95,27 +101,19 @@ pub(crate) async fn probe_ollama_tool_support(
     let url = ollama_show_url(base_url);
     let body = serde_json::json!({ "model": model });
 
-    let response = match client.post(&url).json(&body).send().await {
-        Ok(resp) => resp,
-        Err(e) => {
-            tracing::debug!(error = %e, url = %url, "Ollama tool-capability probe request failed");
+    let probe = async {
+        let response = client.post(&url).json(&body).send().await.ok()?;
+        if !response.status().is_success() {
             return None;
         }
+        let value = response.json::<Value>().await.ok()?;
+        parse_tool_capability(&value)
     };
 
-    if !response.status().is_success() {
-        tracing::debug!(
-            status = %response.status(),
-            url = %url,
-            "Ollama tool-capability probe returned non-success status"
-        );
-        return None;
-    }
-
-    match response.json::<Value>().await {
-        Ok(value) => parse_tool_capability(&value),
-        Err(e) => {
-            tracing::debug!(error = %e, url = %url, "Ollama tool-capability probe body parse failed");
+    match tokio::time::timeout(std::time::Duration::from_secs(2), probe).await {
+        Ok(result) => result,
+        Err(_) => {
+            tracing::debug!(url = %url, "Ollama tool-capability probe timed out");
             None
         }
     }

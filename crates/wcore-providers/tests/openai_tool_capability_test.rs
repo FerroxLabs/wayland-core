@@ -212,3 +212,156 @@ async fn ollama_probe_strips_tools_before_request_for_no_tool_model() {
         "the probe must have stripped `tools` BEFORE the request; body was {body}"
     );
 }
+
+/// The inverse of the strip test: an Ollama model whose `/api/show` reports
+/// `tools` support must KEEP its tools — the gate is capability-aware, not
+/// blind. (Guards against a regression that strips tools from capable models.)
+#[tokio::test]
+async fn ollama_probe_keeps_tools_for_tool_capable_model() {
+    let server = MockServer::start().await;
+
+    Mock::given(method("POST"))
+        .and(path("/api/show"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "capabilities": ["completion", "tools"]
+        })))
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .respond_with(ResponseTemplate::new(200).set_body_raw(ok_sse(), "text/event-stream"))
+        .mount(&server)
+        .await;
+
+    let provider = OpenAIProvider::new(
+        "ollama",
+        &server.uri(),
+        ProviderCompat::ollama_defaults(),
+        DebugConfig::default(),
+    );
+
+    let rx = provider
+        .stream(&request_with_tools("llama3.2:1b"))
+        .await
+        .expect("stream() must succeed");
+    let _ = collect_events(rx).await;
+
+    let reqs = server.received_requests().await.expect("recorded requests");
+    let chat = reqs
+        .iter()
+        .find(|r| r.url.path() == "/v1/chat/completions")
+        .expect("a chat request must have been sent");
+    let body: serde_json::Value = serde_json::from_slice(&chat.body).expect("chat body is JSON");
+    assert!(
+        body.get("tools")
+            .and_then(|t| t.as_array())
+            .is_some_and(|a| a.len() == 1),
+        "a tool-capable model must KEEP its tools; body was {body}"
+    );
+}
+
+/// A failed probe must fail OPEN: tools stay attached (optimistic), and the
+/// turn proceeds — the reactive net is the backstop if the model truly can't
+/// do tools.
+#[tokio::test]
+async fn ollama_probe_failure_keeps_tools_optimistically() {
+    let server = MockServer::start().await;
+
+    // Probe endpoint errors → capability unknown.
+    Mock::given(method("POST"))
+        .and(path("/api/show"))
+        .respond_with(ResponseTemplate::new(500))
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .respond_with(ResponseTemplate::new(200).set_body_raw(ok_sse(), "text/event-stream"))
+        .mount(&server)
+        .await;
+
+    let provider = OpenAIProvider::new(
+        "ollama",
+        &server.uri(),
+        ProviderCompat::ollama_defaults(),
+        DebugConfig::default(),
+    );
+
+    let rx = provider
+        .stream(&request_with_tools("mystery-model"))
+        .await
+        .expect("stream() must succeed despite a failed probe");
+    let _ = collect_events(rx).await;
+
+    let reqs = server.received_requests().await.expect("recorded requests");
+    let chat = reqs
+        .iter()
+        .find(|r| r.url.path() == "/v1/chat/completions")
+        .expect("a chat request must have been sent");
+    let body: serde_json::Value = serde_json::from_slice(&chat.body).expect("chat body is JSON");
+    assert!(
+        body.get("tools").is_some(),
+        "a failed probe must leave tools attached (fail-open); body was {body}"
+    );
+}
+
+/// Cache-learning across turns: after a reactive tools-unsupported 400 on turn
+/// 1, the SAME provider must drop tools PRE-EMPTIVELY on turn 2 — so only the
+/// very first request ever carries a `tools` array. This is the mechanism that
+/// covers backends with no probe endpoint (e.g. llama.cpp) on subsequent turns.
+#[tokio::test]
+async fn reactive_400_is_remembered_and_strips_tools_on_next_turn() {
+    let server = MockServer::start().await;
+
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .and(body_string_contains("\"tools\""))
+        .respond_with(ResponseTemplate::new(400).set_body_string(
+            r#"{"error":{"message":"tools param requires --jinja flag","type":"invalid_request_error"}}"#,
+        ))
+        .with_priority(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .respond_with(ResponseTemplate::new(200).set_body_raw(ok_sse(), "text/event-stream"))
+        .mount(&server)
+        .await;
+
+    // Plain OpenAI provider (no probe) so we isolate the reactive-learning path.
+    let provider = OpenAIProvider::new(
+        "key",
+        &server.uri(),
+        ProviderCompat::openai_defaults(),
+        DebugConfig::default(),
+    );
+
+    // Turn 1: tools attached → 400 → reactive retry → completes; cache learns.
+    let rx = provider
+        .stream(&request_with_tools("gpt-4o"))
+        .await
+        .expect("turn 1 must complete via reactive retry");
+    let _ = collect_events(rx).await;
+
+    // Turn 2: same provider/model → tools must be stripped pre-emptively.
+    let rx = provider
+        .stream(&request_with_tools("gpt-4o"))
+        .await
+        .expect("turn 2 must complete");
+    let _ = collect_events(rx).await;
+
+    let reqs = server.received_requests().await.expect("recorded requests");
+    let with_tools = reqs
+        .iter()
+        .filter(|r| r.url.path() == "/v1/chat/completions")
+        .filter(|r| {
+            serde_json::from_slice::<serde_json::Value>(&r.body)
+                .ok()
+                .and_then(|b| b.get("tools").cloned())
+                .is_some()
+        })
+        .count();
+    assert_eq!(
+        with_tools, 1,
+        "only turn 1's first attempt may carry tools; turn 2 must strip them pre-emptively"
+    );
+}

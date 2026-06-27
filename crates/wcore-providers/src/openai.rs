@@ -746,10 +746,25 @@ fn is_tools_unsupported_error(status: u16, body: &str) -> bool {
     if status != 400 {
         return false;
     }
-    let body = body.to_ascii_lowercase();
+    // Match the provider's error MESSAGE, not the whole body. A raw 400 body can
+    // echo the request — tool descriptions, the user's prompt — and a marker
+    // appearing there would false-positive, strip tools, and (worse) poison the
+    // capability cache to text-only for the rest of the session. Extract
+    // `error.message` when the body is structured JSON; fall back to the raw
+    // body for non-JSON error surfaces.
+    let message = serde_json::from_str::<serde_json::Value>(body)
+        .ok()
+        .and_then(|v| {
+            v.get("error")
+                .and_then(|e| e.get("message"))
+                .and_then(|m| m.as_str())
+                .map(str::to_owned)
+        })
+        .unwrap_or_else(|| body.to_owned())
+        .to_ascii_lowercase();
     TOOLS_UNSUPPORTED_MARKERS
         .iter()
-        .any(|marker| body.contains(marker))
+        .any(|marker| message.contains(marker))
 }
 
 /// Strip configured patterns from text content
@@ -1141,7 +1156,11 @@ impl LlmProvider for OpenAIProvider {
         // backend, probe `/api/show` once per model so an unsupported `tools`
         // array is dropped BEFORE the request (inside `build_request_body`)
         // rather than reactively after a 400. No-op for non-Ollama providers.
-        self.maybe_probe_ollama_tools(&request.model).await;
+        // Only worth a probe when this turn could actually attach tools — a
+        // plain chat turn has nothing to strip.
+        if !request.tools.is_empty() {
+            self.maybe_probe_ollama_tools(&request.model).await;
+        }
         let body = if use_responses {
             openai_responses::build_responses_body(request, &self.compat)
         } else {
@@ -2146,6 +2165,27 @@ mod tests {
             400,
             "this model does not support function calling"
         ));
+    }
+
+    #[test]
+    fn tools_unsupported_matches_marker_in_structured_error_message() {
+        // The marker lives in `error.message` of a structured JSON body.
+        let body = r#"{"error":{"message":"tools param requires --jinja flag","type":"invalid_request_error"}}"#;
+        assert!(is_tools_unsupported_error(400, body));
+    }
+
+    #[test]
+    fn tools_unsupported_ignores_marker_outside_error_message() {
+        // A 400 for an UNRELATED reason whose body merely ECHOES a tool
+        // description containing a marker phrase must NOT be classified as
+        // tools-unsupported — otherwise we'd strip tools and poison the cache
+        // for a model that actually supports them. We match `error.message`,
+        // not the echoed request payload.
+        let body = r#"{"error":{"message":"context length exceeded","type":"invalid_request_error"},"request":{"tools":[{"function":{"description":"this model does not support function calling"}}]}}"#;
+        assert!(
+            !is_tools_unsupported_error(400, body),
+            "a marker echoed in the request payload must not trip the gate"
+        );
     }
 
     // --- FluxRouter typed 402 / entitlement error parsing -----------------
