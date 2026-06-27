@@ -97,6 +97,9 @@ pub fn openai_config(api_key: &str) -> Config {
             skills: wcore_config::config::SkillsPermissionConfig::default(),
             verify_edits: false,
             windows_shell: None,
+            env_passthrough: Vec::new(),
+            sandbox: None,
+            allow_no_sandbox: None,
         },
         session: SessionConfig {
             enabled: false,
@@ -134,6 +137,9 @@ pub fn bedrock_config() -> Config {
             skills: wcore_config::config::SkillsPermissionConfig::default(),
             verify_edits: false,
             windows_shell: None,
+            env_passthrough: Vec::new(),
+            sandbox: None,
+            allow_no_sandbox: None,
         },
         session: SessionConfig {
             enabled: false,

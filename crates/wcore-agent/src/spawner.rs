@@ -1122,6 +1122,9 @@ mod posture_inheritance_tests {
                 skills: wcore_config::config::SkillsPermissionConfig::default(),
                 verify_edits: false,
                 windows_shell: None,
+                env_passthrough: Vec::new(),
+                sandbox: None,
+                allow_no_sandbox: None,
             },
             ..Default::default()
         }

@@ -682,6 +682,28 @@ pub struct ToolsConfig {
     /// runtime. The host (desktop app) writes this key from its shell toggle.
     #[serde(default)]
     pub windows_shell: Option<String>,
+    /// #325 — environment-variable names passed through to sandboxed tool
+    /// children (`bash` / `script`). By default the sandbox strips
+    /// everything but a curated base allowlist (locale / `PATH` / etc.);
+    /// names listed here are additionally forwarded. Secret-shaped names
+    /// (`*_API_KEY`, `*_TOKEN`, `WAYLAND_VAULT_*`, …) are still dropped by
+    /// the sandbox's secret filter even if listed here. Wired at bootstrap
+    /// into `wcore_tools::env_passthrough::set_config_passthrough`.
+    #[serde(default)]
+    pub env_passthrough: Vec<String>,
+    /// #327 — sandbox backend selection, mirroring the `WAYLAND_SANDBOX`
+    /// env var (`"none"` / `"docker"`; unset = platform default backend).
+    /// The env var, when set, takes precedence for back-compat. `"none"`
+    /// additionally requires `allow_no_sandbox = true` (or the
+    /// `WAYLAND_ALLOW_NO_SANDBOX` env var) or the sandbox fails closed.
+    #[serde(default)]
+    pub sandbox: Option<String>,
+    /// #327 — operator opt-in to run with NO isolation when the platform
+    /// sandbox is unavailable (or `sandbox = "none"`), mirroring the
+    /// `WAYLAND_ALLOW_NO_SANDBOX` env var. The env var, when set, takes
+    /// precedence for back-compat. Defaults to off (fail closed).
+    #[serde(default)]
+    pub allow_no_sandbox: Option<bool>,
 }
 
 impl Default for ToolsConfig {
@@ -692,6 +714,9 @@ impl Default for ToolsConfig {
             skills: SkillsPermissionConfig::default(),
             verify_edits: true,
             windows_shell: None,
+            env_passthrough: Vec::new(),
+            sandbox: None,
+            allow_no_sandbox: None,
         }
     }
 }
@@ -2637,6 +2662,12 @@ fn try_load_config_file(path: &Path) -> Result<ConfigFile, ConfigLoadError> {
             // non-fatal (the warning is the load-bearing signal).
             crate::credentials::warn_if_world_readable(path);
             let _ = crate::credentials::secure_credential_file(path);
+            // #326: warn (don't fail) on unknown / mis-sectioned keys so a
+            // typo'd or wrong-section setting is discoverable instead of
+            // being silently dropped. Runs before the real parse; a clean
+            // `deny_unknown_fields` would reject existing configs on a
+            // release, so we surface rather than reject.
+            warn_unknown_config_keys(&content, path);
             toml::from_str(&content).map_err(|source| ConfigLoadError::ParseFailed {
                 path: path.display().to_string(),
                 source,
@@ -2645,6 +2676,51 @@ fn try_load_config_file(path: &Path) -> Result<ConfigFile, ConfigLoadError> {
         // No file (or unreadable) → fresh-install defaults are correct.
         Err(_) => Ok(ConfigFile::default()),
     }
+}
+
+/// #326: emit a `warn`-level log for every config key that is unknown to
+/// `ConfigFile` (a typo) or mis-sectioned (a real key under the wrong
+/// table — e.g. `env_passthrough` under `[security]` instead of `[tools]`).
+///
+/// Uses `serde_ignored` to collect the ignored key paths during a throwaway
+/// deserialize. This is deliberately a WARNING, not `#[serde(deny_unknown_fields)]`:
+/// a hard deny would turn a previously-accepted config (e.g. one carrying a
+/// future-version key, or a harmlessly-misplaced one) into a hard startup
+/// failure on upgrade. Warning keeps the config loading while making the
+/// misconfiguration visible. A genuinely malformed TOML still errors on the
+/// real parse downstream.
+fn warn_unknown_config_keys(raw: &str, path: &Path) {
+    for key in collect_unknown_config_keys(raw) {
+        tracing::warn!(
+            target: "wcore_config",
+            key = %key,
+            path = %path.display(),
+            "ignoring unknown or mis-sectioned config key `{key}` in {} — \
+             it has no effect; check for a typo or wrong [section]",
+            path.display(),
+        );
+    }
+}
+
+/// Collect the dotted paths of every config key that `ConfigFile` ignores
+/// during deserialize — the testable core of [`warn_unknown_config_keys`].
+///
+/// Returns an empty vec when the TOML is malformed (the authoritative parse
+/// surfaces that error separately) or when every key is recognized.
+fn collect_unknown_config_keys(raw: &str) -> Vec<String> {
+    // toml 1.x returns a `Result` from the parse-time deserializer
+    // constructor; a malformed document is reported by the real parse.
+    let de = match toml::Deserializer::parse(raw) {
+        Ok(de) => de,
+        Err(_) => return Vec::new(),
+    };
+    let unknown = std::cell::RefCell::new(Vec::new());
+    // The deserialized value is discarded; we only want the ignored paths.
+    let _ = serde_ignored::deserialize(de, |key_path| {
+        unknown.borrow_mut().push(key_path.to_string());
+    })
+    .map(|_cfg: ConfigFile| ());
+    unknown.into_inner()
 }
 
 /// Infallible config-file loader, used only by the read-only `/profile` and
@@ -3078,6 +3154,15 @@ fn merge_config_files(global: ConfigFile, project: ConfigFile) -> ConfigFile {
             verify_edits: project.tools.verify_edits || global.tools.verify_edits,
             // #182 — project overrides global for the Windows shell selector.
             windows_shell: project.tools.windows_shell.or(global.tools.windows_shell),
+            // #325 — concatenate passthrough allowlists (global first), like
+            // the skills deny/allow merge above; both layers' vars apply.
+            env_passthrough: [global.tools.env_passthrough, project.tools.env_passthrough].concat(),
+            // #327 — project overrides global for the sandbox toggle.
+            sandbox: project.tools.sandbox.or(global.tools.sandbox),
+            allow_no_sandbox: project
+                .tools
+                .allow_no_sandbox
+                .or(global.tools.allow_no_sandbox),
         }
     } else {
         ToolsConfig {
@@ -3089,6 +3174,12 @@ fn merge_config_files(global: ConfigFile, project: ConfigFile) -> ConfigFile {
             },
             verify_edits: project.tools.verify_edits || global.tools.verify_edits,
             windows_shell: project.tools.windows_shell.or(global.tools.windows_shell),
+            env_passthrough: [global.tools.env_passthrough, project.tools.env_passthrough].concat(),
+            sandbox: project.tools.sandbox.or(global.tools.sandbox),
+            allow_no_sandbox: project
+                .tools
+                .allow_no_sandbox
+                .or(global.tools.allow_no_sandbox),
         }
     };
 
@@ -6015,5 +6106,93 @@ skills_lifecycle = true
                 }
             }
         }
+    }
+
+    // -------------------------------------------------------------------------
+    // #325 — `[tools] env_passthrough` parses onto ToolsConfig.
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn tools_env_passthrough_parses_from_toml() {
+        let cfg: ConfigFile =
+            toml::from_str("[tools]\nenv_passthrough = [\"KUBECONFIG\", \"AWS_PROFILE\"]\n")
+                .expect("parse");
+        assert_eq!(
+            cfg.tools.env_passthrough,
+            vec!["KUBECONFIG".to_string(), "AWS_PROFILE".to_string()]
+        );
+    }
+
+    #[test]
+    fn tools_env_passthrough_defaults_empty() {
+        let cfg: ConfigFile = toml::from_str("[tools]\n").expect("parse");
+        assert!(cfg.tools.env_passthrough.is_empty());
+    }
+
+    // -------------------------------------------------------------------------
+    // #327 — `[tools] sandbox` / `allow_no_sandbox` parse onto ToolsConfig.
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn tools_sandbox_toggle_parses_from_toml() {
+        let cfg: ConfigFile =
+            toml::from_str("[tools]\nsandbox = \"none\"\nallow_no_sandbox = true\n")
+                .expect("parse");
+        assert_eq!(cfg.tools.sandbox.as_deref(), Some("none"));
+        assert_eq!(cfg.tools.allow_no_sandbox, Some(true));
+    }
+
+    #[test]
+    fn tools_sandbox_toggle_defaults_none() {
+        let cfg: ConfigFile = toml::from_str("[tools]\n").expect("parse");
+        assert!(cfg.tools.sandbox.is_none());
+        assert!(cfg.tools.allow_no_sandbox.is_none());
+    }
+
+    // -------------------------------------------------------------------------
+    // #326 — unknown / mis-sectioned config keys are surfaced (not denied).
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn unknown_top_level_key_is_collected() {
+        let keys = collect_unknown_config_keys("definitely_not_a_key = 1\n");
+        assert!(
+            keys.iter().any(|k| k == "definitely_not_a_key"),
+            "a typo'd top-level key must be surfaced, got {keys:?}"
+        );
+    }
+
+    #[test]
+    fn mis_sectioned_key_is_collected() {
+        // The issue's exact repro: env_passthrough under [security] (where it
+        // does not belong) instead of [tools].
+        let keys = collect_unknown_config_keys("[security]\nenv_passthrough = [\"Path\"]\n");
+        assert!(
+            keys.iter().any(|k| k == "security.env_passthrough"),
+            "a mis-sectioned key must be surfaced with its section path, got {keys:?}"
+        );
+    }
+
+    #[test]
+    fn known_keys_are_not_flagged() {
+        // A fully-valid config must produce zero unknown-key warnings — proving
+        // the warn pass doesn't false-positive on legitimate settings (and so
+        // won't spam existing users on upgrade).
+        let raw = "[default]\nprovider = \"anthropic\"\n\
+                   [tools]\nauto_approve = true\nenv_passthrough = [\"KUBECONFIG\"]\n\
+                   sandbox = \"docker\"\n\
+                   [security]\nenabled = true\negress_allow = [\"example.com\"]\n";
+        let keys = collect_unknown_config_keys(raw);
+        assert!(
+            keys.is_empty(),
+            "valid keys must not be flagged, got {keys:?}"
+        );
+    }
+
+    #[test]
+    fn malformed_toml_collects_nothing() {
+        // Malformed TOML is reported by the authoritative parse, not here.
+        let keys = collect_unknown_config_keys("this is = = not toml");
+        assert!(keys.is_empty());
     }
 }

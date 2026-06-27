@@ -26,6 +26,8 @@ pub use manifest::{NetworkPolicy, SandboxManifest, SyscallPolicy};
 use async_trait::async_trait;
 use std::sync::Arc;
 use std::sync::Mutex;
+use std::sync::OnceLock;
+use std::sync::RwLock;
 use std::time::{Duration, Instant};
 
 /// Operator opt-in that permits running model-driven commands with NO
@@ -34,11 +36,82 @@ use std::time::{Duration, Instant};
 /// degrading to host-permission execution (audit M-2 / rel-concurrency-70).
 const ALLOW_NO_SANDBOX_ENV: &str = "WAYLAND_ALLOW_NO_SANDBOX";
 
-/// True iff the operator has explicitly opted in to unsandboxed execution
-/// via `WAYLAND_ALLOW_NO_SANDBOX=1` (or `=true`).
+/// Env-var name selecting the sandbox backend (`none` / `docker`).
+const SANDBOX_ENV: &str = "WAYLAND_SANDBOX";
+
+/// #327: config-sourced sandbox toggle, installed once at bootstrap from
+/// `[tools] sandbox` / `[tools] allow_no_sandbox`.
+///
+/// This is a process-global fallback consulted only when the corresponding
+/// env var is unset — the `WAYLAND_SANDBOX` / `WAYLAND_ALLOW_NO_SANDBOX`
+/// env vars keep precedence for back-compat. Mirrors the process-global
+/// pattern used by `wcore_tools::env_passthrough::set_config_passthrough`.
+#[derive(Clone, Default)]
+struct SandboxConfigOverride {
+    /// Backend selection (`Some("none")` / `Some("docker")`), or `None` to
+    /// leave the platform default.
+    backend: Option<String>,
+    /// Operator opt-in to unsandboxed execution; `None` = unset.
+    allow_no_sandbox: Option<bool>,
+}
+
+fn sandbox_config_override() -> &'static RwLock<SandboxConfigOverride> {
+    static CFG: OnceLock<RwLock<SandboxConfigOverride>> = OnceLock::new();
+    CFG.get_or_init(|| RwLock::new(SandboxConfigOverride::default()))
+}
+
+/// Install the config-sourced sandbox toggle (#327).
+///
+/// Called once at host bootstrap with the resolved `[tools] sandbox` /
+/// `[tools] allow_no_sandbox` values. The `WAYLAND_SANDBOX` /
+/// `WAYLAND_ALLOW_NO_SANDBOX` env vars still take precedence — config is
+/// only the fallback when the env var is absent. Subsequent calls replace
+/// the previous config (the host owns the source of truth).
+pub fn set_config_sandbox(backend: Option<String>, allow_no_sandbox: Option<bool>) {
+    let normalized = backend.and_then(|b| {
+        let t = b.trim();
+        if t.is_empty() {
+            None
+        } else {
+            Some(t.to_string())
+        }
+    });
+    let mut guard = match sandbox_config_override().write() {
+        Ok(g) => g,
+        Err(p) => p.into_inner(),
+    };
+    *guard = SandboxConfigOverride {
+        backend: normalized,
+        allow_no_sandbox,
+    };
+}
+
+/// Resolve the effective sandbox backend selection: the `WAYLAND_SANDBOX`
+/// env var wins; otherwise the config-installed value (#327); otherwise
+/// `None` (platform default).
+fn resolved_sandbox_choice() -> Option<String> {
+    if let Ok(v) = std::env::var(SANDBOX_ENV) {
+        return Some(v);
+    }
+    sandbox_config_override()
+        .read()
+        .ok()
+        .and_then(|g| g.backend.clone())
+}
+
+/// True iff the operator has explicitly opted in to unsandboxed execution.
+///
+/// The `WAYLAND_ALLOW_NO_SANDBOX=1` (or `=true`) env var wins; otherwise
+/// the config-installed `[tools] allow_no_sandbox` value is consulted
+/// (#327).
 pub fn no_sandbox_opt_in() -> bool {
-    std::env::var(ALLOW_NO_SANDBOX_ENV)
-        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+    if let Ok(v) = std::env::var(ALLOW_NO_SANDBOX_ENV) {
+        return v == "1" || v.eq_ignore_ascii_case("true");
+    }
+    sandbox_config_override()
+        .read()
+        .ok()
+        .and_then(|g| g.allow_no_sandbox)
         .unwrap_or(false)
 }
 
@@ -264,7 +337,8 @@ impl SandboxRegistry {
 /// returns [`backends::no_sandbox::NoSandboxBackend`] with a rate-limited
 /// warning on every selection.
 pub fn default_for_platform() -> Box<dyn backends::SandboxBackend> {
-    if let Ok(choice) = std::env::var("WAYLAND_SANDBOX") {
+    // #327: env var wins; otherwise the config-installed `[tools] sandbox`.
+    if let Some(choice) = resolved_sandbox_choice() {
         match choice.as_str() {
             "none" => {
                 // Explicit operator request for no sandbox. Honor it only
@@ -332,26 +406,49 @@ pub fn default_for_platform() -> Box<dyn backends::SandboxBackend> {
     unsandboxed_fallback()
 }
 
+/// Crate-wide serialization lock for tests that mutate the process-global
+/// sandbox state (`WAYLAND_SANDBOX` / `WAYLAND_ALLOW_NO_SANDBOX` env vars and
+/// the `#327` config override). Both `fail_closed_tests` and
+/// `config_toggle_tests` touch the SAME globals, so they must share one lock —
+/// per-module locks would let env mutations from one module race the reads of
+/// the other.
+#[cfg(test)]
+static SANDBOX_TEST_LOCK: Mutex<()> = Mutex::new(());
+
 #[cfg(test)]
 mod fail_closed_tests {
     use super::*;
     use backends::SandboxBackend as _;
 
     /// Serialize the env-mutating tests in this module — `WAYLAND_SANDBOX`
-    /// and `WAYLAND_ALLOW_NO_SANDBOX` are process-global.
-    static ENV_LOCK: Mutex<()> = Mutex::new(());
+    /// and `WAYLAND_ALLOW_NO_SANDBOX` are process-global. Shared with
+    /// `config_toggle_tests` (same globals).
+    use super::SANDBOX_TEST_LOCK as ENV_LOCK;
 
     /// RAII guard that snapshots and restores both sandbox env vars so a
     /// test never leaks state into a sibling.
+    ///
+    /// These tests assert pure-env behavior, so `capture()` also clears the
+    /// `#327` config override (snapshotting it for restore) — otherwise a
+    /// config value left by a sibling `config_toggle_tests` case would bleed
+    /// into `no_sandbox_opt_in` / `default_for_platform`.
     struct EnvGuard {
         sandbox: Option<String>,
         allow: Option<String>,
+        cfg: SandboxConfigOverride,
     }
     impl EnvGuard {
         fn capture() -> Self {
+            let cfg = sandbox_config_override()
+                .read()
+                .map(|g| g.clone())
+                .unwrap_or_default();
+            // Clear config so these tests observe env-only behavior.
+            set_config_sandbox(None, None);
             Self {
                 sandbox: std::env::var("WAYLAND_SANDBOX").ok(),
                 allow: std::env::var(ALLOW_NO_SANDBOX_ENV).ok(),
+                cfg,
             }
         }
         fn set_sandbox(v: Option<&str>) {
@@ -377,6 +474,7 @@ mod fail_closed_tests {
         fn drop(&mut self) {
             Self::set_sandbox(self.sandbox.as_deref());
             Self::set_allow(self.allow.as_deref());
+            set_config_sandbox(self.cfg.backend.clone(), self.cfg.allow_no_sandbox);
         }
     }
 
@@ -409,7 +507,7 @@ mod fail_closed_tests {
 
     #[test]
     fn unsandboxed_fallback_fails_closed_without_opt_in() {
-        let _lock = ENV_LOCK.lock().unwrap();
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         let _g = EnvGuard::capture();
         EnvGuard::set_allow(None);
         let backend = unsandboxed_fallback();
@@ -422,7 +520,7 @@ mod fail_closed_tests {
 
     #[test]
     fn unsandboxed_fallback_runs_no_sandbox_with_opt_in() {
-        let _lock = ENV_LOCK.lock().unwrap();
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         let _g = EnvGuard::capture();
         EnvGuard::set_allow(Some("1"));
         let backend = unsandboxed_fallback();
@@ -435,7 +533,7 @@ mod fail_closed_tests {
 
     #[test]
     fn sandbox_none_fails_closed_without_opt_in() {
-        let _lock = ENV_LOCK.lock().unwrap();
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         let _g = EnvGuard::capture();
         EnvGuard::set_sandbox(Some("none"));
         EnvGuard::set_allow(None);
@@ -450,7 +548,7 @@ mod fail_closed_tests {
 
     #[test]
     fn sandbox_none_honored_with_opt_in() {
-        let _lock = ENV_LOCK.lock().unwrap();
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         let _g = EnvGuard::capture();
         EnvGuard::set_sandbox(Some("none"));
         EnvGuard::set_allow(Some("1"));
@@ -476,7 +574,7 @@ mod fail_closed_tests {
 
     #[test]
     fn opt_in_parsing_accepts_1_and_true() {
-        let _lock = ENV_LOCK.lock().unwrap();
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         let _g = EnvGuard::capture();
         EnvGuard::set_allow(Some("1"));
         assert!(no_sandbox_opt_in());
@@ -490,5 +588,158 @@ mod fail_closed_tests {
         assert!(!no_sandbox_opt_in());
         EnvGuard::set_allow(None);
         assert!(!no_sandbox_opt_in());
+    }
+}
+
+#[cfg(test)]
+mod config_toggle_tests {
+    //! #327: `[tools] sandbox` / `[tools] allow_no_sandbox` config toggle.
+    //!
+    //! The config-installed values are a fallback consulted only when the
+    //! corresponding env var is unset; the env var keeps precedence. Both
+    //! the env vars and the config override are process-global, so these
+    //! tests serialize on a private lock and restore all state on drop.
+    use super::*;
+
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    /// Snapshot + restore both sandbox env vars AND the config override so a
+    /// test never leaks state into a sibling (config override is process-global).
+    struct StateGuard {
+        sandbox: Option<String>,
+        allow: Option<String>,
+        cfg: SandboxConfigOverride,
+    }
+    impl StateGuard {
+        fn capture() -> Self {
+            let cfg = sandbox_config_override()
+                .read()
+                .map(|g| g.clone())
+                .unwrap_or_default();
+            Self {
+                sandbox: std::env::var(SANDBOX_ENV).ok(),
+                allow: std::env::var(ALLOW_NO_SANDBOX_ENV).ok(),
+                cfg,
+            }
+        }
+        fn clear_env() {
+            // SAFETY: serialized via ENV_LOCK.
+            unsafe {
+                std::env::remove_var(SANDBOX_ENV);
+                std::env::remove_var(ALLOW_NO_SANDBOX_ENV);
+            }
+        }
+    }
+    impl Drop for StateGuard {
+        fn drop(&mut self) {
+            // SAFETY: serialized via ENV_LOCK.
+            unsafe {
+                match &self.sandbox {
+                    Some(v) => std::env::set_var(SANDBOX_ENV, v),
+                    None => std::env::remove_var(SANDBOX_ENV),
+                }
+                match &self.allow {
+                    Some(v) => std::env::set_var(ALLOW_NO_SANDBOX_ENV, v),
+                    None => std::env::remove_var(ALLOW_NO_SANDBOX_ENV),
+                }
+            }
+            set_config_sandbox(self.cfg.backend.clone(), self.cfg.allow_no_sandbox);
+        }
+    }
+
+    #[test]
+    fn config_allow_no_sandbox_opt_in_honored_when_env_unset() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let _g = StateGuard::capture();
+        StateGuard::clear_env();
+        set_config_sandbox(None, None);
+        assert!(!no_sandbox_opt_in(), "default must be off");
+        set_config_sandbox(None, Some(true));
+        assert!(
+            no_sandbox_opt_in(),
+            "[tools] allow_no_sandbox = true must opt in when env is unset"
+        );
+    }
+
+    #[test]
+    fn env_allow_no_sandbox_wins_over_config() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let _g = StateGuard::capture();
+        StateGuard::clear_env();
+        // Config says opt-in, env explicitly says off → env wins (back-compat).
+        set_config_sandbox(None, Some(true));
+        // SAFETY: serialized via ENV_LOCK.
+        unsafe { std::env::set_var(ALLOW_NO_SANDBOX_ENV, "0") };
+        assert!(
+            !no_sandbox_opt_in(),
+            "WAYLAND_ALLOW_NO_SANDBOX must take precedence over config"
+        );
+    }
+
+    #[test]
+    fn config_sandbox_none_honored_with_config_opt_in() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let _g = StateGuard::capture();
+        StateGuard::clear_env();
+        // Pure-config path: sandbox=none + allow_no_sandbox=true, no env vars.
+        set_config_sandbox(Some("none".into()), Some(true));
+        let backend = default_for_platform();
+        assert_eq!(
+            backend.name(),
+            "no_sandbox",
+            "[tools] sandbox=\"none\" + allow_no_sandbox=true must select NoSandbox"
+        );
+    }
+
+    #[test]
+    fn config_sandbox_none_fails_closed_without_opt_in() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let _g = StateGuard::capture();
+        StateGuard::clear_env();
+        // sandbox=none from config but no opt-in → must fail closed, exactly
+        // like the env-var path (audit M-2 invariant preserved).
+        set_config_sandbox(Some("none".into()), Some(false));
+        let backend = default_for_platform();
+        assert_eq!(
+            backend.name(),
+            "fail_closed",
+            "config sandbox=none without the opt-in must fail closed"
+        );
+    }
+
+    #[test]
+    fn env_sandbox_backend_wins_over_config_backend() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let _g = StateGuard::capture();
+        StateGuard::clear_env();
+        // Config selects docker; env forces none. The env WAYLAND_SANDBOX
+        // backend selection wins. With the env opt-in set, none resolves to
+        // NoSandbox (proving env's `none` overrode config's `docker`).
+        set_config_sandbox(Some("docker".into()), Some(false));
+        // SAFETY: serialized via ENV_LOCK.
+        unsafe {
+            std::env::set_var(SANDBOX_ENV, "none");
+            std::env::set_var(ALLOW_NO_SANDBOX_ENV, "1");
+        }
+        let backend = default_for_platform();
+        assert_eq!(
+            backend.name(),
+            "no_sandbox",
+            "env WAYLAND_SANDBOX must take precedence over config sandbox backend"
+        );
+    }
+
+    #[test]
+    fn empty_config_backend_is_treated_as_unset() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let _g = StateGuard::capture();
+        StateGuard::clear_env();
+        // A whitespace-only [tools] sandbox must normalize to None (platform
+        // default), not a bogus backend name.
+        set_config_sandbox(Some("   ".into()), None);
+        assert!(
+            resolved_sandbox_choice().is_none(),
+            "blank config sandbox must resolve to None"
+        );
     }
 }

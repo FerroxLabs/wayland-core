@@ -14,6 +14,9 @@ wcore-config.workspace    = true
 wcore-providers.workspace = true
 wcore-egress.workspace = true
 wcore-tools.workspace     = true
+# #327: bootstrap installs the config-sourced sandbox toggle
+# (`[tools] sandbox` / `allow_no_sandbox`) via `set_config_sandbox`.
+wcore-sandbox.workspace   = true
 wcore-mcp.workspace       = true
 wcore-skills.workspace    = true
 # v0.8.0 Task K — wire `TemplateRouter` as primary orchestration-template

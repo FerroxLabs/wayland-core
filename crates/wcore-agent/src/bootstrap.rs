@@ -582,6 +582,23 @@ impl AgentBootstrap {
         // Windows (set once at boot; WAYLAND_BASH_SHELL env still overrides).
         wcore_config::shell::set_bash_shell_config(self.config.tools.windows_shell.clone());
 
+        // #325: install the config-sourced env passthrough allowlist so
+        // `[tools] env_passthrough` actually forwards the named vars into
+        // sandboxed tool children (the sandbox secret filter still drops
+        // secret-shaped names). Skill-declared passthroughs are additive.
+        wcore_tools::env_passthrough::set_config_passthrough(
+            self.config.tools.env_passthrough.iter(),
+        );
+
+        // #327: install the config-sourced sandbox toggle so `[tools]
+        // sandbox` / `[tools] allow_no_sandbox` are honored by
+        // `wcore_sandbox::default_for_platform`. The `WAYLAND_SANDBOX` /
+        // `WAYLAND_ALLOW_NO_SANDBOX` env vars still take precedence.
+        wcore_sandbox::set_config_sandbox(
+            self.config.tools.sandbox.clone(),
+            self.config.tools.allow_no_sandbox,
+        );
+
         registry.register(Box::new(wcore_tools::read::ReadTool::new(
             file_cache.clone(),
         )));

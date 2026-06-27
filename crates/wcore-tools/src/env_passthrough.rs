@@ -590,6 +590,56 @@ mod tests {
 
     #[test]
     #[serial]
+    fn config_passthrough_var_is_applied_to_sandboxed_env() {
+        // #325: a var named in `[tools] env_passthrough` (installed via
+        // set_config_passthrough at bootstrap) must actually appear in the
+        // curated sandbox env — proving the config is no longer inert.
+        let _g = guard();
+        unsafe {
+            std::env::set_var("TEST_CFG_PASSTHROUGH_VAR", "from-config");
+        }
+        // Without the config allowlist the var is stripped.
+        assert!(
+            !build_sandboxed_env(&[])
+                .iter()
+                .any(|(k, _)| k == "TEST_CFG_PASSTHROUGH_VAR"),
+            "var must be stripped before config passthrough installs it"
+        );
+        // Install it the way the host does at bootstrap.
+        set_config_passthrough(["TEST_CFG_PASSTHROUGH_VAR"]);
+        let env = build_sandboxed_env(&[]);
+        assert!(
+            env.iter()
+                .any(|(k, v)| k == "TEST_CFG_PASSTHROUGH_VAR" && v == "from-config"),
+            "a config-passthrough var must be forwarded into the sandboxed env"
+        );
+        unsafe {
+            std::env::remove_var("TEST_CFG_PASSTHROUGH_VAR");
+        }
+    }
+
+    #[test]
+    #[serial]
+    fn config_passthrough_cannot_leak_a_secret_shaped_var() {
+        // #325 safety: even if a user lists a secret-shaped name in
+        // [tools] env_passthrough, the sandbox secret filter still drops it.
+        let _g = guard();
+        unsafe {
+            std::env::set_var("TEST_CFG_SECRET_TOKEN", "nope");
+        }
+        set_config_passthrough(["TEST_CFG_SECRET_TOKEN"]);
+        let env = build_sandboxed_env(&[]);
+        assert!(
+            !env.iter().any(|(k, _)| k == "TEST_CFG_SECRET_TOKEN"),
+            "a secret-shaped config passthrough var must still be dropped"
+        );
+        unsafe {
+            std::env::remove_var("TEST_CFG_SECRET_TOKEN");
+        }
+    }
+
+    #[test]
+    #[serial]
     fn build_sandboxed_env_with_prefixes_keeps_discovery_drops_secrets() {
         let _g = guard();
         unsafe {
