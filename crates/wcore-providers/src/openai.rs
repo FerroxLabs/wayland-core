@@ -53,6 +53,11 @@ pub struct OpenAIProvider {
     pinned_base_url: Arc<Mutex<Option<String>>>,
     compat: ProviderCompat,
     debug: DebugConfig,
+    /// Per-model "accepts a `tools` array" cache — the capability-first tools
+    /// gate (#389/#97 follow-up). Populated by the Ollama `/api/show` probe and
+    /// by reactive tools-unsupported 400s; read by `build_request_body` before
+    /// attaching `body["tools"]`. Shared across clones via an inner `Arc`.
+    tool_support: crate::tool_capability::ToolSupportCache,
 }
 
 impl OpenAIProvider {
@@ -65,6 +70,7 @@ impl OpenAIProvider {
             pinned_base_url: Arc::new(Mutex::new(None)),
             compat,
             debug,
+            tool_support: crate::tool_capability::ToolSupportCache::new(),
         }
     }
 
@@ -86,6 +92,30 @@ impl OpenAIProvider {
             pinned_base_url: Arc::new(Mutex::new(None)),
             compat,
             debug,
+            tool_support: crate::tool_capability::ToolSupportCache::new(),
+        }
+    }
+
+    /// Capability-first tools gate for local Ollama backends (#389/#97
+    /// follow-up). On the first turn for an Ollama-served model, probe
+    /// `/api/show` and cache whether it advertises `tools` support, so
+    /// [`OpenAIProvider::build_request_body`] can drop an unsupported `tools`
+    /// array pre-emptively instead of eating a reactive 400. No-op for
+    /// non-Ollama providers and for models already cached (by a prior probe or
+    /// a reactive failure). Best-effort: a failed probe leaves the model
+    /// unknown, so tools stay attached optimistically.
+    async fn maybe_probe_ollama_tools(&self, model: &str) {
+        if self.compat.provider_type() != "ollama" {
+            return;
+        }
+        if self.tool_support.get(model).is_some() {
+            return;
+        }
+        if let Some(supports) =
+            crate::ollama_probe::probe_ollama_tool_support(&self.client, &self.base_url, model)
+                .await
+        {
+            self.tool_support.set(model, supports);
         }
     }
 
@@ -623,6 +653,7 @@ impl OpenAIProvider {
             body["tools"] = json!([{ "type": "web_search" }]);
         } else if !request.tools.is_empty()
             && openai_compat::model_supports_tool_calling(&request.model)
+            && self.tool_support.allows(&request.model)
         {
             body["tools"] = json!(Self::build_tools(&request.tools));
         }
@@ -690,11 +721,9 @@ impl OpenAIProvider {
 ///
 /// Backends differ in wording, so we match a set of specific markers rather
 /// than one provider's phrasing:
-///   - Ollama:    `... does not support tools`
-///   - llama.cpp: `tools param requires --jinja flag` (started without
-///                `--jinja`), `Unsupported param: tools`
-///   - generic:   `does not support function calling`, `tools are not
-///                supported`, etc.
+/// - Ollama: `... does not support tools`
+/// - llama.cpp without `--jinja`: `tools param requires --jinja flag`, `Unsupported param: tools`
+/// - generic: `does not support function calling`, `tools are not supported`, etc.
 ///
 /// Matched conservatively: 400-only, and each marker is specific enough not to
 /// collide with unrelated 400s (a 500 is never retried — it may be a transient
@@ -709,10 +738,10 @@ fn is_tools_unsupported_error(status: u16, body: &str) -> bool {
         "does not support tools",            // Ollama
         "tools param requires",              // llama.cpp without --jinja
         "unsupported param: tools",          // llama.cpp (ggml-org/llama.cpp#10920)
-        "does not support function calling",  // generic
-        "tool calling is not supported",      // generic
-        "tools are not supported",            // generic
-        "tool use is not supported",          // generic
+        "does not support function calling", // generic
+        "tool calling is not supported",     // generic
+        "tools are not supported",           // generic
+        "tool use is not supported",         // generic
     ];
     if status != 400 {
         return false;
@@ -1108,6 +1137,11 @@ impl LlmProvider for OpenAIProvider {
         // `/v1/chat/completions` and MUST use the Responses API. Everything
         // else keeps the chat path unchanged. See `uses_responses_api`.
         let use_responses = self.uses_responses_api(request);
+        // Capability-first tools gate (#389/#97 follow-up): for a local Ollama
+        // backend, probe `/api/show` once per model so an unsupported `tools`
+        // array is dropped BEFORE the request (inside `build_request_body`)
+        // rather than reactively after a 400. No-op for non-Ollama providers.
+        self.maybe_probe_ollama_tools(&request.model).await;
         let body = if use_responses {
             openai_responses::build_responses_body(request, &self.compat)
         } else {
@@ -1153,6 +1187,10 @@ impl LlmProvider for OpenAIProvider {
                     model = %request.model,
                     "model does not support tools; retrying request without tools (#389)"
                 );
+                // Capability-first follow-up: remember this model rejects tools
+                // so every later turn drops the array pre-emptively — covers
+                // backends with no capability endpoint to probe (e.g. llama.cpp).
+                self.tool_support.set(&request.model, false);
                 let mut no_tools_request = request.clone();
                 no_tools_request.tools.clear();
                 no_tools_request.web_search = false;
@@ -3185,6 +3223,35 @@ mod tests {
         assert!(
             body.get("tools").is_none(),
             "Groq Compound must receive NO `tools` field (it rejects tool calling)"
+        );
+    }
+
+    #[test]
+    fn build_request_body_omits_tools_when_capability_cache_says_unsupported() {
+        // Capability-first gate (#389/#97 follow-up): a model that PASSES the
+        // name-gate still gets its `tools` array dropped once the per-provider
+        // capability cache records it as tools-unsupported (set by the Ollama
+        // `/api/show` probe or a reactive 400). Proves the cache — not just the
+        // static name-gate — gates `body["tools"]`.
+        let provider = stop_provider();
+        let mut req = stop_req();
+        req.tools = one_tool();
+
+        // With an empty cache the (normal) model carries its tools optimistically.
+        assert!(
+            provider
+                .build_request_body(&req)
+                .get("tools")
+                .and_then(|t| t.as_array())
+                .is_some_and(|a| a.len() == 1),
+            "an unknown model must carry tools optimistically"
+        );
+
+        // Record the model as tools-unsupported; the array must now be dropped.
+        provider.tool_support.set(&req.model, false);
+        assert!(
+            provider.build_request_body(&req).get("tools").is_none(),
+            "a model cached as tools-unsupported must receive NO `tools` field"
         );
     }
 

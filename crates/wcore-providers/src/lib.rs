@@ -30,6 +30,7 @@ pub mod mistral;
 pub mod model_catalog;
 pub mod moonshot;
 pub mod nvidia;
+pub mod ollama_probe;
 pub mod openai;
 pub mod openai_chatgpt;
 pub mod openai_compat;
@@ -45,6 +46,7 @@ pub mod resilient;
 pub mod retry;
 pub mod routing;
 pub mod together;
+pub mod tool_capability;
 pub mod vertex;
 pub mod xai;
 
