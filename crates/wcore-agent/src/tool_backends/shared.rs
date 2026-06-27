@@ -4,6 +4,9 @@
 //! resolver (R-H2) and the `urlencode` helper used by multiple search
 //! backends. Cross-backend imports go through this module.
 
+use wcore_config::config::{Config, ProviderType};
+use wcore_providers::flux_router::FLUX_ROUTER_DEFAULT_BASE_URL;
+
 /// Canonical env-var resolver. Returns `Some(key)` only when the env
 /// var is set **and** its value is non-empty (closes R-H2: empty-string
 /// `OPENAI_API_KEY=""` should NOT count as "configured"). Every new
@@ -29,6 +32,69 @@ pub fn join_openai_endpoint(base_url: &str, path: &str) -> String {
         base_url.trim_end_matches('/'),
         path.trim_start_matches('/')
     )
+}
+
+/// Resolve the OpenAI-wire API root (guaranteed to end in `/v1`) for the
+/// providers that actually serve the OpenAI-wire media endpoints
+/// (`/images/generations`, `/audio/speech`): native **OpenAI** and our
+/// **FluxRouter**. Every other OpenAI-compatible provider (Groq, Together,
+/// Deepseek, …) is LLM-completion-only — routing media to them would 404 —
+/// and Azure OpenAI uses a deployment-scoped URL scheme, so all of them
+/// return `None` here and the caller falls through to the env-key media
+/// backends.
+///
+/// Fills the provider default when `config.base_url` is empty (Tier-2
+/// newtypes such as FluxRouter leave it empty and supply the default
+/// themselves), then normalizes to a `/v1` root.
+///
+/// #310 follow-up: the original gate compared `config.provider ==
+/// ProviderType::OpenAI`, which never matches `ProviderType::FluxRouter`, so
+/// the fix was a silent no-op in a real Flux session (`"flux-router"` parses
+/// to `ProviderType::FluxRouter`). FluxRouter is now handled explicitly, and
+/// native OpenAI gets the required `/v1` even though its default
+/// `config.base_url` is `https://api.openai.com` (no `/v1`).
+pub fn openai_wire_media_base(config: &Config) -> Option<String> {
+    let raw = match config.provider {
+        ProviderType::OpenAI => {
+            let b = config.base_url.trim();
+            if b.is_empty() {
+                "https://api.openai.com"
+            } else {
+                b
+            }
+        }
+        ProviderType::FluxRouter => {
+            let b = config.base_url.trim();
+            if b.is_empty() {
+                FLUX_ROUTER_DEFAULT_BASE_URL
+            } else {
+                b
+            }
+        }
+        _ => return None,
+    };
+    ensure_v1_root(raw)
+}
+
+/// Normalize an OpenAI-wire base URL to a `…/v1` root. Returns `None` when
+/// the URL is unusable: empty, missing an `http(s)://` scheme, or carrying
+/// userinfo (`user:pass@host`) — the latter a credential-confusion / SSRF
+/// exfil vector when `base_url` comes from a hostile config. A base that
+/// already ends in `/v1` is preserved; otherwise `/v1` is appended.
+fn ensure_v1_root(base: &str) -> Option<String> {
+    let trimmed = base.trim().trim_end_matches('/');
+    let after_scheme = trimmed
+        .strip_prefix("https://")
+        .or_else(|| trimmed.strip_prefix("http://"))?;
+    let authority = after_scheme.split('/').next().unwrap_or(after_scheme);
+    if authority.is_empty() || authority.contains('@') {
+        return None;
+    }
+    if trimmed.ends_with("/v1") {
+        Some(trimmed.to_string())
+    } else {
+        Some(format!("{trimmed}/v1"))
+    }
 }
 
 /// Minimal `application/x-www-form-urlencoded` encoder.
@@ -111,5 +177,83 @@ mod tests {
         assert_eq!(urlencode("hello world"), "hello+world");
         assert_eq!(urlencode("foo=bar&baz"), "foo%3Dbar%26baz");
         assert_eq!(urlencode("a.b-c_d~e"), "a.b-c_d~e");
+    }
+
+    #[test]
+    fn media_base_native_openai_appends_v1() {
+        // Native OpenAI's resolved base_url is `https://api.openai.com` (no
+        // `/v1`); the media root must add it (else the endpoint 404s).
+        let cfg = Config {
+            provider: ProviderType::OpenAI,
+            api_key: "sk-o".into(),
+            base_url: "https://api.openai.com".into(),
+            ..Config::default()
+        };
+        assert_eq!(
+            openai_wire_media_base(&cfg).as_deref(),
+            Some("https://api.openai.com/v1")
+        );
+    }
+
+    #[test]
+    fn media_base_flux_router_uses_default_when_base_empty() {
+        // Real Flux session shape: provider = FluxRouter, base_url empty (the
+        // newtype supplies the default). #310 must fire here.
+        let cfg = Config {
+            provider: ProviderType::FluxRouter,
+            api_key: "sk-flux".into(),
+            base_url: String::new(),
+            ..Config::default()
+        };
+        assert_eq!(
+            openai_wire_media_base(&cfg).as_deref(),
+            Some("https://api.fluxrouter.ai/v1")
+        );
+    }
+
+    #[test]
+    fn media_base_none_for_non_openai_wire_media_providers() {
+        for p in [
+            ProviderType::Anthropic,
+            ProviderType::Gemini,
+            ProviderType::Groq,
+        ] {
+            let cfg = Config {
+                provider: p,
+                api_key: "k".into(),
+                ..Config::default()
+            };
+            assert!(
+                openai_wire_media_base(&cfg).is_none(),
+                "{p:?} has no OpenAI-wire media endpoint and must fall through"
+            );
+        }
+    }
+
+    #[test]
+    fn media_base_rejects_userinfo_exfil() {
+        // A hostile config base_url with userinfo would exfiltrate the key to
+        // attacker.com (the @ makes api.openai.com the path, not the host).
+        let cfg = Config {
+            provider: ProviderType::OpenAI,
+            api_key: "sk-o".into(),
+            base_url: "https://attacker.com@api.openai.com/v1".into(),
+            ..Config::default()
+        };
+        assert!(openai_wire_media_base(&cfg).is_none());
+    }
+
+    #[test]
+    fn media_base_preserves_explicit_v1_and_trailing_slash() {
+        let cfg = Config {
+            provider: ProviderType::FluxRouter,
+            api_key: "k".into(),
+            base_url: "https://api.fluxrouter.ai/v1/".into(),
+            ..Config::default()
+        };
+        assert_eq!(
+            openai_wire_media_base(&cfg).as_deref(),
+            Some("https://api.fluxrouter.ai/v1")
+        );
     }
 }

@@ -29,10 +29,10 @@ use wcore_tools::image_generation_tool::{
     ImageGenerationBackend, ImageGenerationError, ImageGenerationRequest, ImageGenerationResponse,
 };
 
-use wcore_config::config::{Config, ProviderType};
+use wcore_config::config::Config;
 
 use super::build_ssrf_safe_tool_client;
-use super::shared::{OPENAI_API_BASE, join_openai_endpoint, read_env_key};
+use super::shared::{OPENAI_API_BASE, join_openai_endpoint, openai_wire_media_base, read_env_key};
 
 // ---------------------------------------------------------------------
 // Per-call timeout. `reqwest`'s `.timeout()` covers the HTTP exchange
@@ -47,37 +47,39 @@ const HF_PER_CALL_TIMEOUT: Duration = Duration::from_secs(90);
 // ---------------------------------------------------------------------
 
 /// Build a concrete OpenAI image backend from the active provider when it
-/// is OpenAI-wire-compatible. Returns `None` for non-OpenAI providers
-/// (Anthropic/Gemini/etc. lack `/images/generations`) or when the resolved
-/// key is empty.
+/// serves the OpenAI-wire `/images/generations` endpoint. Returns `None`
+/// for providers without it (Anthropic/Gemini and the LLM-only OpenAI-compat
+/// routers) or when the resolved key is empty.
 ///
-/// `ProviderType::OpenAI` covers native OpenAI, Flux Router, and the
-/// OpenAI-compat catalog providers (they all resolve to OpenAI for wire
-/// construction). The endpoint is derived from `config.base_url` so a Flux
-/// session targets `https://api.fluxrouter.ai/v1/images/generations` with
-/// the Flux key (#310), not `api.openai.com`.
+/// Only native **OpenAI** and **FluxRouter** serve this media endpoint, so
+/// [`openai_wire_media_base`] resolves the `/v1` API root for those two
+/// (filling FluxRouter's default base when `config.base_url` is empty) and
+/// returns `None` otherwise. A Flux session therefore targets
+/// `https://api.fluxrouter.ai/v1/images/generations` with the Flux key
+/// (#310), and native OpenAI gets the required `/v1` even though its
+/// resolved `config.base_url` is `https://api.openai.com` (no `/v1`).
 ///
 /// Returns the concrete `DalleBackend` (not a trait object) so the resolved
 /// endpoint + key are unit-assertable.
 pub(crate) fn dalle_backend_from_config(config: &Config) -> Option<DalleBackend> {
-    if config.provider == ProviderType::OpenAI && !config.api_key.trim().is_empty() {
-        Some(DalleBackend::new(config.api_key.clone(), &config.base_url))
-    } else {
-        None
+    if config.api_key.trim().is_empty() {
+        return None;
     }
+    let base = openai_wire_media_base(config)?;
+    Some(DalleBackend::new(config.api_key.clone(), &base))
 }
 
 /// Resolve a real `ImageGenerationBackend` from the resolved `Config`
 /// and environment variables.
 ///
 /// Priority order (first match wins):
-/// 1. **Active OpenAI-wire provider** (e.g. OpenAI, Flux Router) — when
-///    `config.provider == ProviderType::OpenAI` and `config.api_key` is
-///    non-empty, the OpenAI image backend is built from the *resolved*
-///    `config.base_url` + `config.api_key`. This is the #310 fix: in a
-///    Flux session the tool now sends the Flux key to
-///    `{config.base_url}/images/generations` instead of the Flux key to
-///    `api.openai.com` (HTTP 401).
+/// 1. **Active OpenAI-wire media provider** (native OpenAI or Flux Router) —
+///    when `dalle_backend_from_config` resolves (see [`openai_wire_media_base`]
+///    for the gated provider set) and `config.api_key` is non-empty, the
+///    backend is built from the resolved `/v1` API root + `config.api_key`.
+///    This is the #310 fix: in a Flux session the tool now sends the Flux key
+///    to `https://api.fluxrouter.ai/v1/images/generations` instead of the
+///    Flux key to `api.openai.com` (HTTP 401).
 /// 2. `OPENAI_API_KEY` → OpenAI image at `api.openai.com` (back-compat
 ///    fallback when config doesn't carry an OpenAI-wire provider)
 /// 3. `FAL_API_KEY` → FAL FLUX schnell
@@ -819,6 +821,7 @@ impl ImageGenerationBackend for PollinationsBackend {
 mod tests {
     use super::*;
     use serial_test::serial;
+    use wcore_config::config::ProviderType;
     use wiremock::matchers::{body_json, header, method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
@@ -842,11 +845,13 @@ mod tests {
         Config::default()
     }
 
-    /// A resolved OpenAI-wire provider config (e.g. Flux Router) carrying a
-    /// non-`api.openai.com` base_url + a non-OpenAI key (#310).
+    /// A real Flux Router session: `provider == ProviderType::FluxRouter`
+    /// (what `"flux-router"` parses to) with an explicit Flux base_url + the
+    /// Flux key (#310). NOTE: the pre-fix fixture used `provider: OpenAI`,
+    /// which masked the bug — the resolver gate never matched FluxRouter.
     fn flux_config() -> Config {
         Config {
-            provider: ProviderType::OpenAI,
+            provider: ProviderType::FluxRouter,
             api_key: "sk-flux-test".to_string(),
             base_url: "https://api.fluxrouter.ai/v1".to_string(),
             ..Config::default()
@@ -973,6 +978,61 @@ mod tests {
             "https://api.openai.com/v1/images/generations"
         );
         assert_eq!(backend.api_key(), "sk-openai-env");
+    }
+
+    #[test]
+    #[serial]
+    fn dalle_resolves_flux_default_base_when_config_base_empty() {
+        // Real Flux sessions leave config.base_url empty (the FluxRouter
+        // newtype supplies the default). The resolver must still target Flux.
+        clear_image_gen_env();
+        let cfg = Config {
+            provider: ProviderType::FluxRouter,
+            api_key: "sk-flux-test".to_string(),
+            base_url: String::new(),
+            ..Config::default()
+        };
+        let backend = dalle_backend_from_config(&cfg).expect("Flux must resolve from default base");
+        assert_eq!(
+            backend.endpoint(),
+            "https://api.fluxrouter.ai/v1/images/generations"
+        );
+        assert_eq!(backend.api_key(), "sk-flux-test");
+    }
+
+    #[test]
+    #[serial]
+    fn dalle_adds_v1_for_native_openai_config() {
+        // Native OpenAI's resolved base_url is `https://api.openai.com` (no
+        // `/v1`); pre-fix this produced a 404 endpoint. The resolver must add
+        // `/v1`.
+        clear_image_gen_env();
+        let cfg = Config {
+            provider: ProviderType::OpenAI,
+            api_key: "sk-openai".to_string(),
+            base_url: "https://api.openai.com".to_string(),
+            ..Config::default()
+        };
+        let backend = dalle_backend_from_config(&cfg).expect("native OpenAI must resolve");
+        assert_eq!(
+            backend.endpoint(),
+            "https://api.openai.com/v1/images/generations"
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn dalle_declines_userinfo_base_url() {
+        // A hostile config base_url with userinfo would exfiltrate the key to
+        // attacker.com — the resolver must decline (fail closed).
+        clear_image_gen_env();
+        let cfg = Config {
+            provider: ProviderType::OpenAI,
+            api_key: "sk-openai".to_string(),
+            base_url: "https://attacker.com@api.openai.com/v1".to_string(),
+            ..Config::default()
+        };
+        assert!(dalle_backend_from_config(&cfg).is_none());
     }
 
     // -- DALL-E happy + failure paths ----------------------------------

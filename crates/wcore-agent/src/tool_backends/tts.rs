@@ -36,10 +36,10 @@ use std::time::Duration;
 use async_trait::async_trait;
 use wcore_egress::EgressClient as Client;
 
-use wcore_config::config::{Config, ProviderType};
+use wcore_config::config::Config;
 
 use super::build_ssrf_safe_tool_client;
-use super::shared::{OPENAI_API_BASE, join_openai_endpoint, read_env_key};
+use super::shared::{OPENAI_API_BASE, join_openai_endpoint, openai_wire_media_base, read_env_key};
 use wcore_tools::tts_tool::{
     TtsBackend, TtsError, TtsFormat, TtsProvider, TtsRequest, TtsResponse,
 };
@@ -72,40 +72,42 @@ pub const OPENAI_TTS_DEFAULT_VOICE: &str = "alloy";
 // Resolver
 // ---------------------------------------------------------------------
 
-/// Build a concrete OpenAI TTS backend from the active provider when it is
-/// OpenAI-wire-compatible. Returns `None` for non-OpenAI providers or an
-/// empty resolved key.
+/// Build a concrete OpenAI TTS backend from the active provider when it
+/// serves the OpenAI-wire `/audio/speech` endpoint. Returns `None` for
+/// providers without it (Anthropic/Gemini and the LLM-only OpenAI-compat
+/// routers) or an empty resolved key.
 ///
-/// `ProviderType::OpenAI` covers native OpenAI, Flux Router, and the
-/// OpenAI-compat catalog providers (all resolve to OpenAI for wire
-/// construction). The endpoint is derived from `config.base_url` so a Flux
-/// session targets `{config.base_url}/audio/speech` with the Flux key
+/// Only native **OpenAI** and **FluxRouter** are routed here, via
+/// [`openai_wire_media_base`] (which fills FluxRouter's default base when
+/// `config.base_url` is empty and guarantees a `/v1` root). A Flux session
+/// targets `https://api.fluxrouter.ai/v1/audio/speech` with the Flux key
 /// (#310) instead of sending the wrong key to `api.openai.com` (401).
 ///
 /// NOTE (#310): Flux's TTS endpoint is undocumented; we deliberately do NOT
-/// special-case it. If `{base_url}/audio/speech` is unsupported the provider
+/// special-case it. If `{base}/audio/speech` is unsupported the provider
 /// returns its own error — still strictly better than a 401 from the wrong
 /// key against OpenAI.
 ///
 /// Returns the concrete `OpenAiTtsBackend` (not a trait object) so the
 /// resolved endpoint + key are unit-assertable.
 pub(crate) fn openai_tts_backend_from_config(config: &Config) -> Option<OpenAiTtsBackend> {
-    if config.provider == ProviderType::OpenAI && !config.api_key.trim().is_empty() {
-        let endpoint = join_openai_endpoint(&config.base_url, "audio/speech");
-        Some(OpenAiTtsBackend::with_endpoint(
-            config.api_key.clone(),
-            endpoint,
-        ))
-    } else {
-        None
+    if config.api_key.trim().is_empty() {
+        return None;
     }
+    let base = openai_wire_media_base(config)?;
+    let endpoint = join_openai_endpoint(&base, "audio/speech");
+    Some(OpenAiTtsBackend::with_endpoint(
+        config.api_key.clone(),
+        endpoint,
+    ))
 }
 
 /// Pick the best available TTS backend from the resolved `Config` and the
 /// user's environment.
 ///
-/// 1. **Active OpenAI-wire provider** (OpenAI / Flux Router) — built from
-///    `config.base_url` + `config.api_key` (#310)
+/// 1. **Active OpenAI-wire media provider** (native OpenAI / Flux Router) —
+///    built from the resolved `/v1` API root + `config.api_key` (#310; see
+///    [`openai_wire_media_base`])
 /// 2. `OPENAI_API_KEY` → OpenAI TTS at `api.openai.com` (back-compat)
 /// 3. `ELEVENLABS_API_KEY` (paid, most natural)
 /// 4. Piper local fallback (B11 cross-wire — only when the `piper_tts`
@@ -532,6 +534,7 @@ mod tests {
     use super::*;
     use serial_test::serial;
     use tempfile::TempDir;
+    use wcore_config::config::ProviderType;
     use wcore_tools::tts_tool::TtsFormat;
 
     fn make_request(output_path: PathBuf) -> TtsRequest {
@@ -553,11 +556,13 @@ mod tests {
         Config::default()
     }
 
-    /// A resolved OpenAI-wire provider config (e.g. Flux Router) carrying a
-    /// non-`api.openai.com` base_url + a non-OpenAI key (#310).
+    /// A real Flux Router session: `provider == ProviderType::FluxRouter`
+    /// (what `"flux-router"` parses to) with an explicit Flux base_url + the
+    /// Flux key (#310). The pre-fix fixture used `provider: OpenAI`, masking
+    /// the bug — the resolver gate never matched FluxRouter.
     fn flux_config() -> Config {
         Config {
-            provider: ProviderType::OpenAI,
+            provider: ProviderType::FluxRouter,
             api_key: "sk-flux-test".to_string(),
             base_url: "https://api.fluxrouter.ai/v1".to_string(),
             ..Config::default()
@@ -673,6 +678,62 @@ mod tests {
         let backend = OpenAiTtsBackend::new("sk-openai-env".to_string());
         assert_eq!(backend.endpoint(), "https://api.openai.com/v1/audio/speech");
         assert_eq!(backend.api_key(), "sk-openai-env");
+    }
+
+    #[test]
+    #[serial]
+    fn openai_tts_resolves_flux_default_base_when_config_base_empty() {
+        // Real Flux sessions leave config.base_url empty; the resolver must
+        // still target Flux via the newtype default.
+        unsafe {
+            std::env::remove_var("OPENAI_API_KEY");
+            std::env::remove_var("ELEVENLABS_API_KEY");
+        }
+        let cfg = Config {
+            provider: ProviderType::FluxRouter,
+            api_key: "sk-flux-test".to_string(),
+            base_url: String::new(),
+            ..Config::default()
+        };
+        let backend =
+            openai_tts_backend_from_config(&cfg).expect("Flux must resolve from default base");
+        assert_eq!(
+            backend.endpoint(),
+            "https://api.fluxrouter.ai/v1/audio/speech"
+        );
+        assert_eq!(backend.api_key(), "sk-flux-test");
+    }
+
+    #[test]
+    #[serial]
+    fn openai_tts_adds_v1_for_native_openai_config() {
+        // Native OpenAI base is `https://api.openai.com` (no `/v1`); the
+        // resolver must add it (pre-fix this produced a 404 endpoint).
+        unsafe {
+            std::env::remove_var("OPENAI_API_KEY");
+            std::env::remove_var("ELEVENLABS_API_KEY");
+        }
+        let cfg = Config {
+            provider: ProviderType::OpenAI,
+            api_key: "sk-openai".to_string(),
+            base_url: "https://api.openai.com".to_string(),
+            ..Config::default()
+        };
+        let backend = openai_tts_backend_from_config(&cfg).expect("native OpenAI must resolve");
+        assert_eq!(backend.endpoint(), "https://api.openai.com/v1/audio/speech");
+    }
+
+    #[test]
+    #[serial]
+    fn openai_tts_declines_userinfo_base_url() {
+        // Hostile base_url with userinfo must fail closed (key-exfil vector).
+        let cfg = Config {
+            provider: ProviderType::OpenAI,
+            api_key: "sk-openai".to_string(),
+            base_url: "https://attacker.com@api.openai.com/v1".to_string(),
+            ..Config::default()
+        };
+        assert!(openai_tts_backend_from_config(&cfg).is_none());
     }
 
     // ------ ElevenLabs default voice ------
