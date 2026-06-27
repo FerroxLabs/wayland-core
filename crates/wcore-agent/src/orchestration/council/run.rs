@@ -35,6 +35,21 @@ use wcore_types::crucible::MICROCENTS_PER_USD;
 /// drift from what the council actually spends.
 pub const DEFAULT_PROPOSER_MAX_TOKENS: u32 = 4096;
 
+/// Minimal system prompt sent to every council proposer in place of the host
+/// system prompt the child would otherwise inherit via `child_config`. Avoids
+/// re-billing the multi-K-token host prompt × N members and leaking host tool
+/// scaffolding cross-provider (orphan-tool 400s). See spec §1.
+pub(crate) const COUNCIL_PROPOSER_SYSTEM_PROMPT: &str = "You are an expert council member. Answer the user's TASK directly, \
+     concisely, and on its own merits. Do not assume any host tools, project \
+     context, or prior conversation beyond the TASK text.";
+
+/// Minimal system prompt for the aggregator sub-agent. Its authoritative
+/// instructions + the untrusted-data fence live in the synthesis PROMPT BODY
+/// (`proposal::build_synthesis_prompt`), so the system prompt only needs to be
+/// minimal and non-leaking.
+pub(crate) const COUNCIL_AGGREGATOR_SYSTEM_PROMPT: &str = "You are a careful aggregator. Follow the instructions in the user message \
+     exactly. Do not assume any host tools or project context.";
+
 /// Pre-flight cap + daily-envelope gate. Certifies the judge-inclusive ceiling
 /// when any cap binds. The per-run `max_cost_usd` cap is STRICT (an unpriceable
 /// roster under it is refused). The default-on daily envelope is SOFT — it binds
@@ -230,7 +245,7 @@ pub async fn run_council(
                 prompt: task.to_string(),
                 max_turns: roster.proposer_max_turns,
                 max_tokens: DEFAULT_PROPOSER_MAX_TOKENS,
-                system_prompt: None,
+                system_prompt: Some(COUNCIL_PROPOSER_SYSTEM_PROMPT.to_string()),
                 provider: Some(p.spec.clone()),
                 model: model.clone(),
             };

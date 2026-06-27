@@ -1190,6 +1190,42 @@ mod posture_inheritance_tests {
         );
     }
 
+    /// Crucible enhancement #1 — a council member must get a minimal,
+    /// council-specific system prompt instead of inheriting the host one. With
+    /// the parent carrying a sentinel host prompt, the child config built from a
+    /// `SubAgentConfig` that supplies an explicit `system_prompt` must equal that
+    /// minimal prompt and must NOT contain the host sentinel (which would mean
+    /// the multi-K-token host prompt is being re-billed × N members).
+    #[test]
+    fn council_proposer_system_prompt_replaces_host_prompt() {
+        let parent = Config {
+            system_prompt: Some("HOST-SECRET-PROMPT".to_string()),
+            ..Config::default()
+        };
+        let spawner = AgentSpawner::new(Arc::new(NeverProvider), parent);
+
+        let sub = SubAgentConfig {
+            name: "p".to_string(),
+            prompt: "task".to_string(),
+            max_turns: 2,
+            max_tokens: 16,
+            system_prompt: Some("MINIMAL COUNCIL".to_string()),
+            provider: None,
+            model: None,
+        };
+        let child = spawner.child_config(&sub);
+
+        assert_eq!(
+            child.system_prompt.as_deref(),
+            Some("MINIMAL COUNCIL"),
+            "child must use the explicit minimal council system prompt"
+        );
+        assert!(
+            !child.system_prompt.unwrap().contains("HOST-SECRET-PROMPT"),
+            "child must NOT inherit the host system prompt (no re-billing × N)"
+        );
+    }
+
     /// Rank 7 — a host cancel must propagate into spawned sub-agents. With the
     /// parent token already fired, the child engine observes `is_cancelled()`
     /// at its first turn boundary and returns WITHOUT reaching the provider

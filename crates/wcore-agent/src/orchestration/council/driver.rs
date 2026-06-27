@@ -13,7 +13,9 @@ use super::assembler::{AssemblyPlan, AssemblyPolicy, assemble};
 use super::gate::{CouncilDecision, GateConfig, Stakes, classify_task};
 use super::plan_card::plan_to_card;
 use super::roster::{ProposerSpec, Roster};
-use super::run::{CouncilOutcome, DEFAULT_PROPOSER_MAX_TOKENS, run_council};
+use super::run::{
+    COUNCIL_PROPOSER_SYSTEM_PROMPT, CouncilOutcome, DEFAULT_PROPOSER_MAX_TOKENS, run_council,
+};
 use super::spend::CouncilSpend;
 
 /// Default intra-family price floor (fraction of a family's flagship price)
@@ -222,7 +224,7 @@ async fn execute_assembled(
                 prompt: task.to_string(),
                 max_turns: cfg.proposer_max_turns,
                 max_tokens: DEFAULT_PROPOSER_MAX_TOKENS,
-                system_prompt: None,
+                system_prompt: Some(COUNCIL_PROPOSER_SYSTEM_PROMPT.to_string()),
                 provider: Some(spec.clone()),
                 model: spec.split_once(':').map(|(_, m)| m.to_string()),
             })

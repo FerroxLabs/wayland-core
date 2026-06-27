@@ -96,7 +96,7 @@ impl Aggregator for LlmSynthesisAggregator {
                 prompt,
                 max_turns: AGGREGATOR_MAX_TURNS,
                 max_tokens: AGGREGATOR_MAX_TOKENS,
-                system_prompt: None,
+                system_prompt: Some(super::run::COUNCIL_AGGREGATOR_SYSTEM_PROMPT.to_string()),
                 provider: None,
                 model: self.model.clone(),
             })
