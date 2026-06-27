@@ -680,19 +680,47 @@ impl OpenAIProvider {
 /// calling" — the request was otherwise valid and would succeed if the `tools`
 /// array were dropped.
 ///
-/// Ollama models without tool support (e.g. `smollm2:135m`) reject the OpenAI-
-/// compatible chat request with a 400 `... does not support tools`
-/// (`type: invalid_request_error`). Unlike Groq's Compound family — a small,
-/// known set we can name-gate in [`openai_compat::model_supports_tool_calling`]
-/// — local Ollama no-tool models are open-ended (any small model the user has
-/// pulled), so we cannot enumerate them. Detect the error and retry once
-/// without tools so the turn still completes. See FerroxLabs/wayland#389.
+/// Local OpenAI-compatible backends without tool support reject the request
+/// with a 400 whose body names the missing capability. Unlike Groq's Compound
+/// family — a small, known set we can name-gate in
+/// [`openai_compat::model_supports_tool_calling`] — local no-tool models are
+/// open-ended (any small model the user has pulled), so we cannot enumerate
+/// them. Detect the error and retry once without tools so the turn still
+/// completes. See FerroxLabs/wayland#389.
 ///
-/// Matched conservatively: a 400 whose body mentions "does not support tools"
-/// (case-insensitive). The phrasing is Ollama's; the substring is specific
-/// enough not to collide with unrelated 400s.
+/// Backends differ in wording, so we match a set of specific markers rather
+/// than one provider's phrasing:
+///   - Ollama:    `... does not support tools`
+///   - llama.cpp: `tools param requires --jinja flag` (started without
+///                `--jinja`), `Unsupported param: tools`
+///   - generic:   `does not support function calling`, `tools are not
+///                supported`, etc.
+///
+/// Matched conservatively: 400-only, and each marker is specific enough not to
+/// collide with unrelated 400s (a 500 is never retried — it may be a transient
+/// server fault, not a stable capability gap). Gated upstream by
+/// `body_has_tools`, so we only ever drop a `tools` array that was actually
+/// attached.
 fn is_tools_unsupported_error(status: u16, body: &str) -> bool {
-    status == 400 && body.to_ascii_lowercase().contains("does not support tools")
+    /// Phrases local backends emit when a tools/function-calling request hits a
+    /// model (or server config) that cannot do tools. Lowercase; matched as
+    /// case-insensitive substrings.
+    const TOOLS_UNSUPPORTED_MARKERS: &[&str] = &[
+        "does not support tools",            // Ollama
+        "tools param requires",              // llama.cpp without --jinja
+        "unsupported param: tools",          // llama.cpp (ggml-org/llama.cpp#10920)
+        "does not support function calling",  // generic
+        "tool calling is not supported",      // generic
+        "tools are not supported",            // generic
+        "tool use is not supported",          // generic
+    ];
+    if status != 400 {
+        return false;
+    }
+    let body = body.to_ascii_lowercase();
+    TOOLS_UNSUPPORTED_MARKERS
+        .iter()
+        .any(|marker| body.contains(marker))
 }
 
 /// Strip configured patterns from text content
@@ -2051,6 +2079,34 @@ mod tests {
         assert!(!is_tools_unsupported_error(
             500,
             "model does not support tools"
+        ));
+    }
+
+    #[test]
+    fn tools_unsupported_matches_llamacpp_jinja_400() {
+        // llama.cpp started without --jinja rejects tool requests with this 400
+        // (ggml-org/llama.cpp; reported via Zed, OpenCode). #389 follow-up.
+        assert!(is_tools_unsupported_error(
+            400,
+            "tools param requires --jinja flag"
+        ));
+    }
+
+    #[test]
+    fn tools_unsupported_matches_llamacpp_unsupported_param_400() {
+        // llama.cpp "Unsupported param: tools" (ggml-org/llama.cpp#10920).
+        assert!(is_tools_unsupported_error(
+            400,
+            r#"{"error":{"message":"Unsupported param: tools","type":"invalid_request_error"}}"#
+        ));
+    }
+
+    #[test]
+    fn tools_unsupported_matches_function_calling_phrasing() {
+        // Generic backends that phrase it as function calling rather than tools.
+        assert!(is_tools_unsupported_error(
+            400,
+            "this model does not support function calling"
         ));
     }
 
