@@ -39,6 +39,13 @@ pub enum ProtocolEvent {
     Thinking {
         text: String,
         msg_id: String,
+        /// #318 — optional per-turn thinking SUBJECT: a short opaque display
+        /// label for the reasoning block (Flux `reasoning_summary`). Present
+        /// only on the subject-carrying chunk (where `text` is typically
+        /// empty); omitted from the JSON on ordinary thinking-text chunks so
+        /// the v0 wire shape is preserved for hosts that don't read it.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        subject: Option<String>,
     },
     ToolRequest {
         msg_id: String,
@@ -713,6 +720,42 @@ mod tests {
         assert_eq!(json["type"], "text_delta");
         assert_eq!(json["text"], "hello");
         assert_eq!(json["msg_id"], "m1");
+    }
+
+    /// #318: a plain thinking-text event (no subject) must serialize WITHOUT
+    /// the `subject` key — preserving the v0 wire shape for hosts that don't
+    /// read it (skip_serializing_if = Option::is_none).
+    #[test]
+    fn test_thinking_event_without_subject_omits_key() {
+        let event = ProtocolEvent::Thinking {
+            text: "step 1".to_string(),
+            msg_id: "m1".to_string(),
+            subject: None,
+        };
+        let json = serde_json::to_value(&event).unwrap();
+        assert_eq!(json["type"], "thinking");
+        assert_eq!(json["text"], "step 1");
+        assert_eq!(json["msg_id"], "m1");
+        assert!(
+            json.get("subject").is_none(),
+            "subject must be omitted when None, got {json}"
+        );
+    }
+
+    /// #318: a subject-carrying thinking event serializes the field as exactly
+    /// `subject` (the name the desktop matches on), with an empty `text`.
+    #[test]
+    fn test_thinking_event_with_subject_serializes_subject() {
+        let event = ProtocolEvent::Thinking {
+            text: String::new(),
+            msg_id: "m1".to_string(),
+            subject: Some("Reasoning through the problem".to_string()),
+        };
+        let json = serde_json::to_value(&event).unwrap();
+        assert_eq!(json["type"], "thinking");
+        assert_eq!(json["text"], "");
+        assert_eq!(json["msg_id"], "m1");
+        assert_eq!(json["subject"], "Reasoning through the problem");
     }
 
     #[test]

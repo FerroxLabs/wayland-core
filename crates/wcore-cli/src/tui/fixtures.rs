@@ -29,6 +29,7 @@ pub fn full_conversation() -> Vec<ProtocolEvent> {
         ProtocolEvent::Thinking {
             text: "The user wants a greeting.".into(),
             msg_id: "m1".into(),
+            subject: None,
         },
         ProtocolEvent::TextDelta {
             text: "Hello! ".into(),

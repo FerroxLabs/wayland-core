@@ -503,6 +503,18 @@ impl OutputSink for ProtocolSink {
         let _ = self.writer.emit(&ProtocolEvent::Thinking {
             text: text.to_string(),
             msg_id: msg_id.to_string(),
+            subject: None,
+        });
+    }
+
+    fn emit_thinking_subject(&self, subject: &str, msg_id: &str) {
+        // #318 — subject-only chunk: empty `text`, `subject: Some(..)`. Lands
+        // on the same msg_id as the reasoning text that follows, so the host
+        // attaches it as the heading of the same in-flight thinking block.
+        let _ = self.writer.emit(&ProtocolEvent::Thinking {
+            text: String::new(),
+            msg_id: msg_id.to_string(),
+            subject: Some(subject.to_string()),
         });
     }
 

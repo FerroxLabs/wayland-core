@@ -117,6 +117,14 @@ pub enum LlmEvent {
     },
     /// Thinking content (Anthropic only)
     ThinkingDelta(String),
+    /// Per-turn thinking SUBJECT: a short opaque display label for the
+    /// reasoning block (e.g. Flux's `delta.reasoning_summary`, a gerund
+    /// phrase like "Reasoning through the problem"). Distinct from
+    /// `ThinkingDelta` (the raw thinking text). Emitted once per turn,
+    /// immediately before the first `ThinkingDelta`, only on turns that
+    /// actually produce reasoning. The host renders it as the heading for
+    /// the in-flight thinking block. Opaque — never switch on the value.
+    ThinkingSubject(String),
     /// Response complete
     Done {
         stop_reason: StopReason,

@@ -4479,6 +4479,15 @@ impl AgentEngine {
                             self.output.emit_thinking(&text, &self.current_msg_id);
                             thinking_text.push_str(&text);
                         }
+                        LlmEvent::ThinkingSubject(subject) => {
+                            // #318 — per-turn thinking SUBJECT. Display-only:
+                            // emit on the same msg_id as the reasoning text
+                            // that follows so the host attaches it to the
+                            // in-flight thinking block. Do NOT fold it into
+                            // `thinking_text` (it's a heading, not content).
+                            self.output
+                                .emit_thinking_subject(&subject, &self.current_msg_id);
+                        }
                         LlmEvent::Done {
                             stop_reason: sr,
                             finish_reason: fr,

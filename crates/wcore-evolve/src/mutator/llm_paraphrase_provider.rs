@@ -215,6 +215,7 @@ async fn collect_text(
             // tool-use blocks (every provider, on prompt non-compliance), or
             // Flux web-search citations/results — none belong in a paraphrase.
             LlmEvent::ThinkingDelta(_)
+            | LlmEvent::ThinkingSubject(_)
             | LlmEvent::ToolUse { .. }
             | LlmEvent::Citations(_)
             | LlmEvent::SearchResults(_)

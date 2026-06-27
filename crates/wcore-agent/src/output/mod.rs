@@ -15,6 +15,13 @@ pub trait OutputSink: Send + Sync {
     fn emit_text_delta(&self, text: &str, msg_id: &str);
     /// Stream thinking content from LLM
     fn emit_thinking(&self, text: &str, msg_id: &str);
+    /// #318 — emit a per-turn thinking SUBJECT: a short opaque display label
+    /// for the in-flight reasoning block (e.g. Flux `reasoning_summary`).
+    /// Default no-op so terminal/null/test sinks need no change; only
+    /// `ProtocolSink` overrides to emit a `Thinking` event carrying
+    /// `subject: Some(..)` on the same `msg_id`/turn as the reasoning text
+    /// that follows.
+    fn emit_thinking_subject(&self, _subject: &str, _msg_id: &str) {}
     /// Announce a tool call
     fn emit_tool_call(&self, name: &str, input: &str);
     /// Display tool result

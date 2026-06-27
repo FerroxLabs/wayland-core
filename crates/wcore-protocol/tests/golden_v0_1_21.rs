@@ -85,6 +85,9 @@ fn golden_thinking_v0_1_21() {
     let got = serialize(&ProtocolEvent::Thinking {
         text: "considering options".into(),
         msg_id: "m-1".into(),
+        // #318 additive field; None omits `subject` from the wire so the v0
+        // shape below is byte-identical for hosts that don't read it.
+        subject: None,
     });
     assert_eq!(
         got,

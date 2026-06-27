@@ -230,6 +230,15 @@ impl OutputSink for ChannelSink {
         self.send(ProtocolEvent::Thinking {
             text: text.to_string(),
             msg_id: msg_id.to_string(),
+            subject: None,
+        });
+    }
+
+    fn emit_thinking_subject(&self, subject: &str, msg_id: &str) {
+        self.send(ProtocolEvent::Thinking {
+            text: String::new(),
+            msg_id: msg_id.to_string(),
+            subject: Some(subject.to_string()),
         });
     }
 

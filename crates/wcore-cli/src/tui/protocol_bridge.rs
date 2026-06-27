@@ -2074,6 +2074,7 @@ mod tests {
             ProtocolEvent::Thinking {
                 text: "reasoning...".into(),
                 msg_id: "m1".into(),
+                subject: None,
             },
         );
         assert_eq!(app.session.thinking, "reasoning...");
