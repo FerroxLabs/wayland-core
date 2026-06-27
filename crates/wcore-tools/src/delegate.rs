@@ -212,6 +212,7 @@ fn task_to_config(task: &Task, max_turns: usize) -> (SubAgentConfig, ForkOverrid
         system_prompt: Some(build_child_prompt(&task.goal, task.context.as_deref())),
         provider: None,
         model: None,
+        temperature: None,
     };
     let overrides = ForkOverrides {
         model: None,

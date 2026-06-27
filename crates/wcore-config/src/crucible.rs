@@ -109,6 +109,12 @@ pub struct CrucibleConfig {
     /// model specs. The learning signal for a future BetaScorer; off until the
     /// operator opts in.
     pub log_assembly: bool,
+    /// Crucible #3: sampling temperature for proposers (diversity). Default 0.6
+    /// — run the proposers hotter so the council explores a wider answer space.
+    pub proposer_temperature: f32,
+    /// Crucible #3: sampling temperature for the aggregator (convergence).
+    /// Default 0.4 — run the aggregator cooler so the synthesis is stable.
+    pub aggregator_temperature: f32,
     /// Opt-in (default `false`): in a NON-interactive `wcore crucible` invocation
     /// (stdin is not a TTY), auto-approve the council plan instead of failing
     /// closed. Default `false` so a headless/piped invocation never spends without
@@ -137,6 +143,8 @@ impl Default for CrucibleConfig {
             cap_low_usd: 0.02,
             cap_med_usd: 0.05,
             cap_high_usd: 0.15,
+            proposer_temperature: 0.6,
+            aggregator_temperature: 0.4,
             log_assembly: false,
             crucible_auto_spend: false,
         }
@@ -224,6 +232,34 @@ proposers = ["openai", "anthropic"]
             (c.cap_low_usd, c.cap_med_usd, c.cap_high_usd),
             (0.02, 0.05, 0.15)
         );
+    }
+
+    #[test]
+    fn temperatures_default_to_split() {
+        // Crucible #3: proposers run hotter (diversity), aggregator cooler
+        // (convergence). These are the defaults consumed by the roster.
+        let c = CrucibleConfig::default();
+        assert!((c.proposer_temperature - 0.6).abs() < 1e-6);
+        assert!((c.aggregator_temperature - 0.4).abs() < 1e-6);
+    }
+
+    #[test]
+    fn temperatures_backfill_in_partial_table() {
+        // A partial table that never mentions temperatures must fall back to the
+        // 0.6 / 0.4 split via container-level #[serde(default)].
+        let toml = r#"
+enabled = true
+proposers = ["openai", "anthropic"]
+"#;
+        let c: CrucibleConfig = toml::from_str(toml).expect("parse partial table");
+        assert!((c.proposer_temperature - 0.6).abs() < 1e-6);
+        assert!((c.aggregator_temperature - 0.4).abs() < 1e-6);
+        // And an explicit override parses.
+        let c2: CrucibleConfig =
+            toml::from_str("proposer_temperature = 0.9\naggregator_temperature = 0.1")
+                .expect("parse explicit temps");
+        assert!((c2.proposer_temperature - 0.9).abs() < 1e-6);
+        assert!((c2.aggregator_temperature - 0.1).abs() < 1e-6);
     }
 
     #[test]

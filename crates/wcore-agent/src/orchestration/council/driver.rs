@@ -201,6 +201,8 @@ pub fn roster_from_plan(
         max_cost_usd: None,
         flux_markup: cfg.flux_markup,
         daily_cap_usd: cfg.daily_cap_usd,
+        proposer_temperature: cfg.proposer_temperature,
+        aggregator_temperature: cfg.aggregator_temperature,
     }
 }
 
@@ -227,6 +229,8 @@ async fn execute_assembled(
                 system_prompt: Some(COUNCIL_PROPOSER_SYSTEM_PROMPT.to_string()),
                 provider: Some(spec.clone()),
                 model: spec.split_once(':').map(|(_, m)| m.to_string()),
+                // Crucible #3: the Direct path is a single proposer-tier call.
+                temperature: Some(cfg.proposer_temperature),
             })
             .await;
         if result.is_error {

@@ -360,6 +360,7 @@ pub(crate) async fn resolve_stage_schema(
                         // model pin is read directly (no node_providers lookup).
                         provider: stage.provider.clone(),
                         model: stage.model.clone(),
+                        temperature: None,
                     })
                     .await;
                 drop(permit);
@@ -1082,6 +1083,7 @@ impl<'a> WorkflowRunner<'a> {
                 system_prompt: None,
                 provider: node_provider(&plan.graph, id),
                 model: node_pinned_model(&plan.graph, id),
+                temperature: None,
             })
             .await
     }
@@ -1125,6 +1127,7 @@ impl<'a> WorkflowRunner<'a> {
                     system_prompt: None,
                     provider: node_provider(&plan.graph, id),
                     model: node_pinned_model(&plan.graph, id),
+                    temperature: None,
                 },
             ));
         }
@@ -1557,6 +1560,7 @@ impl<'a> WorkflowRunner<'a> {
                     system_prompt: None,
                     provider: node_provider(&plan.graph, agent_name),
                     model: node_pinned_model(&plan.graph, agent_name),
+                    temperature: None,
                 };
                 let result = self.spawner.spawn_one(cfg).await;
                 if result.is_error {

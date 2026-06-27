@@ -55,6 +55,10 @@ pub struct Roster {
     /// Optional per-user/day aggregate spend ceiling in USD. Charged + pre-checked
     /// against the shared `BudgetTracker` so many councils in a day stay bounded.
     pub daily_cap_usd: Option<f64>,
+    /// Crucible #3: sampling temperature applied to every proposer (diversity).
+    pub proposer_temperature: f32,
+    /// Crucible #3: sampling temperature applied to the aggregator (convergence).
+    pub aggregator_temperature: f32,
 }
 
 /// Why a `[crucible]` roster failed validation.
@@ -152,6 +156,8 @@ pub fn validate_and_build(cfg: &CrucibleConfig) -> Result<Roster, CrucibleConfig
         max_cost_usd: cfg.max_cost_usd,
         flux_markup: cfg.flux_markup,
         daily_cap_usd: cfg.daily_cap_usd,
+        proposer_temperature: cfg.proposer_temperature,
+        aggregator_temperature: cfg.aggregator_temperature,
     })
 }
 

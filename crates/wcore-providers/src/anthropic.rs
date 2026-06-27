@@ -230,6 +230,11 @@ impl AnthropicProvider {
             });
         }
 
+        // Crucible #3: emit an explicit `temperature` when set, gated by the
+        // provider's `supports_temperature` flag + the per-model exclusion (see
+        // `openai_compat::emit_temperature`). Anthropic accepts `temperature`.
+        crate::openai_compat::emit_temperature(&mut body, request, &self.compat);
+
         // Output-side optimization (Part A): UNION the request's fluff stop
         // sequences into Anthropic's `stop_sequences` field, preserving any the
         // caller already placed on the body. Must run BEFORE apply_cache_zones
@@ -832,6 +837,7 @@ mod tests {
             web_search: false,
             conversation_id: None,
             client_context_tokens: None,
+            temperature: None,
         }
     }
 

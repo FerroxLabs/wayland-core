@@ -560,6 +560,12 @@ impl AgentSpawner {
         let mut config = self.base_config.clone();
         config.max_turns = Some(sub_config.max_turns);
         config.max_tokens = sub_config.max_tokens;
+        // Crucible #3 — honor a per-spawn temperature override. `None` leaves the
+        // base config's temperature in place (top-level base is `None`, so the
+        // child engine omits the field unless this sets it).
+        if let Some(temperature) = sub_config.temperature {
+            config.temperature = Some(temperature);
+        }
         if let Some(sp) = sub_config.system_prompt.clone() {
             config.system_prompt = Some(sp);
         }
@@ -895,6 +901,7 @@ mod crucible_provider_resolution_tests {
             system_prompt: None,
             provider: provider.map(|s| s.into()),
             model: None,
+            temperature: None,
         }
     }
 
@@ -1067,6 +1074,7 @@ mod phase7_tests {
             system_prompt: Some("you are helpful".to_string()),
             provider: None,
             model: None,
+            temperature: None,
         };
         assert_eq!(config.name, "test-agent");
         assert_eq!(config.max_turns, 5);
@@ -1128,6 +1136,7 @@ mod posture_inheritance_tests {
             system_prompt: None,
             provider: None,
             model: None,
+            temperature: None,
         }
     }
 
@@ -1212,6 +1221,7 @@ mod posture_inheritance_tests {
             system_prompt: Some("MINIMAL COUNCIL".to_string()),
             provider: None,
             model: None,
+            temperature: None,
         };
         let child = spawner.child_config(&sub);
 

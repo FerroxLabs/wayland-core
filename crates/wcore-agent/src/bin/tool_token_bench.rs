@@ -219,6 +219,7 @@ async fn drain_scripted_usage(provider: &ScriptedProvider) -> Usage {
         web_search: false,
         conversation_id: None,
         client_context_tokens: None,
+        temperature: None,
     };
     let mut rx = provider.stream(&req).await.expect("scripted stream");
     let mut tu = TokenUsage::default();

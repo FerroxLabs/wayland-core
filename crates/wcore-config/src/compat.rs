@@ -266,6 +266,18 @@ pub struct ProviderCompat {
     /// `[compat.tier_models] cheap = "claude-haiku-4" balanced = "..."`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tier_models: Option<TierModels>,
+
+    /// Crucible #3: whether this provider accepts an explicit `temperature`
+    /// body field. `None`/`Some(true)` (the default) emits the request's
+    /// temperature when one is set; `Some(false)` suppresses it for endpoints
+    /// that reject the parameter. This is a coarse PROVIDER-level switch; the
+    /// per-MODEL exclusion of the OpenAI `o1*`/`o3*` reasoning families (which
+    /// fix temperature at 1.0) is handled separately by
+    /// `openai_compat::accepts_temperature(model)`. Following the no-hardcoded-
+    /// quirks rule, temperature emission is gated by this flag + that model
+    /// predicate, never by `base_url.contains(...)`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub supports_temperature: Option<bool>,
 }
 
 impl ProviderCompat {
@@ -290,6 +302,8 @@ impl ProviderCompat {
             cost_per_output_token: Some(75.0 / 1_000_000.0),
             cost_per_cache_read_token: Some(1.5 / 1_000_000.0),
             cost_per_cache_write_token: Some(18.75 / 1_000_000.0),
+            // Crucible #3: Anthropic chat models accept an explicit temperature.
+            supports_temperature: Some(true),
             ..Default::default()
         }
     }
@@ -310,6 +324,8 @@ impl ProviderCompat {
             cost_per_output_token: Some(75.0 / 1_000_000.0),
             cost_per_cache_read_token: Some(1.5 / 1_000_000.0),
             cost_per_cache_write_token: Some(18.75 / 1_000_000.0),
+            // Crucible #3: Anthropic-on-Bedrock chat models accept temperature.
+            supports_temperature: Some(true),
             ..Default::default()
         }
     }
@@ -417,6 +433,10 @@ impl ProviderCompat {
             // the pricing.toml catalog so they resolve correctly before reaching this fallback.
             cost_per_input_token: Some(0.0),
             cost_per_output_token: Some(0.0),
+            // Crucible #3: OpenAI chat models accept an explicit temperature;
+            // the `o1*`/`o3*` reasoning families are excluded per-model by
+            // `openai_compat::accepts_temperature`.
+            supports_temperature: Some(true),
             ..Default::default()
         }
     }
@@ -728,6 +748,10 @@ impl ProviderCompat {
                 .replays_thinking_in_history
                 .or(defaults.replays_thinking_in_history),
             tier_models: user.tier_models.or(defaults.tier_models),
+            // Crucible #3 — merge ripple: a new compat field MUST be threaded
+            // here or it is silently dropped when user config is merged over the
+            // provider preset.
+            supports_temperature: user.supports_temperature.or(defaults.supports_temperature),
         }
     }
 
@@ -780,6 +804,14 @@ impl ProviderCompat {
     /// sets it `false` because `grok-4.3` (a reasoning model) 400s on `stop`.
     pub fn supports_stop_param(&self) -> bool {
         self.supports_stop_param.unwrap_or(true)
+    }
+
+    /// Crucible #3: whether to emit an explicit `temperature` body field.
+    /// Defaults to `true` (chat models accept it). `Some(false)` suppresses it
+    /// for endpoints that reject the parameter. The per-model `o1*`/`o3*`
+    /// exclusion is layered on top via `openai_compat::accepts_temperature`.
+    pub fn supports_temperature(&self) -> bool {
+        self.supports_temperature.unwrap_or(true)
     }
 
     /// Whether to replay historical assistant `reasoning_content` on the Chat
@@ -1702,5 +1734,32 @@ mod input_optimization_tests {
         let defaults = ProviderCompat::flux_router_defaults();
         let merged = ProviderCompat::merge(defaults, ProviderCompat::default());
         assert_eq!(merged.input_optimization(), "router");
+    }
+
+    /// Crucible #3 — merge ripple: a user `supports_temperature = false` MUST
+    /// survive `merge()` over a preset that defaults it `Some(true)` (the
+    /// reference_providercompat_merge_ripple gotcha). An empty user keeps the
+    /// preset's `Some(true)`; an unset field resolves to `true` via the accessor.
+    #[test]
+    fn merge_user_supports_temperature_overrides_default() {
+        let defaults = ProviderCompat::openai_defaults();
+        assert_eq!(defaults.supports_temperature, Some(true));
+
+        // User opts a quirky endpoint OUT of temperature.
+        let user = ProviderCompat {
+            supports_temperature: Some(false),
+            ..ProviderCompat::default()
+        };
+        let merged = ProviderCompat::merge(defaults.clone(), user);
+        assert_eq!(merged.supports_temperature, Some(false));
+        assert!(!merged.supports_temperature());
+
+        // Empty user keeps the preset's Some(true).
+        let merged_empty = ProviderCompat::merge(defaults, ProviderCompat::default());
+        assert_eq!(merged_empty.supports_temperature, Some(true));
+        assert!(merged_empty.supports_temperature());
+
+        // Unset everywhere → accessor defaults to true.
+        assert!(ProviderCompat::default().supports_temperature());
     }
 }

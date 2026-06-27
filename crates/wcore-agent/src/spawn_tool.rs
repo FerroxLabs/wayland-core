@@ -266,6 +266,7 @@ fn parse_tasks(input: &Value) -> Result<(Vec<SubAgentConfig>, Vec<Option<String>
             system_prompt: Some(system_prompt),
             provider: None,
             model: None,
+            temperature: None,
         });
         agent_names.push(agent);
     }

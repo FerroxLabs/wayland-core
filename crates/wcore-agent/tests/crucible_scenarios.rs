@@ -159,6 +159,8 @@ fn roster(
         max_cost_usd,
         flux_markup: 1.0,
         daily_cap_usd: None,
+        proposer_temperature: 0.6,
+        aggregator_temperature: 0.4,
     }
 }
 

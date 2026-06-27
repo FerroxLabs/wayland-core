@@ -819,6 +819,12 @@ pub struct Config {
     pub security: SecurityConfig,
     pub model: String,
     pub max_tokens: u32,
+    /// Crucible #3: optional sampling temperature for this session's requests.
+    /// `None` (the default) leaves the provider on its own default and omits the
+    /// `temperature` body field. The council threads per-tier temperatures here
+    /// via `SubAgentConfig` -> `child_config`; the top-level CLI path leaves it
+    /// `None`.
+    pub temperature: Option<f32>,
     pub max_turns: Option<usize>,
     /// The resolved default tool-approval posture (from `[default]
     /// approval_mode`). Consumed at TUI boot to seed the approval manager's
@@ -910,6 +916,7 @@ impl std::fmt::Debug for Config {
             .field("security", &self.security)
             .field("model", &self.model)
             .field("max_tokens", &self.max_tokens)
+            .field("temperature", &self.temperature)
             .field("max_turns", &self.max_turns)
             .field("approval_mode", &self.approval_mode)
             .field("system_prompt", &self.system_prompt)
@@ -967,6 +974,7 @@ impl Default for Config {
             base_url: String::new(),
             model: String::new(),
             max_tokens: default_max_tokens(),
+            temperature: None,
             max_turns: None,
             approval_mode: ApprovalMode::default(),
             system_prompt: None,
@@ -1744,6 +1752,9 @@ impl Config {
             base_url,
             model,
             max_tokens,
+            // Crucible #3: the top-level session leaves temperature unset; the
+            // council sets per-tier temperatures via SubAgentConfig downstream.
+            temperature: None,
             max_turns,
             approval_mode,
             system_prompt,

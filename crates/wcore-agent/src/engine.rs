@@ -957,6 +957,10 @@ pub struct AgentEngine {
     /// `apply_context_modifiers`) refuse the switch and log the divergence.
     user_model_pin: Option<String>,
     max_tokens: u32,
+    /// Crucible #3: optional sampling temperature sourced from `Config` at
+    /// construction. `None` (the default top-level session) omits the field;
+    /// the council's child engines set it via `child_config` -> `Config`.
+    temperature: Option<f32>,
     max_turns: Option<usize>,
     /// FluxRouter web_search grounding (contract §5): when `true`, each turn's
     /// `LlmRequest` carries `web_search: true` so the provider attaches the
@@ -1497,6 +1501,7 @@ impl AgentEngine {
             model: config.model,
             user_model_pin: None,
             max_tokens: config.max_tokens,
+            temperature: config.temperature,
             max_turns: config.max_turns,
             total_usage: TokenUsage::default(),
             thinking: config.thinking,
@@ -1674,6 +1679,7 @@ impl AgentEngine {
             model: config.model.clone(),
             user_model_pin: None,
             max_tokens: config.max_tokens,
+            temperature: config.temperature,
             max_turns: config.max_turns,
             total_usage: session.total_usage.clone(),
             thinking: config.thinking,
@@ -4106,6 +4112,9 @@ impl AgentEngine {
                 // context-routing headers on tier-alias turns.
                 conversation_id: Some(self.conversation_id.clone()),
                 client_context_tokens: Some(input_token_estimate as u64),
+                // Crucible #3: per-session sampling temperature (council child
+                // engines set it; top-level session leaves it `None`).
+                temperature: self.temperature,
             };
 
             // Cache-stability (token-opt): inject the per-turn skill-router
@@ -8099,6 +8108,7 @@ mod set_config_tests {
     fn make_engine(model: &str) -> super::AgentEngine {
         super::AgentEngine {
             provider: Arc::new(NullProvider),
+            temperature: None,
             tools: Arc::new(ToolRegistry::new()),
             messages: vec![],
             rebind_system_prefix: None,
@@ -8923,6 +8933,7 @@ mod phase6_tests {
     fn make_engine(model: &str, allow_list: Vec<String>) -> super::AgentEngine {
         super::AgentEngine {
             provider: Arc::new(NullProvider),
+            temperature: None,
             tools: Arc::new(ToolRegistry::new()),
             messages: vec![],
             rebind_system_prefix: None,
@@ -9215,6 +9226,7 @@ mod compact_tests {
     ) -> super::AgentEngine {
         super::AgentEngine {
             provider: Arc::new(NullProvider),
+            temperature: None,
             tools: Arc::new(ToolRegistry::new()),
             messages,
             rebind_system_prefix: None,
@@ -10537,6 +10549,7 @@ mod plan_mode_tests {
         let flag = Arc::new(AtomicBool::new(false));
         super::AgentEngine {
             provider: Arc::new(NullProvider),
+            temperature: None,
             tools: Arc::new(ToolRegistry::new()),
             messages: vec![],
             rebind_system_prefix: None,
@@ -10962,6 +10975,7 @@ mod hook_integration_tests {
     fn make_engine(model: &str) -> super::AgentEngine {
         super::AgentEngine {
             provider: Arc::new(NullProvider),
+            temperature: None,
             tools: Arc::new(ToolRegistry::new()),
             messages: vec![],
             rebind_system_prefix: None,
@@ -11791,6 +11805,7 @@ mod approval_bridge_engine_tests {
     fn make_engine() -> super::AgentEngine {
         super::AgentEngine {
             provider: Arc::new(NullProvider),
+            temperature: None,
             tools: Arc::new(ToolRegistry::new()),
             messages: vec![],
             rebind_system_prefix: None,
@@ -12763,6 +12778,7 @@ mod user_model_writeback_tests {
     fn make_engine() -> super::AgentEngine {
         super::AgentEngine {
             provider: Arc::new(NullProvider),
+            temperature: None,
             tools: Arc::new(ToolRegistry::new()),
             messages: vec![],
             rebind_system_prefix: None,

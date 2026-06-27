@@ -21,6 +21,10 @@ pub struct SubAgentConfig {
     /// Optional model override applied to the child engine config. `None` ⇒
     /// inherit the (resolved) provider's default model.
     pub model: Option<String>,
+    /// Crucible #3: optional sampling temperature applied to the child engine's
+    /// requests via `child_config`. `None` ⇒ inherit the base config's
+    /// temperature (the engine then omits the field unless the base set one).
+    pub temperature: Option<f32>,
 }
 
 /// Overrides applied when spawning a fork-mode skill sub-agent.
@@ -80,6 +84,7 @@ mod tests {
             system_prompt: None,
             provider: Some("openai".into()),
             model: Some("gpt-5.5".into()),
+            temperature: None,
         };
         assert_eq!(c.provider.as_deref(), Some("openai"));
         assert_eq!(c.model.as_deref(), Some("gpt-5.5"));

@@ -197,6 +197,7 @@ async fn dispatch(
             system_prompt: Some(SYNTH_SYSTEM_PROMPT.to_string()),
             provider: None,
             model: None,
+            temperature: None,
         })
         .await;
     if result.is_error {

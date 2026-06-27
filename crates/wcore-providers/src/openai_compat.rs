@@ -113,6 +113,30 @@ pub fn accepts_temperature(model: &str) -> bool {
     !is_o_series(&m)
 }
 
+/// Crucible #3: emit `body["temperature"]` for the request, but only when ALL
+/// hold:
+/// 1. the request carries an explicit `temperature` (`Some`),
+/// 2. the provider hasn't opted out via `compat.supports_temperature == false`,
+/// 3. the model accepts an explicit temperature (`accepts_temperature` excludes
+///    the OpenAI `o1*`/`o3*` reasoning families, which fix it at 1.0).
+///
+/// Centralizing the gate here keeps the o-series exclusion + the provider switch
+/// in one place so every provider body builder emits temperature identically —
+/// no hardcoded `base_url.contains(...)` quirks (AGENTS.md). The field name is
+/// `"temperature"` for every current provider.
+pub fn emit_temperature(
+    body: &mut serde_json::Value,
+    request: &wcore_types::llm::LlmRequest,
+    compat: &wcore_config::compat::ProviderCompat,
+) {
+    if let Some(t) = request.temperature
+        && compat.supports_temperature()
+        && accepts_temperature(&request.model)
+    {
+        body["temperature"] = serde_json::json!(t);
+    }
+}
+
 /// True when the model accepts caller-supplied tool-calling parameters
 /// (the `tools` array) on the Chat Completions request.
 ///

@@ -166,6 +166,11 @@ impl BedrockProvider {
             });
         }
 
+        // Crucible #3: emit an explicit `temperature` when set, gated by the
+        // provider's `supports_temperature` flag + the per-model exclusion (see
+        // `openai_compat::emit_temperature`). Anthropic-on-Bedrock accepts it.
+        crate::openai_compat::emit_temperature(&mut body, request, &self.compat);
+
         body
     }
 
@@ -2001,6 +2006,7 @@ mod tests {
                 web_search: false,
                 conversation_id: None,
                 client_context_tokens: None,
+                temperature: None,
             }
         }
 

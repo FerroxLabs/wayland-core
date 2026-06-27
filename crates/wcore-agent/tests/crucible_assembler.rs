@@ -111,6 +111,8 @@ fn roster_from_plan(members: &[String], aggregator: Option<String>) -> Roster {
         max_cost_usd: None,
         flux_markup: 1.0,
         daily_cap_usd: None,
+        proposer_temperature: 0.6,
+        aggregator_temperature: 0.4,
     }
 }
 

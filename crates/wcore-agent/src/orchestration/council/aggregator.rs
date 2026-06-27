@@ -43,14 +43,23 @@ pub struct LlmSynthesisAggregator {
     model: Option<String>,
     /// Base config the synthesis sub-agent inherits (policy surface, etc.).
     base: Config,
+    /// Crucible #3: sampling temperature for the synthesis sub-agent
+    /// (convergence — runs cooler than the proposers).
+    temperature: f32,
 }
 
 impl LlmSynthesisAggregator {
-    pub fn new(provider: Arc<dyn LlmProvider>, model: Option<String>, base: Config) -> Self {
+    pub fn new(
+        provider: Arc<dyn LlmProvider>,
+        model: Option<String>,
+        base: Config,
+        temperature: f32,
+    ) -> Self {
         Self {
             provider,
             model,
             base,
+            temperature,
         }
     }
 
@@ -99,6 +108,8 @@ impl Aggregator for LlmSynthesisAggregator {
                 system_prompt: Some(super::run::COUNCIL_AGGREGATOR_SYSTEM_PROMPT.to_string()),
                 provider: None,
                 model: self.model.clone(),
+                // Crucible #3: aggregator runs cooler for a stable synthesis.
+                temperature: Some(self.temperature),
             })
             .await;
 
@@ -169,7 +180,8 @@ mod tests {
     async fn empty_usable_set_returns_empty_without_spawning() {
         // All errored → nothing usable → early return BEFORE any spawn, so the
         // (never-streaming) provider is never invoked.
-        let agg = LlmSynthesisAggregator::new(Arc::new(NeverProvider), None, Config::default());
+        let agg =
+            LlmSynthesisAggregator::new(Arc::new(NeverProvider), None, Config::default(), 0.4);
         let res = agg.aggregate("task", &[prop("openai", "x", true)]).await;
         assert!(res.final_text.is_empty());
         assert!(res.chosen_from.is_empty());

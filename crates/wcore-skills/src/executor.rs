@@ -119,6 +119,7 @@ pub async fn execute_fork(
         system_prompt: None,
         provider: None,
         model: None,
+        temperature: None,
     };
 
     let overrides = ForkOverrides {

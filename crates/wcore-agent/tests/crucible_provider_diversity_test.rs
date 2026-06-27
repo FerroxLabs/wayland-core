@@ -57,6 +57,7 @@ fn pinned_roster(n: usize) -> (Vec<SubAgentConfig>, Arc<dyn ProviderResolver>) {
             system_prompt: None,
             provider: Some(spec),
             model: None,
+            temperature: None,
         });
     }
     (configs, Arc::new(MapResolver { map }))
@@ -122,6 +123,7 @@ async fn unpinned_member_uses_parent_provider() {
             system_prompt: None,
             provider: None,
             model: None,
+            temperature: None,
         })
         .await;
     assert_eq!(result.text, "PARENT");

@@ -20,6 +20,7 @@ fn make_sub_config(name: &str) -> SubAgentConfig {
         system_prompt: None,
         provider: None,
         model: None,
+        temperature: None,
     }
 }
 

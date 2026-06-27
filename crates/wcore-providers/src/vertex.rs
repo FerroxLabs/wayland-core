@@ -207,6 +207,11 @@ impl VertexProvider {
             });
         }
 
+        // Crucible #3: emit an explicit `temperature` when set, gated by the
+        // provider's `supports_temperature` flag + the per-model exclusion (see
+        // `openai_compat::emit_temperature`). Anthropic-on-Vertex accepts it.
+        crate::openai_compat::emit_temperature(&mut body, request, &self.compat);
+
         body
     }
 

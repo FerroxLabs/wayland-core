@@ -35,6 +35,7 @@ fn sub_config(name: &str, prompt: &str) -> SubAgentConfig {
         system_prompt: None,
         provider: None,
         model: None,
+        temperature: None,
     }
 }
 

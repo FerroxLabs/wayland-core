@@ -448,6 +448,8 @@ async fn run_direct(
             system_prompt: None,
             provider: Some(first.spec.clone()),
             model: first.model.clone(),
+            // Crucible #3: the gated direct path is a single proposer-tier call.
+            temperature: Some(roster.proposer_temperature),
         })
         .await;
     if result.is_error {

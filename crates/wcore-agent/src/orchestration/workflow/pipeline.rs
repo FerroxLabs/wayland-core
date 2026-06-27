@@ -227,6 +227,7 @@ async fn run_item(
                 system_prompt: None,
                 provider: None,
                 model: None,
+                temperature: None,
             })
             .await;
         drop(permit);

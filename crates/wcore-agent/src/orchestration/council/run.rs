@@ -248,6 +248,8 @@ pub async fn run_council(
                 system_prompt: Some(COUNCIL_PROPOSER_SYSTEM_PROMPT.to_string()),
                 provider: Some(p.spec.clone()),
                 model: model.clone(),
+                // Crucible #3: proposers run hotter for answer diversity.
+                temperature: Some(roster.proposer_temperature),
             };
             let provider = p.provider.clone();
             let route = p.spec.split(':').next().unwrap_or(&p.spec).to_string();
@@ -375,7 +377,12 @@ pub async fn run_council(
             Ok((provider, model)) => {
                 let agg_provider = spec.split(':').next().unwrap_or(spec).to_string();
                 aggregator_provenance = Some((agg_provider, model.clone()));
-                let agg = LlmSynthesisAggregator::new(provider, model, base.clone());
+                let agg = LlmSynthesisAggregator::new(
+                    provider,
+                    model,
+                    base.clone(),
+                    roster.aggregator_temperature,
+                );
                 Some(agg.aggregate(task, &proposals).await)
             }
             Err(_) => None,
@@ -513,6 +520,8 @@ mod tests {
             max_cost_usd: None,
             flux_markup: 1.0,
             daily_cap_usd: None,
+            proposer_temperature: 0.6,
+            aggregator_temperature: 0.4,
         }
     }
 
