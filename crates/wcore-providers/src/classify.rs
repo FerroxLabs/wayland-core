@@ -69,9 +69,20 @@ fn classify_by_body(body: &str) -> Option<FailoverReason> {
     if b.contains("session expired") || b.contains("session has expired") {
         return Some(FailoverReason::SessionExpired);
     }
+    // Billing must key on GENUINE credit/quota/payment signals, never on the
+    // bare word "billing". Anthropic appends a "Please go to Plans & Billing
+    // to upgrade or purchase credits." remediation link to a wide range of
+    // error bodies — including non-billing ones — so a bare `contains("billing")`
+    // mis-classifies an unrelated failure as out-of-credit and surfaces a false
+    // "balance is too low" to a user whose balance is fine (issue #329). Match
+    // the real signals instead: insufficient quota, an explicit credit-balance
+    // exhaustion, a request to purchase credits, payment-required, or the
+    // "billing plan" entitlement phrasing.
     if b.contains("insufficient_quota")
         || b.contains("insufficient quota")
-        || b.contains("billing")
+        || b.contains("credit balance is too low")
+        || b.contains("purchase credits")
+        || b.contains("billing plan")
         || b.contains("payment required")
     {
         return Some(FailoverReason::Billing);
@@ -363,6 +374,38 @@ mod tests {
         assert_eq!(
             classify_failover(&dummy_err(), None, Some("payment required"), None),
             FailoverReason::Billing
+        );
+    }
+
+    /// Issue #329: a genuine Anthropic low-credit 400 body must still classify
+    /// as Billing. The signal is the credit-balance phrasing, NOT the trailing
+    /// "Plans & Billing" link.
+    #[test]
+    fn body_billing_anthropic_credit_balance_too_low() {
+        let anthropic_body = "{\"type\":\"error\",\"error\":{\"type\":\"invalid_request_error\",\
+            \"message\":\"Your credit balance is too low to access the Anthropic API. \
+            Please go to Plans & Billing to upgrade or purchase credits.\"}}";
+        assert_eq!(
+            classify_failover(&dummy_err(), None, Some(anthropic_body), None),
+            FailoverReason::Billing
+        );
+    }
+
+    /// Issue #329 regression: an Anthropic error that is NOT about credits but
+    /// whose remediation text mentions "Plans & Billing" must NOT be classified
+    /// as Billing (which would surface a false "balance is too low" and pin the
+    /// key into a permanent cooldown). Before the fix the bare `contains("billing")`
+    /// match swallowed this; now it falls through to its real reason.
+    #[test]
+    fn body_non_billing_error_with_billing_link_is_not_billing() {
+        let body = "{\"type\":\"error\",\"error\":{\"type\":\"invalid_request_error\",\
+            \"message\":\"This model requires a specific feature. \
+            Visit Plans & Billing for details.\"}}";
+        assert_ne!(
+            classify_failover(&dummy_err(), None, Some(body), None),
+            FailoverReason::Billing,
+            "a non-credit error that merely links to Plans & Billing must not \
+             be classified as out-of-credit"
         );
     }
 
