@@ -1,5 +1,25 @@
 # Changelog
 
+## [0.12.11](https://github.com/FerroxLabs/wayland-core/compare/v0.12.10...v0.12.11) (2026-06-27)
+
+This release is headlined by **Crucible**, our cross-provider Mixture-of-Providers council — wayland-core's answer to single-model ceilings — folded together with two audited reliability and security fixes.
+
+### ✨ Headliner — Crucible (Mixture-of-Providers)
+
+* **crucible:** a cross-provider council you run with `wayland-core crucible "<task>"`. N proposers, **each pinned to a different LLM provider**, work the task in parallel; a fenced, read-only **aggregator** fuses their answers into one. Three ways to run it: `--auto` gates convening behind a cheap difficulty classifier (trivial tasks get a single direct call, high-stakes tasks convene the full council); `--advisor` injects the fused synthesis into the normal trusted agent loop as private guidance (the agent then reasons, acts, and uses tools on it); `--terminal` prints the fused answer and stops. Includes per-tier proposer/aggregator temperatures, provenance-fenced injection containment, per-proposer **and** global soft deadlines with quorum, and `[crucible]` budget/daily-cap guards. Tri-model cross-audited; 151 dedicated tests. ([#91](https://github.com/FerroxLabs/wayland-core/pull/91))
+
+### Enhancements
+
+* **tools:** `image_generate` and `text_to_speech` now follow your active provider instead of assuming a single hardcoded host. FluxRouter and native OpenAI sessions route to the correct endpoint with the correct key (with proper `/v1` API-root resolution), gracefully fall back to FAL / Gemini Imagen / Hugging Face FLUX via their env keys, and **fail closed** on a base URL carrying embedded credentials. ([#310](https://github.com/FerroxLabs/wayland/issues/310))
+
+### Security & Hardening
+
+* **mcp:** MCP tool curation is now driven purely by **BM25 relevance + recency**. Removed a name-based "rescue" boost that a third-party MCP server could exploit by naming a tool like a built-in to jump the curation budget — closing a budget-hijack vector with no impact on built-in tools (which are never curated). ([#89](https://github.com/FerroxLabs/wayland/issues/89))
+
+### Validation
+
+* Full cross-platform gate green — **9,411 tests** across Linux, macOS, and Windows.
+
 ## [0.12.10](https://github.com/FerroxLabs/wayland-core/compare/v0.12.9...v0.12.10) (2026-06-27)
 
 
