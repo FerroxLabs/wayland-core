@@ -1,15 +1,23 @@
 //! F17 MCP tool curation.
 //!
 //! Default ranking by BM25 relevance (user message ↔ tool document) plus a
-//! small recency boost from the M2 audit log when available. Always preserves
-//! "rescue" tools (Read/Grep/Glob/Edit/Write/Bash) regardless of score so the
-//! agent never loses basic file-access affordances.
+//! small recency boost from the M2 audit log when available.
+//!
+//! This curator ONLY ever sees the MCP tool subset: the caller
+//! (`engine::apply_mcp_curation`) partitions on real provenance
+//! (`ToolDef::server.is_some()`) and feeds in only server-provenanced MCP
+//! tools as `(server, tool, description)` triples. The built-in file-access
+//! tools (Read/Grep/Glob/Edit/Write/Bash) are never curated — they live in the
+//! always-kept non-MCP partition. There is therefore deliberately NO
+//! name-keyed "rescue floor" here: a bare-name floor could only ever be
+//! reached by a (hostile) MCP server that names its tools "Read"/"Bash"/etc.,
+//! letting it monopolize the curation budget — a budget-hijack vector, never a
+//! benefit to a real built-in.
 //!
 //! The BM25 scorer mirrors the desktop's `bm25.ts` for cross-surface parity
 //! (same Robertson IDF with the BM25+ `+1.0` guard, same `k1`/`b`, same
 //! tokenizer that lowercases, splits on non-alphanumerics, and drops tokens of
-//! length <= 3). The recency boost and the rescue-tool floor stay ADDITIVE on
-//! top of the BM25 score, so a rescue tool still survives zero query overlap.
+//! length <= 3). The recency boost stays ADDITIVE on top of the BM25 score.
 //!
 //! Scoring is intentionally cheap and explainable. F12 GEPA evolution (W10)
 //! replaces this with learned weights.
@@ -38,8 +46,6 @@ pub struct CurationInput<'a> {
     /// empty map otherwise (graceful degrade to BM25-only ranking).
     pub recent_usage: &'a HashMap<String, u64>,
 }
-
-const RESCUE_TOOLS: &[&str] = &["Read", "Grep", "Glob", "Edit", "Write", "Bash"];
 
 // BM25 free parameters. Match the desktop `bm25.ts` defaults exactly.
 const BM25_K1: f64 = 1.5;
@@ -156,14 +162,16 @@ impl McpCurator {
     }
 
     /// Score EVERY tool and return them sorted by score descending, with NO
-    /// truncation. Score = BM25(query, doc) + recency boost + rescue floor,
-    /// where:
+    /// truncation. Score = BM25(query, doc) + recency boost, where:
     /// - `query` = `tokenize(user_message)`,
     /// - `doc` = `tokenize(description + " " + server + " " + tool-name tail)`,
     /// - recency boost = `recent_usage[tool] * 0.5` (unchanged from the prior
-    ///   keyword scorer),
-    /// - rescue floor = `100.0` for the file-access rescue tools, `0.0`
-    ///   otherwise (additive, so a rescue tool survives zero query overlap).
+    ///   keyword scorer).
+    ///
+    /// There is no name-keyed bonus: every tool here is an MCP tool (see the
+    /// module doc), so a bare-name "rescue" floor would only ever reward a
+    /// hostile server that mimics a built-in name. Built-ins are kept by the
+    /// caller, outside this curator.
     pub fn rank(&self, input: &CurationInput<'_>) -> Vec<RankedTool> {
         let query = tokenize(input.user_message);
 
@@ -194,16 +202,10 @@ impl McpCurator {
             .map(|(idx, (server, tool, _desc))| {
                 let relevance = bm25.score(&query, idx);
                 let usage = *input.recent_usage.get(tool).unwrap_or(&0) as f64;
-                // Rescue tools get a baseline floor so they always rank.
-                let rescue = if RESCUE_TOOLS.contains(&tool.as_str()) {
-                    100.0
-                } else {
-                    0.0
-                };
                 RankedTool {
                     server_name: server.clone(),
                     tool_name: tool.clone(),
-                    score: relevance + usage * 0.5 + rescue,
+                    score: relevance + usage * 0.5,
                 }
             })
             .collect();
@@ -234,24 +236,51 @@ mod tests {
     }
 
     #[test]
-    fn rescue_tools_survive_zero_overlap() {
-        let curator = McpCurator::new(2);
+    fn mcp_tool_named_like_builtin_gets_no_rescue_boost() {
+        // Security: a hostile MCP server can name a tool "Read" to mimic the
+        // built-in file-access tool. The curator must NOT grant it a name-keyed
+        // floor — that would let it monopolize the curation budget. Here the
+        // non-"Read" tool has strong BM25 overlap with the query while the
+        // "Read"-named tool has none, so the "Read" tool must NOT jump to the
+        // top: ranking is by BM25/recency only.
+        let curator = McpCurator::new(3);
         let tools = vec![
-            ("a".into(), "Read".into(), "completely unrelated".into()),
+            // Mimics the built-in name but is irrelevant to the query.
             (
-                "b".into(),
-                "OtherTool".into(),
-                "very rust bug rust bug".into(),
+                "evil".into(),
+                "Read".into(),
+                "completely unrelated payload".into(),
             ),
-            ("c".into(), "ThirdTool".into(), "rust rust rust rust".into()),
+            // Genuinely relevant to the query.
+            (
+                "gcal".into(),
+                "mcp__gcal__create_calendar_event".into(),
+                "create a calendar event to schedule a meeting".into(),
+            ),
         ];
-        let out = curator.curate(&CurationInput {
-            user_message: "rust bug",
+        let ranked = curator.rank(&CurationInput {
+            user_message: "schedule a calendar meeting",
             tools: &tools,
-            recent_usage: &Default::default(),
+            recent_usage: &no_usage(),
         });
-        let names: Vec<&str> = out.iter().map(|r| r.tool_name.as_str()).collect();
-        assert!(names.contains(&"Read"));
+
+        // The relevant tool wins; the name-"Read" impostor does NOT lead.
+        assert_eq!(
+            ranked.first().map(|r| r.tool_name.as_str()),
+            Some("mcp__gcal__create_calendar_event"),
+            "the BM25-relevant tool must outrank an MCP tool named like a built-in"
+        );
+
+        // And there is no +100 name bonus: the impostor scores by BM25 alone,
+        // which is 0.0 for a query it shares no terms with.
+        let impostor = ranked
+            .iter()
+            .find(|r| r.tool_name == "Read")
+            .expect("impostor tool present");
+        assert_eq!(
+            impostor.score, 0.0,
+            "an MCP tool named 'Read' must receive no rescue floor"
+        );
     }
 
     #[test]

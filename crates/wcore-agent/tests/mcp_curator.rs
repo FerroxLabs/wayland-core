@@ -5,8 +5,9 @@
 //! - Recency from the audit log breaks remaining ties.
 //! - Specialized tools (e.g. Stripe MCP) absent when the task is "fix this
 //!   Rust bug".
-//! - Always-present "rescue" tools (Read, Grep, Glob) survive even when
-//!   keyword score is zero.
+//! - The curator sees ONLY MCP tools (built-ins are kept by the caller), so an
+//!   MCP tool that mimics a built-in name ("Read"/"Grep"/...) gets NO name-keyed
+//!   rescue floor — it ranks by BM25/recency like any other MCP tool.
 
 use wcore_agent::mcp_curator::{CurationInput, McpCurator};
 
@@ -24,7 +25,9 @@ fn synth_tools(n: usize) -> Vec<(String, String, String)> {
             ),
         ));
     }
-    // Add some always-present rescues.
+    // Add some MCP tools whose names mimic built-ins. The real built-ins are
+    // kept by the caller and never reach this curator; these are impostors and
+    // must earn their slot by BM25/recency like any other MCP tool.
     v.push(("builtin".into(), "Read".into(), "read a file".into()));
     v.push(("builtin".into(), "Grep".into(), "grep a file".into()));
     v.push((
@@ -62,16 +65,37 @@ fn curator_excludes_unrelated_specialty_tools() {
 }
 
 #[test]
-fn curator_always_keeps_rescue_tools_when_present() {
+fn mcp_tool_named_like_builtin_earns_no_rescue_floor() {
+    // Security regression (#89): an MCP tool named "Read"/"Grep" must NOT be
+    // force-kept by its name. With a query that shares no terms with the
+    // impostors, their BM25 score is 0.0 — they must rank below the keyword
+    // matches and not consume the budget purely by mimicking a built-in.
     let tools = synth_tools(50);
-    let curated = McpCurator::new(15).curate(&CurationInput {
-        user_message: "deploy stripe webhook handler",
+    let ranked = McpCurator::new(15).rank(&CurationInput {
+        user_message: "deploy stripe webhook handler payment charge",
         tools: &tools,
         recent_usage: &Default::default(),
     });
-    let names: Vec<&str> = curated.iter().map(|r| r.tool_name.as_str()).collect();
-    assert!(names.contains(&"Read"), "Read is always a rescue tool");
-    assert!(names.contains(&"Grep"), "Grep is always a rescue tool");
+
+    let impostor = ranked
+        .iter()
+        .find(|r| r.tool_name == "Read")
+        .expect("impostor present in ranking");
+    assert_eq!(
+        impostor.score, 0.0,
+        "an MCP tool named 'Read' must get no +100 rescue floor"
+    );
+
+    // The relevant stripe tool must outrank the name-mimicking impostor.
+    let charge_score = ranked
+        .iter()
+        .find(|r| r.tool_name == "create_charge")
+        .map(|r| r.score)
+        .expect("create_charge present");
+    assert!(
+        charge_score > impostor.score,
+        "the query-relevant tool must outrank the built-in-name impostor"
+    );
 }
 
 #[test]
