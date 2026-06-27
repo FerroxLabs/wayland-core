@@ -10,6 +10,7 @@
 //! `Arc<dyn LlmProvider>` requires `wcore-providers` + `wcore-config`, which
 //! sit above the leaf types crate.
 
+pub mod advisor;
 pub mod aggregator;
 pub mod assembler;
 pub mod assembler_log;
@@ -22,6 +23,7 @@ pub mod roster;
 pub mod run;
 pub mod spend;
 
+pub use advisor::{ADVISOR_HEADER, build_advisor_turn};
 pub use aggregator::{Aggregator, LlmSynthesisAggregator};
 pub use assembler::{AssemblyPlan, AssemblyPolicy, DEFAULT_FLUX_POOL, assemble, bootstrap_pool};
 pub use assembler_log::{assembly_log_line, log_assembly};

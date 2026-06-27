@@ -36,6 +36,23 @@ pub enum AssemblyMode {
     Auto,
 }
 
+/// How the fused council synthesis is consumed.
+///
+/// `Terminal` (the default) prints `final_text` and stops — today's read-only
+/// surface, byte-identical to the shipped behavior. `Advisor` injects the fused
+/// synthesis as PRIVATE guidance into the normal trusted agent loop, which then
+/// reasons/acts/uses tools on it. In both modes the council itself stays
+/// read-only and injection-fenced; only the SINK differs. See spec §3.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum CouncilMode {
+    /// Print the fused answer and stop (the read-only terminal surface).
+    #[default]
+    Terminal,
+    /// Inject the fused synthesis as private guidance into the normal loop.
+    Advisor,
+}
+
 /// The `[crucible]` configuration block.
 ///
 /// `#[serde(default)]` at the container level means any omitted field falls
@@ -115,6 +132,11 @@ pub struct CrucibleConfig {
     /// Crucible #3: sampling temperature for the aggregator (convergence).
     /// Default 0.4 — run the aggregator cooler so the synthesis is stable.
     pub aggregator_temperature: f32,
+    /// Crucible #2: how the fused synthesis is consumed. `Terminal` (default)
+    /// prints the answer and stops; `Advisor` injects it as private guidance
+    /// into the normal trusted agent loop. The council deliberation stays
+    /// read-only + fenced in both modes — only the sink changes.
+    pub mode: CouncilMode,
     /// Opt-in (default `false`): in a NON-interactive `wcore crucible` invocation
     /// (stdin is not a TTY), auto-approve the council plan instead of failing
     /// closed. Default `false` so a headless/piped invocation never spends without
@@ -145,6 +167,7 @@ impl Default for CrucibleConfig {
             cap_high_usd: 0.15,
             proposer_temperature: 0.6,
             aggregator_temperature: 0.4,
+            mode: CouncilMode::Terminal,
             log_assembly: false,
             crucible_auto_spend: false,
         }
@@ -260,6 +283,35 @@ proposers = ["openai", "anthropic"]
                 .expect("parse explicit temps");
         assert!((c2.proposer_temperature - 0.9).abs() < 1e-6);
         assert!((c2.aggregator_temperature - 0.1).abs() < 1e-6);
+    }
+
+    #[test]
+    fn mode_defaults_to_terminal() {
+        // Crucible #2: the sink defaults to Terminal so existing behavior is
+        // byte-identical unless the operator opts into Advisor.
+        let c = CrucibleConfig::default();
+        assert_eq!(c.mode, CouncilMode::Terminal);
+    }
+
+    #[test]
+    fn mode_absent_parses_as_terminal_and_advisor_parses() {
+        // A table that never mentions `mode` must default to Terminal via the
+        // container-level #[serde(default)] backfill.
+        let toml = r#"
+enabled = true
+proposers = ["openai", "anthropic"]
+"#;
+        let c: CrucibleConfig = toml::from_str(toml).expect("parse without mode");
+        assert_eq!(c.mode, CouncilMode::Terminal);
+
+        // The lowercase rename means `mode = "advisor"` parses.
+        let c2: CrucibleConfig = toml::from_str("mode = \"advisor\"").expect("parse mode=advisor");
+        assert_eq!(c2.mode, CouncilMode::Advisor);
+
+        // And `mode = "terminal"` parses back to the default.
+        let c3: CrucibleConfig =
+            toml::from_str("mode = \"terminal\"").expect("parse mode=terminal");
+        assert_eq!(c3.mode, CouncilMode::Terminal);
     }
 
     #[test]

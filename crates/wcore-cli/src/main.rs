@@ -481,6 +481,14 @@ enum TopCmd {
         /// Auto mode: exclude these provider families (comma-separated).
         #[arg(long, value_delimiter = ',')]
         deny: Vec<String>,
+        /// Inject the council synthesis into the normal trusted agent loop as
+        /// private guidance (the agent then reasons/acts/uses tools on it),
+        /// instead of printing the fused answer and stopping. Overrides config.
+        #[arg(long)]
+        advisor: bool,
+        /// Force terminal (print-and-stop) mode, overriding `[crucible].mode`.
+        #[arg(long)]
+        terminal: bool,
     },
     /// v0.7.0 Task 1.C.1: print resolved project context from WAYLAND.md /
     /// AGENTS.md / .wayland/context.md / CLAUDE.md walking up from cwd.
@@ -980,6 +988,8 @@ async fn run() -> anyhow::Result<ExitCode> {
                 force_council,
                 deep,
                 deny,
+                advisor,
+                terminal,
             } => {
                 let args = wcore_cli::crucible::CrucibleArgs {
                     task,
@@ -990,6 +1000,8 @@ async fn run() -> anyhow::Result<ExitCode> {
                     force_council,
                     deep,
                     deny,
+                    advisor,
+                    terminal,
                 };
                 match wcore_cli::crucible::run_crucible(args).await {
                     Ok(()) => Ok(ExitCode::SUCCESS),

@@ -23,7 +23,7 @@ use wcore_agent::orchestration::council::{
 };
 use wcore_agent::spawner::{AgentSpawner, SubAgentConfig};
 use wcore_config::config::{CliArgs, Config, ConfigFile, load_merged_config_file};
-use wcore_config::crucible::{AssemblyMode, CrucibleConfig};
+use wcore_config::crucible::{AssemblyMode, CouncilMode, CrucibleConfig};
 use wcore_types::crucible::CrucibleDecision;
 
 /// A cap-less per-user/day spend accumulator for council charging, built when the
@@ -68,6 +68,99 @@ pub struct CrucibleArgs {
     pub deep: bool,
     /// Exclude these provider families from an auto roster.
     pub deny: Vec<String>,
+    /// Crucible #2: inject the fused synthesis into the normal trusted agent
+    /// loop as private guidance (overrides `[crucible].mode` → Advisor).
+    pub advisor: bool,
+    /// Crucible #2: force terminal print-and-stop mode (overrides config).
+    pub terminal: bool,
+}
+
+/// Resolve the effective [`CouncilMode`] from the CLI flags and config.
+///
+/// `--advisor` wins (Advisor), then `--terminal` (Terminal), else the config's
+/// `[crucible].mode`. `--advisor` + `--terminal` together is a usage error —
+/// the two are mutually exclusive sinks.
+fn resolve_council_mode(cfg: &CrucibleConfig, args: &CrucibleArgs) -> anyhow::Result<CouncilMode> {
+    if args.advisor && args.terminal {
+        anyhow::bail!("--advisor and --terminal are mutually exclusive");
+    }
+    if args.advisor {
+        return Ok(CouncilMode::Advisor);
+    }
+    if args.terminal {
+        return Ok(CouncilMode::Terminal);
+    }
+    Ok(cfg.mode)
+}
+
+/// Consume the fused council `final_text` per the resolved [`CouncilMode`].
+///
+/// `Terminal` prints it and stops (the read-only surface). `Advisor` wraps it in
+/// the advisory envelope and runs the normal TRUSTED main agent loop over it —
+/// the council already produced `final_text` through the same gate/budget/
+/// approval path, so only the SINK changes here.
+async fn consume_outcome(mode: CouncilMode, task: &str, final_text: &str) -> anyhow::Result<()> {
+    match mode {
+        CouncilMode::Terminal => {
+            println!("{final_text}");
+            Ok(())
+        }
+        CouncilMode::Advisor => run_advisor_loop(task, final_text).await,
+    }
+}
+
+/// Advisor sink: inject the fused synthesis as private guidance at the TAIL of
+/// the user turn (cache-preserving) and run the normal trusted main agent loop.
+///
+/// This is the trusted main loop — NOT a read-only council sub-agent. Advisor
+/// mode's whole point is that the full-tool main agent acts on the synthesis,
+/// exactly as if the operator pasted the council answer back into a session.
+/// The council itself stayed read-only + fenced (unchanged); only the consumer
+/// is the trusted loop.
+async fn run_advisor_loop(task: &str, final_text: &str) -> anyhow::Result<()> {
+    use wcore_agent::orchestration::council::build_advisor_turn;
+
+    // The trusted main loop resolves against the SESSION DEFAULT provider/model
+    // (the council members are pinned independently and already ran).
+    let config = Config::resolve(&CliArgs::default())?;
+    wcore_agent::egress::install_egress_policy(&config);
+
+    let cwd = std::env::current_dir()
+        .map(|p| p.to_string_lossy().into_owned())
+        .unwrap_or_else(|_| ".".to_string());
+    let output: Arc<dyn wcore_agent::output::OutputSink> =
+        Arc::new(wcore_agent::output::terminal::TerminalSink::new(false));
+
+    let result = wcore_agent::bootstrap::AgentBootstrap::new(config, &cwd, output.clone())
+        .build()
+        .await?;
+    let mut engine = result.engine;
+    engine.init_session("crucible-advisor", &cwd, None)?;
+
+    // Cache-preserving: the advisory rides at the tail of the user turn so the
+    // main loop's cached prefix (the original task) stays byte-stable.
+    let user_turn = build_advisor_turn(task, final_text);
+    let run = engine
+        .run(&user_turn, "")
+        .await
+        .map_err(|e| anyhow::anyhow!("advisor loop failed: {e}"))?;
+    // The TerminalSink already streamed the answer during the run; close the
+    // turn the same way the headless `-p` path does (no double-print of text).
+    output.emit_stream_end(
+        "",
+        run.turns,
+        run.usage.input_tokens,
+        run.usage.output_tokens,
+        run.usage.cache_creation_tokens,
+        run.usage.cache_read_tokens,
+        run.finish_reason,
+    );
+    engine.run_stop_hooks().await;
+
+    for mgr in &result.mcp_managers {
+        mgr.shutdown().await;
+    }
+    Ok(())
 }
 
 /// Whether the auto Assembler should choose the roster (vs the manual path).
@@ -194,8 +287,11 @@ pub async fn run_crucible(args: CrucibleArgs) -> anyhow::Result<()> {
         );
     }
 
+    // Resolve the sink mode up front so a bad flag combo fails before any spend.
+    let mode = resolve_council_mode(&cf.crucible, &args)?;
+
     if wants_auto(&cf.crucible, &args) {
-        return run_crucible_auto(&args, &cf).await;
+        return run_crucible_auto(&args, &cf, mode).await;
     }
 
     // ---- MANUAL PATH (byte-identical to the shipped behavior) ----
@@ -226,7 +322,7 @@ pub async fn run_crucible(args: CrucibleArgs) -> anyhow::Result<()> {
         && let CouncilDecision::Direct { reason } =
             classify_task(&args.task, &GateConfig::default())
     {
-        return run_direct(&args.task, &roster, &spawner, &reason).await;
+        return run_direct(&args.task, &roster, &spawner, &reason, mode).await;
     }
 
     eprintln!(
@@ -244,12 +340,15 @@ pub async fn run_crucible(args: CrucibleArgs) -> anyhow::Result<()> {
         .map_err(|e| anyhow::anyhow!("council failed: {e}"))?;
 
     eprint!("{}", render_provenance(&outcome));
-    println!("{}", outcome.final_text);
-    Ok(())
+    consume_outcome(mode, &args.task, &outcome.final_text).await
 }
 
 /// The AUTO path: the Assembler chooses the roster from the keyed candidate pool.
-async fn run_crucible_auto(args: &CrucibleArgs, cf: &ConfigFile) -> anyhow::Result<()> {
+async fn run_crucible_auto(
+    args: &CrucibleArgs,
+    cf: &ConfigFile,
+    mode: CouncilMode,
+) -> anyhow::Result<()> {
     // Base resolves against the SESSION DEFAULT provider — NOT a proposer — since
     // the auto premise is that no roster is listed. The base provider is a
     // never-used placeholder (every council member is pinned); it just resolves.
@@ -318,13 +417,13 @@ async fn run_crucible_auto(args: &CrucibleArgs, cf: &ConfigFile) -> anyhow::Resu
     {
         CouncilRunResult::Direct { spec, text } => {
             eprintln!("crucible: direct answer via {spec}");
-            println!("{text}");
+            consume_outcome(mode, &args.task, &text).await?;
         }
         CouncilRunResult::Council { plan, outcome } => {
             // Privacy-safe preference signal (opt-in; family-mix + cost only).
             log_assembly(&plan, &outcome.spend, &cf.crucible, None);
             eprint!("{}", render_provenance(&outcome));
-            println!("{}", outcome.final_text);
+            consume_outcome(mode, &args.task, &outcome.final_text).await?;
         }
         CouncilRunResult::Cancelled => {
             eprintln!("crucible: cancelled — no spend.");
@@ -429,6 +528,7 @@ async fn run_direct(
     roster: &Roster,
     spawner: &AgentSpawner,
     reason: &str,
+    mode: CouncilMode,
 ) -> anyhow::Result<()> {
     let first = roster
         .proposers
@@ -455,8 +555,7 @@ async fn run_direct(
     if result.is_error {
         anyhow::bail!("direct call failed: {}", result.text);
     }
-    println!("{}", result.text);
-    Ok(())
+    consume_outcome(mode, task, &result.text).await
 }
 
 #[cfg(test)]
@@ -654,6 +753,66 @@ mod tests {
             ..Default::default()
         };
         assert!(wants_auto(&auto, &CrucibleArgs::default()));
+    }
+
+    #[test]
+    fn resolve_council_mode_flag_precedence() {
+        // Crucible #2: --advisor wins, then --terminal, else config.mode.
+        let cfg_terminal = CrucibleConfig::default(); // mode = Terminal
+        let cfg_advisor = CrucibleConfig {
+            mode: CouncilMode::Advisor,
+            ..Default::default()
+        };
+
+        // No flags: inherit config.
+        assert_eq!(
+            resolve_council_mode(&cfg_terminal, &CrucibleArgs::default()).unwrap(),
+            CouncilMode::Terminal
+        );
+        assert_eq!(
+            resolve_council_mode(&cfg_advisor, &CrucibleArgs::default()).unwrap(),
+            CouncilMode::Advisor
+        );
+
+        // --advisor forces Advisor even when config says Terminal.
+        assert_eq!(
+            resolve_council_mode(
+                &cfg_terminal,
+                &CrucibleArgs {
+                    advisor: true,
+                    ..Default::default()
+                }
+            )
+            .unwrap(),
+            CouncilMode::Advisor
+        );
+        // --terminal forces Terminal even when config says Advisor.
+        assert_eq!(
+            resolve_council_mode(
+                &cfg_advisor,
+                &CrucibleArgs {
+                    terminal: true,
+                    ..Default::default()
+                }
+            )
+            .unwrap(),
+            CouncilMode::Terminal
+        );
+    }
+
+    #[test]
+    fn resolve_council_mode_rejects_conflicting_flags() {
+        // --advisor + --terminal is a usage error (mutually-exclusive sinks).
+        let err = resolve_council_mode(
+            &CrucibleConfig::default(),
+            &CrucibleArgs {
+                advisor: true,
+                terminal: true,
+                ..Default::default()
+            },
+        )
+        .expect_err("conflicting flags must error");
+        assert!(err.to_string().contains("mutually exclusive"));
     }
 
     #[test]
