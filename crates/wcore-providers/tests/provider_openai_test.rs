@@ -576,6 +576,101 @@ async fn test_openai_400_bad_request_surfaces_as_api_error() {
     }
 }
 
+/// #389: an Ollama no-tool model returns a 400 `... does not support tools` on
+/// the first (tools-bearing) request. The provider must transparently retry the
+/// same request without the `tools` array so the turn completes, instead of
+/// surfacing a raw provider 400.
+#[tokio::test]
+async fn test_openai_retries_without_tools_on_unsupported_400() {
+    use wcore_types::tool::ToolDef;
+
+    let server = MockServer::start().await;
+
+    // Higher-priority mock: serves ONLY the first request (the one carrying
+    // `tools`) and rejects it exactly the way Ollama does for a no-tool model.
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .respond_with(ResponseTemplate::new(400).set_body_string(
+            r#"{"error":{"message":"registry.ollama.ai/library/smollm2:135m does not support tools","type":"invalid_request_error"}}"#,
+        ))
+        .up_to_n_times(1)
+        .with_priority(1)
+        .mount(&server)
+        .await;
+
+    // Lower-priority fallback: serves the retry (no `tools`) with a normal
+    // text response so the turn completes.
+    let chunk = json!({
+        "id": "chatcmpl-389",
+        "object": "chat.completion.chunk",
+        "choices": [{
+            "index": 0,
+            "delta": {"content": "hi"},
+            "finish_reason": "stop"
+        }],
+        "usage": {"prompt_tokens": 5, "completion_tokens": 1}
+    })
+    .to_string();
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_raw(build_sse_body(&[&chunk]), "text/event-stream"),
+        )
+        .with_priority(2)
+        .mount(&server)
+        .await;
+
+    let provider = OpenAIProvider::new(
+        "test-key",
+        &server.uri(),
+        ProviderCompat::openai_defaults(),
+        DebugConfig::default(),
+    );
+
+    // A request that carries a tool — without it the retry path is not exercised.
+    let mut request = make_request();
+    request.tools = vec![ToolDef {
+        name: "Read".into(),
+        description: "Read a file".into(),
+        input_schema: json!({
+            "type": "object",
+            "properties": {"path": {"type": "string"}},
+            "required": ["path"]
+        }),
+        deferred: false,
+        server: None,
+    }];
+
+    let rx = provider
+        .stream(&request)
+        .await
+        .expect("turn must complete via the no-tools retry, not a raw 400");
+    let events = collect_events(rx).await;
+
+    // The retry produced a usable text response.
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, LlmEvent::TextDelta(t) if t == "hi")),
+        "expected the retried (no-tools) response text, got: {events:?}"
+    );
+
+    // Exactly two requests hit the server: the original (with tools) and the
+    // retry (without tools).
+    let received = server.received_requests().await.expect("recorded requests");
+    assert_eq!(received.len(), 2, "expected original + one retry");
+    let first: serde_json::Value = serde_json::from_slice(&received[0].body).unwrap();
+    let second: serde_json::Value = serde_json::from_slice(&received[1].body).unwrap();
+    assert!(
+        first.get("tools").is_some(),
+        "first request must carry tools"
+    );
+    assert!(
+        second.get("tools").is_none(),
+        "retry must omit the tools array"
+    );
+}
+
 /// 403 Forbidden → ProviderError::Api{status:403}, not Ok.
 #[tokio::test]
 async fn test_openai_403_forbidden_surfaces_as_api_error() {
