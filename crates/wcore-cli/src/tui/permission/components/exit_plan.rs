@@ -111,6 +111,7 @@ mod tests {
             input_pretty: "{}".into(),
             approval_reason: String::new(),
             plan_body,
+            crucible_plan: None,
         }
     }
 

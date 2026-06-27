@@ -195,6 +195,9 @@ async fn dispatch(
             // Pin the compiler framing so the model emits RON in its single
             // turn instead of exploring the codebase with its read-only tools.
             system_prompt: Some(SYNTH_SYSTEM_PROMPT.to_string()),
+            provider: None,
+            model: None,
+            temperature: None,
         })
         .await;
     if result.is_error {

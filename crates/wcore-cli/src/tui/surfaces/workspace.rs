@@ -4978,6 +4978,7 @@ mod tests {
             input_pretty: String::new(),
             approval_reason: "test".into(),
             plan_body: None,
+            crucible_plan: None,
         });
     }
 
@@ -4999,6 +5000,7 @@ mod tests {
             input_pretty: String::new(),
             approval_reason: String::new(),
             plan_body: None,
+            crucible_plan: None,
         };
 
         tool_card_cache_clear();
@@ -6098,6 +6100,7 @@ mod tests {
             input_pretty: "{}".into(),
             approval_reason: String::new(),
             plan_body: None,
+            crucible_plan: None,
         };
         let theme = Theme::hearth();
         let mut app = App::new();
@@ -6231,6 +6234,7 @@ mod tests {
             input_pretty: "{}".into(),
             approval_reason: String::new(),
             plan_body: None,
+            crucible_plan: None,
         };
         let mut ok_lines: Vec<Line<'static>> = Vec::new();
         push_tool_card_lines(
@@ -6652,6 +6656,7 @@ mod tests {
                 correlation_id: "tok-1".into(),
                 reason: "exec".into(),
                 context: "first call".into(),
+                plan: None,
             },
             ProtocolEvent::ToolRunning {
                 msg_id: "m1".into(),
@@ -6687,6 +6692,7 @@ mod tests {
                 correlation_id: "tok-2".into(),
                 reason: "writes a new file".into(),
                 context: "second call".into(),
+                plan: None,
             },
         ];
 
@@ -6786,6 +6792,7 @@ mod tests {
                 correlation_id: "t-1".into(),
                 reason: "exec".into(),
                 context: String::new(),
+                plan: None,
             },
         );
         assert!(
@@ -6825,6 +6832,7 @@ mod tests {
                 correlation_id: "t-2".into(),
                 reason: "write".into(),
                 context: String::new(),
+                plan: None,
             },
         );
         assert!(
@@ -7153,6 +7161,7 @@ mod tests {
             approval_reason: String::new(),
             status: ToolCardStatus::Running,
             plan_body: None,
+            crucible_plan: None,
         };
         push_tool_card_lines(&mut lines, &card, &theme, true, &app, 80, None, 0, false);
         // The spinner glyph is one of `◐◓◑◒`; find whichever frame
@@ -7598,6 +7607,7 @@ mod tests {
             input_pretty: input_pretty.into(),
             approval_reason: String::new(),
             plan_body: None,
+            crucible_plan: None,
         });
     }
 
@@ -8494,6 +8504,7 @@ mod tests {
             input_pretty: String::new(),
             approval_reason: String::new(),
             plan_body: None,
+            crucible_plan: None,
         }];
         let fp_running = tool_cards_fingerprint(&cards);
 

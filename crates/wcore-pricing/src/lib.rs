@@ -78,6 +78,117 @@ impl PricingCatalog {
         let total_microcents = ((in_usd + out_usd) * 100.0 * 1_000_000.0).round() as u64;
         Ok(total_microcents)
     }
+
+    /// Cost in microcents, resolving a Flux pinned-tier model to its native SKU.
+    ///
+    /// Tries the literal `(provider, model)` first, so every non-Flux provider
+    /// prices exactly as `estimate_cost_microcents` does. If that misses and the
+    /// spec is a `flux-pinned-*` model, derive the native `(provider, model)` via
+    /// [`flux_pinned_native`], price THAT exact row, and apply `markup` (Flux's
+    /// flat-rate / markup factor — `1.0` means the underlying native rate).
+    ///
+    /// Returns `None` when neither the literal key nor an exact native row exists.
+    /// It is EXACT-MATCH-OR-NONE: it never guesses a "nearest" model and never
+    /// silently charges an unpriced member $0 (the caller decides what to do with
+    /// an unpriced member — see the Assembler's eligibility filter).
+    ///
+    /// Stopgap until Flux emits an authoritative per-request cost
+    /// (FerroxLabs/wayland#319), which will replace this derivation.
+    pub fn estimate_cost_microcents_resolved(
+        &self,
+        provider: &str,
+        model: &str,
+        input_tokens: u64,
+        output_tokens: u64,
+        markup: f64,
+    ) -> Option<u64> {
+        // A nonsense markup must never fabricate a price: NaN/inf/negative would
+        // saturate the `as u64` cast to 0 (or u64::MAX) and silently report an
+        // unpriced member as priceable, defeating the budget guard. Treat it as
+        // unpriceable. (markup == 0.0 is a deliberate "free" choice and allowed.)
+        if !markup.is_finite() || markup < 0.0 {
+            return None;
+        }
+        // Literal key first — non-flux providers are unaffected by this path.
+        if let Ok(c) = self.estimate_cost_microcents(provider, model, input_tokens, output_tokens) {
+            return Some(c);
+        }
+        // Flux pinned-tier: price the underlying native SKU × markup.
+        // `flux_pinned_native` already strips an optional `flux-router:` prefix,
+        // so the model token alone is sufficient.
+        let (native_provider, native_model) = flux_pinned_native(model)?;
+        let native = self
+            .estimate_cost_microcents(&native_provider, &native_model, input_tokens, output_tokens)
+            .ok()?;
+        Some(((native as f64) * markup).round() as u64)
+    }
+}
+
+/// Flux pinned-tier vendor token → catalog provider key that prices the
+/// underlying native SKU. Sanctioned derivation data (like
+/// `provider_type_from_slug`), NOT a hardcoded model list.
+///
+/// Every target MUST be a real provider section in the bundled pricing catalog —
+/// `every_flux_vendor_maps_to_a_real_catalog_provider` enforces this so a mapping
+/// can never silently point at a nonexistent key. NOTE: Gemini's catalog key is
+/// `gemini` (NOT `google`); mapping to `google` would miss every Gemini row.
+///
+/// Only vendors whose native SKUs are actually in the catalog are listed. Other
+/// live Flux vendors (glm, kimi, nova, qwen, …) are deliberately ABSENT: their
+/// catalog rows don't exist yet, so `flux_pinned_native` returns `None` for them
+/// (EXACT-MATCH-OR-NONE → unpriced) rather than aiming at a phantom provider key.
+/// Add them here only alongside their `pricing.toml` rows (or once #319 lands).
+const FLUX_VENDOR_TO_CATALOG_PROVIDER: &[(&str, &str)] = &[
+    ("claude", "anthropic"),
+    ("gpt", "openai"),
+    ("gemini", "gemini"),
+    ("deepseek", "deepseek"),
+    ("grok", "xai"),
+];
+
+/// Look up the catalog provider for a vendor token. Fails open: an unknown
+/// vendor returns `None` so the caller treats the model as unpriced.
+fn flux_vendor_to_catalog_provider(vendor: &str) -> Option<&'static str> {
+    FLUX_VENDOR_TO_CATALOG_PROVIDER
+        .iter()
+        .find(|(v, _)| *v == vendor)
+        .map(|(_, p)| *p)
+}
+
+/// Extract the vendor token from a Flux pinned-tier spec — the family-grouping
+/// discriminator. Accepts an optional `flux-router:` prefix, requires the
+/// `flux-pinned-` prefix, and returns the first `-`-separated segment of the
+/// remainder (`claude`, `gpt`, `gemini`, `glm`, `kimi`, …).
+///
+/// Unlike [`flux_pinned_native`] this does NOT consult the pricing alias table,
+/// so it yields a token even for vendors with no catalog price (glm, kimi, …) —
+/// exactly what diversity grouping needs (each distinct vendor is its own
+/// family). Returns `None` for a non-flux-pinned spec or an empty remainder.
+pub fn flux_pinned_vendor(spec: &str) -> Option<String> {
+    let model = spec.strip_prefix("flux-router:").unwrap_or(spec);
+    let rest = model.strip_prefix("flux-pinned-")?;
+    let vendor = rest.split('-').next().filter(|v| !v.is_empty())?;
+    Some(vendor.to_string())
+}
+
+/// Derive the native `(catalog_provider, native_model)` for a Flux pinned-tier
+/// model spec so it can be priced against the catalog's underlying SKU.
+///
+/// Accepts an optional `flux-router:` provider prefix, then REQUIRES the
+/// `flux-pinned-` model prefix (returns `None` otherwise). The vendor token (via
+/// [`flux_pinned_vendor`]) is mapped to the catalog provider via
+/// [`flux_vendor_to_catalog_provider`]; the FULL remainder is the native model
+/// id, since catalog model ids carry the vendor prefix (`claude-opus-4-8`,
+/// `gpt-5`, `deepseek-v4-pro`, `gemini-3-1-pro`).
+///
+/// Returns `None` for a non-flux-pinned spec, an empty remainder, or an unknown
+/// vendor token — it never guesses a model.
+pub fn flux_pinned_native(spec: &str) -> Option<(String, String)> {
+    let model = spec.strip_prefix("flux-router:").unwrap_or(spec);
+    let rest = model.strip_prefix("flux-pinned-")?;
+    let vendor = flux_pinned_vendor(spec)?;
+    let provider = flux_vendor_to_catalog_provider(&vendor)?;
+    Some((provider.to_string(), rest.to_string()))
 }
 
 pub static DEFAULT_CATALOG: Lazy<PricingCatalog> = Lazy::new(|| {
@@ -223,5 +334,168 @@ output_per_mtok_usd = 15.0
             cat.get("together", "some/unlisted-model"),
             Err(PricingError::UnknownModel { .. })
         ));
+    }
+
+    #[test]
+    fn flux_pinned_native_maps_vendor_to_catalog_provider() {
+        // Vendor token → catalog provider; the FULL remainder is the native id.
+        let n = flux_pinned_native("flux-router:flux-pinned-claude-opus-4-8").unwrap();
+        assert_eq!(n.0, "anthropic");
+        assert_eq!(n.1, "claude-opus-4-8");
+        // gemini maps to `gemini` (NOT `google`).
+        let g = flux_pinned_native("flux-pinned-gemini-3-1-pro").unwrap();
+        assert_eq!(g, ("gemini".to_string(), "gemini-3-1-pro".to_string()));
+        let d = flux_pinned_native("flux-pinned-deepseek-v4-pro").unwrap();
+        assert_eq!(d, ("deepseek".to_string(), "deepseek-v4-pro".to_string()));
+    }
+
+    #[test]
+    fn flux_pinned_vendor_extracts_token_even_for_unpriced_vendors() {
+        assert_eq!(
+            flux_pinned_vendor("flux-router:flux-pinned-claude-opus-4-8").as_deref(),
+            Some("claude")
+        );
+        // Unpriced vendors (no catalog row) still yield a token — family grouping
+        // needs this so a single-key Flux council groups by real vendor lineage.
+        assert_eq!(
+            flux_pinned_vendor("flux-pinned-glm-5-2").as_deref(),
+            Some("glm")
+        );
+        assert_eq!(
+            flux_pinned_vendor("flux-pinned-kimi-k2").as_deref(),
+            Some("kimi")
+        );
+        assert_eq!(flux_pinned_vendor("openai:gpt-5"), None);
+        assert_eq!(flux_pinned_vendor("flux-pinned-"), None);
+    }
+
+    #[test]
+    fn flux_pinned_native_rejects_malformed() {
+        assert!(flux_pinned_native("openai:gpt-5").is_none()); // not flux-pinned
+        assert!(flux_pinned_native("flux-pinned-").is_none()); // empty remainder
+        assert!(flux_pinned_native("flux-pinned-unknownvendor-x").is_none()); // unknown vendor
+        assert!(flux_pinned_native("").is_none());
+    }
+
+    #[test]
+    fn flux_pinned_resolves_to_native_catalog_price() {
+        let cat = PricingCatalog::load_default().unwrap();
+        // A flux-pinned model whose native SKU IS in the catalog prices > 0.
+        let gpt = cat.estimate_cost_microcents_resolved(
+            "flux-router",
+            "flux-pinned-gpt-5",
+            1000,
+            1000,
+            1.0,
+        );
+        assert!(
+            gpt.is_some() && gpt.unwrap() > 0,
+            "gpt-5 native row must price"
+        );
+        let ds = cat.estimate_cost_microcents_resolved(
+            "flux-router",
+            "flux-pinned-deepseek-v4-pro",
+            1000,
+            1000,
+            1.0,
+        );
+        assert!(
+            ds.is_some() && ds.unwrap() > 0,
+            "deepseek-v4-pro native row must price"
+        );
+
+        // EXACT-MATCH-OR-NONE: a flux-pinned model with NO native catalog row
+        // stays unpriced (None) — never a guessed "nearest" price, never a silent
+        // $0. claude-opus-4-8 is absent (catalog has -4-7/-4-6 only).
+        assert!(
+            cat.estimate_cost_microcents_resolved(
+                "flux-router",
+                "flux-pinned-claude-opus-4-8",
+                1000,
+                1000,
+                1.0
+            )
+            .is_none(),
+            "absent native SKU must be None, not nearest-matched"
+        );
+        // glm has no catalog rows at all.
+        assert!(
+            cat.estimate_cost_microcents_resolved(
+                "flux-router",
+                "flux-pinned-glm-5-2",
+                1000,
+                1000,
+                1.0
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn every_flux_vendor_maps_to_a_real_catalog_provider() {
+        // Guard against vendor→provider drift: every mapped target must be a real
+        // section in the bundled catalog, else flux-pinned models for that vendor
+        // silently stay unpriced.
+        let cat = PricingCatalog::load_default().unwrap();
+        for (vendor, provider) in FLUX_VENDOR_TO_CATALOG_PROVIDER {
+            assert!(
+                cat.providers.contains_key(*provider),
+                "flux vendor '{vendor}' maps to '{provider}', which has no section in pricing.toml"
+            );
+        }
+    }
+
+    #[test]
+    fn invalid_markup_is_unpriceable_never_zero() {
+        // A nonsense markup must yield None (unpriceable), never a fabricated $0
+        // that a budget guard would wave through.
+        let cat = PricingCatalog::load_default().unwrap();
+        for bad in [-1.0, f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            assert!(
+                cat.estimate_cost_microcents_resolved(
+                    "flux-router",
+                    "flux-pinned-gpt-5",
+                    1000,
+                    1000,
+                    bad
+                )
+                .is_none(),
+                "markup {bad} must be unpriceable, not $0"
+            );
+        }
+        // markup == 0.0 is a deliberate "free" choice → priceable at 0.
+        assert_eq!(
+            cat.estimate_cost_microcents_resolved(
+                "flux-router",
+                "flux-pinned-gpt-5",
+                1000,
+                1000,
+                0.0
+            ),
+            Some(0)
+        );
+    }
+
+    #[test]
+    fn flux_markup_scales_native_price_and_non_flux_unchanged() {
+        let cat = PricingCatalog::load_default().unwrap();
+        // markup multiplies the native cost exactly.
+        let base = cat
+            .estimate_cost_microcents_resolved("flux-router", "flux-pinned-gpt-5", 1000, 1000, 1.0)
+            .unwrap();
+        let marked = cat
+            .estimate_cost_microcents_resolved("flux-router", "flux-pinned-gpt-5", 1000, 1000, 2.0)
+            .unwrap();
+        assert_eq!(marked, base * 2, "markup 2.0 doubles the native cost");
+
+        // A literal (non-flux) provider key prices identically to the plain API,
+        // proving the resolved path is additive (markup default leaves it alone).
+        let literal = cat
+            .estimate_cost_microcents("openai", "gpt-5", 1000, 1000)
+            .unwrap();
+        let resolved = cat
+            .estimate_cost_microcents_resolved("openai", "gpt-5", 1000, 1000, 1.0)
+            .unwrap();
+        assert_eq!(literal, resolved);
     }
 }

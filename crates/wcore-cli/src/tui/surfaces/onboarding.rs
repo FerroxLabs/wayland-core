@@ -1346,7 +1346,10 @@ impl OnboardingSurface {
         // A conflict adds the Overwrite/Keep choice + an explanatory line,
         // so the card is taller in that case.
         let conflict = self.existing_config.is_some();
-        let card_h = if conflict { 17 } else { 13 };
+        // Stage 4c — +1 in BOTH branches to fit the `/crucible` discovery tip
+        // line below. The card has a FIXED height; a Line past the inner area
+        // renders nothing, which would silently clip the tip.
+        let card_h = if conflict { 18 } else { 14 };
         let card = centered(area, 64, card_h);
         let block = card_block(theme, " Ready ");
         let inner = block.inner(card);
@@ -1456,6 +1459,14 @@ impl OnboardingSurface {
             };
             lines.push(status);
         }
+
+        // Stage 4c — surface the `/crucible` council so users discover it once
+        // they reach the workspace. Dim so it reads as a tip, not a step.
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(
+            "Tip: /crucible <question> convenes a cross-vendor council to cross-check a hard call.",
+            Style::default().fg(theme.text_dim),
+        )));
 
         lines.push(Line::from(""));
         let foot = if conflict {
@@ -2395,6 +2406,22 @@ mod tests {
                 "content reached the last terminal column — card text overflowed"
             );
         }
+    }
+
+    #[test]
+    fn ready_card_shows_the_crucible_discovery_tip() {
+        // Stage 4c — the Ready card surfaces the `/crucible` council tip so a new
+        // user discovers it. Rendered through the real render path; the assertion
+        // would FAIL if `card_h` weren't bumped to fit the extra line (a clipped
+        // line renders nothing past the fixed-height card's inner area).
+        let mut surface = fresh();
+        surface.completed_via = Some(Path::ApiKey);
+        surface.step = Step::Ready;
+        let text = render_text(&mut surface, 90, 30);
+        assert!(
+            text.contains("/crucible"),
+            "the Ready card must surface the `/crucible` discovery tip:\n{text}"
+        );
     }
 
     #[test]

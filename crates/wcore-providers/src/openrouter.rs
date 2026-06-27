@@ -190,6 +190,7 @@ mod tests {
             web_search: false,
             conversation_id: None,
             client_context_tokens: None,
+            temperature: None,
         };
         let result = p.stream(&req).await;
         assert!(result.is_err(), "expected error from unreachable host");
@@ -258,6 +259,7 @@ mod tests {
             web_search: false,
             conversation_id: None,
             client_context_tokens: None,
+            temperature: None,
         };
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()

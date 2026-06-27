@@ -87,6 +87,9 @@ async fn run_sequential(spawner: &AgentSpawner, stages: &[(&str, &str)]) -> Vec<
             max_turns: 4,
             max_tokens: 256,
             system_prompt: None,
+            provider: None,
+            model: None,
+            temperature: None,
         };
         let r = spawner.spawn_one(cfg).await;
         prev = r.text.clone();

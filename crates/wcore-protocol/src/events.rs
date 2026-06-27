@@ -241,6 +241,10 @@ pub enum ProtocolEvent {
         correlation_id: String,
         reason: String,
         context: String,
+        /// Crucible Stage 2 — the typed proposal card, set only when a council
+        /// approval is requested; `None` for every other approval.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        plan: Option<wcore_types::crucible::CruciblePlan>,
     },
     /// W7: S4 session is in Suspended state — emitted alongside
     /// ApprovalRequired so hosts that render a state pill can update

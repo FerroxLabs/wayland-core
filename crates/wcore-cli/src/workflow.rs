@@ -202,7 +202,18 @@ async fn run_workflow(name: &str) -> anyhow::Result<()> {
     // end of this function.
     let agent_bus = Arc::new(AgentBus::new(256));
     spawn_lifecycle_logger(Arc::clone(&agent_bus));
-    let spawner = AgentSpawner::new(provider, config).with_bus(agent_bus);
+    // Guardrail #4 (crucible): attach the council provider resolver so a RON
+    // workflow that pins a node's provider (`Agent((provider: Some(..)))`)
+    // resolves it from the on-disk `[providers]` map instead of hard-erroring.
+    // Harmless for unpinned workflows (no pin → inherit the parent provider).
+    let mut spawner = AgentSpawner::new(provider, config.clone()).with_bus(agent_bus);
+    if let Ok(cf) = wcore_config::config::load_merged_config_file(None)
+        && !cf.providers.is_empty()
+    {
+        let resolver =
+            wcore_agent::orchestration::council::CouncilProviderResolver::new(config, cf.providers);
+        spawner = spawner.with_provider_resolver(Arc::new(resolver));
+    }
 
     // Pre-execution estimate so the operator sees the footprint before any
     // spawn. The `run` subcommand is the explicit/saved tier — no confirm gate

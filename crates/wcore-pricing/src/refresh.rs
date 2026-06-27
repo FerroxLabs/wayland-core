@@ -212,16 +212,20 @@ fn openrouter_to_catalog(raw: OpenRouterResponse) -> PricingCatalog {
             Some(p) => p,
             None => continue,
         };
-        let prompt: f64 = pricing
-            .prompt
-            .as_deref()
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(0.0);
-        let completion: f64 = pricing
-            .completion
-            .as_deref()
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(0.0);
+        // Parse prompt+completion as USD/token. A missing, non-numeric, or
+        // non-positive price means UNPRICED — never $0 (a $0 row would be
+        // seated as the global-cheapest and then billed at the real rate).
+        // Drop the row; certification later refuses an unpriced roster.
+        let parse_pos = |s: &Option<String>| -> Option<f64> {
+            s.as_deref()
+                .and_then(|v| v.parse::<f64>().ok())
+                .filter(|v| v.is_finite() && *v > 0.0)
+        };
+        let (Some(prompt), Some(completion)) =
+            (parse_pos(&pricing.prompt), parse_pos(&pricing.completion))
+        else {
+            continue;
+        };
         // OpenRouter publishes prompt/completion in USD per TOKEN — convert to per million.
         let input_per_mtok_usd = prompt * 1_000_000.0;
         let output_per_mtok_usd = completion * 1_000_000.0;
@@ -448,6 +452,37 @@ output_per_mtok_usd = 75.0
                 .unwrap()
                 .contains_key("claude-opus-4-7")
         );
+    }
+
+    #[test]
+    fn unpriced_or_garbage_rows_are_excluded_not_zeroed() {
+        let raw: OpenRouterResponse = serde_json::from_value(serde_json::json!({
+            "data": [
+                { "id": "openai/gpt-5", "pricing": { "prompt": "0.0000011", "completion": "0.0000044" } },
+                { "id": "vendor/nullpriced", "pricing": { "prompt": null, "completion": "0.0000044" } },
+                { "id": "vendor/dashpriced", "pricing": { "prompt": "-1", "completion": "0.0000044" } },
+                { "id": "vendor/textpriced", "pricing": { "prompt": "auto", "completion": "0.0000044" } },
+            ]
+        })).unwrap();
+        let cat = openrouter_to_catalog(raw);
+        assert!(
+            cat.providers
+                .get("openai")
+                .and_then(|m| m.get("gpt-5"))
+                .is_some()
+        );
+        for models in cat.providers.values() {
+            for price in models.values() {
+                assert!(
+                    price.input_per_mtok_usd > 0.0,
+                    "an unpriced row leaked in as $0"
+                );
+                assert!(
+                    price.output_per_mtok_usd > 0.0,
+                    "an unpriced row leaked in as $0"
+                );
+            }
+        }
     }
 
     #[test]

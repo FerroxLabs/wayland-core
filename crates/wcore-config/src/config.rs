@@ -17,7 +17,10 @@ use wcore_types::llm::ThinkingConfig;
 // ---------------------------------------------------------------------------
 
 /// AWS Bedrock credentials configuration
-#[derive(Debug, Clone, Deserialize, Serialize, Default)]
+//
+// `Debug` is hand-written (not derived) so the long-lived AWS secrets never
+// land in a log/trace via `{:?}` — only their presence is shown.
+#[derive(Clone, Deserialize, Serialize, Default)]
 pub struct BedrockConfig {
     pub region: Option<String>,
     pub access_key_id: Option<String>,
@@ -26,13 +29,43 @@ pub struct BedrockConfig {
     pub profile: Option<String>,
 }
 
+impl std::fmt::Debug for BedrockConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let redact = |o: &Option<String>| o.as_ref().map(|_| "<redacted>");
+        f.debug_struct("BedrockConfig")
+            .field("region", &self.region)
+            .field("access_key_id", &redact(&self.access_key_id))
+            .field("secret_access_key", &redact(&self.secret_access_key))
+            .field("session_token", &redact(&self.session_token))
+            .field("profile", &self.profile)
+            .finish()
+    }
+}
+
 /// Google Vertex AI authentication configuration
-#[derive(Debug, Clone, Deserialize, Serialize, Default)]
+//
+// `Debug` is hand-written so the inline service-account key never leaks via
+// `{:?}` — only its presence is shown.
+#[derive(Clone, Deserialize, Serialize, Default)]
 pub struct VertexConfig {
     pub project_id: Option<String>,
     pub region: Option<String>,
     pub credentials_file: Option<String>,
     pub service_account_json: Option<String>,
+}
+
+impl std::fmt::Debug for VertexConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("VertexConfig")
+            .field("project_id", &self.project_id)
+            .field("region", &self.region)
+            .field("credentials_file", &self.credentials_file)
+            .field(
+                "service_account_json",
+                &self.service_account_json.as_ref().map(|_| "<redacted>"),
+            )
+            .finish()
+    }
 }
 
 /// Azure OpenAI authentication mode.
@@ -250,6 +283,15 @@ pub struct ConfigFile {
     /// bootstrap skips tracker installation, preserving pre-M5.3 behaviour.
     #[serde(default)]
     pub session_cap: Option<crate::budget::BudgetConfig>,
+
+    /// Crucible (Mixture-of-Providers) — opt-in `[crucible]` block defining the
+    /// cross-provider council roster + bounds. OFF by default (`enabled =
+    /// false`); validated into a runnable roster at bootstrap. Lives on
+    /// `ConfigFile` (the on-disk shape) rather than the resolved `Config` —
+    /// bootstrap reads it alongside the `[providers]` map (which is also
+    /// `ConfigFile`-only) to build the council.
+    #[serde(default)]
+    pub crucible: crate::crucible::CrucibleConfig,
 }
 
 /// Wave SD — top-level `[storage]` block in `config.toml`.
@@ -764,7 +806,10 @@ fn default_max_sessions() -> usize {
 
 // --- Resolved runtime config ---
 
-#[derive(Debug, Clone)]
+// `Debug` is hand-written (below) so the live `api_key` never lands in a log or
+// trace via `{:?}`. Every other field delegates to its own Debug (Bedrock/Vertex
+// sub-configs redact their own secrets).
+#[derive(Clone)]
 pub struct Config {
     pub provider_label: String,
     pub provider: ProviderType,
@@ -774,6 +819,12 @@ pub struct Config {
     pub security: SecurityConfig,
     pub model: String,
     pub max_tokens: u32,
+    /// Crucible #3: optional sampling temperature for this session's requests.
+    /// `None` (the default) leaves the provider on its own default and omits the
+    /// `temperature` body field. The council threads per-tier temperatures here
+    /// via `SubAgentConfig` -> `child_config`; the top-level CLI path leaves it
+    /// `None`.
+    pub temperature: Option<f32>,
     pub max_turns: Option<usize>,
     /// The resolved default tool-approval posture (from `[default]
     /// approval_mode`). Consumed at TUI boot to seed the approval manager's
@@ -837,6 +888,63 @@ pub struct Config {
     /// on-disk surface is `ConfigFile.session_cap` which carries the
     /// `#[serde(default)]` attribute.
     pub session_cap: Option<wcore_budget::BudgetConfig>,
+
+    /// Crucible (Mixture-of-Providers) council config, carried onto the resolved
+    /// `Config` so the in-process bootstrap can gate the council's cap-less spend
+    /// accumulator on `crucible.daily_cap_usd` / `crucible.max_cost_usd` (the
+    /// CLI council path reads it from `ConfigFile` directly). Mirrors the
+    /// `ConfigFile.crucible` block; populated from the merged on-disk config in
+    /// `Config::resolve` and defaults to OFF (`CrucibleConfig::default()`).
+    pub crucible: crate::crucible::CrucibleConfig,
+}
+
+impl std::fmt::Debug for Config {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Config")
+            .field("provider_label", &self.provider_label)
+            .field("provider", &self.provider)
+            // SECURITY: never print the live api_key — only whether one is set.
+            .field(
+                "api_key",
+                &if self.api_key.is_empty() {
+                    "<none>"
+                } else {
+                    "<redacted>"
+                },
+            )
+            .field("base_url", &self.base_url)
+            .field("security", &self.security)
+            .field("model", &self.model)
+            .field("max_tokens", &self.max_tokens)
+            .field("temperature", &self.temperature)
+            .field("max_turns", &self.max_turns)
+            .field("approval_mode", &self.approval_mode)
+            .field("system_prompt", &self.system_prompt)
+            .field("thinking", &self.thinking)
+            .field("prompt_caching", &self.prompt_caching)
+            .field("compat", &self.compat)
+            .field("tools", &self.tools)
+            .field("builtin_tools", &self.builtin_tools)
+            .field("advertised_capabilities", &self.advertised_capabilities)
+            .field("session", &self.session)
+            .field("inbound_webhook", &self.inbound_webhook)
+            .field("compact", &self.compact)
+            .field("plan", &self.plan)
+            .field("file_cache", &self.file_cache)
+            .field("hooks", &self.hooks)
+            .field("bedrock", &self.bedrock)
+            .field("vertex", &self.vertex)
+            .field("mcp", &self.mcp)
+            .field("debug", &self.debug)
+            .field("observability", &self.observability)
+            .field("provider_chain", &self.provider_chain)
+            .field("budget", &self.budget)
+            .field("storage", &self.storage)
+            .field("memory", &self.memory)
+            .field("browser", &self.browser)
+            .field("session_cap", &self.session_cap)
+            .finish()
+    }
 }
 
 impl Default for Config {
@@ -866,6 +974,7 @@ impl Default for Config {
             base_url: String::new(),
             model: String::new(),
             max_tokens: default_max_tokens(),
+            temperature: None,
             max_turns: None,
             approval_mode: ApprovalMode::default(),
             system_prompt: None,
@@ -893,6 +1002,7 @@ impl Default for Config {
             browser: BrowserConfig::default(),
             security: SecurityConfig::default(),
             session_cap: None,
+            crucible: crate::crucible::CrucibleConfig::default(),
         }
     }
 }
@@ -1642,6 +1752,9 @@ impl Config {
             base_url,
             model,
             max_tokens,
+            // Crucible #3: the top-level session leaves temperature unset; the
+            // council sets per-tier temperatures via SubAgentConfig downstream.
+            temperature: None,
             max_turns,
             approval_mode,
             system_prompt,
@@ -1670,6 +1783,7 @@ impl Config {
             browser: merged.browser,
             security: merged.security,
             session_cap: merged.session_cap,
+            crucible: merged.crucible,
         })
     }
 
@@ -1845,6 +1959,180 @@ fn resolve_provider_alias(
         ),
         catalog_entry: None,
     })
+}
+
+/// Error raised while resolving a cross-provider council member.
+///
+/// The council treats these two cases differently: an [`Unknown`](Self::Unknown)
+/// provider id is a configuration error the caller should surface, whereas a
+/// [`Keyless`](Self::Keyless) provider is a BYO-key member the council simply
+/// *skips* (a user who hasn't supplied a key for one council provider should
+/// still get a council from the providers they have keyed).
+#[derive(Debug, thiserror::Error)]
+pub enum CouncilProviderError {
+    /// The provider id is neither a built-in provider, a `[providers]` alias,
+    /// nor a bundled catalog entry.
+    #[error("unknown council provider '{0}'")]
+    Unknown(String),
+    /// The provider resolved, but no usable api key could be found (inline
+    /// config, credentials store, or env var). Skip, don't fail.
+    #[error("council provider '{0}' has no usable api key")]
+    Keyless(String),
+}
+
+/// Resolve a council `spec` (`"provider"` or `"provider:model"`) into a fully
+/// keyed runtime [`Config`] for that provider, reusing the exact same alias /
+/// catalog / credential / compat resolution as [`Config::resolve`].
+///
+/// This is the keyed-provider helper the cross-provider council needs: unlike a
+/// resolver seeded from a single already-resolved `Config` (which carries only
+/// one provider's `api_key`), this consults the on-disk `[providers]` map so it
+/// can pull each council member's *own* credentials. Every non-provider runtime
+/// setting (max_tokens, max_turns, tools, storage, observability, …) is
+/// inherited verbatim from `base` so council members share the session's policy
+/// surface and differ only in provider identity, endpoint, model, and key.
+///
+/// Returns the derived `Config` plus the resolved model (the spec's pinned
+/// model if given, else the provider/config default when non-empty; `None` for
+/// catalog providers with no default — the API surfaces an honest error).
+///
+/// Intentional divergences from [`Config::resolve`] (all by design, not bugs):
+/// - No CLI override rungs (`--provider`/`--model`/`--api-key`/`--base-url`) —
+///   the council never takes CLI args.
+/// - No `[default].model` fallback in model resolution. The session default
+///   model belongs to the *primary* provider; seeding it onto a different
+///   council provider (e.g. an Anthropic-shaped literal onto an OpenAI member)
+///   would be wrong. `base` is an already-resolved `Config`, so the on-disk
+///   `[default]` block isn't reachable here anyway.
+/// - `thinking` is inherited from `base` (whereas `Config::resolve` hard-sets
+///   `None`). Identical whenever `base` itself came from `Config::resolve`.
+/// - The F-088 OpenAI effort-capability gate uses the fully-resolved model
+///   string (more accurate than `Config::resolve`'s pre-expansion check).
+pub fn resolve_council_provider(
+    providers: &HashMap<String, ProviderConfig>,
+    base: &Config,
+    spec: &str,
+) -> Result<(Config, Option<String>), CouncilProviderError> {
+    // Split on the FIRST ':' → (provider_id, model?). A bare "provider" has no
+    // model; "provider:model" pins the model.
+    let (provider_id, spec_model) = match spec.split_once(':') {
+        Some((id, model)) => (id, Some(model.to_string())),
+        None => (spec, None),
+    };
+
+    // Reuse the full alias + catalog + merge resolution. Any failure here means
+    // the id matched nothing resolvable → Unknown (the council surfaces it).
+    let resolved = resolve_provider_alias(providers, provider_id)
+        .map_err(|_| CouncilProviderError::Unknown(provider_id.to_string()))?;
+    let provider = resolved.provider_type;
+    let provider_config = resolved.effective_config;
+    let catalog_entry = resolved.catalog_entry;
+
+    let base_url = provider_config
+        .base_url
+        .clone()
+        .or_else(|| catalog_entry.as_ref().map(|e| e.base_url.clone()))
+        .unwrap_or_else(|| default_base_url_for(provider));
+
+    let raw_model = spec_model
+        .clone()
+        .or_else(|| provider_config.model.clone())
+        .unwrap_or_else(|| {
+            // Catalog providers host heterogeneous catalogs with no sensible
+            // default — mirror Config::resolve and leave it empty so the user
+            // must pin a model (an unset model surfaces as an honest API error).
+            if catalog_entry.is_some() {
+                String::new()
+            } else {
+                default_model_for(provider).to_string()
+            }
+        });
+    let model = wcore_types::model_aliases::expand_short_form(&raw_model)
+        .map(str::to_string)
+        .unwrap_or(raw_model);
+
+    // Credentials: inline config key → store → env var (per provider), plus the
+    // catalog entry's own env var as a fallback — exactly Config::resolve's
+    // chain, with no CLI key (the council never takes a CLI `--api-key`).
+    let catalog_env_key = provider_config
+        .api_key
+        .is_none()
+        .then(|| {
+            catalog_entry
+                .as_ref()
+                .and_then(|e| std::env::var(&e.env_var).ok())
+        })
+        .flatten();
+    // The keyless decision keys off the Ok/Err *distinction*, NOT string
+    // emptiness. `resolve_api_key` returns `Ok("")` by design for providers
+    // that authenticate out-of-band — Bedrock/Vertex (cloud creds), ChatGPT
+    // (OAuth), xAI (when OAuth creds are present). Those are valid council
+    // members and MUST be built, not skipped. It returns `Err(MissingApiKey)`
+    // only when no credential was found anywhere; that case (with no catalog
+    // env var) is the genuine BYO-key-missing member the council skips.
+    let api_key = match resolve_api_key(
+        None,
+        provider_config.api_key.as_deref(),
+        provider,
+        &base.storage.credentials,
+    ) {
+        // A real inline / store / env key.
+        Ok(key) if !key.is_empty() => key,
+        // Out-of-band auth → legitimately empty inline key; build it. (A catalog
+        // env var, if somehow set for this id, still wins — mirrors resolve().)
+        Ok(empty) => catalog_env_key.clone().unwrap_or(empty),
+        // Nothing found anywhere: honor a catalog env var, else this is a
+        // keyless BYO member the council skips (not fatal).
+        Err(_) => match catalog_env_key.clone() {
+            Some(key) => key,
+            None => return Err(CouncilProviderError::Keyless(provider_id.to_string())),
+        },
+    };
+
+    let prompt_caching = provider_config
+        .prompt_caching
+        .unwrap_or(matches!(provider, ProviderType::Anthropic));
+
+    let compat_defaults = if let Some(entry) = catalog_entry.as_ref() {
+        ProviderCompat::from_catalog_entry(&entry.id, entry.api_path.as_deref())
+    } else {
+        compat_defaults_for(provider)
+    };
+    let user_compat = provider_config.compat.clone().unwrap_or_default();
+    let mut compat = ProviderCompat::merge(compat_defaults, user_compat.clone());
+
+    // F-088: align the advertised effort capability with what the resolved
+    // model actually accepts (only when the user hasn't pinned it explicitly).
+    if provider == ProviderType::OpenAI
+        && user_compat.supports_effort.is_none()
+        && compat.supports_effort.unwrap_or(false)
+        && !model.is_empty()
+        && !openai_model_accepts_effort(&model)
+    {
+        compat.supports_effort = Some(false);
+        compat.effort_levels = Some(vec![]);
+    }
+
+    let resolved_model = if model.is_empty() {
+        None
+    } else {
+        Some(model.clone())
+    };
+
+    // Inherit every non-provider runtime field from `base`; overwrite only the
+    // provider identity, endpoint, model, key, and provider-derived compat.
+    let derived = Config {
+        provider,
+        provider_label: resolved.requested_name.clone(),
+        api_key,
+        base_url,
+        model,
+        prompt_caching,
+        compat,
+        ..base.clone()
+    };
+
+    Ok((derived, resolved_model))
 }
 
 fn resolve_api_key(
@@ -2249,6 +2537,24 @@ fn project_config_path() -> PathBuf {
         (false, true) => dir_form,
         (false, false) => file_form, // neither exists; return file form (canonical)
     }
+}
+
+/// Load + merge the global and project config files into a [`ConfigFile`]
+/// WITHOUT resolving them into a runtime [`Config`].
+///
+/// `Config::resolve` consumes the merged `ConfigFile` and drops the
+/// `ConfigFile`-only blocks (`[providers]`, `[crucible]`) once it has extracted
+/// the runtime fields. Consumers that need those blocks — e.g. the Crucible
+/// council, which keys per-provider credentials from `[providers]` — load the
+/// merged file directly here. `project_dir` defaults to the CWD's
+/// `.wayland-core.toml` when `None`.
+pub fn load_merged_config_file(project_dir: Option<&Path>) -> anyhow::Result<ConfigFile> {
+    let global = try_load_config_file(&global_config_path())?;
+    let project_path = project_dir
+        .map(|d| d.join(".wayland-core.toml"))
+        .unwrap_or_else(project_config_path);
+    let project = try_load_config_file(&project_path)?;
+    Ok(merge_config_files(global, project))
 }
 
 /// Read the configured profiles from the global `config.toml`, for the
@@ -2985,6 +3291,16 @@ fn merge_config_files(global: ConfigFile, project: ConfigFile) -> ConfigFile {
         global.browser
     };
 
+    // Crucible: project overrides global when it set a non-default council
+    // (enabled, or a non-empty proposer roster). Mirrors the browser/memory
+    // "project overrides when non-default" strategy; preserves the OFF default
+    // when neither layer configures a council.
+    let crucible = if project.crucible.enabled || !project.crucible.proposers.is_empty() {
+        project.crucible
+    } else {
+        global.crucible
+    };
+
     ConfigFile {
         default,
         providers,
@@ -3008,6 +3324,7 @@ fn merge_config_files(global: ConfigFile, project: ConfigFile) -> ConfigFile {
         browser,
         security,
         session_cap,
+        crucible,
     }
 }
 
@@ -3569,6 +3886,209 @@ mod tests {
         assert!(msg.contains("my-service"));
         assert!(msg.contains("provider"));
         assert!(msg.contains("built-in type"));
+    }
+
+    // ---- resolve_council_provider (keyed cross-provider council) ------------
+
+    #[test]
+    fn council_resolves_each_provider_to_its_own_key() {
+        // The core cross-provider guarantee: two council members keyed to two
+        // different providers each get THEIR OWN credentials from the
+        // `[providers]` map — not one shared base key (the bug this fixes).
+        let mut providers = HashMap::new();
+        providers.insert(
+            "openai".to_string(),
+            ProviderConfig {
+                api_key: Some("sk-openai-aaa".to_string()),
+                ..Default::default()
+            },
+        );
+        providers.insert(
+            "anthropic".to_string(),
+            ProviderConfig {
+                api_key: Some("sk-ant-bbb".to_string()),
+                ..Default::default()
+            },
+        );
+        let base = Config::default();
+
+        let (oa, _) = resolve_council_provider(&providers, &base, "openai").expect("openai");
+        let (an, _) = resolve_council_provider(&providers, &base, "anthropic").expect("anthropic");
+
+        assert_eq!(oa.provider, ProviderType::OpenAI);
+        assert_eq!(oa.api_key, "sk-openai-aaa");
+        assert_eq!(an.provider, ProviderType::Anthropic);
+        assert_eq!(an.api_key, "sk-ant-bbb");
+        // Distinct keys — the single-base-key behavior would make these equal.
+        assert_ne!(oa.api_key, an.api_key);
+    }
+
+    #[test]
+    fn council_pins_model_from_spec() {
+        let mut providers = HashMap::new();
+        providers.insert(
+            "openai".to_string(),
+            ProviderConfig {
+                api_key: Some("sk-openai".to_string()),
+                ..Default::default()
+            },
+        );
+        let base = Config::default();
+        let (cfg, model) =
+            resolve_council_provider(&providers, &base, "openai:gpt-5.5").expect("resolve");
+        assert_eq!(cfg.model, "gpt-5.5");
+        assert_eq!(model.as_deref(), Some("gpt-5.5"));
+    }
+
+    #[test]
+    fn council_resolves_out_of_band_provider() {
+        // Vertex/Bedrock/ChatGPT authenticate out-of-band (GCP/AWS creds, OAuth)
+        // and resolve to an empty inline key BY DESIGN. They are valid council
+        // members and must NOT be skipped as keyless — that would drop exactly
+        // the enterprise providers a cross-provider council wants.
+        let providers = HashMap::new();
+        let base = Config::default();
+        let (cfg, _model) = resolve_council_provider(&providers, &base, "vertex")
+            .expect("vertex (out-of-band auth) must resolve, not be skipped");
+        assert_eq!(cfg.provider, ProviderType::Vertex);
+    }
+
+    #[test]
+    fn council_skips_genuinely_keyless_provider() {
+        // A provider that REQUIRES an inline key but has none (no inline config,
+        // no env var) is the real keyless case → skip. `cohere` needs
+        // COHERE_API_KEY; with an empty providers map and that env var unset,
+        // resolve_api_key returns Err → Keyless.
+        let providers = HashMap::new();
+        let base = Config::default();
+        let err = resolve_council_provider(&providers, &base, "cohere")
+            .expect_err("cohere with no key must be keyless");
+        assert!(
+            matches!(err, CouncilProviderError::Keyless(_)),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn council_errors_unknown_provider() {
+        let providers = HashMap::new();
+        let base = Config::default();
+        let err = resolve_council_provider(&providers, &base, "definitely-not-a-provider")
+            .expect_err("unknown id");
+        assert!(
+            matches!(err, CouncilProviderError::Unknown(_)),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn council_inherits_non_provider_fields_from_base() {
+        let mut providers = HashMap::new();
+        providers.insert(
+            "openai".to_string(),
+            ProviderConfig {
+                api_key: Some("sk-openai".to_string()),
+                ..Default::default()
+            },
+        );
+        let base = Config {
+            max_tokens: 4242,
+            ..Default::default()
+        };
+        let (cfg, _) = resolve_council_provider(&providers, &base, "openai").expect("resolve");
+        assert_eq!(
+            cfg.max_tokens, 4242,
+            "non-provider field must inherit from base"
+        );
+    }
+
+    #[test]
+    fn bedrock_debug_redacts_secrets() {
+        let cfg = BedrockConfig {
+            region: Some("us-east-1".to_string()),
+            access_key_id: Some("AKIAEXAMPLE".to_string()),
+            secret_access_key: Some("super-secret-value".to_string()),
+            session_token: Some("token-value".to_string()),
+            profile: Some("default".to_string()),
+        };
+        let dbg = format!("{cfg:?}");
+        // Non-secret metadata stays visible.
+        assert!(dbg.contains("us-east-1"));
+        assert!(dbg.contains("default"));
+        // Secrets are masked, never printed verbatim.
+        assert!(dbg.contains("<redacted>"));
+        assert!(!dbg.contains("AKIAEXAMPLE"));
+        assert!(!dbg.contains("super-secret-value"));
+        assert!(!dbg.contains("token-value"));
+    }
+
+    #[test]
+    fn vertex_debug_redacts_inline_key() {
+        let cfg = VertexConfig {
+            project_id: Some("my-proj".to_string()),
+            region: Some("us-central1".to_string()),
+            credentials_file: Some("/path/to/key.json".to_string()),
+            service_account_json: Some("{\"private_key\":\"LEAK\"}".to_string()),
+        };
+        let dbg = format!("{cfg:?}");
+        assert!(dbg.contains("my-proj"));
+        assert!(dbg.contains("<redacted>"));
+        assert!(!dbg.contains("LEAK"));
+    }
+
+    #[test]
+    fn config_debug_redacts_api_key() {
+        let cfg = Config {
+            api_key: "sk-super-secret-LEAK".to_string(),
+            model: "gpt-5.5".to_string(),
+            ..Default::default()
+        };
+        let dbg = format!("{cfg:?}");
+        // The live key never appears; only the masked sentinel does.
+        assert!(
+            !dbg.contains("sk-super-secret-LEAK"),
+            "api_key must not leak via Debug"
+        );
+        assert!(dbg.contains("<redacted>"));
+        // Non-secret fields stay visible (Debug still useful).
+        assert!(dbg.contains("gpt-5.5"));
+    }
+
+    #[test]
+    fn config_debug_shows_none_for_empty_api_key() {
+        let cfg = Config::default(); // empty api_key
+        let dbg = format!("{cfg:?}");
+        assert!(dbg.contains("api_key: \"<none>\""));
+    }
+
+    #[test]
+    fn crucible_block_merges_project_over_global() {
+        let global = ConfigFile {
+            crucible: crate::crucible::CrucibleConfig {
+                enabled: true,
+                proposers: vec!["openai".to_string()],
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let project = ConfigFile {
+            crucible: crate::crucible::CrucibleConfig {
+                enabled: true,
+                proposers: vec!["anthropic".to_string(), "gemini".to_string()],
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let merged = merge_config_files(global, project);
+        // Project set a non-default council → it wins.
+        assert_eq!(merged.crucible.proposers, vec!["anthropic", "gemini"]);
+    }
+
+    #[test]
+    fn crucible_defaults_off_when_absent() {
+        let merged = merge_config_files(ConfigFile::default(), ConfigFile::default());
+        assert!(!merged.crucible.enabled);
+        assert!(merged.crucible.proposers.is_empty());
     }
 
     // -------------------------------------------------------------------------

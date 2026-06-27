@@ -270,6 +270,7 @@ mod tests {
             web_search: false,
             conversation_id: None,
             client_context_tokens: None,
+            temperature: None,
         };
         let mut rx = p.stream(&req).await.unwrap();
         let first = rx.recv().await.unwrap();

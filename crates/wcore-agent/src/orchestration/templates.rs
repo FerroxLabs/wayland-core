@@ -15,7 +15,9 @@ use parking_lot::Mutex;
 
 use serde_json::Value;
 
-use super::graph::{AggregationStrategy, GraphConfig, GraphResult, InputMapper, Predicate};
+use super::graph::{
+    AggregationStrategy, GraphConfig, GraphResult, InputMapper, Predicate, ProviderPin,
+};
 
 /// Boxed replan closure for [`AdaptiveConfig`]. Returns `Some(new_cfg)`
 /// to trigger a replacement graph after the initial run, or `None` to
@@ -126,6 +128,41 @@ impl GraphConfig {
         g
     }
 
+    /// Crucible Mixture-of-Providers topology: PassThrough root → one pinned
+    /// `AgentCall` per proposer (provider/model written into `node_providers`)
+    /// → a marker `aggregator_id` `AgentCall` node the runner intercepts for
+    /// runner-phase synthesis. Built on `parallel_fanout`'s STRUCTURE (NOT
+    /// `multi_agent_consensus`'s `vote` semantics): each proposer is pinned to
+    /// its own provider, and the aggregator is a sink the runner fuses.
+    ///
+    /// `proposers` is `(node_id, ProviderPin, prompt)`. The prompt currently
+    /// rides through state as `PassThrough`; the runner layer is responsible
+    /// for routing the council task to each proposer.
+    pub fn mixture_of_providers(
+        proposers: &[(String, ProviderPin, String)],
+        aggregator_id: &str,
+    ) -> Self {
+        assert!(
+            !proposers.is_empty(),
+            "mixture_of_providers requires ≥1 proposer"
+        );
+        let root = "__mop_root__".to_string();
+        let mut g = Self::empty(root.clone());
+        g.add_passthrough(&root);
+        for (node_id, pin, _prompt) in proposers {
+            g.add_agent(node_id.clone(), InputMapper::PassThrough);
+            g.set_node_provider(node_id, pin.clone());
+            g.add_edge(&root, node_id.clone(), None);
+        }
+        // The aggregator is a marker `AgentCall` node the runner intercepts to
+        // perform runner-phase synthesis over the collected proposals.
+        g.add_agent(aggregator_id, InputMapper::PassThrough);
+        for (node_id, _pin, _prompt) in proposers {
+            g.add_edge(node_id.clone(), aggregator_id, None);
+        }
+        g
+    }
+
     /// Self-critique loop: each iteration runs `doer` then `critic`
     /// in sequence; stops when `state["good_enough"] == true` or
     /// `max_revisions` iterations have passed.
@@ -206,5 +243,45 @@ impl AdaptiveConfig {
             return Ok(second);
         }
         Ok(first)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn mixture_of_providers_pins_each_proposer() {
+        let g = GraphConfig::mixture_of_providers(
+            &[
+                (
+                    "p_openai".into(),
+                    ProviderPin {
+                        provider: Some("openai".into()),
+                        model: None,
+                    },
+                    "task".into(),
+                ),
+                (
+                    "p_anthropic".into(),
+                    ProviderPin {
+                        provider: Some("anthropic".into()),
+                        model: None,
+                    },
+                    "task".into(),
+                ),
+            ],
+            "synth",
+        );
+        assert_eq!(
+            g.node_providers["p_openai"].provider.as_deref(),
+            Some("openai")
+        );
+        assert_eq!(
+            g.node_providers["p_anthropic"].provider.as_deref(),
+            Some("anthropic")
+        );
+        // The aggregator marker node exists in the graph.
+        assert!(g.nodes.iter().any(|(id, _)| id == "synth"));
     }
 }

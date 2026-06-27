@@ -94,6 +94,7 @@ mod tests {
             input_pretty: pretty.into(),
             approval_reason: String::new(),
             plan_body: None,
+            crucible_plan: None,
         }
     }
 

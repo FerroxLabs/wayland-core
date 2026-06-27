@@ -1665,10 +1665,31 @@ impl AgentBootstrap {
         // background-task vec so `Drop for AgentEngine` aborts it on
         // session shutdown.
         let agent_bus = Arc::new(crate::agents::bus::AgentBus::new(256));
-        let spawner = Arc::new(
+        // Crucible cost governance — a cap-less per-user/day spend ACCUMULATOR for
+        // council members, built whenever the council has a daily or per-run cap
+        // configured (independent of [session_cap], which governs the per-turn
+        // engine charge — a separate concern wired in the M5 block below). Built
+        // BEFORE the spawner is Arc-wrapped (it is moved into tools just below).
+        // It carries NO caps on purpose: the council's daily bound is the SOFT
+        // pre-flight check in run_council, and per-member charging must ALWAYS
+        // record (a capped charge would reject + drop, undercounting real spend).
+        let council_budget_tracker = (self.config.crucible.daily_cap_usd.is_some()
+            || self.config.crucible.max_cost_usd.is_some())
+        .then(|| {
+            Arc::new(parking_lot::Mutex::new(wcore_budget::BudgetTracker::new(
+                wcore_budget::BudgetCap::default(),
+            )))
+        });
+        let mut spawner_builder =
             crate::spawner::AgentSpawner::new(provider.clone(), self.config.clone())
-                .with_bus(Arc::clone(&agent_bus)),
-        );
+                .with_bus(Arc::clone(&agent_bus));
+        if let Some(tracker) = council_budget_tracker.as_ref() {
+            // TODO(stage3): use the live per-conversation session id.
+            spawner_builder = spawner_builder
+                .with_budget_tracker(Arc::clone(tracker))
+                .with_budget_identity("session", crate::engine::resolve_user_model_user_id());
+        }
+        let spawner = Arc::new(spawner_builder);
         // Lane D3 (G2/G4): register agents copied into installed marketplace
         // plugins (`<plugins-root>/<plugin>@<marketplace>/agents/*.yaml`),
         // namespaced `<marketplace>/<plugin>:<agent>` so agents from different
@@ -2238,13 +2259,16 @@ impl AgentBootstrap {
         // and never unblock the awaiting script step.
         engine.set_approval_bridge(approval_bridge);
 
-        // M5.bootstrap-wiring — install a per-session `BudgetTracker`
-        // when `Config.session_cap` is set. When the bootstrap also has
-        // a `SpanSink` installed, wire `ObservabilityBudgetEventBridge`
-        // so `BudgetEvent::{Charge, CapWarn, CapBlock}` reach the JSON
-        // span channel. Without `session_cap`, the engine's
-        // `budget_tracker` stays `None` and the per-turn charge call
-        // in `engine.rs::run` is a no-op (matches pre-M5.3 behaviour).
+        // M5.bootstrap-wiring — install a per-session engine `BudgetTracker`
+        // when `Config.session_cap` is set. This governs the PER-TURN engine
+        // charge in `engine.rs::run` — a SEPARATE concern from the council's
+        // cap-less spend accumulator (built above and attached to the spawner),
+        // which governs council spend via `crucible.daily_cap_usd`. The two do
+        // NOT share one envelope. When the bootstrap also has a `SpanSink`
+        // installed, wire `ObservabilityBudgetEventBridge` so
+        // `BudgetEvent::{Charge, CapWarn, CapBlock}` reach the JSON span
+        // channel. Without `session_cap`, the engine's `budget_tracker` stays
+        // `None` and the per-turn charge is a no-op (matches pre-M5.3 behaviour).
         if let Some(cap_cfg) = session_cap_cfg.as_ref() {
             let cap: wcore_budget::BudgetCap = cap_cfg.into();
             let mut tracker = wcore_budget::BudgetTracker::new(cap);

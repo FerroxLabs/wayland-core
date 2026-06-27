@@ -105,19 +105,33 @@ impl BedrockProvider {
     // NOTE(v0.6.4): native Bedrock event-stream parsing for Mistral/Cohere.
     fn build_request_body(&self, request: &LlmRequest) -> Value {
         if mistral::is_mistral_model(&request.model) {
-            // Mistral on Bedrock has no `temperature`/`top_p` source on
-            // `LlmRequest` today — pass `None`, letting Bedrock apply its
-            // defaults. Wire those through if `LlmRequest` gains the fields.
+            // Crucible #3: thread an explicit `temperature` when set, gated by
+            // the provider's `supports_temperature` flag + the per-model
+            // exclusion (same gate as `openai_compat::emit_temperature`).
+            // `top_p` has no `LlmRequest` source today — pass `None`.
+            let temperature = if request.temperature.is_some()
+                && self.compat.supports_temperature()
+                && crate::openai_compat::accepts_temperature(&request.model)
+            {
+                request.temperature
+            } else {
+                None
+            };
             return mistral::build_mistral_request_body(
                 &request.system,
                 &request.messages,
                 request.max_tokens,
-                None,
+                temperature,
                 None,
             );
         }
         if cohere::is_cohere_model(&request.model) {
-            return cohere::build_cohere_request_body(request);
+            // Crucible #3: Cohere's Chat schema carries `temperature` at the
+            // root, so reuse the shared emitter (same gate as the Anthropic
+            // family above) rather than threading a param.
+            let mut body = cohere::build_cohere_request_body(request);
+            crate::openai_compat::emit_temperature(&mut body, request, &self.compat);
+            return body;
         }
         self.build_anthropic_request_body(request)
     }
@@ -165,6 +179,11 @@ impl BedrockProvider {
                 "budget_tokens": budget_tokens
             });
         }
+
+        // Crucible #3: emit an explicit `temperature` when set, gated by the
+        // provider's `supports_temperature` flag + the per-model exclusion (see
+        // `openai_compat::emit_temperature`). Anthropic-on-Bedrock accepts it.
+        crate::openai_compat::emit_temperature(&mut body, request, &self.compat);
 
         body
     }
@@ -2001,6 +2020,7 @@ mod tests {
                 web_search: false,
                 conversation_id: None,
                 client_context_tokens: None,
+                temperature: None,
             }
         }
 
@@ -2239,6 +2259,64 @@ mod tests {
             assert_eq!(body["message"], "hello");
             assert_eq!(body["preamble"], "you are helpful");
             assert_eq!(body["max_tokens"], 128);
+        }
+
+        /// Crucible #3: a Mistral id with an explicit temperature threads it
+        /// into the Mistral body (root-level `temperature`).
+        #[test]
+        fn mistral_id_emits_temperature_when_set() {
+            let mut request = req("mistral.mistral-large-2407-v1:0");
+            request.temperature = Some(0.6);
+            let body = provider().build_request_body(&request);
+            assert!((body["temperature"].as_f64().unwrap() - 0.6).abs() < 1e-4);
+        }
+
+        /// Crucible #3: a Cohere id with an explicit temperature emits it at the
+        /// body root via the shared emitter.
+        #[test]
+        fn cohere_id_emits_temperature_when_set() {
+            let mut request = req("cohere.command-r-v1:0");
+            request.temperature = Some(0.6);
+            let body = provider().build_request_body(&request);
+            assert!((body["temperature"].as_f64().unwrap() - 0.6).abs() < 1e-4);
+        }
+
+        /// Crucible #3: with `supports_temperature == false`, neither native
+        /// Bedrock family emits a temperature even when the request sets one.
+        #[test]
+        fn native_families_omit_temperature_when_compat_opts_out() {
+            let opt_out = BedrockProvider::new(
+                "us-east-1",
+                AwsCredentials::Explicit {
+                    access_key_id: "AKIA_TEST".into(),
+                    secret_access_key: "secret_test".into(),
+                    session_token: None,
+                },
+                false,
+                ProviderCompat {
+                    supports_temperature: Some(false),
+                    ..ProviderCompat::default()
+                },
+                DebugConfig::default(),
+            );
+            let mut mistral = req("mistral.mistral-large-2407-v1:0");
+            mistral.temperature = Some(0.6);
+            assert!(
+                opt_out
+                    .build_request_body(&mistral)
+                    .get("temperature")
+                    .is_none(),
+                "supports_temperature=false must suppress Mistral temperature"
+            );
+            let mut cohere = req("cohere.command-r-v1:0");
+            cohere.temperature = Some(0.6);
+            assert!(
+                opt_out
+                    .build_request_body(&cohere)
+                    .get("temperature")
+                    .is_none(),
+                "supports_temperature=false must suppress Cohere temperature"
+            );
         }
 
         /// An Anthropic model id still builds the Anthropic-on-Bedrock body —

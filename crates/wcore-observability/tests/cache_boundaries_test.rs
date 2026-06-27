@@ -23,6 +23,7 @@ fn req_with_messages(messages: Vec<Message>) -> LlmRequest {
         web_search: false,
         conversation_id: None,
         client_context_tokens: None,
+        temperature: None,
     }
 }
 

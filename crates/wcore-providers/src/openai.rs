@@ -640,6 +640,11 @@ impl OpenAIProvider {
             body["reasoning_effort"] = json!(effort);
         }
 
+        // Crucible #3: emit an explicit `temperature` when set, gated by the
+        // provider's `supports_temperature` flag + the per-model o-series
+        // exclusion (see `openai_compat::emit_temperature`).
+        openai_compat::emit_temperature(&mut body, request, &self.compat);
+
         // Output-side optimization (Part A): UNION the request's fluff stop
         // sequences into OpenAI's `stop` field, preserving any the caller
         // already placed on the body. The Chat Completions API accepts `stop`
@@ -2603,6 +2608,7 @@ mod tests {
             web_search: false,
             conversation_id: None,
             client_context_tokens: None,
+            temperature: None,
         };
         let body = provider.build_request_body(&req);
         assert_eq!(body["max_tokens"], 1024);
@@ -2635,6 +2641,7 @@ mod tests {
             web_search: false,
             conversation_id: None,
             client_context_tokens: None,
+            temperature: None,
         }
     }
 
@@ -2680,6 +2687,69 @@ mod tests {
             body["stop"],
             json!(["\n\nLet me know if", "\n\nFeel free to"]),
             "OpenAI must emit stops under the `stop` key as an array"
+        );
+    }
+
+    // --- Crucible #3: per-tier temperature emission -----------------------
+
+    #[test]
+    fn build_request_body_emits_temperature_for_accepting_model() {
+        // A proposer-tier temperature on an accepting model (gpt-4o) is emitted.
+        let mut req = stop_req();
+        req.temperature = Some(0.6);
+        let body = stop_provider().build_request_body(&req);
+        assert!(
+            (body["temperature"].as_f64().unwrap() - 0.6).abs() < 1e-6,
+            "accepting model + Some(0.6) must emit temperature 0.6 (proposer tier)"
+        );
+
+        // The aggregator-tier temperature is emitted identically.
+        let mut agg = stop_req();
+        agg.temperature = Some(0.4);
+        let agg_body = stop_provider().build_request_body(&agg);
+        assert!(
+            (agg_body["temperature"].as_f64().unwrap() - 0.4).abs() < 1e-6,
+            "accepting model + Some(0.4) must emit temperature 0.4 (aggregator tier)"
+        );
+    }
+
+    #[test]
+    fn build_request_body_omits_temperature_when_unset() {
+        // `None` (the back-compat default) emits no temperature field.
+        let body = stop_provider().build_request_body(&stop_req());
+        assert!(
+            body.get("temperature").is_none(),
+            "temperature: None must emit no `temperature` field (back-compat)"
+        );
+    }
+
+    #[test]
+    fn build_request_body_omits_temperature_for_o_series_model() {
+        // o1/o3 reasoning families fix temperature at 1.0 and reject an explicit
+        // value, so `accepts_temperature` drops it even when a council temp is set.
+        let mut req = stop_req();
+        req.model = "o1-mini".into();
+        req.temperature = Some(0.6);
+        let body = stop_provider().build_request_body(&req);
+        assert!(
+            body.get("temperature").is_none(),
+            "o1-class model must omit temperature even when a council temp is set"
+        );
+    }
+
+    #[test]
+    fn build_request_body_omits_temperature_when_compat_opts_out() {
+        // A provider with supports_temperature = false drops the field entirely.
+        let mut compat = openai_compat();
+        compat.supports_temperature = Some(false);
+        let provider =
+            OpenAIProvider::new("key", "http://localhost", compat, DebugConfig::default());
+        let mut req = stop_req();
+        req.temperature = Some(0.6);
+        let body = provider.build_request_body(&req);
+        assert!(
+            body.get("temperature").is_none(),
+            "supports_temperature = false must omit the temperature field"
         );
     }
 
@@ -2978,6 +3048,7 @@ mod tests {
             web_search: false,
             conversation_id: None,
             client_context_tokens: None,
+            temperature: None,
         };
         let body = provider.build_request_body(&req);
         assert_eq!(body["max_completion_tokens"], 2048);
@@ -3015,6 +3086,7 @@ mod tests {
             web_search: false,
             conversation_id: None,
             client_context_tokens: None,
+            temperature: None,
         };
         let body = provider.build_request_body(&req);
         assert_eq!(body["max_completion_tokens"], 1024);
@@ -3048,6 +3120,7 @@ mod tests {
             web_search: false,
             conversation_id: None,
             client_context_tokens: None,
+            temperature: None,
         };
         let body = provider.build_request_body(&req);
         assert_eq!(body["max_tokens"], 1024);
@@ -3079,6 +3152,7 @@ mod tests {
             web_search: false,
             conversation_id: None,
             client_context_tokens: None,
+            temperature: None,
         };
         let body = provider.build_request_body(&req);
         assert!(
@@ -3110,6 +3184,7 @@ mod tests {
             web_search: false,
             conversation_id: None,
             client_context_tokens: None,
+            temperature: None,
         };
         let body = provider.build_request_body(&req);
         assert_eq!(body["reasoning_effort"], "medium");

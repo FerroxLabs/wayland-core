@@ -46,6 +46,7 @@ fn minimal_request() -> LlmRequest {
         web_search: false,
         conversation_id: None,
         client_context_tokens: None,
+        temperature: None,
     }
 }
 
@@ -622,6 +623,7 @@ async fn gemini_live_api_smoke_test() {
         web_search: false,
         conversation_id: None,
         client_context_tokens: None,
+        temperature: None,
     };
 
     let rx = provider

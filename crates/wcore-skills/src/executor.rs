@@ -117,6 +117,9 @@ pub async fn execute_fork(
         max_turns: skill.max_turns.unwrap_or(10),
         max_tokens: skill.max_tokens.unwrap_or(16384),
         system_prompt: None,
+        provider: None,
+        model: None,
+        temperature: None,
     };
 
     let overrides = ForkOverrides {

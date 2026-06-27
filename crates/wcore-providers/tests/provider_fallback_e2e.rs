@@ -64,6 +64,7 @@ fn dummy_request() -> LlmRequest {
         web_search: false,
         conversation_id: None,
         client_context_tokens: None,
+        temperature: None,
     }
 }
 

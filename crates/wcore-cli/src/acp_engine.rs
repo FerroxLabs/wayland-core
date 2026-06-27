@@ -1072,6 +1072,7 @@ mod tests {
                 correlation_id: "c9".into(),
                 reason: "edit".into(),
                 context: "write a file".into(),
+                plan: None,
             },
             ProtocolEvent::StreamEnd {
                 msg_id: "m".into(),
@@ -1142,6 +1143,7 @@ mod tests {
                 correlation_id: "wf1".into(),
                 reason: "Run ForgeFlow `demo`?".into(),
                 context: "~2 agents / ~$0.10".into(),
+                plan: None,
             })
             .unwrap();
         emitter

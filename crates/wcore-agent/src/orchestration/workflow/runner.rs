@@ -99,6 +99,24 @@ fn node_token_budget(graph: &GraphConfig, node_id: &str) -> u32 {
         .unwrap_or(DEFAULT_MAX_TOKENS)
 }
 
+/// Resolve a node's pinned provider spec from `graph.node_providers` (lowered
+/// from `AgentSpec.provider`). `None` ⇒ the node inherits the spawner's
+/// provider. Mirrors the `node_*_budget` side-table lookups above.
+fn node_provider(graph: &GraphConfig, node_id: &str) -> Option<String> {
+    graph
+        .node_providers
+        .get(node_id)
+        .and_then(|p| p.provider.clone())
+}
+
+/// Resolve a node's pinned model from `graph.node_providers`.
+fn node_pinned_model(graph: &GraphConfig, node_id: &str) -> Option<String> {
+    graph
+        .node_providers
+        .get(node_id)
+        .and_then(|p| p.model.clone())
+}
+
 /// Bound on `Loop`/predicate-gated iteration so a malformed predicate can
 /// never spin forever. Mirrors the walker's `max_iters` discipline. Exposed to
 /// the cost estimator (FIX B) so its `Loop` agent count uses the SAME cap the
@@ -338,6 +356,11 @@ pub(crate) async fn resolve_stage_schema(
                         max_turns: dispatch.max_turns,
                         max_tokens: dispatch.max_tokens,
                         system_prompt: None,
+                        // The pipeline stage IS an AgentSpec, so its provider /
+                        // model pin is read directly (no node_providers lookup).
+                        provider: stage.provider.clone(),
+                        model: stage.model.clone(),
+                        temperature: None,
                     })
                     .await;
                 drop(permit);
@@ -1058,6 +1081,9 @@ impl<'a> WorkflowRunner<'a> {
                 max_turns: node_turn_budget(&plan.graph, id),
                 max_tokens: node_token_budget(&plan.graph, id),
                 system_prompt: None,
+                provider: node_provider(&plan.graph, id),
+                model: node_pinned_model(&plan.graph, id),
+                temperature: None,
             })
             .await
     }
@@ -1099,6 +1125,9 @@ impl<'a> WorkflowRunner<'a> {
                     max_turns: node_turn_budget(&plan.graph, id),
                     max_tokens: node_token_budget(&plan.graph, id),
                     system_prompt: None,
+                    provider: node_provider(&plan.graph, id),
+                    model: node_pinned_model(&plan.graph, id),
+                    temperature: None,
                 },
             ));
         }
@@ -1529,6 +1558,9 @@ impl<'a> WorkflowRunner<'a> {
                     max_turns: node_turn_budget(&plan.graph, agent_name),
                     max_tokens: node_token_budget(&plan.graph, agent_name),
                     system_prompt: None,
+                    provider: node_provider(&plan.graph, agent_name),
+                    model: node_pinned_model(&plan.graph, agent_name),
+                    temperature: None,
                 };
                 let result = self.spawner.spawn_one(cfg).await;
                 if result.is_error {

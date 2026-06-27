@@ -264,6 +264,9 @@ fn parse_tasks(input: &Value) -> Result<(Vec<SubAgentConfig>, Vec<Option<String>
             max_turns: DEFAULT_SUB_AGENT_MAX_TURNS,
             max_tokens: DEFAULT_SUB_AGENT_MAX_TOKENS,
             system_prompt: Some(system_prompt),
+            provider: None,
+            model: None,
+            temperature: None,
         });
         agent_names.push(agent);
     }

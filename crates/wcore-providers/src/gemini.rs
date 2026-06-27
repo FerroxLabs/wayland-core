@@ -226,6 +226,19 @@ pub(crate) fn build_gemini_body(
     let mut generation_config = json!({
         "maxOutputTokens": request.max_tokens,
     });
+
+    // Crucible #3: emit an explicit `temperature` when set, gated by the
+    // provider's `supports_temperature` flag + the per-model exclusion. Gemini
+    // nests sampling controls under `generationConfig` (not the root body), so
+    // this can't reuse `openai_compat::emit_temperature` directly; the gate is
+    // replicated here to match it (no hardcoded provider quirks — AGENTS.md).
+    if let Some(t) = request.temperature
+        && compat.supports_temperature()
+        && crate::openai_compat::accepts_temperature(&request.model)
+    {
+        generation_config["temperature"] = json!(t);
+    }
+
     if let Some(effort) = &request.reasoning_effort
         && !effort.is_empty()
     {
@@ -1011,6 +1024,7 @@ mod tests {
             web_search: false,
             conversation_id: None,
             client_context_tokens: None,
+            temperature: None,
         }
     }
 
@@ -1166,6 +1180,60 @@ mod tests {
             body["generationConfig"]["stopSequences"],
             json!(["\n\nLet me know if", "\n\nFeel free to"]),
             "Gemini must emit stops under generationConfig.stopSequences"
+        );
+    }
+
+    // --- Crucible #3: generationConfig.temperature ---
+
+    #[test]
+    fn build_request_body_emits_temperature_under_generation_config() {
+        let provider = GeminiProvider::new("k", "", compat(), DebugConfig::default());
+        let mut request = make_request_with_messages(vec![Message::new(
+            Role::User,
+            vec![ContentBlock::Text { text: "hi".into() }],
+        )]);
+        request.temperature = Some(0.6);
+        let body = provider.build_request_body(&request);
+        // f32 0.6 widens to f64 ~0.60000002, so compare with tolerance, not ==.
+        let temp = body["generationConfig"]["temperature"]
+            .as_f64()
+            .expect("Gemini must emit temperature under generationConfig");
+        assert!(
+            (temp - 0.6).abs() < 1e-6,
+            "Gemini generationConfig.temperature should be ~0.6, got {temp}"
+        );
+    }
+
+    #[test]
+    fn build_request_body_omits_temperature_when_unset() {
+        let provider = GeminiProvider::new("k", "", compat(), DebugConfig::default());
+        let request = make_request_with_messages(vec![Message::new(
+            Role::User,
+            vec![ContentBlock::Text { text: "hi".into() }],
+        )]);
+        let body = provider.build_request_body(&request);
+        assert!(
+            body["generationConfig"].get("temperature").is_none(),
+            "no temperature must emit no field"
+        );
+    }
+
+    #[test]
+    fn build_request_body_omits_temperature_when_compat_opts_out() {
+        let opt_out = ProviderCompat {
+            supports_temperature: Some(false),
+            ..compat()
+        };
+        let provider = GeminiProvider::new("k", "", opt_out, DebugConfig::default());
+        let mut request = make_request_with_messages(vec![Message::new(
+            Role::User,
+            vec![ContentBlock::Text { text: "hi".into() }],
+        )]);
+        request.temperature = Some(0.6);
+        let body = provider.build_request_body(&request);
+        assert!(
+            body["generationConfig"].get("temperature").is_none(),
+            "supports_temperature=false must suppress the field"
         );
     }
 

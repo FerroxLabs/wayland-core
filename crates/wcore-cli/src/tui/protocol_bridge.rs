@@ -438,6 +438,7 @@ fn apply_event_inner(app: &mut App, event: ProtocolEvent) {
                 // snapshotted just above (before `app.plan` was cleared);
                 // all other tools leave it None.
                 plan_body: captured_plan_body,
+                crucible_plan: None,
             });
         }
         ProtocolEvent::ToolRunning {
@@ -505,7 +506,10 @@ fn apply_event_inner(app: &mut App, event: ProtocolEvent) {
             }
         }
         ProtocolEvent::ApprovalRequired {
-            call_id, reason, ..
+            call_id,
+            reason,
+            plan,
+            ..
         } => {
             // Mark the matching card as awaiting the user's decision and
             // park the reason on the card so the approval modal can show
@@ -527,6 +531,11 @@ fn apply_event_inner(app: &mut App, event: ProtocolEvent) {
                 Some(card) => {
                     card.status = ToolCardStatus::AwaitingApproval;
                     card.approval_reason = reason;
+                    // Crucible Stage 4: snapshot the typed proposal card off
+                    // the event so the CrucibleComponent renders it from the
+                    // card model (mirrors how `approval_reason` is parked here).
+                    // `None` for every non-council approval.
+                    card.crucible_plan = plan;
                     Some(card.tool_name.clone())
                 }
                 // B2.5 — an egress consent (`egress:` call_id) has no tool card
@@ -545,6 +554,7 @@ fn apply_event_inner(app: &mut App, event: ProtocolEvent) {
                         input_pretty: String::new(),
                         approval_reason: reason,
                         plan_body: None,
+                        crucible_plan: None,
                     });
                     Some("egress".to_string())
                 }
@@ -1502,6 +1512,7 @@ pub fn hydrate_history(messages: &[Message]) -> (Vec<TurnView>, Vec<ToolCardMode
                                 input_pretty: pretty_input(input),
                                 approval_reason: String::new(),
                                 plan_body: None,
+                                crucible_plan: None,
                             });
                         }
                         ContentBlock::ToolResult { .. } => {}
@@ -2360,6 +2371,7 @@ mod tests {
                 correlation_id: "t".into(),
                 reason: "exec".into(),
                 context: "running x".into(),
+                plan: None,
             },
         );
         assert_eq!(
@@ -2379,6 +2391,7 @@ mod tests {
                 correlation_id: "t".into(),
                 reason: "exec".into(),
                 context: "ctx".into(),
+                plan: None,
             },
         );
         assert_eq!(app.session.turns.len(), 1);
@@ -3143,6 +3156,7 @@ mod tests {
                 correlation_id: String::new(),
                 reason: "writes a file".into(),
                 context: String::new(),
+                plan: None,
             },
         );
 
@@ -4112,6 +4126,7 @@ mod tests {
                 input_pretty: String::new(),
                 approval_reason: String::new(),
                 plan_body: None,
+                crucible_plan: None,
             });
         }
         // Push a turn.
@@ -4177,6 +4192,7 @@ mod tests {
             input_pretty: String::new(),
             approval_reason: String::new(),
             plan_body: None,
+            crucible_plan: None,
         });
         // The turn elements must contain ToolCard("c-real") and NOT
         // contain ToolCard("c-orphan") — the orphan card is in the
@@ -4224,6 +4240,7 @@ mod tests {
                 correlation_id: String::new(),
                 reason: "writes a file".into(),
                 context: String::new(),
+                plan: None,
             },
         );
         match &app.session.phase {
@@ -4260,6 +4277,7 @@ mod tests {
                 correlation_id: String::new(),
                 reason: "edits a file".into(),
                 context: String::new(),
+                plan: None,
             },
         );
         assert!(
@@ -4282,6 +4300,7 @@ mod tests {
                 correlation_id: String::new(),
                 reason: "Allow network access to `react.dev`? (data-less GET)".into(),
                 context: String::new(),
+                plan: None,
             },
         );
         let card = app
@@ -4313,6 +4332,7 @@ mod tests {
                 correlation_id: String::new(),
                 reason: "something".into(),
                 context: String::new(),
+                plan: None,
             },
         );
         assert_eq!(

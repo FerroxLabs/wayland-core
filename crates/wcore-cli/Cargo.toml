@@ -109,6 +109,10 @@ wcore-cron  = { path = "../wcore-cron" }
 # F-089: `models list` subcommand reads the bundled pricing catalog to
 # enumerate known provider/model ids without a live API call.
 wcore-pricing.workspace = true
+# Crucible: attach a cap-less per-user/day council spend tracker on the
+# `wcore crucible` spawners (the council's daily bound is enforced by the
+# soft pre-flight check; this tracker just accumulates for accurate accounting).
+wcore-budget.workspace = true
 # v0.6.4 Task 2.6: parse humantime durations from `--brief` TOML + the
 # `--timeout` flag. `humantime-serde` covers the serde derive path for
 # the TOML brief; `humantime` itself is needed for the flag-side
@@ -131,6 +135,9 @@ tokio.workspace  = true
 # AUDIT-D: `CancellationToken` for the TUI's cooperative turn-cancel —
 # `TuiEngine::cancel` fires a per-turn token before the hard `abort()`.
 tokio-util.workspace = true
+# Crucible: Mutex around the council BudgetTracker (matches wcore-agent's
+# `Arc<parking_lot::Mutex<BudgetTracker>>` shape on the spawner).
+parking_lot.workspace = true
 anyhow.workspace = true
 # F-001: install tracing_subscriber at main() startup so every
 # tracing::info!/warn!/error!/debug! call in the engine reaches a live

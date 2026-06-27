@@ -86,6 +86,14 @@ pub struct LlmRequest {
     /// `Option` so providers/tests that don't supply an estimate stay
     /// back-compatible via `..Default::default()`.
     pub client_context_tokens: Option<u64>,
+    /// Crucible #3: optional sampling temperature. `None` (the default) means
+    /// the provider uses its own default and omits the field entirely.
+    /// Providers that reject an explicit temperature (OpenAI `o1*`/`o3*`
+    /// reasoning families) drop it via `openai_compat::accepts_temperature`;
+    /// a provider can also opt out via `ProviderCompat.supports_temperature`.
+    /// `Default` is `None`, so all existing `..Default::default()` construction
+    /// sites stay back-compatible.
+    pub temperature: Option<f32>,
 }
 
 #[derive(Debug, Clone)]

@@ -30,6 +30,7 @@ pub mod config;
 pub mod context_window;
 // Wave SD: CredentialsStore trait + plaintext/keyring backends.
 pub mod credentials;
+pub mod crucible;
 pub mod cua;
 pub mod debug;
 // v0.9.0 W4 E1 / S-H3: atomic .env writer with strict key/value validation.

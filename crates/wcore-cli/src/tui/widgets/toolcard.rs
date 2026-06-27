@@ -327,6 +327,7 @@ mod tests {
             input_pretty: r#"{ "path": "src/main.rs" }"#.into(),
             approval_reason: String::new(),
             plan_body: None,
+            crucible_plan: None,
         }
     }
 

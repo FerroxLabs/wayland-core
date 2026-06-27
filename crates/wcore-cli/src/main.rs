@@ -450,6 +450,46 @@ enum TopCmd {
         #[command(subcommand)]
         cmd: wcore_cli::workflow::WorkflowCmd,
     },
+    /// Crucible (Mixture-of-Providers): run the cross-provider council over a
+    /// task. N proposers (each pinned to its own provider from `[providers]`)
+    /// answer in parallel; a fenced, read-only aggregator fuses them. Requires
+    /// `[crucible] enabled = true` with a `proposers` roster in your config.
+    Crucible {
+        /// The task for the council to work.
+        task: String,
+        /// Gate the council: a cheap classifier decides whether the task
+        /// warrants convening (high-stakes / complex) or can be answered with a
+        /// single direct call (trivial). Without this flag the council always
+        /// convenes.
+        #[arg(long)]
+        auto: bool,
+        /// Auto mode: pin the candidate pool to these specs (comma-separated).
+        #[arg(long, value_delimiter = ',')]
+        council: Vec<String>,
+        /// Auto mode: pin the aggregator to this spec.
+        #[arg(long)]
+        judge: Option<String>,
+        /// Auto mode: force a single direct answer.
+        #[arg(long)]
+        direct: bool,
+        /// Auto mode: force convening a council regardless of the gate.
+        #[arg(long)]
+        force_council: bool,
+        /// Auto mode: treat the task as High stakes (widest roster, top judge).
+        #[arg(long)]
+        deep: bool,
+        /// Auto mode: exclude these provider families (comma-separated).
+        #[arg(long, value_delimiter = ',')]
+        deny: Vec<String>,
+        /// Inject the council synthesis into the normal trusted agent loop as
+        /// private guidance (the agent then reasons/acts/uses tools on it),
+        /// instead of printing the fused answer and stopping. Overrides config.
+        #[arg(long)]
+        advisor: bool,
+        /// Force terminal (print-and-stop) mode, overriding `[crucible].mode`.
+        #[arg(long)]
+        terminal: bool,
+    },
     /// v0.7.0 Task 1.C.1: print resolved project context from WAYLAND.md /
     /// AGENTS.md / .wayland/context.md / CLAUDE.md walking up from cwd.
     ProjectContext,
@@ -939,6 +979,38 @@ async fn run() -> anyhow::Result<ExitCode> {
                     Ok(ExitCode::FAILURE)
                 }
             },
+            TopCmd::Crucible {
+                task,
+                auto,
+                council,
+                judge,
+                direct,
+                force_council,
+                deep,
+                deny,
+                advisor,
+                terminal,
+            } => {
+                let args = wcore_cli::crucible::CrucibleArgs {
+                    task,
+                    auto,
+                    council: (!council.is_empty()).then_some(council),
+                    judge,
+                    direct,
+                    force_council,
+                    deep,
+                    deny,
+                    advisor,
+                    terminal,
+                };
+                match wcore_cli::crucible::run_crucible(args).await {
+                    Ok(()) => Ok(ExitCode::SUCCESS),
+                    Err(e) => {
+                        eprintln!("wayland-core crucible: {e:#}");
+                        Ok(ExitCode::FAILURE)
+                    }
+                }
+            }
             // methodology #27: production caller for project_context::scan
             // (v0.7.0 Task 1.C.1).
             TopCmd::ProjectContext => {
@@ -2426,12 +2498,20 @@ impl ProtocolEmitter for GatingProtocolWriter {
                 if let Ok(mut seen) = self.synthesized.lock() {
                     seen.insert(call_id.clone());
                 }
+                // Crucible Stage 4: the typed proposal card rides the
+                // ToolRequest's `tool.args` (the explicit ApprovalRequired{plan}
+                // is suppressed by the dedupe above), so carry it into the
+                // host-visible synthesized frame. None for every other tool.
+                let plan = tool.args.get("plan").and_then(|v| {
+                    serde_json::from_value::<wcore_types::crucible::CruciblePlan>(v.clone()).ok()
+                });
                 self.inner.emit(&ProtocolEvent::ApprovalRequired {
                     call_id: call_id.clone(),
                     resume_token: call_id.clone(),
                     correlation_id: call_id.clone(),
                     reason: reason.to_string(),
                     context: tool.description.clone(),
+                    plan,
                 })?;
             }
         }

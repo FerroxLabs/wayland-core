@@ -28,6 +28,12 @@ fn tool_dispatch_timeout(category: ToolCategory) -> Duration {
     }
 }
 
+// Crucible (Mixture-of-Providers) council: cross-provider proposers + a
+// provenance-aware aggregator. Hosts `CouncilProviderResolver`, which keys a
+// provider id to an `Arc<dyn LlmProvider>` (resolution lives here, not in the
+// leaf `wcore-types`, because it needs `wcore-providers` + `wcore-config`).
+pub mod council;
+
 // W8b.2.B C.1: directed-graph executor (additive — not wired into the
 // per-turn loop yet; that lands in C.5).
 pub mod graph;
