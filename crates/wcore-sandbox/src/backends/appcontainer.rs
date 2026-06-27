@@ -1723,6 +1723,20 @@ mod windows_impl {
     ) -> Result<Vec<std::path::PathBuf>> {
         let mut granted: Vec<std::path::PathBuf> = Vec::new();
         for path in paths {
+            // A grant target that doesn't exist can't be ACL'd: GetNamedSecurityInfoW
+            // returns ERROR_FILE_NOT_FOUND (0x2), which would abort the entire spawn.
+            // The local allowlist intentionally includes optional dev caches
+            // (~/.cache, ~/.cargo, ~/.npm, ~/.rustup) that are simply absent on
+            // non-developer machines, so skip any path that isn't present rather than
+            // failing every sandboxed command. (#321-324)
+            if !path.exists() {
+                tracing::debug!(
+                    target: "wcore_sandbox",
+                    path = %path.display(),
+                    "skipping AppContainer DACL grant for non-existent path"
+                );
+                continue;
+            }
             if !acl_path_is_safe(path) {
                 unsafe { revoke_appcontainer_dacl(&granted, sid) };
                 return Err(SandboxError::ExecFailed(format!(
@@ -1756,6 +1770,16 @@ mod windows_impl {
     ) -> Result<Vec<std::path::PathBuf>> {
         let mut denied: Vec<std::path::PathBuf> = Vec::new();
         for path in paths {
+            // A deny target that doesn't exist needs no ACE (nothing there to read),
+            // and GetNamedSecurityInfoW would otherwise fail (0x2) and abort the spawn.
+            if !path.exists() {
+                tracing::debug!(
+                    target: "wcore_sandbox",
+                    path = %path.display(),
+                    "skipping AppContainer DACL deny for non-existent path"
+                );
+                continue;
+            }
             if !acl_path_is_safe(path) {
                 unsafe { revoke_appcontainer_dacl(&denied, sid) };
                 return Err(SandboxError::ExecFailed(format!(
