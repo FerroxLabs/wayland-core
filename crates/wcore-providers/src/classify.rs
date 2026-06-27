@@ -70,18 +70,21 @@ fn classify_by_body(body: &str) -> Option<FailoverReason> {
         return Some(FailoverReason::SessionExpired);
     }
     // Billing must key on GENUINE credit/quota/payment signals, never on the
-    // bare word "billing". Anthropic appends a "Please go to Plans & Billing
-    // to upgrade or purchase credits." remediation link to a wide range of
-    // error bodies — including non-billing ones — so a bare `contains("billing")`
-    // mis-classifies an unrelated failure as out-of-credit and surfaces a false
-    // "balance is too low" to a user whose balance is fine (issue #329). Match
-    // the real signals instead: insufficient quota, an explicit credit-balance
-    // exhaustion, a request to purchase credits, payment-required, or the
-    // "billing plan" entitlement phrasing.
+    // bare word "billing" — and never on "purchase credits". Anthropic appends a
+    // "Please go to Plans & Billing to upgrade or purchase credits." remediation
+    // tail to a wide range of error bodies — including non-billing ones — so any
+    // match on a substring of that tail (`contains("billing")`, but ALSO
+    // `contains("purchase credits")`) mis-classifies an unrelated failure as
+    // out-of-credit and surfaces a false "balance is too low" to a user whose
+    // balance is fine, pinning the key into a permanent cooldown (issue #329).
+    // Match only the unambiguous signals: insufficient quota, an explicit
+    // credit-balance exhaustion, payment-required, or the "billing plan"
+    // entitlement phrasing. A genuine Anthropic credit error always carries
+    // "credit balance is too low", so dropping "purchase credits" loses no
+    // real-credit coverage.
     if b.contains("insufficient_quota")
         || b.contains("insufficient quota")
         || b.contains("credit balance is too low")
-        || b.contains("purchase credits")
         || b.contains("billing plan")
         || b.contains("payment required")
     {
@@ -392,20 +395,24 @@ mod tests {
     }
 
     /// Issue #329 regression: an Anthropic error that is NOT about credits but
-    /// whose remediation text mentions "Plans & Billing" must NOT be classified
-    /// as Billing (which would surface a false "balance is too low" and pin the
-    /// key into a permanent cooldown). Before the fix the bare `contains("billing")`
-    /// match swallowed this; now it falls through to its real reason.
+    /// carries the standard remediation tail ("Please go to Plans & Billing to
+    /// upgrade or purchase credits.") must NOT be classified as Billing (which
+    /// would surface a false "balance is too low" and pin the key into a
+    /// permanent cooldown). The tail contains the substring "purchase credits",
+    /// so keying Billing on "purchase credits" would re-introduce the exact #329
+    /// bug; this test pins that "purchase credits" is NOT a Billing signal. The
+    /// body deliberately omits "credit balance is too low" — the only genuine
+    /// credit signal — so a correct classifier falls through to its real reason.
     #[test]
     fn body_non_billing_error_with_billing_link_is_not_billing() {
         let body = "{\"type\":\"error\",\"error\":{\"type\":\"invalid_request_error\",\
             \"message\":\"This model requires a specific feature. \
-            Visit Plans & Billing for details.\"}}";
+            Please go to Plans & Billing to upgrade or purchase credits.\"}}";
         assert_ne!(
             classify_failover(&dummy_err(), None, Some(body), None),
             FailoverReason::Billing,
-            "a non-credit error that merely links to Plans & Billing must not \
-             be classified as out-of-credit"
+            "a non-credit error that merely carries the standard 'purchase \
+             credits' remediation tail must not be classified as out-of-credit"
         );
     }
 
