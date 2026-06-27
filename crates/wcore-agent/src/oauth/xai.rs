@@ -454,6 +454,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial]
     async fn get_returns_a_fresh_stored_token_without_refreshing() {
         // Isolate from any real ~/.grok/auth.json so the test is deterministic.
         unsafe { std::env::set_var("GROK_HOME", "/nonexistent-grok-home-for-test") };
@@ -468,6 +469,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial]
     fn reads_real_grok_auth_json_shape() {
         // The host-prefixed wrapper with a `key` is extracted; a JWT `key`
         // yields an expiry from its `exp` claim.

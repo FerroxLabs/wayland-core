@@ -598,10 +598,11 @@ mod config_toggle_tests {
     //! The config-installed values are a fallback consulted only when the
     //! corresponding env var is unset; the env var keeps precedence. Both
     //! the env vars and the config override are process-global, so these
-    //! tests serialize on a private lock and restore all state on drop.
+    //! tests serialize on the shared SANDBOX_TEST_LOCK (the same lock
+    //! fail_closed_tests uses) and restore all state on drop.
     use super::*;
 
-    static ENV_LOCK: Mutex<()> = Mutex::new(());
+    use super::SANDBOX_TEST_LOCK as ENV_LOCK;
 
     /// Snapshot + restore both sandbox env vars AND the config override so a
     /// test never leaks state into a sibling (config override is process-global).
