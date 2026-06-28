@@ -56,8 +56,26 @@ fn null_output() -> Arc<dyn wcore_agent::output::OutputSink> {
     Arc::new(NullSink)
 }
 
+/// Pin `WAYLAND_PLUGINS_DIR` to a fresh empty directory so on-disk plugin
+/// discovery cannot pick up plugins installed on the host or CI runner (e.g. an
+/// `ijfw` plugin that registers an `ijfw-memory` MCP server). Without this, the
+/// no-MCP assertions below fail on any machine that has a plugin installed.
+/// Returns BOTH the guard and the `TempDir`; the caller must bind both for the
+/// duration of the test (the guard restores the env on drop; the dir must
+/// outlive `build()`). Requires `#[serial]` since it mutates process-global env.
+fn isolated_plugins() -> (tempfile::TempDir, EnvGuard) {
+    let dir = tempfile::TempDir::new().expect("plugins dir");
+    let guard = EnvGuard::set(&[(
+        "WAYLAND_PLUGINS_DIR",
+        dir.path().to_str().expect("utf8 plugins dir"),
+    )]);
+    (dir, guard)
+}
+
 #[tokio::test]
+#[serial]
 async fn bootstrap_builds_engine_with_model_in_prompt() {
+    let (_plugins, _env) = isolated_plugins();
     let config = minimal_config();
     let workdir = tempfile::TempDir::new().expect("workdir");
     let result = AgentBootstrap::new(config, workdir.path().to_str().unwrap(), null_output())
@@ -242,7 +260,9 @@ async fn bootstrap_no_plan_tools_when_disabled() {
 }
 
 #[tokio::test]
+#[serial]
 async fn bootstrap_no_mcp_when_no_servers() {
+    let (_plugins, _env) = isolated_plugins();
     let config = minimal_config();
     let workdir = tempfile::TempDir::new().expect("workdir");
     let result = AgentBootstrap::new(config, workdir.path().to_str().unwrap(), null_output())
