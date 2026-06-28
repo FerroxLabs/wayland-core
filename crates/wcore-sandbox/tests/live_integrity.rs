@@ -120,3 +120,57 @@ async fn live_cmd_builtin_runs_under_hardened_sandbox() {
         String::from_utf8_lossy(&out.stdout)
     );
 }
+
+/// Field regression (#321-324 follow-up, PR #99). The local fs allowlist
+/// routinely includes optional dev caches (`~/.cache`, `~/.cargo`, `~/.npm`,
+/// `~/.rustup`) that are ABSENT on non-developer machines. Before the
+/// grant/deny skip-missing fix, `GetNamedSecurityInfoW` returned
+/// `ERROR_FILE_NOT_FOUND` (0x2) on the absent path and aborted the whole spawn,
+/// so EVERY sandboxed shell command hard-failed in the field. This proves a real
+/// sandboxed `cmd` still runs end-to-end when the allowlist contains a
+/// non-existent path alongside a real one.
+#[tokio::test(flavor = "current_thread")]
+async fn live_cmd_runs_when_allowlist_has_missing_path() {
+    if std::env::var("WAYLAND_SANDBOX_LIVE_WINDOWS").is_err() {
+        return;
+    }
+
+    let real = std::env::temp_dir();
+    let missing = std::path::PathBuf::from(r"C:\__wcore_absent_cache__\.npm");
+    assert!(
+        !missing.exists(),
+        "precondition: the allowlist path must be absent"
+    );
+
+    let b = AppContainerBackend::new();
+    let m = SandboxManifest {
+        fs_read_allow: vec![real, missing],
+        timeout: Some(Duration::from_secs(10)),
+        ..Default::default()
+    };
+    let out = b
+        .execute(
+            &m,
+            SandboxCommand {
+                argv: vec![
+                    "cmd.exe".into(),
+                    "/c".into(),
+                    "echo allowlist-skip-ok".into(),
+                ],
+                cwd: None,
+            },
+        )
+        .await
+        .expect("AppContainer spawn must succeed despite a non-existent allowlist path");
+    assert_eq!(
+        out.exit_code,
+        0,
+        "cmd must run when the allowlist has a missing path; stderr={:?}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&out.stdout).contains("allowlist-skip-ok"),
+        "expected 'allowlist-skip-ok' in stdout: {:?}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+}
