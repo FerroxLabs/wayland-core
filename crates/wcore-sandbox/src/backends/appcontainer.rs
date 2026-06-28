@@ -114,7 +114,7 @@ mod windows_impl {
         JOB_OBJECT_UILIMIT_READCLIPBOARD, JOB_OBJECT_UILIMIT_SYSTEMPARAMETERS,
         JOB_OBJECT_UILIMIT_WRITECLIPBOARD, JOBOBJECT_BASIC_UI_RESTRICTIONS,
         JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JobObjectBasicUIRestrictions,
-        JobObjectExtendedLimitInformation, SetInformationJobObject,
+        JobObjectExtendedLimitInformation, SetInformationJobObject, TerminateJobObject,
     };
     use windows_sys::Win32::System::Pipes::CreatePipe;
     use windows_sys::Win32::System::SystemInformation::GetSystemDirectoryW;
@@ -1369,6 +1369,12 @@ mod windows_impl {
 
             // ---- 9. CreateProcessAsUserW (suspended) ----
             let mut pi: PROCESS_INFORMATION = mem::zeroed();
+            // NOTE: do NOT add CREATE_NO_WINDOW here. Under the AppContainer
+            // Low-IL restricted token, forcing `cmd.exe` window-less makes its
+            // console-host init fail with 0xC0000142 (STATUS_DLL_INIT_FAILED) —
+            // breaking every command. cmd needs its console host; the #100 hang
+            // is instead handled at drain time by reaping the whole job tree, so
+            // a lingering conhost can't keep the inherited pipe write-end open.
             let creation_flags =
                 EXTENDED_STARTUPINFO_PRESENT | CREATE_SUSPENDED | 0x0400 /* CREATE_UNICODE_ENVIRONMENT */;
             let cp_ok = CreateProcessAsUserW(
@@ -1451,8 +1457,6 @@ mod windows_impl {
             let wait_res = WaitForSingleObject(process.as_raw(), timeout_ms);
             let mut timed_out = false;
             if wait_res == WAIT_TIMEOUT {
-                TerminateProcess(process.as_raw(), 1);
-                WaitForSingleObject(process.as_raw(), 1_000);
                 timed_out = true;
             } else if wait_res != WAIT_OBJECT_0 {
                 return Err(SandboxError::ExecFailed(format!(
@@ -1463,13 +1467,30 @@ mod windows_impl {
             }
 
             // ---- 12. Exit code + drain ----
+            // Capture the child's exit code BEFORE reaping the tree (only
+            // meaningful on a clean exit; on timeout it is replaced by the
+            // `Timeout` error below).
             let mut exit_code: u32 = 0;
-            if GetExitCodeProcess(process.as_raw(), &mut exit_code) == 0 {
+            if !timed_out && GetExitCodeProcess(process.as_raw(), &mut exit_code) == 0 {
                 return Err(SandboxError::ExecFailed(format!(
                     "GetExitCodeProcess: {:#x}",
                     GetLastError()
                 )));
             }
+
+            // Reap the ENTIRE job tree before draining (#100). The direct child
+            // can spawn helpers — most notably a console host (`conhost.exe`) —
+            // that outlive it and keep the inherited stdout/stderr write-ends
+            // open. A plain `TerminateProcess(child)` leaves them running, so the
+            // blocking `drain_pipe` below would never reach EOF and the call
+            // would hang far past the timeout (observed as a 120s "command timed
+            // out" with no output on disconnected RDP sessions). Terminating the
+            // job closes every member's handles so the pipes EOF; bytes already
+            // written to the pipe buffers stay readable. The short wait lets the
+            // kernel finish closing the handles before we read.
+            TerminateJobObject(job.as_raw(), if timed_out { 1 } else { exit_code });
+            WaitForSingleObject(process.as_raw(), 2_000);
+
             let stdout = drain_pipe(stdout_r.as_raw());
             let mut stderr = drain_pipe(stderr_r.as_raw());
 

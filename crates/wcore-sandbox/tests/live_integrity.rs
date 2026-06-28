@@ -174,3 +174,45 @@ async fn live_cmd_runs_when_allowlist_has_missing_path() {
         String::from_utf8_lossy(&out.stdout)
     );
 }
+
+/// #100 regression: a runaway command must be bounded by the manifest timeout.
+/// On timeout the backend terminates the whole job tree and reaps it before
+/// draining, so the blocking `drain_pipe` can reach EOF even when the child (or
+/// a helper it spawned, e.g. a console host) is still alive — otherwise the call
+/// hangs far past the timeout (the 120s "command timed out, no output" symptom).
+#[tokio::test(flavor = "current_thread")]
+async fn live_runaway_command_is_bounded_by_timeout() {
+    if std::env::var("WAYLAND_SANDBOX_LIVE_WINDOWS").is_err() {
+        return;
+    }
+
+    let b = AppContainerBackend::new();
+    let m = SandboxManifest {
+        timeout: Some(Duration::from_secs(3)),
+        ..Default::default()
+    };
+    let start = std::time::Instant::now();
+    // `for /l %i in (0,0,1)` never reaches its end value -> infinite cmd loop.
+    let r = b
+        .execute(
+            &m,
+            SandboxCommand {
+                argv: vec![
+                    "cmd.exe".into(),
+                    "/c".into(),
+                    "for /l %i in (0,0,1) do @rem".into(),
+                ],
+                cwd: None,
+            },
+        )
+        .await;
+    let secs = start.elapsed().as_secs();
+    assert!(
+        secs <= 8,
+        "runaway command must be bounded by the 3s timeout; took {secs}s (drain hung past timeout)"
+    );
+    assert!(
+        matches!(r, Err(wcore_sandbox::SandboxError::Timeout)),
+        "expected SandboxError::Timeout, got {r:?}"
+    );
+}
