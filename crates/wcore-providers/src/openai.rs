@@ -131,9 +131,23 @@ impl OpenAIProvider {
             .keys
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        pool.next_key()
-            .map(str::to_string)
-            .ok_or(ProviderError::MissingApiKey)
+        if let Some(key) = pool.next_key() {
+            return Ok(key.to_string());
+        }
+        // No key configured. A self-hosted / local inference endpoint (Ollama,
+        // llama.cpp, LM Studio) needs none, so send a benign placeholder and let
+        // the turn succeed instead of failing with `MissingApiKey` (surfaced as
+        // "OpenAI API key is required") for a model the user is running locally.
+        // A public host still errors, preserving the clear missing-key signal for
+        // real cloud providers.
+        if is_self_hosted_base_url(&self.base_url) {
+            tracing::debug!(
+                base_url = %self.base_url,
+                "no API key for a self-hosted endpoint; using keyless placeholder bearer"
+            );
+            return Ok(SELF_HOSTED_PLACEHOLDER_KEY.to_string());
+        }
+        Err(ProviderError::MissingApiKey)
     }
 
     /// Promote `key` to last-good after a successful (2xx) response.
@@ -705,6 +719,67 @@ impl OpenAIProvider {
 
         body
     }
+}
+
+/// A benign bearer for a self-hosted endpoint configured without an API key.
+/// Local inference servers (Ollama, llama.cpp, LM Studio, vLLM) ignore the
+/// `Authorization` header, so any non-empty value works. Sending this lets a
+/// keyless local connection succeed instead of failing the turn with
+/// `MissingApiKey` (surfaced in the UI as "OpenAI API key is required").
+const SELF_HOSTED_PLACEHOLDER_KEY: &str = "wayland-local";
+
+/// True when `base_url`'s host is a self-hosted address that is plausibly
+/// keyless: loopback (`localhost`, `127.0.0.0/8`, `::1`), unspecified
+/// (`0.0.0.0`/`::`), Docker (`host.docker.internal`), mDNS (`*.local`), an
+/// RFC1918 private LAN range (`10/8`, `172.16/12`, `192.168/16`), or the
+/// Tailscale / CGNAT range (`100.64.0.0/10`). Public hosts return `false`, so a
+/// real cloud provider with a missing key still surfaces a clear `MissingApiKey`
+/// rather than silently sending a bogus bearer and getting a 401.
+fn is_self_hosted_base_url(base_url: &str) -> bool {
+    // Host = strip scheme, take up to the first '/', drop any `user@`, strip the
+    // `:port`. IPv6 literals are bracketed (`[::1]:11434`).
+    let after_scheme = base_url
+        .split_once("://")
+        .map(|(_, r)| r)
+        .unwrap_or(base_url);
+    let authority = after_scheme.split('/').next().unwrap_or("");
+    let host_port = authority.rsplit('@').next().unwrap_or(authority);
+    let host = if let Some(rest) = host_port.strip_prefix('[') {
+        rest.split(']').next().unwrap_or(rest)
+    } else {
+        host_port.split(':').next().unwrap_or(host_port)
+    }
+    .trim()
+    .to_ascii_lowercase();
+
+    if host.is_empty() {
+        return false;
+    }
+    if host == "localhost"
+        || host.ends_with(".localhost")
+        || host == "host.docker.internal"
+        || host.ends_with(".local")
+        || host == "0.0.0.0"
+        || host == "::1"
+        || host == "::"
+    {
+        return true;
+    }
+    // IPv4 loopback / private / CGNAT ranges. Every dotted segment must parse as
+    // a u8, so a hostname like `api.openai.com` (a non-numeric segment) yields an
+    // empty vec and falls through to `false`.
+    let octets: Vec<u8> = host
+        .split('.')
+        .map(|o| o.parse::<u8>())
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap_or_default();
+    if octets.len() == 4 {
+        return matches!(
+            (octets[0], octets[1]),
+            (127, _) | (10, _) | (192, 168) | (172, 16..=31) | (100, 64..=127)
+        );
+    }
+    false
 }
 
 /// True when a provider HTTP error means "this model does not support tool
@@ -4392,6 +4467,79 @@ mod tests {
         );
     }
 
+    // --- keyless self-hosted endpoints (#398: "OpenAI API key is required"
+    //     on a local Ollama model) -------------------------------------------
+
+    #[test]
+    fn self_hosted_base_urls_are_detected() {
+        for url in [
+            "http://localhost:11434/v1",
+            "http://localhost",
+            "http://127.0.0.1:11434/v1",
+            "http://0.0.0.0:8080",
+            "http://[::1]:11434/v1",
+            "http://host.docker.internal:11434/v1",
+            "http://ollama.lan.local:11434",
+            "http://10.0.0.5:11434/v1",
+            "http://192.168.1.50:11434",
+            "http://172.16.4.4:11434",
+            "http://172.31.255.1:11434",
+            "http://100.109.207.54:11434/v1", // Tailscale CGNAT
+        ] {
+            assert!(is_self_hosted_base_url(url), "expected self-hosted: {url}");
+        }
+    }
+
+    #[test]
+    fn public_base_urls_are_not_self_hosted() {
+        for url in [
+            "https://api.openai.com/v1",
+            "https://generativelanguage.googleapis.com",
+            "https://api.x.ai/v1",
+            "http://8.8.8.8/v1",
+            "http://172.32.0.1:11434",  // just outside 172.16/12
+            "http://100.200.0.1:11434", // just outside 100.64/10
+            "",
+        ] {
+            assert!(!is_self_hosted_base_url(url), "expected public: {url}");
+        }
+    }
+
+    /// A keyless local endpoint (e.g. Ollama over its OpenAI-compatible surface)
+    /// must NOT fail with `MissingApiKey`; it gets the benign placeholder bearer
+    /// so the turn reaches the local server, which ignores the header.
+    #[test]
+    fn keyless_self_hosted_endpoint_uses_placeholder_bearer() {
+        let provider = OpenAIProvider::new(
+            "",
+            "http://localhost:11434/v1",
+            openai_compat(),
+            DebugConfig::default(),
+        );
+        assert_eq!(
+            provider
+                .select_key()
+                .expect("self-hosted keyless selects placeholder"),
+            SELF_HOSTED_PLACEHOLDER_KEY,
+        );
+    }
+
+    /// A keyless PUBLIC endpoint still surfaces the clear missing-key error, so
+    /// real cloud providers don't silently send a bogus bearer.
+    #[test]
+    fn keyless_public_endpoint_still_errors_missing_key() {
+        let provider = OpenAIProvider::new(
+            "",
+            "https://api.openai.com/v1",
+            openai_compat(),
+            DebugConfig::default(),
+        );
+        assert!(matches!(
+            provider.select_key(),
+            Err(ProviderError::MissingApiKey)
+        ));
+    }
+
     /// Multi-key rotation: after the current key is demoted via
     /// `mark_key_failure`, `select_key` rotates to a different key; once the
     /// new key succeeds it becomes sticky.
@@ -4432,9 +4580,12 @@ mod tests {
         provider.mark_key_success("solo-key");
         assert_eq!(provider.select_key().unwrap(), "solo-key");
 
+        // No key on a PUBLIC endpoint still surfaces MissingApiKey. (A
+        // self-hosted endpoint is deliberately keyless — see
+        // `keyless_self_hosted_endpoint_uses_placeholder_bearer`.)
         let empty = OpenAIProvider::new(
             "",
-            "http://localhost",
+            "https://api.openai.com/v1",
             openai_compat(),
             DebugConfig::default(),
         );
