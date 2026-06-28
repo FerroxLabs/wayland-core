@@ -103,22 +103,133 @@ Authorization = "Bearer ${cred:mcp:agent-vault:token}"
 
 ## Deferred Loading
 
-MCP tools can be registered as "deferred" — their full schema is not loaded into the system prompt at startup, reducing initial token usage. The LLM discovers deferred tools via the `ToolSearch` tool when needed.
+MCP tools are registered as "deferred" **by default** — their full schema is not loaded into the system prompt at startup, reducing initial token usage. The LLM discovers deferred tools via the `ToolSearch` tool when needed. Set `deferred = false` on a server to send its full tool schemas eagerly instead.
 
 ```toml
-[mcp.servers.large-toolset]
+[mcp.servers.small-toolset]
 transport = "stdio"
 command = "npx"
 args = ["-y", "my-mcp-server"]
-deferred = true    # Don't load tool schemas at startup
+deferred = false    # Send full tool schemas at startup (opt out of deferral)
 ```
 
 | `deferred` | Behavior |
 |------------|----------|
-| `false` (default for config servers) | Tool schemas included in system prompt at startup |
-| `true` | Tools registered but schemas loaded on-demand via ToolSearch |
+| `true` (default when omitted) | Tools registered but schemas loaded on-demand via ToolSearch |
+| `false` | Tool schemas included in system prompt at startup |
 
-Use `deferred = true` for MCP servers with many tools to keep the initial system prompt small.
+Leave `deferred` at its default (`true`) for MCP servers with many tools to keep the initial system prompt small; set `deferred = false` only for a small, always-needed toolset.
+
+## Smart Tool Curation
+
+A single large MCP server (e.g. Google Workspace) can advertise dozens or
+hundreds of tools. Sending all of them on every turn wastes context tokens and,
+on some providers, overflows the provider's tool-array limit (an OpenAI request
+with more than 128 tools fails with an API 400). Wayland Core handles this with
+two independent passes applied to the outbound tool list each turn, in this
+order:
+
+1. **Relevance curation** (`[mcp].curation`) — a token/relevance optimization
+   that trims the MCP tools to the most relevant `k` for the turn.
+2. **Provider hard cap** (`max_tools` compat field) — a correctness guarantee
+   that caps the *total* tool array at the provider's limit.
+
+Both passes only ever touch **MCP** tools. The built-in tools (Read, Write,
+Edit, Bash, Grep, Glob, Spawn, ToolSearch, plan tools, skills) are always kept.
+
+### How tools are classified (real provenance)
+
+An MCP tool is identified by its **real provenance** — `ToolDef.server` is
+`Some(server_name)` for any tool sourced from an MCP server, and `None` for a
+built-in/skill/spawn/plan tool. Classification is **not** done on the `mcp__`
+name prefix: a non-colliding MCP tool keeps its bare, un-prefixed original name
+(see [Tool Naming](#tool-naming)), so the prefix alone cannot distinguish it
+from a built-in. Using the prefix would misclassify a uniquely-named MCP tool as
+a built-in and never curate or cap it.
+
+### Relevance ranking (BM25 + recency)
+
+Within the MCP partition, tools are ranked by:
+
+```
+score = BM25(user_message, tool_document) + recent_usage[tool] * 0.5
+```
+
+- **BM25 relevance** — the query is the most recent user message in the turn.
+  Each tool's "document" is its `description` + the real server name + the
+  tool-name tail (the last `__`-segment, or the bare name). The tokenizer
+  lowercases, splits on non-alphanumerics, and drops tokens of length ≤ 3, so
+  `mcp__gcal__list_calendar_events` tokenizes to `["gcal", "list", "calendar",
+  "events"]`. BM25 parameters are `k1 = 1.5`, `b = 0.75`, with Robertson IDF
+  guarded by the BM25+ `+1.0` term (keeps IDF non-negative for a term present in
+  every tool). This mirrors the desktop app's `bm25.ts` for cross-surface
+  parity.
+- **Recency boost** — an additive `0.5` per recent use, read from the long-term
+  audit log. When no audit log is available the curator gracefully degrades to
+  BM25-only ranking.
+
+There is deliberately **no** name-keyed "rescue" bonus. Because only MCP tools
+are ranked here, a bare-name floor (e.g. matching the name `Read`) could only
+ever reward a hostile MCP server that names a tool like a built-in to monopolize
+the curation budget — a budget-hijack vector closed in 0.12.11. Built-ins are
+kept by the caller, outside the curator.
+
+### Configuring relevance curation — `[mcp].curation`
+
+```toml
+# Default: keep the 15 most relevant MCP tools per turn.
+[mcp.curation]
+kind = "top_k"
+k = 15
+
+# Or disable curation entirely (expose every connected MCP tool).
+[mcp.curation]
+kind = "off"
+```
+
+| `[mcp].curation` `kind` | Behavior |
+|-------------------------|----------|
+| `top_k` (default, `k = 15`) | Trim the per-turn MCP tool list to the `k` highest-ranked tools |
+| `off` | Expose every connected MCP tool (no relevance trim) |
+
+When the connected MCP tool count is already ≤ `k`, curation is a no-op.
+
+### Provider hard cap — `max_tools`
+
+After relevance curation, the engine enforces the provider's hard tool-array
+limit. This is a `ProviderCompat` field, set per-provider:
+
+| Provider | `max_tools` default |
+|----------|---------------------|
+| OpenAI / OpenAI-wire (Azure, ChatGPT, flux-router, routers, …) | `128` |
+| Anthropic (and providers that don't set it) | none (uncapped) |
+
+The cap keeps **all** non-MCP tools, then fills the remaining budget with the
+most BM25-relevant MCP tools and truncates the rest. If the built-ins alone
+meet or exceed the limit, the entire MCP block is dropped for that request. You
+can override the cap per provider in `wcore.toml`:
+
+```toml
+[providers.openai.compat]
+max_tools = 64
+```
+
+### Dropped tools stay reachable
+
+MCP tools trimmed by either pass are not lost — they remain **discoverable via
+the `ToolSearch` meta-tool**, whose registry is a full bootstrap snapshot. The
+model can search for and surface a curated-out tool when a turn actually needs
+it.
+
+### Cache stability
+
+Both passes emit the kept MCP set in an **append-only union order** keyed on the
+MCP tool inventory (the hard cap additionally keys on its budget). A tool, once
+admitted, holds its slot; newly-surfaced tools are appended at the end. This
+keeps the serialized tool-zone prefix byte-stable across same-context turns so
+the provider prompt cache is read, not rewritten, every turn. The union resets
+only when the inventory itself changes (server connect/disconnect or plugin
+reload).
 
 ## Local (loopback) MCP servers — `allow_local`
 
