@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.12.15](https://github.com/FerroxLabs/wayland-core/compare/v0.12.14...v0.12.15) (2026-06-28)
+
+
+### Bug Fixes
+
+* **providers:** keyless self-hosted endpoints (no more "OpenAI API key is required" on local Ollama) ([#102](https://github.com/FerroxLabs/wayland-core/issues/102)) ([28d5eac](https://github.com/FerroxLabs/wayland-core/commit/28d5eac64851b9e404bd371f59768ee41890d9e9))
+
 ## [0.12.14](https://github.com/FerroxLabs/wayland-core/compare/v0.12.13...v0.12.14) (2026-06-28)
 
 A focused Windows reliability release: it makes the sandboxed shell tool work end-to-end on Windows, fixing two AppContainer defects that left tool-use broken in the field.
