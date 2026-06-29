@@ -147,6 +147,46 @@ async fn low_cap_shrinks_thinking_to_reserve_the_answer() {
     assert!(max_tokens - budget >= MIN_VISIBLE_OUTPUT);
 }
 
+/// Boundary: the smallest cap that still keeps thinking on. With
+/// MIN_VISIBLE_OUTPUT=4096 and MIN_THINKING_BUDGET=1024, a 5120 cap fits exactly
+/// 1024 thinking + 4096 visible.
+#[tokio::test]
+async fn exact_minimum_cap_keeps_thinking_at_the_floor() {
+    let (mut engine, provider) = reasoning_engine(5_120, 10_000);
+    engine.run("hello", "").await.expect("run should succeed");
+
+    let max_tokens = provider
+        .max_tokens
+        .lock()
+        .unwrap()
+        .expect("a request was sent");
+    let budget = captured_budget(&provider).expect("thinking stayed enabled at the boundary");
+    assert_eq!(max_tokens, 5_120);
+    assert_eq!(budget, 1_024, "exactly the minimum thinking budget fits");
+    assert_eq!(
+        max_tokens - budget,
+        MIN_VISIBLE_OUTPUT,
+        "the visible floor is exactly preserved"
+    );
+}
+
+/// Boundary: one token below the minimum viable cap. The fitted budget would be
+/// 1023 (< MIN_THINKING_BUDGET), so thinking is dropped rather than sent invalid.
+#[tokio::test]
+async fn one_below_minimum_cap_drops_thinking() {
+    let (mut engine, provider) = reasoning_engine(5_119, 10_000);
+    engine.run("hello", "").await.expect("run should succeed");
+
+    assert_eq!(provider.max_tokens.lock().unwrap().unwrap(), 5_119);
+    assert!(
+        matches!(
+            provider.thinking.lock().unwrap().clone(),
+            Some(ThinkingConfig::Disabled)
+        ),
+        "5119 leaves only 1023 budget after the visible floor; thinking must drop"
+    );
+}
+
 /// When the cap is too small to hold any usable reasoning budget plus the floor,
 /// thinking is dropped entirely so the full budget goes to the visible answer.
 #[tokio::test]

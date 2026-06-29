@@ -212,17 +212,19 @@ fn fit_thinking_budget(max_tokens: u32, requested_budget: u32) -> u32 {
 /// called AFTER the smart-routing tier swap (`request.model = tier_model`) so
 /// the clamp sees the post-swap model's real ceiling, never the pre-swap one.
 ///
-/// `thinking_budget` is the requested reasoning budget for this turn (`None`
-/// when extended thinking is off). For an unknown / router-aliased reasoning
-/// model the conservative 8192 floor cannot hold the reasoning budget plus a
-/// visible answer, so a reasoning turn is allowed to grow to
-/// `UNKNOWN_REASONING_CAP` (#426). Known models already get their real ceiling.
+/// `is_reasoning_turn` is true when this turn uses extended thinking — either a
+/// numeric Anthropic/DeepSeek-style `thinking.budget_tokens` OR an OpenAI-style
+/// `reasoning_effort` (o-series / gpt-5), both of which spend output tokens on
+/// hidden reasoning. For an unknown / router-aliased reasoning model the
+/// conservative 8192 floor cannot hold the reasoning spend plus a visible
+/// answer, so a reasoning turn is allowed to grow to `UNKNOWN_REASONING_CAP`
+/// (#426). Known models already get their real ceiling.
 fn size_output_cap(
     config_max: u32,
     provider: &str,
     model: &str,
     est_input_tokens: usize,
-    thinking_budget: Option<u32>,
+    is_reasoning_turn: bool,
 ) -> u32 {
     /// Conservative cap for models with no known output ceiling. Safe for
     /// essentially every modern model (gpt-4o is 16384). Never raised on
@@ -245,7 +247,7 @@ fn size_output_cap(
         // such a model needs room for the reasoning budget AND a visible
         // answer, so allow it to grow to the reasoning-aware ceiling (#426).
         None => {
-            let cap = if thinking_budget.is_some() {
+            let cap = if is_reasoning_turn {
                 UNKNOWN_REASONING_CAP
             } else {
                 UNKNOWN_CAP
@@ -267,17 +269,17 @@ mod output_sizing_tests {
         // A generous config cap is clamped DOWN to the model's real ceiling,
         // so a large default never 400s a model that allows less.
         assert_eq!(
-            size_output_cap(64_000, "openai", "gpt-4o-mini", 1_000, None),
+            size_output_cap(64_000, "openai", "gpt-4o-mini", 1_000, false),
             16_384,
             "gpt-4o output ceiling binds"
         );
         assert_eq!(
-            size_output_cap(64_000, "anthropic", "claude-opus-4-7", 1_000, None),
+            size_output_cap(64_000, "anthropic", "claude-opus-4-7", 1_000, false),
             32_000,
             "opus 4.x output ceiling binds"
         );
         assert_eq!(
-            size_output_cap(64_000, "anthropic", "claude-sonnet-4-6", 1_000, None),
+            size_output_cap(64_000, "anthropic", "claude-sonnet-4-6", 1_000, false),
             64_000,
             "sonnet can use its full 64k"
         );
@@ -288,11 +290,11 @@ mod output_sizing_tests {
         // A router alias (served model unknown) must NOT receive the generous
         // 64k — it could route to a small model and 400. Clamp to the floor.
         assert_eq!(
-            size_output_cap(64_000, "flux-router", "flux-auto", 1_000, None),
+            size_output_cap(64_000, "flux-router", "flux-auto", 1_000, false),
             8_192
         );
         assert_eq!(
-            size_output_cap(64_000, "ollama", "some-local-model", 1_000, None),
+            size_output_cap(64_000, "ollama", "some-local-model", 1_000, false),
             8_192
         );
     }
@@ -301,11 +303,11 @@ mod output_sizing_tests {
     fn explicit_low_user_cap_is_always_respected() {
         // If the user sets a low max_tokens, it binds on known AND unknown.
         assert_eq!(
-            size_output_cap(4_000, "anthropic", "claude-opus-4-7", 1_000, None),
+            size_output_cap(4_000, "anthropic", "claude-opus-4-7", 1_000, false),
             4_000
         );
         assert_eq!(
-            size_output_cap(4_000, "flux-router", "flux-auto", 1_000, None),
+            size_output_cap(4_000, "flux-router", "flux-auto", 1_000, false),
             4_000
         );
     }
@@ -314,24 +316,34 @@ mod output_sizing_tests {
     fn near_context_limit_input_shrinks_the_output_cap() {
         // When the prompt nearly fills the window, the remaining room binds
         // below the model's output ceiling (prevents an input+output overflow).
-        let cap = size_output_cap(64_000, "anthropic", "claude-opus-4-7", 199_000, None);
+        let cap = size_output_cap(64_000, "anthropic", "claude-opus-4-7", 199_000, false);
         assert!(cap < 32_000, "window room must bind near the context limit");
         assert!(cap >= 1, "never zero or negative");
     }
 
     #[test]
     fn unknown_reasoning_model_gets_headroom_not_the_8192_floor() {
-        // #426 / wayland#422: flux-auto with extended thinking on must NOT be
-        // clamped to 8192 (the budget would eat the whole cap and the answer
-        // would be empty). It grows to the reasoning-aware ceiling instead.
+        // #426 / wayland#422: flux-auto on a reasoning turn must NOT be clamped
+        // to 8192 (the reasoning would eat the whole cap and the answer would be
+        // empty). It grows to the reasoning-aware ceiling instead. This holds
+        // for BOTH reasoning signals — a numeric thinking budget (Anthropic /
+        // DeepSeek) and an OpenAI reasoning_effort (o-series / gpt-5) — which is
+        // why the parameter is a single `is_reasoning_turn` flag.
         assert_eq!(
-            size_output_cap(64_000, "flux-router", "flux-auto", 1_000, Some(10_000)),
+            size_output_cap(64_000, "flux-router", "flux-auto", 1_000, true),
             UNKNOWN_REASONING_CAP,
             "a reasoning turn on a router alias gets reasoning headroom"
         );
+        // Specifically the reasoning_effort path: an unknown o-series model with
+        // NO numeric budget (only reasoning_effort) must still get the headroom.
+        assert_eq!(
+            size_output_cap(64_000, "openai", "o3-pro-unlisted", 1_000, true),
+            UNKNOWN_REASONING_CAP,
+            "reasoning_effort lifts an unknown o-series model off 8192"
+        );
         // Non-reasoning turn on the same alias still gets the conservative floor.
         assert_eq!(
-            size_output_cap(64_000, "flux-router", "flux-auto", 1_000, None),
+            size_output_cap(64_000, "flux-router", "flux-auto", 1_000, false),
             8_192
         );
     }
@@ -341,7 +353,7 @@ mod output_sizing_tests {
         // A known model's real ceiling/window always binds, even with thinking
         // on — the reasoning ceiling only rescues UNKNOWN models from 8192.
         assert_eq!(
-            size_output_cap(64_000, "anthropic", "claude-opus-4-7", 1_000, Some(20_000)),
+            size_output_cap(64_000, "anthropic", "claude-opus-4-7", 1_000, true),
             32_000,
             "opus 4.x ceiling still binds with thinking on"
         );
@@ -4425,12 +4437,18 @@ impl AgentEngine {
                 }
                 _ => None,
             };
+            // #426 — a turn is "reasoning" if it carries either a numeric
+            // thinking budget (Anthropic/DeepSeek) or an OpenAI reasoning_effort
+            // (o-series / gpt-5). Both spend output tokens on hidden reasoning,
+            // so both must lift an unknown model off the 8192 floor.
+            let is_reasoning_turn =
+                requested_thinking_budget.is_some() || request.reasoning_effort.is_some();
             request.max_tokens = size_output_cap(
                 self.max_tokens,
                 self.compat.provider_type(),
                 &request.model,
                 input_token_estimate,
-                requested_thinking_budget,
+                is_reasoning_turn,
             );
 
             // #426 / wayland#422 — separate the reasoning budget from the output
