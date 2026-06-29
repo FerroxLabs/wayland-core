@@ -170,6 +170,35 @@ fn select_tier_model(
     compat.tier_model(tier).map(str::to_string)
 }
 
+/// #426 — minimum slice of the output budget reserved for the user-visible
+/// answer whenever extended thinking is on. Anthropic's `max_tokens` (and the
+/// reasoning-model output budget generally) is the TOTAL of reasoning + visible
+/// output, so without a reserved floor a heavy reasoning turn can spend the
+/// whole budget thinking and return an empty, `finish_reason: length` reply
+/// (wayland#422). This floor is never sacrificed to thinking.
+const MIN_VISIBLE_OUTPUT: u32 = 4_096;
+
+/// #426 — Anthropic's minimum accepted `thinking.budget_tokens`. If the output
+/// budget is so small that the reasoning budget cannot be kept at or above this
+/// while still reserving `MIN_VISIBLE_OUTPUT`, thinking is dropped for the turn
+/// rather than sending an invalid request or starving the answer.
+const MIN_THINKING_BUDGET: u32 = 1_024;
+
+/// #426 — reasoning-aware ceiling for an unknown / router-aliased model. The
+/// plain `UNKNOWN_CAP` (8192) cannot hold a real reasoning budget AND a visible
+/// answer, so a reasoning turn on such a model is allowed to grow up to here
+/// (matches the desktop's reasoning default). Still a CAP, with the truncation
+/// auto-continue loop as the net for longer outputs.
+const UNKNOWN_REASONING_CAP: u32 = 32_768;
+
+/// #426 — shrink a requested reasoning budget so the visible answer can never be
+/// starved: the budget may use at most `max_tokens - MIN_VISIBLE_OUTPUT`. Returns
+/// the budget to actually send (0 when no room remains; the caller drops thinking
+/// below `MIN_THINKING_BUDGET`).
+fn fit_thinking_budget(max_tokens: u32, requested_budget: u32) -> u32 {
+    requested_budget.min(max_tokens.saturating_sub(MIN_VISIBLE_OUTPUT))
+}
+
 /// Up-front output sizing (Layer 1). Returns the `max_tokens` to request so a
 /// normal turn finishes in ONE round, sized to the model's real output ceiling
 /// where known and clamped to the room left in the context window. This makes a
@@ -182,7 +211,19 @@ fn select_tier_model(
 /// `model` must be the FINAL model that will actually be sent — i.e. this is
 /// called AFTER the smart-routing tier swap (`request.model = tier_model`) so
 /// the clamp sees the post-swap model's real ceiling, never the pre-swap one.
-fn size_output_cap(config_max: u32, provider: &str, model: &str, est_input_tokens: usize) -> u32 {
+///
+/// `thinking_budget` is the requested reasoning budget for this turn (`None`
+/// when extended thinking is off). For an unknown / router-aliased reasoning
+/// model the conservative 8192 floor cannot hold the reasoning budget plus a
+/// visible answer, so a reasoning turn is allowed to grow to
+/// `UNKNOWN_REASONING_CAP` (#426). Known models already get their real ceiling.
+fn size_output_cap(
+    config_max: u32,
+    provider: &str,
+    model: &str,
+    est_input_tokens: usize,
+    thinking_budget: Option<u32>,
+) -> u32 {
     /// Conservative cap for models with no known output ceiling. Safe for
     /// essentially every modern model (gpt-4o is 16384). Never raised on
     /// guesswork — that is what 400s.
@@ -199,30 +240,44 @@ fn size_output_cap(config_max: u32, provider: &str, model: &str, est_input_token
                 .max(1);
             config_max.min(out_ceiling).min(window_room)
         }
-        None => config_max.min(UNKNOWN_CAP),
+        // Unknown / router-aliased model. Normally clamp to a conservative
+        // floor so a small served model never 400s. But a reasoning turn on
+        // such a model needs room for the reasoning budget AND a visible
+        // answer, so allow it to grow to the reasoning-aware ceiling (#426).
+        None => {
+            let cap = if thinking_budget.is_some() {
+                UNKNOWN_REASONING_CAP
+            } else {
+                UNKNOWN_CAP
+            };
+            config_max.min(cap)
+        }
     }
 }
 
 #[cfg(test)]
 mod output_sizing_tests {
-    use super::size_output_cap;
+    use super::{
+        MIN_THINKING_BUDGET, MIN_VISIBLE_OUTPUT, UNKNOWN_REASONING_CAP, fit_thinking_budget,
+        size_output_cap,
+    };
 
     #[test]
     fn known_model_is_clamped_to_its_real_output_ceiling() {
         // A generous config cap is clamped DOWN to the model's real ceiling,
         // so a large default never 400s a model that allows less.
         assert_eq!(
-            size_output_cap(64_000, "openai", "gpt-4o-mini", 1_000),
+            size_output_cap(64_000, "openai", "gpt-4o-mini", 1_000, None),
             16_384,
             "gpt-4o output ceiling binds"
         );
         assert_eq!(
-            size_output_cap(64_000, "anthropic", "claude-opus-4-7", 1_000),
+            size_output_cap(64_000, "anthropic", "claude-opus-4-7", 1_000, None),
             32_000,
             "opus 4.x output ceiling binds"
         );
         assert_eq!(
-            size_output_cap(64_000, "anthropic", "claude-sonnet-4-6", 1_000),
+            size_output_cap(64_000, "anthropic", "claude-sonnet-4-6", 1_000, None),
             64_000,
             "sonnet can use its full 64k"
         );
@@ -233,11 +288,11 @@ mod output_sizing_tests {
         // A router alias (served model unknown) must NOT receive the generous
         // 64k — it could route to a small model and 400. Clamp to the floor.
         assert_eq!(
-            size_output_cap(64_000, "flux-router", "flux-auto", 1_000),
+            size_output_cap(64_000, "flux-router", "flux-auto", 1_000, None),
             8_192
         );
         assert_eq!(
-            size_output_cap(64_000, "ollama", "some-local-model", 1_000),
+            size_output_cap(64_000, "ollama", "some-local-model", 1_000, None),
             8_192
         );
     }
@@ -246,11 +301,11 @@ mod output_sizing_tests {
     fn explicit_low_user_cap_is_always_respected() {
         // If the user sets a low max_tokens, it binds on known AND unknown.
         assert_eq!(
-            size_output_cap(4_000, "anthropic", "claude-opus-4-7", 1_000),
+            size_output_cap(4_000, "anthropic", "claude-opus-4-7", 1_000, None),
             4_000
         );
         assert_eq!(
-            size_output_cap(4_000, "flux-router", "flux-auto", 1_000),
+            size_output_cap(4_000, "flux-router", "flux-auto", 1_000, None),
             4_000
         );
     }
@@ -259,9 +314,63 @@ mod output_sizing_tests {
     fn near_context_limit_input_shrinks_the_output_cap() {
         // When the prompt nearly fills the window, the remaining room binds
         // below the model's output ceiling (prevents an input+output overflow).
-        let cap = size_output_cap(64_000, "anthropic", "claude-opus-4-7", 199_000);
+        let cap = size_output_cap(64_000, "anthropic", "claude-opus-4-7", 199_000, None);
         assert!(cap < 32_000, "window room must bind near the context limit");
         assert!(cap >= 1, "never zero or negative");
+    }
+
+    #[test]
+    fn unknown_reasoning_model_gets_headroom_not_the_8192_floor() {
+        // #426 / wayland#422: flux-auto with extended thinking on must NOT be
+        // clamped to 8192 (the budget would eat the whole cap and the answer
+        // would be empty). It grows to the reasoning-aware ceiling instead.
+        assert_eq!(
+            size_output_cap(64_000, "flux-router", "flux-auto", 1_000, Some(10_000)),
+            UNKNOWN_REASONING_CAP,
+            "a reasoning turn on a router alias gets reasoning headroom"
+        );
+        // Non-reasoning turn on the same alias still gets the conservative floor.
+        assert_eq!(
+            size_output_cap(64_000, "flux-router", "flux-auto", 1_000, None),
+            8_192
+        );
+    }
+
+    #[test]
+    fn known_reasoning_model_still_bound_by_its_real_ceiling() {
+        // A known model's real ceiling/window always binds, even with thinking
+        // on — the reasoning ceiling only rescues UNKNOWN models from 8192.
+        assert_eq!(
+            size_output_cap(64_000, "anthropic", "claude-opus-4-7", 1_000, Some(20_000)),
+            32_000,
+            "opus 4.x ceiling still binds with thinking on"
+        );
+    }
+
+    #[test]
+    fn fit_thinking_budget_reserves_the_visible_floor() {
+        // Plenty of room: the full requested budget is kept.
+        assert_eq!(fit_thinking_budget(32_768, 10_000), 10_000);
+        // Tight cap: the budget is shrunk so MIN_VISIBLE_OUTPUT survives.
+        assert_eq!(
+            fit_thinking_budget(8_192, 10_000),
+            8_192 - MIN_VISIBLE_OUTPUT,
+            "budget shrinks to leave the visible floor"
+        );
+        // The boundary: visible floor exactly reserved.
+        assert_eq!(
+            fit_thinking_budget(MIN_VISIBLE_OUTPUT + 5_000, 10_000),
+            5_000
+        );
+    }
+
+    #[test]
+    fn fit_thinking_budget_collapses_when_no_room() {
+        // Cap below the visible floor → zero budget (caller drops thinking,
+        // since 0 < MIN_THINKING_BUDGET). The answer is never starved.
+        assert_eq!(fit_thinking_budget(MIN_VISIBLE_OUTPUT, 10_000), 0);
+        assert_eq!(fit_thinking_budget(2_000, 10_000), 0);
+        assert!(fit_thinking_budget(2_000, 10_000) < MIN_THINKING_BUDGET);
     }
 }
 
@@ -4310,12 +4419,53 @@ impl AgentEngine {
             // allows (so the generous default never 400s); an unknown/router
             // model is clamped to a conservative floor. `self.max_tokens` is the
             // user's CAP and always binds.
+            let requested_thinking_budget = match &request.thinking {
+                Some(wcore_types::llm::ThinkingConfig::Enabled { budget_tokens }) => {
+                    Some(*budget_tokens)
+                }
+                _ => None,
+            };
             request.max_tokens = size_output_cap(
                 self.max_tokens,
                 self.compat.provider_type(),
                 &request.model,
                 input_token_estimate,
+                requested_thinking_budget,
             );
+
+            // #426 / wayland#422 — separate the reasoning budget from the output
+            // budget so extended thinking can never starve the visible answer.
+            // For reasoning models `max_tokens` is the TOTAL of reasoning +
+            // visible output; without this a heavy thinking turn (especially on
+            // a router alias clamped low) spends the whole budget thinking and
+            // returns an empty, `finish_reason: length` reply. Shrink the budget
+            // to reserve `MIN_VISIBLE_OUTPUT`; if no usable budget remains, drop
+            // thinking for the turn rather than emit an empty answer.
+            if let Some(budget) = requested_thinking_budget {
+                let fitted = fit_thinking_budget(request.max_tokens, budget);
+                request.thinking = Some(if fitted >= MIN_THINKING_BUDGET {
+                    if fitted < budget {
+                        tracing::debug!(
+                            target: "wcore_agent::engine",
+                            requested = budget,
+                            fitted,
+                            max_tokens = request.max_tokens,
+                            "thinking budget shrunk to reserve visible-output room (#426)"
+                        );
+                    }
+                    wcore_types::llm::ThinkingConfig::Enabled {
+                        budget_tokens: fitted,
+                    }
+                } else {
+                    tracing::debug!(
+                        target: "wcore_agent::engine",
+                        requested = budget,
+                        max_tokens = request.max_tokens,
+                        "output budget too small for thinking + visible answer; thinking dropped for this turn (#426)"
+                    );
+                    wcore_types::llm::ThinkingConfig::Disabled
+                });
+            }
 
             // AUDIT A3 / E-C2 — bounded stream-level retry loop.
             //
