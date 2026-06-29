@@ -746,6 +746,13 @@ mod windows_impl {
             "appcontainer"
         }
 
+        /// PowerShell (`powershell.exe` / `pwsh.exe`) cannot load .NET / GAC
+        /// assemblies under the Low-integrity restricted token (STATUS_DLL_NOT_FOUND,
+        /// 0xC0000135). See FerroxLabs/wayland#413 / #324.
+        fn blocks_powershell(&self) -> bool {
+            true
+        }
+
         /// Real-spawn availability probe.
         ///
         /// On first call, runs a `cmd.exe /c exit 0` through the full

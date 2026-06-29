@@ -94,6 +94,40 @@ fn build_sandbox_pieces(
     (manifest, SandboxCommand { argv, cwd })
 }
 
+/// PowerShell cannot run under the AppContainer sandbox — it needs .NET / GAC
+/// assemblies that fail to load under the Low-integrity restricted token
+/// (`STATUS_DLL_NOT_FOUND`, 0xC0000135). When the active backend reports
+/// [`SandboxBackend::blocks_powershell`], a `powershell`/`pwsh` shell selection
+/// (via `WAYLAND_BASH_SHELL` / `[tools] windows_shell`) would make EVERY Bash
+/// command hard-fail. The shell is an implementation detail of "run this
+/// command", so downgrade the prefix to `cmd /C`, preserving the user's command,
+/// and warn once. See FerroxLabs/wayland#413.
+fn downgrade_powershell_for_sandbox(argv: &mut Vec<String>, blocks_powershell: bool) {
+    if !blocks_powershell {
+        return;
+    }
+    let is_powershell = argv.first().is_some_and(|s| {
+        let stem = s.strip_suffix(".exe").unwrap_or(s);
+        stem.eq_ignore_ascii_case("powershell") || stem.eq_ignore_ascii_case("pwsh")
+    });
+    if !is_powershell {
+        return;
+    }
+    // The powershell/pwsh prefix is `[shell, "-NoProfile", "-Command", <command>]`;
+    // the user's command is the last element. Replace the whole prefix with `cmd /C`.
+    let command = argv.last().cloned().unwrap_or_default();
+    static WARNED: std::sync::Once = std::sync::Once::new();
+    WARNED.call_once(|| {
+        tracing::warn!(
+            target: "wcore_tools",
+            "configured Bash shell is PowerShell, which cannot run under the active \
+             sandbox (AppContainer Low-integrity token); falling back to `cmd /C`. \
+             Set `[tools] windows_shell = cmd` (or WAYLAND_BASH_SHELL=cmd) to silence this."
+        );
+    });
+    *argv = vec!["cmd".to_string(), "/C".to_string(), command];
+}
+
 /// Whether the platform's default sandbox backend enforces secret-read-deny
 /// at the OS layer (`SandboxBackend::enforces_read_deny()`).
 ///
@@ -494,7 +528,8 @@ impl Tool for BashTool {
         let timeout = Duration::from_millis(timeout_ms);
 
         let backend = default_for_platform();
-        let (manifest, cmd) = build_sandbox_pieces(command, None);
+        let (manifest, mut cmd) = build_sandbox_pieces(command, None);
+        downgrade_powershell_for_sandbox(&mut cmd.argv, backend.blocks_powershell());
 
         let result = tokio::time::timeout(timeout, backend.execute(&manifest, cmd)).await;
 
@@ -554,7 +589,8 @@ impl Tool for BashTool {
         // `execute_streaming` takes `self: Arc<Self>` so the backend can
         // own a handle in its background task — wrap the boxed backend.
         let backend: Arc<dyn SandboxBackend> = Arc::from(default_for_platform());
-        let (manifest, cmd) = build_sandbox_pieces(command, None);
+        let (manifest, mut cmd) = build_sandbox_pieces(command, None);
+        downgrade_powershell_for_sandbox(&mut cmd.argv, backend.blocks_powershell());
 
         let mut rx = match backend.execute_streaming(&manifest, cmd) {
             Ok(rx) => rx,
@@ -675,7 +711,8 @@ impl Tool for BashTool {
                 is_error: true,
             };
         }
-        let (manifest, cmd) = build_sandbox_pieces(command, ctx.workspace.as_deref());
+        let (manifest, mut cmd) = build_sandbox_pieces(command, ctx.workspace.as_deref());
+        downgrade_powershell_for_sandbox(&mut cmd.argv, backend.blocks_powershell());
         let net = manifest.network.clone();
         tokio::select! {
             _ = ctx.cancel.cancelled() => ToolResult {
@@ -741,7 +778,8 @@ impl Tool for BashTool {
             };
         }
         let backend: Arc<dyn SandboxBackend> = Arc::from(backend_probe);
-        let (manifest, cmd) = build_sandbox_pieces(command, ctx.workspace.as_deref());
+        let (manifest, mut cmd) = build_sandbox_pieces(command, ctx.workspace.as_deref());
+        downgrade_powershell_for_sandbox(&mut cmd.argv, backend.blocks_powershell());
         let net = manifest.network.clone();
 
         let mut rx = match backend.execute_streaming(&manifest, cmd) {
@@ -1159,6 +1197,102 @@ mod tests {
         };
         let r = annotate_network_block("curl -sL https://x.y", NetworkPolicy::Deny, ok);
         assert!(!r.content.contains("NO NETWORK"), "no hint on success");
+    }
+
+    // ── #413: powershell → cmd downgrade under a powershell-blocking sandbox ──
+
+    #[test]
+    fn downgrade_powershell_swaps_to_cmd_when_blocked() {
+        // Mirrors the powershell prefix bash_shell_argv_prefix() produces, plus the command.
+        let mut argv = vec![
+            "powershell".to_string(),
+            "-NoProfile".to_string(),
+            "-Command".to_string(),
+            "echo hello".to_string(),
+        ];
+        downgrade_powershell_for_sandbox(&mut argv, true);
+        assert_eq!(argv, vec!["cmd", "/C", "echo hello"]);
+    }
+
+    #[test]
+    fn downgrade_powershell_handles_pwsh_and_exe_suffix() {
+        let mut argv = vec![
+            "pwsh.exe".to_string(),
+            "-NoProfile".to_string(),
+            "-Command".to_string(),
+            "ls -la".to_string(),
+        ];
+        downgrade_powershell_for_sandbox(&mut argv, true);
+        assert_eq!(argv, vec!["cmd", "/C", "ls -la"]);
+    }
+
+    #[test]
+    fn downgrade_powershell_noop_when_sandbox_allows_powershell() {
+        let mut argv = vec![
+            "powershell".to_string(),
+            "-NoProfile".to_string(),
+            "-Command".to_string(),
+            "echo hi".to_string(),
+        ];
+        let before = argv.clone();
+        downgrade_powershell_for_sandbox(&mut argv, false);
+        assert_eq!(
+            argv, before,
+            "must not rewrite when backend allows powershell"
+        );
+    }
+
+    #[test]
+    fn downgrade_powershell_noop_for_cmd_prefix() {
+        let mut argv = vec!["cmd".to_string(), "/C".to_string(), "echo hi".to_string()];
+        let before = argv.clone();
+        downgrade_powershell_for_sandbox(&mut argv, true);
+        assert_eq!(argv, before, "cmd prefix is already sandbox-compatible");
+    }
+
+    // #413 live proof: with the Bash shell configured to PowerShell (the
+    // customer's failing config), the real build path produces a powershell
+    // prefix that CANNOT run under AppContainer; the downgrade swaps it to cmd
+    // and the command actually runs with stdout captured. Gated behind
+    // WAYLAND_SANDBOX_LIVE_WINDOWS — runs only on a real Windows box.
+    #[cfg(windows)]
+    #[tokio::test(flavor = "current_thread")]
+    async fn live_413_powershell_shell_falls_back_to_cmd() {
+        use wcore_sandbox::backends::SandboxBackend;
+        use wcore_sandbox::backends::appcontainer::AppContainerBackend;
+
+        if std::env::var("WAYLAND_SANDBOX_LIVE_WINDOWS").is_err() {
+            return;
+        }
+        let backend = AppContainerBackend::new();
+        if !backend.is_available() {
+            eprintln!("skip: AppContainer not available on this host");
+            return;
+        }
+        assert!(backend.blocks_powershell());
+
+        // Simulate the customer's config (`[tools] windows_shell = powershell`).
+        unsafe { std::env::set_var("WAYLAND_BASH_SHELL", "powershell") };
+        let (manifest, mut cmd) = build_sandbox_pieces("echo hello413", None);
+        unsafe { std::env::remove_var("WAYLAND_BASH_SHELL") };
+
+        // Pre-fix: the prefix is powershell, which would hard-fail under the sandbox.
+        assert!(
+            cmd.argv
+                .first()
+                .is_some_and(|s| s.eq_ignore_ascii_case("powershell")),
+            "expected powershell prefix, got {:?}",
+            cmd.argv
+        );
+        downgrade_powershell_for_sandbox(&mut cmd.argv, backend.blocks_powershell());
+        assert_eq!(cmd.argv.first().map(|s| s.as_str()), Some("cmd"));
+
+        let out = backend.execute(&manifest, cmd).await.unwrap();
+        assert_eq!(out.exit_code, 0, "downgraded cmd should run");
+        assert!(
+            String::from_utf8_lossy(&out.stdout).contains("hello413"),
+            "stdout should be captured via cmd fallback"
+        );
     }
 
     // ── Task 4: build_sandbox_pieces derives manifest from WorkspacePolicy ──

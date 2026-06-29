@@ -111,4 +111,15 @@ pub trait SandboxBackend: Send + Sync + 'static {
     fn enforces_read_deny(&self) -> bool {
         false
     }
+
+    /// True if this backend cannot run PowerShell (`powershell.exe` / `pwsh.exe`).
+    /// The Windows AppContainer backend overrides this to `true`: PowerShell
+    /// requires .NET / GAC assemblies that fail to load under the Low-integrity
+    /// restricted token (`STATUS_DLL_NOT_FOUND`, 0xC0000135). Callers that pick
+    /// the shell as an implementation detail (e.g. `BashTool`) use this to
+    /// downgrade a powershell shell selection to `cmd` rather than failing every
+    /// command. Default `false`. See FerroxLabs/wayland#413.
+    fn blocks_powershell(&self) -> bool {
+        false
+    }
 }
