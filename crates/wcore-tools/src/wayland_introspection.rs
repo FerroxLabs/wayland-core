@@ -101,22 +101,14 @@ impl TelemetryQuery {
             .unwrap_or(TELEMETRY_DEFAULT_SINCE)
             .to_string();
 
-        // Filter precedence: explicit `filter` object wins. Otherwise
-        // fold convenience args (event_type / tool_name / success) into
-        // a synthetic filter map; empty fold → None.
+        // #403: only an explicit `filter` object carries a query. The old code
+        // folded `event_type`/`tool_name`/`success` into a synthetic filter, but
+        // the backend requires a `kind`-tagged typed query, so those folded
+        // filters were always rejected ("missing field kind"). A bare call (no
+        // filter) now correctly yields the session-stats snapshot.
         let filter = match input.get("filter") {
             Some(Value::Object(m)) => Some(m.clone()),
-            _ => {
-                let mut fold = Map::new();
-                for key in ["event_type", "tool_name", "success"] {
-                    if let Some(v) = input.get(key)
-                        && !v.is_null()
-                    {
-                        fold.insert(key.to_string(), v.clone());
-                    }
-                }
-                if fold.is_empty() { None } else { Some(fold) }
-            }
+            _ => None,
         };
 
         let raw_limit = input
@@ -279,24 +271,17 @@ fn status_schema() -> JsonSchema {
 }
 
 fn telemetry_schema() -> JsonSchema {
+    // #403: advertise the query the backend actually accepts. The backend
+    // parses a typed, `kind`-tagged enum from the `filter` slot; the previous
+    // schema advertised `event_type`/`tool_name`/`success` convenience args that
+    // the backend ignored, so any query built from them was rejected with
+    // "invalid telemetry query: missing field kind". Describe the real shape.
     json!({
         "type": "object",
         "properties": {
             "since": {
                 "type": "string",
                 "description": "ISO-8601 timestamp or relative window (1h, 24h, 7d). Default: '1h'."
-            },
-            "event_type": {
-                "type": "string",
-                "description": "Filter by event type (e.g. 'tool_call', 'model_call')."
-            },
-            "tool_name": {
-                "type": "string",
-                "description": "Filter by tool name."
-            },
-            "success": {
-                "type": "boolean",
-                "description": "Filter by success flag."
             },
             "limit": {
                 "type": "integer",
@@ -306,8 +291,32 @@ fn telemetry_schema() -> JsonSchema {
             },
             "filter": {
                 "type": "object",
-                "description": "Structured filter object. If supplied, takes precedence over the convenience top-level keys.",
-                "additionalProperties": true
+                "description": "Typed telemetry query. Omit for a session-stats snapshot. When present, `kind` selects the query and the other fields are per-kind.",
+                "properties": {
+                    "kind": {
+                        "type": "string",
+                        "enum": ["session_stats", "tool_usage_over_time", "top_n_tools", "errors_by_provider"],
+                        "description": "Query kind. `session_stats`: current session snapshot. `tool_usage_over_time`: call counts over a window. `top_n_tools`: most-used tools. `errors_by_provider`: error counts per provider."
+                    },
+                    "window_secs": {
+                        "type": "integer",
+                        "description": "For kind=tool_usage_over_time: window size in seconds."
+                    },
+                    "n": {
+                        "type": "integer",
+                        "description": "For kind=top_n_tools: how many tools to return."
+                    },
+                    "by": {
+                        "type": "string",
+                        "enum": ["calls", "tokens", "duration"],
+                        "description": "For kind=top_n_tools: ranking metric (tokens/duration fall back to calls until per-tool token accounting lands)."
+                    },
+                    "provider": {
+                        "type": "string",
+                        "description": "For kind=errors_by_provider: optional provider id to filter to."
+                    }
+                },
+                "required": ["kind"]
             }
         },
         "required": []
@@ -523,9 +532,11 @@ mod tests {
     }
 
     #[test]
-    fn telemetry_folds_convenience_args_into_filter() {
-        // No top-level `filter`, but event_type + tool_name + success
-        // present — Python folds these into a synthetic filter dict.
+    fn telemetry_convenience_args_are_ignored_no_kindless_filter() {
+        // #403: convenience args no longer fold into a synthetic (kind-less)
+        // filter — that produced "invalid telemetry query: missing field kind".
+        // since/limit still apply; with no explicit `filter` the query is None
+        // (the backend then returns a session-stats snapshot).
         let backend = Arc::new(CapturingIntrospectionBackend::new());
         let tool = WaylandTelemetryQueryTool::new(backend.clone());
         let res = run(
@@ -542,13 +553,10 @@ mod tests {
         let q = &backend.snapshot().telemetry[0];
         assert_eq!(q.since, "24h");
         assert_eq!(q.limit, 50);
-        let f = q.filter.as_ref().expect("convenience args ⇒ Some(filter)");
-        assert_eq!(
-            f.get("event_type").and_then(Value::as_str),
-            Some("tool_call")
+        assert!(
+            q.filter.is_none(),
+            "convenience args must not synthesize a kind-less filter"
         );
-        assert_eq!(f.get("tool_name").and_then(Value::as_str), Some("Read"));
-        assert_eq!(f.get("success").and_then(Value::as_bool), Some(true));
     }
 
     #[test]
@@ -595,19 +603,26 @@ mod tests {
 
         let t = telemetry_schema();
         assert_eq!(t["type"], "object");
-        for key in [
-            "since",
-            "event_type",
-            "tool_name",
-            "success",
-            "limit",
-            "filter",
-        ] {
+        for key in ["since", "limit", "filter"] {
             assert!(t["properties"][key].is_object(), "missing property: {key}");
         }
         assert_eq!(t["properties"]["limit"]["minimum"], 1);
         assert_eq!(t["properties"]["limit"]["maximum"], 1000);
         assert_eq!(t["required"].as_array().unwrap().len(), 0);
+        // #403: the filter must advertise the `kind` selector the backend requires.
+        let kind = &t["properties"]["filter"]["properties"]["kind"];
+        assert!(kind.is_object(), "filter must advertise a `kind` selector");
+        let kinds = kind["enum"].as_array().expect("kind enum");
+        assert!(kinds.iter().any(|k| k == "top_n_tools"));
+        assert!(kinds.iter().any(|k| k == "session_stats"));
+        assert_eq!(
+            t["properties"]["filter"]["required"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1,
+            "filter requires `kind`"
+        );
     }
 
     #[test]
@@ -642,22 +657,21 @@ mod tests {
     }
 
     #[test]
-    fn telemetry_null_value_in_convenience_arg_is_dropped() {
-        // The Python `if args[key] is not None` check excludes JSON nulls.
+    fn telemetry_explicit_typed_filter_passes_through() {
+        // #403: an explicit, kind-tagged filter is forwarded verbatim to the
+        // backend (which parses it into the typed enum).
         let backend = Arc::new(CapturingIntrospectionBackend::new());
         let tool = WaylandTelemetryQueryTool::new(backend.clone());
-        let _ = run(
+        let res = run(
             &tool,
-            json!({
-                "event_type": "tool_call",
-                "tool_name": null,
-                "success": null,
-            }),
+            json!({ "filter": {"kind": "top_n_tools", "n": 5, "by": "calls"} }),
         );
+        assert!(!res.is_error);
         let q = &backend.snapshot().telemetry[0];
-        let f = q.filter.as_ref().unwrap();
-        assert_eq!(f.len(), 1);
-        assert!(f.contains_key("event_type"));
+        let f = q.filter.as_ref().expect("explicit filter ⇒ Some");
+        assert_eq!(f.get("kind").and_then(Value::as_str), Some("top_n_tools"));
+        assert_eq!(f.get("n").and_then(Value::as_u64), Some(5));
+        assert_eq!(f.get("by").and_then(Value::as_str), Some("calls"));
     }
 
     // --- v0.9.0 W1 backend gate (per-tool, gated independently) ---

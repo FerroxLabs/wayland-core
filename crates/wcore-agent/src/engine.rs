@@ -3787,6 +3787,12 @@ impl AgentEngine {
             }
         }
         self.current_msg_id = msg_id.to_string();
+        // #403: clear tool circuit breakers at the start of each user turn.
+        // A transient burst of `web`/`WebFetch` failures in one turn opened the
+        // breaker and, with no per-turn reset, left every web tool short-circuited
+        // for the rest of the session — the chat appeared dead. Persistent
+        // failures simply re-open the breaker again within this turn.
+        self.tools.reset_all_breakers();
         // #279(c): mint a stable per-run correlation id on the first run()
         // of the session and reuse it for every subsequent turn/message.
         // Re-minted only when None (fresh engine / cleared session); persists

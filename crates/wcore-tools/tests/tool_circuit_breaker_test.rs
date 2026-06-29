@@ -240,3 +240,30 @@ async fn success_after_failures_resets_breaker() {
     b.record_failure();
     assert_eq!(b.state(), BreakerState::Closed);
 }
+
+/// #403: reset_all_breakers() clears an opened breaker so a new user turn
+/// starts clean instead of staying short-circuited for the whole session.
+#[tokio::test]
+async fn reset_all_breakers_clears_open_breaker() {
+    let mut reg = ToolRegistry::new();
+    reg.register(Box::new(ErrTool));
+
+    for _ in 0..3 {
+        reg.dispatch("err_tool", input()).await;
+    }
+    assert_eq!(reg.breaker_state("err_tool"), Some(BreakerState::Open));
+
+    // Simulate the start of a new user turn.
+    reg.reset_all_breakers();
+    assert_eq!(
+        reg.breaker_state("err_tool"),
+        Some(BreakerState::Closed),
+        "reset must close a previously-open breaker"
+    );
+
+    // The breaker must be functional again (not wedged): a fresh full
+    // threshold of failures is needed before it re-opens.
+    reg.dispatch("err_tool", input()).await;
+    reg.dispatch("err_tool", input()).await;
+    assert_eq!(reg.breaker_state("err_tool"), Some(BreakerState::Closed));
+}

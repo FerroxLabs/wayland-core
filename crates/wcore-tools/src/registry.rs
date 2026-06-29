@@ -183,6 +183,17 @@ impl ToolRegistry {
         }
     }
 
+    /// #403 — clear every tool circuit breaker back to Closed. Called at the
+    /// start of each new user turn so transient per-turn failures (a flaky
+    /// `web`/`WebFetch` burst that opened the breaker) don't leave tools wedged
+    /// across independent user messages, which made the session look dead.
+    /// Persistent failures simply re-open the breaker within the new turn.
+    pub fn reset_all_breakers(&self) {
+        for breaker in self.breakers.read().values() {
+            breaker.record_success();
+        }
+    }
+
     /// Get all registered tool names
     pub fn tool_names(&self) -> Vec<String> {
         self.tools.iter().map(|t| t.name().to_string()).collect()

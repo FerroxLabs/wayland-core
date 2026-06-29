@@ -293,7 +293,12 @@ impl Tool for WebFetchTool {
     }
 
     fn is_concurrency_safe(&self, _input: &Value) -> bool {
-        true
+        // #403: serialize WebFetch calls. Running several fetches in parallel —
+        // especially repeated fetches to the same slow host — multiplied the
+        // load that pinned the readability parser and made the timeout/fallback
+        // cascade worse. The engine runs non-concurrency-safe tools one at a
+        // time, which is a simple, host-agnostic guard against that hammering.
+        false
     }
 
     fn category(&self) -> ToolCategory {
@@ -517,8 +522,10 @@ mod tests {
     }
 
     #[test]
-    fn is_concurrency_safe_returns_true() {
+    fn is_not_concurrency_safe() {
+        // #403: WebFetch is serialized to avoid parallel same-host hammering
+        // that worsened the readability-timeout cascade.
         let tool = WebFetchTool::default();
-        assert!(tool.is_concurrency_safe(&json!({})));
+        assert!(!tool.is_concurrency_safe(&json!({})));
     }
 }

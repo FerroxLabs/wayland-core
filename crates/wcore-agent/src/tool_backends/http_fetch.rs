@@ -15,6 +15,12 @@ use wcore_tools::web_fetch::{
 // WebFetch — simple HTTP GET → readable text.
 // ---------------------------------------------------------------------
 
+/// Dedicated deadline for the synchronous readability extraction stage
+/// (#403). Kept well below the default per-call budget (30s) so a
+/// pathological page that pins the parser falls back to raw text fast
+/// instead of consuming the whole fetch budget with no output.
+const READABILITY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(12);
+
 /// Real `FetchBackend` over `reqwest`. Powers the `WebFetch` tool.
 ///
 /// Built once per session via [`build_fetch_backend`] and registered in
@@ -157,16 +163,48 @@ impl HttpFetchBackend {
         // needs anyway (the meaningful text is near the top of the doc).
         let looks_like_html = content_type.to_ascii_lowercase().starts_with("text/html");
         let body = if req.readable && looks_like_html {
-            let capped = if raw_text.len() > WEB_FETCH_MAX_RESPONSE_BYTES {
+            let capped: String = if raw_text.len() > WEB_FETCH_MAX_RESPONSE_BYTES {
                 let mut end = WEB_FETCH_MAX_RESPONSE_BYTES;
                 while end > 0 && !raw_text.is_char_boundary(end) {
                     end -= 1;
                 }
-                &raw_text[..end]
+                raw_text[..end].to_string()
             } else {
-                raw_text.as_str()
+                raw_text
             };
-            wcore_browser::readability::extract(capped, wcore_browser::op::ReadMode::Article)
+            // #403: readability::extract is a SYNCHRONOUS, CPU-bound DOM walk.
+            // The outer `tokio::time::timeout` cannot interrupt it (a blocking
+            // sync call never yields), so a pathological page pinned a CPU and
+            // surfaced as the full-budget "timed out" with no output. Run the
+            // extractor on a blocking thread and race it against a dedicated,
+            // shorter deadline; if extraction overruns, fall back to the raw
+            // (already byte-capped) body rather than failing the whole fetch.
+            let raw_fallback = capped.clone();
+            let extract_fut = tokio::task::spawn_blocking(move || {
+                wcore_browser::readability::extract(&capped, wcore_browser::op::ReadMode::Article)
+            });
+            match tokio::time::timeout(READABILITY_TIMEOUT, extract_fut).await {
+                Ok(Ok(extracted)) => extracted,
+                Ok(Err(join_err)) => {
+                    tracing::warn!(
+                        target: "wcore_agent",
+                        url = %final_url,
+                        error = %join_err,
+                        "readability extraction task failed; returning raw body"
+                    );
+                    raw_fallback
+                }
+                Err(_) => {
+                    tracing::warn!(
+                        target: "wcore_agent",
+                        url = %final_url,
+                        timeout_s = READABILITY_TIMEOUT.as_secs(),
+                        "readability extraction exceeded its deadline; returning raw body \
+                         (retry with readable:false to skip extraction)"
+                    );
+                    raw_fallback
+                }
+            }
         } else {
             raw_text
         };
