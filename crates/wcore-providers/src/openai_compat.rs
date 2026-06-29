@@ -59,6 +59,22 @@ pub fn accepts_reasoning_effort(model: &str) -> bool {
     wcore_config::config::openai_model_accepts_effort(model)
 }
 
+/// #417 — true when the TARGET model is a strict reasoner that 400s unless every
+/// historical assistant message carries `reasoning_content` once any turn
+/// produced thinking (DeepSeek Reasoner, Moonshot/Kimi). This is a per-MODEL
+/// contract, so it must be keyed off the model id — not just the provider's
+/// static compat. A router provider (Flux/OpenRouter) carries a generic compat
+/// with `replays_thinking_in_history` off, yet can route to DeepSeek/Kimi, which
+/// is exactly the case wayland#417 hit. Keying off the model lets a router serve
+/// a strict reasoner correctly while NEVER replaying for a non-strict model
+/// (e.g. claude-via-Flux, which would 400 on an unsigned thinking block). The
+/// `has-thinking` gate at the replay site still prevents replay when a turn
+/// produced no reasoning, so a non-reasoning DeepSeek model is unaffected.
+pub fn requires_reasoning_content_replay(model: &str) -> bool {
+    let m = model.to_ascii_lowercase();
+    m.contains("deepseek") || m.contains("moonshot") || m.contains("kimi")
+}
+
 /// True when the model must be served via the OpenAI **Responses API**
 /// (`POST /v1/responses`) instead of Chat Completions
 /// (`POST /v1/chat/completions`).
@@ -319,6 +335,35 @@ mod tests {
     fn accepts_reasoning_effort_case_insensitive() {
         assert!(accepts_reasoning_effort("GPT-5"));
         assert!(accepts_reasoning_effort("O1-Mini"));
+    }
+
+    // --- requires_reasoning_content_replay (#417) -------------------------
+
+    #[test]
+    fn requires_replay_for_strict_reasoners() {
+        // DeepSeek (incl. the wayland#417 model) and Moonshot/Kimi require it.
+        assert!(requires_reasoning_content_replay("deepseek-v4-pro"));
+        assert!(requires_reasoning_content_replay("deepseek-reasoner"));
+        assert!(requires_reasoning_content_replay("deepseek-chat"));
+        assert!(requires_reasoning_content_replay("moonshot-v1-128k"));
+        assert!(requires_reasoning_content_replay("kimi-k2"));
+    }
+
+    #[test]
+    fn no_replay_for_non_strict_models() {
+        // Crucially claude-via-Flux must NOT replay (unsigned thinking 400s
+        // Anthropic), and ordinary OpenAI / router aliases stay off.
+        assert!(!requires_reasoning_content_replay("claude-opus-4-7"));
+        assert!(!requires_reasoning_content_replay("gpt-4o"));
+        assert!(!requires_reasoning_content_replay("gpt-5"));
+        assert!(!requires_reasoning_content_replay("flux-auto"));
+        assert!(!requires_reasoning_content_replay("grok-4"));
+    }
+
+    #[test]
+    fn requires_replay_is_case_insensitive() {
+        assert!(requires_reasoning_content_replay("DeepSeek-V4-Pro"));
+        assert!(requires_reasoning_content_replay("Kimi-K2"));
     }
 
     // --- model_uses_responses_api -----------------------------------------

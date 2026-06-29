@@ -218,6 +218,27 @@ impl OpenAIProvider {
         }
     }
 
+    /// #417 — resolve the per-request message compat from the target model. The
+    /// strict-reasoner "must replay reasoning_content" contract is a per-MODEL
+    /// requirement, but a router provider's static compat has the flag off, so a
+    /// DeepSeek/Kimi turn routed through Flux/OpenRouter would drop the history's
+    /// reasoning_content and 400 (wayland#417). When the target model requires
+    /// replay, force the flag on for this request only; otherwise return the base
+    /// compat unchanged, so a non-strict model (e.g. claude-via-Flux) never
+    /// replays an unsigned thinking block. Direct DeepSeek/Kimi already set the
+    /// flag, so this is a no-op clone for them.
+    fn message_compat(compat: &ProviderCompat, model: &str) -> ProviderCompat {
+        if openai_compat::requires_reasoning_content_replay(model)
+            && !compat.replays_thinking_in_history()
+        {
+            let mut c = compat.clone();
+            c.replays_thinking_in_history = Some(true);
+            c
+        } else {
+            compat.clone()
+        }
+    }
+
     fn build_messages(messages: &[Message], system: &str, compat: &ProviderCompat) -> Vec<Value> {
         let mut result: Vec<Value> = Vec::new();
 
@@ -634,9 +655,14 @@ impl OpenAIProvider {
                 .unwrap_or("max_tokens")
         };
 
+        // #417 — resolve the effective message compat for THIS request's target
+        // model, so a router (Flux/OpenRouter) replays reasoning_content when it
+        // routes to a strict reasoner (DeepSeek/Kimi) without 400ing, while a
+        // non-strict model keeps replay off. See `message_compat`.
+        let msg_compat = Self::message_compat(&self.compat, &request.model);
         let mut body = json!({
             "model": request.model,
-            "messages": Self::build_messages(&request.messages, &request.system, &self.compat),
+            "messages": Self::build_messages(&request.messages, &request.system, &msg_compat),
             "stream": true
         });
         // `stream_options: {include_usage: true}` asks for token accounting in
@@ -2897,6 +2923,45 @@ mod tests {
 
     fn openai_compat() -> ProviderCompat {
         ProviderCompat::openai_defaults()
+    }
+
+    // --- message_compat (#417: per-request reasoning_content replay) ---
+
+    #[test]
+    fn message_compat_forces_replay_for_strict_reasoner_via_router() {
+        // Flux's static compat has replay OFF, but routing to DeepSeek must
+        // turn it ON for this request so reasoning_content is replayed (#417).
+        let flux = ProviderCompat::flux_router_defaults();
+        assert!(
+            !flux.replays_thinking_in_history(),
+            "precondition: router compat has replay off"
+        );
+        let resolved = OpenAIProvider::message_compat(&flux, "deepseek-v4-pro");
+        assert!(
+            resolved.replays_thinking_in_history(),
+            "DeepSeek via Flux must replay reasoning_content"
+        );
+    }
+
+    #[test]
+    fn message_compat_does_not_replay_for_non_strict_via_router() {
+        // claude-via-Flux must NOT replay — Anthropic 400s on an unsigned
+        // thinking block. Ordinary OpenAI models stay off too.
+        let flux = ProviderCompat::flux_router_defaults();
+        assert!(
+            !OpenAIProvider::message_compat(&flux, "claude-opus-4-7").replays_thinking_in_history()
+        );
+        assert!(!OpenAIProvider::message_compat(&flux, "gpt-4o").replays_thinking_in_history());
+    }
+
+    #[test]
+    fn message_compat_is_noop_for_direct_deepseek() {
+        // Direct DeepSeek already sets the flag; resolution leaves it on.
+        let ds = ProviderCompat::deepseek_defaults();
+        assert!(ds.replays_thinking_in_history());
+        assert!(
+            OpenAIProvider::message_compat(&ds, "deepseek-v4-pro").replays_thinking_in_history()
+        );
     }
 
     // --- max_tokens_field ---
