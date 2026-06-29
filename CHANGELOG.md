@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.12.16](https://github.com/FerroxLabs/wayland-core/compare/v0.12.15...v0.12.16) (2026-06-29)
+
+
+### Bug Fixes
+
+* **bash:** fall back to cmd when PowerShell shell is selected under AppContainer ([#105](https://github.com/FerroxLabs/wayland-core/issues/105)) ([d698c66](https://github.com/FerroxLabs/wayland-core/commit/d698c663f0f361912ed25f532a83e519305c246a))
+* **engine:** never let the reasoning budget starve the visible answer ([#426](https://github.com/FerroxLabs/wayland-core/issues/426)) ([#107](https://github.com/FerroxLabs/wayland-core/issues/107)) ([60f8e7d](https://github.com/FerroxLabs/wayland-core/commit/60f8e7d649a4a2fa684c4228b620a9ea8d0491fd))
+* **providers:** replay reasoning_content for strict reasoners routed via a router ([#417](https://github.com/FerroxLabs/wayland-core/issues/417)) ([#108](https://github.com/FerroxLabs/wayland-core/issues/108)) ([fac4bde](https://github.com/FerroxLabs/wayland-core/commit/fac4bde7eecc2b3c31ec7c20927034432eea4bfa))
+* **web:** bound readability extraction + reset breakers per turn + telemetry schema ([#403](https://github.com/FerroxLabs/wayland-core/issues/403)) ([#106](https://github.com/FerroxLabs/wayland-core/issues/106)) ([43c7aac](https://github.com/FerroxLabs/wayland-core/commit/43c7aac819e649c72383edd58be446d94856ace7))
+
 ## [0.12.15](https://github.com/FerroxLabs/wayland-core/compare/v0.12.14...v0.12.15) (2026-06-28)
 
 
