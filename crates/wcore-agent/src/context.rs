@@ -21,6 +21,11 @@ use crate::plan::prompt as plan_prompt;
 pub const TERSENESS_DIRECTIVE: &str = "Be concise. Lead with the answer or the \
     action; skip restating the question and ceremonial preamble/closing.";
 
+/// Byte cap on the custom assistant prompt/preset injected into the cached
+/// prefix. Generous (~4k tokens) but bounded so a giant preset can't bloat the
+/// session-permanent prefix the way large project context did (issue #115).
+const MAX_CUSTOM_PROMPT_BYTES: usize = 16 * 1024;
+
 /// Today's date as `YYYY-MM-DD` in local time.
 ///
 /// Read once per turn by the engine and fed to [`current_date_block`]. Kept as
@@ -251,7 +256,7 @@ pub fn build_system_prompt(
         let custom_cached = cache
             .sections
             .entry("custom")
-            .or_insert_with(|| custom.to_string());
+            .or_insert_with(|| agents_md::truncate_with_marker(custom, MAX_CUSTOM_PROMPT_BYTES));
         parts.push(custom_cached.clone());
     }
 
