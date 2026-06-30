@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.12.17](https://github.com/FerroxLabs/wayland-core/compare/v0.12.16...v0.12.17) (2026-06-30)
+
+
+### Bug Fixes
+
+* **agent:** resolve send_message channel by platform family so named instance channels (e.g. email-imap) receive sends ([#116](https://github.com/FerroxLabs/wayland-core/issues/116)) ([#117](https://github.com/FerroxLabs/wayland-core/issues/117)) ([82b590c](https://github.com/FerroxLabs/wayland-core/commit/82b590c3))
+* **agent:** cap project-context (AGENTS.md / @-includes) injection to bound the cached system prefix ([#115](https://github.com/FerroxLabs/wayland-core/issues/115)) ([#118](https://github.com/FerroxLabs/wayland-core/issues/118)) ([9cdf420](https://github.com/FerroxLabs/wayland-core/commit/9cdf420e))
+* **providers:** strip internal extra_content from outbound tool_calls so long-context replay to strict providers no longer 400s ([#120](https://github.com/FerroxLabs/wayland-core/issues/120)) ([#121](https://github.com/FerroxLabs/wayland-core/issues/121)) ([525a90f](https://github.com/FerroxLabs/wayland-core/commit/525a90f2))
+
+
+### Dependencies
+
+* clear release security gate — wasmtime 36.0.11 → 36.0.12 (RUSTSEC-2026-0188), anyhow 1.0.102 → 1.0.103 (RUSTSEC-2026-0190), ttf-parser OSV disposition (RUSTSEC-2026-0192) ([#119](https://github.com/FerroxLabs/wayland-core/issues/119)) ([db3797f](https://github.com/FerroxLabs/wayland-core/commit/db3797fd))
+
 ## [0.12.16](https://github.com/FerroxLabs/wayland-core/compare/v0.12.15...v0.12.16) (2026-06-29)
 
 
