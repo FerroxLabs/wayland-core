@@ -374,7 +374,16 @@ impl OpenAIProvider {
                                         "arguments": serde_json::to_string(input).unwrap_or_default()
                                     }
                                 });
-                                if let Some(extra_val) = extra {
+                                // `extra_content` is an internal-only field
+                                // (e.g. Gemini's google.thought routing marker
+                                // captured inbound). Only echo it outbound for
+                                // providers that emitted it and tolerate the
+                                // round-trip; strict OpenAI-compat endpoints
+                                // (Fireworks / GLM-5 via Flux) 400 on it during
+                                // long-context replay (wayland-core#120).
+                                if compat.emit_tool_call_extra_content()
+                                    && let Some(extra_val) = extra
+                                {
                                     tc_json["extra_content"] = extra_val.clone();
                                 }
                                 Some(tc_json)
@@ -3903,6 +3912,75 @@ mod tests {
         let result = OpenAIProvider::build_messages(&messages, "", &no_compat());
         let tool_msgs: Vec<_> = result.iter().filter(|m| m["role"] == "tool").collect();
         assert_eq!(tool_msgs.len(), 2);
+    }
+
+    // --- outbound extra_content stripping (wayland-core#120) ---
+
+    #[test]
+    fn test_tool_call_extra_content_stripped_for_strict_provider() {
+        // wayland-core#120: the internal extra_content blob (captured from an
+        // inbound tool_calls[].extra_content, e.g. Gemini's google.thought
+        // marker) must NOT be echoed onto outbound tool_calls for providers
+        // that reject unknown fields. On long-context replay, strict
+        // OpenAI-compat endpoints (Fireworks / GLM-5 via Flux) 400 with
+        // "Extra inputs are not permitted ... tool_calls[0].extra_content".
+        // An answering ToolResult so tc1 is NOT an orphan: openai_compat() sets
+        // clean_orphan_tool_calls, which would otherwise prune the lone tool_call
+        // and make the assertions below vacuous. A real long-context replay always
+        // carries the matching result, so this mirrors the customer scenario.
+        let messages = vec![
+            Message::new(
+                Role::Assistant,
+                vec![ContentBlock::ToolUse {
+                    id: "tc1".into(),
+                    name: "bash".into(),
+                    input: json!({"cmd": "ls"}),
+                    extra: Some(json!({"google": {"thought": true}})),
+                }],
+            ),
+            Message::new(
+                Role::Tool,
+                vec![ContentBlock::ToolResult {
+                    tool_use_id: "tc1".into(),
+                    content: "ok".into(),
+                    is_error: false,
+                }],
+            ),
+        ];
+
+        let result = OpenAIProvider::build_messages(&messages, "", &openai_compat());
+        let assistant = result.iter().find(|m| m["role"] == "assistant").unwrap();
+        let tc = &assistant["tool_calls"][0];
+
+        assert!(
+            tc.get("extra_content").is_none(),
+            "extra_content must be stripped from outbound tool_calls for strict providers"
+        );
+        // The tool call itself is otherwise intact.
+        assert_eq!(tc["id"], "tc1");
+        assert_eq!(tc["function"]["name"], "bash");
+    }
+
+    #[test]
+    fn test_tool_call_extra_content_preserved_for_gemini() {
+        // Google/Gemini's OpenAI-compat endpoint emitted extra_content and
+        // tolerates its round-trip, so it (and only it) keeps emitting it.
+        let messages = vec![Message::new(
+            Role::Assistant,
+            vec![ContentBlock::ToolUse {
+                id: "tc1".into(),
+                name: "bash".into(),
+                input: json!({}),
+                extra: Some(json!({"google": {"thought": true}})),
+            }],
+        )];
+
+        let result =
+            OpenAIProvider::build_messages(&messages, "", &ProviderCompat::gemini_defaults());
+        let assistant = result.iter().find(|m| m["role"] == "assistant").unwrap();
+        let tc = &assistant["tool_calls"][0];
+
+        assert_eq!(tc["extra_content"], json!({"google": {"thought": true}}));
     }
 
     // --- dedup_tool_results ---
