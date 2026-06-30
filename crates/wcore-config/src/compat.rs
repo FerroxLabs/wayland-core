@@ -252,6 +252,21 @@ pub struct ProviderCompat {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub replays_thinking_in_history: Option<bool>,
 
+    /// Whether to re-serialize the internal `extra_content` blob (captured from
+    /// an inbound `tool_calls[].extra_content`, e.g. Gemini's
+    /// `extra_content.google.thought` routing marker) back onto OUTBOUND
+    /// `tool_calls` on the Chat Completions path.
+    ///
+    /// Defaults to `false`: `extra_content` is an internal-only field and must
+    /// NOT be echoed to providers that reject unknown fields. On long-context
+    /// replay, strict OpenAI-compat endpoints (e.g. Fireworks / GLM-5 via the
+    /// Flux router) 400 with "Extra inputs are not permitted, field:
+    /// messages[N].tool_calls[0].extra_content" (wayland-core#120). Only the
+    /// Google/Gemini preset sets `Some(true)`, since that endpoint emitted the
+    /// field and tolerates its round-trip.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub emit_tool_call_extra_content: Option<bool>,
+
     /// Finding #174: per-tier model substitution for smart routing.
     ///
     /// The engine classifies every turn into a `RoutingTier` and stamps a
@@ -406,6 +421,11 @@ impl ProviderCompat {
             effort_levels: Some(vec!["low".into(), "medium".into(), "high".into()]),
             cache_message_breakpoints: Some(false),
             provider_type: Some("gemini".into()),
+            // Gemini's OpenAI-compat endpoint emits extra_content (the
+            // google.thought routing marker) and tolerates its round-trip, so
+            // it is the one provider that keeps emitting it outbound
+            // (wayland-core#120). Every other provider strips it (default).
+            emit_tool_call_extra_content: Some(true),
             // Q2-2026 Gemini 2.5 Pro list price (per Google AI Studio pricing page).
             // Free tier exists for low volume; the paid tier price is
             // $1.25 / 1M input tokens, $10 / 1M output. Use the paid
@@ -759,6 +779,9 @@ impl ProviderCompat {
             replays_thinking_in_history: user
                 .replays_thinking_in_history
                 .or(defaults.replays_thinking_in_history),
+            emit_tool_call_extra_content: user
+                .emit_tool_call_extra_content
+                .or(defaults.emit_tool_call_extra_content),
             tier_models: user.tier_models.or(defaults.tier_models),
             max_tools: user.max_tools.or(defaults.max_tools),
             // Crucible #3 — merge ripple: a new compat field MUST be threaded
@@ -833,6 +856,13 @@ impl ProviderCompat {
     /// DeepSeek/Moonshot set `true` because their API 400s without the replay.
     pub fn replays_thinking_in_history(&self) -> bool {
         self.replays_thinking_in_history.unwrap_or(false)
+    }
+
+    /// Whether to re-serialize internal `extra_content` onto outbound
+    /// `tool_calls`. Defaults to `false` (strip): only Google/Gemini opts in.
+    /// See [`ProviderCompat::emit_tool_call_extra_content`] (wayland-core#120).
+    pub fn emit_tool_call_extra_content(&self) -> bool {
+        self.emit_tool_call_extra_content.unwrap_or(false)
     }
 
     pub fn supports_thinking(&self) -> bool {
