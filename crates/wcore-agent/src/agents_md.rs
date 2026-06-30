@@ -650,9 +650,9 @@ mod tests {
         // Three large @-includes; a small budget lets the first through but cuts
         // off later ones once the accumulated size exceeds the budget.
         let tmp = TempDir::new().unwrap();
-        let chunk_a: String = std::iter::repeat("AAAA").take(40).collect(); // 160 B
-        let chunk_b: String = std::iter::repeat("BBBB").take(40).collect();
-        let chunk_c: String = std::iter::repeat("CCCC").take(40).collect();
+        let chunk_a: String = "AAAA".repeat(40); // 160 B
+        let chunk_b: String = "BBBB".repeat(40);
+        let chunk_c: String = "CCCC".repeat(40);
         fs::write(tmp.path().join("a.md"), &chunk_a).unwrap();
         fs::write(tmp.path().join("b.md"), &chunk_b).unwrap();
         fs::write(tmp.path().join("c.md"), &chunk_c).unwrap();
