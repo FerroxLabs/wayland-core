@@ -117,3 +117,19 @@ reason = "proc-macro-error: build-time proc-macro, no runtime surface; transitiv
 id = "GHSA-w9wp-h8wv-79jx"
 ignoreUntil = "2026-09-02T00:00:00Z"
 reason = "opentelemetry_sdk baggage-extract DoS: receiving-side only; wayland-core is an OTLP exporter, otlp feature default-off, only trace feature enabled, no BaggagePropagator usage (0 grep hits). Not reachable. Tracked; revisit on opentelemetry 0.32 bump."
+
+# ── ttf-parser 0.25.1 (unmaintained) ─────────────────────────────────────
+# The author has declared ttf-parser unmaintained (no further fixes;
+# patched = []). Recommended successor is skrifa (fontations), but the switch
+# is an UPSTREAM decision for our parent, not ours: ttf-parser arrives only
+# transitively via lopdf 0.42.0 <- pdf-extract 0.12.0 <- wcore-tools (PDF text
+# extraction for the Read tool). It is a font table parser exercised only when
+# a PDF embeds fonts during text extraction; there is no maintained pdf-extract
+# release that drops the lopdf/ttf-parser chain. Informational "unmaintained"
+# advisory, no known vulnerability and no patch to apply. Surfaced 2026-06-28
+# (ambient advisory, not a code change in this PR). Revisit when pdf-extract or
+# lopdf move off ttf-parser, or migrate the PDF path to a maintained extractor.
+[[IgnoredVulns]]
+id = "RUSTSEC-2026-0192"
+ignoreUntil = "2026-09-02T00:00:00Z"
+reason = "ttf-parser unmaintained (patched=[]); transitive only via lopdf <- pdf-extract <- wcore-tools PDF text extraction. Informational, no patch exists; successor skrifa is an upstream pdf-extract/lopdf decision. Tracked; revisit on pdf-extract/lopdf bump."
