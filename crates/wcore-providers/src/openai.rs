@@ -3924,15 +3924,29 @@ mod tests {
         // that reject unknown fields. On long-context replay, strict
         // OpenAI-compat endpoints (Fireworks / GLM-5 via Flux) 400 with
         // "Extra inputs are not permitted ... tool_calls[0].extra_content".
-        let messages = vec![Message::new(
-            Role::Assistant,
-            vec![ContentBlock::ToolUse {
-                id: "tc1".into(),
-                name: "bash".into(),
-                input: json!({"cmd": "ls"}),
-                extra: Some(json!({"google": {"thought": true}})),
-            }],
-        )];
+        // An answering ToolResult so tc1 is NOT an orphan: openai_compat() sets
+        // clean_orphan_tool_calls, which would otherwise prune the lone tool_call
+        // and make the assertions below vacuous. A real long-context replay always
+        // carries the matching result, so this mirrors the customer scenario.
+        let messages = vec![
+            Message::new(
+                Role::Assistant,
+                vec![ContentBlock::ToolUse {
+                    id: "tc1".into(),
+                    name: "bash".into(),
+                    input: json!({"cmd": "ls"}),
+                    extra: Some(json!({"google": {"thought": true}})),
+                }],
+            ),
+            Message::new(
+                Role::Tool,
+                vec![ContentBlock::ToolResult {
+                    tool_use_id: "tc1".into(),
+                    content: "ok".into(),
+                    is_error: false,
+                }],
+            ),
+        ];
 
         let result = OpenAIProvider::build_messages(&messages, "", &openai_compat());
         let assistant = result.iter().find(|m| m["role"] == "assistant").unwrap();
