@@ -244,15 +244,43 @@ async fn collect_stream_text(
     Err(CompactError::EmptyResponse)
 }
 
+/// True when `msg` carries a tool result — either a dedicated `Role::Tool`
+/// message or a user-role message threading `ToolResult` blocks (both shapes
+/// occur in the conversation history). Such a message is only valid when its
+/// parent assistant `tool_calls` turn precedes it; on its own it is an orphan.
+fn is_tool_result(msg: &Message) -> bool {
+    msg.role == Role::Tool
+        || msg
+            .content
+            .iter()
+            .any(|b| matches!(b, ContentBlock::ToolResult { .. }))
+}
+
 /// Truncate the oldest ~20% of messages for PTL retry.
 ///
 /// Returns `None` if there are too few messages to truncate meaningfully.
+///
+/// Tool-pair aware (FerroxLabs/wayland-core#123): the cut never lands between
+/// an assistant `tool_calls` turn and its tool results. Dropping the assistant
+/// while keeping its result leaves an orphaned `role:"tool"` message that
+/// strict OpenAI endpoints (DeepSeek via Flux) reject with HTTP 400. After
+/// computing the nominal boundary we advance it forward past any leading
+/// tool-result messages so `remaining` always begins at a clean turn boundary.
 fn truncate_for_retry(messages: &[Message]) -> Option<Vec<Message>> {
     if messages.len() < 2 {
         return None;
     }
 
-    let drop_count = (messages.len() / 5).max(1);
+    let mut drop_count = (messages.len() / 5).max(1);
+
+    // Snap the boundary to a turn start: if it would leave a tool result at the
+    // front of `remaining` (its parent assistant turn dropped), drop that
+    // orphaned result too. Parallel tool calls produce several consecutive
+    // results, so advance past the whole run.
+    while drop_count < messages.len() && is_tool_result(&messages[drop_count]) {
+        drop_count += 1;
+    }
+
     if drop_count >= messages.len() {
         return None;
     }
@@ -548,6 +576,91 @@ mod tests {
             ContentBlock::Text { text } => assert_eq!(text, "msg-2"),
             _ => panic!("expected Text"),
         }
+    }
+
+    /// #123 lock: the nominal 20% boundary lands on a tool result whose parent
+    /// assistant turn would be dropped. The cut must advance past the orphan so
+    /// `remaining` never starts with a tool result, and a later intact tool
+    /// pair (in the kept tail) must survive whole.
+    #[test]
+    fn truncate_never_splits_a_tool_pair() {
+        let tool_use = |id: &str| {
+            Message::new(
+                Role::Assistant,
+                vec![ContentBlock::ToolUse {
+                    id: id.into(),
+                    name: "bash".into(),
+                    input: serde_json::json!({}),
+                    extra: None,
+                }],
+            )
+        };
+        let tool_result = |id: &str| {
+            Message::new(
+                Role::Tool,
+                vec![ContentBlock::ToolResult {
+                    tool_use_id: id.into(),
+                    content: "out".into(),
+                    is_error: false,
+                }],
+            )
+        };
+        let text =
+            |role: Role, t: &str| Message::new(role, vec![ContentBlock::Text { text: t.into() }]);
+
+        // 12 msgs → nominal drop_count = 2, which is the tool result for tc1
+        // (its assistant tool_use is index 1, inside the drop window).
+        let msgs = vec![
+            text(Role::User, "u0"),
+            tool_use("tc1"),    // 1 — dropped
+            tool_result("tc1"), // 2 — naive boundary: orphan
+            text(Role::User, "u3"),
+            text(Role::Assistant, "a4"),
+            text(Role::User, "u5"),
+            text(Role::Assistant, "a6"),
+            text(Role::User, "u7"),
+            tool_use("tc2"), // 8 — intact pair, in kept tail
+            tool_result("tc2"),
+            text(Role::User, "u10"),
+            text(Role::Assistant, "a11"),
+        ];
+
+        let result = truncate_for_retry(&msgs).unwrap();
+
+        // The cut advanced past the orphaned tc1 result → no leading tool result.
+        assert!(
+            !is_tool_result(&result[0]),
+            "remaining must not start with a tool result: {:?}",
+            result[0].role
+        );
+
+        // Every surviving tool result has its parent tool_use earlier in the
+        // result (no orphans of either id).
+        let mut seen_calls = std::collections::HashSet::new();
+        for m in &result {
+            for b in &m.content {
+                match b {
+                    ContentBlock::ToolUse { id, .. } => {
+                        seen_calls.insert(id.clone());
+                    }
+                    ContentBlock::ToolResult { tool_use_id, .. } => {
+                        assert!(
+                            seen_calls.contains(tool_use_id),
+                            "orphaned tool result for id {tool_use_id} survived truncation"
+                        );
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        // The intact tc2 pair survived whole.
+        let has_tc2_result = result.iter().any(|m| {
+            m.content.iter().any(
+                |b| matches!(b, ContentBlock::ToolResult { tool_use_id, .. } if tool_use_id == "tc2"),
+            )
+        });
+        assert!(has_tc2_result, "intact tc2 pair must survive in the tail");
     }
 
     // ── boundary detection / extraction ─────────────────────────────────
