@@ -324,6 +324,13 @@ mod tests {
     use std::fs;
     use tempfile::TempDir;
 
+    // Tests that don't exercise the include budget pass an effectively
+    // unlimited one. Returns a fresh value so callers can take `&mut` without
+    // mutating a `const` item (which would be a no-op and a CI lint error).
+    fn unlimited_budget() -> usize {
+        usize::MAX
+    }
+
     // --- @include expansion tests ---
 
     #[test]
@@ -331,7 +338,7 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let mut seen = HashSet::new();
         let input = "Hello world\nNo includes here.";
-        let result = expand_includes(input, tmp.path(), 0, &mut seen, &mut usize::MAX);
+        let result = expand_includes(input, tmp.path(), 0, &mut seen, &mut unlimited_budget());
         assert_eq!(result, input);
     }
 
@@ -341,7 +348,7 @@ mod tests {
         fs::write(tmp.path().join("other.md"), "INCLUDED_CONTENT").unwrap();
         let mut seen = HashSet::new();
         let input = "@other.md";
-        let result = expand_includes(input, tmp.path(), 0, &mut seen, &mut usize::MAX);
+        let result = expand_includes(input, tmp.path(), 0, &mut seen, &mut unlimited_budget());
         assert!(result.contains("INCLUDED_CONTENT"));
         assert!(!result.contains("@other.md"));
     }
@@ -352,7 +359,7 @@ mod tests {
         fs::write(tmp.path().join("sub.md"), "SUB_CONTENT").unwrap();
         let mut seen = HashSet::new();
         let input = "@./sub.md";
-        let result = expand_includes(input, tmp.path(), 0, &mut seen, &mut usize::MAX);
+        let result = expand_includes(input, tmp.path(), 0, &mut seen, &mut unlimited_budget());
         assert!(result.contains("SUB_CONTENT"));
     }
 
@@ -362,7 +369,7 @@ mod tests {
         fs::write(tmp.path().join("skip.md"), "SHOULD_NOT_APPEAR").unwrap();
         let mut seen = HashSet::new();
         let input = "```\n@skip.md\n```";
-        let result = expand_includes(input, tmp.path(), 0, &mut seen, &mut usize::MAX);
+        let result = expand_includes(input, tmp.path(), 0, &mut seen, &mut unlimited_budget());
         assert!(!result.contains("SHOULD_NOT_APPEAR"));
         assert!(result.contains("@skip.md"));
     }
@@ -372,7 +379,7 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let mut seen = HashSet::new();
         let input = "before\n@nonexistent.md\nafter";
-        let result = expand_includes(input, tmp.path(), 0, &mut seen, &mut usize::MAX);
+        let result = expand_includes(input, tmp.path(), 0, &mut seen, &mut unlimited_budget());
         assert!(result.contains("before"));
         assert!(result.contains("after"));
         assert!(!result.contains("@nonexistent.md"));
@@ -384,7 +391,7 @@ mod tests {
         fs::write(tmp.path().join("a.md"), "A_CONTENT\n@b.md").unwrap();
         fs::write(tmp.path().join("b.md"), "B_CONTENT\n@a.md").unwrap();
         let mut seen = HashSet::new();
-        let result = expand_includes("@a.md", tmp.path(), 0, &mut seen, &mut usize::MAX);
+        let result = expand_includes("@a.md", tmp.path(), 0, &mut seen, &mut unlimited_budget());
         assert!(result.contains("A_CONTENT"));
         assert!(result.contains("B_CONTENT"));
         // @a.md in b.md should be skipped (circular)
@@ -407,7 +414,7 @@ mod tests {
             fs::write(tmp.path().join(format!("d{i}.md")), content).unwrap();
         }
         let mut seen = HashSet::new();
-        let result = expand_includes("@d0.md", tmp.path(), 0, &mut seen, &mut usize::MAX);
+        let result = expand_includes("@d0.md", tmp.path(), 0, &mut seen, &mut unlimited_budget());
         assert!(result.contains("DEPTH_0"));
         assert!(result.contains("DEPTH_3"));
         assert!(result.contains("DEPTH_4"));
@@ -421,7 +428,7 @@ mod tests {
         fs::write(tmp.path().join("image.png"), "BINARY_DATA").unwrap();
         let mut seen = HashSet::new();
         let input = "@image.png";
-        let result = expand_includes(input, tmp.path(), 0, &mut seen, &mut usize::MAX);
+        let result = expand_includes(input, tmp.path(), 0, &mut seen, &mut unlimited_budget());
         assert!(!result.contains("BINARY_DATA"));
     }
 
@@ -431,7 +438,7 @@ mod tests {
         fs::write(tmp.path().join("inc.md"), "MIDDLE").unwrap();
         let mut seen = HashSet::new();
         let input = "TOP\n@inc.md\nBOTTOM";
-        let result = expand_includes(input, tmp.path(), 0, &mut seen, &mut usize::MAX);
+        let result = expand_includes(input, tmp.path(), 0, &mut seen, &mut unlimited_budget());
         assert_eq!(result, "TOP\nMIDDLE\nBOTTOM");
     }
 
@@ -454,7 +461,7 @@ mod tests {
         fs::write(tmp.path().join("x.md"), "SHOULD_NOT_APPEAR").unwrap();
         let mut seen = HashSet::new();
         let input = "Use `@x.md` for config";
-        let result = expand_includes(input, tmp.path(), 0, &mut seen, &mut usize::MAX);
+        let result = expand_includes(input, tmp.path(), 0, &mut seen, &mut unlimited_budget());
         assert!(!result.contains("SHOULD_NOT_APPEAR"));
     }
 
@@ -463,7 +470,7 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let mut seen = HashSet::new();
         let input = "@~/nonexistent-test-file.md";
-        let result = expand_includes(input, tmp.path(), 0, &mut seen, &mut usize::MAX);
+        let result = expand_includes(input, tmp.path(), 0, &mut seen, &mut unlimited_budget());
         assert!(!result.contains("@~/"));
     }
 
