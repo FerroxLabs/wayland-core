@@ -50,15 +50,22 @@ impl ChannelManagerTransport {
 ///
 /// Resolution order:
 /// 1. Exact match on the platform token (preserves default-named channels).
-/// 2. Family match: the first registered channel whose name starts with the
-///    platform token (covers "email-imap"/"email-agentmail" for "email").
+/// 2. Family match: the first registered channel whose name is the platform
+///    token followed by the `-` instance separator (covers "email-imap"/
+///    "email-agentmail" for "email"). The separator is required so a bare
+///    prefix can't cross distinct platforms — e.g. "wecom" must NOT resolve
+///    to a "wecom_callback" channel ('_', not '-'), and "email" must not
+///    match an unrelated "emailfoo".
 /// 3. No match: return the token unchanged so `send_to` yields its existing
 ///    "unknown channel" error.
 fn resolve_channel_name(names: &[String], platform_token: &str) -> String {
     if names.iter().any(|n| n == platform_token) {
         return platform_token.to_string();
     }
-    if let Some(name) = names.iter().find(|n| n.starts_with(platform_token)) {
+    if let Some(name) = names.iter().find(|n| {
+        n.strip_prefix(platform_token)
+            .is_some_and(|r| r.starts_with('-'))
+    }) {
         return name.clone();
     }
     platform_token.to_string()
@@ -118,6 +125,19 @@ mod tests {
         // Nothing in the family: return the token unchanged so send_to errors.
         let names = vec!["telegram".to_string()];
         assert_eq!(resolve_channel_name(&names, "email"), "email");
+
+        // Separator guard: the family arm requires the platform token followed
+        // by '-'. "wecom" and "wecom_callback" are DISTINCT platforms (the
+        // separator is '_'), so a "wecom_callback" channel must NOT satisfy a
+        // "wecom" target — that would re-introduce the cross-family misroute
+        // this fix exists to prevent. Token returned unchanged → unknown channel.
+        let names = vec!["wecom_callback".to_string()];
+        assert_eq!(resolve_channel_name(&names, "wecom"), "wecom");
+
+        // An unrelated name that merely shares the prefix without the separator
+        // ("emailfoo") must not match either.
+        let names = vec!["emailfoo".to_string()];
+        assert_eq!(resolve_channel_name(&names, "email"), "email");
     }
 
     /// Issue #116: an email channel registered under its instance name
@@ -159,6 +179,33 @@ mod tests {
                 "expected unknown-channel error, got: {message}"
             ),
             SendOutcome::Ok { .. } => panic!("expected Err for an absent platform"),
+        }
+    }
+
+    /// Cross-family guard (end-to-end): "wecom" and "wecom_callback" are
+    /// distinct platforms. Targeting "wecom" with only a "wecom_callback"
+    /// channel registered must NOT misroute to it — it must surface the
+    /// unknown-channel error, the exact bug class this fix prevents.
+    #[tokio::test]
+    async fn send_to_wecom_does_not_misroute_to_wecom_callback() {
+        let mut mgr = ChannelManager::new();
+        mgr.register(Box::new(MockChannel::new("wecom_callback")))
+            .await;
+        mgr.start_all().await.expect("start channels");
+        let transport = ChannelManagerTransport::new(Arc::new(RwLock::new(mgr)));
+
+        let outcome = transport
+            .send(&target(MessagingPlatform::Wecom, "room1"), "hi")
+            .await;
+
+        match outcome {
+            SendOutcome::Err { message } => assert!(
+                message.contains("unknown channel"),
+                "expected unknown-channel error, got: {message}"
+            ),
+            SendOutcome::Ok { .. } => {
+                panic!("wecom must NOT resolve to a wecom_callback channel")
+            }
         }
     }
 }
