@@ -58,9 +58,127 @@
 //! are rejected so a remote share's DACL is never touched. (`NetworkPolicy::
 //! AllowHosts` WFP DNS gating remains queued separately.)
 
+// The probe cache is consumed only by the Windows backend; it is also
+// exercised by unit tests on every platform. Gate it to exactly those two so
+// it is neither dead code on non-Windows lib builds nor duplicated.
+#[cfg(any(windows, test))]
+use std::time::{Duration, Instant};
+
+/// How long a *negative* AppContainer probe verdict is trusted before a fresh
+/// probe is warranted. A positive verdict is sticky for the process lifetime;
+/// a negative one is cached only briefly so a transient stall (AV image scan,
+/// disk contention, slow profile-service RPC) self-heals after the window
+/// instead of re-running the (now wall-clock-guarded) probe on every command.
+/// (FerroxLabs/wayland-core#125)
+///
+/// Only the Windows backend consumes this; the cache tests supply their own
+/// TTL, so it is `cfg(windows)` (not `test`) to stay dead-code-free elsewhere.
+#[cfg(windows)]
+const NEGATIVE_PROBE_TTL: Duration = Duration::from_secs(30);
+
+/// Temporal cache verdict for the AppContainer real-spawn probe.
+#[cfg(any(windows, test))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ProbeVerdict {
+    /// Never probed (or the last negative verdict has expired).
+    Unknown,
+    /// Probe succeeded — sticky for the process lifetime.
+    Available,
+    /// Probe failed; do not re-probe until this instant.
+    UnavailableUntil(Instant),
+}
+
+/// Availability cache for the AppContainer probe.
+///
+/// Positive results stick (the sandbox stays available once proven); negative
+/// results are cached with a short TTL so a transient failure neither
+/// permanently disables isolation (a silent security regression) nor forces a
+/// full probe on every command (the ~120s-per-Bash hang of
+/// FerroxLabs/wayland-core#125). This temporal logic is platform-independent
+/// and unit-tested on all targets; the Windows backend drives it with the real
+/// Win32 probe.
+#[cfg(any(windows, test))]
+struct ProbeCache {
+    verdict: ProbeVerdict,
+}
+
+#[cfg(any(windows, test))]
+impl ProbeCache {
+    const fn new() -> Self {
+        Self {
+            verdict: ProbeVerdict::Unknown,
+        }
+    }
+
+    /// A cached verdict usable *without* re-probing, or `None` when a fresh
+    /// probe is warranted (never probed, or a negative verdict has expired).
+    fn cached(&self, now: Instant) -> Option<bool> {
+        match self.verdict {
+            ProbeVerdict::Available => Some(true),
+            ProbeVerdict::UnavailableUntil(until) if now < until => Some(false),
+            ProbeVerdict::Unknown | ProbeVerdict::UnavailableUntil(_) => None,
+        }
+    }
+
+    /// Record a fresh probe result. A success is sticky; a failure is trusted
+    /// for `neg_ttl` before the next `cached()` call will re-probe.
+    fn record(&mut self, available: bool, now: Instant, neg_ttl: Duration) {
+        self.verdict = if available {
+            ProbeVerdict::Available
+        } else {
+            ProbeVerdict::UnavailableUntil(now + neg_ttl)
+        };
+    }
+}
+
+#[cfg(test)]
+mod probe_cache_tests {
+    use super::{Duration, Instant, ProbeCache};
+
+    #[test]
+    fn unknown_forces_a_probe() {
+        let c = ProbeCache::new();
+        assert_eq!(c.cached(Instant::now()), None);
+    }
+
+    #[test]
+    fn positive_is_sticky() {
+        let mut c = ProbeCache::new();
+        let t0 = Instant::now();
+        c.record(true, t0, Duration::from_secs(30));
+        assert_eq!(c.cached(t0), Some(true));
+        // Still available far in the future — never re-probes.
+        assert_eq!(c.cached(t0 + Duration::from_secs(3600)), Some(true));
+    }
+
+    #[test]
+    fn negative_is_cached_then_self_heals() {
+        let mut c = ProbeCache::new();
+        let t0 = Instant::now();
+        let ttl = Duration::from_secs(30);
+        c.record(false, t0, ttl);
+        // Within the TTL: cheap negative, no re-probe.
+        assert_eq!(c.cached(t0 + Duration::from_secs(10)), Some(false));
+        // At/after the TTL: verdict expires → re-probe (self-heal).
+        assert_eq!(c.cached(t0 + ttl), None);
+        assert_eq!(c.cached(t0 + Duration::from_secs(31)), None);
+    }
+
+    #[test]
+    fn negative_then_positive_recovers_and_sticks() {
+        let mut c = ProbeCache::new();
+        let t0 = Instant::now();
+        c.record(false, t0, Duration::from_secs(30));
+        // A later successful probe upgrades to sticky-available.
+        c.record(true, t0 + Duration::from_secs(31), Duration::from_secs(30));
+        assert_eq!(c.cached(t0 + Duration::from_secs(3600)), Some(true));
+    }
+}
+
 #[cfg(windows)]
 mod windows_impl {
     use super::super::SandboxBackend;
+    use super::{NEGATIVE_PROBE_TTL, ProbeCache};
     use crate::error::{Result, SandboxError};
     use crate::manifest::{NetworkPolicy, SandboxManifest};
     use crate::{ResourceLimitEnforcement, SandboxCommand, SandboxOutput};
@@ -70,8 +188,9 @@ mod windows_impl {
     use std::mem;
     use std::os::windows::ffi::{OsStrExt, OsStringExt};
     use std::ptr;
+    use std::sync::mpsc;
     use std::sync::{Mutex, OnceLock};
-    use std::time::Duration;
+    use std::time::{Duration, Instant};
     use windows_sys::Win32::Foundation::{
         CloseHandle, ERROR_ALREADY_EXISTS, GetLastError, HANDLE, INVALID_HANDLE_VALUE,
         WAIT_OBJECT_0, WAIT_TIMEOUT,
@@ -735,9 +854,9 @@ mod windows_impl {
     /// permanently cached — instead, `is_available()` re-probes on every
     /// call until it succeeds once. This avoids the "transient flake at
     /// startup permanently disables sandboxing" silent-failure pattern.
-    fn probe_cache() -> &'static Mutex<Option<bool>> {
-        static CACHE: OnceLock<Mutex<Option<bool>>> = OnceLock::new();
-        CACHE.get_or_init(|| Mutex::new(None))
+    fn probe_cache() -> &'static Mutex<ProbeCache> {
+        static CACHE: OnceLock<Mutex<ProbeCache>> = OnceLock::new();
+        CACHE.get_or_init(|| Mutex::new(ProbeCache::new()))
     }
 
     #[async_trait]
@@ -755,25 +874,27 @@ mod windows_impl {
 
         /// Real-spawn availability probe.
         ///
-        /// On first call, runs a `cmd.exe /c exit 0` through the full
-        /// pipeline. **Caches `true` permanently** so subsequent calls
-        /// return instantly. Does NOT cache `false` — a transient probe
-        /// failure at startup (AV scan, disk contention, slow userenv
-        /// init) would otherwise permanently disable sandboxing for the
-        /// process lifetime, which is a silent security regression.
+        /// On first call, runs a wall-clock-guarded `cmd.exe /c exit 0`
+        /// through the full pipeline. A success is cached permanently so
+        /// subsequent calls return instantly. A failure is cached only for
+        /// [`NEGATIVE_PROBE_TTL`]: a transient probe failure (AV scan, disk
+        /// contention, slow profile-service RPC) neither permanently disables
+        /// sandboxing (a silent security regression) nor re-runs the full
+        /// probe on every command (the ~120s-per-Bash hang of #125). The
+        /// probe itself is bounded by a hard wall-clock guard in
+        /// [`probe_appcontainer_available`], so a stalled Win32 setup call can
+        /// cost at most one guarded probe per TTL window.
         fn is_available(&self) -> bool {
             let cache = probe_cache();
             {
                 let g = cache.lock().expect("probe cache poisoned");
-                if let Some(true) = *g {
-                    return true;
+                if let Some(cached) = g.cached(Instant::now()) {
+                    return cached;
                 }
             }
             let result = probe_appcontainer_available();
             let mut g = cache.lock().expect("probe cache poisoned");
-            if result {
-                *g = Some(true);
-            }
+            g.record(result, Instant::now(), NEGATIVE_PROBE_TTL);
             result
         }
 
@@ -792,9 +913,23 @@ mod windows_impl {
                 ));
             }
             let manifest = manifest.clone();
-            tokio::task::spawn_blocking(move || execute_blocking(&manifest, &cmd))
-                .await
-                .map_err(|e| SandboxError::ExecFailed(format!("join: {e}")))?
+            // Defense-in-depth wall-clock ceiling (#125). `execute_blocking`'s
+            // inner `WaitForSingleObject` bounds only the child's *run*, not the
+            // Win32 setup calls before it (`CreateAppContainerProfile`,
+            // `CreateProcessAsUserW`). Bound the whole blocking call at the
+            // effective wait timeout plus a setup grace so a stalled setup call
+            // cannot hang the async caller. The grace guarantees this ceiling
+            // never preempts a legitimately-timed command (the inner wait always
+            // fires first). Abandoning the blocking task on elapse is safe — it
+            // reaps its own child via the KILL_ON_JOB_CLOSE Job Object once its
+            // handles drop.
+            let ceiling =
+                manifest.timeout.unwrap_or(Duration::from_secs(60)) + Duration::from_secs(15);
+            let handle = tokio::task::spawn_blocking(move || execute_blocking(&manifest, &cmd));
+            match tokio::time::timeout(ceiling, handle).await {
+                Ok(joined) => joined.map_err(|e| SandboxError::ExecFailed(format!("join: {e}")))?,
+                Err(_elapsed) => Err(SandboxError::Timeout),
+            }
         }
     }
 
@@ -831,8 +966,13 @@ mod windows_impl {
             );
             return false;
         }
-        // 10s probe timeout — covers a slow first-time AppContainer profile
-        // create + userenv.dll init + cmd.exe load under disk contention.
+        // Inner `manifest.timeout` bounds ONLY `WaitForSingleObject` (the wait
+        // for the child to exit). It does NOT bound the Win32 setup calls
+        // before that wait — `CreateAppContainerProfile` (profile-service RPC)
+        // and `CreateProcessAsUserW` (image load under the Low-IL token, where
+        // AV process-creation callbacks run synchronously) — either of which
+        // can stall ~120s, so control never reaches the wait and this timeout
+        // never fires (#125). The real bound is the wall-clock guard below.
         let manifest = SandboxManifest {
             timeout: Some(Duration::from_secs(10)),
             ..Default::default()
@@ -845,9 +985,32 @@ mod windows_impl {
             ],
             cwd: None,
         };
-        match execute_blocking(&manifest, &cmd) {
-            Ok(out) if out.exit_code == 0 => true,
-            Ok(out) => {
+
+        // Hard wall-clock guard: run the probe on a dedicated thread and bound
+        // the whole thing with `recv_timeout`, so a stalled setup call upstream
+        // of the wait cannot hang the caller. Orphaning the thread on timeout
+        // is safe — `execute_blocking` reaps its own child and the Job Object
+        // carries KILL_ON_JOB_CLOSE, so the child (and its image scan) is torn
+        // down when the blocking call finally returns and drops its handles.
+        const PROBE_WALL_CLOCK: Duration = Duration::from_secs(15);
+        let (tx, rx) = mpsc::channel();
+        if std::thread::Builder::new()
+            .name("appcontainer-probe".into())
+            .spawn(move || {
+                let _ = tx.send(execute_blocking(&manifest, &cmd));
+            })
+            .is_err()
+        {
+            tracing::error!(
+                target: "wcore_sandbox",
+                "could not spawn AppContainer probe thread; sandbox disabled."
+            );
+            return false;
+        }
+
+        match rx.recv_timeout(PROBE_WALL_CLOCK) {
+            Ok(Ok(out)) if out.exit_code == 0 => true,
+            Ok(Ok(out)) => {
                 tracing::error!(
                     target: "wcore_sandbox",
                     exit_code = out.exit_code,
@@ -856,13 +1019,32 @@ mod windows_impl {
                 );
                 false
             }
-            Err(e) => {
+            Ok(Err(e)) => {
                 tracing::error!(
                     target: "wcore_sandbox",
                     error = %e,
                     "AppContainer real-spawn probe failed; sandbox disabled. \
                      If the failure is transient (AV, disk contention), the probe \
-                     will retry on the next is_available() call."
+                     re-runs after the negative-cache TTL."
+                );
+                false
+            }
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                tracing::error!(
+                    target: "wcore_sandbox",
+                    guard_secs = PROBE_WALL_CLOCK.as_secs(),
+                    "AppContainer probe exceeded its hard wall-clock guard — a Win32 \
+                     setup call (CreateAppContainerProfile / CreateProcessAsUserW) \
+                     stalled, most likely an AV image scan or profile-service RPC. \
+                     Treating the sandbox as unavailable for this probe; it re-runs \
+                     after the negative-cache TTL (#125)."
+                );
+                false
+            }
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                tracing::error!(
+                    target: "wcore_sandbox",
+                    "AppContainer probe thread ended without a result; sandbox disabled."
                 );
                 false
             }
