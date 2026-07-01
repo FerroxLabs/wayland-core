@@ -613,6 +613,24 @@ impl ApprovalMode {
             _ => ApprovalMode::Default,
         }
     }
+
+    /// Restrictiveness rank — higher is stricter (asks for more approvals).
+    /// `Default` (ask before everything) is strictest; `Force` (never ask) is
+    /// loosest. Used to clamp project config tighten-only (GHSA-8r7g).
+    fn strictness(self) -> u8 {
+        match self {
+            ApprovalMode::Default => 2,
+            ApprovalMode::AutoEdit => 1,
+            ApprovalMode::Force => 0,
+        }
+    }
+
+    /// True when `self` is at least as strict as `other` (asks for at least as
+    /// many approvals). A project config may only move the posture to a mode
+    /// satisfying this relative to the global config — never looser.
+    pub fn is_at_least_as_strict_as(self, other: ApprovalMode) -> bool {
+        self.strictness() >= other.strictness()
+    }
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, Default)]
@@ -3112,8 +3130,17 @@ fn merge_config_files(global: ConfigFile, project: ConfigFile) -> ConfigFile {
             global.default.max_tokens
         },
         max_turns: project.default.max_turns.or(global.default.max_turns),
-        // Project overrides global only when it set a non-default posture.
-        approval_mode: if project.default.approval_mode != ApprovalMode::default() {
+        // GHSA-8r7g: a project config is untrusted (checked into a cloned
+        // repo). It may move the approval posture STRICTER than global, never
+        // looser. So a project value applies only when it is both non-default
+        // AND at least as strict as global; a project attempt to loosen (e.g.
+        // Force when global is Default/AutoEdit) is ignored and global stands.
+        approval_mode: if project.default.approval_mode != ApprovalMode::default()
+            && project
+                .default
+                .approval_mode
+                .is_at_least_as_strict_as(global.default.approval_mode)
+        {
             project.default.approval_mode
         } else {
             global.default.approval_mode
@@ -3142,10 +3169,48 @@ fn merge_config_files(global: ConfigFile, project: ConfigFile) -> ConfigFile {
 
     // Tools: project overrides global for scalar fields; skills deny/allow are concatenated
     // (global first, then project) — consistent with the hooks merge strategy.
+    //
+    // GHSA-8r7g: `auto_approve` and `allow_no_sandbox` are privilege-granting
+    // flags. A project config (untrusted — travels with a cloned repo) must not
+    // be able to raise them beyond the user's global posture. Clamp both
+    // tighten-only, computed once so BOTH allow_list branches below apply it.
+    //
+    // - auto_approve (bool): a project may never enable it; it takes global's
+    //   value. (A project can't silently grant itself blanket tool approval.)
+    // - allow_no_sandbox (Option<bool>): a project may set it only to a value
+    //   no more permissive than global — `Some(true)` is honored only when
+    //   global already allows no-sandbox; otherwise global stands. Note the
+    //   `sandbox = "none"` backend selector is already fail-closed unless
+    //   allow_no_sandbox is true, so clamping this flag also defangs a project
+    //   setting sandbox="none".
+    let clamped_auto_approve = global.tools.auto_approve;
+    let clamped_allow_no_sandbox = match project.tools.allow_no_sandbox {
+        Some(true) if global.tools.allow_no_sandbox != Some(true) => global.tools.allow_no_sandbox,
+        other => other.or(global.tools.allow_no_sandbox),
+    };
+    // GHSA-8r7g: `allow_list` membership SKIPS the approval gate
+    // (orchestration/mod.rs: `!allow_list.contains(name)` short-circuits
+    // needs_approval), so a project EXPANDING it past global is a per-tool
+    // privilege grant — a cloned repo could add "Bash"/"Write" and auto-execute
+    // them. Clamp tighten-only: the effective list is the project's list
+    // intersected with global's, so a project may only NARROW the approved set,
+    // never approve a tool the user's global config didn't. A project that
+    // doesn't customize the list keeps global's list unchanged.
+    let clamped_allow_list: Vec<String> = if project.tools.allow_list != default_allow_list() {
+        project
+            .tools
+            .allow_list
+            .iter()
+            .filter(|t| global.tools.allow_list.contains(t))
+            .cloned()
+            .collect()
+    } else {
+        global.tools.allow_list.clone()
+    };
     let tools = if project.tools.allow_list != default_allow_list() || project.tools.auto_approve {
         ToolsConfig {
-            auto_approve: global.tools.auto_approve || project.tools.auto_approve,
-            allow_list: project.tools.allow_list,
+            auto_approve: clamped_auto_approve,
+            allow_list: clamped_allow_list,
             skills: SkillsPermissionConfig {
                 deny: [global.tools.skills.deny, project.tools.skills.deny].concat(),
                 allow: [global.tools.skills.allow, project.tools.skills.allow].concat(),
@@ -3159,14 +3224,12 @@ fn merge_config_files(global: ConfigFile, project: ConfigFile) -> ConfigFile {
             env_passthrough: [global.tools.env_passthrough, project.tools.env_passthrough].concat(),
             // #327 — project overrides global for the sandbox toggle.
             sandbox: project.tools.sandbox.or(global.tools.sandbox),
-            allow_no_sandbox: project
-                .tools
-                .allow_no_sandbox
-                .or(global.tools.allow_no_sandbox),
+            // GHSA-8r7g: tighten-only (see clamp above).
+            allow_no_sandbox: clamped_allow_no_sandbox,
         }
     } else {
         ToolsConfig {
-            auto_approve: global.tools.auto_approve || project.tools.auto_approve,
+            auto_approve: clamped_auto_approve,
             allow_list: global.tools.allow_list,
             skills: SkillsPermissionConfig {
                 deny: [global.tools.skills.deny, project.tools.skills.deny].concat(),
@@ -3176,10 +3239,8 @@ fn merge_config_files(global: ConfigFile, project: ConfigFile) -> ConfigFile {
             windows_shell: project.tools.windows_shell.or(global.tools.windows_shell),
             env_passthrough: [global.tools.env_passthrough, project.tools.env_passthrough].concat(),
             sandbox: project.tools.sandbox.or(global.tools.sandbox),
-            allow_no_sandbox: project
-                .tools
-                .allow_no_sandbox
-                .or(global.tools.allow_no_sandbox),
+            // GHSA-8r7g: tighten-only (see clamp above).
+            allow_no_sandbox: clamped_allow_no_sandbox,
         }
     };
 
@@ -4542,6 +4603,159 @@ mod tests {
         );
     }
 
+    // -------------------------------------------------------------------------
+    // GHSA-8r7g: a project config must only tighten the security posture,
+    // never loosen it (a checked-in repo config cannot grant itself privilege).
+    // -------------------------------------------------------------------------
+
+    /// Helper: a global config with the given posture flags.
+    fn cfg_with(
+        approval: ApprovalMode,
+        auto_approve: bool,
+        allow_no_sandbox: Option<bool>,
+    ) -> ConfigFile {
+        ConfigFile {
+            default: DefaultConfig {
+                approval_mode: approval,
+                ..Default::default()
+            },
+            tools: ToolsConfig {
+                auto_approve,
+                allow_no_sandbox,
+                ..Default::default()
+            },
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn ghsa_project_cannot_enable_auto_approve() {
+        let global = cfg_with(ApprovalMode::Default, false, None);
+        let project = cfg_with(ApprovalMode::Default, true, None);
+        let merged = merge_config_files(global, project);
+        assert!(
+            !merged.tools.auto_approve,
+            "a project must not be able to enable auto_approve when global has it off"
+        );
+    }
+
+    #[test]
+    fn ghsa_project_cannot_loosen_approval_mode() {
+        let global = cfg_with(ApprovalMode::Default, false, None);
+        let project = cfg_with(ApprovalMode::Force, false, None);
+        let merged = merge_config_files(global, project);
+        assert_eq!(
+            merged.default.approval_mode,
+            ApprovalMode::Default,
+            "a project Force must not loosen a global Default posture"
+        );
+    }
+
+    #[test]
+    fn ghsa_project_can_tighten_approval_mode() {
+        // Global is loosest (Force); a project may tighten to AutoEdit.
+        let global = cfg_with(ApprovalMode::Force, false, None);
+        let project = cfg_with(ApprovalMode::AutoEdit, false, None);
+        let merged = merge_config_files(global, project);
+        assert_eq!(
+            merged.default.approval_mode,
+            ApprovalMode::AutoEdit,
+            "a project may tighten a looser global posture"
+        );
+    }
+
+    #[test]
+    fn ghsa_project_cannot_enable_allow_no_sandbox() {
+        let global = cfg_with(ApprovalMode::Default, false, None);
+        let project = cfg_with(ApprovalMode::Default, false, Some(true));
+        let merged = merge_config_files(global, project);
+        assert_ne!(
+            merged.tools.allow_no_sandbox,
+            Some(true),
+            "a project must not enable allow_no_sandbox when global does not"
+        );
+    }
+
+    #[test]
+    fn ghsa_project_allow_no_sandbox_honored_when_global_allows() {
+        let global = cfg_with(ApprovalMode::Default, false, Some(true));
+        let project = cfg_with(ApprovalMode::Default, false, Some(true));
+        let merged = merge_config_files(global, project);
+        assert_eq!(
+            merged.tools.allow_no_sandbox,
+            Some(true),
+            "with global consent already granted, the project value is honored"
+        );
+    }
+
+    #[test]
+    fn ghsa_project_can_tighten_allow_no_sandbox() {
+        // Global allows no-sandbox; a project may revoke it (tighten).
+        let global = cfg_with(ApprovalMode::Default, false, Some(true));
+        let project = cfg_with(ApprovalMode::Default, false, Some(false));
+        let merged = merge_config_files(global, project);
+        assert_eq!(
+            merged.tools.allow_no_sandbox,
+            Some(false),
+            "a project may tighten allow_no_sandbox from a permissive global"
+        );
+    }
+
+    #[test]
+    fn ghsa_project_cannot_expand_allow_list() {
+        // allow_list membership SKIPS approval, so adding a tool is a privilege
+        // grant. A project must not add a tool global didn't already approve.
+        let global = ConfigFile {
+            tools: ToolsConfig {
+                allow_list: vec!["Read".into(), "Grep".into()],
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let project = ConfigFile {
+            tools: ToolsConfig {
+                allow_list: vec!["Read".into(), "Bash".into(), "Write".into()],
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let merged = merge_config_files(global, project);
+        assert!(
+            !merged.tools.allow_list.contains(&"Bash".to_string()),
+            "a project must not add Bash to the approval-skip list"
+        );
+        assert!(!merged.tools.allow_list.contains(&"Write".to_string()));
+        assert!(
+            merged.tools.allow_list.contains(&"Read".to_string()),
+            "a tool approved by both survives"
+        );
+    }
+
+    #[test]
+    fn ghsa_project_can_narrow_allow_list() {
+        // A project may remove tools from the approved set (tighten).
+        let global = ConfigFile {
+            tools: ToolsConfig {
+                allow_list: vec!["Read".into(), "Grep".into(), "Glob".into()],
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let project = ConfigFile {
+            tools: ToolsConfig {
+                allow_list: vec!["Read".into()],
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let merged = merge_config_files(global, project);
+        assert_eq!(
+            merged.tools.allow_list,
+            vec!["Read".to_string()],
+            "a project may narrow the approved set to a subset of global"
+        );
+    }
+
     #[test]
     fn p5_14_skills_deny_allow_deserialized() {
         let toml_str = r#"
@@ -5229,8 +5443,16 @@ enabled = false
 
     #[test]
     fn approval_mode_parses_from_toml_and_resolves_onto_config() {
-        // The full path: `[default] approval_mode` in TOML → resolved
+        // The full path: `[default] approval_mode` in TOML → merge → resolved
         // Config.approval_mode (what the TUI boot consumer reads).
+        //
+        // GHSA-8r7g: a PROJECT config is untrusted and may only TIGHTEN. Here
+        // there is no global override, so global is the strict default
+        // (`Default`); a project asking for the looser `auto-edit` is a
+        // loosening attempt and is clamped back to `Default`. (Before the fix
+        // this resolved to `AutoEdit` — a checked-in repo silently reducing
+        // approval friction.) A user who wants auto-edit sets it in their own
+        // GLOBAL config or via the CLI, which is explicit local consent.
         let tmp = tempfile::tempdir().unwrap();
         let project = tmp.path().join(".wayland-core.toml");
         std::fs::write(&project, "[default]\napproval_mode = \"auto-edit\"\n").unwrap();
@@ -5247,7 +5469,11 @@ enabled = false
             project_dir: Some(tmp.path().to_path_buf()),
         };
         let config = Config::resolve(&cli).unwrap();
-        assert_eq!(config.approval_mode, ApprovalMode::AutoEdit);
+        assert_eq!(
+            config.approval_mode,
+            ApprovalMode::Default,
+            "a project must not loosen approval_mode below the (default-strict) global"
+        );
     }
 
     #[test]
