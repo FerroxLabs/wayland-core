@@ -23,16 +23,34 @@ pub struct SkillHooksConfig {
 /// Returns None when:
 /// - `hooks_raw` is None
 /// - skill source is MCP (security boundary)
+/// - skill source is Project/Legacy (repo-local, untrusted) and the operator
+///   did NOT opt in via the global `[hooks] trust_project_hooks` (GHSA-8r7g H-1)
 /// - the JSON is not an object (logs warning)
 /// - after parsing all events, every vec is empty (D-5)
 pub fn parse_skill_hooks(
     hooks_raw: Option<&serde_json::Value>,
     skill_name: &str,
     source: SkillSource,
+    trust_project_hooks: bool,
 ) -> Option<SkillHooksConfig> {
     // MCP skills may not register hooks (security boundary).
     if source == SkillSource::Mcp {
         eprintln!("[skill:{skill_name}] MCP source — hooks ignored");
+        return None;
+    }
+
+    // GHSA-8r7g H-1: a `Project` skill (`.wayland-core/skills/`) or a `Legacy`
+    // command (`.wayland-core/commands/`) travels with a cloned repo, so its
+    // frontmatter hooks — which run as child processes at first tool use — are
+    // arbitrary code execution from untrusted repo content. Gate them behind the
+    // SAME operator opt-in as project *config* hooks (`[hooks] trust_project_hooks`
+    // in the GLOBAL config); a repo can never self-authorize. Default-deny.
+    if matches!(source, SkillSource::Project | SkillSource::Legacy) && !trust_project_hooks {
+        eprintln!(
+            "[skill:{skill_name}] project/legacy source — frontmatter hooks ignored; a project \
+             skill hook runs an arbitrary command, so it is not executed unless the operator sets \
+             `[hooks] trust_project_hooks = true` in the GLOBAL config (GHSA-8r7g)"
+        );
         return None;
     }
 
@@ -199,7 +217,7 @@ mod tests {
             "PostToolUse": [{"matcher": "Read", "hooks": [{"type": "command", "command": "echo post"}]}],
             "Stop": [{"hooks": [{"type": "command", "command": "echo stop"}]}]
         });
-        let result = parse_skill_hooks(Some(&raw), "my-skill", SkillSource::User);
+        let result = parse_skill_hooks(Some(&raw), "my-skill", SkillSource::User, false);
         let config = result.expect("TC-11.1: should return Some");
         assert_eq!(config.pre_tool_use.len(), 1);
         assert_eq!(config.post_tool_use.len(), 1);
@@ -211,7 +229,7 @@ mod tests {
     // -----------------------------------------------------------------------
     #[test]
     fn tc_11_2_none_hooks_raw_returns_none() {
-        let result = parse_skill_hooks(None, "my-skill", SkillSource::User);
+        let result = parse_skill_hooks(None, "my-skill", SkillSource::User, false);
         assert!(result.is_none(), "TC-11.2: None input must return None");
     }
 
@@ -221,7 +239,7 @@ mod tests {
     #[test]
     fn tc_11_3_mcp_source_returns_none() {
         let raw = json!({"PreToolUse": [{"hooks": [{"type": "command", "command": "echo x"}]}]});
-        let result = parse_skill_hooks(Some(&raw), "mcp-skill", SkillSource::Mcp);
+        let result = parse_skill_hooks(Some(&raw), "mcp-skill", SkillSource::Mcp, false);
         assert!(result.is_none(), "TC-11.3: MCP source must return None");
     }
 
@@ -231,7 +249,7 @@ mod tests {
     #[test]
     fn tc_11_4_prompt_type_skipped_returns_none() {
         let raw = json!({"PreToolUse": [{"hooks": [{"type": "prompt", "command": "echo x"}]}]});
-        let result = parse_skill_hooks(Some(&raw), "skill", SkillSource::User);
+        let result = parse_skill_hooks(Some(&raw), "skill", SkillSource::User, false);
         assert!(result.is_none(), "TC-11.4: prompt type only → None");
     }
 
@@ -241,7 +259,7 @@ mod tests {
     #[test]
     fn tc_11_5_http_type_skipped_returns_none() {
         let raw = json!({"PreToolUse": [{"hooks": [{"type": "http", "url": "http://x"}]}]});
-        let result = parse_skill_hooks(Some(&raw), "skill", SkillSource::User);
+        let result = parse_skill_hooks(Some(&raw), "skill", SkillSource::User, false);
         assert!(result.is_none(), "TC-11.5: http type only → None");
     }
 
@@ -251,7 +269,7 @@ mod tests {
     #[test]
     fn tc_11_6_agent_type_skipped_returns_none() {
         let raw = json!({"PreToolUse": [{"hooks": [{"type": "agent", "agent": "foo"}]}]});
-        let result = parse_skill_hooks(Some(&raw), "skill", SkillSource::User);
+        let result = parse_skill_hooks(Some(&raw), "skill", SkillSource::User, false);
         assert!(result.is_none(), "TC-11.6: agent type only → None");
     }
 
@@ -261,7 +279,7 @@ mod tests {
     #[test]
     fn tc_11_7_unknown_event_skipped_returns_none() {
         let raw = json!({"SessionStart": [{"hooks": [{"type": "command", "command": "echo x"}]}]});
-        let result = parse_skill_hooks(Some(&raw), "skill", SkillSource::User);
+        let result = parse_skill_hooks(Some(&raw), "skill", SkillSource::User, false);
         assert!(result.is_none(), "TC-11.7: unknown event only → None");
     }
 
@@ -274,7 +292,7 @@ mod tests {
             "PreToolUse": [{"hooks": [{"type": "command", "command": "echo pre"}]}],
             "SessionStart": [{"hooks": [{"type": "command", "command": "echo x"}]}]
         });
-        let result = parse_skill_hooks(Some(&raw), "skill", SkillSource::User);
+        let result = parse_skill_hooks(Some(&raw), "skill", SkillSource::User, false);
         let config = result.expect("TC-11.8: known event present → Some");
         assert_eq!(config.pre_tool_use.len(), 1);
         assert_eq!(config.stop.len(), 0);
@@ -286,7 +304,7 @@ mod tests {
     #[test]
     fn tc_11_9_missing_command_field_returns_none() {
         let raw = json!({"PreToolUse": [{"hooks": [{"type": "command"}]}]});
-        let result = parse_skill_hooks(Some(&raw), "skill", SkillSource::User);
+        let result = parse_skill_hooks(Some(&raw), "skill", SkillSource::User, false);
         assert!(result.is_none(), "TC-11.9: missing command field → None");
     }
 
@@ -296,7 +314,7 @@ mod tests {
     #[test]
     fn tc_11_10_array_input_returns_none() {
         let raw = json!([1, 2, 3]);
-        let result = parse_skill_hooks(Some(&raw), "skill", SkillSource::User);
+        let result = parse_skill_hooks(Some(&raw), "skill", SkillSource::User, false);
         assert!(result.is_none(), "TC-11.10: array input must return None");
     }
 
@@ -306,7 +324,7 @@ mod tests {
     #[test]
     fn tc_11_11_null_json_returns_none() {
         let raw = json!(null);
-        let result = parse_skill_hooks(Some(&raw), "skill", SkillSource::User);
+        let result = parse_skill_hooks(Some(&raw), "skill", SkillSource::User, false);
         assert!(result.is_none(), "TC-11.11: null JSON must return None");
     }
 
@@ -316,7 +334,7 @@ mod tests {
     #[test]
     fn tc_11_12_absent_matcher_is_none() {
         let raw = json!({"PreToolUse": [{"hooks": [{"type": "command", "command": "echo x"}]}]});
-        let config = parse_skill_hooks(Some(&raw), "skill", SkillSource::User)
+        let config = parse_skill_hooks(Some(&raw), "skill", SkillSource::User, false)
             .expect("TC-11.12: should return Some");
         assert!(
             config.pre_tool_use[0].matcher.is_none(),
@@ -330,7 +348,7 @@ mod tests {
     #[test]
     fn tc_11_13_present_matcher_preserved() {
         let raw = json!({"PreToolUse": [{"matcher": "Bash", "hooks": [{"type": "command", "command": "echo x"}]}]});
-        let config = parse_skill_hooks(Some(&raw), "skill", SkillSource::User)
+        let config = parse_skill_hooks(Some(&raw), "skill", SkillSource::User, false)
             .expect("TC-11.13: should return Some");
         assert_eq!(config.pre_tool_use[0].matcher.as_deref(), Some("Bash"));
     }
@@ -341,7 +359,7 @@ mod tests {
     #[test]
     fn tc_11_14_timeout_preserved() {
         let raw = json!({"PreToolUse": [{"hooks": [{"type": "command", "command": "echo x", "timeout": 5}]}]});
-        let config = parse_skill_hooks(Some(&raw), "skill", SkillSource::User)
+        let config = parse_skill_hooks(Some(&raw), "skill", SkillSource::User, false)
             .expect("TC-11.14: should return Some");
         assert_eq!(config.pre_tool_use[0].timeout_secs, Some(5));
     }
@@ -352,7 +370,7 @@ mod tests {
     #[test]
     fn tc_11_15_absent_timeout_is_none() {
         let raw = json!({"PreToolUse": [{"hooks": [{"type": "command", "command": "echo x"}]}]});
-        let config = parse_skill_hooks(Some(&raw), "skill", SkillSource::User)
+        let config = parse_skill_hooks(Some(&raw), "skill", SkillSource::User, false)
             .expect("TC-11.15: should return Some");
         assert!(config.pre_tool_use[0].timeout_secs.is_none());
     }
@@ -363,17 +381,31 @@ mod tests {
     #[test]
     fn tc_11_16_non_mcp_sources_parse_successfully() {
         let raw = json!({"PreToolUse": [{"hooks": [{"type": "command", "command": "echo x"}]}]});
+        // GHSA-8r7g H-1: operator-provisioned sources (User's own config skills,
+        // Managed installs, Bundled built-ins) run frontmatter hooks regardless
+        // of the project-trust flag.
         for source in [
-            SkillSource::Project,
+            SkillSource::User,
             SkillSource::Managed,
             SkillSource::Bundled,
-            SkillSource::Legacy,
         ] {
-            let result = parse_skill_hooks(Some(&raw), "skill", source);
             assert!(
-                result.is_some(),
-                "TC-11.16: source {:?} should return Some",
-                source
+                parse_skill_hooks(Some(&raw), "skill", source, false).is_some(),
+                "operator-provisioned source {source:?} must run its hooks"
+            );
+        }
+        // A Project skill (`.wayland-core/skills/`) or a Legacy command
+        // (`.wayland-core/commands/`) travels with a cloned repo: its hooks are
+        // arbitrary code execution and MUST be default-denied, then run only
+        // with the operator's global opt-in.
+        for source in [SkillSource::Project, SkillSource::Legacy] {
+            assert!(
+                parse_skill_hooks(Some(&raw), "skill", source, false).is_none(),
+                "repo-local source {source:?} must be gated by default (GHSA-8r7g H-1)"
+            );
+            assert!(
+                parse_skill_hooks(Some(&raw), "skill", source, true).is_some(),
+                "repo-local source {source:?} runs with global trust_project_hooks"
             );
         }
     }
@@ -389,7 +421,7 @@ mod tests {
                 {"type": "prompt", "prompt": "p"}
             ]}]
         });
-        let config = parse_skill_hooks(Some(&raw), "skill", SkillSource::User)
+        let config = parse_skill_hooks(Some(&raw), "skill", SkillSource::User, false)
             .expect("TC-11.17: command present → Some");
         assert_eq!(config.pre_tool_use.len(), 1);
         assert_eq!(config.pre_tool_use[0].command, "echo x");
@@ -401,7 +433,7 @@ mod tests {
     #[test]
     fn tc_11_18_empty_object_returns_none() {
         let raw = json!({});
-        let result = parse_skill_hooks(Some(&raw), "skill", SkillSource::User);
+        let result = parse_skill_hooks(Some(&raw), "skill", SkillSource::User, false);
         assert!(result.is_none(), "TC-11.18: empty object → None");
     }
 
@@ -414,7 +446,7 @@ mod tests {
             "PreToolUse": [{"hooks": [{"type": "command", "command": "echo pre"}]}],
             "PostToolUse": [{"hooks": [{"type": "prompt", "prompt": "p"}]}]
         });
-        let config = parse_skill_hooks(Some(&raw), "skill", SkillSource::User)
+        let config = parse_skill_hooks(Some(&raw), "skill", SkillSource::User, false)
             .expect("TC-11.19: pre has command → Some");
         assert_eq!(config.pre_tool_use.len(), 1);
         assert_eq!(config.post_tool_use.len(), 0);
@@ -582,7 +614,7 @@ mod tests {
                 {"hooks": [{"type": "command", "command": "echo stop-2"}]}
             ]
         });
-        let config = parse_skill_hooks(Some(&raw), "skill", SkillSource::User)
+        let config = parse_skill_hooks(Some(&raw), "skill", SkillSource::User, false)
             .expect("TC-11.50: should return Some");
         assert_eq!(config.pre_tool_use.len(), 2);
         assert_eq!(config.post_tool_use.len(), 2);
@@ -613,7 +645,7 @@ mod tests {
     #[test]
     fn tc_11_52_empty_command_string_succeeds() {
         let raw = json!({"PreToolUse": [{"hooks": [{"type": "command", "command": ""}]}]});
-        let config = parse_skill_hooks(Some(&raw), "skill", SkillSource::User)
+        let config = parse_skill_hooks(Some(&raw), "skill", SkillSource::User, false)
             .expect("TC-11.52: empty command string should still parse");
         assert_eq!(config.pre_tool_use[0].command, "");
     }
@@ -643,7 +675,7 @@ mod tests {
     #[test]
     fn tc_11_54_string_input_returns_none() {
         let raw = json!("not an object");
-        let result = parse_skill_hooks(Some(&raw), "skill", SkillSource::User);
+        let result = parse_skill_hooks(Some(&raw), "skill", SkillSource::User, false);
         assert!(result.is_none(), "TC-11.54: string input must return None");
     }
 }
