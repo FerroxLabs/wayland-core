@@ -8,7 +8,7 @@ use crate::compact::CompactConfig;
 use crate::compat::ProviderCompat;
 use crate::debug::DebugConfig;
 use crate::file_cache::FileCacheConfig;
-use crate::hooks::HooksConfig;
+use crate::hooks::{HookDef, HooksConfig};
 use crate::plan::PlanConfig;
 use wcore_types::llm::ThinkingConfig;
 
@@ -3264,12 +3264,44 @@ fn merge_config_files(global: ConfigFile, project: ConfigFile) -> ConfigFile {
     };
 
     // Hooks: combine hooks from both configs (project hooks appended after global)
+    // GHSA-8r7g: a project `.wayland-core.toml` is untrusted (travels with a
+    // cloned repo), and every `HookDef.command` runs as a child process — so
+    // merging project-defined hooks is arbitrary code execution from repo
+    // content. Only run project hooks when the OPERATOR opted in via their
+    // GLOBAL config (`[hooks] trust_project_hooks = true`); a project cannot
+    // authorize its own hooks (we read `global.hooks.trust_project_hooks`, never
+    // the project's). Default-deny: project hooks are dropped. Warn (not
+    // silently) so a suppressed legitimate hook is discoverable.
+    let trust_project_hooks = global.hooks.trust_project_hooks;
+    if !trust_project_hooks {
+        let dropped = project.hooks.pre_tool_use.len()
+            + project.hooks.post_tool_use.len()
+            + project.hooks.stop.len();
+        if dropped > 0 {
+            tracing::warn!(
+                dropped,
+                "ignored {dropped} hook(s) defined in the project config — a project \
+                 hook runs an arbitrary command, so it is not executed unless the \
+                 operator sets `[hooks] trust_project_hooks = true` in the GLOBAL config \
+                 (GHSA-8r7g)"
+            );
+        }
+    }
+    let merge_hooks = |g: Vec<HookDef>, p: Vec<HookDef>| -> Vec<HookDef> {
+        if trust_project_hooks {
+            [g, p].concat()
+        } else {
+            g
+        }
+    };
     let hooks = HooksConfig {
-        pre_tool_use: [global.hooks.pre_tool_use, project.hooks.pre_tool_use].concat(),
-        post_tool_use: [global.hooks.post_tool_use, project.hooks.post_tool_use].concat(),
-        stop: [global.hooks.stop, project.hooks.stop].concat(),
+        pre_tool_use: merge_hooks(global.hooks.pre_tool_use, project.hooks.pre_tool_use),
+        post_tool_use: merge_hooks(global.hooks.post_tool_use, project.hooks.post_tool_use),
+        stop: merge_hooks(global.hooks.stop, project.hooks.stop),
         // Default ON; an explicit opt-out in either layer wins.
         dispatch_enabled: global.hooks.dispatch_enabled && project.hooks.dispatch_enabled,
+        // Operator-owned; a project value can never re-enable project hooks.
+        trust_project_hooks,
     };
 
     // MCP: merge servers from both configs, project overrides global
@@ -4753,6 +4785,102 @@ mod tests {
             merged.tools.allow_list,
             vec!["Read".to_string()],
             "a project may narrow the approved set to a subset of global"
+        );
+    }
+
+    // -------------------------------------------------------------------------
+    // GHSA-8r7g: project-defined hooks run arbitrary commands, so they are
+    // default-denied and require an operator opt-in from the GLOBAL config.
+    // -------------------------------------------------------------------------
+
+    fn test_hook(name: &str) -> HookDef {
+        HookDef {
+            name: name.into(),
+            tool_match: vec![],
+            file_match: vec![],
+            command: "echo hi".into(),
+            timeout_ms: 30_000,
+        }
+    }
+
+    #[test]
+    fn ghsa_project_hooks_dropped_by_default() {
+        let global = ConfigFile::default(); // operator did not opt in
+        let project = ConfigFile {
+            hooks: HooksConfig {
+                pre_tool_use: vec![test_hook("evil")],
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let merged = merge_config_files(global, project);
+        assert!(
+            merged.hooks.pre_tool_use.is_empty(),
+            "a project hook (arbitrary command) must not run without operator opt-in"
+        );
+    }
+
+    #[test]
+    fn ghsa_project_hooks_run_when_operator_opts_in() {
+        let global = ConfigFile {
+            hooks: HooksConfig {
+                trust_project_hooks: true,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let project = ConfigFile {
+            hooks: HooksConfig {
+                pre_tool_use: vec![test_hook("lint")],
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let merged = merge_config_files(global, project);
+        assert_eq!(
+            merged.hooks.pre_tool_use.len(),
+            1,
+            "with the operator's global opt-in, project hooks run"
+        );
+    }
+
+    #[test]
+    fn ghsa_project_cannot_self_authorize_hooks() {
+        let global = ConfigFile::default(); // operator did NOT opt in
+        let project = ConfigFile {
+            hooks: HooksConfig {
+                pre_tool_use: vec![test_hook("evil")],
+                trust_project_hooks: true, // project tries to authorize itself
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let merged = merge_config_files(global, project);
+        assert!(
+            merged.hooks.pre_tool_use.is_empty(),
+            "a project cannot authorize its own hooks by setting trust_project_hooks"
+        );
+        assert!(
+            !merged.hooks.trust_project_hooks,
+            "the project's trust flag is ignored; only the global value is honored"
+        );
+    }
+
+    #[test]
+    fn ghsa_global_hooks_always_run() {
+        let global = ConfigFile {
+            hooks: HooksConfig {
+                pre_tool_use: vec![test_hook("global-lint")],
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let project = ConfigFile::default();
+        let merged = merge_config_files(global, project);
+        assert_eq!(
+            merged.hooks.pre_tool_use.len(),
+            1,
+            "the operator's own global hooks always run"
         );
     }
 
