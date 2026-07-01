@@ -456,6 +456,14 @@ impl OpenAIProvider {
             merge_consecutive_assistant(&mut result);
         }
 
+        // An assistant message must carry `content` or `tool_calls`. The orphan
+        // and empty-id passes above can strip the last tool_call from a
+        // tool-call-only (text-less) assistant turn — leaving `{"role":
+        // "assistant"}`, which native DeepSeek 400s ("content or tool_calls
+        // must be set"). Stamp an empty-string content in that case so the
+        // request stays valid (FerroxLabs/wayland-core#123).
+        ensure_assistant_content_present(&mut result);
+
         result
     }
 
@@ -1073,6 +1081,28 @@ fn clean_orphaned_tool_calls(messages: &mut [Value]) {
                 // children). `as_object_mut` is therefore always Some.
                 msg.as_object_mut().unwrap().remove("tool_calls");
             }
+        }
+    }
+}
+
+/// Guarantee every assistant message carries `content` or `tool_calls`.
+///
+/// `build_messages` omits `content` for a tool-call-only assistant turn (its
+/// text is empty), and the orphan/empty-id cleanup passes can then strip that
+/// turn's only `tool_calls` entry — leaving `{"role":"assistant"}` with
+/// neither field. Strict OpenAI endpoints reject it: native DeepSeek returns
+/// HTTP 400 "Invalid assistant message: content or tool_calls must be set".
+/// Stamping an empty-string content (the same value `build_messages` uses for
+/// a genuinely empty assistant turn) keeps the request valid without inventing
+/// text (FerroxLabs/wayland-core#123).
+fn ensure_assistant_content_present(messages: &mut [Value]) {
+    for msg in messages.iter_mut() {
+        if msg["role"].as_str() == Some("assistant")
+            && msg.get("tool_calls").is_none()
+            && !msg["content"].is_string()
+            && let Some(obj) = msg.as_object_mut()
+        {
+            obj.insert("content".to_string(), json!(""));
         }
     }
 }
@@ -4162,6 +4192,47 @@ mod tests {
                 assert!(
                     matched && !id.is_empty(),
                     "orphaned tool result must not reach the provider: {m}"
+                );
+            }
+        }
+    }
+
+    /// #123: when the orphan cleanup strips a tool-call-only assistant's only
+    /// `tool_calls` entry, the resulting message must still carry `content`
+    /// (native DeepSeek 400s on an assistant with neither content nor
+    /// tool_calls). Here the assistant's tool call is never answered, so
+    /// `clean_orphaned_tool_calls` removes it.
+    #[test]
+    fn stripped_tool_call_leaves_valid_assistant_content() {
+        let messages = vec![
+            Message::new(Role::User, vec![ContentBlock::Text { text: "go".into() }]),
+            // Text-less assistant turn: a single tool call, no answering result.
+            Message::new(
+                Role::Assistant,
+                vec![ContentBlock::ToolUse {
+                    id: "call_unanswered".into(),
+                    name: "get".into(),
+                    input: json!({}),
+                    extra: None,
+                }],
+            ),
+            Message::new(
+                Role::User,
+                vec![ContentBlock::Text {
+                    text: "never answered".into(),
+                }],
+            ),
+        ];
+
+        let result = OpenAIProvider::build_messages(&messages, "", &openai_compat());
+
+        for m in &result {
+            if m["role"] == "assistant" {
+                let has_calls = m["tool_calls"].as_array().is_some_and(|a| !a.is_empty());
+                let has_content = m["content"].is_string();
+                assert!(
+                    has_calls || has_content,
+                    "assistant must carry content or tool_calls (would 400 DeepSeek): {m}"
                 );
             }
         }
