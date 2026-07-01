@@ -62,11 +62,13 @@ pub fn set_config_model_swap() -> Scenario {
         )
 }
 
-/// SetMode: send `set_mode { mode: "force" }` before the turn, assert the
-/// engine acked `"mode updated: force"` and emitted `config_changed` carrying
-/// `current_mode: "force"`.
+/// GHSA-8r7g: a wire peer must NOT be able to escalate to Force. This runs the
+/// real binary WITHOUT any local-operator opt-in (no --force / no
+/// WAYLAND_ALLOW_WIRE_FORCE), sends `set_mode { mode: "force" }` over the
+/// protocol, and asserts the engine REFUSES it (rather than acking
+/// `mode updated: force`). The plain text turn still completes normally.
 pub fn set_mode_force() -> Scenario {
-    Scenario::new("protocol_set_mode_force", Category::Coverage)
+    Scenario::new("protocol_set_mode_force_refused", Category::Coverage)
         .provider(ProviderChoice::ForceDeepSeek)
         .max_total_time(Duration::from_secs(60))
         .max_total_cost_usd(0.02)
@@ -75,10 +77,8 @@ pub fn set_mode_force() -> Scenario {
                 .max_time(Duration::from_secs(45))
                 .max_steps(2)
                 .pre_command(TurnCommand::SetMode { mode: "force" })
-                // Info ack from the standalone set_mode arm.
-                .assert(Assertion::InfoContains("mode updated: force"))
-                // config_changed capabilities reflect the new current_mode.
-                .assert(Assertion::InfoContains("\"current_mode\":\"force\"")),
+                // The wire Force request is refused for lack of a local opt-in.
+                .assert(Assertion::InfoContains("'force' refused")),
         )
 }
 

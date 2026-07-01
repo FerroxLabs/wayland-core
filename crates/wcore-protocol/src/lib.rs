@@ -10,6 +10,7 @@ use std::collections::HashMap;
 use std::collections::HashSet;
 use std::sync::Arc;
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use tokio::sync::oneshot;
@@ -174,6 +175,14 @@ pub struct ToolApprovalManager {
     /// `auto_approved`, which is whole-category (bare `Always`).
     auto_approved_prefixes: Mutex<HashMap<String, Vec<String>>>,
     session_mode: Mutex<SessionMode>,
+    /// GHSA-8r7g — local-operator opt-in gating `SessionMode::Force` requested
+    /// over the protocol. `Force` auto-approves every tool, so an untrusted
+    /// wire peer (remote ACP, or model-influenced data reaching the command
+    /// parser) must NOT be able to set it. Default `false`: a wire `SetMode`
+    /// requesting `Force` (or its `yolo` / `dangerously_*` aliases) is refused
+    /// unless a local operator opted in at launch. Local, in-process surfaces
+    /// (the interactive TUI) call [`set_mode`] directly and are unaffected.
+    allow_wire_force: AtomicBool,
     /// Per-request TTL. Defaults to [`DEFAULT_APPROVAL_TTL`]; tests use
     /// a sub-second TTL via [`ToolApprovalManager::with_ttl`].
     ttl: Duration,
@@ -193,6 +202,7 @@ impl ToolApprovalManager {
             auto_approved_tool_names: Mutex::new(HashSet::new()),
             auto_approved_prefixes: Mutex::new(HashMap::new()),
             session_mode: Mutex::new(SessionMode::Default),
+            allow_wire_force: AtomicBool::new(false),
             ttl,
         }
     }
@@ -480,10 +490,37 @@ impl ToolApprovalManager {
     }
 
     /// Set the session approval mode. Takes effect immediately.
+    ///
+    /// This is the LOCAL, trusted entry point (interactive TUI, CLI). It is
+    /// unrestricted by design. Protocol/wire callers must use
+    /// [`set_mode_from_wire`](Self::set_mode_from_wire) instead.
     pub fn set_mode(&self, mode: SessionMode) {
         if let Ok(mut current) = self.session_mode.lock() {
             *current = mode;
         }
+    }
+
+    /// GHSA-8r7g — grant or revoke the local-operator opt-in that lets a
+    /// protocol peer request [`SessionMode::Force`]. Set from an explicit
+    /// launch-time signal (the `--force` flag / `WAYLAND_ALLOW_WIRE_FORCE`
+    /// env), never from wire data.
+    pub fn set_allow_wire_force(&self, allow: bool) {
+        self.allow_wire_force.store(allow, Ordering::Relaxed);
+    }
+
+    /// Apply a session mode requested over the PROTOCOL (an untrusted wire
+    /// peer). `Force` auto-approves every tool, so it is honored only when a
+    /// local operator opted in via [`set_allow_wire_force`](Self::set_allow_wire_force);
+    /// otherwise the request is refused and the current mode is left unchanged.
+    /// Non-`Force` modes are always applied. Returns `true` when the requested
+    /// mode was applied, `false` when a `Force` request was refused (so the
+    /// caller can surface a diagnostic).
+    pub fn set_mode_from_wire(&self, mode: SessionMode) -> bool {
+        if mode == SessionMode::Force && !self.allow_wire_force.load(Ordering::Relaxed) {
+            return false;
+        }
+        self.set_mode(mode);
+        true
     }
 
     /// Return the current session mode as a string for capability reporting.
@@ -545,6 +582,36 @@ mod tests {
     fn default_mode_current_mode_string() {
         let mgr = ToolApprovalManager::new();
         assert_eq!(mgr.current_mode(), "default");
+    }
+
+    // --- GHSA-8r7g: wire Force requires a local-operator opt-in ---
+
+    #[test]
+    fn ghsa_wire_force_refused_without_local_opt_in() {
+        let mgr = ToolApprovalManager::new();
+        // A wire peer cannot escalate to Force by default.
+        assert!(!mgr.set_mode_from_wire(SessionMode::Force));
+        assert_eq!(mgr.current_mode(), "default");
+        // Non-Force modes are always applied over the wire.
+        assert!(mgr.set_mode_from_wire(SessionMode::AutoEdit));
+        assert_eq!(mgr.current_mode(), "auto_edit");
+    }
+
+    #[test]
+    fn ghsa_wire_force_allowed_after_local_opt_in() {
+        let mgr = ToolApprovalManager::new();
+        mgr.set_allow_wire_force(true);
+        assert!(mgr.set_mode_from_wire(SessionMode::Force));
+        assert_eq!(mgr.current_mode(), "force");
+    }
+
+    #[test]
+    fn ghsa_local_set_mode_force_is_unrestricted() {
+        // The local (in-process) path — used by the interactive TUI — is never
+        // gated by the wire opt-in.
+        let mgr = ToolApprovalManager::new();
+        mgr.set_mode(SessionMode::Force);
+        assert_eq!(mgr.current_mode(), "force");
     }
 
     // --- SessionMode: auto_edit mode ---
