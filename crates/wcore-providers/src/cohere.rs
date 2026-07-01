@@ -31,6 +31,7 @@ use wcore_types::message::{
 use crate::key_rotation::{KeyPool, split_keys};
 use crate::registry::{ProviderFactory, ProviderRegistry, RegistryError};
 use crate::retry::builder_send_with_retry;
+use crate::tool_name::{decode_tool_name, encode_tool_name};
 use crate::{
     LlmProvider, ProviderError, dump_request_body, dump_response_chunk, reset_response_dump,
 };
@@ -249,7 +250,11 @@ pub(crate) fn build_cohere_body(req: &LlmRequest, model: &str) -> Value {
             .iter()
             .map(|t| {
                 json!({
-                    "name": t.name.clone(),
+                    // #129: encode through the shared canonical codec so an MCP
+                    // tool name carrying an out-of-charset char (`.`/`:`/space/
+                    // unicode from a server id) or over the length limit does not
+                    // 400 the Cohere function-name validator and abort the turn.
+                    "name": encode_tool_name(&t.name),
                     "description": t.description.clone(),
                     "parameter_definitions": t.input_schema.clone(),
                 })
@@ -389,11 +394,10 @@ fn parse_cohere_event(json: &Value, usage: &mut TokenUsage) -> Vec<LlmEvent> {
         "tool-calls-generation" => {
             if let Some(arr) = json.get("tool_calls").and_then(|v| v.as_array()) {
                 for tc in arr {
-                    let name = tc
-                        .get("name")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("")
-                        .to_string();
+                    // #129: decode the canonical wire name back to the real
+                    // tool name so the call routes to the right MCP tool.
+                    let name =
+                        decode_tool_name(tc.get("name").and_then(|v| v.as_str()).unwrap_or(""));
                     let input = tc.get("parameters").cloned().unwrap_or(Value::Null);
                     let id: ToolUseId = tc
                         .get("id")
@@ -570,6 +574,62 @@ mod tests {
         let body = build_cohere_body(&req, "command-r");
         assert_eq!(body["message"], "");
         assert_eq!(body["chat_history"].as_array().unwrap().len(), 1);
+    }
+
+    /// #129: an MCP tool name with out-of-charset characters must be encoded
+    /// through the shared codec on the way to Cohere (so its function-name
+    /// validator doesn't 400) and decoded back on the return path (so the call
+    /// routes to the real tool). Round-trips end to end through the two Cohere
+    /// sites.
+    #[test]
+    fn encodes_and_decodes_mcp_tool_names_round_trip() {
+        use wcore_types::tool::ToolDef;
+        // Server id + dotted/colon tool name — invalid as a raw function name.
+        let raw = "mcp__github.server:list-issues";
+
+        let req = LlmRequest {
+            model: "command-r".into(),
+            tools: vec![ToolDef {
+                name: raw.into(),
+                description: "d".into(),
+                input_schema: json!({"type": "object"}),
+                deferred: false,
+                server: None,
+            }],
+            max_tokens: 16,
+            ..Default::default()
+        };
+        let body = build_cohere_body(&req, "command-r");
+        let emitted = body["tools"][0]["name"].as_str().unwrap();
+        assert_eq!(emitted, encode_tool_name(raw));
+        assert_ne!(
+            emitted, raw,
+            "an out-of-charset name must be encoded on the wire"
+        );
+        assert!(
+            emitted
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-'),
+            "encoded name must be charset-safe: {emitted}"
+        );
+
+        // The model returns a tool call under the ENCODED name; it must decode
+        // back to the real MCP tool name.
+        let ev = json!({
+            "event_type": "tool-calls-generation",
+            "tool_calls": [{ "name": emitted, "parameters": {} }],
+        });
+        let mut usage = TokenUsage::default();
+        let events = parse_cohere_event(&ev, &mut usage);
+        let name = events.iter().find_map(|e| match e {
+            LlmEvent::ToolUse { name, .. } => Some(name.clone()),
+            _ => None,
+        });
+        assert_eq!(
+            name.as_deref(),
+            Some(raw),
+            "decoded name must route to the real MCP tool"
+        );
     }
 
     #[test]
