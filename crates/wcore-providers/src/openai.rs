@@ -456,6 +456,14 @@ impl OpenAIProvider {
             merge_consecutive_assistant(&mut result);
         }
 
+        // An assistant message must carry `content` or `tool_calls`. The orphan
+        // and empty-id passes above can strip the last tool_call from a
+        // tool-call-only (text-less) assistant turn — leaving `{"role":
+        // "assistant"}`, which native DeepSeek 400s ("content or tool_calls
+        // must be set"). Stamp an empty-string content in that case so the
+        // request stays valid (FerroxLabs/wayland-core#123).
+        ensure_assistant_content_present(&mut result);
+
         result
     }
 
@@ -977,14 +985,20 @@ fn clean_orphaned_tool_results(messages: &mut Vec<Value>) {
         .collect();
 
     messages.retain(|m| {
-        if m["role"].as_str() == Some("tool")
-            && let Some(id) = m["tool_call_id"].as_str()
-        {
-            // Keep only results whose call survives in the array.
-            called_ids.contains(id)
+        if m["role"].as_str() == Some("tool") {
+            // Keep a tool result only when it answers an assistant tool_calls
+            // entry that survives in the array. A result whose tool_call_id is
+            // unmatched — OR missing/non-string entirely — is an orphan that
+            // strict OpenAI endpoints (DeepSeek via Flux) 400 on, so drop it
+            // (FerroxLabs/wayland-core#123). The empty/missing-id case is also
+            // caught upstream by `strip_empty_tool_call_ids`; handling it here
+            // too keeps this pass correct in isolation, independent of call
+            // order or compat gating.
+            m["tool_call_id"]
+                .as_str()
+                .is_some_and(|id| called_ids.contains(id))
         } else {
-            // Non-tool messages, and any malformed tool message without a
-            // tool_call_id, are out of scope for this pass.
+            // Non-tool messages are out of scope for this pass.
             true
         }
     });
@@ -1067,6 +1081,28 @@ fn clean_orphaned_tool_calls(messages: &mut [Value]) {
                 // children). `as_object_mut` is therefore always Some.
                 msg.as_object_mut().unwrap().remove("tool_calls");
             }
+        }
+    }
+}
+
+/// Guarantee every assistant message carries `content` or `tool_calls`.
+///
+/// `build_messages` omits `content` for a tool-call-only assistant turn (its
+/// text is empty), and the orphan/empty-id cleanup passes can then strip that
+/// turn's only `tool_calls` entry — leaving `{"role":"assistant"}` with
+/// neither field. Strict OpenAI endpoints reject it: native DeepSeek returns
+/// HTTP 400 "Invalid assistant message: content or tool_calls must be set".
+/// Stamping an empty-string content (the same value `build_messages` uses for
+/// a genuinely empty assistant turn) keeps the request valid without inventing
+/// text (FerroxLabs/wayland-core#123).
+fn ensure_assistant_content_present(messages: &mut [Value]) {
+    for msg in messages.iter_mut() {
+        if msg["role"].as_str() == Some("assistant")
+            && msg.get("tool_calls").is_none()
+            && !msg["content"].is_string()
+            && let Some(obj) = msg.as_object_mut()
+        {
+            obj.insert("content".to_string(), json!(""));
         }
     }
 }
@@ -4087,6 +4123,119 @@ mod tests {
         assert_eq!(tool_msgs.len(), 1);
         assert_eq!(tool_msgs[0]["tool_call_id"], "tc_good");
         assert_eq!(tool_msgs[0]["content"], "kept");
+    }
+
+    // --- #123: orphaned tool result hardening ---
+
+    /// `clean_orphaned_tool_results` must drop a `role:"tool"` message whose
+    /// `tool_call_id` is unmatched OR missing entirely — the latter is the
+    /// "out of scope" gap that previously let a no-id tool message survive to
+    /// the provider and 400 DeepSeek via Flux (parity-sweep rank 8).
+    #[test]
+    fn clean_orphaned_tool_results_strips_missing_and_unmatched_ids() {
+        let mut messages = vec![
+            // Surviving pair.
+            json!({
+                "role": "assistant",
+                "tool_calls": [{ "id": "tc_ok", "type": "function",
+                    "function": { "name": "bash", "arguments": "{}" } }]
+            }),
+            json!({ "role": "tool", "tool_call_id": "tc_ok", "content": "kept" }),
+            // Orphan: id present but no matching assistant tool_call.
+            json!({ "role": "tool", "tool_call_id": "tc_gone", "content": "unmatched" }),
+            // Orphan: no tool_call_id at all (the previously-"out of scope" case).
+            json!({ "role": "tool", "content": "no id" }),
+        ];
+
+        clean_orphaned_tool_results(&mut messages);
+
+        let tool_msgs: Vec<_> = messages.iter().filter(|m| m["role"] == "tool").collect();
+        assert_eq!(tool_msgs.len(), 1, "only the matched result survives");
+        assert_eq!(tool_msgs[0]["tool_call_id"], "tc_ok");
+    }
+
+    /// End-to-end contract: a history whose assistant `tool_calls` turn was
+    /// trimmed away (leaving the result orphaned) must serialize to ZERO
+    /// `role:"tool"` messages lacking a matching `tool_call_id`
+    /// (parity-sweep rank 7).
+    #[test]
+    fn split_tool_pair_serializes_without_orphans() {
+        // Only the result survives; its parent assistant tool_use is gone, as
+        // a context trim that split the pair would leave it.
+        let messages = vec![
+            Message::new(
+                Role::User,
+                vec![ContentBlock::Text {
+                    text: "earlier turn".into(),
+                }],
+            ),
+            Message::new(
+                Role::Tool,
+                vec![ContentBlock::ToolResult {
+                    tool_use_id: "tc_orphan".into(),
+                    content: "orphaned result".into(),
+                    is_error: false,
+                }],
+            ),
+        ];
+
+        let result = OpenAIProvider::build_messages(&messages, "", &openai_compat());
+
+        for m in &result {
+            if m["role"] == "tool" {
+                let id = m["tool_call_id"].as_str().unwrap_or("");
+                let matched = result.iter().any(|a| {
+                    a["tool_calls"]
+                        .as_array()
+                        .is_some_and(|tcs| tcs.iter().any(|tc| tc["id"] == id))
+                });
+                assert!(
+                    matched && !id.is_empty(),
+                    "orphaned tool result must not reach the provider: {m}"
+                );
+            }
+        }
+    }
+
+    /// #123: when the orphan cleanup strips a tool-call-only assistant's only
+    /// `tool_calls` entry, the resulting message must still carry `content`
+    /// (native DeepSeek 400s on an assistant with neither content nor
+    /// tool_calls). Here the assistant's tool call is never answered, so
+    /// `clean_orphaned_tool_calls` removes it.
+    #[test]
+    fn stripped_tool_call_leaves_valid_assistant_content() {
+        let messages = vec![
+            Message::new(Role::User, vec![ContentBlock::Text { text: "go".into() }]),
+            // Text-less assistant turn: a single tool call, no answering result.
+            Message::new(
+                Role::Assistant,
+                vec![ContentBlock::ToolUse {
+                    id: "call_unanswered".into(),
+                    name: "get".into(),
+                    input: json!({}),
+                    extra: None,
+                }],
+            ),
+            Message::new(
+                Role::User,
+                vec![ContentBlock::Text {
+                    text: "never answered".into(),
+                }],
+            ),
+        ];
+
+        let result = OpenAIProvider::build_messages(&messages, "", &openai_compat());
+
+        for m in &result {
+            if m["role"] == "assistant" {
+                let has_calls = m["tool_calls"].as_array().is_some_and(|a| !a.is_empty());
+                let has_content = m["content"].is_string();
+                assert!(
+                    has_calls || has_content,
+                    "assistant must carry content or tool_calls (would 400 DeepSeek): {m}"
+                );
+            }
+        }
     }
 
     // --- usage token parsing ---

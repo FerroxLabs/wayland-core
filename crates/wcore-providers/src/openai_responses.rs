@@ -157,14 +157,17 @@ fn clean_orphaned_function_call_outputs(input: &mut Vec<Value>) {
         .collect();
 
     input.retain(|item| {
-        if item["type"].as_str() == Some("function_call_output")
-            && let Some(id) = item["call_id"].as_str()
-        {
-            // Keep only outputs whose call survives in the input set.
-            called_ids.contains(id)
+        if item["type"].as_str() == Some("function_call_output") {
+            // Keep only outputs whose call survives in the input set. An output
+            // whose call_id is unmatched — OR missing/non-string entirely — is
+            // an orphan the Responses API 400s on, so drop it
+            // (FerroxLabs/wayland-core#123). Unlike the Chat path there is no
+            // separate empty-id guard here, so this pass must be self-sufficient.
+            item["call_id"]
+                .as_str()
+                .is_some_and(|id| called_ids.contains(id))
         } else {
-            // Non-output items, and any malformed output without a call_id,
-            // are out of scope for this pass.
+            // Non-output items are out of scope for this pass.
             true
         }
     });
@@ -834,6 +837,32 @@ mod tests {
         assert!(input.iter().any(|item| {
             item["type"] == json!("function_call_output") && item["call_id"] == json!("call_live")
         }));
+    }
+
+    /// #123: `clean_orphaned_function_call_outputs` must drop a
+    /// `function_call_output` whose `call_id` is missing/non-string, not just
+    /// the present-but-unmatched case. The Responses path has no separate
+    /// empty-id guard, so this pass must be self-sufficient.
+    #[test]
+    fn clean_orphaned_outputs_strips_missing_call_id() {
+        let mut input = vec![
+            json!({ "type": "function_call", "call_id": "ok",
+                "name": "read", "arguments": "{}" }),
+            json!({ "type": "function_call_output", "call_id": "ok", "output": "kept" }),
+            // Unmatched id.
+            json!({ "type": "function_call_output", "call_id": "gone", "output": "x" }),
+            // Missing call_id entirely (previously "out of scope").
+            json!({ "type": "function_call_output", "output": "no id" }),
+        ];
+
+        clean_orphaned_function_call_outputs(&mut input);
+
+        let outputs: Vec<_> = input
+            .iter()
+            .filter(|i| i["type"] == json!("function_call_output"))
+            .collect();
+        assert_eq!(outputs.len(), 1, "only the matched output survives");
+        assert_eq!(outputs[0]["call_id"], json!("ok"));
     }
 
     #[test]
