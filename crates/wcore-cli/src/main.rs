@@ -2957,7 +2957,9 @@ async fn run_json_stream_mode(
                                     }
                                     ProtocolCommand::SetMode { mode } => {
                                         // GHSA-8r7g: a wire peer may not escalate to
-                                        // Force without a local-operator opt-in.
+                                        // an auto-approving mode (Force or AutoEdit)
+                                        // without a local-operator opt-in.
+                                        let mode_str = format!("{mode:?}").to_lowercase();
                                         if approval_manager.set_mode_from_wire(mode) {
                                             mode_changed = true;
                                             let _ = writer.emit(&wcore_protocol::events::ProtocolEvent::Info {
@@ -2967,7 +2969,7 @@ async fn run_json_stream_mode(
                                         } else {
                                             let _ = writer.emit(&wcore_protocol::events::ProtocolEvent::Info {
                                                 msg_id: String::new(),
-                                                message: "set_mode: 'force' refused — requires a local-operator opt-in (launch with --force or WAYLAND_ALLOW_WIRE_FORCE=1)".to_string(),
+                                                message: format!("set_mode: '{mode_str}' refused — an auto-approving mode (auto_edit/force) requires a local-operator opt-in (launch with --force or WAYLAND_ALLOW_WIRE_FORCE=1)"),
                                             });
                                         }
                                     }
@@ -3051,14 +3053,14 @@ async fn run_json_stream_mode(
             }
             ProtocolCommand::SetMode { mode } => {
                 let mode_str = format!("{mode:?}").to_lowercase();
-                // GHSA-8r7g: a wire peer may not escalate to Force without a
-                // local-operator opt-in.
+                // GHSA-8r7g: a wire peer may not escalate to an auto-approving
+                // mode (Force or AutoEdit) without a local-operator opt-in.
                 if !approval_manager.set_mode_from_wire(mode) {
                     let _ = writer.emit(&wcore_protocol::events::ProtocolEvent::Info {
                         msg_id: String::new(),
-                        message: "set_mode: 'force' refused — requires a local-operator opt-in (launch with --force or WAYLAND_ALLOW_WIRE_FORCE=1)".to_string(),
+                        message: format!("set_mode: '{mode_str}' refused — an auto-approving mode (auto_edit/force) requires a local-operator opt-in (launch with --force or WAYLAND_ALLOW_WIRE_FORCE=1)"),
                     });
-                    eprintln!("[protocol] SetMode refused (force, no local opt-in)");
+                    eprintln!("[protocol] SetMode refused ({mode_str}, no local opt-in)");
                 } else {
                     let _ = writer.emit(&wcore_protocol::events::ProtocolEvent::Info {
                         msg_id: String::new(),

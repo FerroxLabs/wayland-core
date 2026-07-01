@@ -509,14 +509,20 @@ impl ToolApprovalManager {
     }
 
     /// Apply a session mode requested over the PROTOCOL (an untrusted wire
-    /// peer). `Force` auto-approves every tool, so it is honored only when a
-    /// local operator opted in via [`set_allow_wire_force`](Self::set_allow_wire_force);
-    /// otherwise the request is refused and the current mode is left unchanged.
-    /// Non-`Force` modes are always applied. Returns `true` when the requested
-    /// mode was applied, `false` when a `Force` request was refused (so the
-    /// caller can surface a diagnostic).
+    /// peer). Both privilege-escalating modes are gated behind the local
+    /// operator opt-in ([`set_allow_wire_force`](Self::set_allow_wire_force)):
+    /// `Force` auto-approves every tool, and `AutoEdit` auto-approves the
+    /// `edit` category (file Write/Edit) — so a wire peer setting `AutoEdit`
+    /// gets write-without-consent (a git hook / `.bashrc` / `authorized_keys`
+    /// write is write-to-RCE). Only `Default` (which asks for everything) is
+    /// safe to accept from an un-opted-in wire peer. Without the opt-in an
+    /// escalating request is refused and the current mode is left unchanged.
+    /// Returns `true` when the requested mode was applied, `false` when an
+    /// escalating request was refused (so the caller can surface a diagnostic).
+    /// (GHSA-8r7g)
     pub fn set_mode_from_wire(&self, mode: SessionMode) -> bool {
-        if mode == SessionMode::Force && !self.allow_wire_force.load(Ordering::Relaxed) {
+        let escalating = matches!(mode, SessionMode::Force | SessionMode::AutoEdit);
+        if escalating && !self.allow_wire_force.load(Ordering::Relaxed) {
             return false;
         }
         self.set_mode(mode);
@@ -592,15 +598,23 @@ mod tests {
         // A wire peer cannot escalate to Force by default.
         assert!(!mgr.set_mode_from_wire(SessionMode::Force));
         assert_eq!(mgr.current_mode(), "default");
-        // Non-Force modes are always applied over the wire.
-        assert!(mgr.set_mode_from_wire(SessionMode::AutoEdit));
-        assert_eq!(mgr.current_mode(), "auto_edit");
+        // AutoEdit is ALSO privilege-escalating (it auto-approves the `edit`
+        // category = file Write/Edit), so a bare wire peer cannot set it either
+        // — write-without-consent is write-to-RCE (GHSA-8r7g).
+        assert!(!mgr.set_mode_from_wire(SessionMode::AutoEdit));
+        assert_eq!(mgr.current_mode(), "default");
+        // Only Default (which asks for everything) is accepted over the wire.
+        assert!(mgr.set_mode_from_wire(SessionMode::Default));
+        assert_eq!(mgr.current_mode(), "default");
     }
 
     #[test]
-    fn ghsa_wire_force_allowed_after_local_opt_in() {
+    fn ghsa_wire_escalating_modes_allowed_after_local_opt_in() {
+        // With the local-operator opt-in, BOTH escalating modes are honored.
         let mgr = ToolApprovalManager::new();
         mgr.set_allow_wire_force(true);
+        assert!(mgr.set_mode_from_wire(SessionMode::AutoEdit));
+        assert_eq!(mgr.current_mode(), "auto_edit");
         assert!(mgr.set_mode_from_wire(SessionMode::Force));
         assert_eq!(mgr.current_mode(), "force");
     }
