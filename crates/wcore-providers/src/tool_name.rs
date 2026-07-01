@@ -141,8 +141,25 @@ fn clamp_and_register(name: &str) -> String {
     let mut reg = lock_registry();
     if reg.contains_key(&clamped) || reg.len() < MAX_CLAMP_ENTRIES {
         reg.insert(clamped.clone(), name.to_string());
+    } else {
+        warn_clamp_cap_reached();
     }
     clamped
+}
+
+/// Warn (at most once per process) that the clamp memo is full, so a new
+/// distinct over-length name can no longer be reverse-routed. Silent past the
+/// cap would otherwise mask a tool that the model can call but never resolve.
+fn warn_clamp_cap_reached() {
+    static WARNED: std::sync::Once = std::sync::Once::new();
+    WARNED.call_once(|| {
+        tracing::warn!(
+            target: "wcore_providers::tool_name",
+            cap = MAX_CLAMP_ENTRIES,
+            "tool-name clamp memo at capacity; reverse routing for further \
+             distinct over-length names is dropped (best effort)"
+        );
+    });
 }
 
 /// FNV-1a 64-bit hash rendered as 16 lowercase hex chars. Deterministic and
@@ -171,13 +188,15 @@ fn lock_registry() -> std::sync::MutexGuard<'static, HashMap<String, String>> {
 /// id, or a model-hallucinated name we never sent) is returned unchanged and
 /// surfaces as a normal unknown-tool error downstream.
 pub(crate) fn decode_tool_name(name: &str) -> String {
+    // Only sentinel-prefixed names are ever encoded/clamped; a plain name can
+    // never be a memo key, so skip the global lock entirely for the common case.
+    let Some(body) = name.strip_prefix(SENTINEL) else {
+        return name.to_string();
+    };
     // Length-clamped names are only reversible via the memo table.
     if let Some(original) = lock_registry().get(name) {
         return original.clone();
     }
-    let Some(body) = name.strip_prefix(SENTINEL) else {
-        return name.to_string();
-    };
     let bytes = body.as_bytes();
     let mut out: Vec<u8> = Vec::with_capacity(bytes.len());
     let mut i = 0;
