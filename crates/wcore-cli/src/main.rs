@@ -1948,6 +1948,7 @@ async fn run_tui_mode(
     engine.set_protocol_writer(Arc::new(tui::ChannelEmitter::with_dedupe(
         tx.clone(),
         std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
+        Some(engine.approval_bridge().clone()),
     )));
 
     // Snapshot the loaded skills + MCP servers for the `/skills` and `/mcp`
@@ -2462,14 +2463,23 @@ struct GatingProtocolWriter {
     /// `ApprovalRequired`, so a later explicit one from the engine for the same
     /// call is not double-emitted.
     synthesized: std::sync::Mutex<std::collections::HashSet<String>>,
+    /// GHSA-8r7g: sync correlation→secret lookup so the synthesized gate frame
+    /// carries the unguessable resume_token for bridge-backed approvals
+    /// (crucible/egress), and EMPTY for a regular tool (no bridge entry).
+    approval_bridge: Option<Arc<wcore_agent::approval::ApprovalBridge>>,
 }
 
 impl GatingProtocolWriter {
-    fn new(inner: Arc<ProtocolWriter>, approval: Arc<ToolApprovalManager>) -> Self {
+    fn new(
+        inner: Arc<ProtocolWriter>,
+        approval: Arc<ToolApprovalManager>,
+        approval_bridge: Option<Arc<wcore_agent::approval::ApprovalBridge>>,
+    ) -> Self {
         Self {
             inner,
             approval,
             synthesized: std::sync::Mutex::new(std::collections::HashSet::new()),
+            approval_bridge,
         }
     }
 }
@@ -2517,9 +2527,17 @@ impl ProtocolEmitter for GatingProtocolWriter {
                 let plan = tool.args.get("plan").and_then(|v| {
                     serde_json::from_value::<wcore_types::crucible::CruciblePlan>(v.clone()).ok()
                 });
+                // GHSA-8r7g: stamp the secret bridge token for bridge-backed
+                // approvals (crucible/egress); EMPTY for a regular tool that
+                // has no bridge entry and is resolved via ToolApprovalManager.
+                let resume_token = self
+                    .approval_bridge
+                    .as_ref()
+                    .and_then(|b| b.secret_for_correlation(call_id))
+                    .unwrap_or_default();
                 self.inner.emit(&ProtocolEvent::ApprovalRequired {
                     call_id: call_id.clone(),
-                    resume_token: call_id.clone(),
+                    resume_token,
                     correlation_id: call_id.clone(),
                     reason: reason.to_string(),
                     context: tool.description.clone(),
@@ -2683,6 +2701,7 @@ async fn run_json_stream_mode(
     let gating_writer: Arc<dyn ProtocolEmitter> = Arc::new(GatingProtocolWriter::new(
         writer.clone(),
         approval_manager.clone(),
+        Some(engine.approval_bridge().clone()),
     ));
     engine.set_protocol_writer(gating_writer);
 
@@ -2975,6 +2994,40 @@ async fn run_json_stream_mode(
                                     }
                                     ProtocolCommand::Ping => {
                                         let _ = writer.emit(&wcore_protocol::events::ProtocolEvent::Pong);
+                                    }
+                                    ProtocolCommand::ApprovalResume {
+                                        resume_token,
+                                        approved,
+                                        modifications,
+                                    } => {
+                                        // GHSA-8r7g: a bridge-backed approval (the
+                                        // Crucible council card, an egress consent) parks
+                                        // DURING an active turn, so its ApprovalResume MUST
+                                        // be handled here — the top-level arm only runs
+                                        // BETWEEN turns and would never see it, leaving the
+                                        // council/consent unresolvable (hang until the TTL)
+                                        // on a JSON-stream host (the desktop app). Route the
+                                        // secret resume_token through the shared bridge.
+                                        let outcome = wcore_agent::approval::ApprovalOutcome {
+                                            approved,
+                                            modifications,
+                                        };
+                                        let resolved =
+                                            approval_bridge.resolve(&resume_token, outcome).await;
+                                        let _ = writer.emit(
+                                            &wcore_protocol::events::ProtocolEvent::ApprovalResume {
+                                                resume_token: resume_token.clone(),
+                                                approved,
+                                            },
+                                        );
+                                        if !resolved {
+                                            let _ = writer.emit(&wcore_protocol::events::ProtocolEvent::Info {
+                                                msg_id: String::new(),
+                                                message: format!(
+                                                    "approval_resume received for unknown token: {resume_token} (stale resume?)"
+                                                ),
+                                            });
+                                        }
                                     }
                                     _ => {
                                         eprintln!("[protocol] Ignoring command during active message processing");

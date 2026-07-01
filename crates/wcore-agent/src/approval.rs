@@ -88,11 +88,30 @@ impl ApprovalOutcome {
 struct Pending {
     sender: oneshot::Sender<ApprovalOutcome>,
     expires_at: Instant,
+    /// GHSA-8r7g: the public correlation handle (a caller-supplied, possibly
+    /// model-known `call_id`) this entry is indexed under in `by_corr`, if any.
+    /// Stored so removing the entry (resolve/reap) also purges the secondary
+    /// index — never leave a `by_corr` mapping dangling to a freed token.
+    correlation_id: Option<String>,
+}
+
+/// GHSA-8r7g: the bridge's pending state under a SINGLE mutex. The primary
+/// map is keyed by a SECRET `resume_token` (`apr-{uuid}`, unguessable) — that
+/// is the only value a wire/host peer may present to resolve an approval. The
+/// secondary `by_corr` index maps a public `correlation_id` (a caller-supplied
+/// `call_id`, which the model can see) to its secret token, so a LOCAL resolver
+/// (a TUI keypress, an in-process egress event) can resolve by the public
+/// handle without the secret ever reaching a model-reachable surface. Both maps
+/// live under one lock so an entry can never appear in one and not the other.
+#[derive(Default)]
+struct PendingMaps {
+    by_token: HashMap<String, Pending>,
+    by_corr: HashMap<String, String>,
 }
 
 #[derive(Clone)]
 pub struct ApprovalBridge {
-    pending: Arc<Mutex<HashMap<String, Pending>>>,
+    pending: Arc<Mutex<PendingMaps>>,
     ttl: Duration,
     /// Wave SC: shared active-token redactor. The bridge holds an
     /// `Arc<RwLock<...>>` so callers (sinks, tests) can clone the
@@ -101,14 +120,23 @@ pub struct ApprovalBridge {
     /// protocol sink's redaction pass always sees current in-flight
     /// correlation ids.
     redactor: crate::output::protocol_sink::ActiveTokenRedactor,
+    /// GHSA-8r7g: a SYNC-readable snapshot of `by_corr` (public correlation id
+    /// → secret `resume_token`). The approval-frame synthesizers
+    /// (`GatingProtocolWriter`, `ChannelEmitter`) run in a synchronous `emit`
+    /// and cannot lock the async `pending` mutex, so they read this mirror to
+    /// stamp the SECRET token onto the host-visible frame (empty for a
+    /// regular tool with no bridge entry). Refreshed on every mutation
+    /// alongside the redactor snapshot, so it never lags the pending state.
+    corr_secrets: Arc<std::sync::RwLock<HashMap<String, String>>>,
 }
 
 impl Default for ApprovalBridge {
     fn default() -> Self {
         Self {
-            pending: Arc::new(Mutex::new(HashMap::new())),
+            pending: Arc::new(Mutex::new(PendingMaps::default())),
             ttl: DEFAULT_APPROVAL_TTL,
             redactor: crate::output::protocol_sink::ActiveTokenRedactor::new(),
+            corr_secrets: Arc::new(std::sync::RwLock::new(HashMap::new())),
         }
     }
 }
@@ -123,9 +151,10 @@ impl ApprovalBridge {
     /// to assert expiry behavior in < 1s.
     pub fn with_ttl(ttl: Duration) -> Self {
         Self {
-            pending: Arc::new(Mutex::new(HashMap::new())),
+            pending: Arc::new(Mutex::new(PendingMaps::default())),
             ttl,
             redactor: crate::output::protocol_sink::ActiveTokenRedactor::new(),
+            corr_secrets: Arc::new(std::sync::RwLock::new(HashMap::new())),
         }
     }
 
@@ -141,8 +170,33 @@ impl ApprovalBridge {
     /// mutation (request / resolve / reap). The redactor's internal
     /// set replaces atomically — readers never observe a torn state.
     async fn refresh_redactor(&self) {
-        let snapshot: Vec<String> = self.pending.lock().await.keys().cloned().collect();
-        self.redactor.set(snapshot);
+        // GHSA-8r7g: snapshot the SECRET tokens only for the redactor. The
+        // public `by_corr` handles (call_ids) are already model-visible, so
+        // redacting them from tool output would be pointless and could scrub
+        // legitimate content. Also refresh the sync correlation→secret mirror
+        // the frame synthesizers read (under the SAME async lock, so both
+        // snapshots reflect one consistent pending state).
+        let (tokens, corr): (Vec<String>, HashMap<String, String>) = {
+            let map = self.pending.lock().await;
+            (map.by_token.keys().cloned().collect(), map.by_corr.clone())
+        };
+        self.redactor.set(tokens);
+        if let Ok(mut mirror) = self.corr_secrets.write() {
+            *mirror = corr;
+        }
+    }
+
+    /// GHSA-8r7g: sync lookup of the SECRET `resume_token` for a public
+    /// correlation id (a `call_id`). Used by the approval-frame synthesizers to
+    /// stamp the unguessable token onto the host-visible frame. Returns `None`
+    /// for a `call_id` with no bridge-backed approval (a regular tool gated by
+    /// the `ToolApprovalManager`), so the synthesizer emits an EMPTY resume
+    /// token there — a regular tool is never resolved through this bridge.
+    pub fn secret_for_correlation(&self, correlation_id: &str) -> Option<String> {
+        self.corr_secrets
+            .read()
+            .ok()
+            .and_then(|m| m.get(correlation_id).cloned())
     }
 
     /// Spawn the background reaper task. Returns a `tokio::task::JoinHandle`
@@ -179,7 +233,7 @@ impl ApprovalBridge {
         count
     }
 
-    async fn reap_expired(pending: &Arc<Mutex<HashMap<String, Pending>>>) -> usize {
+    async fn reap_expired(pending: &Arc<Mutex<PendingMaps>>) -> usize {
         let now = Instant::now();
         // Wave RB RELIABILITY MAJOR (requester-crash leak): an entry
         // also counts as reapable if its `sender.is_closed()` — that
@@ -192,7 +246,8 @@ impl ApprovalBridge {
         // (every 30s by default) collects the abandoned entry.
         let reapable_keys: Vec<String> = {
             let map = pending.lock().await;
-            map.iter()
+            map.by_token
+                .iter()
                 .filter(|(_, p)| p.expires_at <= now || p.sender.is_closed())
                 .map(|(k, _)| k.clone())
                 .collect()
@@ -201,7 +256,16 @@ impl ApprovalBridge {
         if count > 0 {
             let mut map = pending.lock().await;
             for key in reapable_keys {
-                if let Some(p) = map.remove(&key) {
+                if let Some(p) = map.by_token.remove(&key) {
+                    // GHSA-8r7g: purge the secondary index too, so no
+                    // `by_corr` mapping dangles to a freed secret token — but
+                    // only if it still points to THIS token (a duplicate
+                    // re-registration to a newer secret must survive).
+                    if let Some(corr) = &p.correlation_id
+                        && map.by_corr.get(corr).map(String::as_str) == Some(key.as_str())
+                    {
+                        map.by_corr.remove(corr);
+                    }
                     // For TTL-expired entries the requester is still
                     // waiting on `rx`; surface the cancelled outcome
                     // so it can react. For requester-crashed entries
@@ -238,44 +302,48 @@ impl ApprovalBridge {
         _req: ApprovalRequest,
         ttl: Duration,
     ) -> (String, oneshot::Receiver<ApprovalOutcome>) {
-        let correlation_id = format!("apr-{}", uuid::Uuid::new_v4());
+        // GHSA-8r7g: the token IS a random secret, so it doubles as its own
+        // public handle here — there is no separate model-known correlation id
+        // to protect (the caller emits this same value as both `resume_token`
+        // and `correlation_id`). No `by_corr` entry is needed.
+        let resume_token = format!("apr-{}", uuid::Uuid::new_v4());
         let (tx, rx) = oneshot::channel();
         let expires_at = Instant::now() + ttl;
-        self.pending.lock().await.insert(
-            correlation_id.clone(),
+        self.pending.lock().await.by_token.insert(
+            resume_token.clone(),
             Pending {
                 sender: tx,
                 expires_at,
+                correlation_id: None,
             },
         );
         self.refresh_redactor().await;
-        (correlation_id, rx)
+        (resume_token, rx)
     }
 
-    /// Register a pending approval under a **caller-supplied** correlation id,
-    /// so the producer can resolve the bridge by a stable, self-describing
-    /// handle (e.g. the egress-consent `call_id`) instead of threading the
-    /// randomly-generated id through the UI. The supplied id is also what the
-    /// producer emits as the `ApprovalRequired.resume_token`, so a host's
-    /// `ApprovalResume{resume_token}` and a TUI keypress carrying the same
-    /// `call_id` both resolve the same entry. Callers MUST supply a unique id
-    /// (a duplicate overwrites the prior pending entry — last writer wins).
+    /// Register a pending approval indexed by a **caller-supplied** public
+    /// `correlation_id` (e.g. the egress-consent `call_id`), so a LOCAL resolver
+    /// can resolve by that stable, self-describing handle.
+    ///
+    /// GHSA-8r7g: the pending entry is keyed internally by a fresh SECRET
+    /// `resume_token` (`apr-{uuid}`), which is returned and is the ONLY value a
+    /// wire/host peer may present to [`resolve`](Self::resolve). The public
+    /// `correlation_id` (which a model can see — it appears in the tool_calls
+    /// the model itself emitted) is indexed in `by_corr` and only ever resolves
+    /// via [`resolve_by_correlation`](Self::resolve_by_correlation), the local
+    /// path. This severs the old "resume_token == call_id" identity where a
+    /// model-known id could self-approve over the wire. Callers MUST emit the
+    /// returned secret as `ApprovalRequired.resume_token` and the
+    /// `correlation_id` as `ApprovalRequired.correlation_id`. A duplicate
+    /// `correlation_id` re-points `by_corr` to the newer token (last writer
+    /// wins); the older token remains resolvable by the wire until it is reaped.
     pub async fn request_with_id(
         &self,
         correlation_id: String,
         _req: ApprovalRequest,
-    ) -> oneshot::Receiver<ApprovalOutcome> {
-        let (tx, rx) = oneshot::channel();
-        let expires_at = Instant::now() + self.ttl;
-        self.pending.lock().await.insert(
-            correlation_id,
-            Pending {
-                sender: tx,
-                expires_at,
-            },
-        );
-        self.refresh_redactor().await;
-        rx
+    ) -> (String, oneshot::Receiver<ApprovalOutcome>) {
+        self.request_with_id_and_ttl(correlation_id, _req, self.ttl)
+            .await
     }
 
     /// Like [`request_with_id`](Self::request_with_id) but with an explicit TTL
@@ -287,29 +355,79 @@ impl ApprovalBridge {
         correlation_id: String,
         _req: ApprovalRequest,
         ttl: Duration,
-    ) -> oneshot::Receiver<ApprovalOutcome> {
+    ) -> (String, oneshot::Receiver<ApprovalOutcome>) {
+        let resume_token = format!("apr-{}", uuid::Uuid::new_v4());
         let (tx, rx) = oneshot::channel();
         let expires_at = Instant::now() + ttl;
-        self.pending.lock().await.insert(
-            correlation_id,
-            Pending {
-                sender: tx,
-                expires_at,
-            },
-        );
+        {
+            let mut map = self.pending.lock().await;
+            map.by_token.insert(
+                resume_token.clone(),
+                Pending {
+                    sender: tx,
+                    expires_at,
+                    correlation_id: Some(correlation_id.clone()),
+                },
+            );
+            map.by_corr.insert(correlation_id, resume_token.clone());
+        }
         self.refresh_redactor().await;
-        rx
+        (resume_token, rx)
     }
 
-    /// Consumer side: called from the engine's command loop when
-    /// `ApprovalResume` arrives. Returns false if the correlation id
-    /// is unknown (host sent a stale or expired resume).
-    pub async fn resolve(&self, correlation_id: &str, outcome: ApprovalOutcome) -> bool {
+    /// Consumer side for the WIRE/host path: called from the engine's command
+    /// loop when `ApprovalResume { resume_token }` arrives off the JSON stream.
+    /// The argument MUST be the SECRET `resume_token` (`apr-{uuid}`) the bridge
+    /// minted and emitted — GHSA-8r7g: a model-known `call_id` is NOT accepted
+    /// here (it is a `correlation_id`, resolvable only via the local
+    /// [`resolve_by_correlation`](Self::resolve_by_correlation)). Returns false
+    /// if the token is unknown (host sent a stale, expired, or guessed value).
+    pub async fn resolve(&self, resume_token: &str, outcome: ApprovalOutcome) -> bool {
         let resolved = {
             let mut map = self.pending.lock().await;
-            if let Some(pending) = map.remove(correlation_id) {
+            if let Some(pending) = map.by_token.remove(resume_token) {
+                // Purge the secondary index — but only if it still points to
+                // THIS token. GHSA-8r7g duplicate-overwrite: if the same
+                // correlation id was re-registered to a newer secret, that
+                // newer mapping must survive resolution of the stale token.
+                if let Some(corr) = &pending.correlation_id
+                    && map.by_corr.get(corr).map(String::as_str) == Some(resume_token)
+                {
+                    map.by_corr.remove(corr);
+                }
                 let _ = pending.sender.send(outcome);
                 true
+            } else {
+                false
+            }
+        };
+        if resolved {
+            self.refresh_redactor().await;
+        }
+        resolved
+    }
+
+    /// Consumer side for the LOCAL path: resolve by the public `correlation_id`
+    /// (a caller-supplied, possibly model-known `call_id`). Used by in-process
+    /// resolvers that hold the correlation handle — a TUI keypress or an egress
+    /// event — NOT by anything reading the wire. GHSA-8r7g: this is safe
+    /// precisely because it is unreachable from the protocol ingress; a wire
+    /// peer can only present a `resume_token`, which routes to [`resolve`].
+    /// Returns false if the correlation id has no pending entry.
+    pub async fn resolve_by_correlation(
+        &self,
+        correlation_id: &str,
+        outcome: ApprovalOutcome,
+    ) -> bool {
+        let resolved = {
+            let mut map = self.pending.lock().await;
+            if let Some(token) = map.by_corr.remove(correlation_id) {
+                if let Some(pending) = map.by_token.remove(&token) {
+                    let _ = pending.sender.send(outcome);
+                    true
+                } else {
+                    false
+                }
             } else {
                 false
             }
@@ -326,7 +444,7 @@ impl ApprovalBridge {
     /// already carries the same ids, but tool output streams MUST
     /// NOT echo them back where a snooping tool could lift them).
     pub async fn active_tokens(&self) -> Vec<String> {
-        self.pending.lock().await.keys().cloned().collect()
+        self.pending.lock().await.by_token.keys().cloned().collect()
     }
 
     /// Test helper: snapshot the currently-pending correlation ids.
@@ -338,7 +456,7 @@ impl ApprovalBridge {
 
     /// Test helper: number of currently-pending entries.
     pub async fn pending_count(&self) -> usize {
-        self.pending.lock().await.len()
+        self.pending.lock().await.by_token.len()
     }
 }
 
@@ -452,7 +570,7 @@ mod tests {
         // the per-request TTL is honored: a zero-TTL entry is reaped while a
         // long-TTL entry survives the SAME reap.
         let bridge = ApprovalBridge::new();
-        let rx_short = bridge
+        let (_tok_short, rx_short) = bridge
             .request_with_id_and_ttl(
                 "short".into(),
                 ApprovalRequest {
@@ -463,7 +581,7 @@ mod tests {
                 Duration::from_secs(0),
             )
             .await;
-        let rx_long = bridge
+        let (tok_long, rx_long) = bridge
             .request_with_id_and_ttl(
                 "long".into(),
                 ApprovalRequest {
@@ -483,11 +601,13 @@ mod tests {
             !rx_short.await.unwrap().approved,
             "the reaped entry resolves to cancelled (no spend)"
         );
-        // The long-TTL crucible card must still be pending + resolvable.
+        // The long-TTL crucible card must still be pending + resolvable by its
+        // SECRET token (the wire/host path). GHSA-8r7g: the correlation string
+        // ("long") no longer resolves via `resolve` — only the secret does.
         assert!(
             bridge
                 .resolve(
-                    "long",
+                    &tok_long,
                     ApprovalOutcome {
                         approved: true,
                         modifications: None

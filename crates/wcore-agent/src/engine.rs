@@ -6074,6 +6074,26 @@ impl AgentEngine {
         // (`TuiEngine::approve`/`deny`) route this approval to the ApprovalBridge
         // instead of the ToolApprovalManager — mirroring the `egress:` precedent.
         let call_id = format!("crucible:{}", uuid::Uuid::new_v4());
+        // GHSA-8r7g: register the bridge approval entry (minting the SECRET
+        // resume_token) BEFORE emitting the ToolRequest, so the frame
+        // synthesizer (Gating/Channel emitter) reads that secret from the
+        // bridge's sync mirror and stamps it onto the host-visible gate frame.
+        // Registering after the emit (the old order) left the mirror empty at
+        // synthesis time → an empty token → the council was unresolvable on a
+        // JSON-stream host and hung until the 24h TTL. The receiver is threaded
+        // into the approver, which no longer registers a second entry.
+        let (_resume_token, council_rx) = self
+            .approval_bridge
+            .request_with_id_and_ttl(
+                call_id.clone(),
+                crate::approval::ApprovalRequest {
+                    call_id: call_id.clone(),
+                    reason: "Run Crucible council?".to_string(),
+                    context: String::new(),
+                },
+                crate::approval::CRUCIBLE_APPROVAL_TTL,
+            )
+            .await;
         let _ = writer.emit(&ProtocolEvent::ToolRequest {
             msg_id: self.current_msg_id.clone(),
             call_id: call_id.clone(),
@@ -6090,6 +6110,7 @@ impl AgentEngine {
             bridge: std::sync::Arc::clone(&self.approval_bridge),
             cancel: self.cancel_token.clone(),
             call_id: call_id.clone(),
+            rx: std::sync::Mutex::new(Some(council_rx)),
         };
         let base_refilter = base.clone();
         let providers_refilter = providers.clone();
@@ -12354,6 +12375,13 @@ struct BridgeApprover {
     bridge: std::sync::Arc<crate::approval::ApprovalBridge>,
     cancel: tokio_util::sync::CancellationToken,
     call_id: String,
+    /// GHSA-8r7g: the pending-approval receiver. The bridge entry is minted +
+    /// registered in `try_crucible_council` BEFORE the `ToolRequest` frame is
+    /// emitted, so the frame synthesizer reads the secret from the bridge mirror
+    /// and stamps it onto the host-visible gate frame. Registering inside
+    /// `approve()` (after the emit) stamped an EMPTY token and hung the council
+    /// on a JSON-stream host. Taken exactly once in `approve`.
+    rx: std::sync::Mutex<Option<tokio::sync::oneshot::Receiver<crate::approval::ApprovalOutcome>>>,
 }
 
 #[async_trait::async_trait]
@@ -12369,36 +12397,31 @@ impl crate::orchestration::council::CouncilApprover for BridgeApprover {
             .ceiling_usd()
             .map(|u| format!("${u:.4}"))
             .unwrap_or_else(|| "price unknown".to_string());
-        // Stage 4b: key the bridge by the stable, `crucible:`-prefixed call_id —
-        // NOT a throwaway per-round uuid. The approval dedupe (TUI ChannelEmitter
-        // + JSON-stream GatingProtocolWriter) SUPPRESSES this explicit
-        // ApprovalRequired and keeps the ToolRequest-synthesized frame, whose
-        // `resume_token` IS the call_id. So every host can only resolve the
-        // bridge by call_id: the TUI via `resolve_crucible(call_id)` and the
-        // JSON host via `ApprovalResume{resume_token}` → `bridge.resolve(call_id)`
-        // (main.rs). Keying by a fresh uuid here left the council unresolvable on
-        // ALL hosts — it hung until the 24h TTL.
-        //
-        // Register the pending entry BEFORE emitting the card so a fast host
-        // response can never arrive before the bridge can resolve it.
+        // GHSA-8r7g: the pending entry was registered in `try_crucible_council`
+        // BEFORE the ToolRequest was emitted (so the synthesized gate frame
+        // carries the SECRET resume_token). Take the receiver minted there; the
+        // approval dedupe SUPPRESSES the explicit frame below whenever the
+        // ToolRequest already synthesized one, so it stands in only for a writer
+        // that did not synthesize. Look the secret up from the bridge's sync
+        // mirror (populated by that pre-registration) so the explicit frame,
+        // when it is the surviving gate, also carries the secret — never the
+        // model-known call_id. The JSON host then resolves via
+        // `ApprovalResume{resume_token=secret}` → `bridge.resolve(secret)`, and
+        // the TUI via `resolve_crucible(call_id)` →
+        // `bridge.resolve_by_correlation(call_id)`.
         let rx = self
+            .rx
+            .lock()
+            .expect("BridgeApprover rx mutex poisoned")
+            .take()
+            .expect("BridgeApprover::approve called exactly once");
+        let resume_token = self
             .bridge
-            .request_with_id_and_ttl(
-                self.call_id.clone(),
-                crate::approval::ApprovalRequest {
-                    call_id: self.call_id.clone(),
-                    reason: "Run Crucible council?".to_string(),
-                    context: format!("council ceiling {ceiling}"),
-                },
-                // Long/no-expire TTL (spec §7): a multi-vendor cost card is a
-                // deliberation-worthy decision and must not be reaped by the
-                // 5-minute default while the user reads it.
-                crate::approval::CRUCIBLE_APPROVAL_TTL,
-            )
-            .await;
+            .secret_for_correlation(&self.call_id)
+            .unwrap_or_default();
         let _ = self.writer.emit(&ProtocolEvent::ApprovalRequired {
             call_id: self.call_id.clone(),
-            resume_token: self.call_id.clone(),
+            resume_token,
             correlation_id: self.call_id.clone(),
             reason: "Run Crucible council?".to_string(),
             context: format!("Crucible council — you're approving up to {ceiling}."),
@@ -12652,11 +12675,14 @@ mod approval_bridge_engine_tests {
         }
     }
 
-    /// Run `BridgeApprover::approve` on a fresh bridge, then have a "host" resolve
-    /// the council by the `crucible:` call_id (the only token any host can send,
-    /// since the approval dedupe collapses every resume token to the call_id).
-    /// Returns the decision the approver derived. Polls `resolve` so the test does
-    /// not race the spawned approve() before it registers the pending entry.
+    /// Run `BridgeApprover::approve` on a fresh bridge, then have a local "TUI"
+    /// resolver resolve the council by the `crucible:` call_id. GHSA-8r7g: the
+    /// bridge entry is registered (secret minted) BEFORE the approver runs —
+    /// mirroring `try_crucible_council`'s register-before-emit order — and the
+    /// receiver is threaded into the approver. The in-process resolver uses
+    /// `resolve_by_correlation` (the wire path would require the secret
+    /// `resume_token`, which a NullEmitter test never surfaces). Returns the
+    /// decision the approver derived. Polls so the test does not race the spawn.
     async fn drive_crucible_approver(
         approved: bool,
         modifications: Option<serde_json::Value>,
@@ -12667,18 +12693,41 @@ mod approval_bridge_engine_tests {
         let bridge = Arc::new(ApprovalBridge::new());
         let call_id = "crucible:fixed-id".to_string();
         let writer: Arc<dyn wcore_protocol::writer::ProtocolEmitter> = Arc::new(NullEmitter);
+        // Register-before-emit: mint the secret + register the entry, then hand
+        // the receiver to the approver (exactly what the front door does).
+        let (_secret, rx) = bridge
+            .request_with_id_and_ttl(
+                call_id.clone(),
+                crate::approval::ApprovalRequest {
+                    call_id: call_id.clone(),
+                    reason: "Run Crucible council?".to_string(),
+                    context: String::new(),
+                },
+                crate::approval::CRUCIBLE_APPROVAL_TTL,
+            )
+            .await;
+        // The synthesizer-facing invariant the blocker violated: the secret is
+        // in the mirror as soon as the entry is registered, so a gate frame
+        // emitted now (via the ToolRequest synthesizer) reads the real token.
+        assert_eq!(
+            bridge.secret_for_correlation(&call_id).as_deref(),
+            Some(_secret.as_str()),
+            "GHSA-8r7g: secret must be in the sync mirror after registration \
+             (register-before-emit) so the frame synthesizer stamps it"
+        );
         let approver = super::BridgeApprover {
             writer,
             bridge: bridge.clone(),
             cancel: CancellationToken::new(),
             call_id: call_id.clone(),
+            rx: std::sync::Mutex::new(Some(rx)),
         };
         let handle = tokio::spawn(async move { approver.approve(&crucible_test_plan()).await });
 
         let mut resolved = false;
         for _ in 0..512 {
             if bridge
-                .resolve(
+                .resolve_by_correlation(
                     &call_id,
                     ApprovalOutcome {
                         approved,
@@ -12694,9 +12743,10 @@ mod approval_bridge_engine_tests {
         }
         assert!(
             resolved,
-            "ApprovalBridge MUST be resolvable by the `crucible:` call_id — keying \
-             the bridge by a throwaway uuid (the pre-4b bug) makes every host's \
-             resolve-by-call_id miss and the council hangs until the 24h TTL"
+            "ApprovalBridge MUST be resolvable by the `crucible:` call_id via \
+             resolve_by_correlation (the local/TUI path) — indexing the bridge \
+             by a throwaway uuid (the pre-4b bug) makes resolve-by-correlation \
+             miss and the council hangs until the 24h TTL"
         );
         handle
             .await
@@ -12705,7 +12755,7 @@ mod approval_bridge_engine_tests {
     }
 
     #[tokio::test]
-    async fn crucible_approver_keys_bridge_by_call_id_and_maps_approve() {
+    async fn crucible_approver_resolvable_by_correlation_and_maps_approve() {
         let decision = drive_crucible_approver(true, None).await;
         assert_eq!(
             decision,
