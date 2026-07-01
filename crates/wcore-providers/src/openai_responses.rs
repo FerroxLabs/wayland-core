@@ -75,7 +75,7 @@
 
 use serde_json::{Value, json};
 
-use crate::openai_tool_name::{decode_tool_name, encode_tool_name};
+use crate::tool_name::{decode_tool_name, encode_tool_name};
 use wcore_config::compat::ProviderCompat;
 use wcore_types::llm::{LlmEvent, LlmRequest};
 use wcore_types::message::{ContentBlock, FinishReason, Message, Role, StopReason, TokenUsage};

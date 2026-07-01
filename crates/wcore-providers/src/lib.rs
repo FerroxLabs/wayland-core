@@ -36,7 +36,6 @@ pub mod openai_chatgpt;
 pub mod openai_compat;
 pub mod openai_compatible;
 pub mod openai_responses;
-pub mod openai_tool_name;
 pub mod openrouter;
 pub mod paste_detect;
 pub mod perplexity;
@@ -47,6 +46,7 @@ pub mod retry;
 pub mod routing;
 pub mod together;
 pub mod tool_capability;
+pub mod tool_name;
 pub mod vertex;
 pub mod xai;
 

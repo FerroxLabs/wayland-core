@@ -10,6 +10,7 @@ use wcore_types::tool::{ToolDef, truncate_deferred_description};
 
 use super::ProviderError;
 use crate::dump_response_chunk;
+use crate::tool_name::{decode_tool_name, encode_tool_name};
 use wcore_config::compat::ProviderCompat;
 use wcore_config::debug::DebugConfig;
 
@@ -44,7 +45,7 @@ pub fn build_messages(messages: &[Message], compat: &ProviderCompat) -> Vec<Valu
                     Some(json!({
                         "type": "tool_use",
                         "id": tool_id,
-                        "name": name,
+                        "name": encode_tool_name(name),
                         "input": input
                     }))
                 }
@@ -199,7 +200,7 @@ pub fn build_tools(tools: &[ToolDef]) -> Vec<Value> {
             if t.deferred {
                 let short_desc = truncate_deferred_description(&t.description);
                 json!({
-                    "name": t.name,
+                    "name": encode_tool_name(&t.name),
                     "description": format!(
                         "(Deferred) {short_desc} — Use ToolSearch to load full schema before calling."
                     ),
@@ -210,7 +211,7 @@ pub fn build_tools(tools: &[ToolDef]) -> Vec<Value> {
                 })
             } else {
                 json!({
-                    "name": t.name,
+                    "name": encode_tool_name(&t.name),
                     "description": t.description,
                     "input_schema": strip_top_level_combinators(&t.input_schema)
                 })
@@ -393,7 +394,10 @@ pub fn parse_sse_data(event_type: &str, data: &str, state: &mut StreamState) -> 
 
             if block_type == "tool_use" {
                 state.tool_id = block["id"].as_str().unwrap_or("").to_string();
-                state.tool_name = block["name"].as_str().unwrap_or("").to_string();
+                // Decode the wire name back to the canonical tool id so the
+                // model's call resolves against the registry (mirrors the
+                // encode in `build_tools` / assistant-history `tool_use`).
+                state.tool_name = decode_tool_name(block["name"].as_str().unwrap_or(""));
                 state.tool_input_json.clear();
             }
         }
@@ -1112,5 +1116,100 @@ mod tests {
             "nested oneOf must survive: {}",
             result[0]["input_schema"]
         );
+    }
+
+    // --- tool-name sanitization (Anthropic mirror of OpenAI #297) ---------
+
+    /// Anthropic requires `tools[N].custom.name` to match
+    /// `^[a-zA-Z0-9_-]{1,128}$` and 400s the ENTIRE request otherwise, so a
+    /// single MCP tool with a `:`/`.` in its name (e.g. `Browser::execute`)
+    /// used to abort every tool-calling turn. `build_tools` now emits a
+    /// wire-legal encoded name for both the deferred and full-schema branches.
+    #[test]
+    fn build_tools_sanitizes_invalid_names() {
+        use wcore_types::tool::ToolDef;
+        let tools = vec![
+            ToolDef {
+                name: "Browser::execute".into(),
+                description: "full".into(),
+                server: None,
+                deferred: false,
+                input_schema: json!({"type": "object", "properties": {}}),
+            },
+            ToolDef {
+                name: "com.microsoft-markitdown".into(),
+                description: "deferred".into(),
+                server: None,
+                deferred: true,
+                input_schema: json!({"type": "object", "properties": {}}),
+            },
+        ];
+        let result = build_tools(&tools);
+        for (i, orig) in ["Browser::execute", "com.microsoft-markitdown"]
+            .into_iter()
+            .enumerate()
+        {
+            let wire = result[i]["name"].as_str().unwrap();
+            assert_ne!(wire, orig, "invalid name must be encoded: {wire}");
+            assert!(is_anthropic_name_legal(wire), "not wire-legal: {wire}");
+        }
+    }
+
+    /// A charset-clean but over-length MCP name (real shape) is clamped to a
+    /// wire-legal ≤ 64-char name by `build_tools` — this is the OpenAI-64 /
+    /// Flux-kimi length 400 that survived the charset-only #297 fix.
+    #[test]
+    fn build_tools_clamps_over_length_names() {
+        use wcore_types::tool::ToolDef;
+        let long =
+            "mcp__io-github-taylorwilsdon-google-workspace-mcp__batch_modify_gmail_message_labels";
+        let tools = vec![ToolDef {
+            name: long.into(),
+            description: "test".into(),
+            server: None,
+            deferred: false,
+            input_schema: json!({"type": "object", "properties": {}}),
+        }];
+        let result = build_tools(&tools);
+        let wire = result[0]["name"].as_str().unwrap();
+        assert!(is_anthropic_name_legal(wire), "not wire-legal: {wire}");
+        assert!(wire.len() <= 64, "name must be clamped to ≤64: {wire}");
+    }
+
+    /// End-to-end round-trip: the encoded name emitted by `build_tools` decodes
+    /// back to the canonical id when the model calls the tool (parsed via
+    /// `content_block_start`), for both the charset and the length regimes.
+    #[test]
+    fn tool_name_round_trips_through_build_and_parse() {
+        use wcore_types::tool::ToolDef;
+        for orig in [
+            "Browser::execute",
+            "mcp__io-github-taylorwilsdon-google-workspace-mcp__batch_modify_gmail_message_labels",
+        ] {
+            let tools = vec![ToolDef {
+                name: orig.into(),
+                description: "t".into(),
+                server: None,
+                deferred: false,
+                input_schema: json!({"type": "object", "properties": {}}),
+            }];
+            // Encode happens in build_tools; grab the wire name.
+            let wire = build_tools(&tools)[0]["name"].as_str().unwrap().to_string();
+            // Model streams a tool_use referencing that wire name.
+            let mut state = StreamState::new();
+            let payload = json!({
+                "content_block": {"type": "tool_use", "id": "toolu_1", "name": wire}
+            })
+            .to_string();
+            parse_sse_data("content_block_start", &payload, &mut state);
+            assert_eq!(state.tool_name, orig, "round-trip failed for {orig}");
+        }
+    }
+
+    fn is_anthropic_name_legal(s: &str) -> bool {
+        !s.is_empty()
+            && s.len() <= 128
+            && s.bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
     }
 }
