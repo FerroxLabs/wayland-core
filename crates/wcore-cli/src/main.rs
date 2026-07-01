@@ -1751,6 +1751,15 @@ fn approval_mode_to_session(
     }
 }
 
+/// GHSA-8r7g: the `WAYLAND_ALLOW_WIRE_FORCE` env opt-in that lets a protocol
+/// peer request `SessionMode::Force`. Mirrors the env-based operator opt-ins
+/// elsewhere (e.g. `WAYLAND_ALLOW_NO_SANDBOX`). Truthy = `1` / `true`.
+fn wire_force_opt_in_env() -> bool {
+    std::env::var("WAYLAND_ALLOW_WIRE_FORCE")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false)
+}
+
 async fn run_tui_mode(
     config: Config,
     cwd: &str,
@@ -1834,6 +1843,9 @@ async fn run_tui_mode(
     let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
     let output: Arc<dyn OutputSink> = Arc::new(tui::ChannelSink::new(tx.clone()));
     let approval_manager = Arc::new(ToolApprovalManager::new());
+    // GHSA-8r7g: a protocol peer may escalate to Force only when this local
+    // operator opted in at launch (--force or WAYLAND_ALLOW_WIRE_FORCE).
+    approval_manager.set_allow_wire_force(force || wire_force_opt_in_env());
     // Seed the initial approval posture from config (`[default] approval_mode`,
     // editable via /config). `--force` below overrides it to Force.
     approval_manager.set_mode(approval_mode_to_session(config.approval_mode));
@@ -2564,6 +2576,9 @@ async fn run_json_stream_mode(
             .with_sub_agent_traces(true),
     );
     let approval_manager = Arc::new(ToolApprovalManager::new());
+    // GHSA-8r7g: a protocol peer may escalate to Force only when this local
+    // operator opted in at launch (--force or WAYLAND_ALLOW_WIRE_FORCE).
+    approval_manager.set_allow_wire_force(force || wire_force_opt_in_env());
     // F-002: plumb --force into json-stream mode. In the TUI path the
     // approval manager is flipped to Force before the engine boots; the
     // json-stream path was missing the same step, causing every mutating
@@ -2941,12 +2956,20 @@ async fn run_json_stream_mode(
                                         });
                                     }
                                     ProtocolCommand::SetMode { mode } => {
-                                        approval_manager.set_mode(mode);
-                                        mode_changed = true;
-                                        let _ = writer.emit(&wcore_protocol::events::ProtocolEvent::Info {
-                                            msg_id: String::new(),
-                                            message: format!("mode updated: {}", approval_manager.current_mode()),
-                                        });
+                                        // GHSA-8r7g: a wire peer may not escalate to
+                                        // Force without a local-operator opt-in.
+                                        if approval_manager.set_mode_from_wire(mode) {
+                                            mode_changed = true;
+                                            let _ = writer.emit(&wcore_protocol::events::ProtocolEvent::Info {
+                                                msg_id: String::new(),
+                                                message: format!("mode updated: {}", approval_manager.current_mode()),
+                                            });
+                                        } else {
+                                            let _ = writer.emit(&wcore_protocol::events::ProtocolEvent::Info {
+                                                msg_id: String::new(),
+                                                message: "set_mode: 'force' refused — requires a local-operator opt-in (launch with --force or WAYLAND_ALLOW_WIRE_FORCE=1)".to_string(),
+                                            });
+                                        }
                                     }
                                     ProtocolCommand::Ping => {
                                         let _ = writer.emit(&wcore_protocol::events::ProtocolEvent::Pong);
@@ -3028,20 +3051,29 @@ async fn run_json_stream_mode(
             }
             ProtocolCommand::SetMode { mode } => {
                 let mode_str = format!("{mode:?}").to_lowercase();
-                approval_manager.set_mode(mode);
-                let _ = writer.emit(&wcore_protocol::events::ProtocolEvent::Info {
-                    msg_id: String::new(),
-                    message: format!("mode updated: {}", approval_manager.current_mode()),
-                });
-                protocol_sink.emit_config_changed_with_plugins(
-                    engine.compat(),
-                    has_mcp,
-                    &approval_manager.current_mode(),
-                    initial_has_plugins,
-                    &initial_plugin_caps,
-                    engine.advertised_capabilities(),
-                );
-                eprintln!("[protocol] SetMode applied: {mode_str}");
+                // GHSA-8r7g: a wire peer may not escalate to Force without a
+                // local-operator opt-in.
+                if !approval_manager.set_mode_from_wire(mode) {
+                    let _ = writer.emit(&wcore_protocol::events::ProtocolEvent::Info {
+                        msg_id: String::new(),
+                        message: "set_mode: 'force' refused — requires a local-operator opt-in (launch with --force or WAYLAND_ALLOW_WIRE_FORCE=1)".to_string(),
+                    });
+                    eprintln!("[protocol] SetMode refused (force, no local opt-in)");
+                } else {
+                    let _ = writer.emit(&wcore_protocol::events::ProtocolEvent::Info {
+                        msg_id: String::new(),
+                        message: format!("mode updated: {}", approval_manager.current_mode()),
+                    });
+                    protocol_sink.emit_config_changed_with_plugins(
+                        engine.compat(),
+                        has_mcp,
+                        &approval_manager.current_mode(),
+                        initial_has_plugins,
+                        &initial_plugin_caps,
+                        engine.advertised_capabilities(),
+                    );
+                    eprintln!("[protocol] SetMode applied: {mode_str}");
+                }
             }
             ProtocolCommand::SetConfig {
                 model,
