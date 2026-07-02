@@ -148,6 +148,106 @@ mod tests {
         assert!(result.is_err(), "expected error from unreachable host");
     }
 
+    /// #139 escalation pin: the desktop's direct-DeepSeek selection resolves
+    /// THIS provider. Prove the newtype delegation reaches OpenAIProvider's
+    /// ENCODED request build — a dirty `Browser::execute` tool must hit the
+    /// wire as its `wct_`-encoded form, and a clean name byte-identical. If a
+    /// future refactor gives DeepSeekProvider its own body builder without
+    /// the codec, this test fails.
+    #[tokio::test]
+    async fn dirty_tool_names_are_encoded_on_the_deepseek_wire() {
+        use wcore_types::llm::Message;
+        use wcore_types::llm::Role;
+        use wcore_types::message::ContentBlock;
+        use wcore_types::tool::ToolDef;
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        let sse_body = concat!(
+            "data: {\"id\":\"x\",\"object\":\"chat.completion.chunk\",\"model\":\"m\",",
+            "\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"ok\"},\"finish_reason\":null}]}\n\n",
+            "data: {\"id\":\"x\",\"object\":\"chat.completion.chunk\",\"model\":\"m\",",
+            "\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n",
+            "data: [DONE]\n\n"
+        );
+        Mock::given(method("POST"))
+            .and(path("/v1/chat/completions"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_string(sse_body)
+                    .insert_header("content-type", "text/event-stream"),
+            )
+            .mount(&server)
+            .await;
+
+        let p = DeepSeekProvider::new(
+            "sk-test",
+            &server.uri(),
+            ProviderCompat::default(),
+            DebugConfig::default(),
+        );
+        let req = LlmRequest {
+            model: "deepseek-v4-flash".into(),
+            messages: vec![Message::new(
+                Role::User,
+                vec![ContentBlock::Text { text: "hi".into() }],
+            )],
+            tools: vec![
+                ToolDef {
+                    name: "Browser::execute".into(),
+                    description: "dirty".into(),
+                    input_schema: serde_json::json!({"type":"object","properties":{}}),
+                    deferred: false,
+                    server: None,
+                },
+                ToolDef {
+                    name: "get_weather".into(),
+                    description: "clean".into(),
+                    input_schema: serde_json::json!({"type":"object","properties":{}}),
+                    deferred: false,
+                    server: None,
+                },
+            ],
+            max_tokens: 16,
+            ..Default::default()
+        };
+        let mut rx = p.stream(&req).await.expect("stream ok");
+        while rx.recv().await.is_some() {}
+
+        let reqs = server.received_requests().await.expect("requests recorded");
+        assert_eq!(reqs.len(), 1, "exactly one wire request");
+        let body: serde_json::Value = serde_json::from_slice(&reqs[0].body).expect("json body");
+        let names: Vec<&str> = body["tools"]
+            .as_array()
+            .expect("tools array")
+            .iter()
+            .map(|t| t["function"]["name"].as_str().expect("name"))
+            .collect();
+        let legal = |n: &str| {
+            !n.is_empty()
+                && n.len() <= 64
+                && n.chars()
+                    .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+        };
+        assert!(
+            names.contains(&"wct_Browser_3A_3Aexecute"),
+            "dirty name must be wct_-encoded on the DeepSeek wire, got {names:?}"
+        );
+        assert!(
+            names.contains(&"get_weather"),
+            "clean name must pass through byte-identical, got {names:?}"
+        );
+        assert!(
+            !names.iter().any(|n| n.contains("::") || n.contains('.')),
+            "no raw dirty name may reach the wire: {names:?}"
+        );
+        assert!(
+            names.iter().all(|n| legal(n)),
+            "every wire name must match ^[a-zA-Z0-9_-]{{1,64}}$: {names:?}"
+        );
+    }
+
     #[test]
     fn register_uses_lowercase_id() {
         let mut r = WaylandProviderRegistry::new();
