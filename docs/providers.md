@@ -30,6 +30,7 @@ to the same built-in. The canonical list lives in `BUILTIN_PROVIDER_NAMES`
 | Cohere | `cohere` | OpenAI-compatible |
 | OpenAI (ChatGPT) | `openai-chatgpt` (`chatgpt`) | OAuth — routes through the ChatGPT Codex backend on your subscription. See [Sign in with ChatGPT](#sign-in-with-chatgpt) |
 | MiniMax | `minimax` (`minimaxi`) | Anthropic-wire provider; region-locked keys |
+| Sakana AI / Fugu | `sakana` (`fugu`) | OpenAI-compatible; multi-agent orchestration router. `fish_`-prefixed keys; `SAKANA_API_KEY` |
 
 ---
 
@@ -104,6 +105,79 @@ sets this by default:
 [providers.my-reasoning-endpoint.compat]
 supports_stop_param = false
 ```
+
+---
+
+## Capability-first tool gating (tool-incapable models)
+
+Some models can't do function calling. A local model pulled into Ollama, a
+`llama.cpp` server started **without** `--jinja`, or a reasoning/embedding/image
+model on Bedrock will reject a request that carries a `tools` array — often with
+a hard HTTP `400` that kills the whole turn. Wayland Core detects these models
+and **degrades gracefully to a text-only turn** instead of surfacing a raw
+provider error. Tool-*capable* models are unaffected: they keep their tools and
+call them exactly as before. (FerroxLabs/wayland#389, shipped 0.12.13.)
+
+Detection runs through four independent signals, all converging on a
+per-provider-instance capability cache (`crates/wcore-providers/src/tool_capability.rs`).
+The cache is **optimistic**: tools are attached unless a model is *positively*
+known to reject them, so an unknown model still gets one chance to use tools
+rather than having them stripped pre-emptively.
+
+1. **Name-gate (static prefix predicate).** Families already known to reject a
+   caller-supplied `tools` array are gated by name before the request is built.
+   For OpenAI-compatible providers this is `model_supports_tool_calling`
+   (`crates/wcore-providers/src/openai_compat.rs`), which currently special-cases
+   only Groq's agentic **Compound** family (`compound-beta`, `compound-beta-mini`,
+   `compound`, `compound-mini`, and the namespaced `groq/compound*` ids — matched
+   case-insensitively, leading-`compound` only so it won't catch e.g.
+   `octo-compound-7b`). Everything else defaults to tool-capable.
+
+2. **Bedrock name-gate.** `bedrock_model_supports_tools`
+   (`crates/wcore-providers/src/bedrock.rs`) drops the `tools` block for models
+   matched by `BEDROCK_NON_TOOL_MODEL_MARKERS` — `deepseek.r1` / `deepseek-r1`
+   (reasoning-only), `stability.` (image), `cohere.embed` and
+   `amazon.titan-embed` (embeddings). Markers are matched as case-insensitive
+   substrings, so regional id prefixes (`us.`, `eu.`) are tolerated
+   (`us.deepseek.r1-v1:0` still matches). Claude, Mistral Large, and Command
+   R/R+ are not listed and keep tools.
+
+3. **Ollama probe (proactive).** On the first turn for an Ollama-served model,
+   the provider issues a best-effort `POST {base}/api/show`
+   (`crates/wcore-providers/src/ollama_probe.rs`) and reads the response's
+   `capabilities` array. If it lists `"tools"` the model keeps its tools; if the
+   array is present but lacks `"tools"`, the `tools` array is stripped **before**
+   the chat request is sent (no failed round-trip). The probe has a hard 2-second
+   wall-clock cap and **fails open**: any error, timeout, non-success status,
+   unparseable body, or missing/malformed `capabilities` resolves to "unknown",
+   leaving tools attached.
+
+4. **Reactive net (learn-from-400).** For backends with no capability endpoint
+   to probe (e.g. `llama.cpp`), the first turn's `tools` request may 400. When
+   the provider sees a tools-unsupported `400` it drops the `tools` array,
+   **retries once** on the same host so the turn still completes, and **records**
+   that the model rejects tools — so every later turn for that model strips tools
+   pre-emptively. Only the very first request for such a model ever carries a
+   `tools` array. The matcher (`is_tools_unsupported_error` in
+   `crates/wcore-providers/src/openai.rs`) is conservative: it fires **only** on
+   status `400`, matches against the provider's `error.message` (not the raw body,
+   which could echo the prompt), and looks for specific markers —
+   `does not support tools` (Ollama), `tools param requires` (llama.cpp without
+   `--jinja`), `unsupported param: tools`, `does not support function calling`,
+   `tool calling is not supported`, `tools are not supported`,
+   `tool use is not supported`. A `500` is never retried (it may be transient).
+
+### What the user sees
+
+Nothing changes in normal operation: the turn completes with a text answer
+instead of erroring out. The model simply won't call tools that turn. The
+proactive paths (name-gate, Ollama probe) avoid the failed round-trip entirely;
+the reactive path costs one extra (failed) request the first time a no-tool
+model is hit, then never again for that model in the session. The retry is logged
+at `warn` level (`model does not support tools; retrying request without tools (#389)`).
+
+> The cache is per-provider-instance and lives in memory for the session — it is
+> not persisted to disk. A fresh process re-probes / re-learns.
 
 ---
 
@@ -284,6 +358,92 @@ the standard `OLLAMA_HOST` environment variable.
 `capabilities.plugins` flips to `true` whenever any plugin (including
 wayland-ollama) is loaded — see W8c.3 H.2 plugin-aware capability
 advertising in `crates/wcore-agent/src/output/protocol_sink.rs`.
+
+---
+
+## Sakana AI (Fugu)
+
+Sakana AI's **Fugu** is a multi-agent orchestration/routing layer that fans a
+task across upstream frontier models behind one OpenAI-compatible
+chat-completions surface — similar in shape to OpenRouter or Flux Router. The
+adapter is a thin newtype over the OpenAI provider
+(`crates/wcore-providers/src/sakana.rs`).
+
+### Configuration
+
+```toml
+[default]
+provider = "sakana"      # alias: fugu
+
+[providers.sakana]
+api_key = "fish_xxx"
+# base_url defaults to https://api.sakana.ai/v1
+```
+
+- **Auth.** Bearer auth with `fish_`-prefixed keys. Set `api_key` in
+  `[providers.sakana]` or the `SAKANA_API_KEY` environment variable. A bare key
+  beginning with `fish_` is auto-detected as Sakana
+  (`crates/wcore-cli/src/provider_keys.rs`).
+- **Slug / alias.** `--provider sakana`, or `--provider fugu` — `fugu` resolves
+  to the same built-in (`crates/wcore-config/src/config.rs`).
+- **Default model.** `fugu`. Other ids: `fugu-ultra`, `fugu-ultra-20260615`.
+  `--provider sakana` with no `--model` just works (it defaults to `fugu`).
+- **Base URL.** `https://api.sakana.ai/v1` (`SAKANA_DEFAULT_BASE_URL`); the
+  base already ends in `/v1`. Override via `base_url` / `--base-url`.
+
+```bash
+wayland-core --provider sakana "explain this repo"            # uses fugu
+wayland-core --provider fugu --model fugu-ultra "deep audit"
+```
+
+> Sakana's API WAFs some datacenter IPs; if requests are blocked from a server
+> host, run from a residential connection or via a permitted egress.
+
+---
+
+## Flux context-routing (#282)
+
+When you target a **Flux Router tier alias** — `flux-auto`, `flux-fast`,
+`flux-standard`, or `flux-reasoning` (i.e. you let Flux pick the upstream model)
+— Wayland Core opts into Flux's **context-aware routing** contract so Flux can
+size and route the turn against the real upstream context window. Pinning a
+**concrete** model id opts OUT (you chose the upstream), and **non-Flux**
+providers never see any of this — the request is left byte-for-byte unchanged.
+Shipped 0.12.7 (#282); implemented in `crates/wcore-providers/src/openai.rs`.
+
+### Request side — Core signals to Flux (`x-wl-*` headers)
+
+On a tier-alias turn, `apply_flux_context_headers` attaches:
+
+| Header | Value |
+|--------|-------|
+| `x-wl-context-tokens` | Assembled-prompt token estimate (skipped if not available) |
+| `x-wl-expected-output` | The output budget (`max_tokens`) |
+| `x-wl-context-managed` | Literal `true` (opts into the managed path) |
+| `x-wl-conversation-id` | Stable conversation id (skipped if absent) |
+
+### Response side — Flux signals back (`x-flux-*` headers)
+
+Flux returns routing telemetry on every response. `parse_flux_response_meta`
+reads it and emits a single `ProviderMeta` event at stream start; non-Flux
+providers send none of these headers, so nothing is emitted and the SSE path is
+unchanged.
+
+| Header | Field | Type |
+|--------|-------|------|
+| `x-flux-routed-model` | `routed_model` | string |
+| `x-flux-model-window` | `model_window` | int |
+| `x-flux-context-pressure` | `context_pressure` | float (counted/window) |
+| `x-flux-context-tokens-counted` | `tokens_counted` | int |
+
+Each field parses independently — an absent or unparsable single header is just
+`None`, never an error. This lets a host (e.g. the Wayland desktop app) surface
+which upstream Flux actually routed to and how close the turn is to that model's
+context window.
+
+> Flux also returns structured `402` (spend/upgrade) and `409`/`413`
+> (context-overflow) error envelopes that the engine decodes into typed provider
+> errors — see `parse_flux_402` / `parse_flux_overflow` in the same module.
 
 ---
 
