@@ -163,7 +163,15 @@ const BIN_JS = `#!/usr/bin/env node
 // binary directly instead of going through this shim.
 const { spawnSync } = require("node:child_process");
 const { binaryPath } = require("../index.js");
-const staleCheck = require("./stale-check.js");
+
+// Belt-and-suspenders: a load-time failure in the self-heal module must never
+// take the launcher down with it.
+let staleCheck = { warnIfStale() {} };
+try {
+  staleCheck = require("./stale-check.js");
+} catch (_e) {
+  // fail-safe: launch without the update check
+}
 
 let bin;
 try {
@@ -237,10 +245,22 @@ function writeState(state) {
   try {
     const file = stateFile();
     fs.mkdirSync(path.dirname(file), { recursive: true });
-    fs.writeFileSync(file, JSON.stringify(state));
+    // temp-file + rename: concurrent launches must never leave a torn file
+    const tmp = file + "." + process.pid + ".tmp";
+    fs.writeFileSync(tmp, JSON.stringify(state));
+    fs.renameSync(tmp, file);
   } catch (_e) {
     // best-effort
   }
+}
+
+// STRICT full-match, stable-only. The registry response (and the state file it
+// is persisted to) is UNTRUSTED: a loose prefix match would let a compromised
+// response smuggle ANSI escapes or an attacker-controlled command string into
+// the printed "run this to fix" warning, and a prerelease dist-tag would tell
+// stable users to pin a prerelease. Returns the validated string or null.
+function validStableVersion(v) {
+  return typeof v === "string" && /^\\d+\\.\\d+\\.\\d+$/.test(v) ? v : null;
 }
 
 function parseVersion(v) {
@@ -277,11 +297,13 @@ function warnIfStale() {
 
   const warnThrottled =
     typeof state.warnedAt === "number" && now - state.warnedAt < WARN_INTERVAL_MS;
-  if (state.latest && isBehind(current, state.latest) && !warnThrottled) {
+  // re-validate on READ: the state file is as untrusted as the registry
+  const latest = validStableVersion(state.latest);
+  if (latest && isBehind(current, latest) && !warnThrottled) {
     console.error(
-      "wayland-core: v" + current + " is stale — latest is v" + state.latest + ".\\n" +
+      "wayland-core: v" + current + " is stale — latest is v" + latest + ".\\n" +
         "  npx caches this package by spec string and never refreshes it; run the\\n" +
-        "  exact version to bust the cache:  npx " + PKG + "@" + state.latest + "\\n" +
+        "  exact version to bust the cache:  npx " + PKG + "@" + latest + "\\n" +
         "  (or: npm i -g " + PKG + "@latest — suppress this check with\\n" +
         "  WAYLAND_CORE_SKIP_UPDATE_CHECK=1)"
     );
@@ -310,24 +332,32 @@ function warnIfStale() {
 async function refresh() {
   const state = readState();
   state.checkedAt = Date.now();
+  // Persist the throttle stamp BEFORE the network call: if the fetch hangs or
+  // this process dies, the next launch must still see a fresh checkedAt and
+  // NOT spawn another checker (otherwise a slow registry accumulates orphans).
+  writeState(state);
   try {
-    if (typeof fetch === "function") {
-      const ctl = new AbortController();
-      const timer = setTimeout(() => ctl.abort(), FETCH_TIMEOUT_MS);
-      const res = await fetch(
-        "https://registry.npmjs.org/-/package/" + PKG + "/dist-tags",
-        { signal: ctl.signal, headers: { accept: "application/json" } }
-      );
-      clearTimeout(timer);
-      if (res.ok) {
-        const tags = await res.json();
-        if (tags && parseVersion(tags.latest)) state.latest = tags.latest;
+    if (typeof fetch !== "function") return;
+    // AbortSignal.timeout covers headers AND the body read (a plain
+    // clearTimeout-after-fetch would leave res.json() unbounded against a
+    // trickled body). fetch implies Node >= 18, which has AbortSignal.timeout.
+    const res = await fetch(
+      "https://registry.npmjs.org/-/package/" + PKG + "/dist-tags",
+      {
+        signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
+        headers: { accept: "application/json" },
       }
+    );
+    if (!res.ok) return;
+    const tags = await res.json();
+    const latest = validStableVersion(tags && tags.latest);
+    if (latest) {
+      state.latest = latest;
+      writeState(state);
     }
   } catch (_e) {
-    // offline / registry down — keep the previous \`latest\`, still throttle
+    // offline / registry down / timeout — keep the previous \`latest\`
   }
-  writeState(state);
 }
 
 module.exports = { warnIfStale };
