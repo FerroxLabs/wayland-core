@@ -133,3 +133,25 @@ reason = "opentelemetry_sdk baggage-extract DoS: receiving-side only; wayland-co
 id = "RUSTSEC-2026-0192"
 ignoreUntil = "2026-09-02T00:00:00Z"
 reason = "ttf-parser unmaintained (patched=[]); transitive only via lopdf <- pdf-extract <- wcore-tools PDF text extraction. Informational, no patch exists; successor skrifa is an upstream pdf-extract/lopdf decision. Tracked; revisit on pdf-extract/lopdf bump."
+
+# ── quick-xml 0.39.4 DoS pair ────────────────────────────────────────────
+# RUSTSEC-2026-0194 (quadratic duplicate-attribute check) and
+# RUSTSEC-2026-0195 (unbounded NsReader namespace-declaration allocation),
+# both published 2026-06-29, fixed only in quick-xml >= 0.41.0. Sole parent
+# trace: plist 1.9.0 <- syntect 5.3.0 <- wcore-cli. syntect is used solely by
+# the TUI diff widget with load_defaults() EMBEDDED binary theme/syntax dumps
+# (crates/wcore-cli/src/tui/widgets/diff.rs:332-333); no from_folder(), no
+# user-supplied .tmTheme/plist XML is ever parsed, so the vulnerable XML
+# reader never receives input. No patched 0.39.x exists and plist 1.9.0 (the
+# latest) still pins ^0.39.2 — nothing to bump. Ambient advisory (not a code
+# change in this PR). Tracked: FerroxLabs/wayland-core#142; lift on a plist
+# release carrying quick-xml >= 0.41.
+[[IgnoredVulns]]
+id = "RUSTSEC-2026-0194"
+ignoreUntil = "2026-09-02T00:00:00Z"
+reason = "quick-xml quadratic dup-attribute DoS: unreachable — sole path plist<-syntect<-wcore-cli TUI diff widget using embedded load_defaults() dumps; no XML parsing of any input. No patched 0.39.x; plist latest pins ^0.39.2. Tracked #142."
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2026-0195"
+ignoreUntil = "2026-09-02T00:00:00Z"
+reason = "quick-xml NsReader namespace-allocation DoS: unreachable — same sole embedded-dump path, no XML input reaches NsReader. No patched 0.39.x; plist latest pins ^0.39.2. Tracked #142."

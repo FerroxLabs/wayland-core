@@ -28,9 +28,27 @@
 # Format reference: https://docs.rs/cargo-audit/latest/cargo_audit/
 
 [advisories]
-# The ignore list is EMPTY again. RUSTSEC-2023-0071 (rsa Marvin Attack) was
-# ELIMINATED AT THE SOURCE, not ignored: jsonwebtoken migrated `rust_crypto`
-# -> `aws_lc_rs` in wcore-channel-msteams + wcore-providers, dropping the
-# pure-Rust `rsa` crate from the tree (`cargo tree -i rsa` -> not found).
-# aws-lc-rs was already present via rustls, so this added no build surface.
-ignore = []
+# (prior state) RUSTSEC-2023-0071 (rsa Marvin Attack) was ELIMINATED AT THE
+# SOURCE, not ignored: jsonwebtoken migrated `rust_crypto` -> `aws_lc_rs` in
+# wcore-channel-msteams + wcore-providers, dropping the pure-Rust `rsa` crate
+# from the tree (`cargo tree -i rsa` -> not found). aws-lc-rs was already
+# present via rustls, so this added no build surface.
+#
+# ── quick-xml 0.39.4 DoS pair (RUSTSEC-2026-0194 / RUSTSEC-2026-0195) ──────
+# Published 2026-06-29; started failing plain `cargo audit` on every PR from
+# 2026-07-02 (ambient advisory-DB event, not a code change). Both fixed only
+# in quick-xml >= 0.41.0.
+# Parent trace (sole path): quick-xml 0.39.4 <- plist 1.9.0 <- syntect 5.3.0
+#   <- wcore-cli (`cargo tree -i quick-xml`).
+# Threat model — UNREACHABLE: syntect is used only by the TUI diff widget
+# (crates/wcore-cli/src/tui/widgets/diff.rs:332-333) via
+# SyntaxSet::load_defaults_newlines() + ThemeSet::load_defaults(), which read
+# syntect's EMBEDDED binary dumps. No from_folder(), no user-supplied
+# .tmTheme/plist XML parsing anywhere in the workspace — the vulnerable
+# NsReader/attribute-check code paths never receive input of any provenance.
+# No fix to take at source: plist's latest release (1.9.0) still requires
+# quick-xml ^0.39.2; nothing patched exists on the 0.39 line.
+# Tracking: FerroxLabs/wayland-core#142 — lift when plist releases with
+# quick-xml >= 0.41 (`cargo update -p plist`, remove both entries here and in
+# .github/osv-scanner.toml).
+ignore = ["RUSTSEC-2026-0194", "RUSTSEC-2026-0195"]
