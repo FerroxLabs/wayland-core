@@ -693,7 +693,11 @@ impl OpenAIProvider {
         // field), skip the wire field so the served model's natural output
         // ceiling applies. `request.max_tokens` still carries the sized
         // internal budget for the x-wl-expected-output header below.
-        if !request.omit_max_tokens {
+        // Belt-and-braces: the request flag is ALSO gated on THIS provider's
+        // own compat, so a request built against another provider's compat
+        // (or a future direct caller) can never strip the field from an
+        // endpoint that requires a sized value.
+        if !(request.omit_max_tokens && self.compat.omit_max_tokens_when_unsized()) {
             body[max_tokens_field] = json!(request.max_tokens);
         }
 
@@ -3048,15 +3052,16 @@ mod tests {
         assert!(body.get("max_completion_tokens").is_none());
     }
 
-    /// #112: when the engine flags `omit_max_tokens`, the chat body carries
-    /// NEITHER `max_tokens` NOR `max_completion_tokens` — the served model's
-    /// natural output ceiling applies.
+    /// #112: when the engine flags `omit_max_tokens` AND this provider's own
+    /// compat is omit-safe, the chat body carries NEITHER `max_tokens` NOR
+    /// `max_completion_tokens` — the served model's natural ceiling applies.
     #[test]
     fn test_omit_max_tokens_drops_the_wire_field() {
+        // Omit-safe provider compat (flux-router preset).
         let provider = OpenAIProvider::new(
             "key",
             "http://localhost",
-            openai_compat(),
+            ProviderCompat::flux_router_defaults(),
             DebugConfig::default(),
         );
         let req = LlmRequest {
@@ -3082,6 +3087,31 @@ mod tests {
         let body = provider.build_request_body(&req_reasoning);
         assert!(body.get("max_completion_tokens").is_none());
         assert!(body.get("max_tokens").is_none());
+    }
+
+    /// #112 belt-and-braces: the request flag alone is NOT enough — a provider
+    /// whose OWN compat is not omit-safe (plain openai / generic openai-compat)
+    /// keeps sending the sized value even if a cross-compat request arrives
+    /// with `omit_max_tokens = true`.
+    #[test]
+    fn test_omit_max_tokens_ignored_when_provider_compat_not_omit_safe() {
+        let provider = OpenAIProvider::new(
+            "key",
+            "http://localhost",
+            openai_compat(), // openai_defaults: omit_max_tokens_when_unsized off
+            DebugConfig::default(),
+        );
+        let req = LlmRequest {
+            model: "some-self-hosted-model".into(),
+            max_tokens: 8_192,
+            omit_max_tokens: true,
+            ..Default::default()
+        };
+        let body = provider.build_request_body(&req);
+        assert_eq!(
+            body["max_tokens"], 8_192,
+            "a non-omit-safe provider must keep sending the sized value"
+        );
     }
 
     // --- Output-side opt (Part A): stop_sequences -> body["stop"] ----------

@@ -227,7 +227,10 @@ pub(crate) fn build_gemini_body(
     // #112: when the engine flagged this turn omit-safe (user omitted the cap
     // + model unknown to the registry + provider tolerates the absent field),
     // skip `maxOutputTokens` so Gemini applies the served model's own ceiling.
-    let mut generation_config = if request.omit_max_tokens {
+    // Belt-and-braces: also gated on THIS provider's own compat so a request
+    // built against another provider's compat can never strip the field.
+    let mut generation_config = if request.omit_max_tokens && compat.omit_max_tokens_when_unsized()
+    {
         json!({})
     } else {
         json!({
@@ -1158,7 +1161,8 @@ mod tests {
         assert_eq!(body["generationConfig"]["maxOutputTokens"], 1024);
     }
 
-    /// #112: when the engine flags `omit_max_tokens`, the body carries NO
+    /// #112: when the engine flags `omit_max_tokens` AND the provider's own
+    /// compat is omit-safe (the gemini preset), the body carries NO
     /// `generationConfig.maxOutputTokens` — Gemini applies the served model's
     /// own ceiling. The rest of generationConfig still assembles normally.
     #[test]
@@ -1166,7 +1170,7 @@ mod tests {
         let provider = GeminiProvider::new(
             "k",
             DEFAULT_GEMINI_BASE_URL,
-            compat(),
+            ProviderCompat::gemini_defaults(),
             DebugConfig::default(),
         );
         let mut request = make_request_with_messages(vec![Message::new(
@@ -1178,6 +1182,28 @@ mod tests {
         assert!(
             body["generationConfig"].get("maxOutputTokens").is_none(),
             "omit_max_tokens must drop generationConfig.maxOutputTokens"
+        );
+    }
+
+    /// #112 belt-and-braces: with a compat that is NOT omit-safe, the request
+    /// flag alone must not strip the field — the sized value is still sent.
+    #[test]
+    fn build_request_body_keeps_max_output_tokens_when_compat_not_omit_safe() {
+        let provider = GeminiProvider::new(
+            "k",
+            DEFAULT_GEMINI_BASE_URL,
+            compat(), // test compat: omit_max_tokens_when_unsized unset (off)
+            DebugConfig::default(),
+        );
+        let mut request = make_request_with_messages(vec![Message::new(
+            Role::User,
+            vec![ContentBlock::Text { text: "hi".into() }],
+        )]);
+        request.omit_max_tokens = true;
+        let body = provider.build_request_body(&request);
+        assert_eq!(
+            body["generationConfig"]["maxOutputTokens"], 1024,
+            "a non-omit-safe compat must keep sending the sized value"
         );
     }
 

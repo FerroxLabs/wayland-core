@@ -84,7 +84,7 @@ use wcore_types::tool::{ToolDef, truncate_deferred_description};
 /// Build the `/v1/responses` request body from a provider-neutral
 /// [`LlmRequest`]. Mirrors `buildParams` + `convertResponsesMessages` +
 /// `convertResponsesTools` from the OpenClaw references in the module docs.
-pub(crate) fn build_responses_body(request: &LlmRequest, _compat: &ProviderCompat) -> Value {
+pub(crate) fn build_responses_body(request: &LlmRequest, compat: &ProviderCompat) -> Value {
     let mut body = json!({
         "model": request.model,
         "input": build_input(&request.messages),
@@ -97,7 +97,9 @@ pub(crate) fn build_responses_body(request: &LlmRequest, _compat: &ProviderCompa
     // #112: when the engine flagged this turn omit-safe (user omitted the cap
     // + model unknown to the registry + provider tolerates the absent field),
     // skip `max_output_tokens` so the served model's natural ceiling applies.
-    if !request.omit_max_tokens {
+    // Belt-and-braces: also gated on THIS provider's own compat so a request
+    // built against another provider's compat can never strip the field.
+    if !(request.omit_max_tokens && compat.omit_max_tokens_when_unsized()) {
         body["max_output_tokens"] = json!(request.max_tokens);
     }
 
@@ -725,8 +727,9 @@ mod tests {
         assert_eq!(input[0]["content"][0]["text"], json!("Hello"));
     }
 
-    /// #112: when the engine flags `omit_max_tokens`, the Responses body
-    /// carries NO `max_output_tokens` — the served model's ceiling applies.
+    /// #112: when the engine flags `omit_max_tokens` AND the provider's own
+    /// compat is omit-safe, the Responses body carries NO `max_output_tokens`
+    /// — the served model's ceiling applies.
     #[test]
     fn build_body_omits_max_output_tokens_when_flagged() {
         let request = LlmRequest {
@@ -737,10 +740,23 @@ mod tests {
             omit_max_tokens: true,
             ..Default::default()
         };
-        let body = build_responses_body(&request, &ProviderCompat::default());
+        let omit_safe = ProviderCompat {
+            omit_max_tokens_when_unsized: Some(true),
+            ..ProviderCompat::default()
+        };
+        let body = build_responses_body(&request, &omit_safe);
         assert!(
             body.get("max_output_tokens").is_none(),
             "omit_max_tokens must drop max_output_tokens from the wire body"
+        );
+
+        // #112 belt-and-braces: with a compat that is NOT omit-safe, the
+        // request flag alone must not strip the field.
+        let body = build_responses_body(&request, &ProviderCompat::default());
+        assert_eq!(
+            body["max_output_tokens"],
+            json!(8_192),
+            "a non-omit-safe compat must keep sending the sized value"
         );
     }
 

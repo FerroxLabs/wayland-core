@@ -471,7 +471,10 @@ sizes the wire value to the model that will actually serve the turn
   sent: 8192, or 32768 on a reasoning turn.
 
 An **explicit** cap (CLI `--max-tokens` or a non-default `max_tokens` in TOML)
-always binds and is never omitted. Custom endpoints can opt in or out of the
+always binds and is never omitted. Known limitation: writing **exactly 64000**
+(the built-in default) in TOML is indistinguishable from omitting it and reads
+as "omitted" — pick any other value (e.g. 63999) to force an explicit cap.
+Custom endpoints can opt in or out of the
 omit behaviour via the `omit_max_tokens_when_unsized` compat flag:
 
 ```toml

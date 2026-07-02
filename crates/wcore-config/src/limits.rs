@@ -65,11 +65,14 @@ pub fn model_output_ceiling(_provider: &str, model: &str) -> Option<(u32, u32)> 
     // models.dev (2026-07-02): gemini-2.5-pro, gemini-2.5-flash, and
     // gemini-2.5-flash-lite all report output 65_536 / context 1_048_576. The
     // specialty variants have MUCH smaller limits (gemini-2.5-flash-image:
-    // 32_768/32_768; the -preview-tts variants: 8_192 window) — an over-claim
+    // 32_768/32_768; the -preview-tts variants: 8_192 window; the
+    // -native-audio / -live realtime variants: ~8k output) — an over-claim
     // would 400 them, so they are excluded and fail open to the unknown path.
     if (m.contains("gemini-2.5-pro") || m.contains("gemini-2.5-flash"))
         && !m.contains("-image")
         && !m.contains("-tts")
+        && !m.contains("-native-audio")
+        && !m.contains("-live")
     {
         return Some((65_536, 1_048_576));
     }
@@ -196,6 +199,15 @@ mod tests {
         );
         assert_eq!(
             model_output_ceiling("gemini", "gemini-2.5-flash-preview-tts"),
+            None
+        );
+        // Realtime variants (~8k real output) must also fail open.
+        assert_eq!(
+            model_output_ceiling("gemini", "gemini-2.5-flash-native-audio-preview"),
+            None
+        );
+        assert_eq!(
+            model_output_ceiling("gemini", "gemini-2.5-flash-live"),
             None
         );
     }

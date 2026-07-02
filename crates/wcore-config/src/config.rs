@@ -5551,6 +5551,60 @@ max_tokens = 1234
         );
     }
 
+    /// #112 (F4): no CLI flag + no TOML value → the cap reads as OMITTED
+    /// (`max_tokens_explicit == false`) with the 64000 default as the internal
+    /// working value. This is the enabling condition of the whole omit path.
+    /// Hermetic: `WAYLAND_HOME` sandboxes the GLOBAL config lookup so a real
+    /// `~/.config/wayland-core/config.toml` on the dev box can't flip it.
+    #[test]
+    #[serial_test::serial(wayland_home_env)]
+    fn test_resolve_omitted_max_tokens_reads_as_not_explicit() {
+        let wh_key = "WAYLAND_HOME";
+        let xdg_key = "XDG_DATA_HOME";
+        let prev_wh = std::env::var_os(wh_key);
+        let prev_xdg = std::env::var_os(xdg_key);
+
+        // Empty sandbox global home + empty project dir: no config anywhere.
+        let sandbox = tempfile::tempdir().unwrap();
+        let project = tempfile::tempdir().unwrap();
+        unsafe {
+            std::env::set_var(wh_key, sandbox.path());
+            std::env::remove_var(xdg_key);
+        }
+
+        let cli_args = CliArgs {
+            provider: Some("anthropic".into()),
+            api_key: Some("test-key".into()),
+            base_url: None,
+            model: None,
+            max_tokens: None,
+            max_turns: None,
+            system_prompt: None,
+            profile: None,
+            auto_approve: false,
+            project_dir: Some(project.path().to_path_buf()),
+        };
+        let config = Config::resolve(&cli_args);
+
+        // Restore env BEFORE assertions so a failure doesn't leak state into
+        // sibling tests.
+        match prev_wh {
+            Some(v) => unsafe { std::env::set_var(wh_key, v) },
+            None => unsafe { std::env::remove_var(wh_key) },
+        }
+        match prev_xdg {
+            Some(v) => unsafe { std::env::set_var(xdg_key, v) },
+            None => unsafe { std::env::remove_var(xdg_key) },
+        }
+
+        let config = config.unwrap();
+        assert_eq!(config.max_tokens, default_max_tokens());
+        assert!(
+            !config.max_tokens_explicit,
+            "no CLI flag + no TOML value must read as OMITTED (explicit=false)"
+        );
+    }
+
     #[test]
     fn patch_config_file_preserves_unrelated_keys() {
         // The keystone property: a partial save must NOT clobber blocks the

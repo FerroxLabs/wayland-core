@@ -560,6 +560,14 @@ impl AgentSpawner {
         let mut config = self.base_config.clone();
         config.max_turns = Some(sub_config.max_turns);
         config.max_tokens = sub_config.max_tokens;
+        // #112 — a per-spawn cap is ALWAYS deliberate: it must bind on the
+        // wire and never be omitted. Without this, (a) a desktop-default
+        // session on an omit-safe provider (flux/openrouter/gemini) would
+        // omit the child's sized cap and let Spawn/council children emit the
+        // served model's full ceiling, busting the sub-agent/CouncilSpend
+        // worst-case math; and (b) a child pinned to a different provider
+        // would decide omission from the PARENT's omitted-cap signal.
+        config.max_tokens_explicit = true;
         // Crucible #3 — honor a per-spawn temperature override. `None` leaves the
         // base config's temperature in place (top-level base is `None`, so the
         // child engine omits the field unless this sets it).
@@ -985,6 +993,32 @@ mod crucible_provider_resolution_tests {
         c.model = Some("claude-opus-4-8".into());
         let cfg = spawner.child_config(&c);
         assert_eq!(cfg.model, "claude-opus-4-8");
+    }
+
+    /// #112 — a per-spawn cap is always deliberate: the child config must mark
+    /// it EXPLICIT so the child engine never omits the wire max-tokens field,
+    /// even when the parent session omitted `--max-tokens` on an omit-safe
+    /// provider (flux/openrouter/gemini). Otherwise Spawn/council children on
+    /// a desktop-default flux session would drop their sized cap on the wire
+    /// and could emit the served model's full ceiling, busting the sub-agent /
+    /// CouncilSpend worst-case math.
+    #[test]
+    fn child_config_marks_per_spawn_cap_explicit() {
+        let parent: Arc<dyn LlmProvider> = Arc::new(StubProvider);
+        // Parent: omit-safe provider compat AND an omitted (defaulted) cap —
+        // the exact configuration where the parent itself WOULD omit.
+        let base = Config {
+            compat: wcore_config::compat::ProviderCompat::flux_router_defaults(),
+            max_tokens_explicit: false,
+            ..Config::default()
+        };
+        assert!(base.compat.omit_max_tokens_when_unsized());
+        let spawner = AgentSpawner::new(parent, base);
+        let cfg = spawner.child_config(&sub("p", None));
+        assert!(
+            cfg.max_tokens_explicit,
+            "a spawned child's per-spawn cap must read as explicit (never omitted on the wire)"
+        );
     }
 
     #[test]
