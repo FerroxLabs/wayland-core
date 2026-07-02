@@ -122,7 +122,15 @@ impl ProbeCache {
 
     /// Record a fresh probe result. A success is sticky; a failure is trusted
     /// for `neg_ttl` before the next `cached()` call will re-probe.
+    ///
+    /// A negative NEVER downgrades a sticky `Available`: the probe runs
+    /// outside the cache lock, so a concurrent stalled probe can finish
+    /// (and time out) after a successful one — the proven-working verdict
+    /// must win regardless of record order.
     fn record(&mut self, available: bool, now: Instant, neg_ttl: Duration) {
+        if !available && self.verdict == ProbeVerdict::Available {
+            return;
+        }
         self.verdict = if available {
             ProbeVerdict::Available
         } else {
@@ -162,6 +170,19 @@ mod probe_cache_tests {
         // At/after the TTL: verdict expires → re-probe (self-heal).
         assert_eq!(c.cached(t0 + ttl), None);
         assert_eq!(c.cached(t0 + Duration::from_secs(31)), None);
+    }
+
+    #[test]
+    fn late_negative_never_downgrades_a_sticky_positive() {
+        // Two concurrent probes race the first fill: A succeeds and records
+        // Available; B (stalled, timed out) records its failure LAST. The
+        // proven-working verdict must survive.
+        let mut c = ProbeCache::new();
+        let t0 = Instant::now();
+        c.record(true, t0, Duration::from_secs(30));
+        c.record(false, t0 + Duration::from_secs(1), Duration::from_secs(30));
+        assert_eq!(c.cached(t0 + Duration::from_secs(2)), Some(true));
+        assert_eq!(c.cached(t0 + Duration::from_secs(3600)), Some(true));
     }
 
     #[test]
@@ -850,10 +871,11 @@ mod windows_impl {
     }
 
     /// Probe cache: stores `Some(true)` once a real spawn has succeeded, and
-    /// stays sticky for the process lifetime. Negative results are NOT
-    /// permanently cached — instead, `is_available()` re-probes on every
-    /// call until it succeeds once. This avoids the "transient flake at
-    /// startup permanently disables sandboxing" silent-failure pattern.
+    /// stays sticky for the process lifetime. Negative results are cached
+    /// only for [`NEGATIVE_PROBE_TTL`], after which `is_available()`
+    /// re-probes. This avoids both the "transient flake at startup
+    /// permanently disables sandboxing" silent-failure pattern and the
+    /// re-probe-every-command hang of #125.
     fn probe_cache() -> &'static Mutex<ProbeCache> {
         static CACHE: OnceLock<Mutex<ProbeCache>> = OnceLock::new();
         CACHE.get_or_init(|| Mutex::new(ProbeCache::new()))
@@ -920,11 +942,17 @@ mod windows_impl {
             // effective wait timeout plus a setup grace so a stalled setup call
             // cannot hang the async caller. The grace guarantees this ceiling
             // never preempts a legitimately-timed command (the inner wait always
-            // fires first). Abandoning the blocking task on elapse is safe — it
-            // reaps its own child via the KILL_ON_JOB_CLOSE Job Object once its
-            // handles drop.
-            let ceiling =
-                manifest.timeout.unwrap_or(Duration::from_secs(60)) + Duration::from_secs(15);
+            // fires first). Abandoning the blocking task on elapse is safe for
+            // CLEANUP — it reaps its own child via the KILL_ON_JOB_CLOSE Job
+            // Object once its handles drop — but note it is not a cancel: if
+            // the stall was in setup (pre-spawn), the child may still run to
+            // completion (bounded by the inner wait) AFTER the caller was told
+            // Timeout, so a retried mutating command can double-execute. That
+            // matches BashTool's pre-existing outer-timeout semantics.
+            let ceiling = manifest
+                .timeout
+                .unwrap_or(Duration::from_secs(60))
+                .saturating_add(Duration::from_secs(15));
             let handle = tokio::task::spawn_blocking(move || execute_blocking(&manifest, &cmd));
             match tokio::time::timeout(ceiling, handle).await {
                 Ok(joined) => joined.map_err(|e| SandboxError::ExecFailed(format!("join: {e}")))?,
