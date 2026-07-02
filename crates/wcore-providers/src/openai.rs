@@ -14,8 +14,8 @@ use wcore_types::tool::{ToolDef, truncate_deferred_description};
 use crate::key_rotation::{KeyPool, split_keys};
 use crate::openai_compat;
 use crate::openai_responses;
-use crate::openai_tool_name::{decode_tool_name, encode_tool_name};
 use crate::retry::builder_send_with_retry;
+use crate::tool_name::{decode_tool_name, encode_tool_name};
 use crate::{
     LlmProvider, ModelInfo, ProviderError, alias_models, dump_request_body, dump_response_chunk,
     reset_response_dump,

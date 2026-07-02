@@ -30,7 +30,7 @@ Most agents are frozen the day you install them, and married to one model. Wayla
 ## The 30-second proof
 
 ```bash
-npx @ferroxlabs/wayland-core "read Cargo.toml, list the workspace crates, and explain the dependency layering"
+npx @ferroxlabs/wayland-core@latest "read Cargo.toml, list the workspace crates, and explain the dependency layering"
 ```
 
 One command. The agent reads the file, runs `grep`/`glob` across the tree, reasons, and answers, with every tool call gated and streamed. Or run `wayland-core` with no arguments and it detects your provider keys and drops you into the TUI:
@@ -61,7 +61,7 @@ wayland-core --version
 
 ```bash
 # or run it once, no install
-npx @ferroxlabs/wayland-core "summarize the TODOs in this repo and draft a triage plan"
+npx @ferroxlabs/wayland-core@latest "summarize the TODOs in this repo and draft a triage plan"
 ```
 
 **Prebuilt binaries** for macOS (arm64/x64), Linux (arm64/x64), and Windows (arm64/x64) are on the [Releases](https://github.com/FerroxLabs/wayland-core/releases) page, each verifiable against `wayland-core-checksums.txt`.

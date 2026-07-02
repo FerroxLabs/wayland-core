@@ -36,6 +36,7 @@ use wcore_types::tool::{ToolDef, truncate_deferred_description};
 
 use crate::key_rotation::{KeyPool, split_keys};
 use crate::retry::builder_send_with_retry;
+use crate::tool_name::{decode_tool_name, encode_tool_name};
 use crate::{
     LlmProvider, ModelInfo, ProviderError, alias_models, dump_request_body, dump_response_chunk,
     reset_response_dump,
@@ -371,7 +372,7 @@ pub(crate) fn build_contents(
                 } => {
                     let mut part = json!({
                         "functionCall": {
-                            "name": name,
+                            "name": encode_tool_name(name),
                             "args": input,
                         }
                     });
@@ -459,7 +460,7 @@ pub(crate) fn build_function_declarations(tools: &[ToolDef]) -> Vec<Value> {
             if t.deferred {
                 let short_desc = truncate_deferred_description(&t.description);
                 json!({
-                    "name": t.name,
+                    "name": encode_tool_name(&t.name),
                     "description": format!(
                         "(Deferred) {short_desc} — Use ToolSearch to load full schema before calling."
                     ),
@@ -470,7 +471,7 @@ pub(crate) fn build_function_declarations(tools: &[ToolDef]) -> Vec<Value> {
                 })
             } else {
                 json!({
-                    "name": t.name,
+                    "name": encode_tool_name(&t.name),
                     "description": t.description,
                     "parameters": sanitize_schema_for_gemini(&t.input_schema),
                 })
@@ -909,11 +910,10 @@ pub(crate) fn parse_sse_chunk(data: &str, state: &mut GeminiStreamState) -> Vec<
             }
 
             if let Some(call) = part.get("functionCall") {
-                let name = call
-                    .get("name")
-                    .and_then(Value::as_str)
-                    .unwrap_or("")
-                    .to_string();
+                // Decode the wire name back to the canonical tool id so the
+                // call resolves against the registry (mirrors the encode in
+                // `build_function_declarations` / assistant-history replay).
+                let name = decode_tool_name(call.get("name").and_then(Value::as_str).unwrap_or(""));
                 let input = call.get("args").cloned().unwrap_or(json!({}));
 
                 // Capture thoughtSignature so the engine can round-trip it
@@ -1636,6 +1636,110 @@ mod tests {
             params["properties"]["pages"]["type"], "integer",
             "union type [integer, null] must be collapsed to 'integer'"
         );
+    }
+
+    // --- tool-name sanitization (Gemini mirror of the shared codec) --------
+
+    /// Gemini requires `functionDeclarations[N].name` to match
+    /// `^[a-zA-Z_][a-zA-Z0-9_.-]{0,63}$` and 400s the whole request otherwise,
+    /// so a single MCP tool with a `:`/`.` in its name aborted every turn.
+    /// `build_function_declarations` now emits a wire-legal encoded name.
+    #[test]
+    fn build_function_declarations_sanitizes_invalid_names() {
+        let tools = vec![
+            ToolDef {
+                name: "Browser::execute".into(),
+                description: "full".into(),
+                input_schema: json!({"type": "object", "properties": {}}),
+                deferred: false,
+                server: None,
+            },
+            ToolDef {
+                name: "com.microsoft-markitdown".into(),
+                description: "deferred".into(),
+                input_schema: json!({"type": "object", "properties": {}}),
+                deferred: true,
+                server: None,
+            },
+        ];
+        let decls = build_function_declarations(&tools);
+        for (i, orig) in ["Browser::execute", "com.microsoft-markitdown"]
+            .into_iter()
+            .enumerate()
+        {
+            let wire = decls[i]["name"].as_str().unwrap();
+            assert_ne!(wire, orig, "invalid name must be encoded: {wire}");
+            assert!(is_gemini_name_legal(wire), "not Gemini-legal: {wire}");
+        }
+    }
+
+    /// A charset-clean but over-length MCP name is clamped to a ≤ 64-char
+    /// Gemini-legal name (Gemini's limit is also 64).
+    #[test]
+    fn build_function_declarations_clamps_over_length_names() {
+        let long =
+            "mcp__io-github-taylorwilsdon-google-workspace-mcp__batch_modify_gmail_message_labels";
+        let tools = vec![ToolDef {
+            name: long.into(),
+            description: "test".into(),
+            input_schema: json!({"type": "object", "properties": {}}),
+            deferred: false,
+            server: None,
+        }];
+        let decls = build_function_declarations(&tools);
+        let wire = decls[0]["name"].as_str().unwrap();
+        assert!(is_gemini_name_legal(wire), "not Gemini-legal: {wire}");
+        assert!(wire.len() <= 64, "name must be clamped to ≤64: {wire}");
+    }
+
+    /// End-to-end: the encoded name emitted by `build_function_declarations`
+    /// decodes back to the canonical id when the model calls the tool (parsed
+    /// via `parse_sse_chunk`), for both the charset and length regimes.
+    #[test]
+    fn gemini_tool_name_round_trips_through_build_and_parse() {
+        for orig in [
+            "Browser::execute",
+            "mcp__io-github-taylorwilsdon-google-workspace-mcp__batch_modify_gmail_message_labels",
+        ] {
+            let tools = vec![ToolDef {
+                name: orig.into(),
+                description: "t".into(),
+                input_schema: json!({"type": "object", "properties": {}}),
+                deferred: false,
+                server: None,
+            }];
+            let wire = build_function_declarations(&tools)[0]["name"]
+                .as_str()
+                .unwrap()
+                .to_string();
+            let mut state = GeminiStreamState::default();
+            let data = json!({
+                "candidates": [{
+                    "content": {"parts": [{"functionCall": {"name": wire, "args": {}}}]}
+                }]
+            })
+            .to_string();
+            let events = parse_sse_chunk(&data, &mut state);
+            let called = events
+                .iter()
+                .find_map(|e| match e {
+                    LlmEvent::ToolUse { name, .. } => Some(name.clone()),
+                    _ => None,
+                })
+                .expect("a ToolUse event");
+            assert_eq!(called, orig, "round-trip failed for {orig}");
+        }
+    }
+
+    fn is_gemini_name_legal(s: &str) -> bool {
+        let mut chars = s.chars();
+        let Some(first) = chars.next() else {
+            return false;
+        };
+        (first.is_ascii_alphabetic() || first == '_')
+            && s.len() <= 64
+            && s.chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | '-'))
     }
 
     // --- SSE frame delimiter / stream-completion (CRLF regression) ----------

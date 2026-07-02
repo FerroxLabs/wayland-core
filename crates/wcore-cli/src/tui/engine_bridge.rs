@@ -66,6 +66,13 @@ pub struct ChannelEmitter {
     /// path. `None` (the stateless [`ChannelEmitter::new`]) keeps the original
     /// always-synthesize behavior for unit tests and any non-persistent caller.
     synthesized: Option<DedupeSet>,
+    /// GHSA-8r7g: sync correlation→secret lookup so a synthesized gate frame
+    /// carries the unguessable `resume_token` for a bridge-backed approval
+    /// (crucible/egress), and EMPTY for a regular tool (no bridge entry —
+    /// resolved via `ToolApprove`). `None` (ACP relay + unit tests) keeps the
+    /// legacy behavior of emitting the `call_id` as the resume handle; the ACP
+    /// projection's endpoint hardening is a separate follow-up.
+    approval_bridge: Option<Arc<wcore_agent::approval::ApprovalBridge>>,
 }
 
 /// Shared "already-synthesized a gate frame" set, held by the persistent
@@ -82,6 +89,7 @@ impl ChannelEmitter {
         Self {
             tx,
             synthesized: None,
+            approval_bridge: None,
         }
     }
 
@@ -89,10 +97,18 @@ impl ChannelEmitter {
     /// explicit `ApprovalRequired` for an already-synthesized call_id is
     /// suppressed (Wave 6 #24 single-gate dedupe). Use this for the persistent
     /// TUI/ACP emitters where the engine may also emit its own gate frame.
-    pub fn with_dedupe(tx: UnboundedSender<ProtocolEvent>, synthesized: DedupeSet) -> Self {
+    /// GHSA-8r7g: `approval_bridge` supplies the sync correlation→secret lookup
+    /// used to stamp the unguessable `resume_token` onto a bridge-backed gate
+    /// frame (`Some` for the TUI; `None` for the ACP relay keeps legacy emit).
+    pub fn with_dedupe(
+        tx: UnboundedSender<ProtocolEvent>,
+        synthesized: DedupeSet,
+        approval_bridge: Option<Arc<wcore_agent::approval::ApprovalBridge>>,
+    ) -> Self {
         Self {
             tx,
             synthesized: Some(synthesized),
+            approval_bridge,
         }
     }
 }
@@ -156,7 +172,15 @@ impl ProtocolEmitter for ChannelEmitter {
                 wcore_protocol::events::ToolCategory::Info => "info",
             };
             let context = tool.description.clone();
-            let resume_token = call_id.clone();
+            // GHSA-8r7g: stamp the bridge's SECRET resume_token (looked up by
+            // this call_id) onto the host-visible gate frame — EMPTY for a
+            // regular tool (no bridge entry; resolved via `ToolApprove`). With
+            // no bridge (ACP relay / unit tests) fall back to the legacy
+            // behavior of emitting the call_id itself as the resume handle.
+            let resume_token = match &self.approval_bridge {
+                Some(bridge) => bridge.secret_for_correlation(call_id).unwrap_or_default(),
+                None => call_id.clone(),
+            };
             // Record that we synthesized a gate for this call_id so a later
             // explicit `ApprovalRequired` (from a self-gating engine site) is
             // suppressed above. No-op for the stateless `new` emitter.
@@ -175,8 +199,10 @@ impl ProtocolEmitter for ChannelEmitter {
             });
             let _ = self.tx.send(ProtocolEvent::ApprovalRequired {
                 call_id: call_id.clone(),
-                resume_token: resume_token.clone(),
-                correlation_id: resume_token,
+                resume_token,
+                // GHSA-8r7g: the public correlation handle is the call_id, not
+                // the (now possibly secret/empty) resume_token.
+                correlation_id: call_id.clone(),
                 reason: reason.to_string(),
                 context,
                 plan,
@@ -1134,8 +1160,10 @@ impl TuiEngine {
         let modifications =
             (approved && always).then(|| serde_json::json!({ "egress_scope": "always" }));
         tokio::spawn(async move {
+            // GHSA-8r7g: a TUI keypress holds the PUBLIC call_id, so resolve by
+            // correlation (the secret resume_token is only on the wire path).
             bridge
-                .resolve(
+                .resolve_by_correlation(
                     &call_id,
                     wcore_agent::approval::ApprovalOutcome {
                         approved,
@@ -1158,8 +1186,9 @@ impl TuiEngine {
         let bridge = self.approval_bridge.clone();
         let call_id = call_id.to_string();
         tokio::spawn(async move {
+            // GHSA-8r7g: resolve by the PUBLIC correlation id (TUI keypress).
             bridge
-                .resolve(
+                .resolve_by_correlation(
                     &call_id,
                     wcore_agent::approval::ApprovalOutcome {
                         approved,
@@ -2718,7 +2747,7 @@ mod tests {
         // malformed second frame downstream).
         let (tx, mut rx) = mpsc::unbounded_channel();
         let seen: DedupeSet = Arc::new(Mutex::new(HashSet::new()));
-        let emitter = ChannelEmitter::with_dedupe(tx, seen);
+        let emitter = ChannelEmitter::with_dedupe(tx, seen, None);
 
         // (1) ToolRequest → forwarded + one synthesized ApprovalRequired.
         emitter

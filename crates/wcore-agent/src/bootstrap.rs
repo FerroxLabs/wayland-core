@@ -1647,7 +1647,10 @@ impl AgentBootstrap {
             };
         registry.register(Box::new(
             crate::skill_tool::SkillTool::new(Arc::clone(&catalog), cwd.to_string(), skill_checker)
-                .with_telemetry_sink(skill_telemetry_sink),
+                .with_telemetry_sink(skill_telemetry_sink)
+                // GHSA-8r7g H-1: gate project/legacy skill frontmatter hooks
+                // behind the operator's global opt-in (default-deny otherwise).
+                .with_trust_project_hooks(self.config.hooks.trust_project_hooks),
         ));
 
         // T3-3.1.7: SessionSearchTool — cross-session conversation recall via

@@ -242,7 +242,10 @@ impl ProtocolEmitter for RelayEmitter {
     fn emit(&self, event: &ProtocolEvent) -> std::io::Result<()> {
         let tx = self.handle.lock().unwrap().clone();
         if let Some(tx) = tx {
-            ChannelEmitter::with_dedupe(tx, self.synthesized.clone()).emit(event)?;
+            // GHSA-8r7g: `None` bridge → legacy resume_token emit on the ACP
+            // relay (its crucible/egress call_ids are already uuids; the ACP
+            // endpoint's secret-token hardening is a separate follow-up).
+            ChannelEmitter::with_dedupe(tx, self.synthesized.clone(), None).emit(event)?;
         }
         Ok(())
     }

@@ -27,6 +27,17 @@ pub struct HooksConfig {
     /// any phase added later.
     #[serde(default = "default_dispatch_enabled")]
     pub dispatch_enabled: bool,
+    /// GHSA-8r7g — operator opt-in to run hooks defined in a PROJECT config
+    /// (`.wayland-core.toml` in the working directory). A `HookDef.command` is
+    /// executed as a child process, so a project config that travels with a
+    /// cloned repo is an arbitrary-code-execution surface. Default `false`:
+    /// project-defined `pre_tool_use` / `post_tool_use` / `stop` hooks are NOT
+    /// run. Only the operator's GLOBAL config value is honored (a project
+    /// cannot set this to trust its own hooks — see `merge_config_files`). Set
+    /// `true` in the global config to run project hooks, accepting that any
+    /// repo you open can then execute its configured hooks.
+    #[serde(default)]
+    pub trust_project_hooks: bool,
 }
 
 impl Default for HooksConfig {
@@ -36,6 +47,7 @@ impl Default for HooksConfig {
             post_tool_use: Vec::new(),
             stop: Vec::new(),
             dispatch_enabled: default_dispatch_enabled(),
+            trust_project_hooks: false,
         }
     }
 }

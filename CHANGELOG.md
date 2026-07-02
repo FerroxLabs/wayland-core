@@ -1,5 +1,53 @@
 # Changelog
 
+## [0.12.19](https://github.com/FerroxLabs/wayland-core/compare/v0.12.18...v0.12.19) (2026-07-01)
+
+A security-hardening release. Wayland Core tightens every seam where an untrusted
+input — a checked-in project config, a wire peer, or a model-known identifier —
+could quietly widen its own privileges. All fixes below are part of the
+coordinated **GHSA-8r7g** approval/posture-hardening advisory and are covered by
+new regression tests.
+
+### Security Hardening (GHSA-8r7g)
+
+* **Project configs can only tighten, never loosen.** A `.wayland-core.toml` that
+  travels with a cloned repo is untrusted. It can no longer raise the approval
+  posture — `approval_mode`, `auto_approve`, `allow_no_sandbox`, and the
+  approval-skip `allow_list` are all clamped tighten-only against your global
+  config, so opening a repo can never silently reduce approval friction or grant
+  a tool blanket auto-approval ([#128](https://github.com/FerroxLabs/wayland-core/issues/128)).
+* **Project-defined hooks are default-denied.** A `[[hooks.*]]` `command` runs as
+  a child process, so a project hook is arbitrary code execution from repo
+  content. Project hooks are now dropped unless the operator opts in with
+  `[hooks] trust_project_hooks = true` in their **global** config; a project
+  cannot authorize its own hooks, and suppressed hooks are logged (not silent).
+* **Auto-approving modes require a local opt-in over the wire.** Both `force` and
+  `auto_edit` auto-approve tools (`auto_edit` covers file writes — a git hook or
+  `authorized_keys` write is write-to-RCE). Neither can now be set by an
+  un-opted-in wire peer; only `default` is accepted unless the operator launched
+  with `--force` / `WAYLAND_ALLOW_WIRE_FORCE=1`.
+* **Unforgeable approval resume tokens.** The in-process approval bridge now keys
+  every pending approval by an opaque secret, indexing the public correlation id
+  (a model-known `call_id`) separately. A wire/host peer must present the secret
+  to resolve an approval — echoing a known `call_id` no longer self-approves —
+  while local TUI keypresses resolve by correlation as before. (Also closes a
+  latent gap where a bridge-backed approval — a Crucible council or an egress
+  consent — parked mid-turn could hang on a JSON-stream host.)
+* **Project skill hooks are default-denied too.** A project- or legacy-sourced
+  skill's `SKILL.md` frontmatter hooks run as child processes, so — like project
+  config hooks — they are now dropped unless the operator opted in via the global
+  `[hooks] trust_project_hooks`. A cloned repo's skill can no longer execute a
+  hook on first tool use.
+
+### Bug Fixes
+
+* **providers:** sanitize Cohere MCP tool names through the shared codec so
+  MCP-heavy profiles no longer 400 on Cohere, matching the cross-provider
+  handling introduced for the other providers
+  ([#129](https://github.com/FerroxLabs/wayland-core/issues/129)) ([#131](https://github.com/FerroxLabs/wayland-core/issues/131)).
+* **providers:** sanitize MCP tool names across all provider paths so MCP-heavy
+  profiles stop hitting name-shape 400s ([#130](https://github.com/FerroxLabs/wayland-core/issues/130)).
+
 ## [0.12.18](https://github.com/FerroxLabs/wayland-core/compare/v0.12.17...v0.12.18) (2026-07-01)
 
 

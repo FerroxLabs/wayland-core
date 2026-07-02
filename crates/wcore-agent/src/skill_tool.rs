@@ -49,6 +49,11 @@ pub struct SkillTool {
     /// `memory.enabled` or `observability.skills_lifecycle` is on so the
     /// procedural-memory loop (M3.5) actually receives events.
     telemetry_sink: Arc<dyn SkillTelemetrySink>,
+    /// GHSA-8r7g H-1: operator opt-in to run frontmatter hooks defined by a
+    /// PROJECT/LEGACY skill (repo-local, untrusted). Default `false`
+    /// (default-deny); bootstrap sets it from the global
+    /// `[hooks] trust_project_hooks`. A project can never self-authorize.
+    trust_project_hooks: bool,
 }
 
 impl SkillTool {
@@ -60,6 +65,7 @@ impl SkillTool {
             session_id: None,
             spawner: None,
             telemetry_sink: Arc::new(NullTelemetrySink),
+            trust_project_hooks: false,
         }
     }
 
@@ -77,6 +83,7 @@ impl SkillTool {
             session_id,
             spawner: None,
             telemetry_sink: Arc::new(NullTelemetrySink),
+            trust_project_hooks: false,
         }
     }
 
@@ -95,6 +102,7 @@ impl SkillTool {
             session_id,
             spawner,
             telemetry_sink: Arc::new(NullTelemetrySink),
+            trust_project_hooks: false,
         }
     }
 
@@ -106,6 +114,15 @@ impl SkillTool {
     /// default [`NullTelemetrySink`] is a no-op.
     pub fn with_telemetry_sink(mut self, sink: Arc<dyn SkillTelemetrySink>) -> Self {
         self.telemetry_sink = sink;
+        self
+    }
+
+    /// GHSA-8r7g H-1 — opt in to running frontmatter hooks from PROJECT/LEGACY
+    /// (repo-local, untrusted) skills. Builder method; bootstrap chains this
+    /// with the operator's global `[hooks] trust_project_hooks`. Default-deny
+    /// (`false`) when unset, so a cloned repo's skill hooks never run silently.
+    pub fn with_trust_project_hooks(mut self, trust: bool) -> Self {
+        self.trust_project_hooks = trust;
         self
     }
 
@@ -375,7 +392,12 @@ impl Tool for SkillTool {
     fn skill_hooks_for(&self, input: &serde_json::Value) -> Option<HooksConfig> {
         let skill_name = input["skill"].as_str()?;
         let skill = self.catalog.find_metadata_sync(skill_name)?;
-        let config = parse_skill_hooks(skill.hooks_raw.as_ref(), &skill.name, skill.source)?;
+        let config = parse_skill_hooks(
+            skill.hooks_raw.as_ref(),
+            &skill.name,
+            skill.source,
+            self.trust_project_hooks,
+        )?;
         Some(to_hook_defs(&config, &skill.name))
     }
 

@@ -53,11 +53,14 @@ fn scope_is_always(modifications: &Option<serde_json::Value>) -> bool {
 #[async_trait::async_trait]
 impl ConsentDoorbell for BridgeConsentDoorbell {
     async fn ask(&self, host: &str, registrable: &str, reason: &str) -> ConsentDecision {
-        // The `call_id` doubles as the bridge correlation id (`request_with_id`),
-        // so a resolver only needs the `call_id` it already has — no separate
-        // token to thread through the UI. A uuid keeps concurrent asks (even to
-        // the same host) from colliding in the bridge's pending map. The `egress:`
-        // prefix lets the TUI/host recognize this as an egress-consent request.
+        // The `call_id` is the PUBLIC correlation handle (`request_with_id`
+        // indexes the pending entry under it), so a LOCAL resolver (a TUI
+        // keypress) resolves via `resolve_by_correlation(call_id)` with the id
+        // it already has. GHSA-8r7g: the bridge mints a SEPARATE secret
+        // `resume_token`, returned below, which is what the host/wire echoes to
+        // resolve — a model-known `call_id` can no longer self-approve. A uuid
+        // keeps concurrent asks (even to the same host) from colliding. The
+        // `egress:` prefix lets the TUI/host recognize this as egress consent.
         let call_id = format!("egress:{}", uuid::Uuid::new_v4());
         let prompt = format!("Allow network access to `{registrable}`? ({reason})");
         // Structured context so a host UI can render richly and a resolver can
@@ -69,7 +72,7 @@ impl ConsentDoorbell for BridgeConsentDoorbell {
         })
         .to_string();
 
-        let rx = self
+        let (resume_token, rx) = self
             .bridge
             .request_with_id(
                 call_id.clone(),
@@ -81,12 +84,13 @@ impl ConsentDoorbell for BridgeConsentDoorbell {
             )
             .await;
 
-        // Surface the prompt. The resume_token IS the call_id (see above). A
-        // no-op on sinks without an approval surface (then the request only
-        // resolves via TTL → deny), so this doorbell is only installed where a
-        // real surface exists.
+        // Surface the prompt. GHSA-8r7g: emit the secret `resume_token` (what
+        // the host echoes back to resolve over the wire), with `call_id` as the
+        // public correlation handle. A no-op on sinks without an approval
+        // surface (then the request only resolves via TTL → deny), so this
+        // doorbell is only installed where a real surface exists.
         self.sink
-            .emit_approval_required(&call_id, &call_id, &prompt, &context);
+            .emit_approval_required(&call_id, &resume_token, &prompt, &context);
 
         match rx.await {
             Ok(outcome) if outcome.approved => {

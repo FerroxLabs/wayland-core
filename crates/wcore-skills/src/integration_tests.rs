@@ -624,7 +624,7 @@ fn tc_e2e_12a_hooks_pre_tool_use_parsed() {
             }
         ]
     });
-    let config = parse_skill_hooks(Some(&hooks_json), "test-skill", SkillSource::User)
+    let config = parse_skill_hooks(Some(&hooks_json), "test-skill", SkillSource::User, false)
         .expect("hooks should parse successfully");
 
     // AC-15 assertions
@@ -659,7 +659,7 @@ fn tc_e2e_12b_hooks_post_tool_use_parsed() {
             }
         ]
     });
-    let config = parse_skill_hooks(Some(&hooks_json), "test-skill", SkillSource::User)
+    let config = parse_skill_hooks(Some(&hooks_json), "test-skill", SkillSource::User, false)
         .expect("hooks should parse successfully");
 
     // AC-15 assertions
@@ -691,7 +691,7 @@ fn tc_e2e_12c_hooks_stop_parsed() {
             }
         ]
     });
-    let config = parse_skill_hooks(Some(&hooks_json), "test-skill", SkillSource::User)
+    let config = parse_skill_hooks(Some(&hooks_json), "test-skill", SkillSource::User, false)
         .expect("hooks should parse successfully");
 
     // AC-15 assertions
@@ -723,8 +723,16 @@ fn tc_e2e_12d_hooks_to_hook_defs_all_events() {
         ]
     });
 
-    let config = parse_skill_hooks(Some(&hooks_json), "multi-hook-skill", SkillSource::Project)
-        .expect("hooks should parse");
+    // GHSA-8r7g H-1: Project source needs the operator opt-in to run hooks; this
+    // test exercises multi-hook PARSING, so grant it (the default-deny gate is
+    // covered by the hooks.rs TC-11.16 test).
+    let config = parse_skill_hooks(
+        Some(&hooks_json),
+        "multi-hook-skill",
+        SkillSource::Project,
+        true,
+    )
+    .expect("hooks should parse");
 
     let hook_defs = to_hook_defs(&config, "multi-hook-skill");
 
@@ -744,7 +752,7 @@ fn tc_e2e_12d_hooks_to_hook_defs_all_events() {
     assert_eq!(hook_defs.stop[0].name, "skill:multi-hook-skill:stop:0");
 
     // Verify MCP skills cannot register hooks (security boundary)
-    let mcp_result = parse_skill_hooks(Some(&hooks_json), "mcp-skill", SkillSource::Mcp);
+    let mcp_result = parse_skill_hooks(Some(&hooks_json), "mcp-skill", SkillSource::Mcp, false);
     assert!(
         mcp_result.is_none(),
         "MCP skills should not be able to register hooks"

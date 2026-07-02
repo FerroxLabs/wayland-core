@@ -164,6 +164,15 @@ const BIN_JS = `#!/usr/bin/env node
 const { spawnSync } = require("node:child_process");
 const { binaryPath } = require("../index.js");
 
+// Belt-and-suspenders: a load-time failure in the self-heal module must never
+// take the launcher down with it.
+let staleCheck = { warnIfStale() {} };
+try {
+  staleCheck = require("./stale-check.js");
+} catch (_e) {
+  // fail-safe: launch without the update check
+}
+
 let bin;
 try {
   bin = binaryPath();
@@ -172,12 +181,190 @@ try {
   process.exit(1);
 }
 
+// npx caches this package by SPEC STRING and never re-queries the registry for
+// an unpinned / @latest spec, so a box can silently freeze on an old engine
+// forever (#126). Warn from cached state (never block, never fail the launch)
+// and refresh that state in a detached background process at most once a day.
+try {
+  staleCheck.warnIfStale();
+} catch (_e) {
+  // fail-safe: the update check must never break a launch
+}
+
 const result = spawnSync(bin, process.argv.slice(2), { stdio: "inherit" });
 if (result.error) {
   console.error("wayland-core: failed to launch: " + result.error.message);
   process.exit(1);
 }
 process.exit(result.status === null ? 1 : result.status);
+`;
+
+const STALE_CHECK_JS = `"use strict";
+// Staleness self-heal for the npx launcher (#126). npx caches the resolved
+// package tree by SPEC STRING and does not reliably re-query the registry even
+// for \`@latest\` (npm/cli#2329, npm/cli#7838, npm/rfcs#700), so a machine that
+// once ran \`npx ${LAUNCHER}\` stays frozen on whatever \`latest\`
+// was at first run — users keep hitting bugs the current engine already fixed.
+// Only an EXACT-version spec is a guaranteed cache miss, so the warning below
+// prints one.
+//
+// Design constraints (deliberate — this wraps every user invocation):
+//   - never blocks the launch: the registry query runs in a detached child
+//     that outlives this process; the foreground only reads the cached state
+//   - fail-safe: every path is wrapped; any error means "no warning", never a
+//     broken launch
+//   - throttled: registry queried at most once per CHECK_INTERVAL_MS, warning
+//     printed at most once per WARN_INTERVAL_MS
+//   - opt-out: WAYLAND_CORE_SKIP_UPDATE_CHECK=1; also skipped when CI is set
+const fs = require("node:fs");
+const os = require("node:os");
+const path = require("node:path");
+
+const PKG = "${LAUNCHER}";
+const CHECK_INTERVAL_MS = 24 * 60 * 60 * 1000;
+const WARN_INTERVAL_MS = 24 * 60 * 60 * 1000;
+const FETCH_TIMEOUT_MS = 5000;
+
+// Launcher-private state; co-located with the engine's home dir convention
+// (WAYLAND_HOME override honored, matching wcore-config resolution order).
+function stateFile() {
+  const home = process.env.WAYLAND_HOME || path.join(os.homedir(), ".wayland");
+  return path.join(home, "npx-update-check.json");
+}
+
+function readState() {
+  try {
+    const parsed = JSON.parse(fs.readFileSync(stateFile(), "utf8"));
+    return parsed && typeof parsed === "object" ? parsed : {};
+  } catch (_e) {
+    return {};
+  }
+}
+
+function writeState(state) {
+  try {
+    const file = stateFile();
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    // temp-file + rename: concurrent launches must never leave a torn file
+    const tmp = file + "." + process.pid + ".tmp";
+    fs.writeFileSync(tmp, JSON.stringify(state));
+    fs.renameSync(tmp, file);
+  } catch (_e) {
+    // best-effort
+  }
+}
+
+// STRICT full-match, stable-only. The registry response (and the state file it
+// is persisted to) is UNTRUSTED: a loose prefix match would let a compromised
+// response smuggle ANSI escapes or an attacker-controlled command string into
+// the printed "run this to fix" warning, and a prerelease dist-tag would tell
+// stable users to pin a prerelease. Returns the validated string or null.
+function validStableVersion(v) {
+  return typeof v === "string" && /^\\d+\\.\\d+\\.\\d+$/.test(v) ? v : null;
+}
+
+function parseVersion(v) {
+  const m = /^(\\d+)\\.(\\d+)\\.(\\d+)/.exec(String(v || ""));
+  return m ? [Number(m[1]), Number(m[2]), Number(m[3])] : null;
+}
+
+function isBehind(current, latest) {
+  const a = parseVersion(current);
+  const b = parseVersion(latest);
+  if (!a || !b) return false;
+  for (let i = 0; i < 3; i++) {
+    if (a[i] < b[i]) return true;
+    if (a[i] > b[i]) return false;
+  }
+  return false;
+}
+
+function skipped() {
+  return Boolean(process.env.WAYLAND_CORE_SKIP_UPDATE_CHECK || process.env.CI);
+}
+
+/** Foreground half: warn from cached state, kick off a background refresh. */
+function warnIfStale() {
+  if (skipped()) return;
+  let current;
+  try {
+    current = require("../package.json").version;
+  } catch (_e) {
+    return;
+  }
+  const state = readState();
+  const now = Date.now();
+
+  const warnThrottled =
+    typeof state.warnedAt === "number" && now - state.warnedAt < WARN_INTERVAL_MS;
+  // re-validate on READ: the state file is as untrusted as the registry
+  const latest = validStableVersion(state.latest);
+  if (latest && isBehind(current, latest) && !warnThrottled) {
+    console.error(
+      "wayland-core: v" + current + " is stale — latest is v" + latest + ".\\n" +
+        "  npx caches this package by spec string and never refreshes it; run the\\n" +
+        "  exact version to bust the cache:  npx " + PKG + "@" + latest + "\\n" +
+        "  (or: npm i -g " + PKG + "@latest — suppress this check with\\n" +
+        "  WAYLAND_CORE_SKIP_UPDATE_CHECK=1)"
+    );
+    state.warnedAt = now;
+    writeState(state);
+  }
+
+  const checkThrottled =
+    typeof state.checkedAt === "number" && now - state.checkedAt < CHECK_INTERVAL_MS;
+  if (!checkThrottled) {
+    try {
+      const { spawn } = require("node:child_process");
+      const child = spawn(process.execPath, [__filename, "--refresh"], {
+        detached: true,
+        stdio: "ignore",
+        windowsHide: true,
+      });
+      child.unref();
+    } catch (_e) {
+      // best-effort
+    }
+  }
+}
+
+/** Background half: query the registry dist-tags and persist the result. */
+async function refresh() {
+  const state = readState();
+  state.checkedAt = Date.now();
+  // Persist the throttle stamp BEFORE the network call: if the fetch hangs or
+  // this process dies, the next launch must still see a fresh checkedAt and
+  // NOT spawn another checker (otherwise a slow registry accumulates orphans).
+  writeState(state);
+  try {
+    if (typeof fetch !== "function") return;
+    // AbortSignal.timeout covers headers AND the body read (a plain
+    // clearTimeout-after-fetch would leave res.json() unbounded against a
+    // trickled body). fetch implies Node >= 18, which has AbortSignal.timeout.
+    const res = await fetch(
+      "https://registry.npmjs.org/-/package/" + PKG + "/dist-tags",
+      {
+        signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
+        headers: { accept: "application/json" },
+      }
+    );
+    if (!res.ok) return;
+    const tags = await res.json();
+    const latest = validStableVersion(tags && tags.latest);
+    if (latest) {
+      state.latest = latest;
+      writeState(state);
+    }
+  } catch (_e) {
+    // offline / registry down / timeout — keep the previous \`latest\`
+  }
+}
+
+module.exports = { warnIfStale };
+
+if (require.main === module && process.argv[2] === "--refresh") {
+  refresh();
+}
 `;
 
 function emitLauncher(out, version, present) {
@@ -205,6 +392,7 @@ function emitLauncher(out, version, present) {
   mkdirSync(dirname(binPath), { recursive: true });
   writeFileSync(binPath, BIN_JS);
   chmodSync(binPath, 0o755);
+  writeFileSync(join(dir, "bin", "stale-check.js"), STALE_CHECK_JS);
   writeFileSync(join(dir, "index.js"), INDEX_JS);
 
   if (present.length !== TARGETS.length) {
