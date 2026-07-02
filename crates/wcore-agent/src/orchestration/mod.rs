@@ -1906,6 +1906,118 @@ mod tests {
         );
     }
 
+    // ---- #133 call_id stability across protocol tool frames ---------------
+
+    /// Capturing emitter — records every protocol event for post-hoc
+    /// assertions on the tool_request/tool_running/tool_result call_ids.
+    struct CapturingEmitter(Mutex<Vec<wcore_protocol::events::ProtocolEvent>>);
+    impl wcore_protocol::writer::ProtocolEmitter for CapturingEmitter {
+        fn emit(&self, event: &wcore_protocol::events::ProtocolEvent) -> std::io::Result<()> {
+            if let Ok(mut events) = self.0.lock() {
+                events.push(event.clone());
+            }
+            Ok(())
+        }
+    }
+
+    /// #133 — for a PARALLEL tool batch driven through the approval gate,
+    /// every call must emit tool_request, tool_running, and tool_result with
+    /// the SAME call_id as the originating ToolUse block. Hosts (the Wayland
+    /// desktop) merge tool cards strictly by call_id: any divergence leaves a
+    /// card in "Executing" forever (desktop #486).
+    #[tokio::test]
+    async fn parallel_batch_tool_result_call_id_matches_tool_request() {
+        use wcore_protocol::events::ProtocolEvent;
+        use wcore_protocol::{ToolApprovalManager, commands::ApprovalScope};
+
+        let registry = make_registry_with_deferred();
+        let mgr = Arc::new(ToolApprovalManager::new());
+        let emitter = Arc::new(CapturingEmitter(Mutex::new(Vec::new())));
+        let writer: Arc<dyn wcore_protocol::writer::ProtocolEmitter> =
+            Arc::clone(&emitter) as Arc<dyn wcore_protocol::writer::ProtocolEmitter>;
+
+        let call_ids = ["call_par_a", "call_par_b"];
+        let calls: Vec<ContentBlock> = call_ids
+            .iter()
+            .map(|id| ContentBlock::ToolUse {
+                id: (*id).into(),
+                name: "MockNonDeferred".into(),
+                input: json!({"cmd": *id}),
+                extra: None,
+            })
+            .collect();
+
+        // The gate parks on each call's approval sequentially; keep nudging
+        // both ids until each pending entry appears and resolves (approve()
+        // is a no-op for a not-yet-registered or already-resolved id).
+        let mgr_clone = Arc::clone(&mgr);
+        tokio::spawn(async move {
+            for _ in 0..10_000 {
+                tokio::task::yield_now().await;
+                for id in call_ids {
+                    mgr_clone.approve(id, ApprovalScope::Once, None);
+                }
+            }
+        });
+
+        let outcome = execute_tool_calls_with_approval(
+            &registry,
+            &calls,
+            &mgr,
+            &writer,
+            "msg-par",
+            false, // approval gate ON for every call
+            &[],
+            None,
+            wcore_compact::CompactionLevel::Off,
+            false,
+            &tokio_util::sync::CancellationToken::new(),
+            None,
+        )
+        .await
+        .expect("should not return ExecutionControl");
+        assert_eq!(outcome.results.len(), 2, "both tools must produce results");
+
+        let events = emitter.0.lock().expect("emitter mutex").clone();
+        for expected in call_ids {
+            let requested = events.iter().any(
+                |e| matches!(e, ProtocolEvent::ToolRequest { call_id, .. } if call_id == expected),
+            );
+            let running = events.iter().any(
+                |e| matches!(e, ProtocolEvent::ToolRunning { call_id, .. } if call_id == expected),
+            );
+            let resulted = events.iter().any(
+                |e| matches!(e, ProtocolEvent::ToolResult { call_id, .. } if call_id == expected),
+            );
+            assert!(requested, "tool_request missing for {expected}");
+            assert!(running, "tool_running missing for {expected}");
+            assert!(resulted, "tool_result missing for {expected}");
+        }
+        // No frame may carry a call_id outside the originating ToolUse ids —
+        // an empty or fabricated id would strand a card host-side.
+        for e in &events {
+            if let ProtocolEvent::ToolRequest { call_id, .. }
+            | ProtocolEvent::ToolRunning { call_id, .. }
+            | ProtocolEvent::ToolResult { call_id, .. } = e
+            {
+                assert!(
+                    call_ids.contains(&call_id.as_str()),
+                    "unexpected call_id on protocol frame: {call_id:?}"
+                );
+            }
+        }
+        // The conversation-level ToolResult blocks echo the same ids.
+        let result_ids: Vec<&str> = outcome
+            .results
+            .iter()
+            .filter_map(|b| match b {
+                ContentBlock::ToolResult { tool_use_id, .. } => Some(tool_use_id.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(result_ids, call_ids, "ToolResult ids must match in order");
+    }
+
     // ---- rank 58: dispatch timeout-cancel surfaces a cancelled id ----------
 
     /// A tool whose `execute` never resolves. Combined with `start_paused`

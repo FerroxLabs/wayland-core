@@ -324,11 +324,14 @@ struct ResponsesToolCall {
 }
 
 /// Streaming state for the Responses event loop. Tracks the currently-open
-/// output item (so deltas route to the right block) and the deferred `Done`
+/// output items (so deltas route to the right block) and the deferred `Done`
 /// event flushed when the terminal `response.completed` frame arrives.
 pub(crate) struct ResponsesStreamState {
-    /// The function-call item currently being assembled, if any.
-    current_tool: Option<ResponsesToolCall>,
+    /// Function-call items currently being assembled, keyed by
+    /// [`tool_item_key`]. A map (not a single slot) so PARALLEL tool calls
+    /// whose `output_item.added` frames interleave never cross-wire each
+    /// other's `call_id`/arguments (#133 — desktop stuck-spinner root cause).
+    open_tools: std::collections::HashMap<String, ResponsesToolCall>,
     input_tokens: u64,
     output_tokens: u64,
     cache_read_tokens: u64,
@@ -340,12 +343,38 @@ pub(crate) struct ResponsesStreamState {
 impl ResponsesStreamState {
     pub(crate) fn new() -> Self {
         Self {
-            current_tool: None,
+            open_tools: std::collections::HashMap::new(),
             input_tokens: 0,
             output_tokens: 0,
             cache_read_tokens: 0,
             saw_tool_call: false,
         }
+    }
+}
+
+/// Correlation key tying a `function_call` item's `output_item.added`,
+/// `function_call_arguments.*`, and `output_item.done` frames together.
+///
+/// Prefers the server-assigned item id (`item.id` on added/done frames,
+/// `item_id` on argument frames — the `fc_...` identifier, present on both
+/// the plain-OpenAI and ChatGPT Codex backends even when `call_id` is absent
+/// from the `added` frame). Falls back to the frame's `output_index`, then to
+/// a fixed sentinel so a stream carrying neither still routes argument deltas
+/// to the single open tool (pre-#133 behaviour).
+fn tool_item_key(frame: &Value) -> String {
+    let item_id = frame
+        .get("item")
+        .and_then(|i| i.get("id"))
+        .and_then(Value::as_str)
+        .or_else(|| frame.get("item_id").and_then(Value::as_str));
+    if let Some(id) = item_id
+        && !id.is_empty()
+    {
+        return id.to_string();
+    }
+    match frame.get("output_index").and_then(Value::as_u64) {
+        Some(idx) => format!("output_index:{idx}"),
+        None => "single".to_string(),
     }
 }
 
@@ -428,28 +457,31 @@ pub(crate) fn parse_responses_event(data: &str, state: &mut ResponsesStreamState
             if let Some(item) = json.get("item")
                 && item.get("type").and_then(Value::as_str) == Some("function_call")
             {
-                state.current_tool = Some(ResponsesToolCall {
-                    call_id: item
-                        .get("call_id")
-                        .and_then(Value::as_str)
-                        .unwrap_or_default()
-                        .to_string(),
-                    name: item
-                        .get("name")
-                        .and_then(Value::as_str)
-                        .unwrap_or_default()
-                        .to_string(),
-                    arguments: item
-                        .get("arguments")
-                        .and_then(Value::as_str)
-                        .unwrap_or_default()
-                        .to_string(),
-                });
+                state.open_tools.insert(
+                    tool_item_key(&json),
+                    ResponsesToolCall {
+                        call_id: item
+                            .get("call_id")
+                            .and_then(Value::as_str)
+                            .unwrap_or_default()
+                            .to_string(),
+                        name: item
+                            .get("name")
+                            .and_then(Value::as_str)
+                            .unwrap_or_default()
+                            .to_string(),
+                        arguments: item
+                            .get("arguments")
+                            .and_then(Value::as_str)
+                            .unwrap_or_default()
+                            .to_string(),
+                    },
+                );
             }
         }
 
         "response.function_call_arguments.delta" => {
-            if let Some(tool) = state.current_tool.as_mut()
+            if let Some(tool) = state.open_tools.get_mut(&tool_item_key(&json))
                 && let Some(delta) = json.get("delta").and_then(Value::as_str)
             {
                 if tool.arguments.len().saturating_add(delta.len()) > MAX_TOOL_ARGS_BYTES {
@@ -466,7 +498,7 @@ pub(crate) fn parse_responses_event(data: &str, state: &mut ResponsesStreamState
         "response.function_call_arguments.done" => {
             // OpenAI sends the authoritative complete argument string here.
             // Prefer it over the accumulated deltas when present.
-            if let Some(tool) = state.current_tool.as_mut()
+            if let Some(tool) = state.open_tools.get_mut(&tool_item_key(&json))
                 && let Some(args) = json.get("arguments").and_then(Value::as_str)
                 && !args.is_empty()
             {
@@ -480,7 +512,7 @@ pub(crate) fn parse_responses_event(data: &str, state: &mut ResponsesStreamState
             // their deltas were already streamed.)
             if let Some(item) = json.get("item")
                 && item.get("type").and_then(Value::as_str) == Some("function_call")
-                && let Some(event) = finalize_tool_call(item, state)
+                && let Some(event) = finalize_tool_call(&json, item, state)
             {
                 events.push(event);
             }
@@ -571,27 +603,57 @@ pub(crate) fn parse_responses_event(data: &str, state: &mut ResponsesStreamState
 /// Finalize the open function-call item into a `ToolUse` event. Fails closed
 /// on malformed argument JSON — never runs the tool with empty/garbage input
 /// (mirrors the chat path's tool-call finalization).
-fn finalize_tool_call(item: &Value, state: &mut ResponsesStreamState) -> Option<LlmEvent> {
-    // Prefer the in-flight accumulator (it carries streamed deltas); fall back
-    // to the done-item's own fields if no item was ever opened.
-    let tool = state.current_tool.take();
-    let (call_id, name, arguments) = match tool {
-        Some(t) => (t.call_id, t.name, t.arguments),
-        None => (
-            item.get("call_id")
-                .and_then(Value::as_str)
-                .unwrap_or_default()
-                .to_string(),
-            item.get("name")
-                .and_then(Value::as_str)
-                .unwrap_or_default()
-                .to_string(),
-            item.get("arguments")
-                .and_then(Value::as_str)
-                .unwrap_or_default()
-                .to_string(),
-        ),
+///
+/// #133 call_id stability: the emitted `ToolUse.id` seeds the json-stream
+/// protocol's `tool_request`/`tool_running`/`tool_result` `call_id`, which
+/// hosts (the Wayland desktop) merge tool cards by. Field merging prefers the
+/// done-item's identity fields (the Codex backend can omit `call_id` from the
+/// `output_item.added` frame and only supply it here), falls back to the
+/// accumulator, and finally to the item's server id — the id is NEVER empty.
+fn finalize_tool_call(
+    frame: &Value,
+    item: &Value,
+    state: &mut ResponsesStreamState,
+) -> Option<LlmEvent> {
+    let key = tool_item_key(frame);
+    let acc = state.open_tools.remove(&key).unwrap_or_default();
+
+    let item_str = |field: &str| -> Option<&str> {
+        item.get(field)
+            .and_then(Value::as_str)
+            .filter(|s| !s.is_empty())
     };
+    let non_empty = |s: String| -> Option<String> { (!s.is_empty()).then_some(s) };
+
+    // Identity: the done item is authoritative; the accumulator (seeded from
+    // the `added` frame) is the fallback. Never emit an empty id — an empty
+    // `call_id` makes parallel tool cards collide host-side and produces a
+    // `function_call_output` the API rejects. Last resort is the item's
+    // server-assigned id / correlation key, which is stable across all three
+    // protocol frames because the engine threads `ToolUse.id` verbatim.
+    let call_id = item_str("call_id")
+        .map(str::to_string)
+        .or_else(|| non_empty(acc.call_id))
+        .or_else(|| item_str("id").map(str::to_string))
+        .unwrap_or_else(|| {
+            tracing::warn!(
+                target: "wcore_providers::openai_responses",
+                key = %key,
+                "function_call item carried no call_id or id on any frame; \
+                 falling back to the correlation key"
+            );
+            key
+        });
+    let name = item_str("name")
+        .map(str::to_string)
+        .or(non_empty(acc.name))
+        .unwrap_or_default();
+    // Arguments: the accumulator carries the streamed deltas (and the
+    // authoritative `function_call_arguments.done` string when one arrived);
+    // the done-item's inline `arguments` is the fallback.
+    let arguments = non_empty(acc.arguments)
+        .or_else(|| item_str("arguments").map(str::to_string))
+        .unwrap_or_default();
 
     let trimmed = arguments.trim();
     let input = if trimmed.is_empty() {
@@ -1002,6 +1064,169 @@ mod tests {
         match &events[0] {
             LlmEvent::Error(msg) => assert!(msg.contains("did not parse as JSON")),
             other => panic!("expected Error, got {other:?}"),
+        }
+    }
+
+    // --- #133 call_id stability -------------------------------------------
+
+    /// Codex-shaped stream: the `output_item.added` frame carries the item id
+    /// (`fc_...`) but NO `call_id`; only the `output_item.done` frame carries
+    /// the real `call_id`. The emitted `ToolUse.id` must be the real call_id —
+    /// never the empty string the added-frame accumulator was seeded with
+    /// (pre-fix, the accumulator won wholesale and the id streamed as "").
+    #[test]
+    fn parse_added_without_call_id_uses_done_frame_call_id() {
+        let mut state = ResponsesStreamState::new();
+        let mut got: Vec<LlmEvent> = Vec::new();
+        for f in [
+            r#"{"type":"response.output_item.added","output_index":0,"item":{"type":"function_call","id":"fc_1","name":"read","arguments":""}}"#,
+            r#"{"type":"response.function_call_arguments.delta","item_id":"fc_1","output_index":0,"delta":"{\"path\":\"a.txt\"}"}"#,
+            r#"{"type":"response.output_item.done","output_index":0,"item":{"type":"function_call","id":"fc_1","call_id":"call_real","name":"read"}}"#,
+        ] {
+            got.extend(parse_responses_event(f, &mut state));
+        }
+        assert_eq!(got.len(), 1, "events: {got:?}");
+        match &got[0] {
+            LlmEvent::ToolUse {
+                id, name, input, ..
+            } => {
+                assert_eq!(id, "call_real", "id must be the done-frame call_id");
+                assert!(!id.is_empty(), "ToolUse id must never be empty");
+                assert_eq!(name, "read");
+                assert_eq!(input, &json!({ "path": "a.txt" }));
+            }
+            other => panic!("expected ToolUse, got {other:?}"),
+        }
+    }
+
+    /// Two PARALLEL function_call items streamed sequentially (added/deltas/
+    /// done per item) must emit two ToolUse events with the correct distinct
+    /// ids and each item's own arguments.
+    #[test]
+    fn parse_parallel_sequential_tool_calls_keep_distinct_ids() {
+        let mut state = ResponsesStreamState::new();
+        let mut got: Vec<LlmEvent> = Vec::new();
+        for f in [
+            r#"{"type":"response.output_item.added","output_index":0,"item":{"type":"function_call","id":"fc_a","call_id":"call_a","name":"read","arguments":""}}"#,
+            r#"{"type":"response.function_call_arguments.delta","item_id":"fc_a","output_index":0,"delta":"{\"path\":\"a\"}"}"#,
+            r#"{"type":"response.output_item.done","output_index":0,"item":{"type":"function_call","id":"fc_a","call_id":"call_a","name":"read"}}"#,
+            r#"{"type":"response.output_item.added","output_index":1,"item":{"type":"function_call","id":"fc_b","call_id":"call_b","name":"grep","arguments":""}}"#,
+            r#"{"type":"response.function_call_arguments.delta","item_id":"fc_b","output_index":1,"delta":"{\"pattern\":\"b\"}"}"#,
+            r#"{"type":"response.output_item.done","output_index":1,"item":{"type":"function_call","id":"fc_b","call_id":"call_b","name":"grep"}}"#,
+        ] {
+            got.extend(parse_responses_event(f, &mut state));
+        }
+        assert_eq!(got.len(), 2, "events: {got:?}");
+        match (&got[0], &got[1]) {
+            (
+                LlmEvent::ToolUse {
+                    id: id_a,
+                    input: in_a,
+                    ..
+                },
+                LlmEvent::ToolUse {
+                    id: id_b,
+                    input: in_b,
+                    ..
+                },
+            ) => {
+                assert_eq!(id_a, "call_a");
+                assert_eq!(in_a, &json!({ "path": "a" }));
+                assert_eq!(id_b, "call_b");
+                assert_eq!(in_b, &json!({ "pattern": "b" }));
+            }
+            other => panic!("expected two ToolUse events, got {other:?}"),
+        }
+    }
+
+    /// Two parallel function_call items whose frames INTERLEAVE (added A,
+    /// added B, delta A, delta B, done A, done B). Pre-fix, the single
+    /// `current_tool` slot let B's `added` overwrite in-flight A: A finalized
+    /// with B's call_id (duplicate id, wrong args) and A's own call_id never
+    /// reached the host — the #133 stuck-spinner shape. The per-item map must
+    /// keep both calls fully separate.
+    #[test]
+    fn parse_parallel_interleaved_tool_calls_do_not_cross_wire() {
+        let mut state = ResponsesStreamState::new();
+        let mut got: Vec<LlmEvent> = Vec::new();
+        for f in [
+            r#"{"type":"response.output_item.added","output_index":0,"item":{"type":"function_call","id":"fc_a","call_id":"call_a","name":"read","arguments":""}}"#,
+            r#"{"type":"response.output_item.added","output_index":1,"item":{"type":"function_call","id":"fc_b","call_id":"call_b","name":"grep","arguments":""}}"#,
+            r#"{"type":"response.function_call_arguments.delta","item_id":"fc_a","output_index":0,"delta":"{\"path\":\"a\"}"}"#,
+            r#"{"type":"response.function_call_arguments.delta","item_id":"fc_b","output_index":1,"delta":"{\"pattern\":\"b\"}"}"#,
+            r#"{"type":"response.output_item.done","output_index":0,"item":{"type":"function_call","id":"fc_a","call_id":"call_a","name":"read"}}"#,
+            r#"{"type":"response.output_item.done","output_index":1,"item":{"type":"function_call","id":"fc_b","call_id":"call_b","name":"grep"}}"#,
+        ] {
+            got.extend(parse_responses_event(f, &mut state));
+        }
+        assert_eq!(got.len(), 2, "events: {got:?}");
+        let ids: Vec<&str> = got
+            .iter()
+            .map(|e| match e {
+                LlmEvent::ToolUse { id, .. } => id.as_str(),
+                other => panic!("expected ToolUse, got {other:?}"),
+            })
+            .collect();
+        assert_eq!(ids, vec!["call_a", "call_b"], "no duplicate/lost call_ids");
+        match (&got[0], &got[1]) {
+            (
+                LlmEvent::ToolUse {
+                    name: n_a,
+                    input: in_a,
+                    ..
+                },
+                LlmEvent::ToolUse {
+                    name: n_b,
+                    input: in_b,
+                    ..
+                },
+            ) => {
+                assert_eq!((n_a.as_str(), in_a), ("read", &json!({ "path": "a" })));
+                assert_eq!((n_b.as_str(), in_b), ("grep", &json!({ "pattern": "b" })));
+            }
+            _ => unreachable!(),
+        }
+    }
+
+    /// Degenerate stream with NO call_id on any frame: the ToolUse id falls
+    /// back to the item's server id (`fc_...`) — never the empty string, so
+    /// the protocol's three tool frames still agree and cards still merge.
+    #[test]
+    fn parse_tool_call_without_any_call_id_falls_back_to_item_id() {
+        let mut state = ResponsesStreamState::new();
+        let mut got: Vec<LlmEvent> = Vec::new();
+        for f in [
+            r#"{"type":"response.output_item.added","output_index":0,"item":{"type":"function_call","id":"fc_9","name":"read","arguments":"{}"}}"#,
+            r#"{"type":"response.output_item.done","output_index":0,"item":{"type":"function_call","id":"fc_9","name":"read"}}"#,
+        ] {
+            got.extend(parse_responses_event(f, &mut state));
+        }
+        assert_eq!(got.len(), 1, "events: {got:?}");
+        match &got[0] {
+            LlmEvent::ToolUse { id, .. } => assert_eq!(id, "fc_9"),
+            other => panic!("expected ToolUse, got {other:?}"),
+        }
+    }
+
+    /// A done frame whose item was never opened (no `added` frame seen) still
+    /// finalizes entirely from the done-item's own fields.
+    #[test]
+    fn parse_done_without_added_finalizes_from_item_fields() {
+        let mut state = ResponsesStreamState::new();
+        let got = parse_responses_event(
+            r#"{"type":"response.output_item.done","output_index":0,"item":{"type":"function_call","id":"fc_2","call_id":"call_2","name":"read","arguments":"{\"path\":\"z\"}"}}"#,
+            &mut state,
+        );
+        assert_eq!(got.len(), 1, "events: {got:?}");
+        match &got[0] {
+            LlmEvent::ToolUse {
+                id, name, input, ..
+            } => {
+                assert_eq!(id, "call_2");
+                assert_eq!(name, "read");
+                assert_eq!(input, &json!({ "path": "z" }));
+            }
+            other => panic!("expected ToolUse, got {other:?}"),
         }
     }
 
