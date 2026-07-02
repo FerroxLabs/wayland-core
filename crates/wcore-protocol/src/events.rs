@@ -422,6 +422,50 @@ pub enum ProtocolEvent {
         app: String,
         reason: String,
     },
+    /// #537/#141 host-send-transport hook: the engine runs host-delegated
+    /// (`WAYLAND_SEND_MESSAGE_HOST_DELEGATE=1` at spawn) and an approved
+    /// `send_message` tool call is asking the HOST to perform the actual
+    /// delivery through its own outbound channel plugins (the engine's
+    /// channel table is empty under the desktop). The host fulfils the send
+    /// and replies with the `host_send_message_result` command, correlated
+    /// by `call_id`. `platform` / `chat_id` / `thread_id` mirror the
+    /// engine's `ParsedTarget`; `body` is the message text.
+    ///
+    /// SECURITY (wayland#543 audit finding 4): the host performs the send
+    /// WITHOUT re-gating — it trusts that the engine's tool-approval flow
+    /// (`tool_request` / allow-list / mode gate) already ran. This event is
+    /// only ever emitted from inside `SendMessageTool::execute`, which the
+    /// orchestration approval gate fronts; `send_message` is `Exec`-category
+    /// and absent from every auto-approve default (see
+    /// `wcore-agent/tests/host_send_delegation.rs`).
+    ///
+    /// Always-on additive variant (no capability flag) — hosts that don't
+    /// recognise `host_send_message_request` drop it silently per the W0
+    /// host decoder contract; only hosts that opted in via the env var
+    /// ever receive it.
+    HostSendMessageRequest {
+        call_id: String,
+        /// `MessagingPlatform::as_str()` token, e.g. `"email"`.
+        platform: String,
+        /// Recipient (for email: the destination address). Omitted when the
+        /// target string carried no chat id.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        chat_id: Option<String>,
+        /// Reply-to / thread handle. Omitted when absent.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        thread_id: Option<String>,
+        /// The message text.
+        body: String,
+        /// Optional subject line. The current `send_message` schema carries
+        /// no subject input, so the engine omits this today; the field is
+        /// part of the wire contract (the desktop host threads it into the
+        /// outgoing message when present).
+        #[serde(skip_serializing_if = "Option::is_none")]
+        subject: Option<String>,
+        /// Session id of the emitting engine, when known. Omitted otherwise.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        conversation_id: Option<String>,
+    },
     /// W5 M6 / #279(d) + #280: a context compaction occurred. Gated by
     /// capabilities.non_destructive_compact; hosts that don't recognise
     /// compact_offload MUST drop it per the host decoder contract.
@@ -756,6 +800,59 @@ mod tests {
         assert_eq!(json["text"], "");
         assert_eq!(json["msg_id"], "m1");
         assert_eq!(json["subject"], "Reasoning through the problem");
+    }
+
+    /// #537/#141: the host-send frame must serialize with EXACTLY the field
+    /// names the desktop's `protocol.ts` union declares
+    /// (`host_send_message_request` / call_id / platform / chat_id /
+    /// thread_id / body / subject / conversation_id) — the desktop half
+    /// (wayland PR #543) is already shipped against this spelling.
+    #[test]
+    fn test_host_send_message_request_full_serialization() {
+        let event = ProtocolEvent::HostSendMessageRequest {
+            call_id: "hsm-1".to_string(),
+            platform: "email".to_string(),
+            chat_id: Some("mike@example.com".to_string()),
+            thread_id: Some("t-9".to_string()),
+            body: "hello".to_string(),
+            subject: Some("Re: invoice".to_string()),
+            conversation_id: Some("abc123".to_string()),
+        };
+        let json = serde_json::to_value(&event).unwrap();
+        assert_eq!(json["type"], "host_send_message_request");
+        assert_eq!(json["call_id"], "hsm-1");
+        assert_eq!(json["platform"], "email");
+        assert_eq!(json["chat_id"], "mike@example.com");
+        assert_eq!(json["thread_id"], "t-9");
+        assert_eq!(json["body"], "hello");
+        assert_eq!(json["subject"], "Re: invoice");
+        assert_eq!(json["conversation_id"], "abc123");
+    }
+
+    /// #537/#141: optional fields are OMITTED (not null) when absent — the
+    /// desktop types them as optional (`chat_id?` / `thread_id?` /
+    /// `subject?` / `conversation_id?`).
+    #[test]
+    fn test_host_send_message_request_omits_absent_optionals() {
+        let event = ProtocolEvent::HostSendMessageRequest {
+            call_id: "hsm-2".to_string(),
+            platform: "telegram".to_string(),
+            chat_id: None,
+            thread_id: None,
+            body: "ping".to_string(),
+            subject: None,
+            conversation_id: None,
+        };
+        let json = serde_json::to_value(&event).unwrap();
+        assert_eq!(json["type"], "host_send_message_request");
+        assert_eq!(json["platform"], "telegram");
+        assert_eq!(json["body"], "ping");
+        for key in ["chat_id", "thread_id", "subject", "conversation_id"] {
+            assert!(
+                json.get(key).is_none(),
+                "{key} must be omitted when None, got {json}"
+            );
+        }
     }
 
     #[test]

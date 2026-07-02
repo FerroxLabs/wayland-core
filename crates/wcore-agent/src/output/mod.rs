@@ -170,6 +170,28 @@ pub trait OutputSink: Send + Sync {
     /// no-op.
     fn emit_approval_resume(&self, _resume_token: &str, _approved: bool) {}
 
+    /// #537/#141: emit `host_send_message_request` — an APPROVED
+    /// `send_message` tool call running host-delegated
+    /// (`WAYLAND_SEND_MESSAGE_HOST_DELEGATE=1`) asks the host to perform
+    /// the actual delivery; the host replies with the
+    /// `host_send_message_result` command, correlated by `call_id`.
+    /// Always-on additive event (no capability flag) per the W0
+    /// forward-additive baseline. Default no-op for non-protocol sinks —
+    /// a delegated send under such a sink times out into a loud tool
+    /// error rather than reaching a host that doesn't exist.
+    #[allow(clippy::too_many_arguments)]
+    fn emit_host_send_message_request(
+        &self,
+        _call_id: &str,
+        _platform: &str,
+        _chat_id: Option<&str>,
+        _thread_id: Option<&str>,
+        _body: &str,
+        _subject: Option<&str>,
+        _conversation_id: Option<&str>,
+    ) {
+    }
+
     /// W8a A.7: emit `budget_exceeded` (singular per session, fires
     /// once when the first ExecutionBudget cap trips). Always-emitted
     /// host-tolerated additive variant per audit F5 — no capability

@@ -829,6 +829,11 @@ Rationale: `BudgetExceeded` is a singular event per session (fires
 once when the first budget cap trips); the flag-per-variant overhead
 exceeds the wire-surface savings.
 
+#537/#141 adds `host_send_message_request` (§1.N+12) to this list:
+it is only ever emitted when the host itself opted in by spawning the
+engine with `WAYLAND_SEND_MESSAGE_HOST_DELEGATE=1`, so a flag would be
+redundant with the env-var opt-in.
+
 W10B's `gepa_enabled` flag is INDEPENDENT of `structured_traces` — F6 audit
 fix in the W10B revision. Hosts that want only W1 turn traces aren't forced
 to accept thousands of W10B per-child evolution events per `wcore-evolve`
@@ -1294,3 +1299,72 @@ about `budget_exceeded` drop the line silently per W0.
   "limit": "10000"
 }
 ```
+
+### 1.N+12 host_send_message_request (#537/#141)
+
+Host-delegated `send_message`: when the host spawned the engine with
+`WAYLAND_SEND_MESSAGE_HOST_DELEGATE=1`, an **approved** `send_message`
+tool call is fulfilled by the HOST — the engine emits this request and
+parks the tool call awaiting the host's `host_send_message_result`
+command (§2.11), correlated by `call_id`. The wait is bounded (30s);
+no reply resolves the tool call as a loud error, never a hang or a
+false success.
+
+**Host-tolerated, no dedicated capability flag** — only hosts that
+opted in via the env var ever receive it; others never see it (and
+would drop it silently per W0).
+
+> **Security invariant (wayland#543 audit finding 4).** The host
+> performs the delivery WITHOUT re-gating: it trusts that the engine's
+> tool-approval flow (`tool_request` / allow-list / mode gate) already
+> ran for this `send_message` call. The engine guarantees this — the
+> event is only emitted from inside the tool's `execute`, which the
+> orchestration approval gate fronts; `send_message` is Exec-category
+> and in no auto-approve default
+> (`crates/wcore-agent/tests/host_send_delegation.rs` pins it).
+
+```json
+{
+  "type": "host_send_message_request",
+  "call_id": "hsm-3f6c…",
+  "platform": "email",
+  "chat_id": "mike@example.com",
+  "thread_id": "t-17",
+  "body": "hello from the agent",
+  "subject": "Re: invoice",
+  "conversation_id": "abc123"
+}
+```
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `call_id` | string | yes | Engine-minted correlation id (`hsm-{uuid}`). Echo it back verbatim on the result. |
+| `platform` | string | yes | `MessagingPlatform::as_str()` token (`"email"`, `"telegram"`, …). |
+| `chat_id` | string | no | Recipient (for email: the destination address). Omitted when the target carried none. |
+| `thread_id` | string | no | Reply-to / thread handle. Omitted when absent. |
+| `body` | string | yes | The message text. |
+| `subject` | string | no | Subject line. The current `send_message` schema has no subject input, so the engine omits it today; part of the wire contract for forward-compat. |
+| `conversation_id` | string | no | Session id of the emitting engine, when known. |
+
+### 2.11 `host_send_message_result` (#537/#141)
+
+The host's reply to `host_send_message_request` (§1.N+12). Accepted
+both between turns and MID-turn (the tool call is parked inside the
+active turn — same mid-turn routing as `approval_resume`). An unknown
+/ stale `call_id` resolves nothing and is surfaced as an `info` event.
+
+```json
+{
+  "type": "host_send_message_result",
+  "call_id": "hsm-3f6c…",
+  "ok": true,
+  "message_id": "smtp-250-2.0.0"
+}
+```
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `call_id` | string | yes | Echoed verbatim from the request. |
+| `ok` | bool | yes | `true` → the tool call resolves as sent; `false` → the tool call fails with `error`. |
+| `message_id` | string | no | Platform-assigned receipt for a successful send. |
+| `error` | string | no | Human-readable failure reason; surfaced verbatim to the model when `ok` is `false`. |

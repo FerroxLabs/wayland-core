@@ -80,6 +80,22 @@ pub enum ProtocolCommand {
         #[serde(default)]
         modifications: Option<serde_json::Value>,
     },
+    /// #537/#141 host-send-transport hook: the host's reply to a
+    /// `host_send_message_request` event, correlated by `call_id`.
+    /// `ok = true` resolves the awaiting `send_message` tool call as sent
+    /// (with the optional `message_id` receipt); `ok = false` surfaces
+    /// `error` as a real tool failure to the model — never a false
+    /// success. Routed through the shared `HostSendBridge` by the CLI
+    /// command loop (including MID-turn, where the tool is parked — same
+    /// pattern as the `ApprovalResume` mid-turn arm from GHSA-8r7g).
+    HostSendMessageResult {
+        call_id: String,
+        ok: bool,
+        #[serde(default)]
+        message_id: Option<String>,
+        #[serde(default)]
+        error: Option<String>,
+    },
     Ping,
 }
 
@@ -438,6 +454,64 @@ mod tests {
                 assert_eq!(answer, Some("Choice C".to_string()));
             }
             _ => panic!("Expected ToolApprove"),
+        }
+    }
+
+    /// #537/#141: success reply as the desktop emits it —
+    /// `{"type":"host_send_message_result","call_id":...,"ok":true,
+    /// "message_id":...}` (error omitted).
+    #[test]
+    fn host_send_message_result_ok_deserialize() {
+        let json = r#"{"type":"host_send_message_result","call_id":"hsm-1","ok":true,"message_id":"msg-123"}"#;
+        let cmd: ProtocolCommand = serde_json::from_str(json).unwrap();
+        match cmd {
+            ProtocolCommand::HostSendMessageResult {
+                call_id,
+                ok,
+                message_id,
+                error,
+            } => {
+                assert_eq!(call_id, "hsm-1");
+                assert!(ok);
+                assert_eq!(message_id.as_deref(), Some("msg-123"));
+                assert!(error.is_none());
+            }
+            _ => panic!("expected HostSendMessageResult"),
+        }
+    }
+
+    /// #537/#141: failure reply — `ok:false` with `error`, no `message_id`.
+    /// Both optionals are serde-default so the minimal shape
+    /// (`call_id` + `ok` only) also parses.
+    #[test]
+    fn host_send_message_result_err_and_minimal_deserialize() {
+        let json = r#"{"type":"host_send_message_result","call_id":"hsm-2","ok":false,"error":"SMTP 550: mailbox unavailable"}"#;
+        let cmd: ProtocolCommand = serde_json::from_str(json).unwrap();
+        match cmd {
+            ProtocolCommand::HostSendMessageResult {
+                call_id,
+                ok,
+                message_id,
+                error,
+            } => {
+                assert_eq!(call_id, "hsm-2");
+                assert!(!ok);
+                assert!(message_id.is_none());
+                assert_eq!(error.as_deref(), Some("SMTP 550: mailbox unavailable"));
+            }
+            _ => panic!("expected HostSendMessageResult"),
+        }
+
+        let minimal = r#"{"type":"host_send_message_result","call_id":"hsm-3","ok":true}"#;
+        let cmd: ProtocolCommand = serde_json::from_str(minimal).unwrap();
+        match cmd {
+            ProtocolCommand::HostSendMessageResult {
+                message_id, error, ..
+            } => {
+                assert!(message_id.is_none());
+                assert!(error.is_none());
+            }
+            _ => panic!("expected HostSendMessageResult"),
         }
     }
 

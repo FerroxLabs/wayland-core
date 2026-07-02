@@ -2711,6 +2711,12 @@ async fn run_json_stream_mode(
     // Bootstrap builds one bridge and hands it to both engine + ScriptTool.
     let approval_bridge = engine.approval_bridge().clone();
 
+    // #537/#141: the host-delegated send_message correlation bridge. The
+    // `HostSendMessageResult` command arms below (top-level AND mid-turn)
+    // resolve through this handle so a `send_message` tool call parked on
+    // `HostDelegatedTransport::send` unblocks with the host's outcome.
+    let host_send_bridge = result.host_send_bridge.clone();
+
     // Wave SC SECURITY MAJOR: share the bridge's active-token redactor
     // with the protocol sink. The sink was built before the bridge
     // existed; `share_with` swaps the inner Arc<RwLock> pointer so
@@ -3029,6 +3035,32 @@ async fn run_json_stream_mode(
                                             });
                                         }
                                     }
+                                    ProtocolCommand::HostSendMessageResult { call_id, ok, message_id, error } => {
+                                        // #537/#141: a host-delegated send_message parks
+                                        // DURING the active turn (the tool call awaits the
+                                        // host's result), so this arm is the one that
+                                        // actually unblocks it — mirroring the
+                                        // ApprovalResume mid-turn handling above
+                                        // (GHSA-8r7g pattern). An unknown call_id resolves
+                                        // nothing (stale reply after timeout, or a peer
+                                        // guessing ids) and is surfaced as Info.
+                                        let resolved = host_send_bridge.resolve(
+                                            &call_id,
+                                            wcore_agent::host_send_transport::HostSendResult {
+                                                ok,
+                                                message_id,
+                                                error,
+                                            },
+                                        );
+                                        if !resolved {
+                                            let _ = writer.emit(&wcore_protocol::events::ProtocolEvent::Info {
+                                                msg_id: String::new(),
+                                                message: format!(
+                                                    "host_send_message_result received for unknown call_id: {call_id} (stale or timed-out send?)"
+                                                ),
+                                            });
+                                        }
+                                    }
                                     _ => {
                                         eprintln!("[protocol] Ignoring command during active message processing");
                                     }
@@ -3202,6 +3234,35 @@ async fn run_json_stream_mode(
                         msg_id: String::new(),
                         message: format!(
                             "approval_resume received for unknown token: {resume_token} (stale resume?)"
+                        ),
+                    });
+                }
+            }
+            ProtocolCommand::HostSendMessageResult {
+                call_id,
+                ok,
+                message_id,
+                error,
+            } => {
+                // #537/#141: a delegated send awaits its result DURING the
+                // turn (handled by the mid-turn arm above); a result arriving
+                // here, between turns, is almost always stale — the send
+                // already timed out into a tool error. Still attempt the
+                // resolve (harmless if the id is gone) and surface unknown
+                // ids as Info, mirroring the ApprovalResume arm.
+                let resolved = host_send_bridge.resolve(
+                    &call_id,
+                    wcore_agent::host_send_transport::HostSendResult {
+                        ok,
+                        message_id,
+                        error,
+                    },
+                );
+                if !resolved {
+                    let _ = writer.emit(&wcore_protocol::events::ProtocolEvent::Info {
+                        msg_id: String::new(),
+                        message: format!(
+                            "host_send_message_result received for unknown call_id: {call_id} (stale or timed-out send?)"
                         ),
                     });
                 }

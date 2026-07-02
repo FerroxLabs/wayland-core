@@ -54,6 +54,12 @@ pub mod file_history;
 // `/v1/models` with 5s cap) for the `/doctor` TUI diagnostics surface.
 pub mod health;
 pub mod hooks;
+// #537/#141 — host-delegated `send_message` transport: when the host
+// spawns the engine with `WAYLAND_SEND_MESSAGE_HOST_DELEGATE=1`, sends are
+// fulfilled by the host over the json-stream protocol
+// (`host_send_message_request` event / `host_send_message_result` command)
+// instead of the engine's own channel table.
+pub mod host_send_transport;
 // Inbound webhook HTTP host — routes platform webhook POSTs (Slack /
 // WhatsApp / Twilio SMS) to each channel's signature-verifying
 // `Channel::ingest_webhook` via the `ChannelManager`.

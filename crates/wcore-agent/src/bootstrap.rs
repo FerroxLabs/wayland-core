@@ -23,6 +23,14 @@ pub struct BootstrapResult {
     pub provider: Arc<dyn LlmProvider>,
     pub mcp_managers: Vec<Arc<McpManager>>,
     pub has_mcp: bool,
+    /// #537/#141 — correlation bridge for host-delegated `send_message`.
+    /// Always constructed (cheap empty map); only populated when the engine
+    /// runs with `WAYLAND_SEND_MESSAGE_HOST_DELEGATE=1` and the registered
+    /// `SendMessageTool` holds a `HostDelegatedTransport`. The CLI command
+    /// loop resolves `host_send_message_result` commands through this
+    /// handle — including MID-turn, where the awaiting tool is parked
+    /// (same pattern as the `ApprovalResume` mid-turn arm).
+    pub host_send_bridge: std::sync::Arc<crate::host_send_transport::HostSendBridge>,
     /// True iff at least one plugin successfully registered during boot
     /// (design spec §5.17 — flips `Capabilities.plugins` in the Ready event).
     pub has_plugins: bool,
@@ -633,9 +641,40 @@ impl AgentBootstrap {
         // the LLM but every send call fails loudly until a host wires a
         // real transport (Telegram/Discord/Slack/etc.). Mirrors the
         // conditional-registration precedent set by RepoMapTool below.
-        registry.register(Box::new(
-            wcore_tools::send_message::SendMessageTool::default(),
-        ));
+        //
+        // #537/#141 host-send-transport hook (spec variant A): when the host
+        // opted in via `WAYLAND_SEND_MESSAGE_HOST_DELEGATE=1`, install
+        // `HostDelegatedTransport` as the PRIMARY transport instead — every
+        // send is fulfilled by the HOST over the json-stream protocol
+        // (`host_send_message_request` / `host_send_message_result`,
+        // correlated through `host_send_bridge` by the CLI command loop).
+        // The later `ChannelManagerTransport` upgrade is skipped in this
+        // mode. Env unset → byte-identical to before.
+        //
+        // SECURITY: this transport only runs inside the tool's `execute`,
+        // which the orchestration approval gate fronts — `send_message` is
+        // Exec-category and in no auto-approve default, so the request
+        // event can never be emitted for an unapproved call (wayland#543
+        // audit finding 4; pinned by tests/host_send_delegation.rs).
+        let host_send_bridge =
+            std::sync::Arc::new(crate::host_send_transport::HostSendBridge::new());
+        if crate::host_send_transport::host_delegated_send_enabled() {
+            registry.register(Box::new(wcore_tools::send_message::SendMessageTool::new(
+                std::sync::Arc::new(crate::host_send_transport::HostDelegatedTransport::new(
+                    host_send_bridge.clone(),
+                    self.output.clone(),
+                )),
+            )));
+            tracing::info!(
+                target: "wcore_agent::bootstrap",
+                "send_message runs host-delegated (WAYLAND_SEND_MESSAGE_HOST_DELEGATE=1): \
+                 sends are fulfilled by the host, not the engine channel table"
+            );
+        } else {
+            registry.register(Box::new(
+                wcore_tools::send_message::SendMessageTool::default(),
+            ));
+        }
         // W6 A1: GitTool — typed wrapper over git ops. Read-only ops route
         // through the concurrency-safe path automatically via
         // `is_concurrency_safe(input)`. Mutating ops (add/commit/checkout/stash)
@@ -2535,7 +2574,19 @@ impl AgentBootstrap {
             // LLM's `send_message` calls route through user-configured channels
             // (Telegram/Discord/Slack/Email/etc.) instead of returning the Null
             // transport's loud "no transport configured" error on every call.
-            if let Some(reg) = engine.registry_mut() {
+            //
+            // #537/#141: in host-delegated mode the tool already holds the
+            // `HostDelegatedTransport` (installed at registration above) —
+            // do NOT overwrite it with the channel-table adapter, which is
+            // empty under the desktop and would reintroduce the exact
+            // "unknown channel: email" failure this hook exists to fix.
+            if crate::host_send_transport::host_delegated_send_enabled() {
+                tracing::debug!(
+                    target: "wcore_agent::bootstrap",
+                    "send_message transport upgrade skipped: host-delegated mode keeps \
+                     HostDelegatedTransport as the primary transport"
+                );
+            } else if let Some(reg) = engine.registry_mut() {
                 let transport = std::sync::Arc::new(
                     crate::channel_send_transport::ChannelManagerTransport::new(
                         std::sync::Arc::clone(&lifted),
@@ -2706,6 +2757,7 @@ impl AgentBootstrap {
             provider,
             mcp_managers,
             has_mcp,
+            host_send_bridge,
             has_plugins,
             plugin_capabilities,
             loaded_plugin_names,

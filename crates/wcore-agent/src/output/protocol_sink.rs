@@ -706,6 +706,33 @@ impl OutputSink for ProtocolSink {
         });
     }
 
+    /// #537/#141: emit `ProtocolEvent::HostSendMessageRequest`
+    /// unconditionally — always-on additive variant (same rationale as
+    /// `BudgetExceeded` / `ToolPanicked`): the event only ever fires when
+    /// the host itself opted in by spawning the engine with
+    /// `WAYLAND_SEND_MESSAGE_HOST_DELEGATE=1`, and hosts that don't
+    /// recognise the `type` drop the line per the W0 decoder contract.
+    fn emit_host_send_message_request(
+        &self,
+        call_id: &str,
+        platform: &str,
+        chat_id: Option<&str>,
+        thread_id: Option<&str>,
+        body: &str,
+        subject: Option<&str>,
+        conversation_id: Option<&str>,
+    ) {
+        let _ = self.writer.emit(&ProtocolEvent::HostSendMessageRequest {
+            call_id: call_id.to_string(),
+            platform: platform.to_string(),
+            chat_id: chat_id.map(str::to_string),
+            thread_id: thread_id.map(str::to_string),
+            body: body.to_string(),
+            subject: subject.map(str::to_string),
+            conversation_id: conversation_id.map(str::to_string),
+        });
+    }
+
     /// W7 S4: emit `ProtocolEvent::ApprovalResume`. Gated by hitl_suspend.
     fn emit_approval_resume(&self, resume_token: &str, approved: bool) {
         if !self.hitl_suspend_enabled {
