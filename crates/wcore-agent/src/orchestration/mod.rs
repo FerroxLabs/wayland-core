@@ -1960,21 +1960,27 @@ mod tests {
             }
         });
 
-        let outcome = execute_tool_calls_with_approval(
-            &registry,
-            &calls,
-            &mgr,
-            &writer,
-            "msg-par",
-            false, // approval gate ON for every call
-            &[],
-            None,
-            wcore_compact::CompactionLevel::Off,
-            false,
-            &tokio_util::sync::CancellationToken::new(),
-            None,
+        // Timeout wrapper: if the nudger exhausts before both approvals land,
+        // the gate parks on `rx` forever — fail loud instead of hanging.
+        let outcome = tokio::time::timeout(
+            Duration::from_secs(30),
+            execute_tool_calls_with_approval(
+                &registry,
+                &calls,
+                &mgr,
+                &writer,
+                "msg-par",
+                false, // approval gate ON for every call
+                &[],
+                None,
+                wcore_compact::CompactionLevel::Off,
+                false,
+                &tokio_util::sync::CancellationToken::new(),
+                None,
+            ),
         )
         .await
+        .expect("approval round-trip timed out — approve-nudger exhausted")
         .expect("should not return ExecutionControl");
         assert_eq!(outcome.results.len(), 2, "both tools must produce results");
 

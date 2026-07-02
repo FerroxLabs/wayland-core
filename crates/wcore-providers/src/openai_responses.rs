@@ -150,26 +150,30 @@ fn build_input(messages: &[Message]) -> Vec<Value> {
 fn clean_orphaned_function_call_outputs(input: &mut Vec<Value>) {
     use std::collections::HashSet;
 
+    // Empty call_ids are excluded outright: a `ToolUse { id: "" }` persisted
+    // by a pre-#133 session would otherwise round-trip a `call_id: ""` pair
+    // that strict endpoints 400 on (parity with the Chat path's empty-id
+    // strip in `openai.rs`).
     let called_ids: HashSet<String> = input
         .iter()
         .filter(|item| item["type"].as_str() == Some("function_call"))
         .filter_map(|item| item["call_id"].as_str().map(String::from))
+        .filter(|id| !id.is_empty())
         .collect();
 
-    input.retain(|item| {
-        if item["type"].as_str() == Some("function_call_output") {
-            // Keep only outputs whose call survives in the input set. An output
-            // whose call_id is unmatched — OR missing/non-string entirely — is
-            // an orphan the Responses API 400s on, so drop it
-            // (FerroxLabs/wayland-core#123). Unlike the Chat path there is no
-            // separate empty-id guard here, so this pass must be self-sufficient.
-            item["call_id"]
-                .as_str()
-                .is_some_and(|id| called_ids.contains(id))
-        } else {
-            // Non-output items are out of scope for this pass.
-            true
-        }
+    input.retain(|item| match item["type"].as_str() {
+        // Drop empty-id calls (see above); keep the rest.
+        Some("function_call") => item["call_id"].as_str().is_some_and(|id| !id.is_empty()),
+        // Keep only outputs whose call survives in the input set. An output
+        // whose call_id is unmatched — OR missing/non-string/empty — is an
+        // orphan the Responses API 400s on, so drop it
+        // (FerroxLabs/wayland-core#123). Unlike the Chat path there is no
+        // separate empty-id guard here, so this pass must be self-sufficient.
+        Some("function_call_output") => item["call_id"]
+            .as_str()
+            .is_some_and(|id| called_ids.contains(id)),
+        // Non-call items are out of scope for this pass.
+        _ => true,
     });
 }
 
@@ -315,6 +319,21 @@ fn build_responses_tools(tools: &[ToolDef]) -> Vec<Value> {
 /// Responses stream cannot grow the buffer without bound.
 const MAX_TOOL_ARGS_BYTES: usize = 8 * 1024 * 1024;
 
+/// Maximum number of concurrently-open `function_call` items. The argument
+/// guard above is per-entry, so without this cap a malicious stream could
+/// open unbounded items at up to `MAX_TOOL_ARGS_BYTES` each. Real turns carry
+/// a handful of parallel calls; 128 is far past any legitimate stream.
+const MAX_OPEN_TOOL_CALLS: usize = 128;
+
+/// Terminal error for a tool call whose argument payload breaches
+/// [`MAX_TOOL_ARGS_BYTES`] (streamed, inline-on-added, or arguments.done).
+fn args_overflow_error() -> LlmEvent {
+    LlmEvent::Error(format!(
+        "tool-call arguments exceeded {MAX_TOOL_ARGS_BYTES} bytes — \
+         aborting stream to bound memory"
+    ))
+}
+
 /// In-flight accumulator for a single `function_call` output item.
 #[derive(Default)]
 struct ResponsesToolCall {
@@ -332,6 +351,11 @@ pub(crate) struct ResponsesStreamState {
     /// whose `output_item.added` frames interleave never cross-wire each
     /// other's `call_id`/arguments (#133 — desktop stuck-spinner root cause).
     open_tools: std::collections::HashMap<String, ResponsesToolCall>,
+    /// Alternate-key → primary-key aliases (`output_index:N` → item id),
+    /// recorded on `output_item.added` so argument frames that carry only the
+    /// output_index still resolve to an item-id-keyed entry (and vice versa
+    /// via the lookup's index-tier fallback). Purged when the entry closes.
+    key_aliases: std::collections::HashMap<String, String>,
     input_tokens: u64,
     output_tokens: u64,
     cache_read_tokens: u64,
@@ -344,6 +368,7 @@ impl ResponsesStreamState {
     pub(crate) fn new() -> Self {
         Self {
             open_tools: std::collections::HashMap::new(),
+            key_aliases: std::collections::HashMap::new(),
             input_tokens: 0,
             output_tokens: 0,
             cache_read_tokens: 0,
@@ -376,6 +401,32 @@ fn tool_item_key(frame: &Value) -> String {
         Some(idx) => format!("output_index:{idx}"),
         None => "single".to_string(),
     }
+}
+
+/// Resolve the `open_tools` key an argument/done frame refers to, tolerating
+/// mixed-tier streams where one frame carries the item id and another only
+/// the `output_index`. Tries, in order: the frame's primary key, its alias,
+/// the index-tier key, and that key's alias. Returns `None` when no open
+/// entry matches on any tier.
+fn resolve_open_tool_key(state: &ResponsesStreamState, frame: &Value) -> Option<String> {
+    let resolve = |key: String| -> Option<String> {
+        if state.open_tools.contains_key(&key) {
+            return Some(key);
+        }
+        state
+            .key_aliases
+            .get(&key)
+            .filter(|target| state.open_tools.contains_key(*target))
+            .cloned()
+    };
+    let primary = tool_item_key(frame);
+    if let Some(key) = resolve(primary) {
+        return Some(key);
+    }
+    frame
+        .get("output_index")
+        .and_then(Value::as_u64)
+        .and_then(|idx| resolve(format!("output_index:{idx}")))
 }
 
 /// True when a raw Responses SSE `data:` frame is a stream-terminal *error*
@@ -457,8 +508,40 @@ pub(crate) fn parse_responses_event(data: &str, state: &mut ResponsesStreamState
             if let Some(item) = json.get("item")
                 && item.get("type").and_then(Value::as_str) == Some("function_call")
             {
+                let key = tool_item_key(&json);
+                // Bound the map: MAX_TOOL_ARGS_BYTES is per-entry, so entry
+                // count must be capped too or total memory is unbounded.
+                if !state.open_tools.contains_key(&key)
+                    && state.open_tools.len() >= MAX_OPEN_TOOL_CALLS
+                {
+                    events.push(LlmEvent::Error(format!(
+                        "more than {MAX_OPEN_TOOL_CALLS} concurrent tool-call items — \
+                         aborting stream to bound memory"
+                    )));
+                    return events;
+                }
+                let arguments = item
+                    .get("arguments")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default();
+                // Inline arguments on the added frame count against the same
+                // byte bound as streamed deltas.
+                if arguments.len() > MAX_TOOL_ARGS_BYTES {
+                    events.push(args_overflow_error());
+                    return events;
+                }
+                // Mixed-tier alias: later argument frames may carry only the
+                // output_index while this frame carried the item id (or vice
+                // versa) — record index→primary so lookups resolve on either
+                // tier instead of silently dropping deltas.
+                if let Some(idx) = json.get("output_index").and_then(Value::as_u64) {
+                    let idx_key = format!("output_index:{idx}");
+                    if idx_key != key {
+                        state.key_aliases.insert(idx_key, key.clone());
+                    }
+                }
                 state.open_tools.insert(
-                    tool_item_key(&json),
+                    key,
                     ResponsesToolCall {
                         call_id: item
                             .get("call_id")
@@ -470,39 +553,59 @@ pub(crate) fn parse_responses_event(data: &str, state: &mut ResponsesStreamState
                             .and_then(Value::as_str)
                             .unwrap_or_default()
                             .to_string(),
-                        arguments: item
-                            .get("arguments")
-                            .and_then(Value::as_str)
-                            .unwrap_or_default()
-                            .to_string(),
+                        arguments: arguments.to_string(),
                     },
                 );
             }
         }
 
         "response.function_call_arguments.delta" => {
-            if let Some(tool) = state.open_tools.get_mut(&tool_item_key(&json))
-                && let Some(delta) = json.get("delta").and_then(Value::as_str)
-            {
-                if tool.arguments.len().saturating_add(delta.len()) > MAX_TOOL_ARGS_BYTES {
-                    events.push(LlmEvent::Error(format!(
-                        "tool-call arguments exceeded {MAX_TOOL_ARGS_BYTES} bytes — \
-                         aborting stream to bound memory"
-                    )));
-                    return events;
+            if let Some(delta) = json.get("delta").and_then(Value::as_str) {
+                match resolve_open_tool_key(state, &json) {
+                    Some(key) => {
+                        if let Some(tool) = state.open_tools.get_mut(&key) {
+                            if tool.arguments.len().saturating_add(delta.len())
+                                > MAX_TOOL_ARGS_BYTES
+                            {
+                                events.push(args_overflow_error());
+                                return events;
+                            }
+                            tool.arguments.push_str(delta);
+                        }
+                    }
+                    // A silent drop here runs the tool with `{}` when the done
+                    // item also omits inline arguments — make it loud.
+                    None => tracing::warn!(
+                        target: "wcore_providers::openai_responses",
+                        "dropping function_call_arguments.delta with no open \
+                         function_call item"
+                    ),
                 }
-                tool.arguments.push_str(delta);
             }
         }
 
         "response.function_call_arguments.done" => {
             // OpenAI sends the authoritative complete argument string here.
             // Prefer it over the accumulated deltas when present.
-            if let Some(tool) = state.open_tools.get_mut(&tool_item_key(&json))
-                && let Some(args) = json.get("arguments").and_then(Value::as_str)
+            if let Some(args) = json.get("arguments").and_then(Value::as_str)
                 && !args.is_empty()
             {
-                tool.arguments = args.to_string();
+                if args.len() > MAX_TOOL_ARGS_BYTES {
+                    events.push(args_overflow_error());
+                    return events;
+                }
+                match resolve_open_tool_key(state, &json) {
+                    Some(key) => {
+                        if let Some(tool) = state.open_tools.get_mut(&key) {
+                            tool.arguments = args.to_string();
+                        }
+                    }
+                    None => tracing::warn!(
+                        target: "wcore_providers::openai_responses",
+                        "dropping function_call_arguments.done with no open \
+                         function_call item"
+                    ),
+                }
             }
         }
 
@@ -615,8 +718,9 @@ fn finalize_tool_call(
     item: &Value,
     state: &mut ResponsesStreamState,
 ) -> Option<LlmEvent> {
-    let key = tool_item_key(frame);
+    let key = resolve_open_tool_key(state, frame).unwrap_or_else(|| tool_item_key(frame));
     let acc = state.open_tools.remove(&key).unwrap_or_default();
+    state.key_aliases.retain(|_, target| target != &key);
 
     let item_str = |field: &str| -> Option<&str> {
         item.get(field)
@@ -1228,6 +1332,149 @@ mod tests {
             }
             other => panic!("expected ToolUse, got {other:?}"),
         }
+    }
+
+    /// Mixed-tier alias, direction 1: the added frame carries the item id,
+    /// argument frames carry ONLY the output_index. The deltas must still
+    /// reach the item-id-keyed entry (a silent drop would run the tool with
+    /// `{}` when the done item omits inline arguments).
+    #[test]
+    fn parse_delta_with_only_output_index_reaches_item_id_keyed_tool() {
+        let mut state = ResponsesStreamState::new();
+        let mut got: Vec<LlmEvent> = Vec::new();
+        for f in [
+            r#"{"type":"response.output_item.added","output_index":0,"item":{"type":"function_call","id":"fc_1","call_id":"c1","name":"read","arguments":""}}"#,
+            r#"{"type":"response.function_call_arguments.delta","output_index":0,"delta":"{\"path\":\"a\"}"}"#,
+            r#"{"type":"response.output_item.done","output_index":0,"item":{"type":"function_call","id":"fc_1","call_id":"c1","name":"read"}}"#,
+        ] {
+            got.extend(parse_responses_event(f, &mut state));
+        }
+        assert_eq!(got.len(), 1, "events: {got:?}");
+        match &got[0] {
+            LlmEvent::ToolUse { id, input, .. } => {
+                assert_eq!(id, "c1");
+                assert_eq!(input, &json!({ "path": "a" }), "deltas must not drop");
+            }
+            other => panic!("expected ToolUse, got {other:?}"),
+        }
+    }
+
+    /// Mixed-tier alias, direction 2: the added frame carries ONLY the
+    /// output_index, argument frames carry the item id (plus index). The
+    /// lookup's index-tier fallback must resolve the entry.
+    #[test]
+    fn parse_delta_with_item_id_reaches_output_index_keyed_tool() {
+        let mut state = ResponsesStreamState::new();
+        let mut got: Vec<LlmEvent> = Vec::new();
+        for f in [
+            r#"{"type":"response.output_item.added","output_index":0,"item":{"type":"function_call","call_id":"c1","name":"read","arguments":""}}"#,
+            r#"{"type":"response.function_call_arguments.delta","item_id":"fc_1","output_index":0,"delta":"{\"path\":\"b\"}"}"#,
+            r#"{"type":"response.output_item.done","output_index":0,"item":{"type":"function_call","id":"fc_1","call_id":"c1","name":"read"}}"#,
+        ] {
+            got.extend(parse_responses_event(f, &mut state));
+        }
+        assert_eq!(got.len(), 1, "events: {got:?}");
+        match &got[0] {
+            LlmEvent::ToolUse { id, input, .. } => {
+                assert_eq!(id, "c1");
+                assert_eq!(input, &json!({ "path": "b" }), "deltas must not drop");
+            }
+            other => panic!("expected ToolUse, got {other:?}"),
+        }
+    }
+
+    /// The open-tools map is bounded: the added frame past
+    /// `MAX_OPEN_TOOL_CALLS` entries aborts the stream with an error instead
+    /// of growing memory without bound (each entry can hold up to
+    /// MAX_TOOL_ARGS_BYTES of arguments).
+    #[test]
+    fn parse_open_tool_cap_errors_past_limit() {
+        let mut state = ResponsesStreamState::new();
+        for i in 0..MAX_OPEN_TOOL_CALLS {
+            let frame = format!(
+                r#"{{"type":"response.output_item.added","output_index":{i},"item":{{"type":"function_call","id":"fc_{i}","call_id":"c_{i}","name":"read","arguments":""}}}}"#
+            );
+            assert!(
+                parse_responses_event(&frame, &mut state).is_empty(),
+                "added frame {i} must be accepted silently"
+            );
+        }
+        let over = format!(
+            r#"{{"type":"response.output_item.added","output_index":{i},"item":{{"type":"function_call","id":"fc_{i}","call_id":"c_{i}","name":"read","arguments":""}}}}"#,
+            i = MAX_OPEN_TOOL_CALLS
+        );
+        let events = parse_responses_event(&over, &mut state);
+        assert_eq!(events.len(), 1);
+        match &events[0] {
+            LlmEvent::Error(msg) => assert!(msg.contains("concurrent tool-call items")),
+            other => panic!("expected Error, got {other:?}"),
+        }
+    }
+
+    /// Inline `arguments` on the added frame count against the same byte
+    /// bound as streamed deltas (previously bypassed the guard).
+    #[test]
+    fn parse_added_inline_arguments_over_byte_cap_errors() {
+        let mut state = ResponsesStreamState::new();
+        let big = "x".repeat(MAX_TOOL_ARGS_BYTES + 1);
+        let frame = json!({
+            "type": "response.output_item.added",
+            "output_index": 0,
+            "item": {
+                "type": "function_call",
+                "id": "fc_1", "call_id": "c1", "name": "read",
+                "arguments": big,
+            },
+        })
+        .to_string();
+        let events = parse_responses_event(&frame, &mut state);
+        assert_eq!(events.len(), 1);
+        match &events[0] {
+            LlmEvent::Error(msg) => assert!(msg.contains("exceeded")),
+            other => panic!("expected Error, got {other:?}"),
+        }
+    }
+
+    /// The authoritative `function_call_arguments.done` replacement string is
+    /// also byte-bounded (previously bypassed the guard).
+    #[test]
+    fn parse_arguments_done_over_byte_cap_errors() {
+        let mut state = ResponsesStreamState::new();
+        let _ = parse_responses_event(
+            r#"{"type":"response.output_item.added","output_index":0,"item":{"type":"function_call","id":"fc_1","call_id":"c1","name":"read","arguments":""}}"#,
+            &mut state,
+        );
+        let big = "x".repeat(MAX_TOOL_ARGS_BYTES + 1);
+        let frame = json!({
+            "type": "response.function_call_arguments.done",
+            "item_id": "fc_1",
+            "output_index": 0,
+            "arguments": big,
+        })
+        .to_string();
+        let events = parse_responses_event(&frame, &mut state);
+        assert_eq!(events.len(), 1);
+        match &events[0] {
+            LlmEvent::Error(msg) => assert!(msg.contains("exceeded")),
+            other => panic!("expected Error, got {other:?}"),
+        }
+    }
+
+    /// A `call_id: ""` pair persisted by a pre-#133 session must not
+    /// round-trip to the API (strict endpoints 400 on it): both the empty-id
+    /// `function_call` and its empty-id output are stripped; valid pairs
+    /// survive.
+    #[test]
+    fn clean_orphaned_outputs_strips_empty_call_id_pairs() {
+        let mut input = vec![
+            json!({"type":"function_call","call_id":"","name":"read","arguments":"{}"}),
+            json!({"type":"function_call_output","call_id":"","output":"x"}),
+            json!({"type":"function_call","call_id":"ok","name":"read","arguments":"{}"}),
+            json!({"type":"function_call_output","call_id":"ok","output":"kept"}),
+        ];
+        clean_orphaned_function_call_outputs(&mut input);
+        assert_eq!(input.len(), 2, "only the valid pair survives: {input:?}");
+        assert!(input.iter().all(|i| i["call_id"] == json!("ok")));
     }
 
     #[test]
