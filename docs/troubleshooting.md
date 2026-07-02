@@ -1,5 +1,34 @@
 # Troubleshooting
 
+## Stale Engine via npx (already-fixed bugs reappear)
+
+```
+API error 400: ... tools[0].function.name ...   # or any bug fixed releases ago
+```
+
+If you launch the engine with `npx @ferroxlabs/wayland-core` (or `@latest`),
+npx caches the resolved package **by spec string** and never re-queries the
+registry (npm/cli#2329) — the box freezes on whatever `latest` was the *first*
+time you ran it. Check with:
+
+```bash
+npx @ferroxlabs/wayland-core --version   # what you're actually running
+npm view @ferroxlabs/wayland-core version  # what's actually latest
+```
+
+Only an **exact-version** spec is a guaranteed cache miss:
+
+```bash
+npx @ferroxlabs/wayland-core@<latest-version> ...
+# or install globally and stop depending on the npx cache:
+npm i -g @ferroxlabs/wayland-core@latest
+```
+
+The launcher also self-heals: it checks the registry in the background (at
+most once a day, never blocking a launch) and prints a warning with the exact
+pinned command when the cached engine is behind. Opt out with
+`WAYLAND_CORE_SKIP_UPDATE_CHECK=1`.
+
 ## API Key Not Configured
 
 ```
