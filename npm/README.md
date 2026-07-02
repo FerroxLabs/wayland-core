@@ -8,7 +8,7 @@ ship the right platform binary with zero friction:
 - **Wayland desktop** (Electron) resolves it from `node_modules` in
   `app/scripts/prepareWaylandCore.js` (the script's documented path 0) instead
   of hand-placing or downloading-by-tag.
-- **End users** can `npx @ferroxlabs/wayland-core …` or `npm i -g`.
+- **End users** can `npx @ferroxlabs/wayland-core@latest …` or `npm i -g`.
 
 ## Layout — launcher + per-platform packages (the esbuild/Biome pattern)
 
@@ -31,6 +31,28 @@ the same key the desktop uses for `bundled-wayland-core/<key>/`.
 
 > **Linux is glibc** (`*-unknown-linux-gnu`), matching the desktop's
 > AppImage/deb/rpm targets and AionCLI's (non-Docker) audience. No musl.
+
+## Staleness self-heal (the npx cache trap, #126)
+
+npx caches the resolved tree by **spec string** and never re-queries the
+registry for an unpinned / `@latest` spec (npm/cli#2329) — a box that once ran
+`npx @ferroxlabs/wayland-core` freezes on that first-resolved version forever.
+The bin shim (`bin/wayland-core.js`) therefore ships a deliberately minimal
+self-heal (`bin/stale-check.js`):
+
+- on launch it reads a cached state file
+  (`$WAYLAND_HOME/npx-update-check.json`, default `~/.wayland/`) and, if the
+  running version is behind the registry's `latest`, prints a stderr warning
+  with the **exact-version** `npx` command (an exact spec is the only
+  guaranteed cache miss);
+- it refreshes that state in a **detached background process** (5s fetch
+  timeout), at most once per 24h — a launch is never blocked and never fails
+  because of the check;
+- warning and registry query are throttled to once per 24h; every path is
+  fail-safe (any error → no warning, launch proceeds);
+- opt out with `WAYLAND_CORE_SKIP_UPDATE_CHECK=1`; skipped automatically when
+  `CI` is set. Hosts that spawn via `binaryPath()` bypass the shim and are
+  unaffected.
 
 ## How consumers use it
 

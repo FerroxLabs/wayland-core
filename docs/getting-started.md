@@ -9,7 +9,7 @@ npm install -g @ferroxlabs/wayland-core
 wayland-core --version
 
 # or run it once with no install
-npx @ferroxlabs/wayland-core "summarize the TODOs in this repo"
+npx @ferroxlabs/wayland-core@latest "summarize the TODOs in this repo"
 ```
 
 **Prebuilt signed binaries** for macOS (arm64/x64), Linux (arm64/x64), and
