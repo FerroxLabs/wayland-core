@@ -69,16 +69,19 @@ impl CaptureEmitter {
     }
 }
 
+/// One captured request frame: `(call_id, platform, chat_id, body)`.
+type CapturedRequest = (String, String, Option<String>, String);
+
 /// OutputSink that records every `host_send_message_request` frame the
 /// transport emits. The gate assertion is on THIS capture: a denied call
 /// must leave it empty.
 #[derive(Default)]
 struct HostRequestCapture {
-    requests: Mutex<Vec<(String, String, Option<String>, String)>>,
+    requests: Mutex<Vec<CapturedRequest>>,
 }
 
 impl HostRequestCapture {
-    fn snapshot(&self) -> Vec<(String, String, Option<String>, String)> {
+    fn snapshot(&self) -> Vec<CapturedRequest> {
         self.requests.lock().map(|v| v.clone()).unwrap_or_default()
     }
 }

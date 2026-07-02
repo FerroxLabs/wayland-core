@@ -230,10 +230,14 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
     use wcore_tools::send_message::MessagingPlatform;
 
+    /// One captured request frame:
+    /// `(call_id, platform, chat_id, thread_id, body)`.
+    type CapturedRequest = (String, String, Option<String>, Option<String>, String);
+
     /// Capturing sink that records every host-send request frame.
     #[derive(Default)]
     struct CaptureSink {
-        requests: Mutex<Vec<(String, String, Option<String>, Option<String>, String)>>,
+        requests: Mutex<Vec<CapturedRequest>>,
     }
 
     impl crate::output::OutputSink for CaptureSink {
@@ -389,14 +393,12 @@ mod tests {
         let sink = Arc::new(CaptureSink::default());
         let transport = HostDelegatedTransport::new(bridge.clone(), sink.clone());
 
-        let send = transport.send(
-            &ParsedTarget {
-                platform: MessagingPlatform::Email,
-                chat_id: Some("mike@example.com".to_string()),
-                thread_id: Some("t-1".to_string()),
-            },
-            "body text",
-        );
+        let target = ParsedTarget {
+            platform: MessagingPlatform::Email,
+            chat_id: Some("mike@example.com".to_string()),
+            thread_id: Some("t-1".to_string()),
+        };
+        let send = transport.send(&target, "body text");
         tokio::pin!(send);
         // Drive the send until the request frame is emitted.
         let outcome = tokio::select! {
@@ -441,7 +443,8 @@ mod tests {
         let sink = Arc::new(CaptureSink::default());
         let transport = HostDelegatedTransport::new(bridge.clone(), sink.clone());
 
-        let send = transport.send(&email_target(), "hi");
+        let target = email_target();
+        let send = transport.send(&target, "hi");
         tokio::pin!(send);
         tokio::select! {
             biased;
@@ -482,7 +485,8 @@ mod tests {
         let sink = Arc::new(CaptureSink::default());
         let transport = HostDelegatedTransport::new(bridge.clone(), sink.clone());
 
-        let send = transport.send(&email_target(), "hi");
+        let target = email_target();
+        let send = transport.send(&target, "hi");
         tokio::pin!(send);
         tokio::select! {
             biased;
@@ -548,7 +552,8 @@ mod tests {
         let transport = HostDelegatedTransport::new(bridge.clone(), sink.clone());
 
         {
-            let send = transport.send(&email_target(), "hi");
+            let target = email_target();
+            let send = transport.send(&target, "hi");
             tokio::pin!(send);
             tokio::select! {
                 biased;
