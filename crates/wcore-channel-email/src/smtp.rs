@@ -7,7 +7,8 @@
 //! errors, permanent short-circuit on auth failure.
 
 use std::sync::Arc;
-use std::time::Duration;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
 use lettre::message::header::{HeaderName, HeaderValue};
@@ -197,6 +198,39 @@ fn reply_headers(reply: &ReplyContext) -> Vec<HeaderValue> {
 /// so MUAs group the reply with the original. When `reply` is `None` the
 /// subject falls back to `subject_override` (if any) or a bare default,
 /// preserving the prior outbound-only behavior.
+/// Monotonic per-process sequence so two sends in the same nanosecond (or on
+/// a coarse clock) still get distinct Message-IDs.
+static OUTBOUND_ID_SEQ: AtomicU64 = AtomicU64::new(0);
+
+/// Generate a bare (no angle brackets) RFC 5322 `Message-ID` for an outbound
+/// message: `wl-<epoch-nanos>-<seq>@<from-domain>`. The domain comes from the
+/// configured From address so the id is well-formed for strict MTAs; falls
+/// back to a fixed label when the address has no `@` (already rejected later
+/// by the address parse, but never panic here).
+pub(crate) fn make_outbound_message_id(from: &str) -> String {
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let seq = OUTBOUND_ID_SEQ.fetch_add(1, Ordering::Relaxed);
+    let domain = from
+        .rsplit_once('@')
+        .map(|(_, d)| d.trim().trim_end_matches('>'))
+        .filter(|d| !d.is_empty())
+        .unwrap_or("wayland.invalid");
+    format!("wl-{nanos:x}-{seq:x}@{domain}")
+}
+
+/// Read the bare `Message-ID` (angle brackets stripped) off a built message.
+/// `build_message` always stamps one, so `None` only happens for messages
+/// built elsewhere.
+pub(crate) fn outbound_message_id(msg: &Message) -> Option<String> {
+    msg.headers()
+        .get_raw("Message-ID")
+        .map(|v| v.trim().trim_matches(|c| c == '<' || c == '>').to_string())
+        .filter(|v| !v.is_empty())
+}
+
 pub(crate) fn build_message(
     from: &str,
     to: &str,
@@ -227,7 +261,13 @@ pub(crate) fn build_message(
     let mut builder = Message::builder()
         .from(from_addr)
         .to(to_addr)
-        .subject(subject);
+        .subject(subject)
+        // Stamp an explicit Message-ID (lettre only generates one when asked;
+        // otherwise the relay assigns it and we never learn the value). The
+        // send path records this id so the IMAP poll task can recognize the
+        // channel's own mail if it echoes back into the monitored mailbox and
+        // mark it `is_self` — breaking the wayland#547 self-reply loop.
+        .message_id(Some(format!("<{}>", make_outbound_message_id(from))));
 
     if let Some(r) = reply {
         for hv in reply_headers(r) {
@@ -539,6 +579,37 @@ mod tests {
             EmailError::Envelope(_) => {}
             other => panic!("expected Envelope, got {other:?}"),
         }
+    }
+
+    // ----- wayland#547 loop guard: outbound Message-ID stamping -----
+
+    #[test]
+    fn build_message_stamps_extractable_message_id() {
+        let msg =
+            build_message("Bot <bot@acme.com>", "ops@acme.com", "hi", None, None, &[]).unwrap();
+        let id = outbound_message_id(&msg).expect("Message-ID stamped");
+        assert!(id.starts_with("wl-"), "id = {id}");
+        // Domain comes from the From addr-spec even in display-name form.
+        assert!(id.ends_with("@acme.com"), "id = {id}");
+        // The bracketed form is what actually hits the wire.
+        let rfc = String::from_utf8_lossy(&msg.formatted()).to_string();
+        assert!(
+            rfc.contains(&format!("Message-ID: <{id}>")),
+            "wire bytes missing stamped Message-ID; rfc = {rfc}"
+        );
+    }
+
+    #[test]
+    fn outbound_message_ids_are_unique_per_send() {
+        let a = make_outbound_message_id("bot@acme.com");
+        let b = make_outbound_message_id("bot@acme.com");
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    fn outbound_message_id_domain_falls_back_when_from_has_no_at() {
+        let id = make_outbound_message_id("garbage");
+        assert!(id.ends_with("@wayland.invalid"), "id = {id}");
     }
 
     #[test]

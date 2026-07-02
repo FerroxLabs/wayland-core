@@ -29,6 +29,7 @@ pub use crate::smtp::{LettreSender, MailSender, SendError};
 pub mod config;
 pub mod error;
 mod imap;
+mod sent_index;
 pub mod smtp;
 mod uid_store;
 
@@ -56,6 +57,11 @@ pub struct EmailChannel {
     /// In-Reply-To / References / Re: subject on outbound replies. Shared
     /// `std::Mutex` because the poll task is synchronous.
     reply_index: crate::imap::ReplyIndex,
+    /// Outbound Message-ID index: `send_message` records every id it
+    /// stamps; the IMAP poll task marks a matching inbound `is_self` so the
+    /// dispatch kernel's loop guard drops the channel's own echoed mail
+    /// (wayland#547). Shared `std::Mutex` because the poll task is sync.
+    sent_ids: crate::sent_index::SentIdIndex,
     /// Credentials store used to resolve SMTP+IMAP creds at `start()`.
     creds: Arc<dyn CredentialsStore>,
     /// Optional test override — when set, `start()` reuses this sender
@@ -82,6 +88,7 @@ impl EmailChannel {
             shutdown: None,
             last_seen_uid: Arc::new(StdMutex::new(0)),
             reply_index: Arc::new(StdMutex::new(HashMap::new())),
+            sent_ids: crate::sent_index::new_index(),
             creds,
             sender_override: None,
         }
@@ -141,6 +148,17 @@ impl EmailChannel {
                 ))
             })?;
 
+        // Own-address set for the inbound self-mail guard (wayland#547):
+        // the configured From address, plus the IMAP account when it is
+        // address-shaped (some servers use bare usernames — skip those).
+        let mut own_addresses = vec![crate::imap::normalize_from_addr(&self.config.from_address)];
+        if imap_user.contains('@') {
+            let normalized = crate::imap::normalize_from_addr(&imap_user);
+            if !own_addresses.contains(&normalized) {
+                own_addresses.push(normalized);
+            }
+        }
+
         let (tx, rx) = watch::channel(false);
         let args = crate::imap::ImapPollArgs {
             host: imap_cfg.host,
@@ -149,6 +167,8 @@ impl EmailChannel {
             pass: imap_pass,
             mailbox: imap_cfg.mailbox,
             allowed_senders: imap_cfg.allowed_senders,
+            own_addresses,
+            sent_ids: Arc::clone(&self.sent_ids),
             poll_interval_secs: imap_cfg.poll_interval_secs,
             inbox: Arc::clone(&self.inbox),
             last_seen_uid: Arc::clone(&self.last_seen_uid),
@@ -334,6 +354,19 @@ impl Channel for EmailChannel {
             &resolved,
         )
         .map_err(ChannelError::from)?;
+
+        // Loop guard (wayland#547): remember the outbound Message-ID BEFORE
+        // the wire send so the IMAP poll task can never race ahead of the
+        // recording — by the time the mail can possibly be delivered (and
+        // echo back into a monitored mailbox) the id is already indexed. A
+        // failed send leaves a harmless stale entry (that id never reaches
+        // the wild).
+        if let Some(id) = crate::smtp::outbound_message_id(&envelope) {
+            if let Ok(mut idx) = self.sent_ids.lock() {
+                idx.record(id);
+            }
+        }
+
         let response = crate::smtp::send_with_retry(sender, envelope)
             .await
             .map_err(ChannelError::from)?;
@@ -498,6 +531,49 @@ mod tests {
             ch.fetch_media(&att).await.unwrap_err(),
             ChannelError::Rejected(_)
         ));
+    }
+
+    // -----------------------------------------------------------------
+    // wayland#547 loop guard: the outbound Message-ID is stamped on the
+    // wire message, recorded in the sent index, and an inbound echo of it
+    // is marked `is_self` (so the dispatch kernel's loop guard drops it).
+    // -----------------------------------------------------------------
+    #[tokio::test]
+    async fn send_message_records_outbound_id_and_marks_echo_self() {
+        let sender = RecordingSender::new(vec![RecordingSender::ok("QID-9")]);
+        let mut ch = EmailChannel::with_sender(
+            "test",
+            cfg_outbound_only(),
+            creds_for_outbound(),
+            sender.clone(),
+        );
+        ch.start().await.unwrap();
+        ch.send_message(OutgoingMessage::text("bot@acme.com", "note to self"))
+            .await
+            .unwrap();
+
+        // The wire message carries an explicit stamped Message-ID…
+        let stamped = {
+            let sent = sender.sent.lock().unwrap();
+            crate::smtp::outbound_message_id(&sent[0]).expect("outbound Message-ID stamped")
+        };
+        assert!(stamped.starts_with("wl-"), "stamped = {stamped}");
+        assert!(stamped.ends_with("@acme.com"), "stamped = {stamped}");
+        // …and was recorded in the sent index before the send.
+        assert!(ch.sent_ids.lock().unwrap().contains(&stamped));
+
+        // An inbound echo of that id — what the IMAP poll task sees when
+        // the agent's mail lands back in the monitored inbox — is marked
+        // is_self even with no own-address configured.
+        let mut echo = wcore_channels::event::IncomingMessage::new(
+            stamped.clone(),
+            "bot@acme.com",
+            "Bot <bot@acme.com>",
+            "note to self",
+            0,
+        );
+        crate::imap::mark_self_inbound(&mut echo, &[], &ch.sent_ids);
+        assert!(echo.is_self, "echoed outbound mail must be marked is_self");
     }
 
     // -----------------------------------------------------------------

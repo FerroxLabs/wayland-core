@@ -60,6 +60,17 @@ pub(crate) struct ImapPollArgs {
     /// list are dropped before enqueueing. See `ImapConfig::allowed_senders`
     /// for the (lack of) authentication guarantees.
     pub allowed_senders: Vec<String>,
+    /// This channel's own addresses (bare addr-spec, lowercased): the SMTP
+    /// From address plus the IMAP account when it is address-shaped. Inbound
+    /// mail whose `From:` matches is marked `is_self` so the dispatch
+    /// kernel's loop guard drops it instead of starting an agent turn
+    /// (wayland#547 — the agent otherwise replies to its own mail forever).
+    pub own_addresses: Vec<String>,
+    /// Message-IDs this channel has sent (recorded by the SMTP path). An
+    /// inbound whose id matches is the channel's own mail echoing back and
+    /// is likewise marked `is_self`. Precise where the From-match is blunt:
+    /// it never flags mail a human sent from the shared account.
+    pub sent_ids: crate::sent_index::SentIdIndex,
     pub inbox: Arc<Mutex<VecDeque<ChannelEvent>>>,
     pub last_seen_uid: Arc<StdMutex<u32>>,
     /// Shared reply-threading index; the poll task records one entry per
@@ -82,6 +93,8 @@ pub(crate) fn imap_poll_blocking(args: ImapPollArgs) {
         mailbox,
         poll_interval_secs,
         allowed_senders,
+        own_addresses,
+        sent_ids,
         inbox,
         last_seen_uid,
         reply_index,
@@ -123,6 +136,8 @@ pub(crate) fn imap_poll_blocking(args: ImapPollArgs) {
             &pass,
             &mailbox,
             allow_set.as_ref(),
+            &own_addresses,
+            &sent_ids,
             &inbox,
             &last_seen_uid,
             &reply_index,
@@ -166,6 +181,8 @@ fn poll_once(
     pass: &str,
     mailbox: &str,
     allow_set: Option<&std::collections::HashSet<String>>,
+    own_addresses: &[String],
+    sent_ids: &crate::sent_index::SentIdIndex,
     inbox: &Arc<Mutex<VecDeque<ChannelEvent>>>,
     last_seen_uid: &Arc<StdMutex<u32>>,
     reply_index: &ReplyIndex,
@@ -248,7 +265,13 @@ fn poll_once(
                 None => continue,
             };
             match parse_message(uid, body) {
-                Ok((msg, reply_ctx)) => {
+                Ok((mut msg, reply_ctx)) => {
+                    // Loop guard (wayland#547): mark the channel's own mail
+                    // echoing back in — by outbound Message-ID (precise) or
+                    // own-address From (backstop for id-rewriting relays) —
+                    // so the dispatch kernel drops it instead of triggering
+                    // an agent turn that would reply to it forever.
+                    mark_self_inbound(&mut msg, own_addresses, sent_ids);
                     // Sender allow-list. `msg.author` is the raw `From:`
                     // header value (display name + addr-spec); compare its
                     // normalized addr-spec against the configured set.
@@ -1018,6 +1041,39 @@ pub(crate) fn is_sender_allowed(
     }
 }
 
+/// Mark an inbound message `is_self` when it is this channel's own mail
+/// echoing back into the monitored mailbox (wayland#547 loop guard).
+///
+/// Two detectors, either suffices:
+/// 1. **Echoed Message-ID** — the id is one the SMTP path recorded before
+///    sending. Precise: only ever matches mail this process sent, so a
+///    human mailing the bot from the shared account is never flagged.
+/// 2. **Own-address From** — the normalized sender matches the channel's
+///    own address set. Blunt backstop for relays that rewrite Message-IDs;
+///    also catches agent mail sent before the current process started.
+///
+/// Marking (not dropping) keeps the drop decision in the dispatch kernel's
+/// existing loop guard (`classify`: `is_self` → silent drop), the same path
+/// every other channel uses.
+pub(crate) fn mark_self_inbound(
+    msg: &mut IncomingMessage,
+    own_addresses: &[String],
+    sent_ids: &crate::sent_index::SentIdIndex,
+) {
+    if msg.is_self {
+        return;
+    }
+    let echoed = sent_ids
+        .lock()
+        .map(|s| s.contains(&msg.id))
+        .unwrap_or(false);
+    // `sender_id` is already the normalized (bare, lowercased) addr-spec.
+    let from_self = !msg.sender_id.is_empty() && own_addresses.iter().any(|a| a == &msg.sender_id);
+    if echoed || from_self {
+        msg.is_self = true;
+    }
+}
+
 /// Extract the display name from a `From:`-style header value, returning
 /// `None` when no display name is present (bare addr-spec form).
 ///
@@ -1039,7 +1095,7 @@ fn extract_display_name(raw: &str) -> Option<String> {
 
 /// Extract the bare `addr-spec` from a `From:`-style header value and
 /// lowercase it for case-insensitive comparison.
-fn normalize_from_addr(raw: &str) -> String {
+pub(crate) fn normalize_from_addr(raw: &str) -> String {
     let trimmed = raw.trim();
     let inner = match (trimmed.find('<'), trimmed.find('>')) {
         (Some(open), Some(close)) if close > open + 1 => &trimmed[open + 1..close],
@@ -1060,6 +1116,56 @@ fn parse_rfc2822_to_epoch(s: String) -> Option<i64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ----- wayland#547 loop guard: mark_self_inbound -----
+
+    #[test]
+    fn mark_self_by_own_address() {
+        let idx = crate::sent_index::new_index();
+        let mut m =
+            IncomingMessage::new("some-id@x", "bot@acme.com", "Bot <bot@acme.com>", "hi", 0);
+        m.sender_id = "bot@acme.com".into();
+        mark_self_inbound(&mut m, &["bot@acme.com".to_string()], &idx);
+        assert!(m.is_self);
+    }
+
+    #[test]
+    fn mark_self_by_echoed_message_id_even_from_foreign_address() {
+        // A relay that rewrites the From still can't dodge the id match.
+        let idx = crate::sent_index::new_index();
+        idx.lock().unwrap().record("wl-1-0@acme.com".into());
+        let mut m = IncomingMessage::new(
+            "wl-1-0@acme.com",
+            "conv",
+            "Rewritten <alias@relay.example>",
+            "hi",
+            0,
+        );
+        m.sender_id = "alias@relay.example".into();
+        mark_self_inbound(&mut m, &["bot@acme.com".to_string()], &idx);
+        assert!(m.is_self);
+    }
+
+    #[test]
+    fn unrelated_inbound_is_not_marked_self() {
+        let idx = crate::sent_index::new_index();
+        idx.lock().unwrap().record("wl-1-0@acme.com".into());
+        let mut m = IncomingMessage::new("user-mail@x", "conv", "Alice <alice@x.com>", "hi", 0);
+        m.sender_id = "alice@x.com".into();
+        mark_self_inbound(&mut m, &["bot@acme.com".to_string()], &idx);
+        assert!(!m.is_self);
+    }
+
+    #[test]
+    fn empty_sender_id_never_matches_an_empty_own_address() {
+        // An unconfigured/unparsable from_address normalizes to "" — that
+        // must not flag inbound mail whose sender also failed to parse.
+        let idx = crate::sent_index::new_index();
+        let mut m = IncomingMessage::new("id@x", "conv", "", "hi", 0);
+        m.sender_id = String::new();
+        mark_self_inbound(&mut m, &[String::new()], &idx);
+        assert!(!m.is_self);
+    }
 
     #[test]
     fn parse_basic_message_extracts_from_subject_body() {
