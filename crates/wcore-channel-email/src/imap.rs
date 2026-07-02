@@ -68,8 +68,9 @@ pub(crate) struct ImapPollArgs {
     pub own_addresses: Vec<String>,
     /// Message-IDs this channel has sent (recorded by the SMTP path). An
     /// inbound whose id matches is the channel's own mail echoing back and
-    /// is likewise marked `is_self`. Precise where the From-match is blunt:
-    /// it never flags mail a human sent from the shared account.
+    /// is likewise marked `is_self`. This detector only ever matches mail
+    /// this process sent; the own-address From match above is the blunter
+    /// backstop — see [`mark_self_inbound`] for the tradeoff.
     pub sent_ids: crate::sent_index::SentIdIndex,
     pub inbox: Arc<Mutex<VecDeque<ChannelEvent>>>,
     pub last_seen_uid: Arc<StdMutex<u32>>,
@@ -264,41 +265,10 @@ fn poll_once(
                 Some(b) => b,
                 None => continue,
             };
-            match parse_message(uid, body) {
-                Ok((mut msg, reply_ctx)) => {
-                    // Loop guard (wayland#547): mark the channel's own mail
-                    // echoing back in — by outbound Message-ID (precise) or
-                    // own-address From (backstop for id-rewriting relays) —
-                    // so the dispatch kernel drops it instead of triggering
-                    // an agent turn that would reply to it forever.
-                    mark_self_inbound(&mut msg, own_addresses, sent_ids);
-                    // Sender allow-list. `msg.author` is the raw `From:`
-                    // header value (display name + addr-spec); compare its
-                    // normalized addr-spec against the configured set.
-                    // NOTE: `From:` is spoofable — this is a delivery-side
-                    // filter, not authentication (see ImapConfig docs).
-                    if !is_sender_allowed(allow_set, &msg.author) {
-                        tracing::info!(
-                            target: "wcore_channel_email::imap",
-                            uid = uid,
-                            "dropping inbound message: From: not in allowed_senders",
-                        );
-                        continue;
-                    }
-                    // Record threading context so a later reply can set
-                    // In-Reply-To / References / Re: subject. Keyed by the
-                    // RFC Message-ID (== msg.id).
-                    record_reply_context(reply_index, msg.id.clone(), reply_ctx);
-                    new_events.push(ChannelEvent::MessageReceived { msg });
-                }
-                Err(e) => {
-                    tracing::warn!(
-                        target: "wcore_channel_email::imap",
-                        uid = uid,
-                        error = %e,
-                        "rfc5322 parse failed; dropping message",
-                    );
-                }
+            if let Some(event) =
+                admit_fetched_message(uid, body, allow_set, own_addresses, sent_ids, reply_index)
+            {
+                new_events.push(event);
             }
         }
         high_water = high_water.max(uid);
@@ -333,6 +303,71 @@ fn poll_once(
     // Best-effort logout; ignore errors.
     let _ = session.logout();
     Ok(())
+}
+
+/// Run the full inbound admission chain for one fetched RFC822 body:
+/// parse → self-mark (wayland#547 loop guard) → sender allow-list →
+/// record reply-threading → wrap as a `MessageReceived` event.
+///
+/// `None` means the message was dropped here (parse failure or allow-list).
+/// Self-marked messages are still returned — the dispatch kernel's loop
+/// guard is the single drop point for `is_self`, the same path every other
+/// channel uses.
+///
+/// Extracted from the `poll_once` fetch loop so the guard wiring is
+/// testable against raw message bytes without a live IMAP session.
+fn admit_fetched_message(
+    uid: u32,
+    body: &[u8],
+    allow_set: Option<&std::collections::HashSet<String>>,
+    own_addresses: &[String],
+    sent_ids: &crate::sent_index::SentIdIndex,
+    reply_index: &ReplyIndex,
+) -> Option<ChannelEvent> {
+    match parse_message(uid, body) {
+        Ok((mut msg, reply_ctx)) => {
+            // Loop guard (wayland#547): mark the channel's own mail echoing
+            // back in so the dispatch kernel drops it instead of triggering
+            // an agent turn that would reply to it forever. INFO (id only,
+            // no content) because the kernel drop itself is silent.
+            if let Some(detector) = mark_self_inbound(&mut msg, own_addresses, sent_ids) {
+                tracing::info!(
+                    target: "wcore_channel_email::imap",
+                    uid = uid,
+                    message_id = %msg.id,
+                    detector = ?detector,
+                    "inbound is this channel's own mail; marked is_self (loop guard)",
+                );
+            }
+            // Sender allow-list. `msg.author` is the raw `From:` header
+            // value (display name + addr-spec); compare its normalized
+            // addr-spec against the configured set. NOTE: `From:` is
+            // spoofable — this is a delivery-side filter, not
+            // authentication (see ImapConfig docs).
+            if !is_sender_allowed(allow_set, &msg.author) {
+                tracing::info!(
+                    target: "wcore_channel_email::imap",
+                    uid = uid,
+                    "dropping inbound message: From: not in allowed_senders",
+                );
+                return None;
+            }
+            // Record threading context so a later reply can set
+            // In-Reply-To / References / Re: subject. Keyed by the
+            // RFC Message-ID (== msg.id).
+            record_reply_context(reply_index, msg.id.clone(), reply_ctx);
+            Some(ChannelEvent::MessageReceived { msg })
+        }
+        Err(e) => {
+            tracing::warn!(
+                target: "wcore_channel_email::imap",
+                uid = uid,
+                error = %e,
+                "rfc5322 parse failed; dropping message",
+            );
+            None
+        }
+    }
 }
 
 /// RFC 5322 / MIME parser — surfaces From, Subject, Message-ID,
@@ -1041,16 +1076,32 @@ pub(crate) fn is_sender_allowed(
     }
 }
 
+/// Which loop-guard detector matched an inbound message as the channel's
+/// own mail. Surfaced so the admission path can log the reason — the
+/// kernel-side drop itself is silent (`record_history: false`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SelfMatch {
+    /// Inbound Message-ID is one this process recorded before sending.
+    MessageId,
+    /// Inbound From matches the channel's own address set.
+    OwnAddress,
+}
+
 /// Mark an inbound message `is_self` when it is this channel's own mail
 /// echoing back into the monitored mailbox (wayland#547 loop guard).
+/// Returns the detector that fired, `None` when the message was left alone
+/// (or was already marked).
 ///
 /// Two detectors, either suffices:
 /// 1. **Echoed Message-ID** — the id is one the SMTP path recorded before
-///    sending. Precise: only ever matches mail this process sent, so a
-///    human mailing the bot from the shared account is never flagged.
+///    sending. Only ever matches mail this process sent.
 /// 2. **Own-address From** — the normalized sender matches the channel's
 ///    own address set. Blunt backstop for relays that rewrite Message-IDs;
 ///    also catches agent mail sent before the current process started.
+///    Tradeoff: a human mailing the monitored account FROM the account's
+///    own address (self-note workflows) is also flagged — indistinguishable
+///    from an agent echo by headers alone, and letting it through would
+///    reinstate the loop on From-rewriting providers.
 ///
 /// Marking (not dropping) keeps the drop decision in the dispatch kernel's
 /// existing loop guard (`classify`: `is_self` → silent drop), the same path
@@ -1059,19 +1110,24 @@ pub(crate) fn mark_self_inbound(
     msg: &mut IncomingMessage,
     own_addresses: &[String],
     sent_ids: &crate::sent_index::SentIdIndex,
-) {
+) -> Option<SelfMatch> {
     if msg.is_self {
-        return;
+        return None;
     }
     let echoed = sent_ids
         .lock()
         .map(|s| s.contains(&msg.id))
         .unwrap_or(false);
-    // `sender_id` is already the normalized (bare, lowercased) addr-spec.
-    let from_self = !msg.sender_id.is_empty() && own_addresses.iter().any(|a| a == &msg.sender_id);
-    if echoed || from_self {
+    if echoed {
         msg.is_self = true;
+        return Some(SelfMatch::MessageId);
     }
+    // `sender_id` is already the normalized (bare, lowercased) addr-spec.
+    if !msg.sender_id.is_empty() && own_addresses.iter().any(|a| a == &msg.sender_id) {
+        msg.is_self = true;
+        return Some(SelfMatch::OwnAddress);
+    }
+    None
 }
 
 /// Extract the display name from a `From:`-style header value, returning
@@ -1125,7 +1181,8 @@ mod tests {
         let mut m =
             IncomingMessage::new("some-id@x", "bot@acme.com", "Bot <bot@acme.com>", "hi", 0);
         m.sender_id = "bot@acme.com".into();
-        mark_self_inbound(&mut m, &["bot@acme.com".to_string()], &idx);
+        let hit = mark_self_inbound(&mut m, &["bot@acme.com".to_string()], &idx);
+        assert_eq!(hit, Some(SelfMatch::OwnAddress));
         assert!(m.is_self);
     }
 
@@ -1142,7 +1199,8 @@ mod tests {
             0,
         );
         m.sender_id = "alias@relay.example".into();
-        mark_self_inbound(&mut m, &["bot@acme.com".to_string()], &idx);
+        let hit = mark_self_inbound(&mut m, &["bot@acme.com".to_string()], &idx);
+        assert_eq!(hit, Some(SelfMatch::MessageId));
         assert!(m.is_self);
     }
 
@@ -1152,7 +1210,10 @@ mod tests {
         idx.lock().unwrap().record("wl-1-0@acme.com".into());
         let mut m = IncomingMessage::new("user-mail@x", "conv", "Alice <alice@x.com>", "hi", 0);
         m.sender_id = "alice@x.com".into();
-        mark_self_inbound(&mut m, &["bot@acme.com".to_string()], &idx);
+        assert_eq!(
+            mark_self_inbound(&mut m, &["bot@acme.com".to_string()], &idx),
+            None
+        );
         assert!(!m.is_self);
     }
 
@@ -1163,8 +1224,69 @@ mod tests {
         let idx = crate::sent_index::new_index();
         let mut m = IncomingMessage::new("id@x", "conv", "", "hi", 0);
         m.sender_id = String::new();
-        mark_self_inbound(&mut m, &[String::new()], &idx);
+        assert_eq!(mark_self_inbound(&mut m, &[String::new()], &idx), None);
         assert!(!m.is_self);
+    }
+
+    // ----- wayland#547 loop guard: the REAL admission path -----
+    // These drive raw RFC822 bytes through `admit_fetched_message` — the
+    // same function `poll_once` calls per fetch — so removing the guard
+    // wiring (not just the helper) fails tests.
+
+    fn empty_reply_index() -> ReplyIndex {
+        Arc::new(StdMutex::new(HashMap::new()))
+    }
+
+    #[test]
+    fn echoed_outbound_is_marked_self_through_the_admission_path() {
+        let idx = crate::sent_index::new_index();
+        idx.lock().unwrap().record("wl-abc-0@acme.com".into());
+        let raw = b"From: Bot <bot@acme.com>\r\nSubject: Re: task\r\nMessage-ID: <wl-abc-0@acme.com>\r\n\r\nself echo\r\n";
+        let ev = admit_fetched_message(7, raw, None, &[], &idx, &empty_reply_index())
+            .expect("echo must still be admitted; the kernel is the drop point");
+        let ChannelEvent::MessageReceived { msg } = ev else {
+            panic!("expected MessageReceived");
+        };
+        assert!(msg.is_self, "echoed outbound must carry is_self");
+    }
+
+    #[test]
+    fn own_address_from_is_marked_self_through_the_admission_path() {
+        let idx = crate::sent_index::new_index();
+        let raw = b"From: Bot <bot@acme.com>\r\nSubject: hello\r\nMessage-ID: <relay-rewrote-this@mta>\r\n\r\nhi\r\n";
+        let ev = admit_fetched_message(
+            8,
+            raw,
+            None,
+            &["bot@acme.com".to_string()],
+            &idx,
+            &empty_reply_index(),
+        )
+        .expect("own-address mail must still be admitted");
+        let ChannelEvent::MessageReceived { msg } = ev else {
+            panic!("expected MessageReceived");
+        };
+        assert!(msg.is_self, "own-address From must carry is_self");
+    }
+
+    #[test]
+    fn ordinary_inbound_is_not_marked_self_through_the_admission_path() {
+        let idx = crate::sent_index::new_index();
+        idx.lock().unwrap().record("wl-abc-0@acme.com".into());
+        let raw = b"From: Alice <alice@x.com>\r\nSubject: question\r\nMessage-ID: <alices-mail@x.com>\r\n\r\nhelp?\r\n";
+        let ev = admit_fetched_message(
+            9,
+            raw,
+            None,
+            &["bot@acme.com".to_string()],
+            &idx,
+            &empty_reply_index(),
+        )
+        .expect("ordinary mail admitted");
+        let ChannelEvent::MessageReceived { msg } = ev else {
+            panic!("expected MessageReceived");
+        };
+        assert!(!msg.is_self, "ordinary inbound must not be flagged");
     }
 
     #[test]

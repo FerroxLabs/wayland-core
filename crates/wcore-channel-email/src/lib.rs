@@ -148,16 +148,7 @@ impl EmailChannel {
                 ))
             })?;
 
-        // Own-address set for the inbound self-mail guard (wayland#547):
-        // the configured From address, plus the IMAP account when it is
-        // address-shaped (some servers use bare usernames — skip those).
-        let mut own_addresses = vec![crate::imap::normalize_from_addr(&self.config.from_address)];
-        if imap_user.contains('@') {
-            let normalized = crate::imap::normalize_from_addr(&imap_user);
-            if !own_addresses.contains(&normalized) {
-                own_addresses.push(normalized);
-            }
-        }
+        let own_addresses = own_address_set(&self.config.from_address, &imap_user);
 
         let (tx, rx) = watch::channel(false);
         let args = crate::imap::ImapPollArgs {
@@ -183,6 +174,21 @@ impl EmailChannel {
         self.shutdown = Some(tx);
         Ok(())
     }
+}
+
+/// Own-address set for the inbound self-mail guard (wayland#547): the
+/// configured From address, plus the IMAP account when it is address-shaped
+/// (some servers use bare usernames — skip those). Normalized (bare
+/// addr-spec, lowercased) and deduplicated.
+fn own_address_set(from_address: &str, imap_user: &str) -> Vec<String> {
+    let mut own = vec![crate::imap::normalize_from_addr(from_address)];
+    if imap_user.contains('@') {
+        let normalized = crate::imap::normalize_from_addr(imap_user);
+        if !own.contains(&normalized) {
+            own.push(normalized);
+        }
+    }
+    own
 }
 
 #[async_trait]
@@ -572,8 +578,36 @@ mod tests {
             "note to self",
             0,
         );
-        crate::imap::mark_self_inbound(&mut echo, &[], &ch.sent_ids);
+        let hit = crate::imap::mark_self_inbound(&mut echo, &[], &ch.sent_ids);
+        assert_eq!(hit, Some(crate::imap::SelfMatch::MessageId));
         assert!(echo.is_self, "echoed outbound mail must be marked is_self");
+    }
+
+    // -----------------------------------------------------------------
+    // wayland#547: own-address set construction (fed to the IMAP poll
+    // task by respawn_imap_poll).
+    // -----------------------------------------------------------------
+    #[test]
+    fn own_address_set_normalizes_and_includes_address_shaped_imap_user() {
+        let own = own_address_set("Bot <BOT@Acme.com>", "shared@acme.com");
+        assert_eq!(
+            own,
+            vec!["bot@acme.com".to_string(), "shared@acme.com".to_string()]
+        );
+    }
+
+    #[test]
+    fn own_address_set_skips_bare_username_and_dedups() {
+        // Bare (non-address) IMAP usernames are skipped…
+        assert_eq!(
+            own_address_set("bot@acme.com", "bot"),
+            vec!["bot@acme.com".to_string()]
+        );
+        // …and an IMAP user equal to the From address isn't doubled.
+        assert_eq!(
+            own_address_set("bot@acme.com", "BOT@ACME.COM"),
+            vec!["bot@acme.com".to_string()]
+        );
     }
 
     // -----------------------------------------------------------------
