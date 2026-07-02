@@ -156,9 +156,7 @@ mod tests {
     /// the codec, this test fails.
     #[tokio::test]
     async fn dirty_tool_names_are_encoded_on_the_deepseek_wire() {
-        use wcore_types::llm::Message;
-        use wcore_types::llm::Role;
-        use wcore_types::message::ContentBlock;
+        use wcore_types::message::{ContentBlock, Message, Role};
         use wcore_types::tool::ToolDef;
         use wiremock::matchers::{method, path};
         use wiremock::{Mock, MockServer, ResponseTemplate};
