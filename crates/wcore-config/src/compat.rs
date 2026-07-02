@@ -299,6 +299,22 @@ pub struct ProviderCompat {
     /// predicate, never by `base_url.contains(...)`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub supports_temperature: Option<bool>,
+
+    /// #112 — whether this provider tolerates OMITTING the max-tokens wire
+    /// field entirely, letting the served model's natural output ceiling
+    /// apply. Consulted by the engine only when the model is unknown to the
+    /// `wcore_config::limits` registry AND the user omitted `--max-tokens`
+    /// (no CLI flag, no non-default TOML value); a known model or an explicit
+    /// user cap always sends a sized value.
+    ///
+    /// `Some(true)` for the gemini / openrouter / flux-router presets (their
+    /// endpoints default the field per served model). `None`/`Some(false)`
+    /// (the default) keeps sending a sized value — REQUIRED for anthropic
+    /// (the Messages API mandates `max_tokens`) and the safe choice for
+    /// generic self-hosted openai-compatible endpoints (vLLM et al. may 400
+    /// without the field or default to a tiny ceiling like 16).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub omit_max_tokens_when_unsized: Option<bool>,
 }
 
 impl ProviderCompat {
@@ -436,6 +452,10 @@ impl ProviderCompat {
             cost_per_output_token: Some(10.0 / 1_000_000.0),
             cost_per_cache_read_token: Some(0.3125 / 1_000_000.0),
             cost_per_cache_write_token: None,
+            // #112: Gemini's generateContent API defaults `maxOutputTokens` to
+            // the served model's own ceiling when the field is absent, so an
+            // unknown Gemini model with no explicit user cap may omit it.
+            omit_max_tokens_when_unsized: Some(true),
             ..Default::default()
         }
     }
@@ -607,7 +627,13 @@ impl ProviderCompat {
 
     /// Defaults for OpenRouter (100+ models via OpenAI-compat router surface).
     pub fn openrouter_defaults() -> Self {
-        Self::openai_compat_provider("openrouter")
+        Self {
+            // #112: OpenRouter applies the routed model's own ceiling when
+            // `max_tokens` is absent, so an unknown/aliased model with no
+            // explicit user cap may omit the field.
+            omit_max_tokens_when_unsized: Some(true),
+            ..Self::openai_compat_provider("openrouter")
+        }
     }
 
     /// Defaults for Flux Router (Sean's own OpenAI-compat router product).
@@ -615,6 +641,12 @@ impl ProviderCompat {
         // Base URL ends in `/v1`; pin `api_path` to avoid `/v1/v1`.
         Self {
             api_path: Some("/chat/completions".into()),
+            // #112: Flux applies the served model's natural ceiling when
+            // `max_tokens` is absent (the desktop #456/#462 contract), so a
+            // tier alias / unknown served model with no explicit user cap may
+            // omit the field. The sized internal budget still rides the
+            // `x-wl-expected-output` header.
+            omit_max_tokens_when_unsized: Some(true),
             ..Self::openai_compat_provider("flux-router")
         }
     }
@@ -788,6 +820,9 @@ impl ProviderCompat {
             // here or it is silently dropped when user config is merged over the
             // provider preset.
             supports_temperature: user.supports_temperature.or(defaults.supports_temperature),
+            omit_max_tokens_when_unsized: user
+                .omit_max_tokens_when_unsized
+                .or(defaults.omit_max_tokens_when_unsized),
         }
     }
 
@@ -848,6 +883,14 @@ impl ProviderCompat {
     /// exclusion is layered on top via `openai_compat::accepts_temperature`.
     pub fn supports_temperature(&self) -> bool {
         self.supports_temperature.unwrap_or(true)
+    }
+
+    /// #112: whether the provider tolerates omitting the max-tokens wire field
+    /// for a model with no registry-known output ceiling. Defaults to `false`
+    /// (always send a sized value); the gemini / openrouter / flux-router
+    /// presets set `true`.
+    pub fn omit_max_tokens_when_unsized(&self) -> bool {
+        self.omit_max_tokens_when_unsized.unwrap_or(false)
     }
 
     /// Whether to replay historical assistant `reasoning_content` on the Chat
@@ -1810,5 +1853,55 @@ mod input_optimization_tests {
 
         // Unset everywhere → accessor defaults to true.
         assert!(ProviderCompat::default().supports_temperature());
+    }
+
+    /// #112 — the omit-safe presets carry `omit_max_tokens_when_unsized =
+    /// Some(true)`; every send-a-sized-value provider stays off it.
+    #[test]
+    fn omit_max_tokens_when_unsized_preset_coverage() {
+        // Omit-safe: the endpoint defaults the field per served model.
+        assert!(ProviderCompat::gemini_defaults().omit_max_tokens_when_unsized());
+        assert!(ProviderCompat::openrouter_defaults().omit_max_tokens_when_unsized());
+        assert!(ProviderCompat::flux_router_defaults().omit_max_tokens_when_unsized());
+
+        // Never omit: anthropic's Messages API mandates `max_tokens`; native
+        // openai + generic openai-compat endpoints keep a sized value (vLLM
+        // et al. may 400 without the field or default to a tiny ceiling).
+        assert!(!ProviderCompat::anthropic_defaults().omit_max_tokens_when_unsized());
+        assert!(!ProviderCompat::openai_defaults().omit_max_tokens_when_unsized());
+        assert!(!ProviderCompat::together_defaults().omit_max_tokens_when_unsized());
+        assert!(!ProviderCompat::default().omit_max_tokens_when_unsized());
+    }
+
+    /// #112 — merge ripple (the reference_providercompat_merge_ripple gotcha):
+    /// a user override MUST survive `merge()` in both directions — opting a
+    /// quirky endpoint IN over a default-off preset, and opting OUT over an
+    /// omit-safe preset. An empty user keeps the preset value.
+    #[test]
+    fn merge_user_omit_max_tokens_when_unsized_overrides_default() {
+        // User opts a custom endpoint IN.
+        let user_on = ProviderCompat {
+            omit_max_tokens_when_unsized: Some(true),
+            ..ProviderCompat::default()
+        };
+        let merged = ProviderCompat::merge(ProviderCompat::openai_defaults(), user_on);
+        assert_eq!(merged.omit_max_tokens_when_unsized, Some(true));
+        assert!(merged.omit_max_tokens_when_unsized());
+
+        // User opts an omit-safe router OUT.
+        let user_off = ProviderCompat {
+            omit_max_tokens_when_unsized: Some(false),
+            ..ProviderCompat::default()
+        };
+        let merged = ProviderCompat::merge(ProviderCompat::flux_router_defaults(), user_off);
+        assert_eq!(merged.omit_max_tokens_when_unsized, Some(false));
+        assert!(!merged.omit_max_tokens_when_unsized());
+
+        // Empty user keeps the omit-safe preset default.
+        let merged_empty = ProviderCompat::merge(
+            ProviderCompat::flux_router_defaults(),
+            ProviderCompat::default(),
+        );
+        assert_eq!(merged_empty.omit_max_tokens_when_unsized, Some(true));
     }
 }

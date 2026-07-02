@@ -1,20 +1,23 @@
 //! Static per-model output-token ceilings.
 //!
 //! The engine sizes each request's `max_tokens` up front (Layer 1) so a normal
-//! turn finishes in ONE round instead of relying on the truncation
-//! auto-continue loop for routine output. To clamp safely we need each model's
-//! real **output** ceiling (distinct from its context window) — sending more
-//! than the model allows is a hard 400.
+//! turn finishes in ONE round — there is NO truncation auto-continue loop, so
+//! an undersized turn ends visibly at `finish_reason: length`. To clamp safely
+//! we need each model's real **output** ceiling (distinct from its context
+//! window) — sending more than the model allows is a hard 400.
 //!
 //! This table is the *load-bearing* source for that number: live `/models`
 //! discovery rarely returns a per-model output cap (most endpoints omit it), so
 //! a small, conservative, version-aware static table is the floor. When a model
 //! is not in the table (older variant, unknown router alias like `flux-auto`)
-//! the lookup returns `None` and the caller **fails open** — it sends the
-//! configured value and lets the continuation loop net any truncation. Erring
-//! toward `None`/low is safe (an undersize just costs a continuation round); a
-//! too-high entry would 400, so every entry here is at or below the model's
-//! documented output ceiling.
+//! the lookup returns `None` and the engine falls back to a conservative floor
+//! (`size_output_cap`'s `UNKNOWN_CAP` 8192 / `UNKNOWN_REASONING_CAP` 32768) —
+//! or, when the user omitted `--max-tokens` and the provider is omit-safe
+//! (`ProviderCompat.omit_max_tokens_when_unsized`, #112), OMITS the wire field
+//! entirely so the served model's natural ceiling applies. Erring toward
+//! `None`/low is safe (an undersize truncates, which is user-visible but
+//! recoverable); a too-high entry would 400, so every entry here is at or
+//! below the model's documented output ceiling.
 //!
 //! Matching is on **versioned** id fragments on purpose: `claude-3-opus` caps
 //! output at 4096 while `claude-opus-4-x` allows 32000, so a bare `"opus"`
@@ -54,6 +57,21 @@ pub fn model_output_ceiling(_provider: &str, model: &str) -> Option<(u32, u32)> 
     // --- xAI Grok 3.x ---
     if m.contains("grok-3") {
         return Some((64_000, 131_072));
+    }
+
+    // --- Google Gemini 2.5 (text family) ---
+    // #112: with no entry, every native Gemini model fell to the unknown-model
+    // floor (8_192 output) despite a real 65_536 ceiling. Verified against
+    // models.dev (2026-07-02): gemini-2.5-pro, gemini-2.5-flash, and
+    // gemini-2.5-flash-lite all report output 65_536 / context 1_048_576. The
+    // specialty variants have MUCH smaller limits (gemini-2.5-flash-image:
+    // 32_768/32_768; the -preview-tts variants: 8_192 window) — an over-claim
+    // would 400 them, so they are excluded and fail open to the unknown path.
+    if (m.contains("gemini-2.5-pro") || m.contains("gemini-2.5-flash"))
+        && !m.contains("-image")
+        && !m.contains("-tts")
+    {
+        return Some((65_536, 1_048_576));
     }
 
     // --- DeepSeek V4-Flash family (1,000,000-token context) ---
@@ -138,6 +156,47 @@ mod tests {
         assert_eq!(
             model_output_ceiling("deepseek", "DeepSeek-V4-Flash"),
             Some((8_192, 1_000_000))
+        );
+    }
+
+    #[test]
+    fn gemini_2_5_text_family_returns_its_real_output_ceiling() {
+        // #112: native Gemini text models resolve as KNOWN (65_536 output /
+        // 1_048_576 window per models.dev) instead of the 8_192 unknown floor.
+        for id in [
+            "gemini-2.5-pro",
+            "gemini-2.5-flash",
+            "gemini-2.5-flash-lite",
+        ] {
+            assert_eq!(
+                model_output_ceiling("gemini", id),
+                Some((65_536, 1_048_576)),
+                "{id} must report the Gemini 2.5 text-family limits"
+            );
+        }
+        // Case-insensitive match (the lookup lowercases first).
+        assert_eq!(
+            model_output_ceiling("gemini", "Gemini-2.5-Pro"),
+            Some((65_536, 1_048_576))
+        );
+    }
+
+    #[test]
+    fn gemini_2_5_specialty_variants_fail_open() {
+        // The image/TTS variants have far smaller limits (flash-image is
+        // 32_768/32_768, the -preview-tts variants an 8_192 window) — claiming
+        // the text family's 65_536 would 400 them, so they must return None.
+        assert_eq!(
+            model_output_ceiling("gemini", "gemini-2.5-flash-image"),
+            None
+        );
+        assert_eq!(
+            model_output_ceiling("gemini", "gemini-2.5-pro-preview-tts"),
+            None
+        );
+        assert_eq!(
+            model_output_ceiling("gemini", "gemini-2.5-flash-preview-tts"),
+            None
         );
     }
 

@@ -94,6 +94,20 @@ pub struct LlmRequest {
     /// `Default` is `None`, so all existing `..Default::default()` construction
     /// sites stay back-compatible.
     pub temperature: Option<f32>,
+    /// #112 — when `true`, providers that tolerate an absent output cap OMIT
+    /// their max-tokens wire field (`max_tokens` / `max_completion_tokens` /
+    /// `max_output_tokens` / `generationConfig.maxOutputTokens`) so the served
+    /// model's natural ceiling applies. Set by the engine ONLY when ALL hold:
+    /// the model is unknown to `wcore_config::limits`, the user omitted
+    /// `--max-tokens` (no CLI flag, no non-default TOML), and the provider's
+    /// `ProviderCompat.omit_max_tokens_when_unsized` is on. `max_tokens` above
+    /// STAYS at the sized positive internal budget regardless (it still feeds
+    /// `fit_thinking_budget`, the `x-wl-expected-output` header, and the #255
+    /// gauge math) — this flag governs the WIRE field only. Anthropic ignores
+    /// it (the Messages API mandates `max_tokens`). `Default` is `false`, so
+    /// all existing `..Default::default()` construction sites keep sending the
+    /// field.
+    pub omit_max_tokens: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -298,6 +312,14 @@ mod tests {
     fn llm_request_default_has_web_search_false() {
         let req = LlmRequest::default();
         assert!(!req.web_search);
+    }
+
+    /// #112 back-compat: a default-constructed request does NOT omit the wire
+    /// max-tokens field, so every existing construction site keeps sending it.
+    #[test]
+    fn llm_request_default_does_not_omit_max_tokens() {
+        let req = LlmRequest::default();
+        assert!(!req.omit_max_tokens);
     }
 
     /// Contract §5.4: a full Sonar `search_results[]` element round-trips —

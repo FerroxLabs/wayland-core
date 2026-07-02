@@ -224,9 +224,16 @@ pub(crate) fn build_gemini_body(
         });
     }
 
-    let mut generation_config = json!({
-        "maxOutputTokens": request.max_tokens,
-    });
+    // #112: when the engine flagged this turn omit-safe (user omitted the cap
+    // + model unknown to the registry + provider tolerates the absent field),
+    // skip `maxOutputTokens` so Gemini applies the served model's own ceiling.
+    let mut generation_config = if request.omit_max_tokens {
+        json!({})
+    } else {
+        json!({
+            "maxOutputTokens": request.max_tokens,
+        })
+    };
 
     // Crucible #3: emit an explicit `temperature` when set, gated by the
     // provider's `supports_temperature` flag + the per-model exclusion. Gemini
@@ -1025,6 +1032,7 @@ mod tests {
             conversation_id: None,
             client_context_tokens: None,
             temperature: None,
+            omit_max_tokens: false,
         }
     }
 
@@ -1148,6 +1156,29 @@ mod tests {
         )]);
         let body = provider.build_request_body(&request);
         assert_eq!(body["generationConfig"]["maxOutputTokens"], 1024);
+    }
+
+    /// #112: when the engine flags `omit_max_tokens`, the body carries NO
+    /// `generationConfig.maxOutputTokens` — Gemini applies the served model's
+    /// own ceiling. The rest of generationConfig still assembles normally.
+    #[test]
+    fn build_request_body_omits_max_output_tokens_when_flagged() {
+        let provider = GeminiProvider::new(
+            "k",
+            DEFAULT_GEMINI_BASE_URL,
+            compat(),
+            DebugConfig::default(),
+        );
+        let mut request = make_request_with_messages(vec![Message::new(
+            Role::User,
+            vec![ContentBlock::Text { text: "hi".into() }],
+        )]);
+        request.omit_max_tokens = true;
+        let body = provider.build_request_body(&request);
+        assert!(
+            body["generationConfig"].get("maxOutputTokens").is_none(),
+            "omit_max_tokens must drop generationConfig.maxOutputTokens"
+        );
     }
 
     // --- Output-side opt (Part A): stop_sequences ->

@@ -257,12 +257,42 @@ fn size_output_cap(
     }
 }
 
+/// #112 — whether this turn's WIRE max-tokens field should be omitted so the
+/// served model's natural output ceiling applies (the desktop's omitted
+/// `--max-tokens` contract, #456/#462). True only when ALL hold:
+///
+/// 1. the model is UNKNOWN to the `wcore_config::limits` registry — a known
+///    model always sends its real sized ceiling;
+/// 2. the user OMITTED the cap (`max_tokens_explicit == false`) — an explicit
+///    cap always binds;
+/// 3. the provider tolerates the absent field
+///    (`ProviderCompat.omit_max_tokens_when_unsized`: gemini / openrouter /
+///    flux-router presets; NEVER anthropic — the Messages API mandates
+///    `max_tokens` — and never generic openai-compat, which may 400 or default
+///    to a tiny ceiling).
+///
+/// The request's `max_tokens` value STAYS at the sized positive internal
+/// budget from `size_output_cap` (8192 / 32768 reasoning) regardless — it
+/// still feeds `fit_thinking_budget`, the `x-wl-expected-output` header, and
+/// the #255 gauge math. This flag governs serialization only.
+fn should_omit_max_tokens(
+    provider: &str,
+    model: &str,
+    max_tokens_explicit: bool,
+    compat_allows_omit: bool,
+) -> bool {
+    compat_allows_omit
+        && !max_tokens_explicit
+        && wcore_config::limits::model_output_ceiling(provider, model).is_none()
+}
+
 #[cfg(test)]
 mod output_sizing_tests {
     use super::{
         MIN_THINKING_BUDGET, MIN_VISIBLE_OUTPUT, UNKNOWN_REASONING_CAP, fit_thinking_budget,
-        size_output_cap,
+        should_omit_max_tokens, size_output_cap,
     };
+    use wcore_config::compat::ProviderCompat;
 
     #[test]
     fn known_model_is_clamped_to_its_real_output_ceiling() {
@@ -356,6 +386,104 @@ mod output_sizing_tests {
             size_output_cap(64_000, "anthropic", "claude-opus-4-7", 1_000, true),
             32_000,
             "opus 4.x ceiling still binds with thinking on"
+        );
+    }
+
+    #[test]
+    fn omitted_cap_on_unknown_model_omits_for_omit_safe_providers() {
+        // #112: user omitted --max-tokens + model unknown to the registry +
+        // provider preset is omit-safe → the wire field is omitted so the
+        // served model's natural ceiling applies. The SIZED internal value
+        // (8192, asserted elsewhere) is unaffected.
+        for (provider, model, compat) in [
+            (
+                "flux-router",
+                "flux-auto",
+                ProviderCompat::flux_router_defaults(),
+            ),
+            (
+                "openrouter",
+                "mistralai/some-new-model",
+                ProviderCompat::openrouter_defaults(),
+            ),
+            (
+                "gemini",
+                "gemini-4-unlisted",
+                ProviderCompat::gemini_defaults(),
+            ),
+        ] {
+            assert!(
+                should_omit_max_tokens(
+                    provider,
+                    model,
+                    false,
+                    compat.omit_max_tokens_when_unsized()
+                ),
+                "{provider}/{model}: unknown + omitted on an omit-safe provider must omit"
+            );
+        }
+    }
+
+    #[test]
+    fn omitted_cap_on_unknown_model_never_omits_for_anthropic_or_generic() {
+        // #112: anthropic's Messages API mandates max_tokens; generic
+        // openai-compat endpoints may 400 without it. Both keep the sized
+        // floor even when the user omitted the cap and the model is unknown.
+        assert!(!should_omit_max_tokens(
+            "anthropic",
+            "claude-unlisted-model",
+            false,
+            ProviderCompat::anthropic_defaults().omit_max_tokens_when_unsized()
+        ));
+        assert!(!should_omit_max_tokens(
+            "openai",
+            "some-self-hosted-model",
+            false,
+            ProviderCompat::openai_defaults().omit_max_tokens_when_unsized()
+        ));
+    }
+
+    #[test]
+    fn explicit_cap_never_omits_even_on_omit_safe_providers() {
+        // #112: an explicit user cap always binds — sized value sent, never
+        // omitted, even for an unknown model on an omit-safe provider.
+        assert!(!should_omit_max_tokens(
+            "flux-router",
+            "flux-auto",
+            true,
+            ProviderCompat::flux_router_defaults().omit_max_tokens_when_unsized()
+        ));
+        // And the sized value itself binds (existing contract, re-pinned).
+        assert_eq!(
+            size_output_cap(4_000, "flux-router", "flux-auto", 1_000, false),
+            4_000
+        );
+    }
+
+    #[test]
+    fn known_model_never_omits_regardless_of_provider() {
+        // #112: a registry-known model always sends its real sized ceiling —
+        // omission is only for unknowns. gemini-2.5 is now a KNOWN model.
+        assert!(!should_omit_max_tokens(
+            "gemini",
+            "gemini-2.5-pro",
+            false,
+            ProviderCompat::gemini_defaults().omit_max_tokens_when_unsized()
+        ));
+        // Its sizing resolves through the registry entry (config cap binds
+        // below the 65_536 ceiling), not the 8192 unknown floor.
+        assert_eq!(
+            size_output_cap(64_000, "gemini", "gemini-2.5-flash", 1_000, false),
+            64_000
+        );
+        // Known-model sizing contracts re-pinned per the #112 test plan.
+        assert_eq!(
+            size_output_cap(64_000, "openai", "gpt-4o", 1_000, false),
+            16_384
+        );
+        assert_eq!(
+            size_output_cap(64_000, "anthropic", "claude-sonnet-4-6", 1_000, false),
+            64_000
         );
     }
 
@@ -1078,6 +1206,13 @@ pub struct AgentEngine {
     /// `apply_context_modifiers`) refuse the switch and log the divergence.
     user_model_pin: Option<String>,
     max_tokens: u32,
+    /// #112 — whether `max_tokens` was set explicitly (CLI flag or non-default
+    /// TOML) rather than defaulted. When `false`, an unknown-to-the-registry
+    /// model on an omit-safe provider (`compat.omit_max_tokens_when_unsized`)
+    /// gets its wire max-tokens field OMITTED so the served model's natural
+    /// ceiling applies; an explicit cap always binds. Sourced from
+    /// `Config.max_tokens_explicit` at construction.
+    max_tokens_explicit: bool,
     /// Crucible #3: optional sampling temperature sourced from `Config` at
     /// construction. `None` (the default top-level session) omits the field;
     /// the council's child engines set it via `child_config` -> `Config`.
@@ -1631,6 +1766,7 @@ impl AgentEngine {
             model: config.model,
             user_model_pin: None,
             max_tokens: config.max_tokens,
+            max_tokens_explicit: config.max_tokens_explicit,
             temperature: config.temperature,
             max_turns: config.max_turns,
             total_usage: TokenUsage::default(),
@@ -1810,6 +1946,7 @@ impl AgentEngine {
             model: config.model.clone(),
             user_model_pin: None,
             max_tokens: config.max_tokens,
+            max_tokens_explicit: config.max_tokens_explicit,
             temperature: config.temperature,
             max_turns: config.max_turns,
             total_usage: session.total_usage.clone(),
@@ -4261,6 +4398,9 @@ impl AgentEngine {
                 // Crucible #3: per-session sampling temperature (council child
                 // engines set it; top-level session leaves it `None`).
                 temperature: self.temperature,
+                // #112: decided below at the sizing site, AFTER the smart-
+                // routing tier swap, so the omit decision sees the final model.
+                omit_max_tokens: false,
             };
 
             // Cache-stability (token-opt): inject the per-turn skill-router
@@ -4455,6 +4595,19 @@ impl AgentEngine {
                 &request.model,
                 input_token_estimate,
                 is_reasoning_turn,
+            );
+            // #112 — when the user omitted `--max-tokens`, the model is
+            // unknown to the registry, and the provider is omit-safe, OMIT the
+            // wire max-tokens field so the served model's natural ceiling
+            // applies instead of the conservative floor. `request.max_tokens`
+            // keeps the sized value above — it still feeds
+            // `fit_thinking_budget` below, the `x-wl-expected-output` header,
+            // and the #255 gauge math; only serialization is skipped.
+            request.omit_max_tokens = should_omit_max_tokens(
+                self.compat.provider_type(),
+                &request.model,
+                self.max_tokens_explicit,
+                self.compat.omit_max_tokens_when_unsized(),
             );
 
             // #426 / wayland#422 — separate the reasoning budget from the output

@@ -76,6 +76,7 @@ fn cohere_request() -> LlmRequest {
         conversation_id: None,
         client_context_tokens: None,
         temperature: None,
+        omit_max_tokens: false,
     }
 }
 
@@ -101,6 +102,7 @@ fn anthropic_request() -> LlmRequest {
         conversation_id: None,
         client_context_tokens: None,
         temperature: None,
+        omit_max_tokens: false,
     }
 }
 

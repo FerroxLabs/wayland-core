@@ -446,6 +446,7 @@ mod resilience_wrap {
                 conversation_id: None,
                 client_context_tokens: None,
                 temperature: None,
+                omit_max_tokens: false,
             };
             let _ = result.provider.stream(&req).await;
         }
@@ -497,6 +498,7 @@ mod resilience_wrap {
                 conversation_id: None,
                 client_context_tokens: None,
                 temperature: None,
+                omit_max_tokens: false,
             };
             let _ = result.provider.stream(&req).await;
         }

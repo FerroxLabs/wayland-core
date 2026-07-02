@@ -446,3 +446,35 @@ verbatim — so fully-qualified literals (e.g. a pinned `…-v2:0` revision)
 still work. The canonical pins live in
 [`crates/wcore-types/src/model_aliases.rs`](../crates/wcore-types/src/model_aliases.rs);
 update there once when a model deprecates, every dependent fixes itself.
+
+---
+
+## Output budget (`--max-tokens`) sizing
+
+`--max-tokens` is a **cap**, never sent raw. Before each request the engine
+sizes the wire value to the model that will actually serve the turn
+(`size_output_cap` in `wcore-agent`, backed by the static registry in
+`crates/wcore-config/src/limits.rs`):
+
+- **Known model** — the wire value is `min(cap, real output ceiling, context-window
+  room)`. E.g. `gpt-4o` is clamped to 16384 (never a 400), `claude-sonnet-4-6`
+  may use its full 64000, `gemini-2.5-pro`/`-flash` their 65536.
+- **Unknown model, `--max-tokens` omitted, omit-safe provider** (gemini,
+  openrouter, flux-router presets) — the wire max-tokens field is **omitted
+  entirely**, so the served model's natural output ceiling applies (#112; the
+  desktop relies on this when it launches the engine without `--max-tokens`).
+  Internally the turn still budgets 8192 (32768 on a reasoning turn) for
+  thinking-budget fitting and context-gauge math.
+- **Unknown model otherwise** (anthropic — the Messages API mandates
+  `max_tokens` — or a generic OpenAI-compatible endpoint like vLLM, which may
+  reject an absent field or default it tiny) — a conservative sized floor is
+  sent: 8192, or 32768 on a reasoning turn.
+
+An **explicit** cap (CLI `--max-tokens` or a non-default `max_tokens` in TOML)
+always binds and is never omitted. Custom endpoints can opt in or out of the
+omit behaviour via the `omit_max_tokens_when_unsized` compat flag:
+
+```toml
+[providers.my-router.compat]
+omit_max_tokens_when_unsized = true   # unknown model + omitted cap ⇒ omit the field
+```

@@ -159,6 +159,7 @@ mod tests {
             conversation_id: None,
             client_context_tokens: None,
             temperature: None,
+            omit_max_tokens: false,
         };
         let result = p.stream(&req).await;
         assert!(result.is_err(), "expected error from unreachable host");

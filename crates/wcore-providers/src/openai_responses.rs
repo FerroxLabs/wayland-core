@@ -92,8 +92,14 @@ pub(crate) fn build_responses_body(request: &LlmRequest, _compat: &ProviderCompa
         // `store: false` keeps OpenAI from persisting the response server-side;
         // wayland-core manages its own history. Mirrors OpenClaw's default.
         "store": false,
-        "max_output_tokens": request.max_tokens,
     });
+
+    // #112: when the engine flagged this turn omit-safe (user omitted the cap
+    // + model unknown to the registry + provider tolerates the absent field),
+    // skip `max_output_tokens` so the served model's natural ceiling applies.
+    if !request.omit_max_tokens {
+        body["max_output_tokens"] = json!(request.max_tokens);
+    }
 
     // System prompt rides the dedicated `instructions` field, NOT an input
     // item (OpenClaw pushes a developer/system message; the `instructions`
@@ -717,6 +723,25 @@ mod tests {
         assert_eq!(input[0]["role"], json!("user"));
         assert_eq!(input[0]["content"][0]["type"], json!("input_text"));
         assert_eq!(input[0]["content"][0]["text"], json!("Hello"));
+    }
+
+    /// #112: when the engine flags `omit_max_tokens`, the Responses body
+    /// carries NO `max_output_tokens` — the served model's ceiling applies.
+    #[test]
+    fn build_body_omits_max_output_tokens_when_flagged() {
+        let request = LlmRequest {
+            model: "gpt-5-unlisted".into(),
+            system: String::new(),
+            messages: vec![user_msg("hi")],
+            max_tokens: 8_192, // sized internal budget stays positive
+            omit_max_tokens: true,
+            ..Default::default()
+        };
+        let body = build_responses_body(&request, &ProviderCompat::default());
+        assert!(
+            body.get("max_output_tokens").is_none(),
+            "omit_max_tokens must drop max_output_tokens from the wire body"
+        );
     }
 
     #[test]

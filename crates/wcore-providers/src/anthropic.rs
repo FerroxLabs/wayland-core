@@ -838,6 +838,7 @@ mod tests {
             conversation_id: None,
             client_context_tokens: None,
             temperature: None,
+            omit_max_tokens: false,
         }
     }
 
@@ -893,6 +894,23 @@ mod tests {
             body["stop_sequences"],
             json!(["\n\nLet me know if", "\n\nFeel free to"]),
             "Anthropic must emit stops under the `stop_sequences` key"
+        );
+    }
+
+    /// #112: the Anthropic Messages API MANDATES `max_tokens` — even when a
+    /// caller (wrongly) flags `omit_max_tokens`, the body must still carry the
+    /// sized value. The engine never sets the flag for anthropic (the compat
+    /// preset is off), but this pins the provider-side invariant regardless.
+    #[test]
+    fn build_request_body_always_sends_max_tokens_even_when_omit_flagged() {
+        let mut req = cache_req(None);
+        req.max_tokens = 8_192;
+        req.omit_max_tokens = true;
+        let body = provider().build_request_body(&req);
+        assert_eq!(
+            body["max_tokens"],
+            json!(8_192),
+            "anthropic must ALWAYS serialize max_tokens (Messages API mandate)"
         );
     }
 }

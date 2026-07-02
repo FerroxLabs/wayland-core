@@ -130,6 +130,7 @@ pub async fn autocompact(
             conversation_id: None,
             client_context_tokens: None,
             temperature: None,
+            omit_max_tokens: false,
         };
 
         match provider.stream(&request).await {

@@ -862,6 +862,18 @@ pub struct Config {
     pub security: SecurityConfig,
     pub model: String,
     pub max_tokens: u32,
+    /// #112 — whether `max_tokens` was set EXPLICITLY (CLI `--max-tokens` or a
+    /// non-default TOML/profile value) rather than falling back to the built-in
+    /// default cap. `false` means the user omitted it, which lets the engine
+    /// OMIT the wire max-tokens field for an unknown model on an omit-safe
+    /// provider (`ProviderCompat.omit_max_tokens_when_unsized`) so the served
+    /// model's natural ceiling applies; an explicit cap always binds.
+    ///
+    /// Detection mirrors the merge logic (`merge_config_files`): a TOML value
+    /// counts as explicit iff it differs from `default_max_tokens()`. Accepted
+    /// documented limitation: a user who explicitly writes the default (64000)
+    /// in TOML is treated as "omitted".
+    pub max_tokens_explicit: bool,
     /// Crucible #3: optional sampling temperature for this session's requests.
     /// `None` (the default) leaves the provider on its own default and omits the
     /// `temperature` body field. The council threads per-tier temperatures here
@@ -959,6 +971,7 @@ impl std::fmt::Debug for Config {
             .field("security", &self.security)
             .field("model", &self.model)
             .field("max_tokens", &self.max_tokens)
+            .field("max_tokens_explicit", &self.max_tokens_explicit)
             .field("temperature", &self.temperature)
             .field("max_turns", &self.max_turns)
             .field("approval_mode", &self.approval_mode)
@@ -1017,6 +1030,7 @@ impl Default for Config {
             base_url: String::new(),
             model: String::new(),
             max_tokens: default_max_tokens(),
+            max_tokens_explicit: false,
             temperature: None,
             max_turns: None,
             approval_mode: ApprovalMode::default(),
@@ -1676,6 +1690,15 @@ impl Config {
             .unwrap_or(raw_model);
 
         let max_tokens = cli.max_tokens.unwrap_or(merged.default.max_tokens);
+        // #112 — preserve the omitted-vs-explicit signal BEFORE it collapses
+        // into the default above. Explicit = a CLI `--max-tokens` OR a
+        // non-default TOML/profile value (the same `!= default_max_tokens()`
+        // comparison `merge_config_files` uses). Accepted documented
+        // limitation: explicitly writing the default (64000) in TOML reads as
+        // "omitted". The engine may only OMIT the wire max-tokens field for an
+        // unknown model on an omit-safe provider when this is `false`.
+        let max_tokens_explicit =
+            cli.max_tokens.is_some() || merged.default.max_tokens != default_max_tokens();
         let max_turns = cli.max_turns.or(merged.default.max_turns);
         let approval_mode = merged.default.approval_mode;
 
@@ -1795,6 +1818,7 @@ impl Config {
             base_url,
             model,
             max_tokens,
+            max_tokens_explicit,
             // Crucible #3: the top-level session leaves temperature unset; the
             // council sets per-tier temperatures via SubAgentConfig downstream.
             temperature: None,
@@ -5493,6 +5517,38 @@ max_tokens = 1234
 
         let config = Config::resolve(&cli_args).unwrap();
         assert_eq!(config.max_tokens, 1234);
+        // #112: a non-default TOML value counts as an EXPLICIT cap — the
+        // engine must never omit the wire max-tokens field for this session.
+        assert!(
+            config.max_tokens_explicit,
+            "non-default TOML max_tokens must read as explicit"
+        );
+    }
+
+    /// #112: a CLI `--max-tokens` always marks the cap explicit, regardless of
+    /// what any config file says.
+    #[test]
+    fn test_resolve_cli_max_tokens_marks_explicit() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cli_args = CliArgs {
+            provider: Some("anthropic".into()),
+            api_key: Some("test-key".into()),
+            base_url: None,
+            model: None,
+            max_tokens: Some(2000),
+            max_turns: None,
+            system_prompt: None,
+            profile: None,
+            auto_approve: false,
+            project_dir: Some(tmp.path().to_path_buf()),
+        };
+
+        let config = Config::resolve(&cli_args).unwrap();
+        assert_eq!(config.max_tokens, 2000);
+        assert!(
+            config.max_tokens_explicit,
+            "a CLI --max-tokens must read as explicit"
+        );
     }
 
     #[test]
