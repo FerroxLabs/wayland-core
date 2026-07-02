@@ -389,6 +389,85 @@ async fn approved_send_resolves_via_host_result_same_call_id() {
     assert_eq!(h.emitter.tool_request_names(), vec!["send_message"]);
 }
 
+/// #141 audit Gap A pin: `ApprovalScope::Always` on the FIRST send_message
+/// must NOT auto-approve the second — Always downgrades to Once for this
+/// tool. The second call emits a fresh tool_request; denying it produces a
+/// tool error and no second host_send_message_request frame. Without the
+/// carve-out, one "Always allow" click would let a prompt-injected turn
+/// message arbitrary recipients silently for the rest of the session.
+#[tokio::test]
+async fn always_scope_does_not_skip_approval_on_second_send() {
+    let h = harness();
+
+    // ── First send: approved with ApprovalScope::Always; host fulfils. ──
+    let first_id = "call-always-1";
+    {
+        let mgr = h.mgr.clone();
+        let sink = h.sink.clone();
+        let bridge = h.bridge.clone();
+        let id = first_id.to_string();
+        tokio::spawn(async move {
+            tokio::task::yield_now().await;
+            mgr.approve(&id, ApprovalScope::Always, None);
+            for _ in 0..200 {
+                if let Some((hsm_id, ..)) = sink.snapshot().first().cloned() {
+                    assert!(bridge.resolve(
+                        &hsm_id,
+                        HostSendResult {
+                            ok: true,
+                            message_id: Some("first-ok".into()),
+                            error: None,
+                        },
+                    ));
+                    return;
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+            panic!("first host_send_message_request never appeared");
+        });
+    }
+    let first = run_turn(&h, send_message_call(first_id)).await;
+    let ContentBlock::ToolResult { is_error, .. } = &first else {
+        panic!("expected ToolResult");
+    };
+    assert!(!is_error, "first (approved) send must succeed");
+
+    // ── Second send: MUST park on a fresh approval; deny it. ──
+    let second_id = "call-always-2";
+    {
+        let mgr = h.mgr.clone();
+        let id = second_id.to_string();
+        tokio::spawn(async move {
+            tokio::task::yield_now().await;
+            mgr.resolve(
+                &id,
+                ToolApprovalResult::Denied {
+                    reason: "second send refused".into(),
+                },
+            );
+        });
+    }
+    let second = run_turn(&h, send_message_call(second_id)).await;
+    let ContentBlock::ToolResult { is_error, .. } = &second else {
+        panic!("expected ToolResult");
+    };
+    assert!(
+        is_error,
+        "second send must have required (and here been denied) approval — \
+         Always on send_message must downgrade to Once"
+    );
+    assert_eq!(
+        h.emitter.tool_request_names(),
+        vec!["send_message", "send_message"],
+        "BOTH sends must emit their own tool_request card"
+    );
+    assert_eq!(
+        h.sink.snapshot().len(),
+        1,
+        "only the first (approved) send may reach the host"
+    );
+}
+
 /// Approved call + host failure: the tool result is a REAL error carrying
 /// the host's message (never a false success).
 #[tokio::test]

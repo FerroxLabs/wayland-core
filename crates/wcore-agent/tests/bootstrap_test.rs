@@ -88,6 +88,124 @@ async fn bootstrap_builds_engine_with_model_in_prompt() {
     assert!(result.mcp_managers.is_empty());
 }
 
+/// #141 audit item 5 — prove the env flag actually installs
+/// `HostDelegatedTransport` at the registration site: with
+/// `WAYLAND_SEND_MESSAGE_HOST_DELEGATE=1`, an executed `send_message` parks
+/// a waiter on the SAME `HostSendBridge` exposed on `BootstrapResult`, and
+/// resolving that bridge completes the tool call with the host's receipt.
+/// (The `#[serial]` + `EnvGuard` discipline mirrors the backend-gating
+/// tests above; the env var is process-global.)
+#[tokio::test]
+#[serial]
+async fn host_delegate_env_installs_host_delegated_send_transport() {
+    let (_plugins, _plugins_env) = isolated_plugins();
+    let _env = EnvGuard::set(&[("WAYLAND_SEND_MESSAGE_HOST_DELEGATE", "1")]);
+
+    let config = minimal_config();
+    let workdir = tempfile::TempDir::new().expect("workdir");
+    let result = AgentBootstrap::new(config, workdir.path().to_str().unwrap(), null_output())
+        .build()
+        .await
+        .expect("bootstrap should succeed");
+
+    let bridge = result.host_send_bridge.clone();
+    assert_eq!(bridge.pending_count(), 0);
+
+    // Play host: wait for the delegated send to register its waiter on the
+    // result's bridge, then resolve it with a receipt.
+    let resolver_bridge = bridge.clone();
+    let resolver = tokio::spawn(async move {
+        for _ in 0..400 {
+            let ids = resolver_bridge.pending_ids();
+            if let Some(id) = ids.first() {
+                assert!(resolver_bridge.resolve(
+                    id,
+                    wcore_agent::host_send_transport::HostSendResult {
+                        ok: true,
+                        message_id: Some("bootstrap-wired-ok".into()),
+                        error: None,
+                    },
+                ));
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+        panic!("send_message never registered a waiter on the BootstrapResult bridge");
+    });
+
+    let tools = result.engine.tools();
+    let tool = tools.get("send_message").expect("send_message registered");
+    let out = tool
+        .execute(serde_json::json!({
+            "target": "email:mike@example.com",
+            "message": "wiring probe"
+        }))
+        .await;
+    resolver.await.expect("resolver task");
+
+    assert!(
+        !out.is_error,
+        "delegated send resolved by the result's bridge must succeed, got: {}",
+        out.content
+    );
+    assert!(
+        out.content.contains("bootstrap-wired-ok"),
+        "the host receipt must flow through — proves HostDelegatedTransport \
+         is bound to BootstrapResult.host_send_bridge, got: {}",
+        out.content
+    );
+}
+
+/// #141 backward-compat control: WITHOUT the env flag the delegated
+/// transport is NOT wired — `send_message` fails through the channel path
+/// immediately (no waiter ever appears on the result's bridge).
+#[tokio::test]
+#[serial]
+async fn without_host_delegate_env_send_message_keeps_channel_path() {
+    let (_plugins, _plugins_env) = isolated_plugins();
+    // Explicitly ensure the flag is absent for this test.
+    struct Unset(Option<String>);
+    impl Drop for Unset {
+        fn drop(&mut self) {
+            if let Some(v) = &self.0 {
+                // SAFETY: `#[serial]` — no concurrent env access.
+                unsafe { std::env::set_var("WAYLAND_SEND_MESSAGE_HOST_DELEGATE", v) };
+            }
+        }
+    }
+    let _unset = Unset(std::env::var("WAYLAND_SEND_MESSAGE_HOST_DELEGATE").ok());
+    // SAFETY: `#[serial]` — no concurrent env access.
+    unsafe { std::env::remove_var("WAYLAND_SEND_MESSAGE_HOST_DELEGATE") };
+
+    let config = minimal_config();
+    let workdir = tempfile::TempDir::new().expect("workdir");
+    let result = AgentBootstrap::new(config, workdir.path().to_str().unwrap(), null_output())
+        .build()
+        .await
+        .expect("bootstrap should succeed");
+
+    let bridge = result.host_send_bridge.clone();
+    let tools = result.engine.tools();
+    let tool = tools.get("send_message").expect("send_message registered");
+    let out = tool
+        .execute(serde_json::json!({
+            "target": "email:mike@example.com",
+            "message": "control probe"
+        }))
+        .await;
+
+    assert!(
+        out.is_error,
+        "flag off: send must fail through the channel/null path, got: {}",
+        out.content
+    );
+    assert_eq!(
+        bridge.pending_count(),
+        0,
+        "flag off: the delegated bridge must never see a waiter"
+    );
+}
+
 #[tokio::test]
 async fn bootstrap_registers_all_expected_tools() {
     let config = minimal_config();

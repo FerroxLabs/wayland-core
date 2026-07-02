@@ -55,6 +55,22 @@ pub fn host_delegated_send_enabled() -> bool {
     std::env::var("WAYLAND_SEND_MESSAGE_HOST_DELEGATE").as_deref() == Ok("1")
 }
 
+/// #141 audit item 3 — upper bound on host-supplied result strings
+/// (`error`, `message_id`). Both land in the tool result and thus in the
+/// model context; an unbounded string from a hostile/buggy host would be a
+/// context-stuffing vector. 4096 chars carries any real SMTP diagnostic.
+pub const MAX_HOST_RESULT_FIELD_CHARS: usize = 4096;
+
+fn clamp_host_field(s: Option<String>) -> Option<String> {
+    s.map(|v| {
+        if v.chars().count() > MAX_HOST_RESULT_FIELD_CHARS {
+            v.chars().take(MAX_HOST_RESULT_FIELD_CHARS).collect()
+        } else {
+            v
+        }
+    })
+}
+
 /// The host's answer to one `host_send_message_request`, as carried by the
 /// `host_send_message_result` protocol command.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -99,7 +115,17 @@ impl HostSendBridge {
     /// Resolve the waiter registered under `call_id`. Returns `false` when
     /// the id is unknown (stale, mistyped, or already timed out) — a wrong
     /// `call_id` never completes somebody else's send.
+    ///
+    /// #141 audit item 3: `message_id` / `error` are host-supplied wire
+    /// strings headed for the tool result (model context); they are clamped
+    /// to [`MAX_HOST_RESULT_FIELD_CHARS`] here — the single chokepoint every
+    /// CLI arm routes through — so a hostile host cannot stuff the context.
     pub fn resolve(&self, call_id: &str, result: HostSendResult) -> bool {
+        let result = HostSendResult {
+            ok: result.ok,
+            message_id: clamp_host_field(result.message_id),
+            error: clamp_host_field(result.error),
+        };
         let sender = match self.pending.lock() {
             Ok(mut map) => map.remove(call_id),
             Err(_) => None,
@@ -121,6 +147,16 @@ impl HostSendBridge {
     /// Number of in-flight delegated sends. Test/diagnostic helper.
     pub fn pending_count(&self) -> usize {
         self.pending.lock().map(|m| m.len()).unwrap_or(0)
+    }
+
+    /// Snapshot of in-flight `call_id`s. Test/diagnostic helper (mirrors
+    /// `ApprovalBridge::pending_tokens`); production resolution always uses
+    /// the id carried by the wire command.
+    pub fn pending_ids(&self) -> Vec<String> {
+        self.pending
+            .lock()
+            .map(|m| m.keys().cloned().collect())
+            .unwrap_or_default()
     }
 }
 
@@ -211,11 +247,19 @@ impl MessageTransport for HostDelegatedTransport {
             Err(_) => {
                 // Timeout: the guard cleans the entry on drop; a late host
                 // reply then resolves nothing (resolve returns false).
+                //
+                // #141 audit Fix B: the host has no send-timeout of its own —
+                // a slow SMTP handshake can outlast this bound and STILL
+                // deliver. The error text below instructs the model not to
+                // auto-retry (a retry could double-send); keep the wording
+                // model-readable and verbatim-ish.
                 SendOutcome::Err {
                     message: format!(
                         "host did not answer the delegated send within {}s \
                          (no host_send_message_result); the message was NOT \
-                         confirmed sent",
+                         confirmed sent. The host may still complete this \
+                         delivery — do NOT automatically retry; ask the user \
+                         before re-sending.",
                         self.timeout.as_secs()
                     ),
                 }
@@ -523,8 +567,14 @@ mod tests {
         let outcome = transport.send(&email_target(), "hi").await;
         match outcome {
             SendOutcome::Err { message } => assert!(
-                message.contains("did not answer") && message.contains("NOT"),
-                "timeout error must be explicit about non-delivery, got: {message}"
+                message.contains("did not answer")
+                    && message.contains("NOT confirmed sent")
+                    // #141 audit Fix B: the double-send advisory must reach
+                    // the model verbatim — the host may still deliver after
+                    // our bound, so an auto-retry could double-send.
+                    && message.contains("do NOT automatically retry")
+                    && message.contains("ask the user before re-sending"),
+                "timeout error must pin non-delivery + the no-retry advisory, got: {message}"
             ),
             SendOutcome::Ok { .. } => panic!("timeout must not be a success"),
         }
@@ -540,6 +590,35 @@ mod tests {
                 },
             ),
             "a late host reply after timeout must resolve nothing"
+        );
+    }
+
+    /// #141 audit item 3: host-supplied `error` / `message_id` strings are
+    /// clamped at the bridge chokepoint so a hostile host can't stuff the
+    /// model context through the tool result.
+    #[tokio::test]
+    async fn oversized_host_result_strings_are_clamped() {
+        let bridge = Arc::new(HostSendBridge::new());
+        let rx = bridge.register("hsm-clamp".to_string());
+        let huge = "x".repeat(MAX_HOST_RESULT_FIELD_CHARS + 5000);
+        assert!(bridge.resolve(
+            "hsm-clamp",
+            HostSendResult {
+                ok: false,
+                message_id: Some(huge.clone()),
+                error: Some(huge),
+            },
+        ));
+        let result = rx.await.expect("resolved");
+        assert_eq!(
+            result.error.as_ref().map(|s| s.chars().count()),
+            Some(MAX_HOST_RESULT_FIELD_CHARS),
+            "error must be clamped to the cap"
+        );
+        assert_eq!(
+            result.message_id.as_ref().map(|s| s.chars().count()),
+            Some(MAX_HOST_RESULT_FIELD_CHARS),
+            "message_id must be clamped to the cap"
         );
     }
 

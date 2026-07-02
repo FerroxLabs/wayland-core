@@ -287,6 +287,18 @@ impl ToolApprovalManager {
         })
     }
 
+    /// #141 audit Gap A — tools whose `ApprovalScope::Always` silently
+    /// downgrades to `Once`. `send_message` has observable external effects
+    /// on ARBITRARY recipients: a single "Always allow" click on one send
+    /// would otherwise auto-approve every later send in the session (any
+    /// platform, any recipient), letting a prompt-injected turn message
+    /// arbitrary recipients with zero confirmation. Each send gets its own
+    /// card. Mirrors the AskUserQuestion always-needs-approval carve-out in
+    /// `orchestration::execute_tool_calls_with_approval`.
+    fn always_scope_ineligible(tool_name: &str) -> bool {
+        tool_name == "send_message"
+    }
+
     /// Resolve a pending approval as `Approved`, honouring the scope
     /// (Once / Always / AlwaysPrefix) for auto-approval registration and
     /// threading `answer` into the resolved `ToolApprovalResult::Approved`.
@@ -310,8 +322,13 @@ impl ToolApprovalManager {
                 // which caused "always allow Bash" to auto-approve every Exec
                 // tool (Write, Edit, etc). Now only the specific tool name is
                 // registered so approval is scoped to that tool only.
+                //
+                // #141 audit Gap A: per-recipient-effect tools
+                // (send_message) are ineligible — Always downgrades to Once.
                 ApprovalScope::Always => {
-                    if let Ok(mut names) = self.auto_approved_tool_names.lock() {
+                    if !Self::always_scope_ineligible(&pending.tool_name)
+                        && let Ok(mut names) = self.auto_approved_tool_names.lock()
+                    {
                         names.insert(pending.tool_name.clone());
                     }
                 }
@@ -376,8 +393,12 @@ impl ToolApprovalManager {
 
         if approved {
             match scope {
+                // #141 audit Gap A: same downgrade-to-Once carve-out as
+                // `approve` — the host path must not be a side door.
                 ApprovalScope::Always => {
-                    if let Ok(mut names) = self.auto_approved_tool_names.lock() {
+                    if !Self::always_scope_ineligible(&pending.tool_name)
+                        && let Ok(mut names) = self.auto_approved_tool_names.lock()
+                    {
                         names.insert(pending.tool_name.clone());
                     }
                 }
@@ -483,6 +504,13 @@ impl ToolApprovalManager {
     ///                       && !is_tool_name_auto_approved(tool_name)
     /// ```
     pub fn is_tool_name_auto_approved(&self, tool_name: &str) -> bool {
+        // #141 audit Gap A belt-and-suspenders: an Always-ineligible tool
+        // (send_message) is never auto-approved by name even if a future
+        // code path writes it into the set — both registration sites skip
+        // it, and this read-side guard makes the invariant unconditional.
+        if Self::always_scope_ineligible(tool_name) {
+            return false;
+        }
         self.auto_approved_tool_names
             .lock()
             .map(|names| names.contains(tool_name))
@@ -582,6 +610,52 @@ mod tests {
         assert!(!mgr.is_auto_approved("edit"));
         assert!(!mgr.is_auto_approved("exec"));
         assert!(!mgr.is_auto_approved("mcp"));
+    }
+
+    // --- #141 audit Gap A: Always-scope carve-out for send_message ---
+
+    /// `ApprovalScope::Always` on send_message must DOWNGRADE to Once:
+    /// no tool-name auto-approve registration, via BOTH resolution paths
+    /// (`approve` and `resolve_host`). A comparison tool (Bash) still
+    /// registers, proving the carve-out is send_message-specific.
+    #[test]
+    fn always_scope_on_send_message_downgrades_to_once() {
+        let mgr = ToolApprovalManager::new();
+
+        // Path 1: approve().
+        let _rx = mgr.request_approval("c-1", &ToolCategory::Exec, "send_message");
+        mgr.approve("c-1", ApprovalScope::Always, None);
+        assert!(
+            !mgr.is_tool_name_auto_approved("send_message"),
+            "Always on send_message must not persist a tool-name allow"
+        );
+
+        // Path 2: resolve_host().
+        let _rx = mgr.request_approval("c-2", &ToolCategory::Exec, "send_message");
+        assert!(mgr.resolve_host("c-2", true, ApprovalScope::Always, None));
+        assert!(
+            !mgr.is_tool_name_auto_approved("send_message"),
+            "resolve_host Always must not be a side door for send_message"
+        );
+
+        // Control: Bash Always still registers (W5.6 H-2 behavior intact).
+        let _rx = mgr.request_approval("c-3", &ToolCategory::Exec, "Bash");
+        mgr.approve("c-3", ApprovalScope::Always, None);
+        assert!(mgr.is_tool_name_auto_approved("Bash"));
+    }
+
+    /// Read-side belt-and-suspenders: even a directly poisoned set must not
+    /// auto-approve send_message by name.
+    #[test]
+    fn send_message_never_name_auto_approved_even_if_set_poisoned() {
+        let mgr = ToolApprovalManager::new();
+        if let Ok(mut names) = mgr.auto_approved_tool_names.lock() {
+            names.insert("send_message".to_string());
+        }
+        assert!(
+            !mgr.is_tool_name_auto_approved("send_message"),
+            "read-side guard must hold even against a poisoned set"
+        );
     }
 
     #[test]

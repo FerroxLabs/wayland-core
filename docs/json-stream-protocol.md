@@ -1322,6 +1322,13 @@ would drop it silently per W0).
 > orchestration approval gate fronts; `send_message` is Exec-category
 > and in no auto-approve default
 > (`crates/wcore-agent/tests/host_send_delegation.rs` pins it).
+> `ApprovalScope::Always` on `send_message` deliberately downgrades to
+> `Once` — every send gets its own confirmation card.
+>
+> The approval gate IS the delegation contract: a host that spawns the
+> engine with `--auto-approve` / `--force` (or grants wire-force via
+> `WAYLAND_ALLOW_WIRE_FORCE=1`) is opting out of that gate and MUST
+> supply its own confirmation UX before fulfilling these requests.
 
 ```json
 {
