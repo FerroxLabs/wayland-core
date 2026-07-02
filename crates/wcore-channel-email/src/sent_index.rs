@@ -34,10 +34,10 @@ impl SentMessageIds {
         if id.is_empty() || self.set.contains(&id) {
             return;
         }
-        if self.order.len() >= SENT_INDEX_CAP {
-            if let Some(oldest) = self.order.pop_front() {
-                self.set.remove(&oldest);
-            }
+        if self.order.len() >= SENT_INDEX_CAP
+            && let Some(oldest) = self.order.pop_front()
+        {
+            self.set.remove(&oldest);
         }
         self.set.insert(id.clone());
         self.order.push_back(id);
