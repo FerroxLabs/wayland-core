@@ -753,6 +753,125 @@ mod tests {
         assert!(tools[0].get("function").is_none());
     }
 
+    /// #139 (Responses path): plugin fq_names must be wire-legal in the FLAT
+    /// tool definitions AND in replayed history `function_call` items — same
+    /// contract as the chat path, since strict backends enforce
+    /// `^[a-zA-Z0-9_-]+$` on both.
+    #[test]
+    fn build_body_encodes_plugin_fq_tool_names_issue_139() {
+        let raw = "Browser::execute";
+        let request = LlmRequest {
+            model: "gpt-5".into(),
+            system: String::new(),
+            messages: vec![
+                Message::new(
+                    Role::Assistant,
+                    vec![ContentBlock::ToolUse {
+                        id: "call_1".into(),
+                        name: raw.into(),
+                        input: json!({"cmd": "ls"}),
+                        extra: None,
+                    }],
+                ),
+                Message::new(
+                    Role::Tool,
+                    vec![ContentBlock::ToolResult {
+                        tool_use_id: "call_1".into(),
+                        content: "ok".into(),
+                        is_error: false,
+                    }],
+                ),
+            ],
+            max_tokens: 256,
+            tools: vec![
+                ToolDef {
+                    name: raw.into(),
+                    description: "run a browser action".into(),
+                    input_schema: json!({ "type": "object", "properties": {} }),
+                    deferred: false,
+                    server: None,
+                },
+                ToolDef {
+                    name: "get_weather".into(),
+                    description: "w".into(),
+                    input_schema: json!({ "type": "object", "properties": {} }),
+                    deferred: false,
+                    server: None,
+                },
+            ],
+            ..Default::default()
+        };
+        let body = build_responses_body(&request, &ProviderCompat::default());
+        let wire_legal = |s: &str| {
+            !s.is_empty()
+                && s.len() <= 64
+                && s.bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+        };
+
+        // FLAT tool defs: every name legal; the dirty one decodes back.
+        let tools = body["tools"].as_array().expect("tools array");
+        assert_eq!(tools.len(), 2);
+        for t in tools {
+            let name = t["name"].as_str().unwrap();
+            assert!(
+                wire_legal(name),
+                "illegal tool-def name on the wire: {name}"
+            );
+        }
+        let wire_name = tools[0]["name"].as_str().unwrap();
+        assert_ne!(wire_name, raw, "fq_name must not leak raw");
+        assert_eq!(decode_tool_name(wire_name), raw);
+        assert_eq!(tools[1]["name"], json!("get_weather"));
+
+        // History function_call items carry the SAME encoded spelling.
+        let input = body["input"].as_array().expect("input array");
+        let call = input
+            .iter()
+            .find(|i| i["type"] == "function_call")
+            .expect("function_call item");
+        assert_eq!(call["name"].as_str().unwrap(), wire_name);
+    }
+
+    /// #139 inbound half on the Responses path: a `function_call` streamed
+    /// under the SANITIZED wire name must surface as `LlmEvent::ToolUse` with
+    /// the ORIGINAL registry fq_name for dispatch.
+    #[test]
+    fn parse_sanitized_tool_call_dispatches_original_name_issue_139() {
+        let raw = "Browser::execute";
+        let wire = encode_tool_name(raw);
+        assert_ne!(wire, raw, "fixture must actually be encoded");
+
+        let mut state = ResponsesStreamState::new();
+        let mut got: Vec<LlmEvent> = Vec::new();
+        let frames = [
+            format!(
+                r#"{{"type":"response.output_item.added","item":{{"type":"function_call","call_id":"call_1","name":"{wire}","arguments":""}}}}"#
+            ),
+            r#"{"type":"response.function_call_arguments.delta","delta":"{\"cmd\":\"ls\"}"}"#
+                .to_string(),
+            format!(
+                r#"{{"type":"response.output_item.done","item":{{"type":"function_call","call_id":"call_1","name":"{wire}"}}}}"#
+            ),
+        ];
+        for f in &frames {
+            got.extend(parse_responses_event(f, &mut state));
+        }
+
+        let (name, input) = got
+            .iter()
+            .find_map(|e| match e {
+                LlmEvent::ToolUse { name, input, .. } => Some((name.clone(), input.clone())),
+                _ => None,
+            })
+            .expect("ToolUse event");
+        assert_eq!(
+            name, raw,
+            "inbound function_call must decode to the canonical fq_name"
+        );
+        assert_eq!(input, json!({"cmd": "ls"}));
+    }
+
     #[test]
     fn build_input_lowers_tool_call_and_result_round_trip() {
         // Assistant tool call + a following tool result lower to

@@ -252,6 +252,7 @@ mod tests {
             "ai.perplexity-perplexity-mcp",
             "com.microsoft-markitdown",
             "org.wikipedia-wikipedia-mcp",
+            "path/to/tool",
         ];
         for n in bad {
             let enc = encode_tool_name(n);
@@ -301,6 +302,44 @@ mod tests {
     #[test]
     fn decode_passes_through_unknown_plain_names() {
         assert_eq!(decode_tool_name("Hallucinated_Tool"), "Hallucinated_Tool");
+    }
+
+    /// #139 collision safety: two DISTINCT raw names must never share a wire
+    /// spelling, or one tool would shadow the other at dispatch. Adversarial
+    /// set: near-identical dirty names, a plain name that IS another name's
+    /// escape body (`a_2Fb` vs `a/b` → `wct_a_2Fb`), and a raw name carrying
+    /// the sentinel itself. Every pair must encode distinctly and every name
+    /// must round-trip to itself.
+    #[test]
+    fn distinct_raw_names_never_collide_on_the_wire() {
+        let names = [
+            "Browser::execute",
+            "Browser:_execute",
+            "Browser__execute",
+            "Browser._execute",
+            "a/b",
+            "a.b",
+            "a:b",
+            "a_2Fb",
+            "wct_a_2Fb",
+        ];
+        let encoded: Vec<String> = names.iter().map(|n| encode_tool_name(n)).collect();
+        for (i, enc) in encoded.iter().enumerate() {
+            assert!(is_wire_legal(enc), "{} encoded to illegal {enc}", names[i]);
+            assert_eq!(
+                decode_tool_name(enc),
+                names[i],
+                "round-trip failed for {}",
+                names[i]
+            );
+            for j in (i + 1)..encoded.len() {
+                assert_ne!(
+                    *enc, encoded[j],
+                    "{} and {} collided on the wire",
+                    names[i], names[j]
+                );
+            }
+        }
     }
 
     /// A charset-clean but over-length name (real MCP shape) is clamped to a

@@ -4388,6 +4388,146 @@ mod tests {
         );
     }
 
+    /// #139: plugin fq_names (`Browser::execute`) must be wire-legal at EVERY
+    /// name-emitting site of the full chat request body — the `tools[]`
+    /// definitions AND replayed assistant-history `tool_calls`. Flux forwards
+    /// both verbatim to strict downstreams (DeepSeek enforces
+    /// `^[a-zA-Z0-9_-]+$` and 400s the whole request), and the engine cannot
+    /// see past Flux to the real downstream, so encoding must be universal.
+    #[test]
+    fn build_request_body_emits_wire_legal_names_everywhere_issue_139() {
+        let raw = "Browser::execute";
+        let mut req = stop_req();
+        req.tools = vec![
+            ToolDef {
+                name: raw.into(),
+                description: "run a browser action".into(),
+                input_schema: json!({"type": "object", "properties": {}}),
+                deferred: false,
+                server: None,
+            },
+            ToolDef {
+                name: "get_weather".into(),
+                description: "w".into(),
+                input_schema: json!({"type": "object", "properties": {}}),
+                deferred: false,
+                server: None,
+            },
+        ];
+        req.messages = vec![
+            Message::new(Role::User, vec![ContentBlock::Text { text: "go".into() }]),
+            Message::new(
+                Role::Assistant,
+                vec![ContentBlock::ToolUse {
+                    id: "tc_1".into(),
+                    name: raw.into(),
+                    input: json!({"cmd": "ls"}),
+                    extra: None,
+                }],
+            ),
+            Message::new(
+                Role::Tool,
+                vec![ContentBlock::ToolResult {
+                    tool_use_id: "tc_1".into(),
+                    content: "ok".into(),
+                    is_error: false,
+                }],
+            ),
+            Message::new(
+                Role::User,
+                vec![ContentBlock::Text {
+                    text: "and?".into(),
+                }],
+            ),
+        ];
+
+        let body = stop_provider().build_request_body(&req);
+        let wire_legal = |s: &str| {
+            !s.is_empty()
+                && s.len() <= 64
+                && s.bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+        };
+
+        // Tool definitions: every emitted name satisfies the strict pattern;
+        // the dirty one decodes back to the canonical fq_name.
+        let tools = body["tools"].as_array().expect("tools array");
+        assert_eq!(tools.len(), 2);
+        for t in tools {
+            let name = t["function"]["name"].as_str().unwrap();
+            assert!(
+                wire_legal(name),
+                "illegal tool-def name on the wire: {name}"
+            );
+        }
+        let wire_name = tools[0]["function"]["name"].as_str().unwrap();
+        assert_ne!(wire_name, raw, "fq_name must not leak raw");
+        assert_eq!(decode_tool_name(wire_name), raw);
+        assert_eq!(tools[1]["function"]["name"], json!("get_weather"));
+
+        // Replayed assistant-history tool_calls carry the SAME encoded
+        // spelling (a mismatch would also 400 or desync the transcript).
+        let messages = body["messages"].as_array().expect("messages array");
+        let assistant = messages
+            .iter()
+            .find(|m| m["role"] == "assistant" && m.get("tool_calls").is_some())
+            .expect("assistant tool_calls message survived history lowering");
+        let hist_name = assistant["tool_calls"][0]["function"]["name"]
+            .as_str()
+            .unwrap();
+        assert!(wire_legal(hist_name), "illegal history name: {hist_name}");
+        assert_eq!(hist_name, wire_name, "history and tools[] must agree");
+    }
+
+    /// #139 inbound half of the round-trip: the model calls back with the
+    /// SANITIZED wire name; the chat stream parser must emit
+    /// `LlmEvent::ToolUse` carrying the ORIGINAL registry fq_name, or the
+    /// engine dispatches into a void ("unknown tool").
+    #[test]
+    fn streamed_sanitized_tool_call_dispatches_original_name_issue_139() {
+        let raw = "Browser::execute";
+        let wire = encode_tool_name(raw);
+        assert_ne!(wire, raw, "fixture must actually be encoded");
+
+        let mut state = StreamState::new();
+        let delta = json!({
+            "choices": [{
+                "index": 0,
+                "delta": {
+                    "tool_calls": [{
+                        "index": 0,
+                        "id": "tc_1",
+                        "type": "function",
+                        "function": { "name": wire, "arguments": "{\"cmd\":\"ls\"}" }
+                    }]
+                }
+            }]
+        })
+        .to_string();
+        assert!(
+            parse_sse_chunk(&delta, &mut state).is_empty(),
+            "no events until finish_reason"
+        );
+
+        let finish = json!({
+            "choices": [{ "index": 0, "delta": {}, "finish_reason": "tool_calls" }]
+        })
+        .to_string();
+        let events = parse_sse_chunk(&finish, &mut state);
+        let (name, input) = events
+            .iter()
+            .find_map(|e| match e {
+                LlmEvent::ToolUse { name, input, .. } => Some((name.clone(), input.clone())),
+                _ => None,
+            })
+            .expect("ToolUse event on finish");
+        assert_eq!(
+            name, raw,
+            "inbound tool_call must decode to the canonical fq_name"
+        );
+        assert_eq!(input, json!({"cmd": "ls"}));
+    }
+
     #[test]
     fn test_build_tools_normalizes_bare_object_schema_issue_24() {
         // Built-in and MCP tools that declare no structured args carry a bare
