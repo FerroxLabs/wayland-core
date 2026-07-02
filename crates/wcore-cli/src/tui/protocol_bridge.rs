@@ -887,6 +887,9 @@ fn apply_event_inner(app: &mut App, event: ProtocolEvent) {
         // These variants carry diagnostics or capability handshakes that
         // no Wave-0 `App` field models. They are explicit no-ops so an
         // unknown-but-valid event can never crash the bridge.
+        // #537/#141 `HostSendMessageRequest` is host-delegation plumbing for
+        // json-stream hosts; the in-process TUI never runs delegated (no
+        // host to fulfil the send), so it has no view impact here.
         ProtocolEvent::Ready { .. }
         | ProtocolEvent::TraceEvent { .. }
         | ProtocolEvent::PluginEvent { .. }
@@ -896,6 +899,7 @@ fn apply_event_inner(app: &mut App, event: ProtocolEvent) {
         | ProtocolEvent::Suspend { .. }
         | ProtocolEvent::ApprovalResume { .. }
         | ProtocolEvent::CompactOffload { .. }
+        | ProtocolEvent::HostSendMessageRequest { .. }
         | ProtocolEvent::Pong => {}
     }
 }
