@@ -361,10 +361,10 @@ impl Channel for EmailChannel {
         // echo back into a monitored mailbox) the id is already indexed. A
         // failed send leaves a harmless stale entry (that id never reaches
         // the wild).
-        if let Some(id) = crate::smtp::outbound_message_id(&envelope) {
-            if let Ok(mut idx) = self.sent_ids.lock() {
-                idx.record(id);
-            }
+        if let Some(id) = crate::smtp::outbound_message_id(&envelope)
+            && let Ok(mut idx) = self.sent_ids.lock()
+        {
+            idx.record(id);
         }
 
         let response = crate::smtp::send_with_retry(sender, envelope)
