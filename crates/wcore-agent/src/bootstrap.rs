@@ -203,6 +203,15 @@ impl AgentBootstrap {
     /// wayland#551 — defer config-declared MCP connects out of `build()`.
     /// See the field doc; the caller becomes responsible for connecting
     /// `config.mcp.servers` (with `${cred:...}` resolution) after boot.
+    ///
+    /// Documented, accepted limitations of deferral (tracked follow-up):
+    /// boot-time consumers that read the config MCP manager during
+    /// `build()` do not see deferred servers — (1) MCP-provided skills
+    /// (`skill://` resources via `load_catalog`) are not loaded for the
+    /// session, and (2) the plugin hook dispatcher / `McpManagerCaller`
+    /// resolve against the boot manager set only (a gap already shared
+    /// with the dynamic `AddMcpServer` path). Late tool REGISTRATION is
+    /// fully supported; late skill/hook binding is not.
     pub fn defer_config_mcp(mut self, v: bool) -> Self {
         self.defer_config_mcp = v;
         self

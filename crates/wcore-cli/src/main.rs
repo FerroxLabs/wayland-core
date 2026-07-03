@@ -3690,6 +3690,81 @@ mod tests {
         }
     }
 
+    /// wayland#551: deferred-MCP integration must register the manager's
+    /// tools into a LIVE engine (post-boot), emit per-server events, and
+    /// park the manager alive in `dynamic_managers`. Pins the integration
+    /// half of the deferral wiring — removing `register_mcp_tools` from
+    /// `integrate_deferred_mcp` fails this.
+    #[tokio::test]
+    async fn integrate_deferred_mcp_registers_tools_into_live_engine() {
+        let (mut engine, _sink) = wcore_agent::bootstrap::AgentBootstrap::build_for_test(
+            wcore_config::config::Config::default(),
+            vec![],
+        );
+        let before = engine.tool_names().len();
+        let mgr = Arc::new(McpManager::new_for_test_with_tools(vec![(
+            "quick",
+            false,
+            Box::new(NoopTransport) as Box<dyn McpTransport>,
+            vec![tool("quick_echo")],
+        )]));
+        let writer = ProtocolWriter::new();
+        let mut dynamic_managers = Vec::new();
+        assert!(
+            integrate_deferred_mcp(
+                &mut engine,
+                mgr,
+                &HashMap::new(),
+                &writer,
+                &mut dynamic_managers
+            ),
+            "integration must succeed on an idle engine"
+        );
+        assert!(
+            engine.tool_names().len() > before
+                && engine.tool_names().iter().any(|n| n.contains("quick_echo")),
+            "deferred server's tools must be registered; got {:?}",
+            engine.tool_names()
+        );
+        assert_eq!(dynamic_managers.len(), 1, "manager must be kept alive");
+    }
+
+    /// wayland#551: while the registry Arc is borrowed (as during a turn),
+    /// integration must decline — no partial registration — so the caller
+    /// parks the manager and retries at the next between-turns boundary.
+    #[tokio::test]
+    async fn integrate_deferred_mcp_parks_while_registry_is_borrowed() {
+        let (mut engine, _sink) = wcore_agent::bootstrap::AgentBootstrap::build_for_test(
+            wcore_config::config::Config::default(),
+            vec![],
+        );
+        let hold = engine.tools(); // second Arc ref → registry_mut() is None
+        let mgr = Arc::new(McpManager::new_for_test_with_tools(vec![(
+            "quick",
+            false,
+            Box::new(NoopTransport) as Box<dyn McpTransport>,
+            vec![tool("quick_echo")],
+        )]));
+        let writer = ProtocolWriter::new();
+        let mut dynamic_managers = Vec::new();
+        assert!(
+            !integrate_deferred_mcp(
+                &mut engine,
+                mgr,
+                &HashMap::new(),
+                &writer,
+                &mut dynamic_managers
+            ),
+            "integration must decline while the registry is borrowed"
+        );
+        assert!(dynamic_managers.is_empty());
+        assert!(
+            !engine.tool_names().iter().any(|n| n.contains("quick_echo")),
+            "no tools may be registered on a declined integration"
+        );
+        drop(hold);
+    }
+
     /// Rank 47 regression: `--no-memory` must parse and flip
     /// `config.memory.enabled` to `false`, giving users an accessible way to
     /// run a stateless session. Pre-fix the flag did not exist (only a TODO
