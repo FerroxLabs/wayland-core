@@ -2425,6 +2425,35 @@ fn mcp_failed_events_for(mgr: &McpManager) -> Vec<ProtocolEvent> {
 /// `McpReady` per connected server and one `McpFailed` per failed server,
 /// and parks the manager in `dynamic_managers` so it stays alive.
 ///
+/// wayland#551 — absorb a settled background config-MCP connect: on
+/// success, integrate into the live engine (returning the parked pair when
+/// the registry is momentarily borrowed so the caller can retry between
+/// turns); on failure, surface the error with bootstrap's inline-connect
+/// wording. Shared by the loop-top non-blocking poll and the select arm.
+fn note_deferred_mcp_connect(
+    outcome: Result<McpManager, wcore_mcp::transport::McpError>,
+    resolved: HashMap<String, McpServerConfig>,
+    engine: &mut wcore_agent::engine::AgentEngine,
+    writer: &ProtocolWriter,
+    output: &Arc<dyn OutputSink>,
+    dynamic_managers: &mut Vec<Arc<McpManager>>,
+) -> Option<(Arc<McpManager>, HashMap<String, McpServerConfig>)> {
+    match outcome {
+        Ok(mgr) => {
+            let mgr = Arc::new(mgr);
+            if integrate_deferred_mcp(engine, mgr.clone(), &resolved, writer, dynamic_managers) {
+                None
+            } else {
+                Some((mgr, resolved))
+            }
+        }
+        Err(e) => {
+            output.emit_error(&format!("MCP initialization error: {e}"), false);
+            None
+        }
+    }
+}
+
 /// Returns `false` when the registry Arc is currently borrowed (a turn is
 /// mid-flight) — the caller parks the manager and retries at the next
 /// between-turns boundary.
@@ -2930,8 +2959,25 @@ async fn run_json_stream_mode(
         None;
 
     'session: loop {
-        // wayland#551 — retry a parked integration between turns (the
-        // registry Arc is only borrowable while no turn is running).
+        // wayland#551 — settle deferred MCP at every between-turns boundary,
+        // BEFORE the next command is processed, so a message that arrives
+        // after the connects finished runs WITH the MCP tools. Two sources:
+        // a non-blocking poll of the connect task (the blocking wait lives
+        // in the select below) and a parked integration whose earlier
+        // attempt found the registry borrowed.
+        if let Some(rx) = deferred_mcp_rx.as_mut()
+            && let Ok((outcome, resolved)) = rx.try_recv()
+        {
+            deferred_mcp_rx = None;
+            pending_deferred_mcp = note_deferred_mcp_connect(
+                outcome,
+                resolved,
+                &mut engine,
+                &writer,
+                &output,
+                &mut dynamic_managers,
+            );
+        }
         if let Some((mgr, resolved)) = pending_deferred_mcp.take()
             && !integrate_deferred_mcp(
                 &mut engine,
@@ -2961,26 +3007,17 @@ async fn run_json_stream_mode(
                         if deferred_mcp_rx.is_some() =>
                     {
                         deferred_mcp_rx = None;
-                        match res {
-                            Ok((Ok(mgr), resolved)) => {
-                                let mgr = Arc::new(mgr);
-                                if !integrate_deferred_mcp(
-                                    &mut engine,
-                                    mgr.clone(),
-                                    &resolved,
-                                    &writer,
-                                    &mut dynamic_managers,
-                                ) {
-                                    pending_deferred_mcp = Some((mgr, resolved));
-                                }
-                            }
-                            Ok((Err(e), _)) => {
-                                // Mirrors bootstrap's inline-connect wording.
-                                output.emit_error(&format!("MCP initialization error: {e}"), false);
-                            }
-                            // Connect task dropped without sending (panic);
-                            // nothing to integrate.
-                            Err(_) => {}
+                        // Err = connect task dropped without sending (panic);
+                        // nothing to integrate.
+                        if let Ok((outcome, resolved)) = res {
+                            pending_deferred_mcp = note_deferred_mcp_connect(
+                                outcome,
+                                resolved,
+                                &mut engine,
+                                &writer,
+                                &output,
+                                &mut dynamic_managers,
+                            );
                         }
                     }
                 }
