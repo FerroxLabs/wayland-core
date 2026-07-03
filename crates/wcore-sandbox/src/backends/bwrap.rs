@@ -158,16 +158,29 @@ impl SandboxBackend for BubblewrapBackend {
             }
         }
 
-        // Manifest-declared mounts.
+        // Manifest-declared mounts. Use the `--*-bind-try` variants so a
+        // declared source that does not exist on THIS host is silently
+        // skipped instead of aborting the whole spawn (bwrap treats a plain
+        // `--bind` with a missing source as a fatal "Can't find source
+        // path"). wayland#552: `WorkspacePolicy::trusted_local` adds the
+        // user's `~/.cache`/`.cargo`/`.npm`/`.rustup` unconditionally, but on
+        // a fresh HOME (fresh profile, container, CI, a user who has never run
+        // cargo/npm) those dirs are absent — with the plain bind that made
+        // EVERY bash command fail-spawn with empty stdout, which a persistent
+        // agent then loops on. `-try` matches the `Path::exists()` guard on
+        // the system dirs above and the AppContainer backend's absent-cache
+        // skip. A skipped WRITE mount is strictly better than a dead shell:
+        // the command runs, and a build that needs the (still-absent) dir
+        // fails on its own terms.
         for p in &manifest.fs_read_allow {
             let s = p.to_string_lossy().into_owned();
-            bwrap_argv.push("--ro-bind".into());
+            bwrap_argv.push("--ro-bind-try".into());
             bwrap_argv.push(s.clone());
             bwrap_argv.push(s);
         }
         for p in &manifest.fs_write_allow {
             let s = p.to_string_lossy().into_owned();
-            bwrap_argv.push("--bind".into());
+            bwrap_argv.push("--bind-try".into());
             bwrap_argv.push(s.clone());
             bwrap_argv.push(s);
         }
@@ -397,6 +410,55 @@ mod tests {
             .await;
         // Could fail if /bin not bound; this is informational.
         let _ = out;
+    }
+
+    /// wayland#552 regression: a manifest-declared mount whose SOURCE does
+    /// not exist on this host must be SKIPPED, not fatal. Pre-fix (`--bind`)
+    /// bwrap aborted the spawn with "Can't find source path", turning every
+    /// bash command into an empty-output error on a fresh HOME (no
+    /// `~/.cache`/`.cargo`/`.npm`/`.rustup`). With `--bind-try` the command
+    /// runs and the absent mount is quietly dropped.
+    #[tokio::test]
+    #[cfg_attr(not(target_os = "linux"), ignore = "bwrap is Linux-only")]
+    async fn missing_bind_source_is_skipped_not_fatal() {
+        let backend = BubblewrapBackend::new();
+        if !backend.is_available() {
+            eprintln!("bwrap not available; skipping");
+            return;
+        }
+        // A path guaranteed absent — the exact failure shape from #552.
+        let ghost = std::path::PathBuf::from("/tmp/wl552-does-not-exist-ghost-mount");
+        assert!(
+            !ghost.exists(),
+            "test precondition: ghost path must be absent"
+        );
+        let m = SandboxManifest {
+            fs_write_allow: vec![ghost.clone()],
+            fs_read_allow: vec![ghost],
+            ..Default::default()
+        };
+        let out = backend
+            .execute(
+                &m,
+                SandboxCommand {
+                    argv: vec!["/bin/echo".into(), "hello-552".into()],
+                    cwd: None,
+                },
+            )
+            .await
+            .expect("spawn must not fail on a missing bind source");
+        assert_eq!(
+            out.exit_code,
+            0,
+            "command must run despite the absent mount; got exit={} stderr={}",
+            out.exit_code,
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert!(
+            String::from_utf8_lossy(&out.stdout).contains("hello-552"),
+            "stdout must carry the command output, not a sandbox spawn error; stderr={}",
+            String::from_utf8_lossy(&out.stderr)
+        );
     }
 
     #[tokio::test]
