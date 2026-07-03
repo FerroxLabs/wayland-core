@@ -233,12 +233,36 @@ impl ProtocolEmitter for ChannelEmitter {
 /// `ProtocolWriter` (stdout), not an arbitrary emitter.
 pub struct ChannelSink {
     tx: UnboundedSender<ProtocolEvent>,
+    /// GHSA-8r7g follow-up (wayland#568): scrub in-flight approval
+    /// resume_tokens from tool-derived output before it reaches the TUI
+    /// transcript — parity with the json-stream `ProtocolSink`. Empty
+    /// (default) → no-op fast path when no approval is outstanding.
+    token_redactor: wcore_agent::output::protocol_sink::ActiveTokenRedactor,
 }
 
 impl ChannelSink {
-    /// Build a sink that forwards onto `tx`.
+    /// Build a sink that forwards onto `tx` with no active-token redaction.
+    /// Used by relay/sub-agent sinks that are not bound to an approval bridge;
+    /// the main TUI sink uses [`Self::with_redactor`].
     pub fn new(tx: UnboundedSender<ProtocolEvent>) -> Self {
-        Self { tx }
+        Self {
+            tx,
+            token_redactor: wcore_agent::output::protocol_sink::ActiveTokenRedactor::new(),
+        }
+    }
+
+    /// Build a sink that scrubs in-flight approval resume_tokens from tool
+    /// output. Pair `redactor` with the engine's `ApprovalBridge::redactor()`
+    /// (via `share_with`) so the bridge's refresh pass updates the same set
+    /// this sink reads — mirroring `ProtocolSink::share_token_redactor_with`.
+    pub fn with_redactor(
+        tx: UnboundedSender<ProtocolEvent>,
+        redactor: wcore_agent::output::protocol_sink::ActiveTokenRedactor,
+    ) -> Self {
+        Self {
+            tx,
+            token_redactor: redactor,
+        }
     }
 
     /// Forward one event, dropping the result — a closed channel means
@@ -348,9 +372,12 @@ impl OutputSink for ChannelSink {
     }
 
     fn emit_info(&self, msg: &str) {
+        // wayland#568: some tools log structured info on the result path, so
+        // scrub in-flight approval resume_tokens (no-op when idle).
+        let message = self.token_redactor.redact(msg);
         self.send(ProtocolEvent::Info {
             msg_id: String::new(),
-            message: msg.to_string(),
+            message,
         });
     }
 
@@ -368,11 +395,14 @@ impl OutputSink for ChannelSink {
     }
 
     fn emit_tool_chunk(&self, msg_id: &str, call_id: &str, tool_name: &str, chunk: &str) {
+        // wayland#568: scrub in-flight approval resume_tokens from streaming
+        // tool output before it reaches the transcript (no-op when idle).
+        let chunk = self.token_redactor.redact(chunk);
         self.send(ProtocolEvent::ToolChunk {
             msg_id: msg_id.to_string(),
             call_id: call_id.to_string(),
             tool_name: tool_name.to_string(),
-            chunk: chunk.to_string(),
+            chunk,
         });
     }
 
@@ -3254,6 +3284,58 @@ mod tests {
                 );
             }
             panic!("emit_tool_result must not enqueue any ProtocolEvent: {event:?}");
+        }
+    }
+
+    /// wayland#568 (GHSA-8r7g follow-up): a streaming tool chunk that echoes a
+    /// live approval resume_token must be scrubbed before it reaches the TUI
+    /// transcript, exactly as the json-stream `ProtocolSink` scrubs it. The
+    /// sink's redactor is bound to the bridge's active-token set.
+    #[tokio::test]
+    async fn channel_sink_redacts_live_token_from_tool_output() {
+        let bridge = wcore_agent::approval::ApprovalBridge::new();
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let sink = ChannelSink::with_redactor(tx, bridge.redactor());
+
+        // Spawn a pending approval — the bridge refreshes the shared redactor's
+        // active set as part of the request. `request` returns the SECRET
+        // `apr-{uuid}` resume_token, which is exactly the value the redactor
+        // scrubs from tool output.
+        let (token, _rx) = bridge
+            .request(wcore_agent::approval::ApprovalRequest {
+                call_id: "c-1".into(),
+                reason: "test".into(),
+                context: "ctx".into(),
+            })
+            .await;
+
+        // A tool that echoes the live token on the streaming path must not leak
+        // it — the chunk on the wire is redacted.
+        let chunk = format!("here is a leaked token: {token} — oops!");
+        OutputSink::emit_tool_chunk(&sink, "m", "c-1", "Bash", &chunk);
+        let event = rx.try_recv().expect("a ToolChunk event must be enqueued");
+        match event {
+            ProtocolEvent::ToolChunk { chunk, .. } => {
+                assert!(
+                    !chunk.contains(&token),
+                    "the live resume_token must be scrubbed from the tool chunk: {chunk}"
+                );
+                assert!(
+                    chunk.contains("[REDACTED]"),
+                    "the scrubbed chunk must carry the [REDACTED] marker: {chunk}"
+                );
+            }
+            other => panic!("expected ToolChunk, got {other:?}"),
+        }
+
+        // The same scrubbing applies to tool-derived Info messages.
+        OutputSink::emit_info(&sink, &format!("info with {token} inside"));
+        match rx.try_recv().expect("an Info event must be enqueued") {
+            ProtocolEvent::Info { message, .. } => assert!(
+                !message.contains(&token) && message.contains("[REDACTED]"),
+                "the live resume_token must be scrubbed from Info: {message}"
+            ),
+            other => panic!("expected Info, got {other:?}"),
         }
     }
 }

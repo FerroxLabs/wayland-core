@@ -384,14 +384,39 @@ struct ProtocolToMessageStream {
     /// `(name, input)` by `call_id` so the gate frame projects a faithful
     /// `ToolCall`. The map is bounded by the in-flight tool calls of one turn.
     pending_calls: HashMap<String, (String, serde_json::Value)>,
+    /// wayland#568 (GHSA-8r7g follow-up): scrubs in-flight approval
+    /// resume_tokens from tool-result output before it is projected to the ACP
+    /// host. Empty (default `new`) → no-op; [`Self::with_redactor`] binds the
+    /// session engine's live active-token set.
+    redactor: wcore_agent::output::protocol_sink::ActiveTokenRedactor,
 }
 
 impl ProtocolToMessageStream {
+    /// No-redaction constructor — test-only. Production always binds the live
+    /// active-token set via [`Self::with_redactor`], so a redactor-less
+    /// projection exists purely for tests that don't exercise scrubbing.
+    #[cfg(test)]
     fn new(rx: UnboundedReceiver<ProtocolEvent>) -> Self {
         Self {
             rx,
             done: false,
             pending_calls: HashMap::new(),
+            redactor: wcore_agent::output::protocol_sink::ActiveTokenRedactor::new(),
+        }
+    }
+
+    /// Build a projection whose tool-result output is scrubbed of in-flight
+    /// approval resume_tokens. `redactor` must be bound to the session engine's
+    /// `ApprovalBridge::redactor()` so it observes the live active-token set.
+    fn with_redactor(
+        rx: UnboundedReceiver<ProtocolEvent>,
+        redactor: wcore_agent::output::protocol_sink::ActiveTokenRedactor,
+    ) -> Self {
+        Self {
+            rx,
+            done: false,
+            pending_calls: HashMap::new(),
+            redactor,
         }
     }
 
@@ -420,13 +445,19 @@ impl ProtocolToMessageStream {
                 status,
                 output,
                 ..
-            } => Some(MessageEvent::ToolResult {
-                result: ToolResult {
-                    call_id,
-                    output: serde_json::Value::String(output),
-                    is_error: matches!(status, ToolStatus::Error),
-                },
-            }),
+            } => {
+                // wayland#568: a tool that echoes a live approval resume_token
+                // in its output must not leak it to the ACP host. Scrub the
+                // in-flight token set before projecting (no-op when idle).
+                let output = self.redactor.redact(&output);
+                Some(MessageEvent::ToolResult {
+                    result: ToolResult {
+                        call_id,
+                        output: serde_json::Value::String(output),
+                        is_error: matches!(status, ToolStatus::Error),
+                    },
+                })
+            }
             ProtocolEvent::ToolCancelled {
                 call_id, reason, ..
             } => Some(MessageEvent::ToolResult {
@@ -540,6 +571,11 @@ pub struct EngineSession {
     /// Tool names the engine registered, captured at build time for the A2A
     /// capability catalog.
     tool_names: Vec<String>,
+    /// wayland#568 (GHSA-8r7g follow-up): the engine's shared active-token
+    /// redactor, cloned into each turn's [`ProtocolToMessageStream`] so a tool
+    /// that echoes a live approval resume_token cannot leak it through
+    /// `MessageEvent::ToolResult`.
+    redactor: wcore_agent::output::protocol_sink::ActiveTokenRedactor,
 }
 
 impl EngineSession {
@@ -553,11 +589,16 @@ impl EngineSession {
         relay: RelayHandle,
     ) -> Self {
         let tool_names = engine.tools().tool_names();
+        // wayland#568: capture the engine's active-token redactor so each turn's
+        // projection can scrub in-flight approval resume_tokens from tool-result
+        // output before it reaches the ACP host.
+        let redactor = engine.approval_bridge().redactor();
         Self {
             engine: Arc::new(AsyncMutex::new(engine)),
             approval_manager,
             relay,
             tool_names,
+            redactor,
         }
     }
 
@@ -643,7 +684,10 @@ impl EngineSession {
             }
         });
 
-        Box::pin(ProtocolToMessageStream::new(rx))
+        Box::pin(ProtocolToMessageStream::with_redactor(
+            rx,
+            self.redactor.clone(),
+        ))
     }
 
     /// Drive one turn to completion and collect the streamed `TextDelta`
@@ -1014,6 +1058,65 @@ mod tests {
             args: serde_json::json!({"path": "x"}),
             description: "desc".to_string(),
         }
+    }
+
+    /// wayland#568 (GHSA-8r7g follow-up): a tool that echoes a live approval
+    /// resume_token in its output must not leak it to the ACP host. The
+    /// per-turn projection, bound to the bridge's active-token set, scrubs the
+    /// token from `MessageEvent::ToolResult.output`.
+    #[tokio::test]
+    async fn projection_redacts_live_token_from_tool_result_output() {
+        let bridge = wcore_agent::approval::ApprovalBridge::new();
+        // Spawn a pending approval so the bridge's redactor observes the live
+        // secret resume_token. `request` returns the SECRET `apr-{uuid}` token,
+        // which is exactly the value the redactor scrubs from tool output.
+        let (token, _rx) = bridge
+            .request(wcore_agent::approval::ApprovalRequest {
+                call_id: "c-1".into(),
+                reason: "test".into(),
+                context: "ctx".into(),
+            })
+            .await;
+
+        let (tx, rx) = unbounded_channel::<ProtocolEvent>();
+        tx.send(ProtocolEvent::ToolResult {
+            msg_id: "m".into(),
+            call_id: "c-1".into(),
+            tool_name: "Bash".into(),
+            status: ToolStatus::Success,
+            output: format!("leaked token: {token} — oops!"),
+            output_type: wcore_protocol::events::OutputType::Text,
+            metadata: None,
+        })
+        .unwrap();
+        tx.send(ProtocolEvent::StreamEnd {
+            msg_id: "m".into(),
+            finish_reason: FinishReason::Stop,
+            usage: None,
+            agent_run_id: None,
+        })
+        .unwrap();
+        drop(tx);
+
+        let out: Vec<MessageEvent> = ProtocolToMessageStream::with_redactor(rx, bridge.redactor())
+            .collect()
+            .await;
+        let result = out
+            .iter()
+            .find_map(|e| match e {
+                MessageEvent::ToolResult { result } => Some(result),
+                _ => None,
+            })
+            .expect("a ToolResult frame must be projected");
+        let output_str = result.output.as_str().unwrap_or_default();
+        assert!(
+            !output_str.contains(&token),
+            "the live resume_token must be scrubbed from the projected output: {output_str}"
+        );
+        assert!(
+            output_str.contains("[REDACTED]"),
+            "the scrubbed output must carry the [REDACTED] marker: {output_str}"
+        );
     }
 
     #[tokio::test]

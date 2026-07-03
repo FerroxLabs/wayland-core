@@ -1862,7 +1862,16 @@ async fn run_tui_mode(
     // `rx`. The channel is unbounded so an event burst during a turn
     // never back-pressures the engine.
     let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
-    let output: Arc<dyn OutputSink> = Arc::new(tui::ChannelSink::new(tx.clone()));
+    // wayland#568 (GHSA-8r7g follow-up): scrub in-flight approval resume_tokens
+    // from tool output on the TUI path too. The sink is built before the engine
+    // (bootstrap needs it), so create the redactor here and `share_with` the
+    // bridge's set once the engine exists — mirroring the json-stream
+    // `ProtocolSink::share_token_redactor_with` wiring.
+    let tui_token_redactor = wcore_agent::output::protocol_sink::ActiveTokenRedactor::new();
+    let output: Arc<dyn OutputSink> = Arc::new(tui::ChannelSink::with_redactor(
+        tx.clone(),
+        tui_token_redactor.clone(),
+    ));
     let approval_manager = Arc::new(ToolApprovalManager::new());
     // GHSA-8r7g: a protocol peer may escalate to Force only when this local
     // operator opted in at launch (--force or WAYLAND_ALLOW_WIRE_FORCE).
@@ -1965,6 +1974,9 @@ async fn run_tui_mode(
         std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
         Some(engine.approval_bridge().clone()),
     )));
+    // wayland#568: bind the TUI sink's redactor to the bridge's active-token
+    // set so streaming tool output is scrubbed of in-flight resume_tokens.
+    tui_token_redactor.share_with(&engine.approval_bridge().redactor());
 
     // Snapshot the loaded skills + MCP servers for the `/skills` and `/mcp`
     // listings. Taken here while `engine` and `result.mcp_managers` are still
