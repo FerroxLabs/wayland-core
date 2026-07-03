@@ -227,13 +227,33 @@ struct RelayEmitter {
     /// `ApprovalRequired` (the live-workflow gate emits its own) is suppressed,
     /// preventing a malformed second gate frame on the ACP projection.
     synthesized: crate::tui::DedupeSet,
+    /// GHSA-8r7g M1 (wayland#497) — the session engine's `ApprovalBridge`.
+    /// Threaded into `ChannelEmitter::with_dedupe` so a bridge-backed
+    /// approval (Crucible council / egress consent) synthesized on the ACP
+    /// relay stamps the server-generated SECRET `apr-{uuid}` resume_token
+    /// instead of the legacy model-known `call_id`. `None` only in unit
+    /// tests.
+    ///
+    /// SCOPE (per the #497 cross-audit): this is frame-level parity with the
+    /// stdin/TUI transports only. The ACP PROJECTION drops `resume_token`
+    /// before it reaches the host (`MessageEvent::ApprovalRequired` carries
+    /// no token field) and the resolve endpoint stays call_id-keyed behind
+    /// X-API-Key — so a bridge-backed gate raised during an ACP turn is not
+    /// yet resolvable by the ACP host at all, and manager-gated resolution
+    /// still keys on the model-known call_id. Carrying + accepting the
+    /// secret end-to-end on ACP is tracked as FerroxLabs/wayland#568.
+    approval_bridge: Option<Arc<wcore_agent::approval::ApprovalBridge>>,
 }
 
 impl RelayEmitter {
-    fn new(handle: RelayHandle) -> Self {
+    fn new(
+        handle: RelayHandle,
+        approval_bridge: Option<Arc<wcore_agent::approval::ApprovalBridge>>,
+    ) -> Self {
         Self {
             handle,
             synthesized: Arc::new(Mutex::new(std::collections::HashSet::new())),
+            approval_bridge,
         }
     }
 }
@@ -242,10 +262,8 @@ impl ProtocolEmitter for RelayEmitter {
     fn emit(&self, event: &ProtocolEvent) -> std::io::Result<()> {
         let tx = self.handle.lock().unwrap().clone();
         if let Some(tx) = tx {
-            // GHSA-8r7g: `None` bridge → legacy resume_token emit on the ACP
-            // relay (its crucible/egress call_ids are already uuids; the ACP
-            // endpoint's secret-token hardening is a separate follow-up).
-            ChannelEmitter::with_dedupe(tx, self.synthesized.clone(), None).emit(event)?;
+            ChannelEmitter::with_dedupe(tx, self.synthesized.clone(), self.approval_bridge.clone())
+                .emit(event)?;
         }
         Ok(())
     }
@@ -773,7 +791,11 @@ impl EngineTurnEngine {
         engine.rebind_memory_session().await;
         engine.run_session_start_hooks().await;
         engine.set_approval_manager(approval_manager.clone());
-        engine.set_protocol_writer(Arc::new(RelayEmitter::new(relay.clone())));
+        // GHSA-8r7g M1 (wayland#497): bind the engine's ApprovalBridge so
+        // bridge-backed gate frames on the ACP relay carry the secret
+        // resume_token (parity with the stdin/TUI transports).
+        let bridge = engine.approval_bridge().clone();
+        engine.set_protocol_writer(Arc::new(RelayEmitter::new(relay.clone(), Some(bridge))));
 
         let session = Arc::new(EngineSession::new(engine, approval_manager, relay));
 
@@ -1120,7 +1142,7 @@ mod tests {
         // The relay's emitter forwards onto the per-turn channel and owns the
         // persistent dedupe set (mirrors `EngineSession`'s wiring).
         let relay: RelayHandle = Arc::new(Mutex::new(Some(tx)));
-        let emitter = RelayEmitter::new(relay);
+        let emitter = RelayEmitter::new(relay, None);
 
         // Reproduce the live-workflow gate's emit sequence (engine.rs):
         // (1) ToolRequest for the gated "Workflow" call, then
@@ -1180,6 +1202,102 @@ mod tests {
                 assert_eq!(
                     call.name, "Workflow",
                     "the surviving gate frame must carry the gated tool name, not an empty phantom"
+                );
+            }
+            other => panic!("expected ApprovalRequired, got {other:?}"),
+        }
+    }
+
+    /// GHSA-8r7g M1 (wayland#497): a bridge-backed approval synthesized on
+    /// the ACP relay must stamp the bridge's SECRET `apr-{uuid}`
+    /// resume_token — not the model-known `call_id` (the pre-fix legacy
+    /// behavior this transport had) and not an empty token. Asserted at the
+    /// raw `ProtocolEvent` boundary, where the wire value is decided.
+    #[tokio::test]
+    async fn relay_emitter_stamps_bridge_secret_resume_token() {
+        let bridge = Arc::new(wcore_agent::approval::ApprovalBridge::new());
+        let (secret, _outcome_rx) = bridge
+            .request_with_id(
+                "crucible-call-9".to_string(),
+                wcore_agent::approval::ApprovalRequest {
+                    call_id: "crucible-call-9".into(),
+                    reason: "council".into(),
+                    context: "ctx".into(),
+                },
+            )
+            .await;
+
+        let (tx, mut rx) = unbounded_channel::<ProtocolEvent>();
+        let relay: RelayHandle = Arc::new(Mutex::new(Some(tx)));
+        let emitter = RelayEmitter::new(relay, Some(bridge));
+
+        emitter
+            .emit(&ProtocolEvent::ToolRequest {
+                msg_id: "m".into(),
+                call_id: "crucible-call-9".into(),
+                tool: wcore_protocol::events::ToolInfo {
+                    name: "CrucibleCouncil".into(),
+                    category: wcore_protocol::events::ToolCategory::Exec,
+                    args: serde_json::json!({}),
+                    description: "council approval".into(),
+                },
+            })
+            .unwrap();
+
+        // First frame is the forwarded ToolRequest; second is the
+        // synthesized gate whose resume_token is under test.
+        let first = rx.recv().await.expect("forwarded ToolRequest");
+        assert!(matches!(first, ProtocolEvent::ToolRequest { .. }));
+        match rx.recv().await.expect("synthesized ApprovalRequired") {
+            ProtocolEvent::ApprovalRequired {
+                call_id,
+                resume_token,
+                ..
+            } => {
+                assert_eq!(call_id, "crucible-call-9");
+                assert_eq!(
+                    resume_token, secret,
+                    "ACP relay must stamp the bridge's secret resume_token"
+                );
+                assert!(resume_token.starts_with("apr-"), "got {resume_token:?}");
+                assert_ne!(
+                    resume_token, call_id,
+                    "the model-known call_id must never be the resume handle"
+                );
+            }
+            other => panic!("expected ApprovalRequired, got {other:?}"),
+        }
+    }
+
+    /// Companion negative: with the bridge bound but NO bridge entry for the
+    /// call (a regular tool gated by the ToolApprovalManager), the
+    /// synthesized token must be EMPTY — never a fallback to the call_id.
+    #[tokio::test]
+    async fn relay_emitter_emits_empty_token_for_non_bridge_call() {
+        let bridge = Arc::new(wcore_agent::approval::ApprovalBridge::new());
+        let (tx, mut rx) = unbounded_channel::<ProtocolEvent>();
+        let relay: RelayHandle = Arc::new(Mutex::new(Some(tx)));
+        let emitter = RelayEmitter::new(relay, Some(bridge));
+
+        emitter
+            .emit(&ProtocolEvent::ToolRequest {
+                msg_id: "m".into(),
+                call_id: "bash-1".into(),
+                tool: wcore_protocol::events::ToolInfo {
+                    name: "Bash".into(),
+                    category: wcore_protocol::events::ToolCategory::Exec,
+                    args: serde_json::json!({"command": "ls"}),
+                    description: "run".into(),
+                },
+            })
+            .unwrap();
+
+        let _tool_req = rx.recv().await.expect("forwarded ToolRequest");
+        match rx.recv().await.expect("synthesized ApprovalRequired") {
+            ProtocolEvent::ApprovalRequired { resume_token, .. } => {
+                assert!(
+                    resume_token.is_empty(),
+                    "non-bridge call must get an EMPTY token (resolved via ToolApprove), got {resume_token:?}"
                 );
             }
             other => panic!("expected ApprovalRequired, got {other:?}"),
