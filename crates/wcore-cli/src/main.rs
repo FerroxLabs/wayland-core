@@ -3194,11 +3194,16 @@ async fn run_json_stream_mode(
                                         approval_manager.resolve(&call_id, ToolApprovalResult::Denied { reason });
                                     }
                                     ProtocolCommand::Stop => {
-                                        // Cancelling the turn drops `engine_fut`, but the host's
-                                        // turn-loop still waits for a terminator. Emit `stream_end`
-                                        // (FinishReason::Stop) for this msg_id — same as the /exit
-                                        // path above — so the host doesn't hang forever waiting for
-                                        // a turn end that the bare break would never send.
+                                        // wayland#403 fix-3: Stop CANCELS THE ACTIVE TURN — it must
+                                        // NOT end the session. Dropping `engine_fut` (via the inner
+                                        // `break` below) cancels the turn; we emit `stream_end`
+                                        // (FinishReason::Stop) for this msg_id so the host's turn-loop
+                                        // gets its terminator and doesn't hang. `stopped` then makes
+                                        // the outer loop `continue` (keep reading commands) instead of
+                                        // breaking — the pre-fix `break` stranded the session
+                                        // ("new chat required") after any mid-turn Stop. Only EOF and
+                                        // `/exit` end a json-stream session, matching the TUI (Esc
+                                        // cancels the turn, never closes the session).
                                         output.emit_stream_end(&msg_id, 0, 0, 0, 0, 0, FinishReason::Stop);
                                         stopped = true;
                                         break;
@@ -3335,11 +3340,19 @@ async fn run_json_stream_mode(
                     );
                 }
                 if stopped {
-                    break;
+                    // wayland#403 fix-3: the mid-turn Stop cancelled the turn and
+                    // already emitted its `stream_end`; resume the command loop so
+                    // the next Message streams. Pre-fix this was `break`, which
+                    // ended the whole session.
+                    continue;
                 }
             }
             ProtocolCommand::Stop => {
-                break;
+                // wayland#403 fix-3: a Stop that arrives with no active turn (or
+                // just as one finishes) is a no-op — it must not close the
+                // session. Keep reading commands; EOF / `/exit` are the
+                // terminators.
+                continue;
             }
             ProtocolCommand::ToolApprove {
                 call_id,

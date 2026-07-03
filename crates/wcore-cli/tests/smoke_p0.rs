@@ -392,6 +392,133 @@ fn smoke_17_force_posture_auto_approves_mutating_tool_in_engine() {
     );
 }
 
+/// wayland#403 fix-3 regression: a mid-turn `Stop` must CANCEL THE TURN but
+/// NOT strand the json-stream session — a subsequent Message must still
+/// stream. Pre-fix, the mid-turn Stop broke the outer command loop, so after
+/// any Stop the session was dead ("new chat required") — reproduced here
+/// deterministically: turn 1 issues a Bash tool call which, under the default
+/// approval posture, PAUSES on approval (a deterministic mid-turn state);
+/// while paused we send Stop, then send a second Message. The fix requires
+/// the second Message to reach its `stream_end`.
+#[test]
+fn stop_mid_turn_does_not_strand_json_stream_session() {
+    use std::io::{BufRead, BufReader, Write};
+    use std::sync::{Arc, Mutex};
+    use std::time::{Duration, Instant};
+
+    // Turn 1: a Bash (exec-category) tool call — under the default posture the
+    // engine emits ToolRequest and BLOCKS on approval. Turn 2 (a fresh LLM
+    // call after Stop cancels turn 1): plain text.
+    let (_rt, server) = start_mock(
+        MockLlm::new()
+            .tool_use("Bash", serde_json::json!({ "command": "echo repro-403" }))
+            .text("SESSION-ALIVE"),
+    );
+    // Default posture (NO --force): the Bash call must pause on approval.
+    let home = TempDir::new().expect("tempdir");
+    write_config(
+        home.path(),
+        "anthropic",
+        Some("claude-sonnet-4-20250514"),
+        Some(&server.uri()),
+    );
+
+    let mut cmd = std::process::Command::new(binary());
+    cmd.args(["--json-stream", "--provider", "anthropic"])
+        .current_dir(home.path());
+    harden_child_env(&mut cmd, home.path());
+    let mut child = cmd
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("spawn --json-stream");
+
+    let mut stdin = child.stdin.take().expect("stdin");
+    let stdout = child.stdout.take().expect("stdout");
+
+    // Collect every stdout line so the test can look for specific frames.
+    let frames: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    {
+        let frames = frames.clone();
+        std::thread::spawn(move || {
+            let reader = BufReader::new(stdout);
+            for line in reader.lines().map_while(Result::ok) {
+                frames.lock().unwrap().push(line);
+            }
+        });
+    }
+
+    // Frame predicate: any collected line whose JSON `type` is one of `types`
+    // and (when `msg_id` is Some) matches that msg_id.
+    let seen = |types: &[&str], msg_id: Option<&str>| -> bool {
+        frames.lock().unwrap().iter().any(|ln| {
+            let Ok(j) = serde_json::from_str::<serde_json::Value>(ln) else {
+                return false;
+            };
+            let ty = j.get("type").and_then(|t| t.as_str()).unwrap_or("");
+            let mid_ok =
+                msg_id.is_none_or(|want| j.get("msg_id").and_then(|m| m.as_str()) == Some(want));
+            types.contains(&ty) && mid_ok
+        })
+    };
+    let wait_until = |pred: &dyn Fn() -> bool, secs: u64| -> bool {
+        let deadline = Instant::now() + Duration::from_secs(secs);
+        while Instant::now() < deadline {
+            if pred() {
+                return true;
+            }
+            std::thread::sleep(Duration::from_millis(150));
+        }
+        false
+    };
+
+    // Turn 1 — forces the Bash tool call, which pauses on approval.
+    writeln!(
+        stdin,
+        "{{\"type\":\"message\",\"msg_id\":\"m1\",\"content\":\"run bash\"}}"
+    )
+    .expect("write m1");
+
+    assert!(
+        wait_until(
+            &|| seen(&["tool_request", "approval_required"], Some("m1")),
+            20
+        ),
+        "turn 1 must pause on the Bash approval gate (deterministic mid-turn state); \
+         frames={:?}",
+        frames.lock().unwrap()
+    );
+
+    // Stop mid-turn — cancels turn 1; the session must survive.
+    writeln!(stdin, "{{\"type\":\"stop\"}}").expect("write stop");
+    assert!(
+        wait_until(&|| seen(&["stream_end"], Some("m1")), 10),
+        "the mid-turn Stop must emit a stream_end for m1 so the host isn't left hanging"
+    );
+
+    // Turn 2 — the actual regression check: a new Message must still stream.
+    writeln!(
+        stdin,
+        "{{\"type\":\"message\",\"msg_id\":\"m2\",\"content\":\"say hi\"}}"
+    )
+    .expect("write m2 (broken pipe here would already prove the session died)");
+
+    let m2_streamed = wait_until(&|| seen(&["stream_end"], Some("m2")), 20);
+
+    let _ = writeln!(stdin, "{{\"type\":\"stop\"}}");
+    let _ = child.kill();
+    let _ = child.wait();
+
+    assert!(
+        m2_streamed,
+        "after a mid-turn Stop the session must keep streaming — m2 produced no \
+         stream_end, so Stop stranded the session (the #403 fix-3 regression). \
+         frames={:?}",
+        frames.lock().unwrap()
+    );
+}
+
 /// wayland#241 regression: config `[default] approval_mode = "auto-edit"`
 /// must reach the json-stream session WITHOUT `--force`. Pre-fix
 /// `run_json_stream_mode` only seeded `--force` and ignored the config
