@@ -241,7 +241,7 @@ struct RelayEmitter {
     /// X-API-Key — so a bridge-backed gate raised during an ACP turn is not
     /// yet resolvable by the ACP host at all, and manager-gated resolution
     /// still keys on the model-known call_id. Carrying + accepting the
-    /// secret end-to-end on ACP is tracked as a separate follow-up issue.
+    /// secret end-to-end on ACP is tracked as FerroxLabs/wayland#568.
     approval_bridge: Option<Arc<wcore_agent::approval::ApprovalBridge>>,
 }
 
