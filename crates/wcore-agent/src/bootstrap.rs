@@ -171,6 +171,15 @@ pub struct AgentBootstrap {
     /// shell tools. `None` (the default, and always the case for the local
     /// CLI / TUI / json-stream engines) leaves the full toolset intact.
     channel_tool_posture: Option<crate::channel_tools::ChannelToolScope>,
+    /// wayland#551 — skip the config-declared MCP `connect_all` during
+    /// build so slow/hung servers cannot gate boot. The caller owns
+    /// connecting them afterwards (json-stream does it in the background
+    /// after emitting `ready`; a hung server previously ate the full 30s
+    /// per-server budget INSIDE bootstrap, blowing the host's 30s ready
+    /// timeout). Plugin-supplied MCP servers are NOT deferred — they are
+    /// local shells whose connects are bounded and cheap. Default `false`
+    /// keeps TUI/one-shot behavior unchanged.
+    defer_config_mcp: bool,
 }
 
 impl AgentBootstrap {
@@ -187,7 +196,16 @@ impl AgentBootstrap {
             without_channels: false,
             enable_inbound_dispatch: false,
             channel_tool_posture: None,
+            defer_config_mcp: false,
         }
+    }
+
+    /// wayland#551 — defer config-declared MCP connects out of `build()`.
+    /// See the field doc; the caller becomes responsible for connecting
+    /// `config.mcp.servers` (with `${cred:...}` resolution) after boot.
+    pub fn defer_config_mcp(mut self, v: bool) -> Self {
+        self.defer_config_mcp = v;
+        self
     }
 
     /// Restrict (and, for `Workspace`, jail) the toolset of a
@@ -995,7 +1013,10 @@ impl AgentBootstrap {
         );
 
         let mut mcp_managers: Vec<Arc<McpManager>> = Vec::new();
-        let mcp_manager = if !self.config.mcp.servers.is_empty() {
+        // wayland#551 — when the caller deferred config MCP, skip the
+        // connect entirely; the caller connects in the background after
+        // boot so a slow/hung server cannot gate the host's ready frame.
+        let mcp_manager = if !self.config.mcp.servers.is_empty() && !self.defer_config_mcp {
             // Slice 3, Piece 2 — resolve any `${cred:KEY}` header references
             // against the credentials store at the connect boundary, on a clone.
             // The long-lived `self.config` keeps the literal `${cred:...}` so the
