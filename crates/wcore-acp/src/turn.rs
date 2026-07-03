@@ -46,6 +46,10 @@ pub struct ApprovalDecision {
     /// Optional answer payload (AskUserQuestion choice). `None` for a plain
     /// approve/deny.
     pub answer: Option<String>,
+    /// GHSA-8r7g M2 (wayland#568) — the SECRET `resume_token` for a
+    /// bridge-backed gate. `None`/empty resolves via the approval manager by
+    /// `call_id` (the legacy manager-gated path).
+    pub resume_token: Option<String>,
 }
 
 /// Per-turn parameters handed to the engine bridge. A struct (not a long

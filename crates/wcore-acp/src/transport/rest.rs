@@ -100,6 +100,14 @@ pub struct ApprovalResolveRequest {
     /// through the approval channel.
     #[serde(default)]
     pub answer: Option<String>,
+    /// GHSA-8r7g M2 (wayland#568) — the SECRET `resume_token` copied from the
+    /// matching `ApprovalRequired` frame. REQUIRED to resolve a BRIDGE-backed
+    /// gate (Crucible council / egress consent); OMIT for a manager-gated tool
+    /// (ordinary approve/deny, resolved by the path `call_id`). A stale or
+    /// unknown token falls through to the manager path, then 404s if that also
+    /// misses — the endpoint stays idempotent.
+    #[serde(default)]
+    pub resume_token: Option<String>,
 }
 
 /// Wire spelling of the approval scope. Flat string enum so the OpenAPI
@@ -491,6 +499,7 @@ async fn resolve_approval<H: HttpHandler>(
         approved: body.approved,
         scope,
         answer: body.answer,
+        resume_token: body.resume_token,
     };
     // Idempotency + 404: an unknown session or unknown/already-resolved/
     // expired call_id surfaces as `AcpError::Session("... not found ...")`,

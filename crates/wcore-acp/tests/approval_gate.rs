@@ -74,6 +74,8 @@ async fn mutating_tool_emits_approval_required_before_result() {
             MessageEvent::ApprovalRequired {
                 call: write_call(),
                 reason: "mutating tool Write requires approval".to_string(),
+                // Manager-gated Write carries no bridge secret (#568).
+                resume_token: String::new(),
             },
             MessageEvent::ToolResult {
                 result: ToolResult {
@@ -111,12 +113,23 @@ async fn mutating_tool_emits_approval_required_before_result() {
 
     // The gate carries the call so a host can correlate the decision.
     match &frames[approval_idx] {
-        MessageEvent::ApprovalRequired { call, reason } => {
+        MessageEvent::ApprovalRequired {
+            call,
+            reason,
+            resume_token,
+        } => {
             assert_eq!(call.id, "c1");
             assert_eq!(call.name, "Write");
             assert!(
                 !reason.is_empty(),
                 "gate must carry a human-readable reason"
+            );
+            // #568 (B): a MANAGER-gated tool (plain Write) carries no bridge
+            // secret, so its resume_token is empty and the host resolves by
+            // call_id. Bridge-backed gates (Crucible/egress) carry a real token.
+            assert!(
+                resume_token.is_empty(),
+                "a manager-gated tool must not carry a bridge secret; got {resume_token:?}"
             );
         }
         other => panic!("expected ApprovalRequired, got {other:?}"),

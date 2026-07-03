@@ -192,6 +192,14 @@ pub enum MessageEvent {
         /// Human-readable explanation of why approval is required (e.g. the
         /// tool category). No em-dashes; surfaced verbatim to hosts.
         reason: String,
+        /// GHSA-8r7g M2 (wayland#568) — the server-generated SECRET
+        /// `resume_token` (`apr-{uuid}`) the host MUST present on the matching
+        /// `POST .../resolve` to answer a BRIDGE-backed gate (Crucible council
+        /// / egress consent). Empty for a manager-gated tool (ordinary
+        /// approve/deny), which has no secret and resolves by the call `id`.
+        /// `skip_serializing_if` keeps the frame clean when there is no secret.
+        #[serde(default, skip_serializing_if = "String::is_empty")]
+        resume_token: String,
     },
     ToolResult {
         result: ToolResult,
