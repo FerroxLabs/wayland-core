@@ -392,6 +392,100 @@ fn smoke_17_force_posture_auto_approves_mutating_tool_in_engine() {
     );
 }
 
+/// wayland#241 regression: config `[default] approval_mode = "auto-edit"`
+/// must reach the json-stream session WITHOUT `--force`. Pre-fix
+/// `run_json_stream_mode` only seeded `--force` and ignored the config
+/// posture, so an edit-class tool blocked on an approval the headless host
+/// never sends. This drives the REAL binary (not the isolated helper) so it
+/// pins the call site the #149 cross-audit flagged as unpinned: a Write
+/// (edit category, auto-approved under AutoEdit) must execute with only the
+/// config seed. A plain `[default]` (no approval_mode) would hang here.
+#[test]
+fn approval_mode_auto_edit_from_config_reaches_json_stream_session() {
+    use std::io::{BufRead, BufReader, Write};
+    use std::time::{Duration, Instant};
+
+    let home = TempDir::new().expect("tempdir");
+    let probe = home.path().join("auto_edit_probe.txt");
+    let probe_arg = probe.to_str().expect("utf-8 path").to_string();
+
+    let (_rt, server) = start_mock(
+        MockLlm::new()
+            .tool_use(
+                "Write",
+                serde_json::json!({ "file_path": probe_arg, "content": "AUTO_EDIT_APPLIED" }),
+            )
+            .text("done"),
+    );
+
+    // Config posture is the ONLY approval signal — no `--force` flag below.
+    let toml = format!(
+        "[default]\nprovider = \"anthropic\"\nmodel = \"claude-sonnet-4-20250514\"\n\
+         approval_mode = \"auto-edit\"\n\n\
+         [providers.anthropic]\napi_key = \"sk-ant-harness-not-real-key-0000000000\"\n\
+         base_url = \"{}\"\n",
+        server.uri()
+    );
+    std::fs::write(home.path().join("config.toml"), toml).expect("write config.toml");
+
+    let mut cmd = std::process::Command::new(binary());
+    // NOTE: no --force. The auto-edit posture must come from config alone.
+    cmd.args(["--json-stream", "--provider", "anthropic"])
+        .current_dir(home.path());
+    harden_child_env(&mut cmd, home.path());
+    let mut child = cmd
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("spawn --json-stream");
+
+    let mut stdin = child.stdin.take().expect("stdin");
+    let stdout = child.stdout.take().expect("stdout");
+    writeln!(
+        stdin,
+        "{{\"type\":\"message\",\"msg_id\":\"1\",\"content\":\"write the probe\"}}"
+    )
+    .expect("write message");
+
+    let (tx, rx) = std::sync::mpsc::channel::<String>();
+    std::thread::spawn(move || {
+        let reader = BufReader::new(stdout);
+        for line in reader.lines().map_while(Result::ok) {
+            if tx.send(line).is_err() {
+                break;
+            }
+        }
+    });
+
+    let deadline = Instant::now() + Duration::from_secs(20);
+    let mut wrote = false;
+    while Instant::now() < deadline {
+        if probe.exists() {
+            wrote = true;
+            break;
+        }
+        let _ = rx.recv_timeout(Duration::from_millis(200));
+    }
+
+    let _ = writeln!(stdin, "{{\"type\":\"stop\"}}");
+    let _ = child.kill();
+    let _ = child.wait();
+
+    assert!(
+        wrote,
+        "config approval_mode=auto-edit must auto-approve the edit-class Write in \
+         json-stream WITHOUT --force (the #241 regression); the probe never appeared, \
+         so the config posture did not reach the session. probe={}",
+        probe.display()
+    );
+    let body = std::fs::read_to_string(&probe).unwrap_or_default();
+    assert!(
+        body.contains("AUTO_EDIT_APPLIED"),
+        "the auto-approved Write must have written the scripted content; got {body:?}"
+    );
+}
+
 // ===========================================================================
 // PTY-DRIVEN CHECKS (Unix-only). Drive the real full-screen TUI through a
 // pseudo-terminal so the assertions hit the RENDERED screen, and every key

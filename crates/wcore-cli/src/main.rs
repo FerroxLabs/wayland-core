@@ -1751,6 +1751,27 @@ fn approval_mode_to_session(
     }
 }
 
+/// Boot-time approval posture from local trust sources: the config's
+/// `[default] approval_mode`, with `--force` (or `WAYLAND_ALLOW_WIRE_FORCE`,
+/// surfaced by the caller as `force`) overriding to `Force`. This is the
+/// LOCAL operator's posture — distinct from a wire-originated mode change,
+/// which goes through the GHSA-8r7g-gated `set_mode_from_wire`.
+///
+/// wayland#241: both the TUI (`run_tui_mode`) and json-stream
+/// (`run_json_stream_mode`) paths seed through this one helper so they can't
+/// drift — the json-stream path previously skipped the config seed entirely,
+/// silently ignoring a user's `approval_mode = "auto-edit"` / `"force"`.
+fn initial_session_mode(
+    config_mode: wcore_config::config::ApprovalMode,
+    force: bool,
+) -> wcore_protocol::commands::SessionMode {
+    if force {
+        wcore_protocol::commands::SessionMode::Force
+    } else {
+        approval_mode_to_session(config_mode)
+    }
+}
+
 /// GHSA-8r7g: the `WAYLAND_ALLOW_WIRE_FORCE` env opt-in that lets a protocol
 /// peer request `SessionMode::Force`. Mirrors the env-based operator opt-ins
 /// elsewhere (e.g. `WAYLAND_ALLOW_NO_SANDBOX`). Truthy = `1` / `true`.
@@ -1847,16 +1868,10 @@ async fn run_tui_mode(
     // operator opted in at launch (--force or WAYLAND_ALLOW_WIRE_FORCE).
     approval_manager.set_allow_wire_force(force || wire_force_opt_in_env());
     // Seed the initial approval posture from config (`[default] approval_mode`,
-    // editable via /config). `--force` below overrides it to Force.
-    approval_manager.set_mode(approval_mode_to_session(config.approval_mode));
-    // Force mode: flip the engine's approval manager into `Force` mode at
-    // boot so every tool category is auto-approved. The TUI's approval
-    // modal then never opens (no `ApprovalRequired` event is produced),
-    // and the bottom status bar renders the FORCE badge so the user can
-    // see the mode is active.
-    if force {
-        approval_manager.set_mode(wcore_protocol::commands::SessionMode::Force);
-    }
+    // editable via /config); `--force` overrides to Force. When Force, the
+    // TUI's approval modal never opens (no `ApprovalRequired` event) and the
+    // status bar renders the FORCE badge so the mode is visible.
+    approval_manager.set_mode(initial_session_mode(config.approval_mode, force));
 
     // Phase 1B-2 — the interactive TUI is a primary long-running session, so
     // opt into inbound channel dispatch (the InboundSubscriber turns admitted
@@ -2685,14 +2700,14 @@ async fn run_json_stream_mode(
     // GHSA-8r7g: a protocol peer may escalate to Force only when this local
     // operator opted in at launch (--force or WAYLAND_ALLOW_WIRE_FORCE).
     approval_manager.set_allow_wire_force(force || wire_force_opt_in_env());
-    // F-002: plumb --force into json-stream mode. In the TUI path the
-    // approval manager is flipped to Force before the engine boots; the
-    // json-stream path was missing the same step, causing every mutating
-    // tool (Write/Edit/Bash) to time out waiting for an approval that
-    // would never arrive.
-    if force {
-        approval_manager.set_mode(wcore_protocol::commands::SessionMode::Force);
-    }
+    // wayland#241: seed the initial approval posture from config
+    // (`[default] approval_mode`) via the shared `initial_session_mode`
+    // helper, exactly like `run_tui_mode`. The json-stream path previously
+    // only honored `--force`, so a config `approval_mode = "auto-edit"` /
+    // `"force"` was silently ignored for the desktop host — every mutating
+    // tool then waited on an approval the host never sent. `--force` still
+    // overrides to Force (F-002).
+    approval_manager.set_mode(initial_session_mode(config.approval_mode, force));
     let output: Arc<dyn OutputSink> = protocol_sink.clone();
 
     let provider_name = config.provider_label.clone();
@@ -3769,6 +3784,46 @@ mod tests {
     /// `config.memory.enabled` to `false`, giving users an accessible way to
     /// run a stateless session. Pre-fix the flag did not exist (only a TODO
     /// in wcore-config), so there was no CLI path to disable memory per-run.
+    /// wayland#241: the boot approval posture both entry points seed
+    /// through. Config drives the mode; `--force` overrides to Force. The
+    /// json-stream path previously skipped the config seed, so a user's
+    /// `approval_mode` was ignored — this helper is now the single source
+    /// both paths use.
+    #[test]
+    fn initial_session_mode_honors_config_and_force_override() {
+        use wcore_config::config::ApprovalMode;
+        use wcore_protocol::commands::SessionMode;
+
+        // Config posture is honored when --force is absent.
+        assert_eq!(
+            initial_session_mode(ApprovalMode::Default, false),
+            SessionMode::Default
+        );
+        assert_eq!(
+            initial_session_mode(ApprovalMode::AutoEdit, false),
+            SessionMode::AutoEdit,
+            "config auto-edit must reach the session (the #241 regression)"
+        );
+        assert_eq!(
+            initial_session_mode(ApprovalMode::Force, false),
+            SessionMode::Force,
+            "config force must reach the session without --force"
+        );
+
+        // --force overrides every config posture to Force.
+        for m in [
+            ApprovalMode::Default,
+            ApprovalMode::AutoEdit,
+            ApprovalMode::Force,
+        ] {
+            assert_eq!(
+                initial_session_mode(m, true),
+                SessionMode::Force,
+                "--force must override config {m:?} to Force"
+            );
+        }
+    }
+
     #[test]
     fn test_no_memory_flag_disables_memory() {
         let cli = Cli::parse_from(["wayland-core", "--no-memory", "hello"]);
