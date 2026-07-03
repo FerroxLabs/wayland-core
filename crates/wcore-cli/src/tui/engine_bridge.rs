@@ -69,9 +69,12 @@ pub struct ChannelEmitter {
     /// GHSA-8r7g: sync correlation→secret lookup so a synthesized gate frame
     /// carries the unguessable `resume_token` for a bridge-backed approval
     /// (crucible/egress), and EMPTY for a regular tool (no bridge entry —
-    /// resolved via `ToolApprove`). `None` (ACP relay + unit tests) keeps the
-    /// legacy behavior of emitting the `call_id` as the resume handle; the ACP
-    /// projection's endpoint hardening is a separate follow-up.
+    /// resolved via `ToolApprove`). All production transports (TUI and, since
+    /// wayland#497, the ACP relay) pass `Some`; `None` (unit tests only)
+    /// falls back to the legacy call_id-as-token emit. NOTE: the ACP
+    /// PROJECTION still drops `resume_token` and its resolve endpoint stays
+    /// call_id-keyed — carrying/accepting the secret end-to-end on ACP is
+    /// tracked separately (see the RelayEmitter field doc).
     approval_bridge: Option<Arc<wcore_agent::approval::ApprovalBridge>>,
 }
 
@@ -99,7 +102,8 @@ impl ChannelEmitter {
     /// TUI/ACP emitters where the engine may also emit its own gate frame.
     /// GHSA-8r7g: `approval_bridge` supplies the sync correlation→secret lookup
     /// used to stamp the unguessable `resume_token` onto a bridge-backed gate
-    /// frame (`Some` for the TUI; `None` for the ACP relay keeps legacy emit).
+    /// frame (`Some` for the TUI and, since wayland#497, the ACP relay;
+    /// `None` only in unit tests).
     pub fn with_dedupe(
         tx: UnboundedSender<ProtocolEvent>,
         synthesized: DedupeSet,
