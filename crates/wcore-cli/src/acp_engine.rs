@@ -327,12 +327,15 @@ impl Drop for TerminalGuard {
 // ─────────────────────────────────────────────────────────────────────────
 
 /// Map a protocol [`FinishReason`] onto an ACP StopReason string. `cancelled`
-/// / `max_turn_requests` are produced by other paths, not by `FinishReason`.
+/// is produced by other paths, not by `FinishReason`.
 fn stop_reason_str(reason: FinishReason) -> &'static str {
     match reason {
         FinishReason::Stop => "end_turn",
         FinishReason::Length => "max_tokens",
         FinishReason::Error => "refusal",
+        // #457: the engine's per-turn cap maps to the ACP `max_turn_requests`
+        // stop reason so an ACP client can offer Continue, not a refusal.
+        FinishReason::MaxTurns => "max_turn_requests",
     }
 }
 

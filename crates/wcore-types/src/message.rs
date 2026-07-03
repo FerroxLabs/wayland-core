@@ -123,11 +123,13 @@ pub enum StopReason {
 ///
 /// Distinct from `StopReason` (internal): `FinishReason` is the contract
 /// the JSON stream protocol exposes to host integrations (e.g. the Wayland
-/// app). It coalesces every provider's native stop signal into three
-/// values so the host can render UX consistently (e.g. show "Response was
-/// truncated" on `Length`).
+/// app). It coalesces stop signals into a small set of values so the host can
+/// render UX consistently (e.g. show "Response was truncated" on `Length`).
 ///
-/// Unmapped provider values map to `Error` rather than silently degrading.
+/// Provider-native signals coalesce to `Stop` / `Length` / `Error`; unmapped
+/// provider values map to `Error` rather than silently degrading. `MaxTurns`
+/// is an ENGINE-level stop (never emitted by a provider) that the host must be
+/// able to tell apart from a provider `Error` — see the variant docs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum FinishReason {
@@ -139,6 +141,12 @@ pub enum FinishReason {
     /// Provider returned an unrecognized stop signal, refused, or the
     /// engine never received a Done event (e.g. mid-stream error).
     Error,
+    /// #457: the ENGINE stopped the run because it hit the per-turn `max_turns`
+    /// cap — the model did NOT fail. Serialized as `"max_turns"`. Hosts should
+    /// offer a "Continue" affordance (resume the run) rather than the provider-
+    /// error UX ("use a bigger model"). Previously coalesced into `Error`, which
+    /// made "out of turns" indistinguishable from a real model failure.
+    MaxTurns,
 }
 
 impl FinishReason {
@@ -147,7 +155,9 @@ impl FinishReason {
         match sr {
             StopReason::EndTurn | StopReason::ToolUse => FinishReason::Stop,
             StopReason::MaxTokens => FinishReason::Length,
-            StopReason::MaxTurns => FinishReason::Error,
+            // #457: keep the turn-cap distinct from a provider Error so the host
+            // can surface Continue instead of a generic model-failure message.
+            StopReason::MaxTurns => FinishReason::MaxTurns,
         }
     }
 }
@@ -345,6 +355,42 @@ mod tests {
     fn test_stop_reason_max_tokens_variant() {
         let reason = StopReason::MaxTokens;
         assert_eq!(reason, StopReason::MaxTokens);
+    }
+
+    // --- FinishReason::from_stop_reason (#457) ---
+
+    #[test]
+    fn finish_reason_maps_each_stop_reason() {
+        assert_eq!(
+            FinishReason::from_stop_reason(StopReason::EndTurn),
+            FinishReason::Stop
+        );
+        assert_eq!(
+            FinishReason::from_stop_reason(StopReason::ToolUse),
+            FinishReason::Stop
+        );
+        assert_eq!(
+            FinishReason::from_stop_reason(StopReason::MaxTokens),
+            FinishReason::Length
+        );
+        // #457: the turn cap must NOT coalesce into Error — it is its own value
+        // so the host can offer Continue instead of a model-failure message.
+        assert_eq!(
+            FinishReason::from_stop_reason(StopReason::MaxTurns),
+            FinishReason::MaxTurns
+        );
+        assert_ne!(
+            FinishReason::from_stop_reason(StopReason::MaxTurns),
+            FinishReason::Error,
+            "regression guard: max_turns must never map back to Error"
+        );
+    }
+
+    #[test]
+    fn finish_reason_max_turns_serializes_snake_case() {
+        // The host contract: the new variant is exposed as "max_turns".
+        let json = serde_json::to_value(FinishReason::MaxTurns).unwrap();
+        assert_eq!(json, json!("max_turns"));
     }
 
     // --- TokenUsage default ---

@@ -933,6 +933,8 @@ mod tests {
             (FinishReason::Stop, "stop"),
             (FinishReason::Length, "length"),
             (FinishReason::Error, "error"),
+            // #457: the engine turn-cap is a distinct, host-visible value.
+            (FinishReason::MaxTurns, "max_turns"),
         ] {
             let event = ProtocolEvent::StreamEnd {
                 msg_id: "m1".to_string(),
