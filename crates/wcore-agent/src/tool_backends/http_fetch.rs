@@ -17,9 +17,65 @@ use wcore_tools::web_fetch::{
 
 /// Dedicated deadline for the synchronous readability extraction stage
 /// (#403). Kept well below the default per-call budget (30s) so a
-/// pathological page that pins the parser falls back to raw text fast
-/// instead of consuming the whole fetch budget with no output.
+/// pathological page that pins the parser lets the FETCH return raw text
+/// promptly instead of consuming the whole budget with no output.
+///
+/// #110 caveat: `tokio::time::timeout` cannot cancel the `spawn_blocking`
+/// thread the extractor runs on — a blocking sync call never yields. On
+/// overrun the extraction is ORPHANED and runs to completion in the
+/// background; it is bounded (not a leak) only because the input is pre-capped
+/// to [`WEB_FETCH_MAX_RESPONSE_BYTES`], so its worst-case duration is bounded.
+/// "Falls back" means the fetch responds fast, NOT that the extraction stops.
 const READABILITY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(12);
+
+/// Run the CPU-bound readability extraction on a blocking thread, racing it
+/// against `deadline`. On overrun or task-join failure, return the raw
+/// (already byte-capped) `capped` body instead of failing the whole fetch.
+///
+/// #403: `readability::extract` is a SYNCHRONOUS, CPU-bound DOM walk. The outer
+/// per-call `tokio::time::timeout` cannot interrupt a blocking sync call, so a
+/// pathological page pinned a CPU and surfaced as a full-budget "timed out" with
+/// no output. This isolates that stage on its own shorter deadline.
+///
+/// #110 caveat: the timeout does NOT cancel the `spawn_blocking` thread — on
+/// overrun the extraction is orphaned and runs to completion in the background
+/// (bounded, because the input was pre-capped). The fetch returns raw promptly;
+/// the extraction work does not stop. Factored out of the fetch path so the
+/// overrun→raw fallback branch is unit-testable with an injected slow extractor.
+async fn extract_or_raw<F>(
+    capped: String,
+    deadline: std::time::Duration,
+    extract: F,
+    log_url: &str,
+) -> String
+where
+    F: FnOnce(String) -> String + Send + 'static,
+{
+    let raw_fallback = capped.clone();
+    let extract_fut = tokio::task::spawn_blocking(move || extract(capped));
+    match tokio::time::timeout(deadline, extract_fut).await {
+        Ok(Ok(extracted)) => extracted,
+        Ok(Err(join_err)) => {
+            tracing::warn!(
+                target: "wcore_agent",
+                url = %log_url,
+                error = %join_err,
+                "readability extraction task failed; returning raw body"
+            );
+            raw_fallback
+        }
+        Err(_) => {
+            tracing::warn!(
+                target: "wcore_agent",
+                url = %log_url,
+                timeout_s = deadline.as_secs(),
+                "readability extraction exceeded its deadline; returning raw body \
+                 (retry with readable:false to skip extraction)"
+            );
+            raw_fallback
+        }
+    }
+}
 
 /// Real `FetchBackend` over `reqwest`. Powers the `WebFetch` tool.
 ///
@@ -172,39 +228,18 @@ impl HttpFetchBackend {
             } else {
                 raw_text
             };
-            // #403: readability::extract is a SYNCHRONOUS, CPU-bound DOM walk.
-            // The outer `tokio::time::timeout` cannot interrupt it (a blocking
-            // sync call never yields), so a pathological page pinned a CPU and
-            // surfaced as the full-budget "timed out" with no output. Run the
-            // extractor on a blocking thread and race it against a dedicated,
-            // shorter deadline; if extraction overruns, fall back to the raw
-            // (already byte-capped) body rather than failing the whole fetch.
-            let raw_fallback = capped.clone();
-            let extract_fut = tokio::task::spawn_blocking(move || {
-                wcore_browser::readability::extract(&capped, wcore_browser::op::ReadMode::Article)
-            });
-            match tokio::time::timeout(READABILITY_TIMEOUT, extract_fut).await {
-                Ok(Ok(extracted)) => extracted,
-                Ok(Err(join_err)) => {
-                    tracing::warn!(
-                        target: "wcore_agent",
-                        url = %final_url,
-                        error = %join_err,
-                        "readability extraction task failed; returning raw body"
-                    );
-                    raw_fallback
-                }
-                Err(_) => {
-                    tracing::warn!(
-                        target: "wcore_agent",
-                        url = %final_url,
-                        timeout_s = READABILITY_TIMEOUT.as_secs(),
-                        "readability extraction exceeded its deadline; returning raw body \
-                         (retry with readable:false to skip extraction)"
-                    );
-                    raw_fallback
-                }
-            }
+            // #403: isolate the synchronous extraction on its own deadline; on
+            // overrun fall back to the raw (byte-capped) body. See
+            // [`extract_or_raw`] for the orphaned-thread caveat (#110).
+            extract_or_raw(
+                capped,
+                READABILITY_TIMEOUT,
+                |html| {
+                    wcore_browser::readability::extract(&html, wcore_browser::op::ReadMode::Article)
+                },
+                &final_url,
+            )
+            .await
         } else {
             raw_text
         };
@@ -238,5 +273,49 @@ impl HttpFetchBackend {
                 ),
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Duration;
+
+    #[tokio::test]
+    async fn extract_or_raw_returns_extracted_when_within_deadline() {
+        // The fast path: the extractor finishes before the deadline, so its
+        // output is used verbatim (not the raw fallback).
+        let out = extract_or_raw(
+            "<html>raw</html>".to_string(),
+            Duration::from_secs(5),
+            |_html| "EXTRACTED".to_string(),
+            "http://example.test",
+        )
+        .await;
+        assert_eq!(out, "EXTRACTED");
+    }
+
+    #[tokio::test]
+    async fn extract_or_raw_falls_back_to_raw_on_deadline_overrun() {
+        // #110 / #106 marquee fix: an extractor that overruns the deadline must
+        // yield the raw (already byte-capped) body promptly rather than failing
+        // the fetch. The orphaned blocking thread keeps running (the timeout
+        // cannot cancel spawn_blocking) but the fetch does not wait for it — so
+        // this test returns in ~50ms (the deadline), not ~400ms (the sleep).
+        let raw = "RAW-BODY-CONTENT".to_string();
+        let out = extract_or_raw(
+            raw.clone(),
+            Duration::from_millis(50),
+            |_html| {
+                std::thread::sleep(Duration::from_millis(400));
+                "EXTRACTED-TOO-LATE".to_string()
+            },
+            "http://example.test",
+        )
+        .await;
+        assert_eq!(
+            out, raw,
+            "an extraction overrun must fall back to the raw body"
+        );
     }
 }
