@@ -501,6 +501,22 @@ impl McpManager {
         }
     }
 
+    /// Test-only constructor: build a manager with an explicit health map
+    /// and no live servers. wayland#551 — lets `mcp_failed_events_for`-style
+    /// consumers be tested against `Failed` / `TimedOut` entries, which the
+    /// other test constructors can't produce (they mark everything Ready).
+    #[cfg(any(test, feature = "test-utils"))]
+    pub fn new_for_test_with_health(health: Vec<(&str, McpServerHealth)>) -> Self {
+        Self {
+            servers: HashMap::new(),
+            health: health
+                .into_iter()
+                .map(|(name, h)| (name.to_string(), h))
+                .collect(),
+            next_id: AtomicU64::new(10),
+        }
+    }
+
     /// Test-only constructor: build a manager from pre-configured servers.
     #[cfg(any(test, feature = "test-utils"))]
     pub fn new_for_test(

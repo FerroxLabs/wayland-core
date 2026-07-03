@@ -392,6 +392,62 @@ async fn bootstrap_no_mcp_when_no_servers() {
     assert!(result.mcp_managers.is_empty());
 }
 
+/// wayland#551 — `defer_config_mcp(true)` must skip the config-server
+/// connect entirely: build() returns without dialing (the configured
+/// server here would hang the full 30s per-server budget if dialed —
+/// the exact stall that blew hosts' 30s ready timeout), registers no
+/// MCP tools, and reports has_mcp=false (the caller advertises MCP
+/// capability itself for declared-but-deferred servers).
+#[tokio::test]
+#[serial]
+async fn bootstrap_defer_config_mcp_skips_connect() {
+    use wcore_config::config::{McpServerConfig, TransportType};
+
+    let (_plugins, _env) = isolated_plugins();
+    let mut config = minimal_config();
+    config.mcp.servers.insert(
+        "hang".into(),
+        McpServerConfig {
+            transport: TransportType::Stdio,
+            // Starts fine, never speaks MCP — a dialed connect would sit in
+            // the handshake until the 30s per-server timeout.
+            command: Some("sleep".into()),
+            args: Some(vec!["300".into()]),
+            env: None,
+            url: None,
+            headers: None,
+            deferred: None,
+            allow_local: false,
+        },
+    );
+    let workdir = tempfile::TempDir::new().expect("workdir");
+
+    let start = std::time::Instant::now();
+    let result = AgentBootstrap::new(config, workdir.path().to_str().unwrap(), null_output())
+        .defer_config_mcp(true)
+        .build()
+        .await
+        .unwrap();
+
+    // Generous bound: well under the 30s connect budget the skipped dial
+    // would have burned, far above any honest build cost.
+    assert!(
+        start.elapsed() < std::time::Duration::from_secs(15),
+        "deferred build must not dial config MCP servers (took {:?})",
+        start.elapsed()
+    );
+    assert!(!result.has_mcp, "deferred servers must not set has_mcp");
+    assert!(result.mcp_managers.is_empty());
+    assert!(
+        !result
+            .engine
+            .tool_names()
+            .iter()
+            .any(|n| n.contains("hang")),
+        "no tools from the deferred server may be registered at build time"
+    );
+}
+
 #[tokio::test]
 async fn bootstrap_with_custom_system_prompt() {
     let mut config = minimal_config();

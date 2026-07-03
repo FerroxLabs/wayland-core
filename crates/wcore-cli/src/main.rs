@@ -2391,6 +2391,94 @@ fn mcp_ready_events_for(mgr: &McpManager) -> Vec<ProtocolEvent> {
         .collect()
 }
 
+/// wayland#551 — companion to [`mcp_ready_events_for`]: one `McpFailed`
+/// event per server whose connect failed or timed out, so a host whose
+/// config MCP servers were dialed in the background still learns WHY a
+/// server's tools never appeared (parity with the dynamic `AddMcpServer`
+/// path's failure emit). Pure and name-sorted for deterministic tests.
+fn mcp_failed_events_for(mgr: &McpManager) -> Vec<ProtocolEvent> {
+    use wcore_mcp::manager::McpServerHealth;
+    let mut entries: Vec<(&String, &McpServerHealth)> = mgr.health().iter().collect();
+    entries.sort_by_key(|(name, _)| name.as_str());
+    entries
+        .into_iter()
+        .filter_map(|(name, health)| {
+            let reason = match health {
+                McpServerHealth::Failed { reason } => reason.clone(),
+                McpServerHealth::TimedOut { after } => {
+                    format!("connect timed out after {}s", after.as_secs())
+                }
+                McpServerHealth::Skipped { reason } => reason.clone(),
+                McpServerHealth::Ready { .. } => return None,
+            };
+            Some(ProtocolEvent::McpFailed {
+                name: name.clone(),
+                reason,
+            })
+        })
+        .collect()
+}
+
+/// wayland#551 — integrate a background-connected config-MCP manager into
+/// the LIVE engine. Registers the manager's tools (same collision handling
+/// as boot via [`wcore_mcp::tool_proxy::register_mcp_tools`]), emits one
+/// `McpReady` per connected server and one `McpFailed` per failed server,
+/// and parks the manager in `dynamic_managers` so it stays alive.
+///
+/// wayland#551 — absorb a settled background config-MCP connect: on
+/// success, integrate into the live engine (returning the parked pair when
+/// the registry is momentarily borrowed so the caller can retry between
+/// turns); on failure, surface the error with bootstrap's inline-connect
+/// wording. Shared by the loop-top non-blocking poll and the select arm.
+fn note_deferred_mcp_connect(
+    outcome: Result<McpManager, wcore_mcp::transport::McpError>,
+    resolved: HashMap<String, McpServerConfig>,
+    engine: &mut wcore_agent::engine::AgentEngine,
+    writer: &ProtocolWriter,
+    output: &Arc<dyn OutputSink>,
+    dynamic_managers: &mut Vec<Arc<McpManager>>,
+) -> Option<(Arc<McpManager>, HashMap<String, McpServerConfig>)> {
+    match outcome {
+        Ok(mgr) => {
+            let mgr = Arc::new(mgr);
+            if integrate_deferred_mcp(engine, mgr.clone(), &resolved, writer, dynamic_managers) {
+                None
+            } else {
+                Some((mgr, resolved))
+            }
+        }
+        Err(e) => {
+            output.emit_error(&format!("MCP initialization error: {e}"), false);
+            None
+        }
+    }
+}
+
+/// Returns `false` when the registry Arc is currently borrowed (a turn is
+/// mid-flight) — the caller parks the manager and retries at the next
+/// between-turns boundary.
+fn integrate_deferred_mcp(
+    engine: &mut wcore_agent::engine::AgentEngine,
+    mgr: Arc<McpManager>,
+    resolved_servers: &HashMap<String, McpServerConfig>,
+    writer: &ProtocolWriter,
+    dynamic_managers: &mut Vec<Arc<McpManager>>,
+) -> bool {
+    let builtin_names = engine.tool_names();
+    let Some(reg) = engine.registry_mut() else {
+        return false;
+    };
+    wcore_mcp::tool_proxy::register_mcp_tools(reg, &mgr, &builtin_names, resolved_servers);
+    for event in mcp_ready_events_for(&mgr) {
+        let _ = writer.emit(&event);
+    }
+    for event in mcp_failed_events_for(&mgr) {
+        let _ = writer.emit(&event);
+    }
+    dynamic_managers.push(mgr);
+    true
+}
+
 fn to_mcp_server_config(
     transport: &str,
     command: Option<String>,
@@ -2609,13 +2697,34 @@ async fn run_json_stream_mode(
 
     let provider_name = config.provider_label.clone();
 
+    // wayland#551 — config-declared MCP connects must NOT gate the `ready`
+    // frame: a slow/hung server eats up to the full 30s per-server connect
+    // budget INSIDE bootstrap, and hosts (the desktop app) time out waiting
+    // for ready at 30s — the chat never opens. Capture + cred-resolve the
+    // servers now (config is moved into bootstrap next), tell bootstrap to
+    // skip them, and dial them in the background right after ready goes out.
+    // Resolution happens here on a clone, mirroring bootstrap's own connect
+    // boundary: the long-lived config keeps the literal `${cred:...}`.
+    let deferred_mcp_servers = if config.mcp.servers.is_empty() {
+        None
+    } else {
+        Some(match config.open_credentials_store() {
+            Ok(store) => wcore_config::mcp_cred_refs::resolve_servers_for_connect(
+                &config.mcp.servers,
+                &*store,
+            ),
+            Err(_) => config.mcp.servers.clone(),
+        })
+    };
+
     // Bootstrap engine with full feature initialization. Phase 1B-2 —
     // json-stream is a primary long-running host session (e.g. the Wayland
     // desktop app), so
     // opt into inbound channel dispatch.
     let mut bootstrap = AgentBootstrap::new(config, cwd, output.clone())
         .plugin_provider_router(make_plugin_provider_router())
-        .enable_inbound_dispatch(true);
+        .enable_inbound_dispatch(true)
+        .defer_config_mcp(deferred_mcp_servers.is_some());
 
     if let Some(resume_id) = &resume {
         let cfg = bootstrap.config();
@@ -2636,7 +2745,9 @@ async fn run_json_stream_mode(
         }
     };
     let mut engine = result.engine;
-    let initial_has_mcp = result.has_mcp;
+    // wayland#551 — declared-but-still-connecting servers count as MCP
+    // capability on the ready frame; their tools register shortly after.
+    let initial_has_mcp = result.has_mcp || deferred_mcp_servers.is_some();
     let initial_has_plugins = result.has_plugins;
     // W8c.3 H.2: snapshot the plugin-derived capability set so the
     // protocol sink advertises `browser_suite` / `computer_use` flags
@@ -2690,6 +2801,22 @@ async fn run_json_stream_mode(
         }
     }
 
+    // wayland#551 — dial the deferred config MCP servers in the background,
+    // AFTER ready is on the wire. The command loop integrates the manager
+    // into the live engine between turns (see the select below) and emits
+    // McpReady / McpFailed per server, exactly like the dynamic
+    // `AddMcpServer` path. A turn that starts before the connects settle
+    // simply runs without the MCP tools — the old behavior was a chat that
+    // never opened at all.
+    let mut deferred_mcp_rx = deferred_mcp_servers.map(|resolved| {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        tokio::spawn(async move {
+            let outcome = McpManager::connect_all(&resolved).await;
+            let _ = tx.send((outcome, resolved));
+        });
+        rx
+    });
+
     engine.set_approval_manager(approval_manager.clone());
     // D012 (P0 security): install the gating writer as the engine's
     // tool-lifecycle emitter so a gated mutating tool emits a host-visible
@@ -2731,7 +2858,39 @@ async fn run_json_stream_mode(
     let mut dynamic_managers: Vec<Arc<McpManager>> = Vec::new();
     let mut first_cmd: Option<ProtocolCommand> = None;
 
-    while let Some(cmd) = cmd_rx.recv().await {
+    // wayland#551 — a deferred-MCP manager whose integration found the
+    // registry borrowed; retried at the next between-turns boundary.
+    let mut pending_deferred_mcp: Option<(Arc<McpManager>, HashMap<String, McpServerConfig>)> =
+        None;
+
+    loop {
+        // wayland#551 — the pre-message phase can park in recv() forever on
+        // a quiet host, so the background connect result must be settled
+        // here too, or McpReady/McpFailed health would wait on host
+        // activity (live-verify caught exactly that).
+        let cmd = tokio::select! {
+            c = cmd_rx.recv() => match c {
+                Some(c) => c,
+                None => break,
+            },
+            res = async { deferred_mcp_rx.as_mut().expect("guarded by is_some").await },
+                if deferred_mcp_rx.is_some() =>
+            {
+                deferred_mcp_rx = None;
+                // Err = connect task dropped without sending (panic).
+                if let Ok((outcome, resolved)) = res {
+                    pending_deferred_mcp = note_deferred_mcp_connect(
+                        outcome,
+                        resolved,
+                        &mut engine,
+                        &writer,
+                        &output,
+                        &mut dynamic_managers,
+                    );
+                }
+                continue;
+            }
+        };
         match cmd {
             ProtocolCommand::AddMcpServer {
                 name,
@@ -2826,13 +2985,69 @@ async fn run_json_stream_mode(
     let has_mcp = initial_has_mcp || !dynamic_managers.is_empty();
     let mut pending_cmd = first_cmd;
 
-    loop {
+    'session: loop {
+        // wayland#551 — settle deferred MCP at every between-turns boundary,
+        // BEFORE the next command is processed, so a message that arrives
+        // after the connects finished runs WITH the MCP tools. Two sources:
+        // a non-blocking poll of the connect task (the blocking wait lives
+        // in the select below) and a parked integration whose earlier
+        // attempt found the registry borrowed.
+        if let Some(rx) = deferred_mcp_rx.as_mut()
+            && let Ok((outcome, resolved)) = rx.try_recv()
+        {
+            deferred_mcp_rx = None;
+            pending_deferred_mcp = note_deferred_mcp_connect(
+                outcome,
+                resolved,
+                &mut engine,
+                &writer,
+                &output,
+                &mut dynamic_managers,
+            );
+        }
+        if let Some((mgr, resolved)) = pending_deferred_mcp.take()
+            && !integrate_deferred_mcp(
+                &mut engine,
+                mgr.clone(),
+                &resolved,
+                &writer,
+                &mut dynamic_managers,
+            )
+        {
+            pending_deferred_mcp = Some((mgr, resolved));
+        }
+
         let cmd = if let Some(c) = pending_cmd.take() {
             c
         } else {
-            match cmd_rx.recv().await {
-                Some(c) => c,
-                None => break,
+            loop {
+                tokio::select! {
+                    c = cmd_rx.recv() => match c {
+                        Some(c) => break c,
+                        None => break 'session,
+                    },
+                    // wayland#551 — background config-MCP connect settled;
+                    // integrate into the live engine and keep waiting for
+                    // the next command. Guarded so a consumed receiver is
+                    // never polled again.
+                    res = async { deferred_mcp_rx.as_mut().expect("guarded by is_some").await },
+                        if deferred_mcp_rx.is_some() =>
+                    {
+                        deferred_mcp_rx = None;
+                        // Err = connect task dropped without sending (panic);
+                        // nothing to integrate.
+                        if let Ok((outcome, resolved)) = res {
+                            pending_deferred_mcp = note_deferred_mcp_connect(
+                                outcome,
+                                resolved,
+                                &mut engine,
+                                &writer,
+                                &output,
+                                &mut dynamic_managers,
+                            );
+                        }
+                    }
+                }
             }
         };
 
@@ -3433,6 +3648,121 @@ mod tests {
             }
             other => panic!("expected McpReady, got {other:?}"),
         }
+    }
+
+    /// wayland#551: background-connect failure surfacing — one `McpFailed`
+    /// per Failed/TimedOut/Skipped server, none for Ready, name-sorted.
+    /// Pre-fix the deferred path would have reported connect failures
+    /// nowhere (bootstrap's inline emit no longer runs for these servers).
+    #[test]
+    fn test_mcp_failed_events_for_reports_failures_only() {
+        use wcore_mcp::manager::McpServerHealth;
+        let mgr = McpManager::new_for_test_with_health(vec![
+            (
+                "slow",
+                McpServerHealth::TimedOut {
+                    after: std::time::Duration::from_secs(30),
+                },
+            ),
+            ("okay", McpServerHealth::Ready { tool_count: 3 }),
+            (
+                "broken",
+                McpServerHealth::Failed {
+                    reason: "handshake refused".into(),
+                },
+            ),
+        ]);
+        let events = mcp_failed_events_for(&mgr);
+        assert_eq!(events.len(), 2, "Ready servers must not emit McpFailed");
+        match &events[0] {
+            ProtocolEvent::McpFailed { name, reason } => {
+                assert_eq!(name, "broken");
+                assert!(reason.contains("handshake refused"), "reason = {reason}");
+            }
+            other => panic!("expected McpFailed, got {other:?}"),
+        }
+        match &events[1] {
+            ProtocolEvent::McpFailed { name, reason } => {
+                assert_eq!(name, "slow");
+                assert!(reason.contains("30"), "reason = {reason}");
+            }
+            other => panic!("expected McpFailed, got {other:?}"),
+        }
+    }
+
+    /// wayland#551: deferred-MCP integration must register the manager's
+    /// tools into a LIVE engine (post-boot), emit per-server events, and
+    /// park the manager alive in `dynamic_managers`. Pins the integration
+    /// half of the deferral wiring — removing `register_mcp_tools` from
+    /// `integrate_deferred_mcp` fails this.
+    #[tokio::test]
+    async fn integrate_deferred_mcp_registers_tools_into_live_engine() {
+        let (mut engine, _sink) = wcore_agent::bootstrap::AgentBootstrap::build_for_test(
+            wcore_config::config::Config::default(),
+            vec![],
+        );
+        let before = engine.tool_names().len();
+        let mgr = Arc::new(McpManager::new_for_test_with_tools(vec![(
+            "quick",
+            false,
+            Box::new(NoopTransport) as Box<dyn McpTransport>,
+            vec![tool("quick_echo")],
+        )]));
+        let writer = ProtocolWriter::new();
+        let mut dynamic_managers = Vec::new();
+        assert!(
+            integrate_deferred_mcp(
+                &mut engine,
+                mgr,
+                &HashMap::new(),
+                &writer,
+                &mut dynamic_managers
+            ),
+            "integration must succeed on an idle engine"
+        );
+        assert!(
+            engine.tool_names().len() > before
+                && engine.tool_names().iter().any(|n| n.contains("quick_echo")),
+            "deferred server's tools must be registered; got {:?}",
+            engine.tool_names()
+        );
+        assert_eq!(dynamic_managers.len(), 1, "manager must be kept alive");
+    }
+
+    /// wayland#551: while the registry Arc is borrowed (as during a turn),
+    /// integration must decline — no partial registration — so the caller
+    /// parks the manager and retries at the next between-turns boundary.
+    #[tokio::test]
+    async fn integrate_deferred_mcp_parks_while_registry_is_borrowed() {
+        let (mut engine, _sink) = wcore_agent::bootstrap::AgentBootstrap::build_for_test(
+            wcore_config::config::Config::default(),
+            vec![],
+        );
+        let hold = engine.tools(); // second Arc ref → registry_mut() is None
+        let mgr = Arc::new(McpManager::new_for_test_with_tools(vec![(
+            "quick",
+            false,
+            Box::new(NoopTransport) as Box<dyn McpTransport>,
+            vec![tool("quick_echo")],
+        )]));
+        let writer = ProtocolWriter::new();
+        let mut dynamic_managers = Vec::new();
+        assert!(
+            !integrate_deferred_mcp(
+                &mut engine,
+                mgr,
+                &HashMap::new(),
+                &writer,
+                &mut dynamic_managers
+            ),
+            "integration must decline while the registry is borrowed"
+        );
+        assert!(dynamic_managers.is_empty());
+        assert!(
+            !engine.tool_names().iter().any(|n| n.contains("quick_echo")),
+            "no tools may be registered on a declined integration"
+        );
+        drop(hold);
     }
 
     /// Rank 47 regression: `--no-memory` must parse and flip
