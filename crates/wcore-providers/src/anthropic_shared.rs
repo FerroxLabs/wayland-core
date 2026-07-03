@@ -356,8 +356,37 @@ pub async fn process_sse_stream(
     Ok(())
 }
 
+/// wayland#552 — env-gated raw SSE capture. When
+/// `WAYLAND_ANTHROPIC_SSE_DUMP` names a file, every SSE event this parser
+/// receives is appended as one `event_type\tdata` line BEFORE parsing, so a
+/// frame shape the parser silently ignores (unknown block/delta types fall
+/// through `_ => {}` arms) is still observable. Diagnostic instrument for
+/// model-family rollouts (first user: the claude-fable-5 empty-bash-loop
+/// capture); zero overhead when the env var is unset (checked once).
+/// SECURITY: the dump contains raw model output — the operator chooses the
+/// path and owns the file; nothing is captured by default.
+fn sse_dump(event_type: &str, data: &str) {
+    use std::io::Write;
+    use std::sync::OnceLock;
+    static DUMP_PATH: OnceLock<Option<String>> = OnceLock::new();
+    let Some(path) = DUMP_PATH
+        .get_or_init(|| std::env::var("WAYLAND_ANTHROPIC_SSE_DUMP").ok())
+        .as_ref()
+    else {
+        return;
+    };
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+    {
+        let _ = writeln!(f, "{event_type}\t{data}");
+    }
+}
+
 /// Parse a single SSE data payload into zero or more LlmEvents
 pub fn parse_sse_data(event_type: &str, data: &str, state: &mut StreamState) -> Vec<LlmEvent> {
+    sse_dump(event_type, data);
     let mut events = Vec::new();
 
     let json: Value = match serde_json::from_str(data) {
