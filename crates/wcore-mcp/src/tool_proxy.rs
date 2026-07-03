@@ -79,9 +79,15 @@ impl Tool for McpToolProxy {
             .call_tool(&self.server_name, &self.tool_name, input)
             .await
         {
-            Ok(content) => ToolResult {
-                content,
-                is_error: false,
+            // #475: a transport-successful call may still be a tool-level
+            // failure (MCP `isError: true`). Surface that as `is_error` so the
+            // agent (retry-cap guard, UI badge, model error signal) sees it —
+            // the `content` still carries the tool's error text so the model can
+            // read it and recover. A single failure never aborts; it is just a
+            // normal error result.
+            Ok(outcome) => ToolResult {
+                content: outcome.text,
+                is_error: outcome.is_error,
             },
             Err(e) => ToolResult {
                 content: format!("MCP tool error: {}", e),

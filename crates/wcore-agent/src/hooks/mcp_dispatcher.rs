@@ -196,7 +196,9 @@ impl McpToolCaller for McpManagerCaller {
         manager
             .call_tool(server, tool, serde_json::json!({}))
             .await
-            .map(cap_hook_response)
+            // Hooks consume the text only; the #475 is_error flag is not
+            // relevant to the hook-dispatch path.
+            .map(|outcome| cap_hook_response(outcome.text))
             .map_err(|e| e.to_string())
     }
 }

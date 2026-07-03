@@ -113,11 +113,11 @@ async fn mcp_tool_html_content_flows_back_through_call_tool() {
 
     // HTML content flows back through McpManager unchanged.
     assert!(
-        result.contains("Example Domain"),
+        result.text.contains("Example Domain"),
         "HTML title must be present in result; got: {result:?}"
     );
     assert!(
-        result.contains("illustrative examples"),
+        result.text.contains("illustrative examples"),
         "HTML body must be present in result; got: {result:?}"
     );
 }

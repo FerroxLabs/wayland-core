@@ -281,7 +281,11 @@ async fn call_tool_round_trip_returns_text_content() {
         .await
         .unwrap();
 
-    assert_eq!(result, "hello from mock");
+    assert_eq!(result.text, "hello from mock");
+    assert!(
+        !result.is_error,
+        "a normal result must not be flagged is_error"
+    );
 }
 
 #[tokio::test]
@@ -299,7 +303,7 @@ async fn call_tool_image_content_produces_bracketed_label() {
     let manager = McpManager::new_for_test_with_tools(entries);
 
     let result = manager.call_tool("srv", "snap", json!({})).await.unwrap();
-    assert_eq!(result, "[image: image/png]");
+    assert_eq!(result.text, "[image: image/png]");
 }
 
 #[tokio::test]
@@ -320,7 +324,7 @@ async fn call_tool_mixed_content_joins_with_newline() {
     let manager = McpManager::new_for_test_with_tools(entries);
 
     let result = manager.call_tool("srv", "multi", json!({})).await.unwrap();
-    assert_eq!(result, "line1\nline2");
+    assert_eq!(result.text, "line1\nline2");
 }
 
 // ---------------------------------------------------------------------------
@@ -361,8 +365,8 @@ async fn concurrent_calls_to_different_servers_return_correct_results() {
         tokio::spawn(async move { m2.call_tool("slow", "t", json!({})).await }),
     );
 
-    assert_eq!(r1.unwrap().unwrap(), "fast-result");
-    assert_eq!(r2.unwrap().unwrap(), "slow-result");
+    assert_eq!(r1.unwrap().unwrap().text, "fast-result");
+    assert_eq!(r2.unwrap().unwrap().text, "slow-result");
 }
 
 // ---------------------------------------------------------------------------

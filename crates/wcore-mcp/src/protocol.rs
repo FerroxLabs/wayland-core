@@ -63,6 +63,14 @@ pub struct McpToolDef {
 #[derive(Debug, Deserialize)]
 pub struct McpToolResult {
     pub content: Vec<McpContent>,
+    /// MCP `isError` flag (spec: optional; absent = false). Per the MCP spec a
+    /// tool that FAILS — including argument-validation failures the tool itself
+    /// performs — reports it as a result with `isError: true`, NOT a JSON-RPC
+    /// error. Dropping it made every MCP tool failure look like success to the
+    /// agent (the retry-cap guard, the UI error badge, the model's error
+    /// signal) — see #475.
+    #[serde(default, rename = "isError")]
+    pub is_error: bool,
 }
 
 /// Content types returned by MCP tool calls
@@ -239,6 +247,24 @@ mod tests {
             McpContent::Text { text } => assert_eq!(text, "hello world"),
             other => panic!("expected McpContent::Text, got {:?}", other),
         }
+    }
+
+    #[test]
+    fn mcp_tool_result_carries_is_error_flag() {
+        // #475: per the MCP spec a tool-level failure is a SUCCESSFUL call whose
+        // result carries `isError: true` (not a JSON-RPC error). We must not
+        // drop it — that made every MCP tool failure look like success.
+        let failed: McpToolResult = serde_json::from_str(
+            r#"{"content":[{"type":"text","text":"missing required arg: service_name"}],"isError":true}"#,
+        )
+        .unwrap();
+        assert!(failed.is_error, "isError:true must deserialize to is_error");
+        assert_eq!(failed.content.len(), 1, "content must still be captured");
+
+        // Absent `isError` defaults to false — a normal successful result.
+        let ok: McpToolResult =
+            serde_json::from_str(r#"{"content":[{"type":"text","text":"ok"}]}"#).unwrap();
+        assert!(!ok.is_error, "absent isError must default to false");
     }
 
     #[test]

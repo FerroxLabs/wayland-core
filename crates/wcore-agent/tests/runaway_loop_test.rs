@@ -44,9 +44,64 @@ fn loop_turn(i: usize) -> Vec<LlmEvent> {
 }
 
 #[tokio::test]
-async fn repeated_identical_tool_call_converges_via_breaker() {
-    // 30 identical tool-call turns queued; max_turns raised to 30 so the breaker
-    // (default threshold 10) is what stops the loop, not the turn cap.
+async fn repeated_identical_successful_tool_call_converges_via_loopguard() {
+    // Identical-SUCCESS no-progress loop: the model calls the same tool with the
+    // same args, getting the same NON-error result every turn. This is
+    // LoopGuard's domain — it keys on the full (tool, args, is_error, content)
+    // signature, so an identical successful call accumulates and trips at the
+    // threshold. (#475: the failing-loop case is now owned by FailureGuard —
+    // see `failing_tool_loop_converges_via_failure_cap_with_maxturns` below.)
+    // max_turns raised to 30 so the breaker (default 10), not the turn cap, is
+    // what stops it.
+    let turns: Vec<Vec<LlmEvent>> = (0..30).map(loop_turn).collect();
+    let provider = Arc::new(MockLlmProvider::with_turns(turns));
+
+    let mut registry = ToolRegistry::new();
+    registry.register(Box::new(MockTool::new(
+        "loop_tool",
+        "same result every time",
+        false, // identical SUCCESSFUL outcome — FailureGuard ignores successes
+    )));
+
+    let sink = Arc::new(TestSink::new());
+    let handle = sink.handle();
+    let output: Arc<dyn OutputSink> = sink;
+    let mut config = test_config();
+    config.max_turns = Some(30);
+
+    let mut engine = AgentEngine::new_with_provider(provider, config, registry, output);
+    let result = engine
+        .run("do the thing", "")
+        .await
+        .expect("run completes (terminated cleanly, not Err)");
+
+    // LoopGuard (threshold 10) must stop the loop well before max_turns(30).
+    assert!(
+        result.turns < 30,
+        "LoopGuard must converge the identical-success loop before max_turns; turns = {}",
+        result.turns
+    );
+
+    // …and surface the no-progress-loop error (LoopGuard's message).
+    let events = handle.snapshot();
+    let saw_loop_error = events
+        .iter()
+        .any(|e| e["type"].as_str() == Some("error") && e.to_string().contains("no-progress loop"));
+    assert!(
+        saw_loop_error,
+        "expected a visible no-progress-loop error event; got {events:?}"
+    );
+}
+
+#[tokio::test]
+async fn failing_tool_loop_converges_via_failure_cap_with_maxturns() {
+    // #475: the model retries a tool that keeps FAILING (here identically, but
+    // FailureGuard is content-agnostic so varied-args validation-error loops
+    // converge the same way). FailureGuard supersedes LoopGuard here — it is
+    // immune to the tool-registry circuit breaker changing the error text after
+    // ~3 failures (which resets LoopGuard's content-keyed streak). It converges
+    // the loop before max_turns and, per #457, exits with finish_reason=max_turns
+    // so the host can offer "Continue" rather than a model-failure UX.
     let turns: Vec<Vec<LlmEvent>> = (0..30).map(loop_turn).collect();
     let provider = Arc::new(MockLlmProvider::with_turns(turns));
 
@@ -54,7 +109,7 @@ async fn repeated_identical_tool_call_converges_via_breaker() {
     registry.register(Box::new(MockTool::new(
         "loop_tool",
         "network is unreachable in this sandbox",
-        true, // identical failing outcome every call
+        true, // failing outcome every call
     )));
 
     let sink = Arc::new(TestSink::new());
@@ -69,22 +124,123 @@ async fn repeated_identical_tool_call_converges_via_breaker() {
         .await
         .expect("run completes (terminated cleanly, not Err)");
 
-    // The breaker (default threshold 10) must stop the loop well before
-    // max_turns(30) — proving it converged, not just hit the turn cap.
     assert!(
         result.turns < 30,
-        "runaway breaker must converge the loop before max_turns; turns = {}",
+        "the failure-cap must converge the failing loop before max_turns; turns = {}",
         result.turns
     );
 
-    // …and surface a clear, user-visible no-progress-loop error.
+    // #457 wiring: a retry-cap stop is Continue-able, not a hard failure.
+    assert_eq!(
+        result.finish_reason,
+        FinishReason::MaxTurns,
+        "the failure-cap exit must surface finish_reason=max_turns (Continue-able)"
+    );
+
+    // …and surface the failure-cap guidance (FailureGuard's message).
     let events = handle.snapshot();
-    let saw_loop_error = events
-        .iter()
-        .any(|e| e["type"].as_str() == Some("error") && e.to_string().contains("no-progress loop"));
+    let saw_failure_cap = events.iter().any(|e| {
+        e["type"].as_str() == Some("error") && e.to_string().contains("failed") && {
+            e.to_string().contains("times in a row")
+        }
+    });
     assert!(
-        saw_loop_error,
-        "expected a visible no-progress-loop error event; got {events:?}"
+        saw_failure_cap,
+        "expected a visible failure-cap error event; got {events:?}"
+    );
+}
+
+#[tokio::test]
+async fn varied_content_failing_loop_converges_via_failure_cap_only() {
+    // Isolation proof (audit follow-up): a tool that FAILS with DIFFERENT
+    // content every call. LoopGuard keys on (tool, args, content), so its
+    // signature changes every turn and it NEVER accumulates — the ONLY breaker
+    // that can converge this loop is FailureGuard (content-agnostic). Proves
+    // FailureGuard owns the failing loop DETERMINISTICALLY, independent of the
+    // circuit breaker or LoopGuard, and exits Continue-able (#457).
+    let turns: Vec<Vec<LlmEvent>> = (0..30).map(loop_turn).collect();
+    let provider = Arc::new(MockLlmProvider::with_turns(turns));
+
+    let mut registry = ToolRegistry::new();
+    registry.register(Box::new(FailingChangingTool::default()));
+
+    let sink = Arc::new(TestSink::new());
+    let handle = sink.handle();
+    let output: Arc<dyn OutputSink> = sink;
+    let mut config = test_config();
+    config.max_turns = Some(30);
+
+    let mut engine = AgentEngine::new_with_provider(provider, config, registry, output);
+    let result = engine.run("keep trying", "").await.expect("run completes");
+
+    assert!(
+        result.turns < 30,
+        "FailureGuard must converge the varied-content failing loop; turns = {}",
+        result.turns
+    );
+    assert_eq!(
+        result.finish_reason,
+        FinishReason::MaxTurns,
+        "the failure-cap exit must be Continue-able (max_turns), not a hard error"
+    );
+    let events = handle.snapshot();
+    assert!(
+        events.iter().any(
+            |e| e["type"].as_str() == Some("error") && e.to_string().contains("times in a row")
+        ),
+        "expected the failure-cap message; got {events:?}"
+    );
+    // LoopGuard must NOT have fired (content varied every call).
+    assert!(
+        !events
+            .iter()
+            .any(|e| e.to_string().contains("no-progress loop")),
+        "LoopGuard must not fire when content varies; got {events:?}"
+    );
+}
+
+/// #475 no-regression: a tool that fails FEWER than the threshold (default 10)
+/// consecutive times must NOT trip the failure-cap — each error result still
+/// reaches the model and the run proceeds normally. Here 6 failing calls under
+/// max_turns=6 stop at the TURN CAP, not the failure-cap, proving a recoverable
+/// isError flow is not aborted mid-stream.
+#[tokio::test]
+async fn sub_threshold_failures_do_not_trip_failure_cap() {
+    let turns: Vec<Vec<LlmEvent>> = (0..6).map(loop_turn).collect();
+    let provider = Arc::new(MockLlmProvider::with_turns(turns));
+
+    let mut registry = ToolRegistry::new();
+    registry.register(Box::new(MockTool::new(
+        "loop_tool",
+        "transient error, retry",
+        true, // failing, but only 6 times — below the default cap of 10
+    )));
+
+    let sink = Arc::new(TestSink::new());
+    let handle = sink.handle();
+    let output: Arc<dyn OutputSink> = sink;
+    let mut config = test_config();
+    config.max_turns = Some(6);
+
+    let mut engine = AgentEngine::new_with_provider(provider, config, registry, output);
+    let result = engine.run("try it", "").await.expect("run completes");
+
+    assert_eq!(
+        result.turns, 6,
+        "run must reach the turn cap, not be cut early"
+    );
+    let events = handle.snapshot();
+    // The stop is the max_turns cap, NOT the failure-cap.
+    assert!(
+        events.iter().any(|e| e["type"].as_str() == Some("info")
+            && e.to_string().contains("reached the configured max_turns")),
+        "expected the max_turns stop, got {events:?}"
+    );
+    assert!(
+        !events
+            .iter()
+            .any(|e| e.to_string().contains("times in a row")),
+        "the failure-cap must NOT fire below its threshold; got {events:?}"
     );
 }
 
@@ -152,6 +308,40 @@ impl wcore_tools::Tool for ChangingTool {
         wcore_types::tool::ToolResult {
             content: format!("progress step {n}"),
             is_error: false,
+        }
+    }
+}
+
+/// A tool that FAILS with a different result on each call — isolates
+/// FailureGuard, since LoopGuard's content-keyed signature never accumulates.
+#[derive(Default)]
+struct FailingChangingTool {
+    calls: std::sync::Mutex<u32>,
+}
+
+#[async_trait::async_trait]
+impl wcore_tools::Tool for FailingChangingTool {
+    fn name(&self) -> &str {
+        "loop_tool"
+    }
+    fn description(&self) -> &str {
+        "Fails with a different message each call"
+    }
+    fn input_schema(&self) -> serde_json::Value {
+        json!({ "type": "object" })
+    }
+    fn category(&self) -> wcore_protocol::events::ToolCategory {
+        wcore_protocol::events::ToolCategory::Info
+    }
+    fn is_concurrency_safe(&self, _input: &serde_json::Value) -> bool {
+        true
+    }
+    async fn execute(&self, _input: serde_json::Value) -> wcore_types::tool::ToolResult {
+        let mut n = self.calls.lock().unwrap();
+        *n += 1;
+        wcore_types::tool::ToolResult {
+            content: format!("distinct failure {n}"),
+            is_error: true,
         }
     }
 }
