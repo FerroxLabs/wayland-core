@@ -241,7 +241,7 @@ Current response turn finished.
 | Field | Type | Description |
 |-------|------|-------------|
 | `msg_id` | string | Message ID this turn belongs to |
-| `finish_reason` | `"stop" \| "length" \| "error"` | Why the turn ended. `stop`: model finished normally. `length`: hit max_tokens. `error`: provider/runtime error. |
+| `finish_reason` | `"stop" \| "length" \| "error" \| "max_turns"` | Why the turn ended. `stop`: model finished normally. `length`: hit max_tokens. `error`: provider/runtime error. `max_turns`: the engine hit the per-turn `max_turns` cap (the model did **not** fail) — offer a "Continue" affordance to resume the run rather than a model-error message. Hosts should treat `finish_reason` as an open string and tolerate future values. |
 | `usage` | object? | Token counts (optional; omitted when provider does not report usage) |
 
 ### 1.10 `error`

@@ -3731,23 +3731,25 @@ impl AgentEngine {
 
     /// AUDIT A1 / E-C1 / A2 — shared clean-termination path for the
     /// non-natural loop exits (turn cap, budget cap, context ceiling,
-    /// host cancel).
+    /// host cancel, no-progress loop).
     ///
-    /// Every one of these is a *failure verdict*: the model did not
-    /// close the task on its own. They run the identical session-end
-    /// bookkeeping the `MaxTurns` exit already did — `fire_on_session_end`,
-    /// `save_session`, and the two learning observes — then return an
-    /// `AgentResult` with `StopReason::MaxTurns` (the engine's existing
-    /// "ran out of budget" verdict; `observe_*` already maps it to
-    /// `Failure` and `FinishReason::from_stop_reason` maps it to
-    /// `Error`). The distinct, user-visible reason is surfaced via the
-    /// `emit_error` call the caller makes before invoking this — the
-    /// `StopReason` enum lives in `wcore-types` and is not extended
-    /// here.
+    /// Every one of these is a *failure verdict*: the model did not close the
+    /// task on its own. They run the identical session-end bookkeeping —
+    /// `fire_on_session_end`, `save_session`, and the two learning observes —
+    /// then return an `AgentResult` with `StopReason::MaxTurns` (the engine's
+    /// existing "ran out of budget" verdict; `observe_*` maps it to `Failure`).
+    ///
+    /// #457: the host-facing `finish_reason` is passed IN by the caller, not
+    /// derived here, because the exits are NOT interchangeable — the `max_turns`
+    /// cap is `FinishReason::MaxTurns` (host offers "Continue"), while a context
+    /// ceiling / budget cap / loop-break stays `FinishReason::Length` (Continue
+    /// would not help). The distinct human-readable reason is surfaced via the
+    /// `emit_info`/`emit_error` call the caller makes before invoking this.
     async fn finish_run_terminated(
         &mut self,
         user_input: &str,
         turn: usize,
+        finish_reason: FinishReason,
     ) -> Result<AgentResult, AgentError> {
         self.fire_on_session_end(turn).await;
         self.save_session();
@@ -3757,7 +3759,7 @@ impl AgentEngine {
         Ok(AgentResult {
             text: String::new(),
             stop_reason: StopReason::MaxTurns,
-            finish_reason: FinishReason::Length,
+            finish_reason,
             usage: self.total_usage.clone(),
             turns: turn,
             active_window_percent: self.active_window_percent_now(&self.model, 0),
@@ -4191,7 +4193,10 @@ impl AgentEngine {
                 self.output.emit_info(&format!(
                     "Run stopped: reached the configured max_turns limit ({limit})."
                 ));
-                return self.finish_run_terminated(user_input, turn).await;
+                // #457: the turn cap is a "Continue"-able exit, not a failure.
+                return self
+                    .finish_run_terminated(user_input, turn, FinishReason::MaxTurns)
+                    .await;
             }
             // Fire on_turn_start hooks at the top of each iteration so Rust
             // hooks can override the model or inject prompt messages before
@@ -4211,7 +4216,9 @@ impl AgentEngine {
                 if let Some(reason) = self.apply_pre_turn_outcome(outcome) {
                     self.output
                         .emit_info(&format!("Run stopped by on_turn_start hook: {reason}"));
-                    return self.finish_run_terminated(user_input, turn).await;
+                    return self
+                        .finish_run_terminated(user_input, turn, FinishReason::Length)
+                        .await;
                 }
             }
 
@@ -4565,7 +4572,10 @@ impl AgentEngine {
                         ),
                         false,
                     );
-                    return self.finish_run_terminated(user_input, turn).await;
+                    // Context ceiling: a bigger budget is needed, not more turns.
+                    return self
+                        .finish_run_terminated(user_input, turn, FinishReason::Length)
+                        .await;
                 }
             }
 
@@ -5193,7 +5203,9 @@ impl AgentEngine {
                     ),
                     false,
                 );
-                return self.finish_run_terminated(user_input, turn + 1).await;
+                return self
+                    .finish_run_terminated(user_input, turn + 1, FinishReason::Length)
+                    .await;
             }
 
             if tool_calls.is_empty() {
@@ -5726,7 +5738,9 @@ impl AgentEngine {
                     ),
                     false,
                 );
-                return self.finish_run_terminated(user_input, turn + 1).await;
+                return self
+                    .finish_run_terminated(user_input, turn + 1, FinishReason::Length)
+                    .await;
             }
 
             // W1 F9: emit one TurnTrace per turn. Hosts that opt in via

@@ -266,9 +266,11 @@ mod tests {
             FinishReason::from_stop_reason(StopReason::MaxTokens),
             FinishReason::Length
         );
+        // #457: the per-turn cap now maps to its own FinishReason::MaxTurns
+        // (was Error) so hosts can offer Continue instead of a model-failure UX.
         assert_eq!(
             FinishReason::from_stop_reason(StopReason::MaxTurns),
-            FinishReason::Error
+            FinishReason::MaxTurns
         );
     }
 

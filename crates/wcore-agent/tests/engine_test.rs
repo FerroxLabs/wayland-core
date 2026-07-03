@@ -354,6 +354,15 @@ async fn test_engine_max_turns_returns_ok() {
 
     assert_eq!(result.stop_reason, StopReason::MaxTurns);
     assert_eq!(result.turns, 1);
+    // #457: the max_turns exit must surface finish_reason=max_turns (NOT length)
+    // so the host offers "Continue" instead of the "use a bigger model" UX. This
+    // exercises the real production path (finish_run_terminated), guarding against
+    // the emit site regressing back to a hardcoded FinishReason.
+    assert_eq!(
+        result.finish_reason,
+        wcore_types::message::FinishReason::MaxTurns,
+        "max_turns run must emit finish_reason=max_turns"
+    );
 }
 
 // ---------------------------------------------------------------------------
