@@ -230,9 +230,18 @@ struct RelayEmitter {
     /// GHSA-8r7g M1 (wayland#497) — the session engine's `ApprovalBridge`.
     /// Threaded into `ChannelEmitter::with_dedupe` so a bridge-backed
     /// approval (Crucible council / egress consent) synthesized on the ACP
-    /// relay stamps the server-generated SECRET `apr-{uuid}` resume_token,
-    /// exactly like the stdin/TUI transports — instead of the legacy
-    /// model-known `call_id`. `None` only in unit tests.
+    /// relay stamps the server-generated SECRET `apr-{uuid}` resume_token
+    /// instead of the legacy model-known `call_id`. `None` only in unit
+    /// tests.
+    ///
+    /// SCOPE (per the #497 cross-audit): this is frame-level parity with the
+    /// stdin/TUI transports only. The ACP PROJECTION drops `resume_token`
+    /// before it reaches the host (`MessageEvent::ApprovalRequired` carries
+    /// no token field) and the resolve endpoint stays call_id-keyed behind
+    /// X-API-Key — so a bridge-backed gate raised during an ACP turn is not
+    /// yet resolvable by the ACP host at all, and manager-gated resolution
+    /// still keys on the model-known call_id. Carrying + accepting the
+    /// secret end-to-end on ACP is tracked as a separate follow-up issue.
     approval_bridge: Option<Arc<wcore_agent::approval::ApprovalBridge>>,
 }
 
