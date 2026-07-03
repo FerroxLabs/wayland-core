@@ -1666,50 +1666,91 @@ mod windows_impl {
                 )));
             }
 
+            // ---- 11a. Drain the pipes CONCURRENTLY with the child (#520). ----
+            // The stdout/stderr pipe buffers are only ~4 KB. Draining them only
+            // after the child exits (the pre-#520 behaviour) deadlocks any
+            // command whose output exceeds that buffer: the child blocks in
+            // WriteFile with a full pipe, never exits, `WaitForSingleObject`
+            // times out, and the post-hoc drain returns only the truncated head.
+            // Users saw this as blank output on small commands and 60s timeouts
+            // on large ones (#453 / #500). Reader threads keep the pipes drained
+            // so the child can always make progress. The `stdout_r` / `stderr_r`
+            // OwnedHandles stay in this scope and outlive the joins below, so the
+            // raw handles the threads hold are valid for the threads' whole life;
+            // EOF (and thus thread exit) is reached once every write-end closes —
+            // guaranteed by the `TerminateJobObject` reap below (#100).
+            let stdout_h = stdout_r.as_raw() as usize;
+            let stderr_h = stderr_r.as_raw() as usize;
+            // `drain_pipe` is unsafe; the call is bare because this whole fn body
+            // is one `unsafe` block and the closures inherit that context.
+            let stdout_reader = std::thread::spawn(move || drain_pipe(stdout_h as _));
+            let stderr_reader = std::thread::spawn(move || drain_pipe(stderr_h as _));
+
             let timeout_ms: u32 = match manifest.timeout {
                 Some(d) => clamp_timeout_ms(d),
                 None => 60_000,
             };
 
             let wait_res = WaitForSingleObject(process.as_raw(), timeout_ms);
-            let mut timed_out = false;
-            if wait_res == WAIT_TIMEOUT {
-                timed_out = true;
-            } else if wait_res != WAIT_OBJECT_0 {
-                return Err(SandboxError::ExecFailed(format!(
-                    "WaitForSingleObject: {:#x} last_err={:#x}",
-                    wait_res,
-                    GetLastError()
-                )));
-            }
+            let timed_out = wait_res == WAIT_TIMEOUT;
+            // A wait result other than OBJECT_0 / TIMEOUT is a hard error, but we
+            // must NOT return before the reap + join below: the detached reader
+            // threads hold raw read-handles owned by this scope's OwnedHandles,
+            // so an early return would leak the threads and drop the handles out
+            // from under them. Capture the failure and surface it after the join.
+            // Snapshot GetLastError() now — TerminateJobObject clobbers it.
+            let wait_err = if !timed_out && wait_res != WAIT_OBJECT_0 {
+                Some((wait_res, GetLastError()))
+            } else {
+                None
+            };
 
             // ---- 12. Exit code + drain ----
             // Capture the child's exit code BEFORE reaping the tree (only
             // meaningful on a clean exit; on timeout it is replaced by the
-            // `Timeout` error below).
+            // `Timeout` error below). As above, defer any error return past the
+            // reap + join.
             let mut exit_code: u32 = 0;
-            if !timed_out && GetExitCodeProcess(process.as_raw(), &mut exit_code) == 0 {
-                return Err(SandboxError::ExecFailed(format!(
-                    "GetExitCodeProcess: {:#x}",
-                    GetLastError()
-                )));
-            }
+            let exitcode_err = if !timed_out
+                && wait_err.is_none()
+                && GetExitCodeProcess(process.as_raw(), &mut exit_code) == 0
+            {
+                Some(GetLastError())
+            } else {
+                None
+            };
 
-            // Reap the ENTIRE job tree before draining (#100). The direct child
-            // can spawn helpers — most notably a console host (`conhost.exe`) —
-            // that outlive it and keep the inherited stdout/stderr write-ends
-            // open. A plain `TerminateProcess(child)` leaves them running, so the
-            // blocking `drain_pipe` below would never reach EOF and the call
-            // would hang far past the timeout (observed as a 120s "command timed
-            // out" with no output on disconnected RDP sessions). Terminating the
-            // job closes every member's handles so the pipes EOF; bytes already
-            // written to the pipe buffers stay readable. The short wait lets the
-            // kernel finish closing the handles before we read.
+            // Reap the ENTIRE job tree before joining the drain threads (#100).
+            // The direct child can spawn helpers — most notably a console host
+            // (`conhost.exe`) — that outlive it and keep the inherited
+            // stdout/stderr write-ends open. A plain `TerminateProcess(child)`
+            // leaves them running, so the reader threads would never reach EOF
+            // and the joins below would hang far past the timeout (observed as a
+            // 120s "command timed out" with no output on disconnected RDP
+            // sessions). Terminating the job closes every member's handles so the
+            // pipes EOF; bytes already written stay readable and the threads have
+            // been draining them all along. The short wait lets the kernel finish
+            // closing the handles before the threads see EOF.
             TerminateJobObject(job.as_raw(), if timed_out { 1 } else { exit_code });
             WaitForSingleObject(process.as_raw(), 2_000);
 
-            let stdout = drain_pipe(stdout_r.as_raw());
-            let mut stderr = drain_pipe(stderr_r.as_raw());
+            // Now that every write-end is closed the reader threads reach EOF;
+            // join them to collect the fully-drained output. This MUST run before
+            // the deferred error returns so the threads never outlive their
+            // handles.
+            let stdout = stdout_reader.join().unwrap_or_default();
+            let mut stderr = stderr_reader.join().unwrap_or_default();
+
+            if let Some((wait_res, last_err)) = wait_err {
+                return Err(SandboxError::ExecFailed(format!(
+                    "WaitForSingleObject: {wait_res:#x} last_err={last_err:#x}"
+                )));
+            }
+            if let Some(last_err) = exitcode_err {
+                return Err(SandboxError::ExecFailed(format!(
+                    "GetExitCodeProcess: {last_err:#x}"
+                )));
+            }
 
             // #324: a child that loads a DLL the Low-IL restricted-token
             // AppContainer cannot map (PowerShell's .NET/GAC, git-bash's
@@ -2557,6 +2598,51 @@ mod windows_impl {
                 ResourceLimitEnforcement::Enforced
             ));
             assert!(String::from_utf8_lossy(&out.stdout).contains("hi"));
+        }
+
+        /// Regression for #520 (dups #453 / #500): a command whose output far
+        /// exceeds the ~4 KB pipe buffer must be captured in full. Before the
+        /// concurrent-drain fix the parent waited for the child to exit before
+        /// reading a byte, so the child blocked in `WriteFile` once the buffer
+        /// filled — the wait timed out and the drain returned truncated/empty
+        /// output. Gated like `echo_runs_live`; CI Windows runners opt in.
+        #[tokio::test]
+        async fn large_output_survives_live() {
+            if std::env::var("WAYLAND_SANDBOX_LIVE_WINDOWS").is_err() {
+                return;
+            }
+            let b = AppContainerBackend::new();
+            if !b.is_available() {
+                eprintln!("skip: AppContainer not available on this host");
+                return;
+            }
+            let m = SandboxManifest {
+                timeout: Some(Duration::from_secs(20)),
+                ..Default::default()
+            };
+            // ~4000 lines * ~32 bytes ≈ 128 KB, far past the 4 KB pipe buffer.
+            // On the pre-fix serial drain this deadlocks the child and times out.
+            let out = b
+                .execute(
+                    &m,
+                    SandboxCommand {
+                        argv: vec![
+                            "cmd.exe".into(),
+                            "/c".into(),
+                            "for /L %i in (1,1,4000) do @echo ABCDEFGHIJKLMNOPQRSTUVWXYZ0123"
+                                .into(),
+                        ],
+                        cwd: None,
+                    },
+                )
+                .await
+                .unwrap();
+            assert_eq!(out.exit_code, 0);
+            assert!(
+                out.stdout.len() > 64 * 1024,
+                "captured only {} bytes — pipe drain truncated (#520 regression)",
+                out.stdout.len()
+            );
         }
 
         // Live integrity-boundary verification lives in
