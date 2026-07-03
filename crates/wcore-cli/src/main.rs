@@ -2932,16 +2932,16 @@ async fn run_json_stream_mode(
     'session: loop {
         // wayland#551 — retry a parked integration between turns (the
         // registry Arc is only borrowable while no turn is running).
-        if let Some((mgr, resolved)) = pending_deferred_mcp.take() {
-            if !integrate_deferred_mcp(
+        if let Some((mgr, resolved)) = pending_deferred_mcp.take()
+            && !integrate_deferred_mcp(
                 &mut engine,
                 mgr.clone(),
                 &resolved,
                 &writer,
                 &mut dynamic_managers,
-            ) {
-                pending_deferred_mcp = Some((mgr, resolved));
-            }
+            )
+        {
+            pending_deferred_mcp = Some((mgr, resolved));
         }
 
         let cmd = if let Some(c) = pending_cmd.take() {
