@@ -375,11 +375,16 @@ fn sse_dump(event_type: &str, data: &str) {
     else {
         return;
     };
-    if let Ok(mut f) = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(path)
+    let mut opts = std::fs::OpenOptions::new();
+    opts.create(true).append(true);
+    // The dump holds raw model output (may echo secrets / tool args), so
+    // create it owner-only rather than umask-default 0644.
+    #[cfg(unix)]
     {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.mode(0o600);
+    }
+    if let Ok(mut f) = opts.open(path) {
         let _ = writeln!(f, "{event_type}\t{data}");
     }
 }
