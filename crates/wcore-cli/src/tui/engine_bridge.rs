@@ -1887,6 +1887,24 @@ impl TuiEngine {
         name: String,
         mut config: wcore_config::config::McpServerConfig,
     ) {
+        // #135: idempotency. If a server with this name is already connected,
+        // re-adding it must NOT spawn a duplicate connection (a second stdio
+        // child process for stdio transports). Check the live registry BEFORE
+        // any connect, report the no-op, and return. Covers the plain `/mcp add`
+        // path and the Forge grant path (both funnel through here).
+        let already_connected = engine.lock().await.mcp_server_connected(&name);
+        if already_connected {
+            let _ = tx.send(ProtocolEvent::Info {
+                msg_id: String::new(),
+                message: format!(
+                    "MCP server '{name}' is already connected — keeping the existing \
+                     connection (no duplicate started). To change its settings, remove \
+                     it first, then add it again."
+                ),
+            });
+            return;
+        }
+
         // Resolve `${cred:KEY}` header references just before connecting. This
         // is the single-server live-add path: per the `mcp_cred_refs` contract,
         // a resolution failure (missing key / store error / malformed ref) is a
