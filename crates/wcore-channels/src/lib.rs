@@ -27,9 +27,10 @@ pub mod webhook;
 pub use chunk::chunk_message;
 pub use config::{ChannelConfig, ChannelConfigLoader};
 pub use dispatch::{
-    AccessDecision, AckMode, ChannelToolPosture, DedupeCache, DedupeKey, DispatchOutcome, DmPolicy,
-    GroupPolicy, InboundPolicy, TurnAdmission, build_session_key, classify, decide_access,
-    evaluate,
+    AccessDecision, AckMode, AutoReplyRateLimiter, ChannelToolPosture, DEFAULT_AUTO_REPLY_WINDOW,
+    DEFAULT_CONVERSATION_CAP, DEFAULT_MAX_AUTO_REPLIES, DedupeCache, DedupeKey, DispatchOutcome,
+    DmPolicy, GroupPolicy, InboundPolicy, TurnAdmission, build_session_key, classify,
+    decide_access, evaluate,
 };
 pub use error::ChannelError;
 pub use event::{
