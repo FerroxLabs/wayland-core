@@ -21,6 +21,7 @@
 pub mod access;
 pub mod admission;
 pub mod dedupe;
+pub mod rate_limit;
 pub mod session_key;
 
 pub use access::{
@@ -29,6 +30,10 @@ pub use access::{
 };
 pub use admission::{TurnAdmission, classify};
 pub use dedupe::{DedupeCache, DedupeKey};
+pub use rate_limit::{
+    AutoReplyRateLimiter, DEFAULT_AUTO_REPLY_WINDOW, DEFAULT_CONVERSATION_CAP,
+    DEFAULT_MAX_AUTO_REPLIES,
+};
 pub use session_key::build_session_key;
 
 use crate::event::IncomingMessage;

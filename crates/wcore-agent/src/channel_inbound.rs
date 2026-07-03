@@ -47,13 +47,14 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::Mutex as StdMutex;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use async_trait::async_trait;
 use tokio::sync::{RwLock, broadcast, mpsc};
 use wcore_channels::{
-    AckMode, ChannelEvent, ChannelManager, DedupeCache, InboundPolicy, IncomingMessage,
-    OutgoingMessage, TurnAdmission, evaluate,
+    AckMode, AutoReplyRateLimiter, ChannelEvent, ChannelManager, DedupeCache, InboundPolicy,
+    IncomingMessage, OutgoingMessage, TurnAdmission, evaluate,
 };
 
 /// Depth of each per-session FIFO. Bounds how far one session may fall
@@ -130,6 +131,14 @@ pub struct InboundSubscriber {
     /// Shared duplicate-suppression cache. Its key already namespaces by
     /// platform / account / message-id, so one cache covers all channels.
     dedupe: DedupeCache,
+    /// Per-conversation rolling-window guard on autonomous auto-replies. Two
+    /// agents wired to the same channel can auto-reply to each other forever
+    /// (wayland#574); this caps how many autonomous sends one conversation may
+    /// emit per window, breaking the ping-pong. Shared (behind a `std::Mutex`)
+    /// because each per-session worker runs its own turn and must consult one
+    /// limiter; the critical section is a bounded map op, never held across an
+    /// `await`.
+    rate_limiter: Arc<StdMutex<AutoReplyRateLimiter>>,
     /// Runtime kill switch. When `false`, inbound events are drained (to
     /// keep the broadcast from lagging) but processed no further.
     enabled: Arc<AtomicBool>,
@@ -151,8 +160,28 @@ impl InboundSubscriber {
             dispatcher,
             policies,
             dedupe: DedupeCache::new(dedupe_ttl_ms, dedupe_max_size),
+            rate_limiter: Arc::new(StdMutex::new(AutoReplyRateLimiter::default())),
             enabled: Arc::new(AtomicBool::new(true)),
         }
+    }
+
+    /// Override the autonomous auto-reply rate limit (default:
+    /// [`wcore_channels::DEFAULT_MAX_AUTO_REPLIES`] per
+    /// [`wcore_channels::DEFAULT_AUTO_REPLY_WINDOW`]). A `window` of
+    /// [`std::time::Duration::ZERO`] disables the guard entirely. Builder-style
+    /// so the default construction path stays unchanged.
+    pub fn with_auto_reply_limit(
+        mut self,
+        max_sends: usize,
+        window: std::time::Duration,
+        conversation_cap: usize,
+    ) -> Self {
+        self.rate_limiter = Arc::new(StdMutex::new(AutoReplyRateLimiter::new(
+            max_sends,
+            window,
+            conversation_cap,
+        )));
+        self
     }
 
     /// Clone of the kill switch so the host can disable the subscriber at
@@ -184,6 +213,9 @@ impl InboundSubscriber {
         let dispatcher = self.dispatcher;
         let policies = self.policies;
         let enabled = self.enabled;
+        // Shared across the per-session workers so every autonomous reply is
+        // counted against one per-conversation budget.
+        let rate_limiter = self.rate_limiter;
         // The loop owns the dedupe cache (mutated per non-short-circuited
         // event).
         let mut dedupe = self.dedupe;
@@ -254,6 +286,7 @@ impl InboundSubscriber {
                                     ev,
                                     &manager,
                                     &dispatcher,
+                                    &rate_limiter,
                                 );
                             }
                             TurnAdmission::ObserveOnly => {
@@ -352,6 +385,7 @@ fn enqueue_to_worker(
     ev: AdmittedEvent,
     manager: &Arc<RwLock<ChannelManager>>,
     dispatcher: &Arc<dyn TurnDispatcher>,
+    rate_limiter: &Arc<StdMutex<AutoReplyRateLimiter>>,
 ) {
     // Fast path: a live worker already exists for this session.
     let ev = match workers.get_mut(&session_key) {
@@ -402,6 +436,7 @@ fn enqueue_to_worker(
         rx,
         Arc::clone(manager),
         Arc::clone(dispatcher),
+        Arc::clone(rate_limiter),
     );
     // The FIFO is fresh and we hold the only sender, so this can be neither
     // Full nor Closed; the event is enqueued unconditionally.
@@ -436,10 +471,11 @@ fn spawn_session_worker(
     mut rx: mpsc::Receiver<AdmittedEvent>,
     manager: Arc<RwLock<ChannelManager>>,
     dispatcher: Arc<dyn TurnDispatcher>,
+    rate_limiter: Arc<StdMutex<AutoReplyRateLimiter>>,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         while let Some(ev) = rx.recv().await {
-            run_turn(&session_key, &ev, &manager, &dispatcher).await;
+            run_turn(&session_key, &ev, &manager, &dispatcher, &rate_limiter).await;
         }
     })
 }
@@ -454,6 +490,7 @@ async fn run_turn(
     ev: &AdmittedEvent,
     manager: &Arc<RwLock<ChannelManager>>,
     dispatcher: &Arc<dyn TurnDispatcher>,
+    rate_limiter: &Arc<StdMutex<AutoReplyRateLimiter>>,
 ) {
     let AdmittedEvent {
         channel_name,
@@ -504,6 +541,28 @@ async fn run_turn(
 
     match dispatch_result {
         Ok(Some(reply)) => {
+            // Per-conversation ping-pong guard (wayland#574): suppress the
+            // autonomous reply once this conversation has emitted its quota of
+            // autonomous sends within the rolling window. The lock is released
+            // before any `.await` (bounded map op only — never held across the
+            // send); a poisoned mutex is recovered rather than panicking, since
+            // the critical section cannot itself panic.
+            let allowed = {
+                let mut limiter = rate_limiter
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                limiter.check_and_record(session_key, std::time::Instant::now())
+            };
+            if !allowed {
+                // Content-free: log only the session key, never message text.
+                tracing::warn!(
+                    target: "wcore_agent::channel_inbound",
+                    session_key = %session_key,
+                    "autonomous reply suppressed: per-conversation rate limit hit (ping-pong guard)"
+                );
+                return;
+            }
+
             let outgoing = OutgoingMessage {
                 conversation_id: msg.conversation_id.clone(),
                 text: reply,
@@ -1094,5 +1153,173 @@ mod tests {
 
         manager.write().await.stop_all().await.unwrap();
         handle.abort();
+    }
+
+    /// Build a subscriber with an explicit autonomous auto-reply limit, register
+    /// a `CapturingChannel` feeding `inbound`, and spawn it. Mirrors [`harness`]
+    /// but applies [`InboundSubscriber::with_auto_reply_limit`].
+    async fn harness_with_limit(
+        channel_name: &str,
+        inbound: VecDeque<IncomingMessage>,
+        policies: HashMap<String, InboundPolicy>,
+        max_sends: usize,
+        window: Duration,
+    ) -> (
+        Arc<RwLock<ChannelManager>>,
+        OutboundLog,
+        Arc<Mutex<Vec<(String, String)>>>,
+        Arc<AtomicUsize>,
+        tokio::task::JoinHandle<()>,
+    ) {
+        let (ch, outbound) = CapturingChannel::new(channel_name, inbound);
+
+        let mgr = ChannelManager::new().with_poll_interval(Duration::from_millis(5));
+        let manager = Arc::new(RwLock::new(mgr));
+
+        let (dispatcher, calls, count) = MockDispatcher::new();
+        let subscriber = InboundSubscriber::new(
+            Arc::clone(&manager),
+            Arc::new(dispatcher),
+            policies,
+            60_000,
+            1024,
+        )
+        .with_auto_reply_limit(max_sends, window, 1024);
+
+        let handle = subscriber.spawn().await;
+
+        {
+            let mut guard = manager.write().await;
+            guard.register(Box::new(ch)).await;
+            guard.start_all().await.unwrap();
+        }
+
+        (manager, outbound, calls, count, handle)
+    }
+
+    /// wayland#574: once a conversation hits its autonomous-send quota within
+    /// the window, further auto-replies are suppressed even though every inbound
+    /// is distinct (not a self-echo, not a duplicate) — the two-agent ping-pong
+    /// case the self/bot loop guard and the Message-ID echo guard both miss.
+    /// The turns still run; only the outbound SEND is throttled.
+    #[tokio::test]
+    async fn over_limit_autonomous_replies_are_suppressed() {
+        let mut policies = HashMap::new();
+        policies.insert("slack".to_string(), open_dm_policy());
+
+        // Five distinct-id messages, all in the same conversation "c1" -> same
+        // session key. Cap autonomous sends at 2 within a wide window.
+        let mut q = VecDeque::new();
+        for i in 0..5 {
+            q.push_back(dm_conv(&format!("m{i}"), "c1"));
+        }
+
+        let (manager, outbound, calls, count, handle) =
+            harness_with_limit("slack", q, policies, 2, Duration::from_secs(600)).await;
+
+        // All five turns dispatch (dispatch is not gated, only the send is).
+        let dispatched = wait_for_len(&calls, 5, Duration::from_secs(3)).await;
+        assert_eq!(dispatched, 5, "every distinct inbound drives a turn");
+        assert_eq!(count.load(Ordering::SeqCst), 5);
+
+        // Give any (incorrect) extra sends a chance to land, then assert the cap.
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        assert_eq!(
+            outbound.lock().await.len(),
+            2,
+            "autonomous sends capped at the per-conversation limit"
+        );
+
+        manager.write().await.stop_all().await.unwrap();
+        handle.abort();
+    }
+
+    /// The rate limit is per-conversation: one conversation exhausting its quota
+    /// must not throttle a different conversation.
+    #[tokio::test]
+    async fn rate_limit_is_per_conversation() {
+        let mut policies = HashMap::new();
+        policies.insert("slack".to_string(), open_dm_policy());
+
+        // Two messages each for conversations "c1" and "c2", cap of 1 per
+        // conversation. Expect exactly one send per conversation = two total.
+        let mut q = VecDeque::new();
+        q.push_back(dm_conv("a0", "c1"));
+        q.push_back(dm_conv("b0", "c2"));
+        q.push_back(dm_conv("a1", "c1"));
+        q.push_back(dm_conv("b1", "c2"));
+
+        let (manager, outbound, calls, count, handle) =
+            harness_with_limit("slack", q, policies, 1, Duration::from_secs(600)).await;
+
+        let dispatched = wait_for_len(&calls, 4, Duration::from_secs(3)).await;
+        assert_eq!(dispatched, 4, "all four turns run");
+        assert_eq!(count.load(Ordering::SeqCst), 4);
+
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        let out = outbound.lock().await;
+        assert_eq!(out.len(), 2, "one allowed send per conversation");
+        let mut convs: Vec<String> = out.iter().map(|m| m.conversation_id.clone()).collect();
+        convs.sort();
+        assert_eq!(convs, vec!["c1".to_string(), "c2".to_string()]);
+
+        drop(out);
+        manager.write().await.stop_all().await.unwrap();
+        handle.abort();
+    }
+
+    /// A disabled guard (`window == 0`) never throttles: all autonomous replies
+    /// for one conversation flow through regardless of count.
+    #[tokio::test]
+    async fn disabled_limit_lets_all_autonomous_replies_through() {
+        let mut policies = HashMap::new();
+        policies.insert("slack".to_string(), open_dm_policy());
+
+        let mut q = VecDeque::new();
+        for i in 0..4 {
+            q.push_back(dm_conv(&format!("m{i}"), "c1"));
+        }
+
+        // Cap of 1 but a ZERO window disables the limiter entirely.
+        let (manager, outbound, calls, _count, handle) =
+            harness_with_limit("slack", q, policies, 1, Duration::ZERO).await;
+
+        let _ = wait_for_len(&calls, 4, Duration::from_secs(3)).await;
+        let replied = wait_for_len(&outbound, 4, Duration::from_secs(3)).await;
+        assert_eq!(replied, 4, "disabled guard sends every reply");
+
+        manager.write().await.stop_all().await.unwrap();
+        handle.abort();
+    }
+
+    /// Human / operator sends go through `ChannelManager::send_to` directly and
+    /// are NEVER gated by the auto-reply limiter — only the inbound-driven
+    /// `run_turn` reply path consults it. This drives more direct sends than any
+    /// auto-reply cap would allow and asserts all are delivered.
+    #[tokio::test]
+    async fn interactive_sends_bypass_the_rate_limit() {
+        let (ch, outbound) = CapturingChannel::new("slack", VecDeque::new());
+        let mgr = ChannelManager::new();
+        let manager = Arc::new(RwLock::new(mgr));
+        {
+            let mut guard = manager.write().await;
+            guard.register(Box::new(ch)).await;
+            guard.start_all().await.unwrap();
+        }
+
+        // Ten operator-initiated sends to the same conversation — far above any
+        // conservative auto-reply cap — all reach the channel.
+        for i in 0..10 {
+            let msg = OutgoingMessage::text("c1", format!("operator-{i}"));
+            manager.read().await.send_to("slack", msg).await.unwrap();
+        }
+
+        assert_eq!(
+            outbound.lock().await.len(),
+            10,
+            "direct operator sends are not rate-limited"
+        );
+
+        manager.write().await.stop_all().await.unwrap();
     }
 }
