@@ -956,6 +956,7 @@ mod tests {
             headers: None,
             deferred: None,
             allow_local: false,
+            only_for_assistant: None,
         };
         let mut configs = HashMap::new();
         configs.insert("hung-server".to_string(), hung);
@@ -994,6 +995,7 @@ mod tests {
             headers: None,
             deferred: None,
             allow_local: false,
+            only_for_assistant: None,
         };
         // A real MCP handshake fixture: answer initialize + tools/list.
         let healthy_script = r#"
@@ -1013,6 +1015,7 @@ mod tests {
             headers: None,
             deferred: None,
             allow_local: false,
+            only_for_assistant: None,
         };
         let mut configs = HashMap::new();
         configs.insert("hung".to_string(), hung);
@@ -1047,6 +1050,7 @@ mod tests {
             headers: None,
             deferred: None,
             allow_local: false,
+            only_for_assistant: None,
         };
         let mut configs = HashMap::new();
         configs.insert("hung".to_string(), hung);
@@ -1081,6 +1085,7 @@ mod tests {
             headers: None,
             deferred: None,
             allow_local: false,
+            only_for_assistant: None,
         };
         let mut configs = HashMap::new();
         configs.insert("broken".to_string(), broken);
@@ -1122,6 +1127,7 @@ mod tests {
             headers: None,
             deferred: None,
             allow_local: false,
+            only_for_assistant: None,
         };
         let hung = McpServerConfig {
             transport: TransportType::Stdio,
@@ -1132,6 +1138,7 @@ mod tests {
             headers: None,
             deferred: None,
             allow_local: false,
+            only_for_assistant: None,
         };
         let mut configs = HashMap::new();
         configs.insert("healthy".to_string(), healthy);

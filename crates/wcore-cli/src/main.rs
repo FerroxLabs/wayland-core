@@ -225,6 +225,14 @@ struct Cli {
     #[arg(long, value_name = "NAME")]
     agent: Option<String>,
 
+    /// #111 — the host's active assistant identity, for per-assistant MCP
+    /// scoping. A config MCP server marked `only_for_assistant` is injected
+    /// only when this matches its allow-list (fail-closed otherwise). Distinct
+    /// from `--agent` (persona/system-prompt); the desktop host sets this when
+    /// spawning the json-stream engine.
+    #[arg(long, value_name = "NAME", env = "WAYLAND_ASSISTANT")]
+    assistant: Option<String>,
+
     /// List built-in agent personas and exit.
     #[arg(long)]
     list_agents: bool,
@@ -1463,7 +1471,15 @@ async fn run() -> anyhow::Result<ExitCode> {
 
     // Branch to JSON stream mode
     if cli.json_stream {
-        run_json_stream_mode(config, &cwd, resume, cli.session_id, cli.force).await?;
+        run_json_stream_mode(
+            config,
+            &cwd,
+            resume,
+            cli.session_id,
+            cli.force,
+            cli.assistant.clone(),
+        )
+        .await?;
         return Ok(ExitCode::SUCCESS);
     }
 
@@ -2517,6 +2533,7 @@ fn to_mcp_server_config(
         headers,
         deferred: Some(false),
         allow_local: false,
+        only_for_assistant: None,
     })
 }
 
@@ -2659,6 +2676,7 @@ async fn run_json_stream_mode(
     resume: Option<String>,
     session_id: Option<String>,
     force: bool,
+    assistant: Option<String>,
 ) -> anyhow::Result<()> {
     let writer = Arc::new(ProtocolWriter::new());
 
@@ -2720,15 +2738,20 @@ async fn run_json_stream_mode(
     // skip them, and dial them in the background right after ready goes out.
     // Resolution happens here on a clone, mirroring bootstrap's own connect
     // boundary: the long-lived config keeps the literal `${cred:...}`.
-    let deferred_mcp_servers = if config.mcp.servers.is_empty() {
+    // #111 — apply per-assistant MCP scoping to the DEFERRED path too (the
+    // second injection choke point per the #613 completeness guardrail): a
+    // server marked `only_for_assistant` must not be background-connected for a
+    // non-matching assistant. Fail-closed when `assistant` is None.
+    let scoped_config_servers = config.mcp.servers_for_assistant(assistant.as_deref());
+    let deferred_mcp_servers = if scoped_config_servers.is_empty() {
         None
     } else {
         Some(match config.open_credentials_store() {
             Ok(store) => wcore_config::mcp_cred_refs::resolve_servers_for_connect(
-                &config.mcp.servers,
+                &scoped_config_servers,
                 &*store,
             ),
-            Err(_) => config.mcp.servers.clone(),
+            Err(_) => scoped_config_servers,
         })
     };
 
@@ -2739,6 +2762,7 @@ async fn run_json_stream_mode(
     let mut bootstrap = AgentBootstrap::new(config, cwd, output.clone())
         .plugin_provider_router(make_plugin_provider_router())
         .enable_inbound_dispatch(true)
+        .active_assistant(assistant.clone())
         .defer_config_mcp(deferred_mcp_servers.is_some());
 
     if let Some(resume_id) = &resume {

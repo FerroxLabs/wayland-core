@@ -125,6 +125,33 @@ pub struct McpServerConfig {
     /// enabled. No effect on stdio transport.
     #[serde(default)]
     pub allow_local: bool,
+    /// #111 — per-assistant scoping allow-list. `None`/empty ⇒ the server is
+    /// GLOBAL, available to every session (today's behavior). `Some([...])` ⇒
+    /// the server is injected ONLY when the host-supplied active assistant
+    /// matches one of these names. Used to gate a read-only Concierge diag MCP
+    /// to the Concierge assistant on the engine leg. FAIL-CLOSED: a marked
+    /// server is excluded when the active assistant is unknown/unset (see
+    /// [`McpServerConfig::is_visible_to_assistant`]).
+    #[serde(default)]
+    pub only_for_assistant: Option<Vec<String>>,
+}
+
+impl McpServerConfig {
+    /// #111 — is this server visible to the given `active` assistant?
+    ///
+    /// - `only_for_assistant` unset or empty ⇒ GLOBAL, always visible.
+    /// - marked ⇒ visible ONLY when `active` is `Some(a)` and `a` is in the
+    ///   allow-list. FAIL-CLOSED: an unknown/unset active assistant (`None`) or
+    ///   a non-matching one does NOT see a marked server — a scoped diag server
+    ///   must never leak to a bare CLI or an unidentified session (Overwatch
+    ///   ruling on FerroxLabs/wayland#613).
+    pub fn is_visible_to_assistant(&self, active: Option<&str>) -> bool {
+        match self.only_for_assistant.as_deref() {
+            // Unset or empty allow-list ⇒ global.
+            None | Some([]) => true,
+            Some(list) => active.is_some_and(|a| list.iter().any(|name| name == a)),
+        }
+    }
 }
 
 /// Collection of MCP server configurations
@@ -138,6 +165,23 @@ pub struct McpConfig {
     /// `wcore_agent::mcp_curator::McpCurator`. Default `TopK(15)`.
     #[serde(default)]
     pub curation: McpCurationPolicy,
+}
+
+impl McpConfig {
+    /// #111 — the subset of configured servers visible to the given `active`
+    /// assistant. Unmarked servers are always kept; a server marked
+    /// `only_for_assistant` is kept only when `active` matches its allow-list
+    /// (fail-closed for `None`/unknown). Callers MUST apply this at EVERY path
+    /// that injects config-declared MCP servers into an agent (the bootstrap
+    /// connect_all/register choke point AND the #551 deferred-connect path) so
+    /// a scoped server cannot slip through an unfiltered path.
+    pub fn servers_for_assistant(&self, active: Option<&str>) -> HashMap<String, McpServerConfig> {
+        self.servers
+            .iter()
+            .filter(|(_, cfg)| cfg.is_visible_to_assistant(active))
+            .map(|(name, cfg)| (name.clone(), cfg.clone()))
+            .collect()
+    }
 }
 
 /// W6 F17 — MCP tool curation policy. Selected at config-load time; consumed
@@ -3791,6 +3835,88 @@ max_sessions = 20                # auto-cleanup oldest
 mod tests {
     use super::*;
     use wcore_types::model_aliases::OPENAI_GPT4O;
+
+    // -------------------------------------------------------------------------
+    // #111 — per-assistant MCP scoping
+    // -------------------------------------------------------------------------
+
+    fn mcp_server(only_for: Option<Vec<String>>) -> McpServerConfig {
+        McpServerConfig {
+            transport: TransportType::Stdio,
+            command: Some("echo".into()),
+            args: None,
+            env: None,
+            url: None,
+            headers: None,
+            deferred: None,
+            allow_local: false,
+            only_for_assistant: only_for,
+        }
+    }
+
+    #[test]
+    fn unmarked_server_is_visible_to_everyone() {
+        let s = mcp_server(None);
+        assert!(s.is_visible_to_assistant(None), "unmarked = global");
+        assert!(s.is_visible_to_assistant(Some("concierge")));
+        // empty allow-list also means global
+        assert!(mcp_server(Some(vec![])).is_visible_to_assistant(None));
+    }
+
+    #[test]
+    fn marked_server_is_fail_closed() {
+        let s = mcp_server(Some(vec!["concierge".into()]));
+        // FAIL-CLOSED: excluded for None/unknown/non-matching (#613 ruling).
+        assert!(
+            !s.is_visible_to_assistant(None),
+            "marked server must NOT leak to an unidentified session"
+        );
+        assert!(
+            !s.is_visible_to_assistant(Some("default")),
+            "marked server must NOT show for a non-matching assistant"
+        );
+        // Visible only for an exact allow-list match.
+        assert!(s.is_visible_to_assistant(Some("concierge")));
+    }
+
+    #[test]
+    fn servers_for_assistant_filters_by_allow_list() {
+        let mut cfg = McpConfig::default();
+        cfg.servers.insert("global".into(), mcp_server(None));
+        cfg.servers
+            .insert("diag".into(), mcp_server(Some(vec!["concierge".into()])));
+
+        // Concierge sees both.
+        let for_concierge = cfg.servers_for_assistant(Some("concierge"));
+        assert!(for_concierge.contains_key("global"));
+        assert!(for_concierge.contains_key("diag"));
+
+        // A non-Concierge assistant sees only the global one.
+        let for_default = cfg.servers_for_assistant(Some("default"));
+        assert!(for_default.contains_key("global"));
+        assert!(
+            !for_default.contains_key("diag"),
+            "scoped server must be filtered out"
+        );
+
+        // A bare session (None) also only sees the global one (fail-closed).
+        let for_none = cfg.servers_for_assistant(None);
+        assert!(for_none.contains_key("global"));
+        assert!(!for_none.contains_key("diag"));
+    }
+
+    #[test]
+    fn only_for_assistant_defaults_to_none_when_absent() {
+        // Back-compat: a config with no `only_for_assistant` key deserializes
+        // to None (global). Uses the TOML shape a user/desktop would write.
+        let toml = r#"
+            transport = "stdio"
+            command = "echo"
+        "#;
+        let s: McpServerConfig = toml::from_str(toml).unwrap();
+        assert!(s.only_for_assistant.is_none());
+        assert!(s.is_visible_to_assistant(None));
+    }
 
     // -------------------------------------------------------------------------
     // parse_builtin_provider tests

@@ -334,6 +334,7 @@ mod tests {
             headers: None,
             deferred,
             allow_local: false,
+            only_for_assistant: None,
         }
     }
 

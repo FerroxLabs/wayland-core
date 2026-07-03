@@ -455,6 +455,14 @@ async fn print_mcp_section(probe: bool) {
         println!("Probing config-declared MCP servers (connect-test)...");
         match wcore_config::config::Config::resolve(&wcore_config::config::CliArgs::default()) {
             Ok(cfg) if !cfg.mcp.servers.is_empty() => {
+                // #111 note: this deliberately connect-tests ALL config servers,
+                // INCLUDING any marked `only_for_assistant` — the per-assistant
+                // scoping filter (`servers_for_assistant`) is intentionally NOT
+                // applied here. This is a throwaway diagnostic manager for the
+                // trusted local operator: its tools are never injected into any
+                // agent tool set or exposed to a model, and it is dropped at the
+                // end of this block. If this manager is ever wired into an agent,
+                // it MUST be filtered by the active assistant first.
                 match wcore_mcp::manager::McpManager::connect_all(&cfg.mcp.servers).await {
                     Ok(mgr) => {
                         let mut names: Vec<&String> = mgr.health().keys().collect();

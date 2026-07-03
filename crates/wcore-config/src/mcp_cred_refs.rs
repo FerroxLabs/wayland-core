@@ -59,6 +59,7 @@ pub fn build_forge_mcp_server_config(url: &str, cred_key: &str) -> McpServerConf
         headers: Some(headers),
         deferred: None,
         allow_local: true,
+        only_for_assistant: None,
     }
 }
 
@@ -193,6 +194,7 @@ mod tests {
             headers: Some(headers),
             deferred: None,
             allow_local: true,
+            only_for_assistant: None,
         }
     }
 

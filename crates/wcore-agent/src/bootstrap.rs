@@ -180,6 +180,12 @@ pub struct AgentBootstrap {
     /// local shells whose connects are bounded and cheap. Default `false`
     /// keeps TUI/one-shot behavior unchanged.
     defer_config_mcp: bool,
+    /// #111 — the host-supplied active assistant identity for per-assistant MCP
+    /// scoping. `None` (the default, and always the case for a bare CLI/TUI
+    /// session) means no assistant is identified, so any config MCP server
+    /// marked `only_for_assistant` is EXCLUDED (fail-closed). The json-stream
+    /// host (desktop) threads the active assistant here via `--assistant`.
+    active_assistant: Option<String>,
 }
 
 impl AgentBootstrap {
@@ -197,7 +203,18 @@ impl AgentBootstrap {
             enable_inbound_dispatch: false,
             channel_tool_posture: None,
             defer_config_mcp: false,
+            active_assistant: None,
         }
+    }
+
+    /// #111 — set the host-supplied active assistant for per-assistant MCP
+    /// scoping. Config MCP servers marked `only_for_assistant` are injected
+    /// only when this matches their allow-list (fail-closed otherwise). This is
+    /// a DEDICATED identity, distinct from the `--agent` persona (system-prompt
+    /// pack): do not conflate them.
+    pub fn active_assistant(mut self, v: Option<String>) -> Self {
+        self.active_assistant = v;
+        self
     }
 
     /// wayland#551 — defer config-declared MCP connects out of `build()`.
@@ -1025,7 +1042,17 @@ impl AgentBootstrap {
         // wayland#551 — when the caller deferred config MCP, skip the
         // connect entirely; the caller connects in the background after
         // boot so a slow/hung server cannot gate the host's ready frame.
-        let mcp_manager = if !self.config.mcp.servers.is_empty() && !self.defer_config_mcp {
+        // #111 — per-assistant MCP scoping. Filter the config-declared servers
+        // to those visible to the host-supplied active assistant BEFORE any
+        // connect/register, so a server marked `only_for_assistant` is never
+        // injected into a non-matching (or unidentified) session. This is the
+        // NON-deferred choke point; the CLI applies the same filter to the #551
+        // deferred-connect path (both read `config.mcp.servers`).
+        let scoped_servers = self
+            .config
+            .mcp
+            .servers_for_assistant(self.active_assistant.as_deref());
+        let mcp_manager = if !scoped_servers.is_empty() && !self.defer_config_mcp {
             // Slice 3, Piece 2 — resolve any `${cred:KEY}` header references
             // against the credentials store at the connect boundary, on a clone.
             // The long-lived `self.config` keeps the literal `${cred:...}` so the
@@ -1034,10 +1061,10 @@ impl AgentBootstrap {
             // fails its own connect, in isolation).
             let resolved_servers = match self.config.open_credentials_store() {
                 Ok(store) => wcore_config::mcp_cred_refs::resolve_servers_for_connect(
-                    &self.config.mcp.servers,
+                    &scoped_servers,
                     &*store,
                 ),
-                Err(_) => self.config.mcp.servers.clone(),
+                Err(_) => scoped_servers.clone(),
             };
             match McpManager::connect_all(&resolved_servers).await {
                 Ok(mgr) => {

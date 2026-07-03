@@ -53,6 +53,7 @@ pub fn translate_mcp_server_spec(spec: &McpServerSpec) -> McpServerConfig {
             headers: None,
             deferred: None,
             allow_local: false,
+            only_for_assistant: None,
         },
         McpTransport::Sse { url } => McpServerConfig {
             transport: TransportType::Sse,
@@ -63,6 +64,7 @@ pub fn translate_mcp_server_spec(spec: &McpServerSpec) -> McpServerConfig {
             headers: None,
             deferred: None,
             allow_local: false,
+            only_for_assistant: None,
         },
         McpTransport::Http { url } => McpServerConfig {
             transport: TransportType::StreamableHttp,
@@ -73,6 +75,7 @@ pub fn translate_mcp_server_spec(spec: &McpServerSpec) -> McpServerConfig {
             headers: None,
             deferred: None,
             allow_local: false,
+            only_for_assistant: None,
         },
     }
 }
