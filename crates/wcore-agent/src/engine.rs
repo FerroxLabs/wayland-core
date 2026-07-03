@@ -2135,6 +2135,29 @@ impl AgentEngine {
         self.tools.clone()
     }
 
+    /// #135 (pure, no `self`): does any tool def carry real provenance for the
+    /// MCP server `name`? Extracted so the engine accessor and its unit test
+    /// share one definition. Matches on `ToolDef::server` (real provenance,
+    /// #86), never the `mcp__` name prefix — a bare-named MCP tool still counts.
+    pub fn mcp_server_has_tools(defs: &[wcore_types::tool::ToolDef], name: &str) -> bool {
+        defs.iter().any(|t| t.server.as_deref() == Some(name))
+    }
+
+    /// #135: idempotency probe for the `/mcp add` entry points. Returns true
+    /// when server `name` already has ≥1 tool registered on the live registry,
+    /// so a caller can skip a duplicate connect (and, for stdio transports, a
+    /// duplicate child process). Deferred tools are registered eagerly as
+    /// name-only stubs, so a just-added deferred server is detected too.
+    ///
+    /// LIMITATION: keys on tool provenance only. A server that exposes ONLY
+    /// resources or prompts (zero tools) leaves no tool defs, so it is not
+    /// detected and a re-add still reconnects. That is the SAME behavior as
+    /// before this fix (no regression) — closing it needs a live
+    /// connected-server registry keyed by name, tracked as a follow-up.
+    pub fn mcp_server_connected(&self, name: &str) -> bool {
+        Self::mcp_server_has_tools(&self.tools().to_tool_defs(), name)
+    }
+
     /// Initialize a new session for this engine run
     pub fn init_session(
         &mut self,
@@ -9023,6 +9046,42 @@ mod set_config_tests {
             capped.len(),
             5,
             "all server:None tools kept (correctness > strict limit for built-ins)"
+        );
+    }
+
+    /// #135 — the `/mcp add` idempotency probe keys on real provenance
+    /// (`ToolDef::server`), NOT the tool-name shape. A connected server is
+    /// detected via its bare-named OR `mcp__`-prefixed tools; a not-connected
+    /// name (or a same-named built-in with `server: None`) must NOT match, so
+    /// re-adding a live server no-ops instead of spawning a duplicate process.
+    #[test]
+    fn mcp_server_connected_probe_keys_on_provenance() {
+        // bare_mcp_tool → server: Some("db"); cap_mcp_tool → server: Some("srv").
+        let defs = vec![
+            builtin_tool("execute_sql"), // server: None — name shape only
+            bare_mcp_tool("execute_sql"),
+            cap_mcp_tool("mcp__srv__query"),
+        ];
+
+        assert!(
+            super::AgentEngine::mcp_server_has_tools(&defs, "db"),
+            "server with a bare-named tool must be detected as connected"
+        );
+        assert!(
+            super::AgentEngine::mcp_server_has_tools(&defs, "srv"),
+            "server with a mcp__-prefixed tool must be detected as connected"
+        );
+        assert!(
+            !super::AgentEngine::mcp_server_has_tools(&defs, "notconnected"),
+            "an unconnected server name must not match"
+        );
+        assert!(
+            !super::AgentEngine::mcp_server_has_tools(&defs, "execute_sql"),
+            "a built-in name (server: None) must never be read as a connected server"
+        );
+        assert!(
+            !super::AgentEngine::mcp_server_has_tools(&[], "db"),
+            "empty registry → nothing connected"
         );
     }
 

@@ -2919,6 +2919,30 @@ async fn run_json_stream_mode(
                 eprintln!(
                     "[mcp] AddMcpServer received: name={name}, transport={transport}, command={command:?}"
                 );
+                // #135: idempotency — re-adding an already-connected server (boot
+                // set or a prior dynamic add) does not spawn a duplicate. Re-emit
+                // the existing tools so the host's view stays consistent, then skip
+                // the reconnect. NOTE: a re-add with changed config is ignored (the
+                // existing connection is kept) — remove then add to reconfigure.
+                if engine.mcp_server_connected(&name) {
+                    let existing: Vec<String> = engine
+                        .tools()
+                        .to_tool_defs()
+                        .iter()
+                        .filter(|t| t.server.as_deref() == Some(name.as_str()))
+                        .map(|t| t.name.clone())
+                        .collect();
+                    eprintln!(
+                        "[mcp] '{name}' already connected ({} tools); keeping existing \
+                         connection, ignoring re-add (remove then add to change config)",
+                        existing.len()
+                    );
+                    let _ = writer.emit(&ProtocolEvent::McpReady {
+                        name,
+                        tools: existing,
+                    });
+                    continue;
+                }
                 let config =
                     match to_mcp_server_config(&transport, command, args, env, url, headers) {
                         Ok(c) => c,
