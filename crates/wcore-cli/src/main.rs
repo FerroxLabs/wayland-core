@@ -2858,7 +2858,39 @@ async fn run_json_stream_mode(
     let mut dynamic_managers: Vec<Arc<McpManager>> = Vec::new();
     let mut first_cmd: Option<ProtocolCommand> = None;
 
-    while let Some(cmd) = cmd_rx.recv().await {
+    // wayland#551 — a deferred-MCP manager whose integration found the
+    // registry borrowed; retried at the next between-turns boundary.
+    let mut pending_deferred_mcp: Option<(Arc<McpManager>, HashMap<String, McpServerConfig>)> =
+        None;
+
+    loop {
+        // wayland#551 — the pre-message phase can park in recv() forever on
+        // a quiet host, so the background connect result must be settled
+        // here too, or McpReady/McpFailed health would wait on host
+        // activity (live-verify caught exactly that).
+        let cmd = tokio::select! {
+            c = cmd_rx.recv() => match c {
+                Some(c) => c,
+                None => break,
+            },
+            res = async { deferred_mcp_rx.as_mut().expect("guarded by is_some").await },
+                if deferred_mcp_rx.is_some() =>
+            {
+                deferred_mcp_rx = None;
+                // Err = connect task dropped without sending (panic).
+                if let Ok((outcome, resolved)) = res {
+                    pending_deferred_mcp = note_deferred_mcp_connect(
+                        outcome,
+                        resolved,
+                        &mut engine,
+                        &writer,
+                        &output,
+                        &mut dynamic_managers,
+                    );
+                }
+                continue;
+            }
+        };
         match cmd {
             ProtocolCommand::AddMcpServer {
                 name,
@@ -2952,11 +2984,6 @@ async fn run_json_stream_mode(
 
     let has_mcp = initial_has_mcp || !dynamic_managers.is_empty();
     let mut pending_cmd = first_cmd;
-
-    // wayland#551 — a deferred-MCP manager whose integration found the
-    // registry borrowed; retried at the next between-turns boundary.
-    let mut pending_deferred_mcp: Option<(Arc<McpManager>, HashMap<String, McpServerConfig>)> =
-        None;
 
     'session: loop {
         // wayland#551 — settle deferred MCP at every between-turns boundary,
