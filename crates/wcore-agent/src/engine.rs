@@ -303,10 +303,12 @@ mod output_sizing_tests {
             16_384,
             "gpt-4o output ceiling binds"
         );
+        // Opus 4.6+ allows 128k output (#165); a generous config above that is
+        // clamped DOWN to the 128k ceiling.
         assert_eq!(
-            size_output_cap(64_000, "anthropic", "claude-opus-4-7", 1_000, false),
-            32_000,
-            "opus 4.x output ceiling binds"
+            size_output_cap(200_000, "anthropic", "claude-opus-4-7", 1_000, false),
+            128_000,
+            "opus 4.6+ output ceiling (128k) binds"
         );
         assert_eq!(
             size_output_cap(64_000, "anthropic", "claude-sonnet-4-6", 1_000, false),
@@ -346,7 +348,9 @@ mod output_sizing_tests {
     fn near_context_limit_input_shrinks_the_output_cap() {
         // When the prompt nearly fills the window, the remaining room binds
         // below the model's output ceiling (prevents an input+output overflow).
-        let cap = size_output_cap(64_000, "anthropic", "claude-opus-4-7", 199_000, false);
+        // Opus 4.6+ now has a 1M window (#165), so the prompt must be near 1M
+        // (not 200k) for the remaining room to bind below the output ceiling.
+        let cap = size_output_cap(64_000, "anthropic", "claude-opus-4-7", 995_000, false);
         assert!(cap < 32_000, "window room must bind near the context limit");
         assert!(cap >= 1, "never zero or negative");
     }
@@ -383,9 +387,9 @@ mod output_sizing_tests {
         // A known model's real ceiling/window always binds, even with thinking
         // on — the reasoning ceiling only rescues UNKNOWN models from 8192.
         assert_eq!(
-            size_output_cap(64_000, "anthropic", "claude-opus-4-7", 1_000, true),
-            32_000,
-            "opus 4.x ceiling still binds with thinking on"
+            size_output_cap(200_000, "anthropic", "claude-opus-4-7", 1_000, true),
+            128_000,
+            "opus 4.6+ ceiling (128k) still binds with thinking on"
         );
     }
 

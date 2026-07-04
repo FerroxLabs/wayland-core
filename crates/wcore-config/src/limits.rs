@@ -32,16 +32,43 @@
 pub fn model_output_ceiling(_provider: &str, model: &str) -> Option<(u32, u32)> {
     let m = model.to_ascii_lowercase();
 
-    // --- Anthropic Claude (4.x era; older 3.x deliberately excluded) ---
+    // --- Anthropic Claude (4.x/5 era; older 3.x deliberately excluded) ---
+    // The 1M-context generation (Opus 4.6/4.7/4.8, Sonnet 4.6, Sonnet 5, Fable 5)
+    // serves the full 1,000,000-token window and 128k output BY DEFAULT — no
+    // beta header, no long-context premium (verified against docs.anthropic.com,
+    // 2026-07-04: "Opus 4.8 serves the full 1M context window by default with no
+    // beta header"; the older `context-1m-2025-08-07` beta is retired). Earlier
+    // 4.x (Opus 4.0/4.1/4.5, Sonnet 4.0/4.5, Haiku 4.5) stay at 200k. Cross-
+    // checked against models.dev (2026-07-04). Match newest-first so a 4.8 id
+    // never falls through to the 200k arm.
+    if m.contains("opus-4-6") || m.contains("opus-4-7") || m.contains("opus-4-8") {
+        return Some((128_000, 1_000_000));
+    }
+    if m.contains("opus-4-5") {
+        return Some((64_000, 200_000));
+    }
     if m.contains("opus-4") {
+        // Opus 4.0 / 4.1 (and a bare opus-4): 200k window, 32k output.
         return Some((32_000, 200_000));
     }
+    if m.contains("sonnet-5") {
+        return Some((128_000, 1_000_000));
+    }
+    if m.contains("sonnet-4-6") {
+        // Sonnet 4.6: 1M window, but output stays 64k (models.dev).
+        return Some((64_000, 1_000_000));
+    }
     if m.contains("sonnet-4") {
+        // Sonnet 4.0 / 4.5: 200k window, 64k output.
         return Some((64_000, 200_000));
     }
     if m.contains("haiku-4") {
-        // Conservative: 4.5 may allow more, but undersizing is safe.
-        return Some((8_192, 200_000));
+        // Haiku 4.5: 200k window, real output 64k (was undersized at 8_192).
+        return Some((64_000, 200_000));
+    }
+    if m.contains("fable-5") {
+        // Claude Fable 5: 1M window / 128k output (models.dev).
+        return Some((128_000, 1_000_000));
     }
 
     // --- OpenAI ---
@@ -52,6 +79,47 @@ pub fn model_output_ceiling(_provider: &str, model: &str) -> Option<(u32, u32)> 
     }
     if m.contains("gpt-4o") {
         return Some((16_384, 128_000));
+    }
+
+    // --- OpenAI GPT-5 family ---
+    // Fixes #165 (customer: a gpt-5.4 run died at 178,336 tokens against a fake
+    // ~177k ceiling). With no entry every gpt-5.x id fell to the 200_000
+    // CompactConfig default — a large-context model silently undersized
+    // (premature compaction / ceiling death) — while the 128k-window
+    // `-codex-spark` tier was simultaneously OVER-claimed by that same default.
+    //
+    // Windows verified against models.dev raw catalogue AND developers.openai.com
+    // docs (2026-07-04); they agree. The family SPLITS by version, so match the
+    // large-window tiers explicitly before the general 400k catch:
+    //   * gpt-5.4 / gpt-5.4-pro / gpt-5.5 / gpt-5.5-pro → 1,050,000 window.
+    //     (Their `-mini` / `-nano` / `-codex` variants stay at 400k — do NOT let
+    //     a bare "gpt-5.4" substring claim 1.05M for gpt-5.4-mini, which is 400k
+    //     and would 400 near the top.)
+    //   * `-codex-spark` (gpt-5.3-codex-spark) → 128k window (BELOW the default,
+    //     so this entry prevents an over-claim).
+    //   * `-chat-latest` (gpt-5.1/5.2/5.3-chat-latest) → 128k window.
+    //   * everything else in the family (gpt-5, 5.1, 5.2, 5.3, the *-codex,
+    //     *-mini, *-nano, *-pro variants) → 400,000 window.
+    // Output held at 128k (the family's documented cap; err low per the header —
+    // gpt-5-pro documents 272k but 128k is safe). These ids route via the Codex
+    // OAuth backend in wayland-core (`--provider openai-chatgpt`); OpenAI serves
+    // the model's full window on that path (the 272k figure some tables cite is
+    // a PRICING tier boundary — cost.tiers[].tier.size — not a context cap).
+    if m.contains("gpt-5") {
+        if m.contains("codex-spark") {
+            return Some((32_000, 128_000));
+        }
+        if m.contains("chat-latest") {
+            return Some((16_384, 128_000));
+        }
+        if (m.contains("gpt-5.4") || m.contains("gpt-5.5"))
+            && !m.contains("-mini")
+            && !m.contains("-nano")
+            && !m.contains("-codex")
+        {
+            return Some((128_000, 1_050_000));
+        }
+        return Some((128_000, 400_000));
     }
 
     // --- xAI Grok 3.x ---
@@ -92,6 +160,21 @@ pub fn model_output_ceiling(_provider: &str, model: &str) -> Option<(u32, u32)> 
         return Some((8_192, 1_000_000));
     }
 
+    // --- MiniMax M-series ---
+    // #165 audit: the canonical MiniMax ids (MiniMax-M2 / M2.5 / M3) had no entry
+    // and fell to the 200k default, undersizing M3's 1M window. Verified against
+    // the MiniMax platform docs + models.dev (2026-07-04): M3 is a 1,000,000-token
+    // context model; M2 / M2.5 are 204,800. Output held conservatively at 128k
+    // (real caps are higher — M2.5 ~196k, M3 ~512k — but err LOW per the header).
+    // M3 checked first (its id contains "minimax-m2"'s prefix "minimax-m" but not
+    // "minimax-m2"), then the M2 line catches M2 and M2.5.
+    if m.contains("minimax-m3") {
+        return Some((128_000, 1_000_000));
+    }
+    if m.contains("minimax-m2") {
+        return Some((128_000, 204_800));
+    }
+
     None
 }
 
@@ -101,13 +184,14 @@ mod tests {
 
     #[test]
     fn known_modern_models_return_their_real_output_ceiling() {
+        // #165: Opus 4.6+ and Sonnet 4.6/5 serve 1M by default (no beta header).
         assert_eq!(
             model_output_ceiling("anthropic", "claude-opus-4-7"),
-            Some((32_000, 200_000))
+            Some((128_000, 1_000_000))
         );
         assert_eq!(
             model_output_ceiling("anthropic", "claude-sonnet-4-6"),
-            Some((64_000, 200_000))
+            Some((64_000, 1_000_000))
         );
         assert_eq!(
             model_output_ceiling("openai", "gpt-4o-mini"),
@@ -117,6 +201,138 @@ mod tests {
             model_output_ceiling("openai", "gpt-4.1"),
             Some((32_768, 1_000_000))
         );
+    }
+
+    #[test]
+    fn claude_1m_generation_resolves_to_one_million_window() {
+        // #165: the 1M-window generation (Opus 4.6/4.7/4.8, Sonnet 4.6, Sonnet 5,
+        // Fable 5) serves 1M by default — verified vs docs.anthropic.com +
+        // models.dev (2026-07-04). Our DEFAULT opus (claude-opus-4-8) was the
+        // headline victim, stuck at the 200k default.
+        for id in [
+            "claude-opus-4-8",
+            "claude-opus-4-7",
+            "claude-opus-4-6",
+            "claude-fable-5",
+            "claude-sonnet-5",
+        ] {
+            assert_eq!(
+                model_output_ceiling("anthropic", id),
+                Some((128_000, 1_000_000)),
+                "{id} must report the 1,000,000-token window / 128k output"
+            );
+        }
+        // Sonnet 4.6 shares the 1M window but a 64k output cap.
+        assert_eq!(
+            model_output_ceiling("anthropic", "claude-sonnet-4-6"),
+            Some((64_000, 1_000_000))
+        );
+        // Case-insensitive (the lookup lowercases first).
+        assert_eq!(
+            model_output_ceiling("anthropic", "Claude-Opus-4-8"),
+            Some((128_000, 1_000_000))
+        );
+    }
+
+    #[test]
+    fn older_claude_4x_stays_at_200k() {
+        // The pre-4.6 generation is genuinely 200k — must NOT inherit the 1M
+        // window (that would 400 near the top).
+        assert_eq!(
+            model_output_ceiling("anthropic", "claude-opus-4-5"),
+            Some((64_000, 200_000))
+        );
+        assert_eq!(
+            model_output_ceiling("anthropic", "claude-opus-4-1"),
+            Some((32_000, 200_000))
+        );
+        assert_eq!(
+            model_output_ceiling("anthropic", "claude-opus-4-20250514"),
+            Some((32_000, 200_000))
+        );
+        assert_eq!(
+            model_output_ceiling("anthropic", "claude-sonnet-4-5"),
+            Some((64_000, 200_000))
+        );
+        // Haiku 4.5: 200k window, real output 64k (previously undersized 8_192).
+        assert_eq!(
+            model_output_ceiling("anthropic", "claude-haiku-4-5"),
+            Some((64_000, 200_000))
+        );
+    }
+
+    #[test]
+    fn gpt5_family_resolves_to_real_windows() {
+        // #165 core: verified vs models.dev raw + developers.openai.com
+        // (2026-07-04). The family splits: full 5.4/5.5 = 1.05M; the rest = 400k.
+        for id in ["gpt-5.4", "gpt-5.4-pro", "gpt-5.5", "gpt-5.5-pro"] {
+            assert_eq!(
+                model_output_ceiling("openai-chatgpt", id),
+                Some((128_000, 1_050_000)),
+                "{id} must report the 1,050,000-token window"
+            );
+        }
+        for id in [
+            "gpt-5",
+            "gpt-5.1",
+            "gpt-5.2",
+            "gpt-5.3-codex",
+            "gpt-5.4-codex",
+            "gpt-5.4-mini",
+            "gpt-5.4-nano",
+            "gpt-5.5-mini",
+        ] {
+            assert_eq!(
+                model_output_ceiling("openai-chatgpt", id),
+                Some((128_000, 400_000)),
+                "{id} must report the 400,000-token window"
+            );
+        }
+        // The 128k-window tiers (below the 200k default → must be explicit to
+        // avoid an over-claim).
+        assert_eq!(
+            model_output_ceiling("openai-chatgpt", "gpt-5.3-codex-spark"),
+            Some((32_000, 128_000))
+        );
+        assert_eq!(
+            model_output_ceiling("openai", "gpt-5.2-chat-latest"),
+            Some((16_384, 128_000))
+        );
+        // Case-insensitive.
+        assert_eq!(
+            model_output_ceiling("openai-chatgpt", "GPT-5.5"),
+            Some((128_000, 1_050_000))
+        );
+    }
+
+    #[test]
+    fn gpt5_large_window_does_not_leak_to_mini_nano_codex() {
+        // A bare "gpt-5.4" substring must NOT hand the 1.05M window to the
+        // 400k-window mini/nano/codex variants (that would 400 near the top).
+        for id in ["gpt-5.4-mini", "gpt-5.4-nano", "gpt-5.4-codex"] {
+            assert_eq!(
+                model_output_ceiling("openai-chatgpt", id),
+                Some((128_000, 400_000)),
+                "{id} must stay at 400k, not inherit the full-5.4 1.05M window"
+            );
+        }
+    }
+
+    #[test]
+    fn minimax_m_series_resolves_to_real_windows() {
+        // #165: M3 is a 1M-context model; M2 / M2.5 are 204,800 (verified vs
+        // MiniMax platform docs + models.dev, 2026-07-04).
+        assert_eq!(
+            model_output_ceiling("minimax", "MiniMax-M3"),
+            Some((128_000, 1_000_000))
+        );
+        for id in ["MiniMax-M2", "MiniMax-M2.5"] {
+            assert_eq!(
+                model_output_ceiling("minimax", id),
+                Some((128_000, 204_800)),
+                "{id} must report the 204,800-token window"
+            );
+        }
     }
 
     #[test]
