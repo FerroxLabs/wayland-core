@@ -4817,6 +4817,35 @@ impl AgentEngine {
                         ceiling,
                         est,
                     );
+                    // #646 — graceful degradation (rung 2). If tool-output
+                    // shedding did not bring the DISPATCHED request under the
+                    // ceiling, the overflow is conversation-heavy: a big pasted
+                    // `Text`/`Thinking` block or many non-tool messages, which
+                    // rung 1 cannot touch. Degrade the non-tool content too —
+                    // truncate an oversized non-tool block head+tail, then drop
+                    // the oldest non-essential (pairing-safe: never a
+                    // tool_use/tool_result, the system prompt, or the latest
+                    // turn) message until under the ceiling. Applied to both the
+                    // dispatched request and persisted history so a resume heals.
+                    if est(&request.messages) >= ceiling {
+                        // Cap any single non-tool block at ~`ceiling` chars
+                        // (≈ a quarter of the ceiling in tokens), so one huge
+                        // paste truncates well under the window and the
+                        // drop-oldest pass mops up any residual.
+                        let per_block_budget = ceiling as usize;
+                        crate::compact::degrade::degrade_conversation_overflow(
+                            &mut request.messages,
+                            ceiling,
+                            per_block_budget,
+                            est,
+                        );
+                        crate::compact::degrade::degrade_conversation_overflow(
+                            &mut self.messages,
+                            ceiling,
+                            per_block_budget,
+                            est,
+                        );
+                    }
                     // Decide on the DISPATCHED set: the window/ceiling are
                     // unchanged, so only `used_tokens` moves. Re-stamp every
                     // downstream consumer of the request size so none sees the

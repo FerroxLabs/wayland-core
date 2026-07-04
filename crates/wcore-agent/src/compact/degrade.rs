@@ -31,7 +31,7 @@
 use wcore_tools::tool_result_storage::{
     BUDGET_TOOL_NAME, BudgetConfig, PERSISTED_OUTPUT_TAG, StorageDir, maybe_persist_tool_result,
 };
-use wcore_types::message::{ContentBlock, Message};
+use wcore_types::message::{ContentBlock, Message, Role};
 
 /// Shed oversized tool-result outputs from `messages`, largest-first, until the
 /// recomputed request size (`estimate`) drops below `ceiling` or no oversized,
@@ -110,6 +110,106 @@ pub fn shed_tool_outputs_until_under(
         }
     }
     shed
+}
+
+/// #646 — graceful context-overflow degradation (rung 2): conversation-heavy
+/// overflow that rung 1 cannot touch.
+///
+/// When the tool-output shed ([`shed_tool_outputs_until_under`]) still leaves
+/// the request over the ceiling — because the bulk is in a plain `Text` (a
+/// pasted log/file) or `Thinking` block, not a tool result — degrade the
+/// non-tool content in two passes, mutating `messages` in place so a persisted/
+/// resumed session heals rather than re-aborting turn 1:
+///
+/// 1. **Truncate** every oversized non-tool block (`Text`/`Thinking`) to a
+///    head+tail preview with a `[N chars truncated]` marker. This alone rescues
+///    the dominant real-world case (one big paste).
+/// 2. **Drop-oldest** sliding window: if still over, remove the oldest
+///    non-essential message until under the ceiling. Pairing-safe by
+///    construction — it never removes the system prompt, never removes the most
+///    recent turn (the last message), and never removes a message carrying a
+///    `ToolUse`/`ToolResult`, so no `tool_use` is ever orphaned (no 400).
+///
+/// Returns `true` if anything was truncated or dropped.
+pub fn degrade_conversation_overflow(
+    messages: &mut Vec<Message>,
+    ceiling: u64,
+    per_block_budget_chars: usize,
+    estimate: impl Fn(&[Message]) -> u64,
+) -> bool {
+    if estimate(messages) < ceiling {
+        return false;
+    }
+    let mut changed = false;
+
+    // Pass 1: truncate every oversized non-tool block. Done in one sweep (no
+    // per-block `estimate` recompute, which would conflict with the `iter_mut`
+    // borrow); the ceiling re-check happens after the sweep.
+    for msg in messages.iter_mut() {
+        for block in msg.content.iter_mut() {
+            match block {
+                ContentBlock::Text { text } if text.chars().count() > per_block_budget_chars => {
+                    *text = truncate_head_tail(text, per_block_budget_chars);
+                    changed = true;
+                }
+                ContentBlock::Thinking { thinking }
+                    if thinking.chars().count() > per_block_budget_chars =>
+                {
+                    *thinking = truncate_head_tail(thinking, per_block_budget_chars);
+                    changed = true;
+                }
+                _ => {}
+            }
+        }
+    }
+    if estimate(messages) < ceiling {
+        return changed;
+    }
+
+    // Pass 2: drop the oldest non-essential message until under the ceiling or
+    // nothing safe is left to drop. Re-scan from the front each iteration so the
+    // oldest droppable message goes first; each pass removes exactly one message
+    // (finite → terminates).
+    loop {
+        if estimate(messages) < ceiling {
+            break;
+        }
+        let last = messages.len().saturating_sub(1);
+        let victim = messages.iter().enumerate().position(|(i, m)| {
+            i != last
+                && m.role != Role::System
+                && !m.content.iter().any(|b| {
+                    matches!(
+                        b,
+                        ContentBlock::ToolUse { .. } | ContentBlock::ToolResult { .. }
+                    )
+                })
+        });
+        match victim {
+            Some(idx) => {
+                messages.remove(idx);
+                changed = true;
+            }
+            // Nothing left that is safe to drop — the caller's final ceiling
+            // check will terminate the run cleanly.
+            None => break,
+        }
+    }
+    changed
+}
+
+/// Truncate `s` to a head+tail preview totalling about `budget` chars with a
+/// `[N chars truncated]` marker between. Char-boundary safe.
+fn truncate_head_tail(s: &str, budget: usize) -> String {
+    let total = s.chars().count();
+    if total <= budget {
+        return s.to_string();
+    }
+    let half = budget / 2;
+    let head: String = s.chars().take(half).collect();
+    let tail: String = s.chars().skip(total - half).collect();
+    let dropped = total - 2 * half;
+    format!("{head}\n\n... [{dropped} chars truncated] ...\n\n{tail}")
 }
 
 #[cfg(test)]
@@ -297,5 +397,152 @@ mod tests {
             chars_estimator,
         );
         assert_eq!(shed, 0, "no work when the request is already under ceiling");
+    }
+
+    // ── #646 rung 2: conversation-heavy (non-tool) overflow ─────────────────
+
+    fn text_msg(role: Role, content: &str) -> Message {
+        Message::new(
+            role,
+            vec![ContentBlock::Text {
+                text: content.to_string(),
+            }],
+        )
+    }
+
+    /// Chars-based estimator counting Text + Thinking + ToolResult content, so
+    /// the rung-2 tests can drive the ceiling with plain-text bulk.
+    fn all_content_estimator(messages: &[Message]) -> u64 {
+        let mut total = 0u64;
+        for m in messages {
+            for b in &m.content {
+                match b {
+                    ContentBlock::Text { text } => total += text.chars().count() as u64,
+                    ContentBlock::Thinking { thinking } => total += thinking.chars().count() as u64,
+                    ContentBlock::ToolResult { content, .. } => {
+                        total += content.chars().count() as u64
+                    }
+                    _ => {}
+                }
+            }
+        }
+        total
+    }
+
+    #[test]
+    fn truncate_head_tail_keeps_head_and_tail() {
+        let s = format!(
+            "{}{}{}",
+            "H".repeat(100),
+            "M".repeat(1_000),
+            "T".repeat(100)
+        );
+        let out = truncate_head_tail(&s, 40);
+        assert!(out.starts_with("HHHH"), "keeps head: {out}");
+        assert!(out.ends_with("TTTT"), "keeps tail: {out}");
+        assert!(out.contains("chars truncated"), "has marker: {out}");
+        assert!(
+            out.chars().count() < s.chars().count(),
+            "shorter than input"
+        );
+    }
+
+    #[test]
+    fn truncates_oversized_text_block_and_continues() {
+        // Rung-2 test 1/2: the overflow bulk is a single big Text block (a paste),
+        // not a tool result — truncation must bring it under the ceiling.
+        let mut messages = vec![
+            text_msg(Role::User, &"P".repeat(100_000)), // the big paste
+            text_msg(Role::Assistant, "ok"),
+        ];
+        let ceiling = 40_000u64;
+        // Per-block budget below the ceiling so the truncated block plus the
+        // other content lands under it (this fake estimator counts chars 1:1;
+        // the real engine's estimator is tokens = chars/4, so it passes the
+        // ceiling itself as the char budget).
+        let changed = degrade_conversation_overflow(
+            &mut messages,
+            ceiling,
+            20_000, // per-block budget < ceiling
+            all_content_estimator,
+        );
+        assert!(changed, "an oversized text block must be degraded");
+        assert!(
+            all_content_estimator(&messages) < ceiling,
+            "truncation must bring the request under the ceiling"
+        );
+        // The block was truncated with a marker, not dropped.
+        assert_eq!(messages.len(), 2, "truncation must not drop the message");
+        let ContentBlock::Text { text } = &messages[0].content[0] else {
+            panic!("expected text");
+        };
+        assert!(text.contains("chars truncated"), "head+tail marker: {text}");
+    }
+
+    #[test]
+    fn drops_oldest_nonessential_and_preserves_system_and_latest() {
+        // Many small text messages, none individually oversized — pass 1 can't
+        // help, so drop-oldest must remove the oldest non-essential messages
+        // while preserving the system prompt and the most recent turn.
+        let mut messages = vec![
+            text_msg(Role::System, &"S".repeat(1_000)),
+            text_msg(Role::User, &"1".repeat(20_000)), // oldest droppable
+            text_msg(Role::Assistant, &"2".repeat(20_000)),
+            text_msg(Role::User, &"3".repeat(20_000)), // latest — preserved
+        ];
+        let ceiling = 35_000u64;
+        let changed =
+            degrade_conversation_overflow(&mut messages, ceiling, 100_000, all_content_estimator);
+        assert!(changed, "drop-oldest must fire");
+        assert!(all_content_estimator(&messages) < ceiling, "under ceiling");
+        // System prompt survives.
+        assert_eq!(messages[0].role, Role::System, "system preserved");
+        // The most recent turn (the "3..." block) survives.
+        let last = messages.last().unwrap();
+        let ContentBlock::Text { text } = &last.content[0] else {
+            panic!("expected text");
+        };
+        assert!(
+            text.starts_with("333"),
+            "latest turn preserved: got {}",
+            &text[..3]
+        );
+    }
+
+    #[test]
+    fn dropoldest_never_orphans_tool_pairs() {
+        // A tool_use/tool_result pair must never be split by drop-oldest, even
+        // when it is the oldest content. Only the pure-text message is dropped.
+        let mut messages = vec![
+            tool_use("a"),
+            tool_result("a", "small"),
+            text_msg(Role::User, &"B".repeat(60_000)), // droppable bulk
+            text_msg(Role::Assistant, "latest"),
+        ];
+        // Force the estimator to count everything; ceiling below the text bulk.
+        let ceiling = 20_000u64;
+        degrade_conversation_overflow(&mut messages, ceiling, 100_000, all_content_estimator);
+        // The tool_use and its result both survive (pairing intact).
+        assert!(
+            messages
+                .iter()
+                .any(|m| matches!(&m.content[0], ContentBlock::ToolUse { id, .. } if id == "a")),
+            "tool_use must survive drop-oldest"
+        );
+        assert!(
+            messages.iter().any(|m| matches!(
+                &m.content[0],
+                ContentBlock::ToolResult { tool_use_id, .. } if tool_use_id == "a"
+            )),
+            "paired tool_result must survive drop-oldest"
+        );
+    }
+
+    #[test]
+    fn returns_false_when_already_under_ceiling() {
+        let mut messages = vec![text_msg(Role::User, "hi")];
+        let changed =
+            degrade_conversation_overflow(&mut messages, 10_000, 5_000, all_content_estimator);
+        assert!(!changed, "no work when already under the ceiling");
     }
 }

@@ -1034,3 +1034,85 @@ async fn tc_2_6_context_overflow_resumed_session_heals_and_continues() {
     assert_eq!(result.text, "Resumed and continued");
     assert_eq!(result.stop_reason, StopReason::EndTurn);
 }
+
+/// #646 rung 2 — a turn whose overflow is a big pasted TEXT block (no tool
+/// call) must degrade (truncate the block) and CONTINUE, not hard-abort. Rung 1
+/// finds zero sheddable tool results here; rung 2 truncates the non-tool block.
+#[tokio::test]
+async fn tc_2_6_context_overflow_text_paste_truncates_and_continues() {
+    let turn1 = text_turn("Handled the big paste", 5_000);
+    let provider = Arc::new(CompactMockProvider::new(vec![turn1]));
+
+    let mut config = test_config();
+    config.compact.enabled = false; // isolate the pre-flight ceiling guard
+    config.compact.context_window = 60_000; // unknown model → fallback window
+    config.compact.output_reserve = 10_000;
+    config.compact.emergency_buffer = 10_000; // ceiling = 40k tokens
+
+    let registry = ToolRegistry::new();
+    let output = silent_output();
+    let mut engine = AgentEngine::new_with_provider(provider.clone(), config, registry, output);
+
+    // A huge pasted user message (~120k tokens of plain text, no tool call).
+    let huge_paste = "x".repeat(480_000);
+    let result = engine
+        .run(&huge_paste, "msg-1")
+        .await
+        .expect("run should succeed, not error");
+
+    // rung 2 truncates the oversized text block and continues to the provider;
+    // an abort would leave call_count == 0.
+    assert_eq!(
+        provider.call_count(),
+        1,
+        "rung 2 must truncate the paste and continue, not abort"
+    );
+    assert_eq!(result.text, "Handled the big paste");
+    assert_eq!(result.stop_reason, StopReason::EndTurn);
+}
+
+/// #646 rung 2 resume-heals — a session terminated on the conversation-heavy
+/// path (a huge non-tool Text block in persisted history) must heal on resume:
+/// rung 2 truncates the block so the first resumed turn continues instead of
+/// re-aborting. This is the non-tool counterpart to the rung-1 resume test.
+#[tokio::test]
+async fn tc_2_6_context_overflow_resumed_text_session_heals() {
+    let turn1 = text_turn("Resumed past the paste", 5_000);
+    let provider = Arc::new(CompactMockProvider::new(vec![turn1]));
+
+    let mut config = test_config();
+    config.compact.enabled = false;
+    config.compact.context_window = 60_000;
+    config.compact.output_reserve = 10_000;
+    config.compact.emergency_buffer = 10_000; // ceiling = 40k tokens
+
+    let registry = ToolRegistry::new();
+    let output = silent_output();
+    let mut engine = AgentEngine::new_with_provider(provider.clone(), config, registry, output);
+
+    // Restore a session whose history holds a huge non-tool Text block (the
+    // shape a big paste leaves), far over the 40k ceiling.
+    let huge = "x".repeat(480_000);
+    engine.load_conversation(vec![
+        Message::new(Role::User, vec![ContentBlock::Text { text: huge }]),
+        Message::new(
+            Role::Assistant,
+            vec![ContentBlock::Text {
+                text: "prior reply".to_string(),
+            }],
+        ),
+    ]);
+
+    let result = engine
+        .run("continue please", "msg-2")
+        .await
+        .expect("resumed run should succeed, not error");
+
+    assert_eq!(
+        provider.call_count(),
+        1,
+        "resumed conversation-heavy session must truncate persisted text and continue, not re-abort"
+    );
+    assert_eq!(result.text, "Resumed past the paste");
+    assert_eq!(result.stop_reason, StopReason::EndTurn);
+}
