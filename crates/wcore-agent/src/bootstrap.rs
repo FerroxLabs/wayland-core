@@ -1628,6 +1628,14 @@ impl AgentBootstrap {
         if let Some(block) = user_ctx_block {
             system_prompt.push_str(&block);
         }
+        // #660 — honest capability availability. Env-gated tools (vision, image
+        // generation, transcription, …) hide themselves from the schema when
+        // unconfigured; without this advisory the model fabricates a cause
+        // instead of naming the missing key. Read from `registry` (fully
+        // populated above) so the reasons match what was actually hidden.
+        if let Some(block) = crate::capability_advisory::render_capability_advisory(&registry) {
+            system_prompt.push_str(&block);
+        }
         self.config.system_prompt = Some(system_prompt);
 
         // W6 — opt the catalog into cross-project skill resolution. The
@@ -2545,22 +2553,23 @@ impl AgentBootstrap {
                 // is built. Bytes are fetched through the originating connector
                 // (auth-aware: the connector uses its own token), then the
                 // host-wired vision/transcription backend derives the text.
-                // Inert (and skipped) when neither backend has an API key.
+                //
+                // #660: installed even when NO backend is configured. With a
+                // backend absent the enricher no longer sits idle — it writes an
+                // honest degraded notice ("no vision backend; cannot see this
+                // image; set a key") into the attachment so the model never
+                // answers an unseen image blind from a bare URL.
                 let media_enricher = {
                     let vision = crate::tool_backends::build_vision_backend();
                     let transcription = crate::tool_backends::build_transcription_backend();
-                    if vision.is_none() && transcription.is_none() {
-                        None
-                    } else {
-                        let source = Arc::new(crate::channel_media::ManagerMediaSource::new(
-                            std::sync::Arc::clone(&lifted),
-                        ));
-                        Some(Arc::new(crate::channel_media::ChannelMediaEnricher::new(
-                            vision,
-                            transcription,
-                            source,
-                        )))
-                    }
+                    let source = Arc::new(crate::channel_media::ManagerMediaSource::new(
+                        std::sync::Arc::clone(&lifted),
+                    ));
+                    Some(Arc::new(crate::channel_media::ChannelMediaEnricher::new(
+                        vision,
+                        transcription,
+                        source,
+                    )))
                 };
 
                 let dispatcher: Arc<dyn crate::channel_inbound::TurnDispatcher> =
