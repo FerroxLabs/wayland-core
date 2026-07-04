@@ -37,7 +37,7 @@ const OPTIONAL_CAPABILITIES: &[Capability] = &[
     Capability {
         label: "Image generation",
         tool: "image_generate",
-        hint: "set OPENAI_API_KEY, FAL_API_KEY, or GEMINI_API_KEY",
+        hint: "set OPENAI_API_KEY, FAL_API_KEY, GEMINI_API_KEY, or HF_API_KEY",
     },
     Capability {
         label: "Image understanding (vision)",
@@ -129,7 +129,7 @@ mod tests {
         );
         // Missing ones are named with their fix.
         assert!(advisory.contains("Image generation"));
-        assert!(advisory.contains("set OPENAI_API_KEY, FAL_API_KEY, or GEMINI_API_KEY"));
+        assert!(advisory.contains("set OPENAI_API_KEY, FAL_API_KEY, GEMINI_API_KEY, or HF_API_KEY"));
         assert!(advisory.contains("Text-to-speech"));
         assert!(advisory.contains("set DISCORD_BOT_TOKEN"));
     }
@@ -139,5 +139,91 @@ mod tests {
         // The advisory must instruct the model to name the fix, not fabricate.
         let advisory = render_from_names(&[]).expect("advisory when nothing registered");
         assert!(advisory.contains("do NOT claim the ability does not exist"));
+    }
+
+    /// Pull the argument of each `read_env_key("NAME")` call out of resolver
+    /// source, in source order (the order the resolver probes providers).
+    fn read_env_keys_in(src: &str) -> Vec<String> {
+        let mut keys = Vec::new();
+        let marker = "read_env_key(\"";
+        let mut rest = src;
+        while let Some(i) = rest.find(marker) {
+            rest = &rest[i + marker.len()..];
+            if let Some(end) = rest.find('"') {
+                keys.push(rest[..end].to_string());
+                rest = &rest[end + 1..];
+            } else {
+                break;
+            }
+        }
+        keys
+    }
+
+    /// Extract the `*_API_KEY` / `*_TOKEN` env-var names named in a hint string.
+    fn env_vars_in(hint: &str) -> Vec<String> {
+        hint.split(|c: char| !(c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_'))
+            .filter(|t| t.ends_with("_API_KEY") || t.ends_with("_TOKEN"))
+            .map(|t| t.to_string())
+            .collect()
+    }
+
+    /// Anti-drift: the env-var hints in `OPTIONAL_CAPABILITIES` must stay in
+    /// sync with the resolvers in `crate::tool_backends`. This test is the guard
+    /// that stops the hint list from silently drifting from the resolvers again
+    /// (the image-gen hint has already omitted `HF_API_KEY` once).
+    #[test]
+    fn advisory_hints_stay_in_sync_with_resolvers() {
+        use std::fs;
+        use std::path::Path;
+
+        let backends = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/tool_backends");
+
+        // Guard 1: the image_generate hint must name exactly the provider keys
+        // that `build_image_gen_backend` probes, in the same order.
+        let image_gen_src = fs::read_to_string(backends.join("image_gen.rs"))
+            .expect("read image_gen resolver source");
+        let resolver_keys = read_env_keys_in(&image_gen_src);
+        assert_eq!(
+            resolver_keys,
+            vec!["OPENAI_API_KEY", "FAL_API_KEY", "GEMINI_API_KEY", "HF_API_KEY"],
+            "image_gen resolver probe order changed — update the image_generate hint to match"
+        );
+        let image_hint = OPTIONAL_CAPABILITIES
+            .iter()
+            .find(|c| c.tool == "image_generate")
+            .map(|c| c.hint)
+            .expect("image_generate capability present");
+        assert_eq!(
+            env_vars_in(image_hint),
+            resolver_keys,
+            "image_generate hint env vars must match the resolver's probe order exactly: {image_hint}"
+        );
+
+        // Guard 2: every env var named in ANY hint must actually be read by some
+        // resolver in tool_backends — no hint may promise a key that configures
+        // nothing (catches typos and renamed keys across all capabilities).
+        let mut all_src = String::new();
+        for entry in fs::read_dir(&backends).expect("read tool_backends dir") {
+            let path = entry.expect("dir entry").path();
+            if path.extension().and_then(|e| e.to_str()) == Some("rs") {
+                all_src.push_str(&fs::read_to_string(&path).expect("read backend source"));
+            }
+        }
+        for cap in OPTIONAL_CAPABILITIES {
+            let vars = env_vars_in(cap.hint);
+            assert!(
+                !vars.is_empty(),
+                "{} hint names no env var — expected at least one: {}",
+                cap.label,
+                cap.hint
+            );
+            for key in vars {
+                assert!(
+                    all_src.contains(&format!("\"{key}\"")),
+                    "{} hint names {key}, but no tool_backends resolver reads it",
+                    cap.label
+                );
+            }
+        }
     }
 }
