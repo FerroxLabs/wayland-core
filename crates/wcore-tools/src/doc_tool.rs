@@ -55,6 +55,12 @@ use crate::truncate_utf8;
 /// [`window_text`] appends, used only for `max_result_size` accounting.
 const MAX_MARKER_BYTES: usize = 200;
 
+/// Upper bound on the artifact-path note appended on the over-budget path
+/// (see [`write_doc_artifact`]), used only for `max_result_size` accounting so
+/// the on-disk full-document path is never clipped by registry-level
+/// truncation. Comfortably exceeds any real filesystem path.
+const MAX_ARTIFACT_NOTE_BYTES: usize = 4_096;
+
 /// Hard ceiling on how far `offset + max_chars` can reach, so an absurd
 /// `offset` cannot drive the extractor to its structural caps needlessly. 8 MB
 /// of extracted text is far beyond any model context window, so no legitimate
@@ -249,9 +255,10 @@ impl Tool for DocExtractTool {
     }
 
     fn max_result_size(&self) -> usize {
-        // Slightly above the cap so window_text's own marker is never clipped a
-        // second time by the registry-level truncation.
-        MAX_DOC_TEXT_BYTES + MAX_MARKER_BYTES
+        // Above the cap so neither window_text's own marker nor the over-budget
+        // full-document artifact note is clipped a second time by the
+        // registry-level truncation.
+        MAX_DOC_TEXT_BYTES + MAX_MARKER_BYTES + MAX_ARTIFACT_NOTE_BYTES
     }
 
     fn category(&self) -> ToolCategory {
@@ -309,15 +316,63 @@ fn extract(
     // this budget; window_text then slices out the [offset..] chunk.
     let budget = offset.saturating_add(max_bytes).min(MAX_EXTRACT_BUDGET);
     match extract_inner(disk_path, sheet, budget) {
-        Ok(text) => ToolResult {
-            content: window_text(&text, offset, max_bytes, budget),
-            is_error: false,
-        },
+        Ok(text) => {
+            // The extractor filling its budget exactly means the document has
+            // more content than this window shows.
+            let over_budget = text.len() >= budget;
+            let mut content = window_text(&text, offset, max_bytes, budget);
+            if over_budget {
+                // #650 Part-2 contract: on the over-budget path, write the FULL
+                // extracted markdown to a workspace artifact and name that path
+                // in the result so the caller (desktop Phase 2, #655) can read
+                // the entire document, not just the offset-paged window. Reuse
+                // `text` when it was already the full ceiling extraction;
+                // otherwise re-extract up to the hard ceiling.
+                let full = if budget >= MAX_EXTRACT_BUDGET {
+                    text
+                } else {
+                    extract_inner(disk_path, sheet, MAX_EXTRACT_BUDGET).unwrap_or(text)
+                };
+                if let Some(path) = write_doc_artifact(display, &full) {
+                    content.push_str(&format!(
+                        "\n\n[full document written to {}]",
+                        path.display()
+                    ));
+                }
+            }
+            ToolResult {
+                content,
+                is_error: false,
+            }
+        }
         Err(e) => ToolResult {
             content: format!("Failed to extract text from {display}: {e}"),
             is_error: true,
         },
     }
+}
+
+/// Write the FULL extracted markdown to a workspace artifact and return its
+/// path (#650 Part-2). Mirrors [`crate::tool_result_storage`]'s spill posture —
+/// a real file under the OS temp dir the model can `read` — but keyed on a
+/// content hash and given a `.md` extension so the desktop full-document reader
+/// (#655) can consume it directly. Returns `None` (degrade to the paged window
+/// only) if the write fails.
+#[cfg(feature = "doc-extract")]
+fn write_doc_artifact(display: &str, full_markdown: &str) -> Option<std::path::PathBuf> {
+    use std::hash::{Hash, Hasher};
+
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    display.hash(&mut hasher);
+    full_markdown.len().hash(&mut hasher);
+    full_markdown.hash(&mut hasher);
+    let hash = hasher.finish();
+
+    let dir = std::env::temp_dir().join("wayland-doc-extract");
+    std::fs::create_dir_all(&dir).ok()?;
+    let path = dir.join(format!("{hash:016x}.md"));
+    std::fs::write(&path, full_markdown).ok()?;
+    Some(path)
 }
 
 #[cfg(feature = "doc-extract")]
@@ -1190,6 +1245,58 @@ mod tests {
                 "continuation chunk starts at the requested offset: {}",
                 second.content
             );
+        }
+
+        #[tokio::test]
+        async fn over_budget_doc_writes_full_artifact_file() {
+            // #650 Part-2 contract: a document whose full extraction far exceeds
+            // max_chars must (a) truncate the window with a continuation offset
+            // AND (b) name an on-disk .md artifact holding the FULL document, so
+            // the desktop full-document reader (#655) can consume it.
+            let mut csv = String::from("col\n");
+            for i in 0..500 {
+                csv.push_str(&format!("row{i}\n"));
+            }
+            let (_d, path) = write_tmp("huge.csv", csv.as_bytes());
+            let result = DocExtractTool::new()
+                .execute(json!({ "path": path.to_str().unwrap(), "max_chars": 60 }))
+                .await;
+            assert!(!result.is_error, "unexpected error: {}", result.content);
+
+            // The window must still page (existing offset contract preserved).
+            assert!(
+                result.content.contains("document text truncated")
+                    && result.content.contains("pass offset="),
+                "window must still page: {}",
+                result.content
+            );
+
+            // The artifact note must carry a real filesystem path to a .md file.
+            let marker = "full document written to ";
+            let idx = result
+                .content
+                .find(marker)
+                .unwrap_or_else(|| panic!("artifact path note absent: {}", result.content));
+            let after = &result.content[idx + marker.len()..];
+            let art_path = after.split(']').next().unwrap().trim();
+            let art = std::path::Path::new(art_path);
+            assert!(art.exists(), "artifact file must exist on disk: {art_path}");
+            assert_eq!(
+                art.extension().and_then(|e| e.to_str()),
+                Some("md"),
+                "artifact must be a .md file: {art_path}"
+            );
+            let full = std::fs::read_to_string(art).unwrap();
+            // The full artifact holds content the tiny window truncated away.
+            assert!(
+                full.contains("row499"),
+                "artifact must hold the FULL document, not just the window"
+            );
+            assert!(
+                full.len() > result.content.len(),
+                "artifact must exceed the paged window"
+            );
+            let _ = std::fs::remove_file(art);
         }
 
         #[tokio::test]
