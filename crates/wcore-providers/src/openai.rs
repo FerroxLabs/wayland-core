@@ -3972,7 +3972,10 @@ mod tests {
             user["content"]
         );
         let content = user["content"].as_str().unwrap();
-        assert_eq!(content, "describe\n[image omitted: model not vision-capable]");
+        assert_eq!(
+            content,
+            "describe\n[image omitted: model not vision-capable]"
+        );
 
         // Belt-and-suspenders: the serialized message must carry no image_url.
         assert!(
