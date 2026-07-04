@@ -426,10 +426,14 @@ fn extract_host_from_urlish(input: &str) -> String {
 /// Returns `None` if access is allowed, or `Some(WebsiteBlock)` if
 /// blocked.
 ///
-/// **Fail-open** when `config_path` is `None`: a malformed config logs
-/// a `tracing::warn` and returns `None`, so a config typo doesn't
-/// nuke all web tools at runtime. When `config_path` is `Some` (the
-/// test path), errors propagate.
+/// **Fail-closed on evaluation error** when `config_path` is `None`: a
+/// present-but-unparseable config logs a `tracing::warn` and returns
+/// `Some(WebsiteBlock)` denying access, so a policy that cannot be
+/// evaluated never silently opens the blocklist. An *absent* config is
+/// not an error — `parse_policy_yaml`/`load_website_blocklist` return a
+/// default (disabled) policy, so web tools still work when no policy is
+/// configured. When `config_path` is `Some` (the test path), errors
+/// propagate to the caller instead.
 pub fn check_website_access(
     url: &str,
     config_path: Option<&Path>,
@@ -457,9 +461,15 @@ pub fn check_website_access(
             }
             tracing::warn!(
                 target: "wcore_tools::website_policy",
-                "Website policy config error (failing open): {err}",
+                "Website policy present but could not be evaluated — denying access (fail closed): {err}",
             );
-            return Ok(None);
+            return Ok(Some(WebsiteBlock {
+                url: url.to_string(),
+                host,
+                rule: String::new(),
+                source: "policy-eval-error".to_string(),
+                message: "website policy present but could not be evaluated".to_string(),
+            }));
         }
     };
 
@@ -654,6 +664,44 @@ mod tests {
         let policy = load_website_blocklist(Some(&nonexistent)).unwrap();
         assert!(!policy.enabled);
         assert!(policy.rules.is_empty());
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn unparseable_default_config_fails_closed() {
+        // Production path (config_path = None): a present-but-malformed
+        // operator policy must DENY, not silently allow. An eval error on
+        // this path must NOT propagate as Err and must NOT return Ok(None).
+        let dir = TempDir::new().unwrap();
+        std::fs::write(
+            dir.path().join("config.yaml"),
+            "security: [not, a, mapping]\n",
+        )
+        .unwrap();
+
+        let prev = std::env::var_os("WAYLAND_HOME");
+        // SAFETY: serial test; single-threaded env mutation.
+        unsafe { std::env::set_var("WAYLAND_HOME", dir.path()) };
+        reset_cache();
+
+        let result = check_website_access("https://anywhere.example/x", None);
+
+        // SAFETY: serial test; restore prior env + cache before asserting.
+        match &prev {
+            Some(v) => unsafe { std::env::set_var("WAYLAND_HOME", v) },
+            None => unsafe { std::env::remove_var("WAYLAND_HOME") },
+        }
+        reset_cache();
+
+        let block = result
+            .expect("eval error must not propagate on the production path")
+            .expect("unparseable policy must fail closed (deny)");
+        assert_eq!(block.host, "anywhere.example");
+        assert!(
+            block.message.contains("could not be evaluated"),
+            "unexpected block message: {}",
+            block.message,
+        );
     }
 
     #[test]
