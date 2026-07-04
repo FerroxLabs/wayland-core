@@ -44,6 +44,7 @@
 //! and defers vendor-specific image handling to the backend wired by
 //! the host.
 
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -53,6 +54,7 @@ use wcore_protocol::events::ToolCategory;
 use wcore_types::tool::{JsonSchema, ToolResult};
 
 use crate::Tool;
+use crate::path_validation::validate_user_path;
 use crate::url_safety::is_safe_url;
 use crate::website_policy::check_website_access;
 
@@ -130,6 +132,33 @@ pub fn validate_image_url(url: &str) -> Result<(), String> {
         ));
     }
     Ok(())
+}
+
+/// Classify an `image_url` argument: a LOCAL file to read, or a remote URL to
+/// fetch. Returns the filesystem path for a `file://` URI or any non-`http(s)`
+/// string (a desktop drag-drop sends an absolute temp path, not a URL);
+/// `None` for `http(s)://` URLs, which stay on the fetcher path. Path SAFETY is
+/// enforced later by [`validate_user_path`], not here.
+fn local_image_path(image_url: &str) -> Option<PathBuf> {
+    if image_url.starts_with("http://") || image_url.starts_with("https://") {
+        return None;
+    }
+    // `file:///abs/path` -> `/abs/path`; a bare path passes through unchanged.
+    let path = image_url.strip_prefix("file://").unwrap_or(image_url);
+    Some(PathBuf::from(path))
+}
+
+/// True for a Windows UNC / network path (`\\server\share`, `\\?\UNC\...`).
+/// Opening one triggers an outbound SMB connection (a NetNTLM-hash leak
+/// vector) before any content check, so the vision local-file path refuses it
+/// up front. Always `false` on Unix — those targets never produce a UNC path
+/// prefix, so this is a no-op there.
+fn is_network_path(path: &std::path::Path) -> bool {
+    use std::path::{Component, Prefix};
+    matches!(
+        path.components().next(),
+        Some(Component::Prefix(p)) if matches!(p.kind(), Prefix::UNC(..) | Prefix::VerbatimUNC(..))
+    )
 }
 
 /// Source of an image — either a remote URL the fetcher must resolve,
@@ -309,22 +338,82 @@ impl VisionAnalyzeTool {
     /// Pure async function — no Tool trait state needed. Exposed pub
     /// for backend authors who want to share validation logic.
     pub async fn resolve_source(&self, image_url: &str) -> Result<(&'static str, Vec<u8>), String> {
-        // 1. Validate URL shape and SSRF safety.
-        validate_image_url(image_url)?;
-        // 2. Optional website-policy blocklist check (fails open on
-        //    config errors — same semantics as the Python original).
-        match check_website_access(image_url, None) {
-            Ok(Some(block)) => return Err(block.message),
-            Ok(None) => {}
-            Err(e) => {
-                // Match Python's behaviour: missing/broken policy
-                // config is non-fatal at the call site.
-                tracing::warn!(target: "wcore_tools::vision_tools", "website_policy error: {e}");
+        // 1-3. Load raw bytes from a LOCAL file or a remote URL. A dropped
+        //       local image (absolute path or `file://` URI) is read from disk;
+        //       an `http(s)` URL is fetched via the host-wired fetcher.
+        let bytes = match local_image_path(image_url) {
+            Some(path) => {
+                // Refuse a Windows UNC / network path (\\server\share) BEFORE any
+                // I/O: merely opening one triggers an outbound SMB connection (a
+                // NetNTLM-hash leak vector), and it is never a legitimate dropped
+                // local image. No-op on Unix (paths carry no UNC prefix there).
+                if is_network_path(&path) {
+                    return Err("Network/UNC image paths are not allowed".to_string());
+                }
+                // Mirror the Read tool's path validation (absolute-only, no
+                // `..` traversal, denied-system-path list, symlink
+                // canonicalization) so an arg like "/etc/shadow" is refused
+                // exactly as Read refuses it. No URL/SSRF/website-policy checks
+                // apply to a local file — those are network-only.
+                let validated =
+                    validate_user_path(&path).map_err(|e| format!("Invalid image path: {e}"))?;
+                // Open ONCE, then take the type + size from the handle (fstat) so
+                // the checks and the read all refer to the SAME file — no
+                // metadata/read TOCTOU where the path is swapped between calls.
+                let file = std::fs::File::open(&validated)
+                    .map_err(|e| format!("Cannot open image file {}: {e}", validated.display()))?;
+                let meta = file
+                    .metadata()
+                    .map_err(|e| format!("Cannot stat image file {}: {e}", validated.display()))?;
+                // An image is always a regular file. Rejecting FIFOs/devices/
+                // directories closes a read-hang / OOM DoS — e.g. /dev/zero,
+                // whose metadata size lies as 0 and whose read never ends. This
+                // matches the is_file() guard sibling file tools already apply.
+                if !meta.is_file() {
+                    return Err(format!("Not a regular image file: {}", validated.display()));
+                }
+                if meta.len() > VISION_MAX_BYTES as u64 {
+                    return Err(format!(
+                        "Image too large for vision API: {} bytes (limit {} bytes)",
+                        meta.len(),
+                        VISION_MAX_BYTES,
+                    ));
+                }
+                // Bounded read (defense-in-depth): cap the bytes pulled into
+                // memory at the limit + 1 so a file that GROWS after the size
+                // check still cannot OOM; the shared post-read length check
+                // below then rejects the overflow.
+                use std::io::Read as _;
+                let mut buf = Vec::with_capacity(meta.len().min(VISION_MAX_BYTES as u64) as usize);
+                file.take(VISION_MAX_BYTES as u64 + 1)
+                    .read_to_end(&mut buf)
+                    .map_err(|e| {
+                        format!("Failed to read image file {}: {e}", validated.display())
+                    })?;
+                buf
             }
-        }
-        // 3. Fetch raw bytes via the host-wired fetcher.
-        let bytes = self.fetcher.fetch(image_url).await?;
-        // 4. Size + MIME validation.
+            None => {
+                // Validate URL shape and SSRF safety.
+                validate_image_url(image_url)?;
+                // Optional website-policy blocklist check (fails open on
+                // config errors — same semantics as the Python original).
+                match check_website_access(image_url, None) {
+                    Ok(Some(block)) => return Err(block.message),
+                    Ok(None) => {}
+                    Err(e) => {
+                        // Match Python's behaviour: missing/broken policy
+                        // config is non-fatal at the call site.
+                        tracing::warn!(
+                            target: "wcore_tools::vision_tools",
+                            "website_policy error: {e}"
+                        );
+                    }
+                }
+                // Fetch raw bytes via the host-wired fetcher.
+                self.fetcher.fetch(image_url).await?
+            }
+        };
+        // 4. Size + MIME validation (shared by both sources).
         if bytes.len() < VISION_MIN_BYTES {
             return Err(format!(
                 "Image too small to be valid ({} bytes)",
@@ -358,9 +447,12 @@ impl Tool for VisionAnalyzeTool {
 
     fn description(&self) -> &str {
         "Analyze images using AI vision. Provides a comprehensive description of the image and \
-         answers a specific question about its content. Supports http:// and https:// URLs; \
-         private/internal addresses and policy-blocked hosts are rejected. Accepted formats: \
-         PNG, JPEG, GIF, BMP, WEBP. Hard size cap: 20 MB."
+         answers a specific question about its content. Accepts an http(s):// URL OR a local \
+         image file (an absolute path or a file:// URI) — use the local path for a file the \
+         user dropped in or one you produced. For URLs, private/internal addresses and \
+         policy-blocked hosts are rejected; local paths are subject to the same path-safety \
+         rules as the Read tool. Accepted formats: PNG, JPEG, GIF, BMP, WEBP. Hard size cap: \
+         20 MB."
     }
 
     fn input_schema(&self) -> JsonSchema {
@@ -369,7 +461,9 @@ impl Tool for VisionAnalyzeTool {
             "properties": {
                 "image_url": {
                     "type": "string",
-                    "description": "HTTP/HTTPS URL of the image to analyze."
+                    "description": "The image to analyze: an http(s):// URL, an absolute local \
+                                    file path, or a file:// URI. Prefer the local path for a \
+                                    file the user provided on disk."
                 },
                 "question": {
                     "type": "string",
@@ -586,6 +680,124 @@ mod tests {
         let snap = backend.snapshot();
         assert_eq!(snap.len(), 1);
         assert_eq!(snap[0].mime, "image/jpeg");
+    }
+
+    // ── #637: local image file support ─────────────────────────────────
+
+    #[test]
+    fn local_image_path_classifies_url_vs_file() {
+        // http(s) URLs stay on the fetcher path.
+        assert!(local_image_path("http://example.com/x.png").is_none());
+        assert!(local_image_path("https://example.com/x.png").is_none());
+        // A `file://` URI strips to its absolute path.
+        assert_eq!(
+            local_image_path("file:///Users/me/x.png"),
+            Some(PathBuf::from("/Users/me/x.png"))
+        );
+        // A bare absolute path (what a desktop drop sends) is local.
+        assert_eq!(
+            local_image_path("/Users/me/x.png"),
+            Some(PathBuf::from("/Users/me/x.png"))
+        );
+    }
+
+    /// A dropped local image resolves from disk with the correct sniffed MIME,
+    /// WITHOUT touching the fetcher (this tool uses the null fetcher).
+    #[test]
+    fn resolve_source_reads_local_png_file() {
+        let dir = tempdir().expect("tempdir");
+        let path = dir.path().join("dropped.png");
+        fs::write(&path, png_bytes()).expect("write png");
+        let tool = VisionAnalyzeTool::default(); // NullImageFetcher
+        let (mime, bytes) =
+            futures::executor::block_on(tool.resolve_source(path.to_str().unwrap()))
+                .expect("local file should resolve");
+        assert_eq!(mime, "image/png");
+        assert_eq!(bytes, png_bytes());
+    }
+
+    /// A `file://` URI form of a local path also resolves.
+    #[test]
+    fn resolve_source_reads_local_file_via_file_uri() {
+        let dir = tempdir().expect("tempdir");
+        let path = dir.path().join("dropped.jpg");
+        fs::write(&path, jpeg_bytes()).expect("write jpeg");
+        let uri = format!("file://{}", path.to_str().unwrap());
+        let tool = VisionAnalyzeTool::default();
+        let (mime, _) = futures::executor::block_on(tool.resolve_source(&uri))
+            .expect("file:// path should resolve");
+        assert_eq!(mime, "image/jpeg");
+    }
+
+    /// Path safety is enforced exactly as the Read tool: non-absolute and
+    /// `..`-traversal args are rejected, and a missing file errors cleanly
+    /// rather than panicking.
+    #[test]
+    fn resolve_source_enforces_path_safety_on_local_files() {
+        let tool = VisionAnalyzeTool::default();
+        // Relative path — validate_user_path requires absolute.
+        assert!(
+            futures::executor::block_on(tool.resolve_source("relative/x.png")).is_err(),
+            "relative path must be rejected"
+        );
+        // `..` traversal — rejected before any read.
+        assert!(
+            futures::executor::block_on(tool.resolve_source("/tmp/../etc/passwd")).is_err(),
+            "traversal must be rejected"
+        );
+        // Absolute-but-missing — a clean error, not a panic.
+        assert!(
+            futures::executor::block_on(
+                tool.resolve_source("/nonexistent/wayland/vision/missing.png")
+            )
+            .is_err(),
+            "missing file must error"
+        );
+    }
+
+    /// A non-regular file (here a directory) is refused — the same guard that
+    /// closes the /dev/zero / FIFO read-hang DoS on special files.
+    #[test]
+    fn resolve_source_rejects_non_regular_file() {
+        let dir = tempdir().expect("tempdir");
+        let tool = VisionAnalyzeTool::default();
+        let res = futures::executor::block_on(tool.resolve_source(dir.path().to_str().unwrap()));
+        assert!(res.is_err(), "a directory must be rejected, got: {res:?}");
+    }
+
+    #[test]
+    fn is_network_path_flags_unc_only() {
+        // Ordinary paths are never network paths (the common case).
+        assert!(!is_network_path(std::path::Path::new("/Users/me/x.png")));
+        assert!(!is_network_path(std::path::Path::new("relative/x.png")));
+        // A UNC path is flagged on Windows; on Unix the same string carries no
+        // UNC prefix, so the platform-correct value there is `false`.
+        #[cfg(windows)]
+        assert!(is_network_path(std::path::Path::new(
+            r"\\server\share\x.png"
+        )));
+    }
+
+    /// End-to-end: a local image drives the backend, with the null fetcher
+    /// proving the local path never crosses the network seam.
+    #[test]
+    fn execute_analyzes_local_file_end_to_end() {
+        let dir = tempdir().expect("tempdir");
+        let path = dir.path().join("photo.png");
+        fs::write(&path, png_bytes()).expect("write png");
+        let backend = Arc::new(CapturingVisionBackend::new("a local png"));
+        let tool = VisionAnalyzeTool::new(backend.clone(), Arc::new(NullImageFetcher));
+        let result = must_exec(
+            &tool,
+            json!({ "image_url": path.to_str().unwrap(), "question": "what is this?" }),
+        );
+        assert!(!result.is_error, "got error result: {}", result.content);
+        let parsed: Value = serde_json::from_str(&result.content).unwrap();
+        assert_eq!(parsed["success"], json!(true));
+        assert_eq!(parsed["mime"], json!("image/png"));
+        let snap = backend.snapshot();
+        assert_eq!(snap.len(), 1);
+        assert_eq!(snap[0].mime, "image/png");
     }
 
     /// Null backend fails loudly with the structured error message —
