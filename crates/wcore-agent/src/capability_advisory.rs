@@ -129,7 +129,9 @@ mod tests {
         );
         // Missing ones are named with their fix.
         assert!(advisory.contains("Image generation"));
-        assert!(advisory.contains("set OPENAI_API_KEY, FAL_API_KEY, GEMINI_API_KEY, or HF_API_KEY"));
+        assert!(
+            advisory.contains("set OPENAI_API_KEY, FAL_API_KEY, GEMINI_API_KEY, or HF_API_KEY")
+        );
         assert!(advisory.contains("Text-to-speech"));
         assert!(advisory.contains("set DISCORD_BOT_TOKEN"));
     }
@@ -185,7 +187,12 @@ mod tests {
         let resolver_keys = read_env_keys_in(&image_gen_src);
         assert_eq!(
             resolver_keys,
-            vec!["OPENAI_API_KEY", "FAL_API_KEY", "GEMINI_API_KEY", "HF_API_KEY"],
+            vec![
+                "OPENAI_API_KEY",
+                "FAL_API_KEY",
+                "GEMINI_API_KEY",
+                "HF_API_KEY"
+            ],
             "image_gen resolver probe order changed — update the image_generate hint to match"
         );
         let image_hint = OPTIONAL_CAPABILITIES
