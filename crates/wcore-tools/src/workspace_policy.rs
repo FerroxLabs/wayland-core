@@ -138,7 +138,14 @@ impl WorkspacePolicy {
             trust: WorkspaceTrust::Trusted,
             writable_extra,
             readable_extra,
-            network: crate::bash::default_bash_network_policy(),
+            // #657: a Trusted workspace is the user's own machine with hands on
+            // the keyboard — network egress is ON by default so agent-run
+            // installs (npm/pip/cargo/brew), curl, and git fetch just work,
+            // matching Claude Code and every competitor. The exfil concern that
+            // motivated the blanket deny applies to UNTRUSTED content, which
+            // runs Contained (network denied below). `WAYLAND_BASH_ALLOW_NETWORK`
+            // is no longer needed on a trusted workspace.
+            network: NetworkPolicy::Inherit,
             cache_env: Vec::new(),
             secret_deny,
         }
@@ -178,6 +185,11 @@ impl WorkspacePolicy {
             trust: WorkspaceTrust::Contained,
             writable_extra,
             readable_extra,
+            // #657: a Contained (untrusted / remote `Workspace`) posture runs
+            // potentially attacker-influenced content, so egress stays DENIED to
+            // keep the exfil boundary tight. `WAYLAND_BASH_ALLOW_NETWORK=1`
+            // remains the explicit operator escape hatch (via
+            // `default_bash_network_policy`).
             network: crate::bash::default_bash_network_policy(),
             cache_env,
             secret_deny,
@@ -440,12 +452,22 @@ mod tests {
     }
 
     #[test]
-    fn network_preserves_the_opt_in_default_deny() {
-        // Default (no env) => Deny. The opt-in is honored elsewhere; here we
-        // assert the policy does not hardcode Deny independent of the helper.
+    fn network_is_gated_on_trust_posture() {
+        // #657: Trusted (the user's own machine) => network ON (Inherit) so
+        // installs/curl/git-fetch work with no env gymnastics. Contained
+        // (untrusted) => denied by default, preserving the exfil boundary; the
+        // env opt-in is honored via the shared helper (not hardcoded here).
         let dir = tempfile::tempdir().unwrap();
-        let p = WorkspacePolicy::contained(dir.path());
-        assert_eq!(p.network(), crate::bash::default_bash_network_policy());
+        assert_eq!(
+            WorkspacePolicy::trusted_local(dir.path()).network(),
+            NetworkPolicy::Inherit,
+            "a trusted workspace must default to network on"
+        );
+        assert_eq!(
+            WorkspacePolicy::contained(dir.path()).network(),
+            crate::bash::default_bash_network_policy(),
+            "a contained workspace stays denied (env opt-in via the helper)"
+        );
     }
 
     #[test]
