@@ -37,9 +37,21 @@ pub const ENV_STALENESS: &str = "WAYLAND_STALENESS";
 /// Returns `true` unless `WAYLAND_STALENESS` is set to (case-insensitive) `"off"`.
 /// Mirrors the auto_memorize::consent_granted opt-out pattern.
 pub fn staleness_enabled() -> bool {
-    std::env::var(ENV_STALENESS)
+    let enabled = std::env::var(ENV_STALENESS)
         .map(|v| v.to_lowercase() != "off")
-        .unwrap_or(true)
+        .unwrap_or(true);
+    // #664: staleness propagation is ON by default; when disabled, stale facts
+    // are never flagged. Log once so the disabled state is visible.
+    if !enabled {
+        static WARNED: std::sync::Once = std::sync::Once::new();
+        WARNED.call_once(|| {
+            tracing::info!(
+                target: "wcore_memory::staleness",
+                "{ENV_STALENESS}=off — stale-fact propagation is disabled this session"
+            );
+        });
+    }
+    enabled
 }
 
 /// Outcome of a single `propagate_staleness` walk.

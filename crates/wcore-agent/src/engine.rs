@@ -8012,6 +8012,15 @@ impl AgentEngine {
         });
 
         if !report.triggered {
+            // #664: the SkipReason was computed then discarded, so facts were
+            // silently not saved. Surface WHY so an operator can see that
+            // auto-memorize skipped (e.g. consent not granted / below threshold).
+            tracing::info!(
+                target: "wcore_agent::memory",
+                skip_reason = ?report.skipped_reason,
+                candidates = report.facts_persisted,
+                "auto-memorize skipped this session; no facts saved"
+            );
             return;
         }
 

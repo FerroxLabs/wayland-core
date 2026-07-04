@@ -556,9 +556,22 @@ pub fn registry() -> &'static FileStateRegistry {
 
 /// Read each call so tests can toggle via `std::env::set_var`.
 fn is_disabled() -> bool {
-    std::env::var("WAYLAND_DISABLE_FILE_STATE_GUARD")
+    let disabled = std::env::var("WAYLAND_DISABLE_FILE_STATE_GUARD")
         .map(|v| v.trim() == "1")
-        .unwrap_or(false)
+        .unwrap_or(false);
+    // #664: with the guard disabled, concurrent clobbers surface no stale-file
+    // warning. Log once so the weakened-safety state is visible to an operator.
+    if disabled {
+        static WARNED: std::sync::Once = std::sync::Once::new();
+        WARNED.call_once(|| {
+            tracing::warn!(
+                target: "wcore_tools::file_state",
+                "WAYLAND_DISABLE_FILE_STATE_GUARD=1 — the stale-file write guard is OFF; \
+                 concurrent overwrites will not be detected"
+            );
+        });
+    }
+    disabled
 }
 
 /// Current wall-clock time in milliseconds since UNIX epoch.

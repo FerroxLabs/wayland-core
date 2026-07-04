@@ -82,6 +82,19 @@ pub fn select_provider(inputs: SelectionInputs) -> Arc<dyn BrowserProvider> {
             }
         }
     }
+    // 1b. Browserbase requested but feature compiled out (the default build):
+    // surface the misconfiguration instead of silently dropping the hint and
+    // using Camoufox, mirroring the chromium-off arm below. The whole feature
+    // block above is compiled out without `--features browserbase`, so a
+    // Browserbase hint would otherwise fall through with no signal at all.
+    #[cfg(not(feature = "browserbase"))]
+    if matches!(inputs.hint, ProviderHint::Browserbase) {
+        tracing::warn!(
+            "ProviderHint::Browserbase requested but wcore-browser was built without the \
+             `browserbase` feature; falling back to Camoufox. Rebuild with \
+             `--features browserbase` (and set BROWSERBASE_* env) to honor the hint."
+        );
+    }
     // 2. Chromium: explicit hint AND feature on.
     #[cfg(feature = "chromium")]
     {
@@ -118,6 +131,20 @@ mod tests {
     #[test]
     fn defaults_to_camoufox() {
         let p = select_provider(SelectionInputs::default());
+        assert_eq!(p.backend_name(), "camoufox");
+    }
+
+    // #664: a Browserbase hint on a build without the `browserbase` feature
+    // (the default) must still resolve to Camoufox (the warn arm falls through),
+    // not panic or drop the request silently.
+    #[cfg(not(feature = "browserbase"))]
+    #[test]
+    fn browserbase_hint_without_feature_falls_back_to_camoufox() {
+        let p = select_provider(SelectionInputs {
+            hint: ProviderHint::Browserbase,
+            allow_cloud: true,
+            ..Default::default()
+        });
         assert_eq!(p.backend_name(), "camoufox");
     }
 

@@ -42,7 +42,20 @@ pub const ENV_KG: &str = "WAYLAND_KG";
 /// Mirrors the [`crate::staleness::staleness_enabled`] /
 /// [`crate::auto_memorize::consent_granted`] opt-out pattern.
 pub fn kg_enabled() -> bool {
-    std::env::var(ENV_KG)
+    let enabled = std::env::var(ENV_KG)
         .map(|v| v.to_lowercase() != "off")
-        .unwrap_or(true)
+        .unwrap_or(true);
+    // #664: KG is ON by default; when an operator disables it the graph-ingest
+    // and graph-query paths silently no-op. Log once so the disabled state is
+    // visible rather than looking like a KG that found nothing.
+    if !enabled {
+        static WARNED: std::sync::Once = std::sync::Once::new();
+        WARNED.call_once(|| {
+            tracing::info!(
+                target: "wcore_memory::kg",
+                "{ENV_KG}=off — knowledge-graph ingest and queries are disabled this session"
+            );
+        });
+    }
+    enabled
 }

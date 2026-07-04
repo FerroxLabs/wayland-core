@@ -114,6 +114,20 @@ impl SemanticPartition {
                     }
                 } else {
                     // Legacy path: any different-object prior is superseded.
+                    // #664: this is the SHIPPING default (env unset), and it
+                    // silently overwrites a conflicting fact with the crude
+                    // supersede instead of consulting the nuanced resolver — a
+                    // data-integrity effect on the default config. Log it so the
+                    // overwrite is visible. (Flipping the default to the resolver
+                    // is gated on dream-cycle CI stability per this module's
+                    // docstring — a separate deliberate change, not this P2 pass.)
+                    tracing::info!(
+                        target: "wcore_memory::semantic",
+                        subject = %f.subject,
+                        predicate = %f.predicate,
+                        "{CONTRADICTION_ENV} unset — superseding a conflicting fact via the \
+                         legacy path (set {CONTRADICTION_ENV}=1 for the nuanced resolver)"
+                    );
                     Action::Supersede(prior_id.clone())
                 }
             }
