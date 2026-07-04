@@ -1332,12 +1332,20 @@ mod tests {
         let (m, cmd) = build_sandbox_pieces("echo hi", Some(&policy));
         assert_eq!(cmd.cwd.as_deref(), Some(policy.root()));
         assert!(m.fs_write_allow.iter().any(|p| p == policy.root()));
-        // #657: a Trusted workspace has network ON (Inherit) — installs/curl/git
-        // fetch work with no env gymnastics — and injects no CARGO_HOME redirect.
-        assert_eq!(m.network, NetworkPolicy::Inherit);
+        // #657 (Overwatch ruling, Sean-confirmed): the bare `trusted_local`
+        // constructor is fail-safe — network follows default_bash_network_policy
+        // (Deny in a test env with no opt-in). The `Inherit` grant is applied at
+        // bootstrap for genuinely-local sessions via `with_network`; see the
+        // trusted-local-grant assertion below. No CARGO_HOME redirect either way.
+        assert_eq!(m.network, default_bash_network_policy());
         assert!(!m.env.iter().any(|(k, _)| k == "CARGO_HOME"));
         // secrets still stripped from base env (unchanged)
         assert!(!m.env.iter().any(|(k, _)| k.contains("TOKEN")));
+        // The bootstrap local-grant path (with_network Inherit) reaches the
+        // manifest: a genuinely-local Trusted workspace runs with host network.
+        let local = policy.with_network(NetworkPolicy::Inherit);
+        let (ml, _) = build_sandbox_pieces("echo hi", Some(&local));
+        assert_eq!(ml.network, NetworkPolicy::Inherit);
     }
 
     #[test]

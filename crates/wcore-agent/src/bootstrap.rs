@@ -2104,10 +2104,18 @@ impl AgentBootstrap {
         // channel) install a `Trusted` policy derived from this session's
         // working directory.
         if registry.workspace_policy().is_none() {
+            // #657 (Overwatch ruling, Sean-confirmed): grant Bash network egress
+            // (`Inherit`) only for a genuinely-local session — no channel posture
+            // attached. Any channel path (including `Full`) is a remote sender and
+            // stays on the fail-safe Deny default that `trusted_local` seeds.
+            let network = wcore_tools::workspace_policy::local_bash_network(
+                self.channel_tool_posture.is_some(),
+            );
             let policy = std::sync::Arc::new(
                 wcore_tools::workspace_policy::WorkspacePolicy::trusted_local(
                     std::path::PathBuf::from(&self.workspace),
-                ),
+                )
+                .with_network(network),
             );
             registry.set_workspace_policy(policy);
         }
