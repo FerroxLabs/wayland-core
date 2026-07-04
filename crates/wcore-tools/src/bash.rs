@@ -1348,6 +1348,72 @@ mod tests {
         assert_eq!(ml.network, NetworkPolicy::Inherit);
     }
 
+    /// #657 LIVE local-verify (Overwatch ruling). Ignored by default — needs a
+    /// real network-capable sandbox backend (bwrap on Linux) and outbound
+    /// network. Run on Hetzner with:
+    ///   cargo test -p wcore-tools --lib bash::tests::live_ -- --ignored --nocapture
+    ///
+    /// Proves the end-to-end wiring my change touches: the derived
+    /// `NetworkPolicy` (Inherit for a genuinely-local session, Deny for a
+    /// channel-attached one) feeds the real backend and actually governs egress.
+    /// A genuinely-local session (with_network Inherit) → curl CONNECTS; a
+    /// channel-attached session (fail-safe default = Deny) → curl is BLOCKED.
+    ///
+    /// Uses an IP target (`1.1.1.1`, `-k` for the SNI cert mismatch) to isolate
+    /// the network-namespace gate my change controls. Name resolution is a
+    /// SEPARATE, pre-existing sandbox-fs concern: bwrap ro-binds `/etc` but not
+    /// `/run`, so a systemd-resolved host (`/etc/resolv.conf -> /run/...stub`)
+    /// dangles the symlink and breaks DNS inside the sandbox even under Inherit
+    /// — orthogonal to #657 and out of its scope.
+    #[cfg(unix)]
+    #[tokio::test]
+    #[ignore = "live network + real sandbox backend (Hetzner) — run with --ignored"]
+    async fn live_local_egress_on_channel_egress_blocked() {
+        use crate::workspace_policy::{WorkspacePolicy, local_bash_network};
+        let dir = tempfile::tempdir().unwrap();
+        let backend = default_for_platform();
+
+        let curl = "curl -sk -m 8 -o /dev/null -w '%{http_code}' https://1.1.1.1";
+
+        // Genuinely-local session: local_bash_network(false) => Inherit.
+        let local =
+            WorkspacePolicy::trusted_local(dir.path()).with_network(local_bash_network(false));
+        assert_eq!(local.network(), NetworkPolicy::Inherit);
+        let (m, cmd) = build_sandbox_pieces(curl, Some(&local));
+        let out = backend.execute(&m, cmd).await.expect("local exec");
+        eprintln!(
+            "LOCAL exit={} stdout={:?}",
+            out.exit_code,
+            String::from_utf8_lossy(&out.stdout)
+        );
+        assert_eq!(
+            out.exit_code, 0,
+            "genuinely-local session must reach the network"
+        );
+        let code = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        assert!(
+            code.len() == 3 && code.chars().all(|c| c.is_ascii_digit()) && code != "000",
+            "local session should get a real HTTP response code from 1.1.1.1, got {code:?}"
+        );
+
+        // Channel-attached session (incl Full): local_bash_network(true) =>
+        // fail-safe default (Deny in this env — no WAYLAND_BASH_ALLOW_NETWORK).
+        let channel =
+            WorkspacePolicy::trusted_local(dir.path()).with_network(local_bash_network(true));
+        assert_eq!(channel.network(), default_bash_network_policy());
+        let (m2, cmd2) = build_sandbox_pieces(curl, Some(&channel));
+        let out2 = backend.execute(&m2, cmd2).await.expect("channel exec");
+        eprintln!(
+            "CHANNEL exit={} stderr={:?}",
+            out2.exit_code,
+            String::from_utf8_lossy(&out2.stderr)
+        );
+        assert_ne!(
+            out2.exit_code, 0,
+            "a channel-attached session must be denied network egress"
+        );
+    }
+
     #[test]
     fn build_sandbox_pieces_contained_injects_cache_redirect() {
         use crate::workspace_policy::WorkspacePolicy;
