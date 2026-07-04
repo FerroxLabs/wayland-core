@@ -48,12 +48,16 @@ fn refuses_bare_env() {
 }
 
 #[test]
-fn refuses_env_with_args() {
-    // `env FOO=bar somecmd` is also a vector — it could exec arbitrary
-    // programs while preserving any inherited env var the model would
-    // like dumped via `set` after.
-    assert_refused("env FOO=bar /usr/bin/whoami");
-    assert_refused("env -u PATH /usr/bin/whoami");
+fn allows_env_runner_idioms() {
+    // #657 Part 2: `env VAR=value cmd` and `env -u/-i … cmd` are legitimate
+    // runner idioms (set/unset a var for one command), NOT env dumps. They
+    // are allowed; only a bare `env` (a pure dump) is refused. The sandbox
+    // env is already secret-scrubbed, so these leak no credentials.
+    assert_allowed("env FOO=bar /usr/bin/whoami");
+    assert_allowed("env -u PATH /usr/bin/whoami");
+    assert_allowed("env -i /usr/bin/node app.js");
+    // But a bare env dump is still refused.
+    assert_refused("env");
 }
 
 #[test]
@@ -157,6 +161,29 @@ fn allows_commands_that_mention_env_substring_but_arent_env_dumps() {
     assert_allowed("cat .envrc");
     // env-related cargo / npm subcommands.
     assert_allowed("cargo run --bin server");
+}
+
+#[test]
+fn allows_env_template_reads() {
+    // #657 Part 2: committed placeholder templates are readable for onboarding.
+    assert_allowed("cat .env.example");
+    assert_allowed("cat .env.sample");
+    assert_allowed("head -n 20 .env.template");
+    assert_allowed("cat config/.env.dist");
+    // But the real secret file is still refused.
+    assert_refused("cat .env");
+    assert_refused("cat .env.production");
+}
+
+#[test]
+fn allows_non_secret_powershell_env_vars() {
+    // #657 Part 2: only secret-shaped `$env:` names are refused.
+    assert_allowed("echo $env:PATH");
+    assert_allowed("echo $env:USERPROFILE");
+    assert_allowed("echo $env:NODE_ENV");
+    // Secret-shaped names still refused.
+    assert_refused("echo $env:MY_API_KEY");
+    assert_refused("$env:OPENAI_API_KEY");
 }
 
 #[test]

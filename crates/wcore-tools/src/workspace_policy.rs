@@ -12,8 +12,12 @@
 //!     `SandboxedFs ∘ SecretDenyFs`. (Bash is NOT in this posture yet — see
 //!     the deferred OS-sandbox secret-read-deny work.)
 //!
-//! Network is ALWAYS seeded from `default_bash_network_policy()` so the
-//! `WAYLAND_BASH_ALLOW_NETWORK` opt-in survives; it is never hardcoded.
+//! Network default is trust-dependent (#657): a `Trusted` session seeds
+//! `NetworkPolicy::Inherit` (network on) so installs/fetches/`curl` work on
+//! the user's own machine, while a `Contained` session seeds
+//! `default_bash_network_policy()` (Deny). `WAYLAND_BASH_ALLOW_NETWORK`
+//! still overrides in BOTH directions (force-on `=1`, force-off `=0`); the
+//! value is never hardcoded past the trust-aware helpers.
 
 use std::path::{Path, PathBuf};
 use wcore_sandbox::manifest::NetworkPolicy;
@@ -112,7 +116,10 @@ impl WorkspacePolicy {
     /// Local/desktop session on the user's own machine. Roots the sandbox
     /// at `workspace`, allows the workspace + user toolchains/caches so
     /// builds and installs work, reuses global caches (no redirect), and
-    /// honors the network opt-in. Does NOT jail the in-process file tools.
+    /// defaults the network ON (`NetworkPolicy::Inherit`, #657) so installs /
+    /// `curl` / `git fetch` work with no env gymnastics — the
+    /// `WAYLAND_BASH_ALLOW_NETWORK` override still forces it off (`=0`) or on
+    /// (`=1`). Does NOT jail the in-process file tools.
     pub fn trusted_local(workspace: impl Into<PathBuf>) -> Self {
         let root = canon(workspace.into());
         let mut writable_extra = scratch_dirs();
@@ -138,7 +145,7 @@ impl WorkspacePolicy {
             trust: WorkspaceTrust::Trusted,
             writable_extra,
             readable_extra,
-            network: crate::bash::default_bash_network_policy(),
+            network: crate::bash::trusted_bash_network_policy(),
             cache_env: Vec::new(),
             secret_deny,
         }
@@ -446,6 +453,39 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let p = WorkspacePolicy::contained(dir.path());
         assert_eq!(p.network(), crate::bash::default_bash_network_policy());
+    }
+
+    /// #657: a Trusted session defaults network ON (`Inherit`) so installs /
+    /// fetches work on the user's own machine, while a Contained session
+    /// stays at the conservative env-gated default (Deny when the override is
+    /// unset). Asserted together under a serial guard so the env override
+    /// cannot bleed in from a sibling test.
+    #[test]
+    #[serial_test::serial]
+    fn trusted_network_defaults_inherit_contained_defaults_deny() {
+        let prev = std::env::var_os("WAYLAND_BASH_ALLOW_NETWORK");
+        // SAFETY: serial test; single-threaded env mutation, restored below.
+        unsafe { std::env::remove_var("WAYLAND_BASH_ALLOW_NETWORK") };
+
+        let dir = tempfile::tempdir().unwrap();
+        let trusted = WorkspacePolicy::trusted_local(dir.path());
+        let contained = WorkspacePolicy::contained(dir.path());
+        assert_eq!(
+            trusted.network(),
+            NetworkPolicy::Inherit,
+            "Trusted must default to network ON"
+        );
+        assert_eq!(
+            contained.network(),
+            NetworkPolicy::Deny,
+            "Contained must default to network OFF"
+        );
+
+        // SAFETY: serial test; restore prior value.
+        match &prev {
+            Some(v) => unsafe { std::env::set_var("WAYLAND_BASH_ALLOW_NETWORK", v) },
+            None => unsafe { std::env::remove_var("WAYLAND_BASH_ALLOW_NETWORK") },
+        }
     }
 
     #[test]

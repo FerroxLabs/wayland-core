@@ -147,6 +147,36 @@ fn warn_sandbox_degraded_rate_limited() {
     }
 }
 
+/// Emit a warn-level log on EVERY unsandboxed selection made because the
+/// session is TRUSTED (the user's own machine) rather than via the
+/// `WAYLAND_ALLOW_NO_SANDBOX` opt-in. Rate-limited like
+/// [`warn_sandbox_degraded_rate_limited`]. Names the exact bypass so the
+/// degraded state is never silent (#657 Part 3 / audit #656).
+fn warn_sandbox_degraded_trusted_rate_limited() {
+    static LAST: Mutex<Option<Instant>> = Mutex::new(None);
+    let mut guard = match LAST.lock() {
+        Ok(g) => g,
+        Err(p) => p.into_inner(),
+    };
+    let now = Instant::now();
+    let due = match *guard {
+        None => true,
+        Some(prev) => now.duration_since(prev) >= DEGRADED_WARN_INTERVAL,
+    };
+    if due {
+        *guard = Some(now);
+        drop(guard);
+        tracing::warn!(
+            target: "wcore_sandbox",
+            "no OS sandbox backend available on this host — running model-driven \
+             commands with NO isolation because the workspace is TRUSTED (your own \
+             machine). Filesystem and network are unconfined. Install bubblewrap \
+             (Linux) or set WAYLAND_SANDBOX=docker to restore isolation; a \
+             Contained/remote workspace would refuse to run instead.",
+        );
+    }
+}
+
 /// Fail-closed backend selected when no real sandbox is available and the
 /// operator has NOT opted in to unsandboxed execution via
 /// `WAYLAND_ALLOW_NO_SANDBOX=1`.
@@ -214,13 +244,22 @@ impl backends::SandboxBackend for FailClosedBackend {
 /// - If `WAYLAND_ALLOW_NO_SANDBOX=1` (or `=true`): warn (rate-limited, on
 ///   every selection) and return [`backends::no_sandbox::NoSandboxBackend`]
 ///   so execution proceeds with NO isolation per explicit operator opt-in.
-/// - Otherwise: return [`FailClosedBackend`], which refuses execution.
+/// - Else if `trusted` (the session's workspace is `Trusted` — the user's
+///   own machine, #657 Part 3): degrade to a LOUD [`NoSandboxBackend`]
+///   (rate-limited warn naming the bypass) so a hands-on-keyboard user on a
+///   host without a real sandbox can still run installs/builds, rather than
+///   hitting a hard refusal that looks broken next to other agents.
+/// - Otherwise (Contained / untrusted / trust unknown): return
+///   [`FailClosedBackend`], which refuses execution.
 ///
 /// Single chokepoint for the silent-degradation paths in
 /// `default_for_platform` (audit M-2 / rel-concurrency-70).
-fn unsandboxed_fallback() -> Box<dyn backends::SandboxBackend> {
+fn unsandboxed_fallback(trusted: bool) -> Box<dyn backends::SandboxBackend> {
     if no_sandbox_opt_in() {
         warn_sandbox_degraded_rate_limited();
+        Box::new(backends::no_sandbox::NoSandboxBackend::new())
+    } else if trusted {
+        warn_sandbox_degraded_trusted_rate_limited();
         Box::new(backends::no_sandbox::NoSandboxBackend::new())
     } else {
         tracing::error!(
@@ -336,7 +375,27 @@ impl SandboxRegistry {
 /// execution) unless `WAYLAND_ALLOW_NO_SANDBOX=1` is set, in which case it
 /// returns [`backends::no_sandbox::NoSandboxBackend`] with a rate-limited
 /// warning on every selection.
+///
+/// This entry point carries NO trust signal, so it fails closed on the
+/// no-backend path. Callers that know the session is `Trusted` (the user's
+/// own machine) should use [`default_for_platform_trusted`] instead, which
+/// degrades to a loud NoSandbox rather than refusing (#657 Part 3).
 pub fn default_for_platform() -> Box<dyn backends::SandboxBackend> {
+    default_for_platform_trusted(false)
+}
+
+/// Trust-aware sandbox selection (#657 Part 3). Identical to
+/// [`default_for_platform`] except that when NO real sandbox backend is
+/// available and the operator has not set `WAYLAND_ALLOW_NO_SANDBOX`, a
+/// `trusted` session (the user's own machine) degrades to a LOUD
+/// [`backends::no_sandbox::NoSandboxBackend`] instead of failing closed — so
+/// installs/builds still run on a host without bubblewrap. Contained /
+/// untrusted sessions (`trusted = false`) keep the fail-closed behavior.
+///
+/// The explicit `WAYLAND_SANDBOX=none`-without-opt-in path still fails
+/// closed regardless of trust: that is a deliberate operator misconfiguration
+/// signal, not the "no sandbox installed" case this flag addresses.
+pub fn default_for_platform_trusted(trusted: bool) -> Box<dyn backends::SandboxBackend> {
     // #327: env var wins; otherwise the config-installed `[tools] sandbox`.
     if let Some(choice) = resolved_sandbox_choice() {
         match choice.as_str() {
@@ -372,7 +431,7 @@ pub fn default_for_platform() -> Box<dyn backends::SandboxBackend> {
                      failing closed (set WAYLAND_ALLOW_NO_SANDBOX=1 to run \
                      unsandboxed instead)"
                 );
-                return unsandboxed_fallback();
+                return unsandboxed_fallback(trusted);
             }
             _ => {}
         }
@@ -403,7 +462,7 @@ pub fn default_for_platform() -> Box<dyn backends::SandboxBackend> {
             return Box::new(appc);
         }
     }
-    unsandboxed_fallback()
+    unsandboxed_fallback(trusted)
 }
 
 /// Crate-wide serialization lock for tests that mutate the process-global
@@ -510,11 +569,12 @@ mod fail_closed_tests {
         let _lock = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         let _g = EnvGuard::capture();
         EnvGuard::set_allow(None);
-        let backend = unsandboxed_fallback();
+        // Untrusted / trust-unknown fallback must fail closed.
+        let backend = unsandboxed_fallback(false);
         assert_eq!(
             backend.name(),
             "fail_closed",
-            "without WAYLAND_ALLOW_NO_SANDBOX the fallback must fail closed"
+            "without WAYLAND_ALLOW_NO_SANDBOX the untrusted fallback must fail closed"
         );
     }
 
@@ -523,11 +583,31 @@ mod fail_closed_tests {
         let _lock = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         let _g = EnvGuard::capture();
         EnvGuard::set_allow(Some("1"));
-        let backend = unsandboxed_fallback();
+        let backend = unsandboxed_fallback(false);
         assert_eq!(
             backend.name(),
             "no_sandbox",
             "WAYLAND_ALLOW_NO_SANDBOX=1 must opt in to NoSandbox"
+        );
+    }
+
+    /// #657 Part 3: with no real sandbox and NO opt-in, a TRUSTED session
+    /// degrades to a loud NoSandbox (installs work on the user's own box),
+    /// while an untrusted session in the identical env still fails closed.
+    #[test]
+    fn unsandboxed_fallback_trusted_degrades_untrusted_refuses() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let _g = EnvGuard::capture();
+        EnvGuard::set_allow(None);
+        assert_eq!(
+            unsandboxed_fallback(true).name(),
+            "no_sandbox",
+            "Trusted session must degrade to NoSandbox instead of failing closed"
+        );
+        assert_eq!(
+            unsandboxed_fallback(false).name(),
+            "fail_closed",
+            "Untrusted session must still fail closed in the same env"
         );
     }
 

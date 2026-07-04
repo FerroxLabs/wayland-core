@@ -2,14 +2,14 @@ use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use async_trait::async_trait;
-use regex::RegexSet;
+use regex::{Regex, RegexSet};
 use serde_json::{Value, json};
 
 use wcore_config::shell::bash_shell_argv_prefix;
 use wcore_protocol::events::ToolCategory;
 use wcore_sandbox::{
     NetworkPolicy, SandboxChunk, SandboxCommand, SandboxManifest, SandboxOutput, SyscallPolicy,
-    backends::SandboxBackend, default_for_platform,
+    backends::SandboxBackend, default_for_platform, default_for_platform_trusted,
 };
 use wcore_types::tool::{JsonSchema, ToolResult};
 
@@ -139,13 +139,38 @@ pub fn platform_enforces_read_deny() -> bool {
     default_for_platform().enforces_read_deny()
 }
 
-/// Network policy for agent-initiated Bash. Defaults to
-/// [`NetworkPolicy::Deny`]; `WAYLAND_BASH_ALLOW_NETWORK=1` opts back into
-/// full host network (`Inherit`) for network-dependent workflows.
+/// #657: is this session's workspace `Trusted` (the user's own machine)?
+/// A missing policy is treated as NOT trusted, so the conservative path
+/// (denylist on, sandbox fail-closed) applies whenever trust is unknown.
+fn trusted_workspace(ctx: &ToolContext) -> bool {
+    ctx.workspace
+        .as_deref()
+        .is_some_and(|p| p.trust() == crate::workspace_policy::WorkspaceTrust::Trusted)
+}
+
+/// Network policy for agent-initiated Bash with NO trust signal (the
+/// policy-less path). Conservative: defaults to [`NetworkPolicy::Deny`];
+/// `WAYLAND_BASH_ALLOW_NETWORK=1` opts back into full host network
+/// (`Inherit`) for network-dependent workflows.
 pub(crate) fn default_bash_network_policy() -> NetworkPolicy {
     match std::env::var("WAYLAND_BASH_ALLOW_NETWORK") {
         Ok(v) if v == "1" || v.eq_ignore_ascii_case("true") => NetworkPolicy::Inherit,
         _ => NetworkPolicy::Deny,
+    }
+}
+
+/// Network policy for a TRUSTED (user's own machine) Bash session (#657).
+///
+/// Defaults to [`NetworkPolicy::Inherit`] (network ON) so package installs,
+/// `curl`, and `git fetch` work with no env gymnastics — the credibility fix.
+/// The `WAYLAND_BASH_ALLOW_NETWORK` override still works in BOTH directions:
+/// an explicit `=0` / `=false` forces the network OFF even in a Trusted
+/// session, while `=1` / any other value keeps it ON. Contained sessions
+/// stay on [`default_bash_network_policy`] (Deny by default).
+pub(crate) fn trusted_bash_network_policy() -> NetworkPolicy {
+    match std::env::var("WAYLAND_BASH_ALLOW_NETWORK") {
+        Ok(v) if v == "0" || v.eq_ignore_ascii_case("false") => NetworkPolicy::Deny,
+        _ => NetworkPolicy::Inherit,
     }
 }
 
@@ -286,9 +311,12 @@ fn denylist() -> &'static RegexSet {
         // since we test the whole command string as a single line and
         // also do a per-line pass below.
         let patterns = &[
-            // Bare `env` / `env <args>` (env-var dump or modify-env exec).
+            // Bare `env` (whole-command env-var dump). #657 Part 2: the
+            // `env VAR=value cmd` and `env -u/-i … cmd` RUNNER idioms are
+            // legitimate and no longer refused — only a bare `env` with no
+            // command (a pure dump) trips here. The sandbox env is already
+            // secret-scrubbed, so a residual `env -0` dump leaks no secrets.
             r"(?i)^\s*env\s*$",
-            r"(?i)^\s*env\s+",
             // Bare `printenv` / `printenv <args>` — prints all or named env vars.
             r"(?i)^\s*printenv\s*$",
             r"(?i)^\s*printenv\b",
@@ -296,8 +324,13 @@ fn denylist() -> &'static RegexSet {
             r"(?i)^\s*set\s*$",
             // PowerShell env enumeration (future Windows surface).
             r"(?i)Get-ChildItem\s+env:",
-            r"(?i)\$env:[A-Z_]",
-            // Reading .env files via common viewers.
+            // #657 Part 2: only SECRET-shaped `$env:` names are refused;
+            // `$env:PATH` / `$env:USERPROFILE` / `$env:NODE_ENV` are allowed.
+            r"(?i)\$env:[A-Za-z0-9_]*(API_KEY|SECRET|TOKEN|PASSWORD|PASSWD|CREDENTIAL)",
+            // Reading .env files via common viewers. Template files
+            // (`.env.example` / `.sample` / `.template` / `.dist`) are
+            // neutralized upstream by `mask_env_templates` (#657 Part 2) so
+            // this still refuses a real `.env` / `.env.production` read.
             r"(?i)\b(cat|tee|less|more|head|tail)\b[^|;]*\.env(\b|$)",
             // `echo $FOO_API_KEY`, `echo $FOO_SECRET_KEY`, etc.
             r"(?i)\becho\b[^|;]*\$[A-Z_][A-Z_0-9]*_(API_KEY|SECRET|TOKEN|PASSWORD|PASSWD)",
@@ -403,6 +436,28 @@ fn deobfuscate(command: &str) -> String {
     out
 }
 
+/// #657 Part 2: neutralize `.env` TEMPLATE tokens before the denylist runs.
+///
+/// `.env.example` / `.env.sample` / `.env.template` / `.env.dist` are
+/// committed onboarding templates full of PLACEHOLDER values, not real
+/// secrets — an agent legitimately reads them to learn which vars a project
+/// needs. The `\.env` read/encode rules would otherwise refuse them (a false
+/// positive). We drop the `.env` anchor from just those template tokens so
+/// the rules no longer fire on them; a real `.env` / `.env.production` read
+/// in the SAME command still trips the rule (its token is untouched).
+///
+/// The `regex` crate has no lookbehind/lookahead, so this pre-pass is the
+/// clean way to carve out the template exception without weakening the
+/// real-secret rules.
+fn mask_env_templates(command: &str) -> String {
+    static TEMPLATE_ENV: OnceLock<Regex> = OnceLock::new();
+    let re = TEMPLATE_ENV.get_or_init(|| {
+        Regex::new(r"(?i)\.env\.(example|sample|template|dist)\b")
+            .expect("env-template mask regex must compile")
+    });
+    re.replace_all(command, "env-template").into_owned()
+}
+
 /// Returns `Some(reason)` if `command` matches a denylist pattern.
 /// `None` means the command is allowed through to the shell.
 ///
@@ -418,11 +473,16 @@ pub fn check_denylist(command: &str) -> Option<&'static str> {
 
     let set = denylist();
 
-    // tools-exec-14/16: test both the raw command and a de-obfuscated form
-    // (empty-quote / escape / surrounding-quote stripped) so the cheapest
+    // #657 Part 2: carve out `.env.example`/`.sample`/`.template`/`.dist`
+    // template reads before matching. Masking never removes a real secret
+    // token, so a genuine `.env` read in the same command is still caught.
+    let masked = mask_env_templates(command);
+
+    // tools-exec-14/16: test both the (masked) command and a de-obfuscated
+    // form (empty-quote / escape / surrounding-quote stripped) so the cheapest
     // `e''nv` / `"printenv"` dodges collapse back onto the pattern set.
-    let deobf = deobfuscate(command);
-    let variants = [command, deobf.as_str()];
+    let deobf = deobfuscate(&masked);
+    let variants = [masked.as_str(), deobf.as_str()];
 
     // Test each whole-string variant first.
     for v in &variants {
@@ -464,10 +524,12 @@ impl Tool for BashTool {
          - Read files: use Read (not cat, head, or tail)\n\
          - Edit files: use Edit (not sed or awk)\n\
          - Write files: use Write (not echo or cat with heredoc)\n\
-         - Web access: the Bash sandbox has NO NETWORK — curl/wget/git-fetch \
-         and other network commands fail (empty output). To read a URL use the \
-         WebFetch tool; to search the web use the `web` tool with operation \
-         \"search\". Do NOT retry with curl/wget.\n\n\
+         - Network: on a trusted workspace (the user's own machine) Bash HAS \
+         network — package installs, curl, and git fetch work. In a \
+         contained/untrusted workspace network is disabled and such commands \
+         fail (empty output) with an explanatory message; in THAT case do NOT \
+         retry with curl/wget — use the WebFetch tool to read a URL or the \
+         `web` tool with operation \"search\" to search.\n\n\
          # Instructions\n\
          - Use absolute paths to avoid working directory confusion.\n\
          - When issuing multiple independent commands, make parallel tool calls \
@@ -683,7 +745,14 @@ impl Tool for BashTool {
                 is_error: true,
             };
         };
-        if let Some(reason) = check_denylist(command) {
+        // #657 Part 2: the credential-exfiltration denylist is skipped in a
+        // Trusted workspace — the OS sandbox there already secret-scrubs the
+        // env and denies credential-store reads, so the string denylist only
+        // contributes false-positives (blocking `env VAR=val cmd`, package
+        // installs, etc.). Contained / policy-less sessions keep it ON.
+        if !trusted_workspace(ctx)
+            && let Some(reason) = check_denylist(command)
+        {
             return ToolResult {
                 content: reason.to_string(),
                 is_error: true,
@@ -694,7 +763,10 @@ impl Tool for BashTool {
             .unwrap_or(DEFAULT_TIMEOUT_MS)
             .min(MAX_TIMEOUT_MS);
         let timeout = Duration::from_millis(timeout_ms);
-        let backend = default_for_platform();
+        // #657 Part 3: a Trusted session degrades to a loud NoSandbox when no
+        // real backend is available (installs still work on the user's own
+        // box); Contained/policy-less sessions fail closed.
+        let backend = default_for_platform_trusted(trusted_workspace(ctx));
         // Task 8 — exec-time capability gate (TOCTOU-free boundary). The same
         // `default_for_platform()` that would run the command decides whether it
         // may run. A bootstrap-only probe would be bypassable because
@@ -749,7 +821,11 @@ impl Tool for BashTool {
             };
         };
 
-        if let Some(reason) = check_denylist(command) {
+        // #657 Part 2: denylist skipped in a Trusted workspace — see
+        // `execute_with_ctx` for the rationale.
+        if !trusted_workspace(ctx)
+            && let Some(reason) = check_denylist(command)
+        {
             return ToolResult {
                 content: reason.to_string(),
                 is_error: true,
@@ -764,7 +840,8 @@ impl Tool for BashTool {
 
         // Task 8 — exec-time capability gate (streaming path, same logic as
         // execute_with_ctx). Must check BEFORE wrapping in Arc.
-        let backend_probe = default_for_platform();
+        // #657 Part 3: trust-aware selection (see execute_with_ctx).
+        let backend_probe = default_for_platform_trusted(trusted_workspace(ctx));
         if let Some(p) = ctx.workspace.as_deref()
             && p.trust() == crate::workspace_policy::WorkspaceTrust::Contained
             && !backend_probe.enforces_read_deny()
@@ -1076,6 +1153,7 @@ mod tests {
     // ── M-3 / M-7: agent Bash network defaults closed ──────────────────
 
     #[test]
+    #[serial_test::serial]
     fn default_bash_network_policy_is_deny() {
         // Without the opt-in env var, agent-initiated Bash must default to
         // NetworkPolicy::Deny so a confined command cannot exfiltrate over
@@ -1093,6 +1171,108 @@ mod tests {
         );
         // Syscall policy is the documented-Inherit deliberate omission (M-4).
         assert_eq!(manifest.syscall_policy, SyscallPolicy::Inherit);
+    }
+
+    // ── #657 Part 1: trust-posture network defaults ────────────────────
+
+    /// A Trusted session defaults network ON (`Inherit`), and the
+    /// `WAYLAND_BASH_ALLOW_NETWORK` override works in BOTH directions.
+    #[test]
+    #[serial_test::serial]
+    fn trusted_bash_network_defaults_inherit_and_override_both_ways() {
+        let prev = std::env::var_os("WAYLAND_BASH_ALLOW_NETWORK");
+        // SAFETY: serial test; single-threaded env mutation, restored below.
+        unsafe { std::env::remove_var("WAYLAND_BASH_ALLOW_NETWORK") };
+        assert_eq!(
+            trusted_bash_network_policy(),
+            NetworkPolicy::Inherit,
+            "Trusted default (env unset) must be Inherit"
+        );
+        unsafe { std::env::set_var("WAYLAND_BASH_ALLOW_NETWORK", "0") };
+        assert_eq!(
+            trusted_bash_network_policy(),
+            NetworkPolicy::Deny,
+            "explicit =0 must force network OFF even in Trusted"
+        );
+        unsafe { std::env::set_var("WAYLAND_BASH_ALLOW_NETWORK", "1") };
+        assert_eq!(
+            trusted_bash_network_policy(),
+            NetworkPolicy::Inherit,
+            "explicit =1 keeps network ON"
+        );
+        // SAFETY: serial test; restore prior value.
+        match &prev {
+            Some(v) => unsafe { std::env::set_var("WAYLAND_BASH_ALLOW_NETWORK", v) },
+            None => unsafe { std::env::remove_var("WAYLAND_BASH_ALLOW_NETWORK") },
+        }
+    }
+
+    /// End-to-end through `build_sandbox_pieces`: a Trusted workspace policy
+    /// yields a manifest with network `Inherit` (installs work); a Contained
+    /// policy yields `Deny`.
+    #[test]
+    #[serial_test::serial]
+    fn build_pieces_network_follows_workspace_trust() {
+        let prev = std::env::var_os("WAYLAND_BASH_ALLOW_NETWORK");
+        // SAFETY: serial test; single-threaded env mutation, restored below.
+        unsafe { std::env::remove_var("WAYLAND_BASH_ALLOW_NETWORK") };
+
+        let dir = tempfile::tempdir().unwrap();
+        let trusted = crate::workspace_policy::WorkspacePolicy::trusted_local(dir.path());
+        let (m, _) = build_sandbox_pieces("npm install -g cowsay", Some(&trusted));
+        assert_eq!(m.network, NetworkPolicy::Inherit, "Trusted manifest = Inherit");
+
+        let contained = crate::workspace_policy::WorkspacePolicy::contained(dir.path());
+        let (m, _) = build_sandbox_pieces("npm install -g cowsay", Some(&contained));
+        assert_eq!(m.network, NetworkPolicy::Deny, "Contained manifest = Deny");
+
+        // SAFETY: serial test; restore prior value.
+        match &prev {
+            Some(v) => unsafe { std::env::set_var("WAYLAND_BASH_ALLOW_NETWORK", v) },
+            None => unsafe { std::env::remove_var("WAYLAND_BASH_ALLOW_NETWORK") },
+        }
+    }
+
+    // ── #657 Part 2: denylist false-positive fixes ─────────────────────
+
+    /// `env VAR=value cmd` and `env -u/-i … cmd` runner idioms are allowed;
+    /// a bare `env` dump is still refused.
+    #[test]
+    fn env_runner_idioms_allowed_bare_env_still_denied() {
+        assert!(check_denylist("env FOO=bar /usr/bin/whoami").is_none());
+        assert!(check_denylist("env -u PATH /usr/bin/whoami").is_none());
+        assert!(check_denylist("env -i node app.js").is_none());
+        // Bare dump still refused (whole-command and chained).
+        assert!(check_denylist("env").is_some());
+        assert!(check_denylist("  env  ").is_some());
+        assert!(check_denylist("ls && env").is_some());
+    }
+
+    /// `$env:PATH` / `$env:USERPROFILE` / `$env:NODE_ENV` are allowed; a
+    /// secret-shaped `$env:*` name is still refused.
+    #[test]
+    fn powershell_env_only_secret_names_denied() {
+        assert!(check_denylist("echo $env:PATH").is_none());
+        assert!(check_denylist("echo $env:USERPROFILE").is_none());
+        assert!(check_denylist("echo $env:NODE_ENV").is_none());
+        assert!(check_denylist("echo $env:MY_API_KEY").is_some());
+        assert!(check_denylist("$env:OPENAI_API_KEY").is_some());
+        assert!(check_denylist("echo $env:DB_PASSWORD").is_some());
+    }
+
+    /// `.env.example` / `.sample` / `.template` / `.dist` templates are
+    /// readable; a real `.env` (or `.env.production`) read is still refused.
+    #[test]
+    fn env_templates_allowed_real_dotenv_denied() {
+        assert!(check_denylist("cat .env.example").is_none());
+        assert!(check_denylist("cat .env.sample").is_none());
+        assert!(check_denylist("head .env.template").is_none());
+        assert!(check_denylist("cat config/.env.dist").is_none());
+        // Real secret env reads still refused.
+        assert!(check_denylist("cat .env").is_some());
+        assert!(check_denylist("tee .env.production").is_some());
+        // A template AND a real .env in one command still trips on the real one.
+        assert!(check_denylist("cat .env.example .env").is_some());
     }
 
     // ── tools-exec-14/16: de-obfuscation defense-in-depth ──────────────
@@ -1310,6 +1490,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial]
     fn build_sandbox_pieces_trusted_sets_cwd_and_no_cache_redirect() {
         use crate::workspace_policy::WorkspacePolicy;
         let dir = tempfile::tempdir().unwrap();
@@ -1317,9 +1498,10 @@ mod tests {
         let (m, cmd) = build_sandbox_pieces("echo hi", Some(&policy));
         assert_eq!(cmd.cwd.as_deref(), Some(policy.root()));
         assert!(m.fs_write_allow.iter().any(|p| p == policy.root()));
-        // Trusted preserves the network opt-in default (Deny) and injects no
-        // CARGO_HOME redirect.
-        assert_eq!(m.network, default_bash_network_policy());
+        // #657 Part 1: Trusted now defaults network ON (Inherit) so installs
+        // work; still injects no CARGO_HOME redirect. Serial so an env-mutating
+        // sibling test cannot flip the trust-aware default under us.
+        assert_eq!(m.network, trusted_bash_network_policy());
         assert!(!m.env.iter().any(|(k, _)| k == "CARGO_HOME"));
         // secrets still stripped from base env (unchanged)
         assert!(!m.env.iter().any(|(k, _)| k.contains("TOKEN")));
