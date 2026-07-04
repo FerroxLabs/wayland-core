@@ -54,8 +54,11 @@
 //!
 //! 1. URL list is rejected when **any** URL fails [`is_safe_url`] — the
 //!    backend is never called with a private-network / loopback URL.
-//! 2. URLs are screened by [`check_website_access`] (fail-open on
-//!    malformed config — same semantics as vision_tools).
+//! 2. URLs are screened by [`check_website_access`]; a policy-evaluation
+//!    error fails **CLOSED** (the URL is rejected), mirroring `web_fetch`.
+//!    (`check_website_access` itself still fails open on a malformed config
+//!    when called with no explicit path — documented on that function — so
+//!    this call-site guard is the last defense-in-depth line.)
 //! 3. URLs are rejected up front if they contain what looks like an API
 //!    key prefix (`sk-`, `pk-`, percent-encoded variants). This mirrors
 //!    the prior engine's secrets-in-URL guard and prevents
@@ -73,7 +76,7 @@ use wcore_types::tool::{JsonSchema, ToolResult};
 
 use crate::Tool;
 use crate::url_safety::is_safe_url;
-use crate::website_policy::check_website_access;
+use crate::website_policy::{WebsiteBlock, WebsitePolicyError, check_website_access};
 
 /// Hard cap on a single search query. Mirrors the practical limit
 /// observed across Tavily / Firecrawl / Exa (~2 KB) with headroom.
@@ -212,22 +215,41 @@ pub fn validate_url_list(urls: &[String]) -> (Vec<String>, Vec<UrlRejection>) {
             });
             continue;
         }
-        match check_website_access(u, None) {
-            Ok(Some(block)) => {
-                rejected.push(UrlRejection {
-                    url: u.to_string(),
-                    reason: block.message,
-                });
-                continue;
-            }
-            Ok(None) => {}
-            Err(e) => {
-                tracing::warn!(target: "wcore_tools::web_tools", "website_policy error: {e}");
-            }
+        if let Some(rejection) = screen_website_policy(u, check_website_access(u, None)) {
+            rejected.push(rejection);
+            continue;
         }
         safe.push(u.to_string());
     }
     (safe, rejected)
+}
+
+/// Map a website-policy check result to an optional rejection for `url`.
+///
+/// **Fails CLOSED on a policy-evaluation error**: an operator blocklist that
+/// cannot be evaluated (malformed/unreadable config) rejects the URL rather than
+/// letting it through, mirroring `web_fetch`. The alternative — falling through
+/// to the allowed list on `Err` — would let web extract/crawl reach URLs the
+/// policy was meant to deny (an SSRF/exfil-adjacent boundary, invisible except a
+/// log line).
+fn screen_website_policy(
+    url: &str,
+    result: Result<Option<WebsiteBlock>, WebsitePolicyError>,
+) -> Option<UrlRejection> {
+    match result {
+        Ok(None) => None,
+        Ok(Some(block)) => Some(UrlRejection {
+            url: url.to_string(),
+            reason: block.message,
+        }),
+        Err(e) => {
+            tracing::warn!(target: "wcore_tools::web_tools", "website_policy error: {e}");
+            Some(UrlRejection {
+                url: url.to_string(),
+                reason: "Blocked: website access policy could not be evaluated".to_string(),
+            })
+        }
+    }
 }
 
 /// A single URL that failed pre-flight validation.
@@ -806,6 +828,42 @@ mod tests {
         assert!(!url_contains_apparent_secret("https://example.com/sk-blog"));
         // No prefix at all.
         assert!(!url_contains_apparent_secret("https://example.com/foo/bar"));
+    }
+
+    #[test]
+    fn screen_website_policy_allows_when_ok_none() {
+        // No policy match → the URL is allowed (no rejection).
+        assert!(screen_website_policy("https://example.com", Ok(None)).is_none());
+    }
+
+    #[test]
+    fn screen_website_policy_rejects_on_block_with_policy_message() {
+        // A policy match → rejected, carrying the block's own message.
+        let block = WebsiteBlock {
+            url: "https://blocked.example".to_string(),
+            host: "blocked.example".to_string(),
+            rule: "blocked.example".to_string(),
+            source: "operator".to_string(),
+            message: "Blocked by website policy: 'blocked.example'".to_string(),
+        };
+        let rej = screen_website_policy("https://blocked.example", Ok(Some(block)))
+            .expect("a matched block must be rejected");
+        assert_eq!(rej.url, "https://blocked.example");
+        assert_eq!(rej.reason, "Blocked by website policy: 'blocked.example'");
+    }
+
+    #[test]
+    fn screen_website_policy_fails_closed_on_eval_error() {
+        // #662: a policy-evaluation error must BLOCK, not allow. Previously this
+        // arm fell through to the safe list (fail OPEN) — an SSRF/exfil boundary.
+        let err = WebsitePolicyError::RootNotMapping(std::path::PathBuf::from("/bad/policy.yaml"));
+        let rej = screen_website_policy("https://uncertain.example", Err(err))
+            .expect("a policy-eval error must be rejected (fail closed)");
+        assert_eq!(rej.url, "https://uncertain.example");
+        assert_eq!(
+            rej.reason,
+            "Blocked: website access policy could not be evaluated"
+        );
     }
 
     #[test]
