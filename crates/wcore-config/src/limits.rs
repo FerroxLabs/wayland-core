@@ -435,4 +435,40 @@ mod tests {
         assert_eq!(model_output_ceiling("deepseek", "deepseek-v4-pro"), None);
         assert_eq!(model_output_ceiling("deepseek", "deepseek-v5"), None);
     }
+
+    /// #165 DRIFT GUARD — the durable prevention. This table is hand-maintained
+    /// SEPARATELY from the routing catalog (`wcore_types::model_aliases`), which
+    /// is how a shipped frontier model (gpt-5.4, claude-opus-4-8) ended up
+    /// SILENTLY falling to the conservative default window: it was added to the
+    /// catalog but not here, and the miss produced no error — just a wrong,
+    /// too-small window.
+    ///
+    /// This test closes that loop: EVERY model the routing catalog can serve
+    /// MUST resolve to a real window/output here. The moment someone adds a
+    /// model to `models_for_provider()` without adding its verified limits above,
+    /// CI goes red at that PR — a new model can never again ship undersized in
+    /// silence. (Routers with no static catalog — flux-router / groq / sakana —
+    /// are intentionally absent from `known_providers()` and so are not checked;
+    /// their window comes from the live served-model signal, not this table.)
+    #[test]
+    fn every_routed_catalog_model_has_a_known_window() {
+        use wcore_types::model_aliases::{known_providers, models_for_provider};
+        let mut missing = Vec::new();
+        for provider in known_providers() {
+            for (alias, model_id) in models_for_provider(provider) {
+                let Some((_out, window)) = model_output_ceiling(provider, model_id) else {
+                    missing.push(format!("{provider} :: {alias} -> {model_id}"));
+                    continue;
+                };
+                assert!(window > 0, "{provider}/{model_id}: window must be positive");
+            }
+        }
+        assert!(
+            missing.is_empty(),
+            "these routed catalog models have NO context-window entry in \
+             model_output_ceiling and would silently fall to the conservative \
+             default (#165) — add their verified window/output above:\n  {}",
+            missing.join("\n  ")
+        );
+    }
 }
