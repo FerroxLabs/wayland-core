@@ -51,8 +51,16 @@ use crate::path_validation::validate_user_path;
 use crate::tool_output_limits::DEFAULT_MAX_BYTES;
 use crate::truncate_utf8;
 
-/// Marker appended when extracted text is truncated to the output cap.
-const TRUNCATION_MARKER: &str = "\n\n... [document text truncated]";
+/// Upper bound on the size of the truncation/continuation marker
+/// [`window_text`] appends, used only for `max_result_size` accounting.
+const MAX_MARKER_BYTES: usize = 200;
+
+/// Hard ceiling on how far `offset + max_chars` can reach, so an absurd
+/// `offset` cannot drive the extractor to its structural caps needlessly. 8 MB
+/// of extracted text is far beyond any model context window, so no legitimate
+/// paging session needs more.
+#[cfg_attr(not(feature = "doc-extract"), allow(dead_code))]
+const MAX_EXTRACT_BUDGET: usize = 8 * 1024 * 1024;
 
 /// Default byte cap for extracted text before truncation. Reuses the shared
 /// terminal-output cap (50_000) so document output is bounded consistently
@@ -76,16 +84,65 @@ impl DocExtractTool {
     }
 }
 
-/// Apply the byte-cap truncation to extracted text. Returns the text unchanged
-/// when within budget, otherwise a char-boundary-safe prefix with
-/// [`TRUNCATION_MARKER`] appended.
+/// Window `text` to the byte range starting at `offset`, at most `max_bytes`
+/// long, appending an honest size + continuation marker (#650 contract: never
+/// silently truncate — a truncated document must say how much was shown and how
+/// to reach the rest).
+///
+/// `budget` is the internal extraction cap (`offset + max_bytes`). When the
+/// extractor filled it exactly (`text.len() >= budget`) the document has more
+/// content past this window, so the marker points the caller at the next
+/// `offset`. When the extractor stopped short of `budget`, the true end was
+/// reached and the total byte count is known and reported.
 #[cfg_attr(not(feature = "doc-extract"), allow(dead_code))]
-fn cap_text(text: &str, max_bytes: usize) -> String {
-    if text.len() <= max_bytes {
-        return text.to_string();
+fn window_text(text: &str, offset: usize, max_bytes: usize, budget: usize) -> String {
+    let extracted = text.len();
+    // Did the extractor stop because it hit its cap (more may follow) or because
+    // it reached the natural end of the document (so `extracted` is the total)?
+    let hit_cap = extracted >= budget;
+
+    // Snap the requested offset down to a UTF-8 char boundary and clamp.
+    let mut start = offset.min(extracted);
+    while start > 0 && !text.is_char_boundary(start) {
+        start -= 1;
     }
-    let head = truncate_utf8(text, max_bytes);
-    format!("{head}{TRUNCATION_MARKER}")
+    if start >= extracted {
+        return if hit_cap {
+            format!(
+                "[no document text at byte offset {offset}; the previous window ended earlier — \
+                 re-request with a smaller offset]"
+            )
+        } else {
+            format!(
+                "[end of document: {extracted} bytes total; byte offset {offset} is past the end]"
+            )
+        };
+    }
+
+    let shown = truncate_utf8(&text[start..], max_bytes);
+    let shown_end = start + shown.len();
+    let more = hit_cap || shown_end < extracted;
+
+    if !more {
+        // Reached the true end within this window — total size is known exactly.
+        if start == 0 {
+            return shown.to_string();
+        }
+        return format!(
+            "{shown}\n\n... [end of document: bytes {start}\u{2013}{shown_end} of {extracted} total]"
+        );
+    }
+
+    // More content remains — give an honest size note and the continuation offset.
+    let total_note = if hit_cap {
+        format!("{shown_end}+ bytes")
+    } else {
+        format!("{extracted} bytes")
+    };
+    format!(
+        "{shown}\n\n... [document text truncated: showing bytes {start}\u{2013}{shown_end} of \
+         {total_note}; pass offset={shown_end} to continue]"
+    )
 }
 
 #[async_trait]
@@ -123,6 +180,11 @@ impl Tool for DocExtractTool {
                     "type": "integer",
                     "minimum": 1,
                     "description": "Cap the extracted text length (bytes). Defaults to a bounded cap."
+                },
+                "offset": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "description": "Byte offset to start extraction from, for paging through a large document. Use the offset printed in a prior call's truncation marker to read the next chunk. Defaults to 0."
                 }
             },
             "required": ["path"],
@@ -177,13 +239,19 @@ impl Tool for DocExtractTool {
             .map(|n| (n as usize).min(MAX_DOC_TEXT_BYTES))
             .unwrap_or(MAX_DOC_TEXT_BYTES);
 
-        extract(&validated, path, sheet.as_deref(), max_bytes)
+        let offset = input
+            .get("offset")
+            .and_then(|v| v.as_u64())
+            .map(|n| n as usize)
+            .unwrap_or(0);
+
+        extract(&validated, path, sheet.as_deref(), offset, max_bytes)
     }
 
     fn max_result_size(&self) -> usize {
-        // Slightly above the cap so cap_text's own marker is never clipped a
+        // Slightly above the cap so window_text's own marker is never clipped a
         // second time by the registry-level truncation.
-        MAX_DOC_TEXT_BYTES + TRUNCATION_MARKER.len() + 64
+        MAX_DOC_TEXT_BYTES + MAX_MARKER_BYTES
     }
 
     fn category(&self) -> ToolCategory {
@@ -228,10 +296,21 @@ const MAX_CELLS: usize = 500_000;
 const MAX_GRID_CELLS: u64 = 1_000_000;
 
 #[cfg(feature = "doc-extract")]
-fn extract(disk_path: &Path, display: &str, sheet: Option<&str>, max_bytes: usize) -> ToolResult {
-    match extract_inner(disk_path, sheet, max_bytes) {
+fn extract(
+    disk_path: &Path,
+    display: &str,
+    sheet: Option<&str>,
+    offset: usize,
+    max_bytes: usize,
+) -> ToolResult {
+    // Extract enough to cover the requested window [offset, offset+max_bytes],
+    // clamped to a hard ceiling so an absurd offset can't drive the extractor to
+    // its structural caps for nothing. The extractor's own byte early-stops use
+    // this budget; window_text then slices out the [offset..] chunk.
+    let budget = offset.saturating_add(max_bytes).min(MAX_EXTRACT_BUDGET);
+    match extract_inner(disk_path, sheet, budget) {
         Ok(text) => ToolResult {
-            content: cap_text(&text, max_bytes),
+            content: window_text(&text, offset, max_bytes, budget),
             is_error: false,
         },
         Err(e) => ToolResult {
@@ -394,25 +473,33 @@ fn extract_xlsx<R: std::io::Read + std::io::Seek>(
             let mut cr = wb
                 .worksheet_cells_reader(name)
                 .map_err(|e| format!("cannot read sheet '{name}': {e}"))?;
+            let mut examined = 0usize;
             while let Some(cell) = cr
                 .next_cell()
                 .map_err(|e| format!("reading sheet '{name}': {e}"))?
             {
+                // Count EVERY visited cell, not only populated ones. An xlsx
+                // packed with a huge run of empty <c> elements (tiny + highly
+                // compressible, staying under the zip-bomb byte caps) would
+                // otherwise drive this loop unbounded: empty cells `continue`
+                // before a populated-only counter, so MAX_CELLS never trips —
+                // defeating the exact anti-DoS guard this loop exists for.
+                examined += 1;
+                if examined > MAX_CELLS {
+                    truncated = true;
+                    break;
+                }
                 let value = dataref_to_string(cell.get_value());
                 if value.is_empty() {
                     continue;
                 }
                 let (row, col) = cell.get_position();
                 cells.push((row, col, value));
-                if cells.len() >= MAX_CELLS {
-                    truncated = true;
-                    break;
-                }
             }
         }
         render_sparse_cells(&cells, &mut out, max_bytes);
         if truncated {
-            out.push_str("\n_[sheet truncated: too many populated cells]_\n");
+            out.push_str("\n_[sheet truncated: cell-scan limit reached]_\n");
         }
         out.push('\n');
         if out.len() >= max_bytes {
@@ -736,6 +823,7 @@ fn extract(
     _disk_path: &Path,
     display: &str,
     _sheet: Option<&str>,
+    _offset: usize,
     _max_bytes: usize,
 ) -> ToolResult {
     ToolResult {
@@ -758,17 +846,47 @@ mod tests {
     // ── pure helper / schema tests (run regardless of the feature) ──────────
 
     #[test]
-    fn cap_text_passes_short_text_through() {
-        assert_eq!(cap_text("hello", MAX_DOC_TEXT_BYTES), "hello");
+    fn window_text_passes_short_text_through() {
+        // Whole doc fits, offset 0 → returned verbatim, no marker.
+        let out = window_text("hello", 0, MAX_DOC_TEXT_BYTES, MAX_DOC_TEXT_BYTES);
+        assert_eq!(out, "hello");
     }
 
     #[test]
-    fn cap_text_truncates_oversized_text() {
+    fn window_text_truncation_marks_size_and_continuation() {
+        // Extractor hit its cap (text.len() >= budget) → the marker must carry a
+        // size note AND a continuation offset (#650 contract: never silent).
         let big = "a".repeat(MAX_DOC_TEXT_BYTES + 5_000);
-        let out = cap_text(&big, MAX_DOC_TEXT_BYTES);
-        assert!(out.ends_with(TRUNCATION_MARKER));
-        assert!(out.len() <= MAX_DOC_TEXT_BYTES + TRUNCATION_MARKER.len());
+        let out = window_text(&big, 0, MAX_DOC_TEXT_BYTES, MAX_DOC_TEXT_BYTES);
+        assert!(
+            out.contains("document text truncated: showing bytes 0"),
+            "size-annotated marker: {}",
+            &out[out.len().saturating_sub(160)..]
+        );
+        assert!(
+            out.contains(&format!("pass offset={MAX_DOC_TEXT_BYTES} to continue")),
+            "continuation offset present"
+        );
+        assert!(out.len() <= MAX_DOC_TEXT_BYTES + MAX_MARKER_BYTES);
         assert!(out.len() < big.len());
+    }
+
+    #[test]
+    fn window_text_offset_reads_next_chunk_and_reports_end() {
+        // A 100-byte doc, offset 50, generous budget → returns the tail and
+        // reports the exact total (end reached, not a silent stop).
+        let text = "x".repeat(100);
+        let out = window_text(&text, 50, 1_000, 1_050);
+        assert!(out.contains("end of document"), "end marker: {out}");
+        assert!(out.contains("of 100 total"), "exact total reported: {out}");
+    }
+
+    #[test]
+    fn window_text_offset_past_end_is_honest() {
+        // Offset beyond the extracted text must say so, not return empty-success.
+        let text = "x".repeat(100);
+        let out = window_text(&text, 200, 1_000, 1_200);
+        assert!(out.contains("past the end"), "honest past-end note: {out}");
     }
 
     #[test]
@@ -1024,6 +1142,57 @@ mod tests {
         }
 
         #[tokio::test]
+        async fn doc_pages_via_offset_continuation() {
+            // #650 FIX-FIRST Finding 2: a doc larger than max_chars must truncate
+            // WITH a continuation offset, and re-reading at that offset returns
+            // the next chunk (never a silent tail-drop).
+            let mut csv = String::from("col\n");
+            for i in 0..200 {
+                csv.push_str(&format!("row{i}\n"));
+            }
+            let (_d, path) = write_tmp("big.csv", csv.as_bytes());
+            let p = path.to_str().unwrap().to_string();
+
+            let first = DocExtractTool::new()
+                .execute(json!({ "path": p, "max_chars": 40 }))
+                .await;
+            assert!(!first.is_error, "{}", first.content);
+            assert!(
+                first.content.contains("document text truncated")
+                    && first.content.contains("pass offset="),
+                "first chunk must truncate with a continuation offset: {}",
+                first.content
+            );
+
+            // Parse the continuation offset and read the next chunk.
+            let off: usize = first
+                .content
+                .rsplit("pass offset=")
+                .next()
+                .unwrap()
+                .chars()
+                .take_while(|c| c.is_ascii_digit())
+                .collect::<String>()
+                .parse()
+                .expect("offset in marker");
+            assert!(off > 0, "offset advances past the first chunk");
+
+            let second = DocExtractTool::new()
+                .execute(json!({ "path": p, "max_chars": 40, "offset": off }))
+                .await;
+            assert!(!second.is_error, "{}", second.content);
+            assert_ne!(
+                first.content, second.content,
+                "the offset must advance to new content"
+            );
+            assert!(
+                second.content.contains(&format!("bytes {off}")),
+                "continuation chunk starts at the requested offset: {}",
+                second.content
+            );
+        }
+
+        #[tokio::test]
         async fn extracts_xlsx_cells_via_streaming() {
             let bytes = make_xlsx(
                 &[
@@ -1109,6 +1278,56 @@ mod tests {
         }
 
         // ── security tests ──────────────────────────────────────────────────
+
+        #[tokio::test]
+        async fn xlsx_empty_cell_flood_is_bounded() {
+            // #650 FIX-FIRST Finding 1 (CRITICAL): a sheet packed with a huge run
+            // of EMPTY cells (each tiny + highly compressible, so it stays under
+            // the zip-bomb byte caps) must NOT drive the cell scan unbounded.
+            // Empty cells previously `continue`d before the populated-only
+            // MAX_CELLS counter, so the guard never tripped. The scan now counts
+            // EVERY examined cell and must break at MAX_CELLS, reporting
+            // truncation — proving bounded work on attacker input.
+            let n = MAX_CELLS + 1_000;
+            let mut sd = String::with_capacity(n * 40);
+            let per_row = 16_000; // stay under Excel's 16_384 column limit
+            let mut remaining = n;
+            let mut row = 1;
+            while remaining > 0 {
+                let cells = remaining.min(per_row);
+                sd.push_str(&format!("<row r=\"{row}\">"));
+                for _ in 0..cells {
+                    sd.push_str("<c t=\"inlineStr\"><is><t></t></is></c>");
+                }
+                sd.push_str("</row>");
+                remaining -= cells;
+                row += 1;
+            }
+            let content_types = r#"<?xml version="1.0"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/><Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/></Types>"#;
+            let root_rels = r#"<?xml version="1.0"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/></Relationships>"#;
+            let workbook = r#"<?xml version="1.0"?><workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="Sheet1" sheetId="1" r:id="rId1"/></sheets></workbook>"#;
+            let wb_rels = r#"<?xml version="1.0"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/></Relationships>"#;
+            let sheet = format!(
+                r#"<?xml version="1.0"?><worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><dimension ref="A1:A{n}"/><sheetData>{sd}</sheetData></worksheet>"#
+            );
+            let bytes = zip_bytes(&[
+                ("[Content_Types].xml", content_types),
+                ("_rels/.rels", root_rels),
+                ("xl/workbook.xml", workbook),
+                ("xl/_rels/workbook.xml.rels", wb_rels),
+                ("xl/worksheets/sheet1.xml", &sheet),
+            ]);
+            let (_d, path) = write_tmp("flood.xlsx", &bytes);
+            let result = DocExtractTool::new()
+                .execute(json!({ "path": path.to_str().unwrap() }))
+                .await;
+            assert!(!result.is_error, "unexpected error: {}", result.content);
+            assert!(
+                result.content.contains("cell-scan limit reached"),
+                "empty-cell flood must trip the MAX_CELLS scan bound: {}",
+                &result.content[..result.content.len().min(400)]
+            );
+        }
 
         #[tokio::test]
         async fn xxe_external_entity_is_not_expanded() {
