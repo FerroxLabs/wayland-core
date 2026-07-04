@@ -55,8 +55,9 @@ pub fn model_output_ceiling(_provider: &str, model: &str) -> Option<(u32, u32)> 
         return Some((128_000, 1_000_000));
     }
     if m.contains("sonnet-4-6") {
-        // Sonnet 4.6: 1M window, but output stays 64k (models.dev).
-        return Some((64_000, 1_000_000));
+        // Sonnet 4.6: 1M window, 128k output. Verified against Anthropic's model
+        // overview + Codex/Gemini cross-audit; models.dev is stale here at 64k.
+        return Some((128_000, 1_000_000));
     }
     if m.contains("sonnet-4") {
         // Sonnet 4.0 / 4.5: 200k window, 64k output.
@@ -203,7 +204,7 @@ mod tests {
         );
         assert_eq!(
             model_output_ceiling("anthropic", "claude-sonnet-4-6"),
-            Some((64_000, 1_000_000))
+            Some((128_000, 1_000_000))
         );
         assert_eq!(
             model_output_ceiling("openai", "gpt-4o-mini"),
@@ -234,10 +235,10 @@ mod tests {
                 "{id} must report the 1,000,000-token window / 128k output"
             );
         }
-        // Sonnet 4.6 shares the 1M window but a 64k output cap.
+        // Sonnet 4.6 shares the 1M window and the generation's 128k output cap.
         assert_eq!(
             model_output_ceiling("anthropic", "claude-sonnet-4-6"),
-            Some((64_000, 1_000_000))
+            Some((128_000, 1_000_000))
         );
         // Case-insensitive (the lookup lowercases first).
         assert_eq!(
