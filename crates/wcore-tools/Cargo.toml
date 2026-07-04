@@ -99,6 +99,16 @@ pdf-extract = { workspace = true, optional = true }
 image        = { workspace = true, optional = true }
 kamadak-exif = { workspace = true, optional = true }
 
+# #650: DocExtractTool — read-only office-doc (docx/xlsx/pptx/csv) text
+# extraction. All pure-Rust, no native build deps, gated behind the default-on
+# `doc-extract` feature (mirroring `pdf` / `image-inspect`). `zip` is already a
+# hard dep (ArchiveTool) so it is reused, not re-declared. A build with
+# `--no-default-features` drops these and DocExtractTool degrades to an honest
+# error.
+calamine  = { workspace = true, optional = true }
+quick-xml = { workspace = true, optional = true }
+csv       = { workspace = true, optional = true }
+
 # v0.9.0 W1 B10 voice_mode — used only by the `VoiceModeTool` Tool impl in
 # `voice_mode.rs` for type-level Arc<dyn ...> wiring. The cpal-backed
 # concrete recorder/player live in wcore-agent's `tool_backends/voice_mode.rs`.
@@ -119,7 +129,7 @@ workspace-hack.workspace = true
 wcore-sandbox = { workspace = true, features = ["seccomp"] }
 
 [features]
-default = ["pdf", "image-inspect"]
+default = ["pdf", "image-inspect", "doc-extract"]
 # Enables postgres_schema_tool::live::TokioPostgresBackend.
 postgres = ["dep:tokio-postgres"]
 # T15: enables PdfTool's real PDF text-extraction backend.
@@ -128,6 +138,10 @@ pdf = ["dep:pdf-extract"]
 # Default-on; `--no-default-features` drops the `image` transitive tree and
 # ImageInspectTool returns an honest "compiled without image-inspect" error.
 image-inspect = ["dep:image", "dep:kamadak-exif"]
+# #650: enables DocExtractTool's real office-doc extraction backend.
+# Default-on; `--no-default-features` drops calamine/quick-xml/csv and
+# DocExtractTool returns an honest "compiled without doc-extract" error.
+doc-extract = ["dep:calamine", "dep:quick-xml", "dep:csv"]
 
 [dev-dependencies]
 tempfile.workspace  = true

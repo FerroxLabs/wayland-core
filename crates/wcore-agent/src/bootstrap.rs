@@ -728,6 +728,10 @@ impl AgentBootstrap {
         // degrades to an honest error when wcore-tools is built without
         // the default-on `pdf` feature.
         registry.register(Box::new(wcore_tools::pdf_tool::PdfTool::new()));
+        // #650: DocExtractTool — read-only office-doc (docx/xlsx/pptx/csv)
+        // extraction. Always registered; degrades to an honest error when
+        // wcore-tools is built without the default-on `doc-extract` feature.
+        registry.register(Box::new(wcore_tools::doc_tool::DocExtractTool::new()));
 
         // v0.6.3 D.0: wire the remaining catalog tools into the live
         // registry. Until D.0 these shipped as `pub mod` code unreachable

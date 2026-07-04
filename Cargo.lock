@@ -1055,6 +1055,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "calamine"
+version = "0.26.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "138646b9af2c5d7f1804ea4bf93afc597737d2bd4f7341d67c48b03316976eb1"
+dependencies = [
+ "byteorder",
+ "codepage",
+ "encoding_rs",
+ "log",
+ "quick-xml 0.31.0",
+ "serde",
+ "zip 2.4.2",
+]
+
+[[package]]
 name = "candle-core"
 version = "0.9.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1121,7 +1136,7 @@ dependencies = [
  "cap-primitives",
  "cap-std",
  "io-lifetimes",
- "windows-sys 0.52.0",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -1150,7 +1165,7 @@ dependencies = [
  "maybe-owned",
  "rustix 1.1.4",
  "rustix-linux-procfs",
- "windows-sys 0.52.0",
+ "windows-sys 0.59.0",
  "winx",
 ]
 
@@ -1494,6 +1509,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "codepage"
+version = "0.1.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "48f68d061bc2828ae826206326e61251aca94c1e4a5305cf52d9138639c918b4"
+dependencies = [
+ "encoding_rs",
+]
+
+[[package]]
 name = "color_quant"
 version = "1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1511,7 +1535,7 @@ version = "3.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "faf9468729b8cbcea668e36183cb69d317348c2e08e994829fb56ebfdfbaac34"
 dependencies = [
- "windows-sys 0.48.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -2001,6 +2025,27 @@ checksum = "eb2a7d3066da2de787b7f032c736763eb7ae5d355f81a68bab2675a96008b0bf"
 dependencies = [
  "lab",
  "phf 0.11.3",
+]
+
+[[package]]
+name = "csv"
+version = "1.4.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "52cd9d68cf7efc6ddfaaee42e7288d3a99d613d4b50f76ce9827ae0c6e14f938"
+dependencies = [
+ "csv-core",
+ "itoa",
+ "ryu",
+ "serde_core",
+]
+
+[[package]]
+name = "csv-core"
+version = "0.1.13"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "704a3c26996a80471189265814dbc2c257598b96b8a7feae2d31ace646bb9782"
+dependencies = [
+ "memchr",
 ]
 
 [[package]]
@@ -2555,7 +2600,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -2652,7 +2697,7 @@ checksum = "0ce92ff622d6dadf7349484f42c93271a0d49b7cc4d466a936405bacbe10aa78"
 dependencies = [
  "cfg-if",
  "rustix 1.1.4",
- "windows-sys 0.52.0",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -2833,7 +2878,7 @@ checksum = "94e7099f6313ecacbe1256e8ff9d617b75d1bcb16a6fddef94866d225a01a14a"
 dependencies = [
  "io-lifetimes",
  "rustix 1.1.4",
- "windows-sys 0.52.0",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -3567,7 +3612,7 @@ dependencies = [
  "js-sys",
  "log",
  "wasm-bindgen",
- "windows-core 0.57.0",
+ "windows-core 0.61.2",
 ]
 
 [[package]]
@@ -3868,7 +3913,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2285ddfe3054097ef4b2fe909ef8c3bcd1ea52a8f0d274416caebeef39f04a65"
 dependencies = [
  "io-lifetimes",
- "windows-sys 0.52.0",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -3900,7 +3945,7 @@ checksum = "3640c1c38b8e4e43584d8df18be5fc6b0aa314ce6ebf51b53313d4306cca8e46"
 dependencies = [
  "hermit-abi",
  "libc",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -5591,7 +5636,7 @@ checksum = "092791278e026273c1b65bbdcfbba3a300f2994c896bd01ab01da613c29c46f1"
 dependencies = [
  "base64 0.22.1",
  "indexmap 2.14.0",
- "quick-xml",
+ "quick-xml 0.39.4",
  "serde",
  "time",
 ]
@@ -5848,7 +5893,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8a56d757972c98b346a9b766e3f02746cde6dd1cd1d1d563472929fdd74bec4d"
 dependencies = [
  "anyhow",
- "itertools 0.10.5",
+ "itertools 0.14.0",
  "proc-macro2",
  "quote",
  "syn 2.0.117",
@@ -5948,6 +5993,16 @@ checksum = "a993555f31e5a609f617c12db6250dedcac1b0a85076912c436e6fc9b2c8e6a3"
 
 [[package]]
 name = "quick-xml"
+version = "0.31.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1004a344b30a54e2ee58d66a71b32d2db2feb0a31f9a2d302bf0536f15de2a33"
+dependencies = [
+ "encoding_rs",
+ "memchr",
+]
+
+[[package]]
+name = "quick-xml"
 version = "0.39.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cdcc8dd4e2f670d309a5f0e83fe36dfdc05af317008fea29144da1a2ac858e5e"
@@ -6007,7 +6062,7 @@ dependencies = [
  "once_cell",
  "socket2",
  "tracing",
- "windows-sys 0.52.0",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -6534,7 +6589,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys 0.4.15",
- "windows-sys 0.52.0",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -6547,7 +6602,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys 0.12.1",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -7411,7 +7466,7 @@ dependencies = [
  "fd-lock",
  "io-lifetimes",
  "rustix 0.38.44",
- "windows-sys 0.52.0",
+ "windows-sys 0.59.0",
  "winx",
 ]
 
@@ -7442,7 +7497,7 @@ dependencies = [
  "getrandom 0.4.2",
  "once_cell",
  "rustix 1.1.4",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -8928,7 +8983,7 @@ dependencies = [
 
 [[package]]
 name = "wayland-browser"
-version = "0.12.20"
+version = "0.12.22"
 dependencies = [
  "async-trait",
  "inventory",
@@ -8945,7 +9000,7 @@ dependencies = [
 
 [[package]]
 name = "wayland-cua"
-version = "0.12.20"
+version = "0.12.22"
 dependencies = [
  "async-trait",
  "inventory",
@@ -8962,7 +9017,7 @@ dependencies = [
 
 [[package]]
 name = "wayland-honcho"
-version = "0.12.20"
+version = "0.12.22"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -8983,7 +9038,7 @@ dependencies = [
 
 [[package]]
 name = "wayland-ijfw"
-version = "0.12.20"
+version = "0.12.22"
 dependencies = [
  "async-trait",
  "chrono",
@@ -9002,7 +9057,7 @@ dependencies = [
 
 [[package]]
 name = "wayland-ollama"
-version = "0.12.20"
+version = "0.12.22"
 dependencies = [
  "async-trait",
  "futures",
@@ -9023,7 +9078,7 @@ dependencies = [
 
 [[package]]
 name = "wcore-acp"
-version = "0.12.20"
+version = "0.12.22"
 dependencies = [
  "async-trait",
  "axum",
@@ -9046,7 +9101,7 @@ dependencies = [
 
 [[package]]
 name = "wcore-agent"
-version = "0.12.20"
+version = "0.12.22"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -9136,7 +9191,7 @@ dependencies = [
 
 [[package]]
 name = "wcore-agents-pack"
-version = "0.12.20"
+version = "0.12.22"
 dependencies = [
  "dirs",
  "serde",
@@ -9149,7 +9204,7 @@ dependencies = [
 
 [[package]]
 name = "wcore-browser"
-version = "0.12.20"
+version = "0.12.22"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -9179,7 +9234,7 @@ dependencies = [
 
 [[package]]
 name = "wcore-budget"
-version = "0.12.20"
+version = "0.12.22"
 dependencies = [
  "chrono",
  "parking_lot",
@@ -9192,7 +9247,7 @@ dependencies = [
 
 [[package]]
 name = "wcore-channel-discord"
-version = "0.12.20"
+version = "0.12.22"
 dependencies = [
  "async-trait",
  "chrono",
@@ -9213,7 +9268,7 @@ dependencies = [
 
 [[package]]
 name = "wcore-channel-email"
-version = "0.12.20"
+version = "0.12.22"
 dependencies = [
  "async-trait",
  "chrono",
@@ -9232,7 +9287,7 @@ dependencies = [
 
 [[package]]
 name = "wcore-channel-imessage"
-version = "0.12.20"
+version = "0.12.22"
 dependencies = [
  "async-trait",
  "chrono",
@@ -9249,7 +9304,7 @@ dependencies = [
 
 [[package]]
 name = "wcore-channel-matrix"
-version = "0.12.20"
+version = "0.12.22"
 dependencies = [
  "async-trait",
  "chrono",
@@ -9268,7 +9323,7 @@ dependencies = [
 
 [[package]]
 name = "wcore-channel-msteams"
-version = "0.12.20"
+version = "0.12.22"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -9289,7 +9344,7 @@ dependencies = [
 
 [[package]]
 name = "wcore-channel-signal"
-version = "0.12.20"
+version = "0.12.22"
 dependencies = [
  "async-trait",
  "chrono",
@@ -9304,7 +9359,7 @@ dependencies = [
 
 [[package]]
 name = "wcore-channel-slack"
-version = "0.12.20"
+version = "0.12.22"
 dependencies = [
  "async-trait",
  "chrono",
@@ -9327,7 +9382,7 @@ dependencies = [
 
 [[package]]
 name = "wcore-channel-sms"
-version = "0.12.20"
+version = "0.12.22"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -9350,7 +9405,7 @@ dependencies = [
 
 [[package]]
 name = "wcore-channel-telegram"
-version = "0.12.20"
+version = "0.12.22"
 dependencies = [
  "async-trait",
  "chrono",
@@ -9369,7 +9424,7 @@ dependencies = [
 
 [[package]]
 name = "wcore-channel-whatsapp"
-version = "0.12.20"
+version = "0.12.22"
 dependencies = [
  "async-trait",
  "chrono",
@@ -9392,7 +9447,7 @@ dependencies = [
 
 [[package]]
 name = "wcore-channels"
-version = "0.12.20"
+version = "0.12.22"
 dependencies = [
  "async-trait",
  "chrono",
@@ -9408,7 +9463,7 @@ dependencies = [
 
 [[package]]
 name = "wcore-channels-registry"
-version = "0.12.20"
+version = "0.12.22"
 dependencies = [
  "dirs",
  "serde",
@@ -9433,7 +9488,7 @@ dependencies = [
 
 [[package]]
 name = "wcore-cli"
-version = "0.12.20"
+version = "0.12.22"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -9516,7 +9571,7 @@ dependencies = [
 
 [[package]]
 name = "wcore-compact"
-version = "0.12.20"
+version = "0.12.22"
 dependencies = [
  "regex",
  "serde",
@@ -9525,7 +9580,7 @@ dependencies = [
 
 [[package]]
 name = "wcore-config"
-version = "0.12.20"
+version = "0.12.22"
 dependencies = [
  "anyhow",
  "argon2",
@@ -9563,7 +9618,7 @@ dependencies = [
 
 [[package]]
 name = "wcore-cron"
-version = "0.12.20"
+version = "0.12.22"
 dependencies = [
  "async-trait",
  "chrono",
@@ -9580,7 +9635,7 @@ dependencies = [
 
 [[package]]
 name = "wcore-cua"
-version = "0.12.20"
+version = "0.12.22"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -9616,7 +9671,7 @@ dependencies = [
 
 [[package]]
 name = "wcore-dispatch"
-version = "0.12.20"
+version = "0.12.22"
 dependencies = [
  "rand 0.9.4",
  "rand_distr",
@@ -9629,7 +9684,7 @@ dependencies = [
 
 [[package]]
 name = "wcore-egress"
-version = "0.12.20"
+version = "0.12.22"
 dependencies = [
  "async-trait",
  "http 1.4.1",
@@ -9642,7 +9697,7 @@ dependencies = [
 
 [[package]]
 name = "wcore-eval"
-version = "0.12.20"
+version = "0.12.22"
 dependencies = [
  "rstest",
  "serde",
@@ -9659,7 +9714,7 @@ dependencies = [
 
 [[package]]
 name = "wcore-eval-scenarios"
-version = "0.12.20"
+version = "0.12.22"
 dependencies = [
  "anyhow",
  "clap",
@@ -9679,7 +9734,7 @@ dependencies = [
 
 [[package]]
 name = "wcore-evolve"
-version = "0.12.20"
+version = "0.12.22"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -9719,7 +9774,7 @@ dependencies = [
 
 [[package]]
 name = "wcore-honcho-adapter"
-version = "0.12.20"
+version = "0.12.22"
 dependencies = [
  "async-trait",
  "serde",
@@ -9734,7 +9789,7 @@ dependencies = [
 
 [[package]]
 name = "wcore-mcp"
-version = "0.12.20"
+version = "0.12.22"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -9761,7 +9816,7 @@ dependencies = [
 
 [[package]]
 name = "wcore-memory"
-version = "0.12.20"
+version = "0.12.22"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -9802,7 +9857,7 @@ dependencies = [
 
 [[package]]
 name = "wcore-observability"
-version = "0.12.20"
+version = "0.12.22"
 dependencies = [
  "chrono",
  "opentelemetry",
@@ -9826,7 +9881,7 @@ dependencies = [
 
 [[package]]
 name = "wcore-permissions"
-version = "0.12.20"
+version = "0.12.22"
 dependencies = [
  "anyhow",
  "chrono",
@@ -9843,7 +9898,7 @@ dependencies = [
 
 [[package]]
 name = "wcore-plugin-api"
-version = "0.12.20"
+version = "0.12.22"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -9870,7 +9925,7 @@ dependencies = [
 
 [[package]]
 name = "wcore-plugin-subprocess"
-version = "0.12.20"
+version = "0.12.22"
 dependencies = [
  "anyhow",
  "serde",
@@ -9889,7 +9944,7 @@ dependencies = [
 
 [[package]]
 name = "wcore-plugin-wasm"
-version = "0.12.20"
+version = "0.12.22"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -9911,7 +9966,7 @@ dependencies = [
 
 [[package]]
 name = "wcore-pluginsrc"
-version = "0.12.20"
+version = "0.12.22"
 dependencies = [
  "serde",
  "serde_json",
@@ -9926,7 +9981,7 @@ dependencies = [
 
 [[package]]
 name = "wcore-pricing"
-version = "0.12.20"
+version = "0.12.22"
 dependencies = [
  "chrono",
  "dirs",
@@ -9945,7 +10000,7 @@ dependencies = [
 
 [[package]]
 name = "wcore-protocol"
-version = "0.12.20"
+version = "0.12.22"
 dependencies = [
  "rstest",
  "serde",
@@ -9957,7 +10012,7 @@ dependencies = [
 
 [[package]]
 name = "wcore-providers"
-version = "0.12.20"
+version = "0.12.22"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -9992,7 +10047,7 @@ dependencies = [
 
 [[package]]
 name = "wcore-replay"
-version = "0.12.20"
+version = "0.12.22"
 dependencies = [
  "serde",
  "serde_json",
@@ -10003,7 +10058,7 @@ dependencies = [
 
 [[package]]
 name = "wcore-repomap"
-version = "0.12.20"
+version = "0.12.22"
 dependencies = [
  "ignore",
  "regex",
@@ -10016,7 +10071,7 @@ dependencies = [
 
 [[package]]
 name = "wcore-safety"
-version = "0.12.20"
+version = "0.12.22"
 dependencies = [
  "async-trait",
  "regex",
@@ -10029,7 +10084,7 @@ dependencies = [
 
 [[package]]
 name = "wcore-sandbox"
-version = "0.12.20"
+version = "0.12.22"
 dependencies = [
  "async-trait",
  "bollard",
@@ -10049,7 +10104,7 @@ dependencies = [
 
 [[package]]
 name = "wcore-skills"
-version = "0.12.20"
+version = "0.12.22"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -10086,7 +10141,7 @@ dependencies = [
 
 [[package]]
 name = "wcore-swarm"
-version = "0.12.20"
+version = "0.12.22"
 dependencies = [
  "futures",
  "humantime-serde",
@@ -10105,12 +10160,14 @@ dependencies = [
 
 [[package]]
 name = "wcore-tools"
-version = "0.12.20"
+version = "0.12.22"
 dependencies = [
  "anyhow",
  "async-trait",
+ "calamine",
  "chrono",
  "criterion",
+ "csv",
  "dirs",
  "flate2",
  "futures",
@@ -10123,6 +10180,7 @@ dependencies = [
  "mail-parser",
  "parking_lot",
  "pdf-extract",
+ "quick-xml 0.39.4",
  "regex",
  "reqwest",
  "rusqlite",
@@ -10152,7 +10210,7 @@ dependencies = [
 
 [[package]]
 name = "wcore-types"
-version = "0.12.20"
+version = "0.12.22"
 dependencies = [
  "async-trait",
  "chrono",
@@ -10162,7 +10220,7 @@ dependencies = [
 
 [[package]]
 name = "wcore-user-model"
-version = "0.12.20"
+version = "0.12.22"
 dependencies = [
  "async-trait",
  "serde",
@@ -10348,7 +10406,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.48.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -10934,7 +10992,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3f3fd376f71958b862e7afb20cfe5a22830e1963462f3a17f49d82a6c1d1f42d"
 dependencies = [
  "bitflags 2.11.1",
- "windows-sys 0.52.0",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
