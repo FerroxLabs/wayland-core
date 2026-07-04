@@ -39,6 +39,11 @@ const AUTO_DRAFT_SCORER: &str = "auto_drafter";
 pub struct SkillDrafter {
     skill_dir: PathBuf,
     prompt_store: Option<Arc<wcore_evolve::prompt_store::PromptStore>>,
+    /// Override for the loader-visible skills root (the PRIMARY write target).
+    /// `None` in production → resolved from `app_config_dir()`. Tests inject a
+    /// tempdir so the primary write is hermetic and does not race with (or
+    /// pollute) the real user config dir. See #564.
+    loader_root: Option<PathBuf>,
 }
 
 impl SkillDrafter {
@@ -52,6 +57,24 @@ impl SkillDrafter {
         Self {
             skill_dir,
             prompt_store,
+            loader_root: None,
+        }
+    }
+
+    /// Test constructor: pin the loader-visible skills root to an explicit
+    /// directory (a tempdir) so `draft()`'s primary write is hermetic instead
+    /// of landing in the shared, process-global `app_config_dir()`. Without
+    /// this, concurrent drafter tests race on one real config path (#564).
+    #[cfg(test)]
+    fn with_loader_root(
+        skill_dir: PathBuf,
+        loader_root: PathBuf,
+        prompt_store: Option<Arc<wcore_evolve::prompt_store::PromptStore>>,
+    ) -> Self {
+        Self {
+            skill_dir,
+            prompt_store,
+            loader_root: Some(loader_root),
         }
     }
 
@@ -77,7 +100,12 @@ impl SkillDrafter {
 
         // Primary write: loader-visible directory format under the config dir.
         // This matches `user_skills_dir()` = `<config_dir>/wayland-core/skills/`.
-        let loader_dir = wcore_config::config::app_config_dir()
+        // Tests pin `loader_root` to a tempdir (#564) so this hermetic path does
+        // not resolve to the shared, process-global `app_config_dir()`.
+        let loader_dir = self
+            .loader_root
+            .clone()
+            .or_else(wcore_config::config::app_config_dir)
             .map(|d| d.join("skills").join(&name))
             .unwrap_or_else(|| self.skill_dir.join(&name));
         let md_path = loader_dir.join("SKILL.md");
@@ -269,7 +297,11 @@ mod tests {
     #[test]
     fn draft_writes_md_and_json_to_skill_dir() {
         let tmp = tempfile::tempdir().unwrap();
-        let drafter = SkillDrafter::new(tmp.path().to_path_buf(), None);
+        let drafter = SkillDrafter::with_loader_root(
+            tmp.path().to_path_buf(),
+            tmp.path().to_path_buf(),
+            None,
+        );
         let trigger = fake_trigger();
         let res = drafter.draft(&trigger).unwrap();
 
@@ -294,7 +326,11 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let db = Arc::new(wcore_memory::db::Db::open_memory().unwrap());
         let store = Arc::new(wcore_evolve::prompt_store::PromptStore::new(db));
-        let drafter = SkillDrafter::new(tmp.path().to_path_buf(), Some(store.clone()));
+        let drafter = SkillDrafter::with_loader_root(
+            tmp.path().to_path_buf(),
+            tmp.path().to_path_buf(),
+            Some(store.clone()),
+        );
         let trigger = fake_trigger();
         let res = drafter.draft(&trigger).unwrap();
 
@@ -323,7 +359,11 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let db = Arc::new(wcore_memory::db::Db::open_memory().unwrap());
         let store = Arc::new(wcore_evolve::prompt_store::PromptStore::new(db));
-        let drafter = SkillDrafter::new(tmp.path().to_path_buf(), Some(store.clone()));
+        let drafter = SkillDrafter::with_loader_root(
+            tmp.path().to_path_buf(),
+            tmp.path().to_path_buf(),
+            Some(store.clone()),
+        );
         let res = drafter.draft(&fake_trigger()).unwrap();
 
         let pairs = store
@@ -340,7 +380,11 @@ mod tests {
     #[test]
     fn draft_succeeds_without_prompt_store() {
         let tmp = tempfile::tempdir().unwrap();
-        let drafter = SkillDrafter::new(tmp.path().to_path_buf(), None);
+        let drafter = SkillDrafter::with_loader_root(
+            tmp.path().to_path_buf(),
+            tmp.path().to_path_buf(),
+            None,
+        );
         // No prompt store wired — disk write still works.
         let trigger = fake_trigger();
         let res = drafter.draft(&trigger).unwrap();
