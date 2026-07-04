@@ -299,6 +299,13 @@ fn flatten_message_text(m: &Message) -> String {
             ContentBlock::ToolUse { .. } | ContentBlock::Thinking { .. } => {
                 // Skipped — surfaced through dedicated channels by the caller.
             }
+            ContentBlock::Image { .. } => {
+                // Cohere chat is text-only here; no native image support.
+                if !out.is_empty() {
+                    out.push('\n');
+                }
+                out.push_str("[image omitted: model not vision-capable]");
+            }
         }
     }
     out

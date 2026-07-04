@@ -366,6 +366,14 @@ fn extract_text(m: &Message) -> Result<String, OllamaError> {
                 return Err(OllamaError::ToolUseUnsupported("tool_result"));
             }
             ContentBlock::Thinking { .. } => {}
+            // Ollama's native image channel (message.images) is not wired here;
+            // substitute a text placeholder rather than drop the turn silently.
+            ContentBlock::Image { .. } => {
+                if !out.is_empty() {
+                    out.push('\n');
+                }
+                out.push_str("[image omitted: model not vision-capable]");
+            }
         }
     }
     Ok(out)

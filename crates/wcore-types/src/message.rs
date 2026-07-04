@@ -37,6 +37,22 @@ pub enum ContentBlock {
     /// and as `reasoning_content` for OpenAI-compatible providers.
     #[serde(rename = "thinking")]
     Thinking { thinking: String },
+
+    /// An inline image on a user turn (e.g. a composer-dropped local image).
+    /// `data` is standard base64 (no data-URI prefix); `mime` is a sniffed
+    /// image MIME such as `image/png`. The engine resolves any local path to
+    /// bytes at the protocol boundary, so providers never touch the filesystem
+    /// — each provider's `build_messages()` re-encodes this into its native
+    /// image content shape (Anthropic `image.source.base64`, OpenAI
+    /// `image_url` data URI, Gemini `inline_data`). The dedicated text-only
+    /// families (Cohere, Mistral/Bedrock, Ollama) drop it and substitute a
+    /// short text placeholder. The OpenAI-compatible builder always emits the
+    /// image part, so a text-only OpenAI-compatible endpoint would reject it;
+    /// a `ProviderCompat` vision-capability gate is a follow-up, tracked with
+    /// the ingest wiring. Vision turns are kept off text-only tier models by
+    /// the engine's vision-routing guard (`message_requires_vision`).
+    #[serde(rename = "image")]
+    Image { mime: String, data: String },
 }
 
 /// Cache-control hint placed on a `Message` by the prompt-cache discipline
@@ -253,6 +269,30 @@ mod tests {
         // assert
         assert_eq!(value["type"], "text");
         assert_eq!(value["text"], "hello world");
+    }
+
+    #[test]
+    fn test_content_block_image_serialization_roundtrip() {
+        // arrange
+        let block = ContentBlock::Image {
+            mime: "image/png".to_string(),
+            data: "QUJD".to_string(),
+        };
+        // act
+        let value = serde_json::to_value(&block).unwrap();
+        // assert wire tag + fields
+        assert_eq!(value["type"], "image");
+        assert_eq!(value["mime"], "image/png");
+        assert_eq!(value["data"], "QUJD");
+        // round-trips back to the same variant
+        let back: ContentBlock = serde_json::from_value(value).unwrap();
+        match back {
+            ContentBlock::Image { mime, data } => {
+                assert_eq!(mime, "image/png");
+                assert_eq!(data, "QUJD");
+            }
+            other => panic!("expected Image, got {other:?}"),
+        }
     }
 
     // --- ContentBlock::ToolUse ---

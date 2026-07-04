@@ -129,15 +129,18 @@ fn resolve_turn_cost_usd(
 /// Finding #174 — does this turn carry image/vision content that forbids a
 /// tier downgrade?
 ///
-/// The `wcore-types` `ContentBlock` enum has no image variant today, so there
-/// is no real vision content to detect and this returns `false`. It is kept as
-/// the single chokepoint for the vision signal: when a future image
-/// `ContentBlock` lands, only this function must change for the smart-routing
-/// guard (and the router's `requires_vision` shape input) to start respecting
-/// it. The router independently promotes any vision turn to Premium, which
-/// [`select_tier_model`] already refuses to swap; this is belt-and-suspenders.
-fn message_requires_vision(_messages: &[Message]) -> bool {
-    false
+/// Returns `true` when any message carries a `ContentBlock::Image` (#648). This
+/// is the single chokepoint for the vision signal feeding the smart-routing
+/// guard (and the router's `requires_vision` shape input): a vision turn must
+/// never be silently downgraded to a text-only tier model. The router also
+/// independently promotes any vision turn to Premium, which [`select_tier_model`]
+/// refuses to swap; this is belt-and-suspenders.
+fn message_requires_vision(messages: &[Message]) -> bool {
+    messages.iter().any(|m| {
+        m.content
+            .iter()
+            .any(|b| matches!(b, ContentBlock::Image { .. }))
+    })
 }
 
 /// Finding #174 — decide whether to swap to a configured tier model, and to
@@ -4129,6 +4132,7 @@ impl AgentEngine {
                         if *is_error { " error" } else { "" }
                     )),
                     ContentBlock::Thinking { thinking } => Some(format!("thinking: {thinking}")),
+                    ContentBlock::Image { mime, .. } => Some(format!("[image: {mime}]")),
                 };
                 if let Some(line) = line {
                     summary.push_str(role);
@@ -8490,6 +8494,7 @@ mod tier_routing_tests {
     use super::{message_requires_vision, select_tier_model};
     use wcore_config::compat::{ProviderCompat, TierModels};
     use wcore_providers::{RequestShape, RoutingHeuristics, route};
+    use wcore_types::message::{ContentBlock, Message, Role};
 
     /// A shape that classifies to Cheap (simple turn): small context, no tools,
     /// no code, no vision.
@@ -8576,6 +8581,37 @@ mod tier_routing_tests {
     #[test]
     fn vision_helper_is_false_without_image_blocks() {
         assert!(!message_requires_vision(&[]));
+        // A text-only turn is not a vision turn.
+        let text = Message::new(Role::User, vec![ContentBlock::Text { text: "hi".into() }]);
+        assert!(!message_requires_vision(&[text]));
+    }
+
+    #[test]
+    fn vision_helper_is_true_with_image_block() {
+        // #648: an image block makes the turn a vision turn, which
+        // `select_tier_model` must refuse to downgrade to a text-only model.
+        let img = Message::new(
+            Role::User,
+            vec![
+                ContentBlock::Text {
+                    text: "what is this".into(),
+                },
+                ContentBlock::Image {
+                    mime: "image/png".into(),
+                    data: "QUJD".into(),
+                },
+            ],
+        );
+        assert!(message_requires_vision(&[img]));
+
+        // And the guard consequently blocks a downgrade even to a configured
+        // cheap tier model.
+        let decision = route(&cheap_shape(), &RoutingHeuristics::default());
+        assert_eq!(
+            select_tier_model(&decision, true, &compat_with_cheap_model()),
+            None,
+            "a vision turn must never be downgraded to a tier model"
+        );
     }
 }
 

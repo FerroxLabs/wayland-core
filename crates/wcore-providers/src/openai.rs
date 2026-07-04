@@ -310,10 +310,43 @@ impl OpenAIProvider {
                             .collect::<Vec<_>>()
                             .join("\n");
                         let text = strip_patterns_from_text(&text, compat);
-                        result.push(json!({
-                            "role": "user",
-                            "content": text
-                        }));
+
+                        // If the turn carries inline images, OpenAI Chat requires
+                        // the multi-part array content shape. Native image part:
+                        // `{type:image_url, image_url:{url:"data:<mime>;base64,<b64>"}}`.
+                        let images: Vec<Value> = msg
+                            .content
+                            .iter()
+                            .filter_map(|b| {
+                                if let ContentBlock::Image { mime, data } = b {
+                                    Some(json!({
+                                        "type": "image_url",
+                                        "image_url": {
+                                            "url": format!("data:{mime};base64,{data}")
+                                        }
+                                    }))
+                                } else {
+                                    None
+                                }
+                            })
+                            .collect();
+
+                        if images.is_empty() {
+                            result.push(json!({
+                                "role": "user",
+                                "content": text
+                            }));
+                        } else {
+                            let mut parts: Vec<Value> = Vec::new();
+                            if !text.is_empty() {
+                                parts.push(json!({ "type": "text", "text": text }));
+                            }
+                            parts.extend(images);
+                            result.push(json!({
+                                "role": "user",
+                                "content": parts
+                            }));
+                        }
                     }
                 }
                 Role::Assistant => {
@@ -3853,6 +3886,43 @@ mod tests {
         let result = OpenAIProvider::build_messages(&messages, "", &no_compat());
         let assistant_msgs: Vec<_> = result.iter().filter(|m| m["role"] == "assistant").collect();
         assert_eq!(assistant_msgs.len(), 2);
+    }
+
+    #[test]
+    fn test_build_messages_user_image_becomes_multipart() {
+        // A user turn with an inline image lowers to the OpenAI Chat multi-part
+        // array shape: a text part + an image_url data-URI part.
+        let messages = vec![Message::new(
+            Role::User,
+            vec![
+                ContentBlock::Text {
+                    text: "describe".into(),
+                },
+                ContentBlock::Image {
+                    mime: "image/png".into(),
+                    data: "QUJD".into(),
+                },
+            ],
+        )];
+        let result = OpenAIProvider::build_messages(&messages, "", &openai_compat());
+        let user = result.iter().find(|m| m["role"] == "user").unwrap();
+        let parts = user["content"].as_array().expect("content must be array");
+        assert_eq!(parts[0]["type"], "text");
+        assert_eq!(parts[0]["text"], "describe");
+        assert_eq!(parts[1]["type"], "image_url");
+        assert_eq!(parts[1]["image_url"]["url"], "data:image/png;base64,QUJD");
+    }
+
+    #[test]
+    fn test_build_messages_user_without_image_stays_string() {
+        // Backwards-compat: no image → plain string content (unchanged wire shape).
+        let messages = vec![Message::new(
+            Role::User,
+            vec![ContentBlock::Text { text: "hi".into() }],
+        )];
+        let result = OpenAIProvider::build_messages(&messages, "", &openai_compat());
+        let user = result.iter().find(|m| m["role"] == "user").unwrap();
+        assert_eq!(user["content"], "hi");
     }
 
     // --- replays_thinking_in_history (finding #174) ---

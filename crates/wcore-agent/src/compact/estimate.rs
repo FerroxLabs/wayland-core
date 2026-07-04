@@ -5,6 +5,17 @@ const CHARS_PER_TOKEN_TEXT: usize = 4;
 
 const CHARS_PER_TOKEN_JSON: usize = 3;
 
+/// Flat per-image token charge. Images are not char-countable, so decoding
+/// them in this hot estimator is avoided; instead each inline image is charged
+/// a constant at the HIGH end of provider vision-token accounting. Anthropic's
+/// patch-based cost reaches ~4784 tokens for a large image (≈3888 at 2000x1500,
+/// ≈2691 at 1920x1080); OpenAI/Gemini high-detail costs sit below that. The
+/// EMERGENCY compaction watermark must never undercount, so this deliberately
+/// over-estimates: firing compaction early is safe, overflowing the window is
+/// not. A composer-dropped image is typically a full-resolution screenshot, so
+/// the ceiling — not an average — is the correct charge.
+const TOKENS_PER_IMAGE: usize = 4800;
+
 /// Estimate the total token count for a slice of messages.
 ///
 /// Intentionally conservative (slightly over-estimates) to ensure
@@ -36,6 +47,7 @@ pub fn estimate_tokens_from_messages_with_thinking(
 fn estimate_tokens_from_messages_inner(messages: &[Message], count_thinking: bool) -> u64 {
     let mut total_chars: usize = 0;
     let mut json_chars: usize = 0;
+    let mut image_tokens: usize = 0;
 
     for msg in messages {
         for block in &msg.content {
@@ -55,6 +67,12 @@ fn estimate_tokens_from_messages_inner(messages: &[Message], count_thinking: boo
                 ContentBlock::ToolResult { content, .. } => {
                     total_chars += content.len();
                 }
+                // Charge a flat conservative constant per inline image rather
+                // than counting the base64 payload (which would wildly
+                // over-count against the model's real vision token cost).
+                ContentBlock::Image { .. } => {
+                    image_tokens += TOKENS_PER_IMAGE;
+                }
             }
         }
     }
@@ -62,7 +80,7 @@ fn estimate_tokens_from_messages_inner(messages: &[Message], count_thinking: boo
     let text_tokens = total_chars / CHARS_PER_TOKEN_TEXT;
     let json_tokens = json_chars / CHARS_PER_TOKEN_JSON;
 
-    (text_tokens + json_tokens) as u64
+    (text_tokens + json_tokens + image_tokens) as u64
 }
 
 /// AUDIT A5 — estimate the token count of a FULL request: messages
@@ -104,6 +122,23 @@ mod tests {
         let text = "a".repeat(400);
         let msg = Message::new(Role::User, vec![ContentBlock::Text { text }]);
         assert_eq!(estimate_tokens_from_messages(&[msg]), 100);
+    }
+
+    #[test]
+    fn image_block_charges_flat_constant() {
+        // An inline image is charged the flat per-image constant regardless of
+        // its (tiny) base64 payload length — not counted as text chars.
+        let msg = Message::new(
+            Role::User,
+            vec![ContentBlock::Image {
+                mime: "image/png".into(),
+                data: "QUJD".into(),
+            }],
+        );
+        assert_eq!(
+            estimate_tokens_from_messages(&[msg]),
+            TOKENS_PER_IMAGE as u64
+        );
     }
 
     #[test]

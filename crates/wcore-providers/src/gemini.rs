@@ -425,6 +425,15 @@ pub(crate) fn build_contents(
                         "thought": true,
                     }));
                 }
+                ContentBlock::Image { mime, data } => {
+                    // Gemini native shape: `parts:[{inlineData:{mimeType,data}}]`.
+                    parts.push(json!({
+                        "inlineData": {
+                            "mimeType": mime,
+                            "data": data,
+                        }
+                    }));
+                }
             }
         }
 
@@ -1051,6 +1060,26 @@ mod tests {
         assert_eq!(contents[0]["role"], "user");
         let parts = contents[0]["parts"].as_array().unwrap();
         assert_eq!(parts[0]["text"], "Hi");
+    }
+
+    #[test]
+    fn build_contents_user_image_becomes_inline_data() {
+        let messages = vec![Message::new(
+            Role::User,
+            vec![
+                ContentBlock::Text { text: "Hi".into() },
+                ContentBlock::Image {
+                    mime: "image/png".into(),
+                    data: "QUJD".into(),
+                },
+            ],
+        )];
+        let (_sys, contents) = build_contents(&messages, &compat());
+        let parts = contents[0]["parts"].as_array().unwrap();
+        assert_eq!(parts[0]["text"], "Hi");
+        // Gemini native inline image shape.
+        assert_eq!(parts[1]["inlineData"]["mimeType"], "image/png");
+        assert_eq!(parts[1]["inlineData"]["data"], "QUJD");
     }
 
     #[test]

@@ -199,14 +199,28 @@ fn push_user_items(input: &mut Vec<Value>, msg: &Message) {
         return;
     }
 
+    // Inline images become `input_image` parts alongside any `input_text`.
+    // Native Responses shape: `{type:input_image, image_url:"data:<mime>;base64,<b64>"}`.
+    let mut content: Vec<Value> = Vec::new();
     let text: String = collect_text(msg);
-    if text.is_empty() {
+    if !text.is_empty() {
+        content.push(json!({ "type": "input_text", "text": text }));
+    }
+    for block in &msg.content {
+        if let ContentBlock::Image { mime, data } = block {
+            content.push(json!({
+                "type": "input_image",
+                "image_url": format!("data:{mime};base64,{data}"),
+            }));
+        }
+    }
+    if content.is_empty() {
         return;
     }
     input.push(json!({
         "type": "message",
         "role": "user",
-        "content": [{ "type": "input_text", "text": text }],
+        "content": content,
     }));
 }
 
@@ -891,6 +905,47 @@ mod tests {
         assert_eq!(input[0]["role"], json!("user"));
         assert_eq!(input[0]["content"][0]["type"], json!("input_text"));
         assert_eq!(input[0]["content"][0]["text"], json!("Hello"));
+    }
+
+    #[test]
+    fn build_input_user_image_becomes_input_image() {
+        let msg = Message::new(
+            Role::User,
+            vec![
+                ContentBlock::Text {
+                    text: "what is this".into(),
+                },
+                ContentBlock::Image {
+                    mime: "image/png".into(),
+                    data: "QUJD".into(),
+                },
+            ],
+        );
+        let input = build_input(&[msg]);
+        assert_eq!(input.len(), 1);
+        let content = input[0]["content"].as_array().unwrap();
+        assert_eq!(content[0]["type"], "input_text");
+        assert_eq!(content[0]["text"], "what is this");
+        // Responses native image-input shape.
+        assert_eq!(content[1]["type"], "input_image");
+        assert_eq!(content[1]["image_url"], "data:image/png;base64,QUJD");
+    }
+
+    #[test]
+    fn build_input_image_only_user_turn_is_not_dropped() {
+        // A turn that is only an image (no text) must still produce an input item.
+        let msg = Message::new(
+            Role::User,
+            vec![ContentBlock::Image {
+                mime: "image/jpeg".into(),
+                data: "QUJD".into(),
+            }],
+        );
+        let input = build_input(&[msg]);
+        assert_eq!(input.len(), 1);
+        let content = input[0]["content"].as_array().unwrap();
+        assert_eq!(content.len(), 1);
+        assert_eq!(content[0]["type"], "input_image");
     }
 
     /// #112: when the engine flags `omit_max_tokens` AND the provider's own

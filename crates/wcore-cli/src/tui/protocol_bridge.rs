@@ -1520,6 +1520,10 @@ pub fn hydrate_history(messages: &[Message]) -> (Vec<TurnView>, Vec<ToolCardMode
                             });
                         }
                         ContentBlock::ToolResult { .. } => {}
+                        ContentBlock::Image { mime, .. } => {
+                            turn.elements
+                                .push(TurnElement::Markdown(format!("_[image: {mime}]_")));
+                        }
                     }
                 }
                 if !turn.elements.is_empty() {

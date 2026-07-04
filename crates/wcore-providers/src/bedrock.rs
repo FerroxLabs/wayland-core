@@ -1172,6 +1172,12 @@ pub mod mistral {
                 ContentBlock::ToolUse { name, input, .. } => {
                     out.push_str(&format!("[tool_use: {name} {input}]"));
                 }
+                // Mistral-on-Bedrock is a text-completion family with no native
+                // image support; substitute a placeholder so the turn is not
+                // silently emptied.
+                ContentBlock::Image { .. } => {
+                    out.push_str("[image omitted: model not vision-capable]");
+                }
             }
         }
         out
@@ -1301,6 +1307,10 @@ pub mod cohere {
             match block {
                 ContentBlock::Text { text } => out.push_str(text),
                 ContentBlock::ToolResult { content, .. } => out.push_str(content),
+                // Text-only wire; no native image support.
+                ContentBlock::Image { .. } => {
+                    out.push_str("[image omitted: model not vision-capable]")
+                }
                 _ => {}
             }
         }

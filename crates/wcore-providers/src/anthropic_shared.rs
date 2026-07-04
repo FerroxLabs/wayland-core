@@ -67,6 +67,16 @@ pub fn build_messages(messages: &[Message], compat: &ProviderCompat) -> Vec<Valu
                 // whole conversation as unrecoverable. Omitting thinking on
                 // replay is always accepted, so drop it.
                 ContentBlock::Thinking { .. } => None,
+                // Inline image on a user turn. Anthropic native shape:
+                // `{type:image, source:{type:base64, media_type, data}}`.
+                ContentBlock::Image { mime, data } => Some(json!({
+                    "type": "image",
+                    "source": {
+                        "type": "base64",
+                        "media_type": mime,
+                        "data": data
+                    }
+                })),
             })
             .collect();
 
@@ -609,6 +619,32 @@ mod tests {
         assert_eq!(content.len(), 1);
         assert_eq!(content[0]["type"], "text");
         assert_eq!(content[0]["text"], "Hello");
+    }
+
+    #[test]
+    fn test_build_messages_with_image() {
+        let messages = vec![Message::new(
+            Role::User,
+            vec![
+                ContentBlock::Text {
+                    text: "what is this?".to_string(),
+                },
+                ContentBlock::Image {
+                    mime: "image/png".to_string(),
+                    data: "QUJD".to_string(),
+                },
+            ],
+        )];
+        let result = build_messages(&messages, &default_compat());
+        assert_eq!(result.len(), 1);
+        let content = result[0]["content"].as_array().unwrap();
+        assert_eq!(content.len(), 2);
+        assert_eq!(content[0]["type"], "text");
+        // Anthropic native image shape.
+        assert_eq!(content[1]["type"], "image");
+        assert_eq!(content[1]["source"]["type"], "base64");
+        assert_eq!(content[1]["source"]["media_type"], "image/png");
+        assert_eq!(content[1]["source"]["data"], "QUJD");
     }
 
     #[test]
