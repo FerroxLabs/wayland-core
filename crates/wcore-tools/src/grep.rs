@@ -229,7 +229,19 @@ async fn try_grep(
     match cmd.output().await {
         Ok(output) => {
             let stdout = String::from_utf8_lossy(&output.stdout);
-            if stdout.is_empty() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            // #661 — POSIX grep / Windows findstr exit codes: 0 = matches,
+            // 1 = no matches, >=2 = a real error (bad regex, unreadable path,
+            // permission denied). Previously ANY empty stdout was reported as
+            // "No matches found" with is_error=false, so an exit-2 failure was
+            // swallowed and the model concluded the symbol was undefined and
+            // safe to delete. Mirror try_ripgrep: surface a real error loudly.
+            if !output.status.success() && output.status.code() != Some(1) {
+                ToolResult {
+                    content: format!("grep error: {}", stderr.trim()),
+                    is_error: true,
+                }
+            } else if stdout.is_empty() {
                 ToolResult {
                     content: "No matches found".to_string(),
                     is_error: false,
@@ -253,6 +265,33 @@ async fn try_grep(
 mod tests {
     use super::*;
     use serde_json::json;
+
+    /// #661: a real grep error (exit >= 2 — here an unreadable/nonexistent
+    /// target) must be surfaced as `is_error: true`, not swallowed as
+    /// "No matches found". Previously `try_grep` only checked whether stdout
+    /// was empty, so an exit-2 failure looked identical to a clean no-match.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn try_grep_reports_real_error_not_no_matches() {
+        // `grep -rn -- pattern <nonexistent>` exits 2 with empty stdout.
+        let out = try_grep(
+            "pattern",
+            "this_path_does_not_exist_9f3a2b.txt",
+            false,
+            None,
+        )
+        .await;
+        assert!(
+            out.is_error,
+            "grep exit-2 must be is_error=true, got: {}",
+            out.content
+        );
+        assert!(
+            !out.content.contains("No matches found"),
+            "a real error must not be reported as a clean no-match: {}",
+            out.content
+        );
+    }
 
     #[tokio::test]
     async fn grep_tool_finds_pattern_in_own_source() {

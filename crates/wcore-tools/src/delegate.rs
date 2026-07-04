@@ -349,12 +349,18 @@ impl Tool for DelegateTool {
             .collect();
 
         let results = futures::future::join_all(jobs).await;
-        let all_error = !results.is_empty() && results.iter().all(|r| r.is_error);
+        // #661 — fail loud on a PARTIAL failure: a batch is an error if ANY
+        // child failed, not only when every child did. `all()` reported success
+        // for a mixed batch, so the parent reasoned as if all children
+        // succeeded. `render_results` already renders each child's status, so
+        // the per-item detail is preserved. (`any()` is false for an empty
+        // batch, so the old `!is_empty()` guard is unnecessary.)
+        let any_error = results.iter().any(|r| r.is_error);
         let payload = render_results(&results);
 
         ToolResult {
             content: payload.to_string(),
-            is_error: all_error,
+            is_error: any_error,
         }
     }
 
@@ -414,6 +420,55 @@ mod tests {
                 is_error: false,
             }
         }
+    }
+
+    /// A spawner where exactly one fork (the second to run) fails, so a batch
+    /// of two is a PARTIAL failure — used to prove #661's `any()` rollup.
+    struct PartialFailSpawner {
+        calls: AtomicUsize,
+    }
+
+    #[async_trait]
+    impl Spawner for PartialFailSpawner {
+        async fn spawn_fork(
+            &self,
+            config: SubAgentConfig,
+            _overrides: ForkOverrides,
+        ) -> SubAgentResult {
+            let i = self.calls.fetch_add(1, Ordering::SeqCst);
+            if i == 1 {
+                SubAgentResult::error(&config.name, "child failed")
+            } else {
+                SubAgentResult {
+                    name: config.name,
+                    text: "ok".to_string(),
+                    usage: TokenUsage::default(),
+                    turns: 1,
+                    is_error: false,
+                }
+            }
+        }
+    }
+
+    /// #661: a batch where SOME (not all) children fail must report
+    /// `is_error: true`. The old `all()` rollup reported success for a partial
+    /// failure, so the parent reasoned as if every child succeeded.
+    #[tokio::test]
+    async fn delegate_batch_partial_failure_is_error() {
+        let spawner = Arc::new(PartialFailSpawner {
+            calls: AtomicUsize::new(0),
+        });
+        let tool = DelegateTool::new(spawner);
+        let out = tool
+            .execute(json!({
+                "tasks": [ {"goal": "task ok"}, {"goal": "task boom"} ]
+            }))
+            .await;
+        assert!(
+            out.is_error,
+            "a partial batch failure must be reported as error, got is_error=false: {}",
+            out.content
+        );
     }
 
     /// Test 1: tool registers in the dispatcher and is resolvable by

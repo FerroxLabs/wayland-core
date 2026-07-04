@@ -206,11 +206,26 @@ impl Tool for SpawnTool {
             })
             .collect();
 
-        let all_error = results.iter().all(|r| r.is_error);
+        // #661 — a batch is an error if ANY child failed, not only when EVERY
+        // child failed. `all()` reported "success" for a partial failure, so the
+        // parent LLM read a half-empty batch as fully complete. Surface the
+        // failed count too, so the partial failure is legible, not buried in the
+        // per-child status lines.
+        let failed = results.iter().filter(|r| r.is_error).count();
+        let any_error = failed > 0;
+        let body = output.join("\n\n---\n\n");
+        let content = if any_error {
+            format!(
+                "{failed} of {} sub-agent(s) failed or terminated early.\n\n{body}",
+                results.len()
+            )
+        } else {
+            body
+        };
 
         ToolResult {
-            content: output.join("\n\n---\n\n"),
-            is_error: all_error,
+            content,
+            is_error: any_error,
         }
     }
 
