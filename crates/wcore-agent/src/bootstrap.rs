@@ -1631,9 +1631,23 @@ impl AgentBootstrap {
         // #660 — honest capability availability. Env-gated tools (vision, image
         // generation, transcription, …) hide themselves from the schema when
         // unconfigured; without this advisory the model fabricates a cause
-        // instead of naming the missing key. Read from `registry` (fully
-        // populated above) so the reasons match what was actually hidden.
-        if let Some(block) = crate::capability_advisory::render_capability_advisory(&registry) {
+        // instead of naming the missing key. `registry` is the final tool set
+        // here for local (posture `None`) and `Full`-posture engines, so its
+        // absences are accurate.
+        //
+        // Skipped for a restrictive channel posture (Conversational/Workspace):
+        // there the capability tools are stripped by `apply_posture` further
+        // below — governed by posture, not API keys — so a key-naming advisory
+        // read from the still-full registry would be both stale and misleading.
+        // Inbound-media blindness on those channel engines is instead surfaced
+        // honestly by the channel-media degraded notices.
+        let restrictive_channel_posture = self
+            .channel_tool_posture
+            .as_ref()
+            .is_some_and(|s| s.posture != wcore_channels::ChannelToolPosture::Full);
+        if !restrictive_channel_posture
+            && let Some(block) = crate::capability_advisory::render_capability_advisory(&registry)
+        {
             system_prompt.push_str(&block);
         }
         self.config.system_prompt = Some(system_prompt);
