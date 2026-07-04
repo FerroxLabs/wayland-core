@@ -108,6 +108,10 @@ pub mod patch_parser;
 // cargo feature; PdfTool degrades to an honest error when the feature
 // is off so the schema stays stable across build configs.
 pub mod pdf_tool;
+// #650: read-only office-document (docx/xlsx/pptx/csv) text extraction. Gated
+// by the default-on `doc-extract` feature; degrades to an honest error when
+// off, so the schema stays stable across build configs (mirrors pdf_tool).
+pub mod doc_tool;
 // T3-3.8 (sub-wave 8): Piper TTS voice + binary downloader (HELPER) ported
 // from the prior Wayland Python engine. Pluggable
 // ModelDownloader + BinaryExtractor traits (Null = fail-loud,
