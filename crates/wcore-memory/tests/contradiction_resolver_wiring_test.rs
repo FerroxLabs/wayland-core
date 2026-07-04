@@ -1,8 +1,9 @@
 //! v0.6.4 Task 6.6d — semantic.rs::assert wiring with ContradictionResolver.
 //!
-//! Covers all three resolver verdicts when the `WAYLAND_CONTRADICTION` env
-//! var is set: Supersede, KeepExisting, Coexist. Also covers the
-//! default-off behaviour (env unset → existing supersedes path runs).
+//! Covers all three resolver verdicts: Supersede, KeepExisting, Coexist.
+//! The resolver is the #664 shipping default, so it runs whether the env is
+//! unset or set to a non-opt-out value. Also covers the legacy opt-out
+//! (`WAYLAND_CONTRADICTION=off` → unconditional supersede path runs).
 //!
 //! Scenarios derive from the design doc §6.3 golden table:
 //!   - Supersede:    existing=0.50, new=0.80 (adjusted_new=0.96 > existing)
@@ -168,25 +169,28 @@ async fn coexist_when_env_set_and_confidences_close() {
 }
 
 #[tokio::test]
-async fn default_path_unchanged_when_env_unset() {
+async fn legacy_supersede_when_env_off() {
     let _guard = env_lock().lock().await;
-    unsafe { std::env::remove_var(ENV_KEY) };
+    // #664: the resolver is now the default; the legacy unconditional-supersede
+    // path is the explicit opt-out, reached via WAYLAND_CONTRADICTION=off.
+    unsafe { std::env::set_var(ENV_KEY, "off") };
 
     let p = fresh_partition().await;
-    // Same inputs as keep_existing — without env, the legacy Supersede
-    // path runs unconditionally (matches semantic.rs pre-Task-6.6d
-    // behaviour: any different-object prior is superseded).
+    // Same inputs as keep_existing — the resolver would KeepExisting here, so
+    // observing a supersede proves the legacy opt-out path ran instead.
     let f1 = fact("lang", "version", "2023", 0.95);
     p.assert(f1).await.unwrap();
     let f2 = fact("lang", "version", "2024", 0.20);
     p.assert(f2).await.unwrap();
 
     let rows = list_all(&p, "lang").await;
-    assert_eq!(rows.len(), 2, "default path inserts new + supersedes old");
+    assert_eq!(rows.len(), 2, "legacy path inserts new + supersedes old");
     let old = rows.iter().find(|r| r.0 == "2023").unwrap();
     let new = rows.iter().find(|r| r.0 == "2024").unwrap();
-    assert!(old.2, "default path supersedes the old fact");
+    assert!(old.2, "legacy path supersedes the old fact");
     assert!(!new.2);
-    // Confidence preserved as-supplied (no resolver adjustment in default path).
+    // Confidence preserved as-supplied (no resolver adjustment in legacy path).
     assert!((new.1 - 0.20).abs() < 1e-9);
+
+    unsafe { std::env::remove_var(ENV_KEY) };
 }

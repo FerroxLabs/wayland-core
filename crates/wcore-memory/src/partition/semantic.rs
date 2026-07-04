@@ -12,13 +12,27 @@ use crate::embed::{Embedder, encode_blob};
 use crate::error::{MemoryError, Result};
 use crate::v2_types::{Fact, FactId, Tier};
 
-/// Env var that gates the [`ContradictionResolver`] wiring in
-/// [`SemanticPartition::assert`]. When unset, the legacy "any different
-/// object supersedes" path runs unchanged.
+/// Env var that opts OUT of the [`ContradictionResolver`] wiring in
+/// [`SemanticPartition::assert`]. The nuanced resolver is the shipping
+/// default; setting this to (case-insensitive) `"off"` or `"0"` falls back
+/// to the legacy "any different object supersedes" path.
 ///
 /// See `.blackboard/v0.6.4-memory-depth-design.md` §4 (Task 6.6d) for the
-/// roll-out plan. The default flips once dream-cycle CI is stable.
+/// roll-out plan. The default now favours the resolver.
 const CONTRADICTION_ENV: &str = "WAYLAND_CONTRADICTION";
+
+/// Returns `true` unless `WAYLAND_CONTRADICTION` is set to (case-insensitive)
+/// `"off"` or `"0"`. Mirrors the [`crate::kg::kg_enabled`] /
+/// [`crate::staleness::staleness_enabled`] opt-out pattern: the feature is ON
+/// by default and this env var opts out to the legacy supersede path.
+fn contradiction_resolver_enabled() -> bool {
+    std::env::var(CONTRADICTION_ENV)
+        .map(|v| {
+            let v = v.to_lowercase();
+            v != "off" && v != "0"
+        })
+        .unwrap_or(true)
+}
 
 pub struct SemanticPartition {
     pub(crate) db: Arc<Db>,
@@ -35,14 +49,17 @@ impl SemanticPartition {
     /// same tier with a different object, the prior fact's superseded_by
     /// is updated to point at the new one.
     ///
-    /// When the `WAYLAND_CONTRADICTION` env var is set, the conflict is
-    /// instead routed through [`ContradictionResolver::resolve`] and one
-    /// of three outcomes is applied:
+    /// By default the conflict is routed through
+    /// [`ContradictionResolver::resolve`] and one of three outcomes is
+    /// applied:
     /// - `Supersede` → existing marked superseded, new written at
     ///   `new_confidence`
     /// - `KeepExisting` → new fact discarded entirely, existing returned
     /// - `Coexist` → both rows present, new written at
     ///   `adjusted_confidence` (0.8× new), neither superseded
+    ///
+    /// Setting `WAYLAND_CONTRADICTION=off` (or `0`) opts out to the legacy
+    /// "any different object supersedes" path.
     pub async fn assert(&self, mut f: Fact) -> Result<FactId> {
         if f.ts == 0 {
             f.ts = now_secs();
@@ -79,10 +96,10 @@ impl SemanticPartition {
 
         // Decide what to do with a different-object prior.
         //
-        // * Default (env unset)            → Supersede (legacy behaviour).
-        // * Env set + same object          → no contradiction, plain insert.
-        // * Env set + different object     → consult resolver.
         // * No prior                       → plain insert.
+        // * Same object                    → no contradiction, plain insert.
+        // * Different object (default)     → consult resolver.
+        // * Different object + env=off/0   → Supersede (legacy behaviour).
         enum Action {
             Insert,                    // No prior, or prior with same object.
             Supersede(String),         // Mark `prior_id` as superseded.
@@ -95,7 +112,7 @@ impl SemanticPartition {
             Some((prior_id, prior_obj, prior_conf)) => {
                 if prior_obj == &f.object {
                     Action::Insert
-                } else if std::env::var(CONTRADICTION_ENV).is_ok() {
+                } else if contradiction_resolver_enabled() {
                     let verdict = ContradictionResolver::new().resolve(&ContradictionCandidate {
                         existing_relation_id: prior_id,
                         existing_fact: prior_obj,
@@ -113,20 +130,18 @@ impl SemanticPartition {
                         },
                     }
                 } else {
-                    // Legacy path: any different-object prior is superseded.
-                    // #664: this is the SHIPPING default (env unset), and it
-                    // silently overwrites a conflicting fact with the crude
-                    // supersede instead of consulting the nuanced resolver — a
-                    // data-integrity effect on the default config. Log it so the
-                    // overwrite is visible. (Flipping the default to the resolver
-                    // is gated on dream-cycle CI stability per this module's
-                    // docstring — a separate deliberate change, not this P2 pass.)
+                    // Legacy opt-out path: any different-object prior is
+                    // superseded. #664: the nuanced resolver is the shipping
+                    // default; this branch only runs when an operator sets
+                    // {CONTRADICTION_ENV}=off (or 0), which silently overwrites
+                    // a conflicting fact with the crude supersede. Log it so the
+                    // opted-out overwrite is visible.
                     tracing::info!(
                         target: "wcore_memory::semantic",
                         subject = %f.subject,
                         predicate = %f.predicate,
-                        "{CONTRADICTION_ENV} unset — superseding a conflicting fact via the \
-                         legacy path (set {CONTRADICTION_ENV}=1 for the nuanced resolver)"
+                        "{CONTRADICTION_ENV}=off — superseding a conflicting fact via the \
+                         legacy path (unset {CONTRADICTION_ENV} for the nuanced resolver)"
                     );
                     Action::Supersede(prior_id.clone())
                 }
@@ -231,4 +246,76 @@ fn now_secs() -> i64 {
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
         .unwrap_or(0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::cdc::CdcWriter;
+    use crate::embed::HashedEmbedder;
+    use crate::v2_types::{Fact, FactId, Tier};
+
+    async fn fresh_partition() -> SemanticPartition {
+        let db = Arc::new(Db::open_memory().unwrap());
+        let embedder = Arc::new(HashedEmbedder::new().await.unwrap());
+        let cdc = Arc::new(CdcWriter::new_stub());
+        SemanticPartition::new(db, embedder, cdc)
+    }
+
+    fn fact(subj: &str, pred: &str, obj: &str, conf: f64) -> Fact {
+        Fact {
+            id: FactId::new(),
+            tier: Tier::Project,
+            ts: 0,
+            subject: subj.into(),
+            predicate: pred.into(),
+            object: obj.into(),
+            confidence: conf,
+            source_episode: None,
+            superseded_by: None,
+        }
+    }
+
+    /// Pins the #664 default: with `WAYLAND_CONTRADICTION` UNSET, a conflicting
+    /// fact routes through the ContradictionResolver, NOT the unconditional
+    /// legacy supersede. Inputs (existing=0.95, new=0.20) yield the resolver's
+    /// `KeepExisting` verdict — the new fact is discarded and the existing fact
+    /// is left un-superseded, an outcome the legacy path can never produce.
+    #[tokio::test]
+    async fn default_routes_through_resolver_not_legacy_supersede() {
+        // The default is env-unset; assert it is unset so the test pins the
+        // shipping default rather than ambient process state.
+        assert!(
+            std::env::var(CONTRADICTION_ENV).is_err(),
+            "test pins the env-UNSET default"
+        );
+
+        let p = fresh_partition().await;
+        let f1 = fact("lang", "version", "2023", 0.95);
+        let id1 = p.assert(f1).await.unwrap();
+        let f2 = fact("lang", "version", "2024", 0.20);
+        let id2 = p.assert(f2).await.unwrap();
+
+        let rows: Vec<(String, bool)> = p
+            .list_by_subject("lang", Tier::Project)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|f| (f.object, f.superseded_by.is_some()))
+            .collect();
+
+        // Resolver KeepExisting: new fact never inserted, existing untouched.
+        assert_eq!(
+            rows.len(),
+            1,
+            "resolver default (KeepExisting) skips the new insert: {rows:?}"
+        );
+        assert_eq!(rows[0].0, "2023", "existing object survives");
+        assert!(
+            !rows[0].1,
+            "existing fact must NOT be superseded under resolver default"
+        );
+        // Legacy supersede would return the new id; resolver returns existing.
+        assert_eq!(id2, id1, "assert returns existing id under KeepExisting");
+    }
 }
