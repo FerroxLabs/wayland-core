@@ -9,7 +9,7 @@ use wcore_config::shell::bash_shell_argv_prefix;
 use wcore_protocol::events::ToolCategory;
 use wcore_sandbox::{
     NetworkPolicy, SandboxChunk, SandboxCommand, SandboxManifest, SandboxOutput, SyscallPolicy,
-    backends::SandboxBackend, default_for_platform, default_for_platform_trusted,
+    backends::SandboxBackend, default_for_platform, default_for_platform_local,
 };
 use wcore_types::tool::{JsonSchema, ToolResult};
 
@@ -139,13 +139,17 @@ pub fn platform_enforces_read_deny() -> bool {
     default_for_platform().enforces_read_deny()
 }
 
-/// #657: is this session's workspace `Trusted` (the user's own machine)?
-/// A missing policy is treated as NOT trusted, so the conservative path
-/// (denylist on, sandbox fail-closed) applies whenever trust is unknown.
-fn trusted_workspace(ctx: &ToolContext) -> bool {
+/// #657: is this a LOCAL INTERACTIVE session (human driving this machine
+/// directly)? This is the gate for the three Bash relaxations — network
+/// Inherit, credential-denylist skip, no-sandbox loud-degrade. It is NOT the
+/// trust enum: a channel `Full` sender is also `Trusted` but is REMOTE, so it
+/// must NOT get the relaxations. A missing policy is treated as NOT local, so
+/// the conservative path (denylist on, sandbox fail-closed) applies whenever
+/// the signal is unknown.
+fn local_interactive_session(ctx: &ToolContext) -> bool {
     ctx.workspace
         .as_deref()
-        .is_some_and(|p| p.trust() == crate::workspace_policy::WorkspaceTrust::Trusted)
+        .is_some_and(|p| p.local_interactive())
 }
 
 /// Network policy for agent-initiated Bash with NO trust signal (the
@@ -326,7 +330,11 @@ fn denylist() -> &'static RegexSet {
             r"(?i)Get-ChildItem\s+env:",
             // #657 Part 2: only SECRET-shaped `$env:` names are refused;
             // `$env:PATH` / `$env:USERPROFILE` / `$env:NODE_ENV` are allowed.
-            r"(?i)\$env:[A-Za-z0-9_]*(API_KEY|SECRET|TOKEN|PASSWORD|PASSWD|CREDENTIAL)",
+            // The `KEY` alternative (no required underscore) catches `APIKEY`,
+            // `AWS_ACCESS_KEY_ID`, `PRIVATE_KEY`; `URL|CONN|DSN|CERT` catch
+            // connection strings / certs (audit finding 2). A few benign names
+            // (`$env:BASE_URL`) match too — accepted false positives.
+            r"(?i)\$env:[A-Za-z0-9_]*(KEY|SECRET|TOKEN|PASSWORD|PASSWD|CREDENTIAL|URL|CONN|DSN|CERT)",
             // Reading .env files via common viewers. Template files
             // (`.env.example` / `.sample` / `.template` / `.dist`) are
             // neutralized upstream by `mask_env_templates` (#657 Part 2) so
@@ -745,12 +753,14 @@ impl Tool for BashTool {
                 is_error: true,
             };
         };
-        // #657 Part 2: the credential-exfiltration denylist is skipped in a
-        // Trusted workspace — the OS sandbox there already secret-scrubs the
-        // env and denies credential-store reads, so the string denylist only
-        // contributes false-positives (blocking `env VAR=val cmd`, package
-        // installs, etc.). Contained / policy-less sessions keep it ON.
-        if !trusted_workspace(ctx)
+        // #657 Part 2: the credential-exfiltration denylist is skipped only in
+        // a LOCAL INTERACTIVE session — the OS sandbox there already
+        // secret-scrubs the env and denies credential-store reads, so the
+        // string denylist only contributes false-positives (blocking
+        // `env VAR=val cmd`, package installs, etc.). A remote channel sender
+        // (including Full posture), Contained, and policy-less sessions keep
+        // it ON.
+        if !local_interactive_session(ctx)
             && let Some(reason) = check_denylist(command)
         {
             return ToolResult {
@@ -763,10 +773,11 @@ impl Tool for BashTool {
             .unwrap_or(DEFAULT_TIMEOUT_MS)
             .min(MAX_TIMEOUT_MS);
         let timeout = Duration::from_millis(timeout_ms);
-        // #657 Part 3: a Trusted session degrades to a loud NoSandbox when no
-        // real backend is available (installs still work on the user's own
-        // box); Contained/policy-less sessions fail closed.
-        let backend = default_for_platform_trusted(trusted_workspace(ctx));
+        // #657 Part 3: a LOCAL INTERACTIVE session degrades to a loud
+        // NoSandbox when no real backend is available (installs still work on
+        // the user's own box); channel/remote/Contained/policy-less sessions
+        // fail closed.
+        let backend = default_for_platform_local(local_interactive_session(ctx));
         // Task 8 — exec-time capability gate (TOCTOU-free boundary). The same
         // `default_for_platform()` that would run the command decides whether it
         // may run. A bootstrap-only probe would be bypassable because
@@ -821,9 +832,9 @@ impl Tool for BashTool {
             };
         };
 
-        // #657 Part 2: denylist skipped in a Trusted workspace — see
-        // `execute_with_ctx` for the rationale.
-        if !trusted_workspace(ctx)
+        // #657 Part 2: denylist skipped only in a LOCAL INTERACTIVE session —
+        // see `execute_with_ctx` for the rationale.
+        if !local_interactive_session(ctx)
             && let Some(reason) = check_denylist(command)
         {
             return ToolResult {
@@ -840,8 +851,8 @@ impl Tool for BashTool {
 
         // Task 8 — exec-time capability gate (streaming path, same logic as
         // execute_with_ctx). Must check BEFORE wrapping in Arc.
-        // #657 Part 3: trust-aware selection (see execute_with_ctx).
-        let backend_probe = default_for_platform_trusted(trusted_workspace(ctx));
+        // #657 Part 3: local-interactive-aware selection (see execute_with_ctx).
+        let backend_probe = default_for_platform_local(local_interactive_session(ctx));
         if let Some(p) = ctx.workspace.as_deref()
             && p.trust() == crate::workspace_policy::WorkspaceTrust::Contained
             && !backend_probe.enforces_read_deny()
@@ -1207,22 +1218,28 @@ mod tests {
         }
     }
 
-    /// End-to-end through `build_sandbox_pieces`: a Trusted workspace policy
-    /// yields a manifest with network `Inherit` (installs work); a Contained
-    /// policy yields `Deny`.
+    /// End-to-end through `build_sandbox_pieces`: only a LOCAL-INTERACTIVE
+    /// (`trusted_local`) policy yields a manifest with network `Inherit`;
+    /// `trusted_remote` (channel Full — same Trusted trust) and `contained`
+    /// both yield `Deny`.
     #[test]
     #[serial_test::serial]
-    fn build_pieces_network_follows_workspace_trust() {
+    fn build_pieces_network_follows_local_interactive_not_trust() {
+        use crate::workspace_policy::WorkspacePolicy;
         let prev = std::env::var_os("WAYLAND_BASH_ALLOW_NETWORK");
         // SAFETY: serial test; single-threaded env mutation, restored below.
         unsafe { std::env::remove_var("WAYLAND_BASH_ALLOW_NETWORK") };
 
         let dir = tempfile::tempdir().unwrap();
-        let trusted = crate::workspace_policy::WorkspacePolicy::trusted_local(dir.path());
-        let (m, _) = build_sandbox_pieces("npm install -g cowsay", Some(&trusted));
-        assert_eq!(m.network, NetworkPolicy::Inherit, "Trusted manifest = Inherit");
+        let local = WorkspacePolicy::trusted_local(dir.path());
+        let (m, _) = build_sandbox_pieces("npm install -g cowsay", Some(&local));
+        assert_eq!(m.network, NetworkPolicy::Inherit, "local manifest = Inherit");
 
-        let contained = crate::workspace_policy::WorkspacePolicy::contained(dir.path());
+        let remote = WorkspacePolicy::trusted_remote(dir.path());
+        let (m, _) = build_sandbox_pieces("npm install -g cowsay", Some(&remote));
+        assert_eq!(m.network, NetworkPolicy::Deny, "Full-channel manifest = Deny");
+
+        let contained = WorkspacePolicy::contained(dir.path());
         let (m, _) = build_sandbox_pieces("npm install -g cowsay", Some(&contained));
         assert_eq!(m.network, NetworkPolicy::Deny, "Contained manifest = Deny");
 
@@ -1231,6 +1248,65 @@ mod tests {
             Some(v) => unsafe { std::env::set_var("WAYLAND_BASH_ALLOW_NETWORK", v) },
             None => unsafe { std::env::remove_var("WAYLAND_BASH_ALLOW_NETWORK") },
         }
+    }
+
+    /// Audit finding 1 (CRITICAL): a channel `Full`-posture session
+    /// (`trusted_remote` — REMOTE sender, same `Trusted` trust as local) must
+    /// NOT get any of the three #657 relaxations. Here: the denylist is NOT
+    /// skipped (a credential echo is refused before spawning), and the
+    /// local-interactive gate is closed (so network stays Deny per the
+    /// build-pieces test and the no-sandbox path passes `false` → fail-closed).
+    #[tokio::test]
+    async fn full_channel_session_gets_no_relaxations() {
+        use crate::context::ToolContext;
+        use crate::workspace_policy::WorkspacePolicy;
+        let dir = tempfile::tempdir().unwrap();
+        let policy = std::sync::Arc::new(WorkspacePolicy::trusted_remote(dir.path()));
+        let ctx = ToolContext::test_default().with_workspace(policy);
+
+        // The gate that governs all three relaxations is closed for a remote
+        // Full-channel sender.
+        assert!(
+            !local_interactive_session(&ctx),
+            "a channel Full sender must NOT be treated as local-interactive"
+        );
+
+        // Denylist is NOT skipped: a credential echo is refused (no shell spawn).
+        let res = BashTool
+            .execute_with_ctx(json!({"command": "echo $ANTHROPIC_API_KEY"}), &ctx)
+            .await;
+        assert!(res.is_error, "remote session must refuse the credential echo");
+        assert!(
+            res.content.contains("credential-exfiltration denylist"),
+            "must be refused by the denylist, got: {}",
+            res.content
+        );
+    }
+
+    /// The mirror: a LOCAL interactive session (`trusted_local`) DOES skip the
+    /// denylist — the same credential echo is not refused by the denylist
+    /// (it runs in the secret-scrubbed sandbox instead).
+    #[tokio::test]
+    async fn local_session_skips_denylist() {
+        use crate::context::ToolContext;
+        use crate::workspace_policy::WorkspacePolicy;
+        let dir = tempfile::tempdir().unwrap();
+        let policy = std::sync::Arc::new(WorkspacePolicy::trusted_local(dir.path()));
+        let ctx = ToolContext::test_default().with_workspace(policy);
+
+        assert!(
+            local_interactive_session(&ctx),
+            "a local session must be treated as local-interactive"
+        );
+
+        let res = BashTool
+            .execute_with_ctx(json!({"command": "echo $ANTHROPIC_API_KEY"}), &ctx)
+            .await;
+        assert!(
+            !res.content.contains("credential-exfiltration denylist"),
+            "local session must NOT hit the denylist, got: {}",
+            res.content
+        );
     }
 
     // ── #657 Part 2: denylist false-positive fixes ─────────────────────
@@ -1249,7 +1325,8 @@ mod tests {
     }
 
     /// `$env:PATH` / `$env:USERPROFILE` / `$env:NODE_ENV` are allowed; a
-    /// secret-shaped `$env:*` name is still refused.
+    /// secret-shaped `$env:*` name is still refused — including the audit
+    /// finding-2 cases the first-cut regex missed.
     #[test]
     fn powershell_env_only_secret_names_denied() {
         assert!(check_denylist("echo $env:PATH").is_none());
@@ -1258,6 +1335,11 @@ mod tests {
         assert!(check_denylist("echo $env:MY_API_KEY").is_some());
         assert!(check_denylist("$env:OPENAI_API_KEY").is_some());
         assert!(check_denylist("echo $env:DB_PASSWORD").is_some());
+        // Audit finding 2: these were slipping through the narrowed regex.
+        assert!(check_denylist("echo $env:AWS_ACCESS_KEY_ID").is_some());
+        assert!(check_denylist("echo $env:PRIVATE_KEY").is_some());
+        assert!(check_denylist("echo $env:DATABASE_URL").is_some());
+        assert!(check_denylist("$env:STRIPE_APIKEY").is_some());
     }
 
     /// `.env.example` / `.sample` / `.template` / `.dist` templates are

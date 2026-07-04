@@ -2100,16 +2100,26 @@ impl AgentBootstrap {
         // rooted at the workspace (fixes the empty-allowlist / cwd:None pain
         // that broke local + desktop builds). A channel `Workspace` posture
         // already installed a `Contained` policy via `apply_posture`; for
-        // every other path (local CLI / TUI / json-stream / ACP / `Full`
-        // channel) install a `Trusted` policy derived from this session's
-        // working directory.
+        // every other path install a `Trusted` policy derived from this
+        // session's working directory.
+        //
+        // #657: the three Bash relaxations (network Inherit, credential
+        // denylist skip, no-sandbox loud-degrade) key on LOCAL-INTERACTIVE,
+        // not trust. `channel_tool_posture.is_none()` is exactly the
+        // local-interactive set: it is `None` for local CLI / TUI /
+        // json-stream / ACP and `Some(..)` for EVERY channel-originated
+        // engine (`Conversational` / `Full`). A channel `Full` sender is
+        // REMOTE, so it gets `trusted_remote` (same unjailed `Trusted` fs
+        // posture as before, but the pre-#657 Bash lockdown), never the local
+        // relaxations.
         if registry.workspace_policy().is_none() {
-            let policy = std::sync::Arc::new(
-                wcore_tools::workspace_policy::WorkspacePolicy::trusted_local(
-                    std::path::PathBuf::from(&self.workspace),
-                ),
-            );
-            registry.set_workspace_policy(policy);
+            let ws = std::path::PathBuf::from(&self.workspace);
+            let policy = if self.channel_tool_posture.is_none() {
+                wcore_tools::workspace_policy::WorkspacePolicy::trusted_local(ws)
+            } else {
+                wcore_tools::workspace_policy::WorkspacePolicy::trusted_remote(ws)
+            };
+            registry.set_workspace_policy(std::sync::Arc::new(policy));
         }
 
         let mut engine = if let Some(session) = self.resume_session {

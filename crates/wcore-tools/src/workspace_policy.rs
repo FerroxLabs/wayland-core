@@ -12,12 +12,14 @@
 //!     `SandboxedFs ∘ SecretDenyFs`. (Bash is NOT in this posture yet — see
 //!     the deferred OS-sandbox secret-read-deny work.)
 //!
-//! Network default is trust-dependent (#657): a `Trusted` session seeds
-//! `NetworkPolicy::Inherit` (network on) so installs/fetches/`curl` work on
-//! the user's own machine, while a `Contained` session seeds
-//! `default_bash_network_policy()` (Deny). `WAYLAND_BASH_ALLOW_NETWORK`
+//! Network default keys on LOCAL-INTERACTIVE, not trust (#657): only a
+//! human-driven local session (`trusted_local`) seeds `NetworkPolicy::Inherit`
+//! (network on) so installs/fetches/`curl` work on the user's own machine. A
+//! channel `Full` sender (`trusted_remote` — same `Trusted` trust) and a
+//! `Contained` session both seed `default_bash_network_policy()` (Deny), so a
+//! remote sender never inherits the relaxation. `WAYLAND_BASH_ALLOW_NETWORK`
 //! still overrides in BOTH directions (force-on `=1`, force-off `=0`); the
-//! value is never hardcoded past the trust-aware helpers.
+//! value is never hardcoded past the helpers.
 
 use std::path::{Path, PathBuf};
 use wcore_sandbox::manifest::NetworkPolicy;
@@ -102,6 +104,16 @@ pub enum WorkspaceTrust {
 pub struct WorkspacePolicy {
     root: PathBuf,
     trust: WorkspaceTrust,
+    /// #657: TRUE only for a LOCAL INTERACTIVE session — the human is
+    /// driving this machine directly (local CLI / TUI / desktop json-stream /
+    /// ACP). This is DISTINCT from `trust`: a channel `Full`-posture engine is
+    /// also `Trusted` (for fs-tool parity with local) but is driven by a
+    /// REMOTE chat sender, so it is NOT local-interactive. The three #657
+    /// relaxations (network `Inherit`, credential-denylist skip, no-sandbox
+    /// loud-degrade) gate on THIS flag, never on `trust` — otherwise a remote
+    /// Full-channel sender would inherit them (a remote-exfil escalation).
+    /// Default `false` everywhere except the two local constructors.
+    local_interactive: bool,
     writable_extra: Vec<PathBuf>,
     readable_extra: Vec<PathBuf>,
     network: NetworkPolicy,
@@ -113,14 +125,35 @@ pub struct WorkspacePolicy {
 }
 
 impl WorkspacePolicy {
-    /// Local/desktop session on the user's own machine. Roots the sandbox
-    /// at `workspace`, allows the workspace + user toolchains/caches so
-    /// builds and installs work, reuses global caches (no redirect), and
-    /// defaults the network ON (`NetworkPolicy::Inherit`, #657) so installs /
-    /// `curl` / `git fetch` work with no env gymnastics — the
-    /// `WAYLAND_BASH_ALLOW_NETWORK` override still forces it off (`=0`) or on
-    /// (`=1`). Does NOT jail the in-process file tools.
+    /// Local interactive session on the user's own machine (local CLI / TUI /
+    /// desktop json-stream / ACP — the human is driving directly). Roots the
+    /// sandbox at `workspace`, allows the workspace + user toolchains/caches so
+    /// builds and installs work, reuses global caches (no redirect). Marked
+    /// `local_interactive`, so the #657 relaxations apply: network defaults ON
+    /// (`NetworkPolicy::Inherit`) so installs / `curl` / `git fetch` work with
+    /// no env gymnastics (the `WAYLAND_BASH_ALLOW_NETWORK` override still
+    /// forces it off `=0` / on `=1`), plus the credential-denylist skip and
+    /// no-sandbox loud-degrade. Does NOT jail the in-process file tools.
     pub fn trusted_local(workspace: impl Into<PathBuf>) -> Self {
+        Self::trusted(workspace, true)
+    }
+
+    /// Channel-originated engine that gets the local (unjailed) `Trusted` fs
+    /// posture for tool parity — but is driven by a REMOTE chat sender, so it
+    /// is NOT a local interactive session. Byte-for-byte the pre-#657
+    /// lockdown for Bash: network defaults `Deny` (env-gated), the credential
+    /// denylist stays ON, and the no-sandbox fallback fails closed. Used for
+    /// channel `Full`/`Conversational` posture engines (see bootstrap), where
+    /// no `Contained` jail is installed.
+    pub fn trusted_remote(workspace: impl Into<PathBuf>) -> Self {
+        Self::trusted(workspace, false)
+    }
+
+    /// Shared builder for the two `Trusted`-trust postures. `local_interactive`
+    /// is the ONLY difference between `trusted_local` (human at the keyboard)
+    /// and `trusted_remote` (channel Full sender): it selects the network
+    /// default and, downstream, whether the #657 relaxations apply.
+    fn trusted(workspace: impl Into<PathBuf>, local_interactive: bool) -> Self {
         let root = canon(workspace.into());
         let mut writable_extra = scratch_dirs();
         if let Some(home) = dirs::home_dir() {
@@ -140,12 +173,22 @@ impl WorkspacePolicy {
         readable_canon.dedup();
         let secret_deny = compute_secret_deny(WorkspaceTrust::Trusted, &root, &readable_canon);
 
+        // Network default keys on local-interactive, NOT trust (#657): only a
+        // human-driven local session gets Inherit; a remote Full-channel
+        // sender stays on the conservative env-gated Deny.
+        let network = if local_interactive {
+            crate::bash::trusted_bash_network_policy()
+        } else {
+            crate::bash::default_bash_network_policy()
+        };
+
         Self {
             root,
             trust: WorkspaceTrust::Trusted,
+            local_interactive,
             writable_extra,
             readable_extra,
-            network: crate::bash::trusted_bash_network_policy(),
+            network,
             cache_env: Vec::new(),
             secret_deny,
         }
@@ -183,6 +226,7 @@ impl WorkspacePolicy {
         Self {
             root,
             trust: WorkspaceTrust::Contained,
+            local_interactive: false,
             writable_extra,
             readable_extra,
             network: crate::bash::default_bash_network_policy(),
@@ -193,6 +237,13 @@ impl WorkspacePolicy {
 
     pub fn trust(&self) -> WorkspaceTrust {
         self.trust
+    }
+    /// #657: TRUE only for a local interactive session (human at the keyboard
+    /// on this machine). Gates the network `Inherit` default, the
+    /// credential-denylist skip, and the no-sandbox loud-degrade. NEVER true
+    /// for a channel-originated engine, including `Full` posture.
+    pub fn local_interactive(&self) -> bool {
+        self.local_interactive
     }
     pub fn root(&self) -> &Path {
         &self.root
@@ -455,31 +506,39 @@ mod tests {
         assert_eq!(p.network(), crate::bash::default_bash_network_policy());
     }
 
-    /// #657: a Trusted session defaults network ON (`Inherit`) so installs /
-    /// fetches work on the user's own machine, while a Contained session
-    /// stays at the conservative env-gated default (Deny when the override is
-    /// unset). Asserted together under a serial guard so the env override
-    /// cannot bleed in from a sibling test.
+    /// #657: the network default + the three relaxations key on
+    /// LOCAL-INTERACTIVE, not the trust enum. `trusted_local` (human at the
+    /// keyboard) defaults network ON and is `local_interactive`; `contained`
+    /// AND `trusted_remote` (a channel `Full` sender — same `Trusted` trust!)
+    /// both default network OFF and are NOT `local_interactive`, so a remote
+    /// sender never inherits the relaxations. Asserted together under a serial
+    /// guard so the env override cannot bleed in from a sibling test.
     #[test]
     #[serial_test::serial]
-    fn trusted_network_defaults_inherit_contained_defaults_deny() {
+    fn relaxations_key_on_local_interactive_not_trust() {
         let prev = std::env::var_os("WAYLAND_BASH_ALLOW_NETWORK");
         // SAFETY: serial test; single-threaded env mutation, restored below.
         unsafe { std::env::remove_var("WAYLAND_BASH_ALLOW_NETWORK") };
 
         let dir = tempfile::tempdir().unwrap();
-        let trusted = WorkspacePolicy::trusted_local(dir.path());
+        let local = WorkspacePolicy::trusted_local(dir.path());
+        let remote = WorkspacePolicy::trusted_remote(dir.path());
         let contained = WorkspacePolicy::contained(dir.path());
-        assert_eq!(
-            trusted.network(),
-            NetworkPolicy::Inherit,
-            "Trusted must default to network ON"
-        );
-        assert_eq!(
-            contained.network(),
-            NetworkPolicy::Deny,
-            "Contained must default to network OFF"
-        );
+
+        // Local interactive: network ON + local flag set.
+        assert_eq!(local.network(), NetworkPolicy::Inherit);
+        assert!(local.local_interactive());
+        assert_eq!(local.trust(), WorkspaceTrust::Trusted);
+
+        // Channel Full sender: SAME Trusted trust, but NOT local — network OFF
+        // and the relaxations gate closed.
+        assert_eq!(remote.network(), NetworkPolicy::Deny);
+        assert!(!remote.local_interactive());
+        assert_eq!(remote.trust(), WorkspaceTrust::Trusted);
+
+        // Contained: network OFF, not local.
+        assert_eq!(contained.network(), NetworkPolicy::Deny);
+        assert!(!contained.local_interactive());
 
         // SAFETY: serial test; restore prior value.
         match &prev {
