@@ -27,8 +27,10 @@
 //!
 //! Every step is best-effort: a connector that can't fetch (default
 //! `Rejected`), a fetch error/timeout, an oversize payload, an unsupported
-//! format, or a backend error all log and leave the attachment as a bare-URL
-//! summary. A media problem never fails the turn. Both the fetch and the
+//! format, a missing backend, or a backend error all log and write an honest
+//! degraded notice into [`Attachment::transcribed`] (#660) — the model is told
+//! it cannot see/hear the content and why, never left to answer blind from a
+//! bare URL. A media problem never fails the turn. Both the fetch and the
 //! analyze step are wall-clock bounded.
 
 use std::sync::Arc;
@@ -57,6 +59,22 @@ const ANALYZE_TIMEOUT: Duration = Duration::from_secs(45);
 /// Vision prompt for eager image enrichment — terse on purpose.
 const IMAGE_DESCRIBE_PROMPT: &str =
     "Concisely describe this image for a chat assistant, and quote any visible text verbatim.";
+
+// Honest degraded-mode notices (#660). When inbound media cannot be turned into
+// text, the model must be told WHY — otherwise the prompt carries only a bare
+// URL it cannot fetch and it answers blind (confidently describing an image it
+// never saw). These strings are written into `Attachment::transcribed`, which
+// `build_turn_prompt` surfaces into the turn.
+const IMAGE_NO_VISION_NOTICE: &str = "[Inbound image received but NOT analyzed: no vision backend is configured, so the \
+     assistant cannot see this image. Do not guess its contents. To enable image \
+     understanding, set ANTHROPIC_API_KEY, OPENAI_API_KEY, or GEMINI_API_KEY.]";
+const AUDIO_NO_TRANSCRIPTION_NOTICE: &str = "[Inbound audio received but NOT transcribed: no transcription backend is configured, so \
+     the assistant cannot hear this audio. To enable transcription, set GROQ_API_KEY or \
+     OPENAI_API_KEY.]";
+const IMAGE_ANALYSIS_FAILED_NOTICE: &str = "[Inbound image could not be analyzed (it may be too large, an unsupported format, or the \
+     vision backend errored/timed out). The assistant has NOT seen its contents; do not guess.]";
+const AUDIO_ANALYSIS_FAILED_NOTICE: &str = "[Inbound audio could not be transcribed (it may be too large, an unsupported format, or the \
+     transcription backend errored/timed out). The assistant has NOT heard its contents.]";
 
 /// Source of inbound media bytes, fetched WITH the originating connector's
 /// own credentials. Abstracts [`ChannelManager`] so the enricher is unit
@@ -96,8 +114,9 @@ impl MediaByteSource for ManagerMediaSource {
 /// and a [`MediaByteSource`] for the auth-aware download.
 ///
 /// Construct via [`ChannelMediaEnricher::new`]. When neither backend is
-/// configured the enricher is *inert* ([`Self::is_inert`]) and the caller
-/// should skip installing it.
+/// configured the enricher is *inert* ([`Self::is_inert`]) for deriving text,
+/// but is still installed so it can emit honest "cannot see/hear this" degraded
+/// notices (#660) rather than letting inbound media be answered blind.
 pub struct ChannelMediaEnricher {
     vision: Option<Arc<dyn VisionBackend>>,
     transcription: Option<Arc<dyn TranscriptionBackend>>,
@@ -123,22 +142,37 @@ impl ChannelMediaEnricher {
         }
     }
 
-    /// `true` when no backend is wired — the enricher would do nothing.
+    /// `true` when no backend is wired — the enricher derives no text and only
+    /// emits honest degraded notices for inbound media (#660).
     pub fn is_inert(&self) -> bool {
         self.vision.is_none() && self.transcription.is_none()
     }
 
     /// Enrich each attachment in place. Best-effort and fail-soft.
+    ///
+    /// When an image/audio attachment cannot be turned into text — no backend
+    /// configured, or fetch/analysis failed — an honest degraded notice is
+    /// written to [`Attachment::transcribed`] instead of silently leaving a
+    /// bare URL (#660). Non-media kinds are left untouched.
     pub async fn enrich(&self, attachments: &mut [Attachment], channel: &str) {
         for att in attachments.iter_mut() {
             // Never overwrite a connector-supplied transcript.
             if att.transcribed.is_some() {
                 continue;
             }
-            // Only kinds we actually have a backend for proceed.
+            // No backend for this media kind → record why, don't drop it blind.
             match att.kind {
-                MediaKind::Image if self.vision.is_some() => {}
-                MediaKind::Audio if self.transcription.is_some() => {}
+                MediaKind::Image if self.vision.is_none() => {
+                    att.transcribed = Some(IMAGE_NO_VISION_NOTICE.to_string());
+                    continue;
+                }
+                MediaKind::Audio if self.transcription.is_none() => {
+                    att.transcribed = Some(AUDIO_NO_TRANSCRIPTION_NOTICE.to_string());
+                    continue;
+                }
+                // A matching backend is configured — proceed to fetch+analyze.
+                MediaKind::Image | MediaKind::Audio => {}
+                // Non-media kind (file, …) — nothing to derive, leave as-is.
                 _ => continue,
             }
 
@@ -151,7 +185,7 @@ impl ChannelMediaEnricher {
             )
             .await
             {
-                Ok(Ok(b)) => b,
+                Ok(Ok(b)) => Some(b),
                 Ok(Err(e)) => {
                     tracing::debug!(
                         target: "wcore_agent::channel_media",
@@ -160,7 +194,7 @@ impl ChannelMediaEnricher {
                         error = %e,
                         "inbound media fetch failed"
                     );
-                    continue;
+                    None
                 }
                 Err(_) => {
                     tracing::warn!(
@@ -170,26 +204,39 @@ impl ChannelMediaEnricher {
                         timeout_secs = self.fetch_timeout.as_secs(),
                         "inbound media fetch timed out"
                     );
-                    continue;
+                    None
                 }
             };
 
-            let derived = match att.kind {
-                MediaKind::Image => self.describe_image(&bytes, channel).await,
-                MediaKind::Audio => self.transcribe_audio(&bytes, channel).await,
+            let derived = match (att.kind, bytes.as_deref()) {
+                (MediaKind::Image, Some(b)) => self.describe_image(b, channel).await,
+                (MediaKind::Audio, Some(b)) => self.transcribe_audio(b, channel).await,
                 _ => None,
             };
-            if let Some(text) = derived {
-                let (text, truncated) = truncate(text, MAX_DERIVED_CHARS);
-                tracing::info!(
-                    target: "wcore_agent::channel_media",
-                    channel,
-                    kind = ?att.kind,
-                    chars = text.len(),
-                    truncated,
-                    "inbound media enriched"
-                );
-                att.transcribed = Some(text);
+            match derived {
+                Some(text) => {
+                    let (text, truncated) = truncate(text, MAX_DERIVED_CHARS);
+                    tracing::info!(
+                        target: "wcore_agent::channel_media",
+                        channel,
+                        kind = ?att.kind,
+                        chars = text.len(),
+                        truncated,
+                        "inbound media enriched"
+                    );
+                    att.transcribed = Some(text);
+                }
+                // Backend WAS configured but fetch/analysis produced nothing —
+                // an honest "could not analyze" notice, never a silent drop.
+                None => {
+                    att.transcribed = Some(
+                        match att.kind {
+                            MediaKind::Image => IMAGE_ANALYSIS_FAILED_NOTICE,
+                            _ => AUDIO_ANALYSIS_FAILED_NOTICE,
+                        }
+                        .to_string(),
+                    );
+                }
             }
         }
     }
@@ -353,11 +400,16 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn fetch_error_leaves_attachment_untouched() {
+    async fn fetch_error_yields_analysis_failed_notice() {
+        // #660: a fetch failure (backend present) must surface an honest notice,
+        // not silently drop the image to a bare URL the model answers blind.
         let enricher = vision_enricher("never", StaticSource(Err("401 unauthorized".into())));
         let mut atts = vec![image_att()];
         enricher.enrich(&mut atts, "slack").await;
-        assert!(atts[0].transcribed.is_none());
+        assert_eq!(
+            atts[0].transcribed.as_deref(),
+            Some(IMAGE_ANALYSIS_FAILED_NOTICE)
+        );
     }
 
     #[tokio::test]
@@ -387,31 +439,52 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn image_skipped_when_only_transcription_wired() {
+    async fn image_without_vision_backend_yields_notice() {
+        // #660: an image with no vision backend must get an honest "cannot see,
+        // set a key" notice instead of being silently dropped.
         let enricher = audio_enricher("audio only", StaticSource(Ok(png_bytes())));
         let mut atts = vec![image_att()];
         enricher.enrich(&mut atts, "slack").await;
-        assert!(atts[0].transcribed.is_none());
+        assert_eq!(atts[0].transcribed.as_deref(), Some(IMAGE_NO_VISION_NOTICE));
     }
 
     #[tokio::test]
-    async fn non_media_bytes_are_rejected_by_mime_sniff() {
-        // Source returns an HTML error page; the mime sniff fails → skip.
+    async fn audio_without_transcription_backend_yields_notice() {
+        // #660: audio with no transcription backend gets the honest notice.
+        let enricher = vision_enricher("vision only", StaticSource(Ok(ogg_bytes())));
+        let mut atts = vec![audio_att()];
+        enricher.enrich(&mut atts, "whatsapp").await;
+        assert_eq!(
+            atts[0].transcribed.as_deref(),
+            Some(AUDIO_NO_TRANSCRIPTION_NOTICE)
+        );
+    }
+
+    #[tokio::test]
+    async fn non_media_bytes_yield_analysis_failed_notice() {
+        // Source returns an HTML error page; the mime sniff fails. Backend was
+        // present, so #660 surfaces an honest "could not analyze" notice.
         let html = b"<!DOCTYPE html><html>nope</html>".to_vec();
         let enricher = vision_enricher("never", StaticSource(Ok(html)));
         let mut atts = vec![image_att()];
         enricher.enrich(&mut atts, "slack").await;
-        assert!(atts[0].transcribed.is_none());
+        assert_eq!(
+            atts[0].transcribed.as_deref(),
+            Some(IMAGE_ANALYSIS_FAILED_NOTICE)
+        );
     }
 
     #[tokio::test]
-    async fn oversize_payload_is_skipped() {
+    async fn oversize_payload_yields_analysis_failed_notice() {
         let mut huge = b"\x89PNG\r\n\x1a\n".to_vec();
         huge.resize(VISION_MAX_BYTES + 1024, 0u8);
         let enricher = vision_enricher("never", StaticSource(Ok(huge)));
         let mut atts = vec![image_att()];
         enricher.enrich(&mut atts, "slack").await;
-        assert!(atts[0].transcribed.is_none());
+        assert_eq!(
+            atts[0].transcribed.as_deref(),
+            Some(IMAGE_ANALYSIS_FAILED_NOTICE)
+        );
     }
 
     #[tokio::test]
@@ -425,13 +498,16 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn inert_enricher_is_a_noop() {
+    async fn inert_enricher_emits_degraded_notice_not_noop() {
+        // #660: even with NO backend wired the enricher must not silently drop
+        // inbound media — it emits the honest no-vision notice so the model
+        // never answers an unseen image blind.
         let enricher =
             ChannelMediaEnricher::new(None, None, Arc::new(StaticSource(Ok(png_bytes()))));
         assert!(enricher.is_inert());
         let mut atts = vec![image_att()];
         enricher.enrich(&mut atts, "slack").await;
-        assert!(atts[0].transcribed.is_none());
+        assert_eq!(atts[0].transcribed.as_deref(), Some(IMAGE_NO_VISION_NOTICE));
     }
 
     #[test]
