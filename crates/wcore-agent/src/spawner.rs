@@ -38,7 +38,18 @@ pub use wcore_types::spawner::{ForkOverrides, Spawner, SubAgentConfig, SubAgentR
 /// from the finish reason, and when the terminated body is empty synthesize a
 /// cause line so the failure is legible rather than a silent empty success.
 fn subagent_ok_result(name: String, result: crate::engine::AgentResult) -> SubAgentResult {
-    let is_error = !matches!(result.finish_reason, FinishReason::Stop);
+    // A clean EndTurn is `Stop`. `MaxTurns`/`Error` are unambiguous abnormal
+    // terminations. `Length` is ambiguous: a run aborted at the context/budget
+    // ceiling returns `Length` with EMPTY text (a real failure), but a complete
+    // answer that ends exactly at the output-token cap also returns `Length`
+    // WITH usable text — a degraded-but-usable answer, not a failure. Flagging
+    // the latter would wrongly drop it from council quorum (is_usable), so treat
+    // a non-empty `Length` as success; only an empty `Length` is an error.
+    let is_error = match result.finish_reason {
+        FinishReason::Stop => false,
+        FinishReason::Length => result.text.trim().is_empty(),
+        FinishReason::MaxTurns | FinishReason::Error => true,
+    };
     let text = if is_error && result.text.trim().is_empty() {
         format!(
             "[sub-agent terminated without completing its task: {}]",
@@ -1352,20 +1363,37 @@ mod fail_loud_tests {
     }
 
     #[test]
-    fn terminated_run_with_partial_output_keeps_text_but_flags_error() {
-        // Produced text before hitting a limit → keep the text (don't clobber
-        // with the cause line), but still flag is_error.
+    fn token_capped_answer_with_text_is_usable_not_error() {
+        // A complete answer that ends exactly at the output-token cap comes back
+        // as Length WITH text — degraded-but-usable, not a failure. Flagging it
+        // would wrongly drop it from council quorum. Keep text, is_error=false.
         let out = subagent_ok_result(
             "child".into(),
-            agent_result("partial", FinishReason::Length),
+            agent_result("the answer", FinishReason::Length),
         );
-        assert!(out.is_error);
-        assert_eq!(out.text, "partial");
+        assert!(!out.is_error, "a non-empty Length result must stay usable");
+        assert_eq!(out.text, "the answer");
+    }
+
+    #[test]
+    fn empty_length_termination_is_error_with_cause() {
+        // An EMPTY Length (the context/budget-ceiling abort path) produced no
+        // answer → error with a synthesized cause, not a silent empty success.
+        let out = subagent_ok_result("child".into(), agent_result("", FinishReason::Length));
+        assert!(
+            out.is_error,
+            "an empty Length termination is a real failure"
+        );
+        assert!(
+            out.text.contains("context, budget, or output-length limit"),
+            "cause line names the limit, got: {}",
+            out.text
+        );
     }
 
     #[test]
     fn clean_completion_is_success() {
-        // A clean EndTurn (FinishReason::Stop) is the only success case.
+        // A clean EndTurn (FinishReason::Stop) is the only unconditional success.
         let out = subagent_ok_result("child".into(), agent_result("done", FinishReason::Stop));
         assert!(!out.is_error);
         assert_eq!(out.text, "done");
