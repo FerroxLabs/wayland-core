@@ -315,6 +315,21 @@ pub struct ProviderCompat {
     /// without the field or default to a tiny ceiling like 16).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub omit_max_tokens_when_unsized: Option<bool>,
+
+    /// #648 — whether the provider's served model(s) accept inline image
+    /// (vision) input. Consulted by `OpenAIProvider::build_messages`: when
+    /// `false` (or unset) a `ContentBlock::Image` is NOT emitted as an OpenAI
+    /// `image_url` multipart part — text-only endpoints 400 on it — and instead
+    /// the shared `[image omitted: model not vision-capable]` text placeholder
+    /// is appended, matching cohere / bedrock (mistral) / wayland-ollama.
+    ///
+    /// `None`/`Some(false)` (the default) is the SAFE choice: omit the image
+    /// (soft degradation) rather than risk a hard 400 on a non-vision model.
+    /// Presets set `Some(true)` only for providers whose catalog hosts
+    /// vision-capable models (openai, azure-openai, openrouter, together,
+    /// fireworks, nvidia, xai, qwen, groq, flux-router, mistral).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub supports_vision: Option<bool>,
 }
 
 impl ProviderCompat {
@@ -486,6 +501,8 @@ impl ProviderCompat {
             // the `o1*`/`o3*` reasoning families are excluded per-model by
             // `openai_compat::accepts_temperature`.
             supports_temperature: Some(true),
+            // #648: native OpenAI hosts vision models (gpt-4o family).
+            supports_vision: Some(true),
             ..Default::default()
         }
     }
@@ -551,7 +568,11 @@ impl ProviderCompat {
     /// Azure prices match OpenAI list price, but cost attribution must be
     /// labelled `"azure-openai"` and resolve against the catalog.
     pub fn azure_openai_defaults() -> Self {
-        Self::openai_compat_provider("azure-openai")
+        Self {
+            // #648: Azure hosts the OpenAI vision models (gpt-4o family).
+            supports_vision: Some(true),
+            ..Self::openai_compat_provider("azure-openai")
+        }
     }
 
     /// Defaults for "Sign in with ChatGPT" (the Codex backend).
@@ -583,6 +604,8 @@ impl ProviderCompat {
         // native `--provider together` arm does not build `/v1/v1/...` (404).
         Self {
             api_path: Some("/chat/completions".into()),
+            // #648: Together hosts vision models (Llama-Vision, Qwen-VL).
+            supports_vision: Some(true),
             ..Self::openai_compat_provider("together")
         }
     }
@@ -592,6 +615,8 @@ impl ProviderCompat {
         // Base URL ends in `/inference/v1`; pin `api_path` to avoid `/v1/v1`.
         Self {
             api_path: Some("/chat/completions".into()),
+            // #648: Fireworks hosts vision models (Llama-Vision, Qwen-VL, Phi).
+            supports_vision: Some(true),
             ..Self::openai_compat_provider("fireworks")
         }
     }
@@ -601,6 +626,8 @@ impl ProviderCompat {
         // Base URL ends in `/v1`; pin `api_path` to avoid `/v1/v1`.
         Self {
             api_path: Some("/chat/completions".into()),
+            // #648: NVIDIA NIM catalog hosts vision models (Llama-Vision, NeVA).
+            supports_vision: Some(true),
             ..Self::openai_compat_provider("nvidia")
         }
     }
@@ -612,6 +639,8 @@ impl ProviderCompat {
         // not 404.
         Self {
             api_path: Some("/chat/completions".into()),
+            // #648: Perplexity's Sonar chat API is text-only — omit images safely.
+            supports_vision: Some(false),
             ..Self::openai_compat_provider("perplexity")
         }
     }
@@ -621,6 +650,8 @@ impl ProviderCompat {
         // Base URL ends in `/v1`; pin `api_path` to avoid `/v1/v1`.
         Self {
             api_path: Some("/chat/completions".into()),
+            // #648: Cerebras serves text-only Llama models — omit images safely.
+            supports_vision: Some(false),
             ..Self::openai_compat_provider("cerebras")
         }
     }
@@ -632,6 +663,8 @@ impl ProviderCompat {
             // `max_tokens` is absent, so an unknown/aliased model with no
             // explicit user cap may omit the field.
             omit_max_tokens_when_unsized: Some(true),
+            // #648: OpenRouter routes hundreds of vision-capable models.
+            supports_vision: Some(true),
             ..Self::openai_compat_provider("openrouter")
         }
     }
@@ -647,6 +680,8 @@ impl ProviderCompat {
             // omit the field. The sized internal budget still rides the
             // `x-wl-expected-output` header.
             omit_max_tokens_when_unsized: Some(true),
+            // #648: Flux routes to vision-capable models across providers.
+            supports_vision: Some(true),
             ..Self::openai_compat_provider("flux-router")
         }
     }
@@ -669,6 +704,8 @@ impl ProviderCompat {
             // carries `reasoning_content` once any turn produced thinking, so we
             // must replay prior-turn thinking here (finding #174 exception).
             replays_thinking_in_history: Some(true),
+            // #648: DeepSeek chat/reasoner are text-only — omit images safely.
+            supports_vision: Some(false),
             ..Self::openai_compat_provider("deepseek")
         }
     }
@@ -682,13 +719,19 @@ impl ProviderCompat {
             // the engine otherwise attaches as a client-side output
             // optimization — suppress it so Grok models actually run.
             supports_stop_param: Some(false),
+            // #648: xAI Grok hosts vision models (grok-2-vision, grok-4).
+            supports_vision: Some(true),
             ..Self::openai_compat_provider("xai")
         }
     }
 
     /// v0.8.1 U10b — Defaults for Groq (fast LPU inference, OpenAI-compatible).
     pub fn groq_defaults() -> Self {
-        Self::openai_compat_provider("groq")
+        Self {
+            // #648: Groq hosts multimodal Llama-4 (scout/maverick) vision models.
+            supports_vision: Some(true),
+            ..Self::openai_compat_provider("groq")
+        }
     }
 
     /// Defaults for Moonshot (Kimi). v0.8.1 U10e.
@@ -715,6 +758,8 @@ impl ProviderCompat {
         // Base URL ends in `/compatible-mode/v1`; pin `api_path` to avoid `/v1/v1`.
         Self {
             api_path: Some("/chat/completions".into()),
+            // #648: DashScope hosts the Qwen-VL vision family (qwen-vl-max).
+            supports_vision: Some(true),
             ..Self::openai_compat_provider("qwen")
         }
     }
@@ -725,6 +770,8 @@ impl ProviderCompat {
         // Base URL ends in `/v1`; pin `api_path` to avoid `/v1/v1`.
         Self {
             api_path: Some("/chat/completions".into()),
+            // #648: Mistral hosts the Pixtral vision family (pixtral-large).
+            supports_vision: Some(true),
             ..Self::openai_compat_provider("mistral")
         }
     }
@@ -823,6 +870,7 @@ impl ProviderCompat {
             omit_max_tokens_when_unsized: user
                 .omit_max_tokens_when_unsized
                 .or(defaults.omit_max_tokens_when_unsized),
+            supports_vision: user.supports_vision.or(defaults.supports_vision),
         }
     }
 
@@ -891,6 +939,15 @@ impl ProviderCompat {
     /// presets set `true`.
     pub fn omit_max_tokens_when_unsized(&self) -> bool {
         self.omit_max_tokens_when_unsized.unwrap_or(false)
+    }
+
+    /// #648: whether to send inline images as OpenAI `image_url` multipart
+    /// parts. Defaults to `false` — a `ContentBlock::Image` is replaced with the
+    /// shared text placeholder for text-only providers rather than risking a
+    /// 400. Vision-capable presets (openai, azure-openai, openrouter, together,
+    /// fireworks, nvidia, xai, qwen, groq, flux-router, mistral) set `true`.
+    pub fn supports_vision(&self) -> bool {
+        self.supports_vision.unwrap_or(false)
     }
 
     /// Whether to replay historical assistant `reasoning_content` on the Chat
