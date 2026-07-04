@@ -109,7 +109,14 @@ pub fn model_output_ceiling(_provider: &str, model: &str) -> Option<(u32, u32)> 
         if m.contains("codex-spark") {
             return Some((32_000, 128_000));
         }
-        if m.contains("chat-latest") {
+        // The VERSIONED chat-latest tiers (5.1/5.2/5.3) are small 128k-window
+        // models. The BASE gpt-5-chat-latest is 400k (models.dev) — it must NOT
+        // be caught here; it falls through to the 400k arm below (cross-audit
+        // Defect 2).
+        if m.contains("5.1-chat-latest")
+            || m.contains("5.2-chat-latest")
+            || m.contains("5.3-chat-latest")
+        {
             return Some((16_384, 128_000));
         }
         if (m.contains("gpt-5.4") || m.contains("gpt-5.5"))
@@ -163,16 +170,21 @@ pub fn model_output_ceiling(_provider: &str, model: &str) -> Option<(u32, u32)> 
     // --- MiniMax M-series ---
     // #165 audit: the canonical MiniMax ids (MiniMax-M2 / M2.5 / M3) had no entry
     // and fell to the 200k default, undersizing M3's 1M window. Verified against
-    // the MiniMax platform docs + models.dev (2026-07-04): M3 is a 1,000,000-token
-    // context model; M2 / M2.5 are 204,800. Output held conservatively at 128k
-    // (real caps are higher — M2.5 ~196k, M3 ~512k — but err LOW per the header).
-    // M3 checked first (its id contains "minimax-m2"'s prefix "minimax-m" but not
-    // "minimax-m2"), then the M2 line catches M2 and M2.5.
+    // models.dev raw (2026-07-04): M3 = 1,000,000; the M2.x point releases
+    // (M2.1 / M2.5 / M2.7) = 204,800; but the BASE MiniMax-M2 = 196,608 — a
+    // distinct, SMALLER window (cross-audit Defect 1: claiming 204,800 for the
+    // base M2 would 400 a request between 196,609 and 204,800). Match order is
+    // longest-substring-first so a point release never falls through to the base
+    // arm. Output held conservatively (err LOW per the header).
     if m.contains("minimax-m3") {
         return Some((128_000, 1_000_000));
     }
-    if m.contains("minimax-m2") {
+    if m.contains("minimax-m2.1") || m.contains("minimax-m2.5") || m.contains("minimax-m2.7") {
         return Some((128_000, 204_800));
+    }
+    if m.contains("minimax-m2") {
+        // Base MiniMax-M2: 196,608 window (smaller than the point releases).
+        return Some((128_000, 196_608));
     }
 
     None
@@ -281,6 +293,9 @@ mod tests {
             "gpt-5.4-mini",
             "gpt-5.4-nano",
             "gpt-5.5-mini",
+            // Base gpt-5-chat-latest is 400k (only the 5.1/5.2/5.3 chat tiers
+            // are 128k) — cross-audit Defect 2.
+            "gpt-5-chat-latest",
         ] {
             assert_eq!(
                 model_output_ceiling("openai-chatgpt", id),
@@ -326,13 +341,21 @@ mod tests {
             model_output_ceiling("minimax", "MiniMax-M3"),
             Some((128_000, 1_000_000))
         );
-        for id in ["MiniMax-M2", "MiniMax-M2.5"] {
+        // The point releases are 204,800...
+        for id in ["MiniMax-M2.5", "MiniMax-M2.1", "MiniMax-M2.7"] {
             assert_eq!(
                 model_output_ceiling("minimax", id),
                 Some((128_000, 204_800)),
                 "{id} must report the 204,800-token window"
             );
         }
+        // ...but the BASE M2 is a smaller 196,608 window (must NOT inherit the
+        // point-release 204,800 — that would 400 near the top). Cross-audit
+        // Defect 1.
+        assert_eq!(
+            model_output_ceiling("minimax", "MiniMax-M2"),
+            Some((128_000, 196_608))
+        );
     }
 
     #[test]
