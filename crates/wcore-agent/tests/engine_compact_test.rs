@@ -21,7 +21,7 @@ use wcore_config::compact::CompactConfig;
 use wcore_providers::{LlmProvider, ProviderError};
 use wcore_tools::registry::ToolRegistry;
 use wcore_types::llm::{LlmEvent, LlmRequest};
-use wcore_types::message::{StopReason, TokenUsage};
+use wcore_types::message::{ContentBlock, Message, Role, StopReason, TokenUsage};
 
 use common::test_config;
 
@@ -960,5 +960,77 @@ async fn tc_2_6_context_overflow_sheds_tool_output_and_continues() {
     );
     assert_eq!(result.text, "Continued after shedding");
     // A clean end-turn — NOT the `finish_run_terminated` MaxTurns/Length verdict.
+    assert_eq!(result.stop_reason, StopReason::EndTurn);
+}
+
+/// #636 resume-heals regression: a session that was terminated with
+/// `FinishReason::Length` — its persisted history still exceeds the model's
+/// context ceiling — must SHED the oversized tool output and CONTINUE when it is
+/// reopened, NOT re-abort on the first resumed turn. This guards the fix's
+/// shedding of `self.messages` (the persisted/heal path), which the live-turn
+/// test above does not exercise: without it, a saved over-ceiling session would
+/// re-hit the ceiling guard on turn 1 of every reopen and be permanently stuck
+/// (the unrecoverable-session death #636 set out to close).
+#[tokio::test]
+async fn tc_2_6_context_overflow_resumed_session_heals_and_continues() {
+    // A single normal assistant reply is all the provider must return: if the
+    // guard heals the resumed history it reaches this one call; if it does NOT,
+    // the run aborts BEFORE any dispatch and call_count stays 0.
+    let turn1 = text_turn("Resumed and continued", 5_000);
+    let provider = Arc::new(CompactMockProvider::new(vec![turn1]));
+
+    let mut config = test_config();
+    config.compact.enabled = false; // isolate the pre-flight ceiling guard
+    config.compact.context_window = 60_000; // unknown model → fallback window
+    config.compact.output_reserve = 10_000;
+    config.compact.emergency_buffer = 10_000; // ceiling = 60k - 20k = 40k tokens
+
+    let registry = ToolRegistry::new();
+    let output = silent_output();
+    let mut engine = AgentEngine::new_with_provider(provider.clone(), config, registry, output);
+
+    // Restore the history of a session that blew the ceiling: an assistant tool
+    // call paired with a ~120k-token tool result (480k chars @ ~4 chars/token,
+    // far over the 40k ceiling) — the exact shape `--resume` reloads from disk.
+    let huge = "x".repeat(480_000);
+    engine.load_conversation(vec![
+        Message::new(
+            Role::User,
+            vec![ContentBlock::Text {
+                text: "earlier question".to_string(),
+            }],
+        ),
+        Message::new(
+            Role::Assistant,
+            vec![ContentBlock::ToolUse {
+                id: "big".to_string(),
+                name: "mock_tool".to_string(),
+                input: serde_json::json!({}),
+                extra: None,
+            }],
+        ),
+        Message::new(
+            Role::Tool,
+            vec![ContentBlock::ToolResult {
+                tool_use_id: "big".to_string(),
+                content: huge,
+                is_error: false,
+            }],
+        ),
+    ]);
+
+    let result = engine
+        .run("continue please", "msg-2")
+        .await
+        .expect("resumed run should succeed, not error");
+
+    // The guard healed the persisted over-ceiling history and continued to the
+    // provider. A re-abort would terminate before dispatch (call_count == 0).
+    assert_eq!(
+        provider.call_count(),
+        1,
+        "resumed over-ceiling session must shed persisted tool output and continue, not re-abort on turn 1"
+    );
+    assert_eq!(result.text, "Resumed and continued");
     assert_eq!(result.stop_reason, StopReason::EndTurn);
 }
