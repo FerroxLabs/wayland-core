@@ -1116,3 +1116,60 @@ async fn tc_2_6_context_overflow_resumed_text_session_heals() {
     assert_eq!(result.text, "Resumed past the paste");
     assert_eq!(result.stop_reason, StopReason::EndTurn);
 }
+
+/// #646 rung 2 drop-oldest — engine level. When the overflow is spread across
+/// MANY non-tool messages that are each individually UNDER the per-block budget
+/// (so pass-1 truncation cannot help), the drop-oldest sliding window (pass 2)
+/// must remove the oldest non-essential turns until the request fits, and the
+/// run must continue to the provider instead of aborting. The two existing
+/// rung-2 integration tests both use one huge block, so pass 1 rescues them and
+/// this end-to-end drop-oldest path would otherwise be untested.
+#[tokio::test]
+async fn tc_2_6_context_overflow_many_small_turns_drop_oldest_and_continue() {
+    let turn1 = text_turn("Continued after dropping old turns", 5_000);
+    let provider = Arc::new(CompactMockProvider::new(vec![turn1]));
+
+    let mut config = test_config();
+    config.compact.enabled = false; // isolate the pre-flight ceiling guard
+    config.compact.context_window = 60_000; // unknown model → fallback window
+    config.compact.output_reserve = 10_000;
+    config.compact.emergency_buffer = 10_000; // ceiling = 40k tokens
+
+    let registry = ToolRegistry::new();
+    let output = silent_output();
+    let mut engine = AgentEngine::new_with_provider(provider.clone(), config, registry, output);
+
+    // 24 plain-text turns of 20k chars each (~5k tokens apiece → ~120k tokens
+    // total, far over the 40k ceiling). Each block is well under the per-block
+    // budget (ceiling = 40k chars), so pass-1 truncation is a no-op and only
+    // drop-oldest can bring the request under the ceiling.
+    let history: Vec<Message> = (0..24)
+        .map(|i| {
+            let role = if i % 2 == 0 {
+                Role::User
+            } else {
+                Role::Assistant
+            };
+            Message::new(
+                role,
+                vec![ContentBlock::Text {
+                    text: "y".repeat(20_000),
+                }],
+            )
+        })
+        .collect();
+    engine.load_conversation(history);
+
+    let result = engine
+        .run("what's next", "msg-3")
+        .await
+        .expect("run should succeed, not error");
+
+    assert_eq!(
+        provider.call_count(),
+        1,
+        "rung 2 drop-oldest must shrink the many-turn history and continue, not abort"
+    );
+    assert_eq!(result.text, "Continued after dropping old turns");
+    assert_eq!(result.stop_reason, StopReason::EndTurn);
+}

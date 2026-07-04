@@ -33,6 +33,13 @@ use wcore_tools::tool_result_storage::{
 };
 use wcore_types::message::{ContentBlock, Message, Role};
 
+/// Stable substring embedded in every [`truncate_head_tail`] marker. Rung 2's
+/// pass 1 skips any block already containing it so a truncated block is never
+/// re-truncated on a later pass — mirroring rung 1's [`PERSISTED_OUTPUT_TAG`]
+/// skip. This keeps rung 2 idempotent: a resumed/re-degraded session re-emits
+/// the identical prefix instead of churning the Anthropic prompt cache.
+const TRUNC_MARKER: &str = "chars truncated";
+
 /// Shed oversized tool-result outputs from `messages`, largest-first, until the
 /// recomputed request size (`estimate`) drops below `ceiling` or no oversized,
 /// not-already-spilled tool result remains.
@@ -147,16 +154,29 @@ pub fn degrade_conversation_overflow(
     // borrow); the ceiling re-check happens after the sweep.
     for msg in messages.iter_mut() {
         for block in msg.content.iter_mut() {
+            // Skip blocks that already carry the truncation marker: a truncated
+            // block sits at ~budget chars and would otherwise re-qualify on every
+            // later pass, re-truncating and churning the cached prefix.
             match block {
-                ContentBlock::Text { text } if text.chars().count() > per_block_budget_chars => {
-                    *text = truncate_head_tail(text, per_block_budget_chars);
-                    changed = true;
+                ContentBlock::Text { text }
+                    if text.chars().count() > per_block_budget_chars
+                        && !text.contains(TRUNC_MARKER) =>
+                {
+                    let truncated = truncate_head_tail(text, per_block_budget_chars);
+                    if truncated.chars().count() < text.chars().count() {
+                        *text = truncated;
+                        changed = true;
+                    }
                 }
                 ContentBlock::Thinking { thinking }
-                    if thinking.chars().count() > per_block_budget_chars =>
+                    if thinking.chars().count() > per_block_budget_chars
+                        && !thinking.contains(TRUNC_MARKER) =>
                 {
-                    *thinking = truncate_head_tail(thinking, per_block_budget_chars);
-                    changed = true;
+                    let truncated = truncate_head_tail(thinking, per_block_budget_chars);
+                    if truncated.chars().count() < thinking.chars().count() {
+                        *thinking = truncated;
+                        changed = true;
+                    }
                 }
                 _ => {}
             }
@@ -170,6 +190,16 @@ pub fn degrade_conversation_overflow(
     // nothing safe is left to drop. Re-scan from the front each iteration so the
     // oldest droppable message goes first; each pass removes exactly one message
     // (finite → terminates).
+    //
+    // Pairing is safe by construction (a `ToolUse` lives on an assistant message
+    // and its `ToolResult` on a separate user message; both are protected by the
+    // `matches!` guard below, so neither half of a pair can be dropped). Dropping
+    // the oldest turns can leave the remaining history assistant-leading; that is
+    // repaired downstream by Anthropic's default-on `ensure_message_alternation`
+    // (anthropic_shared.rs), which prepends a user filler. Residual edge: a
+    // provider configured with `ensure_alternation:false` AND no surviving user
+    // message could send an assistant-leading history — acceptable for v1 since
+    // the last message here is always the current (user-role) turn.
     loop {
         if estimate(messages) < ceiling {
             break;
@@ -200,6 +230,12 @@ pub fn degrade_conversation_overflow(
 
 /// Truncate `s` to a head+tail preview totalling about `budget` chars with a
 /// `[N chars truncated]` marker between. Char-boundary safe.
+///
+/// Guarantees a NET REDUCTION: for a block only marginally over budget, the
+/// head+tail+marker framing can be longer than the original, which would grow
+/// the request instead of shrinking it. When the candidate is not strictly
+/// shorter, return `s` unchanged so the caller's `changed`/`estimate` logic
+/// never registers a phantom shrink.
 fn truncate_head_tail(s: &str, budget: usize) -> String {
     let total = s.chars().count();
     if total <= budget {
@@ -209,7 +245,12 @@ fn truncate_head_tail(s: &str, budget: usize) -> String {
     let head: String = s.chars().take(half).collect();
     let tail: String = s.chars().skip(total - half).collect();
     let dropped = total - 2 * half;
-    format!("{head}\n\n... [{dropped} chars truncated] ...\n\n{tail}")
+    let candidate = format!("{head}\n\n... [{dropped} {TRUNC_MARKER}] ...\n\n{tail}");
+    if candidate.chars().count() < total {
+        candidate
+    } else {
+        s.to_string()
+    }
 }
 
 #[cfg(test)]
@@ -544,5 +585,52 @@ mod tests {
         let changed =
             degrade_conversation_overflow(&mut messages, 10_000, 5_000, all_content_estimator);
         assert!(!changed, "no work when already under the ceiling");
+    }
+
+    #[test]
+    fn truncate_head_tail_never_grows_marginal_block() {
+        // A block only a few chars over budget: head+tail+marker framing would be
+        // LONGER than the input. `truncate_head_tail` must return it unchanged so
+        // truncation is always a net reduction, never a phantom "shrink" that
+        // actually grows the request.
+        let s = "A".repeat(50);
+        let out = truncate_head_tail(&s, 48);
+        assert_eq!(out, s, "a marginally-oversized block must not be grown");
+    }
+
+    #[test]
+    fn truncation_pass_is_idempotent() {
+        // Rung-2 pass 1 must be idempotent: a block that already carries the
+        // truncation marker must NOT be re-truncated even when it is still over
+        // the per-block budget, because a truncated block sits at ~budget chars
+        // and would otherwise re-qualify on every later pass — churning the
+        // Anthropic prompt cache on resume.
+        //
+        // Craft a single already-marked, still-oversized block as the sole
+        // (latest, drop-oldest-protected) message so the call is forced past the
+        // early ceiling guard into pass 1: pass 1 must skip it, and drop-oldest
+        // has no eligible victim, so nothing changes.
+        let marked = format!(
+            "{}\n\n... [50000 {TRUNC_MARKER}] ...\n\n{}",
+            "H".repeat(15_000),
+            "T".repeat(15_000)
+        );
+        let mut messages = vec![text_msg(Role::User, &marked)];
+        let snapshot = marked.clone();
+        let ceiling = 10_000u64; // well under the ~30k marked block
+        let changed = degrade_conversation_overflow(
+            &mut messages,
+            ceiling,
+            20_000, // block (~30k) exceeds budget, but marker must guard it
+            all_content_estimator,
+        );
+        let ContentBlock::Text { text } = &messages[0].content[0] else {
+            panic!("expected text");
+        };
+        assert_eq!(
+            *text, snapshot,
+            "already-marked block must not be re-truncated"
+        );
+        assert!(!changed, "marker-guarded pass must report no change");
     }
 }

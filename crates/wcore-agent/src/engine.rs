@@ -4827,13 +4827,18 @@ impl AgentEngine {
                     // tool_use/tool_result, the system prompt, or the latest
                     // turn) message until under the ceiling. Applied to both the
                     // dispatched request and persisted history so a resume heals.
+                    let mut rung2_fired = false;
                     if est(&request.messages) >= ceiling {
                         // Cap any single non-tool block at ~`ceiling` chars
                         // (≈ a quarter of the ceiling in tokens), so one huge
                         // paste truncates well under the window and the
                         // drop-oldest pass mops up any residual.
                         let per_block_budget = ceiling as usize;
-                        crate::compact::degrade::degrade_conversation_overflow(
+                        // The dispatched-set result drives the user notification:
+                        // rung 2 is LOSSY (truncates pasted content, drops oldest
+                        // turns) and irreversible, unlike rung 1's disk-spill — so
+                        // it must never fire silently.
+                        rung2_fired = crate::compact::degrade::degrade_conversation_overflow(
                             &mut request.messages,
                             ceiling,
                             per_block_budget,
@@ -4871,18 +4876,34 @@ impl AgentEngine {
                             .finish_run_terminated(user_input, turn, FinishReason::Length)
                             .await;
                     }
-                    if shed > 0 {
+                    if shed > 0 || rung2_fired {
                         tracing::info!(
                             target: "wcore_agent::compact",
                             shed,
+                            rung2_fired,
                             ceiling,
                             used = input_token_estimate,
                             model = %request.model,
-                            "context overflow: shed oversized tool outputs, continuing"
+                            "context overflow: degraded history to continue"
                         );
+                        // Two distinct degradations may have fired: rung 1 spills
+                        // large tool outputs to disk (recoverable); rung 2 truncates
+                        // pasted content and/or drops the oldest turns (lossy). Name
+                        // whichever ran so the user knows what changed.
+                        let mut parts: Vec<String> = Vec::new();
+                        if shed > 0 {
+                            parts.push(format!("shed {shed} large tool output(s) to disk"));
+                        }
+                        if rung2_fired {
+                            parts.push(
+                                "truncated oversized message content and/or dropped the \
+                                 oldest turns"
+                                    .to_string(),
+                            );
+                        }
                         self.output.emit_info(&format!(
-                            "Context exceeded the model limit; shed {shed} large tool \
-                             output(s) to disk and continued."
+                            "Context exceeded the model limit; {} to continue.",
+                            parts.join(" and "),
                         ));
                     }
                 }
