@@ -199,6 +199,93 @@ async fn varied_content_failing_loop_converges_via_failure_cap_only() {
     );
 }
 
+/// One turn that calls a NAMED tool (so a run can alternate between distinct
+/// tool names turn-to-turn). Mirrors `loop_turn` but parameterizes the tool.
+fn named_turn(i: usize, tool: &str) -> Vec<LlmEvent> {
+    vec![
+        LlmEvent::ToolUse {
+            id: format!("call-{i}"),
+            name: tool.to_string(),
+            input: json!({ "q": "same" }),
+            extra: None,
+        },
+        LlmEvent::Done {
+            stop_reason: StopReason::ToolUse,
+            finish_reason: FinishReason::from_stop_reason(StopReason::ToolUse),
+            usage: TokenUsage {
+                input_tokens: 50,
+                output_tokens: 10,
+                cache_creation_tokens: 0,
+                cache_read_tokens: 0,
+            },
+        },
+    ]
+}
+
+#[tokio::test]
+async fn interleaved_failing_tools_converge_via_global_failure_cap() {
+    // #160: a failing loop that ALTERNATES tools — tool_a fails, tool_b fails,
+    // tool_a fails, tool_b fails… Neither breaker caught this before the fix:
+    //   * LoopGuard keys on the full signature, and the tool name alternates
+    //     every turn, so its consecutive-signature streak resets each turn.
+    //   * The old FailureGuard keyed the streak on the tool NAME and reset the
+    //     count to 1 whenever the failing tool changed — so it never passed 1.
+    // With the global (tool-agnostic) failure count, consecutive guarded-tool
+    // errors accumulate across identities and converge the loop before the turn
+    // cap, exiting Continue-able (finish_reason=max_turns, #457).
+    let turns: Vec<Vec<LlmEvent>> = (0..30)
+        .map(|i| named_turn(i, if i % 2 == 0 { "tool_a" } else { "tool_b" }))
+        .collect();
+    let provider = Arc::new(MockLlmProvider::with_turns(turns));
+
+    let mut registry = ToolRegistry::new();
+    registry.register(Box::new(MockTool::new(
+        "tool_a",
+        "auth failed: missing scope",
+        true,
+    )));
+    registry.register(Box::new(MockTool::new("tool_b", "not found: bad id", true)));
+
+    let sink = Arc::new(TestSink::new());
+    let handle = sink.handle();
+    let output: Arc<dyn OutputSink> = sink;
+    let mut config = test_config();
+    config.max_turns = Some(30);
+
+    let mut engine = AgentEngine::new_with_provider(provider, config, registry, output);
+    let result = engine
+        .run("keep flailing between tools", "")
+        .await
+        .expect("run completes (terminated cleanly, not Err)");
+
+    assert!(
+        result.turns < 30,
+        "the global failure-cap must converge the interleaved failing loop \
+         before max_turns; turns = {}",
+        result.turns
+    );
+    assert_eq!(
+        result.finish_reason,
+        FinishReason::MaxTurns,
+        "the failure-cap exit must be Continue-able (max_turns), not a hard error"
+    );
+    let events = handle.snapshot();
+    assert!(
+        events.iter().any(
+            |e| e["type"].as_str() == Some("error") && e.to_string().contains("times in a row")
+        ),
+        "expected the failure-cap message; got {events:?}"
+    );
+    // LoopGuard must NOT have fired — the tool name alternates every turn, so no
+    // signature repeats consecutively.
+    assert!(
+        !events
+            .iter()
+            .any(|e| e.to_string().contains("no-progress loop")),
+        "LoopGuard must not fire when the tool alternates every turn; got {events:?}"
+    );
+}
+
 /// #475 no-regression: a tool that fails FEWER than the threshold (default 10)
 /// consecutive times must NOT trip the failure-cap — each error result still
 /// reaches the model and the run proceeds normally. Here 6 failing calls under

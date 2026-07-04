@@ -1113,12 +1113,22 @@ fn loop_call_signature(
 /// every call and slips past `LoopGuard`, burning the turn's budget mid-thought
 /// (the #475 `start_google_auth(service_name)` case).
 ///
-/// `FailureGuard` keys on the tool NAME alone and counts CONSECUTIVE error
-/// results (`is_error == true`) for the same tool, regardless of arguments. Any
-/// success — or a switch to a different tool — resets the streak, so productive
-/// work (which mixes in successes or moves between tools) is never cut. The
-/// threshold is read once per run from `WAYLAND_MAX_CONSECUTIVE_TOOL_FAILURES`
-/// (default 10); `0` disables the breaker.
+/// `FailureGuard` counts CONSECUTIVE error results (`is_error == true`) across
+/// guarded tools, regardless of tool identity or arguments. Any success resets
+/// the streak, so productive work (which mixes in successful calls) is never
+/// cut. The threshold is read once per run from
+/// `WAYLAND_MAX_CONSECUTIVE_TOOL_FAILURES` (default 10); `0` disables the
+/// breaker.
+///
+/// The count is GLOBAL (not per-tool) on purpose (#160): an early version keyed
+/// the streak on the tool NAME and reset it whenever the failing tool changed,
+/// so a loop that ALTERNATES failing tools — A fails, B fails, A fails, B
+/// fails… — never accumulated past 1 for either name and slipped the cap
+/// entirely (and if the content also varied, `LoopGuard` missed it too, letting
+/// the loop burn to the turn cap). Counting failures across tools closes that
+/// gap while preserving the #475 same-tool contract: N consecutive same-tool
+/// failures still trip at exactly N, and a single failure followed by a success
+/// still resets to 0 (recoverable `isError` is never hard-aborted).
 ///
 /// Precedence (deterministic, NOT timing-dependent): the run loop checks the
 /// failure-break BEFORE the identical-signature loop-break, so `FailureGuard`
@@ -1128,10 +1138,11 @@ fn loop_call_signature(
 ///
 /// Scope: the shell tool (`Bash`) is EXCLUDED at the observe site — its
 /// `is_error` is just a non-zero exit, so a legitimate coding burst (build,
-/// clippy, test all failing) must not be read as a stuck loop. Identical Bash
-/// retries are still caught by `LoopGuard`.
+/// clippy, test all failing) must not be read as a stuck loop. Because Bash is
+/// filtered before `observe`, a Bash failure neither increments nor resets the
+/// streak (it is neutral). Identical Bash retries are still caught by
+/// `LoopGuard`.
 struct FailureGuard {
-    last_failing_tool: Option<String>,
     count: u32,
     threshold: u32,
 }
@@ -1143,30 +1154,23 @@ impl FailureGuard {
             .and_then(|v| v.trim().parse::<u32>().ok())
             .unwrap_or(10);
         Self {
-            last_failing_tool: None,
             count: 0,
             threshold,
         }
     }
 
-    /// Record one tool outcome. Returns `Some(count)` once the SAME tool has
-    /// returned an error `>= threshold` times in a row. A success — or a
-    /// different tool (whether it succeeds or fails) — resets the streak.
-    fn observe(&mut self, tool_name: &str, is_error: bool) -> Option<u32> {
+    /// Record one guarded-tool outcome. Returns `Some(count)` once guarded tools
+    /// have returned an error `>= threshold` times in a row, counting across
+    /// tool identities (#160). Any success resets the streak to 0.
+    fn observe(&mut self, is_error: bool) -> Option<u32> {
         if self.threshold == 0 {
             return None;
         }
         if !is_error {
-            self.last_failing_tool = None;
             self.count = 0;
             return None;
         }
-        if self.last_failing_tool.as_deref() == Some(tool_name) {
-            self.count = self.count.saturating_add(1);
-        } else {
-            self.last_failing_tool = Some(tool_name.to_string());
-            self.count = 1;
-        }
+        self.count = self.count.saturating_add(1);
         (self.count >= self.threshold).then_some(self.count)
     }
 }
@@ -1177,7 +1181,6 @@ mod failure_guard_tests {
 
     fn guard(threshold: u32) -> FailureGuard {
         FailureGuard {
-            last_failing_tool: None,
             count: 0,
             threshold,
         }
@@ -1186,12 +1189,12 @@ mod failure_guard_tests {
     #[test]
     fn trips_on_consecutive_same_tool_failures() {
         let mut g = guard(3);
-        assert_eq!(g.observe("start_google_auth", true), None, "1st");
-        assert_eq!(g.observe("start_google_auth", true), None, "2nd");
+        assert_eq!(g.observe(true), None, "1st");
+        assert_eq!(g.observe(true), None, "2nd");
         assert_eq!(
-            g.observe("start_google_auth", true),
+            g.observe(true),
             Some(3),
-            "3rd consecutive failure of the same tool must trip"
+            "3rd consecutive failure must trip"
         );
     }
 
@@ -1201,36 +1204,59 @@ mod failure_guard_tests {
         // FailureGuard ignores args, so the streak accumulates and trips where
         // the signature-based LoopGuard never would.
         let mut g = guard(3);
-        g.observe("start_google_auth", true);
-        g.observe("start_google_auth", true);
-        assert_eq!(g.observe("start_google_auth", true), Some(3));
+        g.observe(true);
+        g.observe(true);
+        assert_eq!(g.observe(true), Some(3));
     }
 
     #[test]
     fn a_success_resets_the_streak() {
         let mut g = guard(3);
-        g.observe("t", true);
-        g.observe("t", true);
-        assert_eq!(g.observe("t", false), None, "success resets");
-        assert_eq!(g.observe("t", true), None, "streak restarts at 1");
-        assert_eq!(g.observe("t", true), None);
-        assert_eq!(g.observe("t", true), Some(3));
+        g.observe(true);
+        g.observe(true);
+        assert_eq!(g.observe(false), None, "success resets");
+        assert_eq!(g.observe(true), None, "streak restarts at 1");
+        assert_eq!(g.observe(true), None);
+        assert_eq!(g.observe(true), Some(3));
     }
 
     #[test]
-    fn a_different_tool_resets_the_streak() {
+    fn interleaved_failing_tools_still_accumulate() {
+        // #160: the count is GLOBAL — `observe` no longer takes a tool name, so
+        // the call site records a failure regardless of which tool produced it.
+        // At the unit level this proves the count accumulates across successive
+        // errors and trips at the threshold; the cross-tool ALTERNATION guarantee
+        // (which the old per-tool key reset away) is exercised end-to-end by the
+        // `interleaved_failing_tools_converge_via_global_failure_cap` E2E test.
+        let mut g = guard(4);
+        assert_eq!(g.observe(true), None, "1");
+        assert_eq!(g.observe(true), None, "2");
+        assert_eq!(g.observe(true), None, "3");
+        assert_eq!(
+            g.observe(true),
+            Some(4),
+            "4th consecutive guarded-tool failure must trip"
+        );
+    }
+
+    #[test]
+    fn a_success_between_interleaved_failures_resets() {
+        // #160 companion: recoverable failures interspersed with a success never
+        // hard-abort — the success (from any tool) zeroes the streak.
         let mut g = guard(3);
-        g.observe("a", true);
-        g.observe("a", true);
-        assert_eq!(g.observe("b", true), None, "different failing tool resets");
-        assert_eq!(g.observe("a", true), None, "back to a restarts at 1");
+        g.observe(true); // a
+        g.observe(true); // b
+        assert_eq!(g.observe(false), None, "a success resets the global streak");
+        assert_eq!(g.observe(true), None, "restart at 1");
+        assert_eq!(g.observe(true), None, "2");
+        assert_eq!(g.observe(true), Some(3), "3");
     }
 
     #[test]
     fn threshold_zero_disables() {
         let mut g = guard(0);
         for _ in 0..100 {
-            assert_eq!(g.observe("t", true), None, "0 disables the breaker");
+            assert_eq!(g.observe(true), None, "0 disables the breaker");
         }
     }
 
@@ -1238,7 +1264,7 @@ mod failure_guard_tests {
     fn successes_never_trip() {
         let mut g = guard(2);
         for _ in 0..100 {
-            assert_eq!(g.observe("t", false), None);
+            assert_eq!(g.observe(false), None);
         }
     }
 }
@@ -5808,24 +5834,27 @@ impl AgentEngine {
                         }
                     }
 
-                    // #475: consecutive-failure breaker — keyed on tool name and
-                    // `is_error` only (args ignored), so a validation-error retry
-                    // loop that varies its arguments still accumulates. First trip
-                    // wins.
+                    // #475/#160: consecutive-failure breaker — counts guarded-tool
+                    // error results GLOBALLY (tool identity and args both ignored),
+                    // so both a same-tool validation-error retry loop AND a loop
+                    // that alternates failing tools accumulate. Any success resets
+                    // the streak. First trip wins.
                     //
                     // Scope guard: the cap targets structured-tool retry loops
                     // (e.g. an MCP tool the model keeps calling with wrong args).
                     // It deliberately EXCLUDES the shell tool — `Bash` sets
                     // is_error on any non-zero exit, so a legitimate coding burst
                     // (build fail, clippy fail, test fail, grep no-match) is a
-                    // stream of same-tool failures that is NOT a stuck loop and
-                    // must not abort the run. Identical Bash retries are still
-                    // caught by LoopGuard above. Unresolved names ("unknown") are
-                    // skipped so two distinct tools can't merge into one streak.
+                    // stream of failures that is NOT a stuck loop and must not
+                    // abort the run. Bash is filtered here BEFORE `observe`, so a
+                    // Bash outcome is neutral — it neither increments nor resets
+                    // the streak. Identical Bash retries are still caught by
+                    // LoopGuard above. Unresolved names ("unknown") are also
+                    // skipped (ambiguous provenance).
                     if failure_break.is_none()
                         && tool_name != "Bash"
                         && tool_name != "unknown"
-                        && let Some(count) = failure_guard.observe(tool_name, *is_error)
+                        && let Some(count) = failure_guard.observe(*is_error)
                     {
                         failure_break = Some((tool_name.to_string(), count));
                     }
@@ -5913,9 +5942,10 @@ impl AgentEngine {
                 }
             }
 
-            // #475 failure-loop breaker tripped: the SAME tool has failed
-            // `count` times in a row (args ignored, so a validation-error retry
-            // loop that varies its arguments still accumulates). Checked BEFORE
+            // #475/#160 failure-loop breaker tripped: guarded tools have failed
+            // `count` times in a row (tool identity and args both ignored, so a
+            // validation-error retry loop that varies its arguments AND a loop
+            // that alternates failing tools both accumulate). Checked BEFORE
             // the identical-signature loop-break below so the failing-loop case
             // is deterministically owned by the failure cap (independent of
             // circuit-breaker timing): a failing loop always exits Continue-able
@@ -5928,11 +5958,11 @@ impl AgentEngine {
                 self.repair_orphaned_tool_use();
                 self.output.emit_error(
                     &format!(
-                        "Run stopped: the `{failing_tool}` tool failed {count} times in a \
-                         row. Retrying it with new guesses is burning the turn — check the \
-                         tool's required arguments (or its error message) and fix the call, \
-                         or try a different approach. (Tune or disable via \
-                         WAYLAND_MAX_CONSECUTIVE_TOOL_FAILURES.)"
+                        "Run stopped: tool calls failed {count} times in a row (most \
+                         recently `{failing_tool}`). Retrying with new guesses is burning \
+                         the turn — check the tool's required arguments (or its error \
+                         message) and fix the call, or try a different approach. (Tune or \
+                         disable via WAYLAND_MAX_CONSECUTIVE_TOOL_FAILURES.)"
                     ),
                     false,
                 );
