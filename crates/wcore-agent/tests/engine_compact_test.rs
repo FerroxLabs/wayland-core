@@ -894,3 +894,71 @@ async fn tc_2_6_e2e_03_circuit_breaker_stops_retries() {
 
     assert_eq!(result.text, "Final");
 }
+
+// ── #636: graceful context-overflow degradation ────────────────────────────
+
+/// End-to-end proof of #636 through the REAL pre-flight guard: a turn whose
+/// assembled request exceeds the model's context ceiling used to abort with
+/// `FinishReason::Length`. Now the guard sheds the oversized tool-result output
+/// to disk and the run CONTINUES to a real second turn.
+///
+/// The model id `test-model` is unknown to `wcore_config::limits`, so the
+/// guard's window falls back to `compact.context_window`; auto/micro/emergency
+/// compaction are disabled so the pre-flight ceiling guard is the ONLY thing
+/// that can stop the run. Turn 1's tool returns ~120k tokens of output (far over
+/// the 40k ceiling) as a single `ToolResult`, so shedding that one block fits.
+#[tokio::test]
+async fn tc_2_6_context_overflow_sheds_tool_output_and_continues() {
+    let turn1 = vec![
+        LlmEvent::ToolUse {
+            id: "big".to_string(),
+            name: "mock_tool".to_string(),
+            input: serde_json::json!({}),
+            extra: None,
+        },
+        LlmEvent::Done {
+            stop_reason: StopReason::ToolUse,
+            finish_reason: wcore_types::message::FinishReason::from_stop_reason(
+                StopReason::ToolUse,
+            ),
+            usage: TokenUsage {
+                input_tokens: 5_000, // low reported tokens → emergency can't fire
+                output_tokens: 100,
+                ..Default::default()
+            },
+        },
+    ];
+    let turn2 = text_turn("Continued after shedding", 5_000);
+    let provider = Arc::new(CompactMockProvider::new(vec![turn1, turn2]));
+
+    let mut config = test_config();
+    config.compact.enabled = false; // no auto/micro/emergency — isolate the guard
+    config.compact.context_window = 60_000; // unknown model → fallback window
+    config.compact.output_reserve = 10_000;
+    config.compact.emergency_buffer = 10_000; // ceiling = 60k - 20k = 40k tokens
+
+    let mut registry = ToolRegistry::new();
+    // ~120k tokens (480k chars @ ~4 chars/token) — far over the 40k ceiling, but
+    // ONE oversized ToolResult, so the mechanical shed brings it back under.
+    let huge = "x".repeat(480_000);
+    registry.register(Box::new(common::MockTool::new("mock_tool", &huge, false)));
+    let output = silent_output();
+
+    let mut engine = AgentEngine::new_with_provider(provider.clone(), config, registry, output);
+    let result = engine
+        .run("summarize the file", "msg-1")
+        .await
+        .expect("run should succeed, not error");
+
+    // The guard sheds + CONTINUES: it reaches the 2nd provider call rather than
+    // aborting before it. If shedding had failed, the guard would have
+    // terminated the run at turn 2 (call_count == 1).
+    assert_eq!(
+        provider.call_count(),
+        2,
+        "guard must shed the oversized tool output and continue to turn 2, not abort"
+    );
+    assert_eq!(result.text, "Continued after shedding");
+    // A clean end-turn — NOT the `finish_run_terminated` MaxTurns/Length verdict.
+    assert_eq!(result.stop_reason, StopReason::EndTurn);
+}

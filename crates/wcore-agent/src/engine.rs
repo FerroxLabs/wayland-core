@@ -4529,7 +4529,7 @@ impl AgentEngine {
             // estimate undercounts the turn-1 watermark by the system
             // prompt + tool-schema size (tens of k tokens for MCP-heavy
             // configs).
-            let input_token_estimate =
+            let mut input_token_estimate =
                 estimate::estimate_request_tokens(&self.messages, &system, &tools) as usize;
             // AUDIT A1 / #255 — context-token overflow guard MOVED below, to
             // immediately AFTER the smart-routing tier swap (so it measures the
@@ -4757,19 +4757,101 @@ impl AgentEngine {
                     self.compact_config.emergency_buffer as u64,
                 ) && ctx.used_tokens >= ceiling
                 {
-                    self.output.emit_error(
-                        &format!(
-                            "Run stopped: estimated request size ({} tokens) \
-                             reached the context-window ceiling ({ceiling}) for model \
-                             '{}' and compaction could not reduce it further.",
-                            ctx.used_tokens, request.model,
-                        ),
-                        false,
+                    // #636 — graceful degradation (rung 1). Before aborting, shed
+                    // the largest tool-result outputs (spilling full content to
+                    // disk, leaving a bounded `<persisted-output>` preview) so the
+                    // request drops back under the ceiling and the run CONTINUES.
+                    // Shedding rewrites `ToolResult` content in place — it never
+                    // adds or removes blocks — so tool_use/tool_result pairing is
+                    // untouched (no orphaned-tool_use 400; the reason drop-oldest
+                    // sliding-window is deferred to a later phase).
+                    //
+                    // Two message sets are shed:
+                    //   * `request.messages` — the copy actually DISPATCHED (a
+                    //     clone of history plus this turn's transient injections);
+                    //     shedding it is what makes the sent call fit. The
+                    //     continue/abort decision is taken on THIS set.
+                    //   * `self.messages` — the PERSISTED history; shedding it too
+                    //     means a saved/resumed session heals (starts already
+                    //     shrunk) instead of re-entering this guard every turn.
+                    // Both target the same oversized blocks and the spills are
+                    // idempotent (`maybe_persist_tool_result` skips already-spilled
+                    // blocks), so re-runs never re-spill or hot-loop.
+                    let storage = wcore_tools::tool_result_storage::StorageDir::os_default();
+                    let budget = wcore_tools::tool_result_storage::BudgetConfig::default();
+                    // Shed any result whose spill is a NET reduction: the
+                    // `<persisted-output>` replacement is the preview (≤
+                    // `preview_size`) plus a small fixed header, so a block over
+                    // `preview_size` + a header margin always shrinks. Keeping the
+                    // floor this low (not a large multiple) means a context that
+                    // is only marginally over the ceiling still gets reduced
+                    // instead of aborting — only genuinely tiny blocks are skipped.
+                    let min_shed = budget.preview_size + 512;
+                    // Fold the fixed system+tools token overhead into a scalar so
+                    // the shedding closure borrows nothing from `request` (the
+                    // `system`/`tools` locals were moved into `request` above).
+                    // `estimate_request_tokens(m, sys, tools)
+                    //   == estimate_tokens_from_messages(m) + overhead` exactly.
+                    let overhead =
+                        estimate::estimate_request_tokens(&[], &request.system, &request.tools);
+                    // `est` captures only `overhead` (a `u64`), so it is `Copy` —
+                    // pass it by value to both sheds and still call it below.
+                    let est = |m: &[Message]| estimate::estimate_tokens_from_messages(m) + overhead;
+                    let shed = crate::compact::degrade::shed_tool_outputs_until_under(
+                        &mut request.messages,
+                        &storage,
+                        &budget,
+                        min_shed,
+                        ceiling,
+                        est,
                     );
-                    // Context ceiling: a bigger budget is needed, not more turns.
-                    return self
-                        .finish_run_terminated(user_input, turn, FinishReason::Length)
-                        .await;
+                    crate::compact::degrade::shed_tool_outputs_until_under(
+                        &mut self.messages,
+                        &storage,
+                        &budget,
+                        min_shed,
+                        ceiling,
+                        est,
+                    );
+                    // Decide on the DISPATCHED set: the window/ceiling are
+                    // unchanged, so only `used_tokens` moves. Re-stamp every
+                    // downstream consumer of the request size so none sees the
+                    // stale pre-shed estimate — `client_context_tokens` feeds the
+                    // Flux/OpenAI context-routing header (mirrors the compaction-
+                    // retry recount below).
+                    let sent = est(&request.messages);
+                    ctx.used_tokens = sent;
+                    input_token_estimate = sent as usize;
+                    request.client_context_tokens = Some(sent);
+                    if sent >= ceiling {
+                        self.output.emit_error(
+                            &format!(
+                                "Run stopped: estimated request size ({sent} tokens) \
+                                 reached the context-window ceiling ({ceiling}) for model \
+                                 '{}' and compaction could not reduce it further.",
+                                request.model,
+                            ),
+                            false,
+                        );
+                        // Context ceiling: a bigger budget is needed, not more turns.
+                        return self
+                            .finish_run_terminated(user_input, turn, FinishReason::Length)
+                            .await;
+                    }
+                    if shed > 0 {
+                        tracing::info!(
+                            target: "wcore_agent::compact",
+                            shed,
+                            ceiling,
+                            used = input_token_estimate,
+                            model = %request.model,
+                            "context overflow: shed oversized tool outputs, continuing"
+                        );
+                        self.output.emit_info(&format!(
+                            "Context exceeded the model limit; shed {shed} large tool \
+                             output(s) to disk and continued."
+                        ));
+                    }
                 }
             }
 
