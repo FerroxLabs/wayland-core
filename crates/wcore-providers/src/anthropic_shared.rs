@@ -204,16 +204,33 @@ fn generate_tool_id() -> String {
 /// emit them at the top level in the first place, but a single bad tool
 /// would otherwise break every Anthropic turn.
 pub fn build_tools(tools: &[ToolDef]) -> Vec<Value> {
-    tools
+    // Layer E1 (token-opt): serialize in a deterministic order — sorted by
+    // tool name — so the tools[] array is byte-identical across round-trips
+    // of one conversation regardless of registration / curation order. The
+    // array is part of the cached prompt prefix; a reordered array changes
+    // the prefix bytes and silently busts prompt caching. Schema /
+    // description / deferred are the DUPLICATE-NAME tiebreak: the registry
+    // does not forbid duplicate registration, and a name-only (stable) sort
+    // would keep input order for equal names — byte-unstable again.
+    let mut ordered: Vec<&ToolDef> = tools.iter().collect();
+    ordered.sort_by_cached_key(|t| {
+        (
+            t.name.clone(),
+            serde_json::to_string(&t.input_schema).unwrap_or_default(),
+            t.description.clone(),
+            t.deferred,
+        )
+    });
+    ordered
         .iter()
         .map(|t| {
             if t.deferred {
                 let short_desc = truncate_deferred_description(&t.description);
                 json!({
                     "name": encode_tool_name(&t.name),
-                    "description": format!(
-                        "(Deferred) {short_desc} — Use ToolSearch to load full schema before calling."
-                    ),
+                    // Layer D2: no per-stub "use ToolSearch" boilerplate —
+                    // the system prompt states the hydration rule once.
+                    "description": format!("(Deferred) {short_desc}"),
                     "input_schema": {
                         "type": "object",
                         "properties": {}
@@ -980,7 +997,79 @@ mod tests {
                 .is_empty()
         );
         let desc = result[1]["description"].as_str().unwrap();
-        assert!(desc.contains("ToolSearch"));
+        assert!(desc.starts_with("(Deferred)"));
+        // Layer D2: the per-stub "use ToolSearch" boilerplate is gone — the
+        // system prompt states the hydration rule once.
+        assert!(!desc.contains("Use ToolSearch"));
+    }
+
+    /// Layer E1 regression guard: the serialized tools[] array must be
+    /// byte-identical across two consecutive round-trips of one conversation
+    /// — even when the input ToolDef order differs (registration vs curation
+    /// order). The array is part of the cached prompt prefix; any byte drift
+    /// silently busts prompt caching.
+    #[test]
+    fn tools_array_byte_stable_across_roundtrips() {
+        let read = ToolDef {
+            name: "Read".into(),
+            description: "Read a file".into(),
+            input_schema: json!({"type": "object", "properties": {"path": {"type": "string"}}}),
+            deferred: false,
+            server: None,
+        };
+        let bash = ToolDef {
+            name: "Bash".into(),
+            description: "Run a shell command".into(),
+            input_schema: json!({"type": "object", "properties": {"cmd": {"type": "string"}}}),
+            deferred: false,
+            server: None,
+        };
+        let spawn = ToolDef {
+            name: "SpawnTool".into(),
+            description: "Spawn sub-agents".into(),
+            input_schema: json!({"type": "object", "properties": {"agents": {"type": "array"}}}),
+            deferred: true,
+            server: None,
+        };
+
+        // Two builds from the same input (turn N and turn N+1).
+        let defs = vec![read.clone(), bash.clone(), spawn.clone()];
+        let turn1 = serde_json::to_string(&build_tools(&defs)).unwrap();
+        let turn2 = serde_json::to_string(&build_tools(&defs)).unwrap();
+        assert_eq!(turn1, turn2, "same input must serialize byte-identically");
+
+        // A build from a reordered input (e.g. a curation pass shuffled the
+        // registry order mid-conversation) must STILL be byte-identical.
+        let reordered = serde_json::to_string(&build_tools(&[spawn, bash, read])).unwrap();
+        assert_eq!(
+            turn1, reordered,
+            "reordered input must serialize byte-identically (deterministic name sort)"
+        );
+
+        // DUPLICATE names must not reintroduce input-order dependence: the
+        // registry does not forbid duplicate registration, and a stable
+        // name-only sort keeps input order for equal names. The
+        // schema/description tiebreak makes duplicates order-independent too.
+        let dup_a = ToolDef {
+            name: "Read".into(),
+            description: "Read a file (duplicate registration)".into(),
+            input_schema: serde_json::json!({"type": "object", "properties": {"offset": {"type": "integer"}}}),
+            deferred: false,
+            server: None,
+        };
+        let dup_b = ToolDef {
+            name: "Read".into(),
+            description: "Read a file".into(),
+            input_schema: serde_json::json!({"type": "object", "properties": {"path": {"type": "string"}}}),
+            deferred: false,
+            server: None,
+        };
+        let one = serde_json::to_string(&build_tools(&[dup_a.clone(), dup_b.clone()])).unwrap();
+        let other = serde_json::to_string(&build_tools(&[dup_b, dup_a])).unwrap();
+        assert_eq!(
+            one, other,
+            "duplicate names must serialize byte-identically regardless of input order"
+        );
     }
 
     // --- parse_sse_data tests ---

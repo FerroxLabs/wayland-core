@@ -4,7 +4,12 @@ use serde_json::Value;
 pub type JsonSchema = Value;
 
 /// Maximum chars kept from a deferred tool's description.
-const DEFERRED_DESC_MAX_CHARS: usize = 200;
+///
+/// Layer D2 (token-opt): 200 → 80. With cold built-ins deferred by default
+/// the stub descriptions dominate the tools[] payload; 80 chars keeps the
+/// first sentence (enough for the model to pick a ToolSearch query) at
+/// ~2.5× less prefix weight per stub.
+const DEFERRED_DESC_MAX_CHARS: usize = 80;
 
 /// Truncate a description for a deferred tool stub.
 ///
@@ -182,15 +187,30 @@ mod tests {
     }
 
     #[test]
-    fn truncate_at_200_chars_before_blank_line() {
-        let desc = format!("{}. More text after.", "A".repeat(200));
+    fn truncate_exactly_80_chars() {
+        let desc = "X".repeat(80);
+        assert_eq!(truncate_deferred_description(&desc), desc);
+    }
+
+    #[test]
+    fn truncate_81_chars() {
+        let desc = "X".repeat(81);
         let result = truncate_deferred_description(&desc);
-        assert!(result.len() <= 200 + '…'.len_utf8());
+        assert!(result.ends_with('…'));
+        // 80 X's + ellipsis
+        assert_eq!(result.len(), 80 + '…'.len_utf8());
+    }
+
+    #[test]
+    fn truncate_at_80_chars_before_blank_line() {
+        let desc = format!("{}. More text after.", "A".repeat(80));
+        let result = truncate_deferred_description(&desc);
+        assert!(result.len() <= 80 + '…'.len_utf8());
         assert!(result.ends_with('…'));
     }
 
     #[test]
-    fn truncate_blank_line_before_200_chars() {
+    fn truncate_blank_line_before_limit() {
         let desc = "Short first paragraph.\n\nLong second paragraph that goes on and on.";
         let result = truncate_deferred_description(desc);
         assert_eq!(result, "Short first paragraph.…");
@@ -202,29 +222,15 @@ mod tests {
     }
 
     #[test]
-    fn truncate_exactly_200_chars() {
-        let desc = "X".repeat(200);
-        assert_eq!(truncate_deferred_description(&desc), desc);
-    }
-
-    #[test]
-    fn truncate_201_chars() {
-        let desc = "X".repeat(201);
-        let result = truncate_deferred_description(&desc);
-        assert!(result.ends_with('…'));
-        // 200 X's + ellipsis
-        assert_eq!(result.len(), 200 + '…'.len_utf8());
-    }
-
-    #[test]
     fn truncate_multibyte_chars_safe() {
-        // 100 two-byte chars = 200 bytes, but only 100 char positions
+        // Two-byte chars: the 80-byte limit must snap back to a char
+        // boundary, never split a code point.
         let desc: String = "é".repeat(150);
         let result = truncate_deferred_description(&desc);
         // Should not panic and should be valid UTF-8
         assert!(result.ends_with('…'));
-        // Should be at most 200 chars (counting code points)
+        // Should be at most 80 chars (counting code points)
         let char_count = result.chars().count();
-        assert!(char_count <= 201); // 200 chars + ellipsis
+        assert!(char_count <= 81); // 80 chars + ellipsis
     }
 }
