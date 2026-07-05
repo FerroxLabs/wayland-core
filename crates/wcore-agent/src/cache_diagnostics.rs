@@ -46,6 +46,31 @@ pub enum CacheBreakCause {
     FirstRequest,
 }
 
+/// Layer E1 — warm-session cache-health warn threshold: a warm round-trip
+/// whose `cache_read / input` ratio falls below this fires a
+/// `cache_health_warn` telemetry event.
+pub const CACHE_HEALTH_WARN_RATIO: f64 = 0.3;
+
+/// Layer E1 — a session counts as "warm" strictly AFTER this many
+/// round-trips have completed (the prefix has had two chances to be
+/// written to the provider cache).
+pub const CACHE_HEALTH_WARM_AFTER_ROUND_TRIPS: u64 = 2;
+
+/// Layer E1 — a warm round-trip whose cache hit-ratio fell below
+/// [`CACHE_HEALTH_WARN_RATIO`]. Detection-side fields only; the engine
+/// wraps this in the wire-shaped
+/// `wcore_providers::cache_observation::CacheHealthWarn` (adding
+/// conversation_id + routed model) before emitting.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CacheHealthAlert {
+    /// 1-based round-trip index within the conversation.
+    pub round_trip: u64,
+    pub input_tokens: u64,
+    pub cache_read_tokens: u64,
+    /// `cache_read_tokens / input_tokens`.
+    pub ratio: f64,
+}
+
 /// Detects prompt cache breaks by comparing consecutive turns.
 pub struct CacheBreakDetector {
     /// Snapshot from the PREVIOUS turn (used for attribution on cache break).
@@ -54,6 +79,16 @@ pub struct CacheBreakDetector {
     current_snapshot: Option<PromptSnapshot>,
     /// Cache stats from the previous API response.
     prev_stats: Option<CacheStats>,
+    /// Layer E1 — completed round-trips (responses seen via
+    /// [`check_response`]). Drives the warm-session gate for
+    /// [`check_cache_health`].
+    round_trips: u64,
+    /// Layer E1 — whether ANY response in this session ever reported cache
+    /// tokens (read or creation). Providers with no prompt-cache support
+    /// report all-zeros forever; without this gate they would fire a
+    /// `cache_health_warn` on every warm turn (mirrors the
+    /// `openai_no_false_alarm` guard in [`Self::compute_diagnostic`]).
+    seen_cache_tokens: bool,
 }
 
 impl CacheBreakDetector {
@@ -62,6 +97,8 @@ impl CacheBreakDetector {
             prev_snapshot: None,
             current_snapshot: None,
             prev_stats: None,
+            round_trips: 0,
+            seen_cache_tokens: false,
         }
     }
 
@@ -95,8 +132,43 @@ impl CacheBreakDetector {
     pub fn check_response(&mut self, stats: CacheStats) -> Option<CacheDiagnostic> {
         let current = self.current_snapshot.as_ref()?;
         let diagnostic = self.compute_diagnostic(current, &stats);
+        // Layer E1 — track warmth for check_cache_health.
+        self.round_trips += 1;
+        if stats.cache_read_tokens > 0 || stats.cache_creation_tokens > 0 {
+            self.seen_cache_tokens = true;
+        }
         self.prev_stats = Some(stats);
         Some(diagnostic)
+    }
+
+    /// Layer E1 — warm-session cache-health probe. Call AFTER
+    /// [`check_response`] for the same turn (so `round_trips` includes the
+    /// turn being probed). Returns `Some` when the session is warm (more
+    /// than [`CACHE_HEALTH_WARM_AFTER_ROUND_TRIPS`] round-trips), the
+    /// provider has demonstrated prompt-cache support at least once, and
+    /// this turn's `cache_read / input` ratio fell below
+    /// [`CACHE_HEALTH_WARN_RATIO`]. Warning-only telemetry — callers must
+    /// never alter the request based on it.
+    pub fn check_cache_health(&self, stats: &CacheStats) -> Option<CacheHealthAlert> {
+        if self.round_trips <= CACHE_HEALTH_WARM_AFTER_ROUND_TRIPS {
+            return None;
+        }
+        if !self.seen_cache_tokens {
+            return None;
+        }
+        if stats.input_tokens == 0 {
+            return None;
+        }
+        let ratio = stats.cache_read_tokens as f64 / stats.input_tokens as f64;
+        if ratio >= CACHE_HEALTH_WARN_RATIO {
+            return None;
+        }
+        Some(CacheHealthAlert {
+            round_trip: self.round_trips,
+            input_tokens: stats.input_tokens,
+            cache_read_tokens: stats.cache_read_tokens,
+            ratio,
+        })
     }
 
     fn compute_diagnostic(&self, current: &PromptSnapshot, stats: &CacheStats) -> CacheDiagnostic {
@@ -390,6 +462,138 @@ mod tests {
 
         // Should be Healthy, not FullMiss
         assert!(matches!(diag, CacheDiagnostic::Healthy { .. }));
+    }
+
+    // --- Layer E1: check_cache_health ---
+
+    /// Drive one round-trip through the detector and return the health probe
+    /// for that same turn (mirrors the engine call order: record_request →
+    /// check_response → check_cache_health).
+    fn round_trip(detector: &mut CacheBreakDetector, stats: CacheStats) -> Option<CacheHealthAlert> {
+        detector.record_request("prompt", &make_tools());
+        detector.check_response(stats.clone());
+        detector.check_cache_health(&stats)
+    }
+
+    #[test]
+    fn warm_session_low_cache_read_fires_health_warn() {
+        let mut detector = CacheBreakDetector::new();
+
+        // Turn 1: cold — prefix written to cache. Turn 2: still inside the
+        // warm-up window. Neither may warn.
+        assert!(
+            round_trip(
+                &mut detector,
+                CacheStats {
+                    input_tokens: 10_000,
+                    cache_read_tokens: 0,
+                    cache_creation_tokens: 9_000,
+                }
+            )
+            .is_none(),
+            "turn 1 (cold) must not warn"
+        );
+        assert!(
+            round_trip(
+                &mut detector,
+                CacheStats {
+                    input_tokens: 10_000,
+                    cache_read_tokens: 128,
+                    cache_creation_tokens: 0,
+                }
+            )
+            .is_none(),
+            "turn 2 (warm-up window) must not warn"
+        );
+
+        // Turn 3: warm session, cache_read stuck at 128 on a 15k input —
+        // the exact 128-flat signature. Must warn.
+        let alert = round_trip(
+            &mut detector,
+            CacheStats {
+                input_tokens: 15_000,
+                cache_read_tokens: 128,
+                cache_creation_tokens: 0,
+            },
+        )
+        .expect("warm turn with dead cache must fire cache_health_warn");
+        assert_eq!(alert.round_trip, 3);
+        assert_eq!(alert.input_tokens, 15_000);
+        assert_eq!(alert.cache_read_tokens, 128);
+        assert!(alert.ratio < CACHE_HEALTH_WARN_RATIO);
+    }
+
+    #[test]
+    fn warm_session_healthy_ratio_does_not_warn() {
+        let mut detector = CacheBreakDetector::new();
+        for _ in 0..2 {
+            round_trip(
+                &mut detector,
+                CacheStats {
+                    input_tokens: 10_000,
+                    cache_read_tokens: 8_000,
+                    cache_creation_tokens: 2_000,
+                },
+            );
+        }
+        // Turn 3: ratio 0.8 >= 0.3 — healthy, no warn.
+        assert!(
+            round_trip(
+                &mut detector,
+                CacheStats {
+                    input_tokens: 10_000,
+                    cache_read_tokens: 8_000,
+                    cache_creation_tokens: 0,
+                }
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn provider_without_cache_support_never_warns() {
+        // A provider that never reports cache tokens (all zeros forever) is
+        // indistinguishable from "no prompt-cache support" — suppress, same
+        // as the openai_no_false_alarm diagnostic guard.
+        let mut detector = CacheBreakDetector::new();
+        for turn in 0..4 {
+            let alert = round_trip(
+                &mut detector,
+                CacheStats {
+                    input_tokens: 10_000,
+                    cache_read_tokens: 0,
+                    cache_creation_tokens: 0,
+                },
+            );
+            assert!(alert.is_none(), "turn {turn} must not warn");
+        }
+    }
+
+    #[test]
+    fn zero_input_tokens_does_not_warn() {
+        let mut detector = CacheBreakDetector::new();
+        for _ in 0..3 {
+            round_trip(
+                &mut detector,
+                CacheStats {
+                    input_tokens: 10_000,
+                    cache_read_tokens: 5_000,
+                    cache_creation_tokens: 0,
+                },
+            );
+        }
+        assert!(
+            round_trip(
+                &mut detector,
+                CacheStats {
+                    input_tokens: 0,
+                    cache_read_tokens: 0,
+                    cache_creation_tokens: 0,
+                }
+            )
+            .is_none(),
+            "zero-input turn cannot produce a meaningful ratio"
+        );
     }
 
     #[test]

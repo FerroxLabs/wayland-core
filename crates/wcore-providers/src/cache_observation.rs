@@ -137,6 +137,29 @@ impl PromptCacheObservation {
     }
 }
 
+/// Structured `cache_health_warn` event (Layer E1) — emitted when a warm
+/// session's cache hit-ratio (`cache_read / input`) falls below the warn
+/// threshold on a round-trip where the prefix should already be cached.
+/// Warning-only telemetry: never alters the request. Detection lives in
+/// `wcore-agent::cache_diagnostics` (which tracks per-conversation
+/// round-trips); this is the wire/observability shape.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CacheHealthWarn {
+    /// Stable per-session conversation id (Flux sticky-routing id).
+    pub conversation_id: String,
+    /// 1-based round-trip index within the conversation.
+    pub round_trip: u64,
+    /// Provider-reported input tokens for the turn.
+    pub input_tokens: u64,
+    /// Provider-reported cache-read tokens for the turn.
+    pub cache_read_tokens: u64,
+    /// `cache_read_tokens / input_tokens`.
+    pub ratio: f64,
+    /// Model that served the turn (Flux `ProviderMeta.routed_model` when
+    /// signaled back, else the dispatched model id).
+    pub routed_model: String,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -224,6 +247,21 @@ mod tests {
         let j = serde_json::to_string(&obs).unwrap();
         let back: PromptCacheObservation = serde_json::from_str(&j).unwrap();
         assert_eq!(obs, back);
+    }
+
+    #[test]
+    fn cache_health_warn_serde_round_trip() {
+        let warn = CacheHealthWarn {
+            conversation_id: "conv-123".into(),
+            round_trip: 3,
+            input_tokens: 15_000,
+            cache_read_tokens: 128,
+            ratio: 128.0 / 15_000.0,
+            routed_model: "gpt-5.4".into(),
+        };
+        let j = serde_json::to_string(&warn).unwrap();
+        let back: CacheHealthWarn = serde_json::from_str(&j).unwrap();
+        assert_eq!(warn, back);
     }
 
     #[test]

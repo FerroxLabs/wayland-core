@@ -519,7 +519,15 @@ impl OpenAIProvider {
     }
 
     fn build_tools(tools: &[ToolDef]) -> Vec<Value> {
-        tools
+        // Layer E1 (token-opt): serialize in a deterministic order — sorted
+        // by tool name — so the tools[] array is byte-identical across
+        // round-trips of one conversation regardless of registration /
+        // curation order. The array is part of the cached prompt prefix; a
+        // reordered array changes the prefix bytes and silently busts prompt
+        // caching.
+        let mut ordered: Vec<&ToolDef> = tools.iter().collect();
+        ordered.sort_by(|a, b| a.name.cmp(&b.name));
+        ordered
             .iter()
             .map(|t| {
                 if t.deferred {
@@ -4689,6 +4697,51 @@ mod tests {
         assert!(spawn_desc.contains("ToolSearch"));
     }
 
+    /// Layer E1 regression guard: the serialized tools[] array must be
+    /// byte-identical across two consecutive round-trips of one conversation
+    /// — even when the input ToolDef order differs (registration vs curation
+    /// order). The array is part of the cached prompt prefix; any byte drift
+    /// silently busts prompt caching.
+    #[test]
+    fn tools_array_byte_stable_across_roundtrips() {
+        let read = ToolDef {
+            name: "Read".into(),
+            description: "Read a file".into(),
+            input_schema: json!({"type": "object", "properties": {"path": {"type": "string"}}}),
+            deferred: false,
+            server: None,
+        };
+        let bash = ToolDef {
+            name: "Bash".into(),
+            description: "Run a shell command".into(),
+            input_schema: json!({"type": "object", "properties": {"cmd": {"type": "string"}}}),
+            deferred: false,
+            server: None,
+        };
+        let spawn = ToolDef {
+            name: "SpawnTool".into(),
+            description: "Spawn sub-agents".into(),
+            input_schema: json!({"type": "object", "properties": {"agents": {"type": "array"}}}),
+            deferred: true,
+            server: None,
+        };
+
+        // Two builds from the same input (turn N and turn N+1).
+        let defs = vec![read.clone(), bash.clone(), spawn.clone()];
+        let turn1 = serde_json::to_string(&OpenAIProvider::build_tools(&defs)).unwrap();
+        let turn2 = serde_json::to_string(&OpenAIProvider::build_tools(&defs)).unwrap();
+        assert_eq!(turn1, turn2, "same input must serialize byte-identically");
+
+        // A build from a reordered input (e.g. a curation pass shuffled the
+        // registry order mid-conversation) must STILL be byte-identical.
+        let reordered =
+            serde_json::to_string(&OpenAIProvider::build_tools(&[spawn, bash, read])).unwrap();
+        assert_eq!(
+            turn1, reordered,
+            "reordered input must serialize byte-identically (deterministic name sort)"
+        );
+    }
+
     /// #297: WCore tool ids contain `:` / `::` / `.`, which OpenAI rejects with
     /// `400 invalid_value` on `tools[N].function.name`. build_tools must emit
     /// names matching `^[a-zA-Z0-9_-]+$`, and a clean snake_case name must be
@@ -4913,21 +4966,30 @@ mod tests {
         ];
         let result = OpenAIProvider::build_tools(&tools);
 
+        // build_tools serializes in deterministic name order (Layer E1), so
+        // look entries up by name instead of input position.
+        let by_name = |name: &str| -> &Value {
+            result
+                .iter()
+                .find(|t| t["function"]["name"] == name)
+                .unwrap_or_else(|| panic!("tool {name} missing from serialized array"))
+        };
+
         // bare {type:object} -> gains properties:{} and required:[]
-        let exec = &result[0]["function"]["parameters"];
+        let exec = &by_name("execute")["function"]["parameters"];
         assert_eq!(exec["type"], "object");
         assert!(exec["properties"].is_object());
         assert!(exec["properties"].as_object().unwrap().is_empty());
         assert!(exec["required"].is_array());
 
         // additionalProperties is preserved; properties + required still added
-        let ijfw = &result[1]["function"]["parameters"];
+        let ijfw = &by_name("ijfw_run")["function"]["parameters"];
         assert!(ijfw["properties"].is_object());
         assert_eq!(ijfw["additionalProperties"], json!(true));
         assert!(ijfw["required"].is_array());
 
         // a well-formed schema is passed through untouched
-        let read = &result[2]["function"]["parameters"];
+        let read = &by_name("Read")["function"]["parameters"];
         assert!(read["properties"].get("path").is_some());
         assert_eq!(read["required"], json!(["path"]));
     }

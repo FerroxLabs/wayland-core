@@ -4782,6 +4782,12 @@ impl AgentEngine {
             // THIS (not `self.model`) so attribution follows any swap.
             let mut effective_model = self.model.clone();
 
+            // Layer E1 — the model Flux ACTUALLY routed this turn to
+            // (ProviderMeta signal-back). `None` on non-Flux paths / before
+            // the signal arrives; the cache_health_warn emission below falls
+            // back to `effective_model`.
+            let mut last_routed_model: Option<String> = None;
+
             let mut request = LlmRequest {
                 model: self.model.clone(),
                 system,
@@ -5441,6 +5447,11 @@ impl AgentEngine {
                             // actually served this turn, not the pre-route guess.
                             self.flux_context_pressure = context_pressure;
                             self.flux_served_window = model_window;
+                            // Layer E1 — remember the served model for the
+                            // cache_health_warn attribution below.
+                            if routed_model.is_some() {
+                                last_routed_model = routed_model.clone();
+                            }
                             if let Some(window) = model_window {
                                 // Reconcile the #255 gauge through the kernel:
                                 // recompute the active-window fraction against the
@@ -5857,7 +5868,7 @@ impl AgentEngine {
                 cache_read_tokens: turn_usage.cache_read_tokens,
                 cache_creation_tokens: turn_usage.cache_creation_tokens,
             };
-            if let Some(diagnostic) = self.cache_detector.check_response(cache_stats) {
+            if let Some(diagnostic) = self.cache_detector.check_response(cache_stats.clone()) {
                 match &diagnostic {
                     CacheDiagnostic::FullMiss { cause } => {
                         // #101: a full cache miss is diagnostic telemetry, NOT a
@@ -5887,6 +5898,41 @@ impl AgentEngine {
                         }
                     }
                 }
+            }
+
+            // Layer E1 — warm-session cache-health warn. On a round-trip
+            // after the 2nd of a warm session, a `cache_read / input` ratio
+            // below the threshold means the cached prefix is not being read
+            // back (the 128-flat signature). Warning-only structured
+            // telemetry: greppable in the engine log, never alters the
+            // request.
+            if let Some(alert) = self.cache_detector.check_cache_health(&cache_stats) {
+                let warn = wcore_providers::cache_observation::CacheHealthWarn {
+                    conversation_id: self.conversation_id.clone(),
+                    round_trip: alert.round_trip,
+                    input_tokens: alert.input_tokens,
+                    cache_read_tokens: alert.cache_read_tokens,
+                    ratio: alert.ratio,
+                    routed_model: last_routed_model
+                        .clone()
+                        .unwrap_or_else(|| effective_model.clone()),
+                };
+                tracing::warn!(
+                    target: "cache_health",
+                    conversation_id = %warn.conversation_id,
+                    round_trip = warn.round_trip,
+                    input_tokens = warn.input_tokens,
+                    cache_read_tokens = warn.cache_read_tokens,
+                    ratio = warn.ratio,
+                    routed_model = %warn.routed_model,
+                    "cache_health_warn: warm-session cache hit-ratio {:.3} below {} \
+                     (input={}, cache_read={}, model={})",
+                    warn.ratio,
+                    crate::cache_diagnostics::CACHE_HEALTH_WARN_RATIO,
+                    warn.input_tokens,
+                    warn.cache_read_tokens,
+                    warn.routed_model,
+                );
             }
 
             let mut assistant_content: Vec<ContentBlock> = Vec::new();
