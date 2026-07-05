@@ -46,7 +46,7 @@ fn anthropic_build_messages_places_cache_control_on_marked_message() {
     ]);
     let compat = ProviderCompat::anthropic_defaults();
 
-    mark_cache_boundaries(&mut req, &compat);
+    mark_cache_boundaries(&mut req, &compat, None);
     let built = anthropic_shared::build_messages(&req.messages, &compat);
 
     // Last message's last content block must carry cache_control.
@@ -76,7 +76,7 @@ fn openai_compat_results_in_no_cache_control_anywhere() {
     )]);
     let compat = ProviderCompat::openai_defaults();
 
-    mark_cache_boundaries(&mut req, &compat);
+    mark_cache_boundaries(&mut req, &compat, None);
     let built = anthropic_shared::build_messages(&req.messages, &compat);
 
     for msg in built {

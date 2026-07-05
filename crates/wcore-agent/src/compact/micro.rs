@@ -415,6 +415,59 @@ fn args_stub(name: &str, input: &serde_json::Value, original_bytes: usize) -> se
     serde_json::Value::Object(obj)
 }
 
+// ── Permanent cache anchor (gap-1 + gap-2 coupling) ─────────────────────────
+
+/// Cache-anchor epoch size: the anchor advances at most once per this many
+/// stubbed messages. Each anchor move costs one prompt-cache re-write from
+/// the anchor point, so moves must be rare; within an epoch the anchor is
+/// byte-frozen and every turn's prefix up to it replays from cache.
+pub const CACHE_ANCHOR_EPOCH: usize = 8;
+
+/// Pick the message to pin the PERMANENT prompt-cache breakpoint on.
+///
+/// Residual cache cost of continuous args-compaction: each turn, the message
+/// at the `keep_recent_turns` boundary transitions verbatim→stub INSIDE the
+/// previously cached prefix, so the provider's prefix match ends there and
+/// everything after re-bills. The fix is a breakpoint pinned to an IMMUTABLE
+/// ANCHOR — a message whose arguments are already stubbed. Stubbing is
+/// marker-gated and monotonic ([`COMPACTED_ARGS_KEY`]): a stubbed assistant
+/// message never changes bytes again, so the prefix ending at the anchor is
+/// permanently cache-valid no matter what transitions happen after it.
+///
+/// Pure function of the marker state — no stored engine state:
+/// - stub indices only APPEND (new stubs happen where the advancing
+///   `keep_recent_turns` cutoff exposes them, always after existing stubs),
+///   so the pick is deterministic and advances monotonically;
+/// - epoch policy: the anchor is the FIRST stub of the current
+///   [`CACHE_ANCHOR_EPOCH`]-sized epoch — it moves at most once per
+///   `CACHE_ANCHOR_EPOCH` newly stubbed messages, never on every turn;
+/// - if autocompact restructures history, the next call simply recomputes
+///   from the surviving markers (the cache is invalidated then anyway).
+///
+/// Returns `None` until the first stub exists.
+pub fn cache_anchor_index(messages: &[Message]) -> Option<usize> {
+    let stubbed: Vec<usize> = messages
+        .iter()
+        .enumerate()
+        .filter(|(_, m)| {
+            m.role == Role::Assistant
+                && m.content.iter().any(|b| {
+                    matches!(
+                        b,
+                        ContentBlock::ToolUse { input, .. }
+                            if input.get(COMPACTED_ARGS_KEY).is_some()
+                    )
+                })
+        })
+        .map(|(i, _)| i)
+        .collect();
+    if stubbed.is_empty() {
+        return None;
+    }
+    let epoch = (stubbed.len() - 1) / CACHE_ANCHOR_EPOCH;
+    Some(stubbed[epoch * CACHE_ANCHOR_EPOCH])
+}
+
 // ── Helpers ─────────────────────────────────────────────────────────────────
 
 /// Build a map from tool_use_id → tool name by scanning ToolUse blocks
@@ -1417,5 +1470,103 @@ mod tests {
         ];
         let (count, _) = prune_superseded_reads(&mut msgs, &read_only_cfg());
         assert_eq!(count, 0, "errored reads carry signal and are never stubbed");
+    }
+
+    // ── Permanent cache anchor (gap-1 + gap-2 coupling) ─────────────────────
+
+    #[test]
+    fn cache_anchor_none_without_stubs() {
+        let body = "x".repeat(4000);
+        let mut msgs = Vec::new();
+        write_turn(&mut msgs, "w1", "a.rs", &body);
+        // No compaction has run — no stub, no anchor.
+        assert_eq!(cache_anchor_index(&msgs), None);
+    }
+
+    /// 5-turn growing conversation with compaction active: the anchor pins
+    /// to the FIRST stubbed message and stays CONSTANT across turns while
+    /// stubs accumulate past it (within the first epoch).
+    #[test]
+    fn cache_anchor_constant_across_growing_turns() {
+        let body = "x".repeat(4000);
+        let cfg = tca_cfg(1, 768);
+        let mut msgs = Vec::new();
+        let mut anchors = Vec::new();
+
+        for turn in 1..=5 {
+            write_turn(&mut msgs, &format!("w{turn}"), "f.rs", &body);
+            compact_tool_call_args(&mut msgs, &cfg);
+            anchors.push(cache_anchor_index(&msgs));
+        }
+
+        // Turn 1: nothing older than the protected tail — no stub, no anchor.
+        assert_eq!(anchors[0], None);
+        // Turns 2..=5: stubs accumulate (1..=4, all within epoch 0) — the
+        // anchor is the first stubbed message (index 0) and NEVER moves.
+        assert_eq!(
+            &anchors[1..],
+            &[Some(0), Some(0), Some(0), Some(0)],
+            "anchor must stay constant while stubs accumulate within the epoch"
+        );
+    }
+
+    /// The anchor advances ONLY at the epoch condition — after
+    /// CACHE_ANCHOR_EPOCH stubs it jumps to the first stub of the next
+    /// epoch — and only monotonically forward.
+    #[test]
+    fn cache_anchor_advances_only_at_epoch_boundary() {
+        let body = "x".repeat(4000);
+        let cfg = tca_cfg(1, 768);
+        let mut msgs = Vec::new();
+        let mut last_anchor = None;
+
+        for turn in 1..=(CACHE_ANCHOR_EPOCH + 4) {
+            write_turn(&mut msgs, &format!("w{turn}"), "f.rs", &body);
+            compact_tool_call_args(&mut msgs, &cfg);
+            let anchor = cache_anchor_index(&msgs);
+            let stub_count = turn - 1; // keep=1 protects only the last turn
+
+            match stub_count {
+                0 => assert_eq!(anchor, None),
+                // Epoch 0: stubs 1..=CACHE_ANCHOR_EPOCH all anchor at the
+                // very first stub (assistant of turn 1 = message index 0).
+                n if n <= CACHE_ANCHOR_EPOCH => assert_eq!(
+                    anchor,
+                    Some(0),
+                    "stub #{n} must keep the epoch-0 anchor at index 0"
+                ),
+                // Epoch 1: the anchor jumps exactly once, to the
+                // (CACHE_ANCHOR_EPOCH+1)-th stubbed message. write_turn
+                // pushes 2 messages/turn with the assistant first, so the
+                // k-th stub (0-based) lives at message index 2*k.
+                n => assert_eq!(
+                    anchor,
+                    Some(2 * CACHE_ANCHOR_EPOCH),
+                    "stub #{n} must anchor at the first stub of epoch 1"
+                ),
+            }
+
+            // Monotonic: the anchor never moves backward.
+            if let (Some(prev), Some(curr)) = (last_anchor, anchor) {
+                assert!(curr >= prev, "anchor must never move backward");
+            }
+            last_anchor = anchor;
+        }
+    }
+
+    /// The anchor is a pure function of the marker state: recomputing on the
+    /// same messages yields the same answer, and un-stubbed histories that
+    /// differ only in verbatim content agree.
+    #[test]
+    fn cache_anchor_deterministic() {
+        let body = "x".repeat(4000);
+        let cfg = tca_cfg(1, 768);
+        let mut msgs = Vec::new();
+        for turn in 1..=4 {
+            write_turn(&mut msgs, &format!("w{turn}"), "f.rs", &body);
+        }
+        compact_tool_call_args(&mut msgs, &cfg);
+        assert_eq!(cache_anchor_index(&msgs), cache_anchor_index(&msgs));
+        assert_eq!(cache_anchor_index(&msgs), Some(0));
     }
 }

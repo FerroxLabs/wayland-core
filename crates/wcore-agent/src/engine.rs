@@ -620,11 +620,18 @@ fn is_http_4xx_error(reason: &str) -> bool {
 /// messages under a different system prompt or tool set) as an "unchanged"
 /// wedge.
 ///
-/// Timestamps and cache hints are deliberately EXCLUDED — providers never see
-/// them (`build_messages()` sends role + content only), so two requests that
-/// are byte-identical on the wire fingerprint identically even when their
-/// local `Message.timestamp`s differ (e.g. a host that rebuilds the same
-/// wedged conversation on a retry or a resume).
+/// Timestamps and cache hints are deliberately EXCLUDED. Timestamps are
+/// never provider-visible. Cache hints CAN reach the wire — anthropic-family
+/// `build_messages()` translates the tail hint into a `cache_control`
+/// marker — but the marker is position-derived (always the tail message)
+/// and pure cache metadata: two requests with identical model / system /
+/// messages / tools produce identical markers, and providers exclude
+/// `cache_control` from content identity. Hashing hints would add no
+/// discriminating power while letting a hint-only difference (e.g. a
+/// re-marked retry) make an unchanged wedge look changed. So two requests
+/// that are semantically identical on the wire fingerprint identically even
+/// when their local `Message.timestamp`s differ (e.g. a host that rebuilds
+/// the same wedged conversation on a retry or a resume).
 ///
 /// Sha256, not a 64-bit `DefaultHasher`: this identity gates whether a
 /// request is ever allowed to be sent again, so it gets a collision-proof
@@ -4896,10 +4903,21 @@ impl AgentEngine {
                 Self::apply_pre_prompt_contribution(&mut request.messages, &outcome);
             }
 
-            // W1 S3: place per-message cache breakpoint at the tail when the
-            // provider honours it. Idempotent across turns: previous turns'
-            // markers are cleared and the new tail is marked.
-            mark_cache_boundaries(&mut request, &self.compat);
+            // W1 S3: place per-message cache breakpoints when the provider
+            // honours them. Idempotent across turns: previous turns' markers
+            // are cleared and the new tail is marked. Gap-1+gap-2 coupling:
+            // a PERMANENT anchor breakpoint is additionally pinned to an
+            // immutable already-stubbed message (pure function of the
+            // compaction markers; `request.messages` is an index-aligned
+            // clone of `self.messages`, so the index maps 1:1). The anchor
+            // keeps the long prefix cache-valid while continuous
+            // args-compaction transitions the message at the
+            // keep_recent_turns boundary inside it.
+            mark_cache_boundaries(
+                &mut request,
+                &self.compat,
+                micro::cache_anchor_index(&self.messages),
+            );
 
             // W1 v0.6.3: stamp a smart-routing hint onto the request so
             // `ProviderChain` can surface the router's decision in dispatch

@@ -324,7 +324,8 @@ pub fn create_native_provider(config: &Config) -> Arc<dyn LlmProvider> {
     match config.provider {
         ProviderType::Anthropic => Arc::new(
             anthropic::AnthropicProvider::new(&config.api_key, &config.base_url, compat, debug)
-                .with_cache(config.prompt_caching),
+                .with_cache(config.prompt_caching)
+                .with_min_prefix_tokens(config.prompt_caching_min_prefix_tokens),
         ),
         ProviderType::OpenAI => Arc::new(openai::OpenAIProvider::new(
             &config.api_key,
