@@ -473,7 +473,14 @@ pub(crate) fn build_contents(
 /// - `additionalProperties` (any value — boolean or object)
 /// - Array-form `type` like `["string", "array"]` (collapsed to first non-null)
 pub(crate) fn build_function_declarations(tools: &[ToolDef]) -> Vec<Value> {
-    tools
+    // Layer E1 (token-opt): serialize in a deterministic order — sorted by
+    // tool name — so the functionDeclarations array is byte-identical across
+    // round-trips of one conversation regardless of registration / curation
+    // order. The array is part of the cached prompt prefix; a reordered
+    // array changes the prefix bytes and silently busts prompt caching.
+    let mut ordered: Vec<&ToolDef> = tools.iter().collect();
+    ordered.sort_by(|a, b| a.name.cmp(&b.name));
+    ordered
         .iter()
         .map(|t| {
             if t.deferred {
@@ -1721,6 +1728,51 @@ mod tests {
         assert_eq!(
             params["properties"]["pages"]["type"], "integer",
             "union type [integer, null] must be collapsed to 'integer'"
+        );
+    }
+
+    /// Layer E1 regression guard: the serialized functionDeclarations array
+    /// must be byte-identical across two consecutive round-trips of one
+    /// conversation — even when the input ToolDef order differs
+    /// (registration vs curation order). The array is part of the cached
+    /// prompt prefix; any byte drift silently busts prompt caching.
+    #[test]
+    fn tools_array_byte_stable_across_roundtrips() {
+        let read = ToolDef {
+            name: "Read".into(),
+            description: "Read a file".into(),
+            input_schema: serde_json::json!({"type": "object", "properties": {"path": {"type": "string"}}}),
+            deferred: false,
+            server: None,
+        };
+        let bash = ToolDef {
+            name: "Bash".into(),
+            description: "Run a shell command".into(),
+            input_schema: serde_json::json!({"type": "object", "properties": {"cmd": {"type": "string"}}}),
+            deferred: false,
+            server: None,
+        };
+        let spawn = ToolDef {
+            name: "SpawnTool".into(),
+            description: "Spawn sub-agents".into(),
+            input_schema: serde_json::json!({"type": "object", "properties": {"agents": {"type": "array"}}}),
+            deferred: true,
+            server: None,
+        };
+
+        // Two builds from the same input (turn N and turn N+1).
+        let defs = vec![read.clone(), bash.clone(), spawn.clone()];
+        let turn1 = serde_json::to_string(&build_function_declarations(&defs)).unwrap();
+        let turn2 = serde_json::to_string(&build_function_declarations(&defs)).unwrap();
+        assert_eq!(turn1, turn2, "same input must serialize byte-identically");
+
+        // A build from a reordered input (e.g. a curation pass shuffled the
+        // registry order mid-conversation) must STILL be byte-identical.
+        let reordered =
+            serde_json::to_string(&build_function_declarations(&[spawn, bash, read])).unwrap();
+        assert_eq!(
+            turn1, reordered,
+            "reordered input must serialize byte-identically (deterministic name sort)"
         );
     }
 
