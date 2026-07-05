@@ -1623,6 +1623,16 @@ pub struct AgentEngine {
     /// (a cache READ, not a per-turn prefix rewrite). Reset when the MCP
     /// inventory or the MCP budget changes.
     mcp_cap_cache: Option<(u64, Vec<String>)>,
+    /// Layer D1 follow-up (hydrated-tool admission): tool names the model has
+    /// hydrated via a successful `ToolSearch` this session, in FIRST-HYDRATION
+    /// order. Providers validate tool calls against the CURRENT `tools[]`
+    /// array, so a tool that `apply_mcp_curation` / `apply_provider_tool_cap`
+    /// trimmed would be learnable through ToolSearch yet uncallable. Both
+    /// passes force-include these names on subsequent turns (evicting the
+    /// last non-hydrated cap slot when the budget is full). Grows
+    /// monotonically — admission changes `tools[]` once (a legitimate
+    /// one-turn cache miss) and the set is stable afterwards.
+    hydrated_tool_names: Vec<String>,
     /// Token-opt (diff-resend): handle to the shared file-state cache (the same
     /// `Arc` the Read/Edit/Write tools hold). Used only to bump the cache's
     /// compaction generation after a compaction pass, so stale read bases stop
@@ -2145,6 +2155,7 @@ impl AgentEngine {
             mcp_curation: config.mcp.curation.clone(),
             mcp_curation_cache: None,
             mcp_cap_cache: None,
+            hydrated_tool_names: Vec::new(),
             file_cache: None,
             session_state: None,
             audit_log: None,
@@ -2327,6 +2338,7 @@ impl AgentEngine {
             mcp_curation: config.mcp.curation.clone(),
             mcp_curation_cache: None,
             mcp_cap_cache: None,
+            hydrated_tool_names: Vec::new(),
             file_cache: None,
             session_state: None,
             audit_log: None,
@@ -6490,6 +6502,18 @@ impl AgentEngine {
 
                     self.output.emit_tool_result(tool_name, *is_error, content);
 
+                    // Layer D1 follow-up (hydrated-tool admission): a
+                    // successful ToolSearch teaches the model a tool's
+                    // schema. Record the returned names so the curation/cap
+                    // passes force-include them in the outbound tools[] on
+                    // subsequent turns — providers validate tool calls
+                    // against the CURRENT tools[] array, so a hydrated tool
+                    // the cap trimmed would otherwise be learnable but not
+                    // callable.
+                    if tool_name == "ToolSearch" && !*is_error {
+                        self.record_hydrated_tools(content);
+                    }
+
                     // B7 writer-side wiring: bump the per-tool call counter in
                     // the live introspection state (one increment per executed
                     // tool result) so `wayland_status` reports real tool-call
@@ -8686,20 +8710,39 @@ impl AgentEngine {
         // newly-surfaced name is pushed at the END. This makes every
         // union-growth turn a cache-safe append (stable prefix) rather than a
         // mid-array insert that would invalidate the cached tool-zone prefix.
-        let keep_order: &Vec<String> = match self.mcp_curation_cache.as_mut() {
+        match self.mcp_curation_cache.as_mut() {
             Some((hash, order)) if *hash == inventory_hash => {
                 for name in this_turn {
                     if !order.contains(&name) {
                         order.push(name);
                     }
                 }
-                &*order
             }
             _ => {
                 self.mcp_curation_cache = Some((inventory_hash, this_turn));
-                &self.mcp_curation_cache.as_ref().expect("just set").1
             }
-        };
+        }
+
+        // Layer D1 follow-up (hydrated-tool admission): union in every MCP
+        // tool the model has hydrated via ToolSearch, so curation can never
+        // trim a tool the model has learned — it must survive this pass for
+        // the provider cap below to admit it into the outbound tools[].
+        // Cache-safe: appended at the END, once (the hydrated list only
+        // grows), a legitimate one-turn miss that is stable afterwards.
+        let hydrated_mcp: Vec<String> = self
+            .hydrated_tool_names
+            .iter()
+            .filter(|n| mcp_tools.iter().any(|t| &t.name == *n))
+            .cloned()
+            .collect();
+        if let Some((_, order)) = self.mcp_curation_cache.as_mut() {
+            for name in hydrated_mcp {
+                if !order.contains(&name) {
+                    order.push(name);
+                }
+            }
+        }
+        let keep_order: &Vec<String> = &self.mcp_curation_cache.as_ref().expect("just set").1;
 
         // Emit kept MCP tools in FIRST-ADD order (not registry-iteration
         // order). Built-in/non-MCP tools in `keep` retain their original
@@ -8722,7 +8765,12 @@ impl AgentEngine {
     /// skills, plan) and fills the remaining budget with the most RELEVANT MCP
     /// tools (BM25 over the current user message), truncating the rest. Dropped
     /// MCP tools stay DISCOVERABLE via the `ToolSearch` meta-tool (its registry
-    /// is a full bootstrap snapshot). `None` cap = no-op.
+    /// is a full bootstrap snapshot) — and once the model HYDRATES one, its
+    /// name is recorded in `hydrated_tool_names` and force-admitted into the
+    /// kept set on subsequent turns (evicting the last non-hydrated BM25 slot
+    /// when the budget is full), because providers validate tool calls against
+    /// the CURRENT tools[] array: discoverable-but-undeclared = uncallable.
+    /// `None` cap = no-op.
     ///
     /// Cache-stability (token-opt): when the cap must trim, the kept MCP set is
     /// emitted in an inventory-keyed APPEND-ONLY UNION order (mirroring
@@ -8766,7 +8814,8 @@ impl AgentEngine {
             tracing::info!(
                 target: "wcore_agent::engine",
                 "provider tool cap: {} tools exceeded the provider limit of {}; kept {} \
-                 (incl. all {} non-MCP), {} MCP tools hidden but reachable via ToolSearch",
+                 (incl. all {} non-MCP), {} MCP tools hidden — discoverable via ToolSearch \
+                 but NOT callable (no MCP budget under the provider cap)",
                 non_mcp_count + mcp_total,
                 limit,
                 non_mcp_count,
@@ -8820,7 +8869,7 @@ impl AgentEngine {
         // length at `mcp_budget` so the kept set never exceeds the provider
         // limit even as the union grows across turns — once full, no new tool
         // displaces an admitted one for the life of this inventory/budget.
-        let keep_order: Vec<String> = match self.mcp_cap_cache.as_mut() {
+        match self.mcp_cap_cache.as_mut() {
             Some((hash, order)) if *hash == inventory_hash => {
                 for name in this_turn {
                     if order.len() >= mcp_budget {
@@ -8830,15 +8879,66 @@ impl AgentEngine {
                         order.push(name);
                     }
                 }
-                order.clone()
             }
             _ => {
                 let mut order = this_turn;
                 order.truncate(mcp_budget);
-                self.mcp_cap_cache = Some((inventory_hash, order.clone()));
-                order
+                self.mcp_cap_cache = Some((inventory_hash, order));
             }
-        };
+        }
+
+        // Layer D1 follow-up (hydrated-tool admission): a tool the model
+        // hydrated via ToolSearch must be genuinely callable — providers
+        // validate tool calls against the CURRENT tools[] array, so a
+        // hydrated-but-trimmed MCP tool would be learnable yet uncallable.
+        // Force-admit hydrated MCP names: appended at the END while budget
+        // remains (a cache-safe append); when the union is FULL, the LAST
+        // non-hydrated slot is evicted to make room (hydration is a stronger
+        // relevance signal than the BM25 guess that admitted that slot).
+        // Either way the change lands once — a legitimate one-turn cache
+        // miss — and the set is stable afterwards because
+        // `hydrated_tool_names` only grows.
+        let hydrated_all: std::collections::HashSet<&str> = self
+            .hydrated_tool_names
+            .iter()
+            .map(String::as_str)
+            .collect();
+        let hydrated_mcp: Vec<String> = self
+            .hydrated_tool_names
+            .iter()
+            .filter(|n| mcp_tools.iter().any(|t| &t.name == *n))
+            .cloned()
+            .collect();
+        let mut evicted: Vec<String> = Vec::new();
+        if let Some((_, order)) = self.mcp_cap_cache.as_mut() {
+            for name in hydrated_mcp {
+                if order.contains(&name) {
+                    continue;
+                }
+                if order.len() >= mcp_budget {
+                    match order.iter().rposition(|n| !hydrated_all.contains(n.as_str())) {
+                        Some(idx) => evicted.push(order.remove(idx)),
+                        // Every kept slot is itself hydrated — no eviction
+                        // candidate; the budget genuinely cannot fit this one.
+                        None => continue,
+                    }
+                }
+                order.push(name);
+            }
+        }
+        if !evicted.is_empty() {
+            tracing::info!(
+                target: "wcore_agent::engine",
+                "provider tool cap: evicted {:?} to admit ToolSearch-hydrated tools \
+                 (one-turn cache miss; set stable afterwards)",
+                evicted
+            );
+        }
+        let keep_order: Vec<String> = self
+            .mcp_cap_cache
+            .as_ref()
+            .map(|(_, order)| order.clone())
+            .unwrap_or_default();
 
         // Emit non-MCP tools first (preserving their relative order), then the
         // kept MCP block in FIRST-ADD union order.
@@ -8856,7 +8956,8 @@ impl AgentEngine {
             tracing::info!(
                 target: "wcore_agent::engine",
                 "provider tool cap: {} tools exceeded the provider limit of {}; kept {} \
-                 (incl. all {} non-MCP), {} MCP tools hidden but reachable via ToolSearch",
+                 (incl. all {} non-MCP), {} MCP tools hidden — discoverable via ToolSearch \
+                 and admitted to tools[] on the turn after hydration",
                 non_mcp_count + mcp_total,
                 limit,
                 kept.len(),
@@ -8865,6 +8966,29 @@ impl AgentEngine {
             );
         }
         kept
+    }
+
+    /// Layer D1 follow-up (hydrated-tool admission): parse a successful
+    /// `ToolSearch` result body (a JSON array of `{name, description,
+    /// parameters}` matches) and record every returned tool name in
+    /// [`Self::hydrated_tool_names`] (FIRST-HYDRATION order, deduped). The
+    /// curation/cap passes force-include these names in the outbound
+    /// `tools[]` on subsequent turns so a hydrated tool is genuinely
+    /// callable. A no-match result is a plain string, not JSON — it parses
+    /// to nothing and records nothing.
+    fn record_hydrated_tools(&mut self, content: &str) {
+        let Ok(serde_json::Value::Array(matches)) =
+            serde_json::from_str::<serde_json::Value>(content)
+        else {
+            return;
+        };
+        for m in matches {
+            if let Some(name) = m.get("name").and_then(|v| v.as_str())
+                && !self.hydrated_tool_names.iter().any(|n| n == name)
+            {
+                self.hydrated_tool_names.push(name.to_string());
+            }
+        }
     }
 
     /// W6 F17 recency input for `McpCurator`. Reads the M2 audit log via the
@@ -9645,6 +9769,7 @@ mod set_config_tests {
             mcp_curation: wcore_config::config::McpCurationPolicy::default(),
             mcp_curation_cache: None,
             mcp_cap_cache: None,
+            hydrated_tool_names: Vec::new(),
             file_cache: None,
             session_state: None,
             audit_log: None,
@@ -10081,6 +10206,120 @@ mod set_config_tests {
             names1, names2,
             "cap emission must be byte-stable across same-context turns"
         );
+    }
+
+    /// Layer D1 follow-up (hydrated-tool admission): an MCP tool the provider
+    /// cap trimmed on turn N, then hydrated via ToolSearch, must be present
+    /// in turn N+1's outbound tools[] — providers validate tool calls against
+    /// the CURRENT array, so discoverable-but-undeclared = uncallable — and
+    /// must genuinely dispatch. The admission is a one-turn tools[] change;
+    /// the set must be byte-stable again from turn N+2.
+    #[tokio::test]
+    async fn hydrated_tool_admitted_to_next_turn_tools_and_dispatches() {
+        use wcore_tools::dispatcher::ToolDispatcher;
+        use wcore_types::message::{ContentBlock, Message, Role};
+
+        /// Minimal dispatchable MCP-provenance tool fixture.
+        struct NamedTool(String);
+        #[async_trait::async_trait]
+        impl wcore_tools::Tool for NamedTool {
+            fn name(&self) -> &str {
+                &self.0
+            }
+            fn description(&self) -> &str {
+                "mcp fixture"
+            }
+            fn input_schema(&self) -> serde_json::Value {
+                serde_json::json!({"type": "object"})
+            }
+            fn is_concurrency_safe(&self, _: &serde_json::Value) -> bool {
+                true
+            }
+            async fn execute(&self, _: serde_json::Value) -> wcore_types::tool::ToolResult {
+                wcore_types::tool::ToolResult {
+                    content: "ok".to_string(),
+                    is_error: false,
+                }
+            }
+            fn category(&self) -> wcore_protocol::events::ToolCategory {
+                wcore_protocol::events::ToolCategory::Info
+            }
+            fn mcp_server(&self) -> Option<&str> {
+                Some("srv")
+            }
+        }
+
+        // Cap = 4: 2 non-MCP + budget for 2 of the 3 MCP tools.
+        let mut engine = make_engine("m");
+        engine.compat.max_tools = Some(4);
+        engine.mcp_curation = wcore_config::config::McpCurationPolicy::Off;
+        engine.audit_log = None; // keyword-only ranking → deterministic
+        engine.messages = vec![Message::new(
+            Role::User,
+            vec![ContentBlock::Text {
+                text: "alpha database query".to_string(),
+            }],
+        )];
+
+        let tools = vec![
+            builtin_tool("Read"),
+            builtin_tool("ToolSearch"),
+            cap_mcp_tool("mcp__srv__alpha"),
+            cap_mcp_tool("mcp__srv__bravo"),
+            cap_mcp_tool("mcp__srv__zulu"),
+        ];
+
+        // Turn N: the cap trims exactly one MCP tool.
+        let turn_n = engine.apply_provider_tool_cap(tools.clone());
+        assert_eq!(turn_n.len(), 4, "capped to the provider limit");
+        let kept_n: Vec<&str> = turn_n.iter().map(|t| t.name.as_str()).collect();
+        let trimmed: Vec<&str> = ["mcp__srv__alpha", "mcp__srv__bravo", "mcp__srv__zulu"]
+            .into_iter()
+            .filter(|n| !kept_n.contains(n))
+            .collect();
+        assert_eq!(trimmed.len(), 1, "exactly one MCP tool trimmed");
+        let hydrated_name = trimmed[0];
+
+        // Turn N, later in the round: the model hydrates the trimmed tool.
+        // This is the exact result-body shape ToolSearchTool emits.
+        let tool_search_result = serde_json::to_string_pretty(&serde_json::json!([{
+            "name": hydrated_name,
+            "description": "trimmed mcp tool",
+            "parameters": {"type": "object"},
+        }]))
+        .unwrap();
+        engine.record_hydrated_tools(&tool_search_result);
+
+        // Turn N+1: the hydrated tool is force-admitted into the outbound
+        // tools[] (evicting the last non-hydrated slot), cap still enforced.
+        let turn_n1 = engine.apply_provider_tool_cap(tools.clone());
+        assert_eq!(turn_n1.len(), 4, "cap still enforced after admission");
+        let kept_n1: Vec<&str> = turn_n1.iter().map(|t| t.name.as_str()).collect();
+        assert!(
+            kept_n1.contains(&hydrated_name),
+            "hydrated tool must be in the next turn's outbound tools[] \
+             (got {kept_n1:?})"
+        );
+
+        // Turn N+2: the admission was a ONE-turn change — the set is
+        // byte-stable again.
+        let turn_n2 = engine.apply_provider_tool_cap(tools);
+        let kept_n2: Vec<&str> = turn_n2.iter().map(|t| t.name.as_str()).collect();
+        assert_eq!(
+            kept_n1, kept_n2,
+            "post-admission set must be byte-stable across turns"
+        );
+
+        // ...and the hydrated tool genuinely dispatches through the registry.
+        let mut reg = ToolRegistry::new();
+        reg.register(Box::new(NamedTool(hydrated_name.to_string())));
+        engine.tools = Arc::new(reg);
+        let result = engine
+            .tools()
+            .dispatch(hydrated_name, serde_json::json!({}))
+            .await;
+        assert!(!result.is_error, "hydrated tool must dispatch: {result:?}");
+        assert_eq!(result.content, "ok");
     }
 
     /// #359 regression — a BARE-named MCP tool is subject to curation. The
@@ -10819,6 +11058,7 @@ mod phase6_tests {
             mcp_curation: wcore_config::config::McpCurationPolicy::default(),
             mcp_curation_cache: None,
             mcp_cap_cache: None,
+            hydrated_tool_names: Vec::new(),
             file_cache: None,
             session_state: None,
             audit_log: None,
@@ -11116,6 +11356,7 @@ mod compact_tests {
             mcp_curation: wcore_config::config::McpCurationPolicy::default(),
             mcp_curation_cache: None,
             mcp_cap_cache: None,
+            hydrated_tool_names: Vec::new(),
             file_cache: None,
             session_state: None,
             audit_log: None,
@@ -12443,6 +12684,7 @@ mod plan_mode_tests {
             mcp_curation: wcore_config::config::McpCurationPolicy::default(),
             mcp_curation_cache: None,
             mcp_cap_cache: None,
+            hydrated_tool_names: Vec::new(),
             file_cache: None,
             session_state: None,
             audit_log: None,
@@ -12873,6 +13115,7 @@ mod hook_integration_tests {
             mcp_curation: wcore_config::config::McpCurationPolicy::default(),
             mcp_curation_cache: None,
             mcp_cap_cache: None,
+            hydrated_tool_names: Vec::new(),
             file_cache: None,
             session_state: None,
             audit_log: None,
@@ -13713,6 +13956,7 @@ mod approval_bridge_engine_tests {
             mcp_curation: wcore_config::config::McpCurationPolicy::default(),
             mcp_curation_cache: None,
             mcp_cap_cache: None,
+            hydrated_tool_names: Vec::new(),
             file_cache: None,
             session_state: None,
             audit_log: None,
@@ -14717,6 +14961,7 @@ mod user_model_writeback_tests {
             mcp_curation: wcore_config::config::McpCurationPolicy::default(),
             mcp_curation_cache: None,
             mcp_cap_cache: None,
+            hydrated_tool_names: Vec::new(),
             file_cache: None,
             session_state: None,
             audit_log: None,
