@@ -15846,11 +15846,17 @@ mod audit_2026_05_22_tests {
             "the second round-trip must never be dispatched"
         );
         let (total, delta) = engine.usage_snapshot();
-        assert_eq!(delta.input_tokens, 100, "delta carries the dead run's usage");
+        assert_eq!(
+            delta.input_tokens, 100,
+            "delta carries the dead run's usage"
+        );
         assert_eq!(delta.output_tokens, 10);
         assert_eq!(delta.cache_creation_tokens, 7);
         assert_eq!(delta.cache_read_tokens, 3);
-        assert_eq!(total.input_tokens, 100, "cumulative grew with the same usage");
+        assert_eq!(
+            total.input_tokens, 100,
+            "cumulative grew with the same usage"
+        );
 
         // And the terminal stream_end built from that snapshot (the CLI's
         // error-path emitter) carries the delta on the wire event.
