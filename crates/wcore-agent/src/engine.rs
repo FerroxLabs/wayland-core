@@ -2376,6 +2376,19 @@ impl AgentEngine {
         self.current_session.as_ref().map(|s| s.id.clone())
     }
 
+    /// CORE-2 — snapshot of the engine's usage counters:
+    /// `(total_usage, run_usage)` = (session-cumulative, current/last run's
+    /// delta). `total_usage` and `run_usage` update together after every
+    /// provider round-trip, but a run that errors out (cancellation,
+    /// compaction failure, provider exhaustion) returns `Err` with no
+    /// `AgentResult` — this accessor lets the host's error-path terminal
+    /// `stream_end` still report the tokens that run consumed instead of
+    /// silently dropping them (the cumulative total has already grown and
+    /// is persisted by the next save).
+    pub fn usage_snapshot(&self) -> (TokenUsage, TokenUsage) {
+        (self.total_usage.clone(), self.run_usage.clone())
+    }
+
     /// AUDIT A2 / B1 — clone the engine's session-root cancellation
     /// token.
     ///
@@ -15330,6 +15343,128 @@ mod audit_2026_05_22_tests {
         assert_eq!(result.usage_delta.cache_read_tokens, 3);
         // On a fresh engine the first run's cumulative equals its delta.
         assert_eq!(result.usage.input_tokens, 140);
+    }
+
+    /// A tool that fires the engine's cancel token when executed, so the
+    /// run dies BETWEEN provider round-trips — after the first round-trip's
+    /// usage was accumulated, before the second dispatch.
+    struct CancellingTool {
+        token: tokio_util::sync::CancellationToken,
+    }
+    #[async_trait]
+    impl wcore_tools::Tool for CancellingTool {
+        fn name(&self) -> &str {
+            "CancelNext"
+        }
+        fn description(&self) -> &str {
+            "cancels the run"
+        }
+        fn input_schema(&self) -> serde_json::Value {
+            json!({"type": "object"})
+        }
+        fn is_concurrency_safe(&self, _: &serde_json::Value) -> bool {
+            false
+        }
+        async fn execute(&self, _: serde_json::Value) -> wcore_types::tool::ToolResult {
+            self.token.cancel();
+            wcore_types::tool::ToolResult {
+                content: "cancelled".into(),
+                is_error: false,
+            }
+        }
+        fn category(&self) -> wcore_protocol::events::ToolCategory {
+            wcore_protocol::events::ToolCategory::Info
+        }
+    }
+
+    #[tokio::test]
+    async fn cancelled_run_snapshot_carries_delta_for_terminal_stream_end() {
+        // CORE-2 audit fix — a run that consumed one provider round-trip and
+        // then died (cancellation between turns) returns Err with no
+        // AgentResult, but total_usage/run_usage already grew. The engine's
+        // usage_snapshot() must expose that delta so the host's error-path
+        // terminal stream_end reports it instead of zeros.
+        let token = tokio_util::sync::CancellationToken::new();
+        let mut registry = ToolRegistry::new();
+        registry.register(Box::new(CancellingTool {
+            token: token.clone(),
+        }));
+        let provider = Arc::new(ScriptedProvider::new(vec![
+            vec![
+                LlmEvent::ToolUse {
+                    id: "t1".into(),
+                    name: "CancelNext".into(),
+                    input: json!({}),
+                    extra: None,
+                },
+                LlmEvent::Done {
+                    stop_reason: StopReason::ToolUse,
+                    finish_reason: FinishReason::Stop,
+                    usage: TokenUsage {
+                        input_tokens: 100,
+                        output_tokens: 10,
+                        cache_creation_tokens: 7,
+                        cache_read_tokens: 3,
+                    },
+                },
+            ],
+            // Never reached — the cancel fires before this dispatch.
+            vec![LlmEvent::TextDelta("never".into()), done_endturn()],
+        ]));
+        let counter = provider.call_counter();
+        let mut engine = super::AgentEngine::new_with_provider(
+            provider,
+            wcore_config::config::Config::default(),
+            registry,
+            Arc::new(NullOutput),
+        );
+        engine.max_turns = Some(20);
+        engine.set_cancel_token(token);
+        // Auto-approve so the tool executes without a confirmer prompt.
+        engine.confirmer = Arc::new(Mutex::new(ToolConfirmer::new(true, vec![])));
+
+        let result = engine.run("task", "m-1").await;
+        assert!(
+            matches!(result, Err(super::AgentError::UserAborted)),
+            "the cancel between round-trips must abort the run, got {result:?}"
+        );
+        assert_eq!(
+            counter.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "the second round-trip must never be dispatched"
+        );
+        let (total, delta) = engine.usage_snapshot();
+        assert_eq!(delta.input_tokens, 100, "delta carries the dead run's usage");
+        assert_eq!(delta.output_tokens, 10);
+        assert_eq!(delta.cache_creation_tokens, 7);
+        assert_eq!(delta.cache_read_tokens, 3);
+        assert_eq!(total.input_tokens, 100, "cumulative grew with the same usage");
+
+        // And the terminal stream_end built from that snapshot (the CLI's
+        // error-path emitter) carries the delta on the wire event.
+        let sink = crate::test_utils::TestSink::new();
+        let handle = sink.handle();
+        OutputSink::emit_stream_end_full(
+            &sink,
+            "m-1",
+            0,
+            total.input_tokens,
+            total.output_tokens,
+            total.cache_creation_tokens,
+            total.cache_read_tokens,
+            FinishReason::Error,
+            None,
+            None,
+            Some(&delta),
+        );
+        let events = handle.snapshot();
+        assert_eq!(events.len(), 1, "exactly one stream_end: {events:?}");
+        assert_eq!(events[0]["type"], "stream_end");
+        assert_eq!(events[0]["usage_delta"]["input_tokens"], 100);
+        assert_eq!(events[0]["usage_delta"]["output_tokens"], 10);
+        assert_eq!(events[0]["usage_delta"]["cache_write_tokens"], 7);
+        assert_eq!(events[0]["usage_delta"]["cache_read_tokens"], 3);
+        assert_eq!(events[0]["usage"]["input_tokens"], 100);
     }
 
     #[tokio::test]
