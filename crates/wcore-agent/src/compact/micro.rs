@@ -268,7 +268,8 @@ fn prune_superseded_reads(messages: &mut [Message], config: &CompactConfig) -> (
 /// request forever. This pass replaces such payloads with a small valid-JSON
 /// stub once the call is older than the last `keep_recent_turns` assistant
 /// turns (the model may still reference recent args; older ones are dead
-/// weight — the outcome is in the tool result and, for file writes, on disk).
+/// weight — the outcome is in the tool result and, for file writes, on disk)
+/// AND the epoch boundary below has ticked past it.
 ///
 /// Modeled on hermes-agent's `_truncate_tool_call_args_json`
 /// (context_compressor.py:1130-1150), but run CONTINUOUSLY on every
@@ -283,6 +284,22 @@ fn prune_superseded_reads(messages: &mut [Message], config: &CompactConfig) -> (
 ///   pass skips it forever after, so a message compacts exactly once and its
 ///   bytes never change again. Growth of history only moves the protected
 ///   tail forward — it can newly compact a message, never un-compact one.
+/// - **Epoch-quantized boundary** (cache economics, GLM byte-walk audit):
+///   monotonicity alone is not enough. If the stub boundary advanced every
+///   turn, exactly one message would flip verbatim→stub INSIDE the
+///   previously-cached prefix each turn; provider prefix-matching is
+///   contiguous, so the byte-identical protected tail AFTER the flip would
+///   re-bill at full price EVERY turn (steady-state cache miss ≈ 2x the
+///   no-compaction baseline; break-even only past ~11 turns). Instead the
+///   boundary advances only in steps of `epoch_turns` (default 4): the count
+///   of eligible assistant turns is `floor((A - keep) / E) * E` where `A` is
+///   the total number of assistant messages. Between ticks the boundary is
+///   FROZEN — zero mid-prefix byte changes, full prefix reuse; at a tick one
+///   batch of `E` turns flips at the deepest possible point, one prefix
+///   rewrite per `E` turns instead of per turn. The formula is a pure
+///   function of the message list (no persisted state), so it is stable
+///   across retries, restarts and session rehydration, and monotone because
+///   `A` only grows. `epoch_turns = 1` degenerates to the per-turn boundary.
 ///
 /// The stub keeps the block's `id`/`name`/`extra` untouched (provider
 /// round-trip metadata such as thought signatures survives) and preserves a
@@ -304,33 +321,36 @@ pub fn compact_tool_call_args(
         };
     }
 
-    // Index of the Nth-most-recent assistant message: everything BEFORE it is
-    // older than the last N assistant turns and eligible for compaction.
+    // Epoch-quantized boundary (see the doc comment): stub the oldest
+    // `floor((A - keep) / E) * E` assistant turns. Always ≤ A - keep, so
+    // nothing newer than the last `keep` assistant turns is ever touched;
+    // between epoch ticks the count is constant, so the pass changes zero
+    // bytes and the provider's contiguous prefix cache holds end-to-end.
     let keep = tca.keep_recent_turns.max(1);
-    let mut seen = 0usize;
-    let mut cutoff = None;
-    for (i, m) in messages.iter().enumerate().rev() {
-        if m.role == Role::Assistant {
-            seen += 1;
-            if seen == keep {
-                cutoff = Some(i);
-                break;
-            }
-        }
-    }
-    let Some(cutoff) = cutoff else {
+    let epoch = tca.epoch_turns.max(1);
+    let total_assistant = messages
+        .iter()
+        .filter(|m| m.role == Role::Assistant)
+        .count();
+    let eligible = (total_assistant.saturating_sub(keep) / epoch) * epoch;
+    if eligible == 0 {
         return MicrocompactResult {
             cleared_count: 0,
             estimated_tokens_freed: 0,
         };
-    };
+    }
 
     let mut cleared_count = 0usize;
     let mut tokens_freed = 0usize;
-    for msg in &mut messages[..cutoff] {
+    let mut ordinal = 0usize;
+    for msg in messages.iter_mut() {
         if msg.role != Role::Assistant {
             continue;
         }
+        if ordinal >= eligible {
+            break;
+        }
+        ordinal += 1;
         for block in &mut msg.content {
             let ContentBlock::ToolUse { name, input, .. } = block else {
                 continue;
@@ -1021,12 +1041,24 @@ mod tests {
         }
     }
 
+    /// Boundary-semantics test config: `epoch_turns = 1` (no quantization) so
+    /// the keep/threshold/stub behavior is exercised at every turn. Epoch
+    /// quantization has its own dedicated tests below.
     fn tca_cfg(keep_recent_turns: usize, min_args_bytes: usize) -> CompactConfig {
+        tca_cfg_epoch(keep_recent_turns, min_args_bytes, 1)
+    }
+
+    fn tca_cfg_epoch(
+        keep_recent_turns: usize,
+        min_args_bytes: usize,
+        epoch_turns: usize,
+    ) -> CompactConfig {
         CompactConfig {
             tool_call_args: ToolCallArgsConfig {
                 enabled: true,
                 keep_recent_turns,
                 min_args_bytes,
+                epoch_turns,
             },
             ..default_config()
         }
@@ -1239,6 +1271,79 @@ mod tests {
         }
     }
 
+    // ── epoch quantization (cache-economics fix, GLM byte-walk audit) ───
+
+    #[test]
+    fn epoch_boundary_frozen_between_ticks() {
+        // keep=2, epoch=4. Eligible count = floor((A - 2) / 4) * 4:
+        // frozen between ticks (zero mid-prefix byte changes = the provider's
+        // contiguous prefix cache holds), one batch flip per epoch tick.
+        let body = "e".repeat(2000);
+        let cfg = tca_cfg_epoch(2, 768, 4);
+        let mut msgs = Vec::new();
+        for i in 0..5 {
+            write_turn(&mut msgs, &format!("w{i}"), &format!("f{i}.rs"), &body);
+        }
+
+        // A=5 → floor(3/4)*4 = 0: below the first tick, nothing stubbed even
+        // though w0..w2 are older than the last 2 assistant turns.
+        let r = compact_tool_call_args(&mut msgs, &cfg);
+        assert_eq!(r.cleared_count, 0, "pre-tick: boundary has not advanced");
+
+        // A=6 → floor(4/4)*4 = 4: first tick stubs w0..w3 in ONE batch.
+        write_turn(&mut msgs, "w5", "f5.rs", &body);
+        let r = compact_tool_call_args(&mut msgs, &cfg);
+        assert_eq!(r.cleared_count, 4, "epoch tick stubs a batch of 4");
+        for idx in [8, 10] {
+            // w4, w5 verbatim (protected tail is >= keep at the tick).
+            assert!(tool_use_input(&msgs[idx]).get(COMPACTED_ARGS_KEY).is_none());
+        }
+        let frozen = serde_json::to_string(&msgs).unwrap();
+        let first_batch = serde_json::to_string(&msgs[..8]).unwrap();
+
+        // A=7,8,9 → still 4 eligible: the pass changes ZERO bytes of the
+        // existing messages — the whole previous request stays a cache hit.
+        let pre_len = msgs.len();
+        for i in 6..9 {
+            write_turn(&mut msgs, &format!("w{i}"), &format!("f{i}.rs"), &body);
+            let r = compact_tool_call_args(&mut msgs, &cfg);
+            assert_eq!(r.cleared_count, 0, "between ticks the boundary is frozen");
+        }
+        let existing = serde_json::to_string(&msgs[..pre_len]).unwrap();
+        assert_eq!(
+            frozen, existing,
+            "between ticks, previously-sent messages must be byte-identical"
+        );
+
+        // A=10 → floor(8/4)*4 = 8: second tick stubs w4..w7 (next batch of 4)
+        // and the first batch's bytes still never move.
+        write_turn(&mut msgs, "w9", "f9.rs", &body);
+        let r = compact_tool_call_args(&mut msgs, &cfg);
+        assert_eq!(r.cleared_count, 4, "second tick stubs the next batch of 4");
+        assert_eq!(
+            first_batch,
+            serde_json::to_string(&msgs[..8]).unwrap(),
+            "first-batch stubs are byte-stable across ticks"
+        );
+    }
+
+    #[test]
+    fn epoch_never_reaches_the_keep_window() {
+        // floor((A - keep) / E) * E <= A - keep for all A: even exactly at a
+        // tick, the last `keep` assistant turns stay verbatim.
+        let body = "k".repeat(2000);
+        let cfg = tca_cfg_epoch(2, 768, 4);
+        let mut msgs = Vec::new();
+        for i in 0..6 {
+            write_turn(&mut msgs, &format!("w{i}"), &format!("g{i}.rs"), &body);
+        }
+        compact_tool_call_args(&mut msgs, &cfg); // tick: A=6, eligible=4
+        for idx in [8, 10] {
+            let input = tool_use_input(&msgs[idx]);
+            assert_eq!(input["content"].as_str().unwrap(), body);
+        }
+    }
+
     #[test]
     fn synthetic_19_turn_capture_shape_byte_reduction() {
         // Mimics the reference capture: 9 user prompts, Write bodies from
@@ -1275,7 +1380,10 @@ mod tests {
         }
 
         let before = serde_json::to_string(&msgs).unwrap().len();
-        let cfg = tca_cfg(2, 768);
+        // Ship defaults: keep=2, min=768, epoch=4. A=23 assistant messages →
+        // eligible = floor(21/4)*4 = 20; all 7 Writes (ordinals ≤ 12) are past
+        // the epoch boundary at the final request.
+        let cfg = tca_cfg_epoch(2, 768, 4);
         let result = compact_tool_call_args(&mut msgs, &cfg);
         let after = serde_json::to_string(&msgs).unwrap().len();
 

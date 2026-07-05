@@ -7385,12 +7385,15 @@ impl AgentEngine {
     async fn run_compaction(&mut self) -> Result<(), AgentError> {
         // 0. Tool-call-argument hygiene (parity gap 2) — CONTINUOUS: no LLM
         // call and no trigger gate, so an old Write body stops riding in
-        // resent history on the very pass it leaves the protected tail.
-        // Deterministic + monotonic (see compact/micro.rs), so the prompt-
-        // cache prefix stays byte-stable: a message compacts exactly once and
-        // never changes bytes again. No file-cache generation bump needed:
-        // diff-resend bases require `Provenance::ReadResult` (tool RESULT
-        // bodies), which this pass never touches.
+        // resent history at the first epoch tick after it leaves the
+        // protected tail. Deterministic + monotonic + epoch-quantized (see
+        // compact/micro.rs): a message compacts exactly once and never
+        // changes bytes again, and the boundary only advances every
+        // `epoch_turns` assistant turns, so between ticks the pass changes
+        // ZERO bytes and the provider's contiguous prefix cache holds
+        // end-to-end. No file-cache generation bump needed: diff-resend
+        // bases require `Provenance::ReadResult` (tool RESULT bodies),
+        // which this pass never touches.
         let args_result = micro::compact_tool_call_args(&mut self.messages, &self.compact_config);
         if args_result.cleared_count > 0 {
             self.output.emit_info(&format!(
