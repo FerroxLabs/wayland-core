@@ -112,6 +112,8 @@ allows the user to better understand and review your work:
  - You can call multiple tools in a single response. If there are no \
 dependencies between them, make all independent calls in parallel. \
 However, if one call depends on a previous result, run them sequentially.
+ - Batch independent shell commands into a single Bash call (joined with \
+&& or ;) when safe — each extra round-trip re-sends the whole conversation.
  - Prefer Edit over Write for modifying existing files — Edit sends only \
 the diff, which is easier to review.
  - Always Read a file before editing it.
