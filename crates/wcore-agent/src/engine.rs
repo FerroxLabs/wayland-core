@@ -3036,6 +3036,10 @@ impl AgentEngine {
     /// Returns the [`MicrocompactResult`]; `cleared_count == 0` means there was
     /// nothing eligible to compact yet.
     pub fn compact_now(&mut self) -> micro::MicrocompactResult {
+        // Tool-call-args hygiene first (parity gap 2), mirroring
+        // `run_compaction` step 0. No file-cache bump for this pass: it never
+        // touches tool-RESULT bodies (where diff-resend bases live).
+        let args_result = micro::compact_tool_call_args(&mut self.messages, &self.compact_config);
         let result = micro::microcompact(&mut self.messages, &self.compact_config);
         if result.cleared_count > 0 {
             // Token-opt (diff-resend): clearing a tool-result body can remove
@@ -3044,7 +3048,11 @@ impl AgentEngine {
             // mirrors `run_compaction`'s microcompact branch.
             self.bump_file_cache_generation();
         }
-        result
+        micro::MicrocompactResult {
+            cleared_count: result.cleared_count + args_result.cleared_count,
+            estimated_tokens_freed: result.estimated_tokens_freed
+                + args_result.estimated_tokens_freed,
+        }
     }
 
     /// M3.2 — number of background decay-scheduler tasks owned by the
@@ -7371,10 +7379,26 @@ impl AgentEngine {
 
     /// Run the multi-level compaction pipeline before each API call.
     ///
-    /// Execution order: microcompact → autocompact → emergency check.
-    /// After a successful autocompact the emergency check is skipped
-    /// because the context has been significantly reduced.
+    /// Execution order: tool-call-args hygiene → microcompact → autocompact →
+    /// emergency check. After a successful autocompact the emergency check is
+    /// skipped because the context has been significantly reduced.
     async fn run_compaction(&mut self) -> Result<(), AgentError> {
+        // 0. Tool-call-argument hygiene (parity gap 2) — CONTINUOUS: no LLM
+        // call and no trigger gate, so an old Write body stops riding in
+        // resent history on the very pass it leaves the protected tail.
+        // Deterministic + monotonic (see compact/micro.rs), so the prompt-
+        // cache prefix stays byte-stable: a message compacts exactly once and
+        // never changes bytes again. No file-cache generation bump needed:
+        // diff-resend bases require `Provenance::ReadResult` (tool RESULT
+        // bodies), which this pass never touches.
+        let args_result = micro::compact_tool_call_args(&mut self.messages, &self.compact_config);
+        if args_result.cleared_count > 0 {
+            self.output.emit_info(&format!(
+                "Compacted {} old tool-call argument payload(s) (~{} tokens freed)",
+                args_result.cleared_count, args_result.estimated_tokens_freed
+            ));
+        }
+
         // 1. Microcompact (lightweight, no LLM call)
         if micro::should_microcompact(&self.messages, &self.compact_config) {
             let result = micro::microcompact(&mut self.messages, &self.compact_config);
