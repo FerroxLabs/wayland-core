@@ -777,6 +777,22 @@ impl OpenAIProvider {
             body["tools"] = json!(Self::build_tools(&request.tools));
         }
 
+        // Flux sticky-session / prefix-cache key. On a Flux tier alias the
+        // conversation id doubles as the OpenAI `prompt_cache_key`: the router
+        // uses it to pin the whole conversation to one backend (a mid-session
+        // backend hop is a cold cache pool, re-billing the full prefix at full
+        // price), and OpenAI-compatible upstreams use it as their documented
+        // cache-routing hint. Gated exactly like the x-wl-* context headers: a
+        // concrete model id (or an absent conversation_id) keeps the body
+        // byte-identical to today, since generic OpenAI-compatible endpoints
+        // can 400 on unknown fields.
+        if is_flux_tier_alias(&request.model)
+            && let Some(id) = request.conversation_id.as_deref()
+            && !id.is_empty()
+        {
+            body["prompt_cache_key"] = json!(id);
+        }
+
         // Gate `reasoning_effort` on the model family. gpt-4o (and other
         // classic chat families) 400 on the field; only o1*/o3*/gpt-5*
         // accept it. This MUST stay per-request: one OpenAIProvider serves
@@ -3303,6 +3319,47 @@ mod tests {
             json!(["\n\nLet me know if", "\n\nFeel free to"]),
             "OpenAI must emit stops under the `stop` key as an array"
         );
+    }
+
+    // --- SPEC-V2 CORE-1: Flux sticky-session prompt_cache_key -------------
+
+    /// On a Flux tier alias with a conversation id, the body carries
+    /// `prompt_cache_key = conversation_id` so the router can pin the
+    /// conversation to one backend (cache affinity) and OpenAI-compatible
+    /// upstreams get their cache-routing hint.
+    #[test]
+    fn build_request_body_stamps_prompt_cache_key_on_tier_alias() {
+        let mut req = stop_req();
+        req.model = "flux-auto".into();
+        req.conversation_id = Some("conv-abc".into());
+        let body = stop_provider().build_request_body(&req);
+        assert_eq!(body["prompt_cache_key"], json!("conv-abc"));
+    }
+
+    /// A concrete model id opts OUT: the body must stay byte-identical to
+    /// today (generic OpenAI-compatible endpoints can 400 on unknown fields).
+    #[test]
+    fn build_request_body_no_prompt_cache_key_for_concrete_model() {
+        let mut req = stop_req();
+        req.model = "gpt-4o".into();
+        req.conversation_id = Some("conv-abc".into());
+        let body = stop_provider().build_request_body(&req);
+        assert!(body.get("prompt_cache_key").is_none());
+    }
+
+    /// Absent (or empty) conversation_id skips the field entirely — never
+    /// emit an empty cache key.
+    #[test]
+    fn build_request_body_no_prompt_cache_key_without_conversation_id() {
+        let mut req = stop_req();
+        req.model = "flux-auto".into();
+        req.conversation_id = None;
+        let body = stop_provider().build_request_body(&req);
+        assert!(body.get("prompt_cache_key").is_none());
+
+        req.conversation_id = Some(String::new());
+        let body = stop_provider().build_request_body(&req);
+        assert!(body.get("prompt_cache_key").is_none());
     }
 
     // --- Crucible #3: per-tier temperature emission -----------------------
