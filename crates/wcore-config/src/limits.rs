@@ -191,6 +191,43 @@ pub fn model_output_ceiling(_provider: &str, model: &str) -> Option<(u32, u32)> 
     None
 }
 
+/// CORE-4 — conservative CONTEXT-WINDOW floor for the four Flux Router tier
+/// aliases (`flux-auto` / `flux-fast` / `flux-standard` / `flux-reasoning`).
+///
+/// Deliberately a SEPARATE table from [`model_output_ceiling`]: the tier
+/// aliases must stay UNKNOWN to that lookup so the engine's output sizing
+/// keeps its router-alias behavior — `size_output_cap` clamps to the
+/// conservative unknown floor (8192 / 32768 reasoning, #426) and
+/// `should_omit_max_tokens` keeps omitting the wire max-tokens field on the
+/// omit-safe Flux preset (#112), letting the SERVED model's natural output
+/// ceiling apply. Listing the aliases in `model_output_ceiling` would silently
+/// revoke both contracts.
+///
+/// What compaction needs is only the INPUT denominator. Flux routes a tier
+/// alias to varying backends per request, so the only safe pre-route window is
+/// the MINIMUM across each tier's realistic pool. No authoritative per-tier
+/// pool manifest exists in this repo, so all four tiers use 128,000 — the safe
+/// common denominator: the pools include 128k-class backends (gpt-4o = 128_000,
+/// grok-3 = 131_072, the gpt-5.x chat tiers = 128_000), and every other
+/// realistic member is larger. Erring LOW is safe here (compaction fires a
+/// little early); erring high is the customer-reported wedge — with no window
+/// the smart-compact trigger never fired and one session grew to 17M cumulative
+/// input before dying at `finish_reason: length`.
+///
+/// Once Flux signals the real served-model window back (`x-flux-model-window`,
+/// #282), the engine prefers THAT over this floor — this value only governs
+/// turns before the first signal (or routes that never send one).
+///
+/// Matched case-insensitively against the four documented aliases, same set as
+/// `wcore_providers::is_flux_tier_alias` (which lives downstream of this crate
+/// and so cannot be called from here).
+pub fn flux_tier_context_window(model: &str) -> Option<u32> {
+    match model.to_ascii_lowercase().as_str() {
+        "flux-auto" | "flux-fast" | "flux-standard" | "flux-reasoning" => Some(128_000),
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -379,10 +416,39 @@ mod tests {
 
     #[test]
     fn unknown_and_router_aliases_return_none() {
-        assert_eq!(model_output_ceiling("flux-router", "flux-auto"), None);
-        assert_eq!(model_output_ceiling("flux-router", "flux-standard"), None);
+        // LOAD-BEARING for CORE-4: the Flux tier aliases must stay UNKNOWN to
+        // this OUTPUT-sizing lookup even though they now have a context-window
+        // floor in `flux_tier_context_window` — a Some() here would make
+        // `size_output_cap` clamp Flux output to a fixed ceiling and flip
+        // `should_omit_max_tokens` off (#112/#426 router-alias contracts).
+        for alias in ["flux-auto", "flux-fast", "flux-standard", "flux-reasoning"] {
+            assert_eq!(model_output_ceiling("flux-router", alias), None);
+        }
         assert_eq!(model_output_ceiling("openai", "some-future-model"), None);
         assert_eq!(model_output_ceiling("ollama", "llama3.1"), None);
+    }
+
+    #[test]
+    fn flux_tier_aliases_resolve_conservative_context_window() {
+        // CORE-4: all four tier aliases carry the 128k pool-minimum window so
+        // the compaction kernel gets a real denominator (customer evidence:
+        // with None the smart trigger never fired and a session wedged at
+        // finish_reason=length after 17M cumulative input tokens).
+        for alias in ["flux-auto", "flux-fast", "flux-standard", "flux-reasoning"] {
+            assert_eq!(
+                flux_tier_context_window(alias),
+                Some(128_000),
+                "{alias} must resolve the conservative 128k floor"
+            );
+        }
+        // Case-insensitive, consistent with model_output_ceiling.
+        assert_eq!(flux_tier_context_window("Flux-Reasoning"), Some(128_000));
+        // Concrete model ids and non-flux names stay None — the floor is for
+        // the four documented tier aliases ONLY (a pinned model resolves its
+        // real window via model_output_ceiling).
+        assert_eq!(flux_tier_context_window("flux-pinned-gpt-5"), None);
+        assert_eq!(flux_tier_context_window("gpt-4o"), None);
+        assert_eq!(flux_tier_context_window(""), None);
     }
 
     #[test]

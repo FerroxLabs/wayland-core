@@ -135,6 +135,52 @@ output_per_mtok_usd = 15.0
 input_per_mtok_usd = 0.0
 output_per_mtok_usd = 0.0
 
+# --- Flux Router tier aliases (CORE-4) ----------------------------------
+# Router-priced, same convention as [openrouter.auto]: the local rate is 0.0
+# because Flux bills per-request on whatever backend it routes to — a real
+# per-model rate here would be confidently wrong. Authoritative per-request
+# cost comes from Flux itself (FerroxLabs/wayland#319); until then a $0 row
+# marks "router-priced" and stops the W7 catalog-miss warning ("unknown model
+# flux-auto for provider openai", 365 occurrences in customer logs) so the
+# engine no longer falls to the heuristic on every Flux turn.
+#
+# Listed under BOTH provider keys Core reaches Flux through: `flux-router`
+# (ProviderCompat::flux_router_defaults() provider_type) and `openai` (Flux
+# configured as a plain OpenAI-compatible endpoint — the key the customer-log
+# misses fired with). `flux-*` are not real OpenAI model ids, so the openai
+# rows can never shadow a genuine OpenAI price.
+[flux-router.flux-auto]
+input_per_mtok_usd = 0.0
+output_per_mtok_usd = 0.0
+
+[flux-router.flux-fast]
+input_per_mtok_usd = 0.0
+output_per_mtok_usd = 0.0
+
+[flux-router.flux-standard]
+input_per_mtok_usd = 0.0
+output_per_mtok_usd = 0.0
+
+[flux-router.flux-reasoning]
+input_per_mtok_usd = 0.0
+output_per_mtok_usd = 0.0
+
+[openai.flux-auto]
+input_per_mtok_usd = 0.0
+output_per_mtok_usd = 0.0
+
+[openai.flux-fast]
+input_per_mtok_usd = 0.0
+output_per_mtok_usd = 0.0
+
+[openai.flux-standard]
+input_per_mtok_usd = 0.0
+output_per_mtok_usd = 0.0
+
+[openai.flux-reasoning]
+input_per_mtok_usd = 0.0
+output_per_mtok_usd = 0.0
+
 # Fix(pricing-audit-2026-05-24): bedrock/vertex claude-opus-4-7 corrected from $15/$75 → $5/$25.
 [bedrock.claude-opus-4-7]
 input_per_mtok_usd = 5.0

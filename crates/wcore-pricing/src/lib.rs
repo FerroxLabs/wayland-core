@@ -392,6 +392,36 @@ output_per_mtok_usd = 15.0
         ));
     }
 
+    /// CORE-4: the four Flux tier aliases must be IN the bundled catalog under
+    /// both provider keys Core reaches Flux through (`flux-router` and plain
+    /// `openai`), priced $0 = "router-priced" (the [openrouter.auto]
+    /// convention). This is what stops the W7 catalog-miss warning ("unknown
+    /// model flux-auto for provider openai" — 365 occurrences in customer
+    /// logs) from firing on every Flux turn.
+    #[test]
+    fn flux_tier_aliases_priced_in_bundled_catalog() {
+        let cat = PricingCatalog::load_default().expect("bundled catalog parses");
+        for provider in ["flux-router", "openai"] {
+            for alias in ["flux-auto", "flux-fast", "flux-standard", "flux-reasoning"] {
+                let p = cat.get(provider, alias).unwrap_or_else(|e| {
+                    panic!("{provider}/{alias} must be in the bundled catalog: {e}")
+                });
+                assert_eq!(
+                    p.input_per_mtok_usd, 0.0,
+                    "{provider}/{alias} is router-priced: local rate must be $0"
+                );
+                assert_eq!(p.output_per_mtok_usd, 0.0);
+                // And the cost path resolves (Ok(0)) instead of erroring into
+                // the heuristic fallback.
+                assert_eq!(
+                    cat.estimate_cost_microcents(provider, alias, 1_000_000, 1_000_000)
+                        .expect("tier alias must price"),
+                    0
+                );
+            }
+        }
+    }
+
     #[test]
     fn flux_pinned_native_maps_vendor_to_catalog_provider() {
         // Vendor token → catalog provider; the FULL remainder is the native id.
