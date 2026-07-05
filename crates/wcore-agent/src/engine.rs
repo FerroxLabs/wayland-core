@@ -612,11 +612,18 @@ fn is_http_4xx_error(reason: &str) -> bool {
 /// messages under a different system prompt or tool set) as an "unchanged"
 /// wedge.
 ///
-/// Timestamps and cache hints are deliberately EXCLUDED — providers never see
-/// them (`build_messages()` sends role + content only), so two requests that
-/// are byte-identical on the wire fingerprint identically even when their
-/// local `Message.timestamp`s differ (e.g. a host that rebuilds the same
-/// wedged conversation on a retry or a resume).
+/// Timestamps and cache hints are deliberately EXCLUDED. Timestamps are
+/// never provider-visible. Cache hints CAN reach the wire — anthropic-family
+/// `build_messages()` translates the tail hint into a `cache_control`
+/// marker — but the marker is position-derived (always the tail message)
+/// and pure cache metadata: two requests with identical model / system /
+/// messages / tools produce identical markers, and providers exclude
+/// `cache_control` from content identity. Hashing hints would add no
+/// discriminating power while letting a hint-only difference (e.g. a
+/// re-marked retry) make an unchanged wedge look changed. So two requests
+/// that are semantically identical on the wire fingerprint identically even
+/// when their local `Message.timestamp`s differ (e.g. a host that rebuilds
+/// the same wedged conversation on a retry or a resume).
 ///
 /// Sha256, not a 64-bit `DefaultHasher`: this identity gates whether a
 /// request is ever allowed to be sent again, so it gets a collision-proof

@@ -277,6 +277,14 @@ impl AnthropicProvider {
                 request.cache_tier.unwrap_or(CacheTier::Ephemeral5m),
                 self.min_prefix_tokens,
             );
+        } else {
+            // Codex audit (e399feb1 finding 1): `build_messages` above runs
+            // BEFORE this gate and — for anthropic-family compat — has
+            // already translated the engine's tail cache hint
+            // (`mark_cache_boundaries`) into a wire `cache_control` marker.
+            // `prompt_caching = false` must mean a body byte-identical to an
+            // uninjected request, so strip that leak here.
+            strip_message_cache_markers(&mut body);
         }
 
         body
@@ -287,11 +295,13 @@ impl AnthropicProvider {
 pub const ANTHROPIC_CACHE_CONTROL_LIMIT: usize = 4;
 
 /// Rough bytes-per-token divisor for the `min_prefix_tokens` floor estimate.
-/// The serialized JSON of the cacheable zones over 4 is a slight
-/// over-estimate of true tokens (JSON scaffolding inflates bytes), which
-/// errs toward injecting markers a little early — harmless — rather than
-/// skipping a prefix that would have cleared the floor.
-const BYTES_PER_TOKEN_ESTIMATE: usize = 4;
+/// Deliberately 2 — NOT the usual ~4 bytes/token English heuristic — because
+/// the floor must never under-count: CJK text and repeated short-token
+/// runs sit near ~2 bytes/token, and bytes/4 would deny caching to contexts
+/// genuinely above the floor. Erring toward caching costs at most the
+/// one-time 25% cache-write premium; erring away forfeits the ~90% read
+/// discount on every subsequent turn.
+const BYTES_PER_TOKEN_ESTIMATE: usize = 2;
 
 /// Inject `cache_control` markers at the 4 Anthropic prompt-cache zones
 /// (moving-breakpoint layout, ported from openclaw/hermes-agent):
@@ -317,8 +327,11 @@ const BYTES_PER_TOKEN_ESTIMATE: usize = 4;
 ///
 /// Floor: when the estimated token size of the cacheable zones
 /// (system + tools + messages) is below `min_prefix_tokens`, no markers are
-/// injected at all — caching a tiny context costs more (25% cache-write
-/// premium) than it can save. Pass `0` to disable the floor.
+/// injected — and any marker already present (the engine's hint path) is
+/// STRIPPED, so a sub-floor request carries zero `cache_control` on the
+/// wire. Caching a tiny context costs more (25% cache-write premium) than
+/// it can save. Pass `0` to disable the floor. [`CacheTier::None`] strips
+/// the same way: per-request "caching off" must mean off.
 ///
 /// Idempotent — re-running on the same body produces the same output.
 /// Skips zones cleanly when empty (no system text / no tools / no
@@ -329,15 +342,22 @@ const BYTES_PER_TOKEN_ESTIMATE: usize = 4;
 /// `tier` controls the ephemeral TTL marker:
 ///   - [`CacheTier::Ephemeral5m`] -> `{ "type": "ephemeral" }` (default 5m)
 ///   - [`CacheTier::Ephemeral1h`] -> `{ "type": "ephemeral", "ttl": "1h" }`
-///   - [`CacheTier::None`]        -> no-op (caching disabled for this request)
+///   - [`CacheTier::None`]        -> strip + return (caching disabled for
+///     this request — pre-existing hint markers must not leak to the wire)
 pub fn apply_cache_zones(body: &mut Value, tier: CacheTier, min_prefix_tokens: usize) {
     let marker = match cache_control_marker(tier) {
         Some(m) => m,
-        None => return,
+        None => {
+            strip_message_cache_markers(body);
+            return;
+        }
     };
 
-    // Floor: skip injection entirely for tiny contexts.
+    // Floor: for tiny contexts, skip injection AND remove any marker the
+    // engine's hint path already placed — otherwise a sub-floor request
+    // still pays cache-write behavior through the leaked tail marker.
     if estimated_prefix_tokens(body) < min_prefix_tokens {
+        strip_message_cache_markers(body);
         return;
     }
 
@@ -389,6 +409,31 @@ pub fn apply_cache_zones(body: &mut Value, tier: CacheTier, min_prefix_tokens: u
             <= ANTHROPIC_CACHE_CONTROL_LIMIT,
         "cache_control markers must never exceed Anthropic's limit of {ANTHROPIC_CACHE_CONTROL_LIMIT}"
     );
+}
+
+/// Remove every `cache_control` marker from the messages zone — from
+/// content blocks and (defensively) from message objects themselves. Used
+/// when caching is off (config, per-request tier, or sub-floor context) to
+/// undo the engine-hint marker that `build_messages` already translated.
+/// Removal is byte-safe for siblings: serde_json objects are BTreeMap-backed
+/// (sorted keys, no `preserve_order` swap-remove hazard), so deleting a key
+/// cannot reorder the remaining fields.
+fn strip_message_cache_markers(body: &mut Value) {
+    let Some(messages) = body.get_mut("messages").and_then(Value::as_array_mut) else {
+        return;
+    };
+    for message in messages {
+        if let Some(obj) = message.as_object_mut() {
+            obj.remove("cache_control");
+        }
+        if let Some(blocks) = message.get_mut("content").and_then(Value::as_array_mut) {
+            for block in blocks {
+                if let Some(obj) = block.as_object_mut() {
+                    obj.remove("cache_control");
+                }
+            }
+        }
+    }
 }
 
 /// Estimate the token size of the cacheable prompt zones (system + tools +
@@ -1183,8 +1228,24 @@ mod tests {
 
     // --- Task 9: config-off byte identity + family gating -------------------
 
+    /// A request carrying the engine's tail cache hint, exactly as
+    /// `wcore-observability::cache::mark_cache_boundaries` stamps it before
+    /// every dispatch. The production path ALWAYS carries this for
+    /// anthropic-family compat — a caching test without it misses the
+    /// hint-translation leak in `build_messages` (Codex audit finding 1).
+    fn hinted_req(tier: Option<CacheTier>) -> LlmRequest {
+        let mut req = cache_req(tier);
+        req.messages
+            .last_mut()
+            .expect("cache_req always has a message")
+            .cache_breakpoint = Some(wcore_types::message::MessageCacheHint::Breakpoint);
+        req
+    }
+
     /// `prompt_caching = false` (config off): the request body is
-    /// byte-identical to a body that never saw the cache injector.
+    /// byte-identical to a body that never saw the cache injector — EVEN
+    /// when the engine's tail hint is present (which `build_messages`
+    /// translates into a wire marker before the config gate runs).
     #[test]
     fn config_off_body_is_byte_identical_to_uninjected() {
         let off = AnthropicProvider::new(
@@ -1195,7 +1256,7 @@ mod tests {
         )
         .with_cache(false);
 
-        let req = cache_req(Some(CacheTier::Ephemeral1h));
+        let req = hinted_req(Some(CacheTier::Ephemeral1h));
         let body = off.build_request_body(&req);
         let bytes = serde_json::to_string(&body).unwrap();
         assert!(
@@ -1216,6 +1277,58 @@ mod tests {
             bytes,
             serde_json::to_string(&expected).unwrap(),
             "config-off body must serialize byte-identically to the uninjected shape"
+        );
+    }
+
+    /// Sub-floor request WITH the engine hint: the leaked tail marker from
+    /// `build_messages` must be stripped, not merely left uninjected —
+    /// a tiny request must carry zero `cache_control` on the wire.
+    #[test]
+    fn sub_floor_request_with_engine_hint_emits_zero_markers() {
+        let default_floor_provider = AnthropicProvider::new(
+            "test-key",
+            "https://api.anthropic.com",
+            ProviderCompat::anthropic_defaults(),
+            DebugConfig::default(),
+        );
+        let body = default_floor_provider.build_request_body(&hinted_req(None));
+        assert_eq!(
+            total_markers(&body),
+            0,
+            "a sub-floor request must strip the engine's hint marker, not leak it"
+        );
+    }
+
+    /// `cache_tier = Some(None)` (per-request caching off) strips the
+    /// engine-hint marker the same way the config gate does.
+    #[test]
+    fn cache_tier_none_strips_engine_hint_marker() {
+        let body = provider().build_request_body(&hinted_req(Some(CacheTier::None)));
+        assert_eq!(
+            total_markers(&body),
+            0,
+            "per-request caching-off must strip the hint marker from the wire body"
+        );
+    }
+
+    /// Marker stripping is byte-safe for siblings: stripping a hinted body
+    /// reproduces the never-hinted body exactly (BTreeMap removal cannot
+    /// reorder remaining keys).
+    #[test]
+    fn strip_reproduces_unhinted_body_bytes() {
+        let off = AnthropicProvider::new(
+            "test-key",
+            "https://api.anthropic.com",
+            ProviderCompat::anthropic_defaults(),
+            DebugConfig::default(),
+        )
+        .with_cache(false);
+        let hinted = off.build_request_body(&hinted_req(None));
+        let unhinted = off.build_request_body(&cache_req(None));
+        assert_eq!(
+            serde_json::to_string(&hinted).unwrap(),
+            serde_json::to_string(&unhinted).unwrap(),
+            "hinted and never-hinted config-off bodies must be byte-identical"
         );
     }
 
