@@ -536,9 +536,10 @@ impl OpenAIProvider {
                         "type": "function",
                         "function": {
                             "name": encode_tool_name(&t.name),
-                            "description": format!(
-                                "(Deferred) {short_desc} — Use ToolSearch to load full schema before calling."
-                            ),
+                            // Layer D2: no per-stub "use ToolSearch"
+                            // boilerplate — the system prompt states the
+                            // hydration rule once.
+                            "description": format!("(Deferred) {short_desc}"),
                             "parameters": {
                                 "type": "object",
                                 "properties": {}
@@ -4694,7 +4695,10 @@ mod tests {
         let spawn_params = &result[1]["function"]["parameters"];
         assert!(spawn_params["properties"].as_object().unwrap().is_empty());
         let spawn_desc = result[1]["function"]["description"].as_str().unwrap();
-        assert!(spawn_desc.contains("ToolSearch"));
+        assert!(spawn_desc.starts_with("(Deferred)"));
+        // Layer D2: the per-stub "use ToolSearch" boilerplate is gone — the
+        // system prompt states the hydration rule once.
+        assert!(!spawn_desc.contains("Use ToolSearch"));
     }
 
     /// Layer E1 regression guard: the serialized tools[] array must be

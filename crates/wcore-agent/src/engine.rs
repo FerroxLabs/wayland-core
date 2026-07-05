@@ -4694,6 +4694,26 @@ impl AgentEngine {
             // relevance trim above.
             let tools = self.apply_provider_tool_cap(tools);
 
+            // Layer D1 (token-opt): defer cold tools to name-only stubs —
+            // only the configured hot allowlist ships full schemas; the
+            // model hydrates a stub on demand via ToolSearch (the system
+            // prompt states that rule once, `tool_usage_guidance`).
+            // CRITICAL: the hot/stub split is a pure function of static
+            // config, never per-turn state, so the serialized tools[] array
+            // stays byte-identical across turns (cache guard:
+            // `tools_array_byte_stable_across_roundtrips`).
+            let tools = {
+                let mut tools = tools;
+                let defer_cfg = &self.config.builtin_tools.defer_cold;
+                if defer_cfg.enabled {
+                    wcore_tools::registry::apply_cold_deferral(
+                        &mut tools,
+                        &defer_cfg.hot_allowlist,
+                    );
+                }
+                tools
+            };
+
             // Build system prompt: append plan mode instructions when active
             let system = if self.plan_state.is_active {
                 format!(

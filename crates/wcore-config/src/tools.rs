@@ -14,6 +14,49 @@ use serde::{Deserialize, Serialize};
 pub struct BuiltinToolsConfig {
     pub script: ScriptToolConfig,
     pub repomap: RepoMapToolConfig,
+    pub defer_cold: DeferColdConfig,
+}
+
+/// Layer D1 (token-opt): defer cold built-ins to name-only stubs.
+///
+/// ~30 built-in tool schemas (~7k tokens) are re-serialized on every model
+/// round-trip. With deferral on, only the tools on `hot_allowlist` ship
+/// their full schema; everything else (cold built-ins + MCP tools) is sent
+/// as a name + truncated-description stub that the model hydrates on demand
+/// via `ToolSearch`.
+///
+/// CRITICAL caching constraint: the hot/stub split is a pure function of
+/// this static config — never of per-turn state — so the serialized
+/// `tools[]` array stays byte-identical across the turns of a conversation
+/// (the cached-prefix guard is `tools_array_byte_stable_across_roundtrips`
+/// in `wcore-providers`).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct DeferColdConfig {
+    /// Default ON. `false` restores full schemas for every tool.
+    pub enabled: bool,
+    /// Tools that always ship their full schema. `ToolSearch` is never
+    /// deferred regardless of this list (it is the hydration path).
+    pub hot_allowlist: Vec<String>,
+}
+
+impl DeferColdConfig {
+    /// The high-frequency core loop tools plus the hydration tool.
+    pub fn default_hot_allowlist() -> Vec<String> {
+        ["Read", "Edit", "Write", "Bash", "Grep", "Glob", "ToolSearch"]
+            .into_iter()
+            .map(String::from)
+            .collect()
+    }
+}
+
+impl Default for DeferColdConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            hot_allowlist: Self::default_hot_allowlist(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

@@ -480,9 +480,9 @@ pub(crate) fn build_function_declarations(tools: &[ToolDef]) -> Vec<Value> {
                 let short_desc = truncate_deferred_description(&t.description);
                 json!({
                     "name": encode_tool_name(&t.name),
-                    "description": format!(
-                        "(Deferred) {short_desc} — Use ToolSearch to load full schema before calling."
-                    ),
+                    // Layer D2: no per-stub "use ToolSearch" boilerplate —
+                    // the system prompt states the hydration rule once.
+                    "description": format!("(Deferred) {short_desc}"),
                     "parameters": {
                         "type": "object",
                         "properties": {}

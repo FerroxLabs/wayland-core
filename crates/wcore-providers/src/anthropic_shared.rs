@@ -218,9 +218,9 @@ pub fn build_tools(tools: &[ToolDef]) -> Vec<Value> {
                 let short_desc = truncate_deferred_description(&t.description);
                 json!({
                     "name": encode_tool_name(&t.name),
-                    "description": format!(
-                        "(Deferred) {short_desc} — Use ToolSearch to load full schema before calling."
-                    ),
+                    // Layer D2: no per-stub "use ToolSearch" boilerplate —
+                    // the system prompt states the hydration rule once.
+                    "description": format!("(Deferred) {short_desc}"),
                     "input_schema": {
                         "type": "object",
                         "properties": {}
@@ -987,7 +987,10 @@ mod tests {
                 .is_empty()
         );
         let desc = result[1]["description"].as_str().unwrap();
-        assert!(desc.contains("ToolSearch"));
+        assert!(desc.starts_with("(Deferred)"));
+        // Layer D2: the per-stub "use ToolSearch" boilerplate is gone — the
+        // system prompt states the hydration rule once.
+        assert!(!desc.contains("Use ToolSearch"));
     }
 
     /// Layer E1 regression guard: the serialized tools[] array must be

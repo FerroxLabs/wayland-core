@@ -234,6 +234,33 @@ impl ToolRegistry {
     }
 }
 
+/// Layer D1 (token-opt): mark every tool NOT on the hot allowlist as
+/// deferred, so providers serialize it as a name + truncated-description
+/// stub instead of its full schema. The model hydrates a stub on demand via
+/// `ToolSearch` (which is never deferred — it is the hydration path — and
+/// is skipped here regardless of the allowlist).
+///
+/// CRITICAL caching constraint: this is a pure function of the def names
+/// and the static allowlist — never of per-turn state — so applying it
+/// every turn yields an identical hot/stub split and the serialized
+/// `tools[]` array stays byte-identical across a conversation (guarded by
+/// `tools_array_byte_stable_across_roundtrips` in `wcore-providers`).
+///
+/// Only the `deferred` flag is flipped; `input_schema`/`description` are
+/// retained on the def so `ToolSearchTool` (which snapshots these defs) can
+/// return the full schema on hydration. Tools already deferred (e.g. MCP
+/// proxies) stay deferred.
+pub fn apply_cold_deferral(defs: &mut [ToolDef], hot_allowlist: &[String]) {
+    for def in defs.iter_mut() {
+        if def.name == "ToolSearch" {
+            continue;
+        }
+        if !hot_allowlist.iter().any(|hot| hot == &def.name) {
+            def.deferred = true;
+        }
+    }
+}
+
 #[async_trait]
 impl ToolDispatcher for ToolRegistry {
     async fn dispatch(&self, tool: &str, input: serde_json::Value) -> ToolResult {
@@ -644,6 +671,78 @@ mod tests {
         }));
         let defs = registry.to_tool_defs();
         assert!(defs[0].deferred, "deferred tool should have deferred=true");
+    }
+
+    // --- apply_cold_deferral tests (Layer D1) ---
+
+    #[test]
+    fn cold_deferral_is_pure_function_of_allowlist() {
+        let mut registry = ToolRegistry::new();
+        registry.register(make_tool("Read", "read files"));
+        registry.register(make_tool("web", "search the web"));
+        registry.register(make_tool("ToolSearch", "hydrate deferred tools"));
+
+        let hot = vec!["Read".to_string()];
+
+        // Applying to two independently-generated def lists yields the
+        // identical split — no per-turn state involved.
+        let mut turn1 = registry.to_tool_defs();
+        let mut turn2 = registry.to_tool_defs();
+        apply_cold_deferral(&mut turn1, &hot);
+        apply_cold_deferral(&mut turn2, &hot);
+
+        for defs in [&turn1, &turn2] {
+            let by_name = |n: &str| defs.iter().find(|d| d.name == n).unwrap();
+            assert!(!by_name("Read").deferred, "hot tool stays full");
+            assert!(by_name("web").deferred, "cold tool defers");
+            assert!(
+                !by_name("ToolSearch").deferred,
+                "ToolSearch is the hydration path — never deferred"
+            );
+            // The full schema survives on the def (only the flag flips) so
+            // ToolSearch hydration can return it.
+            assert_eq!(
+                by_name("web").input_schema,
+                serde_json::json!({"type": "object"})
+            );
+        }
+        assert_eq!(turn1.len(), turn2.len());
+        for (a, b) in turn1.iter().zip(turn2.iter()) {
+            assert_eq!(a.name, b.name);
+            assert_eq!(a.deferred, b.deferred);
+        }
+    }
+
+    /// Correctness gate for Layer D1: a cold-deferred tool must remain
+    /// (1) discoverable via ToolSearch — which returns its FULL schema —
+    /// and (2) callable through the registry (deferral only changes what
+    /// the LLM sees, never dispatch).
+    #[tokio::test]
+    async fn cold_deferred_tool_hydrates_via_tool_search_and_dispatches() {
+        let mut registry = ToolRegistry::new();
+        registry.register(make_tool("Read", "read files"));
+        registry.register(make_tool("web", "search the web"));
+
+        let mut defs = registry.to_tool_defs();
+        apply_cold_deferral(&mut defs, &["Read".to_string()]);
+
+        // Discoverable + hydratable: ToolSearch built on the deferred defs
+        // returns the cold tool's name AND full parameters schema.
+        let search = crate::tool_search::ToolSearchTool::new(defs);
+        let found = search
+            .execute(serde_json::json!({"query": "web"}))
+            .await;
+        assert!(!found.is_error);
+        assert!(found.content.contains("\"web\""), "cold tool discoverable");
+        assert!(
+            found.content.contains("parameters"),
+            "hydration returns the full schema"
+        );
+
+        // Still callable: dispatch routes by name, unaffected by deferral.
+        let result = registry.dispatch("web", serde_json::json!({})).await;
+        assert!(!result.is_error, "deferred tool still dispatches");
+        assert_eq!(result.content, "ok");
     }
 
     /// v0.9.1.1 F8 — the catalog the LLM sees must use the exact
