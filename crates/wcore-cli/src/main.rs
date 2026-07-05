@@ -810,21 +810,25 @@ async fn run() -> anyhow::Result<ExitCode> {
     // existing CI scrapers.
     let mut _sentinel_guard = {
         let sentinel_path = wcore_cli::crash_sentinel::CrashSentinel::default_path();
-        // R2 fix A5: probe + arm via a SINGLE fs::write (was: probe via
-        // arm() then write again via new() — double-write that could
-        // discard a successful first write on second-write failure).
-        let was_dirty = wcore_cli::crash_sentinel::CrashSentinel::check_dirty(&sentinel_path);
-        if was_dirty {
+        // #181: the sentinel is scoped per-process (`.dirty-death.<pid>`).
+        // The scan reports ONLY flags whose owning pid is dead (plus the
+        // legacy un-scoped flag, once, for migration) — a live sibling
+        // engine's flag is not a crash. Reported flags are reaped by the
+        // scan so each dirty death fires exactly once.
+        let dead_sentinels = wcore_cli::crash_sentinel::CrashSentinel::scan_dead_sentinels(
+            &wcore_cli::crash_sentinel::CrashSentinel::default_dir(),
+        );
+        for dead_path in &dead_sentinels {
             if will_enter_tui {
                 tracing::warn!(
-                    path = %sentinel_path.display(),
+                    path = %dead_path.display(),
                     "previous run did not shut down cleanly (crash sentinel found)"
                 );
             } else {
                 eprintln!(
                     "wayland-core: warning: previous run did not shut down cleanly \
                      (crash sentinel found at {})",
-                    sentinel_path.display()
+                    dead_path.display()
                 );
             }
         }
