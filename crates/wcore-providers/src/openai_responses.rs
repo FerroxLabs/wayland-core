@@ -960,8 +960,7 @@ mod tests {
             server: None,
         };
         let one =
-            serde_json::to_string(&build_responses_tools(&[dup_a.clone(), dup_b.clone()]))
-                .unwrap();
+            serde_json::to_string(&build_responses_tools(&[dup_a.clone(), dup_b.clone()])).unwrap();
         let other = serde_json::to_string(&build_responses_tools(&[dup_b, dup_a])).unwrap();
         assert_eq!(
             one, other,

@@ -282,7 +282,10 @@ pub fn apply_cold_deferral(defs: &mut [ToolDef], hot_allowlist: &[String]) {
 /// Fallback: when no non-deferred `ToolSearch` def is present there is no
 /// surface to carry the catalog — the defs are returned unchanged (per-tool
 /// stubs), never silently undiscoverable.
-pub fn fold_deferred_into_catalog(mut defs: Vec<ToolDef>, catalog_max_chars: usize) -> Vec<ToolDef> {
+pub fn fold_deferred_into_catalog(
+    mut defs: Vec<ToolDef>,
+    catalog_max_chars: usize,
+) -> Vec<ToolDef> {
     if !defs.iter().any(|d| d.deferred) {
         return defs;
     }
@@ -312,10 +315,7 @@ pub fn fold_deferred_into_catalog(mut defs: Vec<ToolDef>, catalog_max_chars: usi
 /// cap). The fixed prefix and the constant-size `+N more` overflow suffix
 /// sit outside the budget; omitted names remain discoverable via ToolSearch
 /// queries.
-fn render_deferred_catalog(
-    names: &std::collections::BTreeSet<String>,
-    max_chars: usize,
-) -> String {
+fn render_deferred_catalog(names: &std::collections::BTreeSet<String>, max_chars: usize) -> String {
     const PREFIX: &str =
         "Deferred tools (name-only; load the full schema via this tool before calling): ";
     let total = names.len();
@@ -826,8 +826,7 @@ mod tests {
         // The catalog line is on ToolSearch, sorted, name-only.
         let ts = folded.iter().find(|d| d.name == "ToolSearch").unwrap();
         assert!(
-            ts.description
-                .contains("alpha_tool, mike_tool, zulu_tool"),
+            ts.description.contains("alpha_tool, mike_tool, zulu_tool"),
             "sorted name-only inventory: {}",
             ts.description
         );
@@ -899,8 +898,7 @@ mod tests {
             ts.description
         );
         assert!(
-            ts.description
-                .contains("+2 more — search to discover"),
+            ts.description.contains("+2 more — search to discover"),
             "all names collapse into the omitted marker: {}",
             ts.description
         );
@@ -952,9 +950,7 @@ mod tests {
         // Discoverable + hydratable: ToolSearch built on the deferred defs
         // returns the cold tool's name AND full parameters schema.
         let search = crate::tool_search::ToolSearchTool::new(defs);
-        let found = search
-            .execute(serde_json::json!({"query": "web"}))
-            .await;
+        let found = search.execute(serde_json::json!({"query": "web"})).await;
         assert!(!found.is_error);
         assert!(found.content.contains("\"web\""), "cold tool discoverable");
         assert!(

@@ -10602,8 +10602,7 @@ mod set_config_tests {
 
         // The serializer therefore emits NO stub entries at all.
         let wire =
-            serde_json::to_string(&wcore_providers::anthropic_shared::build_tools(&turn1))
-                .unwrap();
+            serde_json::to_string(&wcore_providers::anthropic_shared::build_tools(&turn1)).unwrap();
         assert!(
             !wire.contains("(Deferred)"),
             "no per-tool stub entries on the wire"
@@ -10612,8 +10611,7 @@ mod set_config_tests {
         // Deterministic + byte-stable across turns (same deferral state).
         let turn2 = engine.apply_tool_deferral(tools.clone());
         let wire2 =
-            serde_json::to_string(&wcore_providers::anthropic_shared::build_tools(&turn2))
-                .unwrap();
+            serde_json::to_string(&wcore_providers::anthropic_shared::build_tools(&turn2)).unwrap();
         assert_eq!(wire, wire2, "catalog line byte-stable across turns");
 
         // Config off: per-tool stub entries restored, catalog absent.
@@ -10621,9 +10619,7 @@ mod set_config_tests {
         let stubbed = engine.apply_tool_deferral(tools);
         assert_eq!(stubbed.len(), 4, "stub mode keeps every def in the array");
         assert!(
-            stubbed
-                .iter()
-                .any(|t| t.name == "clarify" && t.deferred),
+            stubbed.iter().any(|t| t.name == "clarify" && t.deferred),
             "cold tool is a stub entry again"
         );
         let ts_stub = stubbed.iter().find(|t| t.name == "ToolSearch").unwrap();
@@ -10835,13 +10831,19 @@ mod set_config_tests {
 
         // Stale hydration pruned: gone from the hydrated set, never emitted.
         assert!(
-            !engine.hydrated_tool_names.iter().any(|n| n == "mcp__srv__ghost"),
+            !engine
+                .hydrated_tool_names
+                .iter()
+                .any(|n| n == "mcp__srv__ghost"),
             "stale hydration must be pruned from the hydrated set"
         );
         assert!(!names.contains(&"mcp__srv__ghost"));
         // Live hydration survives the prune and is admitted.
         assert!(
-            engine.hydrated_tool_names.iter().any(|n| n == "mcp__srv__bravo"),
+            engine
+                .hydrated_tool_names
+                .iter()
+                .any(|n| n == "mcp__srv__bravo"),
             "live hydration must survive the prune"
         );
         assert!(

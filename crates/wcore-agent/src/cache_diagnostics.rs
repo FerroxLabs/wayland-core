@@ -469,7 +469,10 @@ mod tests {
     /// Drive one round-trip through the detector and return the health probe
     /// for that same turn (mirrors the engine call order: record_request →
     /// check_response → check_cache_health).
-    fn round_trip(detector: &mut CacheBreakDetector, stats: CacheStats) -> Option<CacheHealthAlert> {
+    fn round_trip(
+        detector: &mut CacheBreakDetector,
+        stats: CacheStats,
+    ) -> Option<CacheHealthAlert> {
         detector.record_request("prompt", &make_tools());
         detector.check_response(stats.clone());
         detector.check_cache_health(&stats)

@@ -1804,11 +1804,12 @@ mod tests {
             deferred: false,
             server: None,
         };
-        let one =
-            serde_json::to_string(&build_function_declarations(&[dup_a.clone(), dup_b.clone()]))
-                .unwrap();
-        let other =
-            serde_json::to_string(&build_function_declarations(&[dup_b, dup_a])).unwrap();
+        let one = serde_json::to_string(&build_function_declarations(&[
+            dup_a.clone(),
+            dup_b.clone(),
+        ]))
+        .unwrap();
+        let other = serde_json::to_string(&build_function_declarations(&[dup_b, dup_a])).unwrap();
         assert_eq!(
             one, other,
             "duplicate names must serialize byte-identically regardless of input order"

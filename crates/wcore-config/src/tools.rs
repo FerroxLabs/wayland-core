@@ -59,10 +59,18 @@ pub struct DeferColdConfig {
 impl DeferColdConfig {
     /// The high-frequency core loop tools plus the hydration tool.
     pub fn default_hot_allowlist() -> Vec<String> {
-        ["Read", "Edit", "Write", "Bash", "Grep", "Glob", "ToolSearch"]
-            .into_iter()
-            .map(String::from)
-            .collect()
+        [
+            "Read",
+            "Edit",
+            "Write",
+            "Bash",
+            "Grep",
+            "Glob",
+            "ToolSearch",
+        ]
+        .into_iter()
+        .map(String::from)
+        .collect()
     }
 }
 

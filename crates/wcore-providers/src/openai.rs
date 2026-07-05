@@ -4773,9 +4773,11 @@ mod tests {
             deferred: false,
             server: None,
         };
-        let one =
-            serde_json::to_string(&OpenAIProvider::build_tools(&[dup_a.clone(), dup_b.clone()]))
-                .unwrap();
+        let one = serde_json::to_string(&OpenAIProvider::build_tools(&[
+            dup_a.clone(),
+            dup_b.clone(),
+        ]))
+        .unwrap();
         let other = serde_json::to_string(&OpenAIProvider::build_tools(&[dup_b, dup_a])).unwrap();
         assert_eq!(
             one, other,
