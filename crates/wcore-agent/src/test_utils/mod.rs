@@ -213,6 +213,7 @@ impl OutputSink for TestSink {
                 },
                 active_window_percent: None,
             }),
+            usage_delta: None,
             agent_run_id: None,
         });
     }

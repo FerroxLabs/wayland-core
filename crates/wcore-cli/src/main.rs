@@ -3214,6 +3214,7 @@ async fn run_json_stream_mode(
                                             result.finish_reason,
                                             result.active_window_percent,
                                             result.agent_run_id.as_deref(),
+                                            Some(&result.usage_delta),
                                         );
                                     }
                                     Err(e) => {

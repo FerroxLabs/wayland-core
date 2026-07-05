@@ -191,6 +191,7 @@ impl OutputSink for ChannelSink {
             msg_id: msg_id.to_string(),
             finish_reason,
             usage: None,
+            usage_delta: None,
             agent_run_id: None,
         });
     }

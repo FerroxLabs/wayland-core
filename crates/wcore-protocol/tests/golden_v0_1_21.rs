@@ -111,6 +111,7 @@ fn golden_stream_end_stop_v0_1_21() {
             cache_write_tokens: None,
             active_window_percent: None,
         }),
+        usage_delta: None,
         agent_run_id: None,
     };
     assert_eq!(
@@ -134,6 +135,7 @@ fn golden_stream_end_length_v0_1_21() {
         msg_id: "m-1".into(),
         finish_reason: FinishReason::Length,
         usage: None,
+        usage_delta: None,
         agent_run_id: None,
     };
     assert_eq!(
@@ -154,6 +156,7 @@ fn golden_stream_end_error_v0_1_21() {
         msg_id: "m-1".into(),
         finish_reason: FinishReason::Error,
         usage: None,
+        usage_delta: None,
         agent_run_id: None,
     };
     assert_eq!(
@@ -182,6 +185,7 @@ fn golden_stream_end_every_finish_reason_serializes_snake_case() {
             msg_id: "m".into(),
             finish_reason: fr,
             usage: None,
+            usage_delta: None,
             agent_run_id: None,
         };
         let got = serialize(&event);
@@ -207,6 +211,7 @@ fn golden_usage_with_full_cache_fields_v0_1_21() {
             cache_write_tokens: Some(200),
             active_window_percent: None,
         }),
+        usage_delta: None,
         agent_run_id: None,
     };
     assert_eq!(
@@ -237,6 +242,7 @@ fn golden_stream_end_no_new_keys_when_unset_279() {
             cache_write_tokens: Some(200),
             active_window_percent: None,
         }),
+        usage_delta: None,
         agent_run_id: None,
     };
     assert_eq!(
@@ -268,6 +274,7 @@ fn golden_stream_end_with_new_keys_when_set_279() {
             cache_write_tokens: None,
             active_window_percent: Some(73),
         }),
+        usage_delta: None,
         agent_run_id: Some("agent-run-abc".into()),
     };
     assert_eq!(

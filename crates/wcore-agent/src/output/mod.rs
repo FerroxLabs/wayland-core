@@ -7,7 +7,7 @@ pub mod terminal;
 use crossterm::execute;
 use crossterm::style::{Attribute, Color, Print, ResetColor, SetAttribute, SetForegroundColor};
 use std::io::{self, Write};
-use wcore_types::message::FinishReason;
+use wcore_types::message::{FinishReason, TokenUsage};
 
 /// Abstraction over output channels (terminal vs JSON stream protocol)
 pub trait OutputSink: Send + Sync {
@@ -49,6 +49,11 @@ pub trait OutputSink: Send + Sync {
     /// and run-correlation id. Default delegates to emit_stream_end (dropping
     /// the extras) so existing sinks/mocks need no change; ProtocolSink
     /// overrides to populate Usage.active_window_percent + StreamEnd.agent_run_id.
+    ///
+    /// CORE-2: `usage_delta` is the run-scoped usage (this run's provider
+    /// round-trips only), emitted as the `usage_delta` sibling of the
+    /// session-cumulative `usage` on the `stream_end` event. None on paths
+    /// that don't track a per-run delta.
     #[allow(clippy::too_many_arguments)]
     fn emit_stream_end_full(
         &self,
@@ -61,6 +66,7 @@ pub trait OutputSink: Send + Sync {
         finish_reason: FinishReason,
         _active_window_percent: Option<u32>,
         _agent_run_id: Option<&str>,
+        _usage_delta: Option<&TokenUsage>,
     ) {
         self.emit_stream_end(
             msg_id,

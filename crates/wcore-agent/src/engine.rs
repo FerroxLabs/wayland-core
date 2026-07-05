@@ -1398,6 +1398,14 @@ pub struct AgentEngine {
     /// guards on `is_flux_tier_alias`).
     web_search: bool,
     total_usage: TokenUsage,
+    /// CORE-2: run-scoped usage delta. Reset at the start of each `run()`
+    /// (user turn) and accumulated from the same per-provider-request
+    /// `turn_usage` values as `total_usage`, so it sums every provider
+    /// round-trip of THIS run only (a run can span multiple round-trips in
+    /// the tool loop). Surfaced via `AgentResult::usage_delta` and the
+    /// `stream_end` protocol event's `usage_delta` sibling field; never
+    /// persisted (a resumed session starts with a fresh zero delta).
+    run_usage: TokenUsage,
     thinking: Option<wcore_types::llm::ThinkingConfig>,
     /// Resolved provider compat settings (for capability validation)
     compat: wcore_config::compat::ProviderCompat,
@@ -1942,6 +1950,7 @@ impl AgentEngine {
             temperature: config.temperature,
             max_turns: config.max_turns,
             total_usage: TokenUsage::default(),
+            run_usage: TokenUsage::default(),
             thinking: config.thinking,
             compat: config.compat.clone(),
             confirmer: Arc::new(Mutex::new(confirmer)),
@@ -2122,6 +2131,9 @@ impl AgentEngine {
             temperature: config.temperature,
             max_turns: config.max_turns,
             total_usage: session.total_usage.clone(),
+            // CORE-2: cumulative usage carries over from the persisted
+            // session; the per-run delta always starts fresh.
+            run_usage: TokenUsage::default(),
             thinking: config.thinking,
             compat: config.compat.clone(),
             confirmer: Arc::new(Mutex::new(confirmer)),
@@ -3958,6 +3970,7 @@ impl AgentEngine {
             stop_reason: StopReason::MaxTurns,
             finish_reason,
             usage: self.total_usage.clone(),
+            usage_delta: self.run_usage.clone(),
             turns: turn,
             active_window_percent: self.active_window_percent_now(&self.model, 0),
             agent_run_id: self.current_agent_run_id.clone(),
@@ -4245,6 +4258,10 @@ impl AgentEngine {
             }
         }
         self.current_msg_id = msg_id.to_string();
+        // CORE-2: reset the run-scoped usage delta at the start of each
+        // user turn; the tool loop below re-accumulates it per provider
+        // round-trip alongside the session-cumulative `total_usage`.
+        self.run_usage = TokenUsage::default();
         // #403: clear tool circuit breakers at the start of each user turn.
         // A transient burst of `web`/`WebFetch` failures in one turn opened the
         // breaker and, with no per-turn reset, left every web tool short-circuited
@@ -5304,6 +5321,12 @@ impl AgentEngine {
             self.total_usage.cache_creation_tokens += turn_usage.cache_creation_tokens;
             self.total_usage.cache_read_tokens += turn_usage.cache_read_tokens;
 
+            // CORE-2: mirror into the run-scoped delta (reset per run()).
+            self.run_usage.input_tokens += turn_usage.input_tokens;
+            self.run_usage.output_tokens += turn_usage.output_tokens;
+            self.run_usage.cache_creation_tokens += turn_usage.cache_creation_tokens;
+            self.run_usage.cache_read_tokens += turn_usage.cache_read_tokens;
+
             // B7 writer-side wiring: mirror this turn's token usage into the
             // live introspection state so `wayland_status` /
             // `wayland_telemetry_query` report non-zero token counters.
@@ -5629,6 +5652,7 @@ impl AgentEngine {
                     stop_reason,
                     finish_reason,
                     usage: self.total_usage.clone(),
+                    usage_delta: self.run_usage.clone(),
                     turns: turn + 1,
                     active_window_percent: self
                         .active_window_percent_now(&effective_model, input_token_estimate as u64),
@@ -6770,6 +6794,7 @@ impl AgentEngine {
             stop_reason: StopReason::EndTurn,
             finish_reason: FinishReason::from_stop_reason(StopReason::EndTurn),
             usage: self.total_usage.clone(),
+            usage_delta: self.run_usage.clone(),
             turns: 1,
             active_window_percent: self.active_window_percent_now(&self.model, 0),
             agent_run_id: self.current_agent_run_id.clone(),
@@ -6835,6 +6860,7 @@ impl AgentEngine {
             stop_reason: StopReason::EndTurn,
             finish_reason: FinishReason::from_stop_reason(StopReason::EndTurn),
             usage: self.total_usage.clone(),
+            usage_delta: self.run_usage.clone(),
             turns: turn + 1,
             active_window_percent: self.active_window_percent_now(&self.model, 0),
             agent_run_id: self.current_agent_run_id.clone(),
@@ -9107,6 +9133,7 @@ mod set_config_tests {
             max_tokens_explicit: false,
             max_turns: Some(10),
             total_usage: Default::default(),
+            run_usage: Default::default(),
             thinking: None,
             compat: wcore_config::compat::ProviderCompat::anthropic_defaults(),
             confirmer: Arc::new(Mutex::new(ToolConfirmer::new(true, vec![]))),
@@ -10279,6 +10306,7 @@ mod phase6_tests {
             max_tokens_explicit: false,
             max_turns: Some(10),
             total_usage: Default::default(),
+            run_usage: Default::default(),
             thinking: None,
             compat: wcore_config::compat::ProviderCompat::anthropic_defaults(),
             confirmer: Arc::new(Mutex::new(ToolConfirmer::new(true, allow_list.clone()))),
@@ -10574,6 +10602,7 @@ mod compact_tests {
             max_tokens_explicit: false,
             max_turns: Some(10),
             total_usage: Default::default(),
+            run_usage: Default::default(),
             thinking: None,
             compat: wcore_config::compat::ProviderCompat::anthropic_defaults(),
             confirmer: Arc::new(Mutex::new(ToolConfirmer::new(true, vec![]))),
@@ -11899,6 +11928,7 @@ mod plan_mode_tests {
             max_tokens_explicit: false,
             max_turns: Some(10),
             total_usage: Default::default(),
+            run_usage: Default::default(),
             thinking: None,
             compat: wcore_config::compat::ProviderCompat::anthropic_defaults(),
             confirmer: Arc::new(Mutex::new(ToolConfirmer::new(true, allow_list.clone()))),
@@ -12327,6 +12357,7 @@ mod hook_integration_tests {
             max_tokens_explicit: false,
             max_turns: Some(10),
             total_usage: Default::default(),
+            run_usage: Default::default(),
             thinking: None,
             compat: wcore_config::compat::ProviderCompat::anthropic_defaults(),
             confirmer: Arc::new(Mutex::new(ToolConfirmer::new(true, vec![]))),
@@ -12973,6 +13004,10 @@ pub struct AgentResult {
     /// can advertise the same value the underlying API returned.
     pub finish_reason: FinishReason,
     pub usage: TokenUsage,
+    /// CORE-2: per-run usage delta — the tokens consumed by THIS run only
+    /// (summing every provider round-trip of the run's tool loop), while
+    /// `usage` stays session-cumulative for back-compat.
+    pub usage_delta: TokenUsage,
     pub turns: usize,
     /// #279(a): active-window fill (0..=100) from ContextWindow::percent()
     /// on the post-swap effective model. None when the window is unknown.
@@ -13161,6 +13196,7 @@ mod approval_bridge_engine_tests {
             max_tokens_explicit: false,
             max_turns: Some(10),
             total_usage: Default::default(),
+            run_usage: Default::default(),
             thinking: None,
             compat: wcore_config::compat::ProviderCompat::anthropic_defaults(),
             confirmer: Arc::new(Mutex::new(ToolConfirmer::new(true, vec![]))),
@@ -14163,6 +14199,7 @@ mod user_model_writeback_tests {
             max_tokens_explicit: false,
             max_turns: Some(10),
             total_usage: Default::default(),
+            run_usage: Default::default(),
             thinking: None,
             compat: wcore_config::compat::ProviderCompat::anthropic_defaults(),
             confirmer: Arc::new(Mutex::new(ToolConfirmer::new(true, vec![]))),
@@ -15193,6 +15230,151 @@ mod audit_2026_05_22_tests {
         let mut engine = engine_with(provider);
         let result = engine.run("task", "m-1").await.expect("clean run");
         assert_eq!(result.stop_reason, StopReason::EndTurn);
+    }
+
+    // --- CORE-2: per-run usage delta --------------------------------------
+
+    fn done_endturn_with(usage: TokenUsage) -> LlmEvent {
+        LlmEvent::Done {
+            stop_reason: StopReason::EndTurn,
+            finish_reason: FinishReason::Stop,
+            usage,
+        }
+    }
+
+    fn usage(input: u64, output: u64) -> TokenUsage {
+        TokenUsage {
+            input_tokens: input,
+            output_tokens: output,
+            cache_creation_tokens: 0,
+            cache_read_tokens: 0,
+        }
+    }
+
+    #[tokio::test]
+    async fn usage_delta_resets_per_run_while_usage_accumulates() {
+        // CORE-2 (a) — two consecutive runs: each result's usage_delta
+        // carries THAT run's provider usage only, while the cumulative
+        // `usage` keeps growing across runs (back-compat).
+        let provider = Arc::new(ScriptedProvider::new(vec![
+            vec![
+                LlmEvent::TextDelta("one".into()),
+                done_endturn_with(usage(100, 10)),
+            ],
+            vec![
+                LlmEvent::TextDelta("two".into()),
+                done_endturn_with(usage(200, 20)),
+            ],
+        ]));
+        let mut engine = engine_with(provider);
+
+        let first = engine.run("first", "m-1").await.expect("clean run");
+        assert_eq!(first.usage_delta.input_tokens, 100);
+        assert_eq!(first.usage_delta.output_tokens, 10);
+        assert_eq!(first.usage.input_tokens, 100);
+        assert_eq!(first.usage.output_tokens, 10);
+
+        let second = engine.run("second", "m-2").await.expect("clean run");
+        assert_eq!(
+            second.usage_delta.input_tokens, 200,
+            "the second run's delta must cover the second run ONLY"
+        );
+        assert_eq!(second.usage_delta.output_tokens, 20);
+        assert_eq!(
+            second.usage.input_tokens, 300,
+            "cumulative usage keeps summing across runs (back-compat)"
+        );
+        assert_eq!(second.usage.output_tokens, 30);
+    }
+
+    #[tokio::test]
+    async fn usage_delta_sums_all_round_trips_of_one_run() {
+        // CORE-2 (b) — a run that spans multiple provider round-trips in
+        // the tool loop (a ToolUse turn + the final EndTurn turn) folds
+        // ALL of them into one delta.
+        let provider = Arc::new(ScriptedProvider::new(vec![
+            vec![
+                LlmEvent::ToolUse {
+                    id: "t1".into(),
+                    name: "Nope".into(),
+                    input: json!({}),
+                    extra: None,
+                },
+                LlmEvent::Done {
+                    stop_reason: StopReason::ToolUse,
+                    finish_reason: FinishReason::Stop,
+                    usage: TokenUsage {
+                        input_tokens: 100,
+                        output_tokens: 10,
+                        cache_creation_tokens: 7,
+                        cache_read_tokens: 3,
+                    },
+                },
+            ],
+            vec![
+                LlmEvent::TextDelta("done".into()),
+                done_endturn_with(usage(40, 4)),
+            ],
+        ]));
+        let counter = provider.call_counter();
+        let mut engine = engine_with(provider);
+        let result = engine.run("task", "m-1").await.expect("clean run");
+        assert_eq!(
+            counter.load(std::sync::atomic::Ordering::SeqCst),
+            2,
+            "the scripted tool turn must drive a second provider round-trip"
+        );
+        assert_eq!(result.usage_delta.input_tokens, 140);
+        assert_eq!(result.usage_delta.output_tokens, 14);
+        assert_eq!(result.usage_delta.cache_creation_tokens, 7);
+        assert_eq!(result.usage_delta.cache_read_tokens, 3);
+        // On a fresh engine the first run's cumulative equals its delta.
+        assert_eq!(result.usage.input_tokens, 140);
+    }
+
+    #[tokio::test]
+    async fn resumed_session_carries_cumulative_usage_but_fresh_delta() {
+        // CORE-2 (c) — an engine resumed from a persisted session inherits
+        // the cumulative total_usage, but the per-run delta starts at zero:
+        // the first post-resume run reports ONLY its own tokens as delta.
+        let session = crate::session::Session {
+            schema_version: 1,
+            id: "sess-core2".into(),
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+            provider: "test".into(),
+            model: "test-model".into(),
+            cwd: String::new(),
+            total_usage: usage(1_000, 500),
+            messages: Vec::new(),
+            extra: serde_json::Map::new(),
+        };
+        let provider = Arc::new(ScriptedProvider::new(vec![vec![
+            LlmEvent::TextDelta("resumed".into()),
+            done_endturn_with(usage(50, 5)),
+        ]]));
+        let mut config = wcore_config::config::Config::default();
+        // Keep the test hermetic: no on-disk session manager.
+        config.session.enabled = false;
+        let mut engine = super::AgentEngine::resume_with_provider(
+            provider,
+            config,
+            ToolRegistry::new(),
+            Arc::new(NullOutput),
+            session,
+        );
+        engine.max_turns = Some(20);
+        let result = engine.run("hello again", "m-1").await.expect("clean run");
+        assert_eq!(
+            result.usage.input_tokens, 1_050,
+            "cumulative usage must carry the persisted total across resume"
+        );
+        assert_eq!(result.usage.output_tokens, 505);
+        assert_eq!(
+            result.usage_delta.input_tokens, 50,
+            "the post-resume delta must be THIS run only, not the carried total"
+        );
+        assert_eq!(result.usage_delta.output_tokens, 5);
     }
 
     // --- B1 / B8: tool-dispatch timeout ----------------------------------

@@ -577,6 +577,7 @@ impl OutputSink for ProtocolSink {
                 },
                 active_window_percent: None,
             }),
+            usage_delta: None,
             agent_run_id: None,
         });
     }
@@ -593,6 +594,7 @@ impl OutputSink for ProtocolSink {
         finish_reason: FinishReason,
         active_window_percent: Option<u32>,
         agent_run_id: Option<&str>,
+        usage_delta: Option<&wcore_types::message::TokenUsage>,
     ) {
         let _ = self.writer.emit(&ProtocolEvent::StreamEnd {
             msg_id: msg_id.to_string(),
@@ -611,6 +613,24 @@ impl OutputSink for ProtocolSink {
                     None
                 },
                 active_window_percent,
+            }),
+            // CORE-2: the run-scoped delta rides as a sibling of the
+            // cumulative usage, same inner field shape (window gauge is
+            // a session-level reading — it stays on `usage` only).
+            usage_delta: usage_delta.map(|d| Usage {
+                input_tokens: d.input_tokens,
+                output_tokens: d.output_tokens,
+                cache_read_tokens: if d.cache_read_tokens > 0 {
+                    Some(d.cache_read_tokens)
+                } else {
+                    None
+                },
+                cache_write_tokens: if d.cache_creation_tokens > 0 {
+                    Some(d.cache_creation_tokens)
+                } else {
+                    None
+                },
+                active_window_percent: None,
             }),
             agent_run_id: agent_run_id.map(str::to_string),
         });

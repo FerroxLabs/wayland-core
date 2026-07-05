@@ -2037,6 +2037,7 @@ mod tests {
                 msg_id: "m1".into(),
                 finish_reason: wcore_protocol::events::FinishReason::Stop,
                 usage: None,
+                usage_delta: None,
                 agent_run_id: None,
             },
         );
@@ -2092,6 +2093,7 @@ mod tests {
                 msg_id: "m1".into(),
                 finish_reason: wcore_protocol::events::FinishReason::Stop,
                 usage: None,
+                usage_delta: None,
                 agent_run_id: None,
             },
         );
@@ -2139,6 +2141,7 @@ mod tests {
                     cache_write_tokens: None,
                     active_window_percent: None,
                 }),
+                usage_delta: None,
                 agent_run_id: None,
             },
         );
@@ -2192,6 +2195,7 @@ mod tests {
                 msg_id: "m1".into(),
                 finish_reason: wcore_protocol::events::FinishReason::Stop,
                 usage: None,
+                usage_delta: None,
                 agent_run_id: None,
             },
         );
@@ -3033,6 +3037,7 @@ mod tests {
                 msg_id: "m1".into(),
                 finish_reason: wcore_protocol::events::FinishReason::Stop,
                 usage: None,
+                usage_delta: None,
                 agent_run_id: None,
             },
         );
@@ -3095,6 +3100,7 @@ mod tests {
                 msg_id: "m1".into(),
                 finish_reason: wcore_protocol::events::FinishReason::Stop,
                 usage: None,
+                usage_delta: None,
                 agent_run_id: None,
             },
         );
@@ -3485,6 +3491,7 @@ mod tests {
                 msg_id: "m1".into(),
                 finish_reason: wcore_protocol::events::FinishReason::Stop,
                 usage: None,
+                usage_delta: None,
                 agent_run_id: None,
             },
         );
@@ -3570,6 +3577,7 @@ mod tests {
                 msg_id: "m1".into(),
                 finish_reason: wcore_protocol::events::FinishReason::Stop,
                 usage: None,
+                usage_delta: None,
                 agent_run_id: None,
             },
         );
@@ -3673,6 +3681,7 @@ mod tests {
                 msg_id: "m1".into(),
                 finish_reason: wcore_protocol::events::FinishReason::Stop,
                 usage: None,
+                usage_delta: None,
                 agent_run_id: None,
             },
         );
@@ -3754,6 +3763,7 @@ mod tests {
                 msg_id: "m1".into(),
                 finish_reason: wcore_protocol::events::FinishReason::Stop,
                 usage: None,
+                usage_delta: None,
                 agent_run_id: None,
             },
         );
@@ -3826,6 +3836,7 @@ mod tests {
                 msg_id: "m1".into(),
                 finish_reason: wcore_protocol::events::FinishReason::Stop,
                 usage: None,
+                usage_delta: None,
                 agent_run_id: None,
             },
         );
@@ -3895,6 +3906,7 @@ mod tests {
                 msg_id: "m1".into(),
                 finish_reason: wcore_protocol::events::FinishReason::Stop,
                 usage: None,
+                usage_delta: None,
                 agent_run_id: None,
             },
         );
@@ -4091,6 +4103,7 @@ mod tests {
                 msg_id: "m1".into(),
                 finish_reason: wcore_protocol::events::FinishReason::Stop,
                 usage: None,
+                usage_delta: None,
                 agent_run_id: None,
             },
         );
@@ -4185,6 +4198,7 @@ mod tests {
                 msg_id: "m1".into(),
                 finish_reason: wcore_protocol::events::FinishReason::Stop,
                 usage: None,
+                usage_delta: None,
                 agent_run_id: None,
             },
         );
