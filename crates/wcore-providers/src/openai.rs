@@ -788,7 +788,7 @@ impl OpenAIProvider {
         // can 400 on unknown fields.
         if is_flux_tier_alias(&request.model)
             && let Some(id) = request.conversation_id.as_deref()
-            && !id.is_empty()
+            && !id.trim().is_empty()
         {
             body["prompt_cache_key"] = json!(id);
         }
@@ -3358,6 +3358,11 @@ mod tests {
         assert!(body.get("prompt_cache_key").is_none());
 
         req.conversation_id = Some(String::new());
+        let body = stop_provider().build_request_body(&req);
+        assert!(body.get("prompt_cache_key").is_none());
+
+        // Whitespace-only ids are degenerate cache keys too (GLM-5.2 audit).
+        req.conversation_id = Some("   ".into());
         let body = stop_provider().build_request_body(&req);
         assert!(body.get("prompt_cache_key").is_none());
     }
