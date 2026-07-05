@@ -17,19 +17,23 @@ pub struct BuiltinToolsConfig {
     pub defer_cold: DeferColdConfig,
 }
 
-/// Layer D1 (token-opt): defer cold built-ins to name-only stubs.
+/// Layer D1 (token-opt): defer cold built-ins out of the tools[] array.
 ///
 /// ~30 built-in tool schemas (~7k tokens) are re-serialized on every model
 /// round-trip. With deferral on, only the tools on `hot_allowlist` ship
-/// their full schema; everything else (cold built-ins + MCP tools) is sent
-/// as a name + truncated-description stub that the model hydrates on demand
-/// via `ToolSearch`.
+/// their full schema. Everything else (cold built-ins + MCP tools) is —
+/// with `catalog` on (default) — folded into a single compact,
+/// name-only inventory line inside ToolSearch's own description (the
+/// openclaw pattern: no per-tool stub entries at all). With `catalog`
+/// off, cold tools fall back to individual name + truncated-description
+/// stub entries. Either way the model hydrates on demand via `ToolSearch`.
 ///
-/// CRITICAL caching constraint: the hot/stub split is a pure function of
-/// this static config — never of per-turn state — so the serialized
-/// `tools[]` array stays byte-identical across the turns of a conversation
-/// (the cached-prefix guard is `tools_array_byte_stable_across_roundtrips`
-/// in `wcore-providers`).
+/// CRITICAL caching constraint: the hot/deferred split is a pure function
+/// of this static config — never of per-turn state — so the serialized
+/// `tools[]` array (including the catalog line) stays byte-identical across
+/// the turns of a conversation (the cached-prefix guard is
+/// `tools_array_byte_stable_across_roundtrips` in `wcore-providers`); a
+/// ToolSearch hydration changes it once.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct DeferColdConfig {
@@ -38,6 +42,15 @@ pub struct DeferColdConfig {
     /// Tools that always ship their full schema. `ToolSearch` is never
     /// deferred regardless of this list (it is the hydration path).
     pub hot_allowlist: Vec<String>,
+    /// Default ON: deferred tools ship as ONE sorted name-only catalog line
+    /// in ToolSearch's description instead of per-tool stub entries
+    /// (measured: 43 stubs cost ~2.5k tokens/request — more than the hot
+    /// schemas). `false` restores per-tool stub entries.
+    pub catalog: bool,
+    /// Defensive cap on the catalog line's name-list length in chars
+    /// (suffix "+N more — search to discover" replaces the overflow, so an
+    /// MCP swarm cannot balloon the prompt). Applies to the names portion.
+    pub catalog_max_chars: usize,
 }
 
 impl DeferColdConfig {
@@ -55,6 +68,8 @@ impl Default for DeferColdConfig {
         Self {
             enabled: true,
             hot_allowlist: Self::default_hot_allowlist(),
+            catalog: true,
+            catalog_max_chars: 4096,
         }
     }
 }

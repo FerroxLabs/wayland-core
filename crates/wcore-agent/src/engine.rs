@@ -9052,16 +9052,27 @@ impl AgentEngine {
         self.hydrated_tool_names.retain(|n| !stale.contains(n));
     }
 
-    /// Layer D1 (token-opt): cold-deferral + hydration exemption for the
-    /// outbound tools[]. Cold tools (not on the static hot allowlist)
-    /// serialize as name-only stubs; a tool the model has HYDRATED via
-    /// ToolSearch ships its FULL schema — whether the deferral above stubbed
-    /// it or it is natively deferred (`Tool::is_deferred`, e.g. MCP proxies)
-    /// — because hydration means the model explicitly fetched the schema and
-    /// is about to call it. Runs AFTER the cap/admission pass so a
-    /// force-admitted hydrated tool is never flipped back to a stub. Pure
-    /// function of static config + the monotonic hydrated set: byte-stable
-    /// across turns, one-turn change on hydration.
+    /// Layer D1/D3 (token-opt): cold-deferral + hydration exemption +
+    /// catalog fold for the outbound tools[].
+    ///
+    /// 1. Cold tools (not on the static hot allowlist) are marked deferred.
+    /// 2. A tool the model has HYDRATED via ToolSearch ships its FULL
+    ///    schema — whether the deferral above marked it or it is natively
+    ///    deferred (`Tool::is_deferred`, e.g. MCP proxies) — because
+    ///    hydration means the model explicitly fetched the schema and is
+    ///    about to call it.
+    /// 3. Catalog mode (default): the remaining deferred defs are removed
+    ///    from the array entirely and folded into ONE sorted name-only
+    ///    inventory line on ToolSearch's description (openclaw parity —
+    ///    per-tool stubs measured MORE expensive than the hot schemas).
+    ///    A hydrated tool leaves the catalog line and ships full, in the
+    ///    same one-turn tools[] change as its admission. Catalog off:
+    ///    deferred defs stay as per-tool stub entries.
+    ///
+    /// Runs AFTER the cap/admission pass so a force-admitted hydrated tool
+    /// is never flipped back to a stub. Pure function of static config +
+    /// the monotonic hydrated set: byte-stable across turns, one-turn
+    /// change on hydration.
     fn apply_tool_deferral(
         &self,
         mut tools: Vec<wcore_types::tool::ToolDef>,
@@ -9081,6 +9092,12 @@ impl AgentEngine {
                     def.deferred = false;
                 }
             }
+        }
+        if defer_cfg.enabled && defer_cfg.catalog {
+            tools = wcore_tools::registry::fold_deferred_into_catalog(
+                tools,
+                defer_cfg.catalog_max_chars,
+            );
         }
         tools
     }
@@ -10403,17 +10420,44 @@ mod set_config_tests {
             cap_mcp_tool("mcp__srv__zulu"),
         ];
 
-        // Turn N: cap + deferral, exactly one MCP tool trimmed.
+        // Turn N: the cap keeps 2 of the 3 MCP tools; deferral then folds
+        // the kept-but-cold MCP defs into ToolSearch's catalog line (Layer
+        // D3), so the outbound array is just the hot tools.
         let capped_n = engine.apply_provider_tool_cap(tools.clone());
-        let turn_n = engine.apply_tool_deferral(capped_n);
-        assert_eq!(turn_n.len(), 4, "capped to the provider limit");
-        let kept_n: Vec<&str> = turn_n.iter().map(|t| t.name.as_str()).collect();
+        assert_eq!(capped_n.len(), 4, "capped to the provider limit");
+        let kept_mcp_n: Vec<String> = capped_n
+            .iter()
+            .filter(|t| t.server.is_some())
+            .map(|t| t.name.clone())
+            .collect();
         let trimmed: Vec<&str> = ["mcp__srv__alpha", "mcp__srv__bravo", "mcp__srv__zulu"]
             .into_iter()
-            .filter(|n| !kept_n.contains(n))
+            .filter(|n| !kept_mcp_n.iter().any(|k| k == n))
             .collect();
         assert_eq!(trimmed.len(), 1, "exactly one MCP tool trimmed");
         let hydrated_name = trimmed[0];
+
+        let turn_n = engine.apply_tool_deferral(capped_n);
+        assert!(
+            turn_n.iter().all(|t| !t.deferred),
+            "catalog mode: no stub entries in the outbound tools[]"
+        );
+        assert_eq!(
+            turn_n.len(),
+            2,
+            "cold MCP defs folded out of the array (hot Read + ToolSearch remain)"
+        );
+        let catalog_n = &turn_n
+            .iter()
+            .find(|t| t.name == "ToolSearch")
+            .expect("ToolSearch carries the catalog")
+            .description;
+        for kept in &kept_mcp_n {
+            assert!(
+                catalog_n.contains(kept.as_str()),
+                "kept cold MCP tool listed in the catalog line: {catalog_n}"
+            );
+        }
 
         // Turn N, later in the round: the model hydrates the trimmed tool
         // through the real ToolSearch (registry snapshot, real result body).
@@ -10423,10 +10467,10 @@ mod set_config_tests {
         // tools[] (evicting the last non-hydrated slot), cap still enforced,
         // and — critically — its def is NOT deferred: the deferral pass runs
         // after admission and must exempt hydrated names, or the name would
-        // ship with an empty stub schema.
+        // be folded away / shipped as a stub.
         let capped_n1 = engine.apply_provider_tool_cap(tools.clone());
+        assert_eq!(capped_n1.len(), 4, "cap still enforced after admission");
         let turn_n1 = engine.apply_tool_deferral(capped_n1);
-        assert_eq!(turn_n1.len(), 4, "cap still enforced after admission");
         let admitted = turn_n1
             .iter()
             .find(|t| t.name == hydrated_name)
@@ -10440,23 +10484,30 @@ mod set_config_tests {
             !admitted.deferred,
             "admitted hydrated tool must ship its FULL schema, not a stub"
         );
-        // A non-hydrated kept MCP tool is still a cold stub — the exemption
-        // is hydration-scoped, not a blanket un-defer.
-        let other_kept_mcp = turn_n1
+        // The hydrated name LEAVES the catalog line; the remaining cold MCP
+        // slot is still listed there (folded, not shipped as a stub entry).
+        let catalog_n1 = &turn_n1
             .iter()
-            .find(|t| t.server.is_some() && t.name != hydrated_name)
-            .expect("one more MCP tool is kept");
+            .find(|t| t.name == "ToolSearch")
+            .expect("ToolSearch carries the catalog")
+            .description;
         assert!(
-            other_kept_mcp.deferred,
-            "non-hydrated cold MCP tool stays a stub"
+            !catalog_n1.contains(hydrated_name),
+            "hydrated tool must leave the catalog line: {catalog_n1}"
+        );
+        assert!(
+            turn_n1.iter().all(|t| !t.deferred),
+            "catalog mode: still no stub entries after admission"
         );
 
-        // Turn N+2: the admission was a ONE-turn change — names AND deferred
-        // flags are stable again.
+        // Turn N+2: the admission was a ONE-turn change — names, deferred
+        // flags AND the catalog line are stable again.
         let capped_n2 = engine.apply_provider_tool_cap(tools);
         let turn_n2 = engine.apply_tool_deferral(capped_n2);
-        let shape = |defs: &[wcore_types::tool::ToolDef]| -> Vec<(String, bool)> {
-            defs.iter().map(|t| (t.name.clone(), t.deferred)).collect()
+        let shape = |defs: &[wcore_types::tool::ToolDef]| -> Vec<(String, bool, String)> {
+            defs.iter()
+                .map(|t| (t.name.clone(), t.deferred, t.description.clone()))
+                .collect()
         };
         assert_eq!(
             shape(&turn_n1),
@@ -10472,6 +10523,74 @@ mod set_config_tests {
             .await;
         assert!(!result.is_error, "hydrated tool must dispatch: {result:?}");
         assert_eq!(result.content, "ok");
+    }
+
+    /// Layer D3 (catalog fold): cold tools produce NO per-tool stub entries
+    /// on the wire — they are folded into one sorted, deterministic catalog
+    /// line on ToolSearch's description — and flipping the config knob off
+    /// restores the previous per-tool stub behavior.
+    #[test]
+    fn catalog_mode_emits_no_stub_entries_and_config_off_restores_stubs() {
+        let mut engine = make_engine("m");
+        let tools = vec![
+            builtin_tool("Read"),
+            builtin_tool("ToolSearch"),
+            builtin_tool("session_search"), // cold built-in
+            builtin_tool("clarify"),        // cold built-in
+        ];
+
+        // Catalog mode (default ON): cold defs leave the array entirely.
+        let turn1 = engine.apply_tool_deferral(tools.clone());
+        assert!(
+            turn1.iter().all(|t| !t.deferred),
+            "no deferred defs reach the serializer"
+        );
+        assert_eq!(turn1.len(), 2, "hot Read + ToolSearch only");
+        let ts = turn1.iter().find(|t| t.name == "ToolSearch").unwrap();
+        assert!(
+            ts.description.contains("clarify, session_search"),
+            "sorted name-only catalog on ToolSearch: {}",
+            ts.description
+        );
+
+        // The serializer therefore emits NO stub entries at all.
+        let wire =
+            serde_json::to_string(&wcore_providers::anthropic_shared::build_tools(&turn1))
+                .unwrap();
+        assert!(
+            !wire.contains("(Deferred)"),
+            "no per-tool stub entries on the wire"
+        );
+
+        // Deterministic + byte-stable across turns (same deferral state).
+        let turn2 = engine.apply_tool_deferral(tools.clone());
+        let wire2 =
+            serde_json::to_string(&wcore_providers::anthropic_shared::build_tools(&turn2))
+                .unwrap();
+        assert_eq!(wire, wire2, "catalog line byte-stable across turns");
+
+        // Config off: per-tool stub entries restored, catalog absent.
+        engine.config.builtin_tools.defer_cold.catalog = false;
+        let stubbed = engine.apply_tool_deferral(tools);
+        assert_eq!(stubbed.len(), 4, "stub mode keeps every def in the array");
+        assert!(
+            stubbed
+                .iter()
+                .any(|t| t.name == "clarify" && t.deferred),
+            "cold tool is a stub entry again"
+        );
+        let ts_stub = stubbed.iter().find(|t| t.name == "ToolSearch").unwrap();
+        assert!(
+            !ts_stub.description.contains("Deferred tools"),
+            "no catalog line in stub mode"
+        );
+        let wire_stub =
+            serde_json::to_string(&wcore_providers::anthropic_shared::build_tools(&stubbed))
+                .unwrap();
+        assert!(
+            wire_stub.contains("(Deferred)"),
+            "stub mode serializes per-tool stub entries"
+        );
     }
 
     /// Layer D1 follow-up, full-union edge: when EVERY kept cap slot is

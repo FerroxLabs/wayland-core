@@ -261,6 +261,78 @@ pub fn apply_cold_deferral(defs: &mut [ToolDef], hot_allowlist: &[String]) {
     }
 }
 
+/// Layer D3 (token-opt, openclaw parity): fold every deferred def OUT of the
+/// tools[] array entirely, replacing the per-tool name-only stubs with ONE
+/// compact catalog line appended to ToolSearch's description. Measured on
+/// the reference workload the 43 stub entries cost ~2.5k tokens/request —
+/// more than the hot full schemas — so removing them is the bigger half of
+/// the deferral win.
+///
+/// Determinism / caching: deferred names are emitted sorted and deduped
+/// (`BTreeSet`), so the catalog line is a pure function of the deferral
+/// state; combined with the monotonic hydrated-tool union the line is
+/// byte-stable across turns and changes exactly when the tools[] array
+/// already changes (a hydration admission).
+///
+/// `catalog_max_chars` bounds the names portion of the line; overflow is
+/// replaced by a `+N more — search to discover` suffix (openclaw's bounded
+/// directory), keeping an MCP swarm from ballooning the prompt while every
+/// omitted tool stays discoverable through ToolSearch queries.
+///
+/// Fallback: when no non-deferred `ToolSearch` def is present there is no
+/// surface to carry the catalog — the defs are returned unchanged (per-tool
+/// stubs), never silently undiscoverable.
+pub fn fold_deferred_into_catalog(mut defs: Vec<ToolDef>, catalog_max_chars: usize) -> Vec<ToolDef> {
+    if !defs.iter().any(|d| d.deferred) {
+        return defs;
+    }
+    if !defs.iter().any(|d| !d.deferred && d.name == "ToolSearch") {
+        return defs;
+    }
+    let names: std::collections::BTreeSet<String> = defs
+        .iter()
+        .filter(|d| d.deferred)
+        .map(|d| d.name.clone())
+        .collect();
+    defs.retain(|d| !d.deferred);
+    let catalog = render_deferred_catalog(&names, catalog_max_chars);
+    for def in defs.iter_mut() {
+        if def.name == "ToolSearch" {
+            def.description = format!("{} {}", def.description.trim_end(), catalog);
+            break;
+        }
+    }
+    defs
+}
+
+/// Render the sorted, bounded deferred-tool inventory line for
+/// [`fold_deferred_into_catalog`]. `max_chars` bounds the names portion;
+/// the fixed prefix and the overflow suffix sit outside the budget.
+fn render_deferred_catalog(
+    names: &std::collections::BTreeSet<String>,
+    max_chars: usize,
+) -> String {
+    const PREFIX: &str =
+        "Deferred tools (name-only; load the full schema via this tool before calling): ";
+    let total = names.len();
+    let mut list = String::new();
+    let mut included = 0usize;
+    for name in names {
+        let sep = if included == 0 { "" } else { ", " };
+        if included > 0 && list.len() + sep.len() + name.len() > max_chars {
+            break;
+        }
+        list.push_str(sep);
+        list.push_str(name);
+        included += 1;
+    }
+    let omitted = total - included;
+    if omitted > 0 {
+        list.push_str(&format!(", +{omitted} more — search to discover"));
+    }
+    format!("{PREFIX}{list}.")
+}
+
 #[async_trait]
 impl ToolDispatcher for ToolRegistry {
     async fn dispatch(&self, tool: &str, input: serde_json::Value) -> ToolResult {
@@ -711,6 +783,115 @@ mod tests {
             assert_eq!(a.name, b.name);
             assert_eq!(a.deferred, b.deferred);
         }
+    }
+
+    // --- fold_deferred_into_catalog tests (Layer D3) ---
+
+    fn catalog_def(name: &str, deferred: bool) -> ToolDef {
+        ToolDef {
+            name: name.to_string(),
+            description: format!("{name} description"),
+            input_schema: serde_json::json!({"type": "object"}),
+            deferred,
+            server: None,
+        }
+    }
+
+    #[test]
+    fn catalog_line_is_sorted_deterministic_and_replaces_stub_entries() {
+        let defs = vec![
+            catalog_def("ToolSearch", false),
+            catalog_def("Read", false),
+            catalog_def("zulu_tool", true),
+            catalog_def("alpha_tool", true),
+            catalog_def("mike_tool", true),
+        ];
+
+        let folded = fold_deferred_into_catalog(defs.clone(), 4096);
+
+        // No deferred entries survive in the array.
+        assert!(
+            folded.iter().all(|d| !d.deferred),
+            "no stub entries may remain"
+        );
+        assert_eq!(folded.len(), 2, "only non-deferred defs remain");
+
+        // The catalog line is on ToolSearch, sorted, name-only.
+        let ts = folded.iter().find(|d| d.name == "ToolSearch").unwrap();
+        assert!(
+            ts.description
+                .contains("alpha_tool, mike_tool, zulu_tool"),
+            "sorted name-only inventory: {}",
+            ts.description
+        );
+        assert!(
+            !ts.description.contains("alpha_tool description")
+                && !ts.description.contains("zulu_tool description"),
+            "no per-tool description text leaks into the catalog (names only): {}",
+            ts.description
+        );
+
+        // Byte-stable: same fold from a reordered input.
+        let mut reordered = defs;
+        reordered.reverse();
+        let folded2 = fold_deferred_into_catalog(reordered, 4096);
+        let ts2 = folded2.iter().find(|d| d.name == "ToolSearch").unwrap();
+        assert_eq!(
+            ts.description, ts2.description,
+            "catalog line must be byte-identical regardless of input order"
+        );
+    }
+
+    #[test]
+    fn catalog_truncates_with_more_marker_at_cap() {
+        let mut defs = vec![catalog_def("ToolSearch", false)];
+        for i in 0..50 {
+            defs.push(catalog_def(&format!("mcp__srv__tool_{i:03}"), true));
+        }
+        // Budget fits only a handful of ~18-char names.
+        let folded = fold_deferred_into_catalog(defs, 60);
+        let ts = folded.iter().find(|d| d.name == "ToolSearch").unwrap();
+        assert!(
+            ts.description.contains("more — search to discover"),
+            "overflow must be summarized: {}",
+            ts.description
+        );
+        // The first (sorted) name is present; a late name is not.
+        assert!(ts.description.contains("mcp__srv__tool_000"));
+        assert!(!ts.description.contains("mcp__srv__tool_049"));
+        // +N accounting: included + omitted = 50.
+        let omitted: usize = ts
+            .description
+            .split("+")
+            .nth(1)
+            .and_then(|s| s.split(' ').next())
+            .and_then(|s| s.parse().ok())
+            .expect("+N marker present");
+        let included = ts.description.matches("mcp__srv__tool_").count();
+        assert_eq!(included + omitted, 50);
+    }
+
+    #[test]
+    fn catalog_without_tool_search_falls_back_to_stubs() {
+        // No ToolSearch def → nothing can carry the catalog; deferred defs
+        // must be returned unchanged (stub entries), never dropped into
+        // undiscoverability.
+        let defs = vec![catalog_def("Read", false), catalog_def("cold_tool", true)];
+        let folded = fold_deferred_into_catalog(defs.clone(), 4096);
+        assert_eq!(folded.len(), 2);
+        assert!(folded.iter().any(|d| d.name == "cold_tool" && d.deferred));
+    }
+
+    #[test]
+    fn catalog_no_deferred_is_a_noop() {
+        let defs = vec![catalog_def("ToolSearch", false), catalog_def("Read", false)];
+        let folded = fold_deferred_into_catalog(defs.clone(), 4096);
+        assert_eq!(folded.len(), 2);
+        let ts = folded.iter().find(|d| d.name == "ToolSearch").unwrap();
+        assert_eq!(
+            ts.description, "ToolSearch description",
+            "no catalog suffix when nothing is deferred"
+        );
     }
 
     /// Correctness gate for Layer D1: a cold-deferred tool must remain
