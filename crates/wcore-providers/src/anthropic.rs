@@ -1169,6 +1169,98 @@ mod tests {
         );
     }
 
+    /// Gap-1+gap-2 coupling: the engine sends TWO hints — the permanent
+    /// compaction anchor plus the tail — and the budget lands at exactly 4
+    /// (system + tools + anchor + tail). The moving previous-boundary marker
+    /// YIELDS its slot to the anchor: the anchor guarantees the long prefix.
+    #[test]
+    fn anchor_plus_tail_hints_budget_exactly_four_prev_boundary_yields() {
+        let mut body = json!({
+            "system": [ { "type": "text", "text": "sys" } ],
+            "tools": [ { "name": "t", "description": "d" } ],
+            "messages": [
+                // Permanent anchor (stubbed compaction message), hint-marked
+                // by mark_cache_boundaries via build_messages.
+                { "role": "assistant", "content": [
+                    { "type": "tool_use", "id": "w1", "name": "Write",
+                      "input": { "_args_cleared": "[stub]" },
+                      "cache_control": { "type": "ephemeral" } }
+                ] },
+                user("r1"),
+                assistant("a2"),
+                user("u2"),
+                assistant("a3"),
+                // Tail, hint-marked by mark_cache_boundaries.
+                { "role": "user", "content": [
+                    { "type": "text", "text": "u3",
+                      "cache_control": { "type": "ephemeral" } }
+                ] }
+            ]
+        });
+        apply_cache_zones(&mut body, CacheTier::Ephemeral5m, 0);
+
+        assert_eq!(
+            total_markers(&body),
+            4,
+            "system + tools + anchor + tail must land exactly at the limit"
+        );
+        let marked = marked_message_indices(&body);
+        assert_eq!(
+            marked,
+            vec![0, 5],
+            "anchor (0) and tail (5) hold the message slots; the moving \
+             previous-boundary marker (3) must yield, got {marked:?}"
+        );
+    }
+
+    /// Config-off stripping (Codex finding 1) also removes the anchor
+    /// marker: with caching disabled, neither the tail hint nor the anchor
+    /// hint may leak to the wire.
+    #[test]
+    fn config_off_strips_anchor_and_tail_hints() {
+        let off = AnthropicProvider::new(
+            "test-key",
+            "https://api.anthropic.com",
+            ProviderCompat::anthropic_defaults(),
+            DebugConfig::default(),
+        )
+        .with_cache(false);
+
+        let mut req = cache_req(None);
+        req.messages = vec![
+            {
+                let mut m = wcore_types::message::Message::new(
+                    wcore_types::message::Role::Assistant,
+                    vec![wcore_types::message::ContentBlock::Text {
+                        text: "anchor".into(),
+                    }],
+                );
+                m.cache_breakpoint = Some(wcore_types::message::MessageCacheHint::Breakpoint);
+                m
+            },
+            wcore_types::message::Message::new(
+                wcore_types::message::Role::User,
+                vec![wcore_types::message::ContentBlock::Text { text: "mid".into() }],
+            ),
+            {
+                let mut m = wcore_types::message::Message::new(
+                    wcore_types::message::Role::User,
+                    vec![wcore_types::message::ContentBlock::Text {
+                        text: "tail".into(),
+                    }],
+                );
+                m.cache_breakpoint = Some(wcore_types::message::MessageCacheHint::Breakpoint);
+                m
+            },
+        ];
+        let body = off.build_request_body(&req);
+        assert_eq!(
+            total_markers(&body),
+            0,
+            "config-off must strip BOTH the anchor and tail hint markers"
+        );
+    }
+
     // --- Task 9: min_prefix_tokens floor ------------------------------------
 
     /// Tiny context + the default 1024-token floor → no markers at all.

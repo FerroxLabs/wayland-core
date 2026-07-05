@@ -4866,10 +4866,21 @@ impl AgentEngine {
                 Self::apply_pre_prompt_contribution(&mut request.messages, &outcome);
             }
 
-            // W1 S3: place per-message cache breakpoint at the tail when the
-            // provider honours it. Idempotent across turns: previous turns'
-            // markers are cleared and the new tail is marked.
-            mark_cache_boundaries(&mut request, &self.compat);
+            // W1 S3: place per-message cache breakpoints when the provider
+            // honours them. Idempotent across turns: previous turns' markers
+            // are cleared and the new tail is marked. Gap-1+gap-2 coupling:
+            // a PERMANENT anchor breakpoint is additionally pinned to an
+            // immutable already-stubbed message (pure function of the
+            // compaction markers; `request.messages` is an index-aligned
+            // clone of `self.messages`, so the index maps 1:1). The anchor
+            // keeps the long prefix cache-valid while continuous
+            // args-compaction transitions the message at the
+            // keep_recent_turns boundary inside it.
+            mark_cache_boundaries(
+                &mut request,
+                &self.compat,
+                micro::cache_anchor_index(&self.messages),
+            );
 
             // W1 v0.6.3: stamp a smart-routing hint onto the request so
             // `ProviderChain` can surface the router's decision in dispatch
