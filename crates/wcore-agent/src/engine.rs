@@ -194,6 +194,14 @@ const MIN_THINKING_BUDGET: u32 = 1_024;
 /// auto-continue loop as the net for longer outputs.
 const UNKNOWN_REASONING_CAP: u32 = 32_768;
 
+/// Layer D1 follow-up (hydrated-tool admission) — hard bound on remembered
+/// ToolSearch hydrations (`AgentEngine::hydrated_tool_names`). Keeps the set
+/// (and the per-turn admission/exemption scans over it) O(1)-bounded on a
+/// long session with many broad ToolSearch queries; overflow evicts the
+/// OLDEST hydration. Sized to comfortably exceed a provider's realistic MCP
+/// slot budget (OpenAI hard cap = 128 total tools minus ~40 built-ins).
+const HYDRATED_TOOLS_CAP: usize = 64;
+
 /// #426 — shrink a requested reasoning budget so the visible answer can never be
 /// starved: the budget may use at most `max_tokens - MIN_VISIBLE_OUTPUT`. Returns
 /// the budget to actually send (0 when no room remains; the caller drops thinking
@@ -4707,24 +4715,15 @@ impl AgentEngine {
             let tools = self.apply_provider_tool_cap(tools);
 
             // Layer D1 (token-opt): defer cold tools to name-only stubs —
-            // only the configured hot allowlist ships full schemas; the
-            // model hydrates a stub on demand via ToolSearch (the system
-            // prompt states that rule once, `tool_usage_guidance`).
-            // CRITICAL: the hot/stub split is a pure function of static
-            // config, never per-turn state, so the serialized tools[] array
-            // stays byte-identical across turns (cache guard:
-            // `tools_array_byte_stable_across_roundtrips`).
-            let tools = {
-                let mut tools = tools;
-                let defer_cfg = &self.config.builtin_tools.defer_cold;
-                if defer_cfg.enabled {
-                    wcore_tools::registry::apply_cold_deferral(
-                        &mut tools,
-                        &defer_cfg.hot_allowlist,
-                    );
-                }
-                tools
-            };
+            // only the configured hot allowlist (plus ToolSearch-hydrated
+            // tools) ships full schemas; the model hydrates a stub on demand
+            // via ToolSearch (the system prompt states that rule once,
+            // `tool_usage_guidance`). The hot/stub split is a pure function
+            // of static config + the monotonic hydrated set, so the
+            // serialized tools[] array stays byte-identical across turns
+            // (cache guard: `tools_array_byte_stable_across_roundtrips`);
+            // a hydration changes it once.
+            let tools = self.apply_tool_deferral(tools);
 
             // Build system prompt: append plan mode instructions when active
             let system = if self.plan_state.is_active {
@@ -8729,10 +8728,12 @@ impl AgentEngine {
         // the provider cap below to admit it into the outbound tools[].
         // Cache-safe: appended at the END, once (the hydrated list only
         // grows), a legitimate one-turn miss that is stable afterwards.
+        let curation_mcp_names: std::collections::HashSet<&str> =
+            mcp_tools.iter().map(|t| t.name.as_str()).collect();
         let hydrated_mcp: Vec<String> = self
             .hydrated_tool_names
             .iter()
-            .filter(|n| mcp_tools.iter().any(|t| &t.name == *n))
+            .filter(|n| curation_mcp_names.contains(n.as_str()))
             .cloned()
             .collect();
         if let Some((_, order)) = self.mcp_curation_cache.as_mut() {
@@ -8891,47 +8892,67 @@ impl AgentEngine {
         // hydrated via ToolSearch must be genuinely callable — providers
         // validate tool calls against the CURRENT tools[] array, so a
         // hydrated-but-trimmed MCP tool would be learnable yet uncallable.
+        //
+        // Stale hydrations are pruned first: a hydrated tool whose MCP
+        // server disconnected is gone from the LIVE registry. The check is
+        // against the registry — NOT the per-turn filtered list — so
+        // plan-mode category filtering or cap trimming never misclassifies
+        // a live tool as stale.
+        self.prune_stale_hydrated_tools();
+        //
         // Force-admit hydrated MCP names: appended at the END while budget
         // remains (a cache-safe append); when the union is FULL, the LAST
         // non-hydrated slot is evicted to make room (hydration is a stronger
         // relevance signal than the BM25 guess that admitted that slot).
-        // Either way the change lands once — a legitimate one-turn cache
-        // miss — and the set is stable afterwards because
-        // `hydrated_tool_names` only grows.
-        let hydrated_all: std::collections::HashSet<&str> = self
-            .hydrated_tool_names
-            .iter()
-            .map(String::as_str)
-            .collect();
+        // When EVERY kept slot is itself hydrated, the OLDEST hydrated slot
+        // (front-most in the union) is evicted AND demoted from the hydrated
+        // set — without the demotion it would force itself back next turn
+        // and the two tools would thrash the array forever. Each change
+        // lands once — a legitimate one-turn cache miss — and the set is
+        // stable afterwards.
+        let mut hydrated_all: std::collections::HashSet<String> =
+            self.hydrated_tool_names.iter().cloned().collect();
+        let mcp_names: std::collections::HashSet<&str> =
+            mcp_tools.iter().map(|t| t.name.as_str()).collect();
         let hydrated_mcp: Vec<String> = self
             .hydrated_tool_names
             .iter()
-            .filter(|n| mcp_tools.iter().any(|t| &t.name == *n))
+            .filter(|n| mcp_names.contains(n.as_str()))
             .cloned()
             .collect();
         let mut evicted: Vec<String> = Vec::new();
+        let mut demoted: Vec<String> = Vec::new();
         if let Some((_, order)) = self.mcp_cap_cache.as_mut() {
             for name in hydrated_mcp {
                 if order.contains(&name) {
                     continue;
                 }
                 if order.len() >= mcp_budget {
-                    match order.iter().rposition(|n| !hydrated_all.contains(n.as_str())) {
-                        Some(idx) => evicted.push(order.remove(idx)),
-                        // Every kept slot is itself hydrated — no eviction
-                        // candidate; the budget genuinely cannot fit this one.
-                        None => continue,
+                    // Last non-hydrated slot first; when all slots are
+                    // hydrated, index 0 = the oldest hydrated slot (LRU).
+                    let idx = order
+                        .iter()
+                        .rposition(|n| !hydrated_all.contains(n))
+                        .unwrap_or(0);
+                    let out = order.remove(idx);
+                    if hydrated_all.remove(&out) {
+                        demoted.push(out.clone());
                     }
+                    evicted.push(out);
                 }
                 order.push(name);
             }
+        }
+        if !demoted.is_empty() {
+            self.hydrated_tool_names.retain(|n| !demoted.contains(n));
         }
         if !evicted.is_empty() {
             tracing::info!(
                 target: "wcore_agent::engine",
                 "provider tool cap: evicted {:?} to admit ToolSearch-hydrated tools \
-                 (one-turn cache miss; set stable afterwards)",
-                evicted
+                 (demoted from hydrated set: {:?}; one-turn cache miss, set stable afterwards)",
+                evicted,
+                demoted
             );
         }
         let keep_order: Vec<String> = self
@@ -8971,7 +8992,8 @@ impl AgentEngine {
     /// Layer D1 follow-up (hydrated-tool admission): parse a successful
     /// `ToolSearch` result body (a JSON array of `{name, description,
     /// parameters}` matches) and record every returned tool name in
-    /// [`Self::hydrated_tool_names`] (FIRST-HYDRATION order, deduped). The
+    /// [`Self::hydrated_tool_names`] (FIRST-HYDRATION order, deduped,
+    /// bounded by [`HYDRATED_TOOLS_CAP`] with evict-oldest). The
     /// curation/cap passes force-include these names in the outbound
     /// `tools[]` on subsequent turns so a hydrated tool is genuinely
     /// callable. A no-match result is a plain string, not JSON — it parses
@@ -8986,9 +9008,81 @@ impl AgentEngine {
             if let Some(name) = m.get("name").and_then(|v| v.as_str())
                 && !self.hydrated_tool_names.iter().any(|n| n == name)
             {
+                if self.hydrated_tool_names.len() >= HYDRATED_TOOLS_CAP {
+                    let dropped = self.hydrated_tool_names.remove(0);
+                    tracing::debug!(
+                        target: "wcore_agent::engine",
+                        "hydrated-tool set at cap ({HYDRATED_TOOLS_CAP}); \
+                         evicting oldest hydration {dropped:?}"
+                    );
+                }
                 self.hydrated_tool_names.push(name.to_string());
             }
         }
+    }
+
+    /// Layer D1 follow-up: drop hydrated names that no longer exist in the
+    /// LIVE tool registry (e.g. their MCP server disconnected after the
+    /// ToolSearch snapshot was taken at bootstrap). Without this, a stale
+    /// hydration would sit in the admission set forever, and — worse — could
+    /// hold a cap slot for a tool that can never dispatch. Checked against
+    /// the registry rather than the per-turn filtered def list, so plan-mode
+    /// category filtering / cap trimming never misclassifies a live tool as
+    /// stale.
+    fn prune_stale_hydrated_tools(&mut self) {
+        if self.hydrated_tool_names.is_empty() {
+            return;
+        }
+        let registry = Arc::clone(&self.tools);
+        let stale: Vec<String> = self
+            .hydrated_tool_names
+            .iter()
+            .filter(|n| registry.get(n).is_none())
+            .cloned()
+            .collect();
+        if stale.is_empty() {
+            return;
+        }
+        tracing::info!(
+            target: "wcore_agent::engine",
+            "dropping stale hydrated tools no longer in the registry \
+             (MCP server disconnected?): {:?}",
+            stale
+        );
+        self.hydrated_tool_names.retain(|n| !stale.contains(n));
+    }
+
+    /// Layer D1 (token-opt): cold-deferral + hydration exemption for the
+    /// outbound tools[]. Cold tools (not on the static hot allowlist)
+    /// serialize as name-only stubs; a tool the model has HYDRATED via
+    /// ToolSearch ships its FULL schema — whether the deferral above stubbed
+    /// it or it is natively deferred (`Tool::is_deferred`, e.g. MCP proxies)
+    /// — because hydration means the model explicitly fetched the schema and
+    /// is about to call it. Runs AFTER the cap/admission pass so a
+    /// force-admitted hydrated tool is never flipped back to a stub. Pure
+    /// function of static config + the monotonic hydrated set: byte-stable
+    /// across turns, one-turn change on hydration.
+    fn apply_tool_deferral(
+        &self,
+        mut tools: Vec<wcore_types::tool::ToolDef>,
+    ) -> Vec<wcore_types::tool::ToolDef> {
+        let defer_cfg = &self.config.builtin_tools.defer_cold;
+        if defer_cfg.enabled {
+            wcore_tools::registry::apply_cold_deferral(&mut tools, &defer_cfg.hot_allowlist);
+        }
+        if !self.hydrated_tool_names.is_empty() {
+            let hydrated: std::collections::HashSet<&str> = self
+                .hydrated_tool_names
+                .iter()
+                .map(String::as_str)
+                .collect();
+            for def in tools.iter_mut() {
+                if def.deferred && hydrated.contains(def.name.as_str()) {
+                    def.deferred = false;
+                }
+            }
+        }
+        tools
     }
 
     /// W6 F17 recency input for `McpCurator`. Reads the M2 audit log via the
@@ -10208,49 +10302,89 @@ mod set_config_tests {
         );
     }
 
+    /// Minimal dispatchable MCP-provenance tool fixture for the
+    /// hydrated-tool-admission tests.
+    struct NamedTool(String);
+    #[async_trait::async_trait]
+    impl wcore_tools::Tool for NamedTool {
+        fn name(&self) -> &str {
+            &self.0
+        }
+        fn description(&self) -> &str {
+            "mcp fixture"
+        }
+        fn input_schema(&self) -> serde_json::Value {
+            serde_json::json!({"type": "object"})
+        }
+        fn is_concurrency_safe(&self, _: &serde_json::Value) -> bool {
+            true
+        }
+        async fn execute(&self, _: serde_json::Value) -> wcore_types::tool::ToolResult {
+            wcore_types::tool::ToolResult {
+                content: "ok".to_string(),
+                is_error: false,
+            }
+        }
+        fn category(&self) -> wcore_protocol::events::ToolCategory {
+            wcore_protocol::events::ToolCategory::Info
+        }
+        fn mcp_server(&self) -> Option<&str> {
+            Some("srv")
+        }
+    }
+
+    /// Registry holding the given MCP fixture tools (the live-registry
+    /// counterpart of the ToolDef lists the cap tests feed in).
+    fn hydration_registry(names: &[&str]) -> ToolRegistry {
+        let mut reg = ToolRegistry::new();
+        for name in names {
+            reg.register(Box::new(NamedTool(name.to_string())));
+        }
+        reg
+    }
+
+    /// The exact hydration flow, end to end against real components: build a
+    /// ToolSearchTool on the cold-deferred bootstrap-style snapshot of the
+    /// engine's LIVE registry, run the query, and feed its real result body
+    /// into the engine's recorder.
+    async fn hydrate_via_tool_search(engine: &mut super::AgentEngine, query: &str) {
+        use wcore_tools::Tool as _;
+        let mut snapshot = engine.tools().to_tool_defs();
+        wcore_tools::registry::apply_cold_deferral(
+            &mut snapshot,
+            &engine.config.builtin_tools.defer_cold.hot_allowlist,
+        );
+        let search = wcore_tools::tool_search::ToolSearchTool::new(snapshot);
+        let result = search.execute(serde_json::json!({"query": query})).await;
+        assert!(!result.is_error, "ToolSearch must find {query}: {result:?}");
+        assert!(
+            result.content.contains("parameters"),
+            "hydration must return the full schema"
+        );
+        engine.record_hydrated_tools(&result.content);
+    }
+
     /// Layer D1 follow-up (hydrated-tool admission): an MCP tool the provider
-    /// cap trimmed on turn N, then hydrated via ToolSearch, must be present
-    /// in turn N+1's outbound tools[] — providers validate tool calls against
-    /// the CURRENT array, so discoverable-but-undeclared = uncallable — and
-    /// must genuinely dispatch. The admission is a one-turn tools[] change;
-    /// the set must be byte-stable again from turn N+2.
+    /// cap trimmed on turn N, then hydrated via a REAL ToolSearch built on the
+    /// registry snapshot, must be present in turn N+1's outbound tools[] with
+    /// deferred == false (full schema — providers validate tool calls against
+    /// the CURRENT array, and a stub is not a callable schema), and must
+    /// genuinely dispatch through the SAME registry ToolSearch snapshotted.
+    /// The admission is a one-turn tools[] change; byte-stable from turn N+2.
     #[tokio::test]
     async fn hydrated_tool_admitted_to_next_turn_tools_and_dispatches() {
         use wcore_tools::dispatcher::ToolDispatcher;
         use wcore_types::message::{ContentBlock, Message, Role};
 
-        /// Minimal dispatchable MCP-provenance tool fixture.
-        struct NamedTool(String);
-        #[async_trait::async_trait]
-        impl wcore_tools::Tool for NamedTool {
-            fn name(&self) -> &str {
-                &self.0
-            }
-            fn description(&self) -> &str {
-                "mcp fixture"
-            }
-            fn input_schema(&self) -> serde_json::Value {
-                serde_json::json!({"type": "object"})
-            }
-            fn is_concurrency_safe(&self, _: &serde_json::Value) -> bool {
-                true
-            }
-            async fn execute(&self, _: serde_json::Value) -> wcore_types::tool::ToolResult {
-                wcore_types::tool::ToolResult {
-                    content: "ok".to_string(),
-                    is_error: false,
-                }
-            }
-            fn category(&self) -> wcore_protocol::events::ToolCategory {
-                wcore_protocol::events::ToolCategory::Info
-            }
-            fn mcp_server(&self) -> Option<&str> {
-                Some("srv")
-            }
-        }
-
-        // Cap = 4: 2 non-MCP + budget for 2 of the 3 MCP tools.
+        // Cap = 4: 2 non-MCP + budget for 2 of the 3 MCP tools. The LIVE
+        // registry carries all three MCP tools (they are trimmed from the
+        // outbound declarations, not from the registry).
         let mut engine = make_engine("m");
+        engine.tools = Arc::new(hydration_registry(&[
+            "mcp__srv__alpha",
+            "mcp__srv__bravo",
+            "mcp__srv__zulu",
+        ]));
         engine.compat.max_tools = Some(4);
         engine.mcp_curation = wcore_config::config::McpCurationPolicy::Off;
         engine.audit_log = None; // keyword-only ranking → deterministic
@@ -10269,8 +10403,9 @@ mod set_config_tests {
             cap_mcp_tool("mcp__srv__zulu"),
         ];
 
-        // Turn N: the cap trims exactly one MCP tool.
-        let turn_n = engine.apply_provider_tool_cap(tools.clone());
+        // Turn N: cap + deferral, exactly one MCP tool trimmed.
+        let capped_n = engine.apply_provider_tool_cap(tools.clone());
+        let turn_n = engine.apply_tool_deferral(capped_n);
         assert_eq!(turn_n.len(), 4, "capped to the provider limit");
         let kept_n: Vec<&str> = turn_n.iter().map(|t| t.name.as_str()).collect();
         let trimmed: Vec<&str> = ["mcp__srv__alpha", "mcp__srv__bravo", "mcp__srv__zulu"]
@@ -10280,46 +10415,207 @@ mod set_config_tests {
         assert_eq!(trimmed.len(), 1, "exactly one MCP tool trimmed");
         let hydrated_name = trimmed[0];
 
-        // Turn N, later in the round: the model hydrates the trimmed tool.
-        // This is the exact result-body shape ToolSearchTool emits.
-        let tool_search_result = serde_json::to_string_pretty(&serde_json::json!([{
-            "name": hydrated_name,
-            "description": "trimmed mcp tool",
-            "parameters": {"type": "object"},
-        }]))
-        .unwrap();
-        engine.record_hydrated_tools(&tool_search_result);
+        // Turn N, later in the round: the model hydrates the trimmed tool
+        // through the real ToolSearch (registry snapshot, real result body).
+        hydrate_via_tool_search(&mut engine, hydrated_name).await;
 
         // Turn N+1: the hydrated tool is force-admitted into the outbound
-        // tools[] (evicting the last non-hydrated slot), cap still enforced.
-        let turn_n1 = engine.apply_provider_tool_cap(tools.clone());
+        // tools[] (evicting the last non-hydrated slot), cap still enforced,
+        // and — critically — its def is NOT deferred: the deferral pass runs
+        // after admission and must exempt hydrated names, or the name would
+        // ship with an empty stub schema.
+        let capped_n1 = engine.apply_provider_tool_cap(tools.clone());
+        let turn_n1 = engine.apply_tool_deferral(capped_n1);
         assert_eq!(turn_n1.len(), 4, "cap still enforced after admission");
-        let kept_n1: Vec<&str> = turn_n1.iter().map(|t| t.name.as_str()).collect();
+        let admitted = turn_n1
+            .iter()
+            .find(|t| t.name == hydrated_name)
+            .unwrap_or_else(|| {
+                panic!(
+                    "hydrated tool must be in the next turn's outbound tools[] (got {:?})",
+                    turn_n1.iter().map(|t| &t.name).collect::<Vec<_>>()
+                )
+            });
         assert!(
-            kept_n1.contains(&hydrated_name),
-            "hydrated tool must be in the next turn's outbound tools[] \
-             (got {kept_n1:?})"
+            !admitted.deferred,
+            "admitted hydrated tool must ship its FULL schema, not a stub"
+        );
+        // A non-hydrated kept MCP tool is still a cold stub — the exemption
+        // is hydration-scoped, not a blanket un-defer.
+        let other_kept_mcp = turn_n1
+            .iter()
+            .find(|t| t.server.is_some() && t.name != hydrated_name)
+            .expect("one more MCP tool is kept");
+        assert!(
+            other_kept_mcp.deferred,
+            "non-hydrated cold MCP tool stays a stub"
         );
 
-        // Turn N+2: the admission was a ONE-turn change — the set is
-        // byte-stable again.
-        let turn_n2 = engine.apply_provider_tool_cap(tools);
-        let kept_n2: Vec<&str> = turn_n2.iter().map(|t| t.name.as_str()).collect();
+        // Turn N+2: the admission was a ONE-turn change — names AND deferred
+        // flags are stable again.
+        let capped_n2 = engine.apply_provider_tool_cap(tools);
+        let turn_n2 = engine.apply_tool_deferral(capped_n2);
+        let shape = |defs: &[wcore_types::tool::ToolDef]| -> Vec<(String, bool)> {
+            defs.iter().map(|t| (t.name.clone(), t.deferred)).collect()
+        };
         assert_eq!(
-            kept_n1, kept_n2,
+            shape(&turn_n1),
+            shape(&turn_n2),
             "post-admission set must be byte-stable across turns"
         );
 
-        // ...and the hydrated tool genuinely dispatches through the registry.
-        let mut reg = ToolRegistry::new();
-        reg.register(Box::new(NamedTool(hydrated_name.to_string())));
-        engine.tools = Arc::new(reg);
+        // ...and the hydrated tool genuinely dispatches through the SAME
+        // registry the ToolSearch snapshot came from.
         let result = engine
             .tools()
             .dispatch(hydrated_name, serde_json::json!({}))
             .await;
         assert!(!result.is_error, "hydrated tool must dispatch: {result:?}");
         assert_eq!(result.content, "ok");
+    }
+
+    /// Layer D1 follow-up, full-union edge: when EVERY kept cap slot is
+    /// already hydrated and one more hydrated tool needs admission, the
+    /// OLDEST hydrated slot is evicted (LRU) and DEMOTED from the hydrated
+    /// set — without the demotion the evicted tool would force itself back
+    /// next turn and the pair would thrash the tools[] array forever.
+    #[tokio::test]
+    async fn hydration_eviction_is_lru_and_does_not_thrash() {
+        use wcore_types::message::{ContentBlock, Message, Role};
+
+        let mut engine = make_engine("m");
+        engine.tools = Arc::new(hydration_registry(&[
+            "mcp__srv__alpha",
+            "mcp__srv__bravo",
+            "mcp__srv__zulu",
+        ]));
+        engine.compat.max_tools = Some(4); // budget for 2 of the 3 MCP tools
+        engine.mcp_curation = wcore_config::config::McpCurationPolicy::Off;
+        engine.audit_log = None;
+        engine.messages = vec![Message::new(
+            Role::User,
+            vec![ContentBlock::Text {
+                text: "alpha database query".to_string(),
+            }],
+        )];
+
+        let tools = vec![
+            builtin_tool("Read"),
+            builtin_tool("ToolSearch"),
+            cap_mcp_tool("mcp__srv__alpha"),
+            cap_mcp_tool("mcp__srv__bravo"),
+            cap_mcp_tool("mcp__srv__zulu"),
+        ];
+
+        // Turn 1 fills the 2 MCP slots; one tool is trimmed.
+        let turn1 = engine.apply_provider_tool_cap(tools.clone());
+        let kept1: Vec<String> = turn1
+            .iter()
+            .filter(|t| t.server.is_some())
+            .map(|t| t.name.clone())
+            .collect();
+        assert_eq!(kept1.len(), 2);
+        let trimmed = ["mcp__srv__alpha", "mcp__srv__bravo", "mcp__srv__zulu"]
+            .into_iter()
+            .find(|n| !kept1.iter().any(|k| k == n))
+            .expect("one trimmed");
+
+        // Hydrate BOTH kept slots, then the trimmed tool (in that order).
+        hydrate_via_tool_search(&mut engine, &kept1[0]).await;
+        hydrate_via_tool_search(&mut engine, &kept1[1]).await;
+        hydrate_via_tool_search(&mut engine, trimmed).await;
+
+        // Turn 2: every slot is hydrated → the OLDEST hydrated slot
+        // (kept1[0], front of the union) is evicted and demoted; the newly
+        // hydrated tool takes the slot.
+        let turn2 = engine.apply_provider_tool_cap(tools.clone());
+        let kept2: Vec<String> = turn2
+            .iter()
+            .filter(|t| t.server.is_some())
+            .map(|t| t.name.clone())
+            .collect();
+        assert_eq!(kept2.len(), 2, "cap still enforced");
+        assert!(
+            kept2.iter().any(|n| n == trimmed),
+            "newly hydrated tool admitted (kept: {kept2:?})"
+        );
+        assert!(
+            !kept2.iter().any(|n| n == &kept1[0]),
+            "oldest hydrated slot evicted (LRU)"
+        );
+        assert!(
+            !engine.hydrated_tool_names.iter().any(|n| n == &kept1[0]),
+            "evicted tool demoted from the hydrated set (anti-thrash)"
+        );
+
+        // Turn 3: stable — the demoted tool must NOT force itself back.
+        let turn3 = engine.apply_provider_tool_cap(tools);
+        let kept3: Vec<String> = turn3
+            .iter()
+            .filter(|t| t.server.is_some())
+            .map(|t| t.name.clone())
+            .collect();
+        assert_eq!(kept2, kept3, "post-eviction set is stable (no thrash)");
+    }
+
+    /// Layer D1 follow-up, stale-hydration regression: ToolSearch serves a
+    /// BOOTSTRAP snapshot, so after an MCP server disconnects the model can
+    /// hydrate a tool that no longer exists in the live registry. The
+    /// admission pass must prune it (never spend a cap slot on it) and keep
+    /// the live hydrations.
+    #[tokio::test]
+    async fn stale_hydration_pruned_when_tool_leaves_registry() {
+        use wcore_types::message::{ContentBlock, Message, Role};
+
+        // Live registry has alpha + bravo. "ghost" was hydratable from the
+        // bootstrap snapshot but its server has since disconnected.
+        let mut engine = make_engine("m");
+        engine.tools = Arc::new(hydration_registry(&["mcp__srv__alpha", "mcp__srv__bravo"]));
+        engine.compat.max_tools = Some(3); // 2 non-MCP + budget for 1 MCP
+        engine.mcp_curation = wcore_config::config::McpCurationPolicy::Off;
+        engine.audit_log = None;
+        engine.messages = vec![Message::new(
+            Role::User,
+            vec![ContentBlock::Text {
+                text: "alpha database query".to_string(),
+            }],
+        )];
+
+        // The model hydrated ghost (pre-disconnect, via the stale snapshot)
+        // and bravo (live). Feed the recorder the exact ToolSearch shape.
+        engine.record_hydrated_tools(
+            &serde_json::to_string_pretty(&serde_json::json!([
+                {"name": "mcp__srv__ghost", "description": "gone", "parameters": {"type": "object"}},
+                {"name": "mcp__srv__bravo", "description": "live", "parameters": {"type": "object"}},
+            ]))
+            .unwrap(),
+        );
+
+        let tools = vec![
+            builtin_tool("Read"),
+            builtin_tool("ToolSearch"),
+            cap_mcp_tool("mcp__srv__alpha"),
+            cap_mcp_tool("mcp__srv__bravo"),
+        ];
+        let kept = engine.apply_provider_tool_cap(tools);
+        let names: Vec<&str> = kept.iter().map(|t| t.name.as_str()).collect();
+
+        // Stale hydration pruned: gone from the hydrated set, never emitted.
+        assert!(
+            !engine.hydrated_tool_names.iter().any(|n| n == "mcp__srv__ghost"),
+            "stale hydration must be pruned from the hydrated set"
+        );
+        assert!(!names.contains(&"mcp__srv__ghost"));
+        // Live hydration survives the prune and is admitted.
+        assert!(
+            engine.hydrated_tool_names.iter().any(|n| n == "mcp__srv__bravo"),
+            "live hydration must survive the prune"
+        );
+        assert!(
+            names.contains(&"mcp__srv__bravo"),
+            "live hydrated tool must be admitted (kept: {names:?})"
+        );
+        assert_eq!(kept.len(), 3, "cap still enforced");
     }
 
     /// #359 regression — a BARE-named MCP tool is subject to curation. The
