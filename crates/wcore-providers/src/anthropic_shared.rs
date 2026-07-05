@@ -208,9 +208,19 @@ pub fn build_tools(tools: &[ToolDef]) -> Vec<Value> {
     // tool name — so the tools[] array is byte-identical across round-trips
     // of one conversation regardless of registration / curation order. The
     // array is part of the cached prompt prefix; a reordered array changes
-    // the prefix bytes and silently busts prompt caching.
+    // the prefix bytes and silently busts prompt caching. Schema /
+    // description / deferred are the DUPLICATE-NAME tiebreak: the registry
+    // does not forbid duplicate registration, and a name-only (stable) sort
+    // would keep input order for equal names — byte-unstable again.
     let mut ordered: Vec<&ToolDef> = tools.iter().collect();
-    ordered.sort_by(|a, b| a.name.cmp(&b.name));
+    ordered.sort_by_cached_key(|t| {
+        (
+            t.name.clone(),
+            serde_json::to_string(&t.input_schema).unwrap_or_default(),
+            t.description.clone(),
+            t.deferred,
+        )
+    });
     ordered
         .iter()
         .map(|t| {
@@ -1034,6 +1044,31 @@ mod tests {
         assert_eq!(
             turn1, reordered,
             "reordered input must serialize byte-identically (deterministic name sort)"
+        );
+
+        // DUPLICATE names must not reintroduce input-order dependence: the
+        // registry does not forbid duplicate registration, and a stable
+        // name-only sort keeps input order for equal names. The
+        // schema/description tiebreak makes duplicates order-independent too.
+        let dup_a = ToolDef {
+            name: "Read".into(),
+            description: "Read a file (duplicate registration)".into(),
+            input_schema: serde_json::json!({"type": "object", "properties": {"offset": {"type": "integer"}}}),
+            deferred: false,
+            server: None,
+        };
+        let dup_b = ToolDef {
+            name: "Read".into(),
+            description: "Read a file".into(),
+            input_schema: serde_json::json!({"type": "object", "properties": {"path": {"type": "string"}}}),
+            deferred: false,
+            server: None,
+        };
+        let one = serde_json::to_string(&build_tools(&[dup_a.clone(), dup_b.clone()])).unwrap();
+        let other = serde_json::to_string(&build_tools(&[dup_b, dup_a])).unwrap();
+        assert_eq!(
+            one, other,
+            "duplicate names must serialize byte-identically regardless of input order"
         );
     }
 
