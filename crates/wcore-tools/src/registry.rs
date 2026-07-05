@@ -306,8 +306,12 @@ pub fn fold_deferred_into_catalog(mut defs: Vec<ToolDef>, catalog_max_chars: usi
 }
 
 /// Render the sorted, bounded deferred-tool inventory line for
-/// [`fold_deferred_into_catalog`]. `max_chars` bounds the names portion;
-/// the fixed prefix and the overflow suffix sit outside the budget.
+/// [`fold_deferred_into_catalog`]. `max_chars` is a HARD bound on the
+/// name-list portion — even the FIRST name is dropped when it alone exceeds
+/// the budget (a pathological MCP name must not blow past the documented
+/// cap). The fixed prefix and the constant-size `+N more` overflow suffix
+/// sit outside the budget; omitted names remain discoverable via ToolSearch
+/// queries.
 fn render_deferred_catalog(
     names: &std::collections::BTreeSet<String>,
     max_chars: usize,
@@ -319,7 +323,7 @@ fn render_deferred_catalog(
     let mut included = 0usize;
     for name in names {
         let sep = if included == 0 { "" } else { ", " };
-        if included > 0 && list.len() + sep.len() + name.len() > max_chars {
+        if list.len() + sep.len() + name.len() > max_chars {
             break;
         }
         list.push_str(sep);
@@ -328,7 +332,10 @@ fn render_deferred_catalog(
     }
     let omitted = total - included;
     if omitted > 0 {
-        list.push_str(&format!(", +{omitted} more — search to discover"));
+        if included > 0 {
+            list.push_str(", ");
+        }
+        list.push_str(&format!("+{omitted} more — search to discover"));
     }
     format!("{PREFIX}{list}.")
 }
@@ -869,6 +876,41 @@ mod tests {
             .expect("+N marker present");
         let included = ts.description.matches("mcp__srv__tool_").count();
         assert_eq!(included + omitted, 50);
+    }
+
+    /// Codex verify finding: `catalog_max_chars` must be a HARD bound. The
+    /// first renderer version exempted the first name from the length check,
+    /// so a single pathological MCP name could blow past the documented cap.
+    #[test]
+    fn catalog_cap_is_hard_even_for_the_first_name() {
+        let long_name = format!("mcp__srv__{}", "x".repeat(120));
+        let defs = vec![
+            catalog_def("ToolSearch", false),
+            catalog_def(&long_name, true),
+            catalog_def(&format!("{long_name}_2"), true),
+        ];
+        // Budget smaller than the (sorted-first) long name: ZERO names ship;
+        // everything collapses into the +N marker.
+        let folded = fold_deferred_into_catalog(defs, 40);
+        let ts = folded.iter().find(|d| d.name == "ToolSearch").unwrap();
+        assert!(
+            !ts.description.contains(&long_name),
+            "an over-budget first name must NOT ship: {}",
+            ts.description
+        );
+        assert!(
+            ts.description
+                .contains("+2 more — search to discover"),
+            "all names collapse into the omitted marker: {}",
+            ts.description
+        );
+        assert!(
+            !ts.description.contains(", +"),
+            "no dangling separator when zero names are included: {}",
+            ts.description
+        );
+        // The deferred entries are still folded out of the array.
+        assert_eq!(folded.len(), 1);
     }
 
     #[test]

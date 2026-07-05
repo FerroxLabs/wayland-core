@@ -6511,6 +6511,15 @@ impl AgentEngine {
                     // callable.
                     if tool_name == "ToolSearch" && !*is_error {
                         self.record_hydrated_tools(content);
+                    } else if tool_name != "unknown" {
+                        // Layer D3 follow-up: a DIRECT call to a
+                        // deferred/folded tool (lax providers can emit calls
+                        // for catalog-only names) also counts as hydration —
+                        // its tool_call now sits in history, so the tool must
+                        // be DECLARED in subsequent tools[] instead of
+                        // staying folded out indefinitely. No-op for hot
+                        // tools and names not in the registry.
+                        self.record_called_deferred_tool(tool_name);
                     }
 
                     // B7 writer-side wiring: bump the per-tool call counter in
@@ -9005,20 +9014,58 @@ impl AgentEngine {
             return;
         };
         for m in matches {
-            if let Some(name) = m.get("name").and_then(|v| v.as_str())
-                && !self.hydrated_tool_names.iter().any(|n| n == name)
-            {
-                if self.hydrated_tool_names.len() >= HYDRATED_TOOLS_CAP {
-                    let dropped = self.hydrated_tool_names.remove(0);
-                    tracing::debug!(
-                        target: "wcore_agent::engine",
-                        "hydrated-tool set at cap ({HYDRATED_TOOLS_CAP}); \
-                         evicting oldest hydration {dropped:?}"
-                    );
-                }
-                self.hydrated_tool_names.push(name.to_string());
+            if let Some(name) = m.get("name").and_then(|v| v.as_str()) {
+                self.push_hydrated_name(name);
             }
         }
+    }
+
+    /// Deduped, [`HYDRATED_TOOLS_CAP`]-bounded (evict-oldest) push into
+    /// [`Self::hydrated_tool_names`]. Shared by the ToolSearch-result
+    /// recorder and the direct-call recorder below.
+    fn push_hydrated_name(&mut self, name: &str) {
+        if self.hydrated_tool_names.iter().any(|n| n == name) {
+            return;
+        }
+        if self.hydrated_tool_names.len() >= HYDRATED_TOOLS_CAP {
+            let dropped = self.hydrated_tool_names.remove(0);
+            tracing::debug!(
+                target: "wcore_agent::engine",
+                "hydrated-tool set at cap ({HYDRATED_TOOLS_CAP}); \
+                 evicting oldest hydration {dropped:?}"
+            );
+        }
+        self.hydrated_tool_names.push(name.to_string());
+    }
+
+    /// Layer D3 follow-up (catalog fold): a DIRECT call to a deferred tool
+    /// counts as hydration too. Lax providers (no constrained decoding —
+    /// Ollama, llama.cpp) can emit a call for a catalog-only name; the
+    /// engine dispatches it by registry name, which leaves a `tool_calls`
+    /// entry in history referencing a tool that the catalog fold keeps OUT
+    /// of the outbound tools[] — indefinitely, because only ToolSearch
+    /// results used to trigger admission. (Stub mode never had this state:
+    /// every deferred name was at least declared.) Recording the called
+    /// name here makes the tool DECLARED with its full schema from the next
+    /// round-trip — the same one-turn tools[] change as a ToolSearch
+    /// hydration. Recorded regardless of the result's error flag: the
+    /// tool_call sits in history either way.
+    ///
+    /// Hot-allowlist tools and unknown names are skipped so the bounded
+    /// hydrated set is not churned by Read/Bash traffic or hallucinated
+    /// names that never dispatched.
+    fn record_called_deferred_tool(&mut self, tool_name: &str) {
+        let cfg = &self.config.builtin_tools.defer_cold;
+        if !cfg.enabled || tool_name == "ToolSearch" {
+            return;
+        }
+        if cfg.hot_allowlist.iter().any(|hot| hot == tool_name) {
+            return;
+        }
+        if self.tools.get(tool_name).is_none() {
+            return;
+        }
+        self.push_hydrated_name(tool_name);
     }
 
     /// Layer D1 follow-up: drop hydrated names that no longer exist in the
@@ -10590,6 +10637,73 @@ mod set_config_tests {
         assert!(
             wire_stub.contains("(Deferred)"),
             "stub mode serializes per-tool stub entries"
+        );
+    }
+
+    /// Codex verify finding (catalog fold edge): on lax providers (no
+    /// constrained decoding) the model can call a catalog-only tool
+    /// DIRECTLY; the engine dispatches it by registry name, leaving a
+    /// tool_calls entry in history that references a name the fold keeps
+    /// out of tools[] — and only ToolSearch results used to trigger
+    /// admission, so the undeclared state persisted indefinitely (stub mode
+    /// always declared every deferred name). A direct call must count as
+    /// hydration: declared, full schema, out of the catalog line, from the
+    /// next round-trip.
+    #[test]
+    fn called_deferred_tool_is_declared_on_subsequent_turns() {
+        let mut engine = make_engine("m");
+        engine.tools = Arc::new(hydration_registry(&["session_search"]));
+
+        let tools = vec![
+            builtin_tool("Read"),
+            builtin_tool("ToolSearch"),
+            builtin_tool("session_search"), // cold built-in
+        ];
+
+        // Round-trip K: session_search is folded into the catalog line.
+        let turn_k = engine.apply_tool_deferral(tools.clone());
+        assert!(
+            !turn_k.iter().any(|t| t.name == "session_search"),
+            "cold tool starts folded out of the array"
+        );
+        assert!(
+            turn_k
+                .iter()
+                .find(|t| t.name == "ToolSearch")
+                .unwrap()
+                .description
+                .contains("session_search"),
+            "cold tool starts in the catalog line"
+        );
+
+        // The model calls it directly (lax provider) — the result loop
+        // records the call as hydration. Hot tools and unknown names are
+        // no-ops (bounded set must not churn on Read/Bash traffic).
+        engine.record_called_deferred_tool("session_search");
+        engine.record_called_deferred_tool("Read");
+        engine.record_called_deferred_tool("ghost_never_registered");
+        assert_eq!(
+            engine.hydrated_tool_names,
+            vec!["session_search".to_string()],
+            "only the called deferred registry tool is recorded"
+        );
+
+        // Round-trip K+1: the called tool is DECLARED with its full schema
+        // and has left the catalog line.
+        let turn_k1 = engine.apply_tool_deferral(tools);
+        let declared = turn_k1
+            .iter()
+            .find(|t| t.name == "session_search")
+            .expect("called deferred tool must be declared in tools[]");
+        assert!(!declared.deferred, "ships full schema, not a stub");
+        assert!(
+            !turn_k1
+                .iter()
+                .find(|t| t.name == "ToolSearch")
+                .unwrap()
+                .description
+                .contains("session_search"),
+            "called tool left the catalog line"
         );
     }
 
