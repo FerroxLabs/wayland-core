@@ -677,6 +677,65 @@ impl ApprovalMode {
     }
 }
 
+/// Default `min_prefix_tokens` floor for prompt-cache breakpoint injection.
+/// Below this estimated prompt size, `cache_control` markers are skipped:
+/// Anthropic charges a 25% cache-write premium, so caching a tiny context
+/// costs more than it can ever save (and Anthropic ignores cache segments
+/// under its own per-model minimum anyway).
+pub const DEFAULT_CACHE_MIN_PREFIX_TOKENS: usize = 1024;
+
+/// Prompt-caching preference for a provider entry. Accepts both TOML shapes:
+///
+/// ```toml
+/// [providers.anthropic]
+/// prompt_caching = false            # legacy bool form
+/// ```
+///
+/// ```toml
+/// [providers.anthropic.prompt_caching]  # detailed table form
+/// enabled = true
+/// min_prefix_tokens = 1024
+/// ```
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+#[serde(untagged)]
+pub enum PromptCachingConfig {
+    /// Legacy bool form: `prompt_caching = true|false`.
+    Enabled(bool),
+    /// Detailed table form with the breakpoint floor.
+    Detailed(PromptCachingDetail),
+}
+
+/// Body of the detailed `[providers.<name>.prompt_caching]` table.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Default)]
+pub struct PromptCachingDetail {
+    /// Enable prompt caching. `None` → provider default (ON for Anthropic).
+    pub enabled: Option<bool>,
+    /// Skip `cache_control` breakpoint injection when the estimated prompt
+    /// prefix is smaller than this many tokens. `None` →
+    /// [`DEFAULT_CACHE_MIN_PREFIX_TOKENS`].
+    pub min_prefix_tokens: Option<usize>,
+}
+
+impl PromptCachingConfig {
+    /// The configured enabled state, if any. `None` (only possible in the
+    /// table form with `enabled` omitted) defers to the provider default.
+    pub fn enabled(&self) -> Option<bool> {
+        match self {
+            PromptCachingConfig::Enabled(b) => Some(*b),
+            PromptCachingConfig::Detailed(d) => d.enabled,
+        }
+    }
+
+    /// The configured breakpoint floor, if any. The legacy bool form carries
+    /// no floor, so it defers to [`DEFAULT_CACHE_MIN_PREFIX_TOKENS`].
+    pub fn min_prefix_tokens(&self) -> Option<usize> {
+        match self {
+            PromptCachingConfig::Enabled(_) => None,
+            PromptCachingConfig::Detailed(d) => d.min_prefix_tokens,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize, Default)]
 pub struct ProviderConfig {
     /// Underlying built-in provider type for a custom provider alias.
@@ -685,8 +744,10 @@ pub struct ProviderConfig {
     pub model: Option<String>,
     pub api_key: Option<String>,
     pub base_url: Option<String>,
-    /// Enable prompt caching (Anthropic only, default: true)
-    pub prompt_caching: Option<bool>,
+    /// Enable prompt caching (Anthropic only, default: true). Accepts the
+    /// legacy bool form or the detailed `[providers.<name>.prompt_caching]`
+    /// table — see [`PromptCachingConfig`].
+    pub prompt_caching: Option<PromptCachingConfig>,
     /// Provider compatibility overrides
     pub compat: Option<ProviderCompat>,
 }
@@ -932,6 +993,12 @@ pub struct Config {
     pub system_prompt: Option<String>,
     pub thinking: Option<ThinkingConfig>,
     pub prompt_caching: bool,
+    /// Breakpoint floor for prompt-cache marker injection: providers skip
+    /// `cache_control` breakpoints when the estimated prompt prefix is
+    /// smaller than this many tokens. From the detailed
+    /// `[providers.<name>.prompt_caching]` table;
+    /// default [`DEFAULT_CACHE_MIN_PREFIX_TOKENS`].
+    pub prompt_caching_min_prefix_tokens: usize,
     pub compat: ProviderCompat,
     pub tools: ToolsConfig,
     /// W4 builtin-tools registration gates (Script on/off, RepoMap on/off).
@@ -1022,6 +1089,10 @@ impl std::fmt::Debug for Config {
             .field("system_prompt", &self.system_prompt)
             .field("thinking", &self.thinking)
             .field("prompt_caching", &self.prompt_caching)
+            .field(
+                "prompt_caching_min_prefix_tokens",
+                &self.prompt_caching_min_prefix_tokens,
+            )
             .field("compat", &self.compat)
             .field("tools", &self.tools)
             .field("builtin_tools", &self.builtin_tools)
@@ -1081,6 +1152,7 @@ impl Default for Config {
             system_prompt: None,
             thinking: None,
             prompt_caching: false,
+            prompt_caching_min_prefix_tokens: DEFAULT_CACHE_MIN_PREFIX_TOKENS,
             compat: crate::compat::ProviderCompat::default(),
             tools: ToolsConfig::default(),
             builtin_tools: crate::tools::BuiltinToolsConfig::default(),
@@ -1803,7 +1875,14 @@ impl Config {
         // Resolve prompt_caching: default true for Anthropic
         let prompt_caching = provider_config
             .prompt_caching
+            .as_ref()
+            .and_then(PromptCachingConfig::enabled)
             .unwrap_or(matches!(provider, ProviderType::Anthropic));
+        let prompt_caching_min_prefix_tokens = provider_config
+            .prompt_caching
+            .as_ref()
+            .and_then(PromptCachingConfig::min_prefix_tokens)
+            .unwrap_or(DEFAULT_CACHE_MIN_PREFIX_TOKENS);
 
         // Resolve compat: provider-type defaults + user overrides.
         //
@@ -1871,6 +1950,7 @@ impl Config {
             system_prompt,
             thinking: None,
             prompt_caching,
+            prompt_caching_min_prefix_tokens,
             compat,
             tools,
             builtin_tools: crate::tools::BuiltinToolsConfig::default(),
@@ -2202,7 +2282,14 @@ pub fn resolve_council_provider(
 
     let prompt_caching = provider_config
         .prompt_caching
+        .as_ref()
+        .and_then(PromptCachingConfig::enabled)
         .unwrap_or(matches!(provider, ProviderType::Anthropic));
+    let prompt_caching_min_prefix_tokens = provider_config
+        .prompt_caching
+        .as_ref()
+        .and_then(PromptCachingConfig::min_prefix_tokens)
+        .unwrap_or(DEFAULT_CACHE_MIN_PREFIX_TOKENS);
 
     let compat_defaults = if let Some(entry) = catalog_entry.as_ref() {
         ProviderCompat::from_catalog_entry(&entry.id, entry.api_path.as_deref())
@@ -2239,6 +2326,7 @@ pub fn resolve_council_provider(
         base_url,
         model,
         prompt_caching,
+        prompt_caching_min_prefix_tokens,
         compat,
         ..base.clone()
     };
@@ -5159,7 +5247,78 @@ prompt_caching = false
 
         let anthropic = config.providers.get("anthropic").unwrap();
         assert_eq!(anthropic.api_key.as_deref(), Some("sk-ant-test"));
-        assert_eq!(anthropic.prompt_caching, Some(false));
+        assert_eq!(
+            anthropic.prompt_caching,
+            Some(PromptCachingConfig::Enabled(false))
+        );
+    }
+
+    /// Detailed `[providers.anthropic.prompt_caching]` table form parses
+    /// alongside the legacy bool form and resolves enabled + floor.
+    #[test]
+    fn test_prompt_caching_detailed_table_form_parses() {
+        let toml_str = r#"
+[default]
+provider = "anthropic"
+
+[providers.anthropic]
+api_key = "sk-ant-test"
+
+[providers.anthropic.prompt_caching]
+enabled = true
+min_prefix_tokens = 2048
+"#;
+        let config: ConfigFile = toml::from_str(toml_str).unwrap();
+        let pc = config
+            .providers
+            .get("anthropic")
+            .unwrap()
+            .prompt_caching
+            .as_ref()
+            .expect("prompt_caching table must parse");
+        assert_eq!(pc.enabled(), Some(true));
+        assert_eq!(pc.min_prefix_tokens(), Some(2048));
+    }
+
+    /// Table form with only the floor set defers `enabled` to the provider
+    /// default (ON for Anthropic); the legacy bool form carries no floor.
+    #[test]
+    fn test_prompt_caching_partial_table_and_bool_accessors() {
+        let toml_str = r#"
+[default]
+provider = "anthropic"
+
+[providers.anthropic.prompt_caching]
+min_prefix_tokens = 512
+"#;
+        let config: ConfigFile = toml::from_str(toml_str).unwrap();
+        let pc = config
+            .providers
+            .get("anthropic")
+            .unwrap()
+            .prompt_caching
+            .clone()
+            .unwrap();
+        assert_eq!(pc.enabled(), None, "enabled omitted → provider default");
+        assert_eq!(pc.min_prefix_tokens(), Some(512));
+
+        let legacy = PromptCachingConfig::Enabled(false);
+        assert_eq!(legacy.enabled(), Some(false));
+        assert_eq!(
+            legacy.min_prefix_tokens(),
+            None,
+            "bool form must defer the floor to DEFAULT_CACHE_MIN_PREFIX_TOKENS"
+        );
+    }
+
+    /// The resolved Config default carries the 1024-token breakpoint floor.
+    #[test]
+    fn test_config_default_min_prefix_tokens_floor() {
+        assert_eq!(
+            Config::default().prompt_caching_min_prefix_tokens,
+            DEFAULT_CACHE_MIN_PREFIX_TOKENS
+        );
+        assert_eq!(DEFAULT_CACHE_MIN_PREFIX_TOKENS, 1024);
     }
 
     #[test]
@@ -5218,7 +5377,7 @@ base_url = "https://my-service.example.com/api/openai"
             api_key: Some("base-key".to_string()),
             base_url: Some("https://base.example.com".to_string()),
             model: Some("base-model".to_string()),
-            prompt_caching: Some(true),
+            prompt_caching: Some(PromptCachingConfig::Enabled(true)),
             provider: Some("openai".to_string()),
             ..Default::default()
         };
@@ -5228,7 +5387,10 @@ base_url = "https://my-service.example.com/api/openai"
         assert_eq!(merged.api_key.as_deref(), Some("base-key"));
         assert_eq!(merged.base_url.as_deref(), Some("https://base.example.com"));
         assert_eq!(merged.model.as_deref(), Some("base-model"));
-        assert_eq!(merged.prompt_caching, Some(true));
+        assert_eq!(
+            merged.prompt_caching,
+            Some(PromptCachingConfig::Enabled(true))
+        );
         assert_eq!(merged.provider.as_deref(), Some("openai"));
     }
 
