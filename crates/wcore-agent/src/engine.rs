@@ -603,31 +603,76 @@ fn is_http_4xx_error(reason: &str) -> bool {
     false
 }
 
-/// LENGTH-WEDGE GATE — deterministic fingerprint of an outbound context: the
-/// dispatched model plus every message's role + content blocks. Timestamps and
-/// cache hints are deliberately EXCLUDED — providers never see them
-/// (`build_messages()` sends role + content only), so two requests that are
-/// byte-identical on the wire fingerprint identically even when their local
-/// `Message.timestamp`s differ (e.g. a host that rebuilds the same wedged
-/// conversation on a retry or a resume).
-fn context_fingerprint(model: &str, messages: &[Message]) -> u64 {
-    use std::hash::{Hash, Hasher};
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    model.hash(&mut hasher);
+/// LENGTH-WEDGE GATE — deterministic fingerprint of an outbound request as
+/// the provider sees it: the dispatched model, the system prompt, every
+/// message's role + content blocks, and the serialized tool surface (the
+/// as-sent, post-curation/post-cap `request.tools`, `deferred` flag
+/// included). All of these are provider-visible bytes — omitting any of them
+/// would falsely refuse a retry that changed only that surface (e.g. the same
+/// messages under a different system prompt or tool set) as an "unchanged"
+/// wedge.
+///
+/// Timestamps and cache hints are deliberately EXCLUDED — providers never see
+/// them (`build_messages()` sends role + content only), so two requests that
+/// are byte-identical on the wire fingerprint identically even when their
+/// local `Message.timestamp`s differ (e.g. a host that rebuilds the same
+/// wedged conversation on a retry or a resume).
+///
+/// Sha256, not a 64-bit `DefaultHasher`: this identity gates whether a
+/// request is ever allowed to be sent again, so it gets a collision-proof
+/// digest. Every field is length-framed so adjacent fields can never alias
+/// (model "a" + system "bc" vs model "ab" + system "c").
+fn request_wire_fingerprint(
+    model: &str,
+    system: &str,
+    messages: &[Message],
+    tools: &[wcore_types::tool::ToolDef],
+) -> [u8; 32] {
+    use sha2::{Digest, Sha256};
+    fn framed(hasher: &mut Sha256, bytes: &[u8]) {
+        hasher.update((bytes.len() as u64).to_le_bytes());
+        hasher.update(bytes);
+    }
+    let mut hasher = Sha256::new();
+    framed(&mut hasher, model.as_bytes());
+    framed(&mut hasher, system.as_bytes());
+    framed(&mut hasher, &(messages.len() as u64).to_le_bytes());
     for msg in messages {
         // `Role` is a small serde enum; its JSON tag is a stable per-variant
         // string. Serialization of these shapes cannot fail in practice; the
         // fallback keeps the fingerprint total rather than skipping content.
-        serde_json::to_string(&msg.role)
-            .unwrap_or_default()
-            .hash(&mut hasher);
-        for block in &msg.content {
-            serde_json::to_string(block)
+        framed(
+            &mut hasher,
+            serde_json::to_string(&msg.role)
                 .unwrap_or_default()
-                .hash(&mut hasher);
+                .as_bytes(),
+        );
+        framed(&mut hasher, &(msg.content.len() as u64).to_le_bytes());
+        for block in &msg.content {
+            framed(
+                &mut hasher,
+                serde_json::to_string(block).unwrap_or_default().as_bytes(),
+            );
         }
     }
-    hasher.finish()
+    framed(&mut hasher, &(tools.len() as u64).to_le_bytes());
+    for tool in tools {
+        // `ToolDef` has no Serialize impl — frame each provider-visible field
+        // (`input_schema` is a `serde_json::Value`). `deferred` changes the
+        // schema actually sent (stub vs full), so it is part of the identity;
+        // `server` provenance disambiguates same-named tools.
+        framed(&mut hasher, tool.name.as_bytes());
+        framed(&mut hasher, tool.description.as_bytes());
+        framed(
+            &mut hasher,
+            serde_json::to_string(&tool.input_schema)
+                .unwrap_or_default()
+                .as_bytes(),
+        );
+        framed(&mut hasher, &[tool.deferred as u8]);
+        framed(&mut hasher, tool.server.as_deref().unwrap_or("").as_bytes());
+    }
+    hasher.finalize().into()
 }
 
 /// Spec v1 Task 5 (clean retry) — the compact stub that replaces a failed
@@ -1895,16 +1940,17 @@ pub struct AgentEngine {
     /// fire, then consumed via `std::mem::take` inside `run_compaction` so the
     /// existing autocompact path runs even though the static threshold is unmet.
     smart_compact_force: bool,
-    /// LENGTH-WEDGE GATE — fingerprint ([`context_fingerprint`]) of the last
-    /// outbound context that came back `finish_reason=length` while at/over
-    /// the resolved input ceiling. Once set, a byte-identical context is
-    /// refused before dispatch: re-sending it can only reproduce the same
-    /// instant `length` truncation (observed in the field as 3 identical
-    /// sub-500ms retries at identical token counts, wedging the conversation
-    /// permanently). `None` until a wedge is observed; an exact-match guard,
-    /// so any context that actually changed (compaction, new user turn)
-    /// passes.
-    length_wedge_fingerprint: Option<u64>,
+    /// LENGTH-WEDGE GATE — fingerprint ([`request_wire_fingerprint`]) of the
+    /// last outbound request that came back `finish_reason=length` while
+    /// at/over the resolved input ceiling. Once set, a wire-identical request
+    /// (model + system + messages + tools) is refused before dispatch:
+    /// re-sending it can only reproduce the same instant `length` truncation
+    /// (observed in the field as 3 identical sub-500ms retries at identical
+    /// token counts, wedging the conversation permanently). `None` until a
+    /// wedge is observed; an exact-match guard, so any request that actually
+    /// changed (compaction, new user turn, different system prompt or tool
+    /// surface) passes.
+    length_wedge_fingerprint: Option<[u8; 32]>,
 }
 
 impl Drop for AgentEngine {
@@ -5223,7 +5269,12 @@ impl AgentEngine {
                 // Hashing only happens once a wedge has been observed — the
                 // common path pays nothing.
                 if let Some(wedge) = self.length_wedge_fingerprint
-                    && context_fingerprint(&request.model, &request.messages) == wedge
+                    && request_wire_fingerprint(
+                        &request.model,
+                        &request.system,
+                        &request.messages,
+                        &request.tools,
+                    ) == wedge
                 {
                     self.output.emit_error(
                         &format!(
@@ -5452,8 +5503,12 @@ impl AgentEngine {
                         if let Some(ceiling) = ceiling
                             && sent_tokens >= ceiling
                         {
-                            let sent_fingerprint =
-                                context_fingerprint(&request.model, &request.messages);
+                            let sent_fingerprint = request_wire_fingerprint(
+                                &request.model,
+                                &request.system,
+                                &request.messages,
+                                &request.tools,
+                            );
                             // Arm the never-resend dispatch guard for this
                             // exact context FIRST, so no path out of here can
                             // be followed by an identical re-send — in this
@@ -5474,8 +5529,12 @@ impl AgentEngine {
                                 // rebuild from `self.messages` drops — which
                                 // would make a no-op compaction look like a
                                 // changed context and defeat the gate.
-                                let history_before =
-                                    context_fingerprint(&request.model, &self.messages);
+                                let history_before = request_wire_fingerprint(
+                                    &request.model,
+                                    &request.system,
+                                    &self.messages,
+                                    &request.tools,
+                                );
                                 // Force the autocompact machinery
                                 // (compact/auto.rs) even though the static
                                 // watermark trigger is unmet — same one-shot
@@ -5486,8 +5545,12 @@ impl AgentEngine {
                                     self.save_session();
                                     return Err(e);
                                 }
-                                let history_after =
-                                    context_fingerprint(&request.model, &self.messages);
+                                let history_after = request_wire_fingerprint(
+                                    &request.model,
+                                    &request.system,
+                                    &self.messages,
+                                    &request.tools,
+                                );
                                 // Rebuild the outbound context from the
                                 // compacted history (mirrors the #282
                                 // ContextOverflow compact-and-retry).
@@ -17390,9 +17453,19 @@ mod retry_wedge_protection_tests {
         let reqs = requests.lock().unwrap();
         assert_eq!(reqs.len(), 3, "wedged turn + compaction call + one retry");
         // The retried context must differ from the wedged one — assert via
-        // the same outbound-context fingerprint the gate uses.
-        let fp_first = super::context_fingerprint(&reqs[0].model, &reqs[0].messages);
-        let fp_retry = super::context_fingerprint(&reqs[2].model, &reqs[2].messages);
+        // the same request-wire fingerprint the gate uses.
+        let fp_first = super::request_wire_fingerprint(
+            &reqs[0].model,
+            &reqs[0].system,
+            &reqs[0].messages,
+            &reqs[0].tools,
+        );
+        let fp_retry = super::request_wire_fingerprint(
+            &reqs[2].model,
+            &reqs[2].system,
+            &reqs[2].messages,
+            &reqs[2].tools,
+        );
         assert_ne!(
             fp_first, fp_retry,
             "the retry must never re-send the identical over-budget context"
@@ -17451,7 +17524,12 @@ mod retry_wedge_protection_tests {
         let wedged_fingerprint = {
             let reqs = control_requests.lock().unwrap();
             assert_eq!(reqs.len(), 1);
-            super::context_fingerprint(&reqs[0].model, &reqs[0].messages)
+            super::request_wire_fingerprint(
+                &reqs[0].model,
+                &reqs[0].system,
+                &reqs[0].messages,
+                &reqs[0].tools,
+            )
         };
 
         let provider = Arc::new(RecordingProvider::new(vec![
@@ -17474,6 +17552,56 @@ mod retry_wedge_protection_tests {
             requests.lock().unwrap().len(),
             0,
             "a byte-identical wedged context must be refused BEFORE dispatch"
+        );
+    }
+
+    #[tokio::test]
+    async fn changed_system_prompt_with_same_messages_is_not_refused() {
+        // Audit finding on the u64 role+content fingerprint: system and
+        // tools[] are provider-visible bytes too. The SAME messages under a
+        // DIFFERENT system prompt are a different wire request — the wedge
+        // guard must let it dispatch, not falsely refuse it as unchanged.
+        let control = Arc::new(RecordingProvider::new(vec![vec![
+            LlmEvent::TextDelta("control".into()),
+            done(StopReason::EndTurn, FinishReason::Stop, 0),
+        ]]));
+        let control_requests = control.recorded();
+        let mut control_engine = wedge_engine(control);
+        control_engine
+            .run("task", "m-sys-a")
+            .await
+            .expect("control run completes");
+        let wedged_fingerprint = {
+            let reqs = control_requests.lock().unwrap();
+            assert_eq!(reqs.len(), 1);
+            super::request_wire_fingerprint(
+                &reqs[0].model,
+                &reqs[0].system,
+                &reqs[0].messages,
+                &reqs[0].tools,
+            )
+        };
+
+        let provider = Arc::new(RecordingProvider::new(vec![vec![
+            LlmEvent::TextDelta("dispatched".into()),
+            done(StopReason::EndTurn, FinishReason::Stop, 0),
+        ]]));
+        let requests = provider.recorded();
+        let mut engine = wedge_engine(provider);
+        // Identical messages ("task" on empty history), different system.
+        engine.system_prompt = format!("{}\n\nCHANGED SURFACE", engine.system_prompt);
+        engine.length_wedge_fingerprint = Some(wedged_fingerprint);
+        let result = engine
+            .run("task", "m-sys-b")
+            .await
+            .expect("a changed-system request must dispatch normally");
+        assert_eq!(result.text, "dispatched");
+        assert_eq!(result.stop_reason, StopReason::EndTurn);
+        assert_eq!(
+            requests.lock().unwrap().len(),
+            1,
+            "same messages under a changed system prompt are a DIFFERENT wire \
+             request and must not be refused as an unchanged wedge"
         );
     }
 
@@ -17656,18 +17784,30 @@ mod retry_wedge_protection_tests {
     }
 
     #[test]
-    fn context_fingerprint_ignores_timestamps_but_not_content() {
+    fn wire_fingerprint_covers_every_provider_visible_surface() {
+        let tools = vec![wcore_types::tool::ToolDef {
+            name: "Read".into(),
+            description: "read a file".into(),
+            input_schema: serde_json::json!({"type": "object"}),
+            deferred: false,
+            server: None,
+        }];
         let a = vec![Message::now(
             Role::User,
             vec![ContentBlock::Text { text: "hi".into() }],
         )];
+        let fp = |model: &str, system: &str, msgs: &[Message], tools: &[_]| {
+            super::request_wire_fingerprint(model, system, msgs, tools)
+        };
+        // Timestamps are NOT sent to the provider — must not change identity.
         let mut b = a.clone();
         b[0].timestamp = Some(chrono::Utc::now() + chrono::Duration::hours(1));
         assert_eq!(
-            super::context_fingerprint("m", &a),
-            super::context_fingerprint("m", &b),
+            fp("m", "sys", &a, &tools),
+            fp("m", "sys", &b, &tools),
             "timestamps are not sent to the provider and must not change the fingerprint"
         );
+        // Every provider-visible surface IS part of the identity.
         let c = vec![Message::now(
             Role::User,
             vec![ContentBlock::Text {
@@ -17675,13 +17815,33 @@ mod retry_wedge_protection_tests {
             }],
         )];
         assert_ne!(
-            super::context_fingerprint("m", &a),
-            super::context_fingerprint("m", &c)
+            fp("m", "sys", &a, &tools),
+            fp("m", "sys", &c, &tools),
+            "message content changes the identity"
         );
         assert_ne!(
-            super::context_fingerprint("model-a", &a),
-            super::context_fingerprint("model-b", &a),
+            fp("model-a", "sys", &a, &tools),
+            fp("model-b", "sys", &a, &tools),
             "the dispatched model is part of the request identity"
+        );
+        assert_ne!(
+            fp("m", "system A", &a, &tools),
+            fp("m", "system B", &a, &tools),
+            "the system prompt is provider-visible and part of the identity"
+        );
+        let mut fewer_tools = tools.clone();
+        fewer_tools.clear();
+        assert_ne!(
+            fp("m", "sys", &a, &tools),
+            fp("m", "sys", &a, &fewer_tools),
+            "the tool surface is provider-visible and part of the identity"
+        );
+        let mut deferred_tools = tools.clone();
+        deferred_tools[0].deferred = true;
+        assert_ne!(
+            fp("m", "sys", &a, &tools),
+            fp("m", "sys", &a, &deferred_tools),
+            "deferral changes the schema actually sent, so it changes the identity"
         );
     }
 }
