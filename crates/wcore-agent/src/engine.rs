@@ -603,6 +603,105 @@ fn is_http_4xx_error(reason: &str) -> bool {
     false
 }
 
+/// LENGTH-WEDGE GATE — deterministic fingerprint of an outbound context: the
+/// dispatched model plus every message's role + content blocks. Timestamps and
+/// cache hints are deliberately EXCLUDED — providers never see them
+/// (`build_messages()` sends role + content only), so two requests that are
+/// byte-identical on the wire fingerprint identically even when their local
+/// `Message.timestamp`s differ (e.g. a host that rebuilds the same wedged
+/// conversation on a retry or a resume).
+fn context_fingerprint(model: &str, messages: &[Message]) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    model.hash(&mut hasher);
+    for msg in messages {
+        // `Role` is a small serde enum; its JSON tag is a stable per-variant
+        // string. Serialization of these shapes cannot fail in practice; the
+        // fallback keeps the fingerprint total rather than skipping content.
+        serde_json::to_string(&msg.role)
+            .unwrap_or_default()
+            .hash(&mut hasher);
+        for block in &msg.content {
+            serde_json::to_string(block)
+                .unwrap_or_default()
+                .hash(&mut hasher);
+        }
+    }
+    hasher.finish()
+}
+
+/// Spec v1 Task 5 (clean retry) — the compact stub that replaces a failed
+/// tool-result body in the outbound retry context. `short_error` is the first
+/// line of the original body, capped, so the model still sees WHAT failed
+/// without the engine re-sending the full contaminated transcript.
+fn retry_stub(tool_name: &str, error_body: &str) -> String {
+    const MAX_ERR_CHARS: usize = 200;
+    let mut short: String = error_body
+        .lines()
+        .next()
+        .unwrap_or("")
+        .chars()
+        .take(MAX_ERR_CHARS)
+        .collect();
+    if short.len() < error_body.lines().next().unwrap_or("").len() {
+        short.push('…');
+    }
+    format!("[tool {tool_name} failed: {short}; retrying]")
+}
+
+/// Spec v1 Task 5 (clean retry) — before a stream retry re-sends the outbound
+/// context, replace the FAILED tool-result bodies of the most recent tool
+/// round with a compact [`retry_stub`]. Only the retry's outbound copy is
+/// rewritten (the caller passes `request.messages`, never the persisted
+/// history), and only the LAST tool-result round — older rounds are part of
+/// the already-cached prefix and rewriting them would bust the prompt cache.
+///
+/// Returns the names of the failing tools in that round (whether or not their
+/// bodies were rewritten on this call — a second retry sees the already-
+/// stubbed bodies but must still report the failing tools so the progress
+/// gate can count consecutive no-progress retries). Empty when the most
+/// recent tool round has no failed results (or there is no tool round).
+fn stub_failed_tool_results_for_retry(messages: &mut [Message]) -> Vec<String> {
+    // Map tool_use_id → tool name across the transcript (ids are unique).
+    let names: std::collections::HashMap<String, String> = messages
+        .iter()
+        .flat_map(|m| &m.content)
+        .filter_map(|b| match b {
+            ContentBlock::ToolUse { id, name, .. } => Some((id.clone(), name.clone())),
+            _ => None,
+        })
+        .collect();
+    // The most recent tool round = the last message carrying any ToolResult.
+    let Some(idx) = messages.iter().rposition(|m| {
+        m.content
+            .iter()
+            .any(|b| matches!(b, ContentBlock::ToolResult { .. }))
+    }) else {
+        return Vec::new();
+    };
+    let mut failing: Vec<String> = Vec::new();
+    for block in &mut messages[idx].content {
+        if let ContentBlock::ToolResult {
+            tool_use_id,
+            content,
+            is_error: true,
+        } = block
+        {
+            let name = names
+                .get(tool_use_id.as_str())
+                .cloned()
+                .unwrap_or_else(|| "unknown".to_string());
+            // Idempotent: a body this helper already stubbed on a prior
+            // retry is left alone (but still reported as failing above).
+            if !(content.starts_with("[tool ") && content.ends_with("; retrying]")) {
+                *content = retry_stub(&name, content);
+            }
+            failing.push(name);
+        }
+    }
+    failing
+}
+
 /// FluxRouter web_search grounding (contract §5.4): render the "Sources" block
 /// appended after a grounded answer. The answer text already carries inline
 /// `[n]` markers; this maps `[n]` → `citations[n-1]` (1-indexed) and lists the
@@ -1796,6 +1895,16 @@ pub struct AgentEngine {
     /// fire, then consumed via `std::mem::take` inside `run_compaction` so the
     /// existing autocompact path runs even though the static threshold is unmet.
     smart_compact_force: bool,
+    /// LENGTH-WEDGE GATE — fingerprint ([`context_fingerprint`]) of the last
+    /// outbound context that came back `finish_reason=length` while at/over
+    /// the resolved input ceiling. Once set, a byte-identical context is
+    /// refused before dispatch: re-sending it can only reproduce the same
+    /// instant `length` truncation (observed in the field as 3 identical
+    /// sub-500ms retries at identical token counts, wedging the conversation
+    /// permanently). `None` until a wedge is observed; an exact-match guard,
+    /// so any context that actually changed (compaction, new user turn)
+    /// passes.
+    length_wedge_fingerprint: Option<u64>,
 }
 
 impl Drop for AgentEngine {
@@ -2068,6 +2177,7 @@ impl AgentEngine {
             smart_compact_last_turn: None,
             smart_compact_exhausted: false,
             smart_compact_force: false,
+            length_wedge_fingerprint: None,
         }
     }
 
@@ -2248,6 +2358,7 @@ impl AgentEngine {
             smart_compact_last_turn: None,
             smart_compact_exhausted: false,
             smart_compact_force: false,
+            length_wedge_fingerprint: None,
         }
     }
 
@@ -5055,6 +5166,16 @@ impl AgentEngine {
             // infinite-loop. After the single retry, a recurring overflow is
             // surfaced as a clean terminal error below.
             let mut overflow_retried = false;
+            // LENGTH-WEDGE GATE: a turn that ends `finish_reason=length` while
+            // at/over the resolved input ceiling gets ONE forced compaction +
+            // retry; this guard bounds it so the turn can never loop. After
+            // the single retry a recurring wedge is a clean terminal error.
+            let mut length_wedge_retried = false;
+            // Spec v1 Task 5 progress gate: consecutive failed stream attempts
+            // whose outbound context carried a failed tool round and which
+            // produced no output at all. Two in a row = no realistic chance
+            // the next full-context re-send fares better — stop instead.
+            let mut no_progress_failures: u32 = 0;
             'stream: loop {
                 // Reset per-attempt accumulators so a retry never
                 // double-commits text/tool-calls from a failed attempt.
@@ -5089,6 +5210,36 @@ impl AgentEngine {
                 let mut grounding_citations: Vec<String> = Vec::new();
                 let mut grounding_search_results: Vec<wcore_types::llm::FluxSearchResult> =
                     Vec::new();
+
+                // LENGTH-WEDGE GATE (dispatch guard) — never re-send a context
+                // that is byte-identical (on the wire) to one that already
+                // came back `finish_reason=length` at/over the input ceiling.
+                // An identical over-budget request can only reproduce the
+                // instant truncation, so re-sending it burns a full-window
+                // input bill for nothing and wedges the conversation. This
+                // covers both the in-loop retry (a compaction that freed
+                // nothing leaves the fingerprint unchanged) and a host-driven
+                // retry of the identical wedged conversation on a later run.
+                // Hashing only happens once a wedge has been observed — the
+                // common path pays nothing.
+                if let Some(wedge) = self.length_wedge_fingerprint
+                    && context_fingerprint(&request.model, &request.messages) == wedge
+                {
+                    self.output.emit_error(
+                        &format!(
+                            "Run stopped: the conversation has exceeded the context \
+                             window of model '{}' (a previous attempt ended with \
+                             finish_reason=length at the window ceiling) and the \
+                             request is unchanged — re-sending it cannot succeed. \
+                             Compact the conversation or start a new session.",
+                            request.model,
+                        ),
+                        false,
+                    );
+                    return self
+                        .finish_run_terminated(user_input, turn, FinishReason::Length)
+                        .await;
+                }
 
                 // P1 Bug#3 — `stream()` runs `builder_send_with_retry`
                 // internally and can surface a *retryable*
@@ -5258,6 +5409,124 @@ impl AgentEngine {
                 // OR a channel that closed with no `Done` (truncated /
                 // dropped stream) is a FAILED attempt.
                 if done_seen && stream_error.is_none() {
+                    // LENGTH-WEDGE GATE — `finish_reason=length` while the
+                    // context sits at/over the resolved input ceiling is the
+                    // permanent-wedge signature: the prompt has consumed the
+                    // window, the output was clamped to (near) nothing, and
+                    // re-sending the same context can only reproduce it
+                    // (observed in the field as 3 identical sub-500ms retries
+                    // at identical token counts). Force a compaction and retry
+                    // ONCE with the shrunk context; if compaction cannot free
+                    // meaningful space — or would re-send identical bytes —
+                    // end the turn with a clear terminal error instead.
+                    //
+                    // A plain `length` BELOW the ceiling (ordinary max_tokens
+                    // output cap) is untouched, as is an unknown window
+                    // (ceiling `None` = fail open, matching the #255 guard).
+                    if attempt_finish_reason == FinishReason::Length {
+                        // Ceiling resolved exactly like the #255 pre-flight
+                        // guard, including the Flux served-window signal-back
+                        // (which may have just updated via ProviderMeta on
+                        // THIS stream).
+                        let mut ctx = wcore_config::context_window::ContextWindow::resolve(
+                            input_token_estimate as u64,
+                            self.compat.provider_type(),
+                            &request.model,
+                            self.compact_config.context_window as u64,
+                        );
+                        if wcore_providers::is_flux_tier_alias(&request.model)
+                            && let Some(window) = self.flux_served_window
+                        {
+                            ctx.window = Some(window);
+                        }
+                        let ceiling = ctx.input_ceiling(
+                            self.compact_config.output_reserve as u64,
+                            self.compact_config.emergency_buffer as u64,
+                        );
+                        // At/over on either count: the provider-billed input is
+                        // authoritative when present — providers can count
+                        // higher than our estimate, which is exactly how a
+                        // wedge slips past the pre-flight guard.
+                        let sent_tokens =
+                            attempt_usage.input_tokens.max(input_token_estimate as u64);
+                        if let Some(ceiling) = ceiling
+                            && sent_tokens >= ceiling
+                        {
+                            let sent_fingerprint =
+                                context_fingerprint(&request.model, &request.messages);
+                            // Arm the never-resend dispatch guard for this
+                            // exact context FIRST, so no path out of here can
+                            // be followed by an identical re-send — in this
+                            // run or a later one.
+                            self.length_wedge_fingerprint = Some(sent_fingerprint);
+                            if !length_wedge_retried {
+                                length_wedge_retried = true;
+                                self.output.emit_info(&format!(
+                                    "Turn ended with finish_reason=length at the context \
+                                     ceiling ({sent_tokens} tokens >= {ceiling}) — forcing \
+                                     compaction before retry"
+                                ));
+                                // Whether compaction achieved anything is
+                                // judged on the PERSISTED history, not the
+                                // dispatched copy: the request carries
+                                // transient per-turn injections (date block,
+                                // skill hint, PrePrompt contributions) that a
+                                // rebuild from `self.messages` drops — which
+                                // would make a no-op compaction look like a
+                                // changed context and defeat the gate.
+                                let history_before =
+                                    context_fingerprint(&request.model, &self.messages);
+                                // Force the autocompact machinery
+                                // (compact/auto.rs) even though the static
+                                // watermark trigger is unmet — same one-shot
+                                // flag the #280 smart pre-gate uses.
+                                self.smart_compact_force = true;
+                                if let Err(e) = self.run_compaction().await {
+                                    self.fire_on_session_end(turn).await;
+                                    self.save_session();
+                                    return Err(e);
+                                }
+                                let history_after =
+                                    context_fingerprint(&request.model, &self.messages);
+                                // Rebuild the outbound context from the
+                                // compacted history (mirrors the #282
+                                // ContextOverflow compact-and-retry).
+                                request.messages = self.messages.clone();
+                                let recount = estimate::estimate_request_tokens(
+                                    &self.messages,
+                                    &request.system,
+                                    &request.tools,
+                                ) as u64;
+                                request.client_context_tokens = Some(recount);
+                                input_token_estimate = recount as usize;
+                                if history_after != history_before && recount < ceiling {
+                                    // Compaction freed real space AND changed
+                                    // the context — retry the turn. (The
+                                    // dispatch guard passes because the
+                                    // rebuilt outbound differs from the
+                                    // recorded wedged bytes.)
+                                    continue 'stream;
+                                }
+                                // Compaction was a no-op or the request is
+                                // still over the ceiling — fall through to
+                                // the terminal error. NEVER re-send.
+                            }
+                            self.output.emit_error(
+                                &format!(
+                                    "Run stopped: the conversation has exceeded the context \
+                                     window of model '{}' (finish_reason=length at \
+                                     {sent_tokens} tokens, input ceiling {ceiling}) and \
+                                     compaction could not free meaningful space. Compact \
+                                     the conversation or start a new session.",
+                                    request.model,
+                                ),
+                                false,
+                            );
+                            return self
+                                .finish_run_terminated(user_input, turn, FinishReason::Length)
+                                .await;
+                        }
+                    }
                     // FluxRouter web_search grounding (contract §5.4): render
                     // the "Sources" block after a SUCCESSFUL grounded answer.
                     // Done only on the committed attempt (inside the success
@@ -5275,6 +5544,11 @@ impl AgentEngine {
                         self.output.emit_text_delta(&block, &self.current_msg_id);
                         assistant_text.push_str(&block);
                     }
+                    // LENGTH-WEDGE GATE — a committed attempt that got past
+                    // the wedge check above completed below the ceiling, so
+                    // the conversation is not wedged: drop any armed
+                    // fingerprint (e.g. the post-compaction retry succeeded).
+                    self.length_wedge_fingerprint = None;
                     stop_reason = attempt_stop_reason;
                     finish_reason = attempt_finish_reason;
                     turn_usage = attempt_usage;
@@ -5308,6 +5582,47 @@ impl AgentEngine {
                     MAX_STREAM_RETRIES
                 };
                 if !is_client_error && stream_attempt < effective_max_retries {
+                    // Spec v1 Task 5 (clean retry): a retry re-sends the whole
+                    // outbound context. When the most recent tool round
+                    // carries FAILED tool results, that context is
+                    // contaminated with the full error bodies (observed:
+                    // desktop stage6 = 4 retries × ~350k tokens of failed
+                    // transcript). Replace each failed body with a compact
+                    // stub before re-sending. Retry-scoped: only
+                    // `request.messages` (this turn's outbound copy) is
+                    // rewritten — `self.messages` (persisted history) keeps
+                    // the full body, and older tool rounds are untouched so
+                    // the cached prefix stays byte-stable.
+                    let failed_tools = stub_failed_tool_results_for_retry(&mut request.messages);
+                    // Spec v1 Task 5 progress gate: two consecutive attempts
+                    // that carried the same failing tool round and produced
+                    // NO output at all (no text, no thinking, no tool calls,
+                    // no billed output tokens) mean the next full-context
+                    // re-send has no realistic chance — stop with a clear
+                    // error instead of burning another full-input bill. (The
+                    // tool round is constant within one turn's retry loop, so
+                    // "same failing tool" holds by construction.)
+                    let produced_output = !assistant_text.is_empty()
+                        || !thinking_text.is_empty()
+                        || !tool_calls.is_empty()
+                        || attempt_usage.output_tokens > 0;
+                    if !failed_tools.is_empty() && !produced_output {
+                        no_progress_failures += 1;
+                    } else if produced_output {
+                        no_progress_failures = 0;
+                    }
+                    if no_progress_failures >= 2 {
+                        let gate_msg = format!(
+                            "Provider stream failed twice in a row with no output while \
+                             the last tool round had failed (`{}`) — retrying the same \
+                             context is burning tokens without progress. Fix the failing \
+                             tool call (see its error above) or try a different approach. \
+                             (last stream error: {reason})",
+                            failed_tools.join("`, `"),
+                        );
+                        self.output.emit_error(&gate_msg, false);
+                        return Err(AgentError::ApiError(gate_msg));
+                    }
                     stream_attempt += 1;
                     // Linear backoff: 500ms, 1000ms.
                     let backoff = std::time::Duration::from_millis(500 * stream_attempt as u64);
@@ -9239,6 +9554,7 @@ mod set_config_tests {
             smart_compact_last_turn: None,
             smart_compact_exhausted: false,
             smart_compact_force: false,
+            length_wedge_fingerprint: None,
         }
     }
 
@@ -10413,6 +10729,7 @@ mod phase6_tests {
             smart_compact_last_turn: None,
             smart_compact_exhausted: false,
             smart_compact_force: false,
+            length_wedge_fingerprint: None,
         }
     }
 
@@ -10709,6 +11026,7 @@ mod compact_tests {
             smart_compact_last_turn: None,
             smart_compact_exhausted: false,
             smart_compact_force: false,
+            length_wedge_fingerprint: None,
         }
     }
 
@@ -12035,6 +12353,7 @@ mod plan_mode_tests {
             smart_compact_last_turn: None,
             smart_compact_exhausted: false,
             smart_compact_force: false,
+            length_wedge_fingerprint: None,
         }
     }
 
@@ -12464,6 +12783,7 @@ mod hook_integration_tests {
             smart_compact_last_turn: None,
             smart_compact_exhausted: false,
             smart_compact_force: false,
+            length_wedge_fingerprint: None,
         }
     }
 
@@ -13303,6 +13623,7 @@ mod approval_bridge_engine_tests {
             smart_compact_last_turn: None,
             smart_compact_exhausted: false,
             smart_compact_force: false,
+            length_wedge_fingerprint: None,
         }
     }
 
@@ -14299,6 +14620,7 @@ mod user_model_writeback_tests {
             smart_compact_last_turn: None,
             smart_compact_exhausted: false,
             smart_compact_force: false,
+            length_wedge_fingerprint: None,
         }
     }
 
@@ -16918,6 +17240,448 @@ mod overflow_retry_tests {
             calls.load(Ordering::SeqCst),
             2,
             "the overflow-retry is bounded to ONE: one initial + one retry, then terminal"
+        );
+    }
+}
+
+// ===========================================================================
+// LENGTH-WEDGE GATE + spec v1 Task 5 (clean retry / progress gate) tests.
+//
+// Field failure this protects against: a conversation at the model's window
+// ceiling ends `finish_reason=length`, the identical request is retried 3
+// times at identical token counts (<0.5s each), and the conversation is
+// permanently wedged. And the desktop stage6 thrash: a failed tool round's
+// full contaminated body re-sent on every stream retry (4 × ~350k tokens).
+// ===========================================================================
+#[cfg(test)]
+mod retry_wedge_protection_tests {
+    use std::sync::Arc;
+    use std::sync::Mutex;
+
+    use async_trait::async_trait;
+    use wcore_providers::{LlmProvider, ProviderError};
+    use wcore_tools::registry::ToolRegistry;
+    use wcore_types::llm::{LlmEvent, LlmRequest};
+    use wcore_types::message::{ContentBlock, FinishReason, Message, Role, StopReason, TokenUsage};
+
+    use crate::output::OutputSink;
+
+    struct NullOutput;
+    impl OutputSink for NullOutput {
+        fn emit_text_delta(&self, _: &str, _: &str) {}
+        fn emit_thinking(&self, _: &str, _: &str) {}
+        fn emit_tool_call(&self, _: &str, _: &str) {}
+        fn emit_tool_result(&self, _: &str, _: bool, _: &str) {}
+        fn emit_stream_start(&self, _: &str) {}
+        fn emit_stream_end(
+            &self,
+            _: &str,
+            _: usize,
+            _: u64,
+            _: u64,
+            _: u64,
+            _: u64,
+            _: FinishReason,
+        ) {
+        }
+        fn emit_error(&self, _: &str, _: bool) {}
+        fn emit_info(&self, _: &str) {}
+    }
+
+    /// A scripted provider that RECORDS every `LlmRequest` it is asked to
+    /// stream, so tests can assert on the exact outbound context of each
+    /// attempt (the wedge fingerprint / retry-stub assertions).
+    struct RecordingProvider {
+        scripts: Mutex<std::collections::VecDeque<Vec<LlmEvent>>>,
+        requests: Arc<Mutex<Vec<LlmRequest>>>,
+    }
+
+    impl RecordingProvider {
+        fn new(scripts: Vec<Vec<LlmEvent>>) -> Self {
+            Self {
+                scripts: Mutex::new(scripts.into_iter().collect()),
+                requests: Arc::new(Mutex::new(Vec::new())),
+            }
+        }
+        fn recorded(&self) -> Arc<Mutex<Vec<LlmRequest>>> {
+            Arc::clone(&self.requests)
+        }
+    }
+
+    #[async_trait]
+    impl LlmProvider for RecordingProvider {
+        async fn stream(
+            &self,
+            request: &LlmRequest,
+        ) -> Result<tokio::sync::mpsc::Receiver<LlmEvent>, ProviderError> {
+            self.requests.lock().unwrap().push(request.clone());
+            let script = self.scripts.lock().unwrap().pop_front().unwrap_or_default();
+            let (tx, rx) = tokio::sync::mpsc::channel(16);
+            tokio::spawn(async move {
+                for ev in script {
+                    let _ = tx.send(ev).await;
+                }
+            });
+            Ok(rx)
+        }
+    }
+
+    fn done(stop: StopReason, finish: FinishReason, input_tokens: u64) -> LlmEvent {
+        LlmEvent::Done {
+            stop_reason: stop,
+            finish_reason: finish,
+            usage: TokenUsage {
+                input_tokens,
+                ..Default::default()
+            },
+        }
+    }
+
+    /// An engine whose resolved input ceiling is small enough for a scripted
+    /// provider-billed `input_tokens` to sit at/over it, while the tiny local
+    /// history estimate stays well below (that mismatch is exactly how the
+    /// field wedge slipped past the #255 pre-flight guard).
+    fn wedge_engine(provider: Arc<dyn LlmProvider>) -> super::AgentEngine {
+        let mut e = super::AgentEngine::new_with_provider(
+            provider,
+            wcore_config::config::Config::default(),
+            ToolRegistry::new(),
+            Arc::new(NullOutput),
+        );
+        e.max_turns = Some(20);
+        // Unknown test model → the window falls back to compact_config.
+        // Ceiling = 50_000 − 100 − 50 = 49_850.
+        e.compact_config.context_window = 50_000;
+        e.compact_config.output_reserve = 100;
+        e.compact_config.emergency_buffer = 50;
+        e
+    }
+
+    // --- A: length-wedge gate ---------------------------------------------
+
+    #[tokio::test]
+    async fn length_at_ceiling_compacts_then_retries_with_changed_context() {
+        // Turn ends Length with a provider-billed input over the ceiling →
+        // the gate forces a compaction (call 2 = the summarizer), then
+        // retries with the CHANGED context (call 3) — never an identical
+        // re-send.
+        let provider = Arc::new(RecordingProvider::new(vec![
+            // call 1 — the wedged turn: instant Length at the ceiling.
+            vec![done(StopReason::EndTurn, FinishReason::Length, 1_000_000)],
+            // call 2 — the forced autocompact summarization call.
+            vec![
+                LlmEvent::TextDelta("<summary>compacted history</summary>".into()),
+                done(StopReason::EndTurn, FinishReason::Stop, 0),
+            ],
+            // call 3 — the retry with the compacted context succeeds.
+            vec![
+                LlmEvent::TextDelta("recovered".into()),
+                done(StopReason::EndTurn, FinishReason::Stop, 100),
+            ],
+        ]));
+        let requests = provider.recorded();
+        let mut engine = wedge_engine(provider);
+        let result = engine
+            .run("task", "m-wedge-1")
+            .await
+            .expect("a shrunk retry after forced compaction must recover");
+        assert_eq!(result.text, "recovered");
+
+        let reqs = requests.lock().unwrap();
+        assert_eq!(reqs.len(), 3, "wedged turn + compaction call + one retry");
+        // The retried context must differ from the wedged one — assert via
+        // the same outbound-context fingerprint the gate uses.
+        let fp_first = super::context_fingerprint(&reqs[0].model, &reqs[0].messages);
+        let fp_retry = super::context_fingerprint(&reqs[2].model, &reqs[2].messages);
+        assert_ne!(
+            fp_first, fp_retry,
+            "the retry must never re-send the identical over-budget context"
+        );
+    }
+
+    #[tokio::test]
+    async fn length_at_ceiling_with_failed_compaction_ends_clean_without_resend() {
+        // Compaction is attempted but fails (the summarizer call errors) →
+        // the outbound context is unchanged, so the gate must END the turn
+        // with a clean Length verdict — NOT re-send the identical request.
+        // Note the local estimate stays under the ceiling here (only the
+        // provider-billed count was over), so without the fingerprint check
+        // the engine would have happily re-sent the identical request.
+        let provider = Arc::new(RecordingProvider::new(vec![
+            // call 1 — the wedged turn.
+            vec![done(StopReason::EndTurn, FinishReason::Length, 1_000_000)],
+            // call 2 — the forced compaction call fails.
+            vec![LlmEvent::Error("summarizer unavailable".into())],
+        ]));
+        let requests = provider.recorded();
+        let mut engine = wedge_engine(provider);
+        let result = engine
+            .run("task", "m-wedge-2")
+            .await
+            .expect("a wedge with failed compaction is a CLEAN terminal verdict, not an Err");
+        assert_eq!(result.stop_reason, StopReason::MaxTurns);
+        assert_eq!(result.finish_reason, FinishReason::Length);
+        assert_eq!(
+            requests.lock().unwrap().len(),
+            2,
+            "wedged turn + compaction attempt only — the identical over-budget \
+             request must NEVER be re-sent"
+        );
+    }
+
+    #[tokio::test]
+    async fn identical_wedged_context_is_refused_before_dispatch() {
+        // The dispatch guard: once a context fingerprint is recorded as
+        // wedged, a run that would send the byte-identical context is
+        // refused BEFORE the provider is called (models a host that retries
+        // the identical wedged conversation, e.g. after a resume). A control
+        // run on an identically-configured engine captures the exact
+        // outbound bytes `run("task")` produces (per-turn injections
+        // included); the engine under test is seeded with that fingerprint.
+        let control = Arc::new(RecordingProvider::new(vec![vec![
+            LlmEvent::TextDelta("control".into()),
+            done(StopReason::EndTurn, FinishReason::Stop, 0),
+        ]]));
+        let control_requests = control.recorded();
+        let mut control_engine = wedge_engine(control);
+        control_engine
+            .run("task", "m-wedge-3a")
+            .await
+            .expect("control run completes");
+        let wedged_fingerprint = {
+            let reqs = control_requests.lock().unwrap();
+            assert_eq!(reqs.len(), 1);
+            super::context_fingerprint(&reqs[0].model, &reqs[0].messages)
+        };
+
+        let provider = Arc::new(RecordingProvider::new(vec![
+            // Would-be call — must never be consumed.
+            vec![
+                LlmEvent::TextDelta("must not run".into()),
+                done(StopReason::EndTurn, FinishReason::Stop, 0),
+            ],
+        ]));
+        let requests = provider.recorded();
+        let mut engine = wedge_engine(provider);
+        engine.length_wedge_fingerprint = Some(wedged_fingerprint);
+        let result = engine
+            .run("task", "m-wedge-3b")
+            .await
+            .expect("refusing a wedged re-send is a clean terminal verdict");
+        assert_eq!(result.stop_reason, StopReason::MaxTurns);
+        assert_eq!(result.finish_reason, FinishReason::Length);
+        assert_eq!(
+            requests.lock().unwrap().len(),
+            0,
+            "a byte-identical wedged context must be refused BEFORE dispatch"
+        );
+    }
+
+    // --- B: clean-retry stub + progress gate (spec v1 Task 5) --------------
+
+    /// History whose most recent tool round FAILED with a huge error body.
+    fn failed_tool_round_history(huge_error: &str) -> Vec<Message> {
+        vec![
+            Message::now(
+                Role::User,
+                vec![ContentBlock::Text {
+                    text: "do the thing".into(),
+                }],
+            ),
+            Message::now(
+                Role::Assistant,
+                vec![ContentBlock::ToolUse {
+                    id: "t1".into(),
+                    name: "BigTool".into(),
+                    input: serde_json::json!({}),
+                    extra: None,
+                }],
+            ),
+            Message::now(
+                Role::User,
+                vec![ContentBlock::ToolResult {
+                    tool_use_id: "t1".into(),
+                    content: huge_error.into(),
+                    is_error: true,
+                }],
+            ),
+        ]
+    }
+
+    #[tokio::test]
+    async fn failing_stream_with_failed_tool_round_stubs_body_and_stops_at_progress_gate() {
+        let huge_error = format!("CONTAMINATED-MARKER {}", "x".repeat(50_000));
+        let provider = Arc::new(RecordingProvider::new(vec![
+            // attempt 0 fails with no output …
+            vec![LlmEvent::Error("boom".into())],
+            // … retry 1 (stubbed context) also fails with no output —
+            // the progress gate must stop here, before a third attempt.
+            vec![LlmEvent::Error("boom again".into())],
+            // a third script would be consumed only if the gate failed.
+            vec![
+                LlmEvent::TextDelta("must not run".into()),
+                done(StopReason::EndTurn, FinishReason::Stop, 0),
+            ],
+        ]));
+        let requests = provider.recorded();
+        let mut engine = wedge_engine(provider);
+        engine.messages = failed_tool_round_history(&huge_error);
+        let result = engine.run("try again", "m-stub-1").await;
+
+        let reqs = requests.lock().unwrap();
+        assert_eq!(
+            reqs.len(),
+            2,
+            "the progress gate must stop after 2 consecutive no-output \
+             failures on a failed tool round — not burn a third full-context send"
+        );
+        // Attempt 0 carried the full contaminated body …
+        let first = serde_json::to_string(&reqs[0].messages).unwrap();
+        assert!(
+            first.contains("CONTAMINATED-MARKER"),
+            "the initial attempt sends the real tool result"
+        );
+        // … the retry carried the compact stub instead.
+        let retried = serde_json::to_string(&reqs[1].messages).unwrap();
+        assert!(
+            !retried.contains(&huge_error),
+            "the retry must NOT re-send the full contaminated body"
+        );
+        assert!(
+            retried.contains("[tool BigTool failed:"),
+            "the retry must carry the compact error stub, got: {}",
+            &retried[..retried.len().min(2_000)]
+        );
+        // The stop is a clear error naming the failing tool.
+        match result {
+            Err(super::AgentError::ApiError(msg)) => {
+                assert!(
+                    msg.contains("BigTool"),
+                    "the progress-gate error must name the failing tool: {msg}"
+                );
+            }
+            other => panic!("expected the progress-gate ApiError, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn transient_stream_failure_with_failed_tool_round_still_recovers() {
+        // Regression guard (spec gate 5.3): fail once, succeed on the (stubbed)
+        // retry — the stub and gate must not kill retry resilience.
+        let huge_error = format!("CONTAMINATED-MARKER {}", "x".repeat(50_000));
+        let provider = Arc::new(RecordingProvider::new(vec![
+            vec![LlmEvent::Error("transient".into())],
+            vec![
+                LlmEvent::TextDelta("recovered".into()),
+                done(StopReason::EndTurn, FinishReason::Stop, 100),
+            ],
+        ]));
+        let requests = provider.recorded();
+        let mut engine = wedge_engine(provider);
+        engine.messages = failed_tool_round_history(&huge_error);
+        let result = engine
+            .run("try again", "m-stub-2")
+            .await
+            .expect("a single transient failure must still recover");
+        assert_eq!(result.text, "recovered");
+        assert_eq!(requests.lock().unwrap().len(), 2, "1 initial + 1 retry");
+    }
+
+    #[test]
+    fn stub_helper_rewrites_only_failed_results_in_last_round() {
+        let mut messages = vec![
+            Message::now(
+                Role::Assistant,
+                vec![
+                    ContentBlock::ToolUse {
+                        id: "ok1".into(),
+                        name: "GoodTool".into(),
+                        input: serde_json::json!({}),
+                        extra: None,
+                    },
+                    ContentBlock::ToolUse {
+                        id: "bad1".into(),
+                        name: "BadTool".into(),
+                        input: serde_json::json!({}),
+                        extra: None,
+                    },
+                ],
+            ),
+            Message::now(
+                Role::User,
+                vec![
+                    ContentBlock::ToolResult {
+                        tool_use_id: "ok1".into(),
+                        content: "fine output".into(),
+                        is_error: false,
+                    },
+                    ContentBlock::ToolResult {
+                        tool_use_id: "bad1".into(),
+                        content: "line one of a huge error\nline two".into(),
+                        is_error: true,
+                    },
+                ],
+            ),
+        ];
+        let failing = super::stub_failed_tool_results_for_retry(&mut messages);
+        assert_eq!(failing, vec!["BadTool".to_string()]);
+        match &messages[1].content[0] {
+            ContentBlock::ToolResult { content, .. } => {
+                assert_eq!(content, "fine output", "successful results untouched")
+            }
+            _ => unreachable!(),
+        }
+        match &messages[1].content[1] {
+            ContentBlock::ToolResult { content, .. } => {
+                assert_eq!(
+                    content,
+                    "[tool BadTool failed: line one of a huge error; retrying]"
+                );
+            }
+            _ => unreachable!(),
+        }
+        // Idempotent + still reports the failing tool on a second pass
+        // (the progress gate needs the name every retry).
+        let failing_again = super::stub_failed_tool_results_for_retry(&mut messages);
+        assert_eq!(failing_again, vec!["BadTool".to_string()]);
+        match &messages[1].content[1] {
+            ContentBlock::ToolResult { content, .. } => {
+                assert_eq!(
+                    content, "[tool BadTool failed: line one of a huge error; retrying]",
+                    "a second pass must not re-stub the stub"
+                );
+            }
+            _ => unreachable!(),
+        }
+    }
+
+    #[test]
+    fn context_fingerprint_ignores_timestamps_but_not_content() {
+        let a = vec![Message::now(
+            Role::User,
+            vec![ContentBlock::Text { text: "hi".into() }],
+        )];
+        let mut b = a.clone();
+        b[0].timestamp = Some(chrono::Utc::now() + chrono::Duration::hours(1));
+        assert_eq!(
+            super::context_fingerprint("m", &a),
+            super::context_fingerprint("m", &b),
+            "timestamps are not sent to the provider and must not change the fingerprint"
+        );
+        let c = vec![Message::now(
+            Role::User,
+            vec![ContentBlock::Text {
+                text: "different".into(),
+            }],
+        )];
+        assert_ne!(
+            super::context_fingerprint("m", &a),
+            super::context_fingerprint("m", &c)
+        );
+        assert_ne!(
+            super::context_fingerprint("model-a", &a),
+            super::context_fingerprint("model-b", &a),
+            "the dispatched model is part of the request identity"
         );
     }
 }
