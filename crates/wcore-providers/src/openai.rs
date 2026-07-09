@@ -2538,7 +2538,7 @@ mod tests {
     fn parse_flux_402_spend_ceiling_unresolved_double_wrapped() {
         // The inner object, exactly as Flux emits it, stringified into the
         // LiteLLM envelope's `error.message`.
-        let inner = r#"{"error":"spend_ceiling_unresolved","reason":"no_account_id","message":"This request requires a resolvable account spend ceiling. Add a payment method or contact billing@ferroxlabs.com.","upgrade_url":"https://fluxrouter.ai/home/billing"}"#;
+        let inner = r#"{"error":"spend_ceiling_unresolved","reason":"no_account_id","message":"This request requires a resolvable account spend ceiling. Add a payment method or contact support@fluxrouter.ai.","upgrade_url":"https://fluxrouter.ai/home/billing"}"#;
         let body = serde_json::json!({
             "error": { "message": inner, "code": "402" }
         })
