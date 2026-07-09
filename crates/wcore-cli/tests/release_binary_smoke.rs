@@ -95,9 +95,29 @@ fn ensure_release_binary_or_fail() -> PathBuf {
     );
 }
 
-/// Back-compat alias for existing call sites in this file. Same body.
-fn ensure_release_binary() -> PathBuf {
-    ensure_release_binary_or_fail()
+/// Skip-aware variant for the smoke tests themselves: on a dev checkout the
+/// release binary is usually absent (`cargo test --workspace` never builds
+/// it), and hard-failing there makes the whole workspace suite permanently
+/// red (#190). Returns `None` to skip with a notice when the artifact is
+/// missing — UNLESS `WCORE_SMOKE_REQUIRE_PREBUILT` is set, in which case a
+/// missing binary is still the hard `WCORE_PREBUILD_REQUIRED` panic. CI sets
+/// that variable on its "Release binary smoke" steps (after the dedicated
+/// pre-build step), so the gate cannot silently degrade into a skip there.
+fn release_binary_or_skip() -> Option<PathBuf> {
+    let bin = release_binary_path();
+    if bin.exists() {
+        return Some(bin);
+    }
+    if std::env::var("WCORE_SMOKE_REQUIRE_PREBUILT").is_ok() {
+        ensure_release_binary_or_fail();
+    }
+    eprintln!(
+        "[release_binary_smoke] release binary not found at {} — skipping.\n\
+         Build it first (`vx cargo build --release -p wcore-cli`), or set\n\
+         WCORE_SMOKE_REQUIRE_PREBUILT=1 to make a missing artifact a failure.",
+        bin.display()
+    );
+    None
 }
 
 /// Run the release binary with the given args; return (status, stdout, stderr).
@@ -115,7 +135,9 @@ fn run_with(bin: &PathBuf, args: &[&str]) -> (std::process::ExitStatus, String, 
 
 #[test]
 fn release_binary_help_and_version_succeed() {
-    let bin = ensure_release_binary();
+    let Some(bin) = release_binary_or_skip() else {
+        return;
+    };
 
     let (help_status, help_stdout, help_stderr) = run_with(&bin, &["--help"]);
     assert!(
@@ -152,14 +174,12 @@ fn release_binary_help_and_version_succeed() {
 /// Mirrors `plugin_discovery_e2e.rs::first_ready_event` but targets the
 /// release artifact at `target/release/wayland-core` instead of the
 /// debug binary Cargo wires through `CARGO_BIN_EXE_wayland-core`.
-fn first_ready_event_release() -> serde_json::Value {
-    let bin = ensure_release_binary();
-
+fn first_ready_event_release(bin: &PathBuf) -> serde_json::Value {
     // Clean cwd + HOME so no `.wayland-core.toml` from the dev environment
     // perturbs config resolution.
     let tmp = TempDir::new().expect("create tmp workspace");
 
-    let mut child = Command::new(&bin)
+    let mut child = Command::new(bin)
         .args([
             "--json-stream",
             "--provider",
@@ -218,7 +238,10 @@ fn first_ready_event_release() -> serde_json::Value {
 
 #[test]
 fn release_binary_ready_event_advertises_plugin_capabilities() {
-    let event = first_ready_event_release();
+    let Some(bin) = release_binary_or_skip() else {
+        return;
+    };
+    let event = first_ready_event_release(&bin);
 
     assert_eq!(
         event["type"], "ready",
