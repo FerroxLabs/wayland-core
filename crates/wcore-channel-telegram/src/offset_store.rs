@@ -61,10 +61,14 @@ mod tests {
     use super::*;
 
     fn unique_tmp() -> PathBuf {
+        // Per-call unique path. A monotonic counter (not a pointer to a
+        // zero-sized temporary, which is the same constant address for every
+        // call) keeps parallel tests in this module from sharing a file.
+        static SEQ: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        let n = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         std::env::temp_dir().join(format!(
-            "wcore-telegram-offset-{}-{:p}.offset",
-            std::process::id(),
-            &() as *const ()
+            "wcore-telegram-offset-{}-{n}.offset",
+            std::process::id()
         ))
     }
 
