@@ -4061,6 +4061,18 @@ mod tests {
 
     #[test]
     fn detail_pane_enter_saves_the_change() {
+        // The detail-pane `⏎` runs a real save through `patch_global_config`,
+        // whose path resolves via process-global `WAYLAND_HOME`. Hermetic via
+        // the same lock + tempdir pattern as every other persisting test here,
+        // so parallel tests that mutate `WAYLAND_HOME` can't race the write
+        // (and the save never lands in the developer's real config.toml).
+        let _guard = EXPERT_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = tempfile::tempdir().expect("tempdir");
+        let prev = std::env::var_os("WAYLAND_HOME");
+        // SAFETY: process-global env mutation is serialised by EXPERT_ENV_LOCK;
+        // the previous value is restored before the lock is released.
+        unsafe { std::env::set_var("WAYLAND_HOME", dir.path()) };
+
         let mut app = App::new();
         let mut surface = ConfigSurface::new();
         surface.on_enter(&mut app);
@@ -4077,6 +4089,14 @@ mod tests {
         // The change persisted — the baseline moved with it.
         assert!(!surface.is_dirty(), "a saved change is no longer dirty");
         assert!(surface.save_pending, "a save should be recorded");
+
+        // SAFETY: restore the prior env under the same lock.
+        unsafe {
+            match prev {
+                Some(v) => std::env::set_var("WAYLAND_HOME", v),
+                None => std::env::remove_var("WAYLAND_HOME"),
+            }
+        }
     }
 
     #[test]
