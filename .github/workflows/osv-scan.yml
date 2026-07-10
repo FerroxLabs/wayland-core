@@ -1,13 +1,17 @@
 name: OSV Scanner
 
+# core#193: this workflow's `scan` job is (re-)added to branch protection as a
+# REQUIRED status check. A required check MUST report on every PR — but a
+# `pull_request` `paths:` filter makes the whole workflow (and thus the check)
+# NOT run when no matching file changed, so the required context never arrives
+# and the PR deadlocks. That is exactly why `scan` was removed from required
+# contexts on 2026-07-10. Instead of a paths filter, the job now runs on EVERY
+# PR and decides RELEVANCE inside the job: a PR that provably touches no
+# dependency file skips the actual scan and succeeds, so the `scan` context
+# always reports. The relevance check is FAIL-SAFE — any uncertainty scans.
 on:
   pull_request:
     branches: [main]
-    paths:
-      - '**/Cargo.lock'
-      - '**/Cargo.toml'
-      - '.github/workflows/osv-scan.yml'
-      - '.github/osv-scanner.toml'
   schedule:
     # Nightly at 06:23 UTC — offset to avoid the top-of-hour rush.
     - cron: '23 6 * * *'
@@ -24,11 +28,58 @@ jobs:
   scan:
     runs-on: ubuntu-latest
     steps:
+      # fetch-depth: 0 so the PR base is reachable for the changed-files diff
+      # below (schedule/dispatch runs don't diff, so the cost is PR-only).
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # Decide whether this run needs to scan. Non-PR runs (nightly schedule,
+      # manual dispatch) always scan — they exist to catch advisory-DB drift on
+      # unchanged deps. PR runs scan only when a dependency-relevant file
+      # changed; otherwise they early-exit to SUCCESS so the required `scan`
+      # context still reports (core#193). FAIL-SAFE: the default is to scan;
+      # `needed` is only cleared when we could compute the PR's changed files AND
+      # none match the dependency patterns. Any diff failure ⇒ scan. No
+      # third-party action; the event fields are passed via env (never
+      # interpolated into the shell) so there is no workflow-injection surface.
+      - name: Determine scan relevance
+        id: relevance
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BASE_REF: ${{ github.base_ref }}
+        run: |
+          set -uo pipefail
+          needed=true
+          if [ "${EVENT_NAME}" = "pull_request" ]; then
+            if git fetch --no-tags --depth=1 origin "${BASE_REF}" 2>/dev/null \
+              && changed="$(git diff --name-only "origin/${BASE_REF}...HEAD" 2>/dev/null)"; then
+              echo "Changed files:"
+              printf '%s\n' "${changed}"
+              # Here-string (not a pipe) on purpose: under `set -o pipefail`, a
+              # `printf ... | grep -q` where grep matches early closes the pipe,
+              # printf takes SIGPIPE (141), and pipefail would surface 141 as the
+              # pipeline status even though grep MATCHED — flipping a real Cargo
+              # change to `needed=false` (a silent skipped scan). `grep <<<` has
+              # no upstream pipe, so a match is an unambiguous exit 0.
+              if ! grep -Eq '(^|/)Cargo\.(lock|toml)$|^\.github/workflows/osv-scan\.yml$|^\.github/osv-scanner\.toml$' <<<"${changed}"; then
+                needed=false
+                echo "No dependency-relevant change; skipping scan and reporting success."
+              else
+                echo "Dependency-relevant change detected; scanning."
+              fi
+            else
+              echo "Could not compute changed files; scanning (fail-safe)."
+            fi
+          else
+            echo "Non-PR event (${EVENT_NAME}); scanning."
+          fi
+          echo "needed=${needed}" >> "$GITHUB_OUTPUT"
 
       # Pin the exact osv-scanner release we verified locally (v2.3.8). Direct
       # binary — no Docker action, no reusable workflow, no code-scanning dep.
       - name: Install osv-scanner
+        if: steps.relevance.outputs.needed == 'true'
         run: |
           curl -sSfL \
             https://github.com/google/osv-scanner/releases/download/v2.3.8/osv-scanner_linux_amd64 \
@@ -40,4 +91,5 @@ jobs:
       # finding not dispositioned in .github/osv-scanner.toml, so this gates the
       # PR directly. Dispositions are public, dated, and reasoned in that file.
       - name: Scan dependencies
+        if: steps.relevance.outputs.needed == 'true'
         run: osv-scanner scan source --recursive --config=.github/osv-scanner.toml ./
