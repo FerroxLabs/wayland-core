@@ -153,6 +153,7 @@ pub fn select_backend_from_env() -> Result<Arc<dyn UserModelBackend>, UserModelE
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serial_test::serial;
     use wcore_user_model::observation::{Observation, Outcome, ToolHint};
 
     #[tokio::test]
@@ -295,16 +296,17 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn selector_defaults_to_local() {
         // Snapshot + restore so other parallel tests in the workspace
-        // don't see our temporary unset. SAFETY: env mutation is a
-        // process-wide side effect; tokio tests in this module use
-        // `#[tokio::test]` (single-thread per test) and this is a plain
-        // `#[test]`, so concurrent tests in the same binary would race.
-        // Risk accepted because this binary has only the adapter tests
-        // and the only mutation here is `remove_var`.
+        // don't see our temporary unset. WAYLAND_USER_MODEL_BACKEND is
+        // process-global; under `cargo test` all tests in this binary share
+        // one process, so a concurrent mutation is a data race (unsafe in
+        // edition 2024). `#[serial]` serializes every test that touches this
+        // var.
         let prior = std::env::var("WAYLAND_USER_MODEL_BACKEND").ok();
-        // SAFETY: see comment above.
+        // SAFETY: `#[serial]` guarantees no other `#[serial]` test mutates the
+        // environment concurrently.
         unsafe {
             std::env::remove_var("WAYLAND_USER_MODEL_BACKEND");
         }
@@ -319,6 +321,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn selector_unknown_backend_errors() {
         // SAFETY: see selector_defaults_to_local for env-mutation caveat.
         let prior = std::env::var("WAYLAND_USER_MODEL_BACKEND").ok();
@@ -342,6 +345,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     #[ignore = "requires live HONCHO_API_KEY + HONCHO_API_URL; run explicitly with --ignored"]
     fn selector_picks_honcho_when_configured() {
         // SAFETY: see selector_defaults_to_local for env-mutation caveat.

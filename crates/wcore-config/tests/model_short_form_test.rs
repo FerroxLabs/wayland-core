@@ -5,6 +5,7 @@
 //! `Config::resolve` and checks that the resolved `Config.model` is the
 //! canonical Bedrock literal — i.e. the engine never sees the short form.
 
+use serial_test::serial;
 use tempfile::TempDir;
 use wcore_config::config::{CliArgs, Config};
 use wcore_types::model_aliases::{
@@ -83,6 +84,7 @@ fn unknown_role_passes_through_unchanged() {
 }
 
 #[test]
+#[serial]
 fn default_bedrock_when_no_model_uses_alias() {
     // No --model flag, no inline config: `default_model_for(Bedrock)` must
     // pick the alias, not the deprecated 20250514 literal that was hard-
@@ -94,14 +96,14 @@ fn default_bedrock_when_no_model_uses_alias() {
     // `model = "<something>"` in that file the default-model path is
     // never exercised and the test fails spuriously.  Point `WAYLAND_HOME`
     // at an empty TempDir so the global config path resolves to a
-    // non-existent file and `default_model_for()` wins.  The SAFETY note
-    // in `std::env::set_var` applies (don't call concurrently with other
-    // `set_var`/`remove_var` on the same key); serial_test is not needed
-    // here because nextest runs each test binary in its own process.
+    // non-existent file and `default_model_for()` wins.  This test and
+    // `default_vertex_when_no_model_uses_alias` both mutate the *same*
+    // WAYLAND_HOME key, so under `cargo test` (all tests of a binary share
+    // one process across threads) they would race — a data race on the
+    // environment (unsafe in edition 2024). `#[serial]` serializes them.
     let tmp = TempDir::new().unwrap();
-    // SAFETY: nextest runs this binary in a single-threaded context before
-    // test threads fork; the env write is visible to Config::resolve below
-    // and is not racy within this process.
+    // SAFETY: `#[serial]` guarantees no other `#[serial]` test mutates the
+    // environment concurrently, so this write/remove pair is race-free.
     #[allow(unsafe_code)]
     unsafe {
         std::env::set_var("WAYLAND_HOME", tmp.path());
@@ -131,6 +133,7 @@ fn default_bedrock_when_no_model_uses_alias() {
 }
 
 #[test]
+#[serial]
 fn default_vertex_when_no_model_uses_alias() {
     // See isolation note in `default_bedrock_when_no_model_uses_alias` above —
     // same problem, same fix: redirect WAYLAND_HOME so the host global config

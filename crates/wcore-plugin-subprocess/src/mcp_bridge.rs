@@ -713,13 +713,19 @@ mod tests {
     /// asserting the child does not inherit secret vars.
     #[cfg(unix)]
     #[tokio::test]
+    #[serial_test::serial]
     async fn mcp_bridge_env_clear_blocks_secret_vars() {
         use tokio::io::AsyncReadExt;
         use tokio::process::Command;
 
         let secret_var = "WAYLAND_MCP_TEST_SECRET";
         let secret_val = "mcp-should-not-leak";
-        // SAFETY: single-threaded test context; no concurrent env mutation.
+        // The environ table is process-global; under `cargo test` all tests in
+        // this binary share one process, so mutating it while another test
+        // reads/writes env is a data race (unsafe in edition 2024). `#[serial]`
+        // serializes every env-mutating test in this binary.
+        // SAFETY: `#[serial]` guarantees no other `#[serial]` test mutates the
+        // environment concurrently.
         unsafe { std::env::set_var(secret_var, secret_val) };
 
         let mut cmd = Command::new("/bin/sh");
