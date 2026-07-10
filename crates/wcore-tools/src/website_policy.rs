@@ -680,7 +680,8 @@ mod tests {
         .unwrap();
 
         let prev = std::env::var_os("WAYLAND_HOME");
-        // SAFETY: serial test; single-threaded env mutation.
+        // SAFETY: `#[serial_test::serial]` serializes every env-mutating test
+        // in this binary, so this mutation cannot race another.
         unsafe { std::env::set_var("WAYLAND_HOME", dir.path()) };
         reset_cache();
 
