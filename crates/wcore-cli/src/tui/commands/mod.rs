@@ -541,6 +541,7 @@ fn damerau_levenshtein(a: &str, b: &str) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serial_test::serial;
 
     // ── damerau_levenshtein ────────────────────────────────────────────
 
@@ -873,14 +874,15 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn theme_light_arg_resolves_to_the_light_palette() {
         use crate::tui::theme::Theme;
         // `Theme::for_mode` resolves the palette by terminal capability
         // (truecolor RGB vs 256-indexed vs `Reset` under NO_COLOR). This test
         // verifies the mode→palette MAPPING, not capability detection, so pin
         // truecolor + clear NO_COLOR for a deterministic result in CI's clean
-        // env (no COLORTERM/TTY). SAFETY: nextest isolates each test in its
-        // own process; the write cannot race another test.
+        // env (no COLORTERM/TTY).
+        // SAFETY: #[serial] serializes every env-mutating test in this binary.
         unsafe {
             std::env::remove_var("NO_COLOR");
             std::env::set_var("COLORTERM", "truecolor");

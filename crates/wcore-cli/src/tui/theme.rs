@@ -377,6 +377,7 @@ impl Theme {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serial_test::serial;
     use std::sync::Mutex;
 
     /// Serializes the two tests that mutate process-global env vars
@@ -469,15 +470,15 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn for_mode_resolves_light_dark_auto() {
         let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         // `for_mode` branches on truecolor (hearth* vs hearth*_256) and on
         // NO_COLOR, both process-global. Force COLORTERM=truecolor and clear
         // NO_COLOR so the assertions are deterministic regardless of host.
         //
-        // SAFETY: single-threaded test body; env mutations are paired and
-        // restored at the end. This and `detect_honors_the_no_color_env_var`
-        // are the only tests in this module touching these vars.
+        // SAFETY: #[serial] serializes every env-mutating test in this binary.
+        // Env mutations are paired and restored at the end.
         let prior_colorterm = std::env::var_os("COLORTERM");
         let prior_no_color = std::env::var_os("NO_COLOR");
         let prior_fgbg = std::env::var_os("COLORFGBG");
@@ -541,6 +542,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn detect_honors_the_no_color_env_var() {
         // `detect()` is the single entry point the live TUI must call so
         // `NO_COLOR` is respected at runtime. With the var set to a
@@ -553,10 +555,8 @@ mod tests {
         // `COLORTERM=truecolor` for the fall-through assertions to be
         // deterministic regardless of host environment.
         //
-        // SAFETY: `set_var`/`remove_var` are process-global. The `ENV_LOCK`
-        // guard serializes this test against `for_mode_resolves_light_dark_auto`
-        // (the only other env-mutating test in this module), so there is no
-        // concurrent reader/writer racing inside this binary.
+        // SAFETY: #[serial] serializes every env-mutating test in this binary.
+        // The `ENV_LOCK` guard is kept as belt-and-suspenders redundancy.
         let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let prior_colorterm = std::env::var_os("COLORTERM");
         unsafe { std::env::set_var("COLORTERM", "truecolor") };

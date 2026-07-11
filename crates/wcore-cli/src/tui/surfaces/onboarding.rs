@@ -1729,6 +1729,7 @@ mod tests {
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
     use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    use serial_test::serial;
 
     fn key(code: KeyCode) -> KeyEvent {
         KeyEvent::new(code, KeyModifiers::NONE)
@@ -2487,10 +2488,11 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn short_path_collapses_the_home_directory() {
         // The Ready card shortens a path under $HOME to a leading `~` so
         // it wraps cleanly — it never cuts a path mid-string.
-        // SAFETY: single-threaded test, env restored immediately after.
+        // SAFETY: #[serial] serializes every env-mutating test in this binary.
         let prev = std::env::var_os("HOME");
         unsafe { std::env::set_var("HOME", "/Users/sean") };
         let shortened = short_path(std::path::Path::new(
