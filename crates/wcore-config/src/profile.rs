@@ -225,20 +225,47 @@ fn profile_flag_from_args(args: impl Iterator<Item = String>) -> Option<String> 
 /// before `load_wayland_env_file()` and before any thread (or the Tokio
 /// runtime) is spawned.
 pub fn activate_for_launch() {
-    activate_for_launch_impl(std::env::args());
+    let outcome = activate_for_launch_impl(std::env::args());
+    // First-wins; `main()` calls this exactly once at process entry.
+    let _ = LAUNCH_OUTCOME.set(outcome);
+}
+
+/// What [`activate_for_launch`] did with the profile selection — recorded so a
+/// host guard can reason about the RESULT of activation WITHOUT re-reading the
+/// `active` pointer (the D2 single-reader discipline forbids reading it outside
+/// this module; re-reading it deep in the stack is the exact corruption bug).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct LaunchOutcome {
+    /// A profile was selected — via `--profile` OR the `active` pointer — but
+    /// its home did not exist (or the name was invalid), so activation WARNED
+    /// and fell through to the shared default home. `Some(name)` is the identity
+    /// that was asked for and NOT bound. A host protocol must refuse rather than
+    /// serve the default home's credentials/memory under that name.
+    pub unbound_selection: Option<String>,
+}
+
+static LAUNCH_OUTCOME: std::sync::OnceLock<LaunchOutcome> = std::sync::OnceLock::new();
+
+/// The recorded outcome of this process's launch-time profile activation, or
+/// `None` if [`activate_for_launch`] has not run (e.g. a unit test that never
+/// entered `main`). See [`LaunchOutcome`].
+#[must_use]
+pub fn launch_outcome() -> Option<LaunchOutcome> {
+    LAUNCH_OUTCOME.get().cloned()
 }
 
 /// Testable core of [`activate_for_launch`] — argv is injected so tests can
 /// exercise the `--profile` path without mutating the real process arguments.
-fn activate_for_launch_impl(args: impl Iterator<Item = String>) {
-    // 1. Explicit WAYLAND_HOME wins — never override it.
+fn activate_for_launch_impl(args: impl Iterator<Item = String>) -> LaunchOutcome {
+    // 1. Explicit WAYLAND_HOME wins — never override it. An explicit home is an
+    //    unambiguous binding, so nothing is left unbound.
     if std::env::var_os("WAYLAND_HOME").is_some() {
-        return;
+        return LaunchOutcome::default();
     }
 
     // 2. --profile on argv, else 3. the active pointer.
     let Some(name) = profile_flag_from_args(args).or_else(read_active_pointer) else {
-        return;
+        return LaunchOutcome::default();
     };
 
     match profile_dir(&name) {
@@ -246,17 +273,39 @@ fn activate_for_launch_impl(args: impl Iterator<Item = String>) {
             // SAFETY: single-threaded at process entry (see the doc comment and
             // the `main()` call site). No other thread can observe the env race.
             unsafe { std::env::set_var("WAYLAND_HOME", &dir) };
+            LaunchOutcome::default()
         }
         Ok(dir) => {
             eprintln!(
                 "warning: profile {name:?} not found at {} — using the default home",
                 dir.display()
             );
+            LaunchOutcome {
+                unbound_selection: Some(name),
+            }
         }
         Err(e) => {
             eprintln!("warning: ignoring invalid profile selection: {e}");
+            LaunchOutcome {
+                unbound_selection: Some(name),
+            }
         }
     }
+}
+
+/// The profile name requested on THIS process's command line, if any —
+/// `--profile <name>` / `--profile=<name>` in either the global or a
+/// subcommand position (a raw-argv scan, stopping at `--`, so a literal
+/// `--profile` inside a user prompt is never mistaken for the flag).
+///
+/// This is the SAME source [`activate_for_launch`] resolves the home from, so a
+/// host guard that validates "am I actually bound to the profile I was asked
+/// for?" and the activation that binds it cannot disagree — they read one
+/// signal. Returns `None` when no `--profile` was given (an isolated home bound
+/// purely via an explicit `WAYLAND_HOME`, or the default home).
+#[must_use]
+pub fn requested_profile_from_argv() -> Option<String> {
+    profile_flag_from_args(std::env::args())
 }
 
 // ===========================================================================
@@ -896,6 +945,20 @@ mod tests {
         assert_eq!(profile_flag_from_args(argv(&["--profile"])), None);
         // A trailing --profile with no value resolves to None (falls through).
         assert_eq!(profile_flag_from_args(argv(&["wcore", "--profile"])), None);
+        // Position-independence: the flag is found the same whether it precedes
+        // the subcommand (global) or follows it. A host guard reading this must
+        // catch BOTH — reading only the parsed subcommand field leaves the
+        // global position unguarded.
+        assert_eq!(
+            profile_flag_from_args(argv(&["wcore", "--profile", "work", "acp", "serve"])),
+            Some("work".to_string()),
+            "global position (before the subcommand)"
+        );
+        assert_eq!(
+            profile_flag_from_args(argv(&["wcore", "acp", "serve", "--profile", "work"])),
+            Some("work".to_string()),
+            "subcommand position (after the subcommand)"
+        );
     }
 
     #[test]
@@ -973,9 +1036,11 @@ mod tests {
             ("WAYLAND_PROFILES_ROOT", Some(root.path().to_str().unwrap())),
             ("WAYLAND_HOME", None),
         ]);
-        activate_for_launch_impl(argv(&["wcore", "--profile", "ghost"]));
-        // Missing profile dir → warn + fall through; WAYLAND_HOME stays unset.
+        let outcome = activate_for_launch_impl(argv(&["wcore", "--profile", "ghost"]));
+        // Missing profile dir → warn + fall through; WAYLAND_HOME stays unset...
         assert_eq!(std::env::var_os("WAYLAND_HOME"), None);
+        // ...and the outcome records the unbound selection so a host can refuse.
+        assert_eq!(outcome.unbound_selection.as_deref(), Some("ghost"));
     }
 
     #[test]
@@ -986,8 +1051,56 @@ mod tests {
             ("WAYLAND_PROFILES_ROOT", Some(root.path().to_str().unwrap())),
             ("WAYLAND_HOME", None),
         ]);
-        activate_for_launch_impl(argv(&["wcore", "--profile", "../escape"]));
+        let outcome = activate_for_launch_impl(argv(&["wcore", "--profile", "../escape"]));
         assert_eq!(std::env::var_os("WAYLAND_HOME"), None);
+        assert_eq!(outcome.unbound_selection.as_deref(), Some("../escape"));
+    }
+
+    /// The pointer path is a first-class selection source, so its missing-home
+    /// fall-through must ALSO be recorded — this is the fail-open a flag-only
+    /// guard misses (`wayland-core profile use X` then a bare launch when X's
+    /// home is gone).
+    #[test]
+    #[serial]
+    fn activate_records_unbound_selection_from_the_active_pointer() {
+        let root = tempdir().unwrap();
+        let _g = EnvGuard::set(&[
+            ("WAYLAND_PROFILES_ROOT", Some(root.path().to_str().unwrap())),
+            ("WAYLAND_HOME", None),
+        ]);
+        // Realistic scenario: `profile use work` while work existed, then work's
+        // home is deleted → the pointer is now stale. (The writer refuses a
+        // non-existent home, so create → point → delete.)
+        std::fs::create_dir_all(root.path().join("work")).unwrap();
+        set_active_profile("work").unwrap();
+        std::fs::remove_dir_all(root.path().join("work")).unwrap();
+
+        // No --profile flag; selection comes from the (now stale) pointer.
+        let outcome = activate_for_launch_impl(argv(&["wcore"]));
+        assert_eq!(std::env::var_os("WAYLAND_HOME"), None);
+        assert_eq!(
+            outcome.unbound_selection.as_deref(),
+            Some("work"),
+            "a pointer-selected missing home must be recorded, not silently ignored"
+        );
+    }
+
+    /// A cleanly bound profile (home exists) leaves nothing unbound.
+    #[test]
+    #[serial]
+    fn activate_bound_profile_records_no_unbound_selection() {
+        let root = tempdir().unwrap();
+        let _g = EnvGuard::set(&[
+            ("WAYLAND_PROFILES_ROOT", Some(root.path().to_str().unwrap())),
+            ("WAYLAND_HOME", None),
+        ]);
+        std::fs::create_dir_all(root.path().join("work")).unwrap();
+        let outcome = activate_for_launch_impl(argv(&["wcore", "--profile", "work"]));
+        assert_eq!(
+            std::env::var_os("WAYLAND_HOME"),
+            Some(root.path().join("work").into_os_string())
+        );
+        assert_eq!(outcome.unbound_selection, None);
     }
 
     // --- Phase 2 management helpers ----------------------------------------
