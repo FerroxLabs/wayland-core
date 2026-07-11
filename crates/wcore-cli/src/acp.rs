@@ -261,31 +261,40 @@ async fn serve(args: AcpServeArgs) -> anyhow::Result<()> {
     // We try to load an existing key from the keychain first; if absent
     // (first run), we generate a new one, persist it, and print it to stderr
     // exactly once. The key is 32 random bytes, hex-encoded → 64 chars.
-    let api_key = match wcore_config::keychain::get_secret(
-        wcore_acp::auth::KEYCHAIN_SERVICE,
-        ACP_SERVER_KEY_ACCOUNT,
-    ) {
+    // persona-profiles PR-7: when the profile SUPERVISOR spawns this process as
+    // a per-profile CHILD, it injects a pre-generated server key via
+    // WAYLAND_ACP_SERVER_KEY so the parent's AcpClient can authenticate to us
+    // (X-API-Key) WITHOUT scraping our stderr for a keychain-generated key. The
+    // env var is readable only by this child process (and root); children bind
+    // localhost ephemeral ports. Takes precedence over the keychain path below.
+    let api_key = match std::env::var("WAYLAND_ACP_SERVER_KEY") {
         Ok(k) if !k.is_empty() => k,
-        _ => {
-            // First run: generate a fresh key.
-            let random_bytes: [u8; 32] = {
-                let mut buf = [0u8; 32];
-                // Use uuid's rng (already in the workspace) for portability.
-                let id = uuid::Uuid::new_v4();
-                let id2 = uuid::Uuid::new_v4();
-                buf[..16].copy_from_slice(id.as_bytes());
-                buf[16..].copy_from_slice(id2.as_bytes());
-                buf
-            };
-            let key: String = random_bytes.iter().map(|b| format!("{:02x}", b)).collect();
-            store_api_key(ACP_SERVER_KEY_ACCOUNT, &key)
-                .map_err(|e| anyhow::anyhow!("keychain store failed: {e}"))?;
-            eprintln!(
-                "wayland-core acp: generated API key (first run) — \
+        _ => match wcore_config::keychain::get_secret(
+            wcore_acp::auth::KEYCHAIN_SERVICE,
+            ACP_SERVER_KEY_ACCOUNT,
+        ) {
+            Ok(k) if !k.is_empty() => k,
+            _ => {
+                // First run: generate a fresh key.
+                let random_bytes: [u8; 32] = {
+                    let mut buf = [0u8; 32];
+                    // Use uuid's rng (already in the workspace) for portability.
+                    let id = uuid::Uuid::new_v4();
+                    let id2 = uuid::Uuid::new_v4();
+                    buf[..16].copy_from_slice(id.as_bytes());
+                    buf[16..].copy_from_slice(id2.as_bytes());
+                    buf
+                };
+                let key: String = random_bytes.iter().map(|b| format!("{:02x}", b)).collect();
+                store_api_key(ACP_SERVER_KEY_ACCOUNT, &key)
+                    .map_err(|e| anyhow::anyhow!("keychain store failed: {e}"))?;
+                eprintln!(
+                    "wayland-core acp: generated API key (first run) — \
                  pass as X-API-Key header:\n  {key}"
-            );
-            key
-        }
+                );
+                key
+            }
+        },
     };
 
     // Resolve a runtime Config for the engine. Provider/model/api-key flags
