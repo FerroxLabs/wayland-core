@@ -213,29 +213,44 @@ async fn serve(args: AcpServeArgs) -> anyhow::Result<()> {
             args.bind
         );
     }
-    let turn_engine = Arc::new(
-        crate::acp_engine::EngineTurnEngine::new(config.clone(), cwd.clone())
-            .force_tools(args.allow_all_tools),
-    );
-    let a2a = Arc::new(crate::acp_engine::EngineA2aHandler::new(
-        agent_id, config, cwd,
-    ));
-    // persona-profiles Phase A (PR-3'): install the trusted persona-agent roster
-    // ONLY when the operator opts in. Feature default-OFF — with no roster
-    // installed the server keeps its pre-persona behaviour exactly (empty
-    // `agents/list`, `AgentNotFound` for any selector).
-    let mut acp_server = AcpServer::new()
-        .with_a2a_handler(a2a)
-        .with_turn_engine(turn_engine);
-    if args.enable_agent_selection {
-        let roster = crate::acp_roster::CliAgentRoster::from_trusted_sources();
+    // persona-profiles Phase A: build the trusted persona-agent roster ONLY when
+    // the operator opts in. Feature default-OFF — with no roster the server keeps
+    // its pre-persona behaviour exactly (empty `agents/list`, `AgentNotFound` for
+    // any selector, and no persona is resolvable by the engine).
+    //
+    // ONE roster instance is shared by the server (which AUTHORIZES a selector at
+    // session/create) and the turn engine (which RESOLVES that id to the persona
+    // overlay). Sharing the instance is the invariant that makes "what you may
+    // select" and "what may be applied to your engine" the same set — two rosters
+    // could drift and become an authz bypass.
+    let roster = if args.enable_agent_selection {
+        let r = crate::acp_roster::CliAgentRoster::from_trusted_sources();
         eprintln!(
             "wayland-core acp: persona-agent selection ENABLED — {} trusted agent(s) \
              selectable (AgentPack + global operator YAML; project manifests and \
              isolated profiles are never enumerated).",
-            roster.len()
+            r.len()
         );
-        acp_server = acp_server.with_roster(Arc::new(roster));
+        Some(Arc::new(r))
+    } else {
+        None
+    };
+
+    let mut engine = crate::acp_engine::EngineTurnEngine::new(config.clone(), cwd.clone())
+        .force_tools(args.allow_all_tools);
+    if let Some(r) = &roster {
+        engine = engine.with_roster(Arc::clone(r));
+    }
+    let turn_engine = Arc::new(engine);
+
+    let a2a = Arc::new(crate::acp_engine::EngineA2aHandler::new(
+        agent_id, config, cwd,
+    ));
+    let mut acp_server = AcpServer::new()
+        .with_a2a_handler(a2a)
+        .with_turn_engine(turn_engine);
+    if let Some(r) = roster {
+        acp_server = acp_server.with_roster(r);
     }
     let server = Arc::new(acp_server);
 
