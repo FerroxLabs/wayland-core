@@ -422,7 +422,10 @@ mod tests {
         };
         let s = serde_json::to_string(&req).unwrap();
         assert_eq!(s, r#"{"model":"claude-opus-4-8"}"#);
-        assert!(!s.contains("agent"), "absent selector must not appear on wire");
+        assert!(
+            !s.contains("agent"),
+            "absent selector must not appear on wire"
+        );
         // And a legacy payload (no `agent` field) still deserializes.
         let legacy: SessionCreateRequest =
             serde_json::from_str(r#"{"model":"claude-opus-4-8"}"#).unwrap();
@@ -463,8 +466,18 @@ mod tests {
             "AgentInfo leaked non-allowlisted field(s): {:?}",
             &keys - &allowed
         );
-        for forbidden in ["system_prompt", "soul", "model", "provider", "api_key", "path"] {
-            assert!(!keys.contains(forbidden), "AgentInfo must not carry {forbidden}");
+        for forbidden in [
+            "system_prompt",
+            "soul",
+            "model",
+            "provider",
+            "api_key",
+            "path",
+        ] {
+            assert!(
+                !keys.contains(forbidden),
+                "AgentInfo must not carry {forbidden}"
+            );
         }
     }
 
@@ -483,7 +496,11 @@ mod tests {
     fn agents_list_response_roundtrip() {
         let resp = AgentsListResponse {
             agents: vec![
-                AgentInfo { id: "a".into(), label: "A".into(), description: None },
+                AgentInfo {
+                    id: "a".into(),
+                    label: "A".into(),
+                    description: None,
+                },
                 AgentInfo {
                     id: "b".into(),
                     label: "B".into(),
