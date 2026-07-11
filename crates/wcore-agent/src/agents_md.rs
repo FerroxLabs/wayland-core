@@ -629,7 +629,11 @@ mod tests {
         fs::write(repo.join("inside.md"), "INSIDE_OK").unwrap();
         fs::write(tmp_dir.join("secret.md"), "SECRET_LEAK").unwrap();
         let confine = Some(repo.as_path());
-        let secret_abs = format!("@{}/secret.md", tmp_dir.display());
+        // Build the absolute include via Path::join (NOT string concat): on
+        // Windows a canonicalized tmp_dir is a `\\?\C:\...` verbatim path, and
+        // appending a literal "/secret.md" would make it an invalid path
+        // (verbatim prefixes reject forward slashes).
+        let secret_abs = format!("@{}", tmp_dir.join("secret.md").display());
 
         // In-root include is served under confinement.
         let mut seen = HashSet::new();
