@@ -63,6 +63,7 @@ pub fn detect_light_mode() -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serial_test::serial;
 
     #[test]
     fn colorfgbg_light_vs_dark() {
@@ -97,13 +98,12 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn detect_light_mode_reads_colorfgbg_then_falls_back_to_dark() {
-        // `detect_light_mode` reads process-global env. This is the only
-        // test in this module that sets COLORFGBG/TERM_PROGRAM, so there is
-        // no concurrent reader to race with inside this binary.
+        // `detect_light_mode` reads process-global env; set/remove are paired
+        // and the prior values are restored at the end.
         //
-        // SAFETY: single-threaded test body; set/remove are paired and the
-        // prior values are restored at the end.
+        // SAFETY: #[serial] serializes every env-mutating test in this binary.
         let prior_fgbg = std::env::var_os("COLORFGBG");
         let prior_tp = std::env::var_os("TERM_PROGRAM");
 

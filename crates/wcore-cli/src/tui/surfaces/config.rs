@@ -3376,6 +3376,7 @@ mod tests {
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
     use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    use serial_test::serial;
 
     /// A key event with no modifiers.
     fn key(code: KeyCode) -> KeyEvent {
@@ -3962,6 +3963,7 @@ mod tests {
     // ── esc saves an unsaved change ─────────────────────────────────────
 
     #[test]
+    #[serial]
     fn esc_saves_an_unsaved_toggle() {
         // `esc` over a dirty overview SAVES the edit and stays on the surface
         // (the footer's "saves & closes" contract). Reverting on esc was the
@@ -4060,6 +4062,7 @@ mod tests {
     // ── detail pane save promotes the baseline ──────────────────────────
 
     #[test]
+    #[serial]
     fn detail_pane_enter_saves_the_change() {
         // The detail-pane `⏎` runs a real save through `patch_global_config`,
         // whose path resolves via process-global `WAYLAND_HOME`. Hermetic via
@@ -4273,6 +4276,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn expert_commit_renders_new_value_and_persists() {
         // `⏎` commits: the new value must render (buffer gone) AND land in
         // `[providers.<active>].compat` on disk. Hermetic via WAYLAND_HOME.
@@ -4340,6 +4344,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn overview_esc_saves_pending_toggle_instead_of_reverting() {
         // Regression: toggling Long-term memory then pressing `esc` must SAVE
         // the edit (persist + advance baseline + signal a live rebind) and
@@ -4446,6 +4451,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn tools_row_space_toggles_and_persists_auto_approve() {
         // S5: the Tools row's `space` flips `[tools] auto_approve`; `esc` saves
         // it to disk. Hermetic via WAYLAND_HOME under the shared env lock.
@@ -4490,6 +4496,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn wallet_row_edits_and_persists_budget_cap() {
         // S5: the Wallet row opens a dollar editor on `⏎`; committing then
         // saving persists `[budget] max_cost_usd`.
@@ -4622,6 +4629,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn egress_allowlist_add_persists_to_security() {
         // Add an entry, then `esc` saves the collection to `[security]
         // egress_allow` on disk. Hermetic via WAYLAND_HOME under the env lock.
@@ -4660,6 +4668,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn failover_toggle_and_fallback_chain_persist_to_provider_chain() {
         // Enabling failover then adding a fallback model persists both
         // `[provider_chain] enabled` and `fallback_models` on a single save.
@@ -4850,6 +4859,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn advanced_traces_toggle_persists_to_observability() {
         // S6: the Advanced Structured-traces toggle flips `[observability]`
         // and `esc` saves it. Hermetic via WAYLAND_HOME under the env lock.
@@ -4890,6 +4900,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn advanced_credential_backend_radio_cycles_and_persists() {
         // S6: the credential-store radio cycles plaintext↔keyring and persists
         // to `[storage.credentials] backend`.
