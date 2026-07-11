@@ -313,6 +313,7 @@ async fn request(args: AcpRequestArgs) -> anyhow::Result<()> {
                     model,
                     tools: Vec::new(),
                     system_prompt: None,
+                    agent: None,
                 })
                 .await
                 .map_err(|e| anyhow::anyhow!("create_session: {e}"))?;
