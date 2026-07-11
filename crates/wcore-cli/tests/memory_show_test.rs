@@ -16,6 +16,7 @@
 
 use std::fs;
 
+use serial_test::serial;
 use tempfile::TempDir;
 use uuid::Uuid;
 
@@ -65,6 +66,7 @@ async fn fixture_with_session_data(session_id: &str) -> (TempDir, TempDir) {
 }
 
 #[tokio::test(flavor = "current_thread")]
+#[serial]
 async fn memory_show_renders_project_procedures_and_session() {
     let session = "test-session-m3-4";
     let (project, memory_root) = fixture_with_session_data(session).await;

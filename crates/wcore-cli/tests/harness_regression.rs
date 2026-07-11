@@ -36,6 +36,7 @@ use std::process::{Command, Output};
 use std::time::{Duration, Instant};
 
 use serde_json::Value;
+use serial_test::serial;
 use tempfile::TempDir;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::Command as AsyncCommand;
@@ -1002,11 +1003,12 @@ async fn r010_openrouter_url_no_double_v1() {
 // log message edits while still catching the absence of the log entirely.
 
 #[tokio::test]
+#[serial]
 async fn r011_channels_auto_register_logs() {
     // Ensure RUST_LOG=info so the child binary emits tracing output.
     // The runner inherits env from the test process, so setting it here
     // propagates to the spawned engine binary.
-    // Safety: test-only, single-threaded nextest run per crate convention.
+    // SAFETY: #[serial] serializes every env-mutating test in this binary.
     unsafe { std::env::set_var("RUST_LOG", "info") };
 
     let scenario = Scenario::new("r011_channels_auto_register_logs", Category::Coverage)
@@ -1070,10 +1072,11 @@ async fn r011_channels_auto_register_logs() {
 //      appear in stderr — FAIL if none match (closes the silent-pass).
 
 #[tokio::test]
+#[serial]
 async fn r012_honcho_fallback_on_no_key() {
     // Remove HONCHO_API_KEY from this process so the child inherits the
     // absence and the local-backend fallback path fires.
-    // Safety: test-only env mutation; nextest isolates each test process.
+    // SAFETY: #[serial] serializes every env-mutating test in this binary.
     unsafe { std::env::remove_var("HONCHO_API_KEY") };
     unsafe { std::env::set_var("RUST_LOG", "info") };
 
