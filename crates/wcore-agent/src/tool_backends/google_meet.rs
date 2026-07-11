@@ -534,6 +534,7 @@ pub fn build_google_meet_backend() -> Option<HttpGoogleMeetBackend> {
 mod tests {
     use super::*;
     use crate::oauth::PkceMode;
+    use serial_test::serial;
     use tempfile::TempDir;
     use wcore_tools::google_meet_tool::MeetMode;
     use wiremock::matchers::{header, method, path as wm_path};
@@ -572,6 +573,7 @@ mod tests {
 
     // ── Resolver / env sniffing ─────────────────────────────────────
 
+    #[serial]
     #[test]
     fn build_google_meet_backend_returns_none_when_client_id_unset() {
         // SAFETY: stash + restore the env var so we don't trample on
@@ -587,6 +589,7 @@ mod tests {
         }
     }
 
+    #[serial]
     #[test]
     fn google_meet_returns_none_when_env_var_empty_string() {
         // R-H2 contract: empty string must NOT count as configured.
@@ -635,6 +638,7 @@ mod tests {
         );
     }
 
+    #[serial]
     #[test]
     fn google_meet_oauth_uses_correct_endpoints_and_scopes() {
         // Sanity-check the well-known Google constants — a typo here

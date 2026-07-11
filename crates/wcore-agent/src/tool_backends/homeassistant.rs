@@ -429,6 +429,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn null_default_skips_registration() {
         // Parallel test in homeassistant_tool.rs (Tool layer)
         // already enforces this. This test confirms the resolver +
