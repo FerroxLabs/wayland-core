@@ -7,6 +7,8 @@
 //! - `GET    /sessions/:id`          → `session/get`
 //! - `DELETE /sessions/:id`          → `session/delete`
 //! - `POST   /sessions/:id/messages` → `message/send` (SSE stream of [`MessageEvent`])
+//! - `GET    /initialize`            → capability handshake (persona-profiles R2)
+//! - `GET    /agents`                → `agents/list` (persona-profiles roster)
 //!
 //! The transport is decoupled from the server implementation via the
 //! [`HttpHandler`] trait; the actual ACP server (lands in 1.A.6) plugs in by
@@ -38,7 +40,8 @@ use futures::stream::{Stream, StreamExt};
 use crate::auth::Verifier;
 use crate::error::AcpError;
 use crate::protocol::{
-    ErrorCode, JsonRpcError, MessageEvent, MessageSendRequest, SessionCreateRequest,
+    ACP_PROTOCOL_VERSION, AgentsListResponse, ErrorCode, InitializeResponse, JsonRpcError,
+    MessageEvent, MessageSendRequest, ServerCapabilities, SessionCreateRequest,
     SessionCreateResponse, SessionGetResponse, SessionListResponse,
 };
 
@@ -75,6 +78,29 @@ pub trait HttpHandler: Send + Sync + 'static {
         Err(AcpError::Protocol(
             "approval resolution not supported".to_string(),
         ))
+    }
+
+    /// persona-profiles Phase A — the persona-agent roster (`agents/list`).
+    /// Default returns an empty roster so existing handlers + mocks compile
+    /// unchanged and the route is backward-compatible (feature default-OFF).
+    /// `AcpServer` overrides this to consult an installed `AgentRoster`, which
+    /// returns only the AUTHORIZED agents (R3), each id/label-only (R4).
+    async fn list_agents(&self) -> Result<AgentsListResponse, AcpError> {
+        Ok(AgentsListResponse {
+            agents: Vec::new(),
+        })
+    }
+
+    /// persona-profiles Phase A — the capability handshake (`initialize`, R2).
+    /// Default advertises NO extension capabilities (conservative), so an
+    /// arbitrary handler does not over-claim. `AcpServer` overrides this to
+    /// advertise `agent_selection`, telling clients this build understands the
+    /// optional `agent` selector + `agents/list` before any selector is used.
+    async fn initialize(&self) -> Result<InitializeResponse, AcpError> {
+        Ok(InitializeResponse {
+            protocol_version: ACP_PROTOCOL_VERSION.to_string(),
+            capabilities: ServerCapabilities::default(),
+        })
     }
 }
 
@@ -130,6 +156,10 @@ impl<H: HttpHandler> HttpSseTransport<H> {
                 get(get_session::<H>).delete(delete_session::<H>),
             )
             .route("/sessions/:id/messages", post(send_message::<H>))
+            // persona-profiles Phase A: capability handshake + agent roster.
+            // Both default-safe (empty roster / advertised capability only).
+            .route("/initialize", get(initialize::<H>))
+            .route("/agents", get(get_agents::<H>))
             .with_state(self.handler.clone());
 
         // F-017: wrap with auth middleware when a verifier is present.
@@ -174,6 +204,10 @@ async fn auth_middleware(verifier: Arc<dyn Verifier>, req: Request, next: Next) 
 fn status_for(err: &AcpError) -> StatusCode {
     match err {
         AcpError::Auth(_) => StatusCode::UNAUTHORIZED,
+        // persona-profiles R3/R4: an unauthorized/unknown agent selector is a
+        // 404 — it leaks no existence information (the roster only ever exposes
+        // authorized agents, so "unknown" and "forbidden" are indistinguishable).
+        AcpError::Agent(_) => StatusCode::NOT_FOUND,
         AcpError::Session(msg) if msg.to_lowercase().contains("not found") => StatusCode::NOT_FOUND,
         AcpError::Session(_) => StatusCode::BAD_REQUEST,
         AcpError::Protocol(_) => StatusCode::BAD_REQUEST,
@@ -185,6 +219,7 @@ fn status_for(err: &AcpError) -> StatusCode {
 fn code_for(err: &AcpError) -> ErrorCode {
     match err {
         AcpError::Auth(_) => ErrorCode::AuthRequired,
+        AcpError::Agent(_) => ErrorCode::AgentNotFound,
         AcpError::Session(_) => ErrorCode::SessionNotFound,
         AcpError::Protocol(_) | AcpError::Serde(_) => ErrorCode::InvalidRequest,
         AcpError::Io(_) | AcpError::Transport(_) => ErrorCode::InternalError,
@@ -279,6 +314,24 @@ async fn send_message<H: HttpHandler>(
         Ok(Event::default().event(kind).data(data))
     });
     Ok(Sse::new(sse_stream).keep_alive(KeepAlive::new().interval(Duration::from_secs(15))))
+}
+
+/// `GET /initialize` — persona-profiles capability handshake (R2). Advertises
+/// the server's [`crate::protocol::ServerCapabilities`] so clients can gate
+/// version-sensitive features (e.g. the `agent` selector) before using them.
+async fn initialize<H: HttpHandler>(
+    State(handler): State<Arc<H>>,
+) -> Result<Json<InitializeResponse>, AcpHttpError> {
+    Ok(Json(handler.initialize().await?))
+}
+
+/// `GET /agents` — persona-profiles agent roster (`agents/list`). Returns the
+/// AUTHORIZED persona-agents (R3), each id/label-only (R4). Defaults to `[]`
+/// when no roster is installed (feature default-OFF, backward-compatible).
+async fn get_agents<H: HttpHandler>(
+    State(handler): State<Arc<H>>,
+) -> Result<Json<AgentsListResponse>, AcpHttpError> {
+    Ok(Json(handler.list_agents().await?))
 }
 
 #[cfg(test)]
@@ -509,6 +562,44 @@ mod tests {
             "expected 4xx, got {}",
             resp.status()
         );
+    }
+
+    // persona-profiles Phase A: the roster route defaults to `[]` for a
+    // handler that does not install a roster (backward-compatible).
+    #[tokio::test]
+    async fn get_agents_defaults_to_empty() {
+        let app = router(false, false);
+        let req = Request::builder()
+            .method("GET")
+            .uri("/agents")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = to_bytes(resp.into_body(), 4096).await.unwrap();
+        let parsed: AgentsListResponse = serde_json::from_slice(&body).unwrap();
+        assert!(parsed.agents.is_empty(), "no roster ⇒ empty agents list");
+    }
+
+    // persona-profiles Phase A: the capability handshake is reachable and
+    // returns a protocol version + capability set (R2).
+    #[tokio::test]
+    async fn get_initialize_returns_handshake() {
+        let app = router(false, false);
+        let req = Request::builder()
+            .method("GET")
+            .uri("/initialize")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = to_bytes(resp.into_body(), 4096).await.unwrap();
+        let parsed: InitializeResponse = serde_json::from_slice(&body).unwrap();
+        assert_eq!(parsed.protocol_version, ACP_PROTOCOL_VERSION);
+        // The bare MockHandler inherits the conservative default (no
+        // capability); AcpServer overrides to advertise `agent_selection`
+        // (asserted in server.rs tests).
+        assert!(!parsed.capabilities.agent_selection);
     }
 
     // Silence unused-import warnings for protocol types referenced only

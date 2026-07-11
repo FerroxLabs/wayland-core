@@ -203,6 +203,66 @@ pub struct AgentsListResponse {
     pub agents: Vec<AgentInfo>,
 }
 
+// ── Capability handshake (persona-profiles R2 — version-skew safety) ──────
+
+/// ACP protocol revision this server implements. Surfaced in the
+/// [`InitializeResponse`] so a client can reason about wire compatibility
+/// before exercising version-gated features.
+pub const ACP_PROTOCOL_VERSION: &str = "0.1";
+
+/// Server capability advertisement returned by `initialize`.
+///
+/// SECURITY / COMPAT (red-team R2): the persona-agent extension adds an
+/// optional `agent` selector to `session/create` and an `agents/list` roster.
+/// Because every request type carries `#[serde(deny_unknown_fields)]`, a NEW
+/// client that blindly sends `agent` to an OLD (pre-extension) server would be
+/// hard-rejected at parse time. The fix is negotiation: a client MUST consult
+/// [`Self::agent_selection`] from `initialize` BEFORE sending an `agent`
+/// selector or relying on `agents/list`. An old server omits the capability
+/// (there is no `initialize` route, or the field is absent → `false` on
+/// parse), so a new client cleanly down-shifts instead of breaking.
+///
+/// NOTE this struct deliberately does NOT use `deny_unknown_fields` (mirroring
+/// `A2aCapabilities`): capability sets are forward-extensible, so an old client
+/// must be able to parse a newer server's response and simply ignore
+/// capabilities it does not understand.
+///
+/// Advertising `agent_selection` says only "this build understands the
+/// selection protocol" — it is a compile-time property of the server, NOT a
+/// claim that any agent is available. Whether a roster actually holds agents
+/// (feature default-OFF ⇒ empty) is discovered separately via `agents/list`,
+/// and selecting an unavailable/unauthorized id still yields
+/// [`ErrorCode::AgentNotFound`]. Advertising the capability therefore grants
+/// nothing; it only prevents a version-skew hard-break.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, ToSchema)]
+pub struct ServerCapabilities {
+    /// `true` when the server understands the persona-agent selection
+    /// extension (accepts an optional `agent` on `session/create` and serves
+    /// the `agents/list` roster, possibly empty).
+    #[serde(default)]
+    pub agent_selection: bool,
+}
+
+/// `initialize` request payload (empty body — included for symmetry, like
+/// [`SessionListRequest`]). A capability handshake takes no client input in
+/// Phase A; the field set is reserved for future client-capability exchange.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct InitializeRequest {}
+
+/// `initialize` response payload — the server capability handshake.
+///
+/// A client performs this handshake first and gates version-sensitive
+/// behaviour (e.g. sending `SessionCreateRequest::agent`) on the advertised
+/// [`ServerCapabilities`]. See [`ServerCapabilities`] for the R2 rationale.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct InitializeResponse {
+    /// ACP protocol revision the server implements ([`ACP_PROTOCOL_VERSION`]).
+    pub protocol_version: String,
+    /// Advertised server capabilities.
+    pub capabilities: ServerCapabilities,
+}
+
 // ── Messages ─────────────────────────────────────────────────────────────
 
 /// `message/send` request payload. Server emits a stream of [`MessageEvent`]s.
@@ -518,6 +578,48 @@ mod tests {
     fn agents_list_request_rejects_unknown_fields() {
         let bad = r#"{"mystery":"x"}"#;
         let r: Result<AgentsListRequest, _> = serde_json::from_str(bad);
+        assert!(r.is_err(), "deny_unknown_fields should reject");
+    }
+
+    /// Capability handshake (R2): the `initialize` response carries a protocol
+    /// version and an `agent_selection` capability that round-trips.
+    #[test]
+    fn initialize_response_roundtrips_with_capability() {
+        let resp = InitializeResponse {
+            protocol_version: ACP_PROTOCOL_VERSION.to_string(),
+            capabilities: ServerCapabilities {
+                agent_selection: true,
+            },
+        };
+        let s = serde_json::to_string(&resp).unwrap();
+        assert!(s.contains(r#""agent_selection":true"#));
+        let back: InitializeResponse = serde_json::from_str(&s).unwrap();
+        assert_eq!(back.protocol_version, ACP_PROTOCOL_VERSION);
+        assert!(back.capabilities.agent_selection);
+    }
+
+    /// R2 version-skew safety: `ServerCapabilities` must be forward-extensible.
+    /// A payload carrying a capability an old client does not know MUST still
+    /// parse (unknown keys ignored), and an absent `agent_selection` defaults
+    /// to `false` (an old server that never advertised it).
+    #[test]
+    fn server_capabilities_is_forward_compatible() {
+        // Unknown future capability is ignored, not rejected.
+        let future = r#"{"agent_selection":true,"some_future_cap":true}"#;
+        let caps: ServerCapabilities = serde_json::from_str(future)
+            .expect("capabilities must tolerate unknown (forward-compat) fields");
+        assert!(caps.agent_selection);
+
+        // Absent capability defaults to false (pre-extension server).
+        let old = r#"{}"#;
+        let caps: ServerCapabilities = serde_json::from_str(old).unwrap();
+        assert!(!caps.agent_selection, "absent capability must default false");
+    }
+
+    #[test]
+    fn initialize_request_rejects_unknown_fields() {
+        let bad = r#"{"mystery":"x"}"#;
+        let r: Result<InitializeRequest, _> = serde_json::from_str(bad);
         assert!(r.is_err(), "deny_unknown_fields should reject");
     }
 }

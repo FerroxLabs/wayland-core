@@ -23,10 +23,12 @@ use tokio::sync::RwLock;
 
 use crate::error::AcpError;
 use crate::protocol::{
-    ErrorCode, JsonRpcError, MessageEvent, MessageSendRequest, SessionCreateRequest,
+    ACP_PROTOCOL_VERSION, AgentsListResponse, ErrorCode, InitializeResponse, JsonRpcError,
+    MessageEvent, MessageSendRequest, ServerCapabilities, SessionCreateRequest,
     SessionCreateResponse, SessionGetResponse, SessionListResponse, SessionMetadata,
     ToolDefinition,
 };
+use crate::roster::AgentRoster;
 use crate::transport::HttpHandler;
 
 /// Internal session record. Wraps [`SessionMetadata`] with the create-time
@@ -47,6 +49,13 @@ struct SessionRecord {
     /// The session's configured tool allowlist. Used as the fallback when a
     /// `message/send` request body carries no per-call tools.
     tools: Vec<ToolDefinition>,
+    /// persona-profiles Phase A: the AUTHORIZED persona-agent id this session
+    /// was created with, if any. Recorded (and readable via
+    /// [`AcpServer::session_agent`]) so a later per-session persona binding
+    /// (PR-4) can resolve the overlay. In PR-2 it is stored + validated only —
+    /// no persona overlay is applied to the engine yet, so selecting an agent
+    /// does NOT change turn behaviour or cross any credential boundary.
+    agent: Option<String>,
 }
 
 /// Minimal ACP server with in-memory session storage.
@@ -68,6 +77,15 @@ pub struct AcpServer {
     /// frame ("no turn engine installed"). Injected from the CLI layer
     /// exactly like `a2a_handler` so `wcore-acp` stays engine-free.
     turn_engine: Option<Arc<dyn crate::turn::TurnEngine>>,
+    /// persona-profiles Phase A — optional persona-agent roster. When `Some`,
+    /// `agents/list` returns the authorized catalog and a `session/create`
+    /// `agent` selector is validated against it. When `None` (the default,
+    /// feature-OFF), `agents/list` is `[]` and any selector is
+    /// `AgentNotFound` — byte-identical to the pre-extension server for
+    /// selector-free clients. Injected from the CLI layer (PR-3's
+    /// `CliAgentRoster`) exactly like `a2a_handler`, keeping `wcore-acp`
+    /// dependency-free.
+    roster: Option<Arc<dyn AgentRoster>>,
 }
 
 impl std::fmt::Debug for AcpServer {
@@ -82,6 +100,7 @@ impl std::fmt::Debug for AcpServer {
                 "turn_engine",
                 &self.turn_engine.as_ref().map(|_| "<dyn TurnEngine>"),
             )
+            .field("roster", &self.roster.as_ref().map(|_| "<dyn AgentRoster>"))
             .finish()
     }
 }
@@ -132,6 +151,34 @@ impl AcpServer {
             .await
             .get(session_id)
             .map(|r| r.tools.clone())
+    }
+
+    /// persona-profiles Phase A — install a persona-agent roster. When present,
+    /// `agents/list` returns its authorized catalog and a `session/create`
+    /// `agent` selector is validated against it (`AgentNotFound` on miss).
+    /// When absent, the server is backward-compatible: empty roster, and any
+    /// selector is rejected. Mirrors [`Self::with_a2a_handler`] /
+    /// [`Self::with_turn_engine`].
+    pub fn with_roster(mut self, roster: Arc<dyn AgentRoster>) -> Self {
+        self.roster = Some(roster);
+        self
+    }
+
+    /// Whether a persona-agent roster is installed.
+    pub fn has_roster(&self) -> bool {
+        self.roster.is_some()
+    }
+
+    /// The AUTHORIZED persona-agent id bound to `session_id` at create-time, if
+    /// the session exists and selected one. Parallels [`Self::session_tools`].
+    /// A later per-session persona binding (PR-4) reads this to resolve the
+    /// overlay; in PR-2 it is a read-only record of the validated selector.
+    pub async fn session_agent(&self, session_id: &str) -> Option<String> {
+        self.sessions
+            .read()
+            .await
+            .get(session_id)
+            .and_then(|r| r.agent.clone())
     }
 
     /// v0.8.1 U12 — dispatch `a2a/handshake`.
@@ -188,6 +235,26 @@ impl HttpHandler for AcpServer {
         &self,
         req: SessionCreateRequest,
     ) -> Result<SessionCreateResponse, AcpError> {
+        // persona-profiles Phase A (R3): if the client selected a persona-agent,
+        // AUTHORIZE it against the installed roster BEFORE creating the session.
+        // The roster returns only agents the principal may use, so a miss (or no
+        // roster at all) is `AgentNotFound` — which doubles as "not authorized"
+        // without leaking existence. A selector-free create is untouched, keeping
+        // the pre-extension wire byte-identical (compat regression proof).
+        //
+        // NOTE this only VALIDATES + RECORDS the id; it applies NO persona
+        // overlay to the engine (system_prompt/model/tools stay as configured).
+        // Binding the persona is PR-4 — deliberately not done here.
+        if let Some(agent_id) = req.agent.as_deref() {
+            let authorized = match &self.roster {
+                Some(roster) => roster.contains(agent_id).await,
+                None => false,
+            };
+            if !authorized {
+                return Err(AcpError::Agent(format!("agent not found: {agent_id}")));
+            }
+        }
+
         let id = uuid::Uuid::new_v4().to_string();
         let now = now_secs();
         let metadata = SessionMetadata {
@@ -201,11 +268,41 @@ impl HttpHandler for AcpServer {
             metadata: metadata.clone(),
             system_prompt: req.system_prompt.clone(),
             tools: req.tools.clone(),
+            agent: req.agent.clone(),
         };
         self.sessions.write().await.insert(id.clone(), record);
         Ok(SessionCreateResponse {
             session_id: id,
             model: req.model,
+        })
+    }
+
+    async fn list_agents(&self) -> Result<AgentsListResponse, AcpError> {
+        // Feature default-OFF: no roster installed ⇒ empty catalog (`[]`),
+        // backward-compatible. When installed, the roster returns ONLY the
+        // agents the calling principal is authorized to see (R3), each exposing
+        // just id/label/description (R4).
+        match &self.roster {
+            Some(roster) => Ok(AgentsListResponse {
+                agents: roster.list().await?,
+            }),
+            None => Ok(AgentsListResponse { agents: Vec::new() }),
+        }
+    }
+
+    async fn initialize(&self) -> Result<InitializeResponse, AcpError> {
+        // Capability handshake (R2): advertise `agent_selection` so a client
+        // knows THIS build understands the optional `agent` selector +
+        // `agents/list` before it risks sending version-gated fields to a
+        // possibly-older peer. This is a compile-time property of the server
+        // (always `true` here) — it is advertised even when no roster is
+        // installed, and grants nothing: `agents/list` is still `[]` and any
+        // selector still yields `AgentNotFound`.
+        Ok(InitializeResponse {
+            protocol_version: ACP_PROTOCOL_VERSION.to_string(),
+            capabilities: ServerCapabilities {
+                agent_selection: true,
+            },
         })
     }
 
@@ -672,6 +769,139 @@ mod tests {
         let got = server.a2a_capabilities().await.unwrap();
         assert_eq!(got.skills, vec!["plan"]);
         assert_eq!(got.tools, vec!["read"]);
+    }
+
+    // ── persona-profiles Phase A: roster wiring + capability handshake ──────
+
+    use crate::protocol::AgentInfo;
+    use crate::roster::AgentRoster;
+
+    /// Fixed in-memory roster for server tests. Returns a canned authorized
+    /// set — the same fixed-script mock style as `MockTurnEngine`.
+    struct MockRoster {
+        agents: Vec<AgentInfo>,
+    }
+
+    #[async_trait]
+    impl AgentRoster for MockRoster {
+        async fn list(&self) -> Result<Vec<AgentInfo>, AcpError> {
+            Ok(self.agents.clone())
+        }
+    }
+
+    fn agent_info(id: &str) -> AgentInfo {
+        AgentInfo {
+            id: id.to_string(),
+            label: id.to_string(),
+            description: None,
+        }
+    }
+
+    // Feature default-OFF: no roster ⇒ `agents/list` is empty, and the server
+    // reports it has no roster.
+    #[tokio::test]
+    async fn list_agents_empty_without_roster() {
+        let server = AcpServer::new();
+        assert!(!server.has_roster());
+        let resp = server.list_agents().await.unwrap();
+        assert!(resp.agents.is_empty());
+    }
+
+    // With a roster installed, `agents/list` returns its authorized catalog.
+    #[tokio::test]
+    async fn list_agents_returns_roster_catalog() {
+        let roster = Arc::new(MockRoster {
+            agents: vec![agent_info("architect"), agent_info("researcher")],
+        });
+        let server = AcpServer::new().with_roster(roster);
+        assert!(server.has_roster());
+        let resp = server.list_agents().await.unwrap();
+        let ids: Vec<&str> = resp.agents.iter().map(|a| a.id.as_str()).collect();
+        assert_eq!(ids, ["architect", "researcher"]);
+    }
+
+    // R3: a `session/create` selecting an AUTHORIZED agent succeeds and the id
+    // is recorded (readable via `session_agent`) — but no persona overlay is
+    // applied (PR-2 records only).
+    #[tokio::test]
+    async fn create_with_authorized_agent_records_selector() {
+        let roster = Arc::new(MockRoster {
+            agents: vec![agent_info("architect")],
+        });
+        let server = AcpServer::new().with_roster(roster);
+        let resp = server
+            .create_session(SessionCreateRequest {
+                model: None,
+                tools: Vec::new(),
+                system_prompt: None,
+                agent: Some("architect".to_string()),
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            server.session_agent(&resp.session_id).await.as_deref(),
+            Some("architect")
+        );
+    }
+
+    // R3: selecting an agent NOT in the authorized roster is rejected with the
+    // agent-not-found signal (maps to ErrorCode::AgentNotFound at the transport).
+    #[tokio::test]
+    async fn create_with_unauthorized_agent_is_agent_error() {
+        let roster = Arc::new(MockRoster {
+            agents: vec![agent_info("architect")],
+        });
+        let server = AcpServer::new().with_roster(roster);
+        let err = server
+            .create_session(SessionCreateRequest {
+                model: None,
+                tools: Vec::new(),
+                system_prompt: None,
+                agent: Some("root".to_string()),
+            })
+            .await
+            .expect_err("unauthorized agent must be rejected");
+        assert!(matches!(err, AcpError::Agent(_)), "got {err:?}");
+    }
+
+    // Feature default-OFF: selecting any agent when NO roster is installed is
+    // rejected (cannot authorize without a roster) — fail closed.
+    #[tokio::test]
+    async fn create_with_agent_but_no_roster_is_agent_error() {
+        let server = AcpServer::new();
+        let err = server
+            .create_session(SessionCreateRequest {
+                model: None,
+                tools: Vec::new(),
+                system_prompt: None,
+                agent: Some("architect".to_string()),
+            })
+            .await
+            .expect_err("no roster ⇒ cannot authorize any selector");
+        assert!(matches!(err, AcpError::Agent(_)), "got {err:?}");
+    }
+
+    // Compat (R2): a selector-free create is unaffected and records no agent.
+    #[tokio::test]
+    async fn create_without_agent_records_none() {
+        let server = AcpServer::new();
+        let resp = server.create_session(empty_create()).await.unwrap();
+        assert_eq!(server.session_agent(&resp.session_id).await, None);
+    }
+
+    // R2: AcpServer advertises the `agent_selection` capability in `initialize`.
+    #[tokio::test]
+    async fn initialize_advertises_agent_selection() {
+        let server = AcpServer::new();
+        let resp = server.initialize().await.unwrap();
+        assert_eq!(resp.protocol_version, ACP_PROTOCOL_VERSION);
+        assert!(
+            resp.capabilities.agent_selection,
+            "AcpServer must advertise agent_selection (R2)"
+        );
+        // Advertised even without a roster (capability = protocol understanding,
+        // not availability).
+        assert!(!server.has_roster());
     }
 
     #[tokio::test]
