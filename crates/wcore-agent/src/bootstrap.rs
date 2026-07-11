@@ -171,6 +171,13 @@ pub struct AgentBootstrap {
     /// shell tools. `None` (the default, and always the case for the local
     /// CLI / TUI / json-stream engines) leaves the full toolset intact.
     channel_tool_posture: Option<crate::channel_tools::ChannelToolScope>,
+    /// persona-profiles PR-4' — restrict this engine's toolset to a persona's
+    /// declared `allowed_tools`. `None` (every pre-existing caller) leaves the
+    /// toolset untouched. Applied with the SAME `registry.retain` mechanism the
+    /// channel posture uses, so a persona can only ever NARROW the toolset —
+    /// never widen it, and never grant auto-approval (that is
+    /// `[tools] allow_list`, a different and deliberately untouched knob).
+    persona_tool_allowlist: Option<Vec<String>>,
     /// wayland#551 — skip the config-declared MCP `connect_all` during
     /// build so slow/hung servers cannot gate boot. The caller owns
     /// connecting them afterwards (json-stream does it in the background
@@ -202,6 +209,7 @@ impl AgentBootstrap {
             without_channels: false,
             enable_inbound_dispatch: false,
             channel_tool_posture: None,
+            persona_tool_allowlist: None,
             defer_config_mcp: false,
             active_assistant: None,
         }
@@ -241,6 +249,22 @@ impl AgentBootstrap {
     /// [`crate::channel_tools::apply_posture`].
     pub fn channel_tool_posture(mut self, scope: crate::channel_tools::ChannelToolScope) -> Self {
         self.channel_tool_posture = Some(scope);
+        self
+    }
+
+    /// persona-profiles PR-4' — restrict the toolset to a persona's declared
+    /// `allowed_tools` (from its `AgentManifest`). An EMPTY list is treated as
+    /// "no restriction declared" and leaves the toolset intact.
+    ///
+    /// This can only NARROW the registry (it is a `retain`), so a persona can
+    /// never gain a tool the engine would not otherwise have. It deliberately
+    /// does NOT touch `[tools] allow_list` — that is the AUTO-APPROVE list, and
+    /// mapping a persona's capability list onto it would silently auto-approve
+    /// destructive tools (Bash/Write) instead of merely making them available.
+    pub fn tool_allowlist(mut self, allowed: Vec<String>) -> Self {
+        if !allowed.is_empty() {
+            self.persona_tool_allowlist = Some(allowed);
+        }
         self
     }
 
@@ -2129,6 +2153,20 @@ impl AgentBootstrap {
                 posture = ?scope.posture,
                 sandbox_enforces_read_deny = enforces,
                 "channel engine tool posture applied"
+            );
+        }
+
+        // persona-profiles PR-4' — narrow the toolset to the selected persona's
+        // declared `allowed_tools`. Same `retain` mechanism as the channel
+        // posture above, and applied AFTER it so a persona composes with (and can
+        // only further narrow) any posture already in force — it can never
+        // re-widen a restricted channel engine.
+        if let Some(allowed) = &self.persona_tool_allowlist {
+            registry.retain(|t| allowed.iter().any(|a| a == t.name()));
+            tracing::info!(
+                target: "wcore_agent::bootstrap",
+                allowed = ?allowed,
+                "persona tool allowlist applied"
             );
         }
 

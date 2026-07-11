@@ -365,6 +365,12 @@ impl HttpHandler for AcpServer {
             req.tools
         };
 
+        // persona-profiles PR-4': carry the session's AUTHORIZED persona-agent id
+        // into the turn so the engine bridge can apply that persona's overlay.
+        // Read from the session record (NOT from the request body) — a per-message
+        // body can never smuggle in a persona that was not authorized at create.
+        let agent = self.session_agent(&req.session_id).await;
+
         match &self.turn_engine {
             Some(engine) => {
                 engine
@@ -372,6 +378,7 @@ impl HttpHandler for AcpServer {
                         session_id: req.session_id,
                         text: req.text,
                         tools,
+                        agent,
                     })
                     .await
             }
