@@ -228,6 +228,7 @@ async fn classify(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serial_test::serial;
     use std::time::Instant;
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -283,6 +284,7 @@ mod tests {
         }
     }
 
+    #[serial]
     #[tokio::test]
     async fn provider_health_yellow_when_no_key() {
         let mut env = EnvBatch::new();
@@ -293,6 +295,7 @@ mod tests {
         assert_eq!(h.detail, "no key");
     }
 
+    #[serial]
     #[tokio::test]
     async fn provider_health_yellow_when_key_empty_string() {
         // R-H2: empty string is "no key", not "key set to empty".
@@ -303,6 +306,7 @@ mod tests {
         assert_eq!(h.status, HealthStatus::Yellow);
     }
 
+    #[serial]
     #[tokio::test]
     async fn provider_health_green_on_200() {
         let server = MockServer::start().await;
@@ -320,6 +324,7 @@ mod tests {
         assert_eq!(h.detail, "reachable");
     }
 
+    #[serial]
     #[tokio::test]
     async fn provider_health_red_on_401() {
         let server = MockServer::start().await;
@@ -342,6 +347,7 @@ mod tests {
         );
     }
 
+    #[serial]
     #[tokio::test]
     async fn provider_health_red_on_timeout() {
         // TEST-NET-1 (192.0.2.0/24) per RFC 5737 — IANA-reserved for
@@ -366,6 +372,7 @@ mod tests {
         );
     }
 
+    #[serial]
     #[tokio::test]
     async fn provider_health_times_out_at_5s() {
         // Spin a TCP listener that accepts but never replies. The
@@ -406,6 +413,7 @@ mod tests {
         server.abort();
     }
 
+    #[serial]
     #[tokio::test]
     async fn gemini_unreachable_detail_omits_api_key() {
         // SECRETS-29: when Gemini is unreachable, the `/doctor` row detail
@@ -434,6 +442,7 @@ mod tests {
         );
     }
 
+    #[serial]
     #[tokio::test]
     async fn provider_health_check_all_returns_four_entries_in_order() {
         // Clear every key — the all-yellow path is what we're after.

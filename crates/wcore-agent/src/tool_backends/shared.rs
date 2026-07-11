@@ -121,6 +121,7 @@ pub fn urlencode(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serial_test::serial;
 
     #[test]
     fn read_env_key_returns_none_for_unset() {
@@ -132,6 +133,7 @@ mod tests {
         assert!(read_env_key("WAYLAND_TEST_DEFINITELY_UNSET_12345").is_none());
     }
 
+    #[serial]
     #[test]
     fn read_env_key_returns_none_for_empty() {
         // SAFETY: tests in this module run on isolated threads; we never
@@ -143,6 +145,7 @@ mod tests {
         unsafe { std::env::remove_var("WAYLAND_TEST_EMPTY_KEY_VAR") };
     }
 
+    #[serial]
     #[test]
     fn read_env_key_returns_some_for_set_nonempty() {
         unsafe { std::env::set_var("WAYLAND_TEST_NONEMPTY_KEY_VAR", "secret123") };

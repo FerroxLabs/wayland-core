@@ -271,6 +271,7 @@ impl MessageTransport for HostDelegatedTransport {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serial_test::serial;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use wcore_tools::send_message::MessagingPlatform;
 
@@ -385,12 +386,11 @@ mod tests {
         }
     }
 
+    #[serial]
     #[test]
     fn env_gate_requires_exactly_one() {
-        // Uses a scoped set/remove; the var name is unique to this feature so
-        // no other test in this crate races it.
-        // SAFETY (Rust 2024 set_var): single-threaded test context for this
-        // env var; no concurrent readers of this name.
+        // SAFETY (Rust 2024 set_var): `#[serial]` serializes every env-mutating
+        // test in this binary, so this scoped set/remove cannot race another.
         unsafe {
             std::env::remove_var("WAYLAND_SEND_MESSAGE_HOST_DELEGATE");
         }

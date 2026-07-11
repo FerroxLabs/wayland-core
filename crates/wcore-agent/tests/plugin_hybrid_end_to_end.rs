@@ -19,6 +19,7 @@
 //! 4. Inventory-discovered static plugins still flow through
 //!    `apply_initialize_outcome` unchanged.
 
+use serial_test::serial;
 use std::path::Path;
 use std::sync::{Arc, Mutex, OnceLock};
 
@@ -87,6 +88,7 @@ impl Drop for EnvGuard {
     }
 }
 
+#[serial]
 #[tokio::test]
 async fn hybrid_pipeline_dispatches_wasm_and_threads_through_synthesizer() {
     // One on-disk WASM manifest; load succeeds (minimal-component bytes),
@@ -213,6 +215,7 @@ kind = "wasm"
     drop(keepalives);
 }
 
+#[serial]
 #[tokio::test]
 async fn hybrid_pipeline_routes_subprocess_and_mcp_bridge_through_dispatch() {
     // Two manifests: subprocess + mcp-bridge. Both load FAIL (binary
@@ -301,6 +304,7 @@ binary_path = "does-not-exist"
     assert!(mcp_bridge_seen, "mcp-bridge manifest not dispatched");
 }
 
+#[serial]
 #[tokio::test]
 async fn hybrid_pipeline_preserves_inventory_static_plugins() {
     // Static-link inventory plugins must still flow through

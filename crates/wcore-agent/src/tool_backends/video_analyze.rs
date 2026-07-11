@@ -526,6 +526,7 @@ pub async fn build_video_analyze_backend() -> Option<Arc<dyn VideoAnalysisBacken
 mod tests {
     use super::*;
     use parking_lot::Mutex;
+    use serial_test::serial;
 
     // -- Path validation (S-H5 closure) ----------------------------------
 
@@ -619,6 +620,7 @@ mod tests {
 
     // -- Resolver gating (`video_backend_hidden_when_*`) -----------------
 
+    #[serial]
     #[tokio::test]
     async fn video_backend_hidden_when_vision_backend_unset() {
         // Clear every known vision-key env var for this process. We then
@@ -640,6 +642,7 @@ mod tests {
         assert!(got.is_none(), "no vision key must hide the tool");
     }
 
+    #[serial]
     #[tokio::test]
     async fn video_backend_hidden_when_ffmpeg_missing() {
         // We cannot remove ffmpeg from PATH inside the test process

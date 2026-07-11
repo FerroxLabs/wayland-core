@@ -1061,6 +1061,7 @@ mod tests {
         );
     }
 
+    #[serial_test::serial]
     #[test]
     fn try_discover_rejects_verification_enabled_with_no_trusted_keys() {
         // Point filesystem trust dir at an empty temp dir so the union is
@@ -1068,13 +1069,8 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let empty_dir = tmp.path().join("empty-keys");
         std::fs::create_dir_all(&empty_dir).unwrap();
-        // Serialize against other tests that touch the same env vars.
-        // Set only inside this scope; clean up at end.
-        // SAFETY: tests run single-threaded per process by default for env;
-        // wcore-agent uses #[test] which runs concurrent threads, so we
-        // explicitly clear the unsigned-trust escape too.
-        // SAFETY: env mutation in tests is acceptable here; this test
-        // group is the only one in this module that touches these vars.
+        // SAFETY: `#[serial_test::serial]` serializes every env-mutating test
+        // in this binary, so this scoped set/clear cannot race another.
         unsafe {
             std::env::set_var("WAYLAND_TRUSTED_KEYS_DIR", &empty_dir);
             std::env::remove_var(ENV_TRUST_UNSIGNED);
