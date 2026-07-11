@@ -519,7 +519,25 @@ impl OpenAIProvider {
     }
 
     fn build_tools(tools: &[ToolDef]) -> Vec<Value> {
-        tools
+        // Layer E1 (token-opt): serialize in a deterministic order — sorted
+        // by tool name — so the tools[] array is byte-identical across
+        // round-trips of one conversation regardless of registration /
+        // curation order. The array is part of the cached prompt prefix; a
+        // reordered array changes the prefix bytes and silently busts prompt
+        // caching. Schema / description / deferred are the DUPLICATE-NAME
+        // tiebreak: the registry does not forbid duplicate registration, and
+        // a name-only (stable) sort would keep input order for equal names —
+        // byte-unstable again.
+        let mut ordered: Vec<&ToolDef> = tools.iter().collect();
+        ordered.sort_by_cached_key(|t| {
+            (
+                t.name.clone(),
+                serde_json::to_string(&t.input_schema).unwrap_or_default(),
+                t.description.clone(),
+                t.deferred,
+            )
+        });
+        ordered
             .iter()
             .map(|t| {
                 if t.deferred {
@@ -528,9 +546,10 @@ impl OpenAIProvider {
                         "type": "function",
                         "function": {
                             "name": encode_tool_name(&t.name),
-                            "description": format!(
-                                "(Deferred) {short_desc} — Use ToolSearch to load full schema before calling."
-                            ),
+                            // Layer D2: no per-stub "use ToolSearch"
+                            // boilerplate — the system prompt states the
+                            // hydration rule once.
+                            "description": format!("(Deferred) {short_desc}"),
                             "parameters": {
                                 "type": "object",
                                 "properties": {}
@@ -775,6 +794,22 @@ impl OpenAIProvider {
             && self.tool_support.allows(&request.model)
         {
             body["tools"] = json!(Self::build_tools(&request.tools));
+        }
+
+        // Flux sticky-session / prefix-cache key. On a Flux tier alias the
+        // conversation id doubles as the OpenAI `prompt_cache_key`: the router
+        // uses it to pin the whole conversation to one backend (a mid-session
+        // backend hop is a cold cache pool, re-billing the full prefix at full
+        // price), and OpenAI-compatible upstreams use it as their documented
+        // cache-routing hint. Gated exactly like the x-wl-* context headers: a
+        // concrete model id (or an absent conversation_id) keeps the body
+        // byte-identical to today, since generic OpenAI-compatible endpoints
+        // can 400 on unknown fields.
+        if is_flux_tier_alias(&request.model)
+            && let Some(id) = request.conversation_id.as_deref()
+            && !id.trim().is_empty()
+        {
+            body["prompt_cache_key"] = json!(id);
         }
 
         // Gate `reasoning_effort` on the model family. gpt-4o (and other
@@ -2503,7 +2538,7 @@ mod tests {
     fn parse_flux_402_spend_ceiling_unresolved_double_wrapped() {
         // The inner object, exactly as Flux emits it, stringified into the
         // LiteLLM envelope's `error.message`.
-        let inner = r#"{"error":"spend_ceiling_unresolved","reason":"no_account_id","message":"This request requires a resolvable account spend ceiling. Add a payment method or contact billing@ferroxlabs.com.","upgrade_url":"https://fluxrouter.ai/home/billing"}"#;
+        let inner = r#"{"error":"spend_ceiling_unresolved","reason":"no_account_id","message":"This request requires a resolvable account spend ceiling. Add a payment method or contact support@fluxrouter.ai.","upgrade_url":"https://fluxrouter.ai/home/billing"}"#;
         let body = serde_json::json!({
             "error": { "message": inner, "code": "402" }
         })
@@ -3303,6 +3338,52 @@ mod tests {
             json!(["\n\nLet me know if", "\n\nFeel free to"]),
             "OpenAI must emit stops under the `stop` key as an array"
         );
+    }
+
+    // --- SPEC-V2 CORE-1: Flux sticky-session prompt_cache_key -------------
+
+    /// On a Flux tier alias with a conversation id, the body carries
+    /// `prompt_cache_key = conversation_id` so the router can pin the
+    /// conversation to one backend (cache affinity) and OpenAI-compatible
+    /// upstreams get their cache-routing hint.
+    #[test]
+    fn build_request_body_stamps_prompt_cache_key_on_tier_alias() {
+        let mut req = stop_req();
+        req.model = "flux-auto".into();
+        req.conversation_id = Some("conv-abc".into());
+        let body = stop_provider().build_request_body(&req);
+        assert_eq!(body["prompt_cache_key"], json!("conv-abc"));
+    }
+
+    /// A concrete model id opts OUT: the body must stay byte-identical to
+    /// today (generic OpenAI-compatible endpoints can 400 on unknown fields).
+    #[test]
+    fn build_request_body_no_prompt_cache_key_for_concrete_model() {
+        let mut req = stop_req();
+        req.model = "gpt-4o".into();
+        req.conversation_id = Some("conv-abc".into());
+        let body = stop_provider().build_request_body(&req);
+        assert!(body.get("prompt_cache_key").is_none());
+    }
+
+    /// Absent (or empty) conversation_id skips the field entirely — never
+    /// emit an empty cache key.
+    #[test]
+    fn build_request_body_no_prompt_cache_key_without_conversation_id() {
+        let mut req = stop_req();
+        req.model = "flux-auto".into();
+        req.conversation_id = None;
+        let body = stop_provider().build_request_body(&req);
+        assert!(body.get("prompt_cache_key").is_none());
+
+        req.conversation_id = Some(String::new());
+        let body = stop_provider().build_request_body(&req);
+        assert!(body.get("prompt_cache_key").is_none());
+
+        // Whitespace-only ids are degenerate cache keys too (GLM-5.2 audit).
+        req.conversation_id = Some("   ".into());
+        let body = stop_provider().build_request_body(&req);
+        assert!(body.get("prompt_cache_key").is_none());
     }
 
     // --- Crucible #3: per-tier temperature emission -----------------------
@@ -4624,7 +4705,84 @@ mod tests {
         let spawn_params = &result[1]["function"]["parameters"];
         assert!(spawn_params["properties"].as_object().unwrap().is_empty());
         let spawn_desc = result[1]["function"]["description"].as_str().unwrap();
-        assert!(spawn_desc.contains("ToolSearch"));
+        assert!(spawn_desc.starts_with("(Deferred)"));
+        // Layer D2: the per-stub "use ToolSearch" boilerplate is gone — the
+        // system prompt states the hydration rule once.
+        assert!(!spawn_desc.contains("Use ToolSearch"));
+    }
+
+    /// Layer E1 regression guard: the serialized tools[] array must be
+    /// byte-identical across two consecutive round-trips of one conversation
+    /// — even when the input ToolDef order differs (registration vs curation
+    /// order). The array is part of the cached prompt prefix; any byte drift
+    /// silently busts prompt caching.
+    #[test]
+    fn tools_array_byte_stable_across_roundtrips() {
+        let read = ToolDef {
+            name: "Read".into(),
+            description: "Read a file".into(),
+            input_schema: json!({"type": "object", "properties": {"path": {"type": "string"}}}),
+            deferred: false,
+            server: None,
+        };
+        let bash = ToolDef {
+            name: "Bash".into(),
+            description: "Run a shell command".into(),
+            input_schema: json!({"type": "object", "properties": {"cmd": {"type": "string"}}}),
+            deferred: false,
+            server: None,
+        };
+        let spawn = ToolDef {
+            name: "SpawnTool".into(),
+            description: "Spawn sub-agents".into(),
+            input_schema: json!({"type": "object", "properties": {"agents": {"type": "array"}}}),
+            deferred: true,
+            server: None,
+        };
+
+        // Two builds from the same input (turn N and turn N+1).
+        let defs = vec![read.clone(), bash.clone(), spawn.clone()];
+        let turn1 = serde_json::to_string(&OpenAIProvider::build_tools(&defs)).unwrap();
+        let turn2 = serde_json::to_string(&OpenAIProvider::build_tools(&defs)).unwrap();
+        assert_eq!(turn1, turn2, "same input must serialize byte-identically");
+
+        // A build from a reordered input (e.g. a curation pass shuffled the
+        // registry order mid-conversation) must STILL be byte-identical.
+        let reordered =
+            serde_json::to_string(&OpenAIProvider::build_tools(&[spawn, bash, read])).unwrap();
+        assert_eq!(
+            turn1, reordered,
+            "reordered input must serialize byte-identically (deterministic name sort)"
+        );
+
+        // DUPLICATE names must not reintroduce input-order dependence: the
+        // registry does not forbid duplicate registration, and a stable
+        // name-only sort keeps input order for equal names. The
+        // schema/description tiebreak makes duplicates order-independent too.
+        let dup_a = ToolDef {
+            name: "Read".into(),
+            description: "Read a file (duplicate registration)".into(),
+            input_schema: serde_json::json!({"type": "object", "properties": {"offset": {"type": "integer"}}}),
+            deferred: false,
+            server: None,
+        };
+        let dup_b = ToolDef {
+            name: "Read".into(),
+            description: "Read a file".into(),
+            input_schema: serde_json::json!({"type": "object", "properties": {"path": {"type": "string"}}}),
+            deferred: false,
+            server: None,
+        };
+        let one = serde_json::to_string(&OpenAIProvider::build_tools(&[
+            dup_a.clone(),
+            dup_b.clone(),
+        ]))
+        .unwrap();
+        let other = serde_json::to_string(&OpenAIProvider::build_tools(&[dup_b, dup_a])).unwrap();
+        assert_eq!(
+            one, other,
+            "duplicate names must serialize byte-identically regardless of input order"
+        );
     }
 
     /// #297: WCore tool ids contain `:` / `::` / `.`, which OpenAI rejects with
@@ -4851,21 +5009,30 @@ mod tests {
         ];
         let result = OpenAIProvider::build_tools(&tools);
 
+        // build_tools serializes in deterministic name order (Layer E1), so
+        // look entries up by name instead of input position.
+        let by_name = |name: &str| -> &Value {
+            result
+                .iter()
+                .find(|t| t["function"]["name"] == name)
+                .unwrap_or_else(|| panic!("tool {name} missing from serialized array"))
+        };
+
         // bare {type:object} -> gains properties:{} and required:[]
-        let exec = &result[0]["function"]["parameters"];
+        let exec = &by_name("execute")["function"]["parameters"];
         assert_eq!(exec["type"], "object");
         assert!(exec["properties"].is_object());
         assert!(exec["properties"].as_object().unwrap().is_empty());
         assert!(exec["required"].is_array());
 
         // additionalProperties is preserved; properties + required still added
-        let ijfw = &result[1]["function"]["parameters"];
+        let ijfw = &by_name("ijfw_run")["function"]["parameters"];
         assert!(ijfw["properties"].is_object());
         assert_eq!(ijfw["additionalProperties"], json!(true));
         assert!(ijfw["required"].is_array());
 
         // a well-formed schema is passed through untouched
-        let read = &result[2]["function"]["parameters"];
+        let read = &by_name("Read")["function"]["parameters"];
         assert!(read["properties"].get("path").is_some());
         assert_eq!(read["required"], json!(["path"]));
     }

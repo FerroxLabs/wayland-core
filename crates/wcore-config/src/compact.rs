@@ -107,6 +107,57 @@ pub struct CompactConfig {
     /// the memory write be soaked/disabled independently for NullMemory hosts.
     #[serde(default = "default_true")]
     pub smart_handoff_to_memory: bool,
+
+    /// Continuous compaction of HISTORICAL assistant tool-call arguments
+    /// (parity gap 2): large `tool_calls[].function.arguments` payloads (e.g.
+    /// Write file bodies) older than the last N assistant turns are replaced
+    /// with a compact stub. TOML table: `[compact.tool_call_args]`.
+    #[serde(default)]
+    pub tool_call_args: ToolCallArgsConfig,
+}
+
+/// Config for continuous tool-call-argument compaction (parity gap 2).
+///
+/// Unlike the tool-RESULT micro-compaction above (trigger-gated), this pass
+/// runs on every compaction pipeline pass: an old Write body stops riding in
+/// resent history at the first epoch tick after it leaves the protected tail.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ToolCallArgsConfig {
+    /// Master gate for the pass. Default ON.
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+
+    /// Assistant turns whose tool-call arguments stay verbatim, counted from
+    /// the end of history — the model may still reference recent args.
+    /// Floored to 1 at the use site.
+    #[serde(default = "default_tca_keep_recent_turns")]
+    pub keep_recent_turns: usize,
+
+    /// Minimum serialized size (bytes) of an argument object before it is
+    /// stubbed. Tiny args (Read paths, short Bash commands) are never touched.
+    #[serde(default = "default_tca_min_args_bytes")]
+    pub min_args_bytes: usize,
+
+    /// Epoch quantization of the stub boundary (cache economics): the
+    /// boundary advances only every `epoch_turns` assistant turns, stubbing a
+    /// batch at once, instead of flipping one message per turn inside the
+    /// provider's cached prefix (which would re-bill the byte-identical
+    /// protected tail at full price every turn). Between ticks the boundary
+    /// is frozen and the whole prefix stays cache-hittable. `1` = advance
+    /// every turn (no quantization). Floored to 1 at the use site.
+    #[serde(default = "default_tca_epoch_turns")]
+    pub epoch_turns: usize,
+}
+
+impl Default for ToolCallArgsConfig {
+    fn default() -> Self {
+        Self {
+            enabled: default_true(),
+            keep_recent_turns: default_tca_keep_recent_turns(),
+            min_args_bytes: default_tca_min_args_bytes(),
+            epoch_turns: default_tca_epoch_turns(),
+        }
+    }
 }
 
 impl Default for CompactConfig {
@@ -131,6 +182,7 @@ impl Default for CompactConfig {
             smart_cooldown_turns: default_smart_cooldown_turns(),
             smart_min_shrink_tokens: default_smart_min_shrink_tokens(),
             smart_handoff_to_memory: true,
+            tool_call_args: ToolCallArgsConfig::default(),
         }
     }
 }
@@ -182,6 +234,15 @@ fn default_smart_cooldown_turns() -> u32 {
 }
 fn default_smart_min_shrink_tokens() -> u64 {
     2_000
+}
+fn default_tca_keep_recent_turns() -> usize {
+    2
+}
+fn default_tca_min_args_bytes() -> usize {
+    768
+}
+fn default_tca_epoch_turns() -> usize {
+    4
 }
 
 #[cfg(test)]
@@ -359,6 +420,49 @@ smart_handoff_to_memory = false
         assert_eq!(cfg.smart_cooldown_turns, 4);
         assert_eq!(cfg.smart_min_shrink_tokens, 5_000);
         assert!(!cfg.smart_handoff_to_memory);
+    }
+
+    #[test]
+    fn tool_call_args_defaults() {
+        // Parity gap 2: default ON, protect the last 2 assistant turns,
+        // never stub argument payloads under 768 serialized bytes.
+        let cfg = CompactConfig::default();
+        assert!(cfg.tool_call_args.enabled);
+        assert_eq!(cfg.tool_call_args.keep_recent_turns, 2);
+        assert_eq!(cfg.tool_call_args.min_args_bytes, 768);
+        assert_eq!(cfg.tool_call_args.epoch_turns, 4);
+    }
+
+    #[test]
+    fn toml_empty_keeps_tool_call_args_defaults() {
+        let cfg: CompactConfig = toml::from_str("").unwrap();
+        assert_eq!(cfg.tool_call_args, ToolCallArgsConfig::default());
+    }
+
+    #[test]
+    fn toml_tool_call_args_override() {
+        let toml_str = r#"
+[tool_call_args]
+enabled = false
+keep_recent_turns = 4
+min_args_bytes = 2048
+epoch_turns = 6
+"#;
+        let cfg: CompactConfig = toml::from_str(toml_str).unwrap();
+        assert!(!cfg.tool_call_args.enabled);
+        assert_eq!(cfg.tool_call_args.keep_recent_turns, 4);
+        assert_eq!(cfg.tool_call_args.min_args_bytes, 2048);
+        assert_eq!(cfg.tool_call_args.epoch_turns, 6);
+    }
+
+    #[test]
+    fn toml_tool_call_args_partial_override() {
+        let cfg: CompactConfig =
+            toml::from_str("[tool_call_args]\nkeep_recent_turns = 3\n").unwrap();
+        assert!(cfg.tool_call_args.enabled);
+        assert_eq!(cfg.tool_call_args.keep_recent_turns, 3);
+        assert_eq!(cfg.tool_call_args.min_args_bytes, 768);
+        assert_eq!(cfg.tool_call_args.epoch_turns, 4);
     }
 
     #[test]

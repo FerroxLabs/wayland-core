@@ -984,6 +984,7 @@ fn map_io_err(e: std::io::Error) -> SubprocessPluginError {
 #[cfg(test)]
 mod tests {
     use super::FORWARDED_ENV_VARS;
+    use serial_test::serial;
 
     /// env_clear() — secret vars must NOT reach the child process.
     ///
@@ -993,6 +994,7 @@ mod tests {
     /// sees an empty string for any var not in `FORWARDED_ENV_VARS`.
     #[cfg(unix)]
     #[tokio::test]
+    #[serial]
     async fn subprocess_env_clear_blocks_secret_vars() {
         use std::path::Path;
         use tokio::io::AsyncReadExt;
@@ -1000,7 +1002,12 @@ mod tests {
         // Plant a secret in the engine's env.
         let secret_var = "WAYLAND_TEST_SECRET_VAR";
         let secret_val = "should-not-leak";
-        // SAFETY: single-threaded test context; no concurrent env mutation.
+        // The environ table is process-global; under `cargo test` all tests in
+        // this binary share one process, so mutating it while another test
+        // reads/writes env is a data race (unsafe in edition 2024). `#[serial]`
+        // serializes every env-mutating test in this binary.
+        // SAFETY: `#[serial]` guarantees no other `#[serial]` test mutates the
+        // environment concurrently.
         unsafe { std::env::set_var(secret_var, secret_val) };
 
         // Spawn `sh -c 'printf "%s" "$WAYLAND_TEST_SECRET_VAR"'` via
@@ -1034,6 +1041,7 @@ mod tests {
     /// transport (stdout is moved into TransportSpawn, not the child handle).
     #[cfg(unix)]
     #[tokio::test]
+    #[serial]
     async fn subprocess_env_clear_blocks_non_allowlist_var_openai() {
         use std::path::Path;
         use tokio::io::AsyncReadExt;
@@ -1070,6 +1078,7 @@ mod tests {
     /// $WAYLAND_HOME and asserts the child sees the parent's value.
     #[cfg(unix)]
     #[tokio::test]
+    #[serial]
     async fn subprocess_forwards_wayland_home() {
         use std::path::Path;
         use tokio::io::AsyncReadExt;
@@ -1222,6 +1231,7 @@ mod tests {
     /// spawn_binary must strip env vars not in FORWARDED_ENV_VARS on Windows.
     #[cfg(windows)]
     #[tokio::test]
+    #[serial]
     async fn subprocess_env_clear_blocks_secret_vars_windows() {
         use std::path::Path;
         use tokio::io::AsyncReadExt;
@@ -1259,6 +1269,7 @@ mod tests {
     /// W-4: env_clear also blocks OPENAI_API_KEY on Windows.
     #[cfg(windows)]
     #[tokio::test]
+    #[serial]
     async fn subprocess_env_clear_blocks_openai_key_windows() {
         use std::path::Path;
         use tokio::io::AsyncReadExt;

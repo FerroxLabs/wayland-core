@@ -1278,6 +1278,7 @@ mod tests {
     // WAYLAND_SANDBOX_LIVE_WINDOWS — runs only on a real Windows box.
     #[cfg(windows)]
     #[tokio::test(flavor = "current_thread")]
+    #[serial_test::serial]
     async fn live_413_powershell_shell_falls_back_to_cmd() {
         use wcore_sandbox::backends::SandboxBackend;
         use wcore_sandbox::backends::appcontainer::AppContainerBackend;

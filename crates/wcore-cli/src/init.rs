@@ -331,6 +331,7 @@ pub fn print_summary(outcome: &InitOutcome) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serial_test::serial;
     use std::path::Path;
     use tempfile::TempDir;
 
@@ -408,10 +409,11 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn placeholder_used_when_no_model_anywhere() {
         // Save + unset WAYLAND_MODEL for this test.
         let saved = std::env::var("WAYLAND_MODEL").ok();
-        // SAFETY: tests run single-threaded by default for this assertion.
+        // SAFETY: #[serial] serializes every env-mutating test in this binary.
         unsafe {
             std::env::remove_var("WAYLAND_MODEL");
         }
@@ -420,7 +422,7 @@ mod tests {
         let body = std::fs::read_to_string(tmp.path().join(".wayland/config.toml")).unwrap();
         assert!(body.contains(PLACEHOLDER_MODEL));
         if let Some(v) = saved {
-            // SAFETY: same.
+            // SAFETY: #[serial] serializes every env-mutating test in this binary.
             unsafe {
                 std::env::set_var("WAYLAND_MODEL", v);
             }

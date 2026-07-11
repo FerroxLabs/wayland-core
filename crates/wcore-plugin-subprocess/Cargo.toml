@@ -30,6 +30,7 @@ workspace-hack.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
+serial_test.workspace = true
 # v0.6.5 Task 3.4 — mcp_bridge_e2e.rs constructs PluginToolCaps which
 # needs tokio_util::sync::CancellationToken to drive synthesized tools.
 tokio-util.workspace = true

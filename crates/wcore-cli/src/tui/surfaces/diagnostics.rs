@@ -2042,6 +2042,7 @@ mod tests {
     use super::*;
     use crate::tui::app::App;
     use crate::tui::theme::Theme;
+    use serial_test::serial;
 
     fn key(code: KeyCode) -> KeyEvent {
         KeyEvent::new(code, KeyModifiers::NONE)
@@ -3132,6 +3133,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn doctor_shows_yellow_when_key_unset() {
         // With no provider keys set, every provider row must render as
         // Yellow with the "no key" detail string. The brand-yellow `▲`
@@ -3179,6 +3181,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn doctor_provider_health_times_out_at_5s() {
         // A wedged provider must NOT stall /doctor. We point
         // `ANTHROPIC_API_BASE` at a TCP listener that accepts and never

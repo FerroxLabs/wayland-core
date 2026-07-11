@@ -378,13 +378,12 @@ mod tests {
     }
 
     #[test]
-    #[serial(env)]
+    #[serial]
     fn default_path_honors_wayland_home_env() {
         let dir = TempDir::new().unwrap();
-        // R3-B2: gated under `serial_test`'s `env` group to prevent
-        // racing with any other env-mutating test in the binary.
-        // SAFETY: `set_var` is unsafe on 1.83+ per the new contract; this is a
-        // test-only single-threaded usage (enforced by `#[serial(env)]`).
+        // R3-B2: the default `#[serial]` group serializes this against every
+        // other env-mutating test in the binary.
+        // SAFETY: #[serial] serializes every env-mutating test in this binary.
         unsafe {
             std::env::set_var(WAYLAND_HOME_ENV, dir.path());
         }

@@ -332,6 +332,7 @@ impl OutputSink for ChannelSink {
                 cache_write_tokens: (cache_creation_tokens > 0).then_some(cache_creation_tokens),
                 active_window_percent: None,
             }),
+            usage_delta: None,
             agent_run_id: None,
         });
     }
@@ -574,6 +575,7 @@ impl Drop for TerminalGuard {
             msg_id: std::mem::take(&mut self.msg_id),
             finish_reason: FinishReason::Error,
             usage: None,
+            usage_delta: None,
             agent_run_id: None,
         });
     }
@@ -1034,6 +1036,16 @@ impl TuiEngine {
                                 .then_some(result.usage.cache_creation_tokens),
                             active_window_percent: result.active_window_percent,
                         }),
+                        // CORE-2: run-scoped delta beside the cumulative usage.
+                        usage_delta: Some(Usage {
+                            input_tokens: result.usage_delta.input_tokens,
+                            output_tokens: result.usage_delta.output_tokens,
+                            cache_read_tokens: (result.usage_delta.cache_read_tokens > 0)
+                                .then_some(result.usage_delta.cache_read_tokens),
+                            cache_write_tokens: (result.usage_delta.cache_creation_tokens > 0)
+                                .then_some(result.usage_delta.cache_creation_tokens),
+                            active_window_percent: None,
+                        }),
                         agent_run_id: result.agent_run_id.clone(),
                     });
                     term.disarm();
@@ -1051,6 +1063,7 @@ impl TuiEngine {
                         msg_id: msg_id.clone(),
                         finish_reason: FinishReason::Error,
                         usage: None,
+                        usage_delta: None,
                         agent_run_id: None,
                     });
                     term.disarm();
@@ -1093,6 +1106,7 @@ impl TuiEngine {
                 msg_id: String::new(),
                 finish_reason: FinishReason::Error,
                 usage: None,
+                usage_delta: None,
                 agent_run_id: None,
             });
         }

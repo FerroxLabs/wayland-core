@@ -1507,9 +1507,19 @@ fn resolve_voice_mode_status() -> ProviderStatus {
 /// otherwise `OAuthConnected` (a token with no recorded expiry is treated as
 /// valid, mirroring the google-meet row's missing-expiry handling).
 fn resolve_chatgpt_status() -> ProviderStatus {
-    let status = wcore_agent::oauth::OAuthStorage::from_home()
+    let Ok(storage) = wcore_agent::oauth::OAuthStorage::from_home() else {
+        return ProviderStatus::NotConfigured;
+    };
+    chatgpt_status_from_storage(&storage)
+}
+
+/// Classify the ChatGPT OAuth status from an explicit token store. Split from
+/// [`resolve_chatgpt_status`] so tests can inject an `OAuthStorage::at_root`
+/// tempdir instead of racing on process-global `HOME`/`WAYLAND_HOME` env vars.
+fn chatgpt_status_from_storage(storage: &wcore_agent::oauth::OAuthStorage) -> ProviderStatus {
+    let status = wcore_agent::oauth::chatgpt_login_status(storage)
         .ok()
-        .and_then(|s| wcore_agent::oauth::chatgpt_login_status(&s).ok().flatten());
+        .flatten();
     let Some(status) = status else {
         return ProviderStatus::NotConfigured;
     };
@@ -3366,6 +3376,7 @@ mod tests {
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
     use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    use serial_test::serial;
 
     /// A key event with no modifiers.
     fn key(code: KeyCode) -> KeyEvent {
@@ -3855,17 +3866,21 @@ mod tests {
 
     // ── FIX 3: openai-chatgpt OAuth status row ───────────────────────────
 
-    /// Seed (or omit) `$HOME/.wayland/oauth/chatgpt.json` under a tempdir HOME,
-    /// run `resolve_chatgpt_status`, and restore HOME. The `token` arg:
+    /// Seed (or omit) `chatgpt.json` inside a tempdir-rooted `OAuthStorage`
+    /// and classify it via `chatgpt_status_from_storage`. Injecting the store
+    /// keeps these tests hermetic: the previous HOME-swapping helper raced
+    /// against parallel tests that mutate `WAYLAND_HOME` (which
+    /// `OAuthStorage::from_home` prefers over HOME) under a different lock.
+    /// The `token` arg:
     /// - `None` → write NO token file (not signed in).
     /// - `Some(None)` → write a token with no `expires_at_unix_secs` field.
     /// - `Some(Some(exp))` → write a token whose expiry is `exp`.
-    #[cfg(unix)]
-    fn chatgpt_status_with_home(token: Option<Option<u64>>) -> ProviderStatus {
+    fn chatgpt_status_with_token(token: Option<Option<u64>>) -> ProviderStatus {
         let tmp = tempfile::tempdir().expect("tempdir");
+        let oauth_dir = tmp.path().join("oauth");
+        let storage = wcore_agent::oauth::OAuthStorage::at_root(oauth_dir.clone())
+            .expect("oauth storage at tempdir root");
         if let Some(expires_at) = token {
-            let oauth_dir = tmp.path().join(".wayland").join("oauth");
-            std::fs::create_dir_all(&oauth_dir).expect("mkdir");
             // A JWT-less access_token is fine: the plan decode just yields None,
             // and the status row only reads expiry. The struct must round-trip
             // through `OAuthTokens`'s serde shape.
@@ -3880,30 +3895,18 @@ mod tests {
             };
             std::fs::write(oauth_dir.join("chatgpt.json"), body).expect("write token");
         }
-        let saved = std::env::var_os("HOME");
-        // SAFETY: serial test; HOME reverted before return.
-        unsafe { std::env::set_var("HOME", tmp.path()) };
-        let status = resolve_chatgpt_status();
-        match saved {
-            Some(v) => unsafe { std::env::set_var("HOME", v) },
-            None => unsafe { std::env::remove_var("HOME") },
-        }
-        status
+        chatgpt_status_from_storage(&storage)
     }
 
-    #[cfg(unix)]
     #[test]
-    #[serial_test::serial]
     fn chatgpt_status_not_configured_when_no_token() {
         assert_eq!(
-            chatgpt_status_with_home(None),
+            chatgpt_status_with_token(None),
             ProviderStatus::NotConfigured
         );
     }
 
-    #[cfg(unix)]
     #[test]
-    #[serial_test::serial]
     fn chatgpt_status_connected_when_future_expiry() {
         let far_future = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -3911,29 +3914,25 @@ mod tests {
             .unwrap_or(0)
             + 3600;
         assert_eq!(
-            chatgpt_status_with_home(Some(Some(far_future))),
+            chatgpt_status_with_token(Some(Some(far_future))),
             ProviderStatus::OAuthConnected
         );
     }
 
-    #[cfg(unix)]
     #[test]
-    #[serial_test::serial]
     fn chatgpt_status_expired_when_past_expiry() {
         assert_eq!(
-            chatgpt_status_with_home(Some(Some(1))),
+            chatgpt_status_with_token(Some(Some(1))),
             ProviderStatus::OAuthExpired
         );
     }
 
-    #[cfg(unix)]
     #[test]
-    #[serial_test::serial]
     fn chatgpt_status_connected_when_no_expiry_field() {
         // A token with no recorded expiry is treated as valid (mirrors the
         // google-meet missing-expiry handling).
         assert_eq!(
-            chatgpt_status_with_home(Some(None)),
+            chatgpt_status_with_token(Some(None)),
             ProviderStatus::OAuthConnected
         );
     }
@@ -3964,6 +3963,7 @@ mod tests {
     // ── esc saves an unsaved change ─────────────────────────────────────
 
     #[test]
+    #[serial]
     fn esc_saves_an_unsaved_toggle() {
         // `esc` over a dirty overview SAVES the edit and stays on the surface
         // (the footer's "saves & closes" contract). Reverting on esc was the
@@ -4062,7 +4062,20 @@ mod tests {
     // ── detail pane save promotes the baseline ──────────────────────────
 
     #[test]
+    #[serial]
     fn detail_pane_enter_saves_the_change() {
+        // The detail-pane `⏎` runs a real save through `patch_global_config`,
+        // whose path resolves via process-global `WAYLAND_HOME`. Hermetic via
+        // the same lock + tempdir pattern as every other persisting test here,
+        // so parallel tests that mutate `WAYLAND_HOME` can't race the write
+        // (and the save never lands in the developer's real config.toml).
+        let _guard = EXPERT_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = tempfile::tempdir().expect("tempdir");
+        let prev = std::env::var_os("WAYLAND_HOME");
+        // SAFETY: process-global env mutation is serialised by EXPERT_ENV_LOCK;
+        // the previous value is restored before the lock is released.
+        unsafe { std::env::set_var("WAYLAND_HOME", dir.path()) };
+
         let mut app = App::new();
         let mut surface = ConfigSurface::new();
         surface.on_enter(&mut app);
@@ -4079,6 +4092,14 @@ mod tests {
         // The change persisted — the baseline moved with it.
         assert!(!surface.is_dirty(), "a saved change is no longer dirty");
         assert!(surface.save_pending, "a save should be recorded");
+
+        // SAFETY: restore the prior env under the same lock.
+        unsafe {
+            match prev {
+                Some(v) => std::env::set_var("WAYLAND_HOME", v),
+                None => std::env::remove_var("WAYLAND_HOME"),
+            }
+        }
     }
 
     #[test]
@@ -4255,6 +4276,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn expert_commit_renders_new_value_and_persists() {
         // `⏎` commits: the new value must render (buffer gone) AND land in
         // `[providers.<active>].compat` on disk. Hermetic via WAYLAND_HOME.
@@ -4322,6 +4344,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn overview_esc_saves_pending_toggle_instead_of_reverting() {
         // Regression: toggling Long-term memory then pressing `esc` must SAVE
         // the edit (persist + advance baseline + signal a live rebind) and
@@ -4428,6 +4451,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn tools_row_space_toggles_and_persists_auto_approve() {
         // S5: the Tools row's `space` flips `[tools] auto_approve`; `esc` saves
         // it to disk. Hermetic via WAYLAND_HOME under the shared env lock.
@@ -4472,6 +4496,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn wallet_row_edits_and_persists_budget_cap() {
         // S5: the Wallet row opens a dollar editor on `⏎`; committing then
         // saving persists `[budget] max_cost_usd`.
@@ -4604,6 +4629,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn egress_allowlist_add_persists_to_security() {
         // Add an entry, then `esc` saves the collection to `[security]
         // egress_allow` on disk. Hermetic via WAYLAND_HOME under the env lock.
@@ -4642,6 +4668,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn failover_toggle_and_fallback_chain_persist_to_provider_chain() {
         // Enabling failover then adding a fallback model persists both
         // `[provider_chain] enabled` and `fallback_models` on a single save.
@@ -4832,6 +4859,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn advanced_traces_toggle_persists_to_observability() {
         // S6: the Advanced Structured-traces toggle flips `[observability]`
         // and `esc` saves it. Hermetic via WAYLAND_HOME under the env lock.
@@ -4872,6 +4900,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn advanced_credential_backend_radio_cycles_and_persists() {
         // S6: the credential-store radio cycles plaintext↔keyring and persists
         // to `[storage.credentials] backend`.

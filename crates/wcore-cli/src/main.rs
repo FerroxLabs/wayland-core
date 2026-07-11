@@ -3184,6 +3184,13 @@ async fn run_json_stream_mode(
                 let mut stopped = false;
                 let mut pending_config: Option<PendingConfig> = None;
                 let mut mode_changed = false;
+                // CORE-2: an errored run may still have consumed provider
+                // round-trips (total_usage/run_usage grew before the Err),
+                // but `run()` returned no AgentResult to read them from.
+                // Defer the error-path terminal stream_end to AFTER this
+                // block — `engine_fut` borrows `engine` until then — so it
+                // can carry the engine's usage snapshot instead of zeros.
+                let mut run_failed = false;
 
                 {
                     let engine_fut = engine.run(&content, &msg_id);
@@ -3218,19 +3225,15 @@ async fn run_json_stream_mode(
                                             result.finish_reason,
                                             result.active_window_percent,
                                             result.agent_run_id.as_deref(),
+                                            Some(&result.usage_delta),
                                         );
                                     }
                                     Err(e) => {
                                         output.emit_error(&format!("{e:#}"), false);
-                                        output.emit_stream_end(
-                                            &msg_id,
-                                            0,
-                                            0,
-                                            0,
-                                            0,
-                                            0,
-                                            FinishReason::Error,
-                                        );
+                                        // stream_end deferred (see run_failed
+                                        // above): emitted after this block with
+                                        // the engine's usage snapshot.
+                                        run_failed = true;
                                     }
                                 }
                                 break;
@@ -3354,6 +3357,36 @@ async fn run_json_stream_mode(
                                 }
                             }
                         }
+                    }
+                }
+
+                if run_failed {
+                    // CORE-2: the failed run's terminal stream_end. When the
+                    // run consumed provider round-trips before dying, report
+                    // the cumulative usage + this run's delta from the
+                    // engine's snapshot (the counters already grew and will
+                    // be persisted); otherwise keep the legacy zero-usage
+                    // emission byte-identical.
+                    let (total, delta) = engine.usage_snapshot();
+                    let delta_nonzero = delta.input_tokens > 0
+                        || delta.output_tokens > 0
+                        || delta.cache_creation_tokens > 0
+                        || delta.cache_read_tokens > 0;
+                    if delta_nonzero {
+                        output.emit_stream_end_full(
+                            &msg_id,
+                            0,
+                            total.input_tokens,
+                            total.output_tokens,
+                            total.cache_creation_tokens,
+                            total.cache_read_tokens,
+                            FinishReason::Error,
+                            None,
+                            None,
+                            Some(&delta),
+                        );
+                    } else {
+                        output.emit_stream_end(&msg_id, 0, 0, 0, 0, 0, FinishReason::Error);
                     }
                 }
 

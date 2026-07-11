@@ -268,12 +268,14 @@ mod tests {
     /// no-op (no UUID minted, no log path, no calls recorded even when
     /// `log_call` is invoked).
     #[test]
+    #[serial]
     fn disabled_session_is_inert() {
-        // Use a uniquely-named env var so concurrent tests can't flip it.
         let var = "WCORE_DEBUG_HELPERS_TEST_DISABLED";
         // Belt-and-suspenders: ensure unset before constructing.
-        // SAFETY: tests in this module use unique env-var names so
-        // concurrent test threads do not race on the same key.
+        // SAFETY: `#[serial]` serializes every env-mutating test in this
+        // binary — the environ table is process-global, so a unique var name
+        // does NOT prevent a data race (unsafe in edition 2024); serialization
+        // does.
         unsafe {
             std::env::remove_var(var);
         }
@@ -292,10 +294,11 @@ mod tests {
 
     /// Happy path: enabled session records calls and counts them.
     #[test]
-    #[serial(env)]
+    #[serial]
     fn enabled_session_records_calls() {
         let var = "WCORE_DEBUG_HELPERS_TEST_ENABLED";
-        // SAFETY: see disabled_session_is_inert — unique env var.
+        // SAFETY: see disabled_session_is_inert — `#[serial]` serializes env
+        // mutations across this binary.
         unsafe {
             std::env::set_var(var, "TRUE"); // case-insensitive
         }
@@ -313,7 +316,7 @@ mod tests {
         // UUID v4 string is 36 chars (8-4-4-4-12).
         assert_eq!(sid.len(), 36);
 
-        // SAFETY: unique env-var name; no other tests read it.
+        // SAFETY: `#[serial]` serializes env-mutating tests in this binary.
         unsafe {
             std::env::remove_var(var);
         }
@@ -325,10 +328,11 @@ mod tests {
     /// the internal `log_dir` after construction — that's the same
     /// fixture pattern other wcore-tools tests use.
     #[test]
-    #[serial(env)]
+    #[serial]
     fn save_writes_well_formed_json_with_custom_dir() {
         let var = "WCORE_DEBUG_HELPERS_TEST_SAVE";
-        // SAFETY: see disabled_session_is_inert — unique env var.
+        // SAFETY: see disabled_session_is_inert — `#[serial]` serializes env
+        // mutations across this binary.
         unsafe {
             std::env::set_var(var, "true");
         }
@@ -360,7 +364,7 @@ mod tests {
         assert_eq!(calls[0]["tool_name"], Value::from("op_x"));
         assert_eq!(calls[0]["hits"], Value::from(7));
 
-        // SAFETY: unique env-var name.
+        // SAFETY: `#[serial]` serializes env-mutating tests in this binary.
         unsafe {
             std::env::remove_var(var);
         }

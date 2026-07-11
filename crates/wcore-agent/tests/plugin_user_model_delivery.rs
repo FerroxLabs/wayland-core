@@ -9,6 +9,7 @@
 //!
 //! No live HTTP / network — pure in-memory data shuttling.
 
+use serial_test::serial;
 use wcore_agent::plugins::runner::CapturedUserModel;
 use wcore_agent::plugins::{InitializeOutcome, apply_initialize_outcome};
 use wcore_plugin_api::UserModelSpec;
@@ -130,8 +131,8 @@ fn honcho_spec_with_env(env_var: &str) -> UserModelSpec {
 }
 
 /// `backend = "honcho"` reifies into a live `HonchoClient` via
-/// `HonchoClient::from_spec`. Uses a unique env var name so we don't
-/// collide with concurrent tests.
+/// `HonchoClient::from_spec`.
+#[serial]
 #[test]
 fn honcho_user_model_reifies() {
     let key_var = "WAYLAND_TASK_1_5_HONCHO_KEY";
@@ -223,11 +224,12 @@ fn unknown_backend_typed_error() {
 /// — no reified client AND no surfaced error (so boot emits no nagging WARN
 /// about a key the user never set up). The local-backend fallback in
 /// bootstrap covers the actual user-model context.
+#[serial]
 #[test]
 fn honcho_missing_api_key_degrades_silently() {
     let key_var = "WAYLAND_TASK_1_5_DEFINITELY_UNSET_KEY";
     // Make extra sure it's not set from a prior test.
-    // SAFETY: unique env-var name, safe to remove.
+    // SAFETY: `#[serial]` serializes every env-mutating test in this binary.
     unsafe {
         env::remove_var(key_var);
     }

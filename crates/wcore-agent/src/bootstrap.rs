@@ -2042,7 +2042,17 @@ impl AgentBootstrap {
             self.config.advertised_capabilities.online_evolution = true;
         }
 
-        let tool_defs_snapshot = registry.to_tool_defs();
+        let mut tool_defs_snapshot = registry.to_tool_defs();
+        // Layer D1 (token-opt): mark cold tools deferred in the snapshot so
+        // ToolSearch can find and hydrate them — it only searches defs with
+        // `deferred == true`. Same pure config-driven split the engine
+        // applies to every outbound tools[] array.
+        if self.config.builtin_tools.defer_cold.enabled {
+            wcore_tools::registry::apply_cold_deferral(
+                &mut tool_defs_snapshot,
+                &self.config.builtin_tools.defer_cold.hot_allowlist,
+            );
+        }
         registry.register(Box::new(wcore_tools::tool_search::ToolSearchTool::new(
             tool_defs_snapshot,
         )));

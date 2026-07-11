@@ -213,7 +213,61 @@ impl OutputSink for TestSink {
                 },
                 active_window_percent: None,
             }),
+            usage_delta: None,
             agent_run_id: None,
+        });
+    }
+    #[allow(clippy::too_many_arguments)]
+    fn emit_stream_end_full(
+        &self,
+        msg_id: &str,
+        _turns: usize,
+        input_tokens: u64,
+        output_tokens: u64,
+        cache_creation_tokens: u64,
+        cache_read_tokens: u64,
+        finish_reason: FinishReason,
+        active_window_percent: Option<u32>,
+        agent_run_id: Option<&str>,
+        usage_delta: Option<&wcore_types::message::TokenUsage>,
+    ) {
+        // CORE-2: mirror ProtocolSink's enriched mapping (gauge, run id,
+        // per-run delta) so tests can assert the terminal stream_end
+        // carries the delta the same way the real wire does.
+        self.record(&ProtocolEvent::StreamEnd {
+            msg_id: msg_id.to_string(),
+            finish_reason,
+            usage: Some(Usage {
+                input_tokens,
+                output_tokens,
+                cache_read_tokens: if cache_read_tokens > 0 {
+                    Some(cache_read_tokens)
+                } else {
+                    None
+                },
+                cache_write_tokens: if cache_creation_tokens > 0 {
+                    Some(cache_creation_tokens)
+                } else {
+                    None
+                },
+                active_window_percent,
+            }),
+            usage_delta: usage_delta.map(|d| Usage {
+                input_tokens: d.input_tokens,
+                output_tokens: d.output_tokens,
+                cache_read_tokens: if d.cache_read_tokens > 0 {
+                    Some(d.cache_read_tokens)
+                } else {
+                    None
+                },
+                cache_write_tokens: if d.cache_creation_tokens > 0 {
+                    Some(d.cache_creation_tokens)
+                } else {
+                    None
+                },
+                active_window_percent: None,
+            }),
+            agent_run_id: agent_run_id.map(str::to_string),
         });
     }
     fn emit_error(&self, msg: &str, retryable: bool) {

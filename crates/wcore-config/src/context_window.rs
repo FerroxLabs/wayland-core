@@ -22,7 +22,7 @@
 //! cannot call the kernel: protocol transports the computed integer percent as
 //! an opaque serde number, matching the observability crate's decoupling.
 
-use crate::limits::model_output_ceiling;
+use crate::limits::{flux_tier_context_window, model_output_ceiling};
 
 /// One turn's assembled-tokens-over-active-window view.
 ///
@@ -45,13 +45,22 @@ impl ContextWindow {
     /// fed to `size_output_cap`). A KNOWN model's real window
     /// ([`model_output_ceiling`]`.1`) ALWAYS wins — this is the #255 root-cause
     /// fix: a swapped-in gpt-4o (128k) must not be measured against a stale
-    /// 200k default. `config_window` is a fail-open fallback used ONLY when the
+    /// 200k default. A Flux tier alias (`flux-auto` / `flux-fast` /
+    /// `flux-standard` / `flux-reasoning`) resolves to the conservative
+    /// 128k pool-minimum floor ([`flux_tier_context_window`], CORE-4) and,
+    /// like a known model, beats `config_window` — a 200k config default over
+    /// a tier that can route to a 128k backend is exactly the wedge where
+    /// compaction never fired and a session grew to 17M cumulative input
+    /// (callers that receive the real served-model window from Flux, #282,
+    /// override this struct's `window` directly and still win).
+    /// `config_window` is a fail-open fallback used ONLY when the
     /// model is unknown AND the user supplied a positive override (their TOML
     /// `context_window`); when both are absent the window is `None` and no
     /// denominator is fabricated.
     pub fn resolve(used_tokens: u64, provider: &str, model: &str, config_window: u64) -> Self {
         let window = model_output_ceiling(provider, model)
             .map(|(_, ctx)| ctx as u64)
+            .or_else(|| flux_tier_context_window(model).map(u64::from))
             .or(if config_window > 0 {
                 Some(config_window)
             } else {
@@ -108,17 +117,55 @@ mod tests {
 
     #[test]
     fn resolve_unknown_model_falls_back_to_config() {
-        // flux-auto is unlisted -> fail open to the user/config value, NOT a
-        // hardcoded 200k inside the kernel.
-        let ctx = ContextWindow::resolve(1_000, "flux-router", "flux-auto", 200_000);
+        // A genuinely unknown model -> fail open to the user/config value, NOT
+        // a hardcoded 200k inside the kernel. (flux-auto no longer qualifies:
+        // the tier aliases resolve to the CORE-4 floor, tested below.)
+        let ctx = ContextWindow::resolve(1_000, "some-provider", "mystery-model", 200_000);
         assert_eq!(ctx.window, Some(200_000));
     }
 
     #[test]
     fn resolve_unknown_model_and_zero_config_is_none() {
         // No real window and no positive config -> no fabricated denominator.
-        let ctx = ContextWindow::resolve(1_000, "flux-router", "flux-auto", 0);
+        let ctx = ContextWindow::resolve(1_000, "some-provider", "mystery-model", 0);
         assert_eq!(ctx.window, None);
+    }
+
+    #[test]
+    fn resolve_flux_tier_aliases_get_conservative_floor() {
+        // CORE-4: every Flux tier alias resolves to the 128k pool-minimum
+        // floor even with NO config fallback — this is the denominator the
+        // smart-compact trigger divides by, so compaction now fires
+        // proactively instead of the session growing until
+        // `finish_reason: length` (customer hit 17M cumulative input).
+        for alias in ["flux-auto", "flux-fast", "flux-standard", "flux-reasoning"] {
+            let ctx = ContextWindow::resolve(1_000, "flux-router", alias, 0);
+            assert_eq!(
+                ctx.window,
+                Some(128_000),
+                "{alias} must resolve the conservative 128k floor"
+            );
+        }
+        // Provider-independent: the customer-log path reaches Flux through the
+        // plain `openai` provider key.
+        let ctx = ContextWindow::resolve(1_000, "openai", "flux-auto", 0);
+        assert_eq!(ctx.window, Some(128_000));
+        // Case-insensitive, like every other model match in limits.rs.
+        let ctx = ContextWindow::resolve(1_000, "flux-router", "Flux-Auto", 0);
+        assert_eq!(ctx.window, Some(128_000));
+    }
+
+    #[test]
+    fn flux_tier_floor_beats_larger_config_window() {
+        // The wedge scenario: a 200k config default over a tier alias that can
+        // route to a 128k backend meant `used/200k` never crossed the trigger.
+        // The conservative floor must win over config, exactly like a known
+        // model's real window does (#255 doctrine).
+        let ctx = ContextWindow::resolve(96_000, "openai", "flux-auto", 200_000);
+        assert_eq!(ctx.window, Some(128_000));
+        // 96k/128k = 0.75 -> above the smart-compact trigger band (0.60-0.70);
+        // against the stale 200k it was 0.48 and never fired.
+        assert_eq!(ctx.percent(), Some(75));
     }
 
     #[test]

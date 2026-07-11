@@ -49,6 +49,7 @@ pub fn full_conversation() -> Vec<ProtocolEvent> {
                 cache_write_tokens: None,
                 active_window_percent: None,
             }),
+            usage_delta: None,
             agent_run_id: None,
         },
     ]

@@ -1343,6 +1343,7 @@ mod fail_loud_tests {
             stop_reason: StopReason::MaxTurns,
             finish_reason: finish,
             usage: TokenUsage::default(),
+            usage_delta: TokenUsage::default(),
             turns: 3,
             active_window_percent: None,
             agent_run_id: None,

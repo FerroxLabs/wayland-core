@@ -152,6 +152,7 @@ fn now_secs() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serial_test::serial;
 
     /// Build a store with explicit `(hits, last_used)` entries, bypassing
     /// `record` so tests can place an entry at a chosen age.
@@ -217,15 +218,16 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn save_then_load_round_trips_the_store() {
         // Redirect the config dir at process scope so `store_path`
         // resolves into a temp dir for this test.
         let tmp = tempfile::tempdir().expect("temp dir");
-        // SAFETY: single-threaded test; WAYLAND_HOME is the canonical
-        // hermetic override resolved by `wayland_config_dir()` (F-010,
-        // #270). It works uniformly on every platform — unlike
-        // XDG_CONFIG_HOME, which `dirs::config_dir()` ignores on
-        // macOS/Windows.
+        // SAFETY: #[serial] serializes every env-mutating test in this binary.
+        // WAYLAND_HOME is the canonical hermetic override resolved by
+        // `wayland_config_dir()` (F-010, #270). It works uniformly on every
+        // platform — unlike XDG_CONFIG_HOME, which `dirs::config_dir()`
+        // ignores on macOS/Windows.
         unsafe {
             std::env::set_var("WAYLAND_HOME", tmp.path());
         }

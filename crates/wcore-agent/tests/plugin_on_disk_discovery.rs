@@ -11,6 +11,7 @@
 //! (real loads require live wasmtime / a real binary). The minimum-
 //! viable wasm component header is reused from Task 2.6's runner tests.
 
+use serial_test::serial;
 use std::path::Path;
 use std::sync::{Arc, Mutex, OnceLock};
 
@@ -91,6 +92,7 @@ fn config() -> PluginsConfig {
     }
 }
 
+#[serial]
 #[tokio::test]
 async fn on_disk_wasm_plugin_discovered_and_dispatched() {
     let tmp = tempfile::TempDir::new().unwrap();
@@ -141,6 +143,7 @@ kind = "wasm"
     assert!(!runner.is_disabled("wasm-fixture"));
 }
 
+#[serial]
 #[tokio::test]
 async fn on_disk_subprocess_plugin_discovered_and_dispatched() {
     let tmp = tempfile::TempDir::new().unwrap();
@@ -188,6 +191,7 @@ binary_path = "does-not-exist"
     assert!(!runner.is_disabled("subprocess-fixture"));
 }
 
+#[serial]
 #[tokio::test]
 async fn on_disk_mcp_bridge_plugin_discovered_and_dispatched() {
     let tmp = tempfile::TempDir::new().unwrap();
@@ -229,6 +233,7 @@ binary_path = "does-not-exist"
     );
 }
 
+#[serial]
 #[tokio::test]
 async fn invalid_runtime_kind_skipped_with_log() {
     let tmp = tempfile::TempDir::new().unwrap();
@@ -272,6 +277,7 @@ kind = "garbage"
     );
 }
 
+#[serial]
 #[tokio::test]
 async fn mixed_static_and_on_disk_coexist() {
     // Static-plugin path through inventory + on-disk path via dir scan.
@@ -333,6 +339,7 @@ binary_path = "does-not-exist"
 //      We skip symlink entries in the plugins root with a warn log.
 // ---------------------------------------------------------------------------
 
+#[serial]
 #[tokio::test]
 async fn traversal_relative_binary_path_rejected() {
     let tmp = tempfile::TempDir::new().unwrap();
@@ -374,6 +381,7 @@ binary_path = "../../../etc/passwd"
     );
 }
 
+#[serial]
 #[tokio::test]
 async fn absolute_binary_path_rejected() {
     let tmp = tempfile::TempDir::new().unwrap();
@@ -431,6 +439,7 @@ binary_path = "{abs_path_literal}"
     );
 }
 
+#[serial]
 #[tokio::test]
 async fn legit_relative_binary_path_accepted() {
     // A clean relative `binary_path` that stays inside the plugin dir
@@ -493,6 +502,7 @@ binary_path = "bin/plugin"
 
 /// T10 — a declarative manifest dispatches to `Declarative`, loads Ok, and the
 /// handle carries the declared hooks + mcp_server spec.
+#[serial]
 #[tokio::test]
 async fn on_disk_declarative_plugin_discovered_and_dispatched() {
     use wcore_agent::plugins::LoadedRuntimeHandle;
@@ -561,6 +571,7 @@ url = "https://example.invalid/sse"
 
 /// T11 — a declarative plugin declaring `[[hooks]]` without `register_hooks`
 /// fails to load (manifest validation rejects it before dispatch).
+#[serial]
 #[tokio::test]
 async fn on_disk_declarative_hooks_without_permission_rejected() {
     let tmp = tempfile::TempDir::new().unwrap();
@@ -603,6 +614,7 @@ tool = "memory_prelude"
 }
 
 #[cfg(unix)]
+#[serial]
 #[tokio::test]
 async fn symlink_entry_in_plugins_root_skipped() {
     use std::os::unix::fs::symlink;
@@ -697,6 +709,7 @@ impl Drop for ProfileHomeEnvGuard {
 /// C3 — a declarative plugin under `profile_home()/plugins` (the C3 profile
 /// home, where IJFW's installer drops it) is discovered via the multi-root
 /// path, WITHOUT setting `$WAYLAND_PLUGINS_DIR`.
+#[serial]
 #[tokio::test]
 async fn on_disk_declarative_plugin_under_profile_home_discovered() {
     use wcore_agent::plugins::LoadedRuntimeHandle;

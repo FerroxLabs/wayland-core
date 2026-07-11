@@ -245,7 +245,7 @@ mod tests {
     /// profile has its OWN trust set, and the explicit `$WAYLAND_TRUSTED_KEYS_DIR`
     /// override still wins over it.
     #[test]
-    #[serial_test::serial(wayland_home_env)]
+    #[serial_test::serial]
     fn trusted_keys_dir_follows_wayland_home_and_env_override() {
         let wh = "WAYLAND_HOME";
         let tk = ENV_TRUSTED_KEYS_DIR;

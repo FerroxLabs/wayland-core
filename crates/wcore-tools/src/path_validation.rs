@@ -465,8 +465,14 @@ mod tests {
     // default path stays denied regardless of this env var.
     #[cfg(unix)]
     #[test]
+    #[serial_test::serial]
     fn wayland_cron_relocated_home_jobs_and_key_rejected() {
-        // SAFETY: single-threaded test setup; no other test mutates this var.
+        // WAYLAND_HOME is process-global; `#[serial]` serializes every
+        // env-mutating test in this binary so this write/remove pair cannot
+        // race another (a data race on the environ table is unsafe in edition
+        // 2024).
+        // SAFETY: `#[serial]` guarantees no other `#[serial]` test mutates the
+        // environment concurrently.
         unsafe { std::env::set_var("WAYLAND_HOME", "/srv/wl-relocated-test") };
         let jobs = validate_user_path(Path::new("/srv/wl-relocated-test/cron/jobs.json"));
         let key = validate_user_path(Path::new("/srv/wl-relocated-test/cron/.integrity.key"));
@@ -486,6 +492,7 @@ mod tests {
     // comparator now also canonicalizes, so the canonical write path is denied.
     #[cfg(unix)]
     #[test]
+    #[serial_test::serial]
     fn wayland_cron_symlinked_home_canonical_write_rejected() {
         use std::os::unix::fs::symlink;
 
@@ -497,7 +504,8 @@ mod tests {
         let _ = fs::remove_file(&link);
         symlink(&realhome, &link).expect("symlink link -> realhome");
 
-        // SAFETY: single-threaded test setup; restored below.
+        // SAFETY: `#[serial]` guarantees no other `#[serial]` test mutates the
+        // environment concurrently; restored below.
         unsafe { std::env::set_var("WAYLAND_HOME", &link) };
         // The agent writes via the CANONICAL real path, which under the raw
         // (symlink) comparator did not match `link/cron`.

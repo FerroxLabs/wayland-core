@@ -200,11 +200,20 @@ fn apply_event_inner(app: &mut App, event: ProtocolEvent) {
                 }
             }
         }
-        ProtocolEvent::StreamEnd { usage, .. } => {
+        ProtocolEvent::StreamEnd {
+            usage, usage_delta, ..
+        } => {
             // W3 D3: roll up output_tokens from the optional Usage payload
             // before flushing — the status widget shows the per-turn total
             // just before phase → Idle.
-            if let Some(u) = usage.as_ref() {
+            //
+            // CORE-2: `usage` is session-CUMULATIVE (it grows across turns
+            // and survives --resume), so summing it per turn overcounts.
+            // Prefer the per-run `usage_delta` sibling for turn-local
+            // counters, falling back to `usage` only when the delta is
+            // absent (old producers / synthetic stream-ends).
+            let turn_usage = usage_delta.as_ref().or(usage.as_ref());
+            if let Some(u) = turn_usage {
                 app.session.tokens_out = app.session.tokens_out.saturating_add(u.output_tokens);
             }
             // ── v0.9.3 W1.3 — persist captured reasoning as Thinking ─────
@@ -213,16 +222,17 @@ fn apply_event_inner(app: &mut App, event: ProtocolEvent) {
             // extended the filter to also accumulate the stripped content
             // into a capture buffer. Drain it here. `secs` is the turn-level
             // proxy (`now − turn_started_at`) per SPEC v1.3 §0 criterion
-            // #11; `tokens` is `StreamEnd.usage.output_tokens` (default 0
-            // when usage is None — the projection gates the `· N tok` meta
-            // on `tokens > 0` so a 0 reads cleanly without tail meta).
+            // #11; `tokens` is the turn-local output count (usage_delta,
+            // falling back to the cumulative usage for old producers;
+            // default 0 when both are None — the projection gates the
+            // `· N tok` meta on `tokens > 0` so a 0 reads cleanly).
             let captured = app.session.reasoning_filter.take_captured();
             let thinking_to_push: Option<TurnElement> = if captured.is_empty() {
                 None
             } else {
                 let now = Instant::now();
                 let secs = now.duration_since(app.session.turn_started_at).as_secs();
-                let tokens = usage.as_ref().map(|u| u.output_tokens).unwrap_or(0);
+                let tokens = turn_usage.map(|u| u.output_tokens).unwrap_or(0);
                 Some(TurnElement::Thinking {
                     body: captured,
                     secs,
@@ -2037,6 +2047,7 @@ mod tests {
                 msg_id: "m1".into(),
                 finish_reason: wcore_protocol::events::FinishReason::Stop,
                 usage: None,
+                usage_delta: None,
                 agent_run_id: None,
             },
         );
@@ -2055,6 +2066,86 @@ mod tests {
         }
         // The `.text()` accessor preserves the old human-readable view.
         assert_eq!(app.session.turns[0].text(), "Hello, world.");
+    }
+
+    /// CORE-2 audit fix: `StreamEnd.usage` is session-CUMULATIVE, so the
+    /// per-turn roll-up must prefer the `usage_delta` sibling — summing the
+    /// cumulative field overcounts on every turn after the first. Old
+    /// producers without a delta still fall back to `usage`.
+    #[test]
+    fn tokens_out_prefers_usage_delta_over_cumulative_usage() {
+        fn usage(output_tokens: u64) -> wcore_protocol::events::Usage {
+            wcore_protocol::events::Usage {
+                input_tokens: 0,
+                output_tokens,
+                cache_read_tokens: None,
+                cache_write_tokens: None,
+                active_window_percent: None,
+            }
+        }
+        let mut app = App::new();
+        // Turn 1: cumulative 42, delta 42.
+        apply_event(
+            &mut app,
+            ProtocolEvent::StreamStart {
+                msg_id: "m1".into(),
+            },
+        );
+        apply_event(
+            &mut app,
+            ProtocolEvent::StreamEnd {
+                msg_id: "m1".into(),
+                finish_reason: wcore_protocol::events::FinishReason::Stop,
+                usage: Some(usage(42)),
+                usage_delta: Some(usage(42)),
+                agent_run_id: None,
+            },
+        );
+        assert_eq!(app.session.tokens_out, 42);
+        // Turn 2: cumulative grew to 142; THIS turn produced 100. The
+        // per-turn counter (reset at StreamStart) must show 100 — reading
+        // the cumulative field would show 142.
+        apply_event(
+            &mut app,
+            ProtocolEvent::StreamStart {
+                msg_id: "m2".into(),
+            },
+        );
+        apply_event(
+            &mut app,
+            ProtocolEvent::StreamEnd {
+                msg_id: "m2".into(),
+                finish_reason: wcore_protocol::events::FinishReason::Stop,
+                usage: Some(usage(142)),
+                usage_delta: Some(usage(100)),
+                agent_run_id: None,
+            },
+        );
+        assert_eq!(
+            app.session.tokens_out, 100,
+            "the per-turn counter must show THIS turn's delta, not the cumulative 142"
+        );
+        // Old producer (no delta): fall back to usage.
+        apply_event(
+            &mut app,
+            ProtocolEvent::StreamStart {
+                msg_id: "m3".into(),
+            },
+        );
+        apply_event(
+            &mut app,
+            ProtocolEvent::StreamEnd {
+                msg_id: "m3".into(),
+                finish_reason: wcore_protocol::events::FinishReason::Stop,
+                usage: Some(usage(8)),
+                usage_delta: None,
+                agent_run_id: None,
+            },
+        );
+        assert_eq!(
+            app.session.tokens_out, 8,
+            "a delta-less stream_end still rolls up its usage"
+        );
     }
 
     #[test]
@@ -2092,6 +2183,7 @@ mod tests {
                 msg_id: "m1".into(),
                 finish_reason: wcore_protocol::events::FinishReason::Stop,
                 usage: None,
+                usage_delta: None,
                 agent_run_id: None,
             },
         );
@@ -2139,6 +2231,7 @@ mod tests {
                     cache_write_tokens: None,
                     active_window_percent: None,
                 }),
+                usage_delta: None,
                 agent_run_id: None,
             },
         );
@@ -2192,6 +2285,7 @@ mod tests {
                 msg_id: "m1".into(),
                 finish_reason: wcore_protocol::events::FinishReason::Stop,
                 usage: None,
+                usage_delta: None,
                 agent_run_id: None,
             },
         );
@@ -3033,6 +3127,7 @@ mod tests {
                 msg_id: "m1".into(),
                 finish_reason: wcore_protocol::events::FinishReason::Stop,
                 usage: None,
+                usage_delta: None,
                 agent_run_id: None,
             },
         );
@@ -3095,6 +3190,7 @@ mod tests {
                 msg_id: "m1".into(),
                 finish_reason: wcore_protocol::events::FinishReason::Stop,
                 usage: None,
+                usage_delta: None,
                 agent_run_id: None,
             },
         );
@@ -3485,6 +3581,7 @@ mod tests {
                 msg_id: "m1".into(),
                 finish_reason: wcore_protocol::events::FinishReason::Stop,
                 usage: None,
+                usage_delta: None,
                 agent_run_id: None,
             },
         );
@@ -3570,6 +3667,7 @@ mod tests {
                 msg_id: "m1".into(),
                 finish_reason: wcore_protocol::events::FinishReason::Stop,
                 usage: None,
+                usage_delta: None,
                 agent_run_id: None,
             },
         );
@@ -3673,6 +3771,7 @@ mod tests {
                 msg_id: "m1".into(),
                 finish_reason: wcore_protocol::events::FinishReason::Stop,
                 usage: None,
+                usage_delta: None,
                 agent_run_id: None,
             },
         );
@@ -3754,6 +3853,7 @@ mod tests {
                 msg_id: "m1".into(),
                 finish_reason: wcore_protocol::events::FinishReason::Stop,
                 usage: None,
+                usage_delta: None,
                 agent_run_id: None,
             },
         );
@@ -3826,6 +3926,7 @@ mod tests {
                 msg_id: "m1".into(),
                 finish_reason: wcore_protocol::events::FinishReason::Stop,
                 usage: None,
+                usage_delta: None,
                 agent_run_id: None,
             },
         );
@@ -3895,6 +3996,7 @@ mod tests {
                 msg_id: "m1".into(),
                 finish_reason: wcore_protocol::events::FinishReason::Stop,
                 usage: None,
+                usage_delta: None,
                 agent_run_id: None,
             },
         );
@@ -4091,6 +4193,7 @@ mod tests {
                 msg_id: "m1".into(),
                 finish_reason: wcore_protocol::events::FinishReason::Stop,
                 usage: None,
+                usage_delta: None,
                 agent_run_id: None,
             },
         );
@@ -4185,6 +4288,7 @@ mod tests {
                 msg_id: "m1".into(),
                 finish_reason: wcore_protocol::events::FinishReason::Stop,
                 usage: None,
+                usage_delta: None,
                 agent_run_id: None,
             },
         );

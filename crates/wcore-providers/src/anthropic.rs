@@ -25,6 +25,11 @@ pub struct AnthropicProvider {
     keys: Arc<Mutex<KeyPool>>,
     base_url: String,
     cache_enabled: bool,
+    /// Breakpoint floor: skip `cache_control` injection when the estimated
+    /// prompt prefix is below this many tokens (see `apply_cache_zones`).
+    /// From `[providers.anthropic.prompt_caching] min_prefix_tokens`;
+    /// defaults to `wcore_config::config::DEFAULT_CACHE_MIN_PREFIX_TOKENS`.
+    min_prefix_tokens: usize,
     /// Provider key used to look up the offline `/model` fallback catalog
     /// (`wcore_types::model_aliases::models_for_provider`) when live model
     /// discovery fails. Defaults to `"anthropic"`; Anthropic-wire third parties
@@ -47,6 +52,7 @@ impl AnthropicProvider {
             keys: Arc::new(Mutex::new(KeyPool::new(split_keys(api_key)))),
             base_url: base_url.to_string(),
             cache_enabled: true,
+            min_prefix_tokens: wcore_config::config::DEFAULT_CACHE_MIN_PREFIX_TOKENS,
             alias_key: "anthropic".to_string(),
             compat,
             debug,
@@ -56,6 +62,13 @@ impl AnthropicProvider {
 
     pub fn with_cache(mut self, enabled: bool) -> Self {
         self.cache_enabled = enabled;
+        self
+    }
+
+    /// Override the breakpoint floor (`min_prefix_tokens`). `0` disables the
+    /// floor — every cache-enabled request gets breakpoint markers.
+    pub fn with_min_prefix_tokens(mut self, min_prefix_tokens: usize) -> Self {
+        self.min_prefix_tokens = min_prefix_tokens;
         self
     }
 
@@ -262,28 +275,91 @@ impl AnthropicProvider {
             apply_cache_zones(
                 &mut body,
                 request.cache_tier.unwrap_or(CacheTier::Ephemeral5m),
+                self.min_prefix_tokens,
             );
+        } else {
+            // Codex audit (e399feb1 finding 1): `build_messages` above runs
+            // BEFORE this gate and — for anthropic-family compat — has
+            // already translated the engine's tail cache hint
+            // (`mark_cache_boundaries`) into a wire `cache_control` marker.
+            // `prompt_caching = false` must mean a body byte-identical to an
+            // uninjected request, so strip that leak here.
+            strip_message_cache_markers(&mut body);
         }
 
         body
     }
 }
 
-/// Inject `cache_control` markers at the 3 standard Anthropic prompt-cache
-/// zones: the last `system` block, the last `tools` entry, and the last
-/// `messages` entry. Idempotent — re-running on the same body produces the
-/// same output. Skips zones cleanly when empty (no system text / no tools /
-/// no messages).
+/// Anthropic's hard limit on `cache_control` blocks per request.
+pub const ANTHROPIC_CACHE_CONTROL_LIMIT: usize = 4;
+
+/// Rough bytes-per-token divisor for the `min_prefix_tokens` floor estimate.
+/// Deliberately 2 — NOT the usual ~4 bytes/token English heuristic — because
+/// the floor must never under-count: CJK text and repeated short-token
+/// runs sit near ~2 bytes/token, and bytes/4 would deny caching to contexts
+/// genuinely above the floor. Erring toward caching costs at most the
+/// one-time 25% cache-write premium; erring away forfeits the ~90% read
+/// discount on every subsequent turn.
+const BYTES_PER_TOKEN_ESTIMATE: usize = 2;
+
+/// Inject `cache_control` markers at the 4 Anthropic prompt-cache zones
+/// (moving-breakpoint layout, ported from openclaw/hermes-agent):
+///
+///   1. the last `system` block — stable prefix,
+///   2. the last `tools` entry — stable prefix,
+///   3. the previous user-boundary message (last user-role message before
+///      the tail) — this is exactly the message the PREVIOUS turn marked as
+///      its write point, so re-marking it guarantees the previous turn's
+///      cached prefix is an addressable cache-read boundary this turn,
+///      regardless of how many content blocks the new turn appended,
+///   4. the last `messages` entry — the new cache-write point.
+///
+/// Zones 3+4 form a moving pair: turn *k* marks boundaries {k−1, k}, turn
+/// *k+1* marks {k, k+1} — consecutive turns always overlap on one marked
+/// boundary, keeping the layout cache-stable across turns.
+///
+/// Hard budget: at most [`ANTHROPIC_CACHE_CONTROL_LIMIT`] markers total,
+/// counting any marker already present (the engine's
+/// `mark_cache_boundaries` hint path may have pre-marked the tail block —
+/// re-marking the same block is free). Message markers are spent
+/// newest-first so the write point always wins over the read boundary.
+///
+/// Floor: when the estimated token size of the cacheable zones
+/// (system + tools + messages) is below `min_prefix_tokens`, no markers are
+/// injected — and any marker already present (the engine's hint path) is
+/// STRIPPED, so a sub-floor request carries zero `cache_control` on the
+/// wire. Caching a tiny context costs more (25% cache-write premium) than
+/// it can save. Pass `0` to disable the floor. [`CacheTier::None`] strips
+/// the same way: per-request "caching off" must mean off.
+///
+/// Idempotent — re-running on the same body produces the same output.
+/// Skips zones cleanly when empty (no system text / no tools / no
+/// messages). Markers are pure key inserts on existing objects: serde_json
+/// maps are BTreeMap-backed (sorted keys), so injection never perturbs the
+/// serialization order of any other field.
 ///
 /// `tier` controls the ephemeral TTL marker:
 ///   - [`CacheTier::Ephemeral5m`] -> `{ "type": "ephemeral" }` (default 5m)
 ///   - [`CacheTier::Ephemeral1h`] -> `{ "type": "ephemeral", "ttl": "1h" }`
-///   - [`CacheTier::None`]        -> no-op (caching disabled for this request)
-pub fn apply_cache_zones(body: &mut Value, tier: CacheTier) {
+///   - [`CacheTier::None`]        -> strip + return (caching disabled for
+///     this request — pre-existing hint markers must not leak to the wire)
+pub fn apply_cache_zones(body: &mut Value, tier: CacheTier, min_prefix_tokens: usize) {
     let marker = match cache_control_marker(tier) {
         Some(m) => m,
-        None => return,
+        None => {
+            strip_message_cache_markers(body);
+            return;
+        }
     };
+
+    // Floor: for tiny contexts, skip injection AND remove any marker the
+    // engine's hint path already placed — otherwise a sub-floor request
+    // still pays cache-write behavior through the leaked tail marker.
+    if estimated_prefix_tokens(body) < min_prefix_tokens {
+        strip_message_cache_markers(body);
+        return;
+    }
 
     // Zone 1: system prompt — mark the last text block.
     if let Some(system_blocks) = body.get_mut("system").and_then(Value::as_array_mut)
@@ -301,13 +377,136 @@ pub fn apply_cache_zones(body: &mut Value, tier: CacheTier) {
         last["cache_control"] = marker.clone();
     }
 
-    // Zone 3: messages — mark the last message so the running context up to
-    // and including that message becomes a cache prefix for the next turn.
+    // Zones 3+4: the moving message-breakpoint pair, spent from whatever
+    // budget the fixed zones (plus any pre-existing hint marker) left over.
+    let fixed_markers = count_cache_markers(body.get("system"))
+        + count_cache_markers(body.get("tools"))
+        + count_message_cache_markers(body.get("messages"));
+    let mut budget = ANTHROPIC_CACHE_CONTROL_LIMIT.saturating_sub(fixed_markers);
+
     if let Some(messages) = body.get_mut("messages").and_then(Value::as_array_mut)
-        && let Some(last) = messages.last_mut()
+        && !messages.is_empty()
     {
-        apply_message_zone_marker(last, &marker);
+        let last_idx = messages.len() - 1;
+
+        // Zone 4 first (newest wins the budget): the tail write point.
+        apply_message_zone_marker_budgeted(&mut messages[last_idx], &marker, &mut budget);
+
+        // Zone 3: the previous user boundary — the last user-role message
+        // strictly before the tail (= the previous turn's write point).
+        if let Some(prev) = messages[..last_idx]
+            .iter()
+            .rposition(|m| m.get("role").and_then(Value::as_str) == Some("user"))
+        {
+            apply_message_zone_marker_budgeted(&mut messages[prev], &marker, &mut budget);
+        }
     }
+
+    debug_assert!(
+        count_cache_markers(body.get("system"))
+            + count_cache_markers(body.get("tools"))
+            + count_message_cache_markers(body.get("messages"))
+            <= ANTHROPIC_CACHE_CONTROL_LIMIT,
+        "cache_control markers must never exceed Anthropic's limit of {ANTHROPIC_CACHE_CONTROL_LIMIT}"
+    );
+}
+
+/// Remove every `cache_control` marker from the messages zone — from
+/// content blocks and (defensively) from message objects themselves. Used
+/// when caching is off (config, per-request tier, or sub-floor context) to
+/// undo the engine-hint marker that `build_messages` already translated.
+/// Removal is byte-safe for siblings: serde_json objects are BTreeMap-backed
+/// (sorted keys, no `preserve_order` swap-remove hazard), so deleting a key
+/// cannot reorder the remaining fields.
+fn strip_message_cache_markers(body: &mut Value) {
+    let Some(messages) = body.get_mut("messages").and_then(Value::as_array_mut) else {
+        return;
+    };
+    for message in messages {
+        if let Some(obj) = message.as_object_mut() {
+            obj.remove("cache_control");
+        }
+        if let Some(blocks) = message.get_mut("content").and_then(Value::as_array_mut) {
+            for block in blocks {
+                if let Some(obj) = block.as_object_mut() {
+                    obj.remove("cache_control");
+                }
+            }
+        }
+    }
+}
+
+/// Estimate the token size of the cacheable prompt zones (system + tools +
+/// messages) as serialized-JSON bytes over [`BYTES_PER_TOKEN_ESTIMATE`].
+fn estimated_prefix_tokens(body: &Value) -> usize {
+    let mut bytes = 0usize;
+    for zone in ["system", "tools", "messages"] {
+        if let Some(v) = body.get(zone) {
+            bytes += serde_json::to_string(v).map(|s| s.len()).unwrap_or(0);
+        }
+    }
+    bytes / BYTES_PER_TOKEN_ESTIMATE
+}
+
+/// Count `cache_control` markers on the direct entries of a system/tools
+/// zone array. `None` / non-array → 0.
+fn count_cache_markers(zone: Option<&Value>) -> usize {
+    zone.and_then(Value::as_array)
+        .map(|entries| {
+            entries
+                .iter()
+                .filter(|e| e.get("cache_control").is_some())
+                .count()
+        })
+        .unwrap_or(0)
+}
+
+/// Count `cache_control` markers anywhere in the messages zone: on content
+/// blocks and (defensively) on message objects themselves.
+fn count_message_cache_markers(zone: Option<&Value>) -> usize {
+    zone.and_then(Value::as_array)
+        .map(|messages| {
+            messages
+                .iter()
+                .map(|m| {
+                    let on_message = usize::from(m.get("cache_control").is_some());
+                    let on_blocks = m
+                        .get("content")
+                        .and_then(Value::as_array)
+                        .map(|blocks| {
+                            blocks
+                                .iter()
+                                .filter(|b| b.get("cache_control").is_some())
+                                .count()
+                        })
+                        .unwrap_or(0);
+                    on_message + on_blocks
+                })
+                .sum()
+        })
+        .unwrap_or(0)
+}
+
+/// Mark `message` if (and only if) its target block is not already marked
+/// and `budget` allows. An already-marked target is free (idempotent);
+/// a fresh marker consumes one budget unit.
+fn apply_message_zone_marker_budgeted(message: &mut Value, marker: &Value, budget: &mut usize) {
+    // Already marked (e.g. by the engine's tail hint, or a repeat call)?
+    // Nothing to spend.
+    let already_marked = message
+        .get("content")
+        .and_then(Value::as_array)
+        .and_then(|blocks| blocks.last())
+        .map(|b| b.get("cache_control").is_some())
+        .unwrap_or_else(|| message.get("cache_control").is_some());
+    if already_marked {
+        return;
+    }
+    if *budget == 0 {
+        return;
+    }
+    apply_message_zone_marker(message, marker);
+    *budget -= 1;
 }
 
 /// Attach the cache_control marker to a single message. Prefers the last
@@ -641,9 +840,9 @@ mod tests {
     }
 
     #[test]
-    fn all_three_zones_injected_when_present() {
+    fn all_four_zones_injected_when_present() {
         let mut body = body_with_all_zones();
-        apply_cache_zones(&mut body, CacheTier::Ephemeral5m);
+        apply_cache_zones(&mut body, CacheTier::Ephemeral5m, 0);
 
         // System: last block has marker, first does not.
         let system = body["system"].as_array().unwrap();
@@ -655,9 +854,14 @@ mod tests {
         assert!(tools[0].get("cache_control").is_none());
         assert_eq!(tools[1]["cache_control"], marker_5m());
 
-        // Messages: last message's last content block has marker.
+        // Messages: the moving pair — the tail (write point) AND the previous
+        // user boundary both carry markers. Total = 4 (system+tools+2).
         let messages = body["messages"].as_array().unwrap();
-        assert!(messages[0]["content"][0].get("cache_control").is_none());
+        assert_eq!(
+            messages[0]["content"][0]["cache_control"],
+            marker_5m(),
+            "previous user boundary must carry the read-boundary marker"
+        );
         assert_eq!(messages[1]["content"][0]["cache_control"], marker_5m());
     }
 
@@ -669,7 +873,7 @@ mod tests {
                 { "role": "user", "content": [ { "type": "text", "text": "hi" } ] }
             ]
         });
-        apply_cache_zones(&mut body, CacheTier::Ephemeral5m);
+        apply_cache_zones(&mut body, CacheTier::Ephemeral5m, 0);
 
         assert_eq!(body["system"][0]["cache_control"], marker_5m());
         assert_eq!(
@@ -688,7 +892,7 @@ mod tests {
                 { "role": "user", "content": [ { "type": "text", "text": "hi" } ] }
             ]
         });
-        apply_cache_zones(&mut body, CacheTier::Ephemeral5m);
+        apply_cache_zones(&mut body, CacheTier::Ephemeral5m, 0);
 
         // Empty system array -> nothing to mark, no panic.
         assert!(body["system"].as_array().unwrap().is_empty());
@@ -706,7 +910,7 @@ mod tests {
                 { "role": "user", "content": [ { "type": "text", "text": "hi" } ] }
             ]
         });
-        apply_cache_zones(&mut body, CacheTier::Ephemeral5m);
+        apply_cache_zones(&mut body, CacheTier::Ephemeral5m, 0);
 
         assert_eq!(
             body["messages"][0]["content"][0]["cache_control"],
@@ -719,21 +923,21 @@ mod tests {
     #[test]
     fn idempotent_when_applied_twice() {
         let mut body = body_with_all_zones();
-        apply_cache_zones(&mut body, CacheTier::Ephemeral5m);
+        apply_cache_zones(&mut body, CacheTier::Ephemeral5m, 0);
         let after_first = body.clone();
-        apply_cache_zones(&mut body, CacheTier::Ephemeral5m);
+        apply_cache_zones(&mut body, CacheTier::Ephemeral5m, 0);
         assert_eq!(body, after_first, "second apply must be a no-op shape");
     }
 
     #[test]
     fn ttl_propagates_5m_vs_1h() {
         let mut body_5m = body_with_all_zones();
-        apply_cache_zones(&mut body_5m, CacheTier::Ephemeral5m);
+        apply_cache_zones(&mut body_5m, CacheTier::Ephemeral5m, 0);
         assert_eq!(body_5m["system"][1]["cache_control"], marker_5m());
         assert!(body_5m["system"][1]["cache_control"].get("ttl").is_none());
 
         let mut body_1h = body_with_all_zones();
-        apply_cache_zones(&mut body_1h, CacheTier::Ephemeral1h);
+        apply_cache_zones(&mut body_1h, CacheTier::Ephemeral1h, 0);
         assert_eq!(body_1h["system"][1]["cache_control"], marker_1h());
         assert_eq!(body_1h["tools"][1]["cache_control"]["ttl"], "1h");
         assert_eq!(
@@ -746,7 +950,7 @@ mod tests {
     fn cache_tier_none_is_noop() {
         let mut body = body_with_all_zones();
         let before = body.clone();
-        apply_cache_zones(&mut body, CacheTier::None);
+        apply_cache_zones(&mut body, CacheTier::None, 0);
         assert_eq!(body, before);
     }
 
@@ -759,7 +963,7 @@ mod tests {
                 { "role": "user", "content": [ { "type": "text", "text": "U" } ] }
             ]
         });
-        apply_cache_zones(&mut body, CacheTier::Ephemeral5m);
+        apply_cache_zones(&mut body, CacheTier::Ephemeral5m, 0);
 
         let expected = json!({
             "system": [
@@ -786,7 +990,7 @@ mod tests {
             "system": [ { "type": "text", "text": "S" } ],
             "messages": []
         });
-        apply_cache_zones(&mut body, CacheTier::Ephemeral5m);
+        apply_cache_zones(&mut body, CacheTier::Ephemeral5m, 0);
 
         // System still marked.
         assert_eq!(body["system"][0]["cache_control"], marker_5m());
@@ -804,12 +1008,513 @@ mod tests {
                 { "role": "user", "content": "plain string" }
             ]
         });
-        apply_cache_zones(&mut body, CacheTier::Ephemeral5m);
+        apply_cache_zones(&mut body, CacheTier::Ephemeral5m, 0);
         assert_eq!(body["messages"][0]["cache_control"], marker_5m());
+    }
+
+    // --- Task 9: moving breakpoint pair + budget + floor + gating -----------
+
+    /// Collect the indices of messages carrying a cache_control marker
+    /// (on any content block or on the message object itself).
+    fn marked_message_indices(body: &Value) -> Vec<usize> {
+        body["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .enumerate()
+            .filter(|(_, m)| {
+                m.get("cache_control").is_some()
+                    || m["content"].as_array().is_some_and(|blocks| {
+                        blocks.iter().any(|b| b.get("cache_control").is_some())
+                    })
+            })
+            .map(|(i, _)| i)
+            .collect()
+    }
+
+    fn total_markers(body: &Value) -> usize {
+        serde_json::to_string(body)
+            .unwrap()
+            .matches("\"cache_control\"")
+            .count()
+    }
+
+    fn user(text: &str) -> Value {
+        json!({ "role": "user", "content": [ { "type": "text", "text": text } ] })
+    }
+
+    fn assistant(text: &str) -> Value {
+        json!({ "role": "assistant", "content": [ { "type": "text", "text": text } ] })
+    }
+
+    /// The moving pair over a growing 3-turn conversation: every turn stays
+    /// within Anthropic's 4-marker limit, marked positions move monotonically
+    /// forward, and the previous turn's write point (its tail) is re-marked
+    /// as this turn's read boundary — the cross-turn stability guarantee.
+    #[test]
+    fn three_turn_growing_conversation_markers_monotonic_and_bounded() {
+        let turn_messages: [Vec<Value>; 3] = [
+            vec![user("u1")],
+            vec![user("u1"), assistant("a1"), user("u2")],
+            vec![
+                user("u1"),
+                assistant("a1"),
+                user("u2"),
+                assistant("a2"),
+                user("u3"),
+            ],
+        ];
+
+        let mut prev_tail: Option<usize> = None;
+        let mut prev_max: usize = 0;
+        for (turn, messages) in turn_messages.into_iter().enumerate() {
+            let mut body = json!({
+                "system": [ { "type": "text", "text": "sys" } ],
+                "tools": [ { "name": "t", "description": "d" } ],
+                "messages": messages
+            });
+            apply_cache_zones(&mut body, CacheTier::Ephemeral5m, 0);
+
+            assert!(
+                total_markers(&body) <= 4,
+                "turn {turn}: markers must never exceed Anthropic's limit of 4"
+            );
+
+            let marked = marked_message_indices(&body);
+            let tail = body["messages"].as_array().unwrap().len() - 1;
+            assert!(
+                marked.contains(&tail),
+                "turn {turn}: the tail write point must always be marked"
+            );
+            assert!(
+                marked.iter().all(|&i| i >= prev_max.min(tail)),
+                "turn {turn}: marked positions must move monotonically forward, got {marked:?}"
+            );
+            if let Some(prev) = prev_tail {
+                assert!(
+                    marked.contains(&prev),
+                    "turn {turn}: the previous turn's write point (index {prev}) must be \
+                     re-marked as this turn's read boundary, got {marked:?}"
+                );
+            }
+            prev_max = *marked.iter().max().unwrap();
+            prev_tail = Some(tail);
+        }
+    }
+
+    /// Budget enforcement with a pre-existing hint marker: the engine's
+    /// `mark_cache_boundaries` path may have already marked the tail block
+    /// via `build_messages`. Re-marking it is free; the total must still
+    /// come out at exactly the 4-marker limit, never above.
+    #[test]
+    fn budget_holds_at_four_with_preexisting_hint_marker() {
+        let mut body = json!({
+            "system": [ { "type": "text", "text": "sys" } ],
+            "tools": [ { "name": "t", "description": "d" } ],
+            "messages": [
+                user("u1"),
+                assistant("a1"),
+                // Tail pre-marked, as the hint path emits it.
+                { "role": "user", "content": [
+                    { "type": "text", "text": "u2",
+                      "cache_control": { "type": "ephemeral" } }
+                ] }
+            ]
+        });
+        apply_cache_zones(&mut body, CacheTier::Ephemeral5m, 0);
+
+        assert_eq!(
+            total_markers(&body),
+            4,
+            "system + tools + boundary pair must land exactly at the limit"
+        );
+        assert_eq!(
+            marked_message_indices(&body),
+            vec![0, 2],
+            "previous user boundary (0) and tail (2) must be the marked pair"
+        );
+    }
+
+    /// When the fixed zones leave only one message slot, the tail write
+    /// point wins it and the read boundary is skipped — never a 5th marker.
+    #[test]
+    fn tail_wins_budget_when_only_one_message_slot_remains() {
+        // Pre-marked NON-tail message eats one budget unit (pathological
+        // upstream state), leaving one slot for two candidates.
+        let mut body = json!({
+            "system": [ { "type": "text", "text": "sys" } ],
+            "tools": [ { "name": "t", "description": "d" } ],
+            "messages": [
+                { "role": "user", "content": [
+                    { "type": "text", "text": "u1",
+                      "cache_control": { "type": "ephemeral" } }
+                ] },
+                assistant("a1"),
+                user("u2"),
+                assistant("a2"),
+                user("u3")
+            ]
+        });
+        apply_cache_zones(&mut body, CacheTier::Ephemeral5m, 0);
+
+        assert_eq!(total_markers(&body), 4, "hard cap must hold");
+        let marked = marked_message_indices(&body);
+        assert!(
+            marked.contains(&4),
+            "the tail write point must win the last budget slot, got {marked:?}"
+        );
+        assert!(
+            !marked.contains(&2),
+            "the read boundary must be skipped when the budget is spent, got {marked:?}"
+        );
+    }
+
+    /// Gap-1+gap-2 coupling: the engine sends TWO hints — the permanent
+    /// compaction anchor plus the tail — and the budget lands at exactly 4
+    /// (system + tools + anchor + tail). The moving previous-boundary marker
+    /// YIELDS its slot to the anchor: the anchor guarantees the long prefix.
+    #[test]
+    fn anchor_plus_tail_hints_budget_exactly_four_prev_boundary_yields() {
+        let mut body = json!({
+            "system": [ { "type": "text", "text": "sys" } ],
+            "tools": [ { "name": "t", "description": "d" } ],
+            "messages": [
+                // Permanent anchor (stubbed compaction message), hint-marked
+                // by mark_cache_boundaries via build_messages.
+                { "role": "assistant", "content": [
+                    { "type": "tool_use", "id": "w1", "name": "Write",
+                      "input": { "_args_cleared": "[stub]" },
+                      "cache_control": { "type": "ephemeral" } }
+                ] },
+                user("r1"),
+                assistant("a2"),
+                user("u2"),
+                assistant("a3"),
+                // Tail, hint-marked by mark_cache_boundaries.
+                { "role": "user", "content": [
+                    { "type": "text", "text": "u3",
+                      "cache_control": { "type": "ephemeral" } }
+                ] }
+            ]
+        });
+        apply_cache_zones(&mut body, CacheTier::Ephemeral5m, 0);
+
+        assert_eq!(
+            total_markers(&body),
+            4,
+            "system + tools + anchor + tail must land exactly at the limit"
+        );
+        let marked = marked_message_indices(&body);
+        assert_eq!(
+            marked,
+            vec![0, 5],
+            "anchor (0) and tail (5) hold the message slots; the moving \
+             previous-boundary marker (3) must yield, got {marked:?}"
+        );
+    }
+
+    /// Config-off stripping (Codex finding 1) also removes the anchor
+    /// marker: with caching disabled, neither the tail hint nor the anchor
+    /// hint may leak to the wire.
+    #[test]
+    fn config_off_strips_anchor_and_tail_hints() {
+        let off = AnthropicProvider::new(
+            "test-key",
+            "https://api.anthropic.com",
+            ProviderCompat::anthropic_defaults(),
+            DebugConfig::default(),
+        )
+        .with_cache(false);
+
+        let mut req = cache_req(None);
+        req.messages = vec![
+            {
+                let mut m = wcore_types::message::Message::new(
+                    wcore_types::message::Role::Assistant,
+                    vec![wcore_types::message::ContentBlock::Text {
+                        text: "anchor".into(),
+                    }],
+                );
+                m.cache_breakpoint = Some(wcore_types::message::MessageCacheHint::Breakpoint);
+                m
+            },
+            wcore_types::message::Message::new(
+                wcore_types::message::Role::User,
+                vec![wcore_types::message::ContentBlock::Text { text: "mid".into() }],
+            ),
+            {
+                let mut m = wcore_types::message::Message::new(
+                    wcore_types::message::Role::User,
+                    vec![wcore_types::message::ContentBlock::Text {
+                        text: "tail".into(),
+                    }],
+                );
+                m.cache_breakpoint = Some(wcore_types::message::MessageCacheHint::Breakpoint);
+                m
+            },
+        ];
+        let body = off.build_request_body(&req);
+        assert_eq!(
+            total_markers(&body),
+            0,
+            "config-off must strip BOTH the anchor and tail hint markers"
+        );
+    }
+
+    // --- Task 9: min_prefix_tokens floor ------------------------------------
+
+    /// Tiny context + the default 1024-token floor → no markers at all.
+    /// Cache-writing a tiny prefix costs a 25% premium for nothing.
+    #[test]
+    fn tiny_context_default_floor_skips_all_markers() {
+        let default_floor_provider = AnthropicProvider::new(
+            "test-key",
+            "https://api.anthropic.com",
+            ProviderCompat::anthropic_defaults(),
+            DebugConfig::default(),
+        );
+        let body = default_floor_provider.build_request_body(&cache_req(None));
+        assert_eq!(
+            total_markers(&body),
+            0,
+            "a tiny prompt under the 1024-token floor must get no cache_control markers"
+        );
+    }
+
+    /// A prompt that clears the floor gets the full marker layout with the
+    /// same default-floor provider.
+    #[test]
+    fn large_context_clears_default_floor_and_gets_markers() {
+        let default_floor_provider = AnthropicProvider::new(
+            "test-key",
+            "https://api.anthropic.com",
+            ProviderCompat::anthropic_defaults(),
+            DebugConfig::default(),
+        );
+        let mut req = cache_req(None);
+        // ~8k bytes ≈ ~2k estimated tokens — comfortably over the 1024 floor.
+        req.system = "x".repeat(8_192);
+        let body = default_floor_provider.build_request_body(&req);
+        assert!(
+            total_markers(&body) >= 2,
+            "a prompt over the floor must carry cache_control markers"
+        );
+        assert_eq!(body["system"][0]["cache_control"], marker_5m());
+    }
+
+    /// The floor gates on the estimate, exactly at the boundary semantics
+    /// of `estimated < floor` → skip.
+    #[test]
+    fn floor_boundary_semantics() {
+        let mut body = json!({
+            "system": [ { "type": "text", "text": "sys" } ],
+            "messages": [ user("hi") ]
+        });
+        let estimate = super::estimated_prefix_tokens(&body);
+        apply_cache_zones(&mut body, CacheTier::Ephemeral5m, estimate + 1);
+        assert_eq!(total_markers(&body), 0, "estimate < floor must skip");
+
+        apply_cache_zones(&mut body, CacheTier::Ephemeral5m, estimate);
+        assert!(total_markers(&body) > 0, "estimate >= floor must inject");
+    }
+
+    // --- Task 9: config-off byte identity + family gating -------------------
+
+    /// A request carrying the engine's tail cache hint, exactly as
+    /// `wcore-observability::cache::mark_cache_boundaries` stamps it before
+    /// every dispatch. The production path ALWAYS carries this for
+    /// anthropic-family compat — a caching test without it misses the
+    /// hint-translation leak in `build_messages` (Codex audit finding 1).
+    fn hinted_req(tier: Option<CacheTier>) -> LlmRequest {
+        let mut req = cache_req(tier);
+        req.messages
+            .last_mut()
+            .expect("cache_req always has a message")
+            .cache_breakpoint = Some(wcore_types::message::MessageCacheHint::Breakpoint);
+        req
+    }
+
+    /// `prompt_caching = false` (config off): the request body is
+    /// byte-identical to a body that never saw the cache injector — EVEN
+    /// when the engine's tail hint is present (which `build_messages`
+    /// translates into a wire marker before the config gate runs).
+    #[test]
+    fn config_off_body_is_byte_identical_to_uninjected() {
+        let off = AnthropicProvider::new(
+            "test-key",
+            "https://api.anthropic.com",
+            ProviderCompat::anthropic_defaults(),
+            DebugConfig::default(),
+        )
+        .with_cache(false);
+
+        let req = hinted_req(Some(CacheTier::Ephemeral1h));
+        let body = off.build_request_body(&req);
+        let bytes = serde_json::to_string(&body).unwrap();
+        assert!(
+            !bytes.contains("cache_control"),
+            "config-off body must carry no cache_control anywhere"
+        );
+
+        let expected = json!({
+            "model": "claude-sonnet-4-6",
+            "max_tokens": 16,
+            "system": [ { "type": "text", "text": "you are a test" } ],
+            "messages": [
+                { "role": "user", "content": [ { "type": "text", "text": "hi" } ] }
+            ],
+            "stream": true
+        });
+        assert_eq!(
+            bytes,
+            serde_json::to_string(&expected).unwrap(),
+            "config-off body must serialize byte-identically to the uninjected shape"
+        );
+    }
+
+    /// Sub-floor request WITH the engine hint: the leaked tail marker from
+    /// `build_messages` must be stripped, not merely left uninjected —
+    /// a tiny request must carry zero `cache_control` on the wire.
+    #[test]
+    fn sub_floor_request_with_engine_hint_emits_zero_markers() {
+        let default_floor_provider = AnthropicProvider::new(
+            "test-key",
+            "https://api.anthropic.com",
+            ProviderCompat::anthropic_defaults(),
+            DebugConfig::default(),
+        );
+        let body = default_floor_provider.build_request_body(&hinted_req(None));
+        assert_eq!(
+            total_markers(&body),
+            0,
+            "a sub-floor request must strip the engine's hint marker, not leak it"
+        );
+    }
+
+    /// `cache_tier = Some(None)` (per-request caching off) strips the
+    /// engine-hint marker the same way the config gate does.
+    #[test]
+    fn cache_tier_none_strips_engine_hint_marker() {
+        let body = provider().build_request_body(&hinted_req(Some(CacheTier::None)));
+        assert_eq!(
+            total_markers(&body),
+            0,
+            "per-request caching-off must strip the hint marker from the wire body"
+        );
+    }
+
+    /// Marker stripping is byte-safe for siblings: stripping a hinted body
+    /// reproduces the never-hinted body exactly (BTreeMap removal cannot
+    /// reorder remaining keys).
+    #[test]
+    fn strip_reproduces_unhinted_body_bytes() {
+        let off = AnthropicProvider::new(
+            "test-key",
+            "https://api.anthropic.com",
+            ProviderCompat::anthropic_defaults(),
+            DebugConfig::default(),
+        )
+        .with_cache(false);
+        let hinted = off.build_request_body(&hinted_req(None));
+        let unhinted = off.build_request_body(&cache_req(None));
+        assert_eq!(
+            serde_json::to_string(&hinted).unwrap(),
+            serde_json::to_string(&unhinted).unwrap(),
+            "hinted and never-hinted config-off bodies must be byte-identical"
+        );
+    }
+
+    /// Family gating: the message-hint translation in `build_messages` obeys
+    /// `compat.cache_message_breakpoints()` — Anthropic-family compat emits
+    /// the marker, OpenAI-family compat leaves the message untouched.
+    #[test]
+    fn family_gating_hint_translation_anthropic_yes_openai_no() {
+        let mut msg = wcore_types::message::Message::new(
+            wcore_types::message::Role::User,
+            vec![wcore_types::message::ContentBlock::Text { text: "hi".into() }],
+        );
+        msg.cache_breakpoint = Some(wcore_types::message::MessageCacheHint::Breakpoint);
+        let messages = vec![msg];
+
+        let anthropic_wire =
+            anthropic_shared::build_messages(&messages, &ProviderCompat::anthropic_defaults());
+        assert!(
+            anthropic_wire[0]["content"][0]
+                .get("cache_control")
+                .is_some(),
+            "anthropic-family compat must translate the hint into cache_control"
+        );
+
+        let openai_wire =
+            anthropic_shared::build_messages(&messages, &ProviderCompat::openai_defaults());
+        assert!(
+            !serde_json::to_string(&openai_wire)
+                .unwrap()
+                .contains("cache_control"),
+            "openai-family compat must never emit cache_control"
+        );
+    }
+
+    /// Family gating at the provider level: an Anthropic-wire third party
+    /// with unverified caching support (the MiniMax reuse) is constructed
+    /// `with_cache(false)` — its bodies carry no markers.
+    #[test]
+    fn family_gating_minimax_reuse_emits_no_markers() {
+        let minimax = AnthropicProvider::new(
+            "k",
+            "https://api.minimax.io/anthropic",
+            ProviderCompat::minimax_defaults(),
+            DebugConfig::default(),
+        )
+        .with_cache(false)
+        .with_alias_key("minimax");
+        let body = minimax.build_request_body(&cache_req(Some(CacheTier::Ephemeral5m)));
+        assert_eq!(
+            total_markers(&body),
+            0,
+            "a cache-disabled Anthropic-wire reuse must emit no cache_control"
+        );
+    }
+
+    /// Byte-stability: injecting markers must not perturb the serialization
+    /// of anything else — stripping the injected `cache_control` keys from
+    /// the marked body must reproduce the unmarked body byte-for-byte.
+    #[test]
+    fn injection_does_not_perturb_sibling_serialization() {
+        let mut marked = body_with_all_zones();
+        apply_cache_zones(&mut marked, CacheTier::Ephemeral5m, 0);
+
+        fn strip(v: &mut Value) {
+            match v {
+                Value::Object(map) => {
+                    map.remove("cache_control");
+                    for child in map.values_mut() {
+                        strip(child);
+                    }
+                }
+                Value::Array(items) => {
+                    for child in items {
+                        strip(child);
+                    }
+                }
+                _ => {}
+            }
+        }
+        strip(&mut marked);
+
+        assert_eq!(
+            serde_json::to_string(&marked).unwrap(),
+            serde_json::to_string(&body_with_all_zones()).unwrap(),
+            "removing only the injected markers must reproduce the original bytes"
+        );
     }
 
     // --- W8 v0.6.3: build_request_body consumes request.cache_tier ---------
 
+    /// Test provider with the breakpoint floor disabled — the tiny request
+    /// bodies these tests build would otherwise (correctly) fall under the
+    /// default 1024-token floor and get no markers at all. The floor itself
+    /// is covered by the dedicated floor tests below.
     fn provider() -> AnthropicProvider {
         AnthropicProvider::new(
             "test-key",
@@ -817,6 +1522,7 @@ mod tests {
             ProviderCompat::anthropic_defaults(),
             DebugConfig::default(),
         )
+        .with_min_prefix_tokens(0)
     }
 
     fn cache_req(tier: Option<CacheTier>) -> LlmRequest {

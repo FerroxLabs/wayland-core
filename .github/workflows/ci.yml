@@ -109,8 +109,14 @@ jobs:
       # of regression where `inventory::submit!` items get dead-code-stripped
       # under `profile.release` (lto="thin" + codegen-units=1) but survive
       # in the debug binary that test-ci exercises. Gating, no continue-on-error.
+      # WCORE_SMOKE_REQUIRE_PREBUILT=1 makes a missing artifact a hard failure
+      # here (dev checkouts without the env var skip instead — #190), so a
+      # dropped/broken "Pre-build wcore-cli release binary" step cannot
+      # silently degrade this gate into a skip.
       - name: Release binary smoke (catches plugin dead-code-strip)
         run: vx cargo nextest run -p wcore-cli --test release_binary_smoke
+        env:
+          WCORE_SMOKE_REQUIRE_PREBUILT: "1"
 
       # Z0 STABILITY MAJOR #4 — eval-gate runs on every PR/main commit so
       # the W10A LOCKED acceptance gate (precision/recall >= 0.80) is enforced
@@ -245,8 +251,10 @@ jobs:
           max_attempts: 2
           command: $DOCKER_RUN "$CI_IMAGE" cargo nextest run --workspace --profile ci
 
+      # WCORE_SMOKE_REQUIRE_PREBUILT=1 (passed into the container): a missing
+      # release artifact is a hard failure here, never a silent skip (#190).
       - name: Release binary smoke (catches plugin dead-code-strip)
-        run: $DOCKER_RUN "$CI_IMAGE" cargo nextest run -p wcore-cli --test release_binary_smoke
+        run: $DOCKER_RUN -e WCORE_SMOKE_REQUIRE_PREBUILT=1 "$CI_IMAGE" cargo nextest run -p wcore-cli --test release_binary_smoke
 
       - name: Security audit
         run: $DOCKER_RUN "$CI_IMAGE" cargo audit

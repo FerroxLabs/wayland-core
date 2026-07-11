@@ -194,6 +194,14 @@ const MIN_THINKING_BUDGET: u32 = 1_024;
 /// auto-continue loop as the net for longer outputs.
 const UNKNOWN_REASONING_CAP: u32 = 32_768;
 
+/// Layer D1 follow-up (hydrated-tool admission) — hard bound on remembered
+/// ToolSearch hydrations (`AgentEngine::hydrated_tool_names`). Keeps the set
+/// (and the per-turn admission/exemption scans over it) O(1)-bounded on a
+/// long session with many broad ToolSearch queries; overflow evicts the
+/// OLDEST hydration. Sized to comfortably exceed a provider's realistic MCP
+/// slot budget (OpenAI hard cap = 128 total tools minus ~40 built-ins).
+const HYDRATED_TOOLS_CAP: usize = 64;
+
 /// #426 — shrink a requested reasoning budget so the visible answer can never be
 /// starved: the budget may use at most `max_tokens - MIN_VISIBLE_OUTPUT`. Returns
 /// the budget to actually send (0 when no room remains; the caller drops thinking
@@ -601,6 +609,157 @@ fn is_http_4xx_error(reason: &str) -> bool {
         }
     }
     false
+}
+
+/// LENGTH-WEDGE GATE — deterministic fingerprint of an outbound request as
+/// the provider sees it: the dispatched model, the system prompt, every
+/// message's role + content blocks, and the serialized tool surface (the
+/// as-sent, post-curation/post-cap `request.tools`, `deferred` flag
+/// included). All of these are provider-visible bytes — omitting any of them
+/// would falsely refuse a retry that changed only that surface (e.g. the same
+/// messages under a different system prompt or tool set) as an "unchanged"
+/// wedge.
+///
+/// Timestamps and cache hints are deliberately EXCLUDED. Timestamps are
+/// never provider-visible. Cache hints CAN reach the wire — anthropic-family
+/// `build_messages()` translates the tail hint into a `cache_control`
+/// marker — but the marker is position-derived (always the tail message)
+/// and pure cache metadata: two requests with identical model / system /
+/// messages / tools produce identical markers, and providers exclude
+/// `cache_control` from content identity. Hashing hints would add no
+/// discriminating power while letting a hint-only difference (e.g. a
+/// re-marked retry) make an unchanged wedge look changed. So two requests
+/// that are semantically identical on the wire fingerprint identically even
+/// when their local `Message.timestamp`s differ (e.g. a host that rebuilds
+/// the same wedged conversation on a retry or a resume).
+///
+/// Sha256, not a 64-bit `DefaultHasher`: this identity gates whether a
+/// request is ever allowed to be sent again, so it gets a collision-proof
+/// digest. Every field is length-framed so adjacent fields can never alias
+/// (model "a" + system "bc" vs model "ab" + system "c").
+fn request_wire_fingerprint(
+    model: &str,
+    system: &str,
+    messages: &[Message],
+    tools: &[wcore_types::tool::ToolDef],
+) -> [u8; 32] {
+    use sha2::{Digest, Sha256};
+    fn framed(hasher: &mut Sha256, bytes: &[u8]) {
+        hasher.update((bytes.len() as u64).to_le_bytes());
+        hasher.update(bytes);
+    }
+    let mut hasher = Sha256::new();
+    framed(&mut hasher, model.as_bytes());
+    framed(&mut hasher, system.as_bytes());
+    framed(&mut hasher, &(messages.len() as u64).to_le_bytes());
+    for msg in messages {
+        // `Role` is a small serde enum; its JSON tag is a stable per-variant
+        // string. Serialization of these shapes cannot fail in practice; the
+        // fallback keeps the fingerprint total rather than skipping content.
+        framed(
+            &mut hasher,
+            serde_json::to_string(&msg.role)
+                .unwrap_or_default()
+                .as_bytes(),
+        );
+        framed(&mut hasher, &(msg.content.len() as u64).to_le_bytes());
+        for block in &msg.content {
+            framed(
+                &mut hasher,
+                serde_json::to_string(block).unwrap_or_default().as_bytes(),
+            );
+        }
+    }
+    framed(&mut hasher, &(tools.len() as u64).to_le_bytes());
+    for tool in tools {
+        // `ToolDef` has no Serialize impl — frame each provider-visible field
+        // (`input_schema` is a `serde_json::Value`). `deferred` changes the
+        // schema actually sent (stub vs full), so it is part of the identity;
+        // `server` provenance disambiguates same-named tools.
+        framed(&mut hasher, tool.name.as_bytes());
+        framed(&mut hasher, tool.description.as_bytes());
+        framed(
+            &mut hasher,
+            serde_json::to_string(&tool.input_schema)
+                .unwrap_or_default()
+                .as_bytes(),
+        );
+        framed(&mut hasher, &[tool.deferred as u8]);
+        framed(&mut hasher, tool.server.as_deref().unwrap_or("").as_bytes());
+    }
+    hasher.finalize().into()
+}
+
+/// Spec v1 Task 5 (clean retry) — the compact stub that replaces a failed
+/// tool-result body in the outbound retry context. `short_error` is the first
+/// line of the original body, capped, so the model still sees WHAT failed
+/// without the engine re-sending the full contaminated transcript.
+fn retry_stub(tool_name: &str, error_body: &str) -> String {
+    const MAX_ERR_CHARS: usize = 200;
+    let mut short: String = error_body
+        .lines()
+        .next()
+        .unwrap_or("")
+        .chars()
+        .take(MAX_ERR_CHARS)
+        .collect();
+    if short.len() < error_body.lines().next().unwrap_or("").len() {
+        short.push('…');
+    }
+    format!("[tool {tool_name} failed: {short}; retrying]")
+}
+
+/// Spec v1 Task 5 (clean retry) — before a stream retry re-sends the outbound
+/// context, replace the FAILED tool-result bodies of the most recent tool
+/// round with a compact [`retry_stub`]. Only the retry's outbound copy is
+/// rewritten (the caller passes `request.messages`, never the persisted
+/// history), and only the LAST tool-result round — older rounds are part of
+/// the already-cached prefix and rewriting them would bust the prompt cache.
+///
+/// Returns the names of the failing tools in that round (whether or not their
+/// bodies were rewritten on this call — a second retry sees the already-
+/// stubbed bodies but must still report the failing tools so the progress
+/// gate can count consecutive no-progress retries). Empty when the most
+/// recent tool round has no failed results (or there is no tool round).
+fn stub_failed_tool_results_for_retry(messages: &mut [Message]) -> Vec<String> {
+    // Map tool_use_id → tool name across the transcript (ids are unique).
+    let names: std::collections::HashMap<String, String> = messages
+        .iter()
+        .flat_map(|m| &m.content)
+        .filter_map(|b| match b {
+            ContentBlock::ToolUse { id, name, .. } => Some((id.clone(), name.clone())),
+            _ => None,
+        })
+        .collect();
+    // The most recent tool round = the last message carrying any ToolResult.
+    let Some(idx) = messages.iter().rposition(|m| {
+        m.content
+            .iter()
+            .any(|b| matches!(b, ContentBlock::ToolResult { .. }))
+    }) else {
+        return Vec::new();
+    };
+    let mut failing: Vec<String> = Vec::new();
+    for block in &mut messages[idx].content {
+        if let ContentBlock::ToolResult {
+            tool_use_id,
+            content,
+            is_error: true,
+        } = block
+        {
+            let name = names
+                .get(tool_use_id.as_str())
+                .cloned()
+                .unwrap_or_else(|| "unknown".to_string());
+            // Idempotent: a body this helper already stubbed on a prior
+            // retry is left alone (but still reported as failing above).
+            if !(content.starts_with("[tool ") && content.ends_with("; retrying]")) {
+                *content = retry_stub(&name, content);
+            }
+            failing.push(name);
+        }
+    }
+    failing
 }
 
 /// FluxRouter web_search grounding (contract §5.4): render the "Sources" block
@@ -1398,6 +1557,14 @@ pub struct AgentEngine {
     /// guards on `is_flux_tier_alias`).
     web_search: bool,
     total_usage: TokenUsage,
+    /// CORE-2: run-scoped usage delta. Reset at the start of each `run()`
+    /// (user turn) and accumulated from the same per-provider-request
+    /// `turn_usage` values as `total_usage`, so it sums every provider
+    /// round-trip of THIS run only (a run can span multiple round-trips in
+    /// the tool loop). Surfaced via `AgentResult::usage_delta` and the
+    /// `stream_end` protocol event's `usage_delta` sibling field; never
+    /// persisted (a resumed session starts with a fresh zero delta).
+    run_usage: TokenUsage,
     thinking: Option<wcore_types::llm::ThinkingConfig>,
     /// Resolved provider compat settings (for capability validation)
     compat: wcore_config::compat::ProviderCompat,
@@ -1471,6 +1638,16 @@ pub struct AgentEngine {
     /// (a cache READ, not a per-turn prefix rewrite). Reset when the MCP
     /// inventory or the MCP budget changes.
     mcp_cap_cache: Option<(u64, Vec<String>)>,
+    /// Layer D1 follow-up (hydrated-tool admission): tool names the model has
+    /// hydrated via a successful `ToolSearch` this session, in FIRST-HYDRATION
+    /// order. Providers validate tool calls against the CURRENT `tools[]`
+    /// array, so a tool that `apply_mcp_curation` / `apply_provider_tool_cap`
+    /// trimmed would be learnable through ToolSearch yet uncallable. Both
+    /// passes force-include these names on subsequent turns (evicting the
+    /// last non-hydrated cap slot when the budget is full). Grows
+    /// monotonically — admission changes `tools[]` once (a legitimate
+    /// one-turn cache miss) and the set is stable afterwards.
+    hydrated_tool_names: Vec<String>,
     /// Token-opt (diff-resend): handle to the shared file-state cache (the same
     /// `Arc` the Read/Edit/Write tools hold). Used only to bump the cache's
     /// compaction generation after a compaction pass, so stale read bases stop
@@ -1788,6 +1965,17 @@ pub struct AgentEngine {
     /// fire, then consumed via `std::mem::take` inside `run_compaction` so the
     /// existing autocompact path runs even though the static threshold is unmet.
     smart_compact_force: bool,
+    /// LENGTH-WEDGE GATE — fingerprint ([`request_wire_fingerprint`]) of the
+    /// last outbound request that came back `finish_reason=length` while
+    /// at/over the resolved input ceiling. Once set, a wire-identical request
+    /// (model + system + messages + tools) is refused before dispatch:
+    /// re-sending it can only reproduce the same instant `length` truncation
+    /// (observed in the field as 3 identical sub-500ms retries at identical
+    /// token counts, wedging the conversation permanently). `None` until a
+    /// wedge is observed; an exact-match guard, so any request that actually
+    /// changed (compaction, new user turn, different system prompt or tool
+    /// surface) passes.
+    length_wedge_fingerprint: Option<[u8; 32]>,
 }
 
 impl Drop for AgentEngine {
@@ -1942,6 +2130,7 @@ impl AgentEngine {
             temperature: config.temperature,
             max_turns: config.max_turns,
             total_usage: TokenUsage::default(),
+            run_usage: TokenUsage::default(),
             thinking: config.thinking,
             compat: config.compat.clone(),
             confirmer: Arc::new(Mutex::new(confirmer)),
@@ -1981,6 +2170,7 @@ impl AgentEngine {
             mcp_curation: config.mcp.curation.clone(),
             mcp_curation_cache: None,
             mcp_cap_cache: None,
+            hydrated_tool_names: Vec::new(),
             file_cache: None,
             session_state: None,
             audit_log: None,
@@ -2059,6 +2249,7 @@ impl AgentEngine {
             smart_compact_last_turn: None,
             smart_compact_exhausted: false,
             smart_compact_force: false,
+            length_wedge_fingerprint: None,
         }
     }
 
@@ -2122,6 +2313,9 @@ impl AgentEngine {
             temperature: config.temperature,
             max_turns: config.max_turns,
             total_usage: session.total_usage.clone(),
+            // CORE-2: cumulative usage carries over from the persisted
+            // session; the per-run delta always starts fresh.
+            run_usage: TokenUsage::default(),
             thinking: config.thinking,
             compat: config.compat.clone(),
             confirmer: Arc::new(Mutex::new(confirmer)),
@@ -2159,6 +2353,7 @@ impl AgentEngine {
             mcp_curation: config.mcp.curation.clone(),
             mcp_curation_cache: None,
             mcp_cap_cache: None,
+            hydrated_tool_names: Vec::new(),
             file_cache: None,
             session_state: None,
             audit_log: None,
@@ -2236,6 +2431,7 @@ impl AgentEngine {
             smart_compact_last_turn: None,
             smart_compact_exhausted: false,
             smart_compact_force: false,
+            length_wedge_fingerprint: None,
         }
     }
 
@@ -2362,6 +2558,19 @@ impl AgentEngine {
     /// Get the current session ID (if sessions are enabled and initialized)
     pub fn current_session_id(&self) -> Option<String> {
         self.current_session.as_ref().map(|s| s.id.clone())
+    }
+
+    /// CORE-2 — snapshot of the engine's usage counters:
+    /// `(total_usage, run_usage)` = (session-cumulative, current/last run's
+    /// delta). `total_usage` and `run_usage` update together after every
+    /// provider round-trip, but a run that errors out (cancellation,
+    /// compaction failure, provider exhaustion) returns `Err` with no
+    /// `AgentResult` — this accessor lets the host's error-path terminal
+    /// `stream_end` still report the tokens that run consumed instead of
+    /// silently dropping them (the cumulative total has already grown and
+    /// is persisted by the next save).
+    pub fn usage_snapshot(&self) -> (TokenUsage, TokenUsage) {
+        (self.total_usage.clone(), self.run_usage.clone())
     }
 
     /// AUDIT A2 / B1 — clone the engine's session-root cancellation
@@ -2854,6 +3063,10 @@ impl AgentEngine {
     /// Returns the [`MicrocompactResult`]; `cleared_count == 0` means there was
     /// nothing eligible to compact yet.
     pub fn compact_now(&mut self) -> micro::MicrocompactResult {
+        // Tool-call-args hygiene first (parity gap 2), mirroring
+        // `run_compaction` step 0. No file-cache bump for this pass: it never
+        // touches tool-RESULT bodies (where diff-resend bases live).
+        let args_result = micro::compact_tool_call_args(&mut self.messages, &self.compact_config);
         let result = micro::microcompact(&mut self.messages, &self.compact_config);
         if result.cleared_count > 0 {
             // Token-opt (diff-resend): clearing a tool-result body can remove
@@ -2862,7 +3075,11 @@ impl AgentEngine {
             // mirrors `run_compaction`'s microcompact branch.
             self.bump_file_cache_generation();
         }
-        result
+        micro::MicrocompactResult {
+            cleared_count: result.cleared_count + args_result.cleared_count,
+            estimated_tokens_freed: result.estimated_tokens_freed
+                + args_result.estimated_tokens_freed,
+        }
     }
 
     /// M3.2 — number of background decay-scheduler tasks owned by the
@@ -3958,6 +4175,7 @@ impl AgentEngine {
             stop_reason: StopReason::MaxTurns,
             finish_reason,
             usage: self.total_usage.clone(),
+            usage_delta: self.run_usage.clone(),
             turns: turn,
             active_window_percent: self.active_window_percent_now(&self.model, 0),
             agent_run_id: self.current_agent_run_id.clone(),
@@ -4245,6 +4463,10 @@ impl AgentEngine {
             }
         }
         self.current_msg_id = msg_id.to_string();
+        // CORE-2: reset the run-scoped usage delta at the start of each
+        // user turn; the tool loop below re-accumulates it per provider
+        // round-trip alongside the session-cumulative `total_usage`.
+        self.run_usage = TokenUsage::default();
         // #403: clear tool circuit breakers at the start of each user turn.
         // A transient burst of `web`/`WebFetch` failures in one turn opened the
         // breaker and, with no per-turn reset, left every web tool short-circuited
@@ -4499,6 +4721,17 @@ impl AgentEngine {
             // relevance trim above.
             let tools = self.apply_provider_tool_cap(tools);
 
+            // Layer D1 (token-opt): defer cold tools to name-only stubs —
+            // only the configured hot allowlist (plus ToolSearch-hydrated
+            // tools) ships full schemas; the model hydrates a stub on demand
+            // via ToolSearch (the system prompt states that rule once,
+            // `tool_usage_guidance`). The hot/stub split is a pure function
+            // of static config + the monotonic hydrated set, so the
+            // serialized tools[] array stays byte-identical across turns
+            // (cache guard: `tools_array_byte_stable_across_roundtrips`);
+            // a hydration changes it once.
+            let tools = self.apply_tool_deferral(tools);
+
             // Build system prompt: append plan mode instructions when active
             let system = if self.plan_state.is_active {
                 format!(
@@ -4587,6 +4820,12 @@ impl AgentEngine {
             // THIS (not `self.model`) so attribution follows any swap.
             let mut effective_model = self.model.clone();
 
+            // Layer E1 — the model Flux ACTUALLY routed this turn to
+            // (ProviderMeta signal-back). `None` on non-Flux paths / before
+            // the signal arrives; the cache_health_warn emission below falls
+            // back to `effective_model`.
+            let mut last_routed_model: Option<String> = None;
+
             let mut request = LlmRequest {
                 model: self.model.clone(),
                 system,
@@ -4664,10 +4903,21 @@ impl AgentEngine {
                 Self::apply_pre_prompt_contribution(&mut request.messages, &outcome);
             }
 
-            // W1 S3: place per-message cache breakpoint at the tail when the
-            // provider honours it. Idempotent across turns: previous turns'
-            // markers are cleared and the new tail is marked.
-            mark_cache_boundaries(&mut request, &self.compat);
+            // W1 S3: place per-message cache breakpoints when the provider
+            // honours them. Idempotent across turns: previous turns' markers
+            // are cleared and the new tail is marked. Gap-1+gap-2 coupling:
+            // a PERMANENT anchor breakpoint is additionally pinned to an
+            // immutable already-stubbed message (pure function of the
+            // compaction markers; `request.messages` is an index-aligned
+            // clone of `self.messages`, so the index maps 1:1). The anchor
+            // keeps the long prefix cache-valid while continuous
+            // args-compaction transitions the message at the
+            // keep_recent_turns boundary inside it.
+            mark_cache_boundaries(
+                &mut request,
+                &self.compat,
+                micro::cache_anchor_index(&self.messages),
+            );
 
             // W1 v0.6.3: stamp a smart-routing hint onto the request so
             // `ProviderChain` can surface the router's decision in dispatch
@@ -5025,6 +5275,16 @@ impl AgentEngine {
             // infinite-loop. After the single retry, a recurring overflow is
             // surfaced as a clean terminal error below.
             let mut overflow_retried = false;
+            // LENGTH-WEDGE GATE: a turn that ends `finish_reason=length` while
+            // at/over the resolved input ceiling gets ONE forced compaction +
+            // retry; this guard bounds it so the turn can never loop. After
+            // the single retry a recurring wedge is a clean terminal error.
+            let mut length_wedge_retried = false;
+            // Spec v1 Task 5 progress gate: consecutive failed stream attempts
+            // whose outbound context carried a failed tool round and which
+            // produced no output at all. Two in a row = no realistic chance
+            // the next full-context re-send fares better — stop instead.
+            let mut no_progress_failures: u32 = 0;
             'stream: loop {
                 // Reset per-attempt accumulators so a retry never
                 // double-commits text/tool-calls from a failed attempt.
@@ -5059,6 +5319,41 @@ impl AgentEngine {
                 let mut grounding_citations: Vec<String> = Vec::new();
                 let mut grounding_search_results: Vec<wcore_types::llm::FluxSearchResult> =
                     Vec::new();
+
+                // LENGTH-WEDGE GATE (dispatch guard) — never re-send a context
+                // that is byte-identical (on the wire) to one that already
+                // came back `finish_reason=length` at/over the input ceiling.
+                // An identical over-budget request can only reproduce the
+                // instant truncation, so re-sending it burns a full-window
+                // input bill for nothing and wedges the conversation. This
+                // covers both the in-loop retry (a compaction that freed
+                // nothing leaves the fingerprint unchanged) and a host-driven
+                // retry of the identical wedged conversation on a later run.
+                // Hashing only happens once a wedge has been observed — the
+                // common path pays nothing.
+                if let Some(wedge) = self.length_wedge_fingerprint
+                    && request_wire_fingerprint(
+                        &request.model,
+                        &request.system,
+                        &request.messages,
+                        &request.tools,
+                    ) == wedge
+                {
+                    self.output.emit_error(
+                        &format!(
+                            "Run stopped: the conversation has exceeded the context \
+                             window of model '{}' (a previous attempt ended with \
+                             finish_reason=length at the window ceiling) and the \
+                             request is unchanged — re-sending it cannot succeed. \
+                             Compact the conversation or start a new session.",
+                            request.model,
+                        ),
+                        false,
+                    );
+                    return self
+                        .finish_run_terminated(user_input, turn, FinishReason::Length)
+                        .await;
+                }
 
                 // P1 Bug#3 — `stream()` runs `builder_send_with_retry`
                 // internally and can surface a *retryable*
@@ -5201,6 +5496,11 @@ impl AgentEngine {
                             // actually served this turn, not the pre-route guess.
                             self.flux_context_pressure = context_pressure;
                             self.flux_served_window = model_window;
+                            // Layer E1 — remember the served model for the
+                            // cache_health_warn attribution below.
+                            if routed_model.is_some() {
+                                last_routed_model = routed_model.clone();
+                            }
                             if let Some(window) = model_window {
                                 // Reconcile the #255 gauge through the kernel:
                                 // recompute the active-window fraction against the
@@ -5228,6 +5528,136 @@ impl AgentEngine {
                 // OR a channel that closed with no `Done` (truncated /
                 // dropped stream) is a FAILED attempt.
                 if done_seen && stream_error.is_none() {
+                    // LENGTH-WEDGE GATE — `finish_reason=length` while the
+                    // context sits at/over the resolved input ceiling is the
+                    // permanent-wedge signature: the prompt has consumed the
+                    // window, the output was clamped to (near) nothing, and
+                    // re-sending the same context can only reproduce it
+                    // (observed in the field as 3 identical sub-500ms retries
+                    // at identical token counts). Force a compaction and retry
+                    // ONCE with the shrunk context; if compaction cannot free
+                    // meaningful space — or would re-send identical bytes —
+                    // end the turn with a clear terminal error instead.
+                    //
+                    // A plain `length` BELOW the ceiling (ordinary max_tokens
+                    // output cap) is untouched, as is an unknown window
+                    // (ceiling `None` = fail open, matching the #255 guard).
+                    if attempt_finish_reason == FinishReason::Length {
+                        // Ceiling resolved exactly like the #255 pre-flight
+                        // guard, including the Flux served-window signal-back
+                        // (which may have just updated via ProviderMeta on
+                        // THIS stream).
+                        let mut ctx = wcore_config::context_window::ContextWindow::resolve(
+                            input_token_estimate as u64,
+                            self.compat.provider_type(),
+                            &request.model,
+                            self.compact_config.context_window as u64,
+                        );
+                        if wcore_providers::is_flux_tier_alias(&request.model)
+                            && let Some(window) = self.flux_served_window
+                        {
+                            ctx.window = Some(window);
+                        }
+                        let ceiling = ctx.input_ceiling(
+                            self.compact_config.output_reserve as u64,
+                            self.compact_config.emergency_buffer as u64,
+                        );
+                        // At/over on either count: the provider-billed input is
+                        // authoritative when present — providers can count
+                        // higher than our estimate, which is exactly how a
+                        // wedge slips past the pre-flight guard.
+                        let sent_tokens =
+                            attempt_usage.input_tokens.max(input_token_estimate as u64);
+                        if let Some(ceiling) = ceiling
+                            && sent_tokens >= ceiling
+                        {
+                            let sent_fingerprint = request_wire_fingerprint(
+                                &request.model,
+                                &request.system,
+                                &request.messages,
+                                &request.tools,
+                            );
+                            // Arm the never-resend dispatch guard for this
+                            // exact context FIRST, so no path out of here can
+                            // be followed by an identical re-send — in this
+                            // run or a later one.
+                            self.length_wedge_fingerprint = Some(sent_fingerprint);
+                            if !length_wedge_retried {
+                                length_wedge_retried = true;
+                                self.output.emit_info(&format!(
+                                    "Turn ended with finish_reason=length at the context \
+                                     ceiling ({sent_tokens} tokens >= {ceiling}) — forcing \
+                                     compaction before retry"
+                                ));
+                                // Whether compaction achieved anything is
+                                // judged on the PERSISTED history, not the
+                                // dispatched copy: the request carries
+                                // transient per-turn injections (date block,
+                                // skill hint, PrePrompt contributions) that a
+                                // rebuild from `self.messages` drops — which
+                                // would make a no-op compaction look like a
+                                // changed context and defeat the gate.
+                                let history_before = request_wire_fingerprint(
+                                    &request.model,
+                                    &request.system,
+                                    &self.messages,
+                                    &request.tools,
+                                );
+                                // Force the autocompact machinery
+                                // (compact/auto.rs) even though the static
+                                // watermark trigger is unmet — same one-shot
+                                // flag the #280 smart pre-gate uses.
+                                self.smart_compact_force = true;
+                                if let Err(e) = self.run_compaction().await {
+                                    self.fire_on_session_end(turn).await;
+                                    self.save_session();
+                                    return Err(e);
+                                }
+                                let history_after = request_wire_fingerprint(
+                                    &request.model,
+                                    &request.system,
+                                    &self.messages,
+                                    &request.tools,
+                                );
+                                // Rebuild the outbound context from the
+                                // compacted history (mirrors the #282
+                                // ContextOverflow compact-and-retry).
+                                request.messages = self.messages.clone();
+                                let recount = estimate::estimate_request_tokens(
+                                    &self.messages,
+                                    &request.system,
+                                    &request.tools,
+                                ) as u64;
+                                request.client_context_tokens = Some(recount);
+                                input_token_estimate = recount as usize;
+                                if history_after != history_before && recount < ceiling {
+                                    // Compaction freed real space AND changed
+                                    // the context — retry the turn. (The
+                                    // dispatch guard passes because the
+                                    // rebuilt outbound differs from the
+                                    // recorded wedged bytes.)
+                                    continue 'stream;
+                                }
+                                // Compaction was a no-op or the request is
+                                // still over the ceiling — fall through to
+                                // the terminal error. NEVER re-send.
+                            }
+                            self.output.emit_error(
+                                &format!(
+                                    "Run stopped: the conversation has exceeded the context \
+                                     window of model '{}' (finish_reason=length at \
+                                     {sent_tokens} tokens, input ceiling {ceiling}) and \
+                                     compaction could not free meaningful space. Compact \
+                                     the conversation or start a new session.",
+                                    request.model,
+                                ),
+                                false,
+                            );
+                            return self
+                                .finish_run_terminated(user_input, turn, FinishReason::Length)
+                                .await;
+                        }
+                    }
                     // FluxRouter web_search grounding (contract §5.4): render
                     // the "Sources" block after a SUCCESSFUL grounded answer.
                     // Done only on the committed attempt (inside the success
@@ -5245,6 +5675,11 @@ impl AgentEngine {
                         self.output.emit_text_delta(&block, &self.current_msg_id);
                         assistant_text.push_str(&block);
                     }
+                    // LENGTH-WEDGE GATE — a committed attempt that got past
+                    // the wedge check above completed below the ceiling, so
+                    // the conversation is not wedged: drop any armed
+                    // fingerprint (e.g. the post-compaction retry succeeded).
+                    self.length_wedge_fingerprint = None;
                     stop_reason = attempt_stop_reason;
                     finish_reason = attempt_finish_reason;
                     turn_usage = attempt_usage;
@@ -5278,6 +5713,47 @@ impl AgentEngine {
                     MAX_STREAM_RETRIES
                 };
                 if !is_client_error && stream_attempt < effective_max_retries {
+                    // Spec v1 Task 5 (clean retry): a retry re-sends the whole
+                    // outbound context. When the most recent tool round
+                    // carries FAILED tool results, that context is
+                    // contaminated with the full error bodies (observed:
+                    // desktop stage6 = 4 retries × ~350k tokens of failed
+                    // transcript). Replace each failed body with a compact
+                    // stub before re-sending. Retry-scoped: only
+                    // `request.messages` (this turn's outbound copy) is
+                    // rewritten — `self.messages` (persisted history) keeps
+                    // the full body, and older tool rounds are untouched so
+                    // the cached prefix stays byte-stable.
+                    let failed_tools = stub_failed_tool_results_for_retry(&mut request.messages);
+                    // Spec v1 Task 5 progress gate: two consecutive attempts
+                    // that carried the same failing tool round and produced
+                    // NO output at all (no text, no thinking, no tool calls,
+                    // no billed output tokens) mean the next full-context
+                    // re-send has no realistic chance — stop with a clear
+                    // error instead of burning another full-input bill. (The
+                    // tool round is constant within one turn's retry loop, so
+                    // "same failing tool" holds by construction.)
+                    let produced_output = !assistant_text.is_empty()
+                        || !thinking_text.is_empty()
+                        || !tool_calls.is_empty()
+                        || attempt_usage.output_tokens > 0;
+                    if !failed_tools.is_empty() && !produced_output {
+                        no_progress_failures += 1;
+                    } else if produced_output {
+                        no_progress_failures = 0;
+                    }
+                    if no_progress_failures >= 2 {
+                        let gate_msg = format!(
+                            "Provider stream failed twice in a row with no output while \
+                             the last tool round had failed (`{}`) — retrying the same \
+                             context is burning tokens without progress. Fix the failing \
+                             tool call (see its error above) or try a different approach. \
+                             (last stream error: {reason})",
+                            failed_tools.join("`, `"),
+                        );
+                        self.output.emit_error(&gate_msg, false);
+                        return Err(AgentError::ApiError(gate_msg));
+                    }
                     stream_attempt += 1;
                     // Linear backoff: 500ms, 1000ms.
                     let backoff = std::time::Duration::from_millis(500 * stream_attempt as u64);
@@ -5303,6 +5779,12 @@ impl AgentEngine {
             self.total_usage.output_tokens += turn_usage.output_tokens;
             self.total_usage.cache_creation_tokens += turn_usage.cache_creation_tokens;
             self.total_usage.cache_read_tokens += turn_usage.cache_read_tokens;
+
+            // CORE-2: mirror into the run-scoped delta (reset per run()).
+            self.run_usage.input_tokens += turn_usage.input_tokens;
+            self.run_usage.output_tokens += turn_usage.output_tokens;
+            self.run_usage.cache_creation_tokens += turn_usage.cache_creation_tokens;
+            self.run_usage.cache_read_tokens += turn_usage.cache_read_tokens;
 
             // B7 writer-side wiring: mirror this turn's token usage into the
             // live introspection state so `wayland_status` /
@@ -5435,7 +5917,7 @@ impl AgentEngine {
                 cache_read_tokens: turn_usage.cache_read_tokens,
                 cache_creation_tokens: turn_usage.cache_creation_tokens,
             };
-            if let Some(diagnostic) = self.cache_detector.check_response(cache_stats) {
+            if let Some(diagnostic) = self.cache_detector.check_response(cache_stats.clone()) {
                 match &diagnostic {
                     CacheDiagnostic::FullMiss { cause } => {
                         // #101: a full cache miss is diagnostic telemetry, NOT a
@@ -5465,6 +5947,41 @@ impl AgentEngine {
                         }
                     }
                 }
+            }
+
+            // Layer E1 — warm-session cache-health warn. On a round-trip
+            // after the 2nd of a warm session, a `cache_read / input` ratio
+            // below the threshold means the cached prefix is not being read
+            // back (the 128-flat signature). Warning-only structured
+            // telemetry: greppable in the engine log, never alters the
+            // request.
+            if let Some(alert) = self.cache_detector.check_cache_health(&cache_stats) {
+                let warn = wcore_providers::cache_observation::CacheHealthWarn {
+                    conversation_id: self.conversation_id.clone(),
+                    round_trip: alert.round_trip,
+                    input_tokens: alert.input_tokens,
+                    cache_read_tokens: alert.cache_read_tokens,
+                    ratio: alert.ratio,
+                    routed_model: last_routed_model
+                        .clone()
+                        .unwrap_or_else(|| effective_model.clone()),
+                };
+                tracing::warn!(
+                    target: "cache_health",
+                    conversation_id = %warn.conversation_id,
+                    round_trip = warn.round_trip,
+                    input_tokens = warn.input_tokens,
+                    cache_read_tokens = warn.cache_read_tokens,
+                    ratio = warn.ratio,
+                    routed_model = %warn.routed_model,
+                    "cache_health_warn: warm-session cache hit-ratio {:.3} below {} \
+                     (input={}, cache_read={}, model={})",
+                    warn.ratio,
+                    crate::cache_diagnostics::CACHE_HEALTH_WARN_RATIO,
+                    warn.input_tokens,
+                    warn.cache_read_tokens,
+                    warn.routed_model,
+                );
             }
 
             let mut assistant_content: Vec<ContentBlock> = Vec::new();
@@ -5629,6 +6146,7 @@ impl AgentEngine {
                     stop_reason,
                     finish_reason,
                     usage: self.total_usage.clone(),
+                    usage_delta: self.run_usage.clone(),
                     turns: turn + 1,
                     active_window_percent: self
                         .active_window_percent_now(&effective_model, input_token_estimate as u64),
@@ -6000,6 +6518,27 @@ impl AgentEngine {
                     }
 
                     self.output.emit_tool_result(tool_name, *is_error, content);
+
+                    // Layer D1 follow-up (hydrated-tool admission): a
+                    // successful ToolSearch teaches the model a tool's
+                    // schema. Record the returned names so the curation/cap
+                    // passes force-include them in the outbound tools[] on
+                    // subsequent turns — providers validate tool calls
+                    // against the CURRENT tools[] array, so a hydrated tool
+                    // the cap trimmed would otherwise be learnable but not
+                    // callable.
+                    if tool_name == "ToolSearch" && !*is_error {
+                        self.record_hydrated_tools(content);
+                    } else if tool_name != "unknown" {
+                        // Layer D3 follow-up: a DIRECT call to a
+                        // deferred/folded tool (lax providers can emit calls
+                        // for catalog-only names) also counts as hydration —
+                        // its tool_call now sits in history, so the tool must
+                        // be DECLARED in subsequent tools[] instead of
+                        // staying folded out indefinitely. No-op for hot
+                        // tools and names not in the registry.
+                        self.record_called_deferred_tool(tool_name);
+                    }
 
                     // B7 writer-side wiring: bump the per-tool call counter in
                     // the live introspection state (one increment per executed
@@ -6770,6 +7309,7 @@ impl AgentEngine {
             stop_reason: StopReason::EndTurn,
             finish_reason: FinishReason::from_stop_reason(StopReason::EndTurn),
             usage: self.total_usage.clone(),
+            usage_delta: self.run_usage.clone(),
             turns: 1,
             active_window_percent: self.active_window_percent_now(&self.model, 0),
             agent_run_id: self.current_agent_run_id.clone(),
@@ -6835,6 +7375,7 @@ impl AgentEngine {
             stop_reason: StopReason::EndTurn,
             finish_reason: FinishReason::from_stop_reason(StopReason::EndTurn),
             usage: self.total_usage.clone(),
+            usage_delta: self.run_usage.clone(),
             turns: turn + 1,
             active_window_percent: self.active_window_percent_now(&self.model, 0),
             agent_run_id: self.current_agent_run_id.clone(),
@@ -6954,10 +7495,29 @@ impl AgentEngine {
 
     /// Run the multi-level compaction pipeline before each API call.
     ///
-    /// Execution order: microcompact → autocompact → emergency check.
-    /// After a successful autocompact the emergency check is skipped
-    /// because the context has been significantly reduced.
+    /// Execution order: tool-call-args hygiene → microcompact → autocompact →
+    /// emergency check. After a successful autocompact the emergency check is
+    /// skipped because the context has been significantly reduced.
     async fn run_compaction(&mut self) -> Result<(), AgentError> {
+        // 0. Tool-call-argument hygiene (parity gap 2) — CONTINUOUS: no LLM
+        // call and no trigger gate, so an old Write body stops riding in
+        // resent history at the first epoch tick after it leaves the
+        // protected tail. Deterministic + monotonic + epoch-quantized (see
+        // compact/micro.rs): a message compacts exactly once and never
+        // changes bytes again, and the boundary only advances every
+        // `epoch_turns` assistant turns, so between ticks the pass changes
+        // ZERO bytes and the provider's contiguous prefix cache holds
+        // end-to-end. No file-cache generation bump needed: diff-resend
+        // bases require `Provenance::ReadResult` (tool RESULT bodies),
+        // which this pass never touches.
+        let args_result = micro::compact_tool_call_args(&mut self.messages, &self.compact_config);
+        if args_result.cleared_count > 0 {
+            self.output.emit_info(&format!(
+                "Compacted {} old tool-call argument payload(s) (~{} tokens freed)",
+                args_result.cleared_count, args_result.estimated_tokens_freed
+            ));
+        }
+
         // 1. Microcompact (lightweight, no LLM call)
         if micro::should_microcompact(&self.messages, &self.compact_config) {
             let result = micro::microcompact(&mut self.messages, &self.compact_config);
@@ -8176,20 +8736,41 @@ impl AgentEngine {
         // newly-surfaced name is pushed at the END. This makes every
         // union-growth turn a cache-safe append (stable prefix) rather than a
         // mid-array insert that would invalidate the cached tool-zone prefix.
-        let keep_order: &Vec<String> = match self.mcp_curation_cache.as_mut() {
+        match self.mcp_curation_cache.as_mut() {
             Some((hash, order)) if *hash == inventory_hash => {
                 for name in this_turn {
                     if !order.contains(&name) {
                         order.push(name);
                     }
                 }
-                &*order
             }
             _ => {
                 self.mcp_curation_cache = Some((inventory_hash, this_turn));
-                &self.mcp_curation_cache.as_ref().expect("just set").1
             }
-        };
+        }
+
+        // Layer D1 follow-up (hydrated-tool admission): union in every MCP
+        // tool the model has hydrated via ToolSearch, so curation can never
+        // trim a tool the model has learned — it must survive this pass for
+        // the provider cap below to admit it into the outbound tools[].
+        // Cache-safe: appended at the END, once (the hydrated list only
+        // grows), a legitimate one-turn miss that is stable afterwards.
+        let curation_mcp_names: std::collections::HashSet<&str> =
+            mcp_tools.iter().map(|t| t.name.as_str()).collect();
+        let hydrated_mcp: Vec<String> = self
+            .hydrated_tool_names
+            .iter()
+            .filter(|n| curation_mcp_names.contains(n.as_str()))
+            .cloned()
+            .collect();
+        if let Some((_, order)) = self.mcp_curation_cache.as_mut() {
+            for name in hydrated_mcp {
+                if !order.contains(&name) {
+                    order.push(name);
+                }
+            }
+        }
+        let keep_order: &Vec<String> = &self.mcp_curation_cache.as_ref().expect("just set").1;
 
         // Emit kept MCP tools in FIRST-ADD order (not registry-iteration
         // order). Built-in/non-MCP tools in `keep` retain their original
@@ -8212,7 +8793,12 @@ impl AgentEngine {
     /// skills, plan) and fills the remaining budget with the most RELEVANT MCP
     /// tools (BM25 over the current user message), truncating the rest. Dropped
     /// MCP tools stay DISCOVERABLE via the `ToolSearch` meta-tool (its registry
-    /// is a full bootstrap snapshot). `None` cap = no-op.
+    /// is a full bootstrap snapshot) — and once the model HYDRATES one, its
+    /// name is recorded in `hydrated_tool_names` and force-admitted into the
+    /// kept set on subsequent turns (evicting the last non-hydrated BM25 slot
+    /// when the budget is full), because providers validate tool calls against
+    /// the CURRENT tools[] array: discoverable-but-undeclared = uncallable.
+    /// `None` cap = no-op.
     ///
     /// Cache-stability (token-opt): when the cap must trim, the kept MCP set is
     /// emitted in an inventory-keyed APPEND-ONLY UNION order (mirroring
@@ -8256,7 +8842,8 @@ impl AgentEngine {
             tracing::info!(
                 target: "wcore_agent::engine",
                 "provider tool cap: {} tools exceeded the provider limit of {}; kept {} \
-                 (incl. all {} non-MCP), {} MCP tools hidden but reachable via ToolSearch",
+                 (incl. all {} non-MCP), {} MCP tools hidden — discoverable via ToolSearch \
+                 but NOT callable (no MCP budget under the provider cap)",
                 non_mcp_count + mcp_total,
                 limit,
                 non_mcp_count,
@@ -8310,7 +8897,7 @@ impl AgentEngine {
         // length at `mcp_budget` so the kept set never exceeds the provider
         // limit even as the union grows across turns — once full, no new tool
         // displaces an admitted one for the life of this inventory/budget.
-        let keep_order: Vec<String> = match self.mcp_cap_cache.as_mut() {
+        match self.mcp_cap_cache.as_mut() {
             Some((hash, order)) if *hash == inventory_hash => {
                 for name in this_turn {
                     if order.len() >= mcp_budget {
@@ -8320,15 +8907,86 @@ impl AgentEngine {
                         order.push(name);
                     }
                 }
-                order.clone()
             }
             _ => {
                 let mut order = this_turn;
                 order.truncate(mcp_budget);
-                self.mcp_cap_cache = Some((inventory_hash, order.clone()));
-                order
+                self.mcp_cap_cache = Some((inventory_hash, order));
             }
-        };
+        }
+
+        // Layer D1 follow-up (hydrated-tool admission): a tool the model
+        // hydrated via ToolSearch must be genuinely callable — providers
+        // validate tool calls against the CURRENT tools[] array, so a
+        // hydrated-but-trimmed MCP tool would be learnable yet uncallable.
+        //
+        // Stale hydrations are pruned first: a hydrated tool whose MCP
+        // server disconnected is gone from the LIVE registry. The check is
+        // against the registry — NOT the per-turn filtered list — so
+        // plan-mode category filtering or cap trimming never misclassifies
+        // a live tool as stale.
+        self.prune_stale_hydrated_tools();
+        //
+        // Force-admit hydrated MCP names: appended at the END while budget
+        // remains (a cache-safe append); when the union is FULL, the LAST
+        // non-hydrated slot is evicted to make room (hydration is a stronger
+        // relevance signal than the BM25 guess that admitted that slot).
+        // When EVERY kept slot is itself hydrated, the OLDEST hydrated slot
+        // (front-most in the union) is evicted AND demoted from the hydrated
+        // set — without the demotion it would force itself back next turn
+        // and the two tools would thrash the array forever. Each change
+        // lands once — a legitimate one-turn cache miss — and the set is
+        // stable afterwards.
+        let mut hydrated_all: std::collections::HashSet<String> =
+            self.hydrated_tool_names.iter().cloned().collect();
+        let mcp_names: std::collections::HashSet<&str> =
+            mcp_tools.iter().map(|t| t.name.as_str()).collect();
+        let hydrated_mcp: Vec<String> = self
+            .hydrated_tool_names
+            .iter()
+            .filter(|n| mcp_names.contains(n.as_str()))
+            .cloned()
+            .collect();
+        let mut evicted: Vec<String> = Vec::new();
+        let mut demoted: Vec<String> = Vec::new();
+        if let Some((_, order)) = self.mcp_cap_cache.as_mut() {
+            for name in hydrated_mcp {
+                if order.contains(&name) {
+                    continue;
+                }
+                if order.len() >= mcp_budget {
+                    // Last non-hydrated slot first; when all slots are
+                    // hydrated, index 0 = the oldest hydrated slot (LRU).
+                    let idx = order
+                        .iter()
+                        .rposition(|n| !hydrated_all.contains(n))
+                        .unwrap_or(0);
+                    let out = order.remove(idx);
+                    if hydrated_all.remove(&out) {
+                        demoted.push(out.clone());
+                    }
+                    evicted.push(out);
+                }
+                order.push(name);
+            }
+        }
+        if !demoted.is_empty() {
+            self.hydrated_tool_names.retain(|n| !demoted.contains(n));
+        }
+        if !evicted.is_empty() {
+            tracing::info!(
+                target: "wcore_agent::engine",
+                "provider tool cap: evicted {:?} to admit ToolSearch-hydrated tools \
+                 (demoted from hydrated set: {:?}; one-turn cache miss, set stable afterwards)",
+                evicted,
+                demoted
+            );
+        }
+        let keep_order: Vec<String> = self
+            .mcp_cap_cache
+            .as_ref()
+            .map(|(_, order)| order.clone())
+            .unwrap_or_default();
 
         // Emit non-MCP tools first (preserving their relative order), then the
         // kept MCP block in FIRST-ADD union order.
@@ -8346,7 +9004,8 @@ impl AgentEngine {
             tracing::info!(
                 target: "wcore_agent::engine",
                 "provider tool cap: {} tools exceeded the provider limit of {}; kept {} \
-                 (incl. all {} non-MCP), {} MCP tools hidden but reachable via ToolSearch",
+                 (incl. all {} non-MCP), {} MCP tools hidden — discoverable via ToolSearch \
+                 and admitted to tools[] on the turn after hydration",
                 non_mcp_count + mcp_total,
                 limit,
                 kept.len(),
@@ -8355,6 +9014,157 @@ impl AgentEngine {
             );
         }
         kept
+    }
+
+    /// Layer D1 follow-up (hydrated-tool admission): parse a successful
+    /// `ToolSearch` result body (a JSON array of `{name, description,
+    /// parameters}` matches) and record every returned tool name in
+    /// [`Self::hydrated_tool_names`] (FIRST-HYDRATION order, deduped,
+    /// bounded by [`HYDRATED_TOOLS_CAP`] with evict-oldest). The
+    /// curation/cap passes force-include these names in the outbound
+    /// `tools[]` on subsequent turns so a hydrated tool is genuinely
+    /// callable. A no-match result is a plain string, not JSON — it parses
+    /// to nothing and records nothing.
+    fn record_hydrated_tools(&mut self, content: &str) {
+        let Ok(serde_json::Value::Array(matches)) =
+            serde_json::from_str::<serde_json::Value>(content)
+        else {
+            return;
+        };
+        for m in matches {
+            if let Some(name) = m.get("name").and_then(|v| v.as_str()) {
+                self.push_hydrated_name(name);
+            }
+        }
+    }
+
+    /// Deduped, [`HYDRATED_TOOLS_CAP`]-bounded (evict-oldest) push into
+    /// [`Self::hydrated_tool_names`]. Shared by the ToolSearch-result
+    /// recorder and the direct-call recorder below.
+    fn push_hydrated_name(&mut self, name: &str) {
+        if self.hydrated_tool_names.iter().any(|n| n == name) {
+            return;
+        }
+        if self.hydrated_tool_names.len() >= HYDRATED_TOOLS_CAP {
+            let dropped = self.hydrated_tool_names.remove(0);
+            tracing::debug!(
+                target: "wcore_agent::engine",
+                "hydrated-tool set at cap ({HYDRATED_TOOLS_CAP}); \
+                 evicting oldest hydration {dropped:?}"
+            );
+        }
+        self.hydrated_tool_names.push(name.to_string());
+    }
+
+    /// Layer D3 follow-up (catalog fold): a DIRECT call to a deferred tool
+    /// counts as hydration too. Lax providers (no constrained decoding —
+    /// Ollama, llama.cpp) can emit a call for a catalog-only name; the
+    /// engine dispatches it by registry name, which leaves a `tool_calls`
+    /// entry in history referencing a tool that the catalog fold keeps OUT
+    /// of the outbound tools[] — indefinitely, because only ToolSearch
+    /// results used to trigger admission. (Stub mode never had this state:
+    /// every deferred name was at least declared.) Recording the called
+    /// name here makes the tool DECLARED with its full schema from the next
+    /// round-trip — the same one-turn tools[] change as a ToolSearch
+    /// hydration. Recorded regardless of the result's error flag: the
+    /// tool_call sits in history either way.
+    ///
+    /// Hot-allowlist tools and unknown names are skipped so the bounded
+    /// hydrated set is not churned by Read/Bash traffic or hallucinated
+    /// names that never dispatched.
+    fn record_called_deferred_tool(&mut self, tool_name: &str) {
+        let cfg = &self.config.builtin_tools.defer_cold;
+        if !cfg.enabled || tool_name == "ToolSearch" {
+            return;
+        }
+        if cfg.hot_allowlist.iter().any(|hot| hot == tool_name) {
+            return;
+        }
+        if self.tools.get(tool_name).is_none() {
+            return;
+        }
+        self.push_hydrated_name(tool_name);
+    }
+
+    /// Layer D1 follow-up: drop hydrated names that no longer exist in the
+    /// LIVE tool registry (e.g. their MCP server disconnected after the
+    /// ToolSearch snapshot was taken at bootstrap). Without this, a stale
+    /// hydration would sit in the admission set forever, and — worse — could
+    /// hold a cap slot for a tool that can never dispatch. Checked against
+    /// the registry rather than the per-turn filtered def list, so plan-mode
+    /// category filtering / cap trimming never misclassifies a live tool as
+    /// stale.
+    fn prune_stale_hydrated_tools(&mut self) {
+        if self.hydrated_tool_names.is_empty() {
+            return;
+        }
+        let registry = Arc::clone(&self.tools);
+        let stale: Vec<String> = self
+            .hydrated_tool_names
+            .iter()
+            .filter(|n| registry.get(n).is_none())
+            .cloned()
+            .collect();
+        if stale.is_empty() {
+            return;
+        }
+        tracing::info!(
+            target: "wcore_agent::engine",
+            "dropping stale hydrated tools no longer in the registry \
+             (MCP server disconnected?): {:?}",
+            stale
+        );
+        self.hydrated_tool_names.retain(|n| !stale.contains(n));
+    }
+
+    /// Layer D1/D3 (token-opt): cold-deferral + hydration exemption +
+    /// catalog fold for the outbound tools[].
+    ///
+    /// 1. Cold tools (not on the static hot allowlist) are marked deferred.
+    /// 2. A tool the model has HYDRATED via ToolSearch ships its FULL
+    ///    schema — whether the deferral above marked it or it is natively
+    ///    deferred (`Tool::is_deferred`, e.g. MCP proxies) — because
+    ///    hydration means the model explicitly fetched the schema and is
+    ///    about to call it.
+    /// 3. Catalog mode (default): the remaining deferred defs are removed
+    ///    from the array entirely and folded into ONE sorted name-only
+    ///    inventory line on ToolSearch's description (openclaw parity —
+    ///    per-tool stubs measured MORE expensive than the hot schemas).
+    ///    A hydrated tool leaves the catalog line and ships full, in the
+    ///    same one-turn tools[] change as its admission. Catalog off:
+    ///    deferred defs stay as per-tool stub entries.
+    ///
+    /// Runs AFTER the cap/admission pass so a force-admitted hydrated tool
+    /// is never flipped back to a stub. Pure function of static config +
+    /// the monotonic hydrated set: byte-stable across turns, one-turn
+    /// change on hydration.
+    fn apply_tool_deferral(
+        &self,
+        mut tools: Vec<wcore_types::tool::ToolDef>,
+    ) -> Vec<wcore_types::tool::ToolDef> {
+        let defer_cfg = &self.config.builtin_tools.defer_cold;
+        if defer_cfg.enabled {
+            wcore_tools::registry::apply_cold_deferral(&mut tools, &defer_cfg.hot_allowlist);
+        }
+        if !self.hydrated_tool_names.is_empty() {
+            let hydrated: std::collections::HashSet<&str> = self
+                .hydrated_tool_names
+                .iter()
+                .map(String::as_str)
+                .collect();
+            for def in tools.iter_mut() {
+                if def.deferred && hydrated.contains(def.name.as_str()) {
+                    def.deferred = false;
+                }
+            }
+        }
+        if defer_cfg.enabled && defer_cfg.catalog {
+            tools = wcore_tools::registry::fold_deferred_into_catalog(
+                tools,
+                defer_cfg.catalog_max_chars,
+            );
+        }
+        tools
     }
 
     /// W6 F17 recency input for `McpCurator`. Reads the M2 audit log via the
@@ -9107,6 +9917,7 @@ mod set_config_tests {
             max_tokens_explicit: false,
             max_turns: Some(10),
             total_usage: Default::default(),
+            run_usage: Default::default(),
             thinking: None,
             compat: wcore_config::compat::ProviderCompat::anthropic_defaults(),
             confirmer: Arc::new(Mutex::new(ToolConfirmer::new(true, vec![]))),
@@ -9134,6 +9945,7 @@ mod set_config_tests {
             mcp_curation: wcore_config::config::McpCurationPolicy::default(),
             mcp_curation_cache: None,
             mcp_cap_cache: None,
+            hydrated_tool_names: Vec::new(),
             file_cache: None,
             session_state: None,
             audit_log: None,
@@ -9199,6 +10011,7 @@ mod set_config_tests {
             smart_compact_last_turn: None,
             smart_compact_exhausted: false,
             smart_compact_force: false,
+            length_wedge_fingerprint: None,
         }
     }
 
@@ -9569,6 +10382,493 @@ mod set_config_tests {
             names1, names2,
             "cap emission must be byte-stable across same-context turns"
         );
+    }
+
+    /// Minimal dispatchable MCP-provenance tool fixture for the
+    /// hydrated-tool-admission tests.
+    struct NamedTool(String);
+    #[async_trait::async_trait]
+    impl wcore_tools::Tool for NamedTool {
+        fn name(&self) -> &str {
+            &self.0
+        }
+        fn description(&self) -> &str {
+            "mcp fixture"
+        }
+        fn input_schema(&self) -> serde_json::Value {
+            serde_json::json!({"type": "object"})
+        }
+        fn is_concurrency_safe(&self, _: &serde_json::Value) -> bool {
+            true
+        }
+        async fn execute(&self, _: serde_json::Value) -> wcore_types::tool::ToolResult {
+            wcore_types::tool::ToolResult {
+                content: "ok".to_string(),
+                is_error: false,
+            }
+        }
+        fn category(&self) -> wcore_protocol::events::ToolCategory {
+            wcore_protocol::events::ToolCategory::Info
+        }
+        fn mcp_server(&self) -> Option<&str> {
+            Some("srv")
+        }
+    }
+
+    /// Registry holding the given MCP fixture tools (the live-registry
+    /// counterpart of the ToolDef lists the cap tests feed in).
+    fn hydration_registry(names: &[&str]) -> ToolRegistry {
+        let mut reg = ToolRegistry::new();
+        for name in names {
+            reg.register(Box::new(NamedTool(name.to_string())));
+        }
+        reg
+    }
+
+    /// The exact hydration flow, end to end against real components: build a
+    /// ToolSearchTool on the cold-deferred bootstrap-style snapshot of the
+    /// engine's LIVE registry, run the query, and feed its real result body
+    /// into the engine's recorder.
+    async fn hydrate_via_tool_search(engine: &mut super::AgentEngine, query: &str) {
+        use wcore_tools::Tool as _;
+        let mut snapshot = engine.tools().to_tool_defs();
+        wcore_tools::registry::apply_cold_deferral(
+            &mut snapshot,
+            &engine.config.builtin_tools.defer_cold.hot_allowlist,
+        );
+        let search = wcore_tools::tool_search::ToolSearchTool::new(snapshot);
+        let result = search.execute(serde_json::json!({"query": query})).await;
+        assert!(!result.is_error, "ToolSearch must find {query}: {result:?}");
+        assert!(
+            result.content.contains("parameters"),
+            "hydration must return the full schema"
+        );
+        engine.record_hydrated_tools(&result.content);
+    }
+
+    /// Layer D1 follow-up (hydrated-tool admission): an MCP tool the provider
+    /// cap trimmed on turn N, then hydrated via a REAL ToolSearch built on the
+    /// registry snapshot, must be present in turn N+1's outbound tools[] with
+    /// deferred == false (full schema — providers validate tool calls against
+    /// the CURRENT array, and a stub is not a callable schema), and must
+    /// genuinely dispatch through the SAME registry ToolSearch snapshotted.
+    /// The admission is a one-turn tools[] change; byte-stable from turn N+2.
+    #[tokio::test]
+    async fn hydrated_tool_admitted_to_next_turn_tools_and_dispatches() {
+        use wcore_tools::dispatcher::ToolDispatcher;
+        use wcore_types::message::{ContentBlock, Message, Role};
+
+        // Cap = 4: 2 non-MCP + budget for 2 of the 3 MCP tools. The LIVE
+        // registry carries all three MCP tools (they are trimmed from the
+        // outbound declarations, not from the registry).
+        let mut engine = make_engine("m");
+        engine.tools = Arc::new(hydration_registry(&[
+            "mcp__srv__alpha",
+            "mcp__srv__bravo",
+            "mcp__srv__zulu",
+        ]));
+        engine.compat.max_tools = Some(4);
+        engine.mcp_curation = wcore_config::config::McpCurationPolicy::Off;
+        engine.audit_log = None; // keyword-only ranking → deterministic
+        engine.messages = vec![Message::new(
+            Role::User,
+            vec![ContentBlock::Text {
+                text: "alpha database query".to_string(),
+            }],
+        )];
+
+        let tools = vec![
+            builtin_tool("Read"),
+            builtin_tool("ToolSearch"),
+            cap_mcp_tool("mcp__srv__alpha"),
+            cap_mcp_tool("mcp__srv__bravo"),
+            cap_mcp_tool("mcp__srv__zulu"),
+        ];
+
+        // Turn N: the cap keeps 2 of the 3 MCP tools; deferral then folds
+        // the kept-but-cold MCP defs into ToolSearch's catalog line (Layer
+        // D3), so the outbound array is just the hot tools.
+        let capped_n = engine.apply_provider_tool_cap(tools.clone());
+        assert_eq!(capped_n.len(), 4, "capped to the provider limit");
+        let kept_mcp_n: Vec<String> = capped_n
+            .iter()
+            .filter(|t| t.server.is_some())
+            .map(|t| t.name.clone())
+            .collect();
+        let trimmed: Vec<&str> = ["mcp__srv__alpha", "mcp__srv__bravo", "mcp__srv__zulu"]
+            .into_iter()
+            .filter(|n| !kept_mcp_n.iter().any(|k| k == n))
+            .collect();
+        assert_eq!(trimmed.len(), 1, "exactly one MCP tool trimmed");
+        let hydrated_name = trimmed[0];
+
+        let turn_n = engine.apply_tool_deferral(capped_n);
+        assert!(
+            turn_n.iter().all(|t| !t.deferred),
+            "catalog mode: no stub entries in the outbound tools[]"
+        );
+        assert_eq!(
+            turn_n.len(),
+            2,
+            "cold MCP defs folded out of the array (hot Read + ToolSearch remain)"
+        );
+        let catalog_n = &turn_n
+            .iter()
+            .find(|t| t.name == "ToolSearch")
+            .expect("ToolSearch carries the catalog")
+            .description;
+        for kept in &kept_mcp_n {
+            assert!(
+                catalog_n.contains(kept.as_str()),
+                "kept cold MCP tool listed in the catalog line: {catalog_n}"
+            );
+        }
+
+        // Turn N, later in the round: the model hydrates the trimmed tool
+        // through the real ToolSearch (registry snapshot, real result body).
+        hydrate_via_tool_search(&mut engine, hydrated_name).await;
+
+        // Turn N+1: the hydrated tool is force-admitted into the outbound
+        // tools[] (evicting the last non-hydrated slot), cap still enforced,
+        // and — critically — its def is NOT deferred: the deferral pass runs
+        // after admission and must exempt hydrated names, or the name would
+        // be folded away / shipped as a stub.
+        let capped_n1 = engine.apply_provider_tool_cap(tools.clone());
+        assert_eq!(capped_n1.len(), 4, "cap still enforced after admission");
+        let turn_n1 = engine.apply_tool_deferral(capped_n1);
+        let admitted = turn_n1
+            .iter()
+            .find(|t| t.name == hydrated_name)
+            .unwrap_or_else(|| {
+                panic!(
+                    "hydrated tool must be in the next turn's outbound tools[] (got {:?})",
+                    turn_n1.iter().map(|t| &t.name).collect::<Vec<_>>()
+                )
+            });
+        assert!(
+            !admitted.deferred,
+            "admitted hydrated tool must ship its FULL schema, not a stub"
+        );
+        // The hydrated name LEAVES the catalog line; the remaining cold MCP
+        // slot is still listed there (folded, not shipped as a stub entry).
+        let catalog_n1 = &turn_n1
+            .iter()
+            .find(|t| t.name == "ToolSearch")
+            .expect("ToolSearch carries the catalog")
+            .description;
+        assert!(
+            !catalog_n1.contains(hydrated_name),
+            "hydrated tool must leave the catalog line: {catalog_n1}"
+        );
+        assert!(
+            turn_n1.iter().all(|t| !t.deferred),
+            "catalog mode: still no stub entries after admission"
+        );
+
+        // Turn N+2: the admission was a ONE-turn change — names, deferred
+        // flags AND the catalog line are stable again.
+        let capped_n2 = engine.apply_provider_tool_cap(tools);
+        let turn_n2 = engine.apply_tool_deferral(capped_n2);
+        let shape = |defs: &[wcore_types::tool::ToolDef]| -> Vec<(String, bool, String)> {
+            defs.iter()
+                .map(|t| (t.name.clone(), t.deferred, t.description.clone()))
+                .collect()
+        };
+        assert_eq!(
+            shape(&turn_n1),
+            shape(&turn_n2),
+            "post-admission set must be byte-stable across turns"
+        );
+
+        // ...and the hydrated tool genuinely dispatches through the SAME
+        // registry the ToolSearch snapshot came from.
+        let result = engine
+            .tools()
+            .dispatch(hydrated_name, serde_json::json!({}))
+            .await;
+        assert!(!result.is_error, "hydrated tool must dispatch: {result:?}");
+        assert_eq!(result.content, "ok");
+    }
+
+    /// Layer D3 (catalog fold): cold tools produce NO per-tool stub entries
+    /// on the wire — they are folded into one sorted, deterministic catalog
+    /// line on ToolSearch's description — and flipping the config knob off
+    /// restores the previous per-tool stub behavior.
+    #[test]
+    fn catalog_mode_emits_no_stub_entries_and_config_off_restores_stubs() {
+        let mut engine = make_engine("m");
+        let tools = vec![
+            builtin_tool("Read"),
+            builtin_tool("ToolSearch"),
+            builtin_tool("session_search"), // cold built-in
+            builtin_tool("clarify"),        // cold built-in
+        ];
+
+        // Catalog mode (default ON): cold defs leave the array entirely.
+        let turn1 = engine.apply_tool_deferral(tools.clone());
+        assert!(
+            turn1.iter().all(|t| !t.deferred),
+            "no deferred defs reach the serializer"
+        );
+        assert_eq!(turn1.len(), 2, "hot Read + ToolSearch only");
+        let ts = turn1.iter().find(|t| t.name == "ToolSearch").unwrap();
+        assert!(
+            ts.description.contains("clarify, session_search"),
+            "sorted name-only catalog on ToolSearch: {}",
+            ts.description
+        );
+
+        // The serializer therefore emits NO stub entries at all.
+        let wire =
+            serde_json::to_string(&wcore_providers::anthropic_shared::build_tools(&turn1)).unwrap();
+        assert!(
+            !wire.contains("(Deferred)"),
+            "no per-tool stub entries on the wire"
+        );
+
+        // Deterministic + byte-stable across turns (same deferral state).
+        let turn2 = engine.apply_tool_deferral(tools.clone());
+        let wire2 =
+            serde_json::to_string(&wcore_providers::anthropic_shared::build_tools(&turn2)).unwrap();
+        assert_eq!(wire, wire2, "catalog line byte-stable across turns");
+
+        // Config off: per-tool stub entries restored, catalog absent.
+        engine.config.builtin_tools.defer_cold.catalog = false;
+        let stubbed = engine.apply_tool_deferral(tools);
+        assert_eq!(stubbed.len(), 4, "stub mode keeps every def in the array");
+        assert!(
+            stubbed.iter().any(|t| t.name == "clarify" && t.deferred),
+            "cold tool is a stub entry again"
+        );
+        let ts_stub = stubbed.iter().find(|t| t.name == "ToolSearch").unwrap();
+        assert!(
+            !ts_stub.description.contains("Deferred tools"),
+            "no catalog line in stub mode"
+        );
+        let wire_stub =
+            serde_json::to_string(&wcore_providers::anthropic_shared::build_tools(&stubbed))
+                .unwrap();
+        assert!(
+            wire_stub.contains("(Deferred)"),
+            "stub mode serializes per-tool stub entries"
+        );
+    }
+
+    /// Codex verify finding (catalog fold edge): on lax providers (no
+    /// constrained decoding) the model can call a catalog-only tool
+    /// DIRECTLY; the engine dispatches it by registry name, leaving a
+    /// tool_calls entry in history that references a name the fold keeps
+    /// out of tools[] — and only ToolSearch results used to trigger
+    /// admission, so the undeclared state persisted indefinitely (stub mode
+    /// always declared every deferred name). A direct call must count as
+    /// hydration: declared, full schema, out of the catalog line, from the
+    /// next round-trip.
+    #[test]
+    fn called_deferred_tool_is_declared_on_subsequent_turns() {
+        let mut engine = make_engine("m");
+        engine.tools = Arc::new(hydration_registry(&["session_search"]));
+
+        let tools = vec![
+            builtin_tool("Read"),
+            builtin_tool("ToolSearch"),
+            builtin_tool("session_search"), // cold built-in
+        ];
+
+        // Round-trip K: session_search is folded into the catalog line.
+        let turn_k = engine.apply_tool_deferral(tools.clone());
+        assert!(
+            !turn_k.iter().any(|t| t.name == "session_search"),
+            "cold tool starts folded out of the array"
+        );
+        assert!(
+            turn_k
+                .iter()
+                .find(|t| t.name == "ToolSearch")
+                .unwrap()
+                .description
+                .contains("session_search"),
+            "cold tool starts in the catalog line"
+        );
+
+        // The model calls it directly (lax provider) — the result loop
+        // records the call as hydration. Hot tools and unknown names are
+        // no-ops (bounded set must not churn on Read/Bash traffic).
+        engine.record_called_deferred_tool("session_search");
+        engine.record_called_deferred_tool("Read");
+        engine.record_called_deferred_tool("ghost_never_registered");
+        assert_eq!(
+            engine.hydrated_tool_names,
+            vec!["session_search".to_string()],
+            "only the called deferred registry tool is recorded"
+        );
+
+        // Round-trip K+1: the called tool is DECLARED with its full schema
+        // and has left the catalog line.
+        let turn_k1 = engine.apply_tool_deferral(tools);
+        let declared = turn_k1
+            .iter()
+            .find(|t| t.name == "session_search")
+            .expect("called deferred tool must be declared in tools[]");
+        assert!(!declared.deferred, "ships full schema, not a stub");
+        assert!(
+            !turn_k1
+                .iter()
+                .find(|t| t.name == "ToolSearch")
+                .unwrap()
+                .description
+                .contains("session_search"),
+            "called tool left the catalog line"
+        );
+    }
+
+    /// Layer D1 follow-up, full-union edge: when EVERY kept cap slot is
+    /// already hydrated and one more hydrated tool needs admission, the
+    /// OLDEST hydrated slot is evicted (LRU) and DEMOTED from the hydrated
+    /// set — without the demotion the evicted tool would force itself back
+    /// next turn and the pair would thrash the tools[] array forever.
+    #[tokio::test]
+    async fn hydration_eviction_is_lru_and_does_not_thrash() {
+        use wcore_types::message::{ContentBlock, Message, Role};
+
+        let mut engine = make_engine("m");
+        engine.tools = Arc::new(hydration_registry(&[
+            "mcp__srv__alpha",
+            "mcp__srv__bravo",
+            "mcp__srv__zulu",
+        ]));
+        engine.compat.max_tools = Some(4); // budget for 2 of the 3 MCP tools
+        engine.mcp_curation = wcore_config::config::McpCurationPolicy::Off;
+        engine.audit_log = None;
+        engine.messages = vec![Message::new(
+            Role::User,
+            vec![ContentBlock::Text {
+                text: "alpha database query".to_string(),
+            }],
+        )];
+
+        let tools = vec![
+            builtin_tool("Read"),
+            builtin_tool("ToolSearch"),
+            cap_mcp_tool("mcp__srv__alpha"),
+            cap_mcp_tool("mcp__srv__bravo"),
+            cap_mcp_tool("mcp__srv__zulu"),
+        ];
+
+        // Turn 1 fills the 2 MCP slots; one tool is trimmed.
+        let turn1 = engine.apply_provider_tool_cap(tools.clone());
+        let kept1: Vec<String> = turn1
+            .iter()
+            .filter(|t| t.server.is_some())
+            .map(|t| t.name.clone())
+            .collect();
+        assert_eq!(kept1.len(), 2);
+        let trimmed = ["mcp__srv__alpha", "mcp__srv__bravo", "mcp__srv__zulu"]
+            .into_iter()
+            .find(|n| !kept1.iter().any(|k| k == n))
+            .expect("one trimmed");
+
+        // Hydrate BOTH kept slots, then the trimmed tool (in that order).
+        hydrate_via_tool_search(&mut engine, &kept1[0]).await;
+        hydrate_via_tool_search(&mut engine, &kept1[1]).await;
+        hydrate_via_tool_search(&mut engine, trimmed).await;
+
+        // Turn 2: every slot is hydrated → the OLDEST hydrated slot
+        // (kept1[0], front of the union) is evicted and demoted; the newly
+        // hydrated tool takes the slot.
+        let turn2 = engine.apply_provider_tool_cap(tools.clone());
+        let kept2: Vec<String> = turn2
+            .iter()
+            .filter(|t| t.server.is_some())
+            .map(|t| t.name.clone())
+            .collect();
+        assert_eq!(kept2.len(), 2, "cap still enforced");
+        assert!(
+            kept2.iter().any(|n| n == trimmed),
+            "newly hydrated tool admitted (kept: {kept2:?})"
+        );
+        assert!(
+            !kept2.iter().any(|n| n == &kept1[0]),
+            "oldest hydrated slot evicted (LRU)"
+        );
+        assert!(
+            !engine.hydrated_tool_names.iter().any(|n| n == &kept1[0]),
+            "evicted tool demoted from the hydrated set (anti-thrash)"
+        );
+
+        // Turn 3: stable — the demoted tool must NOT force itself back.
+        let turn3 = engine.apply_provider_tool_cap(tools);
+        let kept3: Vec<String> = turn3
+            .iter()
+            .filter(|t| t.server.is_some())
+            .map(|t| t.name.clone())
+            .collect();
+        assert_eq!(kept2, kept3, "post-eviction set is stable (no thrash)");
+    }
+
+    /// Layer D1 follow-up, stale-hydration regression: ToolSearch serves a
+    /// BOOTSTRAP snapshot, so after an MCP server disconnects the model can
+    /// hydrate a tool that no longer exists in the live registry. The
+    /// admission pass must prune it (never spend a cap slot on it) and keep
+    /// the live hydrations.
+    #[tokio::test]
+    async fn stale_hydration_pruned_when_tool_leaves_registry() {
+        use wcore_types::message::{ContentBlock, Message, Role};
+
+        // Live registry has alpha + bravo. "ghost" was hydratable from the
+        // bootstrap snapshot but its server has since disconnected.
+        let mut engine = make_engine("m");
+        engine.tools = Arc::new(hydration_registry(&["mcp__srv__alpha", "mcp__srv__bravo"]));
+        engine.compat.max_tools = Some(3); // 2 non-MCP + budget for 1 MCP
+        engine.mcp_curation = wcore_config::config::McpCurationPolicy::Off;
+        engine.audit_log = None;
+        engine.messages = vec![Message::new(
+            Role::User,
+            vec![ContentBlock::Text {
+                text: "alpha database query".to_string(),
+            }],
+        )];
+
+        // The model hydrated ghost (pre-disconnect, via the stale snapshot)
+        // and bravo (live). Feed the recorder the exact ToolSearch shape.
+        engine.record_hydrated_tools(
+            &serde_json::to_string_pretty(&serde_json::json!([
+                {"name": "mcp__srv__ghost", "description": "gone", "parameters": {"type": "object"}},
+                {"name": "mcp__srv__bravo", "description": "live", "parameters": {"type": "object"}},
+            ]))
+            .unwrap(),
+        );
+
+        let tools = vec![
+            builtin_tool("Read"),
+            builtin_tool("ToolSearch"),
+            cap_mcp_tool("mcp__srv__alpha"),
+            cap_mcp_tool("mcp__srv__bravo"),
+        ];
+        let kept = engine.apply_provider_tool_cap(tools);
+        let names: Vec<&str> = kept.iter().map(|t| t.name.as_str()).collect();
+
+        // Stale hydration pruned: gone from the hydrated set, never emitted.
+        assert!(
+            !engine
+                .hydrated_tool_names
+                .iter()
+                .any(|n| n == "mcp__srv__ghost"),
+            "stale hydration must be pruned from the hydrated set"
+        );
+        assert!(!names.contains(&"mcp__srv__ghost"));
+        // Live hydration survives the prune and is admitted.
+        assert!(
+            engine
+                .hydrated_tool_names
+                .iter()
+                .any(|n| n == "mcp__srv__bravo"),
+            "live hydration must survive the prune"
+        );
+        assert!(
+            names.contains(&"mcp__srv__bravo"),
+            "live hydrated tool must be admitted (kept: {names:?})"
+        );
+        assert_eq!(kept.len(), 3, "cap still enforced");
     }
 
     /// #359 regression — a BARE-named MCP tool is subject to curation. The
@@ -10279,6 +11579,7 @@ mod phase6_tests {
             max_tokens_explicit: false,
             max_turns: Some(10),
             total_usage: Default::default(),
+            run_usage: Default::default(),
             thinking: None,
             compat: wcore_config::compat::ProviderCompat::anthropic_defaults(),
             confirmer: Arc::new(Mutex::new(ToolConfirmer::new(true, allow_list.clone()))),
@@ -10306,6 +11607,7 @@ mod phase6_tests {
             mcp_curation: wcore_config::config::McpCurationPolicy::default(),
             mcp_curation_cache: None,
             mcp_cap_cache: None,
+            hydrated_tool_names: Vec::new(),
             file_cache: None,
             session_state: None,
             audit_log: None,
@@ -10372,6 +11674,7 @@ mod phase6_tests {
             smart_compact_last_turn: None,
             smart_compact_exhausted: false,
             smart_compact_force: false,
+            length_wedge_fingerprint: None,
         }
     }
 
@@ -10574,6 +11877,7 @@ mod compact_tests {
             max_tokens_explicit: false,
             max_turns: Some(10),
             total_usage: Default::default(),
+            run_usage: Default::default(),
             thinking: None,
             compat: wcore_config::compat::ProviderCompat::anthropic_defaults(),
             confirmer: Arc::new(Mutex::new(ToolConfirmer::new(true, vec![]))),
@@ -10601,6 +11905,7 @@ mod compact_tests {
             mcp_curation: wcore_config::config::McpCurationPolicy::default(),
             mcp_curation_cache: None,
             mcp_cap_cache: None,
+            hydrated_tool_names: Vec::new(),
             file_cache: None,
             session_state: None,
             audit_log: None,
@@ -10667,6 +11972,7 @@ mod compact_tests {
             smart_compact_last_turn: None,
             smart_compact_exhausted: false,
             smart_compact_force: false,
+            length_wedge_fingerprint: None,
         }
     }
 
@@ -11899,6 +13205,7 @@ mod plan_mode_tests {
             max_tokens_explicit: false,
             max_turns: Some(10),
             total_usage: Default::default(),
+            run_usage: Default::default(),
             thinking: None,
             compat: wcore_config::compat::ProviderCompat::anthropic_defaults(),
             confirmer: Arc::new(Mutex::new(ToolConfirmer::new(true, allow_list.clone()))),
@@ -11926,6 +13233,7 @@ mod plan_mode_tests {
             mcp_curation: wcore_config::config::McpCurationPolicy::default(),
             mcp_curation_cache: None,
             mcp_cap_cache: None,
+            hydrated_tool_names: Vec::new(),
             file_cache: None,
             session_state: None,
             audit_log: None,
@@ -11992,6 +13300,7 @@ mod plan_mode_tests {
             smart_compact_last_turn: None,
             smart_compact_exhausted: false,
             smart_compact_force: false,
+            length_wedge_fingerprint: None,
         }
     }
 
@@ -12327,6 +13636,7 @@ mod hook_integration_tests {
             max_tokens_explicit: false,
             max_turns: Some(10),
             total_usage: Default::default(),
+            run_usage: Default::default(),
             thinking: None,
             compat: wcore_config::compat::ProviderCompat::anthropic_defaults(),
             confirmer: Arc::new(Mutex::new(ToolConfirmer::new(true, vec![]))),
@@ -12354,6 +13664,7 @@ mod hook_integration_tests {
             mcp_curation: wcore_config::config::McpCurationPolicy::default(),
             mcp_curation_cache: None,
             mcp_cap_cache: None,
+            hydrated_tool_names: Vec::new(),
             file_cache: None,
             session_state: None,
             audit_log: None,
@@ -12420,6 +13731,7 @@ mod hook_integration_tests {
             smart_compact_last_turn: None,
             smart_compact_exhausted: false,
             smart_compact_force: false,
+            length_wedge_fingerprint: None,
         }
     }
 
@@ -12867,10 +14179,10 @@ mod hook_integration_tests {
     /// `assert_fact` even though the session messages carry extractable
     /// facts. `WAYLAND_AUTO_MEMORIZE=off` is the hermetic kill switch.
     #[tokio::test]
-    #[serial_test::serial(env)]
+    #[serial_test::serial]
     async fn w3_auto_memorize_skips_without_consent() {
         let prior = std::env::var(wcore_memory::auto_memorize::ENV_AUTO_MEMORIZE).ok();
-        // SAFETY: #[serial(env)] serializes all env writes in this group.
+        // SAFETY: #[serial_test::serial] serializes every env-mutating test in this binary.
         unsafe {
             std::env::set_var(wcore_memory::auto_memorize::ENV_AUTO_MEMORIZE, "off");
         }
@@ -12895,7 +14207,7 @@ mod hook_integration_tests {
             "no facts may be persisted when consent is off"
         );
 
-        // SAFETY: #[serial(env)] serializes all env writes in this group.
+        // SAFETY: #[serial_test::serial] serializes every env-mutating test in this binary.
         unsafe {
             match prior {
                 Some(v) => std::env::set_var(wcore_memory::auto_memorize::ENV_AUTO_MEMORIZE, v),
@@ -12910,10 +14222,10 @@ mod hook_integration_tests {
     /// persistence. The consent file is created and removed within the
     /// test (state restored on exit) under `#[serial]`.
     #[tokio::test]
-    #[serial_test::serial(env)]
+    #[serial_test::serial]
     async fn w3_auto_memorize_persists_with_consent() {
         let prior_env = std::env::var(wcore_memory::auto_memorize::ENV_AUTO_MEMORIZE).ok();
-        // SAFETY: #[serial(env)] serializes all env writes in this group.
+        // SAFETY: #[serial_test::serial] serializes every env-mutating test in this binary.
         unsafe {
             std::env::remove_var(wcore_memory::auto_memorize::ENV_AUTO_MEMORIZE);
         }
@@ -12950,7 +14262,7 @@ mod hook_integration_tests {
         if !consent_existed {
             let _ = std::fs::remove_file(&consent_path);
         }
-        // SAFETY: #[serial(env)] serializes all env writes in this group.
+        // SAFETY: #[serial_test::serial] serializes every env-mutating test in this binary.
         unsafe {
             if let Some(v) = prior_env {
                 std::env::set_var(wcore_memory::auto_memorize::ENV_AUTO_MEMORIZE, v);
@@ -12973,6 +14285,10 @@ pub struct AgentResult {
     /// can advertise the same value the underlying API returned.
     pub finish_reason: FinishReason,
     pub usage: TokenUsage,
+    /// CORE-2: per-run usage delta — the tokens consumed by THIS run only
+    /// (summing every provider round-trip of the run's tool loop), while
+    /// `usage` stays session-cumulative for back-compat.
+    pub usage_delta: TokenUsage,
     pub turns: usize,
     /// #279(a): active-window fill (0..=100) from ContextWindow::percent()
     /// on the post-swap effective model. None when the window is unknown.
@@ -13161,6 +14477,7 @@ mod approval_bridge_engine_tests {
             max_tokens_explicit: false,
             max_turns: Some(10),
             total_usage: Default::default(),
+            run_usage: Default::default(),
             thinking: None,
             compat: wcore_config::compat::ProviderCompat::anthropic_defaults(),
             confirmer: Arc::new(Mutex::new(ToolConfirmer::new(true, vec![]))),
@@ -13188,6 +14505,7 @@ mod approval_bridge_engine_tests {
             mcp_curation: wcore_config::config::McpCurationPolicy::default(),
             mcp_curation_cache: None,
             mcp_cap_cache: None,
+            hydrated_tool_names: Vec::new(),
             file_cache: None,
             session_state: None,
             audit_log: None,
@@ -13254,6 +14572,7 @@ mod approval_bridge_engine_tests {
             smart_compact_last_turn: None,
             smart_compact_exhausted: false,
             smart_compact_force: false,
+            length_wedge_fingerprint: None,
         }
     }
 
@@ -14163,6 +15482,7 @@ mod user_model_writeback_tests {
             max_tokens_explicit: false,
             max_turns: Some(10),
             total_usage: Default::default(),
+            run_usage: Default::default(),
             thinking: None,
             compat: wcore_config::compat::ProviderCompat::anthropic_defaults(),
             confirmer: Arc::new(Mutex::new(ToolConfirmer::new(true, vec![]))),
@@ -14190,6 +15510,7 @@ mod user_model_writeback_tests {
             mcp_curation: wcore_config::config::McpCurationPolicy::default(),
             mcp_curation_cache: None,
             mcp_cap_cache: None,
+            hydrated_tool_names: Vec::new(),
             file_cache: None,
             session_state: None,
             audit_log: None,
@@ -14249,6 +15570,7 @@ mod user_model_writeback_tests {
             smart_compact_last_turn: None,
             smart_compact_exhausted: false,
             smart_compact_force: false,
+            length_wedge_fingerprint: None,
         }
     }
 
@@ -15193,6 +16515,279 @@ mod audit_2026_05_22_tests {
         let mut engine = engine_with(provider);
         let result = engine.run("task", "m-1").await.expect("clean run");
         assert_eq!(result.stop_reason, StopReason::EndTurn);
+    }
+
+    // --- CORE-2: per-run usage delta --------------------------------------
+
+    fn done_endturn_with(usage: TokenUsage) -> LlmEvent {
+        LlmEvent::Done {
+            stop_reason: StopReason::EndTurn,
+            finish_reason: FinishReason::Stop,
+            usage,
+        }
+    }
+
+    fn usage(input: u64, output: u64) -> TokenUsage {
+        TokenUsage {
+            input_tokens: input,
+            output_tokens: output,
+            cache_creation_tokens: 0,
+            cache_read_tokens: 0,
+        }
+    }
+
+    #[tokio::test]
+    async fn usage_delta_resets_per_run_while_usage_accumulates() {
+        // CORE-2 (a) — two consecutive runs: each result's usage_delta
+        // carries THAT run's provider usage only, while the cumulative
+        // `usage` keeps growing across runs (back-compat).
+        let provider = Arc::new(ScriptedProvider::new(vec![
+            vec![
+                LlmEvent::TextDelta("one".into()),
+                done_endturn_with(usage(100, 10)),
+            ],
+            vec![
+                LlmEvent::TextDelta("two".into()),
+                done_endturn_with(usage(200, 20)),
+            ],
+        ]));
+        let mut engine = engine_with(provider);
+
+        let first = engine.run("first", "m-1").await.expect("clean run");
+        assert_eq!(first.usage_delta.input_tokens, 100);
+        assert_eq!(first.usage_delta.output_tokens, 10);
+        assert_eq!(first.usage.input_tokens, 100);
+        assert_eq!(first.usage.output_tokens, 10);
+
+        let second = engine.run("second", "m-2").await.expect("clean run");
+        assert_eq!(
+            second.usage_delta.input_tokens, 200,
+            "the second run's delta must cover the second run ONLY"
+        );
+        assert_eq!(second.usage_delta.output_tokens, 20);
+        assert_eq!(
+            second.usage.input_tokens, 300,
+            "cumulative usage keeps summing across runs (back-compat)"
+        );
+        assert_eq!(second.usage.output_tokens, 30);
+    }
+
+    #[tokio::test]
+    async fn usage_delta_sums_all_round_trips_of_one_run() {
+        // CORE-2 (b) — a run that spans multiple provider round-trips in
+        // the tool loop (a ToolUse turn + the final EndTurn turn) folds
+        // ALL of them into one delta.
+        let provider = Arc::new(ScriptedProvider::new(vec![
+            vec![
+                LlmEvent::ToolUse {
+                    id: "t1".into(),
+                    name: "Nope".into(),
+                    input: json!({}),
+                    extra: None,
+                },
+                LlmEvent::Done {
+                    stop_reason: StopReason::ToolUse,
+                    finish_reason: FinishReason::Stop,
+                    usage: TokenUsage {
+                        input_tokens: 100,
+                        output_tokens: 10,
+                        cache_creation_tokens: 7,
+                        cache_read_tokens: 3,
+                    },
+                },
+            ],
+            vec![
+                LlmEvent::TextDelta("done".into()),
+                done_endturn_with(usage(40, 4)),
+            ],
+        ]));
+        let counter = provider.call_counter();
+        let mut engine = engine_with(provider);
+        let result = engine.run("task", "m-1").await.expect("clean run");
+        assert_eq!(
+            counter.load(std::sync::atomic::Ordering::SeqCst),
+            2,
+            "the scripted tool turn must drive a second provider round-trip"
+        );
+        assert_eq!(result.usage_delta.input_tokens, 140);
+        assert_eq!(result.usage_delta.output_tokens, 14);
+        assert_eq!(result.usage_delta.cache_creation_tokens, 7);
+        assert_eq!(result.usage_delta.cache_read_tokens, 3);
+        // On a fresh engine the first run's cumulative equals its delta.
+        assert_eq!(result.usage.input_tokens, 140);
+    }
+
+    /// A tool that fires the engine's cancel token when executed, so the
+    /// run dies BETWEEN provider round-trips — after the first round-trip's
+    /// usage was accumulated, before the second dispatch.
+    struct CancellingTool {
+        token: tokio_util::sync::CancellationToken,
+    }
+    #[async_trait]
+    impl wcore_tools::Tool for CancellingTool {
+        fn name(&self) -> &str {
+            "CancelNext"
+        }
+        fn description(&self) -> &str {
+            "cancels the run"
+        }
+        fn input_schema(&self) -> serde_json::Value {
+            json!({"type": "object"})
+        }
+        fn is_concurrency_safe(&self, _: &serde_json::Value) -> bool {
+            false
+        }
+        async fn execute(&self, _: serde_json::Value) -> wcore_types::tool::ToolResult {
+            self.token.cancel();
+            wcore_types::tool::ToolResult {
+                content: "cancelled".into(),
+                is_error: false,
+            }
+        }
+        fn category(&self) -> wcore_protocol::events::ToolCategory {
+            wcore_protocol::events::ToolCategory::Info
+        }
+    }
+
+    #[tokio::test]
+    async fn cancelled_run_snapshot_carries_delta_for_terminal_stream_end() {
+        // CORE-2 audit fix — a run that consumed one provider round-trip and
+        // then died (cancellation between turns) returns Err with no
+        // AgentResult, but total_usage/run_usage already grew. The engine's
+        // usage_snapshot() must expose that delta so the host's error-path
+        // terminal stream_end reports it instead of zeros.
+        let token = tokio_util::sync::CancellationToken::new();
+        let mut registry = ToolRegistry::new();
+        registry.register(Box::new(CancellingTool {
+            token: token.clone(),
+        }));
+        let provider = Arc::new(ScriptedProvider::new(vec![
+            vec![
+                LlmEvent::ToolUse {
+                    id: "t1".into(),
+                    name: "CancelNext".into(),
+                    input: json!({}),
+                    extra: None,
+                },
+                LlmEvent::Done {
+                    stop_reason: StopReason::ToolUse,
+                    finish_reason: FinishReason::Stop,
+                    usage: TokenUsage {
+                        input_tokens: 100,
+                        output_tokens: 10,
+                        cache_creation_tokens: 7,
+                        cache_read_tokens: 3,
+                    },
+                },
+            ],
+            // Never reached — the cancel fires before this dispatch.
+            vec![LlmEvent::TextDelta("never".into()), done_endturn()],
+        ]));
+        let counter = provider.call_counter();
+        let mut engine = super::AgentEngine::new_with_provider(
+            provider,
+            wcore_config::config::Config::default(),
+            registry,
+            Arc::new(NullOutput),
+        );
+        engine.max_turns = Some(20);
+        engine.set_cancel_token(token);
+        // Auto-approve so the tool executes without a confirmer prompt.
+        engine.confirmer = Arc::new(Mutex::new(ToolConfirmer::new(true, vec![])));
+
+        let result = engine.run("task", "m-1").await;
+        assert!(
+            matches!(result, Err(super::AgentError::UserAborted)),
+            "the cancel between round-trips must abort the run, got {result:?}"
+        );
+        assert_eq!(
+            counter.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "the second round-trip must never be dispatched"
+        );
+        let (total, delta) = engine.usage_snapshot();
+        assert_eq!(
+            delta.input_tokens, 100,
+            "delta carries the dead run's usage"
+        );
+        assert_eq!(delta.output_tokens, 10);
+        assert_eq!(delta.cache_creation_tokens, 7);
+        assert_eq!(delta.cache_read_tokens, 3);
+        assert_eq!(
+            total.input_tokens, 100,
+            "cumulative grew with the same usage"
+        );
+
+        // And the terminal stream_end built from that snapshot (the CLI's
+        // error-path emitter) carries the delta on the wire event.
+        let sink = crate::test_utils::TestSink::new();
+        let handle = sink.handle();
+        OutputSink::emit_stream_end_full(
+            &sink,
+            "m-1",
+            0,
+            total.input_tokens,
+            total.output_tokens,
+            total.cache_creation_tokens,
+            total.cache_read_tokens,
+            FinishReason::Error,
+            None,
+            None,
+            Some(&delta),
+        );
+        let events = handle.snapshot();
+        assert_eq!(events.len(), 1, "exactly one stream_end: {events:?}");
+        assert_eq!(events[0]["type"], "stream_end");
+        assert_eq!(events[0]["usage_delta"]["input_tokens"], 100);
+        assert_eq!(events[0]["usage_delta"]["output_tokens"], 10);
+        assert_eq!(events[0]["usage_delta"]["cache_write_tokens"], 7);
+        assert_eq!(events[0]["usage_delta"]["cache_read_tokens"], 3);
+        assert_eq!(events[0]["usage"]["input_tokens"], 100);
+    }
+
+    #[tokio::test]
+    async fn resumed_session_carries_cumulative_usage_but_fresh_delta() {
+        // CORE-2 (c) — an engine resumed from a persisted session inherits
+        // the cumulative total_usage, but the per-run delta starts at zero:
+        // the first post-resume run reports ONLY its own tokens as delta.
+        let session = crate::session::Session {
+            schema_version: 1,
+            id: "sess-core2".into(),
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+            provider: "test".into(),
+            model: "test-model".into(),
+            cwd: String::new(),
+            total_usage: usage(1_000, 500),
+            messages: Vec::new(),
+            extra: serde_json::Map::new(),
+        };
+        let provider = Arc::new(ScriptedProvider::new(vec![vec![
+            LlmEvent::TextDelta("resumed".into()),
+            done_endturn_with(usage(50, 5)),
+        ]]));
+        let mut config = wcore_config::config::Config::default();
+        // Keep the test hermetic: no on-disk session manager.
+        config.session.enabled = false;
+        let mut engine = super::AgentEngine::resume_with_provider(
+            provider,
+            config,
+            ToolRegistry::new(),
+            Arc::new(NullOutput),
+            session,
+        );
+        engine.max_turns = Some(20);
+        let result = engine.run("hello again", "m-1").await.expect("clean run");
+        assert_eq!(
+            result.usage.input_tokens, 1_050,
+            "cumulative usage must carry the persisted total across resume"
+        );
+        assert_eq!(result.usage.output_tokens, 505);
+        assert_eq!(
+            result.usage_delta.input_tokens, 50,
+            "the post-resume delta must be THIS run only, not the carried total"
+        );
+        assert_eq!(result.usage_delta.output_tokens, 5);
     }
 
     // --- B1 / B8: tool-dispatch timeout ----------------------------------
@@ -16601,6 +18196,545 @@ mod overflow_retry_tests {
             calls.load(Ordering::SeqCst),
             2,
             "the overflow-retry is bounded to ONE: one initial + one retry, then terminal"
+        );
+    }
+}
+
+// ===========================================================================
+// LENGTH-WEDGE GATE + spec v1 Task 5 (clean retry / progress gate) tests.
+//
+// Field failure this protects against: a conversation at the model's window
+// ceiling ends `finish_reason=length`, the identical request is retried 3
+// times at identical token counts (<0.5s each), and the conversation is
+// permanently wedged. And the desktop stage6 thrash: a failed tool round's
+// full contaminated body re-sent on every stream retry (4 × ~350k tokens).
+// ===========================================================================
+#[cfg(test)]
+mod retry_wedge_protection_tests {
+    use std::sync::Arc;
+    use std::sync::Mutex;
+
+    use async_trait::async_trait;
+    use wcore_providers::{LlmProvider, ProviderError};
+    use wcore_tools::registry::ToolRegistry;
+    use wcore_types::llm::{LlmEvent, LlmRequest};
+    use wcore_types::message::{ContentBlock, FinishReason, Message, Role, StopReason, TokenUsage};
+
+    use crate::output::OutputSink;
+
+    struct NullOutput;
+    impl OutputSink for NullOutput {
+        fn emit_text_delta(&self, _: &str, _: &str) {}
+        fn emit_thinking(&self, _: &str, _: &str) {}
+        fn emit_tool_call(&self, _: &str, _: &str) {}
+        fn emit_tool_result(&self, _: &str, _: bool, _: &str) {}
+        fn emit_stream_start(&self, _: &str) {}
+        fn emit_stream_end(
+            &self,
+            _: &str,
+            _: usize,
+            _: u64,
+            _: u64,
+            _: u64,
+            _: u64,
+            _: FinishReason,
+        ) {
+        }
+        fn emit_error(&self, _: &str, _: bool) {}
+        fn emit_info(&self, _: &str) {}
+    }
+
+    /// A scripted provider that RECORDS every `LlmRequest` it is asked to
+    /// stream, so tests can assert on the exact outbound context of each
+    /// attempt (the wedge fingerprint / retry-stub assertions).
+    struct RecordingProvider {
+        scripts: Mutex<std::collections::VecDeque<Vec<LlmEvent>>>,
+        requests: Arc<Mutex<Vec<LlmRequest>>>,
+    }
+
+    impl RecordingProvider {
+        fn new(scripts: Vec<Vec<LlmEvent>>) -> Self {
+            Self {
+                scripts: Mutex::new(scripts.into_iter().collect()),
+                requests: Arc::new(Mutex::new(Vec::new())),
+            }
+        }
+        fn recorded(&self) -> Arc<Mutex<Vec<LlmRequest>>> {
+            Arc::clone(&self.requests)
+        }
+    }
+
+    #[async_trait]
+    impl LlmProvider for RecordingProvider {
+        async fn stream(
+            &self,
+            request: &LlmRequest,
+        ) -> Result<tokio::sync::mpsc::Receiver<LlmEvent>, ProviderError> {
+            self.requests.lock().unwrap().push(request.clone());
+            let script = self.scripts.lock().unwrap().pop_front().unwrap_or_default();
+            let (tx, rx) = tokio::sync::mpsc::channel(16);
+            tokio::spawn(async move {
+                for ev in script {
+                    let _ = tx.send(ev).await;
+                }
+            });
+            Ok(rx)
+        }
+    }
+
+    fn done(stop: StopReason, finish: FinishReason, input_tokens: u64) -> LlmEvent {
+        LlmEvent::Done {
+            stop_reason: stop,
+            finish_reason: finish,
+            usage: TokenUsage {
+                input_tokens,
+                ..Default::default()
+            },
+        }
+    }
+
+    /// An engine whose resolved input ceiling is small enough for a scripted
+    /// provider-billed `input_tokens` to sit at/over it, while the tiny local
+    /// history estimate stays well below (that mismatch is exactly how the
+    /// field wedge slipped past the #255 pre-flight guard).
+    fn wedge_engine(provider: Arc<dyn LlmProvider>) -> super::AgentEngine {
+        let mut e = super::AgentEngine::new_with_provider(
+            provider,
+            wcore_config::config::Config::default(),
+            ToolRegistry::new(),
+            Arc::new(NullOutput),
+        );
+        e.max_turns = Some(20);
+        // Unknown test model → the window falls back to compact_config.
+        // Ceiling = 50_000 − 100 − 50 = 49_850.
+        e.compact_config.context_window = 50_000;
+        e.compact_config.output_reserve = 100;
+        e.compact_config.emergency_buffer = 50;
+        e
+    }
+
+    // --- A: length-wedge gate ---------------------------------------------
+
+    #[tokio::test]
+    async fn length_at_ceiling_compacts_then_retries_with_changed_context() {
+        // Turn ends Length with a provider-billed input over the ceiling →
+        // the gate forces a compaction (call 2 = the summarizer), then
+        // retries with the CHANGED context (call 3) — never an identical
+        // re-send.
+        let provider = Arc::new(RecordingProvider::new(vec![
+            // call 1 — the wedged turn: instant Length at the ceiling.
+            vec![done(StopReason::EndTurn, FinishReason::Length, 1_000_000)],
+            // call 2 — the forced autocompact summarization call.
+            vec![
+                LlmEvent::TextDelta("<summary>compacted history</summary>".into()),
+                done(StopReason::EndTurn, FinishReason::Stop, 0),
+            ],
+            // call 3 — the retry with the compacted context succeeds.
+            vec![
+                LlmEvent::TextDelta("recovered".into()),
+                done(StopReason::EndTurn, FinishReason::Stop, 100),
+            ],
+        ]));
+        let requests = provider.recorded();
+        let mut engine = wedge_engine(provider);
+        let result = engine
+            .run("task", "m-wedge-1")
+            .await
+            .expect("a shrunk retry after forced compaction must recover");
+        assert_eq!(result.text, "recovered");
+
+        let reqs = requests.lock().unwrap();
+        assert_eq!(reqs.len(), 3, "wedged turn + compaction call + one retry");
+        // The retried context must differ from the wedged one — assert via
+        // the same request-wire fingerprint the gate uses.
+        let fp_first = super::request_wire_fingerprint(
+            &reqs[0].model,
+            &reqs[0].system,
+            &reqs[0].messages,
+            &reqs[0].tools,
+        );
+        let fp_retry = super::request_wire_fingerprint(
+            &reqs[2].model,
+            &reqs[2].system,
+            &reqs[2].messages,
+            &reqs[2].tools,
+        );
+        assert_ne!(
+            fp_first, fp_retry,
+            "the retry must never re-send the identical over-budget context"
+        );
+    }
+
+    #[tokio::test]
+    async fn length_at_ceiling_with_failed_compaction_ends_clean_without_resend() {
+        // Compaction is attempted but fails (the summarizer call errors) →
+        // the outbound context is unchanged, so the gate must END the turn
+        // with a clean Length verdict — NOT re-send the identical request.
+        // Note the local estimate stays under the ceiling here (only the
+        // provider-billed count was over), so without the fingerprint check
+        // the engine would have happily re-sent the identical request.
+        let provider = Arc::new(RecordingProvider::new(vec![
+            // call 1 — the wedged turn.
+            vec![done(StopReason::EndTurn, FinishReason::Length, 1_000_000)],
+            // call 2 — the forced compaction call fails.
+            vec![LlmEvent::Error("summarizer unavailable".into())],
+        ]));
+        let requests = provider.recorded();
+        let mut engine = wedge_engine(provider);
+        let result = engine
+            .run("task", "m-wedge-2")
+            .await
+            .expect("a wedge with failed compaction is a CLEAN terminal verdict, not an Err");
+        assert_eq!(result.stop_reason, StopReason::MaxTurns);
+        assert_eq!(result.finish_reason, FinishReason::Length);
+        assert_eq!(
+            requests.lock().unwrap().len(),
+            2,
+            "wedged turn + compaction attempt only — the identical over-budget \
+             request must NEVER be re-sent"
+        );
+    }
+
+    #[tokio::test]
+    async fn identical_wedged_context_is_refused_before_dispatch() {
+        // The dispatch guard: once a context fingerprint is recorded as
+        // wedged, a run that would send the byte-identical context is
+        // refused BEFORE the provider is called (models a host that retries
+        // the identical wedged conversation, e.g. after a resume). A control
+        // run on an identically-configured engine captures the exact
+        // outbound bytes `run("task")` produces (per-turn injections
+        // included); the engine under test is seeded with that fingerprint.
+        let control = Arc::new(RecordingProvider::new(vec![vec![
+            LlmEvent::TextDelta("control".into()),
+            done(StopReason::EndTurn, FinishReason::Stop, 0),
+        ]]));
+        let control_requests = control.recorded();
+        let mut control_engine = wedge_engine(control);
+        control_engine
+            .run("task", "m-wedge-3a")
+            .await
+            .expect("control run completes");
+        let wedged_fingerprint = {
+            let reqs = control_requests.lock().unwrap();
+            assert_eq!(reqs.len(), 1);
+            super::request_wire_fingerprint(
+                &reqs[0].model,
+                &reqs[0].system,
+                &reqs[0].messages,
+                &reqs[0].tools,
+            )
+        };
+
+        let provider = Arc::new(RecordingProvider::new(vec![
+            // Would-be call — must never be consumed.
+            vec![
+                LlmEvent::TextDelta("must not run".into()),
+                done(StopReason::EndTurn, FinishReason::Stop, 0),
+            ],
+        ]));
+        let requests = provider.recorded();
+        let mut engine = wedge_engine(provider);
+        engine.length_wedge_fingerprint = Some(wedged_fingerprint);
+        let result = engine
+            .run("task", "m-wedge-3b")
+            .await
+            .expect("refusing a wedged re-send is a clean terminal verdict");
+        assert_eq!(result.stop_reason, StopReason::MaxTurns);
+        assert_eq!(result.finish_reason, FinishReason::Length);
+        assert_eq!(
+            requests.lock().unwrap().len(),
+            0,
+            "a byte-identical wedged context must be refused BEFORE dispatch"
+        );
+    }
+
+    #[tokio::test]
+    async fn changed_system_prompt_with_same_messages_is_not_refused() {
+        // Audit finding on the u64 role+content fingerprint: system and
+        // tools[] are provider-visible bytes too. The SAME messages under a
+        // DIFFERENT system prompt are a different wire request — the wedge
+        // guard must let it dispatch, not falsely refuse it as unchanged.
+        let control = Arc::new(RecordingProvider::new(vec![vec![
+            LlmEvent::TextDelta("control".into()),
+            done(StopReason::EndTurn, FinishReason::Stop, 0),
+        ]]));
+        let control_requests = control.recorded();
+        let mut control_engine = wedge_engine(control);
+        control_engine
+            .run("task", "m-sys-a")
+            .await
+            .expect("control run completes");
+        let wedged_fingerprint = {
+            let reqs = control_requests.lock().unwrap();
+            assert_eq!(reqs.len(), 1);
+            super::request_wire_fingerprint(
+                &reqs[0].model,
+                &reqs[0].system,
+                &reqs[0].messages,
+                &reqs[0].tools,
+            )
+        };
+
+        let provider = Arc::new(RecordingProvider::new(vec![vec![
+            LlmEvent::TextDelta("dispatched".into()),
+            done(StopReason::EndTurn, FinishReason::Stop, 0),
+        ]]));
+        let requests = provider.recorded();
+        let mut engine = wedge_engine(provider);
+        // Identical messages ("task" on empty history), different system.
+        engine.system_prompt = format!("{}\n\nCHANGED SURFACE", engine.system_prompt);
+        engine.length_wedge_fingerprint = Some(wedged_fingerprint);
+        let result = engine
+            .run("task", "m-sys-b")
+            .await
+            .expect("a changed-system request must dispatch normally");
+        assert_eq!(result.text, "dispatched");
+        assert_eq!(result.stop_reason, StopReason::EndTurn);
+        assert_eq!(
+            requests.lock().unwrap().len(),
+            1,
+            "same messages under a changed system prompt are a DIFFERENT wire \
+             request and must not be refused as an unchanged wedge"
+        );
+    }
+
+    // --- B: clean-retry stub + progress gate (spec v1 Task 5) --------------
+
+    /// History whose most recent tool round FAILED with a huge error body.
+    fn failed_tool_round_history(huge_error: &str) -> Vec<Message> {
+        vec![
+            Message::now(
+                Role::User,
+                vec![ContentBlock::Text {
+                    text: "do the thing".into(),
+                }],
+            ),
+            Message::now(
+                Role::Assistant,
+                vec![ContentBlock::ToolUse {
+                    id: "t1".into(),
+                    name: "BigTool".into(),
+                    input: serde_json::json!({}),
+                    extra: None,
+                }],
+            ),
+            Message::now(
+                Role::User,
+                vec![ContentBlock::ToolResult {
+                    tool_use_id: "t1".into(),
+                    content: huge_error.into(),
+                    is_error: true,
+                }],
+            ),
+        ]
+    }
+
+    #[tokio::test]
+    async fn failing_stream_with_failed_tool_round_stubs_body_and_stops_at_progress_gate() {
+        let huge_error = format!("CONTAMINATED-MARKER {}", "x".repeat(50_000));
+        let provider = Arc::new(RecordingProvider::new(vec![
+            // attempt 0 fails with no output …
+            vec![LlmEvent::Error("boom".into())],
+            // … retry 1 (stubbed context) also fails with no output —
+            // the progress gate must stop here, before a third attempt.
+            vec![LlmEvent::Error("boom again".into())],
+            // a third script would be consumed only if the gate failed.
+            vec![
+                LlmEvent::TextDelta("must not run".into()),
+                done(StopReason::EndTurn, FinishReason::Stop, 0),
+            ],
+        ]));
+        let requests = provider.recorded();
+        let mut engine = wedge_engine(provider);
+        engine.messages = failed_tool_round_history(&huge_error);
+        let result = engine.run("try again", "m-stub-1").await;
+
+        let reqs = requests.lock().unwrap();
+        assert_eq!(
+            reqs.len(),
+            2,
+            "the progress gate must stop after 2 consecutive no-output \
+             failures on a failed tool round — not burn a third full-context send"
+        );
+        // Attempt 0 carried the full contaminated body …
+        let first = serde_json::to_string(&reqs[0].messages).unwrap();
+        assert!(
+            first.contains("CONTAMINATED-MARKER"),
+            "the initial attempt sends the real tool result"
+        );
+        // … the retry carried the compact stub instead.
+        let retried = serde_json::to_string(&reqs[1].messages).unwrap();
+        assert!(
+            !retried.contains(&huge_error),
+            "the retry must NOT re-send the full contaminated body"
+        );
+        assert!(
+            retried.contains("[tool BigTool failed:"),
+            "the retry must carry the compact error stub, got: {}",
+            &retried[..retried.len().min(2_000)]
+        );
+        // The stop is a clear error naming the failing tool.
+        match result {
+            Err(super::AgentError::ApiError(msg)) => {
+                assert!(
+                    msg.contains("BigTool"),
+                    "the progress-gate error must name the failing tool: {msg}"
+                );
+            }
+            other => panic!("expected the progress-gate ApiError, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn transient_stream_failure_with_failed_tool_round_still_recovers() {
+        // Regression guard (spec gate 5.3): fail once, succeed on the (stubbed)
+        // retry — the stub and gate must not kill retry resilience.
+        let huge_error = format!("CONTAMINATED-MARKER {}", "x".repeat(50_000));
+        let provider = Arc::new(RecordingProvider::new(vec![
+            vec![LlmEvent::Error("transient".into())],
+            vec![
+                LlmEvent::TextDelta("recovered".into()),
+                done(StopReason::EndTurn, FinishReason::Stop, 100),
+            ],
+        ]));
+        let requests = provider.recorded();
+        let mut engine = wedge_engine(provider);
+        engine.messages = failed_tool_round_history(&huge_error);
+        let result = engine
+            .run("try again", "m-stub-2")
+            .await
+            .expect("a single transient failure must still recover");
+        assert_eq!(result.text, "recovered");
+        assert_eq!(requests.lock().unwrap().len(), 2, "1 initial + 1 retry");
+    }
+
+    #[test]
+    fn stub_helper_rewrites_only_failed_results_in_last_round() {
+        let mut messages = vec![
+            Message::now(
+                Role::Assistant,
+                vec![
+                    ContentBlock::ToolUse {
+                        id: "ok1".into(),
+                        name: "GoodTool".into(),
+                        input: serde_json::json!({}),
+                        extra: None,
+                    },
+                    ContentBlock::ToolUse {
+                        id: "bad1".into(),
+                        name: "BadTool".into(),
+                        input: serde_json::json!({}),
+                        extra: None,
+                    },
+                ],
+            ),
+            Message::now(
+                Role::User,
+                vec![
+                    ContentBlock::ToolResult {
+                        tool_use_id: "ok1".into(),
+                        content: "fine output".into(),
+                        is_error: false,
+                    },
+                    ContentBlock::ToolResult {
+                        tool_use_id: "bad1".into(),
+                        content: "line one of a huge error\nline two".into(),
+                        is_error: true,
+                    },
+                ],
+            ),
+        ];
+        let failing = super::stub_failed_tool_results_for_retry(&mut messages);
+        assert_eq!(failing, vec!["BadTool".to_string()]);
+        match &messages[1].content[0] {
+            ContentBlock::ToolResult { content, .. } => {
+                assert_eq!(content, "fine output", "successful results untouched")
+            }
+            _ => unreachable!(),
+        }
+        match &messages[1].content[1] {
+            ContentBlock::ToolResult { content, .. } => {
+                assert_eq!(
+                    content,
+                    "[tool BadTool failed: line one of a huge error; retrying]"
+                );
+            }
+            _ => unreachable!(),
+        }
+        // Idempotent + still reports the failing tool on a second pass
+        // (the progress gate needs the name every retry).
+        let failing_again = super::stub_failed_tool_results_for_retry(&mut messages);
+        assert_eq!(failing_again, vec!["BadTool".to_string()]);
+        match &messages[1].content[1] {
+            ContentBlock::ToolResult { content, .. } => {
+                assert_eq!(
+                    content, "[tool BadTool failed: line one of a huge error; retrying]",
+                    "a second pass must not re-stub the stub"
+                );
+            }
+            _ => unreachable!(),
+        }
+    }
+
+    #[test]
+    fn wire_fingerprint_covers_every_provider_visible_surface() {
+        let tools = vec![wcore_types::tool::ToolDef {
+            name: "Read".into(),
+            description: "read a file".into(),
+            input_schema: serde_json::json!({"type": "object"}),
+            deferred: false,
+            server: None,
+        }];
+        let a = vec![Message::now(
+            Role::User,
+            vec![ContentBlock::Text { text: "hi".into() }],
+        )];
+        let fp = |model: &str, system: &str, msgs: &[Message], tools: &[_]| {
+            super::request_wire_fingerprint(model, system, msgs, tools)
+        };
+        // Timestamps are NOT sent to the provider — must not change identity.
+        let mut b = a.clone();
+        b[0].timestamp = Some(chrono::Utc::now() + chrono::Duration::hours(1));
+        assert_eq!(
+            fp("m", "sys", &a, &tools),
+            fp("m", "sys", &b, &tools),
+            "timestamps are not sent to the provider and must not change the fingerprint"
+        );
+        // Every provider-visible surface IS part of the identity.
+        let c = vec![Message::now(
+            Role::User,
+            vec![ContentBlock::Text {
+                text: "different".into(),
+            }],
+        )];
+        assert_ne!(
+            fp("m", "sys", &a, &tools),
+            fp("m", "sys", &c, &tools),
+            "message content changes the identity"
+        );
+        assert_ne!(
+            fp("model-a", "sys", &a, &tools),
+            fp("model-b", "sys", &a, &tools),
+            "the dispatched model is part of the request identity"
+        );
+        assert_ne!(
+            fp("m", "system A", &a, &tools),
+            fp("m", "system B", &a, &tools),
+            "the system prompt is provider-visible and part of the identity"
+        );
+        let mut fewer_tools = tools.clone();
+        fewer_tools.clear();
+        assert_ne!(
+            fp("m", "sys", &a, &tools),
+            fp("m", "sys", &a, &fewer_tools),
+            "the tool surface is provider-visible and part of the identity"
+        );
+        let mut deferred_tools = tools.clone();
+        deferred_tools[0].deferred = true;
+        assert_ne!(
+            fp("m", "sys", &a, &tools),
+            fp("m", "sys", &a, &deferred_tools),
+            "deferral changes the schema actually sent, so it changes the identity"
         );
     }
 }
