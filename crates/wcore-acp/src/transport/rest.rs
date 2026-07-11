@@ -13,6 +13,8 @@
 //!   DELETE /v1/sessions/{id}         delete_session
 //!   POST   /v1/sessions/{id}/prompt  send_message  (SSE: text/event-stream)
 //!   GET    /v1/tools                 list_tools
+//!   GET    /v1/agents                list_agents  (persona-profiles roster)
+//!   GET    /v1/initialize            initialize   (capability handshake, R2)
 //!   GET    /v1/health                liveness
 //!   GET    /openapi.json             the OpenAPI document (unauthenticated)
 //!   GET    /doc                      embedded spec viewer, HTML (unauthenticated)
@@ -40,8 +42,9 @@ use utoipa::OpenApi;
 use crate::auth::Verifier;
 use crate::error::AcpError;
 use crate::protocol::{
-    ErrorCode, JsonRpcError, MessageEvent, MessageSendRequest, SessionCreateRequest,
-    SessionCreateResponse, SessionGetResponse, SessionListResponse, ToolDefinition,
+    AgentsListResponse, ErrorCode, InitializeResponse, JsonRpcError, MessageEvent,
+    MessageSendRequest, SessionCreateRequest, SessionCreateResponse, SessionGetResponse,
+    SessionListResponse, ToolDefinition,
 };
 // Reuse the engine bridge and the HTTP error→status mapping from the ACP
 // transport — no second engine binding, no duplicated `status_for`/`code_for`.
@@ -196,6 +199,11 @@ impl<H: HttpHandler> RestTransport<H> {
                 post(resolve_approval::<H>),
             )
             .route("/v1/tools", get(list_tools::<H>))
+            // persona-profiles Phase A: agent roster + capability handshake.
+            // Both default-safe (empty roster / advertised capability only) and
+            // gated by the same auth middleware as the rest of `/v1/*`.
+            .route("/v1/agents", get(list_agents::<H>))
+            .route("/v1/initialize", get(initialize::<H>))
             .route("/v1/health", get(health))
             .with_state(self.handler.clone());
 
@@ -232,6 +240,8 @@ impl<H: HttpHandler> RestTransport<H> {
         prompt,
         resolve_approval,
         list_tools,
+        list_agents,
+        initialize,
         health,
     ),
     components(schemas(
@@ -249,6 +259,10 @@ impl<H: HttpHandler> RestTransport<H> {
         ApprovalResolveResponse,
         ApprovalScopeDto,
         JsonRpcError,
+        AgentsListResponse,
+        InitializeResponse,
+        crate::protocol::AgentInfo,
+        crate::protocol::ServerCapabilities,
         crate::protocol::SessionMetadata,
         crate::protocol::ToolCall,
         crate::protocol::ToolResult,
@@ -527,6 +541,31 @@ async fn list_tools<H: HttpHandler>(
 }
 
 #[utoipa::path(
+    get, path = "/v1/agents", tag = "sessions",
+    responses((status = 200, description = "Authorized persona-agent roster", body = AgentsListResponse))
+)]
+async fn list_agents<H: HttpHandler>(
+    State(h): State<Arc<H>>,
+) -> Result<Json<AgentsListResponse>, AcpHttpError> {
+    // persona-profiles Phase A: `[]` by default (no roster installed); when
+    // installed, the roster returns only AUTHORIZED agents (R3), each exposing
+    // just id/label/description (R4).
+    Ok(Json(h.list_agents().await?))
+}
+
+#[utoipa::path(
+    get, path = "/v1/initialize", tag = "sessions",
+    responses((status = 200, description = "Server capability handshake", body = InitializeResponse))
+)]
+async fn initialize<H: HttpHandler>(
+    State(h): State<Arc<H>>,
+) -> Result<Json<InitializeResponse>, AcpHttpError> {
+    // persona-profiles Phase A (R2): advertise `agent_selection` so clients can
+    // gate the optional `agent` selector on a version-skew-safe handshake.
+    Ok(Json(h.initialize().await?))
+}
+
+#[utoipa::path(
     get, path = "/v1/health", tag = "sessions",
     responses((status = 200, description = "Liveness", body = HealthResponse))
 )]
@@ -761,6 +800,49 @@ mod tests {
         assert_eq!(parsed["tools"], serde_json::json!([]));
     }
 
+    // persona-profiles Phase A: `/v1/agents` defaults to `[]` (no roster
+    // installed) — backward-compatible, mirrors `get_tools_returns_empty_default`.
+    #[tokio::test]
+    async fn get_agents_returns_empty_default() {
+        let app = router(false);
+        let resp = app
+            .oneshot(
+                HttpRequest::builder()
+                    .uri("/v1/agents")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = to_bytes(resp.into_body(), 4096).await.unwrap();
+        let parsed: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(parsed["agents"], serde_json::json!([]));
+    }
+
+    // persona-profiles Phase A (R2): `/v1/initialize` returns the capability
+    // handshake with a protocol version + capability set.
+    #[tokio::test]
+    async fn get_initialize_returns_capabilities() {
+        let app = router(false);
+        let resp = app
+            .oneshot(
+                HttpRequest::builder()
+                    .uri("/v1/initialize")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = to_bytes(resp.into_body(), 4096).await.unwrap();
+        let parsed: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert!(parsed["protocol_version"].is_string());
+        // The `agent_selection` capability key is present (bare MockHandler
+        // inherits the conservative default `false`).
+        assert!(parsed["capabilities"]["agent_selection"].is_boolean());
+    }
+
     // ── T-C5 ───────────────────────────────────────────────────────────
     #[tokio::test]
     async fn get_health_ok() {
@@ -867,6 +949,8 @@ mod tests {
             "/v1/sessions/{id}/prompt",
             "/v1/sessions/{id}/approvals/{call_id}/resolve",
             "/v1/tools",
+            "/v1/agents",
+            "/v1/initialize",
             "/v1/health",
         ] {
             assert!(doc["paths"][p].is_object(), "missing path {p}");
