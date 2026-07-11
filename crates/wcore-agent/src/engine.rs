@@ -4165,8 +4165,28 @@ impl AgentEngine {
         turn: usize,
         finish_reason: FinishReason,
     ) -> Result<AgentResult, AgentError> {
+        self.finish_run_terminated_inner(user_input, turn, finish_reason, true)
+            .await
+    }
+
+    /// #636: like [`finish_run_terminated`] but `persist_session` gates whether
+    /// the history is written to disk. The context-ceiling abort passes `false`
+    /// when graceful degradation could NOT bring the persisted history under the
+    /// ceiling — writing that over-ceiling session would trap a resume into the
+    /// SAME unrecoverable context (the customer "can't recover in another chat"
+    /// report). Skipping the save leaves the last recoverable on-disk state
+    /// intact. Every other terminal path passes `true` (unchanged behavior).
+    async fn finish_run_terminated_inner(
+        &mut self,
+        user_input: &str,
+        turn: usize,
+        finish_reason: FinishReason,
+        persist_session: bool,
+    ) -> Result<AgentResult, AgentError> {
         self.fire_on_session_end(turn).await;
-        self.save_session();
+        if persist_session {
+            self.save_session();
+        }
         let auto_skill_picked = self.current_skill_router_pick.clone();
         self.observe_skill_router_outcome(StopReason::MaxTurns);
         self.observe_auto_skill(user_input, auto_skill_picked, StopReason::MaxTurns, turn);
@@ -5116,18 +5136,38 @@ impl AgentEngine {
                     input_token_estimate = sent as usize;
                     request.client_context_tokens = Some(sent);
                     if sent >= ceiling {
+                        // #636: is the PERSISTED history (which, unlike the
+                        // dispatched request, carries none of this turn's transient
+                        // injections) resumable? If degradation left it under the
+                        // ceiling, a resume heals — persist it. If not, saving it
+                        // would trap the resume in the same over-ceiling context, so
+                        // DON'T persist: keep the last recoverable on-disk state.
+                        let resumable = est(&self.messages) < ceiling;
+                        let tail = if resumable {
+                            "Start a new chat or raise the model's context budget; \
+                             your saved session was trimmed to stay resumable."
+                        } else {
+                            "This over-limit turn was not saved — your previous \
+                             (smaller) session is still resumable; reopen it or \
+                             start a new chat."
+                        };
                         self.output.emit_error(
                             &format!(
                                 "Run stopped: estimated request size ({sent} tokens) \
                                  reached the context-window ceiling ({ceiling}) for model \
-                                 '{}' and compaction could not reduce it further.",
+                                 '{}' and compaction could not reduce it further. {tail}",
                                 request.model,
                             ),
                             false,
                         );
                         // Context ceiling: a bigger budget is needed, not more turns.
                         return self
-                            .finish_run_terminated(user_input, turn, FinishReason::Length)
+                            .finish_run_terminated_inner(
+                                user_input,
+                                turn,
+                                FinishReason::Length,
+                                resumable,
+                            )
                             .await;
                     }
                     if shed > 0 || rung2_fired {
@@ -5642,19 +5682,43 @@ impl AgentEngine {
                                 // still over the ceiling — fall through to
                                 // the terminal error. NEVER re-send.
                             }
+                            // #636: this provider-billed wedge path can also fall
+                            // through with a still-over-ceiling PERSISTED history —
+                            // a large response pushed `self.messages` past the
+                            // ceiling and the one forced compaction could not
+                            // reduce it (`recount >= ceiling`). Apply the same rule
+                            // as the pre-flight guard above: judge resumability on
+                            // the persisted history and DON'T save an unrecoverable
+                            // one, else a resume re-loads the same wedge.
+                            let resumable = estimate::estimate_request_tokens(
+                                &self.messages,
+                                &request.system,
+                                &request.tools,
+                            ) < ceiling;
+                            let tail = if resumable {
+                                "Compact the conversation or start a new session."
+                            } else {
+                                "This turn was not saved — your previous (smaller) \
+                                 session is still resumable; reopen it or start a new \
+                                 session."
+                            };
                             self.output.emit_error(
                                 &format!(
                                     "Run stopped: the conversation has exceeded the context \
                                      window of model '{}' (finish_reason=length at \
                                      {sent_tokens} tokens, input ceiling {ceiling}) and \
-                                     compaction could not free meaningful space. Compact \
-                                     the conversation or start a new session.",
+                                     compaction could not free meaningful space. {tail}",
                                     request.model,
                                 ),
                                 false,
                             );
                             return self
-                                .finish_run_terminated(user_input, turn, FinishReason::Length)
+                                .finish_run_terminated_inner(
+                                    user_input,
+                                    turn,
+                                    FinishReason::Length,
+                                    resumable,
+                                )
                                 .await;
                         }
                     }
@@ -18311,6 +18375,134 @@ mod retry_wedge_protection_tests {
         e.compact_config.output_reserve = 100;
         e.compact_config.emergency_buffer = 50;
         e
+    }
+
+    // --- #636: never persist an unrecoverable (still-over-ceiling) session ---
+
+    /// The guard's `resumable = est(&self.messages) < ceiling` predicate must
+    /// classify an IRREDUCIBLE history (a huge `ToolUse` input — no degradation
+    /// rung touches `ToolUse`) as NOT resumable, and a small one as resumable.
+    #[test]
+    fn irreducible_tooluse_history_is_classified_unrecoverable() {
+        use crate::compact::estimate;
+        // Mirror the guard exactly: est = messages + system/tools overhead.
+        let overhead = estimate::estimate_request_tokens(&[], "", &[]);
+        let est = |m: &[Message]| estimate::estimate_tokens_from_messages(m) + overhead;
+        let ceiling = 49_850u64; // wedge_engine's ceiling (50_000 − 100 − 50)
+
+        let huge = vec![Message::new(
+            Role::Assistant,
+            vec![ContentBlock::ToolUse {
+                id: "big".into(),
+                name: "read".into(),
+                input: serde_json::json!({ "blob": "x".repeat(1_000_000) }),
+                extra: None,
+            }],
+        )];
+        assert!(
+            est(&huge) >= ceiling,
+            "an irreducible huge-ToolUse history must exceed the ceiling"
+        );
+
+        let small = vec![Message::new(
+            Role::User,
+            vec![ContentBlock::Text { text: "hi".into() }],
+        )];
+        assert!(est(&small) < ceiling, "a small history must be resumable");
+    }
+
+    /// When the ceiling abort judges the persisted history UNRECOVERABLE
+    /// (`persist_session = false`), the over-ceiling history must NOT overwrite
+    /// the last recoverable on-disk session — else a resume re-traps into the
+    /// same over-ceiling context (#636).
+    #[tokio::test]
+    async fn ceiling_abort_does_not_persist_unrecoverable_session() {
+        let dir = tempfile::tempdir().unwrap();
+        let manager = crate::session::SessionManager::new(dir.path().to_path_buf(), 10);
+        let session = manager.create("test", "m", "/tmp", None).unwrap();
+        let sid = session.id.clone();
+
+        let provider = Arc::new(RecordingProvider::new(vec![]));
+        let mut engine = wedge_engine(provider);
+        engine.session_manager = Some(manager);
+        engine.current_session = Some(session);
+
+        // Establish the last GOOD on-disk state via the engine's OWN save path
+        // (persist = true also runs update_index_for, so `load` can find it —
+        // a bare `SessionManager::save` does not index the session).
+        engine.messages = vec![Message::new(
+            Role::User,
+            vec![ContentBlock::Text {
+                text: "recoverable".into(),
+            }],
+        )];
+        engine
+            .finish_run_terminated_inner("ok", 1, FinishReason::Length, true)
+            .await
+            .unwrap();
+
+        // Now the in-memory history is UNRECOVERABLE; persist = false must leave
+        // the recoverable on-disk state untouched.
+        engine.messages = vec![Message::new(
+            Role::User,
+            vec![ContentBlock::Text {
+                text: "OVER-CEILING-must-not-persist".into(),
+            }],
+        )];
+        engine
+            .finish_run_terminated_inner("x", 2, FinishReason::Length, false)
+            .await
+            .unwrap();
+
+        // The on-disk session is STILL the small recoverable state.
+        let verify = crate::session::SessionManager::new(dir.path().to_path_buf(), 10);
+        let loaded = verify.load(&sid).unwrap();
+        assert_eq!(
+            loaded.messages.len(),
+            1,
+            "unrecoverable history must not overwrite the saved session"
+        );
+        let ContentBlock::Text { text } = &loaded.messages[0].content[0] else {
+            panic!("expected text");
+        };
+        assert_eq!(
+            text, "recoverable",
+            "the last recoverable state must survive"
+        );
+    }
+
+    /// The complement: a RESUMABLE terminal abort (`persist_session = true`)
+    /// still writes history through, so normal termination is unchanged.
+    #[tokio::test]
+    async fn terminal_abort_persists_when_recoverable() {
+        let dir = tempfile::tempdir().unwrap();
+        let manager = crate::session::SessionManager::new(dir.path().to_path_buf(), 10);
+        let session = manager.create("test", "m", "/tmp", None).unwrap();
+        let sid = session.id.clone();
+
+        let provider = Arc::new(RecordingProvider::new(vec![]));
+        let mut engine = wedge_engine(provider);
+        engine.session_manager = Some(manager);
+        engine.current_session = Some(session);
+        engine.messages = vec![Message::new(
+            Role::User,
+            vec![ContentBlock::Text {
+                text: "new-small".into(),
+            }],
+        )];
+
+        engine
+            .finish_run_terminated_inner("new-small", 1, FinishReason::Length, true)
+            .await
+            .unwrap();
+
+        let verify = crate::session::SessionManager::new(dir.path().to_path_buf(), 10);
+        let loaded = verify.load(&sid).unwrap();
+        assert_eq!(loaded.messages.len(), 1);
+        let ContentBlock::Text { text } = &loaded.messages[0].content[0] else {
+            panic!("expected text");
+        };
+        assert_eq!(text, "new-small", "a recoverable session must be persisted");
     }
 
     // --- A: length-wedge gate ---------------------------------------------
