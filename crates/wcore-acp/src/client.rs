@@ -302,6 +302,7 @@ mod tests {
                 model: Some("opus".into()),
                 tools: Vec::new(),
                 system_prompt: None,
+                agent: None,
             })
             .await
             .unwrap();
@@ -320,6 +321,7 @@ mod tests {
                     model: None,
                     tools: Vec::new(),
                     system_prompt: None,
+                    agent: None,
                 })
                 .await
                 .unwrap();
@@ -337,6 +339,7 @@ mod tests {
                 model: None,
                 tools: Vec::new(),
                 system_prompt: None,
+                agent: None,
             })
             .await
             .unwrap();
@@ -357,6 +360,7 @@ mod tests {
                 model: None,
                 tools: Vec::new(),
                 system_prompt: None,
+                agent: None,
             })
             .await
             .unwrap();
