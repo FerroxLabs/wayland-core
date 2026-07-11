@@ -402,12 +402,15 @@ mod tests {
 
     #[tokio::test]
     async fn fetch_media_reads_local_attachment_by_id() {
-        let dir = std::env::temp_dir().join("wcore_signal_fetch_media_test");
-        std::fs::create_dir_all(&dir).unwrap();
+        // Per-process unique tempdir (auto-removed on drop). A fixed shared
+        // /tmp path collides across concurrent workspace runs — one run's
+        // cleanup deletes another's fixture (#191).
+        let tmp = tempfile::TempDir::new().unwrap();
+        let dir = tmp.path();
         std::fs::write(dir.join("att-id-1"), b"SIGBYTES").unwrap();
 
         let mut config = cfg();
-        config.attachments_dir = Some(dir.clone());
+        config.attachments_dir = Some(dir.to_path_buf());
         let ch = SignalChannel::new("t", config);
 
         let att = wcore_channels::event::Attachment {
@@ -416,8 +419,7 @@ mod tests {
         };
         let bytes = ch.fetch_media(&att).await.unwrap();
         assert_eq!(bytes, b"SIGBYTES");
-
-        let _ = std::fs::remove_file(dir.join("att-id-1"));
+        // No manual cleanup: `tmp` (TempDir) removes the directory on drop.
     }
 
     #[tokio::test]
