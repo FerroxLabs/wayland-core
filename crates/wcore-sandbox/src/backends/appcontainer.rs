@@ -281,7 +281,10 @@ mod probe_cache_tests {
             }));
         }
         let all_available = handles.into_iter().all(|h| h.join().unwrap());
-        assert!(all_available, "every caller must observe the Available verdict");
+        assert!(
+            all_available,
+            "every caller must observe the Available verdict"
+        );
         assert_eq!(
             probe_calls.load(Ordering::SeqCst),
             1,
@@ -350,7 +353,10 @@ mod probe_cache_tests {
             probe_calls.fetch_add(1, Ordering::SeqCst);
             true
         });
-        assert!(!reused, "cached fail-closed verdict must be reused, not re-probed");
+        assert!(
+            !reused,
+            "cached fail-closed verdict must be reused, not re-probed"
+        );
         assert_eq!(
             probe_calls.load(Ordering::SeqCst),
             1,
