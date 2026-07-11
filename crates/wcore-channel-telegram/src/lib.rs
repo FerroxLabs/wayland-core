@@ -714,7 +714,12 @@ mod tests {
             .await;
 
         let creds = InMemoryCreds::with_token("telegram.test.bot_token", TEST_TOKEN);
-        let mut ch = TelegramChannel::with_api_base("test", cfg(), creds, server.url());
+        // Unique channel name → unique offset-store file, so this test's offset
+        // watermark can't collide with another telegram test under the shared
+        // process-wide WAYLAND_HOME (`cargo test` runs the whole crate's tests
+        // in ONE process; the pid-unique WAYLAND_HOME is then shared by all of
+        // them, and offset_store keys only on the channel name — #210).
+        let mut ch = TelegramChannel::with_api_base("longpoll-ingest", cfg(), creds, server.url());
         ch.start().await.unwrap();
 
         // Wait until the long-poll task has pushed the message.
@@ -770,7 +775,9 @@ mod tests {
             .await;
 
         let creds = InMemoryCreds::with_token("telegram.test.bot_token", TEST_TOKEN);
-        let mut ch = TelegramChannel::with_api_base("test", cfg(), creds, server.url());
+        // Unique channel name → unique offset-store file, isolated from the
+        // other longpoll test under the shared process WAYLAND_HOME (#210).
+        let mut ch = TelegramChannel::with_api_base("longpoll-advance", cfg(), creds, server.url());
         ch.start().await.unwrap();
 
         // Wait until we see the second call hit with offset=43.
