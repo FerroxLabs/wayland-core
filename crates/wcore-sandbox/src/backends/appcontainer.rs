@@ -139,6 +139,51 @@ impl ProbeCache {
     }
 }
 
+/// Collapse concurrent cold availability probes into a single real probe
+/// (FerroxLabs/wayland#754).
+///
+/// The probe cache alone does not stop a stampede: when the cache is cold, N
+/// concurrent callers all miss it *before* any records a verdict, so each runs
+/// its OWN probe. On Windows those parallel AppContainer spawns contend on the
+/// shared per-PID profile and mostly fail, and every failure is cached as
+/// `UnavailableUntil(now + neg_ttl)` — so `default_for_platform()` returns
+/// `FailClosedBackend` and refuses EVERY command for the whole TTL window.
+///
+/// This helper gates the slow (probe) path so only the first cold arrival
+/// spawns; the rest block on `gate` and then observe that arrival's verdict via
+/// the double-checked cache read. Split out of `is_available` (which is
+/// Windows-only) so the concurrency contract is unit-testable on every platform
+/// with a counting closure standing in for the real Win32 probe. The gate is
+/// held only across a cold probe, so warm calls stay lock-free on the fast path.
+#[cfg(any(windows, test))]
+fn probe_single_flight(
+    cache: &std::sync::Mutex<ProbeCache>,
+    gate: &std::sync::Mutex<()>,
+    neg_ttl: Duration,
+    probe: impl FnOnce() -> bool,
+) -> bool {
+    // Fast path: a cached verdict needs neither a probe nor the gate.
+    {
+        let g = cache.lock().expect("probe cache poisoned");
+        if let Some(cached) = g.cached(Instant::now()) {
+            return cached;
+        }
+    }
+    // Slow path: serialize, then re-check the cache under the gate so only the
+    // first arrival probes and the rest reuse its verdict.
+    let _gate = gate.lock().expect("probe gate poisoned");
+    {
+        let g = cache.lock().expect("probe cache poisoned");
+        if let Some(cached) = g.cached(Instant::now()) {
+            return cached;
+        }
+    }
+    let result = probe();
+    let mut g = cache.lock().expect("probe cache poisoned");
+    g.record(result, Instant::now(), neg_ttl);
+    result
+}
+
 #[cfg(test)]
 mod probe_cache_tests {
     use super::{Duration, Instant, ProbeCache};
@@ -193,6 +238,51 @@ mod probe_cache_tests {
         // A later successful probe upgrades to sticky-available.
         c.record(true, t0 + Duration::from_secs(31), Duration::from_secs(30));
         assert_eq!(c.cached(t0 + Duration::from_secs(3600)), Some(true));
+    }
+
+    /// Regression for FerroxLabs/wayland#754: concurrent cold callers must NOT
+    /// each run the real probe. Before the single-flight gate, N parallel
+    /// `is_available()` callers all missed the cold cache and each launched its
+    /// own AppContainer spawn; on Windows those contended and failed, poisoning
+    /// the negative cache so every command was refused by `FailClosedBackend`.
+    /// With the gate, the probe runs exactly once and every caller observes the
+    /// same verdict. Without the gate this asserts >1 and fails.
+    #[test]
+    fn single_flight_runs_probe_once_under_concurrency() {
+        use super::probe_single_flight;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::{Arc, Barrier, Mutex};
+
+        let cache = Arc::new(Mutex::new(ProbeCache::new()));
+        let gate = Arc::new(Mutex::new(()));
+        let probe_calls = Arc::new(AtomicUsize::new(0));
+        let n = 32usize;
+        let barrier = Arc::new(Barrier::new(n));
+
+        let mut handles = Vec::with_capacity(n);
+        for _ in 0..n {
+            let cache = Arc::clone(&cache);
+            let gate = Arc::clone(&gate);
+            let probe_calls = Arc::clone(&probe_calls);
+            let barrier = Arc::clone(&barrier);
+            handles.push(std::thread::spawn(move || {
+                // Release all threads at once to maximize the cold-cache race.
+                barrier.wait();
+                probe_single_flight(&cache, &gate, Duration::from_secs(30), || {
+                    probe_calls.fetch_add(1, Ordering::SeqCst);
+                    // Widen the window a real Win32 probe would occupy.
+                    std::thread::sleep(Duration::from_millis(5));
+                    true
+                })
+            }));
+        }
+        let all_available = handles.into_iter().all(|h| h.join().unwrap());
+        assert!(all_available, "every caller must observe the Available verdict");
+        assert_eq!(
+            probe_calls.load(Ordering::SeqCst),
+            1,
+            "the real probe must run exactly once despite {n} concurrent cold callers (#754)"
+        );
     }
 }
 
@@ -881,6 +971,32 @@ mod windows_impl {
         CACHE.get_or_init(|| Mutex::new(ProbeCache::new()))
     }
 
+    /// Single-flight gate for the availability probe (FerroxLabs/wayland#754).
+    ///
+    /// The probe cache alone does NOT prevent a stampede: when the cache is
+    /// cold, N concurrent `is_available()` callers all miss it *before* any of
+    /// them records a verdict, so each launches its OWN real AppContainer spawn
+    /// at the same instant. On Windows those parallel spawns contend on the
+    /// shared per-PID AppContainer profile / profile-service RPC and most of
+    /// them FAIL — and every failure is written into the cache as
+    /// `UnavailableUntil(now + NEGATIVE_PROBE_TTL)`, so for the next 30s
+    /// `default_for_platform()` returns `FailClosedBackend` and EVERY tool
+    /// command is refused ("sandbox UNAVAILABLE … refusing to run"). The agent
+    /// reads that as a failed command and retries, which the user sees as every
+    /// shell command timing out / returning empty / looping.
+    ///
+    /// This gate serializes the SLOW (probe) path so only the first cold caller
+    /// actually spawns; the rest block briefly, then observe its verdict via the
+    /// double-checked cache read in `is_available()`. A single serial probe is
+    /// reliable (it is exactly the serial path every non-concurrent command
+    /// already takes), so the cache warms to `Available` (sticky) and all later
+    /// calls take the lock-free fast path. Held only across the cold probe, so it
+    /// adds no steady-state contention.
+    fn probe_gate() -> &'static Mutex<()> {
+        static GATE: OnceLock<Mutex<()>> = OnceLock::new();
+        GATE.get_or_init(|| Mutex::new(()))
+    }
+
     #[async_trait]
     impl SandboxBackend for AppContainerBackend {
         fn name(&self) -> &'static str {
@@ -907,17 +1023,16 @@ mod windows_impl {
         /// [`probe_appcontainer_available`], so a stalled Win32 setup call can
         /// cost at most one guarded probe per TTL window.
         fn is_available(&self) -> bool {
-            let cache = probe_cache();
-            {
-                let g = cache.lock().expect("probe cache poisoned");
-                if let Some(cached) = g.cached(Instant::now()) {
-                    return cached;
-                }
-            }
-            let result = probe_appcontainer_available();
-            let mut g = cache.lock().expect("probe cache poisoned");
-            g.record(result, Instant::now(), NEGATIVE_PROBE_TTL);
-            result
+            // Single-flight the probe so concurrent cold callers collapse onto
+            // ONE real AppContainer spawn instead of stampeding it (#754). The
+            // logic lives in a platform-independent helper so it is unit-tested
+            // on every target; here it is driven by the real Win32 probe.
+            super::probe_single_flight(
+                probe_cache(),
+                probe_gate(),
+                NEGATIVE_PROBE_TTL,
+                probe_appcontainer_available,
+            )
         }
 
         fn enforces_read_deny(&self) -> bool {
