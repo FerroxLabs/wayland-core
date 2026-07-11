@@ -70,6 +70,22 @@ pub struct AcpServeArgs {
     /// bind. Without it, approval-required tools do not auto-execute.
     #[arg(long)]
     pub allow_all_tools: bool,
+
+    /// persona-profiles Phase A — expose the TRUSTED persona-agent roster over
+    /// ACP (`agents/list` + the `session/create.agent` selector). OFF by
+    /// default: without this flag no roster is installed, so `agents/list`
+    /// returns an empty catalog and any `agent` selector resolves to
+    /// `AgentNotFound` — byte-identical to the pre-persona server.
+    ///
+    /// Enumerates ONLY compiled-in `AgentPack` personas and the operator's own
+    /// global agent YAML (`wayland_config_dir()/agents`). It never enumerates
+    /// project-supplied manifests (untrusted repo content) and never isolated
+    /// profiles (a profile is a credential boundary — per-profile isolation is
+    /// the supervisor/router topology, one process per profile, not this
+    /// in-process roster). Personas share this process's single identity: they
+    /// overlay prompt/model/tools only, never credentials.
+    #[arg(long)]
+    pub enable_agent_selection: bool,
 }
 
 #[derive(Args, Debug)]
@@ -204,11 +220,24 @@ async fn serve(args: AcpServeArgs) -> anyhow::Result<()> {
     let a2a = Arc::new(crate::acp_engine::EngineA2aHandler::new(
         agent_id, config, cwd,
     ));
-    let server = Arc::new(
-        AcpServer::new()
-            .with_a2a_handler(a2a)
-            .with_turn_engine(turn_engine),
-    );
+    // persona-profiles Phase A (PR-3'): install the trusted persona-agent roster
+    // ONLY when the operator opts in. Feature default-OFF — with no roster
+    // installed the server keeps its pre-persona behaviour exactly (empty
+    // `agents/list`, `AgentNotFound` for any selector).
+    let mut acp_server = AcpServer::new()
+        .with_a2a_handler(a2a)
+        .with_turn_engine(turn_engine);
+    if args.enable_agent_selection {
+        let roster = crate::acp_roster::CliAgentRoster::from_trusted_sources();
+        eprintln!(
+            "wayland-core acp: persona-agent selection ENABLED — {} trusted agent(s) \
+             selectable (AgentPack + global operator YAML; project manifests and \
+             isolated profiles are never enumerated).",
+            roster.len()
+        );
+        acp_server = acp_server.with_roster(Arc::new(roster));
+    }
+    let server = Arc::new(acp_server);
 
     // F-017: wire the ApiKeyVerifier so every request must carry
     // X-API-Key: <api_key>. CorsLayer::permissive() is gone — no

@@ -18,6 +18,13 @@ pub mod acp;
 // --lib`.
 pub mod acp_engine;
 
+// persona-profiles PR-3': the CLI-layer `AgentRoster` impl. `wcore-acp` owns
+// the transport-neutral roster seam but must not depend on the identity
+// sources, so enumeration (AgentPack + the operator's global agent YAML —
+// never project-supplied manifests, never isolated profiles) lives here,
+// alongside the other injected bridges.
+pub mod acp_roster;
+
 // v0.7.0 Task 3.B.2: `agent` subcommand — five flag-driven CRUD ops
 // (create / list / show / edit / delete) wrapping the
 // `wcore_agents_pack::factory` user-agent surface. Lives in the lib so
