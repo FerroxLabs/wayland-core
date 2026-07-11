@@ -51,6 +51,20 @@ fn run_new_via_stdio() -> Result<SlashOutcome, SlashError> {
     let dir = factory::user_agent_dir()
         .map_err(|e| SlashError::Bad(format!("could not resolve user-agent dir: {e}")))?;
     let stdin = std::io::stdin();
+    // `/agent new` is an interactive prompt flow: it only makes sense on a real
+    // terminal. When stdin is not a TTY (piped/redirected, EOF under a test
+    // harness, or nextest's per-process stdin — which may carry unrelated bytes),
+    // reading it yields unreliable input, so abort cleanly instead of consuming
+    // arbitrary data and creating a bogus agent. This also makes the wire-up test
+    // deterministic under both `cargo test` and `nextest`.
+    if !std::io::IsTerminal::is_terminal(&stdin) {
+        return Err(SlashError::Bad(
+            AgentNewError::Aborted {
+                step: "description",
+            }
+            .to_string(),
+        ));
+    }
     let mut io = StdioPromptIo::new(stdin.lock(), std::io::stdout());
     let name = run_new(&mut io, &dir).map_err(|e| SlashError::Bad(e.to_string()))?;
     Ok(SlashOutcome::Handled {
