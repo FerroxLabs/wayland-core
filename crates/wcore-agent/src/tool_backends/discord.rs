@@ -404,6 +404,7 @@ fn urlencode(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serial_test::serial;
     use wcore_tools::discord_tool::{DiscordOutcome, DiscordTool};
     use wiremock::matchers::{header, method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -427,6 +428,7 @@ mod tests {
 
     // ----- Resolver behaviour ------------------------------------------------
 
+    #[serial]
     #[test]
     fn build_discord_backend_returns_none_when_token_unset() {
         // SAFETY: tests run sequentially per crate; we restore env after.
@@ -438,6 +440,7 @@ mod tests {
         }
     }
 
+    #[serial]
     #[test]
     fn build_discord_backend_returns_none_when_token_empty_string() {
         // R-H2: empty string must be treated as unset.
