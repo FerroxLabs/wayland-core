@@ -571,7 +571,7 @@ async fn shutdown_signal() {
 /// The previous `#[cfg(not(unix))]` branch returned hardcoded `false`,
 /// causing every Windows `cron daemon` invocation to spawn a duplicate
 /// daemon because the PID check always reported "dead."
-fn process_is_alive(pid: u32) -> bool {
+pub(crate) fn process_is_alive(pid: u32) -> bool {
     #[cfg(unix)]
     {
         // /proc/<pid> existence check — no libc required.
