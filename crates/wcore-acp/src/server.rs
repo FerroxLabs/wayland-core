@@ -354,6 +354,7 @@ mod tests {
             model: None,
             tools: Vec::new(),
             system_prompt: None,
+            agent: None,
         }
     }
 
@@ -365,6 +366,7 @@ mod tests {
                 model: Some("claude-opus-4-7".to_string()),
                 tools: Vec::new(),
                 system_prompt: None,
+                agent: None,
             })
             .await
             .unwrap();
@@ -516,6 +518,7 @@ mod tests {
                 model: None,
                 tools: tools.clone(),
                 system_prompt: Some("be terse".to_string()),
+                agent: None,
             })
             .await
             .unwrap();
@@ -566,6 +569,7 @@ mod tests {
                 model: None,
                 tools: vec![stored_tool],
                 system_prompt: None,
+                agent: None,
             })
             .await
             .unwrap();
@@ -683,6 +687,7 @@ mod tests {
                 model: None,
                 tools,
                 system_prompt: None,
+                agent: None,
             })
             .await
             .unwrap();
