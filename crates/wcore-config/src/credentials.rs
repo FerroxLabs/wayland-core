@@ -144,6 +144,28 @@ impl PlaintextCredentialsStore {
         secure_credential_file(&self.path)?;
         Ok(())
     }
+
+    /// Enumerate the `[secrets]` table as flat `(key, value)` pairs, plus the
+    /// raw entry count.
+    ///
+    /// Used by the #183 plaintext→vault migration. Non-string values (a
+    /// corrupt/hand-edited file) are dropped from the returned pairs — they
+    /// were never resolvable as credentials (`get` also does `.as_str()`) — but
+    /// the raw count lets the migration detect that it dropped some and keep the
+    /// plaintext file rather than destroy those hand-edited entries.
+    fn load_all(&self) -> Result<(Vec<(String, String)>, usize), CredentialsError> {
+        let table = self.load_table()?;
+        let secrets = match table.get("secrets") {
+            Some(toml::Value::Table(t)) => t,
+            _ => return Ok((Vec::new(), 0)),
+        };
+        let raw_count = secrets.len();
+        let entries = secrets
+            .iter()
+            .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string())))
+            .collect();
+        Ok((entries, raw_count))
+    }
 }
 
 impl CredentialsStore for PlaintextCredentialsStore {
@@ -560,6 +582,33 @@ impl EncryptedFileCredentialsStore {
         secure_credential_file(&self.key_params_path)?;
         Ok(())
     }
+
+    /// Import many secrets in a SINGLE atomic vault write (#183 migration).
+    ///
+    /// One `load → merge → save_secrets` means the whole batch lands via ONE
+    /// `atomic_write` of the ciphertext, so an interrupted migration can never
+    /// leave a partially-populated `.enc` (the per-key `put` loop it replaces
+    /// could). Existing keys are PRESERVED (`or_insert`) — a pre-existing vault
+    /// value is authoritative and never clobbered by an incoming plaintext one.
+    fn import_secrets(&self, entries: &[(String, String)]) -> Result<(), CredentialsError> {
+        let vault = self.unlock()?;
+        let mut table = self.load_secrets(&vault)?;
+        let secrets = table
+            .entry("secrets".to_string())
+            .or_insert_with(|| toml::Value::Table(toml::Table::new()));
+        if !matches!(secrets, toml::Value::Table(_)) {
+            *secrets = toml::Value::Table(toml::Table::new());
+        }
+        let toml::Value::Table(secrets_table) = secrets else {
+            unreachable!("just normalized to Table");
+        };
+        for (k, v) in entries {
+            secrets_table
+                .entry(k.clone())
+                .or_insert_with(|| toml::Value::String(v.clone()));
+        }
+        self.save_secrets(&vault, &table)
+    }
 }
 
 impl CredentialsStore for EncryptedFileCredentialsStore {
@@ -658,6 +707,210 @@ fn warn_isolated_plaintext_fallback(path: &Path) {
     });
 }
 
+/// Exclusive, self-recovering lock guarding the one-shot migration against a
+/// concurrent opener on the same profile home. Held only for the brief
+/// import+verify+delete window.
+///
+/// It is a create-`O_EXCL` lockfile (atomic on every platform). A concurrent
+/// migrator spins briefly for it; a holder that CRASHED leaves a stale lockfile
+/// that is stolen once it ages past a minute (so a crash defers migration by at
+/// most that long — and until then the plaintext store keeps serving, so no
+/// secret is ever lost). The lockfile is removed on drop.
+///
+/// This matters because two migrators that both saw no `.enc`/`.kdf` would
+/// generate DIFFERENT random salts and interleave their two-file writes into a
+/// mismatched (undecryptable) vault — serializing here prevents that.
+struct MigrationLock {
+    path: PathBuf,
+    /// Unique per-acquisition token stamped into the lockfile, so `drop` only
+    /// removes a lockfile that is STILL ours — never one a concurrent stealer
+    /// created after our lock was (wrongly) judged stale.
+    nonce: String,
+}
+
+impl MigrationLock {
+    fn acquire(dir: &Path) -> Result<Self, CredentialsError> {
+        let path = dir.join(".credentials.migrate.lock");
+        // Unique per acquisition (pid + a process-local sequence) so different
+        // processes/acquisitions never collide.
+        static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let nonce = format!(
+            "{}-{}",
+            std::process::id(),
+            SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        );
+        // ~10s ceiling (200 × 50ms) — migration itself is sub-second; this only
+        // waits out a genuinely concurrent migrator.
+        for _ in 0..200 {
+            match std::fs::OpenOptions::new()
+                .create_new(true)
+                .write(true)
+                .open(&path)
+            {
+                Ok(mut f) => {
+                    use std::io::Write;
+                    // Best-effort stamp. Even if the write fails the lock (the
+                    // file's existence) still holds; we simply won't nonce-match
+                    // on drop and will conservatively leave the file.
+                    let _ = f.write_all(nonce.as_bytes());
+                    return Ok(Self { path, nonce });
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                    if Self::is_stale(&path) {
+                        // Crashed holder — steal it and re-race the create_new
+                        // (whoever wins the atomic create proceeds).
+                        let _ = std::fs::remove_file(&path);
+                    } else {
+                        std::thread::sleep(std::time::Duration::from_millis(50));
+                    }
+                }
+                Err(e) => return Err(CredentialsError::Io(e)),
+            }
+        }
+        Err(CredentialsError::BackendUnavailable(
+            "credentials migration lock is busy; will retry on next open".into(),
+        ))
+    }
+
+    /// A lockfile older than a minute is treated as abandoned by a crashed
+    /// holder. Any error reading the mtime (clock skew, missing) → not stale.
+    fn is_stale(path: &Path) -> bool {
+        std::fs::metadata(path)
+            .and_then(|m| m.modified())
+            .map(|t| {
+                t.elapsed()
+                    .map(|age| age > std::time::Duration::from_secs(60))
+            })
+            .map(|r| r.unwrap_or(false))
+            .unwrap_or(false)
+    }
+}
+
+impl Drop for MigrationLock {
+    fn drop(&mut self) {
+        // Remove ONLY if the lockfile still carries our nonce. If a stale-steal
+        // replaced it with another holder's token, deleting it would let a third
+        // migrator in concurrently — so leave it for the current owner.
+        if let Ok(contents) = std::fs::read_to_string(&self.path)
+            && contents == self.nonce
+        {
+            let _ = std::fs::remove_file(&self.path);
+        }
+    }
+}
+
+/// #183 — one-shot plaintext→encrypted-vault migration.
+///
+/// The encrypted store only ever reads `credentials.enc`; it never consulted an
+/// existing plaintext `credentials.toml`. So the first time a profile that had
+/// stored secrets in plaintext gains vault unlock material, those secrets would
+/// silently vanish (apparent credential loss — the reason the desktop
+/// wayland#710 fix gated existing-plaintext profiles to stay plaintext until
+/// this shipped). This imports them.
+///
+/// Crash-atomic and concurrency-safe (both were review BLOCKERs):
+///   * The guard is driven by PLAINTEXT PRESENCE, not `.enc` absence. The
+///     plaintext file is removed only AFTER a full verified import, so an
+///     interrupted run is simply retried on the next open — a partial `.enc` is
+///     never trusted as the source of truth.
+///   * Import is a SINGLE atomic vault write (`import_secrets`), so no partial
+///     `.enc` exists mid-run. Existing vault keys are preserved, so the import
+///     is idempotent — re-running after an interruption converges.
+///   * A `.enc` with no `.kdf` can only be a crash artifact of an interrupted
+///     write (a healthy vault has both); it is permanently undecryptable, and
+///     the plaintext still holds the truth, so it is discarded and rebuilt.
+///   * The whole sequence runs under [`MigrationLock`] so two concurrent
+///     openers cannot corrupt the vault with mismatched salts.
+///
+/// Only runs when non-interactive unlock material is present, so `open_store`
+/// never blocks on an interactive passphrase prompt. On failure it returns the
+/// error: the isolated-profile `Auto` path then keeps serving plaintext (secrets
+/// stay resolvable); an operator who explicitly chose `EncryptedFile` sees it.
+fn migrate_plaintext_into_vault(
+    plaintext_path: &Path,
+    store: &EncryptedFileCredentialsStore,
+) -> Result<(), CredentialsError> {
+    // Cheap guards BEFORE any unlock (so a no-op never prompts): need unlock
+    // material and a plaintext source to migrate at all.
+    if !vault_unlock_material_present() || !plaintext_path.exists() {
+        return Ok(());
+    }
+    let dir = plaintext_path
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+
+    // Serialize against a concurrent opener on the same home for the whole
+    // import → verify → delete window.
+    let _lock = MigrationLock::acquire(dir)?;
+
+    // Re-read UNDER the lock — a migrator we waited on may have already
+    // finished and removed the plaintext file.
+    let plaintext = PlaintextCredentialsStore::new(plaintext_path.to_path_buf());
+    let (entries, raw_count) = plaintext.load_all()?;
+    if entries.is_empty() {
+        return Ok(());
+    }
+
+    // A ciphertext whose KDF-params file is missing OR unparseable is a crash
+    // artifact from an interrupted write (a healthy vault always has both, and a
+    // valid params file) — permanently undecryptable, and the plaintext still
+    // holds the authoritative secrets, so discard it and rebuild. (A `.enc` with
+    // a VALID `.kdf` that simply won't decrypt — e.g. a real vault under a
+    // different passphrase — is left alone: `import_secrets` surfaces the unlock
+    // error and we fall back to plaintext rather than destroying it.)
+    if store.cipher_path.exists() {
+        let kdf_unusable = !store.key_params_path.exists()
+            || encrypted_file::load_key_params(&store.key_params_path).is_err();
+        if kdf_unusable {
+            let _ = std::fs::remove_file(&store.cipher_path);
+            let _ = std::fs::remove_file(&store.key_params_path);
+        }
+    }
+
+    // ONE atomic vault write, then verify every plaintext key resolves before
+    // touching the original.
+    store.import_secrets(&entries)?;
+    for (k, _v) in &entries {
+        if store.get(k)?.is_none() {
+            return Err(CredentialsError::BackendUnavailable(format!(
+                "vault migration readback missing key '{k}'"
+            )));
+        }
+    }
+
+    // Remove the plaintext original only if EVERY entry migrated. If some
+    // non-string (hand-edited, non-credential) values were dropped by
+    // `load_all`, keep the file so that data is not destroyed.
+    if entries.len() == raw_count {
+        if let Err(e) = std::fs::remove_file(plaintext_path)
+            && e.kind() != std::io::ErrorKind::NotFound
+        {
+            // The vault holds every secret; a lingering plaintext file is
+            // retried (and re-removed) on the next open. Log, don't fail.
+            tracing::warn!(
+                target: "wcore_credentials",
+                error = %e,
+                "vault migration succeeded but could not remove the plaintext file; \
+                 it will be retried on the next open"
+            );
+        }
+    } else {
+        tracing::warn!(
+            target: "wcore_credentials",
+            skipped = raw_count - entries.len(),
+            "vault migration imported the string secrets but kept the plaintext file \
+             because it also holds non-string entries"
+        );
+    }
+    tracing::info!(
+        target: "wcore_credentials",
+        count = entries.len(),
+        "migrated existing plaintext credentials into the encrypted vault"
+    );
+    Ok(())
+}
+
 /// Factory selecting the configured backend.
 pub fn open_store(
     cfg: &CredentialsStorageConfig,
@@ -677,10 +930,24 @@ pub fn open_store(
             if std::env::var_os("WAYLAND_HOME").is_some() {
                 if vault_unlock_material_present() {
                     let (cipher_path, key_params_path) = default_vault_paths(plaintext_path);
-                    return Ok(Box::new(EncryptedFileCredentialsStore::new(
-                        cipher_path,
-                        key_params_path,
-                    )));
+                    let store = EncryptedFileCredentialsStore::new(cipher_path, key_params_path);
+                    // #183: import any pre-existing plaintext secrets into the
+                    // vault once. On failure, keep serving the plaintext store
+                    // so existing secrets stay resolvable (never lost).
+                    match migrate_plaintext_into_vault(plaintext_path, &store) {
+                        Ok(()) => return Ok(Box::new(store)),
+                        Err(e) => {
+                            tracing::warn!(
+                                target: "wcore_credentials",
+                                error = %e,
+                                "plaintext→vault migration failed; keeping existing \
+                                 plaintext credentials store unchanged"
+                            );
+                            return Ok(Box::new(PlaintextCredentialsStore::new(
+                                plaintext_path.to_path_buf(),
+                            )));
+                        }
+                    }
                 }
                 warn_isolated_plaintext_fallback(plaintext_path);
                 return Ok(Box::new(PlaintextCredentialsStore::new(
@@ -719,10 +986,15 @@ pub fn open_store(
         CredentialsBackend::EncryptedFile {
             cipher_path,
             key_params_path,
-        } => Ok(Box::new(EncryptedFileCredentialsStore::new(
-            cipher_path.clone(),
-            key_params_path.clone(),
-        ))),
+        } => {
+            let store =
+                EncryptedFileCredentialsStore::new(cipher_path.clone(), key_params_path.clone());
+            // #183: import pre-existing plaintext secrets once. The operator
+            // explicitly chose encryption here, so surface any migration error
+            // rather than silently downgrading to plaintext.
+            migrate_plaintext_into_vault(plaintext_path, &store)?;
+            Ok(Box::new(store))
+        }
     }
 }
 
@@ -1324,6 +1596,299 @@ mod tests {
 
         // Validator passes too.
         validate_credentials_config(&cfg).expect("encrypted-file validator passes");
+    }
+
+    /// Set/restore an arbitrary process-global env var for a test. Mirrors
+    /// [`EnvPassphraseGuard`] for `WAYLAND_HOME` (the isolated-profile switch).
+    struct EnvVarGuard {
+        key: &'static str,
+        prior: Option<String>,
+    }
+
+    impl EnvVarGuard {
+        fn set(key: &'static str, value: &str) -> Self {
+            let prior = std::env::var(key).ok();
+            unsafe {
+                std::env::set_var(key, value);
+            }
+            Self { key, prior }
+        }
+    }
+
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            unsafe {
+                match &self.prior {
+                    Some(v) => std::env::set_var(self.key, v),
+                    None => std::env::remove_var(self.key),
+                }
+            }
+        }
+    }
+
+    // #183 — plaintext→vault migration entrypoint.
+
+    #[test]
+    #[serial_test::serial(vault_passphrase_env)]
+    fn migrate_plaintext_into_vault_imports_verifies_and_removes() {
+        let _g = EnvPassphraseGuard::set("migrate-pass-1");
+        let dir = tempdir().unwrap();
+        let plaintext_path = dir.path().join("credentials.toml");
+        let seed = PlaintextCredentialsStore::new(&plaintext_path);
+        seed.put("anthropic_api_key", "sk-ant-1").unwrap();
+        seed.put("openai_api_key", "sk-oai-2").unwrap();
+        assert!(plaintext_path.exists());
+
+        let (cipher, params) = default_vault_paths(&plaintext_path);
+        let store = EncryptedFileCredentialsStore::new(cipher.clone(), params.clone());
+        migrate_plaintext_into_vault(&plaintext_path, &store).unwrap();
+
+        // Secrets now resolve through the vault...
+        assert_eq!(
+            store.get("anthropic_api_key").unwrap().as_deref(),
+            Some("sk-ant-1")
+        );
+        assert_eq!(
+            store.get("openai_api_key").unwrap().as_deref(),
+            Some("sk-oai-2")
+        );
+        // ...the ciphertext exists, and the plaintext original is gone.
+        assert!(cipher.exists(), "vault ciphertext should be written");
+        assert!(
+            !plaintext_path.exists(),
+            "plaintext file should be removed after a verified migration"
+        );
+    }
+
+    #[test]
+    #[serial_test::serial(vault_passphrase_env)]
+    fn migrate_merges_without_clobbering_existing_vault_keys() {
+        let _g = EnvPassphraseGuard::set("migrate-pass-2");
+        let dir = tempdir().unwrap();
+        let plaintext_path = dir.path().join("credentials.toml");
+        let seed = PlaintextCredentialsStore::new(&plaintext_path);
+        seed.put("shared", "plain-shared").unwrap();
+        seed.put("plaintext_only", "plain-only").unwrap();
+
+        let (cipher, params) = default_vault_paths(&plaintext_path);
+        let store = EncryptedFileCredentialsStore::new(cipher.clone(), params.clone());
+        store.put("shared", "vault-shared").unwrap();
+        assert!(cipher.exists());
+
+        migrate_plaintext_into_vault(&plaintext_path, &store).unwrap();
+        // Existing vault key is authoritative (NOT clobbered by plaintext)...
+        assert_eq!(
+            store.get("shared").unwrap().as_deref(),
+            Some("vault-shared")
+        );
+        // ...the plaintext-only key is imported...
+        assert_eq!(
+            store.get("plaintext_only").unwrap().as_deref(),
+            Some("plain-only")
+        );
+        // ...and the plaintext file is consolidated away.
+        assert!(
+            !plaintext_path.exists(),
+            "plaintext should be removed after every key is resolvable in the vault"
+        );
+    }
+
+    #[test]
+    #[serial_test::serial(vault_passphrase_env)]
+    fn migrate_discards_orphaned_ciphertext_without_kdf() {
+        // BLOCKER-1 regression: an interrupted migration can leave a `.enc`
+        // with no `.kdf` (crash between the two writes). It is permanently
+        // undecryptable, so the migration must discard it and rebuild from the
+        // still-present plaintext — never trust the orphan and lose secrets.
+        let _g = EnvPassphraseGuard::set("migrate-pass-orphan");
+        let dir = tempdir().unwrap();
+        let plaintext_path = dir.path().join("credentials.toml");
+        let seed = PlaintextCredentialsStore::new(&plaintext_path);
+        seed.put("k1", "v1").unwrap();
+        seed.put("k2", "v2").unwrap();
+
+        let (cipher, params) = default_vault_paths(&plaintext_path);
+        // Simulate the crash artifact: a ciphertext with NO params file.
+        std::fs::write(&cipher, b"orphaned-unreadable-ciphertext").unwrap();
+        assert!(cipher.exists() && !params.exists());
+
+        let store = EncryptedFileCredentialsStore::new(cipher.clone(), params.clone());
+        migrate_plaintext_into_vault(&plaintext_path, &store).unwrap();
+
+        // Rebuilt from plaintext: both keys resolve, params now exist, plaintext gone.
+        assert_eq!(store.get("k1").unwrap().as_deref(), Some("v1"));
+        assert_eq!(store.get("k2").unwrap().as_deref(), Some("v2"));
+        assert!(params.exists(), "kdf params should be rebuilt");
+        assert!(!plaintext_path.exists());
+    }
+
+    #[test]
+    #[serial_test::serial(vault_passphrase_env)]
+    fn migrate_discards_ciphertext_with_corrupt_kdf() {
+        // F3 regression: a present-but-unparseable `.kdf` (crash mid-write) is
+        // also a dead artifact — discard both and rebuild from plaintext rather
+        // than hard-failing every open forever.
+        let _g = EnvPassphraseGuard::set("migrate-pass-corruptkdf");
+        let dir = tempdir().unwrap();
+        let plaintext_path = dir.path().join("credentials.toml");
+        let seed = PlaintextCredentialsStore::new(&plaintext_path);
+        seed.put("k", "v").unwrap();
+
+        let (cipher, params) = default_vault_paths(&plaintext_path);
+        std::fs::write(&cipher, b"orphaned-ciphertext").unwrap();
+        std::fs::write(&params, b"not-valid-json{{{").unwrap();
+
+        let store = EncryptedFileCredentialsStore::new(cipher.clone(), params.clone());
+        migrate_plaintext_into_vault(&plaintext_path, &store).unwrap();
+
+        assert_eq!(store.get("k").unwrap().as_deref(), Some("v"));
+        assert!(!plaintext_path.exists());
+    }
+
+    #[test]
+    fn migration_lock_drop_removes_only_our_own_lock() {
+        // F1 regression: after a stale-steal replaces our lockfile with another
+        // holder's, our drop must NOT delete the stealer's lock (which would let
+        // a third concurrent migrator in).
+        let dir = tempdir().unwrap();
+        let path = dir.path().join(".credentials.migrate.lock");
+        {
+            let _lock = MigrationLock::acquire(dir.path()).unwrap();
+            assert!(path.exists());
+            std::fs::write(&path, "another-process-nonce").unwrap();
+            // _lock drops here.
+        }
+        assert!(
+            path.exists(),
+            "drop must leave a lockfile that carries another holder's nonce"
+        );
+
+        // Clear the foreign lock, then confirm a normal acquire DOES clean up
+        // its own lock on drop.
+        std::fs::remove_file(&path).unwrap();
+        {
+            let _lock = MigrationLock::acquire(dir.path()).unwrap();
+            assert!(path.exists());
+        }
+        assert!(!path.exists(), "drop removes our own lockfile");
+    }
+
+    #[test]
+    #[serial_test::serial(vault_passphrase_env)]
+    fn migrate_keeps_plaintext_when_non_string_entries_present() {
+        // NIT-6 regression: a non-string (hand-edited) entry is not a credential
+        // and cannot migrate; the plaintext file must be KEPT so that data is
+        // not silently destroyed, while the real string secret still migrates.
+        let _g = EnvPassphraseGuard::set("migrate-pass-nonstr");
+        let dir = tempdir().unwrap();
+        let plaintext_path = dir.path().join("credentials.toml");
+        std::fs::write(
+            &plaintext_path,
+            "[secrets]\napi_key = \"sk-real\"\nport = 8080\n",
+        )
+        .unwrap();
+
+        let (cipher, params) = default_vault_paths(&plaintext_path);
+        let store = EncryptedFileCredentialsStore::new(cipher.clone(), params.clone());
+        migrate_plaintext_into_vault(&plaintext_path, &store).unwrap();
+
+        assert_eq!(store.get("api_key").unwrap().as_deref(), Some("sk-real"));
+        assert!(
+            plaintext_path.exists(),
+            "plaintext must be kept when it holds a non-string entry that cannot migrate"
+        );
+    }
+
+    #[test]
+    #[serial_test::serial(vault_passphrase_env)]
+    fn migrate_is_noop_without_plaintext_secrets() {
+        let _g = EnvPassphraseGuard::set("migrate-pass-3");
+        let dir = tempdir().unwrap();
+        let plaintext_path = dir.path().join("credentials.toml");
+        let (cipher, params) = default_vault_paths(&plaintext_path);
+        let store = EncryptedFileCredentialsStore::new(cipher.clone(), params.clone());
+
+        // (a) missing plaintext file → no-op, no vault materialized.
+        migrate_plaintext_into_vault(&plaintext_path, &store).unwrap();
+        assert!(
+            !cipher.exists(),
+            "no vault should be created when there is nothing to migrate"
+        );
+
+        // (b) present-but-empty plaintext file → still a no-op.
+        std::fs::write(&plaintext_path, "").unwrap();
+        migrate_plaintext_into_vault(&plaintext_path, &store).unwrap();
+        assert!(!cipher.exists());
+        assert!(plaintext_path.exists());
+    }
+
+    #[test]
+    #[serial_test::serial(vault_passphrase_env)]
+    fn open_store_encrypted_file_migrates_plaintext_once() {
+        let _g = EnvPassphraseGuard::set("migrate-pass-4");
+        let dir = tempdir().unwrap();
+        let plaintext_path = dir.path().join("credentials.toml");
+        let seed = PlaintextCredentialsStore::new(&plaintext_path);
+        seed.put("provider_key", "sk-live-xyz").unwrap();
+
+        let cipher = dir.path().join("credentials.enc");
+        let params = dir.path().join("credentials.kdf.json");
+        let cfg = CredentialsStorageConfig {
+            backend: CredentialsBackend::EncryptedFile {
+                cipher_path: cipher.clone(),
+                key_params_path: params.clone(),
+            },
+            service_name: None,
+        };
+
+        // First open migrates plaintext → vault.
+        let store = open_store(&cfg, &plaintext_path).unwrap();
+        assert_eq!(
+            store.get("provider_key").unwrap().as_deref(),
+            Some("sk-live-xyz")
+        );
+        assert!(cipher.exists());
+        assert!(
+            !plaintext_path.exists(),
+            "plaintext removed after migrating via open_store"
+        );
+
+        // Second open (simulated restart) is a no-op and still reads.
+        let store2 = open_store(&cfg, &plaintext_path).unwrap();
+        assert_eq!(
+            store2.get("provider_key").unwrap().as_deref(),
+            Some("sk-live-xyz")
+        );
+    }
+
+    #[test]
+    #[serial_test::serial(vault_passphrase_env)]
+    fn open_store_auto_isolated_migrates_plaintext_to_vault() {
+        let _pass = EnvPassphraseGuard::set("migrate-pass-5");
+        let dir = tempdir().unwrap();
+        let _home = EnvVarGuard::set("WAYLAND_HOME", dir.path().to_str().unwrap());
+        let plaintext_path = dir.path().join("credentials.toml");
+        let seed = PlaintextCredentialsStore::new(&plaintext_path);
+        seed.put("isolated_key", "sk-iso").unwrap();
+
+        // Auto backend + WAYLAND_HOME + passphrase present ⇒ the isolated-profile
+        // branch builds the in-home vault and migrates into it.
+        let cfg = CredentialsStorageConfig::default();
+        let store = open_store(&cfg, &plaintext_path).unwrap();
+        assert_eq!(
+            store.get("isolated_key").unwrap().as_deref(),
+            Some("sk-iso")
+        );
+
+        let (cipher, _params) = default_vault_paths(&plaintext_path);
+        assert!(
+            cipher.exists(),
+            "auto-isolated path should have created the vault"
+        );
+        assert!(
+            !plaintext_path.exists(),
+            "plaintext removed after auto-isolated migration"
+        );
     }
 
     #[test]
