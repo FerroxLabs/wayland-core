@@ -66,6 +66,26 @@ jobs:
           setup: 'true'
           cache: 'true'
 
+      # The self-hosted Windows runner intermittently leaves a locked
+      # `.install-action/tmp` behind between runs, so taiki-e/install-action's
+      # own retry hits `rm: cannot remove '.../.install-action/tmp/tmp': Device
+      # or resource busy` and the step dies on a bash-startup flake
+      # (actions/partner-runner-images#169) — the recurring `CI (Array)` red that
+      # stalls the strict-mode merge train. Force-clear the stale state before
+      # install (guarded to Windows, failure-tolerant so it can never break the
+      # job) so install-action starts clean and its built-in retry succeeds
+      # inside this one run — no job re-run needed.
+      - name: Clear stale install-action state (Windows flake mitigation, partner-runner-images#169)
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          for base in "$USERPROFILE" "/c/Users/$USERNAME" \
+                      "/c/WINDOWS/ServiceProfiles/NetworkService" \
+                      "/c/WINDOWS/system32/config/systemprofile"; do
+            [ -n "$base" ] && rm -rf "$base/.install-action/tmp" "$base/.install-action/init" 2>/dev/null || true
+          done
+          exit 0
+
       - name: Install cargo-nextest
         uses: taiki-e/install-action@v2
         with:
