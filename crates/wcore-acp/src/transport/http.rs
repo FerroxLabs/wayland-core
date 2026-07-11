@@ -86,9 +86,7 @@ pub trait HttpHandler: Send + Sync + 'static {
     /// `AcpServer` overrides this to consult an installed `AgentRoster`, which
     /// returns only the AUTHORIZED agents (R3), each id/label-only (R4).
     async fn list_agents(&self) -> Result<AgentsListResponse, AcpError> {
-        Ok(AgentsListResponse {
-            agents: Vec::new(),
-        })
+        Ok(AgentsListResponse { agents: Vec::new() })
     }
 
     /// persona-profiles Phase A — the capability handshake (`initialize`, R2).

@@ -613,7 +613,10 @@ mod tests {
         // Absent capability defaults to false (pre-extension server).
         let old = r#"{}"#;
         let caps: ServerCapabilities = serde_json::from_str(old).unwrap();
-        assert!(!caps.agent_selection, "absent capability must default false");
+        assert!(
+            !caps.agent_selection,
+            "absent capability must default false"
+        );
     }
 
     #[test]
