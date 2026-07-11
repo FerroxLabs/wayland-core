@@ -171,6 +171,10 @@ fn probe_single_flight(
     }
     // Slow path: serialize, then re-check the cache under the gate so only the
     // first arrival probes and the rest reuse its verdict.
+    // The gate stays un-poisonable in practice: the real Win32 FFI runs on the
+    // detached `appcontainer-probe` thread, so a panic there surfaces here as a
+    // `RecvTimeoutError::Disconnected` → `false` return, never an unwind through
+    // this caller — a caller-thread unwind cannot poison the gate and wedge it.
     let _gate = gate.lock().expect("probe gate poisoned");
     {
         let g = cache.lock().expect("probe cache poisoned");
@@ -284,6 +288,75 @@ mod probe_cache_tests {
             "the real probe must run exactly once despite {n} concurrent cold callers (#754)"
         );
     }
+
+    /// Fail-closed counterpart to the test above (FerroxLabs/wayland#754): the
+    /// single-flight fix must NOT weaken fail-closed under concurrency. When the
+    /// (one) probe reports the sandbox UNAVAILABLE, N concurrent cold callers
+    /// must still (a) run the probe exactly once — no stampede, (b) EVERY caller
+    /// observe `false` (→ `FailClosedBackend`, never a silent unsandboxed
+    /// fallback), and (c) leave the cache holding the negative `UnavailableUntil`
+    /// verdict so later calls within the TTL reuse it instead of re-probing.
+    #[test]
+    fn single_flight_fails_closed_once_under_concurrency() {
+        use super::probe_single_flight;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::{Arc, Barrier, Mutex};
+
+        let cache = Arc::new(Mutex::new(ProbeCache::new()));
+        let gate = Arc::new(Mutex::new(()));
+        let probe_calls = Arc::new(AtomicUsize::new(0));
+        let n = 32usize;
+        let ttl = Duration::from_secs(30);
+        let barrier = Arc::new(Barrier::new(n));
+
+        let mut handles = Vec::with_capacity(n);
+        for _ in 0..n {
+            let cache = Arc::clone(&cache);
+            let gate = Arc::clone(&gate);
+            let probe_calls = Arc::clone(&probe_calls);
+            let barrier = Arc::clone(&barrier);
+            handles.push(std::thread::spawn(move || {
+                barrier.wait();
+                probe_single_flight(&cache, &gate, ttl, || {
+                    probe_calls.fetch_add(1, Ordering::SeqCst);
+                    // Widen the window a real Win32 probe would occupy.
+                    std::thread::sleep(Duration::from_millis(5));
+                    false // sandbox UNAVAILABLE — must fail closed
+                })
+            }));
+        }
+        // (b) every caller observes the fail-closed verdict (none saw Available).
+        let any_available = handles.into_iter().any(|h| h.join().unwrap());
+        assert!(
+            !any_available,
+            "every caller must observe the UNAVAILABLE verdict (fail closed)"
+        );
+        // (a) no stampede: the failing probe ran exactly once.
+        assert_eq!(
+            probe_calls.load(Ordering::SeqCst),
+            1,
+            "the failing probe must run exactly once despite {n} concurrent cold callers (#754)"
+        );
+        // (c) the cache holds the negative verdict (UnavailableUntil), reused
+        // within the TTL — an Unknown/uncached verdict would surface as `None`.
+        assert_eq!(
+            cache.lock().unwrap().cached(Instant::now()),
+            Some(false),
+            "a concurrent fail-closed probe must cache UnavailableUntil, not leave the cache cold"
+        );
+        // …and a follow-up caller reuses that verdict WITHOUT re-probing: this
+        // closure would flip the result to Available if it ran, so it must not.
+        let reused = probe_single_flight(&cache, &gate, ttl, || {
+            probe_calls.fetch_add(1, Ordering::SeqCst);
+            true
+        });
+        assert!(!reused, "cached fail-closed verdict must be reused, not re-probed");
+        assert_eq!(
+            probe_calls.load(Ordering::SeqCst),
+            1,
+            "cached UnavailableUntil must be reused within the TTL — no re-probe"
+        );
+    }
 }
 
 #[cfg(windows)]
@@ -301,7 +374,7 @@ mod windows_impl {
     use std::ptr;
     use std::sync::mpsc;
     use std::sync::{Mutex, OnceLock};
-    use std::time::{Duration, Instant};
+    use std::time::Duration;
     use windows_sys::Win32::Foundation::{
         CloseHandle, ERROR_ALREADY_EXISTS, GetLastError, HANDLE, INVALID_HANDLE_VALUE,
         WAIT_OBJECT_0, WAIT_TIMEOUT,
