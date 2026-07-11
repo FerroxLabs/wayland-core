@@ -14179,10 +14179,10 @@ mod hook_integration_tests {
     /// `assert_fact` even though the session messages carry extractable
     /// facts. `WAYLAND_AUTO_MEMORIZE=off` is the hermetic kill switch.
     #[tokio::test]
-    #[serial_test::serial(env)]
+    #[serial_test::serial]
     async fn w3_auto_memorize_skips_without_consent() {
         let prior = std::env::var(wcore_memory::auto_memorize::ENV_AUTO_MEMORIZE).ok();
-        // SAFETY: #[serial(env)] serializes all env writes in this group.
+        // SAFETY: #[serial_test::serial] serializes every env-mutating test in this binary.
         unsafe {
             std::env::set_var(wcore_memory::auto_memorize::ENV_AUTO_MEMORIZE, "off");
         }
@@ -14207,7 +14207,7 @@ mod hook_integration_tests {
             "no facts may be persisted when consent is off"
         );
 
-        // SAFETY: #[serial(env)] serializes all env writes in this group.
+        // SAFETY: #[serial_test::serial] serializes every env-mutating test in this binary.
         unsafe {
             match prior {
                 Some(v) => std::env::set_var(wcore_memory::auto_memorize::ENV_AUTO_MEMORIZE, v),
@@ -14222,10 +14222,10 @@ mod hook_integration_tests {
     /// persistence. The consent file is created and removed within the
     /// test (state restored on exit) under `#[serial]`.
     #[tokio::test]
-    #[serial_test::serial(env)]
+    #[serial_test::serial]
     async fn w3_auto_memorize_persists_with_consent() {
         let prior_env = std::env::var(wcore_memory::auto_memorize::ENV_AUTO_MEMORIZE).ok();
-        // SAFETY: #[serial(env)] serializes all env writes in this group.
+        // SAFETY: #[serial_test::serial] serializes every env-mutating test in this binary.
         unsafe {
             std::env::remove_var(wcore_memory::auto_memorize::ENV_AUTO_MEMORIZE);
         }
@@ -14262,7 +14262,7 @@ mod hook_integration_tests {
         if !consent_existed {
             let _ = std::fs::remove_file(&consent_path);
         }
-        // SAFETY: #[serial(env)] serializes all env writes in this group.
+        // SAFETY: #[serial_test::serial] serializes every env-mutating test in this binary.
         unsafe {
             if let Some(v) = prior_env {
                 std::env::set_var(wcore_memory::auto_memorize::ENV_AUTO_MEMORIZE, v);

@@ -10,6 +10,7 @@
 //!     → `resolve_server_for_plugin` binds plugin→server
 //!     → `McpHookDispatcher` fires the hook → returns the MCP tool's text.
 
+use serial_test::serial;
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::{Arc, Mutex, OnceLock};
@@ -112,6 +113,7 @@ async fn discover_and_apply(
 
 /// T12 — integration: a declarative plugin's hooks + mcp_server reach the
 /// applied outcome through the real on-disk discovery + apply pipeline.
+#[serial]
 #[tokio::test]
 async fn declarative_plugin_flows_into_applied_outcome() {
     let tmp = tempfile::TempDir::new().unwrap();
@@ -181,6 +183,7 @@ impl McpToolCaller for FakeCaller {
     }
 }
 
+#[serial]
 #[tokio::test]
 async fn declarative_plugin_hook_dispatches_through_c1() {
     let tmp = tempfile::TempDir::new().unwrap();
@@ -248,6 +251,7 @@ url = "https://example.invalid/sse"
 // --- T14 security: declarative plugin outside allowed roots → load Err ------
 
 #[cfg(unix)]
+#[serial]
 #[tokio::test]
 async fn declarative_plugin_outside_roots_via_symlink_skipped() {
     use std::os::unix::fs::symlink;
@@ -295,6 +299,7 @@ tool = "steal"
 
 // --- T15 security: [mcp_server] without register_mcp_server → load Err -------
 
+#[serial]
 #[tokio::test]
 async fn declarative_mcp_server_without_permission_rejected() {
     let tmp = tempfile::TempDir::new().unwrap();
