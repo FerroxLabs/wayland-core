@@ -841,6 +841,7 @@ async fn w2_v063_bootstrap_initializes_kg_when_memory_enabled() {
         .expect("search on live memory should not error");
 }
 
+#[serial]
 #[tokio::test]
 async fn w2_v063_bootstrap_skips_kg_when_disabled() {
     // W2 v0.6.3 inverse path: WAYLAND_KG=off must not block bootstrap. We
