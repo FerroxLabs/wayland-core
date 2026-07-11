@@ -392,6 +392,9 @@ impl HttpHandler for AcpServer {
                         message: "no turn engine installed".to_string(),
                         data: None,
                     },
+                    // #787: a server-level frame with no turn context — there is
+                    // no per-turn id to stamp (no engine ran).
+                    turn_id: String::new(),
                 };
                 Ok(stream::iter(vec![ev]).boxed())
             }
@@ -541,7 +544,7 @@ mod tests {
             .unwrap();
         let first = s.next().await.expect("one event");
         match first {
-            MessageEvent::Error { error } => {
+            MessageEvent::Error { error, .. } => {
                 assert_eq!(error.message, "no turn engine installed");
                 assert_eq!(error.code, ErrorCode::InternalError.code());
             }
@@ -564,6 +567,7 @@ mod tests {
             },
             MessageEvent::Done {
                 stop_reason: "end_turn".to_string(),
+                turn_id: String::new(),
             },
         ]));
         let server = AcpServer::new().with_turn_engine(engine.clone());
@@ -583,7 +587,7 @@ mod tests {
             other => panic!("expected TextDelta, got {other:?}"),
         }
         match s.next().await.expect("terminal") {
-            MessageEvent::Done { stop_reason } => assert_eq!(stop_reason, "end_turn"),
+            MessageEvent::Done { stop_reason, .. } => assert_eq!(stop_reason, "end_turn"),
             other => panic!("expected Done, got {other:?}"),
         }
         assert!(s.next().await.is_none());
@@ -615,6 +619,7 @@ mod tests {
         }];
         let engine = Arc::new(MockTurnEngine::new(vec![MessageEvent::Done {
             stop_reason: "end_turn".to_string(),
+            turn_id: String::new(),
         }]));
         let server = AcpServer::new().with_turn_engine(engine.clone());
         let resp = server
@@ -666,6 +671,7 @@ mod tests {
         };
         let engine = Arc::new(MockTurnEngine::new(vec![MessageEvent::Done {
             stop_reason: "end_turn".to_string(),
+            turn_id: String::new(),
         }]));
         let server = AcpServer::new().with_turn_engine(engine.clone());
         let resp = server

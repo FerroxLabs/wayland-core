@@ -325,9 +325,24 @@ pub enum MessageEvent {
     },
     Done {
         stop_reason: String,
+        /// #787: stable per-turn correlation id (the turn's `msg_id` uuid — a
+        /// `uuid::Uuid::new_v4()` minted once per turn). Lets a host dedup a
+        /// terminal frame per turn: a re-wake straggler carries the PRIOR
+        /// turn's id, so it is distinguishable from the new turn's terminal.
+        /// Empty only on server-level frames that carry no turn context (e.g.
+        /// "no turn engine installed"). `#[serde(default)]` so a newer client
+        /// can still parse an older server that omits it.
+        #[serde(default, skip_serializing_if = "String::is_empty")]
+        turn_id: String,
     },
     Error {
         error: JsonRpcError,
+        /// #787: stable per-turn correlation id — see [`MessageEvent::Done`].
+        /// Carried here precisely because the error/synthetic-terminal path is
+        /// the duplicate-terminal case a host dedups (`agent_run_id` is `None`
+        /// there, `msg_id` is not).
+        #[serde(default, skip_serializing_if = "String::is_empty")]
+        turn_id: String,
     },
 }
 

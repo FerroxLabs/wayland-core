@@ -398,6 +398,15 @@ struct ProtocolToMessageStream {
     /// `(name, input)` by `call_id` so the gate frame projects a faithful
     /// `ToolCall`. The map is bounded by the in-flight tool calls of one turn.
     pending_calls: HashMap<String, (String, serde_json::Value)>,
+    /// #787: the turn's `msg_id`, stashed from the first frame that carries it
+    /// (every ACP turn opens with `StreamStart { msg_id }`). Used as the
+    /// terminal frame's `turn_id` when the terminal `ProtocolEvent::Error`
+    /// itself carries `msg_id: None` — the in-band `emit_error` path
+    /// (`ChannelSink::emit_error`) has no msg_id in its trait signature and
+    /// hardcodes `None`, yet it is a terminal frame the host must be able to
+    /// dedup. Without this stash that (common, retryable-provider-error)
+    /// terminal would ship `turn_id = ""` and collapse the dedup key.
+    turn_id: String,
 }
 
 impl ProtocolToMessageStream {
@@ -406,6 +415,17 @@ impl ProtocolToMessageStream {
             rx,
             done: false,
             pending_calls: HashMap::new(),
+            turn_id: String::new(),
+        }
+    }
+
+    /// #787: remember the turn's `msg_id` from the first non-empty frame that
+    /// carries one (all frames of a turn share the same id). Used as the
+    /// fallback `turn_id` for a terminal `Error` frame whose own `msg_id` is
+    /// `None` (the in-band `emit_error` path).
+    fn stash_turn_id(&mut self, msg_id: &str) {
+        if self.turn_id.is_empty() && !msg_id.is_empty() {
+            self.turn_id = msg_id.to_string();
         }
     }
 
@@ -413,8 +433,21 @@ impl ProtocolToMessageStream {
     /// `None` to swallow the event; sets `done` when the frame is terminal.
     fn project(&mut self, ev: ProtocolEvent) -> Option<MessageEvent> {
         match ev {
-            ProtocolEvent::TextDelta { text, .. } => Some(MessageEvent::TextDelta { text }),
-            ProtocolEvent::Thinking { text, .. } => Some(MessageEvent::Thinking { text }),
+            ProtocolEvent::StreamStart { msg_id } => {
+                // #787: the guaranteed-first frame of every ACP turn — stash its
+                // id so a later terminal Error with msg_id: None can still stamp
+                // the right turn_id. Swallowed (no MessageEvent analogue).
+                self.stash_turn_id(&msg_id);
+                None
+            }
+            ProtocolEvent::TextDelta { text, msg_id } => {
+                self.stash_turn_id(&msg_id);
+                Some(MessageEvent::TextDelta { text })
+            }
+            ProtocolEvent::Thinking { text, msg_id, .. } => {
+                self.stash_turn_id(&msg_id);
+                Some(MessageEvent::Thinking { text })
+            }
             ProtocolEvent::ToolRequest { call_id, tool, .. } => {
                 // D012: remember the call so the matching `ApprovalRequired`
                 // (synthesized by the relay's `ChannelEmitter`) can project a
@@ -461,13 +494,19 @@ impl ProtocolToMessageStream {
                     is_error: true,
                 },
             }),
-            ProtocolEvent::StreamEnd { finish_reason, .. } => {
+            ProtocolEvent::StreamEnd {
+                msg_id,
+                finish_reason,
+                ..
+            } => {
                 self.done = true;
                 Some(MessageEvent::Done {
                     stop_reason: stop_reason_str(finish_reason).to_string(),
+                    // #787: stamp the per-turn id so the host can dedup terminals.
+                    turn_id: msg_id,
                 })
             }
-            ProtocolEvent::Error { error, .. } => {
+            ProtocolEvent::Error { msg_id, error, .. } => {
                 self.done = true;
                 Some(MessageEvent::Error {
                     error: JsonRpcError {
@@ -477,6 +516,14 @@ impl ProtocolToMessageStream {
                         // inspect it.
                         data: Some(serde_json::json!({ "retryable": error.retryable })),
                     },
+                    // #787: the error terminal is exactly the duplicate-terminal
+                    // case the host dedups. Prefer the frame's own msg_id, but
+                    // the in-band `emit_error` path (ChannelSink::emit_error)
+                    // has no msg_id in its trait signature and relays
+                    // `msg_id: None` — fall back to the id stashed from the
+                    // turn's StreamStart so this (common, retryable) terminal
+                    // still carries a stable turn_id.
+                    turn_id: msg_id.unwrap_or_else(|| self.turn_id.clone()),
                 })
             }
             // D012 (P0 security): surface the approval gate to REST/SSE/ACP
@@ -512,9 +559,10 @@ impl ProtocolToMessageStream {
                     resume_token,
                 })
             }
-            // StreamStart / ToolRunning / ToolChunk / Suspend / ApprovalResume /
-            // Info / traces / costs etc. have no faithful ACP `MessageEvent`
-            // analogue — swallow them.
+            // ToolRunning / ToolChunk / Suspend / ApprovalResume / Info /
+            // traces / costs etc. have no faithful ACP `MessageEvent` analogue —
+            // swallow them. (StreamStart is handled explicitly above so its
+            // msg_id can seed the turn_id stash before it is swallowed.)
             _ => None,
         }
     }
@@ -685,7 +733,7 @@ impl EngineSession {
         while let Some(ev) = stream.next().await {
             match ev {
                 MessageEvent::TextDelta { text } => reply.push_str(&text),
-                MessageEvent::Error { error } => return Err(error.message),
+                MessageEvent::Error { error, .. } => return Err(error.message),
                 MessageEvent::Done { .. } => break,
                 // Thinking / tool frames are not part of the A2A reply text.
                 _ => {}
@@ -1200,7 +1248,7 @@ mod tests {
             other => panic!("expected ToolResult, got {other:?}"),
         }
         match &out[3] {
-            MessageEvent::Done { stop_reason } => assert_eq!(stop_reason, "max_tokens"),
+            MessageEvent::Done { stop_reason, .. } => assert_eq!(stop_reason, "max_tokens"),
             other => panic!("expected Done, got {other:?}"),
         }
     }
@@ -1456,12 +1504,76 @@ mod tests {
         let out = project_all(events).await;
         assert_eq!(out.len(), 1);
         match &out[0] {
-            MessageEvent::Error { error } => {
+            MessageEvent::Error { error, turn_id } => {
                 assert_eq!(error.message, "kaboom");
                 assert_eq!(error.code, ErrorCode::ToolFailed.code());
                 assert_eq!(
                     error.data.as_ref().unwrap().get("retryable").unwrap(),
                     &serde_json::Value::Bool(true)
+                );
+                // #787: the source ProtocolEvent::Error carried msg_id "m" →
+                // it must be stamped as the terminal frame's turn_id.
+                assert_eq!(turn_id, "m");
+            }
+            other => panic!("expected Error, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn projection_stamps_turn_id_from_stream_end_msg_id() {
+        // #787: the terminal Done frame must carry the turn's msg_id as
+        // turn_id so a host can dedup terminals per turn (a re-wake straggler
+        // then carries the PRIOR turn's id, distinct from the new turn's).
+        let events = vec![ProtocolEvent::StreamEnd {
+            msg_id: "turn-xyz".into(),
+            finish_reason: FinishReason::Stop,
+            usage: None,
+            usage_delta: None,
+            agent_run_id: None,
+        }];
+        let out = project_all(events).await;
+        assert_eq!(out.len(), 1);
+        match &out[0] {
+            MessageEvent::Done {
+                stop_reason,
+                turn_id,
+            } => {
+                assert_eq!(stop_reason, "end_turn");
+                assert_eq!(turn_id, "turn-xyz");
+            }
+            other => panic!("expected Done, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn projection_stamps_turn_id_on_in_band_error_from_stream_start() {
+        // #787 regression: the in-band emit_error path (ChannelSink::emit_error)
+        // relays ProtocolEvent::Error { msg_id: None } — yet it is a TERMINAL
+        // frame the host must dedup. The turn's id, stashed from the opening
+        // StreamStart, must be stamped as turn_id; otherwise the dedup key
+        // collapses to `${conv}#` for every retryable provider error (the exact
+        // case #787 targets). Without the stash this asserts turn_id == "".
+        let events = vec![
+            ProtocolEvent::StreamStart {
+                msg_id: "turn-abc".into(),
+            },
+            ProtocolEvent::Error {
+                msg_id: None,
+                error: wcore_protocol::events::ErrorInfo {
+                    code: "provider_error".into(),
+                    message: "upstream 503".into(),
+                    retryable: true,
+                },
+            },
+        ];
+        let out = project_all(events).await;
+        // StreamStart is swallowed; only the terminal Error projects.
+        assert_eq!(out.len(), 1);
+        match &out[0] {
+            MessageEvent::Error { turn_id, .. } => {
+                assert_eq!(
+                    turn_id, "turn-abc",
+                    "in-band error must inherit the turn's StreamStart id"
                 );
             }
             other => panic!("expected Error, got {other:?}"),

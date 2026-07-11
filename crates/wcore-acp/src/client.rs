@@ -274,6 +274,7 @@ mod tests {
         {
             Ok(futures::stream::iter(vec![MessageEvent::Done {
                 stop_reason: "end_turn".to_string(),
+                turn_id: String::new(),
             }])
             .boxed())
         }

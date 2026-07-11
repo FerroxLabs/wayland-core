@@ -110,7 +110,7 @@ async fn acp_turn_streams_text_then_done() {
         "exactly one terminal frame; frames: {frames:?}"
     );
     match frames.last().expect("a terminal frame") {
-        MessageEvent::Done { stop_reason } => assert_eq!(stop_reason, "end_turn"),
+        MessageEvent::Done { stop_reason, .. } => assert_eq!(stop_reason, "end_turn"),
         other => panic!("expected a clean Done last, got {other:?}"),
     }
 }

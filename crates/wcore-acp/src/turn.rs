@@ -188,6 +188,7 @@ mod tests {
                 },
                 MessageEvent::Done {
                     stop_reason: "end_turn".to_string(),
+                    turn_id: String::new(),
                 },
             ],
         };
@@ -215,7 +216,7 @@ mod tests {
             .count();
         assert_eq!(terminals, 1, "exactly one terminal frame");
         match frames.last().expect("last frame") {
-            MessageEvent::Done { stop_reason } => assert_eq!(stop_reason, "end_turn"),
+            MessageEvent::Done { stop_reason, .. } => assert_eq!(stop_reason, "end_turn"),
             other => panic!("expected Done last, got {other:?}"),
         }
     }
@@ -230,6 +231,7 @@ mod tests {
                     message: "boom".to_string(),
                     data: None,
                 },
+                turn_id: String::new(),
             }],
         };
         let req = TurnRequest {

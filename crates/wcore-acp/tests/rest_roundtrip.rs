@@ -74,6 +74,7 @@ impl HttpHandler for MockHandler {
             MessageEvent::TextDelta { text: "hi".into() },
             MessageEvent::Done {
                 stop_reason: "end_turn".into(),
+                turn_id: String::new(),
             },
         ];
         Ok(Box::pin(stream::iter(events)))
