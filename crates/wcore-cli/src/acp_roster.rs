@@ -62,10 +62,20 @@ use wcore_plugin_api::agent_manifest::AgentManifest;
 /// operator's global agent YAML). See the module docs for the trust model.
 #[derive(Debug, Clone, Default)]
 pub struct CliAgentRoster {
-    /// Precomputed authorized set, keyed by id for stable ordering. Snapshotted
-    /// at construction: enumeration is a startup concern, and a fixed snapshot
-    /// means a mid-session filesystem change cannot silently widen the roster.
-    agents: Vec<AgentInfo>,
+    /// THE authorized set — the single source of truth, keyed by id (BTreeMap ⇒
+    /// deterministic, sorted enumeration). Snapshotted at construction: a
+    /// mid-session filesystem change cannot silently widen the roster.
+    ///
+    /// The full [`AgentManifest`] is retained (not just the wire-safe
+    /// [`AgentInfo`]) because PR-4' must resolve a selected id to that persona's
+    /// overlay (system_prompt/model/allowed_tools) SERVER-SIDE. Storing both
+    /// views in one map is deliberate: `list()`, `contains()` and `resolve()` all
+    /// answer from THIS map, so an id that is not enumerable/selectable can never
+    /// be resolved to an overlay (fail closed — no divergence to bypass).
+    ///
+    /// The manifest NEVER leaves this crate: only [`Self::to_info`]'s wire-safe
+    /// projection is handed to `wcore-acp`.
+    by_id: BTreeMap<String, AgentManifest>,
 }
 
 impl CliAgentRoster {
@@ -85,12 +95,11 @@ impl CliAgentRoster {
     /// project-supplied agents dir could be threaded in.
     pub fn from_pack_and_global_dir(global_agents_dir: &Path) -> Self {
         // BTreeMap ⇒ deterministic, sorted-by-id output.
-        let mut by_id: BTreeMap<String, AgentInfo> = BTreeMap::new();
+        let mut by_id: BTreeMap<String, AgentManifest> = BTreeMap::new();
 
         // 1. Compiled-in personas (trusted by construction).
         for manifest in AgentPack::list() {
-            let info = Self::to_info(&manifest);
-            by_id.insert(info.id.clone(), info);
+            by_id.insert(manifest.name.clone(), manifest);
         }
 
         // 2. Operator-authored global YAML. Loaded through the registry so we
@@ -108,16 +117,30 @@ impl CliAgentRoster {
                 continue;
             }
             if let Some(manifest) = registry.get(&name) {
-                let info = Self::to_info(&manifest);
                 // Operator's own YAML intentionally overrides a same-named
                 // built-in: it is the more specific, operator-authored source.
-                by_id.insert(info.id.clone(), info);
+                // Both sides are TRUSTED, so this is not an escalation path (a
+                // project source is never in this map at all).
+                by_id.insert(manifest.name.clone(), manifest);
             }
         }
 
-        Self {
-            agents: by_id.into_values().collect(),
-        }
+        Self { by_id }
+    }
+
+    /// persona-profiles PR-4' — resolve an AUTHORIZED id to its persona overlay
+    /// (system_prompt / model / allowed_tools / max_turns).
+    ///
+    /// SERVER-SIDE ONLY. The returned [`AgentManifest`] must never be serialized
+    /// or handed to `wcore-acp` — only [`Self::to_info`]'s projection crosses the
+    /// wire (R4).
+    ///
+    /// FAIL CLOSED: this reads the SAME `by_id` map that `list()`/`contains()`
+    /// answer from, so an id that is not enumerable/selectable resolves to `None`
+    /// and NO overlay is ever applied. There is deliberately no second lookup
+    /// path (a divergent resolver is exactly how an authz bypass is born).
+    pub fn resolve(&self, id: &str) -> Option<AgentManifest> {
+        self.by_id.get(id).cloned()
     }
 
     /// The ONE manifest → wire mapping. R4: drops `system_prompt`, `model`,
@@ -137,19 +160,22 @@ impl CliAgentRoster {
 
     /// Number of authorized agents (tests + observability).
     pub fn len(&self) -> usize {
-        self.agents.len()
+        self.by_id.len()
     }
 
     /// Whether the authorized roster is empty.
     pub fn is_empty(&self) -> bool {
-        self.agents.is_empty()
+        self.by_id.is_empty()
     }
 }
 
 #[async_trait]
 impl AgentRoster for CliAgentRoster {
     async fn list(&self) -> Result<Vec<AgentInfo>, AcpError> {
-        Ok(self.agents.clone())
+        // Projected from the SAME map `resolve()` reads ⇒ what is enumerable is
+        // exactly what is selectable is exactly what is resolvable. R4: only the
+        // wire-safe projection escapes; the manifest never does.
+        Ok(self.by_id.values().map(Self::to_info).collect())
     }
     // `contains` uses the trait default, which answers from `list` — so the
     // authz gate applied above governs selector admission too (R3). No override:
@@ -178,11 +204,11 @@ mod tests {
         assert!(!pack_names.is_empty(), "AgentPack should ship personas");
         for name in &pack_names {
             assert!(
-                roster.agents.iter().any(|a| &a.id == name),
+                roster.by_id.contains_key(name),
                 "AgentPack persona {name} missing from roster"
             );
         }
-        assert!(roster.agents.iter().all(|a| !a.id.is_empty()));
+        assert!(roster.by_id.keys().all(|id| !id.is_empty()));
     }
 
     /// Operator-authored global YAML is enumerated alongside the pack.
@@ -193,11 +219,13 @@ mod tests {
         let roster = CliAgentRoster::from_pack_and_global_dir(dir.path());
 
         let ops = roster
-            .agents
-            .iter()
-            .find(|a| a.id == "opsbot")
+            .resolve("opsbot")
             .expect("global operator agent should be enumerated");
-        assert_eq!(ops.description.as_deref(), Some("desc for opsbot"));
+        assert_eq!(ops.description, "desc for opsbot");
+        assert_eq!(
+            CliAgentRoster::to_info(&ops).description.as_deref(),
+            Some("desc for opsbot")
+        );
     }
 
     /// SECURITY (untrusted project content): an agent manifest sitting in a
@@ -215,18 +243,24 @@ mod tests {
         let roster = CliAgentRoster::from_pack_and_global_dir(global.path());
 
         assert!(
-            roster.agents.iter().any(|a| a.id == "trusted-global"),
+            roster.by_id.contains_key("trusted-global"),
             "trusted global agent should be present"
         );
         assert!(
-            !roster.agents.iter().any(|a| a.id == "evil-project"),
+            !roster.by_id.contains_key("evil-project"),
             "project-supplied agent MUST NOT be enumerated"
         );
-        // And it is not admissible as a selector either (R3: unknown == not
-        // authorized == false, via the trait's `contains` default).
+        // Not admissible as a selector either (R3: unknown == not authorized ==
+        // false, via the trait's `contains` default).
         assert!(
             !roster.contains("evil-project").await,
             "project-supplied agent MUST NOT be selectable"
+        );
+        // PR-4' fail-closed: and it can NEVER be resolved to a persona overlay,
+        // so its attacker-controlled system_prompt can never reach an engine.
+        assert!(
+            roster.resolve("evil-project").is_none(),
+            "project-supplied agent MUST NOT resolve to an overlay"
         );
     }
 
@@ -292,14 +326,15 @@ mod tests {
 
     /// Deterministic, sorted output — a roster that reorders per call would make
     /// clients' agent lists flap.
-    #[test]
-    fn roster_is_sorted_and_deduped() {
+    #[tokio::test]
+    async fn roster_is_sorted_and_deduped() {
         let dir = tempfile::tempdir().unwrap();
         write_agent_yaml(dir.path(), "zzz-last", "z");
         write_agent_yaml(dir.path(), "aaa-first", "a");
         let roster = CliAgentRoster::from_pack_and_global_dir(dir.path());
 
-        let ids: Vec<&str> = roster.agents.iter().map(|a| a.id.as_str()).collect();
+        let listed = roster.list().await.unwrap();
+        let ids: Vec<&str> = listed.iter().map(|a| a.id.as_str()).collect();
         let mut sorted = ids.clone();
         sorted.sort_unstable();
         assert_eq!(ids, sorted, "roster must be sorted by id");
@@ -307,5 +342,37 @@ mod tests {
         let mut uniq = ids.clone();
         uniq.dedup();
         assert_eq!(ids.len(), uniq.len(), "roster must not contain duplicates");
+    }
+
+    /// PR-4' core invariant: what is ENUMERABLE == what is SELECTABLE == what is
+    /// RESOLVABLE. Any divergence between these three is an authz bypass (an id
+    /// you cannot see but can still bind a persona from, or vice-versa).
+    #[tokio::test]
+    async fn list_contains_and_resolve_never_diverge() {
+        let dir = tempfile::tempdir().unwrap();
+        write_agent_yaml(dir.path(), "opsbot", "ops");
+        let roster = CliAgentRoster::from_pack_and_global_dir(dir.path());
+
+        for info in roster.list().await.unwrap() {
+            assert!(
+                roster.contains(&info.id).await,
+                "listed agent {} must be selectable",
+                info.id
+            );
+            assert!(
+                roster.resolve(&info.id).is_some(),
+                "listed agent {} must be resolvable",
+                info.id
+            );
+        }
+        // And the converse: an id that is not listed is neither selectable nor
+        // resolvable (fail closed).
+        for id in ["", "nope", "../escape", "OPSBOT"] {
+            assert!(!roster.contains(id).await, "{id} must not be selectable");
+            assert!(
+                roster.resolve(id).is_none(),
+                "{id} must not resolve to an overlay"
+            );
+        }
     }
 }

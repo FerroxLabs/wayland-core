@@ -718,6 +718,15 @@ pub struct EngineTurnEngine {
     /// client-bound approval channel is a tracked follow-up). When on, the
     /// API key is root-equivalent and the operator opted into that.
     force_tools: bool,
+    /// persona-profiles PR-4' — the SAME authorized roster the ACP server is
+    /// wired with. Resolves a session's selected persona id to its overlay
+    /// (system_prompt / model / max_turns / allowed_tools).
+    ///
+    /// It MUST be the same `CliAgentRoster` instance the server authorizes
+    /// against, so "what you may select" and "what may be applied to your engine"
+    /// cannot drift apart. `None` (no `--enable-agent-selection`) ⇒ no persona is
+    /// ever resolvable and the engine behaves exactly as before.
+    roster: Option<Arc<crate::acp_roster::CliAgentRoster>>,
 }
 
 impl EngineTurnEngine {
@@ -731,6 +740,7 @@ impl EngineTurnEngine {
             sessions: Arc::new(AsyncMutex::new(HashMap::new())),
             provider: None,
             force_tools: false,
+            roster: None,
         }
     }
 
@@ -741,6 +751,47 @@ impl EngineTurnEngine {
     pub fn force_tools(mut self, on: bool) -> Self {
         self.force_tools = on;
         self
+    }
+
+    /// persona-profiles PR-4' — install the authorized persona roster (the SAME
+    /// instance the `AcpServer` is given) so a session's selected persona can be
+    /// resolved to its overlay. Without this, no persona is resolvable.
+    pub fn with_roster(mut self, roster: Arc<crate::acp_roster::CliAgentRoster>) -> Self {
+        self.roster = Some(roster);
+        self
+    }
+
+    /// persona-profiles PR-4' — the engine inputs for a session's persona.
+    ///
+    /// Returns the (possibly overlaid) [`Config`] plus the persona's declared
+    /// tool allowlist. When `agent` is `None`, or no roster is installed, or the
+    /// id does not resolve in the AUTHORIZED set (fail closed), this is exactly
+    /// the base config with no allowlist — byte-identical to pre-persona
+    /// behaviour.
+    ///
+    /// The overlay is PROMPT / MODEL / LIMITS only. It deliberately does not
+    /// touch `WAYLAND_HOME`, API keys, or the egress policy: those are
+    /// process-global credential identity, and swapping them per session is the
+    /// credential-bleed the design forbids. True per-profile isolation is the
+    /// supervisor (one process per profile), not this overlay.
+    fn engine_inputs_for(&self, agent: Option<&str>) -> (Config, Vec<String>) {
+        let Some(manifest) = agent
+            .and_then(|id| self.roster.as_ref().map(|r| (id, r)))
+            .and_then(|(id, r)| r.resolve(id))
+        else {
+            return (self.config.clone(), Vec::new());
+        };
+
+        let mut config = self.config.clone();
+        config.system_prompt = Some(manifest.system_prompt.clone());
+        if let Some(model) = manifest.model.clone() {
+            config.model = model;
+        }
+        if let Some(max_turns) = manifest.max_turns {
+            // AgentManifest carries u32; Config carries usize.
+            config.max_turns = Some(max_turns as usize);
+        }
+        (config, manifest.allowed_tools.clone())
     }
 
     /// Test/embedding seam: build a turn engine with a pre-created provider,
@@ -757,6 +808,10 @@ impl EngineTurnEngine {
             cwd,
             sessions: Arc::new(AsyncMutex::new(HashMap::new())),
             provider: Some(provider),
+            // No persona roster on the embedding/test seam: personas are an
+            // operator-enabled ACP-serve feature, so a hermetic engine resolves
+            // no persona (fail closed).
+            roster: None,
             // Embedding/test seam: the caller is in-process and trusted, so
             // tools auto-approve (hermetic turn tests drive real tool flow).
             force_tools: true,
@@ -765,7 +820,21 @@ impl EngineTurnEngine {
 
     /// Fetch (or build + cache) the `EngineSession` for `session_id`. One
     /// engine per session preserves conversation history across turns.
-    async fn session_for(&self, session_id: &str) -> Result<Arc<EngineSession>, AcpError> {
+    ///
+    /// persona-profiles PR-4': `agent` is the session's AUTHORIZED persona id (or
+    /// `None`). The persona is bound at BUILD time — the engine cached for this
+    /// session id is constructed WITH that persona's overlay. This is load-bearing:
+    /// the pool is keyed by session id and a session's persona is fixed for its
+    /// lifetime, so a cached engine always carries the persona it was created
+    /// with, and two sessions with different personas get different engines. (If
+    /// the overlay were applied per-turn instead, the first session to build an
+    /// engine would silently impose its persona on every later session — an
+    /// identity/security bug.)
+    async fn session_for(
+        &self,
+        session_id: &str,
+        agent: Option<&str>,
+    ) -> Result<Arc<EngineSession>, AcpError> {
         {
             let pool = self.sessions.lock().await;
             if let Some(existing) = pool.get(session_id) {
@@ -802,8 +871,14 @@ impl EngineTurnEngine {
             approval_manager.set_mode(wcore_protocol::commands::SessionMode::Force);
         }
 
+        // persona-profiles PR-4': resolve this session's persona (if any) to its
+        // config overlay + declared tool allowlist. Fails CLOSED — an id that is
+        // not in the authorized roster yields the base config and no allowlist.
+        let (session_config, persona_tools) = self.engine_inputs_for(agent);
+
         let output: Arc<dyn OutputSink> = Arc::new(RelaySink::new(relay.clone()));
-        let mut bootstrap = AgentBootstrap::new(self.config.clone(), self.cwd.clone(), output);
+        let mut bootstrap = AgentBootstrap::new(session_config.clone(), self.cwd.clone(), output)
+            .tool_allowlist(persona_tools);
         if let Some(provider) = &self.provider {
             bootstrap = bootstrap.provider(provider.clone());
         }
@@ -813,7 +888,7 @@ impl EngineTurnEngine {
             .map_err(|e| AcpError::Protocol(format!("engine bootstrap failed: {e}")))?;
         let mut engine = result.engine;
 
-        let provider_name = self.config.provider_label.clone();
+        let provider_name = session_config.provider_label.clone();
         engine
             .init_session(&provider_name, &self.cwd, Some(session_id))
             .map_err(|e| AcpError::Protocol(format!("engine init_session failed: {e}")))?;
@@ -848,7 +923,10 @@ impl TurnEngine for EngineTurnEngine {
         // applied to the engine build in this MVP (documented follow-up); the
         // engine's full registry is the faithful default.
         let _ = &req.tools;
-        let session = self.session_for(&req.session_id).await?;
+        // persona-profiles PR-4': bind THIS session's authorized persona (None = none).
+        let session = self
+            .session_for(&req.session_id, req.agent.as_deref())
+            .await?;
         let msg_id = uuid::Uuid::new_v4().to_string();
         Ok(session.run_turn(req.text, msg_id).await)
     }
@@ -962,7 +1040,8 @@ impl EngineA2aHandler {
     /// session keyed on the agent id (the first build wins) and reads its
     /// registered tools.
     async fn tool_catalog(&self) -> Vec<String> {
-        match self.inner.session_for(&self.agent_id).await {
+        // A2A federation carries no ACP persona selector — no overlay.
+        match self.inner.session_for(&self.agent_id, None).await {
             Ok(session) => session.tool_names(),
             Err(_) => Vec::new(),
         }
@@ -1011,7 +1090,7 @@ impl A2aHandler for EngineA2aHandler {
         };
         let session = self
             .inner
-            .session_for(&session_id)
+            .session_for(&session_id, None)
             .await
             .map_err(|e| A2aError::HandlerError(e.to_string()))?;
         let msg_id = uuid::Uuid::new_v4().to_string();
@@ -1688,6 +1767,133 @@ mod tests {
         assert!(
             matches!(err, AcpError::Session(_)),
             "re-resolving a consumed gate is idempotent not-found, got {err:?}"
+        );
+    }
+
+    // ── persona-profiles PR-4': per-session persona overlay ───────────────
+    //
+    // The security decision lives in `engine_inputs_for`: it alone decides
+    // whether a persona overlay is applied and what it contains. These pin it.
+
+    fn persona_roster(dir: &std::path::Path) -> Arc<crate::acp_roster::CliAgentRoster> {
+        Arc::new(crate::acp_roster::CliAgentRoster::from_pack_and_global_dir(
+            dir,
+        ))
+    }
+
+    fn write_persona(dir: &std::path::Path, name: &str, prompt: &str, model: &str, tools: &[&str]) {
+        std::fs::create_dir_all(dir).unwrap();
+        let tools_yaml: String = tools.iter().map(|t| format!("  - {t}\n")).collect();
+        std::fs::write(
+            dir.join(format!("{name}.yaml")),
+            format!(
+                "name: {name}\ndescription: d\nsystem_prompt: \"{prompt}\"\nmodel: {model}\nallowed_tools:\n{tools_yaml}"
+            ),
+        )
+        .unwrap();
+    }
+
+    /// No persona selected ⇒ base config, no allowlist: byte-identical to the
+    /// pre-persona engine.
+    #[test]
+    fn no_agent_leaves_the_engine_inputs_untouched() {
+        let dir = tempfile::tempdir().unwrap();
+        let engine = EngineTurnEngine::new(placeholder_config(), ".".to_string())
+            .with_roster(persona_roster(dir.path()));
+        let (cfg, tools) = engine.engine_inputs_for(None);
+        assert_eq!(cfg.system_prompt, placeholder_config().system_prompt);
+        assert_eq!(cfg.model, placeholder_config().model);
+        assert!(tools.is_empty());
+    }
+
+    /// FAIL CLOSED: an id outside the AUTHORIZED roster applies no overlay. A
+    /// hostile/unknown id can never inject a system_prompt into an engine.
+    #[test]
+    fn unauthorized_agent_applies_no_overlay() {
+        let dir = tempfile::tempdir().unwrap();
+        let engine = EngineTurnEngine::new(placeholder_config(), ".".to_string())
+            .with_roster(persona_roster(dir.path()));
+        let (cfg, tools) = engine.engine_inputs_for(Some("not-in-the-roster"));
+        assert_eq!(cfg.system_prompt, placeholder_config().system_prompt);
+        assert!(tools.is_empty());
+    }
+
+    /// Feature default-OFF: with NO roster installed even a real pack id is inert.
+    #[test]
+    fn no_roster_installed_means_no_persona_is_resolvable() {
+        let engine = EngineTurnEngine::new(placeholder_config(), ".".to_string());
+        let (cfg, tools) = engine.engine_inputs_for(Some("architect"));
+        assert_eq!(cfg.system_prompt, placeholder_config().system_prompt);
+        assert!(tools.is_empty());
+    }
+
+    /// A selected persona overlays prompt + model and carries its declared
+    /// tool allowlist through to the bootstrap.
+    #[test]
+    fn selected_persona_overlays_prompt_model_and_tools() {
+        let dir = tempfile::tempdir().unwrap();
+        write_persona(
+            dir.path(),
+            "opsbot",
+            "YOU ARE OPS",
+            "test-model-x",
+            &["Read", "Grep"],
+        );
+        let engine = EngineTurnEngine::new(placeholder_config(), ".".to_string())
+            .with_roster(persona_roster(dir.path()));
+        let (cfg, tools) = engine.engine_inputs_for(Some("opsbot"));
+        assert_eq!(cfg.system_prompt.as_deref(), Some("YOU ARE OPS"));
+        assert_eq!(cfg.model, "test-model-x");
+        assert_eq!(tools, vec!["Read".to_string(), "Grep".to_string()]);
+    }
+
+    /// THE landmine test. Two sessions selecting DIFFERENT personas must never
+    /// share an overlay. The engine pool is keyed by session id and the persona
+    /// is bound at engine-BUILD time, so each session's inputs are independent —
+    /// if the overlay were computed once and reused, the first session would
+    /// silently impose its persona on every later one (identity/security bug).
+    #[test]
+    fn two_personas_never_share_an_overlay() {
+        let dir = tempfile::tempdir().unwrap();
+        write_persona(dir.path(), "alpha", "I AM ALPHA", "model-a", &["Read"]);
+        write_persona(dir.path(), "beta", "I AM BETA", "model-b", &["Grep"]);
+        let engine = EngineTurnEngine::new(placeholder_config(), ".".to_string())
+            .with_roster(persona_roster(dir.path()));
+
+        let (a, a_tools) = engine.engine_inputs_for(Some("alpha"));
+        let (b, b_tools) = engine.engine_inputs_for(Some("beta"));
+
+        assert_eq!(a.system_prompt.as_deref(), Some("I AM ALPHA"));
+        assert_eq!(b.system_prompt.as_deref(), Some("I AM BETA"));
+        assert_ne!(a.system_prompt, b.system_prompt);
+        assert_ne!(a.model, b.model);
+        assert_eq!(a_tools, vec!["Read".to_string()]);
+        assert_eq!(b_tools, vec!["Grep".to_string()]);
+    }
+
+    /// The overlay is PROMPT/MODEL/LIMITS only — it must NEVER re-point the
+    /// process's credential identity. Swapping creds per session is exactly the
+    /// credential-bleed the design forbids (true per-profile isolation is the
+    /// supervisor: one process per profile).
+    #[test]
+    fn persona_overlay_never_touches_credential_identity() {
+        let dir = tempfile::tempdir().unwrap();
+        write_persona(dir.path(), "opsbot", "ops", "m", &["Read"]);
+        let engine = EngineTurnEngine::new(placeholder_config(), ".".to_string())
+            .with_roster(persona_roster(dir.path()));
+        let base = placeholder_config();
+        let (cfg, _) = engine.engine_inputs_for(Some("opsbot"));
+        assert_eq!(
+            cfg.api_key, base.api_key,
+            "persona must not swap the API key"
+        );
+        assert_eq!(
+            cfg.provider_label, base.provider_label,
+            "persona must not swap the provider identity"
+        );
+        assert_eq!(
+            cfg.base_url, base.base_url,
+            "persona must not repoint the provider endpoint"
         );
     }
 }
