@@ -42,8 +42,8 @@ pub fn strip_line_numbers(numbered: &str) -> Vec<String> {
 
 /// Longest-common-subsequence line diff. Returns the ordered edit script that
 /// turns `base` into `cur`. O(n*m) time/space — bounded by the 100 KB Read
-/// result cap, and only ever run on a route that opted into client-side
-/// optimization.
+/// result cap. Runs on every route (diff-resend is no longer route-gated; see
+/// #182), subject to the caller's soundness guards in `read.rs`.
 fn diff_ops(base: &[String], cur: &[String]) -> Vec<Op> {
     let n = base.len();
     let m = cur.len();

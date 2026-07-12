@@ -351,11 +351,13 @@ impl AgentBootstrap {
             let cache = Arc::new(std::sync::RwLock::new(
                 wcore_tools::file_cache::FileStateCache::new(&self.config.file_cache),
             ));
-            // Token-opt (diff-resend): enable client-side diff answers only on
-            // routes that optimize client-side. Router-optimized routes leave
-            // this off and send full reads. Set once here from the resolved
+            // Token-opt: enable OUTPUT-dedup (identical-tool-result backrefs)
+            // only on client-optimized routes; router-optimized routes defer
+            // output/wire dedup to the server. Set once here from the resolved
             // compat (config is moved into the engine below, so it must happen
-            // before construction).
+            // before construction). NOTE (#182): this no longer gates the read
+            // diff-resend — that is a context reduction the server can't do for
+            // us, so it runs on every route (see wcore-tools `read.rs`).
             if let Ok(mut c) = cache.write() {
                 c.set_optimize_reads(self.config.compat.input_optimization() == "client");
             }
