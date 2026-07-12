@@ -41,18 +41,6 @@ const SECRET_EXTENSIONS: &[&str] = &["pem", "key", "p12", "pfx", "tfstate"];
 /// component.
 const SECRET_BASENAMES: &[&str] = &["id_rsa", "id_ed25519", "id_ecdsa", "id_dsa"];
 
-/// Machine-generated directory trees (VCS, build output, dependency and
-/// redirected-cache dirs) pruned from the project-secret walk. They never hold
-/// a secret the operator COMMITTED to the workspace, and traversing them is a
-/// hazard for the per-exec dynamic recompute (#234): in `Contained` mode the
-/// package caches are redirected INTO the workspace (`CACHE_ENV_DIRS` →
-/// `<root>/.wcache/*`), so an unpruned walk would (a) stall every shell command
-/// re-walking a filled cargo/npm cache and (b) sweep dependency TLS fixtures
-/// (`*.pem`/`*.key`) into `fs_read_deny`, ballooning the sandbox manifest. Safe
-/// for the construction-time callers too — empty at bootstrap, never a
-/// committed secret.
-const WALK_PRUNE_DIRS: &[&str] = &[".git", ".wcache", "target", "node_modules"];
-
 /// Cache vars redirected into `<root>/.wcache/<tool>` in `Contained` mode.
 const CACHE_ENV_DIRS: &[(&str, &str)] = &[
     ("CARGO_HOME", "cargo"),
@@ -504,37 +492,44 @@ fn project_committed_secrets(root: &Path, readable_canon: &[PathBuf]) -> Vec<Pat
     };
 
     let mut out: Vec<PathBuf> = Vec::new();
+    // NO directory prune: the file tools' `is_project_secret` predicate covers a
+    // secret ANYWHERE under root, so this list must too — pruning `node_modules`/
+    // `target`/`.wcache` would deny a committed secret to Read/Edit/Grep while
+    // leaving it READABLE via `Bash cat node_modules/vendor/x.pem` (the two layers
+    // must not diverge). The per-exec #234 DoS is killed instead by a LEXICAL
+    // prefilter: we canonicalize (an expensive symlink-resolving syscall) ONLY for
+    // secret-NAMED files and for symlinks — not for every entry. Visiting (readdir)
+    // a large `node_modules` is cheap; canonicalizing every file in it was the cost.
     let walker = ignore::WalkBuilder::new(root)
         .standard_filters(false) // a .gitignore'd .env must still be denied
         .hidden(false)
         .follow_links(false)
-        // Prune machine-generated trees (WALK_PRUNE_DIRS) so the per-exec #234
-        // recompute does not traverse the redirected cache / build output. Only
-        // DIRECTORIES are pruned — a stray file with such a name is still checked.
-        .filter_entry(|e| {
-            !(e.file_type().is_some_and(|t| t.is_dir())
-                && e.file_name()
-                    .to_str()
-                    .is_some_and(|n| WALK_PRUNE_DIRS.contains(&n)))
-        })
         .build();
     for entry in walker.flatten() {
         let path = entry.path();
-        let Ok(canon) = std::fs::canonicalize(path) else {
+        let is_symlink = entry.path_is_symlink();
+        if !is_symlink {
+            // Regular file: cheap lexical check on the raw name FIRST; only a
+            // secret-named file is worth the canonicalize syscall.
+            if !entry.file_type().is_some_and(|t| t.is_file()) || !is_secret_path_static(path) {
+                continue;
+            }
+            if let Ok(canon) = std::fs::canonicalize(path)
+                && under_mounted(&canon)
+            {
+                out.push(canon);
+            }
             continue;
-        };
-        // Direct secret files.
-        if entry.file_type().is_some_and(|t| t.is_file())
-            && is_secret_path_static(path)
+        }
+        // Symlink (rare): resolve the target and deny the link's own canonical
+        // path if the TARGET is a secret, masking a benign-named link to a secret
+        // (`notes.txt` → `.env`). Must canonicalize regardless of the link's name.
+        // External-target residual (target not under a mounted root) is documented
+        // in the plan — backstopped by network-Deny.
+        if let Ok(canon) = std::fs::canonicalize(path)
+            && is_secret_path_static(&canon)
             && under_mounted(&canon)
         {
-            out.push(canon.clone());
-        }
-        // Symlink whose RESOLVED target is a secret → deny the link's
-        // own (canonicalized) path so the read-through is masked.
-        // External-target residual (target not under a mounted root) is
-        // documented in the plan — backstopped by network-Deny.
-        if entry.path_is_symlink() && is_secret_path_static(&canon) && under_mounted(&canon) {
             out.push(canon);
         }
     }
@@ -1115,42 +1110,67 @@ mod tests {
         );
     }
 
-    /// #234 HIGH fix: the per-exec walk PRUNES machine-generated trees
-    /// (`target`/`.wcache`/`node_modules`/`.git`) so a filled cache neither stalls
-    /// every shell command nor sweeps dependency TLS fixtures (`*.pem`) into the
-    /// deny list — while a real secret in an ordinary (even nested) source dir is
-    /// still caught.
+    /// MF3 (auditor) — the walk must NOT prune for detection: a secret INSIDE a
+    /// `node_modules`/`target`/`.wcache` dir is denied to Bash just as the file
+    /// tools' `is_project_secret` denies it, so `Bash cat node_modules/vendor/x.pem`
+    /// cannot read what `Read` refuses. The earlier prune (my #234 DoS fix) opened
+    /// exactly this hole; the fix is a lexical-first walk (no prune), not coverage
+    /// dropping. Nested ordinary-dir secret still caught (control).
     #[test]
-    fn dynamic_deny_prunes_machine_dirs_but_catches_real_secrets() {
+    fn dynamic_deny_covers_secret_inside_machine_dirs() {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
         let p = WorkspacePolicy::trusted_local(root).with_project_secret_deny();
 
-        // Dependency / build fixtures that must NOT be swept into the deny list.
+        // Committed secrets that happen to live under machine-named dirs — MUST
+        // be denied (the file tools' predicate denies them, so Bash must too).
         for d in ["target", ".wcache", "node_modules"] {
-            std::fs::create_dir_all(root.join(d).join("sub")).unwrap();
-            std::fs::write(root.join(d).join("sub").join("fixture.pem"), b"x").unwrap();
+            std::fs::create_dir_all(root.join(d).join("vendor")).unwrap();
+            std::fs::write(root.join(d).join("vendor").join("x.pem"), b"k").unwrap();
         }
-        // A genuinely-committed secret in an ordinary nested dir.
+        // Ordinary nested secret (control).
         std::fs::create_dir_all(root.join("deploy").join("keys")).unwrap();
         std::fs::write(root.join("deploy").join("keys").join("prod.pem"), b"k").unwrap();
 
         let dynamic = p.secret_deny_paths_dynamic();
-
+        for d in ["target", ".wcache", "node_modules"] {
+            let secret = std::fs::canonicalize(root.join(d).join("vendor").join("x.pem")).unwrap();
+            assert!(
+                dynamic.contains(&secret),
+                "a committed secret under {d}/ MUST be denied (no prune); got {dynamic:?}"
+            );
+        }
         let real =
             std::fs::canonicalize(root.join("deploy").join("keys").join("prod.pem")).unwrap();
         assert!(
             dynamic.contains(&real),
-            "a real committed secret in a normal nested dir must be denied; got {dynamic:?}"
+            "nested ordinary secret must be denied"
         );
-        for d in ["target", ".wcache", "node_modules"] {
-            let fixture =
-                std::fs::canonicalize(root.join(d).join("sub").join("fixture.pem")).unwrap();
-            assert!(
-                !dynamic.contains(&fixture),
-                "a *.pem under {d}/ (machine-generated) must be PRUNED, not denied; got {dynamic:?}"
-            );
-        }
+    }
+
+    /// MF4 (auditor) — the Contained posture must not under-deny secrets under
+    /// machine-named dirs (the base branch denied them; the prune had regressed
+    /// this). Restored by dropping the prune.
+    #[test]
+    fn contained_denies_secret_inside_machine_dirs() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::create_dir_all(root.join("node_modules").join("v")).unwrap();
+        std::fs::write(root.join("node_modules").join("v").join("id.pem"), b"k").unwrap();
+        let p = WorkspacePolicy::contained(root);
+        let secret =
+            std::fs::canonicalize(root.join("node_modules").join("v").join("id.pem")).unwrap();
+        // Both the frozen construction-time list and the dynamic list must cover it.
+        assert!(
+            p.secret_deny_paths().contains(&secret),
+            "Contained construction-time deny must cover node_modules secret; got {:?}",
+            p.secret_deny_paths()
+        );
+        assert!(
+            p.secret_deny_paths_dynamic().contains(&secret),
+            "Contained dynamic deny must cover node_modules secret; got {:?}",
+            p.secret_deny_paths_dynamic()
+        );
     }
 
     /// #667 F3: a benign-named symlink whose target is a project secret is

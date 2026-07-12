@@ -1685,6 +1685,20 @@ mod tests {
             mc.fs_read_deny
         );
 
+        // MF3 (auditor) at the exec path: a secret UNDER a machine-named dir
+        // (`node_modules/`) must ALSO reach fs_read_deny — no prune — so
+        // `Bash cat node_modules/vendor/x.pem` is denied, matching the file tools.
+        std::fs::create_dir_all(root.join("node_modules").join("vendor")).unwrap();
+        std::fs::write(root.join("node_modules").join("vendor").join("x.pem"), "k").unwrap();
+        let nm =
+            std::fs::canonicalize(root.join("node_modules").join("vendor").join("x.pem")).unwrap();
+        let (mnm, _cmd) = build_sandbox_pieces("cat node_modules/vendor/x.pem", Some(&remote));
+        assert!(
+            mnm.fs_read_deny.contains(&nm),
+            "Full/remote Bash exec must DENY a secret under node_modules/ (MF3); got: {:?}",
+            mnm.fs_read_deny
+        );
+
         // Negative control: bare local keyboard session stays EXEMPT.
         let local = WorkspacePolicy::trusted_local(root);
         let (ml, _cmd) = build_sandbox_pieces("cat terraform.tfstate", Some(&local));
