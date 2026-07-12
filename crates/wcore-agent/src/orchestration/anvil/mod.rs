@@ -18,6 +18,8 @@
 pub mod climb;
 /// Gate closure pinning, the pre-climb probe, injection fencing, flake policy.
 pub mod gates;
+/// Append-only climb journal for crash recovery + idempotent resume.
+pub mod journal;
 /// Per-task cost ledger with atomic reservation-before-dispatch.
 pub mod ledger;
 
