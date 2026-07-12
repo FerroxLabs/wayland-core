@@ -19,7 +19,12 @@
 //!   bypass `SecretDenyFs`. The exec-time gate in `bash.rs` is the
 //!   authoritative boundary; this UX drop prevents advertising a tool that
 //!   would always refuse.
-//! - **Full**: no filtering, no jail — identical to a local CLI session.
+//! - **Full**: no jail, and every tool kept EXCEPT the unconfined-search
+//!   built-ins `Grep`/`Glob` ([`FULL_CHANNEL_DENY`]) — their recursive scan
+//!   shells out past `ctx.vfs`, so a channel sender could read project
+//!   secrets `SecretDenyFs` already denies to Read/Write/Edit. A LOCAL CLI
+//!   Full session is unaffected (it has no scope, so `apply_posture` never
+//!   runs); only channel/remote Full drops them.
 //!
 //! Enforcement is at the [`ToolRegistry`] (not just the LLM schema): a
 //! dropped tool is un-dispatchable, so even a hallucinated call cannot
@@ -74,8 +79,10 @@ const CONVERSATIONAL_SAFE: &[&str] = &[
 /// recursive scan is NOT confined by the jail, so a `Grep`/`Glob` with the
 /// default `path="."` (or a symlink inside the workspace) would escape it.
 /// Until their subprocess cwd is pinned to the jail root and symlink
-/// following is disabled, they stay unavailable in `Workspace` (and `Full`
-/// remains the escape hatch for unconfined search). Likewise Git, RepoMap,
+/// following is disabled, they stay unavailable in `Workspace`. Channel/remote
+/// `Full` also drops them ([`FULL_CHANNEL_DENY`]); only a LOCAL CLI `Full`
+/// session (no scope → `apply_posture` never runs) keeps unconfined search.
+/// Likewise Git, RepoMap,
 /// pdf_extract, kubectl, gcloud, aws_cli, sql_query, Script touch the host
 /// fs/shell outside `ctx.vfs` and stay unavailable.
 ///
@@ -85,6 +92,19 @@ const CONVERSATIONAL_SAFE: &[&str] = &[
 /// gate in `bash.rs` is the authoritative boundary; this is the UX-drop
 /// companion that avoids advertising a tool that would always refuse).
 const WORKSPACE_FS_TOOLS: &[&str] = &["Read", "Write", "Edit", "Bash"];
+
+/// Built-in tools dropped from `Full` **channel/remote** posture: their
+/// recursive scan escapes any path confinement. `Grep`/`Glob` probe only the
+/// top-level path arg through `ctx.vfs`, then shell out (`rg`/`grep`) or walk
+/// the glob crate against the real fs at process cwd — so `Grep TOKEN .` /
+/// `Glob **/*.pem` reads NON-dotfile project secrets (`*.pem`,
+/// `service-account.json`, `*.tfstate`) a channel sender could exfiltrate,
+/// past the `SecretDenyFs` that already guards Read/Write/Edit. Dropping them
+/// closes the #667 residual. A LOCAL CLI `Full` session is unaffected:
+/// `apply_posture` is never called without a channel scope. Operator-wired
+/// MCP tools are exempt (deliberate extensions). `.env` is separately fully
+/// closed (rg skips dotfiles by default).
+const FULL_CHANNEL_DENY: &[&str] = &["Grep", "Glob"];
 
 /// Operator-wired MCP tools are kept under restricted postures: they are
 /// deliberate, named extensions the operator installed, not ambient host
@@ -104,7 +124,11 @@ fn is_mcp(t: &dyn Tool) -> bool {
 /// only result in exec-time refusals from `bash.rs`.
 fn keep_under(posture: ChannelToolPosture, tool: &dyn Tool, read_deny_enforced: bool) -> bool {
     match posture {
-        ChannelToolPosture::Full => true,
+        // Full host access, EXCEPT the unconfined-search built-ins
+        // (`FULL_CHANNEL_DENY`). `apply_posture` runs only for channel/remote
+        // engines (a local CLI has no scope), so a LOCAL Full session never
+        // reaches here and keeps them. Operator-wired MCP tools are exempt.
+        ChannelToolPosture::Full => is_mcp(tool) || !FULL_CHANNEL_DENY.contains(&tool.name()),
         ChannelToolPosture::Conversational => {
             CONVERSATIONAL_SAFE.contains(&tool.name()) || is_mcp(tool)
         }
@@ -128,19 +152,21 @@ fn keep_under(posture: ChannelToolPosture, tool: &dyn Tool, read_deny_enforced: 
 /// `Workspace` posture — a UX gate so the LLM schema doesn't advertise a
 /// tool that would always refuse at exec time.
 ///
-/// A no-op for [`ChannelToolPosture::Full`] (and never called for a local
-/// CLI engine, which has no scope). Must run AFTER the full toolset —
-/// including MCP tools — is registered, and BEFORE the registry is moved
-/// into the engine.
+/// For [`ChannelToolPosture::Full`] it drops only the unconfined-search tools
+/// ([`FULL_CHANNEL_DENY`]) and installs no jail; every other tool survives.
+/// Never called for a local CLI engine (which has no scope), so a LOCAL Full
+/// session keeps `Grep`/`Glob`. Must run AFTER the full toolset — including
+/// MCP tools — is registered, and BEFORE the registry is moved into the engine.
 pub fn apply_posture(
     registry: &mut ToolRegistry,
     scope: &ChannelToolScope,
     read_deny_enforced: bool,
 ) {
-    if scope.posture != ChannelToolPosture::Full {
-        let posture = scope.posture;
-        registry.retain(|t| keep_under(posture, t, read_deny_enforced));
-    }
+    // Runs for every posture, including Full: the Full arm of `keep_under`
+    // drops `FULL_CHANNEL_DENY` (Grep/Glob) while keeping all else. Only
+    // channel/remote engines reach here, so local Full is untouched.
+    let posture = scope.posture;
+    registry.retain(|t| keep_under(posture, t, read_deny_enforced));
     if scope.posture == ChannelToolPosture::Workspace {
         let policy = Arc::new(wcore_tools::workspace_policy::WorkspacePolicy::contained(
             scope.workspace_root.clone(),
@@ -414,12 +440,76 @@ mod tests {
     }
 
     #[test]
-    fn full_keeps_everything() {
+    fn full_channel_remote_drops_grep_glob_keeps_rest() {
         for t in builtin_roster() {
-            // read_deny_enforced is irrelevant for Full posture.
-            assert!(
+            // Full drops only FULL_CHANNEL_DENY builtins; read_deny_enforced
+            // is irrelevant for Full posture.
+            let expected = !FULL_CHANNEL_DENY.contains(&t.name());
+            assert_eq!(
                 keep_under(ChannelToolPosture::Full, &t, false),
-                "full posture keeps every tool, including '{}'",
+                expected,
+                "Full channel-remote must {} '{}'",
+                if expected { "keep" } else { "drop" },
+                t.name()
+            );
+        }
+        // The two unconfined-search builtins are dropped...
+        for name in FULL_CHANNEL_DENY {
+            assert!(
+                !keep_under(
+                    ChannelToolPosture::Full,
+                    &tool(name, ToolCategory::Info),
+                    true
+                ),
+                "Full channel-remote must drop unconfined-search tool '{name}'"
+            );
+        }
+        // ...but an operator-wired MCP tool that name-collides is exempt.
+        assert!(
+            keep_under(
+                ChannelToolPosture::Full,
+                &tool("Grep", ToolCategory::Mcp),
+                false
+            ),
+            "operator MCP tool must survive Full even if it name-collides with a denied builtin"
+        );
+        // Full is still full host access for everything else.
+        for name in ["Read", "Write", "Edit", "Bash", "kubectl", "Git"] {
+            assert!(
+                keep_under(
+                    ChannelToolPosture::Full,
+                    &tool(name, ToolCategory::Exec),
+                    true
+                ),
+                "Full must keep non-search host tool '{name}'"
+            );
+        }
+    }
+
+    /// Regression guard for the `is_mcp(tool) ||` short-circuit in the Full
+    /// arm: if the real `Grep`/`Glob` builtins were ever renamed or
+    /// recategorized to `Mcp`, they would silently survive Full channel-remote
+    /// again. Pin their real identity (name in `FULL_CHANNEL_DENY`, category
+    /// NOT `Mcp`) and assert the concrete types are dropped end-to-end — the
+    /// unit-`FakeTool` tests above can't catch a drift in the real tools.
+    #[test]
+    fn real_grep_glob_builtins_denied_by_identity_under_full() {
+        let grep = wcore_tools::grep::GrepTool;
+        let glob = wcore_tools::glob::GlobTool;
+        for t in [&grep as &dyn Tool, &glob as &dyn Tool] {
+            assert!(
+                FULL_CHANNEL_DENY.contains(&t.name()),
+                "builtin '{}' must be listed in FULL_CHANNEL_DENY",
+                t.name()
+            );
+            assert!(
+                !matches!(t.category(), ToolCategory::Mcp),
+                "builtin '{}' must NOT be MCP category, or the is_mcp exemption resurrects it",
+                t.name()
+            );
+            assert!(
+                !keep_under(ChannelToolPosture::Full, t, true),
+                "real builtin '{}' must be dropped from Full channel-remote",
                 t.name()
             );
         }
@@ -451,6 +541,37 @@ mod tests {
             reg.tool_vfs().is_none(),
             "conversational posture installs no vfs (fs tools are dropped, not jailed)"
         );
+    }
+
+    #[test]
+    fn apply_posture_full_drops_grep_glob_keeps_rest_no_jail() {
+        let mut reg = ToolRegistry::new();
+        for (n, c) in [
+            ("Grep", ToolCategory::Info),
+            ("Glob", ToolCategory::Info),
+            ("Read", ToolCategory::Info),
+            ("Bash", ToolCategory::Exec),
+            ("some_mcp_tool", ToolCategory::Mcp),
+        ] {
+            reg.register(Box::new(tool(n, c)));
+        }
+        let scope = ChannelToolScope {
+            posture: ChannelToolPosture::Full,
+            workspace_root: PathBuf::from("/tmp"),
+        };
+        apply_posture(&mut reg, &scope, false);
+        // Full installs NO jail (unconfined by design; the drop is the guard).
+        assert!(
+            reg.tool_vfs().is_none(),
+            "Full posture installs no vfs jail"
+        );
+        // The unconfined-search builtins are gone...
+        assert!(reg.get("Grep").is_none(), "Full channel-remote drops Grep");
+        assert!(reg.get("Glob").is_none(), "Full channel-remote drops Glob");
+        // ...every other tool (host tools + operator MCP) survives.
+        for name in ["Read", "Bash", "some_mcp_tool"] {
+            assert!(reg.get(name).is_some(), "Full must keep '{name}'");
+        }
     }
 
     #[test]
