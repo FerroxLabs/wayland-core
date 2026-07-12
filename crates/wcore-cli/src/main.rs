@@ -880,6 +880,11 @@ async fn run() -> anyhow::Result<ExitCode> {
             // Best-effort: remove the sentinel so the next restart
             // doesn't falsely report a crash.
             let _ = std::fs::remove_file(&sentinel_path_for_sig);
+            // PR-7: reap any live per-profile supervisor children before exit.
+            // std::process::exit bypasses Drop, so the router's Drop-based
+            // reaping never runs on a signal — without this, SIGTERM/SIGINT/
+            // SIGHUP orphans every credential-bearing `acp serve --profile` child.
+            wcore_cli::profile_router::reap_all_children_blocking();
             std::process::exit(0);
         });
     }
@@ -899,6 +904,10 @@ async fn run() -> anyhow::Result<ExitCode> {
             // before a hard kill.
             let _ = tokio::signal::ctrl_c().await;
             let _ = std::fs::remove_file(&sentinel_path_for_sig);
+            // PR-7: reap live per-profile children before exit (exit bypasses
+            // Drop). Without this, a Ctrl+C / TerminateProcess orphans every
+            // credential-bearing `acp serve --profile` child.
+            wcore_cli::profile_router::reap_all_children_blocking();
             std::process::exit(0);
         });
     }
