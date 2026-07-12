@@ -35,6 +35,7 @@ use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::process::{Child as ProcChild, Command, Stdio};
 use std::sync::Mutex as StdMutex;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -88,6 +89,17 @@ const ENV_PASSTHROUGH: &[&str] = &[
     // TLS trust roots (HTTPS to providers on distros that set these)
     "SSL_CERT_FILE",
     "SSL_CERT_DIR",
+    // Outbound proxy config. reqwest reads these from the env; without them a
+    // child in a proxied/corporate network can't reach any LLM provider after
+    // env_clear. Shared infrastructure config, not a per-identity secret.
+    "HTTP_PROXY",
+    "HTTPS_PROXY",
+    "ALL_PROXY",
+    "NO_PROXY",
+    "http_proxy",
+    "https_proxy",
+    "all_proxy",
+    "no_proxy",
     // diagnostics
     "RUST_BACKTRACE",
     "RUST_LOG",
@@ -115,6 +127,15 @@ const ENV_PASSTHROUGH: &[&str] = &[
     "PROCESSOR_ARCHITECTURE",
     "SSL_CERT_FILE",
     "SSL_CERT_DIR",
+    // Outbound proxy config (see the unix list) — infra, not a secret.
+    "HTTP_PROXY",
+    "HTTPS_PROXY",
+    "ALL_PROXY",
+    "NO_PROXY",
+    "http_proxy",
+    "https_proxy",
+    "all_proxy",
+    "no_proxy",
     "RUST_BACKTRACE",
     "RUST_LOG",
     "WAYLAND_PROFILES_ROOT",
@@ -130,10 +151,26 @@ const ENV_PASSTHROUGH: &[&str] = &[
 /// (not the tokio one) so it is lockable from the non-async signal path.
 static LIVE_CHILDREN: StdMutex<Option<HashMap<u32, ProcChild>>> = StdMutex::new(None);
 
+/// Set once a shutdown reap has begun. Checked by `register_child` UNDER the
+/// `LIVE_CHILDREN` lock so a child spawned in the narrow window between
+/// `reap_all_children_blocking`'s drain and `std::process::exit(0)` is killed
+/// immediately instead of being orphaned past process exit.
+static SHUTTING_DOWN: AtomicBool = AtomicBool::new(false);
+
 /// Move a spawned child into the global registry; returns its pid.
-fn register_child(child: ProcChild) -> u32 {
+///
+/// If a shutdown reap has already started, the child is killed + reaped here
+/// instead of registered (it would otherwise outlive the exiting supervisor).
+/// The returned pid then refers to a dead process, so the caller's health-check
+/// fails and `open()` fails closed — no orphan, no half-up child.
+fn register_child(mut child: ProcChild) -> u32 {
     let pid = child.id();
     let mut g = LIVE_CHILDREN.lock().unwrap_or_else(|e| e.into_inner());
+    if SHUTTING_DOWN.load(Ordering::SeqCst) {
+        let _ = child.kill();
+        let _ = child.wait();
+        return pid;
+    }
     g.get_or_insert_with(HashMap::new).insert(pid, child);
     pid
 }
@@ -166,6 +203,10 @@ fn reap_child(pid: u32) {
 /// normal shutdown (SIGTERM/SIGINT/SIGHUP, Windows Ctrl+C) never orphans a
 /// credential-bearing `acp serve --profile` child. Idempotent.
 pub fn reap_all_children_blocking() {
+    // Set BEFORE taking the lock so any `register_child` that acquires the lock
+    // afterwards observes the shutdown and self-reaps its child (closing the
+    // spawn-after-drain orphan window).
+    SHUTTING_DOWN.store(true, Ordering::SeqCst);
     let mut g = LIVE_CHILDREN.lock().unwrap_or_else(|e| e.into_inner());
     if let Some(map) = g.as_mut() {
         for (_pid, mut child) in map.drain() {
@@ -685,6 +726,19 @@ mod tests {
                     && !up.contains("SECRET")
                     && !up.contains("PASSWORD"),
                 "credential-shaped var {k:?} must not be in the passthrough allowlist"
+            );
+        }
+    }
+
+    /// Proxy config MUST pass through — else a child in a proxied/corporate
+    /// network can't reach any LLM provider after env_clear (a real regression
+    /// the verify review caught). Lock it in so a refactor can't silently drop it.
+    #[test]
+    fn env_passthrough_includes_proxy_vars() {
+        for want in ["HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "ALL_PROXY"] {
+            assert!(
+                ENV_PASSTHROUGH.contains(&want),
+                "proxy var {want:?} must be in the passthrough allowlist"
             );
         }
     }
