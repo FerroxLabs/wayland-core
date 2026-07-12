@@ -459,6 +459,13 @@ async fn full_remote_bash_git_object_store_secret_is_denied() {
     sh("git init -q && git config user.email t@t.co && git config user.name t");
     std::fs::write(root.join(".env"), "AWS_SECRET=AKIA_TOPSECRET_LEAK\n").unwrap();
     sh("git add -f .env && git commit -qm secret");
+    // A committed secret under a machine-generated dir (MF3 vector).
+    std::fs::create_dir_all(root.join("node_modules").join("vendor")).unwrap();
+    std::fs::write(
+        root.join("node_modules").join("vendor").join("x.pem"),
+        "NM_SECRET=AKIA_NODE_MODULES_LEAK\n",
+    )
+    .unwrap();
 
     let policy = std::sync::Arc::new(
         wcore_tools::workspace_policy::WorkspacePolicy::trusted_local(root)
@@ -467,20 +474,25 @@ async fn full_remote_bash_git_object_store_secret_is_denied() {
     let ctx = ToolContext::test_default().with_workspace(policy);
     let tool = BashTool;
 
-    for cmd in [
-        "git show HEAD:.env",
-        "git cat-file -p HEAD:.env",
-        "git log -p -- .env",
-    ] {
+    // EXPLOITS — each must be DENIED (no secret bytes returned).
+    let exploits = [
+        ("AKIA_TOPSECRET_LEAK", "git show HEAD:.env"),
+        ("AKIA_TOPSECRET_LEAK", "git cat-file -p HEAD:.env"),
+        ("AKIA_TOPSECRET_LEAK", "git log -p -- .env"),
+        // MF3: committed secret under node_modules — denied at the working-tree path.
+        ("AKIA_NODE_MODULES_LEAK", "cat node_modules/vendor/x.pem"),
+    ];
+    for (needle, cmd) in exploits {
         let r = tool.execute_with_ctx(json!({ "command": cmd }), &ctx).await;
         assert!(
-            !r.content.contains("AKIA_TOPSECRET_LEAK"),
-            "committed secret LEAKED via `{cmd}` in Full/remote posture: {}",
+            !r.content.contains(needle),
+            "secret LEAKED via `{cmd}` in Full/remote posture: {}",
             r.content
         );
     }
 
-    // Positive control: git actually runs and refs stay readable (fix is targeted).
+    // POSITIVE CONTROLS — prove nothing is vacuous: git actually ran (refs kept)
+    // and an ordinary command still works.
     let rp = tool
         .execute_with_ctx(json!({ "command": "git rev-parse HEAD" }), &ctx)
         .await;
@@ -488,5 +500,13 @@ async fn full_remote_bash_git_object_store_secret_is_denied() {
         !rp.is_error && rp.content.trim().len() >= 7,
         "git rev-parse must still succeed (git ran; refs preserved): {}",
         rp.content
+    );
+    let echo = tool
+        .execute_with_ctx(json!({ "command": "echo live_smoke_ok" }), &ctx)
+        .await;
+    assert!(
+        !echo.is_error && echo.content.contains("live_smoke_ok"),
+        "ordinary shell command must still work in Full/remote: {}",
+        echo.content
     );
 }
