@@ -498,6 +498,10 @@ enum TopCmd {
         #[arg(long)]
         terminal: bool,
     },
+    /// Anvil (gated forge) — forge a candidate that passes a REAL executable
+    /// gate (tests / build / lint), then stamp a verified receipt. Requires
+    /// `[anvil] enabled = true`; kill-switched until the A1 slice completes.
+    Forge(wcore_cli::anvil::ForgeArgs),
     /// v0.7.0 Task 1.C.1: print resolved project context from WAYLAND.md /
     /// AGENTS.md / .wayland/context.md / CLAUDE.md walking up from cwd.
     ProjectContext,
@@ -1032,6 +1036,13 @@ async fn run() -> anyhow::Result<ExitCode> {
                     }
                 }
             }
+            TopCmd::Forge(args) => match wcore_cli::anvil::run_forge(args).await {
+                Ok(()) => Ok(ExitCode::SUCCESS),
+                Err(e) => {
+                    eprintln!("wayland-core forge: {e:#}");
+                    Ok(ExitCode::FAILURE)
+                }
+            },
             // methodology #27: production caller for project_context::scan
             // (v0.7.0 Task 1.C.1).
             TopCmd::ProjectContext => {

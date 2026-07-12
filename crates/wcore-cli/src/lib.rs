@@ -82,6 +82,8 @@ pub mod workflow;
 // touching the user's home dir.
 pub mod cron;
 
+// Anvil (gated forge): `wayland-core forge "<task>"` — kill-switched engine.
+pub mod anvil;
 // Crucible (Mixture-of-Providers): `wayland-core crucible "<task>"` runs the
 // cross-provider council — N pinned-provider proposers fused by a fenced,
 // read-only aggregator. Self-contained one-shot handler.
