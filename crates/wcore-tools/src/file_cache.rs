@@ -43,11 +43,12 @@ pub struct FileStateCache {
     entries: LruCache<PathBuf, FileState>,
     max_size_bytes: usize,
     current_size_bytes: usize,
-    /// Token-opt (diff-resend): whether re-reads on this route may be answered
-    /// with a line diff instead of full content. Set once from the resolved
-    /// `ProviderCompat.input_optimization()` (`"client"` → true). Router-side
-    /// optimization leaves this false so the engine sends full reads and defers
-    /// to the server.
+    /// Token-opt: whether OUTPUT-dedup ([`Self::output_backref`]) is enabled for
+    /// this route. Set once from `ProviderCompat.input_optimization()` (`"client"`
+    /// → true); router-optimized routes leave it false and defer output/wire
+    /// dedup to the server. NOTE (#182): this no longer gates the read
+    /// diff-resend — that is a context reduction the server can't do for us, so it
+    /// applies on every route (see `read.rs`).
     optimize_reads: bool,
     /// Token-opt (diff-resend): monotonically bumped by the engine whenever a
     /// compaction pass (autocompact OR microcompact) runs. A cached read is only
@@ -126,13 +127,14 @@ impl FileStateCache {
         None
     }
 
-    /// Token-opt: enable/disable diff-resend for this cache's route. Called once
-    /// at bootstrap from the resolved provider compat.
+    /// Token-opt: enable/disable OUTPUT-dedup ([`Self::output_backref`]) for this
+    /// cache's route. Called once at bootstrap from the resolved provider compat.
+    /// (Read diff-resend is no longer gated on this — see #182.)
     pub fn set_optimize_reads(&mut self, enabled: bool) {
         self.optimize_reads = enabled;
     }
 
-    /// Token-opt: whether diff-resend is enabled for this route.
+    /// Token-opt: whether OUTPUT-dedup is enabled for this route.
     pub fn optimize_reads(&self) -> bool {
         self.optimize_reads
     }

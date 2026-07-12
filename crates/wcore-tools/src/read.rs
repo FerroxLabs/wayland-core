@@ -318,8 +318,18 @@ impl Tool for ReadTool {
         // not stubbing) capture a base for a possible diff. See `execute()` for
         // the `ReadResult` guard rationale.
         //
-        // `diff_base` is only populated when a diff would be SOUND to emit:
-        //   * the route opted into client-side optimization (`optimize_reads`),
+        // `diff_base` is only populated when a diff would be SOUND to emit.
+        //
+        // #182: this is deliberately NOT gated on the route's `optimize_reads`
+        // flag. Diff-resend shrinks THIS agent's own context — it is model-facing
+        // ("apply this diff to your previous Read") — so it applies on every
+        // route, exactly like the always-on unchanged-stub below. `optimize_reads`
+        // (== `input_optimization == "client"`) governs OUTPUT-side opts and
+        // wire/billing input dedup, which a server-side router (flux-router,
+        // openrouter, …) does upstream; but a router cannot shrink this process's
+        // context window, so on router routes a mid-turn re-read of a changed file
+        // was re-injecting the FULL file (the #182 bloat). The soundness guards
+        // below still hold on all routes:
         //   * this is a full read (offset/limit None) matching the cached window,
         //   * the caller is the main agent (`source_agent` is None) — the cache is
         //     process-wide across sub-agents, so a sibling's read must never seed
@@ -327,7 +337,9 @@ impl Tool for ReadTool {
         //   * the base is a `ReadResult` (something the model actually saw), and
         //   * the base is still visible: the compaction generation has not moved
         //     since it was cached, so the diff's reference content has not been
-        //     collapsed/cleared out of the transcript.
+        //     collapsed/cleared out of the transcript,
+        //   * and `build_read_diff` verifies the diff reconstructs the current
+        //     content byte-for-byte before it is ever emitted.
         let is_full_read = offset.is_none() && limit.is_none();
         let single_agent = ctx.source_agent.is_none();
         let mut diff_base: Option<String> = None;
@@ -342,7 +354,6 @@ impl Tool for ReadTool {
             && let (Some(cache_arc), Some(current_mtime)) = (&self.file_cache, mtime_ms)
             && let Ok(mut cache) = cache_arc.write()
         {
-            let optimize_reads = cache.optimize_reads();
             current_gen = cache.compaction_generation();
             if let Some(cached) = cache.get(path) {
                 let matches_window = cached.offset == offset && cached.limit == limit;
@@ -368,8 +379,7 @@ impl Tool for ReadTool {
                         is_error: false,
                     };
                 }
-                if optimize_reads
-                    && is_full_read
+                if is_full_read
                     && single_agent
                     && matches_window
                     && cached.provenance == Provenance::ReadResult
@@ -888,8 +898,13 @@ mod tests {
         );
     }
 
+    /// #182: diff-resend is a context reduction, so it applies on EVERY route —
+    /// including router-optimized ones (`optimize_reads` false). A server-side
+    /// router optimizes the wire/billing but cannot shrink THIS process's
+    /// context, so a mid-turn re-read of an externally-changed file must diff,
+    /// not re-inject the full file (the exact bloat #182 reported on flux-router).
     #[tokio::test]
-    async fn route_disabled_returns_full_content_not_diff() {
+    async fn router_route_still_diffs_changed_reread() {
         let dir = tempdir().unwrap();
         let file = write_lines(dir.path(), "big.txt", 60, "ORIGINAL");
 
@@ -899,15 +914,23 @@ mod tests {
         let ctx = ctx_main();
         let input = json!({ "file_path": file.to_str().unwrap() });
 
-        tool.execute_with_ctx(input.clone(), &ctx).await;
+        let r1 = tool.execute_with_ctx(input.clone(), &ctx).await;
+        assert!(!r1.content.contains(DIFF_RESEND_HEADER));
         std::thread::sleep(std::time::Duration::from_millis(50));
         let _ = write_lines(dir.path(), "big.txt", 60, "PATCHED");
 
         let r2 = tool.execute_with_ctx(input, &ctx).await;
-        assert!(!r2.content.contains(DIFF_RESEND_HEADER));
+        assert!(!r2.is_error);
+        assert!(
+            r2.content.contains(DIFF_RESEND_HEADER),
+            "#182: a router route must ALSO diff a changed re-read, got: {}",
+            r2.content
+        );
         assert!(r2.content.contains("PATCHED"));
-        // Full content has every line numbered.
-        assert!(r2.content.contains("line 59"));
+        assert!(
+            r2.content.len() < r1.content.len(),
+            "diff must be smaller than the full content"
+        );
     }
 
     #[tokio::test]
