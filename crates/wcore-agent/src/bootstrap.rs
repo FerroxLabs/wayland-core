@@ -2184,15 +2184,40 @@ impl AgentBootstrap {
             // (`Inherit`) only for a genuinely-local session — no channel posture
             // attached. Any channel path (including `Full`) is a remote sender and
             // stays on the fail-safe Deny default that `trusted_local` seeds.
-            let network = wcore_tools::workspace_policy::local_bash_network(
-                self.channel_tool_posture.is_some(),
+            let is_channel_remote = self.channel_tool_posture.is_some();
+            let network = wcore_tools::workspace_policy::local_bash_network(is_channel_remote);
+            let mut policy = wcore_tools::workspace_policy::WorkspacePolicy::trusted_local(
+                std::path::PathBuf::from(&self.workspace),
+            )
+            .with_network(network);
+            // #667 (Overwatch ruling, Sean-confirmed): a `Full`-posture channel /
+            // remote session lands on a `Trusted` policy but keeps host
+            // filesystem/shell tools, so it must still be denied the PROJECT's own
+            // committed secrets. A genuinely-local keyboard session (posture None)
+            // is EXEMPT: it may read its own `.env`.
+            //   * `with_project_secret_deny` adds the project secrets to
+            //     `secret_deny_paths()` → Bash's OS sandbox refuses them (bash.rs).
+            //   * the `SecretDenyFs` read-path guard (installed below, WITHOUT a
+            //     `SandboxedFs` jail so Full stays unconfined for non-secrets)
+            //     refuses `Read`/`Write`/`Edit` of the same project secrets.
+            // Gated on `Full` specifically (F6): `Workspace` posture already
+            // installed a `Contained` policy above; `Conversational` is stripped of
+            // every filesystem/shell tool, so its per-message workspace walk +
+            // guard would be dead weight with nothing to protect.
+            let is_full_posture = matches!(
+                self.channel_tool_posture.as_ref().map(|s| s.posture),
+                Some(wcore_channels::ChannelToolPosture::Full)
             );
-            let policy = std::sync::Arc::new(
-                wcore_tools::workspace_policy::WorkspacePolicy::trusted_local(
-                    std::path::PathBuf::from(&self.workspace),
-                )
-                .with_network(network),
-            );
+            if is_full_posture {
+                policy = policy.with_project_secret_deny();
+            }
+            let policy = std::sync::Arc::new(policy);
+            if is_full_posture {
+                registry.set_tool_vfs(std::sync::Arc::new(wcore_tools::vfs::SecretDenyFs::new(
+                    wcore_tools::vfs::RealFs,
+                    std::sync::Arc::clone(&policy),
+                )));
+            }
             registry.set_workspace_policy(policy);
         }
 
