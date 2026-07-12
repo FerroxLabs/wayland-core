@@ -183,3 +183,13 @@ check-no-assertion-todos:
 # Run: `just smoke`
 smoke:
     scripts/smoke.sh
+
+# Wayland Proving Ground — deterministic bug-sweep spine (unix, hermetic, $0).
+# Drives the REAL binary over a PTY across throw-away homes and asserts
+# deterministic invariants (config persistence, content reachability, replay
+# determinism), plus the network-free provider-detection registry invariant and
+# the build-provenance (stale-binary) check.
+# Run: `just proving-ground`
+proving-ground:
+    vx cargo nextest run -p wcore-cli --test proving_ground --test build_provenance
+    vx cargo nextest run -p wcore-providers --test detection_registry
