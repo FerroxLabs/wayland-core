@@ -20,6 +20,8 @@ pub mod climb;
 pub mod gates;
 /// Append-only climb journal for crash recovery + idempotent resume.
 pub mod journal;
+/// Per-workspace climb lease preventing interleaved climbs / user edits.
+pub mod lease;
 /// Per-task cost ledger with atomic reservation-before-dispatch.
 pub mod ledger;
 
