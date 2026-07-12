@@ -322,6 +322,10 @@ impl WorkspacePolicy {
     /// list is built from, so the two cannot drift and its anti-bypass properties
     /// (a `.gitignore`d `.env` is still denied, a symlink-to-secret is masked,
     /// only under-mounted paths are emitted) are inherited verbatim.
+    ///
+    /// Also denies the git CONTENT stores ([`git_content_stores`]) so a committed
+    /// secret cannot be reconstructed from `.git/objects` via `Bash("git show
+    /// HEAD:.env")` and friends — the sibling of the typed-GitTool drop (MF1).
     pub fn secret_deny_paths_dynamic(&self) -> Vec<PathBuf> {
         if !self.secret_read_deny_required {
             return self.secret_deny.clone();
@@ -330,6 +334,7 @@ impl WorkspacePolicy {
             readable_canon_roots(&self.root, &self.writable_extra, &self.readable_extra);
         let mut out = self.secret_deny.clone();
         out.extend(project_committed_secrets(&self.root, &readable_canon));
+        out.extend(git_content_stores(&self.root));
         out.sort();
         out.dedup();
         out
@@ -531,6 +536,29 @@ fn project_committed_secrets(root: &Path, readable_canon: &[PathBuf]) -> Vec<Pat
             && under_mounted(&canon)
         {
             out.push(canon);
+        }
+    }
+    out
+}
+
+/// Git CONTENT stores under `root` that must be OS-sandbox-denied for reads in a
+/// secret-deny posture. A committed secret's bytes live in the object store, NOT
+/// as a working-tree path, so `Bash("git show HEAD:.env")` / `git cat-file` /
+/// `git log -p` / `git blame` reconstruct the committed secret from there,
+/// sailing past the working-tree `.env` deny. The typed `GitTool` is already
+/// dropped in these postures (MF1); denying the object store closes the sibling
+/// Bash+git door ROBUSTLY — one mechanism kills every content-emitting git verb
+/// and every shell-syntax variant, versus enumerating git's sprawling read
+/// surface. `.git/refs`/`HEAD` stay readable, so `git rev-parse` (a SHA, no
+/// content) still works. Covers the main store, submodule stores (`.git/modules`)
+/// and LFS (`.git/lfs`). Empirically verified on the box (bwrap `--tmpfs` shadows
+/// the dir → `git show`/`cat-file`/`log -p` all fail).
+fn git_content_stores(root: &Path) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    for rel in [".git/objects", ".git/modules", ".git/lfs"] {
+        let p = root.join(rel);
+        if p.exists() {
+            out.push(std::fs::canonicalize(&p).unwrap_or(p));
         }
     }
     out
@@ -1170,6 +1198,30 @@ mod tests {
             p.secret_deny_paths_dynamic().contains(&secret),
             "Contained dynamic deny must cover node_modules secret; got {:?}",
             p.secret_deny_paths_dynamic()
+        );
+    }
+
+    /// Auditor round-2 HIGH: the git object store must be in Bash's fs_read_deny
+    /// for secret-deny postures so `git show HEAD:<committed secret>` cannot
+    /// reconstruct it from `.git/objects`. Local keyboard stays exempt.
+    #[test]
+    fn dynamic_deny_covers_git_object_store() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::create_dir_all(root.join(".git").join("objects")).unwrap();
+        let objects = std::fs::canonicalize(root.join(".git").join("objects")).unwrap();
+
+        let remote = WorkspacePolicy::trusted_local(root).with_project_secret_deny();
+        assert!(
+            remote.secret_deny_paths_dynamic().contains(&objects),
+            "Full/remote Bash deny must include .git/objects (git-show leak); got {:?}",
+            remote.secret_deny_paths_dynamic()
+        );
+
+        let local = WorkspacePolicy::trusted_local(root);
+        assert!(
+            !local.secret_deny_paths_dynamic().contains(&objects),
+            "local keyboard must NOT newly-deny .git/objects (exempt)"
         );
     }
 
