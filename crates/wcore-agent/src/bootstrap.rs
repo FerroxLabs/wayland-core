@@ -2139,9 +2139,10 @@ impl AgentBootstrap {
         // (and, in `Workspace`, jail) the toolset BEFORE it moves into the
         // engine, so a remote sender cannot reach host filesystem/shell
         // tools. No-op for the local CLI/TUI/json-stream engines (posture
-        // `None`) and for `Full`. Runs after all built-in registration; MCP
-        // tools survive every posture, so post-construction MCP wiring is
-        // unaffected.
+        // `None`); for `Full` channel/remote it drops only the unconfined-search
+        // tools (Grep/Glob, #667 residual) and keeps the rest. Runs after all
+        // built-in registration; MCP tools survive every posture, so
+        // post-construction MCP wiring is unaffected.
         if let Some(scope) = self.channel_tool_posture.as_ref() {
             // Task 8 — bootstrap UX gate. Probe whether the platform's
             // sandbox backend enforces secret-read-deny; if not, suppress
