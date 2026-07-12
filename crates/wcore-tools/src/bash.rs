@@ -95,7 +95,12 @@ fn build_sandbox_pieces(
     if let Some(p) = policy {
         manifest.fs_write_allow = p.writable_roots();
         manifest.fs_read_allow = p.readable_roots();
-        manifest.fs_read_deny = p.secret_deny_paths().to_vec();
+        // #234: recompute per-exec (not the frozen construction-time list) so a
+        // secret CREATED after bootstrap (pulled *.pem, generated terraform.tfstate)
+        // is denied on the next command — closing the Bash TOCTOU that the file
+        // tools' dynamic `is_project_secret` guard already avoids. Local-keyboard
+        // (Trusted, no project-secret denial) is returned unchanged, no walk.
+        manifest.fs_read_deny = p.secret_deny_paths_dynamic();
         manifest.env.extend(p.cache_env().iter().cloned());
         manifest.network = p.network();
         cwd = Some(p.root().to_path_buf());
@@ -1642,6 +1647,51 @@ mod tests {
             m.fs_read_deny.contains(&env_path),
             "Contained policy must deny the workspace .env; got: {:?}",
             m.fs_read_deny
+        );
+    }
+
+    /// #234 PRIMARY-vuln regression: a secret CREATED AFTER the policy is
+    /// constructed (the TOCTOU window) still lands in `manifest.fs_read_deny` at
+    /// the NEXT Bash exec — proving `Bash cat <post-bootstrap-secret>` is DENIED
+    /// by the OS sandbox, not merely present in some list. This is the exec-path
+    /// proof (`build_sandbox_pieces` → `fs_read_deny`) that the dynamic recompute
+    /// closes the secret-READ hole, distinct from the DoS/prune sub-issue. Covers
+    /// Full/remote + Contained; bare local keyboard stays exempt (negative control).
+    #[test]
+    fn build_sandbox_pieces_denies_post_bootstrap_secret_234() {
+        use crate::workspace_policy::WorkspacePolicy;
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+
+        // Full/remote posture — secret ABSENT at construction.
+        let remote = WorkspacePolicy::trusted_local(root).with_project_secret_deny();
+        // Secret appears AFTER bootstrap — the exact vector #234 closes.
+        std::fs::write(root.join("terraform.tfstate"), "{}").unwrap();
+        let tf = std::fs::canonicalize(root.join("terraform.tfstate")).unwrap();
+
+        let (m, _cmd) = build_sandbox_pieces("cat terraform.tfstate", Some(&remote));
+        assert!(
+            m.fs_read_deny.contains(&tf),
+            "Full/remote Bash exec must DENY a post-bootstrap secret; got: {:?}",
+            m.fs_read_deny
+        );
+
+        // Contained posture — same guarantee at the exec path.
+        let contained = WorkspacePolicy::contained(root);
+        let (mc, _cmd) = build_sandbox_pieces("cat terraform.tfstate", Some(&contained));
+        assert!(
+            mc.fs_read_deny.contains(&tf),
+            "Contained Bash exec must DENY a post-bootstrap secret; got: {:?}",
+            mc.fs_read_deny
+        );
+
+        // Negative control: bare local keyboard session stays EXEMPT.
+        let local = WorkspacePolicy::trusted_local(root);
+        let (ml, _cmd) = build_sandbox_pieces("cat terraform.tfstate", Some(&local));
+        assert!(
+            !ml.fs_read_deny.contains(&tf),
+            "local keyboard session must NOT newly-deny a post-bootstrap secret; got: {:?}",
+            ml.fs_read_deny
         );
     }
 
