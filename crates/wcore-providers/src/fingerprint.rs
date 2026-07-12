@@ -142,6 +142,17 @@ fn slug_for_env_var(name: &str) -> Option<&'static str> {
     Some(slug)
 }
 
+/// The declared `(prefix, slug)` detection table.
+///
+/// Exposed so a network-free registry invariant test can assert that every
+/// prefix we CLAIM to detect maps to a slug the onboarding flow can actually
+/// connect — the `sk-flux-` class of bug, where a key detects but then fails to
+/// connect. See `wcore-providers/tests/detection_registry.rs`.
+#[must_use]
+pub fn declared_prefixes() -> &'static [(&'static str, &'static str)] {
+    UNIQUE_PREFIXES
+}
+
 /// Fingerprint a pasted credential into ranked provider candidates.
 ///
 /// Never makes a network call. The returned [`Fingerprint::candidates`] are a
