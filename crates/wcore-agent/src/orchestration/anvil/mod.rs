@@ -16,6 +16,8 @@
 
 /// Gate closure pinning, the pre-climb probe, injection fencing, flake policy.
 pub mod gates;
+/// Per-task cost ledger with atomic reservation-before-dispatch.
+pub mod ledger;
 
 use wcore_config::anvil::AnvilConfig;
 
