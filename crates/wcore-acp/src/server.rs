@@ -394,10 +394,10 @@ impl HttpHandler for AcpServer {
         // persona-profiles PR-7: reap the per-profile child session mapped to
         // this session (the router tears the child process down when its last
         // session goes away). Non-profile sessions have no child — nothing to do.
-        if Self::is_profile_agent(record.agent.as_deref()) {
-            if let Some(router) = &self.router {
-                router.delete(&session_id).await?;
-            }
+        if Self::is_profile_agent(record.agent.as_deref())
+            && let Some(router) = &self.router
+        {
+            router.delete(&session_id).await?;
         }
         Ok(())
     }
@@ -1069,7 +1069,7 @@ mod tests {
         );
         assert_eq!(
             router.sent.lock().unwrap().as_slice(),
-            &[resp.session_id.clone()]
+            std::slice::from_ref(&resp.session_id)
         );
 
         server

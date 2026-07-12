@@ -58,8 +58,29 @@ use wcore_agent::agents::registry::{AgentRegistry, AgentSource};
 use wcore_agents_pack::AgentPack;
 use wcore_plugin_api::agent_manifest::AgentManifest;
 
+/// A roster entry — either an in-process PERSONA (an overlay applied to THIS
+/// process's single identity) or a `profile:<name>` AGENT (a separate process
+/// with its own credential home, reached via the supervisor/router; PR-7).
+///
+/// Modelling both kinds explicitly is a fail-open guard: a `profile:` id is
+/// enumerable + selectable (so the supervisor may route it) but
+/// [`CliAgentRoster::resolve`] returns `None` for it, so it can NEVER apply an
+/// in-process persona overlay to this engine. Collapsing the two — treating a
+/// profile id as a persona that happens to resolve to the default identity —
+/// is exactly the fail-open the design forbids.
+#[derive(Debug, Clone)]
+enum RosterEntry {
+    /// A trusted persona (AgentPack or operator global YAML). Resolvable to an
+    /// overlay server-side.
+    Persona(AgentManifest),
+    /// An isolated profile, enumerated as `profile:<name>`. Routed to a child
+    /// process by the supervisor; NEVER resolvable to an in-process overlay.
+    Profile(String),
+}
+
 /// Authorization-gated roster of TRUSTED persona agents (AgentPack + the
-/// operator's global agent YAML). See the module docs for the trust model.
+/// operator's global agent YAML) and — when the profile supervisor is enabled
+/// (PR-7) — `profile:<name>` agents. See the module docs for the trust model.
 #[derive(Debug, Clone, Default)]
 pub struct CliAgentRoster {
     /// THE authorized set — the single source of truth, keyed by id (BTreeMap ⇒
@@ -75,7 +96,7 @@ pub struct CliAgentRoster {
     ///
     /// The manifest NEVER leaves this crate: only [`Self::to_info`]'s wire-safe
     /// projection is handed to `wcore-acp`.
-    by_id: BTreeMap<String, AgentManifest>,
+    by_id: BTreeMap<String, RosterEntry>,
 }
 
 impl CliAgentRoster {
@@ -95,11 +116,11 @@ impl CliAgentRoster {
     /// project-supplied agents dir could be threaded in.
     pub fn from_pack_and_global_dir(global_agents_dir: &Path) -> Self {
         // BTreeMap ⇒ deterministic, sorted-by-id output.
-        let mut by_id: BTreeMap<String, AgentManifest> = BTreeMap::new();
+        let mut by_id: BTreeMap<String, RosterEntry> = BTreeMap::new();
 
         // 1. Compiled-in personas (trusted by construction).
         for manifest in AgentPack::list() {
-            by_id.insert(manifest.name.clone(), manifest);
+            by_id.insert(manifest.name.clone(), RosterEntry::Persona(manifest));
         }
 
         // 2. Operator-authored global YAML. Loaded through the registry so we
@@ -121,11 +142,30 @@ impl CliAgentRoster {
                 // built-in: it is the more specific, operator-authored source.
                 // Both sides are TRUSTED, so this is not an escalation path (a
                 // project source is never in this map at all).
-                by_id.insert(manifest.name.clone(), manifest);
+                by_id.insert(manifest.name.clone(), RosterEntry::Persona(manifest));
             }
         }
 
         Self { by_id }
+    }
+
+    /// persona-profiles PR-7 — add `profile:<name>` entries (isolated-profile
+    /// agents). Only called when `--enable-profile-router` is set, so profile
+    /// enumeration stays behind the feature flag.
+    ///
+    /// A Profile entry is enumerable + selectable (it authorizes
+    /// `session/create.agent = "profile:<name>"` so the SUPERVISOR may spawn +
+    /// route to that profile's child) but is NEVER resolvable to an in-process
+    /// overlay: [`Self::resolve`] returns `None` for it. That is the fail-open
+    /// guard — a `profile:` id can never apply a system_prompt/model overlay to
+    /// THIS process's engine; it only ever routes out to a dedicated child.
+    #[must_use]
+    pub fn with_profiles(mut self, names: Vec<String>) -> Self {
+        for name in names {
+            let id = format!("profile:{name}");
+            self.by_id.insert(id, RosterEntry::Profile(name));
+        }
+        self
     }
 
     /// persona-profiles PR-4' — resolve an AUTHORIZED id to its persona overlay
@@ -140,7 +180,24 @@ impl CliAgentRoster {
     /// and NO overlay is ever applied. There is deliberately no second lookup
     /// path (a divergent resolver is exactly how an authz bypass is born).
     pub fn resolve(&self, id: &str) -> Option<AgentManifest> {
-        self.by_id.get(id).cloned()
+        match self.by_id.get(id) {
+            Some(RosterEntry::Persona(m)) => Some(m.clone()),
+            // A `profile:<name>` id is deliberately NOT resolvable to an
+            // in-process overlay — it routes to a dedicated child (PR-7). This
+            // is the fail-open guard.
+            Some(RosterEntry::Profile(_)) | None => None,
+        }
+    }
+
+    /// persona-profiles PR-7 — resolve a `profile:<name>` id to its profile
+    /// name for the supervisor/router. `None` for personas and unknown ids,
+    /// mirroring [`Self::resolve`]'s single-map, fail-closed discipline (what is
+    /// not enumerated as a Profile is not routable).
+    pub fn resolve_profile(&self, id: &str) -> Option<String> {
+        match self.by_id.get(id) {
+            Some(RosterEntry::Profile(name)) => Some(name.clone()),
+            Some(RosterEntry::Persona(_)) | None => None,
+        }
     }
 
     /// The ONE manifest → wire mapping. R4: drops `system_prompt`, `model`,
@@ -154,6 +211,20 @@ impl CliAgentRoster {
                 None
             } else {
                 Some(manifest.description.clone())
+            },
+        }
+    }
+
+    /// Project any roster entry to its wire-safe [`AgentInfo`]. A Profile
+    /// surfaces ONLY as `id = "profile:<name>"`, `label = <name>` — never its
+    /// home path/model/key (R4: the credential boundary never crosses the wire).
+    fn entry_to_info(entry: &RosterEntry) -> AgentInfo {
+        match entry {
+            RosterEntry::Persona(m) => Self::to_info(m),
+            RosterEntry::Profile(name) => AgentInfo {
+                id: format!("profile:{name}"),
+                label: name.clone(),
+                description: None,
             },
         }
     }
@@ -172,10 +243,11 @@ impl CliAgentRoster {
 #[async_trait]
 impl AgentRoster for CliAgentRoster {
     async fn list(&self) -> Result<Vec<AgentInfo>, AcpError> {
-        // Projected from the SAME map `resolve()` reads ⇒ what is enumerable is
-        // exactly what is selectable is exactly what is resolvable. R4: only the
-        // wire-safe projection escapes; the manifest never does.
-        Ok(self.by_id.values().map(Self::to_info).collect())
+        // Projected from the SAME map `resolve()`/`resolve_profile()` read ⇒
+        // what is enumerable is exactly what is selectable is exactly what is
+        // resolvable/routable. R4: only the wire-safe projection escapes; the
+        // manifest (and any profile home) never does.
+        Ok(self.by_id.values().map(Self::entry_to_info).collect())
     }
     // `contains` uses the trait default, which answers from `list` — so the
     // authz gate applied above governs selector admission too (R3). No override:
@@ -374,5 +446,82 @@ mod tests {
                 "{id} must not resolve to an overlay"
             );
         }
+    }
+
+    /// PR-7 fail-open guard: a `profile:<name>` is enumerable + selectable (the
+    /// supervisor may route it) yet NEVER resolvable to an in-process overlay.
+    /// It resolves only via `resolve_profile` (to a routable name).
+    #[tokio::test]
+    async fn profiles_enumerate_and_route_but_never_overlay() {
+        let dir = tempfile::tempdir().unwrap();
+        let roster = CliAgentRoster::from_pack_and_global_dir(dir.path())
+            .with_profiles(vec!["work".into(), "home".into()]);
+
+        // Enumerated as `profile:<name>`, label = name, no capability fields.
+        let listed = roster.list().await.unwrap();
+        let work = listed
+            .iter()
+            .find(|a| a.id == "profile:work")
+            .expect("profile:work must be enumerated");
+        assert_eq!(work.label, "work");
+        assert_eq!(work.description, None);
+
+        // Selectable — authorizes the supervisor route.
+        assert!(roster.contains("profile:work").await);
+        // But NEVER resolvable to an in-process persona overlay (fail-open guard).
+        assert!(
+            roster.resolve("profile:work").is_none(),
+            "a profile must never resolve to an in-process overlay"
+        );
+        // The router-facing resolver DOES see it (routable name).
+        assert_eq!(
+            roster.resolve_profile("profile:work").as_deref(),
+            Some("work")
+        );
+        assert_eq!(
+            roster.resolve_profile("profile:home").as_deref(),
+            Some("home")
+        );
+        // A persona is not a profile; an unknown id is neither.
+        assert!(roster.resolve_profile("nonexistent").is_none());
+        assert!(roster.resolve_profile("").is_none());
+    }
+
+    /// R4: even a profile's wire projection carries no home path/model/key — the
+    /// credential boundary never crosses the wire.
+    #[tokio::test]
+    async fn profile_info_carries_no_secrets() {
+        let dir = tempfile::tempdir().unwrap();
+        let roster =
+            CliAgentRoster::from_pack_and_global_dir(dir.path()).with_profiles(vec!["work".into()]);
+        let listed = roster.list().await.unwrap();
+        let work = listed.iter().find(|a| a.id == "profile:work").unwrap();
+        let json = serde_json::to_string(work).unwrap();
+        // Only the opaque id + label; no home path, model, or key material.
+        assert!(json.contains("profile:work"));
+        for leaked in [
+            "WAYLAND_HOME",
+            "/home/",
+            "api_key",
+            "system_prompt",
+            "model",
+        ] {
+            assert!(
+                !json.contains(leaked),
+                "profile AgentInfo leaked {leaked}: {json}"
+            );
+        }
+    }
+
+    /// Default-OFF: without `with_profiles`, no profile is enumerated or
+    /// selectable — byte-identical to the pre-PR-7 roster.
+    #[tokio::test]
+    async fn profiles_absent_without_with_profiles() {
+        let dir = tempfile::tempdir().unwrap();
+        let roster = CliAgentRoster::from_pack_and_global_dir(dir.path());
+        assert!(!roster.contains("profile:work").await);
+        assert!(roster.resolve_profile("profile:work").is_none());
+        let listed = roster.list().await.unwrap();
+        assert!(listed.iter().all(|a| !a.id.starts_with("profile:")));
     }
 }

@@ -117,6 +117,22 @@ pub struct AcpServeArgs {
     /// `activate_for_launch` also uses, so the two cannot disagree.
     #[arg(long, value_name = "NAME")]
     pub profile: Option<String>,
+
+    /// persona-profiles PR-7 — enable the profile SUPERVISOR/ROUTER. When set,
+    /// isolated profiles are enumerated as `profile:<name>` agents, and a
+    /// `session/create` selecting one spawns a DEDICATED child process
+    /// (`acp serve --profile <name>`) with that profile's own `WAYLAND_HOME` /
+    /// credentials and routes the session to it. One process PER profile — N
+    /// profiles are NEVER multiplexed into this process (that would share this
+    /// process's credential / egress singletons across identities).
+    ///
+    /// This is DISTINCT from `--profile` (which makes THIS process serve one
+    /// profile) and from `--enable-agent-selection` (in-process personas that
+    /// share this identity). FAILS CLOSED: selecting an unknown profile is
+    /// `AgentNotFound` and spawns no child. Default-OFF: without it, no profile
+    /// is enumerated or routable and the server behaves byte-identically.
+    #[arg(long)]
+    pub enable_profile_router: bool,
 }
 
 /// Resolve `--profile` to the isolated home the process is ACTUALLY bound to,
@@ -364,14 +380,32 @@ async fn serve(args: AcpServeArgs) -> anyhow::Result<()> {
     // overlay). Sharing the instance is the invariant that makes "what you may
     // select" and "what may be applied to your engine" the same set — two rosters
     // could drift and become an authz bypass.
-    let roster = if args.enable_agent_selection {
-        let r = crate::acp_roster::CliAgentRoster::from_trusted_sources();
-        eprintln!(
-            "wayland-core acp: persona-agent selection ENABLED — {} trusted agent(s) \
-             selectable (AgentPack + global operator YAML; project manifests and \
-             isolated profiles are never enumerated).",
-            r.len()
-        );
+    //
+    // PR-7: the profile SUPERVISOR shares this same roster — enabling it
+    // enumerates `profile:<name>` agents so `session/create` can AUTHORIZE a
+    // profile selector, which the installed `ProfileRouter` then spawns/routes
+    // to a dedicated child. A roster is built when EITHER feature is on.
+    let roster = if args.enable_agent_selection || args.enable_profile_router {
+        let mut r = crate::acp_roster::CliAgentRoster::from_trusted_sources();
+        if args.enable_agent_selection {
+            eprintln!(
+                "wayland-core acp: persona-agent selection ENABLED — {} trusted agent(s) \
+                 selectable (AgentPack + global operator YAML; project manifests and \
+                 isolated profiles are never enumerated as in-process personas).",
+                r.len()
+            );
+        }
+        if args.enable_profile_router {
+            let profiles = wcore_config::profile::list_profiles();
+            let n = profiles.len();
+            r = r.with_profiles(profiles);
+            eprintln!(
+                "wayland-core acp: profile SUPERVISOR/ROUTER ENABLED — {n} isolated \
+                 profile(s) selectable as profile:<name>; each spawns a dedicated child \
+                 process with its own WAYLAND_HOME/credentials (one process per profile, \
+                 fail-closed on unknown profiles)."
+            );
+        }
         Some(Arc::new(r))
     } else {
         None
@@ -392,6 +426,15 @@ async fn serve(args: AcpServeArgs) -> anyhow::Result<()> {
         .with_turn_engine(turn_engine);
     if let Some(r) = roster {
         acp_server = acp_server.with_roster(r);
+    }
+    // PR-7: install the profile supervisor. It re-invokes THIS binary as
+    // `acp serve --profile <name>` per selected profile and routes that
+    // session to the child. Only reachable for a `profile:` agent the roster
+    // above authorized (default-OFF ⇒ no profile is ever authorized).
+    if args.enable_profile_router {
+        let router = crate::profile_router::CliProfileRouter::new()
+            .map_err(|e| anyhow::anyhow!("failed to init profile supervisor: {e}"))?;
+        acp_server = acp_server.with_profile_router(Arc::new(router));
     }
     let server = Arc::new(acp_server);
 

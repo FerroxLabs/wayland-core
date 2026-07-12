@@ -25,6 +25,12 @@ pub mod acp_engine;
 // alongside the other injected bridges.
 pub mod acp_roster;
 
+// persona-profiles PR-7: the CLI-layer `ProfileRouter` impl — the profile
+// SUPERVISOR. `wcore-acp` owns the transport-neutral router seam but must not
+// depend on process/spawn machinery or the profile store, so the one-process-
+// per-profile spawn/health-check/route/reap lifecycle lives here.
+pub mod profile_router;
+
 // v0.7.0 Task 3.B.2: `agent` subcommand — five flag-driven CRUD ops
 // (create / list / show / edit / delete) wrapping the
 // `wcore_agents_pack::factory` user-agent surface. Lives in the lib so
