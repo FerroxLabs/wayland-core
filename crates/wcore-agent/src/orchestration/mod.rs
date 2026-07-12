@@ -28,6 +28,8 @@ fn tool_dispatch_timeout(category: ToolCategory) -> Duration {
     }
 }
 
+// Anvil — native gated-forge engine (`drive_climb`), sibling of council.
+pub mod anvil;
 // Crucible (Mixture-of-Providers) council: cross-provider proposers + a
 // provenance-aware aggregator. Hosts `CouncilProviderResolver`, which keys a
 // provider id to an `Arc<dyn LlmProvider>` (resolution lives here, not in the

@@ -47,6 +47,12 @@ pub enum PathValidationError {
     Traversal(PathBuf),
     #[error("path targets a denied system location: {0:?}")]
     SystemPath(PathBuf),
+    #[error("path is a UNC / network path (SMB NTLM-leak risk): {0:?}")]
+    UncPath(PathBuf),
+    #[error("path uses a Windows device / verbatim namespace (\\\\.\\ or \\\\?\\): {0:?}")]
+    DeviceOrVerbatimPath(PathBuf),
+    #[error("path is not a regular file: {0:?}")]
+    NonRegularFile(PathBuf),
 }
 
 /// Validate an LLM-supplied path before any filesystem touch.
@@ -60,6 +66,30 @@ pub fn validate_user_path(path: &Path) -> Result<PathBuf, PathValidationError> {
     let path_str = path.to_string_lossy();
     if path_str.contains('\0') {
         return Err(PathValidationError::NullByte(raw));
+    }
+
+    // #644: reject Windows UNC / network paths (`\\server\share`,
+    // `\\?\UNC\server\share`). On Windows such a path is absolute and would
+    // pass the check below; opening it triggers an outbound SMB connect that
+    // leaks a NetNTLM hash to an attacker-chosen host. On Unix the string is
+    // not absolute (the `is_absolute` guard would catch it as NotAbsolute),
+    // but we reject it explicitly and portably here so the guard is enforced —
+    // and unit-tested — on every platform, and returns the precise reason.
+    if looks_like_unc(path, &path_str) {
+        return Err(PathValidationError::UncPath(raw));
+    }
+
+    // #644 (CI(Array) fix): reject the Windows device (`\\.\`) and verbatim
+    // (`\\?\...`) namespaces. On Windows a verbatim-disk path (`\\?\C:\...`) is
+    // absolute, so it would sail past the `is_absolute` guard below and be
+    // ACCEPTED — bypassing Win32 path normalization and confinement — while a
+    // device path (`\\.\PhysicalDrive0`) is a raw handle with the same
+    // unbounded-read / non-regular hazard #644 targets. Neither is a legitimate
+    // input to the legacy file tools. Reject both explicitly and portably (they
+    // are NOT UNC — `\\?\UNC\...` is already consumed as UncPath above), so the
+    // guard is enforced and unit-tested on every platform.
+    if looks_like_device_or_verbatim(path, &path_str) {
+        return Err(PathValidationError::DeviceOrVerbatimPath(raw));
     }
 
     if !path.is_absolute() {
@@ -111,7 +141,102 @@ pub fn validate_user_path(path: &Path) -> Result<PathBuf, PathValidationError> {
         return Err(PathValidationError::SystemPath(link_target));
     }
 
+    // #644: reject an EXISTING non-regular file (FIFO, char/block device,
+    // socket). `/dev/zero` reports a metadata length of 0 then streams
+    // unbounded into `fs::read` (OOM); a FIFO with no writer blocks the read
+    // forever (DoS). `fs::metadata` follows symlinks, so a symlink to such a
+    // target is caught too. Only enforced when the path already exists, so a
+    // not-yet-created Write/Edit target (and ordinary directories) still pass.
+    if let Ok(meta) = fs::metadata(&normalized) {
+        let ft = meta.file_type();
+        if !ft.is_file() && !ft.is_dir() {
+            return Err(PathValidationError::NonRegularFile(normalized));
+        }
+    }
+
     Ok(normalized)
+}
+
+/// #644: does `path`/`s` name a Windows UNC / network path?
+///
+/// Matches plain UNC (`\\server\share`) and verbatim UNC
+/// (`\\?\UNC\server\share`), but NOT a verbatim local-disk path (`\\?\C:\...`)
+/// or a device path (`\\.\...`), which are not remote SMB targets.
+///
+/// Two separators matter here: Windows (and Rust's path parser) treat `/` and
+/// `\` as INTERCHANGEABLE in the prefix, so `//server/share` and `\/server\share`
+/// parse as UNC just like the backslash spelling. A byte-literal `\\` match
+/// would miss those and let the SMB connect through — so we (a) ask the parser
+/// directly on Windows (authoritative), and (b) normalize `/`→`\` before the
+/// portable string match (which is also what the cross-platform tests exercise).
+fn looks_like_unc(path: &Path, s: &str) -> bool {
+    // Authoritative on Windows: classify via the parsed prefix, which already
+    // normalizes separators and recognizes every UNC spelling.
+    #[cfg(windows)]
+    {
+        use std::path::Prefix;
+        if let Some(Component::Prefix(p)) = path.components().next()
+            && matches!(p.kind(), Prefix::UNC(..) | Prefix::VerbatimUNC(..))
+        {
+            return true;
+        }
+    }
+    #[cfg(not(windows))]
+    let _ = path;
+
+    // Portable backstop: normalize separators, then match UNC forms.
+    let norm: String = s.chars().map(|c| if c == '/' { '\\' } else { c }).collect();
+    let lower = norm.to_ascii_lowercase();
+    // Verbatim UNC: \\?\UNC\server\share (case-insensitive prefix).
+    if lower.starts_with(r"\\?\unc\") {
+        return true;
+    }
+    // Plain UNC: two leading separators then a host character — exclude the
+    // verbatim `\\?\` and device `\\.\` namespaces.
+    if let Some(rest) = norm.strip_prefix(r"\\") {
+        return !matches!(rest.chars().next(), Some('?') | Some('.') | None);
+    }
+    false
+}
+
+/// #644: does `path`/`s` name a Windows device (`\\.\`) or verbatim (`\\?\`)
+/// namespace path (other than `\\?\UNC\...`, which `looks_like_unc` already
+/// classifies as UNC)?
+///
+/// These share the `\\` lead-in with UNC but are not remote SMB targets:
+///   * `\\?\C:\...` (verbatim disk) disables Win32 path normalization and is
+///     `is_absolute() == true` on Windows, so without this guard it would be
+///     ACCEPTED by the legacy file tools.
+///   * `\\.\PhysicalDrive0` (device namespace) is a raw device handle.
+///
+/// Callers invoke this AFTER `looks_like_unc`, so verbatim-UNC is already
+/// handled; the `\\?\unc\` guard below is belt-and-suspenders for the standalone
+/// function. Mirrors `looks_like_unc`'s dual strategy: authoritative parsed
+/// prefix on Windows, portable normalized-string match everywhere.
+fn looks_like_device_or_verbatim(path: &Path, s: &str) -> bool {
+    #[cfg(windows)]
+    {
+        use std::path::Prefix;
+        if let Some(Component::Prefix(p)) = path.components().next()
+            && matches!(
+                p.kind(),
+                Prefix::VerbatimDisk(..) | Prefix::DeviceNS(..) | Prefix::Verbatim(..)
+            )
+        {
+            return true;
+        }
+    }
+    #[cfg(not(windows))]
+    let _ = path;
+
+    // Portable backstop: normalize separators, then match the device / verbatim
+    // lead-ins. `\\?\UNC\...` is UNC (handled earlier) — never device/verbatim.
+    let norm: String = s.chars().map(|c| if c == '/' { '\\' } else { c }).collect();
+    let lower = norm.to_ascii_lowercase();
+    if lower.starts_with(r"\\?\unc\") {
+        return false;
+    }
+    lower.starts_with(r"\\?\") || lower.starts_with(r"\\.\")
 }
 
 /// If `path` is a symlink, follow it (up to 8 hops) to an absolute,
@@ -392,6 +517,97 @@ mod tests {
     fn ssh_private_key_rejected() {
         let err = validate_user_path(Path::new("/home/alice/.ssh/id_rsa")).unwrap_err();
         assert!(matches!(err, PathValidationError::SystemPath(_)));
+    }
+
+    // #644 — UNC / network-path rejection (SMB NTLM-leak). String-based, so the
+    // guard is exercised on Unix CI even though a UNC path is Windows-specific.
+    #[test]
+    fn unc_paths_rejected() {
+        for p in [
+            // Backslash spellings.
+            r"\\server\share\file.txt",
+            r"\\?\UNC\server\share\file.txt",
+            r"\\10.0.0.5\c$\secret",
+            // Forward / mixed slash — Windows treats '/' == '\' in the prefix,
+            // so these parse as UNC too and MUST be rejected (the SMB-leak
+            // bypass). These are the security-critical spellings.
+            "//server/share/secret",
+            r"\/server\share\file",
+            r"/\server/share/file",
+            "//?/UNC/server/share/file",
+        ] {
+            let err = validate_user_path(Path::new(p)).unwrap_err();
+            assert!(
+                matches!(err, PathValidationError::UncPath(_)),
+                "expected UncPath for {p:?}, got {err:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn verbatim_disk_and_device_paths_are_not_unc() {
+        // These share the `\\` lead-in but are NOT remote SMB targets, so the
+        // UNC guard must not claim them. They ARE rejected (device / verbatim
+        // namespace), just not as UncPath — on Windows `\\?\C:\...` is absolute
+        // and would otherwise be ACCEPTED, so the reject is load-bearing there.
+        for p in [r"\\?\C:\Users\me\notes.txt", r"\\.\PhysicalDrive0"] {
+            let err = validate_user_path(Path::new(p)).unwrap_err();
+            assert!(
+                !matches!(err, PathValidationError::UncPath(_)),
+                "{p:?} must not be classified as UNC, got {err:?}"
+            );
+            assert!(
+                matches!(err, PathValidationError::DeviceOrVerbatimPath(_)),
+                "{p:?} must be rejected as device/verbatim, got {err:?}"
+            );
+        }
+    }
+
+    // `\\?\UNC\server\share` stays classified as UNC — the device/verbatim
+    // guard must not steal it from the UNC classifier (SMB-leak reject).
+    #[test]
+    fn verbatim_unc_still_classified_as_unc() {
+        let err = validate_user_path(Path::new(r"\\?\UNC\server\share\file.txt")).unwrap_err();
+        assert!(
+            matches!(err, PathValidationError::UncPath(_)),
+            "verbatim-UNC must stay UncPath, got {err:?}"
+        );
+    }
+
+    // #644 — non-regular files (FIFO/device/socket) must be rejected: they hang
+    // or stream unbounded through `fs::read`. A unix-domain socket file is a
+    // pure-std way to create a non-regular file.
+    #[cfg(unix)]
+    #[test]
+    fn non_regular_file_rejected() {
+        use std::os::unix::net::UnixListener;
+        let dir = tempfile::tempdir().unwrap();
+        let sock = dir.path().join("s.sock");
+        let _l = UnixListener::bind(&sock).unwrap();
+        let err = validate_user_path(&sock).unwrap_err();
+        assert!(
+            matches!(err, PathValidationError::NonRegularFile(_)),
+            "a socket must be rejected as non-regular, got {err:?}"
+        );
+    }
+
+    // A regular file passes, and a not-yet-existing Write/Edit target still
+    // passes (the non-regular guard only fires on existing files).
+    #[cfg(unix)]
+    #[test]
+    fn regular_file_and_nonexistent_target_allowed() {
+        let dir = tempfile::tempdir().unwrap();
+        let f = dir.path().join("notes.txt");
+        std::fs::write(&f, b"x").unwrap();
+        assert!(
+            validate_user_path(&f).is_ok(),
+            "existing regular file allowed"
+        );
+        let new = dir.path().join("to-create.txt");
+        assert!(
+            validate_user_path(&new).is_ok(),
+            "not-yet-existing write target allowed"
+        );
     }
 
     #[cfg(unix)]

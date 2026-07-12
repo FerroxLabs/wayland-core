@@ -25,6 +25,8 @@ pub mod chatgpt_catalog;
 pub mod compact;
 pub mod compat;
 pub mod config;
+// Anvil (native gated-forge engine): `[anvil]` kill-switch config.
+pub mod anvil;
 // THE KERNEL (#255): single per-turn context-window computation. See the
 // module header. Co-located with `limits` (the per-model window table).
 pub mod context_window;
