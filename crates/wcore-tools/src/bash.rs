@@ -788,13 +788,13 @@ impl Tool for BashTool {
         // may run. A bootstrap-only probe would be bypassable because
         // default_for_platform() re-resolves on each call.
         if let Some(p) = ctx.workspace.as_deref()
-            && p.trust() == crate::workspace_policy::WorkspaceTrust::Contained
+            && p.secret_read_deny_required()
             && !backend.enforces_read_deny()
         {
             return ToolResult {
-                content: "Refused: shell is unavailable in the contained workspace \
-                          because the active sandbox backend cannot enforce \
-                          secret-read-deny."
+                content: "Refused: shell is unavailable because the active sandbox \
+                          backend cannot enforce secret-read-deny for this \
+                          workspace."
                     .to_string(),
                 is_error: true,
             };
@@ -854,13 +854,13 @@ impl Tool for BashTool {
         // execute_with_ctx). Must check BEFORE wrapping in Arc.
         let backend_probe = default_for_platform();
         if let Some(p) = ctx.workspace.as_deref()
-            && p.trust() == crate::workspace_policy::WorkspaceTrust::Contained
+            && p.secret_read_deny_required()
             && !backend_probe.enforces_read_deny()
         {
             return ToolResult {
-                content: "Refused: shell is unavailable in the contained workspace \
-                          because the active sandbox backend cannot enforce \
-                          secret-read-deny."
+                content: "Refused: shell is unavailable because the active sandbox \
+                          backend cannot enforce secret-read-deny for this \
+                          workspace."
                     .to_string(),
                 is_error: true,
             };
