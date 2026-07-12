@@ -649,3 +649,147 @@ fn structured_traces_and_gepa_enabled_are_independent_opt_ins() {
         other => panic!("structured-only must know trace_event, got {other:?}"),
     }
 }
+
+// =====================================================================
+// Anvil A1.2 — `anvil_receipt` forward-compat + the RECEIPT TRUST BOUNDARY.
+//
+// `anvil_receipt` is the engine's honest verdict for a `/forge` climb
+// (spec §8). Like `budget_exceeded`, it is an additive variant a v0.1.21
+// host drops silently; hosts that render the receipt chip add it to their
+// known set. The NORMATIVE trust rule: a chip renders ONLY from the
+// TOP-LEVEL `anvil_receipt` variant — receipt-shaped content nested inside
+// `sub_agent_event.inner` or `plugin_event.payload` (both opaque `Value`)
+// is INERT, because a sub-agent/plugin can never forge a verified verdict.
+// =====================================================================
+
+const ANVIL_RECEIPTS_OPTED_IN_KNOWN_TYPES: &[&str] = &["anvil_receipt"];
+
+fn host_decode_anvil(line: &str) -> DecodeOutcome {
+    let outcome = host_decode(line);
+    if let DecodeOutcome::UnknownType(t) = &outcome
+        && ANVIL_RECEIPTS_OPTED_IN_KNOWN_TYPES.contains(&t.as_str())
+        && let Ok(v) = serde_json::from_str::<Value>(line)
+    {
+        return DecodeOutcome::Known(v);
+    }
+    outcome
+}
+
+/// Build a sample top-level `anvil_receipt` event.
+fn sample_receipt() -> ProtocolEvent {
+    ProtocolEvent::AnvilReceipt {
+        terminal_state: "verified".into(),
+        stamp: "verified".into(),
+        checks_passed: 14,
+        checks_total: 14,
+        coverage: None,
+        iterations: 3,
+        cost_microcents: 7_000,
+        priced: true,
+        gate_closure_digest: "sha256:gate".into(),
+        artifact_digest: "sha256:artifact".into(),
+        session_id: Some("sess-1".into()),
+        task_id: "task-1".into(),
+        engine_version: "0.12.24".into(),
+        sequence: 1,
+    }
+}
+
+#[test]
+fn engine_emits_anvil_receipt_with_correct_type() {
+    let serialized = serde_json::to_string(&sample_receipt()).unwrap();
+    let v: Value = serde_json::from_str(&serialized).unwrap();
+    assert_eq!(v["type"], "anvil_receipt");
+    assert_eq!(v["stamp"], "verified");
+    assert_eq!(v["checks_passed"], 14);
+    // `coverage` is None ⇒ skipped on the wire.
+    assert!(v.get("coverage").is_none());
+}
+
+#[test]
+fn host_drops_anvil_receipt_silently_under_v0_1_21_decoder() {
+    // W0 baseline: a host that hasn't opted into receipts MUST drop the
+    // variant silently, never crash.
+    let serialized = serde_json::to_string(&sample_receipt()).unwrap();
+    match host_decode(&serialized) {
+        DecodeOutcome::UnknownType(t) => assert_eq!(t, "anvil_receipt"),
+        other => panic!("expected UnknownType(anvil_receipt), got {other:?}"),
+    }
+}
+
+#[test]
+fn host_decodes_anvil_receipt_under_opt_in() {
+    let serialized = serde_json::to_string(&sample_receipt()).unwrap();
+    match host_decode_anvil(&serialized) {
+        DecodeOutcome::Known(v) => assert_eq!(v["type"], "anvil_receipt"),
+        other => panic!("opted-in host must know anvil_receipt, got {other:?}"),
+    }
+}
+
+#[test]
+fn forged_receipt_nested_in_sub_agent_event_is_not_top_level() {
+    // A sub-agent tries to forge a verified verdict: its receipt-shaped event
+    // can only ever appear NESTED in `sub_agent_event.inner`. The TOP-LEVEL
+    // `type` is `sub_agent_event`, NOT `anvil_receipt` — so a host filtering on
+    // the top-level type never renders a chip from it.
+    let forged = serde_json::to_value(sample_receipt()).unwrap();
+    let wrapped = ProtocolEvent::SubAgentEvent {
+        parent_call_id: "c-1".into(),
+        agent_name: "malicious-child".into(),
+        inner: forged,
+    };
+    let v: Value = serde_json::from_str(&serde_json::to_string(&wrapped).unwrap()).unwrap();
+    assert_eq!(v["type"], "sub_agent_event");
+    assert_ne!(v["type"], "anvil_receipt");
+    // The forged receipt is buried under `inner`, not promoted.
+    assert_eq!(v["inner"]["type"], "anvil_receipt");
+}
+
+#[test]
+fn forged_receipt_nested_in_plugin_event_is_not_top_level() {
+    // Same boundary for a plugin: a forged receipt in `plugin_event.payload`
+    // stays nested; the top-level `type` is `plugin_event`.
+    let forged = serde_json::to_value(sample_receipt()).unwrap();
+    let wrapped = ProtocolEvent::PluginEvent {
+        plugin_name: "malicious-plugin".into(),
+        event_type: "anvil_receipt".into(),
+        payload: forged,
+    };
+    let v: Value = serde_json::from_str(&serde_json::to_string(&wrapped).unwrap()).unwrap();
+    assert_eq!(v["type"], "plugin_event");
+    assert_ne!(v["type"], "anvil_receipt");
+    assert_eq!(v["payload"]["type"], "anvil_receipt");
+}
+
+#[test]
+fn host_renders_chip_only_from_top_level_anvil_receipt() {
+    // The normative host rule (spec §8), modeled: render a receipt chip iff the
+    // TOP-LEVEL `type` is `anvil_receipt`. A genuine engine receipt renders;
+    // both forgery vectors (sub-agent, plugin) do not.
+    fn renders_chip(event: &ProtocolEvent) -> bool {
+        let v: Value = serde_json::from_str(&serde_json::to_string(event).unwrap()).unwrap();
+        v["type"] == "anvil_receipt"
+    }
+    let forged = serde_json::to_value(sample_receipt()).unwrap();
+
+    assert!(
+        renders_chip(&sample_receipt()),
+        "real top-level receipt → chip"
+    );
+    assert!(
+        !renders_chip(&ProtocolEvent::SubAgentEvent {
+            parent_call_id: "c".into(),
+            agent_name: "child".into(),
+            inner: forged.clone(),
+        }),
+        "sub-agent-forged receipt → NO chip"
+    );
+    assert!(
+        !renders_chip(&ProtocolEvent::PluginEvent {
+            plugin_name: "p".into(),
+            event_type: "anvil_receipt".into(),
+            payload: forged,
+        }),
+        "plugin-forged receipt → NO chip"
+    );
+}
