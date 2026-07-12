@@ -14,6 +14,9 @@
 //!
 //! Spec: `docs/design/2026-07-12-anvil-native-gated-forge-design.md` (v2).
 
+/// Gate closure pinning, the pre-climb probe, injection fencing, flake policy.
+pub mod gates;
+
 use wcore_config::anvil::AnvilConfig;
 
 /// Terminal state of a climb — the COMPLETE enum (spec §6.5). Every climb ends
