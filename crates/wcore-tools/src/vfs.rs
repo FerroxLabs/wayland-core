@@ -343,10 +343,19 @@ impl<F: VirtualFs + 'static> VirtualFs for SandboxedFs<F> {
     }
 }
 
-/// Wraps a `VirtualFs` and refuses any op whose path is a secret per the
-/// active `WorkspacePolicy`. Layer INSIDE `SandboxedFs`
-/// (`SandboxedFs::new(SecretDenyFs::new(RealFs, p), root)`) so it inspects
-/// the canonicalized path and catches symlinks-to-secrets inside the root.
+/// Wraps a `VirtualFs` and refuses any op whose path is a PROJECT-committed
+/// secret per the active `WorkspacePolicy` (a secret-named file under the
+/// workspace root). Two deployments:
+///   * Workspace posture: layered INSIDE `SandboxedFs`
+///     (`SandboxedFs::new(SecretDenyFs::new(RealFs, p), root)`) so it inspects
+///     the canonicalized path and catches symlinks-to-secrets inside the root.
+///     The jail already confines every path to the root, so the scope check is
+///     always satisfied there — behaviour is unchanged.
+///   * #667 Full-posture channel/remote: installed WITHOUT a `SandboxedFs`
+///     jail (Full stays unconfined for non-secret paths); the workspace-scoped
+///     [`is_project_secret`](crate::workspace_policy::WorkspacePolicy::is_project_secret)
+///     predicate is what limits the new denial to the project's own secrets,
+///     leaving host secrets outside the workspace readable.
 pub struct SecretDenyFs<F: VirtualFs> {
     inner: F,
     policy: std::sync::Arc<crate::workspace_policy::WorkspacePolicy>,
@@ -357,7 +366,7 @@ impl<F: VirtualFs> SecretDenyFs<F> {
         Self { inner, policy }
     }
     fn guard(&self, path: &Path) -> Result<(), VfsError> {
-        if self.policy.is_secret_path(path) {
+        if self.policy.is_project_secret(path) {
             return Err(VfsError::SecretDenied {
                 path: path.to_path_buf(),
             });
@@ -448,5 +457,46 @@ mod tests {
             jail.read(&root.join("notes.txt")).await,
             Err(VfsError::SecretDenied { .. })
         ));
+    }
+
+    /// #667 Full-posture read path: `SecretDenyFs` installed WITHOUT a
+    /// `SandboxedFs` jail (Full stays unconfined) denies the project's own
+    /// `.env` but leaves a secret OUTSIDE the workspace root readable — the
+    /// workspace-scoped `is_project_secret` predicate does the limiting.
+    #[tokio::test]
+    async fn full_posture_denies_project_secret_but_allows_host_secret() {
+        use crate::workspace_policy::WorkspacePolicy;
+        use std::sync::Arc;
+        let dir = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(dir.path()).unwrap();
+        std::fs::write(root.join(".env"), b"PROJECT=secret").unwrap();
+        std::fs::write(root.join("main.rs"), b"fn main() {}").unwrap();
+
+        // A host secret OUTSIDE the workspace root.
+        let host = tempfile::tempdir().unwrap();
+        let host_root = std::fs::canonicalize(host.path()).unwrap();
+        std::fs::write(host_root.join(".env"), b"HOST=secret").unwrap();
+
+        // Full posture = trusted_local + channel/remote opt-in, no jail wrapper.
+        let policy = Arc::new(WorkspacePolicy::trusted_local(&root).with_project_secret_deny());
+        let fs = SecretDenyFs::new(RealFs, Arc::clone(&policy));
+
+        assert!(
+            matches!(
+                fs.read(&root.join(".env")).await,
+                Err(VfsError::SecretDenied { .. })
+            ),
+            "project .env must be denied on the read path"
+        );
+        assert_eq!(
+            fs.read(&root.join("main.rs")).await.unwrap(),
+            b"fn main() {}",
+            "ordinary project file must still be readable"
+        );
+        assert_eq!(
+            fs.read(&host_root.join(".env")).await.unwrap(),
+            b"HOST=secret",
+            "a host secret OUTSIDE the workspace root stays readable (Full = trusted-remote operator)"
+        );
     }
 }
