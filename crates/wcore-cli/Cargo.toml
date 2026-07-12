@@ -189,6 +189,8 @@ toml.workspace = true
 url.workspace = true
 regex.workspace = true
 serde.workspace = true
+# `serde_yaml` parses Hermes `config.yaml` for the `migrate` importer (#228).
+serde_yaml.workspace = true
 thiserror.workspace = true
 dirs.workspace = true
 reqwest = { workspace = true, features = ["blocking"], optional = true }
