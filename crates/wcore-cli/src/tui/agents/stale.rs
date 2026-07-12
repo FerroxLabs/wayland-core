@@ -55,10 +55,22 @@ mod tests {
         }
     }
 
+    /// A Windows-safe base "now" for tests that fabricate an OLDER timestamp by
+    /// subtracting a `Duration`. On a freshly-booted Windows CI runner
+    /// `Instant::now()` can be smaller than the offsets these tests subtract, and
+    /// `Instant - Duration` PANICS on underflow (std `time.rs:445`) — the
+    /// intermittent `CI (Array)` failure (fails only when runner uptime < the
+    /// subtracted offset). Anchoring the base well ahead keeps every
+    /// `base - <offset>` positive; `duration_since` is unaffected because the
+    /// base and the fabricated event shift together, preserving the intended age.
+    fn test_now() -> Instant {
+        Instant::now() + Duration::from_secs(2 * 3600)
+    }
+
     #[test]
     fn running_agent_within_threshold_is_not_stale_v093() {
         let mut app = App::default();
-        let t0 = Instant::now();
+        let t0 = test_now();
         app.session
             .sub_agents
             .push(mk_agent("a", SubAgentStatus::Running));
@@ -71,7 +83,7 @@ mod tests {
     #[test]
     fn running_agent_past_threshold_is_stale_v093() {
         let mut app = App::default();
-        let t0 = Instant::now();
+        let t0 = test_now();
         app.session
             .sub_agents
             .push(mk_agent("a", SubAgentStatus::Running));
@@ -84,7 +96,7 @@ mod tests {
     #[test]
     fn done_agent_with_old_event_is_not_stale_v093() {
         let mut app = App::default();
-        let t0 = Instant::now();
+        let t0 = test_now();
         // Done agent with a very old last-event must NOT be counted.
         app.session
             .sub_agents
@@ -97,7 +109,7 @@ mod tests {
     #[test]
     fn failed_agent_with_old_event_is_not_stale_v093() {
         let mut app = App::default();
-        let t0 = Instant::now();
+        let t0 = test_now();
         app.session
             .sub_agents
             .push(mk_agent("a", SubAgentStatus::Failed));
@@ -120,7 +132,7 @@ mod tests {
     #[test]
     fn check_counts_multiple_stale_agents_v093() {
         let mut app = App::default();
-        let t0 = Instant::now();
+        let t0 = test_now();
         // Two stale Running agents.
         app.session
             .sub_agents
@@ -154,7 +166,7 @@ mod tests {
     #[test]
     fn stateless_repeated_check_returns_running_total_not_delta_v093() {
         let mut app = App::default();
-        let t0 = Instant::now();
+        let t0 = test_now();
         app.session
             .sub_agents
             .push(mk_agent("a", SubAgentStatus::Running));
