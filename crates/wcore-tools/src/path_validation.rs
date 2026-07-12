@@ -49,6 +49,8 @@ pub enum PathValidationError {
     SystemPath(PathBuf),
     #[error("path is a UNC / network path (SMB NTLM-leak risk): {0:?}")]
     UncPath(PathBuf),
+    #[error("path uses a Windows device / verbatim namespace (\\\\.\\ or \\\\?\\): {0:?}")]
+    DeviceOrVerbatimPath(PathBuf),
     #[error("path is not a regular file: {0:?}")]
     NonRegularFile(PathBuf),
 }
@@ -75,6 +77,19 @@ pub fn validate_user_path(path: &Path) -> Result<PathBuf, PathValidationError> {
     // and unit-tested — on every platform, and returns the precise reason.
     if looks_like_unc(path, &path_str) {
         return Err(PathValidationError::UncPath(raw));
+    }
+
+    // #644 (CI(Array) fix): reject the Windows device (`\\.\`) and verbatim
+    // (`\\?\...`) namespaces. On Windows a verbatim-disk path (`\\?\C:\...`) is
+    // absolute, so it would sail past the `is_absolute` guard below and be
+    // ACCEPTED — bypassing Win32 path normalization and confinement — while a
+    // device path (`\\.\PhysicalDrive0`) is a raw handle with the same
+    // unbounded-read / non-regular hazard #644 targets. Neither is a legitimate
+    // input to the legacy file tools. Reject both explicitly and portably (they
+    // are NOT UNC — `\\?\UNC\...` is already consumed as UncPath above), so the
+    // guard is enforced and unit-tested on every platform.
+    if looks_like_device_or_verbatim(path, &path_str) {
+        return Err(PathValidationError::DeviceOrVerbatimPath(raw));
     }
 
     if !path.is_absolute() {
@@ -182,6 +197,46 @@ fn looks_like_unc(path: &Path, s: &str) -> bool {
         return !matches!(rest.chars().next(), Some('?') | Some('.') | None);
     }
     false
+}
+
+/// #644: does `path`/`s` name a Windows device (`\\.\`) or verbatim (`\\?\`)
+/// namespace path (other than `\\?\UNC\...`, which `looks_like_unc` already
+/// classifies as UNC)?
+///
+/// These share the `\\` lead-in with UNC but are not remote SMB targets:
+///   * `\\?\C:\...` (verbatim disk) disables Win32 path normalization and is
+///     `is_absolute() == true` on Windows, so without this guard it would be
+///     ACCEPTED by the legacy file tools.
+///   * `\\.\PhysicalDrive0` (device namespace) is a raw device handle.
+///
+/// Callers invoke this AFTER `looks_like_unc`, so verbatim-UNC is already
+/// handled; the `\\?\unc\` guard below is belt-and-suspenders for the standalone
+/// function. Mirrors `looks_like_unc`'s dual strategy: authoritative parsed
+/// prefix on Windows, portable normalized-string match everywhere.
+fn looks_like_device_or_verbatim(path: &Path, s: &str) -> bool {
+    #[cfg(windows)]
+    {
+        use std::path::Prefix;
+        if let Some(Component::Prefix(p)) = path.components().next()
+            && matches!(
+                p.kind(),
+                Prefix::VerbatimDisk(..) | Prefix::DeviceNS(..) | Prefix::Verbatim(..)
+            )
+        {
+            return true;
+        }
+    }
+    #[cfg(not(windows))]
+    let _ = path;
+
+    // Portable backstop: normalize separators, then match the device / verbatim
+    // lead-ins. `\\?\UNC\...` is UNC (handled earlier) — never device/verbatim.
+    let norm: String = s.chars().map(|c| if c == '/' { '\\' } else { c }).collect();
+    let lower = norm.to_ascii_lowercase();
+    if lower.starts_with(r"\\?\unc\") {
+        return false;
+    }
+    lower.starts_with(r"\\?\") || lower.starts_with(r"\\.\")
 }
 
 /// If `path` is a symlink, follow it (up to 8 hops) to an absolute,
@@ -492,15 +547,31 @@ mod tests {
     #[test]
     fn verbatim_disk_and_device_paths_are_not_unc() {
         // These share the `\\` lead-in but are NOT remote SMB targets, so the
-        // UNC guard must not claim them (they fail later checks on Unix, but not
-        // as UncPath).
+        // UNC guard must not claim them. They ARE rejected (device / verbatim
+        // namespace), just not as UncPath — on Windows `\\?\C:\...` is absolute
+        // and would otherwise be ACCEPTED, so the reject is load-bearing there.
         for p in [r"\\?\C:\Users\me\notes.txt", r"\\.\PhysicalDrive0"] {
             let err = validate_user_path(Path::new(p)).unwrap_err();
             assert!(
                 !matches!(err, PathValidationError::UncPath(_)),
                 "{p:?} must not be classified as UNC, got {err:?}"
             );
+            assert!(
+                matches!(err, PathValidationError::DeviceOrVerbatimPath(_)),
+                "{p:?} must be rejected as device/verbatim, got {err:?}"
+            );
         }
+    }
+
+    // `\\?\UNC\server\share` stays classified as UNC — the device/verbatim
+    // guard must not steal it from the UNC classifier (SMB-leak reject).
+    #[test]
+    fn verbatim_unc_still_classified_as_unc() {
+        let err = validate_user_path(Path::new(r"\\?\UNC\server\share\file.txt")).unwrap_err();
+        assert!(
+            matches!(err, PathValidationError::UncPath(_)),
+            "verbatim-UNC must stay UncPath, got {err:?}"
+        );
     }
 
     // #644 — non-regular files (FIFO/device/socket) must be rejected: they hang
