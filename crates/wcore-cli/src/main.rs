@@ -563,6 +563,11 @@ enum TopCmd {
         #[command(subcommand)]
         cmd: wcore_cli::profile::ProfileCmd,
     },
+    /// Import an existing agent setup (Hermes) into wayland-core profiles.
+    Migrate {
+        #[command(subcommand)]
+        cmd: wcore_cli::migrate::MigrateCmd,
+    },
 }
 
 /// F-089: `models` sub-subcommands.
@@ -1161,6 +1166,14 @@ async fn run() -> anyhow::Result<ExitCode> {
                 Ok(()) => Ok(ExitCode::SUCCESS),
                 Err(e) => {
                     eprintln!("wayland-core profile: {e:#}");
+                    Ok(ExitCode::FAILURE)
+                }
+            },
+            // `migrate::run` is synchronous — no `.await` (mirrors `TopCmd::Profile`).
+            TopCmd::Migrate { cmd } => match wcore_cli::migrate::run(cmd) {
+                Ok(()) => Ok(ExitCode::SUCCESS),
+                Err(e) => {
+                    eprintln!("wayland-core migrate: {e:#}");
                     Ok(ExitCode::FAILURE)
                 }
             },

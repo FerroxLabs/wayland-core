@@ -124,6 +124,9 @@ pub mod auth;
 // active-pointer access stays in `wcore_config::profile` (D2 single-reader lint).
 pub mod profile;
 
+// CLI surface: `wayland-core migrate` — import Hermes/OpenClaw setups (#228).
+pub mod migrate;
+
 // CLI surface: `wayland-core image` — FluxRouter image generation
 // (`POST /v1/images/generations`). Lives in the lib so credential
 // resolution + path numbering are unit-testable.
