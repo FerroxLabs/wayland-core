@@ -425,7 +425,13 @@ async fn exec_time_gate_trusted_policy_passes_through() {
 /// asserts DENIED after adding the object store to fs_read_deny. `git rev-parse`
 /// is a positive control — it must still succeed, proving git actually RAN (so a
 /// non-running git can't false-pass) and that the fix is targeted (refs kept).
-/// Requires an enforcing backend (bwrap on Linux/box); skips elsewhere.
+/// LINUX-ONLY: the proof needs bwrap (real subtree deny) AND a real `git` that
+/// runs under the sandbox. macOS CI's `git` is an xcode shim that won't execute
+/// under `sandbox_exec` (the positive control `git rev-parse` exits 1 → the deny
+/// would only assert vacuously), and Windows AppContainer differs — so this live
+/// proof is gated to Linux (CI linux-containerized + the Hetzner box), per the
+/// re-audit's "live proof from the Linux box" requirement.
+#[cfg(target_os = "linux")]
 #[tokio::test]
 #[serial]
 async fn full_remote_bash_git_object_store_secret_is_denied() {
