@@ -42,6 +42,10 @@ pub struct AcpClient {
     http: HttpClient,
     base_url: String,
     bearer: Option<String>,
+    /// persona-profiles PR-7 — `X-API-Key` sent on every request. This is the
+    /// auth an `acp serve` server enforces (`SimpleKeyVerifier`), so the profile
+    /// SUPERVISOR uses it to talk to a child it spawned with a known key.
+    api_key: Option<String>,
 }
 
 impl AcpClient {
@@ -56,6 +60,7 @@ impl AcpClient {
             http,
             base_url: base_url.into().trim_end_matches('/').to_string(),
             bearer: None,
+            api_key: None,
         })
     }
 
@@ -65,10 +70,23 @@ impl AcpClient {
         self
     }
 
+    /// persona-profiles PR-7 — attach an ACP server API key, sent as the
+    /// `X-API-Key` header the `acp serve` `SimpleKeyVerifier` enforces. Builder.
+    pub fn with_api_key(mut self, key: impl Into<String>) -> Self {
+        self.api_key = Some(key.into());
+        self
+    }
+
     fn maybe_auth(
         &self,
         req: wcore_egress::EgressRequestBuilder,
     ) -> wcore_egress::EgressRequestBuilder {
+        // X-API-Key (server auth) and bearer are independent; apply whichever is
+        // configured. The supervisor uses X-API-Key to reach a child server.
+        let req = match &self.api_key {
+            Some(k) => req.header("X-API-Key", k),
+            None => req,
+        };
         match &self.bearer {
             Some(t) => req.bearer_auth(t),
             None => req,
