@@ -487,6 +487,68 @@ pub enum ProtocolEvent {
         #[serde(skip_serializing_if = "Option::is_none")]
         active_window_percent: Option<u32>,
     },
+    /// Anvil (gated-forge) receipt — the engine's honest verdict for a `/forge`
+    /// climb (spec §8). Carries the terminal state, the trust-tier stamp
+    /// actually earned, check counts + coverage, iterations, settled cost, and
+    /// the gate/artifact digests that bind the receipt to what was verified.
+    ///
+    /// **TRUST BOUNDARY (normative, spec §8):** a host renders a receipt "chip"
+    /// ONLY from this TOP-LEVEL variant. Receipt-shaped content arriving nested
+    /// in [`ProtocolEvent::SubAgentEvent`]'s `inner` or
+    /// [`ProtocolEvent::PluginEvent`]'s `payload` (both opaque `Value`) is
+    /// INERT — a sub-agent or plugin can never forge a verified verdict. This
+    /// holds structurally: spawned children carry no protocol writer, so their
+    /// events are always wrapped (never promoted to the top level). The
+    /// `host_decoder_contract` tests lock the wire-level invariant. Same class
+    /// as ratchet `00364cf` (a previewed fragment cannot forge the
+    /// Approve/Reject verdict).
+    ///
+    /// Emission is engine-only, from the climb exit path, and lands with the
+    /// climb slice (A1.5/A1.6) — this variant is defined here first so the wire
+    /// contract and the trust boundary can be reviewed and tested in isolation.
+    /// Like [`ProtocolEvent::BudgetExceeded`], it is an additive variant a
+    /// v0.1.21 host drops silently (W0 forward-compat).
+    AnvilReceipt {
+        /// Canonical terminal state (anvil §6.5): `verified` | `criteria_checked`
+        /// | `self_checked` | `needs_escalation` | `blocked` | `cancelled` |
+        /// `timed_out` | `permission_denied` | `crashed_recovered` | `superseded`.
+        terminal_state: String,
+        /// The trust-tier stamp actually earned (spec §2 honesty vocabulary):
+        /// `verified` (real Tier-1 gate only) | `criteria_checked` |
+        /// `self_checked` | `format_validated` | `consensus_only`. Distinct from
+        /// `terminal_state`; never `verified` unless a real gate passed.
+        stamp: String,
+        /// Checks passed / total on the final candidate.
+        checks_passed: u32,
+        checks_total: u32,
+        /// Coverage-scope note, e.g. "suite-passed; 2 files outside exercised
+        /// tests". Absent when the whole change-set was covered.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        coverage: Option<String>,
+        /// Climb iterations performed.
+        iterations: u32,
+        /// Settled cost across the whole climb, in micro-cents. When `priced`
+        /// is false this is NOT a real price — the host renders "unpriced",
+        /// never $0 (spec §2).
+        cost_microcents: u64,
+        /// Whether `cost_microcents` is a real, metered price.
+        priced: bool,
+        /// Digest of the pinned gate closure (spec §5) — binds the receipt to
+        /// the exact gate invocation that produced it.
+        gate_closure_digest: String,
+        /// Digest of the verified artifact (spec §8 staleness) — any later
+        /// mutation of the verified files invalidates the chip.
+        artifact_digest: String,
+        /// Session this climb ran in.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        session_id: Option<String>,
+        /// Task-lineage id the climb served.
+        task_id: String,
+        /// Engine version that produced the receipt.
+        engine_version: String,
+        /// Monotonic per-session sequence (receipt ordering / dedup).
+        sequence: u64,
+    },
     Pong,
 }
 
