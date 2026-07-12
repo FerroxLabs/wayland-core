@@ -2001,11 +2001,25 @@ impl AgentBootstrap {
         if self.config.builtin_tools.script.enabled {
             use wcore_tools::dispatcher::ToolDispatcher;
 
-            let dispatch_reg = build_script_dispatcher_registry(
+            let mut dispatch_reg = build_script_dispatcher_registry(
                 file_cache_for_script.clone(),
                 cwd_path,
                 self.config.builtin_tools.repomap.enabled,
             );
+            // MF2 (auditor): ScriptTool dispatches against THIS separate mini-registry,
+            // which `apply_posture` (run later, on the MAIN registry) never touches — so
+            // `Script([{tool:Grep}]/{tool:Glob})` would bypass the Full channel-remote
+            // drop of Grep/Glob (#232) and Git (MF1) entirely. Apply the SAME posture
+            // retain (and Workspace jail) to the mini-registry so it obeys the identical
+            // channel scope; a dropped tool then resolves to "not in registry". Never runs
+            // for a local CLI engine (no scope) — local Script keeps its full toolset.
+            if let Some(scope) = self.channel_tool_posture.as_ref() {
+                crate::channel_tools::apply_posture(
+                    &mut dispatch_reg,
+                    scope,
+                    wcore_tools::bash::platform_enforces_read_deny(),
+                );
+            }
             let shared = Arc::new(tokio::sync::RwLock::new(dispatch_reg));
             let dispatcher_handle = Arc::clone(&shared);
             // W8b.2.A — route through the ctx-aware closure shape so
@@ -3408,6 +3422,38 @@ mod tests {
     use super::*;
     use std::collections::HashMap;
     use wcore_plugin_api::{McpServerSpec, McpTransport};
+
+    /// MF2 (auditor): the ScriptTool dispatcher mini-registry must obey the SAME
+    /// channel posture as the main registry — otherwise `Script([{tool:Grep}])` /
+    /// `Script([{tool:Glob}])` bypasses the Full channel-remote drop (#232/MF1).
+    /// Build the mini-registry, apply the Full scope (as the bootstrap call site
+    /// now does when a channel scope is present), and assert the unconfined-search
+    /// builtins are gone while ordinary tools survive.
+    #[test]
+    fn script_dispatcher_registry_obeys_full_channel_posture() {
+        let mut reg = build_script_dispatcher_registry(None, std::path::Path::new("/tmp"), false);
+        assert!(
+            reg.get("Grep").is_some() && reg.get("Glob").is_some(),
+            "precondition: the raw mini-registry registers Grep/Glob"
+        );
+        let scope = crate::channel_tools::ChannelToolScope {
+            posture: wcore_channels::ChannelToolPosture::Full,
+            workspace_root: std::path::PathBuf::from("/tmp"),
+        };
+        crate::channel_tools::apply_posture(&mut reg, &scope, false);
+        assert!(
+            reg.get("Grep").is_none(),
+            "Full must drop Grep from the Script mini-registry (MF2)"
+        );
+        assert!(
+            reg.get("Glob").is_none(),
+            "Full must drop Glob from the Script mini-registry (MF2)"
+        );
+        assert!(
+            reg.get("Read").is_some() && reg.get("Bash").is_some(),
+            "non-search tools still survive in the Script mini-registry under Full"
+        );
+    }
 
     /// A4c: a declarative stdio MCP server whose command cannot be launched
     /// must fail the reachability gate. This is the only pre-connect skip on
