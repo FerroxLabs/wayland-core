@@ -14,6 +14,8 @@
 //!
 //! Spec: `docs/design/2026-07-12-anvil-native-gated-forge-design.md` (v2).
 
+/// The climb decision core: per-check gate model, fail-set acceptance, order.
+pub mod climb;
 /// Gate closure pinning, the pre-climb probe, injection fencing, flake policy.
 pub mod gates;
 /// Per-task cost ledger with atomic reservation-before-dispatch.
