@@ -336,6 +336,13 @@ pub struct ConfigFile {
     /// `ConfigFile`-only) to build the council.
     #[serde(default)]
     pub crucible: crate::crucible::CrucibleConfig,
+
+    /// Anvil (native gated-forge engine) — opt-in `[anvil]` block. OFF by
+    /// default (`enabled = false`), kill-switched until the A1 slice completes.
+    /// Lives on `ConfigFile` (the on-disk shape) alongside `[crucible]`; the
+    /// `forge` entry point reads it via `load_merged_config_file`.
+    #[serde(default)]
+    pub anvil: crate::anvil::AnvilConfig,
 }
 
 /// Wave SD — top-level `[storage]` block in `config.toml`.
@@ -3647,6 +3654,12 @@ fn merge_config_files(global: ConfigFile, project: ConfigFile) -> ConfigFile {
         global.crucible
     };
 
+    let anvil = if project.anvil.enabled {
+        project.anvil
+    } else {
+        global.anvil
+    };
+
     ConfigFile {
         default,
         providers,
@@ -3671,6 +3684,7 @@ fn merge_config_files(global: ConfigFile, project: ConfigFile) -> ConfigFile {
         security,
         session_cap,
         crucible,
+        anvil,
     }
 }
 
