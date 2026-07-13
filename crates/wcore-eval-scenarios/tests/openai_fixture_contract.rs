@@ -50,6 +50,9 @@ async fn success_is_valid_sse_and_records_one_redacted_request() {
     let observation = first.shutdown().await.expect("clean fixture shutdown");
     assert!(observation.complete());
     assert_eq!(observation.requests.len(), 1);
+    assert_eq!(observation.attempts(), 1);
+    assert_eq!(observation.retries(), 0);
+    assert!(observation.typed_failures().is_empty());
     assert_eq!(observation.requests[0].sequence, 1);
     assert_eq!(observation.requests[0].method, "POST");
     assert_eq!(observation.requests[0].path, "/v1/chat/completions");
@@ -117,6 +120,12 @@ async fn fault_steps_are_fifo_and_extra_requests_fail_closed() {
 
     let observation = fixture.shutdown().await.expect("fixture shutdown");
     assert_eq!(observation.requests.len(), 5);
+    assert_eq!(observation.attempts(), 5);
+    assert_eq!(observation.retries(), 3);
+    assert_eq!(
+        observation.typed_failures(),
+        ["http_503", "http_429", "truncated_stream"]
+    );
     assert!(!observation.complete());
     assert_eq!(observation.violations, ["unexpected_request"]);
 }

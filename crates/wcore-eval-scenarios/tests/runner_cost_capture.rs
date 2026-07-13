@@ -137,4 +137,13 @@ async fn captures_session_cost_emitted_before_stream_end() {
         "expected $0.00185985, got ${}",
         result.cost_usd
     );
+    let usage = result
+        .execution
+        .provider_usage
+        .as_ref()
+        .expect("stream_end usage must be retained");
+    assert_eq!(usage.input_tokens, 12);
+    assert_eq!(usage.output_tokens, 1);
+    assert_eq!(usage.cache_read_tokens, 0);
+    assert_eq!(usage.cache_write_tokens, 0);
 }

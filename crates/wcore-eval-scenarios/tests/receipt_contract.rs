@@ -448,6 +448,15 @@ fn critical_usability_finding_is_a_receipt_gate_failure() {
                 call_id: "call-approved-write".to_string(),
                 approved: true,
             }],
+            provider_attempts: Some(3),
+            provider_retries: Some(2),
+            provider_typed_failures: vec!["http_503".to_string()],
+            provider_usage: Some(wcore_eval_scenarios::runner::ProviderUsageEvidence {
+                input_tokens: 12,
+                output_tokens: 1,
+                cache_read_tokens: 0,
+                cache_write_tokens: 0,
+            }),
             cancellation_requested: false,
             shutdown_time: Duration::from_millis(5),
         },
@@ -473,6 +482,11 @@ fn critical_usability_finding_is_a_receipt_gate_failure() {
     assert_eq!(receipt.body.decisions[0].decision, "approve_all");
     assert_eq!(receipt.body.decisions[1].action, "tool_approval_command");
     assert_eq!(receipt.body.decisions[1].decision, "approve_sent");
+    assert_eq!(receipt.body.provider.attempts, Evidence::observed(3));
+    assert_eq!(receipt.body.provider.retries, Evidence::observed(2));
+    assert_eq!(receipt.body.provider.input_tokens, Evidence::observed(12));
+    assert_eq!(receipt.body.provider.output_tokens, Evidence::observed(1));
+    assert_eq!(receipt.body.provider.typed_failures, ["http_503"]);
     assert_eq!(
         receipt.body.decisions[1].resource_sha256,
         format!("{:x}", Sha256::digest(b"call-approved-write"))
