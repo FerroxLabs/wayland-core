@@ -32,6 +32,7 @@ use tokio::process::{Child, Command};
 
 use crate::child_env::ChildEnvironment;
 use crate::cost::CostReport;
+use crate::process_tree::ProcessTree;
 use crate::providers::{ProviderConfig, ProviderId};
 use crate::redaction::SecretRedactor;
 use crate::stderr_capture::StderrCapture;
@@ -211,7 +212,15 @@ pub fn spawn_for_run(
     wayland_home: Option<&std::path::Path>,
 ) -> Result<Child, SpawnError> {
     let secret = provider.resolved_key();
-    spawn_for_run_with_secret(bin, cwd, provider, yolo, wayland_home, secret.as_deref())
+    spawn_for_run_with_secret(
+        bin,
+        cwd,
+        provider,
+        yolo,
+        wayland_home,
+        secret.as_deref(),
+        None,
+    )
 }
 
 fn spawn_for_run_with_secret(
@@ -221,6 +230,7 @@ fn spawn_for_run_with_secret(
     yolo: bool,
     wayland_home: Option<&std::path::Path>,
     secret: Option<&str>,
+    process_tree: Option<&ProcessTree>,
 ) -> Result<Child, SpawnError> {
     let mut cmd = Command::new(bin);
     let isolated_home = wayland_home.unwrap_or(cwd);
@@ -244,6 +254,9 @@ fn spawn_for_run_with_secret(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
+    if let Some(process_tree) = process_tree {
+        process_tree.configure(&mut cmd)?;
+    }
     // `wayland_config_dir()` = `$WAYLAND_HOME` resolves the global config layer:
     // MCP servers, skills dir, and memory DBs. D4 cross-session runs pass ONE
     // persistent home so those carry across sessions. Persona/coverage runs pass
@@ -394,6 +407,9 @@ async fn run_session_body(
 ) -> anyhow::Result<ScenarioResult> {
     let start = Instant::now();
 
+    let mut process_tree = ProcessTree::prepare()
+        .map_err(|error| anyhow::anyhow!("process containment unavailable: {error}"))?;
+
     let mut child = spawn_for_run_with_secret(
         bin,
         cwd,
@@ -401,8 +417,12 @@ async fn run_session_body(
         scenario.approval == crate::scenario::ApprovalPolicy::Yolo,
         wayland_home,
         secret,
+        Some(&process_tree),
     )
     .map_err(|e| anyhow::anyhow!(e.to_string()))?;
+    process_tree
+        .bind(&child)
+        .map_err(|error| anyhow::anyhow!("could not bind evaluator child: {error}"))?;
 
     // Detach stderr first so we never deadlock on a full pipe.
     let stderr = child.stderr.take().expect("piped stderr");
@@ -428,8 +448,7 @@ async fn run_session_body(
                 drive_out.info_events,
             ),
             Ok(Err(e)) => {
-                let _ = child.start_kill();
-                let _ = child.wait().await;
+                let cleanup_error = process_tree.terminate(&mut child).await.err();
                 let stderr_tail = stderr_cap.snapshot();
                 let failure = e.downcast_ref::<TurnTimeout>().map_or_else(
                     || Failure::RunnerError(e.to_string()),
@@ -438,13 +457,19 @@ async fn run_session_body(
                         budget_secs: timeout.budget.as_secs_f64(),
                     },
                 );
+                let mut failures = vec![failure];
+                if let Some(error) = cleanup_error {
+                    failures.push(Failure::RunnerError(format!(
+                        "process-tree cleanup failed: {error}"
+                    )));
+                }
                 return Ok(ScenarioResult {
                     name: scenario.name.to_string(),
                     provider: provider.id,
                     platform: crate::scenario::Platform::current(),
                     approval: scenario.approval,
                     passed: false,
-                    failures: vec![failure],
+                    failures,
                     wall_time: start.elapsed(),
                     cost_usd: 0.0,
                     trace: ToolTrace::default(),
@@ -459,18 +484,23 @@ async fn run_session_body(
             Err(_elapsed) => {
                 // M-1: timeout fired. Kill explicitly, reap, then record
                 // Hung with the stderr tail snapshot.
-                let _ = child.start_kill();
-                let _ = child.wait().await;
+                let cleanup_error = process_tree.terminate(&mut child).await.err();
                 let stderr_tail = stderr_cap.snapshot();
+                let mut failures = vec![Failure::Hung {
+                    stderr_tail: stderr_tail.clone(),
+                }];
+                if let Some(error) = cleanup_error {
+                    failures.push(Failure::RunnerError(format!(
+                        "process-tree cleanup failed: {error}"
+                    )));
+                }
                 return Ok(ScenarioResult {
                     name: scenario.name.to_string(),
                     provider: provider.id,
                     platform: crate::scenario::Platform::current(),
                     approval: scenario.approval,
                     passed: false,
-                    failures: vec![Failure::Hung {
-                        stderr_tail: stderr_tail.clone(),
-                    }],
+                    failures,
                     wall_time: start.elapsed(),
                     cost_usd: 0.0,
                     trace: ToolTrace::default(),
@@ -488,17 +518,19 @@ async fn run_session_body(
     // and consumed the trailing `session_cost`; the child should exit
     // promptly. Give a short grace, then kill if it lingers.
     let shutdown = tokio::time::timeout(Duration::from_secs(8), child.wait()).await;
-    let exit_code = match shutdown {
-        Ok(Ok(status)) => status.code().unwrap_or(0),
+    let (exit_code, cleanup_error) = match shutdown {
+        Ok(Ok(status)) => (
+            status.code().unwrap_or(0),
+            process_tree.cleanup_descendants().await.err(),
+        ),
         Ok(Err(_)) | Err(_) => {
             // The child either errored on `wait()` or did not exit within the
             // grace window (it produced its output but hung on shutdown). Kill
             // it and surface a NON-zero sentinel so the `exit_code != 0` gate
             // below records `Crashed` — never silently report a clean exit for
             // a binary that couldn't exit (cross-audit finding #8).
-            let _ = child.start_kill();
-            let _ = child.wait().await;
-            -1
+            let cleanup_error = process_tree.terminate(&mut child).await.err();
+            (-1, cleanup_error)
         }
     };
 
@@ -509,6 +541,11 @@ async fn run_session_body(
     let mut failures: Vec<Failure> = Vec::new();
     if let Some(err) = hit_internal_error {
         failures.push(Failure::RunnerError(err));
+    }
+    if let Some(error) = cleanup_error {
+        failures.push(Failure::RunnerError(format!(
+            "process-tree cleanup failed: {error}"
+        )));
     }
     if exit_code != 0 {
         failures.push(Failure::Crashed {

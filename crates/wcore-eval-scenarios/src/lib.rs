@@ -48,6 +48,7 @@ pub mod hook_scenarios;
 pub mod judge;
 pub mod mcp_scenarios;
 pub mod personas;
+mod process_tree;
 pub mod protocol_scenarios;
 pub mod providers;
 #[cfg(unix)]

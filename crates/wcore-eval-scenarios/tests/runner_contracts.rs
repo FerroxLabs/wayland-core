@@ -14,7 +14,7 @@ fn provider(model: &str) -> ProviderConfig {
     ProviderConfig::new(ProviderId::DeepSeek, model).with_api_key("fixture-key")
 }
 
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 #[derive(Debug, Clone, Copy)]
 struct OrphanState {
     pid: u32,
@@ -22,7 +22,7 @@ struct OrphanState {
     heartbeat: u64,
 }
 
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 fn read_orphan_state(path: &std::path::Path) -> Option<OrphanState> {
     let contents = std::fs::read_to_string(path).ok()?;
     let value = |name: &str| contents.lines().find_map(|line| line.strip_prefix(name));
@@ -33,7 +33,7 @@ fn read_orphan_state(path: &std::path::Path) -> Option<OrphanState> {
     })
 }
 
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 async fn wait_for_orphan_state(path: &std::path::Path, timeout: Duration) -> Option<OrphanState> {
     let deadline = tokio::time::Instant::now() + timeout;
     loop {
@@ -47,7 +47,7 @@ async fn wait_for_orphan_state(path: &std::path::Path, timeout: Duration) -> Opt
     }
 }
 
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 fn process_exists(pid: u32) -> bool {
     // SAFETY: signal 0 performs only an existence/permission check.
     let result = unsafe { libc::kill(pid as libc::pid_t, 0) };
@@ -58,13 +58,13 @@ fn process_exists(pid: u32) -> bool {
         )
 }
 
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 fn listener_accepts_connections(port: u16) -> bool {
     let address = std::net::SocketAddr::from(([127, 0, 0, 1], port));
     std::net::TcpStream::connect_timeout(&address, Duration::from_millis(50)).is_ok()
 }
 
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 async fn wait_for_orphan_cleanup(state: OrphanState, timeout: Duration) -> bool {
     let deadline = tokio::time::Instant::now() + timeout;
     loop {
@@ -78,7 +78,7 @@ async fn wait_for_orphan_cleanup(state: OrphanState, timeout: Duration) -> bool 
     }
 }
 
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 async fn emergency_kill_orphan(state: OrphanState) {
     if process_exists(state.pid) {
         // SAFETY: the fixture deliberately makes itself the leader of a fresh
@@ -224,9 +224,13 @@ async fn oversized_unterminated_stdout_is_a_bounded_runner_error() {
     );
 }
 
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 #[tokio::test]
 async fn timeout_reaps_detached_descendant_and_listener() {
+    if std::env::var_os("WCORE_EVAL_REQUIRE_CONTAINMENT").is_none() {
+        eprintln!("skipping authoritative cgroup contract outside the containment gate");
+        return;
+    }
     let control_dir = tempfile::tempdir().expect("create external orphan control dir");
     let control_path = control_dir.path().join("orphan-state");
     let model = format!("fixture-orphan:{}", control_path.display());

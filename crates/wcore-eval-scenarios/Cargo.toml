@@ -57,6 +57,9 @@ vt100        = "0.15"
 wcore-protocol = { workspace = true }
 wcore-config = { workspace = true }
 
+[target.'cfg(unix)'.dependencies]
+libc = { workspace = true }
+
 [dev-dependencies]
 # Tests need the wayland-core binary available — declaring wcore-cli as
 # an artifact dev-dep would also work, but the runner already supports
@@ -65,11 +68,3 @@ wcore-config = { workspace = true }
 # tests in tests/smoke.rs use that helper so no extra build dep is
 # required and there's no risk of pulling the entire wcore-cli tree
 # into the test compile graph.
-
-# libc — `hung_scenario_does_not_leak_pid` checks PID reaping via
-# `libc::kill(pid, 0)` instead of shelling out to /bin/kill, which is
-# absent in the ci-linux slim Debian docker image
-# (`rust:1.95-slim-bookworm`) — caused ENOENT panic + nextest job fail
-# in CI run 26396718138.
-[target.'cfg(unix)'.dev-dependencies]
-libc = { workspace = true }
