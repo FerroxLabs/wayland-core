@@ -22,6 +22,8 @@
 
 use std::path::PathBuf;
 use std::process::Stdio;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
@@ -356,6 +358,7 @@ pub(crate) async fn run_session_in(
                     cwd,
                     wayland_home,
                     secret.as_deref(),
+                    &redactor,
                 )
                 .await
             }
@@ -369,6 +372,7 @@ pub(crate) async fn run_session_in(
                 cwd,
                 wayland_home,
                 secret.as_deref(),
+                &redactor,
             )
             .await
         }
@@ -404,6 +408,7 @@ async fn run_session_body(
     cwd: &std::path::Path,
     wayland_home: Option<&std::path::Path>,
     secret: Option<&str>,
+    redactor: &SecretRedactor,
 ) -> anyhow::Result<ScenarioResult> {
     let start = Instant::now();
 
@@ -426,14 +431,21 @@ async fn run_session_body(
 
     // Detach stderr first so we never deadlock on a full pipe.
     let stderr = child.stderr.take().expect("piped stderr");
-    let stderr_cap = StderrCapture::spawn(stderr);
+    let stderr_cap = StderrCapture::spawn_redacted(stderr, redactor.clone());
 
     let stdin = child.stdin.take().expect("piped stdin");
     let stdout = child.stdout.take().expect("piped stdout");
+    let stdout_secret_detected = Arc::new(AtomicBool::new(false));
 
     // Outer wall-time guard. On Elapsed we MUST start_kill + wait —
     // tokio::time::timeout only cancels the future, not the child.
-    let drive = drive_session(stdin, stdout, scenario);
+    let drive = drive_session(
+        stdin,
+        stdout,
+        scenario,
+        redactor.clone(),
+        Arc::clone(&stdout_secret_detected),
+    );
     let result = tokio::time::timeout(scenario.max_total_time, drive).await;
 
     let (turn_results, trace, final_text, cost_report, hit_internal_error, boot_time, info_events) =
@@ -449,6 +461,7 @@ async fn run_session_body(
             ),
             Ok(Err(e)) => {
                 let cleanup_error = process_tree.terminate(&mut child).await.err();
+                stderr_cap.finish().await;
                 let stderr_tail = stderr_cap.snapshot();
                 let failure = e.downcast_ref::<TurnTimeout>().map_or_else(
                     || Failure::RunnerError(e.to_string()),
@@ -463,6 +476,7 @@ async fn run_session_body(
                         "process-tree cleanup failed: {error}"
                     )));
                 }
+                add_capture_failures(&mut failures, &stderr_cap, &stdout_secret_detected);
                 return Ok(ScenarioResult {
                     name: scenario.name.to_string(),
                     provider: provider.id,
@@ -485,6 +499,7 @@ async fn run_session_body(
                 // M-1: timeout fired. Kill explicitly, reap, then record
                 // Hung with the stderr tail snapshot.
                 let cleanup_error = process_tree.terminate(&mut child).await.err();
+                stderr_cap.finish().await;
                 let stderr_tail = stderr_cap.snapshot();
                 let mut failures = vec![Failure::Hung {
                     stderr_tail: stderr_tail.clone(),
@@ -494,6 +509,7 @@ async fn run_session_body(
                         "process-tree cleanup failed: {error}"
                     )));
                 }
+                add_capture_failures(&mut failures, &stderr_cap, &stdout_secret_detected);
                 return Ok(ScenarioResult {
                     name: scenario.name.to_string(),
                     provider: provider.id,
@@ -534,6 +550,7 @@ async fn run_session_body(
         }
     };
 
+    stderr_cap.finish().await;
     let stderr_tail = stderr_cap.snapshot();
     let cost_usd = cost_report.as_ref().map(|c| c.total_usd).unwrap_or(0.0);
     let wall_time = start.elapsed();
@@ -547,6 +564,7 @@ async fn run_session_body(
             "process-tree cleanup failed: {error}"
         )));
     }
+    add_capture_failures(&mut failures, &stderr_cap, &stdout_secret_detected);
     if exit_code != 0 {
         failures.push(Failure::Crashed {
             stderr_tail: stderr_tail.clone(),
@@ -682,6 +700,23 @@ async fn run_session_body(
     Ok(result)
 }
 
+fn add_capture_failures(
+    failures: &mut Vec<Failure>,
+    stderr: &StderrCapture,
+    stdout_secret_detected: &AtomicBool,
+) {
+    if stderr.secret_detected() {
+        failures.push(Failure::SecretDetected {
+            sink: "stderr".to_string(),
+        });
+    }
+    if stdout_secret_detected.load(Ordering::Acquire) {
+        failures.push(Failure::SecretDetected {
+            sink: "stdout".to_string(),
+        });
+    }
+}
+
 /// Output of the inner stdin/stdout-driving loop. Pulled out so the
 /// outer `tokio::time::timeout(...)` can wrap it cleanly.
 struct DriveOutput {
@@ -715,6 +750,8 @@ async fn read_turn_event<R>(
     turn: usize,
     started: Instant,
     budget: Duration,
+    redactor: &SecretRedactor,
+    secret_detected: &AtomicBool,
 ) -> anyhow::Result<Option<Value>>
 where
     R: tokio::io::AsyncRead + Unpin,
@@ -729,7 +766,7 @@ where
         .into());
     };
 
-    match tokio::time::timeout(remaining, read_one_event(reader)).await {
+    match tokio::time::timeout(remaining, read_one_event(reader, redactor, secret_detected)).await {
         Ok(event) => event,
         Err(_) => Err(TurnTimeout {
             turn,
@@ -818,6 +855,8 @@ async fn drive_session(
     mut stdin: tokio::process::ChildStdin,
     stdout: tokio::process::ChildStdout,
     scenario: &crate::scenario::Scenario,
+    redactor: SecretRedactor,
+    secret_detected: Arc<AtomicBool>,
 ) -> anyhow::Result<DriveOutput> {
     let mut reader = BufReader::new(stdout);
     // Cold-boot latency clock: from here (≈ just after spawn) to the `ready`
@@ -833,7 +872,7 @@ async fn drive_session(
     let boot_time = {
         let mut saw_ready = false;
         for _ in 0..256 {
-            match read_one_event(&mut reader).await? {
+            match read_one_event(&mut reader, &redactor, &secret_detected).await? {
                 Some(ev) => {
                     if ev.get("type").and_then(Value::as_str) == Some("ready") {
                         saw_ready = true;
@@ -902,7 +941,16 @@ async fn drive_session(
             // and a no-op `info` as terminal otherwise. Bounded so neither
             // case can hang us.
             for _ in 0..16 {
-                match read_turn_event(&mut reader, turn_idx, turn_start, turn.max_time).await? {
+                match read_turn_event(
+                    &mut reader,
+                    turn_idx,
+                    turn_start,
+                    turn.max_time,
+                    &redactor,
+                    &secret_detected,
+                )
+                .await?
+                {
                     Some(ev) => {
                         let ty = ev.get("type").and_then(Value::as_str).unwrap_or("");
                         if ty == "config_changed" {
@@ -956,7 +1004,16 @@ async fn drive_session(
         let mut stop_pending = turn.stop_mid_turn;
 
         loop {
-            let ev = match read_turn_event(&mut reader, turn_idx, turn_start, turn.max_time).await {
+            let ev = match read_turn_event(
+                &mut reader,
+                turn_idx,
+                turn_start,
+                turn.max_time,
+                &redactor,
+                &secret_detected,
+            )
+            .await
+            {
                 Ok(Some(ev)) => ev,
                 Ok(None) => {
                     runner_error = Some(format!(
@@ -1156,7 +1213,7 @@ async fn drive_session(
     drop(stdin); // close stdin so the engine's command reader sees EOF
 
     loop {
-        match read_one_event(&mut reader).await {
+        match read_one_event(&mut reader, &redactor, &secret_detected).await {
             Ok(Some(ev)) => {
                 if let Some(c) = crate::cost::parse(&ev) {
                     cost = Some(c);
@@ -1184,7 +1241,11 @@ async fn drive_session(
 /// `serde_json::Value`. Returns `Ok(None)` on EOF. Blank lines are
 /// skipped. Lines that don't parse are silently dropped (W0 host
 /// decoder contract — tolerate unknown / forward-additive shapes).
-async fn read_one_event<R>(reader: &mut BufReader<R>) -> anyhow::Result<Option<Value>>
+async fn read_one_event<R>(
+    reader: &mut BufReader<R>,
+    redactor: &SecretRedactor,
+    secret_detected: &AtomicBool,
+) -> anyhow::Result<Option<Value>>
 where
     R: tokio::io::AsyncRead + Unpin,
 {
@@ -1222,7 +1283,12 @@ where
                     continue;
                 }
                 match serde_json::from_str::<Value>(line) {
-                    Ok(value) => return Ok(Some(value)),
+                    Ok(mut value) => {
+                        if redactor.value(&mut value) {
+                            secret_detected.store(true, Ordering::Release);
+                        }
+                        return Ok(Some(value));
+                    }
                     Err(_) => continue,
                 }
             }

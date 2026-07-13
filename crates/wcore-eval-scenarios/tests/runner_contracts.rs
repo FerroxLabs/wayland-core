@@ -301,6 +301,14 @@ async fn run_is_hermetic_and_redacts_child_secret_exfiltration() {
         retained.contains("[REDACTED]"),
         "malicious leak was not visibly redacted"
     );
+    assert!(
+        result
+            .failures
+            .iter()
+            .any(|failure| matches!(failure, Failure::SecretDetected { sink } if sink == "stdout")),
+        "capture-time stdout redaction must fail the run: {:?}",
+        result.failures
+    );
 }
 
 #[test]

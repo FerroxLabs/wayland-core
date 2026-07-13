@@ -8,10 +8,13 @@
 //! failure dump.
 
 use std::collections::VecDeque;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use tokio::io::{AsyncRead, AsyncReadExt};
 use tokio::task::JoinHandle;
+
+use crate::redaction::SecretRedactor;
 
 const RING_CAPACITY: usize = 50;
 const MAX_CAPTURE_BYTES: usize = 64 * 1024;
@@ -22,6 +25,7 @@ const MAX_CAPTURE_BYTES: usize = 64 * 1024;
 /// tests).
 pub struct StderrCapture {
     buf: Arc<Mutex<VecDeque<String>>>,
+    secret_detected: Arc<AtomicBool>,
     handle: Mutex<Option<JoinHandle<()>>>,
 }
 
@@ -34,8 +38,17 @@ impl StderrCapture {
     where
         R: AsyncRead + Unpin + Send + 'static,
     {
+        Self::spawn_redacted(stderr, SecretRedactor::default())
+    }
+
+    pub(crate) fn spawn_redacted<R>(stderr: R, redactor: SecretRedactor) -> Self
+    where
+        R: AsyncRead + Unpin + Send + 'static,
+    {
         let buf = Arc::new(Mutex::new(VecDeque::with_capacity(RING_CAPACITY)));
         let buf_for_task = Arc::clone(&buf);
+        let secret_detected = Arc::new(AtomicBool::new(false));
+        let detected_for_task = Arc::clone(&secret_detected);
 
         let handle = tokio::spawn(async move {
             let mut reader = stderr;
@@ -47,7 +60,7 @@ impl StderrCapture {
                     Ok(count) => {
                         for byte in &chunk[..count] {
                             if *byte == b'\n' {
-                                push_line(&buf_for_task, &mut line);
+                                push_line(&buf_for_task, &mut line, &redactor, &detected_for_task);
                             } else {
                                 if line.len() == MAX_CAPTURE_BYTES {
                                     line.pop_front();
@@ -60,12 +73,13 @@ impl StderrCapture {
                 }
             }
             if !line.is_empty() {
-                push_line(&buf_for_task, &mut line);
+                push_line(&buf_for_task, &mut line, &redactor, &detected_for_task);
             }
         });
 
         Self {
             buf,
+            secret_detected,
             handle: Mutex::new(Some(handle)),
         }
     }
@@ -81,6 +95,17 @@ impl StderrCapture {
         bounded_tail(lines.join("\n"))
     }
 
+    pub(crate) fn secret_detected(&self) -> bool {
+        self.secret_detected.load(Ordering::Acquire)
+    }
+
+    pub(crate) async fn finish(&self) {
+        let handle = self.handle.lock().ok().and_then(|mut handle| handle.take());
+        if let Some(handle) = handle {
+            let _ = handle.await;
+        }
+    }
+
     /// Best-effort cancel of the drain task. Used by tests so the
     /// tokio runtime can shut down deterministically; in normal runs
     /// the task ends naturally when stderr closes on child exit.
@@ -93,12 +118,21 @@ impl StderrCapture {
     }
 }
 
-fn push_line(buf: &Arc<Mutex<VecDeque<String>>>, line: &mut VecDeque<u8>) {
+fn push_line(
+    buf: &Arc<Mutex<VecDeque<String>>>,
+    line: &mut VecDeque<u8>,
+    redactor: &SecretRedactor,
+    secret_detected: &AtomicBool,
+) {
     if line.back() == Some(&b'\r') {
         line.pop_back();
     }
     let bytes = line.make_contiguous();
     let value = bounded_tail(String::from_utf8_lossy(bytes).into_owned());
+    let (value, detected) = redactor.text(value);
+    if detected {
+        secret_detected.store(true, Ordering::Release);
+    }
     line.clear();
     if let Ok(mut queue) = buf.lock() {
         if queue.len() == RING_CAPACITY {
@@ -217,5 +251,20 @@ mod tests {
             "newline-free stderr exceeded {MAX_CAPTURE_BYTES} bytes: captured {}",
             snap.len()
         );
+    }
+
+    #[tokio::test]
+    async fn redacts_and_flags_secret_before_retention() {
+        const SECRET: &str = "secret-canary-123";
+        let cap = StderrCapture::spawn_redacted(
+            CursorAdapter(Cursor::new(format!("before {SECRET} after\n").into_bytes())),
+            SecretRedactor::from_secret(Some(SECRET.to_string())),
+        );
+        cap.finish().await;
+
+        let retained = cap.snapshot();
+        assert!(!retained.contains(SECRET));
+        assert!(retained.contains("[REDACTED]"));
+        assert!(cap.secret_detected());
     }
 }

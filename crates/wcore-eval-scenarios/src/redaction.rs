@@ -33,6 +33,33 @@ impl SecretRedactor {
         (value, detected)
     }
 
+    pub(crate) fn value(&self, value: &mut serde_json::Value) -> bool {
+        match value {
+            serde_json::Value::String(text) => {
+                let (redacted, detected) = self.text(std::mem::take(text));
+                *text = redacted;
+                detected
+            }
+            serde_json::Value::Array(values) => values
+                .iter_mut()
+                .fold(false, |detected, value| self.value(value) || detected),
+            serde_json::Value::Object(values) => {
+                let mut detected = false;
+                let original = std::mem::take(values);
+                for (key, mut value) in original {
+                    let (key, key_detected) = self.text(key);
+                    detected |= key_detected;
+                    detected |= self.value(&mut value);
+                    values.insert(key, value);
+                }
+                detected
+            }
+            serde_json::Value::Null | serde_json::Value::Bool(_) | serde_json::Value::Number(_) => {
+                false
+            }
+        }
+    }
+
     pub(crate) fn result(&self, mut result: ScenarioResult) -> ScenarioResult {
         let mut sinks = BTreeSet::new();
         redact(&mut result.name, self, "name", &mut sinks);
@@ -59,6 +86,30 @@ impl SecretRedactor {
         }
         result.passed = result.failures.is_empty();
         result
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn redacts_nested_protocol_values_at_capture_time() {
+        const SECRET: &str = "secret-canary-123";
+        let redactor = SecretRedactor::from_secret(Some(SECRET.to_string()));
+        let mut value = serde_json::json!({
+            "message": SECRET,
+            "nested": ["safe", format!("prefix-{SECRET}-suffix")],
+        });
+        value
+            .as_object_mut()
+            .expect("test object")
+            .insert(format!("key-{SECRET}"), serde_json::json!("value"));
+
+        assert!(redactor.value(&mut value));
+        let retained = value.to_string();
+        assert!(!retained.contains(SECRET));
+        assert!(retained.contains(REDACTED));
     }
 }
 
