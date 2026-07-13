@@ -235,3 +235,65 @@ fn budget_reservation_aborts_before_spending() {
         "{stdout}"
     );
 }
+
+#[test]
+fn fixture_run_publishes_one_redacted_receipt_bundle() {
+    let temp = tempfile::tempdir().expect("temp report root");
+    let report_root = temp.path().join("reports");
+    let mut command = Command::new(env!("CARGO_BIN_EXE_wayland-eval"));
+    command.args([
+        "--scenario",
+        "canary",
+        "--provider",
+        "deepseek",
+        "--binary",
+        fixture(),
+        "--expected-source-commit",
+        COMMIT,
+        "--report-dir",
+    ]);
+    command.arg(&report_root);
+    command.env("DEEPSEEK_API_KEY", "fixture-key");
+    command.env_remove("ANTHROPIC_API_KEY");
+    command.env_remove("OPENAI_API_KEY");
+    let output = command.output().expect("run receipt fixture");
+    assert!(output.status.success(), "{}", output_context(&output));
+
+    let cells = std::fs::read_dir(&report_root)
+        .expect("report root")
+        .collect::<Result<Vec<_>, _>>()
+        .expect("report entries");
+    assert_eq!(cells.len(), 1);
+    let cell = cells[0].path();
+    for name in [
+        "receipt.json",
+        "events.jsonl",
+        "junit.xml",
+        "report.txt",
+        "report.md",
+    ] {
+        let bytes = std::fs::read(cell.join(name)).expect("report projection");
+        assert!(
+            !bytes
+                .windows(b"fixture-key".len())
+                .any(|window| window == b"fixture-key")
+        );
+    }
+
+    let receipt: wcore_eval_scenarios::receipt::EvidenceReceiptV1 =
+        serde_json::from_slice(&std::fs::read(cell.join("receipt.json")).expect("receipt JSON"))
+            .expect("versioned receipt");
+    assert_eq!(receipt.schema, "wayland.eval.receipt");
+    assert_eq!(receipt.body.identity.source_commit, COMMIT);
+    assert_eq!(receipt.body.identity.binary_sha256.len(), 64);
+    assert!(matches!(
+        wcore_eval_scenarios::receipt::ReceiptVerifier::new()
+            .verify(
+                &receipt,
+                &wcore_eval_scenarios::receipt::VerificationPolicy::default()
+            )
+            .expect("local receipt integrity")
+            .authority,
+        wcore_eval_scenarios::receipt::VerifiedAuthority::LocalNonAuthoritative
+    ));
+}

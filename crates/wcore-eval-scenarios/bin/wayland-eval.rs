@@ -3,6 +3,7 @@
 use std::path::PathBuf;
 
 use clap::Parser;
+use sha2::{Digest, Sha256};
 use wcore_eval_scenarios::Scenario;
 use wcore_eval_scenarios::artifact::{
     ArtifactExpectation, SealedBinaryArtifact, seal_binary, select_candidate,
@@ -10,9 +11,13 @@ use wcore_eval_scenarios::artifact::{
 };
 use wcore_eval_scenarios::catalog::{select_scenarios, standard_scenarios};
 use wcore_eval_scenarios::providers::{
-    ProviderAvailability, ProviderResolution, provider_override, resolve,
+    ProviderAvailability, ProviderConfig, ProviderResolution, provider_override, resolve,
 };
-use wcore_eval_scenarios::runner::run_with_binary;
+use wcore_eval_scenarios::receipt::{
+    Evidence, EvidenceReceiptV1, ReceiptMetadataV1, ReceiptVerifier, VerificationPolicy,
+};
+use wcore_eval_scenarios::report::{ReceiptReports, render_receipt_reports};
+use wcore_eval_scenarios::runner::{Failure, run_with_binary};
 use wcore_eval_scenarios::scenario::{Platform, PlatformDisposition};
 
 #[derive(Debug, Parser)]
@@ -64,6 +69,15 @@ struct Cli {
     /// Atomically persist the same status lines written to stdout.
     #[arg(long, value_name = "PATH")]
     output: Option<PathBuf>,
+
+    /// Atomically persist a redacted local receipt and all report projections
+    /// under one subdirectory per executed scenario/provider cell.
+    #[arg(
+        long,
+        value_name = "DIR",
+        conflicts_with_all = ["list", "verify_binary", "dry"]
+    )]
+    report_dir: Option<PathBuf>,
 }
 
 #[tokio::main]
@@ -223,42 +237,58 @@ async fn execute(cli: Cli) -> i32 {
                 ));
             } else {
                 match run_result {
-                    Ok(result) if result.passed => {
+                    Ok(mut result) => {
                         total_cost += result.cost_usd;
                         if cli.budget.is_some_and(|budget| total_cost > budget) {
-                            failed += 1;
-                            cell_failed = true;
-                            status.line(format!(
-                                "FAIL {} {} os={} approval={} reason=budget_overshoot",
-                                scenario.name, provider.id, result.platform, result.approval
-                            ));
-                        } else {
-                            passed += 1;
-                            status.line(format!(
-                                "PASS {} {} os={} approval={}",
-                                scenario.name, provider.id, result.platform, result.approval
-                            ));
+                            result.failures.push(Failure::OverCost {
+                                observed_usd: total_cost,
+                                budget_usd: cli.budget.unwrap_or_default(),
+                            });
+                            result.passed = false;
+                        }
+                        match build_and_persist_receipt(
+                            &cli, &artifact, scenario, provider, &result, index,
+                        ) {
+                            Ok(gate_passed) if gate_passed => {
+                                passed += 1;
+                                status.line(format!(
+                                    "PASS {} {} os={} approval={}",
+                                    scenario.name, provider.id, result.platform, result.approval
+                                ));
+                            }
+                            Ok(_) => {
+                                failed += 1;
+                                cell_failed = true;
+                                status.line(format!(
+                                    "FAIL {} {} os={} approval={} failures={}",
+                                    scenario.name,
+                                    provider.id,
+                                    result.platform,
+                                    result.approval,
+                                    result.failures.len()
+                                ));
+                            }
+                            Err(error) => {
+                                failed += 1;
+                                cell_failed = true;
+                                status.line(format!(
+                                    "FAIL {} {} reason=receipt_error detail={error}",
+                                    scenario.name, provider.id
+                                ));
+                            }
                         }
                     }
-                    Ok(result) => {
-                        total_cost += result.cost_usd;
+                    Err(error) => {
                         failed += 1;
                         cell_failed = true;
                         status.line(format!(
-                            "FAIL {} {} os={} approval={} failures={}",
+                            "FAIL {} {} reason=runner_error detail={}",
                             scenario.name,
                             provider.id,
-                            result.platform,
-                            result.approval,
-                            result.failures.len()
-                        ));
-                    }
-                    Err(_error) => {
-                        failed += 1;
-                        cell_failed = true;
-                        status.line(format!(
-                            "FAIL {} {} reason=runner_error",
-                            scenario.name, provider.id
+                            safe_status_detail(
+                                &error.to_string(),
+                                provider.resolved_key().as_deref()
+                            )
                         ));
                     }
                 }
@@ -393,4 +423,127 @@ fn finish_output(cli: &Cli, status: &StatusOutput, code: i32) -> i32 {
         return 2;
     }
     code
+}
+
+fn build_and_persist_receipt(
+    cli: &Cli,
+    artifact: &SealedBinaryArtifact,
+    scenario: &Scenario,
+    provider: &ProviderConfig,
+    result: &wcore_eval_scenarios::ScenarioResult,
+    index: usize,
+) -> Result<bool, String> {
+    let fixture_sha256 = format!(
+        "{:x}",
+        Sha256::digest(format!("{}:{}", artifact.sha256, scenario.name))
+    );
+    let receipt = EvidenceReceiptV1::from_scenario_result(
+        ReceiptMetadataV1 {
+            run_id: format!(
+                "{}-{index}-{}-{}",
+                &artifact.sha256[..12],
+                scenario.name,
+                provider.id
+            ),
+            source_commit: artifact.source_commit.clone(),
+            binary_sha256: artifact.sha256.clone(),
+            fixture_sha256,
+            model: provider.model.clone(),
+            build: Evidence::Unavailable {
+                code: "local_non_authoritative".to_string(),
+            },
+        },
+        result,
+        scenario.max_total_cost_usd,
+    )
+    .map_err(|error| error.to_string())?;
+    let gate_passed = ReceiptVerifier::new()
+        .verify(&receipt, &VerificationPolicy::default())
+        .map_err(|error| error.to_string())?
+        .gate_passed;
+
+    if let Some(report_dir) = &cli.report_dir {
+        let forbidden_secrets = provider.resolved_key().into_iter().collect::<Vec<_>>();
+        let reports = render_receipt_reports(&receipt, &forbidden_secrets)
+            .map_err(|error| error.to_string())?;
+        persist_receipt_reports(
+            report_dir,
+            &cell_directory_name(index, scenario.name, provider),
+            &reports,
+        )?;
+    }
+    Ok(gate_passed)
+}
+
+fn persist_receipt_reports(
+    root: &std::path::Path,
+    cell: &str,
+    reports: &ReceiptReports,
+) -> Result<(), String> {
+    std::fs::create_dir_all(root)
+        .map_err(|error| format!("could not create report root {}: {error}", root.display()))?;
+    let destination = root.join(cell);
+    if destination.exists() {
+        return Err(format!(
+            "report destination already exists: {}",
+            destination.display()
+        ));
+    }
+    let staging = root.join(format!(".{cell}.tmp-{}", std::process::id()));
+    std::fs::create_dir(&staging).map_err(|error| {
+        format!(
+            "could not create report staging directory {}: {error}",
+            staging.display()
+        )
+    })?;
+    let write_result = [
+        ("receipt.json", reports.json.as_bytes()),
+        ("events.jsonl", reports.jsonl.as_bytes()),
+        ("junit.xml", reports.junit.as_bytes()),
+        ("report.txt", reports.console.as_bytes()),
+        ("report.md", reports.markdown.as_bytes()),
+    ]
+    .into_iter()
+    .try_for_each(|(name, bytes)| {
+        wcore_config::atomic_write(&staging.join(name), bytes)
+            .map_err(|error| format!("could not persist {name}: {error}"))
+    });
+    if let Err(error) = write_result {
+        let _ = std::fs::remove_dir_all(&staging);
+        return Err(error);
+    }
+    if let Err(error) = std::fs::rename(&staging, &destination) {
+        let _ = std::fs::remove_dir_all(&staging);
+        return Err(format!(
+            "could not publish report directory {}: {error}",
+            destination.display()
+        ));
+    }
+    Ok(())
+}
+
+fn cell_directory_name(index: usize, scenario: &str, provider: &ProviderConfig) -> String {
+    let safe_scenario = scenario
+        .chars()
+        .map(|character| {
+            if character.is_ascii_alphanumeric() || matches!(character, '-' | '_') {
+                character
+            } else {
+                '_'
+            }
+        })
+        .collect::<String>();
+    format!("{index:03}-{safe_scenario}-{}", provider.id)
+}
+
+fn safe_status_detail(detail: &str, secret: Option<&str>) -> String {
+    let detail = secret.filter(|secret| !secret.is_empty()).map_or_else(
+        || detail.to_string(),
+        |secret| detail.replace(secret, "[REDACTED]"),
+    );
+    detail
+        .replace(['\r', '\n'], " ")
+        .chars()
+        .take(240)
+        .collect()
 }
