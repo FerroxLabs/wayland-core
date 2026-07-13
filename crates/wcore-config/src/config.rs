@@ -1338,6 +1338,22 @@ pub fn openai_model_accepts_effort(model: &str) -> bool {
 
 /// default-section config picks one. All four built-in providers now route
 /// through `wcore_types::model_aliases`, so an upstream model deprecation is
+/// Mid-tier "driver seat" model for Anvil forge builders (the Smart Loops
+/// seat split: the session/frontier model plans, a mid-tier model drives the
+/// turns, machinery verifies). Empty = no obvious mid tier in this family;
+/// the session model drives unchanged. Same table pattern as
+/// [`default_model_for`] — extend here, never inline in provider code.
+pub(crate) fn driver_model_for(provider: ProviderType) -> &'static str {
+    use wcore_types::model_aliases::{ANTHROPIC_SONNET, BEDROCK_SONNET, VERTEX_SONNET};
+    match provider {
+        ProviderType::Anthropic => ANTHROPIC_SONNET,
+        ProviderType::Bedrock => BEDROCK_SONNET,
+        ProviderType::Vertex => VERTEX_SONNET,
+        // Every other family: no confident mid-tier pick — session drives.
+        _ => "",
+    }
+}
+
 /// a one-line edit in that module (closes debt B.4 / HC-3-followup).
 pub(crate) fn default_model_for(provider: ProviderType) -> &'static str {
     use wcore_types::model_aliases::{
@@ -3656,9 +3672,14 @@ fn merge_config_files(global: ConfigFile, project: ConfigFile) -> ConfigFile {
     };
 
     // Anvil: project overrides global when it set a non-default value — an
-    // explicit kill-switch (`enabled = false`, since the default is ON) or a
-    // gate. An absent/default project block must NOT shadow a global gate.
-    let anvil = if !project.anvil.enabled || !project.anvil.gate.is_empty() {
+    // explicit kill-switch (`enabled = false`, since the default is ON), a
+    // gate, or a driver seat. An absent/default project block must NOT shadow
+    // a global gate or seat.
+    let anvil = if !project.anvil.enabled
+        || !project.anvil.gate.is_empty()
+        || project.anvil.driver_provider.is_some()
+        || project.anvil.driver_model.is_some()
+    {
         project.anvil
     } else {
         global.anvil

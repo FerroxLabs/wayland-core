@@ -11,7 +11,8 @@ use std::sync::Arc;
 use clap::Args;
 use wcore_agent::orchestration::anvil::forge::drive_climb_full;
 use wcore_agent::spawner::AgentSpawner;
-use wcore_config::config::{CliArgs, Config, load_merged_config_file};
+use wcore_config::anvil::DriverSeatPlan;
+use wcore_config::config::{CliArgs, Config, connected_providers, load_merged_config_file};
 use wcore_protocol::writer::{ProtocolEmitter, ProtocolWriter};
 
 /// Arguments for `wayland-core forge`.
@@ -42,8 +43,62 @@ pub async fn run_forge(args: ForgeArgs) -> anyhow::Result<()> {
     // session into auto-approve so the builder can actually make the change.
     let mut session_cfg = Config::resolve(&CliArgs::default())?;
     session_cfg.tools.auto_approve = true;
-    let provider = wcore_agent::bootstrap::create_provider_with_oauth(&session_cfg)?;
-    let spawner = AgentSpawner::new(provider, session_cfg.clone());
+
+    // Seat routing (A1.8): builders run on the DRIVER seat — explicit config,
+    // else Flux's routed lane when a Flux key is connected, else an in-family
+    // mid tier, else the session seat. Materialization failures fall back to
+    // the session seat with a visible note: seat routing must never break a
+    // forge, only cheapen it.
+    let plan = cf
+        .anvil
+        .resolve_driver_seat(session_cfg.provider, &connected_providers());
+    let driver_cfg = match &plan {
+        DriverSeatPlan::Session => session_cfg.clone(),
+        DriverSeatPlan::SessionModel { model } => {
+            let mut c = session_cfg.clone();
+            c.model = model.clone();
+            c
+        }
+        DriverSeatPlan::Provider { provider, model } => {
+            let args = CliArgs {
+                provider: Some(provider.clone()),
+                model: model.clone(),
+                auto_approve: true,
+                ..CliArgs::default()
+            };
+            match Config::resolve(&args) {
+                Ok(mut c) => {
+                    c.tools.auto_approve = true;
+                    c
+                }
+                Err(e) => {
+                    eprintln!(
+                        "forge: driver seat `{provider}` unavailable ({e}); session model drives"
+                    );
+                    session_cfg.clone()
+                }
+            }
+        }
+    };
+    eprintln!(
+        "forge: driver seat = {}/{}",
+        driver_cfg.provider_label, driver_cfg.model
+    );
+    let (provider, spawner_cfg) =
+        match wcore_agent::bootstrap::create_provider_with_oauth(&driver_cfg) {
+            Ok(p) => (p, driver_cfg),
+            Err(e) if driver_cfg.provider != session_cfg.provider => {
+                // Cross-family driver failed to build — fall back, don't fail.
+                // The fallback spawner must pair the session provider with the
+                // session config (a driver_cfg here would point forks at the
+                // failed provider's model).
+                eprintln!("forge: driver provider failed ({e}); session model drives");
+                let p = wcore_agent::bootstrap::create_provider_with_oauth(&session_cfg)?;
+                (p, session_cfg.clone())
+            }
+            Err(e) => return Err(e),
+        };
+    let spawner = AgentSpawner::new(provider, spawner_cfg);
 
     // The top-level protocol writer — the AnvilReceipt is trusted ONLY from this
     // top-level emission (host trust boundary, spec §8).
