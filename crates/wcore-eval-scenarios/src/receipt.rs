@@ -367,6 +367,15 @@ impl EvidenceReceiptV1 {
             .iter()
             .any(|finding| finding.severity == "high" || finding.severity == "critical");
         let passed = result.passed && failure_evidence.is_empty() && !critical_usability;
+        let outcome_failure_code = failure_evidence
+            .first()
+            .map(|failure| failure.code.clone())
+            .or_else(|| {
+                usability
+                    .iter()
+                    .find(|finding| finding.severity == "high" || finding.severity == "critical")
+                    .map(|finding| finding.code.clone())
+            });
         let cell_id = format!(
             "{}/{}/{}",
             result.name,
@@ -540,7 +549,7 @@ impl EvidenceReceiptV1 {
             assertions: vec![AssertionEvidenceV1 {
                 assertion_id: "scenario_outcome".to_string(),
                 passed,
-                failure_code: failure_evidence.first().map(|failure| failure.code.clone()),
+                failure_code: outcome_failure_code,
             }],
             quarantines: Vec::new(),
             required_cells: vec![cell_id.clone()],
@@ -783,6 +792,15 @@ fn validate_body(body: &ReceiptBodyV1) -> Result<(), ReceiptError> {
     require_sha256("identity.fixture_sha256", &body.identity.fixture_sha256, 64)?;
     require_nonempty("identity.provider", &body.identity.provider)?;
     require_nonempty("identity.model", &body.identity.model)?;
+    match &body.identity.build {
+        Evidence::Observed { value } => {
+            require_nonempty("identity.build.repository", &value.repository)?;
+            require_nonempty("identity.build.source_ref", &value.source_ref)?;
+            require_nonempty("identity.build.workflow", &value.workflow)?;
+            require_nonempty("identity.build.invocation_id", &value.invocation_id)?;
+        }
+        Evidence::Unavailable { code } => require_nonempty("identity.build.code", code)?,
+    }
     require_nonempty("target.os", &body.target.os)?;
     require_nonempty("target.architecture", &body.target.architecture)?;
     require_nonempty("target.sandbox_backend", &body.target.sandbox_backend)?;
@@ -792,6 +810,75 @@ fn validate_body(body: &ReceiptBodyV1) -> Result<(), ReceiptError> {
         &body.policy.effective_policy_sha256,
         64,
     )?;
+    for (field, evidence) in [
+        ("timings.boot_ms", &body.timings.boot_ms),
+        ("timings.ready_ms", &body.timings.ready_ms),
+        ("timings.prompt_ms", &body.timings.prompt_ms),
+        ("timings.first_token_ms", &body.timings.first_token_ms),
+        ("timings.tool_ms", &body.timings.tool_ms),
+        ("timings.approval_ms", &body.timings.approval_ms),
+        ("timings.completion_ms", &body.timings.completion_ms),
+        ("timings.shutdown_ms", &body.timings.shutdown_ms),
+    ] {
+        validate_evidence(field, evidence)?;
+    }
+    for failure in &body.provider.typed_failures {
+        require_nonempty("provider.typed_failures", failure)?;
+    }
+    for tool in &body.tools {
+        require_sha256("tools.call_id_sha256", &tool.call_id_sha256, 64)?;
+        require_nonempty("tools.tool_name", &tool.tool_name)?;
+        require_sha256("tools.request_sha256", &tool.request_sha256, 64)?;
+        require_sha256("tools.result_sha256", &tool.result_sha256, 64)?;
+        validate_evidence("tools.duration_ms", &tool.duration_ms)?;
+        require_nonempty("tools.exit_state", &tool.exit_state)?;
+        validate_sha_evidence("tools.idempotency_key_sha256", &tool.idempotency_key_sha256)?;
+    }
+    if body.decisions.is_empty() {
+        return Err(ReceiptError::InvalidEvidence(
+            "decisions must contain the effective policy decision".to_string(),
+        ));
+    }
+    for decision in &body.decisions {
+        require_nonempty("decisions.actor", &decision.actor)?;
+        require_nonempty("decisions.action", &decision.action)?;
+        require_sha256("decisions.resource_sha256", &decision.resource_sha256, 64)?;
+        require_nonempty("decisions.scope", &decision.scope)?;
+        require_nonempty("decisions.decision", &decision.decision)?;
+    }
+    for delta in &body.boundaries.filesystem_deltas {
+        require_sha256("filesystem.path_sha256", &delta.path_sha256, 64)?;
+        require_nonempty("filesystem.operation", &delta.operation)?;
+        validate_sha_evidence("filesystem.content_sha256", &delta.content_sha256)?;
+    }
+    require_sha256("process.tree_sha256", &body.process.tree_sha256, 64)?;
+    validate_evidence("process.peak_memory_bytes", &body.process.peak_memory_bytes)?;
+    validate_evidence("process.peak_cpu_millis", &body.process.peak_cpu_millis)?;
+    validate_evidence("process.orphan_count", &body.process.orphan_count)?;
+    validate_sha_evidence(
+        "recovery.journal_cursor_sha256",
+        &body.recovery.journal_cursor_sha256,
+    )?;
+    require_nonempty("recovery.action", &body.recovery.action)?;
+    if body.assertions.is_empty() {
+        return Err(ReceiptError::InvalidEvidence(
+            "assertions must not be empty".to_string(),
+        ));
+    }
+    for assertion in &body.assertions {
+        require_nonempty("assertions.assertion_id", &assertion.assertion_id)?;
+        if !assertion.passed && assertion.failure_code.is_none() {
+            return Err(ReceiptError::InvalidEvidence(format!(
+                "failed assertion {} has no failure code",
+                assertion.assertion_id
+            )));
+        }
+    }
+    for quarantine in &body.quarantines {
+        require_nonempty("quarantines.assertion_id", &quarantine.assertion_id)?;
+        require_nonempty("quarantines.owner", &quarantine.owner)?;
+        require_nonempty("quarantines.expires_at", &quarantine.expires_at)?;
+    }
     if body.required_cells.is_empty() {
         return Err(ReceiptError::InvalidEvidence(
             "required_cells must not be empty".to_string(),
@@ -819,6 +906,19 @@ fn validate_body(body: &ReceiptBodyV1) -> Result<(), ReceiptError> {
         require_nonempty("result.task", &result.task)?;
         require_nonempty("result.provider", &result.provider)?;
         require_nonempty("result.platform", &result.platform)?;
+        for failure in &result.failures {
+            require_nonempty("result.failures.code", &failure.code)?;
+            validate_sha_evidence("result.failures.detail_sha256", &failure.detail_sha256)?;
+        }
+        for finding in &result.usability {
+            require_nonempty("result.usability.severity", &finding.severity)?;
+            require_nonempty("result.usability.code", &finding.code)?;
+            require_sha256(
+                "result.usability.evidence_sha256",
+                &finding.evidence_sha256,
+                64,
+            )?;
+        }
         let critical_usability = result
             .usability
             .iter()
@@ -930,6 +1030,20 @@ fn require_sha256(field: &str, value: &str, length: usize) -> Result<(), Receipt
         )));
     }
     Ok(())
+}
+
+fn validate_evidence<T>(field: &str, evidence: &Evidence<T>) -> Result<(), ReceiptError> {
+    if let Evidence::Unavailable { code } = evidence {
+        require_nonempty(&format!("{field}.code"), code)?;
+    }
+    Ok(())
+}
+
+fn validate_sha_evidence(field: &str, evidence: &Evidence<String>) -> Result<(), ReceiptError> {
+    match evidence {
+        Evidence::Observed { value } => require_sha256(field, value, 64),
+        Evidence::Unavailable { .. } => validate_evidence(field, evidence),
+    }
 }
 
 fn unique_set(field: &str, values: &[String]) -> Result<BTreeSet<String>, ReceiptError> {

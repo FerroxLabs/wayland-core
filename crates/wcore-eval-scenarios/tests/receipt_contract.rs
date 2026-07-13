@@ -5,10 +5,10 @@ use ed25519_dalek::SigningKey;
 use sha2::{Digest, Sha256};
 use wcore_eval_scenarios::receipt::{
     AssertionEvidenceV1, AuthorityClaimV1, BoundaryEvidenceV1, BuildProvenanceV1,
-    CanaryScanEvidenceV1, CellResultV1, Evidence, EvidenceReceiptV1, IdentityEvidenceV1,
-    PolicyEvidenceV1, ProcessEvidenceV1, ProviderEvidenceV1, ReceiptBodyV1, ReceiptError,
-    ReceiptMetadataV1, ReceiptVerifier, RecoveryEvidenceV1, SummaryEvidenceV1, TargetEvidenceV1,
-    TimingEvidenceV1, VerificationPolicy, VerifiedAuthority,
+    CanaryScanEvidenceV1, CellResultV1, DecisionEvidenceV1, Evidence, EvidenceReceiptV1,
+    IdentityEvidenceV1, PolicyEvidenceV1, ProcessEvidenceV1, ProviderEvidenceV1, ReceiptBodyV1,
+    ReceiptError, ReceiptMetadataV1, ReceiptVerifier, RecoveryEvidenceV1, SummaryEvidenceV1,
+    TargetEvidenceV1, TimingEvidenceV1, VerificationPolicy, VerifiedAuthority,
 };
 use wcore_eval_scenarios::report::{ReportRenderError, render_receipt_reports};
 use wcore_eval_scenarios::runner::{ExecutionEvidence, ScenarioResult};
@@ -76,7 +76,13 @@ fn body() -> ReceiptBodyV1 {
             limit_microusd: 10_000,
         },
         tools: Vec::new(),
-        decisions: Vec::new(),
+        decisions: vec![DecisionEvidenceV1 {
+            actor: "evaluator".to_string(),
+            action: "tool_approval".to_string(),
+            resource_sha256: h64('2'),
+            scope: "scenario".to_string(),
+            decision: "approve_all".to_string(),
+        }],
         boundaries: BoundaryEvidenceV1 {
             egress_attempted: Vec::new(),
             egress_allowed: Vec::new(),
@@ -223,6 +229,20 @@ fn incomplete_and_internally_inconsistent_receipts_are_rejected() {
         });
     assert!(matches!(
         EvidenceReceiptV1::local(inconsistent),
+        Err(ReceiptError::InvalidEvidence(_))
+    ));
+
+    let mut empty_required_evidence = body();
+    empty_required_evidence.process.tree_sha256.clear();
+    assert!(matches!(
+        EvidenceReceiptV1::local(empty_required_evidence),
+        Err(ReceiptError::InvalidEvidence(_))
+    ));
+
+    let mut no_policy_decision = body();
+    no_policy_decision.decisions.clear();
+    assert!(matches!(
+        EvidenceReceiptV1::local(no_policy_decision),
         Err(ReceiptError::InvalidEvidence(_))
     ));
 }
