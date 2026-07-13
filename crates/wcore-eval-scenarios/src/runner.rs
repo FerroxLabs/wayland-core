@@ -268,6 +268,18 @@ pub async fn run(
     scenario: &crate::scenario::Scenario,
     provider: &ProviderConfig,
 ) -> anyhow::Result<ScenarioResult> {
+    let bin = discover_binary().map_err(|e| anyhow::anyhow!(e.to_string()))?;
+    run_with_binary(scenario, provider, &bin).await
+}
+
+/// Drive a scenario against a caller-validated binary artifact. The CLI uses
+/// this path so artifact selection and provenance cannot be replaced by the
+/// legacy developer auto-discovery between validation and spawn.
+pub async fn run_with_binary(
+    scenario: &crate::scenario::Scenario,
+    provider: &ProviderConfig,
+    bin: &std::path::Path,
+) -> anyhow::Result<ScenarioResult> {
     // Persona path: a fresh hermetic throwaway env per run. WAYLAND_HOME points
     // at the tempdir (NOT stripped): `wayland_config_dir()` then resolves to the
     // empty tempdir, so the global config layer — the developer's real MCP
@@ -281,8 +293,7 @@ pub async fn run(
     // layer. The cross-session harness drives `run_session_in` directly against
     // its own persistent home instead.
     let env = tempenv::build_with(provider, &TempEnvOptions::default())?;
-    let bin = discover_binary().map_err(|e| anyhow::anyhow!(e.to_string()))?;
-    run_session_in(scenario, provider, &bin, env.path(), Some(env.path())).await
+    run_session_in(scenario, provider, bin, env.path(), Some(env.path())).await
 }
 
 /// Drive ONE session of a scenario inside an already-prepared working
