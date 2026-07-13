@@ -1,9 +1,18 @@
 //! Exact packaged-binary selection and identity validation for evaluation runs.
 
 use std::ffi::OsStr;
+use std::fs::File;
+use std::io::Read;
 use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
+use std::thread;
+use std::time::{Duration, Instant};
 
+use sha2::{Digest, Sha256};
 use thiserror::Error;
+
+const PROBE_TIMEOUT: Duration = Duration::from_secs(5);
+const MAX_PROBE_OUTPUT: u64 = 64 * 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BinaryArtifact {
@@ -41,24 +50,225 @@ pub enum ArtifactError {
 /// Select one candidate without validating it. Validation failure is terminal:
 /// callers must not fall through to a lower-precedence candidate.
 pub fn select_candidate(
-    _explicit: Option<&Path>,
-    _environment: Option<&OsStr>,
-    _workspace_root: &Path,
+    explicit: Option<&Path>,
+    environment: Option<&OsStr>,
+    workspace_root: &Path,
 ) -> Result<PathBuf, ArtifactError> {
+    if let Some(path) = explicit {
+        return Ok(path.to_path_buf());
+    }
+    if let Some(path) = environment.filter(|value| !value.is_empty()) {
+        return Ok(PathBuf::from(path));
+    }
+
+    let binary_name = format!("wayland-core{}", std::env::consts::EXE_SUFFIX);
+    for profile in ["release", "debug"] {
+        let candidate = workspace_root
+            .join("target")
+            .join(profile)
+            .join(&binary_name);
+        if candidate.exists() {
+            return Ok(candidate);
+        }
+    }
     Err(ArtifactError::Missing)
+}
+
+/// Validate a selected binary using the production bounded `--build-info`
+/// process probe.
+pub fn inspect_binary(
+    path: &Path,
+    expected: ArtifactExpectation<'_>,
+) -> Result<BinaryArtifact, ArtifactError> {
+    inspect_with_probe(path, expected, probe_build_info)
 }
 
 /// Validate a selected artifact using an injected provenance probe. Production
 /// uses the bounded process probe; unit tests remain offline and cross-platform.
 pub fn inspect_with_probe<F>(
-    _path: &Path,
-    _expected: ArtifactExpectation<'_>,
-    _probe: F,
+    path: &Path,
+    expected: ArtifactExpectation<'_>,
+    probe: F,
 ) -> Result<BinaryArtifact, ArtifactError>
 where
     F: FnOnce(&Path) -> Result<ProbeOutput, ArtifactError>,
 {
-    Err(ArtifactError::Invalid("not implemented".into()))
+    let path = path.canonicalize().map_err(|error| {
+        ArtifactError::Invalid(format!(
+            "{} cannot be canonicalized: {error}",
+            path.display()
+        ))
+    })?;
+    let metadata = path.metadata().map_err(|error| {
+        ArtifactError::Invalid(format!("{} cannot be inspected: {error}", path.display()))
+    })?;
+    if !metadata.is_file() {
+        return Err(ArtifactError::Invalid(format!(
+            "{} is not a regular file",
+            path.display()
+        )));
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if metadata.permissions().mode() & 0o111 == 0 {
+            return Err(ArtifactError::Invalid(format!(
+                "{} is not executable",
+                path.display()
+            )));
+        }
+    }
+
+    validate_commit(expected.source_commit, "expected")?;
+    let sha256 = sha256_file(&path)?;
+    let output = probe(&path)?;
+    if !output.success {
+        return Err(ArtifactError::Probe(
+            "--build-info exited unsuccessfully (stderr omitted)".into(),
+        ));
+    }
+    let (version, source_commit) = parse_build_info(&output.stdout)?;
+    if version != expected.version {
+        return Err(ArtifactError::Mismatch(format!(
+            "version {version} != expected {}",
+            expected.version
+        )));
+    }
+    if source_commit != expected.source_commit {
+        return Err(ArtifactError::Mismatch(format!(
+            "source {source_commit} != expected {}",
+            expected.source_commit
+        )));
+    }
+
+    Ok(BinaryArtifact {
+        path,
+        sha256,
+        version,
+        source_commit,
+    })
+}
+
+fn sha256_file(path: &Path) -> Result<String, ArtifactError> {
+    let mut file = File::open(path).map_err(|error| {
+        ArtifactError::Invalid(format!("{} cannot be opened: {error}", path.display()))
+    })?;
+    let mut hasher = Sha256::new();
+    std::io::copy(&mut file, &mut hasher).map_err(|error| {
+        ArtifactError::Invalid(format!("{} cannot be hashed: {error}", path.display()))
+    })?;
+    Ok(format!("{:x}", hasher.finalize()))
+}
+
+fn parse_build_info(bytes: &[u8]) -> Result<(String, String), ArtifactError> {
+    let text = std::str::from_utf8(bytes)
+        .map_err(|_| ArtifactError::Probe("--build-info was not UTF-8".into()))?;
+    let line = text.strip_suffix('\n').unwrap_or(text);
+    let line = line.strip_suffix('\r').unwrap_or(line);
+    if line.contains('\n') || line.contains('\r') {
+        return Err(ArtifactError::Probe(
+            "--build-info emitted more than one line".into(),
+        ));
+    }
+    let body = line
+        .strip_prefix("wayland-core ")
+        .ok_or_else(|| ArtifactError::Probe("malformed --build-info prefix".into()))?;
+    let (version, source) = body
+        .split_once(" (source ")
+        .ok_or_else(|| ArtifactError::Probe("malformed --build-info identity".into()))?;
+    let source = source
+        .strip_suffix(')')
+        .ok_or_else(|| ArtifactError::Probe("malformed --build-info suffix".into()))?;
+    if version.is_empty() {
+        return Err(ArtifactError::Probe("--build-info version is empty".into()));
+    }
+    validate_commit(source, "reported")?;
+    Ok((version.to_string(), source.to_string()))
+}
+
+fn validate_commit(commit: &str, origin: &str) -> Result<(), ArtifactError> {
+    if commit.len() != 40
+        || !commit
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+    {
+        return Err(ArtifactError::Probe(format!(
+            "{origin} source identity is not 40 lowercase hexadecimal characters"
+        )));
+    }
+    Ok(())
+}
+
+fn probe_build_info(path: &Path) -> Result<ProbeOutput, ArtifactError> {
+    let mut child = Command::new(path)
+        .arg("--build-info")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|error| ArtifactError::Probe(format!("spawn failed: {error}")))?;
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| ArtifactError::Probe("stdout pipe unavailable".into()))?;
+    let stderr = child
+        .stderr
+        .take()
+        .ok_or_else(|| ArtifactError::Probe("stderr pipe unavailable".into()))?;
+    let stdout_reader = thread::spawn(move || read_limited(stdout));
+    let stderr_reader = thread::spawn(move || read_limited(stderr));
+
+    let deadline = Instant::now() + PROBE_TIMEOUT;
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) if Instant::now() < deadline => thread::sleep(Duration::from_millis(10)),
+            Ok(None) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                let _ = stdout_reader.join();
+                let _ = stderr_reader.join();
+                return Err(ArtifactError::Probe("--build-info timed out".into()));
+            }
+            Err(error) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                let _ = stdout_reader.join();
+                let _ = stderr_reader.join();
+                return Err(ArtifactError::Probe(format!("wait failed: {error}")));
+            }
+        }
+    };
+
+    let stdout = join_reader(stdout_reader, "stdout")?;
+    let stderr = join_reader(stderr_reader, "stderr")?;
+    Ok(ProbeOutput {
+        success: status.success(),
+        stdout,
+        stderr,
+    })
+}
+
+fn read_limited(mut reader: impl Read) -> std::io::Result<Vec<u8>> {
+    let mut bytes = Vec::new();
+    reader
+        .by_ref()
+        .take(MAX_PROBE_OUTPUT + 1)
+        .read_to_end(&mut bytes)?;
+    if bytes.len() as u64 > MAX_PROBE_OUTPUT {
+        return Err(std::io::Error::other("probe output exceeded 64 KiB"));
+    }
+    Ok(bytes)
+}
+
+fn join_reader(
+    reader: thread::JoinHandle<std::io::Result<Vec<u8>>>,
+    stream: &str,
+) -> Result<Vec<u8>, ArtifactError> {
+    reader
+        .join()
+        .map_err(|_| ArtifactError::Probe(format!("{stream} reader panicked")))?
+        .map_err(|error| ArtifactError::Probe(format!("{stream} read failed: {error}")))
 }
 
 #[cfg(test)]
