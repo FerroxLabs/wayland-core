@@ -345,7 +345,12 @@ impl AgentBootstrap {
         // plugin runner has settled (see post-init block below). The
         // original ResilientProvider wrap also moves after that point.
 
-        let memory_dir = wcore_memory::paths::auto_memory_dir(cwd_path);
+        let memory_dir = self
+            .config
+            .memory
+            .enabled
+            .then(|| wcore_memory::paths::auto_memory_dir(cwd_path))
+            .flatten();
 
         let file_cache = if self.config.file_cache.enabled {
             let cache = Arc::new(std::sync::RwLock::new(
