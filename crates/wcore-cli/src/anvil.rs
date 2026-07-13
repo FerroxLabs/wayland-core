@@ -3,8 +3,8 @@
 //! Mirrors [`crate::crucible::run_crucible`]: it enforces the `[anvil] enabled`
 //! kill-switch, resolves a provider + spawner + protocol emitter, then drives a
 //! real gated-forge climb ([`drive_climb_full`]) which forks a builder into an
-//! isolated worktree, runs the configured gate, climbs, and emits an
-//! `AnvilReceipt` (on stdout, as a JSON-stream event).
+//! isolated worktree, runs the configured (or auto-detected) gate, climbs, and
+//! emits an `AnvilReceipt` (on stdout, as a JSON-stream event).
 
 use std::sync::Arc;
 
@@ -28,16 +28,12 @@ pub async fn run_forge(args: ForgeArgs) -> anyhow::Result<()> {
 
     if !cf.anvil.enabled {
         anyhow::bail!(
-            "Anvil is disabled. Set `enabled = true` under `[anvil]` in your config \
-             to forge gated tasks."
+            "Anvil is disabled (kill-switched). Remove `enabled = false` from \
+             `[anvil]` in your config to forge gated tasks."
         );
     }
-    if cf.anvil.gate.is_empty() {
-        anyhow::bail!(
-            "Anvil has no gate configured. Set `[anvil] gate = [\"cargo\", \"test\"]` \
-             (the argv Anvil runs to verify a forged candidate)."
-        );
-    }
+    // No gate pre-check here: an empty `[anvil] gate` means auto-detect (A1.7),
+    // and `drive_climb_full` refuses with a precise error if nothing is found.
 
     // Resolve the session provider + a spawner to fork builder sub-agents with.
     // Anvil A1 runs in a TRUSTED / auto-approve posture (spec §5): a forked

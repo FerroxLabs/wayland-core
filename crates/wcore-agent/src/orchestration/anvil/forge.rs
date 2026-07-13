@@ -31,6 +31,7 @@ use wcore_types::spawner::{ForkOverrides, Spawner, SubAgentConfig};
 
 use super::TerminalState;
 use super::climb::{CandidateId, CheckOutcome, GateReport, Severity};
+use super::detect::detect_gate_candidates;
 use super::engine::{
     BuildFeedback, Builder, BuiltCandidate, ClimbOutcome, ClimbParams, EngineError, GateExecutor,
     run_climb,
@@ -54,8 +55,13 @@ pub enum ForgeError {
     /// Anvil is kill-switched off.
     #[error("Anvil is disabled (`[anvil] enabled = false`)")]
     Disabled,
-    /// No gate command configured — a gated-forge with no gate verifies nothing.
-    #[error("no gate configured: set `[anvil] gate = [\"cargo\", \"test\"]`")]
+    /// No gate configured and none auto-detected — a gated-forge with no gate
+    /// verifies nothing.
+    #[error(
+        "no gate configured and none detected in this workspace: set \
+         `[anvil] gate = [\"cargo\", \"test\"]` (the argv Anvil runs to verify \
+         a forged candidate)"
+    )]
     NoGate,
     /// The workspace is already leased by another climb.
     #[error("workspace is busy: {0}")]
@@ -285,22 +291,20 @@ pub async fn drive_climb_full(
     if !cfg.enabled {
         return Err(ForgeError::Disabled);
     }
-    if cfg.gate.is_empty() {
+
+    // Gate resolution (A1.7): an explicitly configured gate always wins; an
+    // empty config means auto-detect candidates from the workspace manifests.
+    let candidates: Vec<Vec<String>> = if cfg.gate.is_empty() {
+        detect_gate_candidates(workspace)
+    } else {
+        vec![cfg.gate.clone()]
+    };
+    if candidates.is_empty() {
         return Err(ForgeError::NoGate);
     }
 
     // Per-workspace lease — no two climbs (or climb + user edits) interleave.
     let _lease = ClimbLease::acquire(workspace).map_err(|e| ForgeError::Lease(e.to_string()))?;
-
-    // Pin the gate closure (spec §5). The gate runs at each candidate's worktree.
-    let spec = GateSpec {
-        argv: cfg.gate.clone(),
-        cwd: workspace.to_path_buf(),
-        env_allowlist: Vec::new(),
-        inputs: Vec::new(),
-    };
-    let closure = GateClosure::pin(spec, &[]).map_err(|e| ForgeError::Gate(e.to_string()))?;
-    let digest = closure.digest_hex();
 
     // Sandbox backend + read/write allowlists (worktree + system toolchain).
     let backend = wcore_sandbox::default_for_platform();
@@ -312,11 +316,34 @@ pub async fn drive_climb_full(
         fs_write_allow: vec![workspace.to_path_buf()],
     };
 
-    // Pre-climb probe (spec §5): if the gate cannot execute on the baseline,
-    // refuse before spending any builder budget.
-    if let BaselineProbe::CannotExecute(why) = closure.probe_baseline(&*backend, &opts).await {
-        return Err(ForgeError::GateUnrunnable(why));
+    // Pin + pre-probe (spec §5): the first candidate whose gate EXECUTES on
+    // the baseline is adopted — detection proposes, the sandbox probe decides.
+    // Unrunnable candidates (missing toolchain, spawn refused) fall through;
+    // refusal reasons accumulate so an all-miss climb explains itself. All of
+    // this happens before any builder budget is spent.
+    let mut adopted = None;
+    let mut refusals: Vec<String> = Vec::new();
+    for argv in candidates {
+        let shown = argv.join(" ");
+        let spec = GateSpec {
+            argv,
+            cwd: workspace.to_path_buf(),
+            env_allowlist: Vec::new(),
+            inputs: Vec::new(),
+        };
+        let closure = GateClosure::pin(spec, &[]).map_err(|e| ForgeError::Gate(e.to_string()))?;
+        match closure.probe_baseline(&*backend, &opts).await {
+            BaselineProbe::CannotExecute(why) => refusals.push(format!("`{shown}`: {why}")),
+            BaselineProbe::Ran { .. } => {
+                adopted = Some(closure);
+                break;
+            }
+        }
     }
+    let Some(closure) = adopted else {
+        return Err(ForgeError::GateUnrunnable(refusals.join("; ")));
+    };
+    let digest = closure.digest_hex();
 
     // Journal + ledger.
     let journal_path = workspace

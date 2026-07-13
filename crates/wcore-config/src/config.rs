@@ -337,8 +337,9 @@ pub struct ConfigFile {
     #[serde(default)]
     pub crucible: crate::crucible::CrucibleConfig,
 
-    /// Anvil (native gated-forge engine) — opt-in `[anvil]` block. OFF by
-    /// default (`enabled = false`), kill-switched until the A1 slice completes.
+    /// Anvil (native gated-forge engine) — `[anvil]` block. ON by default
+    /// (availability, not activity: the forge is invocation-only and refuses
+    /// without a real gate); `enabled = false` is the kill-switch.
     /// Lives on `ConfigFile` (the on-disk shape) alongside `[crucible]`; the
     /// `forge` entry point reads it via `load_merged_config_file`.
     #[serde(default)]
@@ -3654,7 +3655,10 @@ fn merge_config_files(global: ConfigFile, project: ConfigFile) -> ConfigFile {
         global.crucible
     };
 
-    let anvil = if project.anvil.enabled {
+    // Anvil: project overrides global when it set a non-default value — an
+    // explicit kill-switch (`enabled = false`, since the default is ON) or a
+    // gate. An absent/default project block must NOT shadow a global gate.
+    let anvil = if !project.anvil.enabled || !project.anvil.gate.is_empty() {
         project.anvil
     } else {
         global.anvil

@@ -9,13 +9,16 @@
 //! This slice establishes the module seam and the shared terminal-state
 //! vocabulary. The climb loop (probe → ensemble → surgical → escalate), gate
 //! closure pinning, ledger, and the `AnvilReceipt` protocol event land in the
-//! subsequent A1 PRs. The whole engine is kill-switched via
-//! [`wcore_config::anvil::AnvilConfig::enabled`] (default `false`).
+//! subsequent A1 PRs. The whole engine honors the kill-switch
+//! [`wcore_config::anvil::AnvilConfig::enabled`] (default `true`; the forge is
+//! invocation-only and refuses without a real gate, so availability is safe).
 //!
 //! Spec: `docs/design/2026-07-12-anvil-native-gated-forge-design.md` (v2).
 
 /// The climb decision core: per-check gate model, fail-set acceptance, order.
 pub mod climb;
+/// Gate auto-detection: workspace manifests → candidate gate argvs (A1.7).
+pub mod detect;
 /// The climb engine loop (probe → gate → surgical → terminal) over injected seams.
 pub mod engine;
 /// The real forge wiring: sandbox gate + spawn builder + `drive_climb_full` + receipt.
