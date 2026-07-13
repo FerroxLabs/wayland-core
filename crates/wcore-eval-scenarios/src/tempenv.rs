@@ -128,7 +128,7 @@ impl TempEnv {
 
 pub(crate) fn config_sha256(root: &Path) -> anyhow::Result<String> {
     let config = fs::read_to_string(root.join(".wayland-core").join("config.toml"))?;
-    let mut config = config.parse::<toml::Value>()?;
+    let mut config = toml::from_str::<toml::Value>(&config)?;
     normalize_fixture_config(&mut config, &root.to_string_lossy());
     let canonical = toml::to_string(&config)?;
     Ok(format!("{:x}", Sha256::digest(canonical)))
