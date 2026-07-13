@@ -144,3 +144,23 @@ fn zero_match_filter_exits_nonzero_before_execution() {
         output_context(&out)
     );
 }
+
+#[test]
+fn list_output_can_be_persisted_atomically() {
+    let directory = tempfile::tempdir().expect("output tempdir");
+    let destination = directory.path().join("catalog.txt");
+    let out = run(&[
+        "--list",
+        "--scenario",
+        "canary",
+        "--output",
+        destination.to_str().expect("UTF-8 test path"),
+    ]);
+
+    assert!(out.status.success(), "{}", output_context(&out));
+    assert_eq!(out.stdout, b"canary\n");
+    assert_eq!(
+        std::fs::read(&destination).expect("persisted output"),
+        out.stdout
+    );
+}
