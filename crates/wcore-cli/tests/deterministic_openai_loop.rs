@@ -630,7 +630,7 @@ async fn run_sealed_repository_once(run_id: &str) -> SealedRun {
             let config_path = cwd.join(".wayland-core").join("config.toml");
             let mut config = std::fs::read_to_string(&config_path)?;
             config.push_str(&format!(
-                "\n[observability]\nstructured_traces = true\n\n[mcp.servers.fixture]\ntransport = \"streamable-http\"\nurl = \"{mcp_url}\"\nallow_local = true\ndeferred = false\n"
+                "\n[memory]\nenabled = false\n\n[observability]\nstructured_traces = true\n\n[mcp.servers.fixture]\ntransport = \"streamable-http\"\nurl = \"{mcp_url}\"\nallow_local = true\ndeferred = false\n"
             ));
             std::fs::write(config_path, config)?;
             Ok(())
