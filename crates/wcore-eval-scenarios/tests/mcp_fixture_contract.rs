@@ -72,3 +72,65 @@ async fn streamable_http_sse_round_trip() {
 async fn legacy_sse_round_trip() {
     assert_http_round_trip(McpHttpMode::LegacySse, TransportType::Sse).await;
 }
+
+#[tokio::test]
+async fn stdio_round_trip_uses_portable_fixture_binary() {
+    let tempdir = tempfile::tempdir().expect("MCP stdio fixture tempdir");
+    let journal = tempdir.path().join("mcp-stdio-journal.jsonl");
+    let mut configs = HashMap::new();
+    configs.insert(
+        "fixture".to_string(),
+        McpServerConfig {
+            transport: TransportType::Stdio,
+            command: Some(env!("CARGO_BIN_EXE_wcore-eval-fixture").to_string()),
+            args: Some(vec![
+                "--mcp-stdio".to_string(),
+                "--mcp-journal".to_string(),
+                journal.to_string_lossy().into_owned(),
+            ]),
+            env: None,
+            url: None,
+            headers: None,
+            deferred: Some(false),
+            allow_local: false,
+            only_for_assistant: None,
+        },
+    );
+
+    let manager = McpManager::connect_all(&configs)
+        .await
+        .expect("connect stdio fixture");
+    assert_eq!(manager.server_names(), ["fixture"]);
+    let outcome = manager
+        .call_tool("fixture", "fixture_echo", json!({"text": "STDIO"}))
+        .await
+        .expect("call stdio fixture tool");
+    assert_eq!(outcome.text, "STDIO");
+    assert!(!outcome.is_error);
+    manager.shutdown().await;
+
+    let rows = std::fs::read_to_string(journal).expect("read MCP stdio journal");
+    let records = rows
+        .lines()
+        .map(|line| serde_json::from_str::<serde_json::Value>(line).expect("journal JSON"))
+        .collect::<Vec<_>>();
+    assert_eq!(records.len(), 4);
+    assert_eq!(
+        records
+            .iter()
+            .map(|record| record["method"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        [
+            "initialize",
+            "notifications/initialized",
+            "tools/list",
+            "tools/call"
+        ]
+    );
+    assert!(records.iter().all(|record| {
+        record["body_sha256"]
+            .as_str()
+            .is_some_and(|digest| digest.len() == 64)
+    }));
+    assert!(!rows.contains("STDIO"));
+}
