@@ -372,16 +372,16 @@ pub(crate) async fn run_session_in(
         Some(setup) => match setup(cwd) {
             Ok(()) => match tempenv::config_sha256(cwd) {
                 Ok(config_sha256) => {
-                    run_session_body(
+                    run_session_body(SessionRun {
                         scenario,
                         provider,
                         bin,
                         cwd,
                         wayland_home,
-                        secret.as_deref(),
-                        &redactor,
+                        secret: secret.as_deref(),
+                        redactor: &redactor,
                         config_sha256,
-                    )
+                    })
                     .await
                 }
                 Err(error) => Err(anyhow::anyhow!("could not hash effective config: {error}")),
@@ -390,16 +390,16 @@ pub(crate) async fn run_session_in(
         },
         None => match tempenv::config_sha256(cwd) {
             Ok(config_sha256) => {
-                run_session_body(
+                run_session_body(SessionRun {
                     scenario,
                     provider,
                     bin,
                     cwd,
                     wayland_home,
-                    secret.as_deref(),
-                    &redactor,
+                    secret: secret.as_deref(),
+                    redactor: &redactor,
                     config_sha256,
-                )
+                })
                 .await
             }
             Err(error) => Err(anyhow::anyhow!("could not hash effective config: {error}")),
@@ -454,16 +454,28 @@ pub(crate) async fn run_session_in(
         .map_err(|error| anyhow::anyhow!(redactor.text(error.to_string()).0))
 }
 
-async fn run_session_body(
-    scenario: &crate::scenario::Scenario,
-    provider: &ProviderConfig,
-    bin: &std::path::Path,
-    cwd: &std::path::Path,
-    wayland_home: Option<&std::path::Path>,
-    secret: Option<&str>,
-    redactor: &SecretRedactor,
+struct SessionRun<'a> {
+    scenario: &'a crate::scenario::Scenario,
+    provider: &'a ProviderConfig,
+    bin: &'a std::path::Path,
+    cwd: &'a std::path::Path,
+    wayland_home: Option<&'a std::path::Path>,
+    secret: Option<&'a str>,
+    redactor: &'a SecretRedactor,
     config_sha256: String,
-) -> anyhow::Result<ScenarioResult> {
+}
+
+async fn run_session_body(input: SessionRun<'_>) -> anyhow::Result<ScenarioResult> {
+    let SessionRun {
+        scenario,
+        provider,
+        bin,
+        cwd,
+        wayland_home,
+        secret,
+        redactor,
+        config_sha256,
+    } = input;
     let start = Instant::now();
 
     let mut process_tree = ProcessTree::prepare()
