@@ -110,3 +110,31 @@ fn stale_expected_source_is_rejected_before_scenario_execution() {
         output_context(&output)
     );
 }
+
+#[test]
+fn verify_binary_proves_identity_without_provider_credentials() {
+    let output = run(
+        &[
+            "--verify-binary",
+            "--binary",
+            fixture(),
+            "--expected-source-commit",
+            COMMIT,
+        ],
+        false,
+    );
+
+    assert!(output.status.success(), "{}", output_context(&output));
+    assert!(output.stderr.is_empty(), "{}", output_context(&output));
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("VERIFIED sha256="),
+        "{}",
+        output_context(&output)
+    );
+    assert!(
+        stdout.contains("version=0.12.25") && stdout.contains(&format!("source={COMMIT}")),
+        "{}",
+        output_context(&output)
+    );
+}
