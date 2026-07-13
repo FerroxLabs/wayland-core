@@ -12,6 +12,7 @@ use wcore_eval_scenarios::providers::{
     ProviderAvailability, ProviderResolution, provider_override, resolve,
 };
 use wcore_eval_scenarios::runner::run_with_binary;
+use wcore_eval_scenarios::scenario::{Platform, PlatformDisposition};
 
 #[derive(Debug, Parser)]
 #[command(
@@ -115,12 +116,27 @@ async fn execute(cli: Cli) -> i32 {
     let mut runnable_count = 0usize;
     for scenario in scenarios {
         let strict = cli.strict || scenario.strict;
+        let platform = match scenario.resolve_platform(Platform::current(), strict) {
+            Ok(platform) => platform,
+            Err(error) => return usage_error(error),
+        };
+        if !matches!(platform, PlatformDisposition::Runnable) {
+            plans.push((
+                scenario,
+                ProviderResolution {
+                    runnable: Vec::new(),
+                    skipped: Vec::new(),
+                },
+                platform,
+            ));
+            continue;
+        }
         let resolution = match resolve(scenario.provider, provider_override, availability, strict) {
             Ok(resolution) => resolution,
             Err(error) => return usage_error(format!("{}: {error}", scenario.name)),
         };
         runnable_count += resolution.runnable.len();
-        plans.push((scenario, resolution));
+        plans.push((scenario, resolution, platform));
     }
 
     if runnable_count == 0 {
@@ -138,21 +154,26 @@ async fn execute(cli: Cli) -> i32 {
     let mut failed = 0usize;
     let skipped = print_skips(&plans);
     let mut total_cost = 0.0;
-    'scenarios: for (scenario, resolution) in &plans {
+    'scenarios: for (scenario, resolution, _) in &plans {
         for provider in &resolution.runnable {
             match run_with_binary(scenario, provider, &artifact.path).await {
                 Ok(result) if result.passed => {
                     total_cost += result.cost_usd;
                     passed += 1;
-                    println!("PASS {} {}", scenario.name, provider.id);
+                    println!(
+                        "PASS {} {} os={} approval={}",
+                        scenario.name, provider.id, result.platform, result.approval
+                    );
                 }
                 Ok(result) => {
                     total_cost += result.cost_usd;
                     failed += 1;
                     println!(
-                        "FAIL {} {} failures={}",
+                        "FAIL {} {} os={} approval={} failures={}",
                         scenario.name,
                         provider.id,
+                        result.platform,
+                        result.approval,
                         result.failures.len()
                     );
                 }
@@ -201,13 +222,30 @@ fn inspect_cli_artifact(cli: &Cli) -> Result<BinaryArtifact, String> {
     .map_err(|error| error.to_string())
 }
 
-fn print_skips(plans: &[(Scenario, ProviderResolution)]) -> usize {
+fn print_skips(plans: &[(Scenario, ProviderResolution, PlatformDisposition)]) -> usize {
     let mut count = 0;
-    for (scenario, resolution) in plans {
+    for (scenario, resolution, platform) in plans {
+        if let PlatformDisposition::Skipped { current, supported } = platform {
+            let supported = supported
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join(",");
+            println!(
+                "SKIP {} os={} approval={} unsupported_os={} supported={}",
+                scenario.name, current, scenario.approval, current, supported
+            );
+            count += 1;
+            continue;
+        }
         for skip in &resolution.skipped {
             println!(
-                "SKIP {} {} missing={}",
-                scenario.name, skip.provider, skip.missing_key
+                "SKIP {} {} os={} approval={} missing={}",
+                scenario.name,
+                skip.provider,
+                Platform::current(),
+                scenario.approval,
+                skip.missing_key
             );
             count += 1;
         }

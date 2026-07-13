@@ -1125,6 +1125,8 @@ mod wave_1_1_tests {
         ScenarioResult {
             name: "test".to_string(),
             provider: ProviderId::Anthropic,
+            platform: crate::scenario::Platform::current(),
+            approval: crate::scenario::ApprovalPolicy::Yolo,
             passed: true,
             failures: Vec::new(),
             wall_time: Duration::from_millis(100),

@@ -265,6 +265,8 @@ mod tests {
         ScenarioResult {
             name: "t".into(),
             provider: ProviderId::DeepSeek,
+            platform: crate::scenario::Platform::current(),
+            approval: crate::scenario::ApprovalPolicy::Yolo,
             passed: true,
             failures: vec![],
             wall_time: Duration::from_secs(1),

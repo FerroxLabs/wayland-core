@@ -41,6 +41,8 @@ use crate::trace::{ToolTrace, TraceEntry};
 pub struct ScenarioResult {
     pub name: String,
     pub provider: ProviderId,
+    pub platform: crate::scenario::Platform,
+    pub approval: crate::scenario::ApprovalPolicy,
     pub passed: bool,
     pub failures: Vec<Failure>,
     pub wall_time: Duration,
@@ -400,6 +402,8 @@ async fn run_session_body(
                 return Ok(ScenarioResult {
                     name: scenario.name.to_string(),
                     provider: provider.id,
+                    platform: crate::scenario::Platform::current(),
+                    approval: scenario.approval,
                     passed: false,
                     failures: vec![failure],
                     wall_time: start.elapsed(),
@@ -422,6 +426,8 @@ async fn run_session_body(
                 return Ok(ScenarioResult {
                     name: scenario.name.to_string(),
                     provider: provider.id,
+                    platform: crate::scenario::Platform::current(),
+                    approval: scenario.approval,
                     passed: false,
                     failures: vec![Failure::Hung {
                         stderr_tail: stderr_tail.clone(),
@@ -565,6 +571,8 @@ async fn run_session_body(
     let mut result = ScenarioResult {
         name: scenario.name.to_string(),
         provider: provider.id,
+        platform: crate::scenario::Platform::current(),
+        approval: scenario.approval,
         passed: false,
         failures,
         wall_time,

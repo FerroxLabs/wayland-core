@@ -69,7 +69,10 @@ pub use judge::{Judge, Verdict};
 pub use providers::{ProviderChoice, ProviderConfig, ProviderId};
 pub use report::Report;
 pub use runner::run;
-pub use scenario::{Category, Scenario, Turn, TurnCommand};
+pub use scenario::{
+    ApprovalPolicy, Category, Platform, PlatformDisposition, Scenario, Turn, TurnCommand,
+    UnsupportedPlatform,
+};
 pub use trace::{ToolTrace, TraceEntry};
 
 // The runner produces a `ScenarioResult` — promoted to the crate root
