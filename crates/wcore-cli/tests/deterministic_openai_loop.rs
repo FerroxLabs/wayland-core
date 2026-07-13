@@ -2,6 +2,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
+use serde::Serialize;
 use sha2::{Digest, Sha256};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use wcore_egress::{BoundedEgressRecorder, EgressClient, EgressOutcome};
@@ -397,7 +398,40 @@ struct SealedRun {
     workspace: PathBuf,
     repository_sha256: String,
     openai_behavior_sha256: String,
+    fixture_manifest: CompositeFixtureManifest,
     receipt: EvidenceReceiptV1,
+}
+
+#[derive(Clone, Serialize)]
+struct HiddenOutcomeContract {
+    kind: &'static str,
+    path: &'static str,
+    needle: &'static str,
+    expected_repository_sha256: String,
+}
+
+impl HiddenOutcomeContract {
+    fn assertion(&self) -> Assertion {
+        Assertion::FileContains {
+            path: self.path,
+            needle: self.needle,
+        }
+    }
+
+    fn fixture_sha256(&self) -> String {
+        sha256(&serde_json::to_vec(&self).expect("hidden outcome contract serialization"))
+    }
+}
+
+#[derive(Serialize)]
+struct EgressFixtureEvidence<'a> {
+    schema: &'static str,
+    method: &'a str,
+    scheme: &'a str,
+    host: &'a str,
+    path_query_sha256: &'a str,
+    request_body_sha256: String,
+    outcome: &'static str,
 }
 
 fn sha256(bytes: &[u8]) -> String {
@@ -440,7 +474,7 @@ async fn observe_egress_fixture() -> String {
         .await
         .expect("egress fixture listener");
     let address = listener.local_addr().expect("egress fixture address");
-    let server = tokio::spawn(async move {
+    let mut server = tokio::spawn(async move {
         let (mut socket, _) = listener.accept().await.expect("egress fixture accept");
         let mut buffer = [0_u8; 2048];
         let _ = socket.read(&mut buffer).await.expect("egress request read");
@@ -450,15 +484,31 @@ async fn observe_egress_fixture() -> String {
             .expect("egress response write");
     });
     let recorder = Arc::new(BoundedEgressRecorder::new(1));
-    let response = EgressClient::tool()
+    let send = EgressClient::tool()
         .with_observer(recorder.clone())
         .post(format!("http://{address}/fixture/status"))
         .body("fixture-request")
-        .send()
-        .await
-        .expect("observed egress request");
+        .send();
+    let response = match tokio::time::timeout(Duration::from_secs(5), send).await {
+        Ok(Ok(response)) => response,
+        Ok(Err(error)) => {
+            server.abort();
+            panic!("observed egress request failed: {error}");
+        }
+        Err(_) => {
+            server.abort();
+            panic!("observed egress request exceeded five seconds");
+        }
+    };
     assert_eq!(response.status().as_u16(), 204);
-    server.await.expect("egress fixture server");
+    match tokio::time::timeout(Duration::from_secs(2), &mut server).await {
+        Ok(Ok(())) => {}
+        Ok(Err(error)) => panic!("egress fixture server failed: {error}"),
+        Err(_) => {
+            server.abort();
+            panic!("egress fixture server did not terminate");
+        }
+    }
     let observation = recorder.snapshot();
     assert_eq!(observation.dropped_events, 0);
     assert_eq!(observation.events.len(), 1);
@@ -466,7 +516,23 @@ async fn observe_egress_fixture() -> String {
         observation.events[0].outcome,
         EgressOutcome::HttpResponse { status: 204 }
     );
-    sha256(b"wcore-f04-egress-script-v1:POST:/fixture/status:204")
+    let event = &observation.events[0];
+    let outcome = match event.outcome {
+        EgressOutcome::HttpResponse { status: 204 } => "http_204",
+        _ => panic!("unexpected egress fixture outcome: {:?}", event.outcome),
+    };
+    sha256(
+        &serde_json::to_vec(&EgressFixtureEvidence {
+            schema: "wayland.eval.f04-egress-fixture.v1",
+            method: &event.method,
+            scheme: &event.destination.scheme,
+            host: &event.destination.host,
+            path_query_sha256: &event.destination.path_query_sha256,
+            request_body_sha256: sha256(b"fixture-request"),
+            outcome,
+        })
+        .expect("egress fixture evidence serialization"),
+    )
 }
 
 async fn run_sealed_repository_once(run_id: &str) -> SealedRun {
@@ -475,6 +541,17 @@ async fn run_sealed_repository_once(run_id: &str) -> SealedRun {
         ("src/settings.toml", "port = 8080\nmode = \"legacy\"\n"),
     ])
     .expect("valid repository fixture");
+    let expected_repository = SeededRepository::new([
+        ("README.md", "fixture repository\n"),
+        ("src/settings.toml", "port = 9090\nmode = \"legacy\"\n"),
+    ])
+    .expect("valid expected repository outcome");
+    let hidden_outcome = HiddenOutcomeContract {
+        kind: "file_contains",
+        path: "repository/src/settings.toml",
+        needle: "port = 9090",
+        expected_repository_sha256: expected_repository.fixture_sha256().to_string(),
+    };
     let seed_provider = ProviderConfig::new(ProviderId::OpenAI, "fixture-chat-v1")
         .with_api_key("fixture-local-token");
     let env = tempenv::build_with(
@@ -544,10 +621,7 @@ async fn run_sealed_repository_once(run_id: &str) -> SealedRun {
                 .assert(Assertion::Contains(
                     "Repository and MCP verification completed",
                 ))
-                .assert(Assertion::FileContains {
-                    path: "repository/src/settings.toml",
-                    needle: "port = 9090",
-                }),
+                .assert(hidden_outcome.assertion()),
         );
 
     let mut result = run_with_binary_in_environment(
@@ -572,11 +646,25 @@ async fn run_sealed_repository_once(run_id: &str) -> SealedRun {
     );
     assert!(openai_observation.complete());
     assert!(mcp_observation.complete(), "{mcp_observation:?}");
+    let workspace_text = workspace.to_string_lossy();
+    let read = &result.trace.entries[0];
+    let edit = &result.trace.entries[1];
+    let mcp_call = &result.trace.entries[2];
+    assert!(read.input.contains(workspace_text.as_ref()));
+    assert!(edit.input.contains(workspace_text.as_ref()));
+    assert!(edit.output.contains(workspace_text.as_ref()));
+    assert!(mcp_call.input.contains("F04-SEALED"));
+    assert!(mcp_call.output.contains("F04-SEALED"));
     result.execution.provider_attempts = Some(openai_observation.attempts());
 
     let final_repository_sha256 =
         repository_tree_sha256(&repository_root).expect("materialized repository digest");
-    let hidden_outcome_sha256 = sha256(b"file_contains\0repository/src/settings.toml\0port = 9090");
+    assert_eq!(
+        final_repository_sha256,
+        expected_repository.fixture_sha256(),
+        "packaged run produced an unexpected extra or missing repository mutation"
+    );
+    let hidden_outcome_sha256 = hidden_outcome.fixture_sha256();
     let egress_fixture_sha256 = observe_egress_fixture().await;
     let remote_execution_sha256 = remote_fixture_sha256(repository.fixture_sha256());
     let manifest = CompositeFixtureManifest::new(
@@ -615,6 +703,7 @@ async fn run_sealed_repository_once(run_id: &str) -> SealedRun {
         openai_behavior_sha256: openai_observation
             .behavior_sha256()
             .expect("OpenAI behavior digest"),
+        fixture_manifest: manifest,
         receipt,
     }
 }
@@ -627,6 +716,10 @@ async fn packaged_f04_run_is_repeatable_and_content_addressed() {
     assert_ne!(first.workspace, second.workspace);
     assert_eq!(first.repository_sha256, second.repository_sha256);
     assert_eq!(first.openai_behavior_sha256, second.openai_behavior_sha256);
+    assert_eq!(
+        first.fixture_manifest.components(),
+        second.fixture_manifest.components()
+    );
     assert_eq!(
         first.receipt.body.identity.fixture_sha256,
         second.receipt.body.identity.fixture_sha256
@@ -685,6 +778,7 @@ async fn packaged_f04_run_is_repeatable_and_content_addressed() {
                 "schema_version": 1,
                 "behavior_sha256": behavior_sha256,
                 "fixture_sha256": first.receipt.body.identity.fixture_sha256,
+                "fixture_manifest": first.fixture_manifest,
                 "openai_behavior_sha256": first.openai_behavior_sha256,
                 "repository_sha256": first.repository_sha256,
                 "runs": 2,
