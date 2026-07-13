@@ -10,8 +10,8 @@
 //! 1. Mints a `TempDir`.
 //! 2. Writes `<tempdir>/.wayland-core/config.toml` with an **absolute**
 //!    `[session].directory = "<tempdir>/sessions"`.
-//! 3. Writes `[provider.<id>] api_key = "..."` so the binary picks up
-//!    the key from config rather than env (more deterministic).
+//! 3. Writes provider identity/model only. Credentials are injected through
+//!    the child-only environment at the final spawn boundary.
 //! 4. Optionally writes `[budget] max_cost_usd = X` for scenarios
 //!    that exercise the budget cap (per H-6 — env vars don't work).
 //!
@@ -47,11 +47,8 @@ pub struct TempEnvOptions {
 
 /// Build a fresh hermetic env for one run.
 ///
-/// The seeded config picks up the API key from `provider.resolved_key()`
-/// — if the caller has no key resolved, an empty string is written and
-/// the spawned binary will surface a clear "missing api key" error
-/// rather than 401-ing against a real provider with a placeholder. T4's
-/// `--strict` mode catches this earlier (SKIP vs FAIL).
+/// The seeded config never persists the API key. T4's `--strict` mode catches
+/// missing credentials before this builder runs.
 pub fn build(provider: &ProviderConfig) -> anyhow::Result<TempEnv> {
     build_with(provider, &TempEnvOptions::default())
 }
@@ -71,7 +68,6 @@ pub fn build_with(provider: &ProviderConfig, opts: &TempEnvOptions) -> anyhow::R
     // basic string), and the session dir is absolute (per C-3).
     let session_dir_abs = sessions_dir.to_string_lossy().to_string();
     let provider_id = provider.id.cli_name();
-    let api_key = provider.resolved_key().unwrap_or_default();
 
     let mut toml = String::new();
     toml.push_str("# wcore-eval-scenarios — seeded per-scenario config\n");
@@ -98,7 +94,6 @@ pub fn build_with(provider: &ProviderConfig, opts: &TempEnvOptions) -> anyhow::R
     toml.push_str("egress_allow = [\"example.com\"]\n\n");
 
     toml.push_str(&format!("[provider.{provider_id}]\n"));
-    toml.push_str(&format!("api_key = \"{}\"\n", escape_toml_basic(&api_key)));
     toml.push_str(&format!(
         "model = \"{}\"\n\n",
         escape_toml_basic(&provider.model)

@@ -20,11 +20,11 @@
 //!
 //! Reuses [`crate::tempenv`] exactly like the json-stream runner: a throwaway
 //! tempdir holds a seeded `.wayland-core/config.toml` (absolute session dir per
-//! cross-audit C-3, plus the provider id/model/key), the binary is spawned with
+//! cross-audit C-3, plus the provider id/model), the binary is spawned with
 //! `cwd = env.path()`, and `WAYLAND_HOME` is pointed at the tempdir so
 //! `wcore_config::wayland_config_dir()` resolves the seeded config on every
-//! platform (matching `wcore-cli/tests/harness_tui_flow.rs`). Ambient provider
-//! keys are stripped so a test never makes a hidden network call.
+//! platform (matching `wcore-cli/tests/harness_tui_flow.rs`). The child receives
+//! only the evaluator's allowlisted environment and selected provider key.
 //!
 //! ## Screen capture & assertions
 //!
@@ -70,6 +70,7 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result, anyhow, bail};
 use portable_pty::{CommandBuilder, MasterPty, PtySize, native_pty_system};
 
+use crate::child_env::ChildEnvironment;
 use crate::providers::ProviderConfig;
 use crate::tempenv::{self, TempEnv, TempEnvOptions};
 
@@ -147,7 +148,7 @@ impl PtyCapture {
             .map_err(|e| anyhow!("locate wayland-core binary: {e}"))?;
 
         // Hermetic tempdir + seeded config.toml (absolute session dir per C-3,
-        // provider id/model/key). Held in `self._env` for the child's lifetime.
+        // provider id/model). Held in `self._env` for the child's lifetime.
         let env = tempenv::build_with(provider, &TempEnvOptions::default())
             .context("build hermetic tempenv for PTY run")?;
 
@@ -162,9 +163,7 @@ impl PtyCapture {
 
         // Build the hermetic command. cwd = tempdir so the engine's config
         // cwd-walk lands inside the sandbox; WAYLAND_HOME = tempdir so
-        // `wayland_config_dir()` resolves the seeded config on every platform;
-        // a TTY-capable TERM so the TUI gate passes; ambient provider keys
-        // stripped so the only key in play is the one tempenv seeded.
+        // `wayland_config_dir()` resolves the seeded config on every platform.
         let mut cmd = CommandBuilder::new(
             bin.to_str()
                 .ok_or_else(|| anyhow!("binary path is not valid UTF-8: {}", bin.display()))?,
@@ -172,14 +171,11 @@ impl PtyCapture {
         for arg in extra_args {
             cmd.arg(arg);
         }
+        ChildEnvironment::build(env.path(), env.path(), Some(provider))?.apply_pty(&mut cmd);
         cmd.cwd(env.path());
-        cmd.env("WAYLAND_HOME", env.path());
-        cmd.env("HOME", env.path());
+        // Override the noninteractive default from ChildEnvironment: a
+        // TTY-capable TERM is required for the TUI launch gate.
         cmd.env("TERM", "xterm-256color");
-        cmd.env_remove("API_KEY");
-        cmd.env_remove("ANTHROPIC_API_KEY");
-        cmd.env_remove("OPENAI_API_KEY");
-        cmd.env_remove("DEEPSEEK_API_KEY");
 
         let child = pty
             .slave

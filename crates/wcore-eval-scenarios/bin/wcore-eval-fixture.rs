@@ -116,9 +116,14 @@ fn hermetic_probe_text() -> String {
     let secret = fixture_secret();
     let args: Vec<String> = std::env::args().collect();
     let config = std::fs::read_to_string(".wayland-core/config.toml").unwrap_or_default();
-    let provider_env_has_secret = ["DEEPSEEK_API_KEY", "ANTHROPIC_API_KEY", "OPENAI_API_KEY"]
-        .iter()
-        .any(|name| std::env::var(name).ok().as_deref() == Some(secret.as_str()));
+    let provider_env_has_secret = [
+        "API_KEY",
+        "DEEPSEEK_API_KEY",
+        "ANTHROPIC_API_KEY",
+        "OPENAI_API_KEY",
+    ]
+    .iter()
+    .any(|name| std::env::var(name).ok().as_deref() == Some(secret.as_str()));
     let poison_inherited = [
         "HOME",
         "XDG_CONFIG_HOME",
@@ -141,7 +146,12 @@ fn hermetic_probe_text() -> String {
 }
 
 fn fixture_secret() -> String {
-    for name in ["DEEPSEEK_API_KEY", "ANTHROPIC_API_KEY", "OPENAI_API_KEY"] {
+    for name in [
+        "API_KEY",
+        "DEEPSEEK_API_KEY",
+        "ANTHROPIC_API_KEY",
+        "OPENAI_API_KEY",
+    ] {
         if let Ok(value) = std::env::var(name)
             && !value.is_empty()
         {

@@ -83,7 +83,7 @@ pub enum ProviderChoice {
 /// returns an empty string — relying on engine defaults silently 400s.
 /// Every scenario MUST supply a model explicitly; the runner forwards
 /// it as `--model <model>` (per T2 spec).
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct ProviderConfig {
     pub id: ProviderId,
     /// Model string passed verbatim as `--model <model>` (e.g.
@@ -94,6 +94,16 @@ pub struct ProviderConfig {
     /// `[provider.<id>] api_key = "..."`. If `None`, the runner reads
     /// `id.env_var()` at spawn time.
     pub api_key: Option<String>,
+}
+
+impl fmt::Debug for ProviderConfig {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ProviderConfig")
+            .field("id", &self.id)
+            .field("model", &self.model)
+            .field("api_key", &self.api_key.as_ref().map(|_| "[REDACTED]"))
+            .finish()
+    }
 }
 
 /// Credential presence snapshot used to plan runs without exposing or copying

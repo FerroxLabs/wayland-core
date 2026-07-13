@@ -39,6 +39,7 @@
 pub mod artifact;
 pub mod assertions;
 pub mod catalog;
+mod child_env;
 pub mod cost;
 pub mod coverage;
 pub mod cron_scenarios;
@@ -52,6 +53,7 @@ pub mod providers;
 #[cfg(unix)]
 pub mod pty_capture;
 pub mod qa;
+mod redaction;
 pub mod report;
 pub mod runner;
 pub mod scenario;

@@ -30,8 +30,10 @@ use thiserror::Error;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, Command};
 
+use crate::child_env::ChildEnvironment;
 use crate::cost::CostReport;
 use crate::providers::{ProviderConfig, ProviderId};
+use crate::redaction::SecretRedactor;
 use crate::stderr_capture::StderrCapture;
 use crate::tempenv::{self, TempEnvOptions};
 use crate::trace::{ToolTrace, TraceEntry};
@@ -123,6 +125,9 @@ pub enum Failure {
     /// invalid wire data, etc.) — surface so the test layer doesn't
     /// silently swallow it.
     RunnerError(String),
+    SecretDetected {
+        sink: String,
+    },
 }
 
 #[derive(Debug, Error)]
@@ -206,6 +211,11 @@ pub fn spawn_for_run(
     wayland_home: Option<&std::path::Path>,
 ) -> Result<Child, SpawnError> {
     let mut cmd = Command::new(bin);
+    let isolated_home = wayland_home.unwrap_or(cwd);
+    ChildEnvironment::build(cwd, isolated_home, Some(provider))?.apply_tokio(&mut cmd);
+    // Build an allowlisted child environment before adding any scenario
+    // arguments. Credentials enter only through the generic API_KEY variable;
+    // they never appear in argv or the persisted scenario config.
     // D3: only force-approve when the scenario's policy is `Yolo`. Without
     // `--yolo` the engine boots in `Default` approval mode and emits
     // `ApprovalRequired` per mutating tool, which the runner answers per policy.
@@ -229,23 +239,6 @@ pub fn spawn_for_run(
     // stripping the var (`None`) instead falls back to the developer's real home
     // and dials their actual MCP servers. `None` remains for callers that
     // genuinely want the host default.
-    match wayland_home {
-        Some(home) => {
-            cmd.env("WAYLAND_HOME", home);
-        }
-        None => {
-            cmd.env_remove("WAYLAND_HOME");
-        }
-    }
-    // Hermeticity: pass an explicitly-configured key to the child via
-    // `--api-key` so scenarios don't silently depend on the ambient env's
-    // key. Without this, a scenario that sets `with_api_key(...)` still falls
-    // back to the host env — so it "passes" on a developer machine (which has
-    // a real key) and crashes with "No API key found" in CI (which doesn't).
-    // `None` preserves the documented env-resolution fallback.
-    if let Some(key) = &provider.api_key {
-        cmd.arg("--api-key").arg(key);
-    }
     Ok(cmd.spawn()?)
 }
 
@@ -295,7 +288,13 @@ pub async fn run_with_binary(
     // which loads regardless of WAYLAND_HOME, so this only empties the global
     // layer. The cross-session harness drives `run_session_in` directly against
     // its own persistent home instead.
-    let env = tempenv::build_with(provider, &TempEnvOptions::default())?;
+    let env = tempenv::build_with(
+        provider,
+        &TempEnvOptions {
+            budget_max_cost_usd: (scenario.max_total_cost_usd > 0.0)
+                .then_some(scenario.max_total_cost_usd),
+        },
+    )?;
     run_session_in(scenario, provider, bin, env.path(), Some(env.path())).await
 }
 
@@ -314,6 +313,7 @@ pub(crate) async fn run_session_in(
     cwd: &std::path::Path,
     wayland_home: Option<&std::path::Path>,
 ) -> anyhow::Result<ScenarioResult> {
+    let redactor = SecretRedactor::from_secret(provider.resolved_key());
     // Run the scenario's setup hook BEFORE spawning the engine. The closure
     // seeds the working dir — input files to probe, fixture scripts (mock MCP
     // server, shell hooks), and config appends (`[mcp.servers.*]`,
@@ -333,7 +333,7 @@ pub(crate) async fn run_session_in(
         .as_ref()
         .and_then(|cleanup| cleanup(cwd).err());
 
-    match (outcome, cleanup_error) {
+    let result = match (outcome, cleanup_error) {
         (Ok(mut result), Some(error)) => {
             result.failures.push(Failure::RunnerError(format!(
                 "scenario cleanup failed: {error}"
@@ -345,7 +345,10 @@ pub(crate) async fn run_session_in(
             "{run_error}; scenario cleanup failed: {cleanup_error}"
         )),
         (outcome, None) => outcome,
-    }
+    };
+    result
+        .map(|result| redactor.result(result))
+        .map_err(|error| anyhow::anyhow!(redactor.text(error.to_string()).0))
 }
 
 async fn run_session_body(
