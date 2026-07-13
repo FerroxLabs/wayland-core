@@ -130,6 +130,7 @@ fn main() {
 }
 
 #[cfg(unix)]
+#[allow(clippy::zombie_processes)] // Intentional: exercises reparented descendant containment.
 fn spawn_detached_orphan(control_path: &std::path::Path) {
     use std::os::unix::process::CommandExt;
 
