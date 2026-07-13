@@ -139,6 +139,7 @@ fn hermetic_probe_text() -> String {
         "GIT_CONFIG_GLOBAL",
         "SSH_AUTH_SOCK",
         "HTTPS_PROXY",
+        "PATH",
     ]
     .iter()
     .any(|name| std::env::var(name).ok().as_deref() == Some("wcore-poison"));

@@ -163,9 +163,9 @@ async fn run_is_hermetic_and_redacts_child_secret_exfiltration() {
     .expect("runner completes hermetic fixture");
 
     assert!(
-        result
-            .final_text
-            .contains("arg_secret=false config_secret=false key_env=true poison=false budget=true"),
+        result.final_text.contains(
+            "arg_secret=false config_secret=false key_env=false poison=false budget=true"
+        ),
         "fixture observed an uncontained run: {}",
         result.final_text
     );
@@ -206,6 +206,7 @@ impl EnvGuard {
             "GIT_CONFIG_GLOBAL",
             "SSH_AUTH_SOCK",
             "HTTPS_PROXY",
+            "PATH",
         ];
         let previous = names
             .into_iter()
