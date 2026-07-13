@@ -36,6 +36,7 @@
 //! and prevents future `todo!()` rot in T4/T5/T6+ surfaces.
 #![deny(clippy::todo)]
 
+pub mod artifact;
 pub mod assertions;
 pub mod catalog;
 pub mod cost;
