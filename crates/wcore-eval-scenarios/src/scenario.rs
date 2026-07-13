@@ -24,6 +24,9 @@ pub type ScenarioHook = Arc<dyn Fn(&Path) -> anyhow::Result<()> + Send + Sync>;
 /// crate) can read them without going through accessors — external
 /// callers should use the builder.
 pub struct Scenario {
+    /// Immutable machine identity used by CLI selection and evidence reports.
+    /// Renaming this is a compatibility break; add separate display text when
+    /// a human-friendly title is needed.
     pub name: &'static str,
     pub category: Category,
     pub turns: Vec<Turn>,

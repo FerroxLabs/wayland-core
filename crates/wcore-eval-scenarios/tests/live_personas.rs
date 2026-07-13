@@ -21,11 +21,9 @@
 use std::fmt::Write as _;
 use std::path::PathBuf;
 
+use wcore_eval_scenarios::catalog;
 use wcore_eval_scenarios::providers::{ProviderConfig, ProviderId};
 use wcore_eval_scenarios::runner::{ScenarioResult, discover_binary};
-use wcore_eval_scenarios::{
-    coverage, cron_scenarios, hook_scenarios, mcp_scenarios, personas, protocol_scenarios, qa,
-};
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "live: drives the real wayland-core binary against the real DeepSeek API (costs money, needs DEEPSEEK_API_KEY + a pre-built binary)"]
@@ -58,15 +56,7 @@ async fn overnight_personas() {
     // 4. Run each scenario, collecting results. Don't abort on failure.
     //    Lane U (personas, user-testing) + Lane Q (qa, coverage) run together;
     //    the report's usability punch list spans both.
-    let mut scenarios = personas::all();
-    scenarios.extend(qa::all());
-    // Lane Q coverage sweep + subsystem keystones (D6 MCP, D7 hooks, D2
-    // protocol-command control channel, cron scheduling probes).
-    scenarios.extend(coverage::all());
-    scenarios.extend(mcp_scenarios::all());
-    scenarios.extend(hook_scenarios::all());
-    scenarios.extend(protocol_scenarios::all());
-    scenarios.extend(cron_scenarios::all());
+    let mut scenarios = catalog::standard_scenarios().expect("standard scenario catalog is valid");
     // Optional subset filter: WCORE_EVAL_ONLY=<substring> runs only scenarios
     // whose name contains the substring (e.g. `approval`, `qa_`, `coder`) — for
     // fast targeted verification without a full 12-scenario, money-spending run.

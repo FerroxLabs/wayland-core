@@ -37,6 +37,7 @@
 #![deny(clippy::todo)]
 
 pub mod assertions;
+pub mod catalog;
 pub mod cost;
 pub mod coverage;
 pub mod cron_scenarios;
