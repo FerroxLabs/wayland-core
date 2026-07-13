@@ -1,6 +1,7 @@
 //! Deterministic cross-platform process fixture for the evaluation driver.
 
 use std::io::{BufRead, Write};
+use std::time::Duration;
 
 const SOURCE_COMMIT: &str = "0123456789abcdef0123456789abcdef01234567";
 
@@ -12,6 +13,8 @@ fn main() {
         );
         return;
     }
+
+    let model = argument_value("--model").unwrap_or_default();
 
     emit(&serde_json::json!({
         "type": "ready",
@@ -34,6 +37,20 @@ fn main() {
                     "msg_id": msg_id,
                     "text": "READY"
                 }));
+                if model == "fixture-slow" {
+                    std::thread::sleep(Duration::from_millis(250));
+                }
+                if model == "fixture-steps" {
+                    for step in 0..2 {
+                        emit(&serde_json::json!({
+                            "type": "tool_result",
+                            "call_id": format!("fixture-{step}"),
+                            "tool_name": "Read",
+                            "output": "fixture",
+                            "status": "success"
+                        }));
+                    }
+                }
                 emit(&serde_json::json!({
                     "type": "session_cost",
                     "session_id": "fixture",
@@ -61,6 +78,16 @@ fn main() {
             _ => {}
         }
     }
+}
+
+fn argument_value(name: &str) -> Option<String> {
+    let mut args = std::env::args();
+    while let Some(argument) = args.next() {
+        if argument == name {
+            return args.next();
+        }
+    }
+    None
 }
 
 fn emit(value: &serde_json::Value) {
