@@ -58,6 +58,10 @@ fn binary_matches_repo_head() {
         !embedded_sha.is_empty() && embedded_sha != "unknown",
         "binary did not emit a real source SHA in --build-info output: {info:?}"
     );
+    assert!(
+        embedded_sha.len() == 40 && embedded_sha.bytes().all(|byte| byte.is_ascii_hexdigit()),
+        "binary source identity must be a full 40-hex commit, got {embedded_sha:?}"
+    );
 
     // ── 3. Default mode: embedded SHA must be an ancestor of HEAD ─────────
     //
