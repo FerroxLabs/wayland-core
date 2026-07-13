@@ -48,12 +48,15 @@ pub struct TurnCost {
 /// a `session_cost`. Returns `None` for any other event type.
 ///
 /// The runner reads stdout line-by-line as `serde_json::Value` and
-/// hands every event through here; the first matching event wins.
+/// hands every event through here; the runner retains the latest aggregate.
 pub fn parse(event: &Value) -> Option<CostReport> {
     if event.get("type").and_then(Value::as_str) != Some("session_cost") {
         return None;
     }
     let total_usd = event.get("total_cost_usd").and_then(Value::as_f64)?;
+    if !total_usd.is_finite() || total_usd < 0.0 {
+        return None;
+    }
     // `per_turn` is `Vec<TurnCost>` in the protocol and always serializes as
     // an array, but treat its absence as an empty breakdown rather than
     // dropping the whole (valid) `total_cost_usd` — a `session_cost` event
@@ -66,6 +69,10 @@ pub fn parse(event: &Value) -> Option<CostReport> {
         .unwrap_or_default();
     let mut per_turn = Vec::with_capacity(per_turn_json.len());
     for row in &per_turn_json {
+        let cost_usd = row.get("cost_usd").and_then(Value::as_f64)?;
+        if !cost_usd.is_finite() || cost_usd < 0.0 {
+            return None;
+        }
         let tc = TurnCost {
             turn: row.get("turn").and_then(Value::as_u64).unwrap_or(0) as usize,
             model: row
@@ -78,7 +85,7 @@ pub fn parse(event: &Value) -> Option<CostReport> {
                 .and_then(Value::as_str)
                 .unwrap_or("")
                 .to_string(),
-            cost_usd: row.get("cost_usd").and_then(Value::as_f64).unwrap_or(0.0),
+            cost_usd,
         };
         per_turn.push(tc);
     }

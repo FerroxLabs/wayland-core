@@ -88,6 +88,7 @@ pub enum Failure {
         observed_usd: f64,
         budget_usd: f64,
     },
+    CostMissing,
     Crashed {
         stderr_tail: String,
         exit: i32,
@@ -476,6 +477,9 @@ async fn run_session_body(
             stderr_tail: stderr_tail.clone(),
             exit: exit_code,
         });
+    }
+    if cost_report.is_none() {
+        failures.push(Failure::CostMissing);
     }
 
     // Soft cost budget (cross-audit finding #3). The hard wall-time kill is the
@@ -1006,9 +1010,7 @@ async fn drive_session(
                     // #278 — capture in-band; this event arrives BEFORE
                     // stream_end on the wire and would otherwise fall into
                     // `_ => {}` and be dropped, leaving `cost_usd == 0.0`.
-                    if cost.is_none()
-                        && let Some(c) = crate::cost::parse(&ev)
-                    {
+                    if let Some(c) = crate::cost::parse(&ev) {
                         cost = Some(c);
                     }
                 }
@@ -1081,9 +1083,7 @@ async fn drive_session(
     loop {
         match read_one_event(&mut reader).await {
             Ok(Some(ev)) => {
-                if cost.is_none()
-                    && let Some(c) = crate::cost::parse(&ev)
-                {
+                if let Some(c) = crate::cost::parse(&ev) {
                     cost = Some(c);
                 }
                 // Drain to EOF either way — leaving bytes in the pipe

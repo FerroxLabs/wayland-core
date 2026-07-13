@@ -21,6 +21,7 @@ fn main() {
         "capabilities": {"cost_attribution": true}
     }));
 
+    let mut completed_turns = 0u32;
     for line in std::io::stdin().lock().lines() {
         let Ok(line) = line else { break };
         let Ok(command) = serde_json::from_str::<serde_json::Value>(&line) else {
@@ -28,6 +29,7 @@ fn main() {
         };
         match command.get("type").and_then(serde_json::Value::as_str) {
             Some("message") => {
+                completed_turns += 1;
                 let msg_id = command
                     .get("msg_id")
                     .and_then(serde_json::Value::as_str)
@@ -51,12 +53,19 @@ fn main() {
                         }));
                     }
                 }
-                emit(&serde_json::json!({
-                    "type": "session_cost",
-                    "session_id": "fixture",
-                    "total_cost_usd": 0.0,
-                    "per_turn": []
-                }));
+                if model != "fixture-no-cost" {
+                    let total_cost_usd = if model == "fixture-cost" {
+                        f64::from(completed_turns) * 0.01
+                    } else {
+                        0.0
+                    };
+                    emit(&serde_json::json!({
+                        "type": "session_cost",
+                        "session_id": "fixture",
+                        "total_cost_usd": total_cost_usd,
+                        "per_turn": []
+                    }));
+                }
                 emit(&serde_json::json!({
                     "type": "stream_end",
                     "msg_id": msg_id,
