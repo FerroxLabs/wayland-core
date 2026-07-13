@@ -17,7 +17,7 @@ Terminal-first · Multi-provider · Self-evolving · MCP-native · Embeddable ·
 [![platforms](https://img.shields.io/badge/macOS_·_Linux_·_Windows-2b2b2b?style=for-the-badge)](#install)
 [![status](https://img.shields.io/badge/status-public_beta-e85d2a?style=for-the-badge)](#built-to-endure)
 
-[Install](#install) · [Quick start](#quick-start) · [Providers](#provider-neutral-core) · [Orchestration](#orchestration--swarms) · [Crucible](#crucible--a-mixture-of-providers-council) · [Security](#security-by-default-fail-closed) · [Channels](#omni-channel-deployment--scheduled-triggers) · [Browser](#browser--computer-use) · [Memory](#memory-sessions--cost-governance) · [Evolution](#self-evolution-gepa) · [Endurance](#built-to-endure) · [Embedding](#embedding-json-lines-protocol--acp-interop) · [Docs](#documentation)
+[Install](#install) · [Quick start](#quick-start) · [Providers](#provider-neutral-core) · [Orchestration](#orchestration--swarms) · [Anvil](#anvil--the-gated-forge-smart-loops) · [Crucible](#crucible--a-mixture-of-providers-council) · [Security](#security-by-default-fail-closed) · [Channels](#omni-channel-deployment--scheduled-triggers) · [Browser](#browser--computer-use) · [Memory](#memory-sessions--cost-governance) · [Evolution](#self-evolution-gepa) · [Endurance](#built-to-endure) · [Embedding](#embedding-json-lines-protocol--acp-interop) · [Docs](#documentation)
 
 </div>
 
@@ -159,6 +159,43 @@ Topology is pure data with cap enforcement, the guards have tests behind them (5
 ![Orchestration, compared](docs/img/compare-orchestration.png)
 
 </div>
+
+## Anvil — the gated forge (Smart Loops)
+
+Anvil is where work with a **real executable gate** goes — tests, a build, a typecheck. Hand it a task with a provable finish line and it iterates until the gate actually passes, then hands you a machine-stamped receipt. Judgment work with no checkable reward — naming, prose, architecture opinions — goes to [Crucible](#crucible--a-mixture-of-providers-council) instead. That's the whole doctrine: the gate is the anvil, the models are the hammer.
+
+It's on by default and needs zero config. In a repo with a test suite:
+
+```bash
+wayland-core forge "fix the failing auth tests"
+```
+
+Or just ask in a session — "iterate until it provably passes" — and the `Forge` tool routes the work to the forge. The gate is auto-detected from the workspace (cargo, npm, go, pytest, just, make); an explicit `[anvil] gate` always wins.
+
+How a climb works: a builder sub-agent is forked into an isolated git worktree, the gate runs sandboxed (network-denied) after every round, and the climb accepts only strict improvement — a candidate that doesn't beat the current best is discarded, not merged. Your tree is never touched; the winning change lands on a review branch.
+
+Every climb ends in a receipt:
+
+```text
+Forged: verified · 1/1 checks · 3 iterations
+```
+
+Only machinery earns `verified` — a model's opinion of its own work never does. A climb that can't get there reports an honest terminal state (`needs_escalation`, `timed_out`) instead of a hopeful one, and cost is shown or marked "unpriced" — never $0.
+
+**The escalation valve.** When consecutive rounds fail with the *same* fail-set, the climb buys exactly ONE read-only diagnostic turn from your frontier session model, feeds the guidance back to the cheap builder, and resumes. You pay for the unblocking, not the grinding.
+
+**Seat routing.** The frontier model plans, a mid-tier driver iterates — or FluxRouter's `flux-auto` lane drives when a Flux key is connected — and machinery verifies. Three knobs in `[anvil]`:
+
+```toml
+[anvil]
+enabled = true                     # kill-switch; a project config can disable, never re-enable (tighten-only)
+# gate = ["cargo", "test"]         # empty = auto-detect from the workspace
+# driver_provider = "flux-router"  # explicit driver seat; driver_model pins the model
+```
+
+Safety is structural, not advisory. The forge is invocation-only and refuses outright without a gate. Builders get edit tools but **no shell** — the gate does the executing. Trampoline gates (`npm test`, `make test`, `just test`) are content-pinned against tampering: a candidate that touches the dispatch manifest fails a Safety-class gate-integrity check that can't be traded away. Baseline probes run sandboxed in scratch worktrees, never in yours.
+
+Shipped in v0.12.25 as the Smart Loops layer, live-proven end to end. [→ docs/advanced.md](docs/advanced.md)
 
 ## Crucible — a Mixture-of-Providers council
 
@@ -520,7 +557,7 @@ Closed-source tools (Claude Code, Codex CLI) are a docs-based orientation, not a
 | [Channels](docs/channels.md) | Messaging-platform connectors, inbound policy, cron triggers |
 | [Memory](docs/memory.md) | Partitions, tiers, the dream cycle, cost governance |
 | [Self-Evolution](docs/wcore-evolve.md) | The GEPA loop, mutators, scoring, curator hand-off |
-| [Advanced](docs/advanced.md) | Sub-agents, hooks, memory, plan mode, compaction |
+| [Advanced](docs/advanced.md) | Sub-agents, hooks, memory, plan mode, compaction, the Anvil forge |
 | [Resilience](docs/resilience.md) | The endurance trial: method, measurements, and honesty bounds |
 | [JSON Stream Protocol](docs/json-stream-protocol.md) | Host integration protocol spec |
 
