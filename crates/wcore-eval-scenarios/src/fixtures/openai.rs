@@ -1,5 +1,6 @@
 //! FIFO-scripted OpenAI-compatible loopback fixture.
 
+use std::convert::Infallible;
 use std::sync::{Arc, Mutex};
 
 use axum::Router;
@@ -8,6 +9,7 @@ use axum::extract::{DefaultBodyLimit, State};
 use axum::http::{HeaderValue, StatusCode, header};
 use axum::response::Response;
 use axum::routing::post;
+use futures::StreamExt;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use sha2::{Digest, Sha256};
@@ -53,6 +55,10 @@ pub enum OpenAiStep {
         name: String,
         arguments: serde_json::Value,
     },
+    TextThenStall {
+        text: String,
+        delay_ms: u64,
+    },
     StallBeforeHeaders {
         delay_ms: u64,
     },
@@ -88,6 +94,13 @@ impl OpenAiStep {
             id: id.into(),
             name: name.into(),
             arguments,
+        }
+    }
+
+    pub fn text_then_stall(text: impl Into<String>, delay_ms: u64) -> Self {
+        Self::TextThenStall {
+            text: text.into(),
+            delay_ms,
         }
     }
 
@@ -196,6 +209,18 @@ impl OpenAiFixtureScript {
                     if arguments.len() > MAX_TOOL_ARGUMENT_BYTES {
                         return Err(OpenAiFixtureError::InvalidScript(format!(
                             "tool arguments exceed {MAX_TOOL_ARGUMENT_BYTES} bytes"
+                        )));
+                    }
+                }
+                OpenAiStep::TextThenStall { text, delay_ms } => {
+                    if text.len() > MAX_TEXT_BYTES {
+                        return Err(OpenAiFixtureError::InvalidScript(format!(
+                            "response text exceeds {MAX_TEXT_BYTES} bytes"
+                        )));
+                    }
+                    if *delay_ms == 0 || *delay_ms > MAX_STALL_MS {
+                        return Err(OpenAiFixtureError::InvalidScript(format!(
+                            "stall must be between 1 and {MAX_STALL_MS} milliseconds"
                         )));
                     }
                 }
@@ -359,6 +384,9 @@ async fn handle_chat_completion(
             name,
             arguments,
         } => sse_response(tool_call_sse(&id, &name, &arguments)),
+        OpenAiStep::TextThenStall { text, delay_ms } => {
+            stalling_sse_response(text_delta_frame(&text), delay_ms)
+        }
         OpenAiStep::StallBeforeHeaders { delay_ms } => {
             tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
             sse_response(complete_text_sse("released", false))
@@ -447,6 +475,21 @@ fn tool_call_sse(id: &str, name: &str, arguments: &serde_json::Value) -> String 
 
 fn sse_response(body: String) -> Response {
     let mut response = Response::new(Body::from(body));
+    *response.status_mut() = StatusCode::OK;
+    response.headers_mut().insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static("text/event-stream"),
+    );
+    response
+}
+
+fn stalling_sse_response(prefix: String, delay_ms: u64) -> Response {
+    let prefix = futures::stream::once(async move { Ok::<Bytes, Infallible>(Bytes::from(prefix)) });
+    let stall = futures::stream::once(async move {
+        tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
+        Ok::<Bytes, Infallible>(Bytes::new())
+    });
+    let mut response = Response::new(Body::from_stream(prefix.chain(stall)));
     *response.status_mut() = StatusCode::OK;
     response.headers_mut().insert(
         header::CONTENT_TYPE,

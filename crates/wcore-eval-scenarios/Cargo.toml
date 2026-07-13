@@ -49,6 +49,7 @@ ed25519-dalek = { workspace = true }
 reqwest      = { workspace = true }
 # Correct HTTP parsing for the loopback-only scripted OpenAI fixture.
 axum         = "0.7"
+futures      = { workspace = true }
 # D8 PTY TUI capture — drive wayland-core's ratatui TUI under a pseudo-terminal
 # and read the rendered screen. Direct deps (not in [workspace.dependencies])
 # but already in the lockfile via wcore-cli's TUI harness; vt100 pinned <0.16 to
