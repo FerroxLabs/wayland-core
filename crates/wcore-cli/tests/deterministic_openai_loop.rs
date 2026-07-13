@@ -7,12 +7,21 @@ use wcore_eval_scenarios::fixtures::openai::{
 };
 use wcore_eval_scenarios::providers::{ProviderConfig, ProviderId};
 use wcore_eval_scenarios::runner::{ScenarioResult, run_with_binary};
-use wcore_eval_scenarios::scenario::{Category, Scenario, Turn};
+use wcore_eval_scenarios::scenario::{ApprovalPolicy, Category, Scenario, Turn};
 
 async fn run_script(
     name: &'static str,
     steps: impl IntoIterator<Item = OpenAiStep>,
     expected: &'static str,
+) -> (ScenarioResult, OpenAiFixtureObservation) {
+    run_script_with_approval(name, steps, expected, ApprovalPolicy::Yolo).await
+}
+
+async fn run_script_with_approval(
+    name: &'static str,
+    steps: impl IntoIterator<Item = OpenAiStep>,
+    expected: &'static str,
+    approval: ApprovalPolicy,
 ) -> (ScenarioResult, OpenAiFixtureObservation) {
     let fixture = OpenAiFixtureScript::new(steps)
         .start()
@@ -23,6 +32,7 @@ async fn run_script(
         .with_base_url(fixture.base_url());
     let scenario = Scenario::new(name, Category::Hardening)
         .max_total_time(Duration::from_secs(20))
+        .approval(approval)
         .turn(
             Turn::new("Return the deterministic fixture answer.")
                 .max_time(Duration::from_secs(10))
@@ -122,4 +132,60 @@ async fn packaged_core_preserves_declared_duplicate_deltas() {
 
     assert_eq!(result.final_text, "repeatrepeat");
     assert_eq!(observation.requests.len(), 1);
+}
+
+#[tokio::test]
+async fn packaged_core_executes_an_approved_write() {
+    let target_dir = tempfile::tempdir().expect("target tempdir");
+    let target = target_dir.path().join("approved.txt");
+    let (result, observation) = run_script_with_approval(
+        "packaged_openai_approval_allow",
+        [
+            OpenAiStep::tool_call(
+                "call-approved-write",
+                "Write",
+                serde_json::json!({
+                    "file_path": target.to_string_lossy(),
+                    "content": "APPROVED"
+                }),
+            ),
+            OpenAiStep::text("approved write completed"),
+        ],
+        "approved write completed",
+        ApprovalPolicy::ApproveAll,
+    )
+    .await;
+
+    assert_eq!(std::fs::read_to_string(&target).unwrap(), "APPROVED");
+    assert_eq!(result.approval, ApprovalPolicy::ApproveAll);
+    assert_eq!(result.trace.count("Write"), 1);
+    assert_eq!(observation.requests.len(), 2);
+}
+
+#[tokio::test]
+async fn packaged_core_blocks_a_denied_write() {
+    let target_dir = tempfile::tempdir().expect("target tempdir");
+    let target = target_dir.path().join("denied.txt");
+    let (result, observation) = run_script_with_approval(
+        "packaged_openai_approval_deny",
+        [
+            OpenAiStep::tool_call(
+                "call-denied-write",
+                "Write",
+                serde_json::json!({
+                    "file_path": target.to_string_lossy(),
+                    "content": "DENIED"
+                }),
+            ),
+            OpenAiStep::text("denied write handled"),
+        ],
+        "denied write handled",
+        ApprovalPolicy::DenyAll,
+    )
+    .await;
+
+    assert!(!target.exists(), "denied tool created {}", target.display());
+    assert_eq!(result.approval, ApprovalPolicy::DenyAll);
+    assert_eq!(result.trace.count("Write"), 1);
+    assert_eq!(observation.requests.len(), 2);
 }
