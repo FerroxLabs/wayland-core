@@ -33,6 +33,7 @@ pub mod channel_dispatch;
 // derived text (description/transcript) via the host-wired vision /
 // transcription tools before the turn prompt is built. Inert when no
 // backend is configured. Consumed by `channel_dispatch` + `bootstrap`.
+pub mod capability_activation;
 pub mod capability_advisory;
 pub mod channel_media;
 // FleetDispatcher-class fix (audit 2026-05-24): bridges SendMessageTool's

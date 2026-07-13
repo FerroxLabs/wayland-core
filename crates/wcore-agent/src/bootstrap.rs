@@ -21,6 +21,9 @@ use crate::session::Session;
 pub struct BootstrapResult {
     pub engine: AgentEngine,
     pub provider: Arc<dyn LlmProvider>,
+    /// F05: deterministic construction truth for the audited capability set.
+    /// Hosts emit these additive events only after their `Ready` boundary.
+    pub capability_activations: Vec<wcore_protocol::events::CapabilityActivation>,
     pub mcp_managers: Vec<Arc<McpManager>>,
     pub has_mcp: bool,
     /// #537/#141 — correlation bridge for host-delegated `send_message`.
@@ -1236,7 +1239,9 @@ impl AgentBootstrap {
         // flag is observability-only). When only `memory.enabled` is on we
         // open `Memory` + spawn the scheduler. When neither is on we stay
         // on `NullMemory`.
-        let want_memory = self.config.memory.enabled || self.config.observability.skills_lifecycle;
+        let smart_handoff_enabled = self.config.compact.smart_handoff_to_memory;
+        let skills_lifecycle_enabled = self.config.observability.skills_lifecycle;
+        let want_memory = self.config.memory.enabled || skills_lifecycle_enabled;
         let mut decay_handle: Option<tokio::task::JoinHandle<()>> = None;
         // v0.8.1 U1 — capture the `Arc<Db>` handle from the opened
         // `Memory` so we can hand it to `wcore_evolve::PromptStore::new`
@@ -1382,6 +1387,14 @@ impl AgentBootstrap {
         } else {
             Arc::new(wcore_memory::NullMemory)
         };
+        let memory_constructed = mem_db_for_router.is_some();
+        if !memory_constructed {
+            // F05: configured-but-unconstructed memory capabilities fail closed.
+            // NullMemory intentionally returns successful no-ops, which would
+            // otherwise let runtime code falsely emit `outcome_changed`.
+            self.config.compact.smart_handoff_to_memory = false;
+            self.config.observability.skills_lifecycle = false;
+        }
 
         // F-036 (HIGH, Aud-2b/Aud-10): call `init_bundled_skills` in
         // production bootstrap. Previously this was only called in tests, so
@@ -2259,7 +2272,6 @@ impl AgentBootstrap {
             registry.set_workspace_policy(policy);
         }
 
-        let skills_lifecycle_enabled = self.config.observability.skills_lifecycle;
         let mut engine = if let Some(session) = self.resume_session {
             AgentEngine::resume_with_provider(
                 provider.clone(),
@@ -2379,6 +2391,15 @@ impl AgentBootstrap {
         if let Some(handle) = decay_handle {
             engine.push_decay_handle(handle);
         }
+
+        let capability_activations = crate::capability_activation::startup_activations(
+            crate::capability_activation::StartupCapabilityInputs {
+                smart_handoff_enabled,
+                skills_lifecycle_enabled,
+                memory_constructed,
+                legacy_drafter_constructed: engine.skill_drafter().is_some(),
+            },
+        );
 
         // v0.8.1 U2 — spawn the production subscriber for `AgentBus`
         // lifecycle events. Forwards every `Spawned` / `FirstMessage` /
@@ -2961,6 +2982,7 @@ impl AgentBootstrap {
         Ok(BootstrapResult {
             engine,
             provider,
+            capability_activations,
             mcp_managers,
             has_mcp,
             host_send_bridge,
