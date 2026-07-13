@@ -149,6 +149,20 @@ impl GateClosure {
         backend: &dyn SandboxBackend,
         opts: &ProbeOpts,
     ) -> BaselineProbe {
+        self.run_at(backend, opts, &self.spec.cwd).await
+    }
+
+    /// Run the pinned gate at an ARBITRARY working directory `cwd` (a candidate's
+    /// isolated worktree, or the baseline), through `backend` with network denied
+    /// and a minimized env — the same tested exec path as [`probe_baseline`], so
+    /// the climb (A1.6) gates each candidate with identical sandbox discipline.
+    /// The pinned argv + env allowlist are unchanged; only the cwd varies.
+    pub async fn run_at(
+        &self,
+        backend: &dyn SandboxBackend,
+        opts: &ProbeOpts,
+        cwd: &std::path::Path,
+    ) -> BaselineProbe {
         let manifest = SandboxManifest {
             network: NetworkPolicy::Deny,
             env: minimized_env(&self.spec.env_allowlist),
@@ -160,7 +174,7 @@ impl GateClosure {
         };
         let cmd = SandboxCommand {
             argv: self.spec.argv.clone(),
-            cwd: Some(self.spec.cwd.clone()),
+            cwd: Some(cwd.to_path_buf()),
         };
         match backend.execute(&manifest, cmd).await {
             Ok(out) => BaselineProbe::Ran {
