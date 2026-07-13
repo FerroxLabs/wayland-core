@@ -6,6 +6,7 @@ use wcore_eval_scenarios::fixtures::mcp::{McpHttpFixture, McpHttpMode};
 use wcore_eval_scenarios::fixtures::openai::{
     OpenAiFixtureObservation, OpenAiFixtureScript, OpenAiStep,
 };
+use wcore_eval_scenarios::fixtures::repository::SeededRepository;
 use wcore_eval_scenarios::providers::{ProviderConfig, ProviderId};
 use wcore_eval_scenarios::runner::{Failure, ScenarioResult, run_with_binary};
 use wcore_eval_scenarios::scenario::{ApprovalPolicy, Category, Scenario, Turn};
@@ -300,4 +301,58 @@ async fn packaged_core_calls_a_streamable_http_mcp_tool() {
     assert_eq!(openai_observation.requests.len(), 2);
     assert!(openai_observation.complete());
     assert!(mcp_observation.complete(), "{mcp_observation:?}");
+}
+
+#[tokio::test]
+async fn packaged_core_satisfies_a_hidden_repository_outcome() {
+    let repository = SeededRepository::new([
+        ("README.md", "fixture repository\n"),
+        ("src/settings.toml", "port = 8080\nmode = \"legacy\"\n"),
+    ])
+    .expect("valid repository fixture");
+    let openai = OpenAiFixtureScript::new([
+        OpenAiStep::tool_call(
+            "call-seeded-edit",
+            "Edit",
+            serde_json::json!({
+                "file_path": "src/settings.toml",
+                "old_string": "port = 8080",
+                "new_string": "port = 9090"
+            }),
+        ),
+        OpenAiStep::text("Repository update completed"),
+    ])
+    .start()
+    .await
+    .expect("start OpenAI fixture");
+    let provider = ProviderConfig::new(ProviderId::OpenAI, "fixture-chat-v1")
+        .with_api_key("fixture-local-token")
+        .with_base_url(openai.base_url());
+    let scenario = Scenario::new("packaged_seeded_repository", Category::Hardening)
+        .max_total_time(Duration::from_secs(20))
+        .setup(move |cwd| repository.materialize(cwd).map_err(Into::into))
+        .turn(
+            Turn::new("Apply the requested repository update and report completion.")
+                .max_time(Duration::from_secs(10))
+                .expect_tool("Edit")
+                .assert(Assertion::Contains("Repository update completed"))
+                .assert(Assertion::FileContains {
+                    path: "src/settings.toml",
+                    needle: "port = 9090",
+                }),
+        );
+
+    let result = run_with_binary(
+        &scenario,
+        &provider,
+        Path::new(env!("CARGO_BIN_EXE_wayland-core")),
+    )
+    .await
+    .expect("packaged seeded-repository run");
+    let observation = openai.shutdown().await.expect("fixture shutdown");
+
+    assert!(result.passed, "unexpected failures: {:?}", result.failures);
+    assert_eq!(result.trace.count("Edit"), 1);
+    assert_eq!(observation.requests.len(), 2);
+    assert!(observation.complete());
 }
