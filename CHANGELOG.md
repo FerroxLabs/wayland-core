@@ -1,5 +1,53 @@
 # Changelog
 
+## [0.12.24](https://github.com/FerroxLabs/wayland-core/compare/v0.12.23...v0.12.24) (2026-07-13)
+
+
+### Features
+
+* **acp:** additive persona-agent protocol types (agents/list, selector) ([#202](https://github.com/FerroxLabs/wayland-core/issues/202)) ([09dc167](https://github.com/FerroxLabs/wayland-core/commit/09dc167271656d40a91dfb69b45af5715c72b6f0))
+* **acp:** agent roster trait + capability handshake ([afddf24](https://github.com/FerroxLabs/wayland-core/commit/afddf24f7c2e47c59a97e8ac027a7e92f0920a3e))
+* **acp:** bind selected persona to the session engine (persona PR-4) ([#215](https://github.com/FerroxLabs/wayland-core/issues/215)) ([59e8676](https://github.com/FerroxLabs/wayland-core/commit/59e8676cf1a757a2602eef0a85291de1a5030fbe))
+* **acp:** CliAgentRoster — trusted persona enumeration (persona PR-3) ([#213](https://github.com/FerroxLabs/wayland-core/issues/213)) ([01836ce](https://github.com/FerroxLabs/wayland-core/commit/01836cecee20316c45159054fb2cc9351af9c3cd))
+* **acp:** defang forged host trust-tags in persona SOUL (PR-5) ([#218](https://github.com/FerroxLabs/wayland-core/issues/218)) ([4915c13](https://github.com/FerroxLabs/wayland-core/commit/4915c135510b0f4f525c873b6b2003bde87137d8))
+* **acp:** profile supervisor router, one process per profile (PR-7) ([34d8676](https://github.com/FerroxLabs/wayland-core/commit/34d86766ae1ee2e631181edb42d0666a64f80393))
+* **acp:** serve an isolated profile via `acp serve --profile` ([#216](https://github.com/FerroxLabs/wayland-core/issues/216)) ([661dd98](https://github.com/FerroxLabs/wayland-core/commit/661dd9827e35281b52e43caa2d3c943393f40cf1))
+* **acp:** stamp per-turn turn_id on terminal Done/Error frames ([#787](https://github.com/FerroxLabs/wayland-core/issues/787)) ([#219](https://github.com/FerroxLabs/wayland-core/issues/219)) ([b11aba5](https://github.com/FerroxLabs/wayland-core/commit/b11aba5ab83e282584d5b653ad087cba67533697))
+* **anvil:** A1 native gated-forge engine — live-proven /forge (A1.3–A1.6) ([#246](https://github.com/FerroxLabs/wayland-core/issues/246)) ([1f89ad4](https://github.com/FerroxLabs/wayland-core/commit/1f89ad42039ebde0ac80e278a73bfe2a740fb4ae))
+* **anvil:** A1.1 engine skeleton + kill-switch + forge verb ([#230](https://github.com/FerroxLabs/wayland-core/issues/230)) ([9928c85](https://github.com/FerroxLabs/wayland-core/commit/9928c85fc3d9697b3ecaa71055f3c5e1361bce2f))
+* **anvil:** A1.2 AnvilReceipt event + receipt trust boundary ([#231](https://github.com/FerroxLabs/wayland-core/issues/231)) ([ca71a88](https://github.com/FerroxLabs/wayland-core/commit/ca71a888c68b52e203e1249eaa741b839220b95d))
+* **anvil:** gate closure/probe + cost ledger (A1.3+A1.4) ([#236](https://github.com/FerroxLabs/wayland-core/issues/236)) ([ea3bb1c](https://github.com/FerroxLabs/wayland-core/commit/ea3bb1c584b157e7e83d34db25d96e1136e9f584))
+* **anvil:** Smart Loops layer — default-ON, auto-gate, seat routing, Forge tool, valve (A1.7–A1.10) ([#247](https://github.com/FerroxLabs/wayland-core/issues/247)) ([49b58e5](https://github.com/FerroxLabs/wayland-core/commit/49b58e54c4608460490007fa962fe4c1596f1bdd))
+* **cache:** Anthropic 4-breakpoint cache_control layout + permanent anchor (parity gap 1) ([#187](https://github.com/FerroxLabs/wayland-core/issues/187)) ([3208283](https://github.com/FerroxLabs/wayland-core/commit/320828395e85b443762bb43a11ac7d9b0ae75f5e))
+* **cli:** add migrate hermes importer for named profiles ([#228](https://github.com/FerroxLabs/wayland-core/issues/228)) ([#226](https://github.com/FerroxLabs/wayland-core/issues/226)) ([c5e9a8e](https://github.com/FerroxLabs/wayland-core/commit/c5e9a8e043b339baa879da2b0c61501a4ee106a0))
+* **proving-ground:** M1 harness + provenance & detection tests ([#53](https://github.com/FerroxLabs/wayland-core/issues/53)) ([#228](https://github.com/FerroxLabs/wayland-core/issues/228)) ([363d918](https://github.com/FerroxLabs/wayland-core/commit/363d918adc080699ea445229d6f065686ed74244))
+* **token-efficiency:** prompt_cache_key stamping, per-run usage_delta, flux-* catalog entries, length-wedge + clean-retry gates ([#184](https://github.com/FerroxLabs/wayland-core/issues/184)) ([38c52de](https://github.com/FerroxLabs/wayland-core/commit/38c52de9b8ffa161c4dfce125599daa289e8d8be))
+* **tools:** deterministic ordering, cold-tool deferral + catalog fold, hydration admission, cache-health telemetry (-86.2% tools bytes) ([#186](https://github.com/FerroxLabs/wayland-core/issues/186)) ([3873665](https://github.com/FerroxLabs/wayland-core/commit/387366547fd5e714aaa5d9dcc5160e3f569e4c03))
+
+
+### Bug Fixes
+
+* **agent:** /agent new aborts on non-TTY stdin instead of reading it ([#212](https://github.com/FerroxLabs/wayland-core/issues/212)) ([e93a879](https://github.com/FerroxLabs/wayland-core/commit/e93a879e2c01397701e2debb9c11f3492f9153f2))
+* **bash:** recompute secret-deny per exec (post-bootstrap) ([#234](https://github.com/FerroxLabs/wayland-core/issues/234)) ([#241](https://github.com/FerroxLabs/wayland-core/issues/241)) ([3317601](https://github.com/FerroxLabs/wayland-core/commit/33176014d0c39efd72981216ea14de81847476e6))
+* **bash:** refuse local-data network uploads to block exfil ([#673](https://github.com/FerroxLabs/wayland-core/issues/673)) ([#224](https://github.com/FerroxLabs/wayland-core/issues/224)) ([f60c25d](https://github.com/FerroxLabs/wayland-core/commit/f60c25d17bda1acf48325e64497c50b2609c927b))
+* **creds:** migrate plaintext secrets into vault on unlock ([#183](https://github.com/FerroxLabs/wayland-core/issues/183)) ([#221](https://github.com/FerroxLabs/wayland-core/issues/221)) ([e84ee26](https://github.com/FerroxLabs/wayland-core/commit/e84ee261e6f9ec9e97e468ec223c5fa9299a1ca8))
+* **engine:** don't persist unrecoverable over-ceiling session ([4a65215](https://github.com/FerroxLabs/wayland-core/commit/4a652150206952888d9b7290045cdbd65d7c397a))
+* **exec:** cross-platform command execution — unbreak Windows ([#754](https://github.com/FerroxLabs/wayland-core/issues/754)) ([#207](https://github.com/FerroxLabs/wayland-core/issues/207)) ([2ead3d5](https://github.com/FerroxLabs/wayland-core/commit/2ead3d5d49103ed3e8db196b7d49e25cd0512707))
+* **read:** apply diff-resend on all routes, not just client ([#182](https://github.com/FerroxLabs/wayland-core/issues/182)) ([da02c73](https://github.com/FerroxLabs/wayland-core/commit/da02c738ee824f755949dc0e7503968549c713de))
+* **read:** reject UNC + non-regular paths in validate_user_path ([#644](https://github.com/FerroxLabs/wayland-core/issues/644)) ([#222](https://github.com/FerroxLabs/wayland-core/issues/222)) ([06d16aa](https://github.com/FerroxLabs/wayland-core/commit/06d16aa1fd0b35fb7f7e9bd042710893ae4bfbd3))
+* repair 3 flaky main tests, fence release-binary smoke ([#192](https://github.com/FerroxLabs/wayland-core/issues/192)) ([076c0e1](https://github.com/FerroxLabs/wayland-core/commit/076c0e1de62ca7f7b1af9c56a5b903057552dbfc))
+* **security:** confine untrusted project [@includes](https://github.com/includes) to the repo root ([#204](https://github.com/FerroxLabs/wayland-core/issues/204)) ([3e495ff](https://github.com/FerroxLabs/wayland-core/commit/3e495ffd8a4e362d91a3b8e68ca660430562bb94))
+* **security:** neutralize untrusted project system_prompt ([#205](https://github.com/FerroxLabs/wayland-core/issues/205)) ([1b48357](https://github.com/FerroxLabs/wayland-core/commit/1b48357a4a1e217bb1a48b40f6810af025dc8b89))
+* **sentinel:** per-pid crash-sentinel scoping (start-time ownership, delete-is-claim) ([#185](https://github.com/FerroxLabs/wayland-core/issues/185)) ([73f8104](https://github.com/FerroxLabs/wayland-core/commit/73f81047d8578163fc1fbbe42c62ba0e79f01bc0))
+* **tools:** deny project secrets for Full-posture channel sessions ([#229](https://github.com/FerroxLabs/wayland-core/issues/229)) ([fdf68b1](https://github.com/FerroxLabs/wayland-core/commit/fdf68b19611a006e38d985691b6c174de3e42d6e))
+* **tools:** drop Grep/Glob from Full channel-remote posture ([#235](https://github.com/FerroxLabs/wayland-core/issues/235)) ([17517e3](https://github.com/FerroxLabs/wayland-core/commit/17517e37fff3e1d2938ba238ecc3094f86193b3d))
+* **tui:** anchor stale test clock; avoid Windows Instant underflow ([#225](https://github.com/FerroxLabs/wayland-core/issues/225)) ([6080a0f](https://github.com/FerroxLabs/wayland-core/commit/6080a0f3531c13d035171aaaa0f025d346851159))
+
+
+### Documentation
+
+* **design:** Anvil native gated-forge engine spec v1 ([#227](https://github.com/FerroxLabs/wayland-core/issues/227)) ([af893eb](https://github.com/FerroxLabs/wayland-core/commit/af893eb1a56e5902c5b1038bd73489317da07669))
+
 ## [0.12.23](https://github.com/FerroxLabs/wayland-core/compare/v0.12.22...v0.12.23) (2026-07-05)
 
 A capabilities-and-honesty release. The engine now reasons in images across
