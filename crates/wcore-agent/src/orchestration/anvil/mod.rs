@@ -14,6 +14,17 @@
 //!
 //! Spec: `docs/design/2026-07-12-anvil-native-gated-forge-design.md` (v2).
 
+/// The climb decision core: per-check gate model, fail-set acceptance, order.
+pub mod climb;
+/// Gate closure pinning, the pre-climb probe, injection fencing, flake policy.
+pub mod gates;
+/// Append-only climb journal for crash recovery + idempotent resume.
+pub mod journal;
+/// Per-workspace climb lease preventing interleaved climbs / user edits.
+pub mod lease;
+/// Per-task cost ledger with atomic reservation-before-dispatch.
+pub mod ledger;
+
 use wcore_config::anvil::AnvilConfig;
 
 /// Terminal state of a climb — the COMPLETE enum (spec §6.5). Every climb ends
