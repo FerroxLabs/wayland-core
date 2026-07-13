@@ -20,6 +20,7 @@ const MAX_SCRIPT_STEPS: usize = 256;
 const MAX_TEXT_BYTES: usize = 64 * 1024;
 const MAX_REQUEST_BYTES: usize = 1024 * 1024;
 const MAX_STALL_MS: u64 = 60_000;
+const MAX_RETRY_AFTER_MS: u64 = 60_000;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OpenAiFixtureScript {
@@ -32,6 +33,7 @@ pub struct OpenAiFixtureScript {
 pub enum OpenAiStep {
     Text { text: String },
     HttpError { status: u16 },
+    RateLimited { retry_after_ms: u64 },
     Truncated { text: String },
     DuplicateText { text: String },
     StallBeforeHeaders { delay_ms: u64 },
@@ -44,6 +46,10 @@ impl OpenAiStep {
 
     pub fn http_error(status: u16) -> Self {
         Self::HttpError { status }
+    }
+
+    pub fn rate_limited(retry_after_ms: u64) -> Self {
+        Self::RateLimited { retry_after_ms }
     }
 
     pub fn truncated(text: impl Into<String>) -> Self {
@@ -131,6 +137,13 @@ impl OpenAiFixtureScript {
                         return Err(OpenAiFixtureError::InvalidScript(
                             "HTTP error status must be between 400 and 599".to_string(),
                         ));
+                    }
+                }
+                OpenAiStep::RateLimited { retry_after_ms } => {
+                    if *retry_after_ms == 0 || *retry_after_ms > MAX_RETRY_AFTER_MS {
+                        return Err(OpenAiFixtureError::InvalidScript(format!(
+                            "retry-after must be between 1 and {MAX_RETRY_AFTER_MS} milliseconds"
+                        )));
                     }
                 }
                 OpenAiStep::StallBeforeHeaders { delay_ms } => {
@@ -276,6 +289,16 @@ async fn handle_chat_completion(
                 json!({"error":{"code":"fixture_http_error","status":status.as_u16()}}).to_string(),
             )
         }
+        OpenAiStep::RateLimited { retry_after_ms } => json_response(
+            StatusCode::TOO_MANY_REQUESTS,
+            json!({
+                "error": {
+                    "code": "fixture_rate_limited",
+                    "retry_after_ms": retry_after_ms
+                }
+            })
+            .to_string(),
+        ),
         OpenAiStep::Truncated { text } => sse_response(text_delta_frame(&text)),
         OpenAiStep::DuplicateText { text } => sse_response(complete_text_sse(&text, true)),
         OpenAiStep::StallBeforeHeaders { delay_ms } => {
