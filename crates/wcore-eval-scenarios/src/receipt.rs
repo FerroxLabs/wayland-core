@@ -544,6 +544,26 @@ impl EvidenceReceiptV1 {
             total_cost_microusd: cost_microusd,
             wall_time_ms: result.wall_time.as_millis() as u64,
         };
+        let mut decisions = vec![DecisionEvidenceV1 {
+            actor: "evaluator".to_string(),
+            action: "approval_posture".to_string(),
+            resource_sha256: sha256(cell_id.as_bytes()),
+            scope: "scenario".to_string(),
+            decision: result.approval.to_string(),
+        }];
+        decisions.extend(result.execution.approval_commands.iter().map(|command| {
+            DecisionEvidenceV1 {
+                actor: "evaluator".to_string(),
+                action: "tool_approval_command".to_string(),
+                resource_sha256: sha256(command.call_id.as_bytes()),
+                scope: "once".to_string(),
+                decision: if command.approved {
+                    "approve_sent".to_string()
+                } else {
+                    "deny_sent".to_string()
+                },
+            }
+        }));
         let body = ReceiptBodyV1 {
             run_id: metadata.run_id,
             identity: IdentityEvidenceV1 {
@@ -610,13 +630,7 @@ impl EvidenceReceiptV1 {
                 limit_microusd,
             },
             tools,
-            decisions: vec![DecisionEvidenceV1 {
-                actor: "evaluator".to_string(),
-                action: "tool_approval".to_string(),
-                resource_sha256: sha256(cell_id.as_bytes()),
-                scope: "scenario".to_string(),
-                decision: result.approval.to_string(),
-            }],
+            decisions,
             boundaries: BoundaryEvidenceV1 {
                 egress_attempted: Evidence::Unavailable {
                     code: "egress_recorder_not_enabled".to_string(),

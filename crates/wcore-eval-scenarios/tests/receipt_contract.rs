@@ -11,7 +11,7 @@ use wcore_eval_scenarios::receipt::{
     TargetEvidenceV1, TimingEvidenceV1, ToolEvidenceV1, VerificationPolicy, VerifiedAuthority,
 };
 use wcore_eval_scenarios::report::{ReportRenderError, render_receipt_reports};
-use wcore_eval_scenarios::runner::{ExecutionEvidence, ScenarioResult};
+use wcore_eval_scenarios::runner::{ApprovalCommandEvidence, ExecutionEvidence, ScenarioResult};
 use wcore_eval_scenarios::scenario::{ApprovalPolicy, Platform};
 use wcore_eval_scenarios::trace::TraceEntry;
 use wcore_eval_scenarios::{ProviderId, ToolTrace};
@@ -444,6 +444,10 @@ fn critical_usability_finding_is_a_receipt_gate_failure() {
             prompt_dispatch_time: Duration::from_millis(1),
             first_token_time: Some(Duration::from_millis(2)),
             approval_response_time: Duration::from_millis(1),
+            approval_commands: vec![ApprovalCommandEvidence {
+                call_id: "call-approved-write".to_string(),
+                approved: true,
+            }],
             shutdown_time: Duration::from_millis(5),
         },
     };

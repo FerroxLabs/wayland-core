@@ -86,7 +86,14 @@ pub struct ExecutionEvidence {
     pub prompt_dispatch_time: Duration,
     pub first_token_time: Option<Duration>,
     pub approval_response_time: Duration,
+    pub approval_commands: Vec<ApprovalCommandEvidence>,
     pub shutdown_time: Duration,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ApprovalCommandEvidence {
+    pub call_id: String,
+    pub approved: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -538,6 +545,7 @@ async fn run_session_body(input: SessionRun<'_>) -> anyhow::Result<ScenarioResul
         prompt_dispatch_time,
         first_token_time,
         approval_response_time,
+        approval_commands,
     ) = match result {
         Ok(Ok(drive_out)) => (
             drive_out.turn_results,
@@ -550,6 +558,7 @@ async fn run_session_body(input: SessionRun<'_>) -> anyhow::Result<ScenarioResul
             drive_out.prompt_dispatch_time,
             drive_out.first_token_time,
             drive_out.approval_response_time,
+            drive_out.approval_commands,
         ),
         Ok(Err(e)) => {
             let shutdown_started = Instant::now();
@@ -598,6 +607,7 @@ async fn run_session_body(input: SessionRun<'_>) -> anyhow::Result<ScenarioResul
                     prompt_dispatch_time: Duration::ZERO,
                     first_token_time: None,
                     approval_response_time: Duration::ZERO,
+                    approval_commands: Vec::new(),
                     shutdown_time,
                 },
             });
@@ -646,6 +656,7 @@ async fn run_session_body(input: SessionRun<'_>) -> anyhow::Result<ScenarioResul
                     prompt_dispatch_time: Duration::ZERO,
                     first_token_time: None,
                     approval_response_time: Duration::ZERO,
+                    approval_commands: Vec::new(),
                     shutdown_time,
                 },
             });
@@ -816,6 +827,7 @@ async fn run_session_body(input: SessionRun<'_>) -> anyhow::Result<ScenarioResul
             prompt_dispatch_time,
             first_token_time,
             approval_response_time,
+            approval_commands,
             shutdown_time,
         },
     };
@@ -871,6 +883,7 @@ struct DriveOutput {
     prompt_dispatch_time: Duration,
     first_token_time: Option<Duration>,
     approval_response_time: Duration,
+    approval_commands: Vec<ApprovalCommandEvidence>,
 }
 
 #[derive(Debug, Error)]
@@ -1037,6 +1050,7 @@ async fn drive_session(
     let mut prompt_dispatch_time = Duration::ZERO;
     let mut first_token_time = None;
     let mut approval_response_time = Duration::ZERO;
+    let mut approval_commands = Vec::new();
     // D3: how to answer the engine's approval gate (only fires when the
     // scenario spawned WITHOUT `--yolo`, i.e. policy != Yolo).
     let approval = scenario.approval;
@@ -1244,6 +1258,10 @@ async fn drive_session(
                         stdin.flush().await?;
                         approval_response_time =
                             approval_response_time.saturating_add(approval_started.elapsed());
+                        approval_commands.push(ApprovalCommandEvidence {
+                            call_id: call_id.clone(),
+                            approved: approval == crate::scenario::ApprovalPolicy::ApproveAll,
+                        });
                         if approval == crate::scenario::ApprovalPolicy::DenyAll {
                             let tool_name = ev
                                 .get("tool")
@@ -1378,6 +1396,10 @@ async fn drive_session(
                         stdin.flush().await?;
                         approval_response_time =
                             approval_response_time.saturating_add(approval_started.elapsed());
+                        approval_commands.push(ApprovalCommandEvidence {
+                            call_id,
+                            approved: approval == crate::scenario::ApprovalPolicy::ApproveAll,
+                        });
                     }
                 }
                 _ => {}
@@ -1439,6 +1461,7 @@ async fn drive_session(
         prompt_dispatch_time,
         first_token_time,
         approval_response_time,
+        approval_commands,
     })
 }
 
