@@ -43,6 +43,12 @@ The exact frozen source was transferred without GitHub to an isolated Hetzner wo
 
 An earlier build that `vx` incorrectly ran under Rust 1.97 is explicitly rejected. The receipt above comes from an explicit `cargo +1.95.0 build --release -p wcore-cli` invocation.
 
+### Baseline erratum discovered during F06 verification
+
+The `0.12.25` release commit changed the workspace version in `Cargo.toml` but did not regenerate `Cargo.lock`. The frozen lock still described internal packages as `0.12.24` and omitted the `wcore-cli` `serde_yaml` dependency. A clean `cargo +1.95.0 check --locked` therefore failed before compilation because Cargo needed to update the lockfile.
+
+The original lock digest and binary receipt above remain the historical baseline, but the binary receipt is rejected as dependency-lock provenance for Frontier candidate comparisons. Commit `32301e682bb457897812545d2afc317401247c45` regenerates the lockfile offline using Cargo 1.95.0. The corrected `Cargo.lock` SHA-256 is `f7b7922c992a7ee144373c1619a0d10d9d16f13345e9517a657713b355a9d2a6`; `cargo +1.95.0 check --locked --offline` passes on the isolated Hetzner worktree. All later evidence receipts must bind the corrected lock digest and a rebuilt binary.
+
 ## 2. Production activation map
 
 | Capability | Construction or configuration | Production caller/outcome | Characterization |
