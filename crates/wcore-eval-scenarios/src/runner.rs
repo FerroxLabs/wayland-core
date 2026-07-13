@@ -639,7 +639,7 @@ struct TurnTimeout {
 }
 
 async fn read_turn_event<R>(
-    reader: &mut tokio::io::Lines<BufReader<R>>,
+    reader: &mut BufReader<R>,
     turn: usize,
     started: Instant,
     budget: Duration,
@@ -747,7 +747,7 @@ async fn drive_session(
     stdout: tokio::process::ChildStdout,
     scenario: &crate::scenario::Scenario,
 ) -> anyhow::Result<DriveOutput> {
-    let mut reader = BufReader::new(stdout).lines();
+    let mut reader = BufReader::new(stdout);
     // Cold-boot latency clock: from here (≈ just after spawn) to the `ready`
     // event = the engine's bootstrap time (a usability/perf metric).
     let drive_start = Instant::now();
@@ -1112,27 +1112,46 @@ async fn drive_session(
 /// `serde_json::Value`. Returns `Ok(None)` on EOF. Blank lines are
 /// skipped. Lines that don't parse are silently dropped (W0 host
 /// decoder contract — tolerate unknown / forward-additive shapes).
-async fn read_one_event<R>(
-    reader: &mut tokio::io::Lines<BufReader<R>>,
-) -> anyhow::Result<Option<Value>>
+async fn read_one_event<R>(reader: &mut BufReader<R>) -> anyhow::Result<Option<Value>>
 where
     R: tokio::io::AsyncRead + Unpin,
 {
+    const MAX_STDOUT_EVENT_BYTES: usize = 64 * 1024;
     loop {
-        match reader.next_line().await? {
-            None => return Ok(None),
-            Some(line) => {
+        let mut line = Vec::new();
+        let complete = loop {
+            let available = reader.fill_buf().await?;
+            if available.is_empty() {
+                break !line.is_empty();
+            }
+            let newline = available.iter().position(|byte| *byte == b'\n');
+            let consumed = newline.map_or(available.len(), |index| index + 1);
+            if line.len().saturating_add(consumed) > MAX_STDOUT_EVENT_BYTES {
+                anyhow::bail!("stdout event exceeded {MAX_STDOUT_EVENT_BYTES} bytes");
+            }
+            line.extend_from_slice(&available[..consumed]);
+            reader.consume(consumed);
+            if newline.is_some() {
+                break true;
+            }
+        };
+        match complete {
+            false => return Ok(None),
+            true => {
+                if line.last() == Some(&b'\n') {
+                    line.pop();
+                }
+                if line.last() == Some(&b'\r') {
+                    line.pop();
+                }
+                let line = std::str::from_utf8(&line)
+                    .map_err(|_| anyhow::anyhow!("stdout event was not valid UTF-8"))?;
                 if line.trim().is_empty() {
                     continue;
                 }
-                match serde_json::from_str::<Value>(&line) {
-                    Ok(v) => return Ok(Some(v)),
-                    Err(_e) => {
-                        // Skip non-JSON lines (defensive — the engine
-                        // shouldn't emit any but a stray panic message
-                        // could land here).
-                        continue;
-                    }
+                match serde_json::from_str::<Value>(line) {
+                    Ok(value) => return Ok(Some(value)),
+                    Err(_) => continue,
                 }
             }
         }
