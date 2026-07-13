@@ -1055,6 +1055,66 @@ fn capture_config_changed(ev: &Value, info_events: &mut Vec<String>) {
     info_events.push(format!("config_changed: {caps}"));
 }
 
+/// Fill tool inputs that are intentionally absent from the normal Yolo
+/// lifecycle events. Structured traces are an explicit host opt-in and carry
+/// the engine's PII-scrubbed `ToolCallTrace::input`, keyed by the same call ID.
+fn capture_structured_tool_inputs(
+    event: &Value,
+    trace: &mut ToolTrace,
+    structured_inputs: &mut std::collections::HashMap<String, (String, String)>,
+) -> Result<(), String> {
+    let Some(tool_calls) = event
+        .get("trace")
+        .and_then(|value| value.get("tool_calls"))
+        .and_then(Value::as_array)
+    else {
+        return Ok(());
+    };
+
+    for call in tool_calls {
+        let call_id = call
+            .get("call_id")
+            .and_then(Value::as_str)
+            .ok_or_else(|| "structured tool trace omitted call_id".to_string())?;
+        let tool_name = call
+            .get("tool_name")
+            .and_then(Value::as_str)
+            .ok_or_else(|| format!("structured tool trace {call_id} omitted tool_name"))?;
+        let input = serde_json::to_string(
+            call.get("input")
+                .ok_or_else(|| format!("structured tool trace {call_id} omitted input"))?,
+        )
+        .map_err(|error| format!("structured tool trace {call_id} input: {error}"))?;
+
+        if let Some((prior_name, prior_input)) = structured_inputs.get(call_id)
+            && (prior_name != tool_name || prior_input != &input)
+        {
+            return Err(format!(
+                "conflicting structured tool trace for call_id {call_id}"
+            ));
+        }
+        structured_inputs.insert(call_id.to_string(), (tool_name.to_string(), input.clone()));
+
+        if let Some(entry) = trace
+            .entries
+            .iter_mut()
+            .find(|entry| entry.call_id == call_id)
+        {
+            if entry.tool_name != tool_name {
+                return Err(format!(
+                    "tool name mismatch for call_id {call_id}: result={}, trace={tool_name}",
+                    entry.tool_name
+                ));
+            }
+            if entry.input.is_empty() {
+                entry.input = input;
+            }
+        }
+    }
+
+    Ok(())
+}
+
 async fn drive_session(
     mut stdin: tokio::process::ChildStdin,
     stdout: tokio::process::ChildStdout,
@@ -1113,6 +1173,8 @@ async fn drive_session(
     // result lands. Best-effort: a result with no pending request falls back to
     // empty input (the prior behaviour).
     let mut pending_inputs: std::collections::HashMap<String, (String, Instant)> =
+        std::collections::HashMap::new();
+    let mut structured_inputs: std::collections::HashMap<String, (String, String)> =
         std::collections::HashMap::new();
     let mut denied_calls = std::collections::HashSet::new();
     // #278 — `session_cost` is emitted by the engine BEFORE `stream_end`
@@ -1370,6 +1432,11 @@ async fn drive_session(
                     let input = pending
                         .as_ref()
                         .map(|(input, _)| input.clone())
+                        .or_else(|| {
+                            structured_inputs
+                                .get(&call_id)
+                                .map(|(_, input)| input.clone())
+                        })
                         .unwrap_or_default();
                     let duration = pending.map(|(_, started)| started.elapsed());
                     if denied_calls.remove(&call_id)
@@ -1392,6 +1459,13 @@ async fn drive_session(
                             duration,
                             turn: turn_idx,
                         });
+                    }
+                }
+                "trace_event" => {
+                    if let Err(error) =
+                        capture_structured_tool_inputs(&ev, &mut trace, &mut structured_inputs)
+                    {
+                        runner_error = Some(error);
                     }
                 }
                 "stream_end" => {
@@ -1607,5 +1681,74 @@ where
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod structured_trace_tests {
+    use super::{ToolTrace, TraceEntry, capture_structured_tool_inputs};
+
+    #[test]
+    fn structured_trace_fills_auto_approved_tool_input() {
+        let mut trace = ToolTrace {
+            entries: vec![TraceEntry {
+                call_id: "call-read".to_string(),
+                tool_name: "Read".to_string(),
+                input: String::new(),
+                output: "contents".to_string(),
+                is_error: false,
+                duration: None,
+                turn: 0,
+            }],
+        };
+        let event = serde_json::json!({
+            "type": "trace_event",
+            "trace": {
+                "tool_calls": [{
+                    "call_id": "call-read",
+                    "tool_name": "Read",
+                    "input": {"file_path": "/fixture/repository/README.md"}
+                }]
+            }
+        });
+        let mut inputs = std::collections::HashMap::new();
+
+        capture_structured_tool_inputs(&event, &mut trace, &mut inputs).unwrap();
+
+        assert_eq!(
+            trace.entries[0].input,
+            r#"{"file_path":"/fixture/repository/README.md"}"#
+        );
+        assert_eq!(inputs["call-read"].0, "Read");
+    }
+
+    #[test]
+    fn structured_trace_rejects_call_id_name_conflict() {
+        let mut trace = ToolTrace {
+            entries: vec![TraceEntry {
+                call_id: "call-read".to_string(),
+                tool_name: "Read".to_string(),
+                input: String::new(),
+                output: "contents".to_string(),
+                is_error: false,
+                duration: None,
+                turn: 0,
+            }],
+        };
+        let event = serde_json::json!({
+            "type": "trace_event",
+            "trace": {
+                "tool_calls": [{
+                    "call_id": "call-read",
+                    "tool_name": "Write",
+                    "input": {"file_path": "/fixture/repository/README.md"}
+                }]
+            }
+        });
+        let mut inputs = std::collections::HashMap::new();
+
+        let error = capture_structured_tool_inputs(&event, &mut trace, &mut inputs).unwrap_err();
+
+        assert!(error.contains("tool name mismatch"), "{error}");
     }
 }
