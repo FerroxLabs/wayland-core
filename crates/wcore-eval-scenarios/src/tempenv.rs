@@ -127,8 +127,43 @@ impl TempEnv {
 }
 
 pub(crate) fn config_sha256(root: &Path) -> anyhow::Result<String> {
-    let config = fs::read(root.join(".wayland-core").join("config.toml"))?;
-    Ok(format!("{:x}", Sha256::digest(config)))
+    let config = fs::read_to_string(root.join(".wayland-core").join("config.toml"))?;
+    let mut config = config.parse::<toml::Value>()?;
+    normalize_fixture_config(&mut config, &root.to_string_lossy());
+    let canonical = toml::to_string(&config)?;
+    Ok(format!("{:x}", Sha256::digest(canonical)))
+}
+
+/// Remove only evaluator-owned run identity from the effective config hash.
+/// Security settings and non-loopback destinations remain byte-significant.
+fn normalize_fixture_config(value: &mut toml::Value, root: &str) {
+    match value {
+        toml::Value::String(text) => {
+            *text = text.replace(root, "<EVAL_ROOT>");
+            if let Ok(mut url) = reqwest::Url::parse(text)
+                && matches!(url.host_str(), Some("localhost" | "127.0.0.1" | "::1"))
+                && url.port().is_some()
+            {
+                if url.set_port(Some(0)).is_ok() {
+                    *text = url.to_string();
+                }
+            }
+        }
+        toml::Value::Array(values) => {
+            for value in values {
+                normalize_fixture_config(value, root);
+            }
+        }
+        toml::Value::Table(values) => {
+            for value in values.values_mut() {
+                normalize_fixture_config(value, root);
+            }
+        }
+        toml::Value::Integer(_)
+        | toml::Value::Float(_)
+        | toml::Value::Boolean(_)
+        | toml::Value::Datetime(_) => {}
+    }
 }
 
 /// Minimal TOML basic-string escaper — handles backslash + quote +
@@ -224,6 +259,39 @@ mod tests {
             config_sha256(first.path()).expect("first config digest"),
             config_sha256(second.path()).expect("second config digest"),
             "receipt behavior identity must not depend on a random temp path"
+        );
+    }
+
+    #[test]
+    fn config_digest_ignores_only_loopback_fixture_ports() {
+        let provider =
+            ProviderConfig::new(ProviderId::OpenAI, "fixture-chat-v1").with_api_key("test-key");
+        let first = build(&provider).expect("first environment");
+        let second = build(&provider).expect("second environment");
+        for (env, port) in [(&first, 43111), (&second, 49222)] {
+            let path = env.path().join(".wayland-core").join("config.toml");
+            let mut config = fs::read_to_string(&path).expect("seeded config");
+            config.push_str(&format!(
+                "[mcp.servers.fixture]\ntransport = \"streamable-http\"\nurl = \"http://127.0.0.1:{port}/mcp\"\n"
+            ));
+            fs::write(path, config).expect("append fixture config");
+        }
+
+        assert_eq!(
+            config_sha256(first.path()).expect("first config digest"),
+            config_sha256(second.path()).expect("second config digest")
+        );
+
+        let path = second.path().join(".wayland-core").join("config.toml");
+        let mut config = fs::read_to_string(&path).expect("seeded config");
+        config = config.replace(
+            "http://127.0.0.1:49222/mcp",
+            "https://api.example.com:49222/mcp",
+        );
+        fs::write(path, config).expect("replace fixture destination");
+        assert_ne!(
+            config_sha256(first.path()).expect("first config digest"),
+            config_sha256(second.path()).expect("non-loopback config digest")
         );
     }
 }
