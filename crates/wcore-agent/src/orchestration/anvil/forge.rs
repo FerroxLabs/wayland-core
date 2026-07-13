@@ -260,13 +260,20 @@ can execute it.";
 /// turn. Empty `allowed_tools` = the spawner's read-only set (Read/Grep/Glob).
 pub struct SpawnValve<'a> {
     spawner: &'a dyn Spawner,
+    /// Human-readable gate command (the pinned argv) — the valve must SEE the
+    /// gate to diagnose a task-vs-gate contradiction, which is its main job.
+    gate_desc: String,
 }
 
 impl<'a> SpawnValve<'a> {
-    /// Build a valve over the (frontier/session-seat) `spawner`.
+    /// Build a valve over the (frontier/session-seat) `spawner`; `gate_desc`
+    /// is the pinned gate argv rendered for the diagnostic prompt.
     #[must_use]
-    pub fn new(spawner: &'a dyn Spawner) -> Self {
-        Self { spawner }
+    pub fn new(spawner: &'a dyn Spawner, gate_desc: impl Into<String>) -> Self {
+        Self {
+            spawner,
+            gate_desc: gate_desc.into(),
+        }
     }
 }
 
@@ -279,10 +286,12 @@ impl Valve for SpawnValve<'_> {
             .map(super::climb::CheckId::as_str)
             .collect();
         let prompt = format!(
-            "Task the builder is stuck on: {task}\n\nThe gate has failed with the SAME fail-set \
-             {repeats} consecutive times.\nStuck checks: {checks}\nDiagnostics (bounded):\n{diag}\n\n\
-             One reply: what is the builder missing, which assumption is wrong, and what exact next \
-             step should it take?",
+            "Task the builder is stuck on: {task}\n\nThe gate command being run (in the candidate \
+             worktree): `{gate}`\nThe gate has failed with the SAME fail-set {repeats} consecutive \
+             times.\nStuck checks: {checks}\nDiagnostics (bounded):\n{diag}\n\nOne reply: what is \
+             the builder missing, which assumption is wrong (check the task text against what the \
+             gate command actually requires), and what exact next step should it take?",
+            gate = self.gate_desc,
             repeats = stall.repeats,
             checks = failing.join(", "),
             diag = stall.diagnostics,
@@ -410,12 +419,12 @@ pub async fn drive_climb_full(
         match closure.probe_baseline(&*backend, &opts).await {
             BaselineProbe::CannotExecute(why) => refusals.push(format!("`{shown}`: {why}")),
             BaselineProbe::Ran { .. } => {
-                adopted = Some(closure);
+                adopted = Some((closure, shown));
                 break;
             }
         }
     }
-    let Some(closure) = adopted else {
+    let Some((closure, gate_desc)) = adopted else {
         return Err(ForgeError::GateUnrunnable(refusals.join("; ")));
     };
     let digest = closure.digest_hex();
@@ -449,7 +458,7 @@ pub async fn drive_climb_full(
 
     // The valve (spec §6.4), when a frontier seat was supplied: one read-only
     // diagnostic turn on a detected stall, guidance back into the loop.
-    let valve = valve_spawner.map(SpawnValve::new);
+    let valve = valve_spawner.map(|s| SpawnValve::new(s, gate_desc.as_str()));
     let valve_ref: Option<&dyn Valve> = valve.as_ref().map(|v| v as &dyn Valve);
 
     let outcome = run_climb(&params, &builder, &gate, valve_ref, &ledger, &mut journal).await;
