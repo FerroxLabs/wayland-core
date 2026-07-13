@@ -719,7 +719,13 @@ async fn run_sealed_repository_once(run_id: &str) -> SealedRun {
     );
     let binary_sha256 =
         sha256(&std::fs::read(env!("CARGO_BIN_EXE_wayland-core")).expect("read packaged binary"));
-    let source_commit = std::env::var("WCORE_F04_SOURCE_COMMIT").unwrap_or_else(|_| "a".repeat(40));
+    let source_commit = env!("WAYLAND_SOURCE_SHA").to_string();
+    if let Ok(expected) = std::env::var("WCORE_F04_SOURCE_COMMIT") {
+        assert_eq!(
+            expected, source_commit,
+            "WCORE_F04_SOURCE_COMMIT must match the source embedded in the tested binary"
+        );
+    }
     let receipt = EvidenceReceiptV1::from_scenario_result(
         ReceiptMetadataV1 {
             run_id: run_id.to_string(),
