@@ -197,7 +197,7 @@ mod linux {
                     .open(path.join("cgroup.kill"))?;
                 File::open(path.join("cgroup.events"))?;
                 Ok(Self {
-                    path,
+                    path: path.clone(),
                     procs,
                     removed: false,
                 })
