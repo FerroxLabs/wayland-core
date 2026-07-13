@@ -607,7 +607,10 @@ fn insert_semantic_leaf_hash(
     workspace: &Path,
     hashes: &mut BTreeMap<String, String>,
 ) -> Result<(), String> {
-    let encoded = serde_json::to_vec(value).map_err(|error| error.to_string())?;
+    let encoded = match value {
+        serde_json::Value::String(text) => text.as_bytes().to_vec(),
+        _ => serde_json::to_vec(value).map_err(|error| error.to_string())?,
+    };
     let digest = workspace_evidence::semantic_sha256(b"openai-request-leaf", &encoded, workspace)
         .map_err(|error| error.to_string())?;
     hashes.insert(pointer.to_string(), digest);
