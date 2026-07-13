@@ -36,6 +36,9 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Paragraph, Wrap};
 use wcore_agent::health::{self, HealthStatus, ProviderHealth as AgentProviderHealth};
+use wcore_protocol::events::{
+    CapabilityActivation, CapabilityId, CapabilityReasonCode, CapabilityStage,
+};
 
 use crate::doctor;
 use crate::tui::app::{App, TurnRole};
@@ -143,6 +146,47 @@ impl HealthState {
             HealthState::Warn => t.warning,
             HealthState::Fail => t.error,
         }
+    }
+}
+
+fn capability_label(capability: CapabilityId) -> &'static str {
+    match capability {
+        CapabilityId::PricingRefresher => "pricing refresher",
+        CapabilityId::MidFlightMonitor => "mid-flight monitor",
+        CapabilityId::CooldownTracker => "cooldown tracker",
+        CapabilityId::LearnedPolicy => "learned policy",
+        CapabilityId::SmartHandoff => "smart handoff",
+        CapabilityId::DelegateIsolation => "delegate isolation",
+        CapabilityId::ProcedureSkillDrafting => "procedure drafting",
+        CapabilityId::LegacyAutoSkillDrafting => "legacy skill drafting",
+    }
+}
+
+fn capability_health(activation: &CapabilityActivation) -> (HealthState, &'static str) {
+    match (activation.stage, activation.reason) {
+        (CapabilityStage::Ready, None) => (HealthState::Ok, "ready"),
+        (CapabilityStage::Observed, None) => (HealthState::Ok, "verified outcome observed"),
+        (CapabilityStage::Unavailable, Some(CapabilityReasonCode::DisabledByConfig)) => {
+            (HealthState::Warn, "disabled by configuration")
+        }
+        (CapabilityStage::Unavailable, Some(CapabilityReasonCode::DependencyUnavailable)) => {
+            (HealthState::Fail, "required dependency unavailable")
+        }
+        (CapabilityStage::Unavailable, Some(CapabilityReasonCode::NoProductionConstructor)) => {
+            (HealthState::Fail, "no production constructor")
+        }
+        (CapabilityStage::Unavailable, Some(CapabilityReasonCode::RuntimePathUnwired)) => {
+            (HealthState::Fail, "runtime path not wired")
+        }
+        (CapabilityStage::Unavailable, Some(CapabilityReasonCode::IsolationNotEnforced)) => {
+            (HealthState::Fail, "isolation not enforced")
+        }
+        (CapabilityStage::Declared, None) => (HealthState::Warn, "declared"),
+        (CapabilityStage::Configured, None) => (HealthState::Warn, "configured"),
+        (CapabilityStage::Constructed, None) => (HealthState::Warn, "constructed"),
+        (CapabilityStage::Reached, None) => (HealthState::Warn, "runtime path reached"),
+        (CapabilityStage::OutcomeChanged, None) => (HealthState::Warn, "outcome changed"),
+        _ => (HealthState::Fail, "invalid activation evidence"),
     }
 }
 
@@ -1611,7 +1655,29 @@ impl DiagnosticsSurface {
             );
         }
 
-        // ── 4. Per-tool backend status ──────────────────────────────
+        // ── 4. Audited capability activation ───────────────────────
+        lines.push(Line::from(""));
+        push_section_header(&mut lines, t, "CAPABILITIES");
+        if app.capability_status.is_empty() {
+            lines.push(Line::from(Span::styled(
+                "  activation evidence not received",
+                Style::default().fg(t.warning),
+            )));
+        } else {
+            for (capability, activation) in &app.capability_status {
+                let (state, detail) = capability_health(activation);
+                push_wrapped_status_rows(
+                    &mut lines,
+                    state,
+                    capability_label(*capability),
+                    detail,
+                    t,
+                    avail_status,
+                );
+            }
+        }
+
+        // ── 5. Per-tool backend status ──────────────────────────────
         lines.push(Line::from(""));
         push_section_header(&mut lines, t, "TOOLS");
         for row in &self.tool_status {
@@ -2815,6 +2881,41 @@ mod tests {
             "skipped server missing:\n{out}"
         );
         assert!(out.contains("skipped"), "skipped state missing:\n{out}");
+    }
+
+    #[test]
+    fn doctor_shows_typed_capability_truth() {
+        let mut s = DiagnosticsSurface::new();
+        let mut app = App::new();
+        app.capability_status.insert(
+            CapabilityId::SmartHandoff,
+            CapabilityActivation::stage(CapabilityId::SmartHandoff, CapabilityStage::Ready),
+        );
+        app.capability_status.insert(
+            CapabilityId::DelegateIsolation,
+            CapabilityActivation::unavailable(
+                CapabilityId::DelegateIsolation,
+                CapabilityReasonCode::IsolationNotEnforced,
+            ),
+        );
+        s.on_enter(&mut app);
+        let out = render_tall(&mut s, &app);
+        assert!(
+            out.contains("CAPABILITIES"),
+            "section header missing:\n{out}"
+        );
+        assert!(
+            out.contains("smart handoff"),
+            "ready capability missing:\n{out}"
+        );
+        assert!(
+            out.contains("delegate isolation"),
+            "unavailable capability missing:\n{out}"
+        );
+        assert!(
+            out.contains("isolation not enforced"),
+            "reason missing:\n{out}"
+        );
     }
 
     #[test]

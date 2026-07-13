@@ -454,6 +454,15 @@ impl OutputSink for ChannelSink {
         });
     }
 
+    fn emit_capability_activation(
+        &self,
+        activation: &wcore_protocol::events::CapabilityActivation,
+    ) {
+        self.send(ProtocolEvent::CapabilityActivation {
+            activation: activation.clone(),
+        });
+    }
+
     fn emit_approval_required(
         &self,
         call_id: &str,

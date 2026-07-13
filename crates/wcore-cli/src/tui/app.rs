@@ -11,7 +11,7 @@
 //! deliberately minimal-but-real — grounded in the mockup surfaces and the
 //! `ProtocolEvent` payloads — so later waves extend by adding, not reshaping.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::path::PathBuf;
 use std::time::Instant;
 
@@ -127,6 +127,13 @@ pub struct App {
     /// right-rail Activity panel can surface MCP status without a
     /// transcript-spamming system turn per server.
     pub mcp_status: HashMap<String, McpServerStatus>,
+    /// F05: latest typed activation fact for each audited capability. The
+    /// protocol bridge updates this without adding transcript turns or toasts;
+    /// `/doctor` is the operator-facing projection.
+    pub capability_status: BTreeMap<
+        wcore_protocol::events::CapabilityId,
+        wcore_protocol::events::CapabilityActivation,
+    >,
     /// Mouse capture toggle for transcript scroll vs native text selection.
     /// `true` (DEFAULT, 2026-05-31) — `EnableMouseCapture` is active, so the
     /// scroll wheel drives transcript scrollback out of the box. This reverts
@@ -313,6 +320,7 @@ impl App {
             // failed — `/config` shows the honest non-degraded copy.
             config_apply_failed: false,
             mcp_status: HashMap::new(),
+            capability_status: BTreeMap::new(),
             // v0.9.1.3 F13: mouse capture defaults OFF so native terminal
             // 2026-05-31: capture ON by default so the scroll wheel drives
             // the transcript out of the box (the off-default read as "I can't

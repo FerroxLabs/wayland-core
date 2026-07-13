@@ -892,6 +892,10 @@ fn apply_event_inner(app: &mut App, event: ProtocolEvent) {
         ProtocolEvent::CuaPolicyDenied { op, reason, .. } => {
             push_system(app, format!("Computer-use op `{op}` blocked: {reason}"));
         }
+        ProtocolEvent::CapabilityActivation { activation } => {
+            app.capability_status
+                .insert(activation.capability, activation);
+        }
 
         // ── No view impact in Wave 0 ─────────────────────────────────
         // These variants carry diagnostics or capability handshakes that
@@ -901,7 +905,6 @@ fn apply_event_inner(app: &mut App, event: ProtocolEvent) {
         // json-stream hosts; the in-process TUI never runs delegated (no
         // host to fulfil the send), so it has no view impact here.
         ProtocolEvent::Ready { .. }
-        | ProtocolEvent::CapabilityActivation { .. }
         | ProtocolEvent::ProviderAttempt { .. }
         | ProtocolEvent::ProviderRetry { .. }
         | ProtocolEvent::ProviderFailure { .. }
@@ -3011,6 +3014,29 @@ mod tests {
         let cost = app.cost.as_ref().expect("app.cost should be populated");
         assert_eq!(cost.session_id, "s1");
         assert!((cost.total_cost_usd - 0.1234).abs() < 1e-9);
+    }
+
+    #[test]
+    fn capability_activation_updates_diagnostics_without_transcript_noise() {
+        use wcore_protocol::events::{CapabilityActivation, CapabilityId, CapabilityReasonCode};
+
+        let mut app = App::new();
+        apply_event(
+            &mut app,
+            ProtocolEvent::CapabilityActivation {
+                activation: CapabilityActivation::unavailable(
+                    CapabilityId::DelegateIsolation,
+                    CapabilityReasonCode::IsolationNotEnforced,
+                ),
+            },
+        );
+
+        assert!(app.session.turns.is_empty());
+        assert!(app.toast.is_none());
+        assert_eq!(
+            app.capability_status[&CapabilityId::DelegateIsolation].reason,
+            Some(CapabilityReasonCode::IsolationNotEnforced)
+        );
     }
 
     #[test]

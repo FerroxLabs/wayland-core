@@ -1996,6 +1996,7 @@ async fn run_tui_mode(
     let mcp_count = bootstrap.config().mcp.servers.len();
     let (mut boot_terminal, boot_guard) = tui::enter()?;
     let result = tui::splash_while(&mut boot_terminal, mcp_count, bootstrap.build()).await?;
+    let startup_capability_activations = result.capability_activations.clone();
     let mut engine = result.engine;
 
     // FluxRouter web_search grounding (contract §5): honour `--search`. A no-op
@@ -2061,6 +2062,9 @@ async fn run_tui_mode(
         std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
         Some(engine.approval_bridge().clone()),
     )));
+    for activation in startup_capability_activations {
+        let _ = tx.send(wcore_protocol::events::ProtocolEvent::CapabilityActivation { activation });
+    }
 
     // Snapshot the loaded skills + MCP servers for the `/skills` and `/mcp`
     // listings. Taken here while `engine` and `result.mcp_managers` are still
@@ -2787,6 +2791,7 @@ async fn run_json_stream_mode(
             return Err(e);
         }
     };
+    let startup_capability_activations = result.capability_activations.clone();
     let mut engine = result.engine;
     // wayland#551 — declared-but-still-connecting servers count as MCP
     // capability on the ready frame; their tools register shortly after.
@@ -2828,6 +2833,9 @@ async fn run_json_stream_mode(
         &initial_plugin_caps,
         engine.advertised_capabilities(),
     );
+    for activation in startup_capability_activations {
+        output.emit_capability_activation(&activation);
+    }
 
     // W6 B.7: emit McpReady for each boot-time MCP server. Previously
     // only the dynamic `AddMcpServer` command path (below) emitted this
