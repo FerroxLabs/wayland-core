@@ -264,14 +264,6 @@ fn behavior_digest_excludes_volatile_execution_identity() {
 
     assert_ne!(first.body_sha256, repeated.body_sha256);
     assert_eq!(
-        first.body.tools[0].request_sha256,
-        repeated.body.tools[0].request_sha256
-    );
-    assert_eq!(
-        first.body.tools[0].result_sha256,
-        repeated.body.tools[0].result_sha256
-    );
-    assert_eq!(
         first.behavior_sha256().expect("first behavior digest"),
         repeated
             .behavior_sha256()
@@ -391,6 +383,14 @@ fn scenario_receipt_normalizes_only_the_owned_workspace() {
     );
 
     assert_ne!(first.body_sha256, repeated.body_sha256);
+    assert_eq!(
+        first.body.tools[0].request_sha256,
+        repeated.body.tools[0].request_sha256
+    );
+    assert_eq!(
+        first.body.tools[0].result_sha256,
+        repeated.body.tools[0].result_sha256
+    );
     assert_eq!(
         first.behavior_sha256().expect("first behavior digest"),
         repeated
