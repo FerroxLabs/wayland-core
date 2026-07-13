@@ -500,6 +500,61 @@ W9 lands the four module-level pipelines (`PatternDetector`, `DraftWriter`, `Cur
 
 F12 GEPA (the eval-driven mutation loop that evolves skill bodies once drafts have accumulated win/loss data) ships under W10B, with a real `LlmParaphraseProvider` for the Paraphrase mutator in production (Phase 3 PA); test runs continue to use the fixture-replay provider for strict determinism.
 
+## Anvil — the gated forge (Smart Loops)
+
+Anvil is the iterate-until-verified engine for work with a **real executable
+gate** (tests, build, typecheck). It forks a builder sub-agent into an
+isolated git worktree, runs the gate sandboxed (network-denied) after every
+attempt, climbs by accept-only-strict-improvement steps, and ends with a
+machine-stamped receipt. Only a passing gate earns `verified` — a model's
+opinion of its own work never does.
+
+**Zero-config quickstart** (Anvil is ON by default):
+
+```bash
+cd your-repo        # has a test suite (cargo / npm / go / pytest / just / make)
+wayland-core forge "fix the failing auth tests"
+```
+
+The gate is auto-detected from the workspace (explicit config always wins),
+the baseline is probed in a scratch worktree, and the winning change lands on
+an `anvil/cand-N` branch for review — your tree is never modified.
+
+In a session, the same engine is the **`Forge` tool**: say "make sure this is
+right — iterate until it provably passes" and the model routes the work to
+the forge and returns the receipt.
+
+**Configuration** (`[anvil]` in `config.toml`):
+
+| Field | Default | Meaning |
+|---|---|---|
+| `enabled` | `true` | Kill-switch. Availability, not activity: the forge only runs when invoked AND a gate exists. A project config can *disable* Anvil but can never re-enable a globally kill-switched one (tighten-only). |
+| `gate` | `[]` (auto-detect) | The gate argv, e.g. `["cargo", "test"]`. Empty = detect from manifests; the sandbox probe adopts the first candidate that actually executes. |
+| `driver_provider` / `driver_model` | unset (auto) | The builder ("driver") seat. Auto: a connected FluxRouter key routes builders through `flux-auto`; otherwise an in-family mid tier (e.g. Sonnet) drives while your session model plans. |
+
+**The escalation valve.** When consecutive attempts fail with the *same*
+fail-set, the climb buys exactly ONE read-only diagnostic turn from your
+session (frontier) model, feeds its guidance back to the cheap builder, and
+resumes. `valve_fires` on the receipt counts it. Pay for the unblocking,
+never the grinding.
+
+**Safety model.** The forge is invocation-only and refuses without a gate;
+gates run sandboxed (network denied, minimized env); baseline probes and
+builders operate in disposable worktrees, never your tree; builders have
+edit tools but **no shell** — the gate does the executing; trampoline gates
+(`npm test`, `make test`, `just test`) content-pin their dispatch manifest,
+and a candidate that tampers with it fails a Safety-class `gate-integrity`
+check that can never be traded away or verified.
+
+**Receipts.** Every climb ends in one `anvil_receipt` (see the JSON stream
+protocol doc): terminal state, stamp, checks, iterations, valve fires, cost
+(`priced: false` renders as "unpriced", never $0). Climbs that run out of
+wall budget stop themselves and report an honest `timed_out` — never a
+silent kill.
+
+Anvil is the checkable-reward sibling of Crucible: work with a real gate goes
+to the forge; judgment work with no checkable reward goes to the council.
+
 ## Browser tool family (W8c.1)
 
 `wcore-browser` is a multi-backend browser tool family. The three

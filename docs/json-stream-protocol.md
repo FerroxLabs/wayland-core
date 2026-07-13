@@ -349,6 +349,7 @@ Decoder Contract (like `budget_exceeded`).
   "checks_passed": 14,
   "checks_total": 14,
   "iterations": 3,
+  "valve_fires": 1,
   "cost_microcents": 7000,
   "priced": true,
   "gate_closure_digest": "sha256:...",
@@ -359,6 +360,8 @@ Decoder Contract (like `budget_exceeded`).
 }
 ```
 
+`valve_fires` counts escalation-valve diagnostic turns bought during the
+climb (0 on the happy path; decoders of pre-valve receipts default it to 0).
 `stamp` is the trust tier actually earned — `verified` ONLY for a real
 executable gate; `criteria_checked` / `self_checked` / `format_validated` /
 `consensus_only` otherwise (never green-parity). `coverage` and `session_id`
