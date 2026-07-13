@@ -20,6 +20,76 @@ fn h64(ch: char) -> String {
     std::iter::repeat_n(ch, 64).collect()
 }
 
+fn traced_result(workdir: &str, external_path: &str) -> ScenarioResult {
+    ScenarioResult {
+        name: "workspace-normalization".to_string(),
+        provider: ProviderId::OpenAI,
+        platform: Platform::Linux,
+        approval: ApprovalPolicy::ApproveAll,
+        passed: true,
+        failures: Vec::new(),
+        wall_time: Duration::from_millis(50),
+        cost_usd: 0.0,
+        trace: ToolTrace {
+            entries: vec![TraceEntry {
+                call_id: "volatile-call-id".to_string(),
+                tool_name: "Edit".to_string(),
+                input: serde_json::json!({
+                    "file_path": format!("{workdir}/src/settings.toml"),
+                    "policy_path": external_path,
+                })
+                .to_string(),
+                output: format!("Edited {workdir}/src/settings.toml"),
+                is_error: false,
+                duration: Some(Duration::from_millis(2)),
+                turn: 0,
+            }],
+        },
+        final_text: "done".to_string(),
+        stderr_tail: String::new(),
+        turn_results: Vec::new(),
+        workdir: PathBuf::from(workdir),
+        boot_time: Duration::from_millis(10),
+        info_events: Vec::new(),
+        execution: ExecutionEvidence {
+            config_sha256: h64('c'),
+            sandbox_backend: "fixture".to_string(),
+            process_tree_sha256: h64('f'),
+            containment_authoritative: true,
+            cleanup_verified: true,
+            artifact_scan_complete: true,
+            prompt_dispatch_time: Duration::from_millis(1),
+            first_token_time: Some(Duration::from_millis(2)),
+            approval_response_time: Duration::ZERO,
+            approval_commands: Vec::new(),
+            provider_attempts: Some(1),
+            provider_retries: Some(0),
+            provider_typed_failures: Vec::new(),
+            provider_usage: None,
+            cancellation_requested: false,
+            shutdown_time: Duration::from_millis(1),
+        },
+    }
+}
+
+fn receipt_from_trace(run_id: &str, result: &ScenarioResult) -> EvidenceReceiptV1 {
+    EvidenceReceiptV1::from_scenario_result(
+        ReceiptMetadataV1 {
+            run_id: run_id.to_string(),
+            source_commit: "a".repeat(40),
+            binary_sha256: h64('b'),
+            fixture_sha256: h64('d'),
+            model: "fixture-model-v1".to_string(),
+            build: Evidence::Unavailable {
+                code: "local_run".to_string(),
+            },
+        },
+        result,
+        0.01,
+    )
+    .expect("receipt conversion")
+}
+
 fn body() -> ReceiptBodyV1 {
     let canary_scans = CanaryScanEvidenceV1 {
         scan_complete: true,
@@ -238,6 +308,36 @@ fn behavior_digest_binds_fixture_tool_and_result_semantics() {
             .expect("changed result receipt")
             .behavior_sha256()
             .expect("changed result digest")
+    );
+}
+
+#[test]
+fn scenario_receipt_normalizes_only_the_owned_workspace() {
+    let first = receipt_from_trace(
+        "run-a",
+        &traced_result("/private/run-a", "/etc/wayland/policy.toml"),
+    );
+    let repeated = receipt_from_trace(
+        "run-b",
+        &traced_result("/private/run-b", "/etc/wayland/policy.toml"),
+    );
+    let changed_external = receipt_from_trace(
+        "run-c",
+        &traced_result("/private/run-c", "/etc/wayland/other.toml"),
+    );
+
+    assert_ne!(first.body_sha256, repeated.body_sha256);
+    assert_eq!(
+        first.behavior_sha256().expect("first behavior digest"),
+        repeated
+            .behavior_sha256()
+            .expect("repeated behavior digest")
+    );
+    assert_ne!(
+        first.behavior_sha256().expect("first behavior digest"),
+        changed_external
+            .behavior_sha256()
+            .expect("changed behavior digest")
     );
 }
 
