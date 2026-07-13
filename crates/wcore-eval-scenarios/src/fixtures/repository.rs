@@ -79,6 +79,89 @@ impl SeededRepository {
     }
 }
 
+/// Hash a materialized repository tree independently of its absolute root.
+/// Symlinks and non-regular entries are rejected rather than followed.
+pub fn repository_tree_sha256(root: &Path) -> Result<String, RepositoryError> {
+    let mut files = BTreeMap::new();
+    let mut total_bytes = 0_usize;
+    collect_tree(root, root, &mut files, &mut total_bytes)?;
+    if files.is_empty() {
+        return Err(RepositoryError::Empty);
+    }
+    let canonical = serde_json::to_vec(&CanonicalRepository {
+        protocol_version: FIXTURE_PROTOCOL_VERSION,
+        files: &files,
+    })?;
+    Ok(format!("{:x}", Sha256::digest(canonical)))
+}
+
+fn collect_tree(
+    root: &Path,
+    directory: &Path,
+    files: &mut BTreeMap<String, Vec<u8>>,
+    total_bytes: &mut usize,
+) -> Result<(), RepositoryError> {
+    let entries = std::fs::read_dir(directory).map_err(|source| RepositoryError::Io {
+        path: directory.to_path_buf(),
+        source,
+    })?;
+    let mut paths = entries
+        .map(|entry| {
+            entry
+                .map(|entry| entry.path())
+                .map_err(|source| RepositoryError::Io {
+                    path: directory.to_path_buf(),
+                    source,
+                })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    paths.sort();
+
+    for path in paths {
+        let metadata = std::fs::symlink_metadata(&path).map_err(|source| RepositoryError::Io {
+            path: path.clone(),
+            source,
+        })?;
+        if metadata.file_type().is_symlink() {
+            return Err(RepositoryError::UnsafeExistingPath(path));
+        }
+        if metadata.is_dir() {
+            collect_tree(root, &path, files, total_bytes)?;
+            continue;
+        }
+        if !metadata.is_file() {
+            return Err(RepositoryError::UnsafeExistingPath(path));
+        }
+        let relative = path
+            .strip_prefix(root)
+            .map_err(|_| RepositoryError::InvalidPath(path.display().to_string()))?;
+        let relative = relative
+            .components()
+            .map(|component| match component {
+                Component::Normal(value) => value.to_str().map(str::to_string),
+                _ => None,
+            })
+            .collect::<Option<Vec<_>>>()
+            .ok_or_else(|| RepositoryError::InvalidPath(relative.display().to_string()))?
+            .join("/");
+        let content = std::fs::read(&path).map_err(|source| RepositoryError::Io {
+            path: path.clone(),
+            source,
+        })?;
+        *total_bytes = total_bytes.saturating_add(content.len());
+        if *total_bytes > MAX_TOTAL_BYTES {
+            return Err(RepositoryError::TooLarge {
+                limit: MAX_TOTAL_BYTES,
+            });
+        }
+        files.insert(relative, content);
+        if files.len() > MAX_FILES {
+            return Err(RepositoryError::TooManyFiles { limit: MAX_FILES });
+        }
+    }
+    Ok(())
+}
+
 #[derive(Serialize)]
 struct CanonicalRepository<'a> {
     protocol_version: u32,

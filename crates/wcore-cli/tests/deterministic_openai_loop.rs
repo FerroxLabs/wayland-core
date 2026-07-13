@@ -371,7 +371,7 @@ async fn packaged_core_satisfies_a_hidden_repository_outcome() {
         &scenario,
         &provider,
         Path::new(env!("CARGO_BIN_EXE_wayland-core")),
-        env,
+        &env,
     )
     .await
     .expect("packaged seeded-repository run");
