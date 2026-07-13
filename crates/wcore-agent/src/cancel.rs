@@ -23,6 +23,136 @@ pub use tokio_util::sync::CancellationToken;
 
 use crate::budget::ExecutionBudgetView;
 
+/// Cloneable observation handle for one session's immutable cancellation root
+/// and replaceable active-turn token. Child spawners can read the current turn
+/// without gaining authority to mutate the session root.
+#[derive(Clone)]
+pub(crate) struct SessionRuntimeHandle {
+    root: CancellationToken,
+    active_turn: std::sync::Arc<parking_lot::RwLock<CancellationToken>>,
+}
+
+impl SessionRuntimeHandle {
+    pub(crate) fn new(root: CancellationToken) -> Self {
+        Self {
+            active_turn: std::sync::Arc::new(parking_lot::RwLock::new(root.clone())),
+            root,
+        }
+    }
+
+    pub(crate) fn root_token(&self) -> CancellationToken {
+        self.root.clone()
+    }
+
+    pub(crate) fn active_turn_token(&self) -> CancellationToken {
+        self.active_turn.read().clone()
+    }
+
+    pub(crate) fn set_active_turn(&self, token: CancellationToken) {
+        *self.active_turn.write() = token;
+    }
+}
+
+/// Engine-owned lifetime authority for a session.
+///
+/// Keeps the budget watcher intact, owns the root-to-turn bridge, and makes
+/// dropping the engine terminal for every clone of the session root.
+pub(crate) struct SessionRuntimeGuard {
+    handle: SessionRuntimeHandle,
+    budget_guard: Option<BudgetGuard>,
+    turn_bridge: Option<JoinHandle<()>>,
+    dangerous_deadline: Option<tokio::time::Instant>,
+    dangerous_expiry: Option<JoinHandle<()>>,
+}
+
+impl SessionRuntimeGuard {
+    pub(crate) fn new(handle: SessionRuntimeHandle) -> Self {
+        Self {
+            handle,
+            budget_guard: None,
+            turn_bridge: None,
+            dangerous_deadline: None,
+            dangerous_expiry: None,
+        }
+    }
+
+    pub(crate) fn root_token(&self) -> CancellationToken {
+        self.handle.root_token()
+    }
+
+    pub(crate) fn attach_budget_guard(&mut self, guard: BudgetGuard) {
+        if let Some(previous) = self.budget_guard.replace(guard) {
+            drop(previous);
+        }
+    }
+
+    pub(crate) fn set_active_turn(&mut self, token: CancellationToken) {
+        if let Some(handle) = self.turn_bridge.take() {
+            handle.abort();
+        }
+        self.handle.set_active_turn(token.clone());
+        let root = self.handle.root_token();
+        if root.is_cancelled() {
+            token.cancel();
+            return;
+        }
+        if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+            self.turn_bridge = Some(runtime.spawn(async move {
+                tokio::select! {
+                    _ = root.cancelled() => token.cancel(),
+                    _ = token.cancelled() => {}
+                }
+            }));
+        } else {
+            // A bootstrapped engine without a runtime cannot maintain the
+            // session-to-turn safety link. Refuse the turn rather than
+            // silently installing a token expiry cannot reach.
+            token.cancel();
+        }
+    }
+
+    /// Arm the resolver-produced Dangerous lease against Tokio's monotonic
+    /// clock. Expiry permanently cancels the immutable session root.
+    pub(crate) fn arm_dangerous_lease(
+        &mut self,
+        grant: &wcore_types::execution_policy::DangerousSessionGrant,
+    ) -> Result<(), wcore_types::execution_policy::ExecutionPolicyError> {
+        if let Some(handle) = self.dangerous_expiry.take() {
+            handle.abort();
+        }
+        let remaining = grant
+            .remaining_ttl()
+            .ok_or(wcore_types::execution_policy::ExecutionPolicyError::DangerousGrantExpired)?;
+        let deadline = tokio::time::Instant::now()
+            .checked_add(remaining)
+            .ok_or(wcore_types::execution_policy::ExecutionPolicyError::DangerousExpiryOverflow)?;
+        let root = self.handle.root_token();
+        self.dangerous_deadline = Some(deadline);
+        self.dangerous_expiry = Some(tokio::spawn(async move {
+            tokio::time::sleep_until(deadline).await;
+            root.cancel();
+        }));
+        Ok(())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn dangerous_deadline(&self) -> Option<tokio::time::Instant> {
+        self.dangerous_deadline
+    }
+}
+
+impl Drop for SessionRuntimeGuard {
+    fn drop(&mut self) {
+        self.handle.root_token().cancel();
+        if let Some(handle) = self.turn_bridge.take() {
+            handle.abort();
+        }
+        if let Some(handle) = self.dangerous_expiry.take() {
+            handle.abort();
+        }
+    }
+}
+
 /// Build a child token that fires when the parent (or any ancestor) fires.
 /// Wraps `CancellationToken::child_token()` for callers that don't want
 /// to depend on `tokio_util` directly.
@@ -135,8 +265,23 @@ pub fn budget_linked_with_callback<F>(
 where
     F: FnOnce(BudgetTripPayload) + Send + 'static,
 {
-    let linked = parent.child_token();
-    let watcher = linked.clone();
+    budget_guard_for_token_with_callback(parent.child_token(), budget, on_exceeded)
+}
+
+/// Attach a budget watcher to an existing session token.
+///
+/// Unlike [`budget_linked_with_callback`], this does not mint a child token.
+/// Bootstrap uses it so the engine and every child spawner share one exact
+/// session cancellation root before the budget watcher is installed.
+pub(crate) fn budget_guard_for_token_with_callback<F>(
+    token: CancellationToken,
+    budget: ExecutionBudgetView,
+    on_exceeded: F,
+) -> BudgetGuard
+where
+    F: FnOnce(BudgetTripPayload) + Send + 'static,
+{
+    let watcher = token.clone();
     let handle = tokio::spawn(async move {
         let mut cb = Some(on_exceeded);
         loop {
@@ -161,7 +306,7 @@ where
         }
     });
     BudgetGuard {
-        token: linked,
+        token,
         handle: Some(handle),
     }
 }

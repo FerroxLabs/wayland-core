@@ -33,20 +33,19 @@ default = []
 live-docker = ["dep:bollard", "dep:futures"]
 # S3 — Landlock LSM ruleset applied to bwrap child via `pre_exec` (Linux-only).
 # Gated so macOS/Windows CI does not need to depend on the Linux-only crate.
-landlock = ["dep:landlock", "dep:libc"]
+landlock = ["dep:landlock"]
 # S4 — seccomp-bpf filter compiled in-process and handed to bwrap via
 # `--seccomp <fd>` (Linux-only). Gated because libseccomp-sys requires the
 # system libseccomp C library at link time which is not available on macOS/
 # Windows runners.
-seccomp = ["dep:libseccomp", "dep:libc"]
+seccomp = ["dep:libseccomp"]
+
+[target.'cfg(unix)'.dependencies]
+libc.workspace = true
 
 [target.'cfg(target_os = "linux")'.dependencies]
 landlock   = { version = "0.4", optional = true }
 libseccomp = { version = "0.4", optional = true }
-# Used by the seccomp wiring to clear FD_CLOEXEC on the BPF tempfile so it
-# survives the spawn into bwrap. Pulled in only when the `seccomp` feature
-# is enabled.
-libc       = { workspace = true, optional = true }
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.59", features = [

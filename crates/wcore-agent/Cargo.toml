@@ -236,6 +236,9 @@ serial_test.workspace = true
 inventory.workspace   = true
 criterion.workspace   = true
 
+[target.'cfg(unix)'.dev-dependencies]
+libc.workspace = true
+
 # ── Integration test binaries ──────────────────────────────────────────────
 [[test]]
 name = "e2e"
@@ -260,4 +263,3 @@ required-features = ["test-utils"]
 [[bench]]
 name    = "orchestration_graph_bench"
 harness = false
-

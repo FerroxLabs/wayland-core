@@ -160,6 +160,10 @@ pub struct AgentSpawner {
     /// for legacy callers; production attaches the engine's token via
     /// `with_cancel(...)`.
     cancel: tokio_util::sync::CancellationToken,
+    /// Production session handle. Reads the active turn token at spawn time,
+    /// so both per-turn host cancellation and immutable session expiry reach
+    /// children. Legacy/test spawners continue to use `cancel`.
+    session_runtime: Option<crate::cancel::SessionRuntimeHandle>,
     /// Crucible (Mixture-of-Providers) — optional resolver that turns a
     /// per-spawn `SubAgentConfig.provider` spec into a keyed provider. `None`
     /// (the default) preserves single-provider behaviour: every child inherits
@@ -186,6 +190,7 @@ impl AgentSpawner {
             sandbox_runtime,
             bus: None,
             cancel: tokio_util::sync::CancellationToken::new(),
+            session_runtime: None,
             resolver: None,
             budget_tracker: None,
             budget_identity: None,
@@ -213,6 +218,22 @@ impl AgentSpawner {
     pub fn with_cancel(mut self, cancel: tokio_util::sync::CancellationToken) -> Self {
         self.cancel = cancel;
         self
+    }
+
+    /// Bind production spawning to the session's shared active-turn handle.
+    pub(crate) fn with_session_runtime(
+        mut self,
+        runtime: crate::cancel::SessionRuntimeHandle,
+    ) -> Self {
+        self.session_runtime = Some(runtime);
+        self
+    }
+
+    fn active_cancel_token(&self) -> tokio_util::sync::CancellationToken {
+        self.session_runtime
+            .as_ref()
+            .map(crate::cancel::SessionRuntimeHandle::active_turn_token)
+            .unwrap_or_else(|| self.cancel.clone())
     }
 
     /// v0.8.0 Task J — attach an `AgentBus` so every `spawn_one` /
@@ -320,7 +341,7 @@ impl AgentSpawner {
         let output: Arc<dyn OutputSink> = Arc::new(NullSink);
         let mut engine = AgentEngine::new_with_provider(provider, config, tools, output);
         // Bind the child to the parent cancel token so a host cancel stops it.
-        engine.set_cancel_token(self.cancel.child_token());
+        engine.set_cancel_token(self.active_cancel_token().child_token());
 
         // v0.8.0 Task J — publish Spawned + FirstMessage before
         // entering the engine, then Completed/Errored on the way out.
@@ -565,7 +586,7 @@ impl AgentSpawner {
         let terminal_output = Arc::clone(&output);
         let mut engine = AgentEngine::new_with_provider(provider, config, tools, output);
         // Bind the child to the parent cancel token so a host cancel stops it.
-        engine.set_cancel_token(self.cancel.child_token());
+        engine.set_cancel_token(self.active_cancel_token().child_token());
 
         // v0.8.0 Task J — Spawned + FirstMessage before the turn,
         // Completed/Errored after. `extras.parent_call_id` (set by
@@ -669,6 +690,7 @@ impl AgentSpawner {
             sandbox_runtime: Arc::clone(&self.sandbox_runtime),
             bus: self.bus.clone(),
             cancel: self.cancel.clone(),
+            session_runtime: self.session_runtime.clone(),
             // CRITICAL (crucible): the resolver MUST be carried into every
             // cloned spawner. The fleet + parallel paths run each proposer on a
             // `clone_for_spawn()` copy; dropping the resolver here would make
@@ -759,7 +781,7 @@ impl Spawner for AgentSpawner {
         let output: Arc<dyn OutputSink> = Arc::new(NullSink);
         let mut engine = AgentEngine::new_with_provider(provider, config, tools, output);
         // Bind the child to the parent cancel token so a host cancel stops it.
-        engine.set_cancel_token(self.cancel.child_token());
+        engine.set_cancel_token(self.active_cancel_token().child_token());
         engine.set_initial_reasoning_effort(overrides.effort.clone());
 
         // v0.8.0 Task J — fork path publishes lifecycle too. Forks
@@ -1367,6 +1389,31 @@ mod posture_inheritance_tests {
             !child.system_prompt.unwrap().contains("HOST-SECRET-PROMPT"),
             "child must NOT inherit the host system prompt (no re-billing × N)"
         );
+    }
+
+    #[test]
+    fn production_spawner_and_clones_read_latest_session_turn() {
+        let root = tokio_util::sync::CancellationToken::new();
+        let runtime = crate::cancel::SessionRuntimeHandle::new(root);
+        let first_turn = tokio_util::sync::CancellationToken::new();
+        runtime.set_active_turn(first_turn.clone());
+        let spawner = AgentSpawner::new(Arc::new(NeverProvider), Config::default())
+            .with_session_runtime(runtime.clone());
+        let first_child = spawner.active_cancel_token().child_token();
+
+        let second_turn = tokio_util::sync::CancellationToken::new();
+        runtime.set_active_turn(second_turn.clone());
+        let cloned_spawner = spawner.clone_for_spawn();
+        let second_child = cloned_spawner.active_cancel_token().child_token();
+
+        first_turn.cancel();
+        assert!(first_child.is_cancelled());
+        assert!(
+            !second_child.is_cancelled(),
+            "a completed prior turn must not cancel a later child"
+        );
+        second_turn.cancel();
+        assert!(second_child.is_cancelled());
     }
 
     /// Rank 7 — a host cancel must propagate into spawned sub-agents. With the

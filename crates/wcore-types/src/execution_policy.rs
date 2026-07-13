@@ -5,6 +5,7 @@
 //! cannot deserialize a sandbox-bypass grant.
 
 use serde::{Deserialize, Serialize};
+use std::time::{Duration, Instant};
 use thiserror::Error;
 
 pub const DEFAULT_DANGEROUS_SESSION_TTL_SECS: u64 = 15 * 60;
@@ -172,13 +173,15 @@ impl DangerousLaunchRequest {
 
 /// Resolver-produced lease metadata. Runtime code must enforce `ttl_millis`
 /// with a monotonic clock. Unix time is display/audit metadata only.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, PartialEq, Eq, Serialize)]
 pub struct DangerousSessionGrant {
     source: PolicySource,
     activation_id: String,
     ttl_millis: u64,
     audit_expires_at_unix_ms: u64,
     managed_floor_active: bool,
+    #[serde(skip)]
+    monotonic_deadline: Instant,
 }
 
 impl DangerousSessionGrant {
@@ -200,6 +203,13 @@ impl DangerousSessionGrant {
 
     pub const fn managed_floor_active(&self) -> bool {
         self.managed_floor_active
+    }
+
+    /// Remaining authority according to the monotonic clock captured when the
+    /// trusted resolver created this one-shot grant.
+    pub fn remaining_ttl(&self) -> Option<Duration> {
+        self.monotonic_deadline
+            .checked_duration_since(Instant::now())
     }
 }
 
@@ -278,16 +288,28 @@ pub enum ExecutionPolicyError {
     DangerousTtlOutOfRange,
     #[error("dangerous session expiry overflowed")]
     DangerousExpiryOverflow,
+    #[error("dangerous session grant has expired")]
+    DangerousGrantExpired,
 }
 
 /// Resolve a local Dangerous request against the immutable session baseline.
 ///
-/// The returned TTL is a duration, not the security clock. Runtime enforcement
-/// must create a monotonic deadline and terminalize the session at expiry.
+/// Resolution binds the grant to a monotonic deadline. Runtime enforcement
+/// must arm the remaining duration and terminalize the session at expiry; the
+/// Unix timestamp is audit metadata only.
 pub fn resolve_dangerous_launch(
     baseline: &BaselineExecutionPolicy,
     request: DangerousLaunchRequest,
     audit_now_unix_ms: u64,
+) -> Result<DangerousSessionGrant, ExecutionPolicyError> {
+    resolve_dangerous_launch_at(baseline, request, audit_now_unix_ms, Instant::now())
+}
+
+fn resolve_dangerous_launch_at(
+    baseline: &BaselineExecutionPolicy,
+    request: DangerousLaunchRequest,
+    audit_now_unix_ms: u64,
+    monotonic_now: Instant,
 ) -> Result<DangerousSessionGrant, ExecutionPolicyError> {
     if matches!(
         baseline.managed_dangerous,
@@ -315,6 +337,9 @@ pub fn resolve_dangerous_launch(
     let audit_expires_at_unix_ms = audit_now_unix_ms
         .checked_add(ttl_millis)
         .ok_or(ExecutionPolicyError::DangerousExpiryOverflow)?;
+    let monotonic_deadline = monotonic_now
+        .checked_add(Duration::from_millis(ttl_millis))
+        .ok_or(ExecutionPolicyError::DangerousExpiryOverflow)?;
 
     Ok(DangerousSessionGrant {
         source: request.source,
@@ -322,6 +347,7 @@ pub fn resolve_dangerous_launch(
         ttl_millis,
         audit_expires_at_unix_ms,
         managed_floor_active: baseline.is_managed(),
+        monotonic_deadline,
     })
 }
 
@@ -446,6 +472,23 @@ mod tests {
             ),
             Err(ExecutionPolicyError::DangerousExpiryOverflow)
         );
+    }
+
+    #[test]
+    fn stale_dangerous_grant_has_no_remaining_authority() {
+        let now = Instant::now();
+        let issued_at = now
+            .checked_sub(Duration::from_secs(2))
+            .expect("test instant must support a two-second subtraction");
+        let grant = resolve_dangerous_launch_at(
+            &smart(),
+            DangerousLaunchRequest::cli(1, "one-shot"),
+            0,
+            issued_at,
+        )
+        .expect("historical resolution itself is valid");
+
+        assert_eq!(grant.remaining_ttl(), None);
     }
 
     #[test]

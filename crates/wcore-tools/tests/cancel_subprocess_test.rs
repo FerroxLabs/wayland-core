@@ -31,6 +31,8 @@ use tokio::process::Command;
 use tokio_util::sync::CancellationToken;
 
 use wcore_config::shell::{shell_command_argv, shell_command_builder};
+use wcore_sandbox::SandboxRegistry;
+use wcore_sandbox::backends::no_sandbox::NoSandboxBackend;
 use wcore_tools::bash::BashTool;
 use wcore_tools::context::ToolContext;
 use wcore_tools::vfs::RealFs;
@@ -152,16 +154,10 @@ async fn unkilled_command_survives_drop_negative_control() {
 /// `tokio::select!` race + helper-applied kill_on_drop reaping the
 /// child as the execute future drops.
 #[tokio::test]
-#[serial_test::serial]
 async fn bash_tool_returns_promptly_when_cancelled_mid_sleep() {
-    // Exercise the cancel path through a real exec, not the sandbox's
-    // fail-closed refusal (bwrap can't spawn in an unprivileged CI
-    // container). Opt into the documented no-sandbox degraded mode.
-    // SAFETY: test-only env mutation; `#[serial]` prevents env races.
-    unsafe {
-        std::env::set_var("WAYLAND_SANDBOX", "none");
-        std::env::set_var("WAYLAND_ALLOW_NO_SANDBOX", "1");
-    }
+    // Inject the exact backend under test. ToolContext defaults fail closed,
+    // so process-global environment toggles cannot prove this execution path.
+    let sandbox = Arc::new(SandboxRegistry::new(Arc::new(NoSandboxBackend::new())));
     let cancel = CancellationToken::new();
     let cancel2 = cancel.clone();
     tokio::spawn(async move {
@@ -174,7 +170,8 @@ async fn bash_tool_returns_promptly_when_cancelled_mid_sleep() {
         Arc::new(RealFs),
         None,
         Arc::new(NullToolOutputSink),
-    );
+    )
+    .with_sandbox(sandbox);
 
     let start = Instant::now();
     let result = BashTool

@@ -8,11 +8,15 @@ use wcore_mcp::manager::McpManager;
 use wcore_observability::sink::SpanSink;
 use wcore_plugin_api::registry::providers::PluginProvider;
 use wcore_providers::{CircuitConfig, LlmProvider, ResilientProvider};
+use wcore_types::execution_policy::DangerousSessionGrant;
 // E-H2: `CircuitReporter` / `NoOpCircuitReporter` are referenced by
 // fully-qualified path in the resilience wiring below.
 
 use crate::budget::{ExecutionBudget, ExecutionBudgetView};
-use crate::cancel::{BudgetGuard, CancellationToken, budget_linked_with_callback};
+use crate::cancel::{
+    CancellationToken, SessionRuntimeGuard, SessionRuntimeHandle,
+    budget_guard_for_token_with_callback,
+};
 use crate::engine::AgentEngine;
 use crate::output::OutputSink;
 use crate::session::Session;
@@ -59,13 +63,10 @@ pub struct BootstrapResult {
     /// against this token (A.4 dispatcher route through
     /// `execute_with_ctx`).
     ///
-    /// Wave RC (audit MAJOR #8) — this is now a [`BudgetGuard`] RAII
-    /// handle rather than a bare `CancellationToken`. Dropping the
-    /// `BootstrapResult` aborts the per-session budget-watcher tokio
-    /// task. The guard derefs to the underlying token so existing
-    /// `.is_cancelled()` / `.cancel()` / `.cancelled()` calls keep
-    /// working without churn.
-    pub cancel_root: BudgetGuard,
+    /// The engine owns the budget watcher and terminal session lifetime;
+    /// this clone is observation/control only. Dropping `BootstrapResult`
+    /// after moving out `engine` cannot disable budget cancellation.
+    pub cancel_root: CancellationToken,
     /// v0.8.1 U5 — channel runtime. `ChannelManager` is constructed
     /// at boot and seeded by
     /// `wcore_channels_registry::auto_register_from_user_config`,
@@ -196,6 +197,9 @@ pub struct AgentBootstrap {
     /// marked `only_for_assistant` is EXCLUDED (fail-closed). The json-stream
     /// host (desktop) threads the active assistant here via `--assistant`.
     active_assistant: Option<String>,
+    /// Trusted, resolver-produced local Dangerous lease. No config, wire,
+    /// environment, TUI, or ACP surface populates this field.
+    dangerous_grant: Option<DangerousSessionGrant>,
 }
 
 impl AgentBootstrap {
@@ -215,6 +219,7 @@ impl AgentBootstrap {
             persona_tool_allowlist: None,
             defer_config_mcp: false,
             active_assistant: None,
+            dangerous_grant: None,
         }
     }
 
@@ -268,6 +273,13 @@ impl AgentBootstrap {
         if !allowed.is_empty() {
             self.persona_tool_allowlist = Some(allowed);
         }
+        self
+    }
+
+    /// Install an already validated local Dangerous lease. Deliberately not
+    /// wired to any user-facing host surface until containment proof is green.
+    pub fn with_dangerous_grant(mut self, grant: DangerousSessionGrant) -> Self {
+        self.dangerous_grant = Some(grant);
         self
     }
 
@@ -339,6 +351,20 @@ impl AgentBootstrap {
     pub async fn build(mut self) -> anyhow::Result<BootstrapResult> {
         let cwd = &self.workspace;
         let cwd_path = std::path::Path::new(cwd);
+        // Mint the immutable session root before any child-capable tools are
+        // built. The budget watcher is attached later, after engine creation,
+        // but the spawner and engine then share this exact token lineage.
+        let session_cancel_root = CancellationToken::new();
+        let session_runtime = SessionRuntimeHandle::new(session_cancel_root.clone());
+        let mut session_guard = SessionRuntimeGuard::new(session_runtime.clone());
+        let dangerous_grant = self.dangerous_grant.take();
+        if dangerous_grant.is_some() {
+            // Dangerous is one typed authority bundle: its resolver-produced
+            // lease bypasses both interactive approvals and the sandbox. Set
+            // this before any confirmer, skill checker, spawner, or engine is
+            // built so every execution path observes the same posture.
+            self.config.tools.auto_approve = true;
+        }
 
         // Wave OL: provider construction is now DEFERRED until after
         // plugin init, so the `plugin_provider_router` (if any) can
@@ -680,9 +706,15 @@ impl AgentBootstrap {
         // persisted config or environment may select another real backend,
         // but cannot disable containment; only a resolver-produced local
         // Dangerous launch grant can construct that runtime.
-        let sandbox_runtime = Arc::new(wcore_sandbox::SandboxRegistry::required_for_session(
-            self.config.tools.sandbox.as_deref(),
-        )?);
+        if let Some(grant) = dangerous_grant.as_ref() {
+            session_guard.arm_dangerous_lease(grant)?;
+        }
+        let sandbox_runtime = Arc::new(match dangerous_grant.as_ref() {
+            Some(grant) => wcore_sandbox::SandboxRegistry::dangerous(grant),
+            None => wcore_sandbox::SandboxRegistry::required_for_session(
+                self.config.tools.sandbox.as_deref(),
+            )?,
+        });
         if self.config.tools.allow_no_sandbox == Some(true) {
             tracing::warn!(
                 target: "wcore_agent::bootstrap",
@@ -1878,6 +1910,7 @@ impl AgentBootstrap {
         let mut spawner_builder =
             crate::spawner::AgentSpawner::new(provider.clone(), self.config.clone())
                 .with_sandbox_runtime(registry.sandbox_runtime())
+                .with_session_runtime(session_runtime.clone())
                 .with_bus(Arc::clone(&agent_bus));
         if let Some(tracker) = council_budget_tracker.as_ref() {
             // TODO(stage3): use the live per-conversation session id.
@@ -2584,14 +2617,19 @@ impl AgentBootstrap {
         // watcher's callback never fires.
         let exec_budget: ExecutionBudget = (&budget_cfg).into();
         let budget = exec_budget.start_root();
-        let cancel_root =
-            budget_linked_with_callback(CancellationToken::new(), budget.clone(), move |payload| {
+        let cancel_guard = budget_guard_for_token_with_callback(
+            session_cancel_root,
+            budget.clone(),
+            move |payload| {
                 sink_for_budget.emit_budget_exceeded(
                     &payload.reason,
                     &payload.observed,
                     &payload.limit,
                 );
-            });
+            },
+        );
+        session_guard.attach_budget_guard(cancel_guard);
+        let cancel_root = engine.install_session_cancel_guard(session_guard);
 
         // F-014 (CRIT, Aud-4/Aud-11): construct ChannelManager, auto-register
         // adapters, lift the manager to Arc<RwLock<ChannelManager>>, (optionally)

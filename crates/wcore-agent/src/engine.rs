@@ -1855,9 +1855,9 @@ pub struct AgentEngine {
     /// shadows) on the pre-U6 no-op path — the bucketer still observes,
     /// but no on-disk draft is written.
     skill_drafter: Option<Arc<crate::auto_skill::SkillDrafter>>,
-    /// AUDIT A2 / B1 — session-root cooperative cancellation token.
+    /// AUDIT A2 / B1 — active-turn cooperative cancellation token.
     ///
-    /// One token per engine, threaded into every per-turn `GraphContext`
+    /// Threaded into every per-turn `GraphContext`
     /// and every per-call `ToolContext` so a host (TUI, ACP server) that
     /// fires `cancel_token()` actually reaches a running tool and stops
     /// the turn loop between iterations. Before this field the per-turn
@@ -1866,10 +1866,14 @@ pub struct AgentEngine {
     /// host cancel had no cooperative path and a wedged tool could only
     /// be escaped by killing the process.
     ///
-    /// The engine never fires it itself (that is the host's job); the
-    /// loop only *observes* it between turns and propagates a child
-    /// token into tool dispatch.
+    /// A bootstrapped engine also owns an immutable session root through
+    /// `session_runtime`; root cancellation is bridged into this token while
+    /// ordinary host cancellation remains scoped to the current turn.
     cancel_token: tokio_util::sync::CancellationToken,
+    /// Immutable session lifetime authority. It owns the budget watcher,
+    /// Dangerous lease and root-to-turn bridge. Hosts may replace
+    /// `cancel_token` for each turn, but cannot replace the session root.
+    session_runtime: Option<crate::cancel::SessionRuntimeGuard>,
     /// AUDIT B-2 / D-5 — handles for background reliability tasks
     /// (currently: the `ToolApprovalManager` TTL reaper). Kept separate
     /// from `decay_handles` so the memory-scheduler accounting that
@@ -1980,6 +1984,7 @@ pub struct AgentEngine {
 
 impl Drop for AgentEngine {
     fn drop(&mut self) {
+        self.cancel_token.cancel();
         // M3.2 — abort every background decay scheduler task on shutdown.
         // `JoinHandle::abort` is safe on already-finished tasks (no-op),
         // so we don't need to inspect state.
@@ -2221,6 +2226,7 @@ impl AgentEngine {
             // AUDIT A2 / B1 — fresh session-root cancellation token.
             // Hosts replace/observe it via `cancel_token()`.
             cancel_token: tokio_util::sync::CancellationToken::new(),
+            session_runtime: None,
             // AUDIT B-2 / D-5 — reaper handle storage; populated by
             // `set_approval_manager`, aborted by `Drop`.
             background_handles: Vec::new(),
@@ -2401,6 +2407,7 @@ impl AgentEngine {
             // AUDIT A2 / B1 — fresh session-root cancellation token.
             // Hosts replace/observe it via `cancel_token()`.
             cancel_token: tokio_util::sync::CancellationToken::new(),
+            session_runtime: None,
             // AUDIT B-2 / D-5 — reaper handle storage; populated by
             // `set_approval_manager`, aborted by `Drop`.
             background_handles: Vec::new(),
@@ -2573,11 +2580,10 @@ impl AgentEngine {
         (self.total_usage.clone(), self.run_usage.clone())
     }
 
-    /// AUDIT A2 / B1 — clone the engine's session-root cancellation
-    /// token.
+    /// AUDIT A2 / B1 — clone the engine's active-turn cancellation token.
     ///
     /// A host (TUI, ACP server) holds the clone and calls `.cancel()` on
-    /// it to cooperatively stop a running agent. The `run()` loop checks
+    /// it to cooperatively stop the current run. The `run()` loop checks
     /// the token between turns and threads a child of it into every
     /// per-turn `GraphContext` and every per-call `ToolContext`, so a
     /// cancel reaches an in-flight tool. The token is `Arc`-backed —
@@ -2586,12 +2592,27 @@ impl AgentEngine {
         self.cancel_token.clone()
     }
 
-    /// AUDIT A2 — install an externally-owned cancellation token as the
-    /// session root. Use this when the host wants to scope agent
-    /// cancellation to a parent token (e.g. a child of the process-wide
-    /// shutdown token). Must be called before `run()`. When unused the
-    /// engine keeps the fresh token minted at construction.
+    /// Install the engine-owned session cancellation root and take ownership
+    /// of its budget watcher. Called exactly once by production bootstrap.
+    pub(crate) fn install_session_cancel_guard(
+        &mut self,
+        mut runtime: crate::cancel::SessionRuntimeGuard,
+    ) -> tokio_util::sync::CancellationToken {
+        let root = runtime.root_token();
+        self.cancel_token = root.clone();
+        runtime.set_active_turn(root.clone());
+        self.session_runtime = Some(runtime);
+        root
+    }
+
+    /// AUDIT A2 — install an externally-owned cancellation token for the next
+    /// turn. Must be called before `run()`. In a bootstrapped engine the
+    /// immutable session root is bridged into this token; cancelling this token
+    /// does not cancel or revive that root.
     pub fn set_cancel_token(&mut self, token: tokio_util::sync::CancellationToken) {
+        if let Some(runtime) = self.session_runtime.as_mut() {
+            runtime.set_active_turn(token.clone());
+        }
         self.cancel_token = token;
     }
 
@@ -10130,6 +10151,7 @@ mod set_config_tests {
             // AUDIT A2 / B1 — fresh session-root cancellation token.
             // Hosts replace/observe it via `cancel_token()`.
             cancel_token: tokio_util::sync::CancellationToken::new(),
+            session_runtime: None,
             // AUDIT B-2 / D-5 — reaper handle storage; populated by
             // `set_approval_manager`, aborted by `Drop`.
             background_handles: Vec::new(),
@@ -11793,6 +11815,7 @@ mod phase6_tests {
             // AUDIT A2 / B1 — fresh session-root cancellation token.
             // Hosts replace/observe it via `cancel_token()`.
             cancel_token: tokio_util::sync::CancellationToken::new(),
+            session_runtime: None,
             // AUDIT B-2 / D-5 — reaper handle storage; populated by
             // `set_approval_manager`, aborted by `Drop`.
             background_handles: Vec::new(),
@@ -12091,6 +12114,7 @@ mod compact_tests {
             // AUDIT A2 / B1 — fresh session-root cancellation token.
             // Hosts replace/observe it via `cancel_token()`.
             cancel_token: tokio_util::sync::CancellationToken::new(),
+            session_runtime: None,
             // AUDIT B-2 / D-5 — reaper handle storage; populated by
             // `set_approval_manager`, aborted by `Drop`.
             background_handles: Vec::new(),
@@ -13419,6 +13443,7 @@ mod plan_mode_tests {
             // AUDIT A2 / B1 — fresh session-root cancellation token.
             // Hosts replace/observe it via `cancel_token()`.
             cancel_token: tokio_util::sync::CancellationToken::new(),
+            session_runtime: None,
             // AUDIT B-2 / D-5 — reaper handle storage; populated by
             // `set_approval_manager`, aborted by `Drop`.
             background_handles: Vec::new(),
@@ -13850,6 +13875,7 @@ mod hook_integration_tests {
             // AUDIT A2 / B1 — fresh session-root cancellation token.
             // Hosts replace/observe it via `cancel_token()`.
             cancel_token: tokio_util::sync::CancellationToken::new(),
+            session_runtime: None,
             // AUDIT B-2 / D-5 — reaper handle storage; populated by
             // `set_approval_manager`, aborted by `Drop`.
             background_handles: Vec::new(),
@@ -14691,6 +14717,7 @@ mod approval_bridge_engine_tests {
             // AUDIT A2 / B1 — fresh session-root cancellation token.
             // Hosts replace/observe it via `cancel_token()`.
             cancel_token: tokio_util::sync::CancellationToken::new(),
+            session_runtime: None,
             // AUDIT B-2 / D-5 — reaper handle storage; populated by
             // `set_approval_manager`, aborted by `Drop`.
             background_handles: Vec::new(),
@@ -15709,6 +15736,7 @@ mod user_model_writeback_tests {
             // AUDIT A2 / B1 — fresh session-root cancellation token.
             // Hosts replace/observe it via `cancel_token()`.
             cancel_token: tokio_util::sync::CancellationToken::new(),
+            session_runtime: None,
             // AUDIT B-2 / D-5 — reaper handle storage; populated by
             // `set_approval_manager`, aborted by `Drop`.
             background_handles: Vec::new(),
@@ -16519,6 +16547,129 @@ mod audit_2026_05_22_tests {
         assert!(
             engine.cancel_token().is_cancelled(),
             "cancelling a host clone must cancel the engine's root token"
+        );
+    }
+
+    #[tokio::test]
+    async fn engine_owned_budget_guard_cancels_current_host_turn() {
+        let mut engine = engine_with(Arc::new(ScriptedProvider::new(vec![])));
+        let budget = crate::budget::ExecutionBudget {
+            max_wall_time: Some(std::time::Duration::from_millis(20)),
+            ..Default::default()
+        }
+        .start_root();
+        let session_root = tokio_util::sync::CancellationToken::new();
+        let runtime = crate::cancel::SessionRuntimeHandle::new(session_root.clone());
+        let guard =
+            crate::cancel::budget_guard_for_token_with_callback(session_root, budget, |_| {});
+        let mut session_guard = crate::cancel::SessionRuntimeGuard::new(runtime.clone());
+        session_guard.attach_budget_guard(guard);
+        let observed_root = engine.install_session_cancel_guard(session_guard);
+        let host_turn = tokio_util::sync::CancellationToken::new();
+        engine.set_cancel_token(host_turn.clone());
+
+        tokio::time::timeout(std::time::Duration::from_millis(250), host_turn.cancelled())
+            .await
+            .expect("budget expiry must reach the active host turn");
+        assert!(observed_root.is_cancelled());
+        assert!(engine.cancel_token().is_cancelled());
+        assert!(runtime.active_turn_token().is_cancelled());
+    }
+
+    #[tokio::test]
+    async fn host_turn_cancel_does_not_terminalize_session_root() {
+        let mut engine = engine_with(Arc::new(ScriptedProvider::new(vec![])));
+        let budget = crate::budget::ExecutionBudget::default().start_root();
+        let root = tokio_util::sync::CancellationToken::new();
+        let runtime = crate::cancel::SessionRuntimeHandle::new(root.clone());
+        let guard = crate::cancel::budget_guard_for_token_with_callback(root, budget, |_| {});
+        let mut session_guard = crate::cancel::SessionRuntimeGuard::new(runtime.clone());
+        session_guard.attach_budget_guard(guard);
+        let session_root = engine.install_session_cancel_guard(session_guard);
+        let host_turn = tokio_util::sync::CancellationToken::new();
+        engine.set_cancel_token(host_turn.clone());
+
+        host_turn.cancel();
+        tokio::task::yield_now().await;
+
+        assert!(engine.cancel_token().is_cancelled());
+        assert!(runtime.active_turn_token().is_cancelled());
+        assert!(
+            !session_root.is_cancelled(),
+            "ordinary host cancellation must stop only the current turn"
+        );
+    }
+
+    #[tokio::test]
+    async fn dropping_engine_terminalizes_owned_session_root() {
+        let mut engine = engine_with(Arc::new(ScriptedProvider::new(vec![])));
+        let root = tokio_util::sync::CancellationToken::new();
+        let runtime = crate::cancel::SessionRuntimeHandle::new(root.clone());
+        let budget = crate::budget::ExecutionBudget::default().start_root();
+        let budget_guard =
+            crate::cancel::budget_guard_for_token_with_callback(root.clone(), budget, |_| {});
+        let mut session_guard = crate::cancel::SessionRuntimeGuard::new(runtime);
+        session_guard.attach_budget_guard(budget_guard);
+        engine.install_session_cancel_guard(session_guard);
+
+        drop(engine);
+
+        assert!(
+            root.is_cancelled(),
+            "moving the engine out of BootstrapResult must leave it as the session lifetime owner"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn dangerous_lease_uses_monotonic_deadline_and_stays_terminal() {
+        use wcore_types::execution_policy::{
+            ApprovalPolicy, BaselineExecutionPolicy, DangerousLaunchRequest, PolicySource,
+            resolve_dangerous_launch,
+        };
+
+        let grant = resolve_dangerous_launch(
+            &BaselineExecutionPolicy::smart(ApprovalPolicy::Prompt, PolicySource::Default),
+            DangerousLaunchRequest::cli(1, "test-activation"),
+            9_999_999_999_000,
+        )
+        .expect("trusted local request must resolve");
+        let mut engine = engine_with(Arc::new(ScriptedProvider::new(vec![])));
+        let root = tokio_util::sync::CancellationToken::new();
+        let runtime = crate::cancel::SessionRuntimeHandle::new(root.clone());
+        let budget = crate::budget::ExecutionBudget::default().start_root();
+        let budget_guard =
+            crate::cancel::budget_guard_for_token_with_callback(root, budget, |_| {});
+        let mut session_guard = crate::cancel::SessionRuntimeGuard::new(runtime);
+        session_guard.attach_budget_guard(budget_guard);
+        let armed_at = tokio::time::Instant::now();
+        session_guard
+            .arm_dangerous_lease(&grant)
+            .expect("validated TTL must fit the monotonic clock");
+        let deadline = session_guard
+            .dangerous_deadline()
+            .expect("lease must expose its armed monotonic deadline");
+        assert!(deadline > armed_at);
+        assert!(deadline <= armed_at + std::time::Duration::from_secs(1));
+        let session_root = engine.install_session_cancel_guard(session_guard);
+        let active_turn = tokio_util::sync::CancellationToken::new();
+        engine.set_cancel_token(active_turn.clone());
+
+        let remaining = deadline.duration_since(armed_at);
+        tokio::time::advance(remaining - std::time::Duration::from_millis(1)).await;
+        tokio::task::yield_now().await;
+        assert!(!session_root.is_cancelled());
+        assert!(!active_turn.is_cancelled());
+
+        tokio::time::sleep_until(deadline).await;
+        tokio::task::yield_now().await;
+        assert!(session_root.is_cancelled());
+        assert!(active_turn.is_cancelled());
+
+        let replacement_turn = tokio_util::sync::CancellationToken::new();
+        engine.set_cancel_token(replacement_turn.clone());
+        assert!(
+            replacement_turn.is_cancelled(),
+            "an expired Dangerous session cannot be revived by a new host turn"
         );
     }
 

@@ -11,9 +11,11 @@
 use super::SandboxBackend;
 use crate::error::{Result, SandboxError};
 use crate::manifest::SandboxManifest;
-use crate::{ResourceLimitEnforcement, SandboxCommand, SandboxOutput};
+use crate::{ResourceLimitEnforcement, SandboxChunk, SandboxCommand, SandboxOutput};
 use async_trait::async_trait;
-use std::sync::Once;
+use std::process::Stdio;
+use std::sync::{Arc, Once};
+use tokio::io::AsyncReadExt;
 
 static WARN_ONCE: Once = Once::new();
 
@@ -34,6 +36,31 @@ pub struct NoSandboxBackend;
 impl NoSandboxBackend {
     pub fn new() -> Self {
         Self
+    }
+
+    fn command(
+        manifest: &SandboxManifest,
+        cmd: &SandboxCommand,
+    ) -> Result<tokio::process::Command> {
+        let program = cmd
+            .argv
+            .first()
+            .ok_or_else(|| SandboxError::ExecFailed("empty argv".into()))?;
+        let mut builder = tokio::process::Command::new(program);
+        if cmd.argv.len() > 1 {
+            builder.args(&cmd.argv[1..]);
+        }
+        if let Some(cwd) = &cmd.cwd {
+            builder.current_dir(cwd);
+        }
+        builder.kill_on_drop(true);
+        super::process_tree::isolate(&mut builder);
+        builder.env_clear();
+        for (k, v) in &manifest.env {
+            builder.env(k, v);
+        }
+        builder.stdout(Stdio::piped()).stderr(Stdio::piped());
+        Ok(builder)
     }
 }
 
@@ -58,41 +85,111 @@ impl SandboxBackend for NoSandboxBackend {
         manifest: &SandboxManifest,
         cmd: SandboxCommand,
     ) -> Result<SandboxOutput> {
-        let program = cmd
-            .argv
-            .first()
-            .ok_or_else(|| SandboxError::ExecFailed("empty argv".into()))?;
-        let mut builder = tokio::process::Command::new(program);
-        if cmd.argv.len() > 1 {
-            builder.args(&cmd.argv[1..]);
-        }
-        if let Some(cwd) = &cmd.cwd {
-            builder.current_dir(cwd);
-        }
         // S9: kill the child if this future is dropped (e.g. when a caller
         // races us against a timeout / cancellation token). Without this
         // a dropped `output()` future leaves a zombie subprocess — the
         // same reliability blocker `wcore_config::shell` fixed for the
         // shell helpers. Routing BashTool through the sandbox must not
         // reintroduce that leak.
-        builder.kill_on_drop(true);
-        // Scrub host env, then inject only what the manifest declares.
-        // Mirrors the real backends so disabling sandbox does not silently
-        // leak host secrets to the child.
-        builder.env_clear();
-        for (k, v) in &manifest.env {
-            builder.env(k, v);
-        }
-        let output = builder
-            .output()
+        let child = Self::command(manifest, &cmd)?
+            .spawn()
+            .map_err(|e| SandboxError::ExecFailed(e.to_string()))?;
+        let mut process_tree = super::process_tree::ProcessTreeGuard::new(child.id());
+        let output = child
+            .wait_with_output()
             .await
             .map_err(|e| SandboxError::ExecFailed(e.to_string()))?;
+        process_tree.disarm();
         Ok(SandboxOutput {
             exit_code: output.status.code().unwrap_or(-1),
             stdout: output.stdout,
             stderr: output.stderr,
             resource_limits: ResourceLimitEnforcement::None,
         })
+    }
+
+    fn execute_streaming(
+        self: Arc<Self>,
+        manifest: &SandboxManifest,
+        cmd: SandboxCommand,
+    ) -> Result<tokio::sync::mpsc::Receiver<SandboxChunk>> {
+        let mut child = Self::command(manifest, &cmd)?
+            .spawn()
+            .map_err(|e| SandboxError::ExecFailed(e.to_string()))?;
+        let mut stdout = child
+            .stdout
+            .take()
+            .ok_or_else(|| SandboxError::ExecFailed("child stdout was not piped".into()))?;
+        let mut stderr = child
+            .stderr
+            .take()
+            .ok_or_else(|| SandboxError::ExecFailed("child stderr was not piped".into()))?;
+        let process_tree = super::process_tree::ProcessTreeGuard::new(child.id());
+        let (tx, rx) = tokio::sync::mpsc::channel(super::STREAM_CHANNEL_CAP);
+
+        tokio::spawn(async move {
+            let mut process_tree = process_tree;
+            let mut stdout_open = true;
+            let mut stderr_open = true;
+            let mut stdout_buf = [0_u8; 8 * 1024];
+            let mut stderr_buf = [0_u8; 8 * 1024];
+            let mut exit_code = None;
+            let wait = child.wait();
+            tokio::pin!(wait);
+
+            while stdout_open || stderr_open || exit_code.is_none() {
+                tokio::select! {
+                    _ = tx.closed() => return,
+                    read = stdout.read(&mut stdout_buf), if stdout_open => match read {
+                        Ok(0) => stdout_open = false,
+                        Ok(n) => {
+                            if tx.send(SandboxChunk::Stdout(stdout_buf[..n].to_vec())).await.is_err() {
+                                return;
+                            }
+                        }
+                        Err(error) => {
+                            let _ = tx.send(SandboxChunk::Stderr(
+                                format!("failed to read child stdout: {error}").into_bytes(),
+                            )).await;
+                            return;
+                        }
+                    },
+                    read = stderr.read(&mut stderr_buf), if stderr_open => match read {
+                        Ok(0) => stderr_open = false,
+                        Ok(n) => {
+                            if tx.send(SandboxChunk::Stderr(stderr_buf[..n].to_vec())).await.is_err() {
+                                return;
+                            }
+                        }
+                        Err(error) => {
+                            let _ = tx.send(SandboxChunk::Stderr(
+                                format!("failed to read child stderr: {error}").into_bytes(),
+                            )).await;
+                            return;
+                        }
+                    },
+                    status = &mut wait, if exit_code.is_none() => match status {
+                        Ok(status) => exit_code = Some(status.code().unwrap_or(-1)),
+                        Err(error) => {
+                            let _ = tx.send(SandboxChunk::Stderr(
+                                format!("failed to wait for child: {error}").into_bytes(),
+                            )).await;
+                            return;
+                        }
+                    },
+                }
+            }
+
+            process_tree.disarm();
+            let _ = tx
+                .send(SandboxChunk::Exit {
+                    exit_code: exit_code.expect("loop exits only after child status is available"),
+                    resource_limits: ResourceLimitEnforcement::None,
+                })
+                .await;
+        });
+
+        Ok(rx)
     }
 }
 
@@ -144,6 +241,80 @@ mod tests {
             .await
             .unwrap_err();
         assert!(matches!(err, SandboxError::ExecFailed(_)));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn dropping_stream_kills_direct_child_and_background_descendant() {
+        use std::sync::Arc;
+
+        fn process_running(pid: u32) -> bool {
+            // SAFETY: signal 0 only checks whether the process exists.
+            if unsafe { libc::kill(pid as libc::pid_t, 0) } != 0 {
+                return false;
+            }
+            #[cfg(target_os = "linux")]
+            if let Ok(stat) = std::fs::read_to_string(format!("/proc/{pid}/stat"))
+                && let Some((_, fields)) = stat.rsplit_once(") ")
+                && fields.starts_with('Z')
+            {
+                return false;
+            }
+            true
+        }
+
+        async fn read_pid(path: &std::path::Path) -> u32 {
+            tokio::time::timeout(std::time::Duration::from_secs(2), async {
+                loop {
+                    if let Ok(raw) = std::fs::read_to_string(path)
+                        && let Ok(pid) = raw.trim().parse()
+                    {
+                        break pid;
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .expect("child must publish its PID")
+        }
+
+        async fn wait_gone(pid: u32) {
+            tokio::time::timeout(std::time::Duration::from_secs(2), async {
+                while process_running(pid) {
+                    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .expect("process group member must die after receiver drop");
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let shell_pid_file = dir.path().join("shell.pid");
+        let child_pid_file = dir.path().join("child.pid");
+        let script = format!(
+            "echo $$ > '{}'; sleep 30 & echo $! > '{}'; wait",
+            shell_pid_file.display(),
+            child_pid_file.display()
+        );
+        let backend = Arc::new(NoSandboxBackend::new());
+        let rx = backend
+            .execute_streaming(
+                &SandboxManifest::default(),
+                SandboxCommand {
+                    argv: vec!["/bin/sh".into(), "-c".into(), script],
+                    cwd: None,
+                },
+            )
+            .unwrap();
+        let shell_pid = read_pid(&shell_pid_file).await;
+        let child_pid = read_pid(&child_pid_file).await;
+        assert!(process_running(shell_pid));
+        assert!(process_running(child_pid));
+
+        drop(rx);
+
+        wait_gone(shell_pid).await;
+        wait_gone(child_pid).await;
     }
 
     #[test]

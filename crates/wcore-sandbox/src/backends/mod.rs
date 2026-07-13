@@ -15,6 +15,7 @@ pub mod bwrap_landlock;
 pub mod bwrap_seccomp;
 pub mod docker;
 pub mod no_sandbox;
+mod process_tree;
 #[cfg(target_os = "macos")]
 pub mod sandbox_exec;
 
@@ -65,7 +66,11 @@ pub trait SandboxBackend: Send + Sync + 'static {
         // Own the manifest so the task does not borrow the caller's stack.
         let manifest = manifest.clone();
         tokio::spawn(async move {
-            match self.execute(&manifest, cmd).await {
+            let result = tokio::select! {
+                _ = tx.closed() => return,
+                result = self.execute(&manifest, cmd) => result,
+            };
+            match result {
                 Ok(out) => {
                     if !out.stdout.is_empty() {
                         let _ = tx.send(SandboxChunk::Stdout(out.stdout)).await;
@@ -121,5 +126,76 @@ pub trait SandboxBackend: Send + Sync + 'static {
     /// command. Default `false`. See FerroxLabs/wayland#413.
     fn blocks_powershell(&self) -> bool {
         false
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    struct PendingBackend {
+        dropped: Arc<AtomicBool>,
+        entered: Arc<tokio::sync::Notify>,
+    }
+
+    struct DropProbe(Arc<AtomicBool>);
+
+    impl Drop for DropProbe {
+        fn drop(&mut self) {
+            self.0.store(true, Ordering::SeqCst);
+        }
+    }
+
+    #[async_trait]
+    impl SandboxBackend for PendingBackend {
+        async fn execute(
+            &self,
+            _manifest: &SandboxManifest,
+            _cmd: SandboxCommand,
+        ) -> Result<SandboxOutput> {
+            let _probe = DropProbe(Arc::clone(&self.dropped));
+            self.entered.notify_one();
+            std::future::pending().await
+        }
+
+        fn name(&self) -> &'static str {
+            "pending-test"
+        }
+
+        fn is_available(&self) -> bool {
+            true
+        }
+    }
+
+    #[tokio::test]
+    async fn dropping_stream_receiver_drops_backend_execution() {
+        let dropped = Arc::new(AtomicBool::new(false));
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let backend = Arc::new(PendingBackend {
+            dropped: Arc::clone(&dropped),
+            entered: Arc::clone(&entered),
+        });
+        let rx = backend
+            .execute_streaming(
+                &SandboxManifest::default(),
+                SandboxCommand {
+                    argv: vec!["pending".into()],
+                    cwd: None,
+                },
+            )
+            .expect("stream worker must start");
+        tokio::time::timeout(std::time::Duration::from_millis(250), entered.notified())
+            .await
+            .expect("backend execution must start before receiver drop");
+        drop(rx);
+
+        tokio::time::timeout(std::time::Duration::from_millis(250), async {
+            while !dropped.load(Ordering::SeqCst) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("receiver drop must cancel the backend execution future");
     }
 }
