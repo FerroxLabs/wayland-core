@@ -5,8 +5,8 @@
 //! SSH connection, or cloud executor. Every execution happens in memory and
 //! every attestation is explicitly fixture-only.
 
-use base64::engine::general_purpose::STANDARD as BASE64;
 use base64::Engine as _;
+use base64::engine::general_purpose::STANDARD as BASE64;
 use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -618,16 +618,14 @@ fn validate_script(script: &RemoteExecutionScript) -> Result<(), RemoteFixtureEr
     if script.events.len() > MAX_EVENTS {
         return Err(RemoteFixtureError::TooManyEvents { limit: MAX_EVENTS });
     }
-    let mut expected = 2_u64;
     let mut total_text = 0_usize;
-    for event in &script.events {
+    for (expected, event) in (2_u64..).zip(&script.events) {
         if event.sequence != expected {
             return Err(RemoteFixtureError::InvalidEventSequence {
                 expected,
                 observed: event.sequence,
             });
         }
-        expected += 1;
         if event.text.len() > MAX_EVENT_TEXT_BYTES {
             return Err(RemoteFixtureError::EventTextTooLarge {
                 limit: MAX_EVENT_TEXT_BYTES,
@@ -728,13 +726,11 @@ fn validate_receipt_semantics(body: &RemoteExecutionReceiptBody) -> Result<(), R
         },
         RemoteExecutionEventKind::TaskAccepted { .. },
     ) = (&body.terminal, first)
-    {
-        if resource != &ResourceKind::OutputBytes
+        && (resource != &ResourceKind::OutputBytes
             || requested <= limit
-            || limit != &body.task.resources.output_bytes
-        {
-            return Err(RemoteFixtureError::InvalidReceiptSemantics);
-        }
+            || limit != &body.task.resources.output_bytes)
+    {
+        return Err(RemoteFixtureError::InvalidReceiptSemantics);
     }
 
     let last = &body.events[body.events.len() - 1].event;

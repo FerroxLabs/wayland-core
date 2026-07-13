@@ -143,10 +143,9 @@ fn normalize_fixture_config(value: &mut toml::Value, root: &str) {
             if let Ok(mut url) = reqwest::Url::parse(text)
                 && matches!(url.host_str(), Some("localhost" | "127.0.0.1" | "::1"))
                 && url.port().is_some()
+                && url.set_port(Some(0)).is_ok()
             {
-                if url.set_port(Some(0)).is_ok() {
-                    *text = url.to_string();
-                }
+                *text = url.to_string();
             }
         }
         toml::Value::Array(values) => {
