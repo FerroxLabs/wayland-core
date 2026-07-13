@@ -132,7 +132,7 @@ fn prefix_boundary(text: &[u8], start: usize) -> bool {
 }
 
 fn suffix_boundary(text: &[u8], end: usize) -> bool {
-    end == text.len() || matches!(text[end], b'/' | b'\\')
+    end == text.len() || text[end].is_ascii_whitespace() || matches!(text[end], b'/' | b'\\')
 }
 
 fn tagged_bytes(hasher: &mut Sha256, tag: u8, bytes: &[u8]) {
@@ -163,6 +163,25 @@ mod tests {
         );
         let second_evidence = format!(
             "Persistent memory lives at `{}/.wayland-core/memory`.",
+            second.path().display()
+        );
+
+        assert_eq!(
+            semantic_sha256(b"test", first_evidence.as_bytes(), first.path()).unwrap(),
+            semantic_sha256(b"test", second_evidence.as_bytes(), second.path()).unwrap()
+        );
+    }
+
+    #[test]
+    fn line_ending_is_a_workspace_boundary() {
+        let first = tempfile::tempdir().unwrap();
+        let second = tempfile::tempdir().unwrap();
+        let first_evidence = format!(
+            "Working directory: {}\nNext section",
+            first.path().display()
+        );
+        let second_evidence = format!(
+            "Working directory: {}\nNext section",
             second.path().display()
         );
 
