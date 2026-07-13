@@ -517,6 +517,59 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn model_resolver_rechecks_lazily_loaded_local_visibility() {
+        let tmp = tempfile::tempdir().unwrap();
+        let skill_dir = tmp.path().join("late-hidden");
+        std::fs::create_dir_all(&skill_dir).unwrap();
+        let skill_path = skill_dir.join("SKILL.md");
+        std::fs::write(
+            &skill_path,
+            "---\nname: late-hidden\ndescription: hidden\n\
+             hide-from-slash-command-tool: true\n---\n\nSECRET BODY\n",
+        )
+        .unwrap();
+
+        let mut stale_visible = make_ref("late-hidden", "stale visible listing");
+        stale_visible.file_path = skill_path;
+        let cat = SkillCatalog::from_refs(vec![stale_visible]);
+
+        let operator = cat.resolve("late-hidden").await.expect("operator lookup");
+        assert!(operator.disable_model_invocation);
+        assert!(matches!(
+            cat.resolve_for_model("late-hidden").await,
+            Err(ResolveError::NotFound(name)) if name == "late-hidden"
+        ));
+    }
+
+    #[tokio::test]
+    async fn model_resolver_rechecks_lazy_local_generated_provenance() {
+        let tmp = tempfile::tempdir().unwrap();
+        let skill_dir = tmp.path().join("auto-late-generated");
+        std::fs::create_dir_all(&skill_dir).unwrap();
+        let skill_path = skill_dir.join("SKILL.md");
+        std::fs::write(
+            &skill_path,
+            "---\nname: auto-late-generated\ndescription: generated\n---\n\nSECRET BODY\n",
+        )
+        .unwrap();
+        std::fs::write(
+            skill_dir.join("manifest.json"),
+            r#"{"auto_drafted":true,"needs_review":false}"#,
+        )
+        .unwrap();
+
+        let mut stale_visible = make_ref("auto-late-generated", "stale visible listing");
+        stale_visible.file_path = skill_path;
+        let cat = SkillCatalog::from_refs(vec![stale_visible]);
+
+        assert!(cat.resolve("auto-late-generated").await.is_ok());
+        assert!(matches!(
+            cat.resolve_for_model("auto-late-generated").await,
+            Err(ResolveError::NotFound(name)) if name == "auto-late-generated"
+        ));
+    }
+
+    #[tokio::test]
     async fn resolve_io_error_surfaces_typed_error() {
         let mut r = make_ref("ghost", "");
         r.file_path = std::path::PathBuf::from("/nonexistent/ghost/SKILL.md");
