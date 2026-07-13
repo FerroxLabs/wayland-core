@@ -237,8 +237,9 @@ impl FixtureState {
             .ok()
             .and_then(|value| value.get("method")?.as_str().map(str::to_string));
         let mut requests = self.requests.lock().expect("MCP fixture request lock");
+        let sequence = requests.len() as u64 + 1;
         requests.push(McpHttpRequestRecord {
-            sequence: requests.len() as u64 + 1,
+            sequence,
             method: method.to_string(),
             path: path.to_string(),
             rpc_method,
