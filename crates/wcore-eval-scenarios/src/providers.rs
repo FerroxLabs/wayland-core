@@ -120,6 +120,19 @@ impl ProviderAvailability {
             ProviderId::OpenAI => self.openai,
         }
     }
+
+    /// Snapshot credential presence without copying values into the run plan.
+    pub fn from_environment() -> Self {
+        fn present(name: &str) -> bool {
+            std::env::var_os(name).is_some_and(|value| !value.is_empty())
+        }
+
+        Self {
+            deepseek: present(ProviderId::DeepSeek.env_var()),
+            anthropic: present(ProviderId::Anthropic.env_var()),
+            openai: present(ProviderId::OpenAI.env_var()),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -180,28 +193,67 @@ impl ProviderConfig {
     }
 }
 
-/// **T4** — resolve a [`ProviderChoice`] into the list of
-/// [`ProviderConfig`]s the runner should iterate.
-///
-/// **Not yet implemented (T4 wave).** Returns an empty `Vec` so callers
-/// can compile against the final API; the runner treats an empty
-/// resolution as "no providers to run" rather than panicking. T4 will
-/// replace this body with the per-provider model tables, API-key
-/// availability checks, and strict-mode SKIP/FAIL logic.
+/// Resolve a scenario's provider choice into explicit runnable and skipped
+/// entries. A CLI/environment override narrows any scenario choice, including
+/// `Matrix`, to that provider. Strict mode rejects the entire plan if any
+/// selected provider is unavailable.
 pub fn resolve(
-    _choice: ProviderChoice,
-    _provider_override: Option<ProviderId>,
-    _availability: ProviderAvailability,
-    _strict: bool,
+    choice: ProviderChoice,
+    provider_override: Option<ProviderId>,
+    availability: ProviderAvailability,
+    strict: bool,
 ) -> Result<ProviderResolution, ResolveError> {
-    // Honest exit until T4 lands: no providers resolved. Replacing
-    // `todo!()` with an empty result keeps the `#![deny(clippy::todo)]`
-    // crate-level gate satisfied while ensuring runtime behaviour is
-    // visibly-incomplete (zero providers run) rather than a panic.
-    Ok(ProviderResolution {
-        runnable: Vec::new(),
-        skipped: Vec::new(),
-    })
+    const MATRIX: [ProviderId; 3] = [
+        ProviderId::DeepSeek,
+        ProviderId::Anthropic,
+        ProviderId::OpenAI,
+    ];
+
+    let selected: &[ProviderId] = if let Some(provider) = &provider_override {
+        std::slice::from_ref(provider)
+    } else {
+        match choice {
+            ProviderChoice::Default | ProviderChoice::ForceDeepSeek => {
+                std::slice::from_ref(&MATRIX[0])
+            }
+            ProviderChoice::ForceAnthropic => std::slice::from_ref(&MATRIX[1]),
+            ProviderChoice::ForceOpenAI => std::slice::from_ref(&MATRIX[2]),
+            ProviderChoice::Matrix => &MATRIX,
+        }
+    };
+
+    let missing: Vec<ProviderId> = selected
+        .iter()
+        .copied()
+        .filter(|provider| !availability.has(*provider))
+        .collect();
+    if strict && !missing.is_empty() {
+        return Err(ResolveError::MissingCredentials { providers: missing });
+    }
+
+    let mut runnable = Vec::with_capacity(selected.len());
+    let mut skipped = Vec::with_capacity(missing.len());
+    for provider in selected.iter().copied() {
+        if availability.has(provider) {
+            runnable.push(default_config(provider));
+        } else {
+            skipped.push(ProviderSkip {
+                provider,
+                missing_key: provider.env_var(),
+            });
+        }
+    }
+
+    Ok(ProviderResolution { runnable, skipped })
+}
+
+fn default_config(provider: ProviderId) -> ProviderConfig {
+    let model = match provider {
+        ProviderId::DeepSeek => "deepseek-chat",
+        ProviderId::Anthropic => "claude-sonnet-4-6",
+        ProviderId::OpenAI => "gpt-4o",
+    };
+    ProviderConfig::new(provider, model)
 }
 
 #[cfg(test)]
