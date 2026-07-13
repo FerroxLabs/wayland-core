@@ -66,6 +66,7 @@ wcore-config = { workspace = true }
 libc = { workspace = true }
 
 [dev-dependencies]
+wcore-mcp = { workspace = true }
 # Tests need the wayland-core binary available — declaring wcore-cli as
 # an artifact dev-dep would also work, but the runner already supports
 # binary discovery via WCORE_EVAL_BIN env + relative target/ walk
