@@ -13,6 +13,9 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
+use crate::runner::{Failure, ScenarioResult};
+use crate::usability::{self, Severity};
+
 pub const RECEIPT_SCHEMA: &str = "wayland.eval.receipt";
 pub const RECEIPT_SCHEMA_VERSION: u32 = 1;
 const SIGNATURE_DOMAIN: &[u8] = b"wayland.eval.receipt.v1\0";
@@ -269,6 +272,16 @@ pub struct VerificationPolicy {
     pub workflow: Option<String>,
 }
 
+#[derive(Debug, Clone)]
+pub struct ReceiptMetadataV1 {
+    pub run_id: String,
+    pub source_commit: String,
+    pub binary_sha256: String,
+    pub fixture_sha256: String,
+    pub model: String,
+    pub build: Evidence<BuildProvenanceV1>,
+}
+
 #[derive(Debug, Default)]
 pub struct ReceiptVerifier {
     trusted_ci_keys: BTreeMap<String, VerifyingKey>,
@@ -315,6 +328,233 @@ impl EvidenceReceiptV1 {
             signature_base64: BASE64.encode(signature.to_bytes()),
         };
         self
+    }
+
+    pub fn from_scenario_result(
+        metadata: ReceiptMetadataV1,
+        result: &ScenarioResult,
+        limit_usd: f64,
+    ) -> Result<Self, ReceiptError> {
+        let cost_microusd = usd_to_microusd("result.cost_usd", result.cost_usd)?;
+        let limit_microusd = usd_to_microusd("scenario.limit_usd", limit_usd)?;
+        let failure_evidence = result
+            .failures
+            .iter()
+            .map(|failure| {
+                Ok(FailureEvidenceV1 {
+                    code: failure_code(failure).to_string(),
+                    detail_sha256: Evidence::observed(hash_serializable(failure)?),
+                })
+            })
+            .collect::<Result<Vec<_>, ReceiptError>>()?;
+        let usability = usability::scan(result)
+            .into_iter()
+            .map(|finding| UsabilityEvidenceV1 {
+                severity: match finding.severity {
+                    Severity::Low => "low",
+                    Severity::Medium => "medium",
+                    Severity::High => "high",
+                }
+                .to_string(),
+                code: finding.category.to_string(),
+                evidence_sha256: sha256(finding.evidence.as_bytes()),
+            })
+            .collect::<Vec<_>>();
+        let critical_usability = usability
+            .iter()
+            .any(|finding| finding.severity == "high" || finding.severity == "critical");
+        let passed = result.passed && failure_evidence.is_empty() && !critical_usability;
+        let cell_id = format!(
+            "{}/{}/{}",
+            result.name,
+            result.provider.cli_name(),
+            result.platform
+        );
+        let tools = result
+            .trace
+            .entries
+            .iter()
+            .map(|entry| ToolEvidenceV1 {
+                call_id_sha256: sha256(entry.call_id.as_bytes()),
+                tool_name: entry.tool_name.clone(),
+                request_sha256: sha256(entry.input.as_bytes()),
+                result_sha256: sha256(entry.output.as_bytes()),
+                duration_ms: entry.duration.map_or_else(
+                    || Evidence::Unavailable {
+                        code: "duration_not_observed".to_string(),
+                    },
+                    |duration| Evidence::observed(duration.as_millis() as u64),
+                ),
+                exit_state: if entry.is_error { "error" } else { "success" }.to_string(),
+                idempotency_key_sha256: Evidence::Unavailable {
+                    code: "not_emitted_by_protocol_v1".to_string(),
+                },
+            })
+            .collect::<Vec<_>>();
+        let tool_ms = result
+            .trace
+            .entries
+            .iter()
+            .filter_map(|entry| entry.duration)
+            .fold(0_u64, |sum, duration| {
+                sum.saturating_add(duration.as_millis() as u64)
+            });
+        let policy_sha256 = sha256(
+            format!(
+                "{}:{}:{}",
+                result.approval, result.execution.config_sha256, result.execution.sandbox_backend
+            )
+            .as_bytes(),
+        );
+        let process_orphans = if result.execution.cleanup_verified {
+            Evidence::observed(0)
+        } else {
+            Evidence::Unavailable {
+                code: "cleanup_not_verified".to_string(),
+            }
+        };
+        let mut canary_scans = CanaryScanEvidenceV1 {
+            scan_complete: result.execution.artifact_scan_complete,
+            protocol: 0,
+            stdout: 0,
+            stderr: 0,
+            files: 0,
+            logs: 0,
+            telemetry: 0,
+        };
+        for failure in &result.failures {
+            if let Failure::SecretDetected { sink } = failure {
+                if sink == "stdout" {
+                    canary_scans.stdout = canary_scans.stdout.saturating_add(1);
+                } else if sink == "stderr" {
+                    canary_scans.stderr = canary_scans.stderr.saturating_add(1);
+                } else if sink.starts_with("artifact:") {
+                    canary_scans.files = canary_scans.files.saturating_add(1);
+                } else {
+                    canary_scans.protocol = canary_scans.protocol.saturating_add(1);
+                }
+            }
+        }
+        let summary = SummaryEvidenceV1 {
+            passed: u64::from(passed),
+            failed: u64::from(!passed),
+            total_cost_microusd: cost_microusd,
+            wall_time_ms: result.wall_time.as_millis() as u64,
+        };
+        let body = ReceiptBodyV1 {
+            run_id: metadata.run_id,
+            identity: IdentityEvidenceV1 {
+                source_commit: metadata.source_commit,
+                binary_sha256: metadata.binary_sha256,
+                config_sha256: result.execution.config_sha256.clone(),
+                fixture_sha256: metadata.fixture_sha256,
+                provider: result.provider.cli_name().to_string(),
+                model: metadata.model,
+                build: metadata.build,
+            },
+            target: TargetEvidenceV1 {
+                os: result.platform.to_string(),
+                architecture: std::env::consts::ARCH.to_string(),
+                sandbox_backend: result.execution.sandbox_backend.clone(),
+            },
+            policy: PolicyEvidenceV1 {
+                posture: result.approval.to_string(),
+                effective_policy_sha256: policy_sha256,
+            },
+            timings: TimingEvidenceV1 {
+                boot_ms: Evidence::observed(result.boot_time.as_millis() as u64),
+                ready_ms: Evidence::observed(result.boot_time.as_millis() as u64),
+                prompt_ms: Evidence::Unavailable {
+                    code: "protocol_v1_does_not_timestamp_prompt".to_string(),
+                },
+                first_token_ms: Evidence::Unavailable {
+                    code: "protocol_v1_does_not_timestamp_first_token".to_string(),
+                },
+                tool_ms: Evidence::observed(tool_ms),
+                approval_ms: Evidence::Unavailable {
+                    code: "protocol_v1_does_not_timestamp_approval".to_string(),
+                },
+                completion_ms: Evidence::observed(result.wall_time.as_millis() as u64),
+                shutdown_ms: Evidence::observed(result.execution.shutdown_time.as_millis() as u64),
+            },
+            provider: ProviderEvidenceV1 {
+                attempts: 1,
+                typed_failures: failure_evidence
+                    .iter()
+                    .map(|failure| failure.code.clone())
+                    .collect(),
+                retries: 0,
+                input_tokens: Evidence::Unavailable {
+                    code: "provider_usage_not_emitted".to_string(),
+                },
+                output_tokens: Evidence::Unavailable {
+                    code: "provider_usage_not_emitted".to_string(),
+                },
+                cache_read_tokens: Evidence::Unavailable {
+                    code: "provider_usage_not_emitted".to_string(),
+                },
+                cache_write_tokens: Evidence::Unavailable {
+                    code: "provider_usage_not_emitted".to_string(),
+                },
+                cost_microusd,
+                limit_microusd,
+            },
+            tools,
+            decisions: vec![DecisionEvidenceV1 {
+                actor: "evaluator".to_string(),
+                action: "tool_approval".to_string(),
+                resource_sha256: sha256(cell_id.as_bytes()),
+                scope: "scenario".to_string(),
+                decision: result.approval.to_string(),
+            }],
+            boundaries: BoundaryEvidenceV1 {
+                egress_attempted: Vec::new(),
+                egress_allowed: Vec::new(),
+                egress_denied: Vec::new(),
+                filesystem_deltas: Vec::new(),
+            },
+            process: ProcessEvidenceV1 {
+                tree_sha256: result.execution.process_tree_sha256.clone(),
+                peak_memory_bytes: Evidence::Unavailable {
+                    code: "resource_sampler_not_enabled".to_string(),
+                },
+                peak_cpu_millis: Evidence::Unavailable {
+                    code: "resource_sampler_not_enabled".to_string(),
+                },
+                cancellation_requested: result.failures.iter().any(|failure| {
+                    matches!(failure, Failure::Hung { .. } | Failure::OverTime { .. })
+                }),
+                orphan_count: process_orphans,
+            },
+            recovery: RecoveryEvidenceV1 {
+                journal_cursor_sha256: Evidence::Unavailable {
+                    code: "no_recovery_journal_for_scenario".to_string(),
+                },
+                action: "none".to_string(),
+                unresolved_side_effects: Vec::new(),
+            },
+            canary_scans,
+            assertions: vec![AssertionEvidenceV1 {
+                assertion_id: "scenario_outcome".to_string(),
+                passed,
+                failure_code: failure_evidence.first().map(|failure| failure.code.clone()),
+            }],
+            quarantines: Vec::new(),
+            required_cells: vec![cell_id.clone()],
+            results: vec![CellResultV1 {
+                cell_id,
+                task: result.name.clone(),
+                provider: result.provider.cli_name().to_string(),
+                platform: result.platform.to_string(),
+                passed,
+                failures: failure_evidence,
+                usability,
+                wall_time_ms: result.wall_time.as_millis() as u64,
+                cost_microusd,
+            }],
+            summary,
+        };
+        Self::local(body)
     }
 }
 
@@ -385,6 +625,44 @@ fn body_digest(body: &ReceiptBodyV1) -> Result<String, ReceiptError> {
     let bytes = serde_json::to_vec(body)
         .map_err(|error| ReceiptError::InvalidEvidence(format!("canonical JSON: {error}")))?;
     Ok(format!("{:x}", Sha256::digest(bytes)))
+}
+
+fn sha256(bytes: &[u8]) -> String {
+    format!("{:x}", Sha256::digest(bytes))
+}
+
+fn hash_serializable(value: &impl Serialize) -> Result<String, ReceiptError> {
+    serde_json::to_vec(value)
+        .map(|bytes| sha256(&bytes))
+        .map_err(|error| ReceiptError::InvalidEvidence(format!("evidence serialization: {error}")))
+}
+
+fn usd_to_microusd(field: &str, value: f64) -> Result<u64, ReceiptError> {
+    if !value.is_finite() || value < 0.0 || value > u64::MAX as f64 / 1_000_000.0 {
+        return Err(ReceiptError::InvalidEvidence(format!(
+            "{field} must be finite, non-negative, and representable"
+        )));
+    }
+    Ok((value * 1_000_000.0).round() as u64)
+}
+
+fn failure_code(failure: &Failure) -> &'static str {
+    match failure {
+        Failure::OverTime { .. } => "over_time",
+        Failure::OverCost { .. } => "over_cost",
+        Failure::CostMissing => "cost_missing",
+        Failure::Crashed { .. } => "crashed",
+        Failure::Hung { .. } => "hung",
+        Failure::ExpectedToolMissing(_) => "expected_tool_missing",
+        Failure::ForbiddenToolUsed(_) => "forbidden_tool_used",
+        Failure::AssertionFailed { .. } => "assertion_failed",
+        Failure::TraceFailed { .. } => "trace_failed",
+        Failure::StepsExceeded { .. } => "steps_exceeded",
+        Failure::SessionBrick { .. } => "session_brick",
+        Failure::SkippedInStrict { .. } => "skipped_in_strict",
+        Failure::RunnerError(_) => "runner_error",
+        Failure::SecretDetected { .. } => "secret_detected",
+    }
 }
 
 fn validate_body(body: &ReceiptBodyV1) -> Result<(), ReceiptError> {

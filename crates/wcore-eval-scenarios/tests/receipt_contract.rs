@@ -1,12 +1,18 @@
+use std::path::PathBuf;
+use std::time::Duration;
+
 use ed25519_dalek::SigningKey;
 use wcore_eval_scenarios::receipt::{
     AssertionEvidenceV1, AuthorityClaimV1, BoundaryEvidenceV1, BuildProvenanceV1,
     CanaryScanEvidenceV1, CellResultV1, Evidence, EvidenceReceiptV1, IdentityEvidenceV1,
     PolicyEvidenceV1, ProcessEvidenceV1, ProviderEvidenceV1, ReceiptBodyV1, ReceiptError,
-    ReceiptVerifier, RecoveryEvidenceV1, SummaryEvidenceV1, TargetEvidenceV1, TimingEvidenceV1,
-    VerificationPolicy, VerifiedAuthority,
+    ReceiptMetadataV1, ReceiptVerifier, RecoveryEvidenceV1, SummaryEvidenceV1, TargetEvidenceV1,
+    TimingEvidenceV1, VerificationPolicy, VerifiedAuthority,
 };
 use wcore_eval_scenarios::report::{ReportRenderError, render_receipt_reports};
+use wcore_eval_scenarios::runner::{ExecutionEvidence, ScenarioResult};
+use wcore_eval_scenarios::scenario::{ApprovalPolicy, Platform};
+use wcore_eval_scenarios::{ProviderId, ToolTrace};
 
 fn h64(ch: char) -> String {
     std::iter::repeat_n(ch, 64).collect()
@@ -287,4 +293,62 @@ fn projection_secret_scan_fails_before_any_report_is_returned() {
         render_receipt_reports(&receipt, &[canary]),
         Err(ReportRenderError::SecretDetected("JSON"))
     ));
+}
+
+#[test]
+fn critical_usability_finding_is_a_receipt_gate_failure() {
+    let result = ScenarioResult {
+        name: "panic-regression".to_string(),
+        provider: ProviderId::OpenAI,
+        platform: Platform::Linux,
+        approval: ApprovalPolicy::ApproveAll,
+        passed: true,
+        failures: Vec::new(),
+        wall_time: Duration::from_millis(50),
+        cost_usd: 0.0,
+        trace: ToolTrace::default(),
+        final_text: "apparently successful".to_string(),
+        stderr_tail: "panic: background subsystem crashed".to_string(),
+        turn_results: Vec::new(),
+        workdir: PathBuf::from("/private/ephemeral"),
+        boot_time: Duration::from_millis(10),
+        info_events: Vec::new(),
+        execution: ExecutionEvidence {
+            config_sha256: h64('c'),
+            sandbox_backend: "cgroup-v2".to_string(),
+            process_tree_sha256: h64('f'),
+            containment_authoritative: true,
+            cleanup_verified: true,
+            artifact_scan_complete: true,
+            shutdown_time: Duration::from_millis(5),
+        },
+    };
+    let receipt = EvidenceReceiptV1::from_scenario_result(
+        ReceiptMetadataV1 {
+            run_id: "panic-run".to_string(),
+            source_commit: "a".repeat(40),
+            binary_sha256: h64('b'),
+            fixture_sha256: h64('d'),
+            model: "fixture-model-v1".to_string(),
+            build: Evidence::Unavailable {
+                code: "local_run".to_string(),
+            },
+        },
+        &result,
+        0.01,
+    )
+    .expect("receipt conversion");
+
+    assert!(!receipt.body.results[0].passed);
+    assert_eq!(receipt.body.results[0].usability[0].code, "panic");
+    assert!(
+        !ReceiptVerifier::new()
+            .verify(&receipt, &VerificationPolicy::default())
+            .expect("receipt integrity")
+            .gate_passed
+    );
+    let reports = render_receipt_reports(&receipt, &[]).expect("safe projections");
+    assert!(reports.console.contains("panic-regression"));
+    assert!(!reports.json.contains("background subsystem crashed"));
+    assert!(!reports.json.contains("/private/ephemeral"));
 }
