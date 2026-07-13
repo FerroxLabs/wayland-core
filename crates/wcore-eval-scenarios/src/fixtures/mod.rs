@@ -2,4 +2,5 @@
 
 pub mod mcp;
 pub mod openai;
+pub mod remote_execution;
 pub mod repository;
