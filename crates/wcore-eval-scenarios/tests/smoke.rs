@@ -50,7 +50,8 @@ async fn spawns_and_captures_help() {
         return;
     };
 
-    let mut child = spawn_with_args(&bin, &["--help"]).expect("spawn --help");
+    let env = tempfile::tempdir().expect("create isolated help environment");
+    let mut child = spawn_with_args(&bin, &["--help"], env.path()).expect("spawn isolated --help");
 
     // Capture stdout BEFORE wait so the pipe never fills (--help is
     // small enough that this would be safe either way, but the

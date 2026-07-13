@@ -269,13 +269,17 @@ fn spawn_for_run_with_secret(
     Ok(cmd.spawn()?)
 }
 
-/// Spawn the binary with arbitrary args + no provider seeding — used by
-/// the `wayland-core --help` smoke test that does NOT touch the engine.
-/// stdout/stderr piped so the caller can collect output; stdin null so
-/// the process exits immediately when `--help` finishes.
-pub fn spawn_with_args(bin: &std::path::Path, args: &[&str]) -> Result<Child, SpawnError> {
+/// Spawn the binary with arbitrary args in an explicit isolated directory —
+/// used by the `wayland-core --help` smoke test that does not touch the engine.
+pub fn spawn_with_args(
+    bin: &std::path::Path,
+    args: &[&str],
+    cwd: &std::path::Path,
+) -> Result<Child, SpawnError> {
     let mut cmd = Command::new(bin);
+    ChildEnvironment::build(cwd, cwd, None)?.apply_tokio(&mut cmd);
     cmd.args(args)
+        .current_dir(cwd)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -395,6 +399,29 @@ pub(crate) async fn run_session_in(
             "{run_error}; scenario cleanup failed: {cleanup_error}"
         )),
         (outcome, None) => outcome,
+    };
+    let artifact_scan = redactor.remove_contaminated_files(cwd);
+    let result = match (result, artifact_scan) {
+        (Ok(mut result), Ok(contaminated)) => {
+            for path in contaminated {
+                result.failures.push(Failure::SecretDetected {
+                    sink: format!("artifact:{}", path.display()),
+                });
+            }
+            result.passed = result.failures.is_empty();
+            Ok(result)
+        }
+        (Ok(mut result), Err(error)) => {
+            result.failures.push(Failure::RunnerError(format!(
+                "artifact secret scan failed: {error}"
+            )));
+            result.passed = false;
+            Ok(result)
+        }
+        (Err(run_error), Err(scan_error)) => Err(anyhow::anyhow!(
+            "{run_error}; artifact secret scan failed: {scan_error}"
+        )),
+        (result, Ok(_)) => result,
     };
     result
         .map(|result| redactor.result(result))

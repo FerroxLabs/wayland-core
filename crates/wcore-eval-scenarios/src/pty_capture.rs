@@ -63,6 +63,7 @@
 #![cfg(unix)]
 
 use std::io::{Read, Write};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
@@ -72,6 +73,7 @@ use portable_pty::{CommandBuilder, MasterPty, PtySize, native_pty_system};
 
 use crate::child_env::ChildEnvironment;
 use crate::providers::ProviderConfig;
+use crate::redaction::SecretRedactor;
 use crate::tempenv::{self, TempEnv, TempEnvOptions};
 
 /// Default PTY geometry. 100 columns keeps the workspace right rail visible
@@ -113,6 +115,10 @@ pub struct PtyCapture {
     master: Box<dyn MasterPty + Send>,
     /// The spawned child. `wait` consumes it; until then `Drop` kills it.
     child: Box<dyn portable_pty::Child + Send + Sync>,
+    /// Exact provider-secret redactor applied before screen text leaves this
+    /// capture object.
+    redactor: SecretRedactor,
+    secret_detected: AtomicBool,
     /// Reader-thread handle. Held so a clean shutdown can join; on panic
     /// `Drop` simply lets it dangle.
     _reader: JoinHandle<()>,
@@ -213,6 +219,8 @@ impl PtyCapture {
             parser,
             master: pty.master,
             child,
+            redactor: SecretRedactor::from_secret(secret),
+            secret_detected: AtomicBool::new(false),
             _reader: reader_handle,
             _env: env,
         })
@@ -229,13 +237,24 @@ impl PtyCapture {
     /// blanks trimmed by vt100. ANSI is already resolved, so this is the
     /// human-visible text, suitable for direct substring matching.
     pub fn screen_text(&self) -> String {
-        match self.parser.lock() {
+        let screen = match self.parser.lock() {
             Ok(p) => p.screen().contents(),
             // A poisoned lock means the reader thread panicked mid-process;
             // surface an empty screen rather than propagating the poison so
             // callers' `wait_for`/assert paths report a clean timeout/mismatch.
             Err(_) => String::new(),
+        };
+        let (screen, detected) = self.redactor.text(screen);
+        if detected {
+            self.secret_detected.store(true, Ordering::Release);
         }
+        screen
+    }
+
+    /// Whether provider material reached the rendered PTY output. The screen
+    /// returned to callers is already redacted; this flag makes the run fail.
+    pub fn secret_detected(&self) -> bool {
+        self.secret_detected.load(Ordering::Acquire)
     }
 
     /// Push raw bytes to the PTY as if typed on a keyboard. Use for control
@@ -301,6 +320,9 @@ impl PtyCapture {
         let mut last = String::new();
         while Instant::now() < deadline {
             last = self.screen_text();
+            if self.secret_detected() {
+                bail!("provider secret detected in PTY output");
+            }
             if predicate(&last) {
                 return Ok(());
             }
@@ -407,6 +429,9 @@ pub fn capture_prompt(provider: &ProviderConfig, prompt: &str, settle: Duration)
     cap.send_prompt(prompt)?;
     std::thread::sleep(settle);
     let screen = cap.screen_text();
+    if cap.secret_detected() {
+        bail!("provider secret detected in PTY output");
+    }
     // Best-effort clean shutdown; the captured screen is already in hand.
     let _ = cap.quit_via_palette(Duration::from_secs(8));
     Ok(screen)
