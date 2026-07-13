@@ -3,9 +3,16 @@
 use std::io::{BufRead, Write};
 use std::time::Duration;
 
+use sha2::{Digest, Sha256};
+
 const SOURCE_COMMIT: &str = "0123456789abcdef0123456789abcdef01234567";
 
 fn main() {
+    if std::env::args_os().any(|arg| arg == "--mcp-stdio") {
+        run_mcp_stdio();
+        return;
+    }
+
     #[cfg(unix)]
     if let Some(control_path) = argument_value("--orphan-listener") {
         run_orphan_listener(std::path::Path::new(&control_path));
@@ -135,6 +142,82 @@ fn main() {
             _ => {}
         }
     }
+}
+
+fn run_mcp_stdio() {
+    let journal_path = argument_value("--mcp-journal").expect("--mcp-journal is required");
+    let mut journal = std::fs::File::create(journal_path).expect("create MCP fixture journal");
+    let mut sequence = 0_u64;
+
+    for line in std::io::stdin().lock().lines() {
+        let Ok(line) = line else { break };
+        let Ok(request) = serde_json::from_str::<serde_json::Value>(&line) else {
+            continue;
+        };
+        let Some(method) = request.get("method").and_then(serde_json::Value::as_str) else {
+            continue;
+        };
+        sequence = sequence.saturating_add(1);
+        serde_json::to_writer(
+            &mut journal,
+            &serde_json::json!({
+                "sequence": sequence,
+                "method": method,
+                "body_sha256": format!("{:x}", Sha256::digest(line.as_bytes()))
+            }),
+        )
+        .expect("write MCP fixture journal row");
+        journal.write_all(b"\n").expect("finish MCP journal row");
+        journal.flush().expect("flush MCP fixture journal");
+
+        let Some(id) = request.get("id").cloned() else {
+            continue;
+        };
+        emit(&mcp_response(id, method, &request));
+    }
+}
+
+fn mcp_response(
+    id: serde_json::Value,
+    method: &str,
+    request: &serde_json::Value,
+) -> serde_json::Value {
+    let result = match method {
+        "initialize" => serde_json::json!({
+            "protocolVersion": "2025-03-26",
+            "capabilities": {"tools": {}},
+            "serverInfo": {"name": "wcore-eval-fixture", "version": "1"}
+        }),
+        "tools/list" => serde_json::json!({
+            "tools": [{
+                "name": "fixture_echo",
+                "description": "Return the supplied text",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {"text": {"type": "string"}},
+                    "required": ["text"]
+                }
+            }]
+        }),
+        "tools/call" => {
+            let text = request
+                .pointer("/params/arguments/text")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default();
+            serde_json::json!({
+                "content": [{"type": "text", "text": text}],
+                "isError": false
+            })
+        }
+        _ => {
+            return serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": id,
+                "error": {"code": -32601, "message": "method not found"}
+            });
+        }
+    };
+    serde_json::json!({"jsonrpc": "2.0", "id": id, "result": result})
 }
 
 #[cfg(unix)]
