@@ -505,7 +505,7 @@ fn persist_receipt_reports(
     ]
     .into_iter()
     .try_for_each(|(name, bytes)| {
-        wcore_config::atomic_write(&staging.join(name), bytes)
+        wcore_config::atomic_write(staging.join(name), bytes)
             .map_err(|error| format!("could not persist {name}: {error}"))
     });
     if let Err(error) = write_result {
