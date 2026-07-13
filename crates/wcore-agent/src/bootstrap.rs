@@ -1943,6 +1943,22 @@ impl AgentBootstrap {
         // below wcore-agent in the dep graph.
         registry.register(Box::new(wcore_tools::delegate::DelegateTool::new(spawner)));
 
+        // A1.9 — Forge: the session-level Anvil gated-forge tool (smart-loop
+        // front door; the tool description carries the routing law so the
+        // session model routes "iterate until verified" asks here). Gated on
+        // the `[anvil] enabled` kill-switch (ON by default; the tool is
+        // invocation-only and refuses without a real gate). The `[anvil]`
+        // block lives on ConfigFile, not resolved Config — load it here; a
+        // load failure just means no Forge tool this session (never fatal).
+        if let Ok(cf) = wcore_config::config::load_merged_config_file(None)
+            && cf.anvil.enabled
+        {
+            registry.register(Box::new(crate::orchestration::anvil::tool::ForgeTool::new(
+                cf.anvil,
+                self.config.clone(),
+            )));
+        }
+
         let plan_active_flag = Arc::new(AtomicBool::new(false));
         if self.config.plan.enabled {
             registry.register(Box::new(crate::plan::tools::EnterPlanModeTool::new(

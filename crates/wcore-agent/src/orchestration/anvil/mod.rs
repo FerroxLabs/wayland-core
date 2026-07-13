@@ -31,6 +31,10 @@ pub mod journal;
 pub mod lease;
 /// Per-task cost ledger with atomic reservation-before-dispatch.
 pub mod ledger;
+/// Driver-seat materialization shared by the CLI verb and the Forge tool (A1.8/A1.9).
+pub mod seat;
+/// The session-level `Forge` tool — natural language in, receipt out (A1.9).
+pub mod tool;
 
 use wcore_config::anvil::AnvilConfig;
 
