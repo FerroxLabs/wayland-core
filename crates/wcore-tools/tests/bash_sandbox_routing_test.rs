@@ -416,3 +416,103 @@ async fn exec_time_gate_trusted_policy_passes_through() {
         result.content
     );
 }
+
+/// LIVE SMOKE (auditor round-2 HIGH) — the committed-secret-via-git-object-store
+/// leak. In a Full/remote posture with a REAL enforcing sandbox, a committed
+/// secret must NOT be reconstructable through `Bash("git show HEAD:.env")` /
+/// `git cat-file`. Empirically reproduced leaking on the box before the fix
+/// (fs_read_deny covered the working-tree `.env`, not `.git/objects`); this
+/// asserts DENIED after adding the object store to fs_read_deny. `git rev-parse`
+/// is a positive control — it must still succeed, proving git actually RAN (so a
+/// non-running git can't false-pass) and that the fix is targeted (refs kept).
+/// LINUX-ONLY: the proof needs bwrap (real subtree deny) AND a real `git` that
+/// runs under the sandbox. macOS CI's `git` is an xcode shim that won't execute
+/// under `sandbox_exec` (the positive control `git rev-parse` exits 1 → the deny
+/// would only assert vacuously), and Windows AppContainer differs — so this live
+/// proof is gated to Linux (CI linux-containerized + the Hetzner box), per the
+/// re-audit's "live proof from the Linux box" requirement.
+#[cfg(target_os = "linux")]
+#[tokio::test]
+#[serial]
+async fn full_remote_bash_git_object_store_secret_is_denied() {
+    // Use the platform-default backend (bwrap on Linux), not the forced NoSandbox.
+    unsafe {
+        std::env::remove_var("WAYLAND_SANDBOX");
+        std::env::remove_var("WAYLAND_ALLOW_NO_SANDBOX");
+    }
+    if !wcore_tools::bash::platform_enforces_read_deny() {
+        return; // no enforcing OS sandbox here — the deny cannot be exercised
+    }
+
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let sh = |c: &str| {
+        let ok = std::process::Command::new("sh")
+            .arg("-c")
+            .arg(c)
+            .current_dir(root)
+            .status()
+            .expect("spawn sh")
+            .success();
+        assert!(ok, "setup command failed: {c}");
+    };
+    sh("git init -q && git config user.email t@t.co && git config user.name t");
+    std::fs::write(root.join(".env"), "AWS_SECRET=AKIA_TOPSECRET_LEAK\n").unwrap();
+    sh("git add -f .env && git commit -qm secret");
+    // A committed secret under a machine-generated dir (MF3 vector).
+    std::fs::create_dir_all(root.join("node_modules").join("vendor")).unwrap();
+    std::fs::write(
+        root.join("node_modules").join("vendor").join("x.pem"),
+        "NM_SECRET=AKIA_NODE_MODULES_LEAK\n",
+    )
+    .unwrap();
+
+    let policy = std::sync::Arc::new(
+        wcore_tools::workspace_policy::WorkspacePolicy::trusted_local(root)
+            .with_project_secret_deny(),
+    );
+    let ctx = ToolContext::test_default().with_workspace(policy);
+    let tool = BashTool;
+
+    // POSITIVE CONTROL FIRST — establish that git actually RUNS under this
+    // sandbox, so the denials below are NON-VACUOUS. Retried: heavy parallel
+    // nextest load can make bwrap's fork/namespace setup transiently fail to
+    // spawn git; and some environments can't run git under the sandbox at all
+    // (the deny would only assert vacuously). If git never runs here, SKIP —
+    // an honest no-op beats a flaky failure or a vacuous pass.
+    let mut git_runs = false;
+    for _ in 0..6 {
+        let rp = tool
+            .execute_with_ctx(json!({ "command": "git rev-parse HEAD" }), &ctx)
+            .await;
+        if !rp.is_error && rp.content.trim().len() >= 7 {
+            git_runs = true;
+            break;
+        }
+    }
+    if !git_runs {
+        eprintln!(
+            "SKIP full_remote_bash_git_object_store_secret_is_denied: \
+             git does not run under the sandbox in this environment"
+        );
+        return;
+    }
+
+    // git RUNS + refs are readable (fix is targeted). Now every exploit must be
+    // DENIED — the committed/working-tree secret bytes must NOT come back.
+    let exploits = [
+        ("AKIA_TOPSECRET_LEAK", "git show HEAD:.env"),
+        ("AKIA_TOPSECRET_LEAK", "git cat-file -p HEAD:.env"),
+        ("AKIA_TOPSECRET_LEAK", "git log -p -- .env"),
+        // MF3: committed secret under node_modules — denied at the working-tree path.
+        ("AKIA_NODE_MODULES_LEAK", "cat node_modules/vendor/x.pem"),
+    ];
+    for (needle, cmd) in exploits {
+        let r = tool.execute_with_ctx(json!({ "command": cmd }), &ctx).await;
+        assert!(
+            !r.content.contains(needle),
+            "secret LEAKED via `{cmd}` in Full/remote posture: {}",
+            r.content
+        );
+    }
+}
