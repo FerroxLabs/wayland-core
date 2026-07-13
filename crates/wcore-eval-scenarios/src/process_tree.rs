@@ -44,6 +44,14 @@ impl ProcessTree {
             }
         }
 
+        #[cfg(not(target_os = "linux"))]
+        if containment_required() {
+            return Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "authoritative process-tree containment is unavailable on this platform",
+            ));
+        }
+
         #[cfg(unix)]
         let backend = Backend::ProcessGroup;
         #[cfg(not(unix))]
@@ -149,7 +157,6 @@ impl Drop for ProcessTree {
     }
 }
 
-#[cfg(target_os = "linux")]
 fn containment_required() -> bool {
     std::env::var_os("WCORE_EVAL_REQUIRE_CONTAINMENT").is_some_and(|value| {
         let value = value.to_string_lossy();
