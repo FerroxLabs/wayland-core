@@ -121,6 +121,32 @@ impl GateClosure {
         &self.spec
     }
 
+    /// Verify the pinned inputs AT a candidate worktree: each input path is
+    /// re-rooted from the pin cwd onto `cwd` and content-compared against the
+    /// pinned digest. `false` = the candidate tampered with (or lost) a gate
+    /// trampoline — a Safety-class integrity failure, never acceptable (the
+    /// manual's condition-gaming counter). Inputs outside the pin cwd cannot
+    /// be re-rooted and are checked at their absolute path instead.
+    #[must_use]
+    pub fn inputs_match_at(&self, cwd: &std::path::Path) -> bool {
+        for (path, pinned) in self.spec.inputs.iter().zip(&self.input_digests) {
+            let at = match path.strip_prefix(&self.spec.cwd) {
+                Ok(rel) => cwd.join(rel),
+                Err(_) => path.clone(),
+            };
+            match std::fs::read(&at) {
+                Ok(bytes) => {
+                    if sha256(&bytes) != *pinned {
+                        return false;
+                    }
+                }
+                // A vanished/unreadable pinned input is tampering too.
+                Err(_) => return false,
+            }
+        }
+        true
+    }
+
     /// Whether any pinned input's content changed since pinning, or an input
     /// became unreadable. Spec §5: ANY closure drift aborts the candidate.
     #[must_use]

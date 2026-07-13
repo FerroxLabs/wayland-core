@@ -1,3 +1,24 @@
+---
+ijfw_version: 1.3.2
+ijfw_schema: 1
+type: software
+primary_type: software
+secondary_types: []
+confidence: 0.907
+detected_at: 2026-07-13T04:27:50.434Z
+signals:
+  - kind: manifest
+    weight: 0.9
+    manifests: [Cargo.toml, Cargo.toml, Cargo.toml, Cargo.toml, Cargo.toml, Cargo.toml]
+  - kind: dir_design
+    weight: 0.4
+    name: design
+  - kind: file_extension_ratio
+    weight: 0.7
+    domain: software
+    ratio: 1
+    count: 1359
+---
 ## Coordination (READ EVERY TASK — multi-agent blackboard)
 
 You are the **core** lane (area label **area:core**). Coordination state lives on GitHub
@@ -373,9 +394,6 @@ When the user corrects your approach, append a one-line rule here before ending 
 
 <!-- IJFW-MEMORY-START -->
 Project memory at .ijfw/memory/. Call `ijfw_memory_prelude` for full context.
-
-Last handoff: # HANDOFF — Wayland Core Defect-Remediation Campaign (LIVE, overnight run)
-> **Updated continuously at context thresholds (60/70/80%).** This is the
 <!-- IJFW-MEMORY-END -->
 
 <!-- IJFW-AGENTS-START -->

@@ -3671,18 +3671,25 @@ fn merge_config_files(global: ConfigFile, project: ConfigFile) -> ConfigFile {
         global.crucible
     };
 
-    // Anvil: project overrides global when it set a non-default value — an
-    // explicit kill-switch (`enabled = false`, since the default is ON), a
-    // gate, or a driver seat. An absent/default project block must NOT shadow
-    // a global gate or seat.
-    let anvil = if !project.anvil.enabled
-        || !project.anvil.gate.is_empty()
-        || project.anvil.driver_provider.is_some()
-        || project.anvil.driver_model.is_some()
-    {
-        project.anvil
-    } else {
-        global.anvil
+    // Anvil merges FIELD-WISE, and the kill-switch merges TIGHTEN-ONLY
+    // (GHSA-8r7g pattern, same as `auto_approve` above): a project config
+    // (untrusted — it travels with a cloned repo) may DISABLE Anvil and may
+    // set gate/driver-seat fields, but must NEVER re-enable a rail the
+    // operator kill-switched globally. Field-wise merging also means a
+    // project gate does not silently drop an unrelated global driver seat
+    // (and vice versa) the way a wholesale block replacement would.
+    let anvil = crate::anvil::AnvilConfig {
+        enabled: global.anvil.enabled && project.anvil.enabled,
+        gate: if project.anvil.gate.is_empty() {
+            global.anvil.gate
+        } else {
+            project.anvil.gate
+        },
+        driver_provider: project
+            .anvil
+            .driver_provider
+            .or(global.anvil.driver_provider),
+        driver_model: project.anvil.driver_model.or(global.anvil.driver_model),
     };
 
     ConfigFile {
@@ -5053,6 +5060,36 @@ mod tests {
             ApprovalMode::AutoEdit,
             "a project may tighten a looser global posture"
         );
+    }
+
+    #[test]
+    fn ghsa_project_cannot_reenable_kill_switched_anvil() {
+        // Same threat class, Anvil edition: a project block that sets ONLY
+        // `gate` wins the field-merge — but it must NOT carry its default
+        // `enabled: true` past a global `enabled = false` kill-switch.
+        let mut global = ConfigFile::default();
+        global.anvil.enabled = false;
+        let mut project = ConfigFile::default();
+        project.anvil.gate = vec!["cargo".into(), "test".into()];
+        assert!(project.anvil.enabled, "precondition: project default is ON");
+        let merged = merge_config_files(global, project);
+        assert!(
+            !merged.anvil.enabled,
+            "a project must not re-enable a globally kill-switched Anvil"
+        );
+        // The project's gate still merges — only the kill-switch is clamped.
+        assert_eq!(merged.anvil.gate, vec!["cargo", "test"]);
+    }
+
+    #[test]
+    fn anvil_project_kill_switch_still_wins() {
+        // The tighten direction is unaffected: project `enabled=false`
+        // disables even when global is on.
+        let global = ConfigFile::default();
+        let mut project = ConfigFile::default();
+        project.anvil.enabled = false;
+        let merged = merge_config_files(global, project);
+        assert!(!merged.anvil.enabled);
     }
 
     #[test]

@@ -130,6 +130,12 @@ pub struct ClimbParams {
     /// climb is progressing through a hard patch; identical failures mean it
     /// is walking into the same wall). `0` disables stall detection.
     pub stall_after: u32,
+    /// Wall-clock deadline for the WHOLE climb. Checked between steps (a
+    /// single in-flight builder/gate await is bounded by its own timeout):
+    /// past the deadline the climb stops and reports an honest `timed_out`
+    /// receipt instead of being killed receipt-less by an outer dispatch
+    /// timeout. `None` = ungoverned.
+    pub deadline: Option<std::time::Instant>,
 }
 
 /// The result of a climb — everything the receipt needs (spec §8).
@@ -195,6 +201,10 @@ pub async fn run_climb(
     };
     iterations += 1;
     track_stall(&report, &mut last_fail_hash, &mut same_reason);
+    // The most recent gate report regardless of acceptance — REJECTED
+    // candidates drive the stall counter, so valve evidence must reflect
+    // them, not the last accepted best.
+    let mut latest = report.clone();
     let mut best = (probe, report.clone());
 
     if let Some(done) = check_verified(gate, &best, iterations, valve_fires, params).await {
@@ -205,6 +215,11 @@ pub async fn run_climb(
     while iterations < params.max_iterations {
         if ledger.is_exhausted() {
             break;
+        }
+        // Wall-clock governor: stop BETWEEN steps and report honestly rather
+        // than letting an outer dispatch timeout kill the climb receipt-less.
+        if past_deadline(params) {
+            return timed_out_from_best(&best.1, iterations, valve_fires);
         }
 
         // Stall? Buy ONE frontier diagnostic turn, feed the guidance back into
@@ -218,8 +233,8 @@ pub async fn run_climb(
             let stall = StallReport {
                 fail_hash: last_fail_hash.unwrap_or_default(),
                 repeats: same_reason,
-                failing: report.fail_set().ids().cloned().collect(),
-                diagnostics: report.diagnostics.tail().to_string(),
+                failing: latest.fail_set().ids().cloned().collect(),
+                diagnostics: latest.diagnostics.tail().to_string(),
             };
             valve_fires += 1;
             journal_valve(journal, &stall, ledger);
@@ -243,6 +258,7 @@ pub async fn run_climb(
             };
         iterations += 1;
         track_stall(&candidate_report, &mut last_fail_hash, &mut same_reason);
+        latest = candidate_report.clone();
 
         // Accept iff the new fail-set is a non-regression on the current best
         // (spec §6.3 — safety-class never traded).
@@ -430,6 +446,32 @@ fn journal_step(
     let _ = journal.append(entry);
 }
 
+/// Whether the climb's wall-clock deadline has passed.
+fn past_deadline(params: &ClimbParams) -> bool {
+    params
+        .deadline
+        .is_some_and(|d| std::time::Instant::now() >= d)
+}
+
+/// Honest terminal when the wall-clock governor stops the climb (the best
+/// candidate so far is reported, never promoted to a stamp it didn't earn).
+fn timed_out_from_best(report: &GateReport, iterations: u32, valve_fires: u32) -> ClimbOutcome {
+    let stamp = if report.all_green() {
+        STAMP_SELF_CHECKED
+    } else {
+        STAMP_NONE
+    };
+    ClimbOutcome {
+        terminal: TerminalState::TimedOut,
+        stamp: stamp.to_string(),
+        checks_passed: report.score(),
+        checks_total: u32::try_from(report.total()).unwrap_or(u32::MAX),
+        iterations,
+        valve_fires,
+        best_worktree: None,
+    }
+}
+
 /// Terminal state when no stable-green candidate was reached.
 fn terminal_from_best(report: &GateReport, iterations: u32, valve_fires: u32) -> ClimbOutcome {
     let (terminal, stamp) = if report.all_green() {
@@ -537,7 +579,32 @@ mod tests {
             max_iterations: 5,
             gate_closure_digest: "deadbeef".into(),
             stall_after: 2,
+            deadline: None,
         }
+    }
+
+    #[tokio::test]
+    async fn past_deadline_yields_honest_timed_out_receipt() {
+        // Probe runs (red), then the governor trips before the first surgical
+        // attempt: the outcome is `timed_out` with the probe's honest counts —
+        // never a receipt-less kill, never an unearned stamp.
+        let builder = SeqBuilder {
+            next: Mutex::new(0),
+        };
+        let gate = ScriptGate {
+            reports: Mutex::new(vec![report(vec![ok("a"), bad("b")])].into()),
+            stable_green: false,
+        };
+        let ledger = ClimbLedger::new("t", LedgerCap::unlimited());
+        let dir = tempfile::tempdir().unwrap();
+        let mut journal = ClimbJournal::open(dir.path().join("j")).unwrap();
+        let mut p = params(1);
+        p.deadline = Some(std::time::Instant::now() - std::time::Duration::from_secs(1));
+        let out = run_climb(&p, &builder, &gate, None, &ledger, &mut journal).await;
+        assert_eq!(out.terminal, TerminalState::TimedOut);
+        assert_eq!(out.stamp, "none");
+        assert_eq!((out.checks_passed, out.checks_total), (1, 2));
+        assert_eq!(out.iterations, 1);
     }
 
     async fn run(reports: Vec<GateReport>, stable_green: bool, stab_of: u32) -> ClimbOutcome {

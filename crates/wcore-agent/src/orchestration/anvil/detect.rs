@@ -12,34 +12,70 @@
 
 use std::path::Path;
 
-/// Detect candidate gate argvs for `workspace`, most specific first.
+/// One detected gate candidate: the argv to run, plus (for TRAMPOLINE gates —
+/// commands that dispatch through a repo-controlled script file) the manifest
+/// to pin. A builder that edits the pinned trampoline in its worktree fails a
+/// Safety-class `gate-integrity` check instead of minting a false `verified`
+/// (the manual's condition-gaming failure mode). Direct gates (cargo/go/
+/// pytest) execute real project code, not a trampoline — nothing to pin.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GateCandidate {
+    /// The gate command argv.
+    pub argv: Vec<String>,
+    /// Repo-relative trampoline file to content-pin, when the argv is a
+    /// dispatcher into it (`package.json`, the matched just/make file).
+    pub pin: Option<String>,
+}
+
+/// Detect candidate gates for `workspace`, most specific first.
 ///
 /// Order: Cargo → npm → go → pytest → just → make. Manifest specificity, not
 /// popularity: a `Cargo.toml` workspace is more definitively "tested by
 /// `cargo test`" than a `Makefile` is by `make test`.
-pub fn detect_gate_candidates(workspace: &Path) -> Vec<Vec<String>> {
+pub fn detect_gate_candidates(workspace: &Path) -> Vec<GateCandidate> {
     let mut candidates = Vec::new();
     let arg = |parts: &[&str]| parts.iter().map(|s| s.to_string()).collect::<Vec<_>>();
 
     if workspace.join("Cargo.toml").is_file() {
-        candidates.push(arg(&["cargo", "test"]));
+        candidates.push(GateCandidate {
+            argv: arg(&["cargo", "test"]),
+            pin: None,
+        });
     }
     if has_npm_test_script(workspace) {
-        candidates.push(arg(&["npm", "test"]));
+        candidates.push(GateCandidate {
+            argv: arg(&["npm", "test"]),
+            pin: Some("package.json".to_string()),
+        });
     }
     if workspace.join("go.mod").is_file() {
-        candidates.push(arg(&["go", "test", "./..."]));
+        candidates.push(GateCandidate {
+            argv: arg(&["go", "test", "./..."]),
+            pin: None,
+        });
     }
     if has_pytest_markers(workspace) {
         // Windows installs expose `python`, Unix convention is `python3`.
         let python = if cfg!(windows) { "python" } else { "python3" };
-        candidates.push(arg(&[python, "-m", "pytest"]));
+        candidates.push(GateCandidate {
+            argv: arg(&[python, "-m", "pytest"]),
+            pin: None,
+        });
     }
-    if has_recipe(workspace, &["justfile", "Justfile", ".justfile"], "test") {
-        candidates.push(arg(&["just", "test"]));
+    if let Some(name) = find_recipe_file(workspace, &["justfile", "Justfile", ".justfile"], "test")
+    {
+        candidates.push(GateCandidate {
+            argv: arg(&["just", "test"]),
+            pin: Some(name),
+        });
     }
-    if has_recipe(workspace, &["Makefile", "makefile", "GNUmakefile"], "test") {
-        candidates.push(arg(&["make", "test"]));
+    if let Some(name) =
+        find_recipe_file(workspace, &["Makefile", "makefile", "GNUmakefile"], "test")
+    {
+        candidates.push(GateCandidate {
+            argv: arg(&["make", "test"]),
+            pin: Some(name),
+        });
     }
     candidates
 }
@@ -55,7 +91,15 @@ fn has_npm_test_script(workspace: &Path) -> bool {
         return false;
     };
     match json.pointer("/scripts/test").and_then(|v| v.as_str()) {
-        Some(script) => !script.trim().is_empty() && !script.contains("no test specified"),
+        Some(script) => {
+            let t = script.trim();
+            // Reject the npm scaffold placeholder AND vacuous always-green
+            // scripts — a gate that cannot fail would mint meaningless
+            // `verified` stamps.
+            !t.is_empty()
+                && !t.contains("no test specified")
+                && !matches!(t, "true" | ":" | "exit 0" | "exit0")
+        }
         None => false,
     }
 }
@@ -67,13 +111,13 @@ fn has_pytest_markers(workspace: &Path) -> bool {
         return true;
     }
     if let Ok(pyproject) = std::fs::read_to_string(workspace.join("pyproject.toml"))
-        && pyproject.contains("[tool.pytest")
+        && has_section_line(&pyproject, "[tool.pytest")
     {
         return true;
     }
     for ini in ["tox.ini", "setup.cfg"] {
         if let Ok(body) = std::fs::read_to_string(workspace.join(ini))
-            && (body.contains("[pytest]") || body.contains("[tool:pytest]"))
+            && (has_section_line(&body, "[pytest]") || has_section_line(&body, "[tool:pytest]"))
         {
             return true;
         }
@@ -81,28 +125,49 @@ fn has_pytest_markers(workspace: &Path) -> bool {
     false
 }
 
-/// A just/make file counts only when it actually defines a `test` recipe —
+/// A section header counts only at line start (comments/embedded strings
+/// don't declare pytest).
+fn has_section_line(body: &str, prefix: &str) -> bool {
+    body.lines()
+        .any(|l| l.trim_start().starts_with(prefix) && !l.trim_start().starts_with('#'))
+}
+
+/// Returns the FIRST of `names` that exists and defines a `test` recipe —
 /// line-anchored `test:` (allowing recipe args before the colon for just).
-fn has_recipe(workspace: &Path, names: &[&str], recipe: &str) -> bool {
+/// Variable assignments (`test := x`, `test = x`) are NOT recipes.
+fn find_recipe_file(workspace: &Path, names: &[&str], recipe: &str) -> Option<String> {
     for name in names {
         let Ok(body) = std::fs::read_to_string(workspace.join(name)) else {
             continue;
         };
         let found = body.lines().any(|line| {
             let line = line.trim_end();
-            // `test:` / `test arg1 arg2:` / `test: deps` — but not `retest:`
-            // and not indented (recipe bodies) or comment lines.
-            !line.starts_with([' ', '\t', '#'])
-                && line
-                    .split(':')
-                    .next()
-                    .is_some_and(|head| head.split_whitespace().next() == Some(recipe))
+            // `test:` / `test arg1 arg2:` / `test: deps` — but not `retest:`,
+            // not indented (recipe bodies), not comments, and not `test :=` /
+            // `test =` variable assignments.
+            if line.starts_with([' ', '\t', '#']) {
+                return false;
+            }
+            let Some(colon) = line.find(':') else {
+                return false;
+            };
+            if line[colon + 1..].starts_with('=') {
+                return false; // `:=` assignment, not a recipe
+            }
+            let head = &line[..colon];
+            let mut toks = head.split_whitespace();
+            if toks.next() != Some(recipe) {
+                return false;
+            }
+            // `test = a:b` is a variable assignment, not a recipe — but just
+            // recipe args with defaults (`test filter='':`) are fine.
+            !matches!(toks.next(), Some(t) if t.starts_with('='))
         });
         if found {
-            return true;
+            return Some((*name).to_string());
         }
     }
-    false
+    None
 }
 
 #[cfg(test)]
@@ -114,6 +179,13 @@ mod tests {
         std::fs::write(dir.join(name), body).unwrap();
     }
 
+    fn argvs(dir: &Path) -> Vec<Vec<String>> {
+        detect_gate_candidates(dir)
+            .into_iter()
+            .map(|c| c.argv)
+            .collect()
+    }
+
     #[test]
     fn empty_workspace_detects_nothing() {
         let dir = tempdir().unwrap();
@@ -121,18 +193,20 @@ mod tests {
     }
 
     #[test]
-    fn cargo_workspace_detects_cargo_test_first() {
+    fn cargo_workspace_detects_cargo_test_first_and_unpinned() {
         let dir = tempdir().unwrap();
         write(dir.path(), "Cargo.toml", "[package]\nname = \"x\"\n");
         write(dir.path(), "Makefile", "test:\n\tcargo test\n");
         let got = detect_gate_candidates(dir.path());
-        assert_eq!(got[0], vec!["cargo", "test"]);
-        // Makefile still surfaces as a fallback candidate.
-        assert_eq!(got[1], vec!["make", "test"]);
+        assert_eq!(got[0].argv, vec!["cargo", "test"]);
+        assert_eq!(got[0].pin, None); // direct gate: nothing to pin
+        // Makefile still surfaces as a fallback candidate, WITH its pin.
+        assert_eq!(got[1].argv, vec!["make", "test"]);
+        assert_eq!(got[1].pin.as_deref(), Some("Makefile"));
     }
 
     #[test]
-    fn npm_placeholder_test_script_is_rejected() {
+    fn npm_placeholder_and_vacuous_scripts_are_rejected() {
         let dir = tempdir().unwrap();
         write(
             dir.path(),
@@ -140,20 +214,27 @@ mod tests {
             r#"{"scripts":{"test":"echo \"Error: no test specified\" && exit 1"}}"#,
         );
         assert!(detect_gate_candidates(dir.path()).is_empty());
+        // A gate that cannot fail must not become a `verified` mill.
+        for vacuous in [
+            r#"{"scripts":{"test":"true"}}"#,
+            r#"{"scripts":{"test":"exit 0"}}"#,
+        ] {
+            write(dir.path(), "package.json", vacuous);
+            assert!(detect_gate_candidates(dir.path()).is_empty(), "{vacuous}");
+        }
     }
 
     #[test]
-    fn npm_real_test_script_is_detected() {
+    fn npm_real_test_script_is_detected_and_pinned() {
         let dir = tempdir().unwrap();
         write(
             dir.path(),
             "package.json",
             r#"{"scripts":{"test":"vitest run"}}"#,
         );
-        assert_eq!(
-            detect_gate_candidates(dir.path()),
-            vec![vec!["npm".to_string(), "test".to_string()]]
-        );
+        let got = detect_gate_candidates(dir.path());
+        assert_eq!(got[0].argv, vec!["npm", "test"]);
+        assert_eq!(got[0].pin.as_deref(), Some("package.json"));
     }
 
     #[test]
@@ -165,9 +246,20 @@ mod tests {
             "pyproject.toml",
             "[tool.pytest.ini_options]\ntestpaths = [\"tests\"]\n",
         );
-        let got = detect_gate_candidates(dir.path());
+        let got = argvs(dir.path());
         assert_eq!(got[0], vec!["go", "test", "./..."]);
         assert_eq!(got[1][1..], ["-m".to_string(), "pytest".to_string()]);
+    }
+
+    #[test]
+    fn commented_pytest_table_is_ignored() {
+        let dir = tempdir().unwrap();
+        write(
+            dir.path(),
+            "pyproject.toml",
+            "# [tool.pytest.ini_options] not really\n[project]\nname = \"x\"\n",
+        );
+        assert!(detect_gate_candidates(dir.path()).is_empty());
     }
 
     #[test]
@@ -180,19 +272,18 @@ mod tests {
             "justfile",
             "build:\n\tcargo build\n\ntest filter='':\n\tcargo test {{filter}}\n",
         );
-        assert_eq!(
-            detect_gate_candidates(dir.path()),
-            vec![vec!["just".to_string(), "test".to_string()]]
-        );
+        let got = detect_gate_candidates(dir.path());
+        assert_eq!(got[0].argv, vec!["just", "test"]);
+        assert_eq!(got[0].pin.as_deref(), Some("justfile"));
     }
 
     #[test]
-    fn makefile_retest_and_indented_lines_do_not_count() {
+    fn make_variable_assignments_and_retest_do_not_count() {
         let dir = tempdir().unwrap();
         write(
             dir.path(),
             "Makefile",
-            "retest:\n\techo no\n\nbuild:\n\ttest -f out || make real\n",
+            "retest:\n\techo no\n\ntest := lies\ntest = more lies\n\nbuild:\n\ttest -f out || make real\n",
         );
         assert!(detect_gate_candidates(dir.path()).is_empty());
     }

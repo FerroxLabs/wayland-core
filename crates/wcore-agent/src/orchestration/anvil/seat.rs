@@ -7,7 +7,9 @@
 //! a visible note — seat routing can only cheapen a forge, never break it.
 
 use wcore_config::anvil::{AnvilConfig, DriverSeatPlan};
-use wcore_config::config::{CliArgs, Config, connected_providers};
+use wcore_config::config::{
+    CliArgs, Config, ProviderType, connected_providers, provider_connected,
+};
 
 use crate::spawner::AgentSpawner;
 
@@ -38,7 +40,14 @@ pub fn materialize_driver_seat(
     session_seat.tools.auto_approve = true;
 
     let mut notes = Vec::new();
-    let plan = anvil.resolve_driver_seat(session_seat.provider, &connected_providers());
+    // `connected_providers()` iterates KNOWN_PROVIDER_TYPES, which deliberately
+    // excludes FluxRouter (it is not a model-catalog provider) — probe Flux
+    // connectivity explicitly or the routed lane is unreachable in practice.
+    let mut connected = connected_providers();
+    if provider_connected(ProviderType::FluxRouter) {
+        connected.push(ProviderType::FluxRouter);
+    }
+    let plan = anvil.resolve_driver_seat(session_seat.provider, &connected);
 
     let driver_cfg = match &plan {
         DriverSeatPlan::Session => session_seat.clone(),
@@ -71,17 +80,18 @@ pub fn materialize_driver_seat(
 
     let (provider, spawner_cfg) = match crate::bootstrap::create_provider_with_oauth(&driver_cfg) {
         Ok(p) => (p, driver_cfg),
-        Err(e) if driver_cfg.provider != session_seat.provider => {
-            // Cross-family driver failed to build — fall back, don't fail.
-            // The fallback spawner must pair the session provider with the
-            // session config (driver_cfg here would point forks at the
-            // failed provider's model).
-            notes.push(format!(
-                "driver provider failed ({e}); session model drives"
-            ));
+        Err(e) if !matches!(plan, DriverSeatPlan::Session) => {
+            // ANY routed seat (cross-family OR in-family model override) that
+            // fails to build falls back to the untouched session seat — the
+            // "never break a forge" contract. The fallback spawner must pair
+            // the session provider with the session config (driver_cfg here
+            // would point forks at the failed seat's model).
+            notes.push(format!("driver seat failed ({e}); session model drives"));
             let p = crate::bootstrap::create_provider_with_oauth(&session_seat)?;
             (p, session_seat)
         }
+        // plan == Session: driver_cfg IS the session seat — nothing to fall
+        // back to; the error is real.
         Err(e) => return Err(e),
     };
 
