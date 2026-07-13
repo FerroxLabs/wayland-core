@@ -51,8 +51,7 @@ async fn success_is_valid_sse_and_records_one_redacted_request() {
     assert!(observation.complete());
     assert_eq!(observation.requests.len(), 1);
     assert_eq!(observation.attempts(), 1);
-    assert_eq!(observation.retries(), 0);
-    assert!(observation.typed_failures().is_empty());
+    assert!(observation.injected_faults().is_empty());
     assert_eq!(observation.requests[0].sequence, 1);
     assert_eq!(observation.requests[0].method, "POST");
     assert_eq!(observation.requests[0].path, "/v1/chat/completions");
@@ -80,7 +79,7 @@ async fn success_is_valid_sse_and_records_one_redacted_request() {
 async fn fault_steps_are_fifo_and_extra_requests_fail_closed() {
     let script = OpenAiFixtureScript::new([
         OpenAiStep::http_error(503),
-        OpenAiStep::http_error(429),
+        OpenAiStep::rate_limited(10),
         OpenAiStep::truncated("partial"),
         OpenAiStep::duplicate_text("repeat"),
     ]);
@@ -92,11 +91,14 @@ async fn fault_steps_are_fifo_and_extra_requests_fail_closed() {
             .status(),
         reqwest::StatusCode::SERVICE_UNAVAILABLE
     );
+    let rate_limited = post(fixture.base_url(), request("fixture-chat-v1")).await;
     assert_eq!(
-        post(fixture.base_url(), request("fixture-chat-v1"))
-            .await
-            .status(),
+        rate_limited.status(),
         reqwest::StatusCode::TOO_MANY_REQUESTS
+    );
+    assert_eq!(
+        rate_limited.json::<serde_json::Value>().await.unwrap()["retry_after_ms"],
+        10
     );
     let truncated = post(fixture.base_url(), request("fixture-chat-v1"))
         .await
@@ -121,10 +123,9 @@ async fn fault_steps_are_fifo_and_extra_requests_fail_closed() {
     let observation = fixture.shutdown().await.expect("fixture shutdown");
     assert_eq!(observation.requests.len(), 5);
     assert_eq!(observation.attempts(), 5);
-    assert_eq!(observation.retries(), 3);
     assert_eq!(
-        observation.typed_failures(),
-        ["http_503", "http_429", "truncated_stream"]
+        observation.injected_faults(),
+        ["http_503", "rate_limited", "truncated_stream"]
     );
     assert!(!observation.complete());
     assert_eq!(observation.violations, ["unexpected_request"]);

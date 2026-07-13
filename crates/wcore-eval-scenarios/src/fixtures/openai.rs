@@ -139,6 +139,7 @@ impl OpenAiFixtureScript {
             steps: self.steps.clone(),
             cursor: 0,
             requests: Vec::new(),
+            request_instants: Vec::new(),
             violations: Vec::new(),
         }));
         let app = Router::new()
@@ -265,8 +266,8 @@ pub struct OpenAiFixtureObservation {
     pub consumed_steps: usize,
     pub expected_steps: usize,
     pub violations: Vec<String>,
-    retry_count: u64,
-    failure_codes: Vec<String>,
+    injected_faults: Vec<String>,
+    inter_request_delays_ms: Vec<u64>,
 }
 
 impl OpenAiFixtureObservation {
@@ -278,12 +279,16 @@ impl OpenAiFixtureObservation {
         self.requests.len() as u64
     }
 
-    pub fn retries(&self) -> u64 {
-        self.retry_count
+    /// Fault modes supplied by the fixture script. These describe test input,
+    /// not provider failures or retries observed from Core.
+    pub fn injected_faults(&self) -> &[String] {
+        &self.injected_faults
     }
 
-    pub fn typed_failures(&self) -> &[String] {
-        &self.failure_codes
+    /// Real elapsed time between request arrivals, used only to prove retry
+    /// hint behavior. It is intentionally excluded from fixture identity.
+    pub fn inter_request_delays_ms(&self) -> &[u64] {
+        &self.inter_request_delays_ms
     }
 }
 
@@ -306,25 +311,24 @@ impl RunningOpenAiFixture {
 
     pub fn observation(&self) -> OpenAiFixtureObservation {
         let state = self.state.lock().expect("OpenAI fixture state lock");
-        let failure_codes = state
+        let injected_faults = state
             .steps
             .iter()
             .take(state.cursor)
             .filter_map(OpenAiStep::failure_code)
             .collect();
-        let retry_count = state
-            .steps
-            .iter()
-            .take(state.cursor.saturating_sub(1))
-            .filter(|step| step.failure_code().is_some())
-            .count() as u64;
+        let inter_request_delays_ms = state
+            .request_instants
+            .windows(2)
+            .map(|pair| pair[1].duration_since(pair[0]).as_millis() as u64)
+            .collect();
         OpenAiFixtureObservation {
             requests: state.requests.clone(),
             consumed_steps: state.cursor,
             expected_steps: state.steps.len(),
             violations: state.violations.clone(),
-            retry_count,
-            failure_codes,
+            injected_faults,
+            inter_request_delays_ms,
         }
     }
 
@@ -357,6 +361,7 @@ struct FixtureState {
     steps: Vec<OpenAiStep>,
     cursor: usize,
     requests: Vec<FixtureRequestRecord>,
+    request_instants: Vec<tokio::time::Instant>,
     violations: Vec<String>,
 }
 
@@ -383,6 +388,7 @@ async fn handle_chat_completion(
             body_sha256,
             model,
         });
+        state.request_instants.push(tokio::time::Instant::now());
         if state.cursor >= state.steps.len() {
             state.violations.push("unexpected_request".to_string());
             None
@@ -411,9 +417,9 @@ async fn handle_chat_completion(
         OpenAiStep::RateLimited { retry_after_ms } => json_response(
             StatusCode::TOO_MANY_REQUESTS,
             json!({
+                "retry_after_ms": retry_after_ms,
                 "error": {
                     "code": "fixture_rate_limited",
-                    "retry_after_ms": retry_after_ms
                 }
             })
             .to_string(),

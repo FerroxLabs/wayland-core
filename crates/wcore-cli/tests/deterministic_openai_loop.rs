@@ -62,8 +62,6 @@ async fn run_script_with_approval(
             .all(|request| request.model.as_deref() == Some("fixture-chat-v1"))
     );
     result.execution.provider_attempts = Some(observation.attempts());
-    result.execution.provider_retries = Some(observation.retries());
-    result.execution.provider_typed_failures = observation.typed_failures().to_vec();
     (result, observation)
 }
 
@@ -79,7 +77,7 @@ async fn packaged_core_completes_a_scripted_openai_turn() {
     assert!(result.final_text.contains("fixture answer"));
     assert_eq!(observation.requests.len(), 1);
     assert_eq!(result.execution.provider_attempts, Some(1));
-    assert_eq!(result.execution.provider_retries, Some(0));
+    assert_eq!(result.execution.provider_retries, None);
     let usage = result
         .execution
         .provider_usage
@@ -119,6 +117,12 @@ async fn packaged_core_recovers_after_a_bounded_429() {
 
     assert_eq!(result.final_text, "recovered after 429");
     assert_eq!(observation.requests.len(), 2);
+    let delay_ms = observation.inter_request_delays_ms()[0];
+    assert!(delay_ms >= 8, "retry ignored the 10 ms hint: {delay_ms} ms");
+    assert!(
+        delay_ms < 1_000,
+        "retry used a fallback delay instead of the fixture hint: {delay_ms} ms"
+    );
 }
 
 #[tokio::test]
