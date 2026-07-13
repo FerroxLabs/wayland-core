@@ -2,6 +2,13 @@
 
 ## [0.12.25](https://github.com/FerroxLabs/wayland-core/compare/v0.12.24...v0.12.25) (2026-07-13)
 
+**Release highlights — Anvil Smart Loops.** The gated forge is on by default:
+auto-detected gates, natural-language invocation via the `Forge` tool,
+cheap-driver seat routing (incl. FluxRouter), an escalation valve that buys
+exactly one frontier turn on a stall, and machine-stamped receipts where only
+a passing gate earns `verified`. Hardened by a dual cross-vendor adversarial
+audit; live-proven end to end.
+
 
 ### Features
 
