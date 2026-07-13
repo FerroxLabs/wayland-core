@@ -19,6 +19,8 @@ use crate::usability::{self, Severity};
 
 pub const RECEIPT_SCHEMA: &str = "wayland.eval.receipt";
 pub const RECEIPT_SCHEMA_VERSION: u32 = 1;
+pub const BEHAVIOR_SCHEMA: &str = "wayland.eval.behavior";
+pub const BEHAVIOR_SCHEMA_VERSION: u32 = 1;
 const SIGNATURE_DOMAIN: &[u8] = b"wayland.eval.receipt.v1\0";
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -252,6 +254,77 @@ pub struct SummaryEvidenceV1 {
     pub wall_time_ms: u64,
 }
 
+#[derive(Serialize)]
+struct BehaviorProjectionV1<'a> {
+    schema: &'static str,
+    schema_version: u32,
+    identity: BehaviorIdentityV1<'a>,
+    target: &'a TargetEvidenceV1,
+    policy: &'a PolicyEvidenceV1,
+    provider: &'a ProviderEvidenceV1,
+    tools: Vec<BehaviorToolV1<'a>>,
+    decisions: &'a [DecisionEvidenceV1],
+    boundaries: &'a BoundaryEvidenceV1,
+    process: BehaviorProcessV1<'a>,
+    recovery: BehaviorRecoveryV1<'a>,
+    canary_scans: &'a CanaryScanEvidenceV1,
+    assertions: &'a [AssertionEvidenceV1],
+    quarantines: &'a [QuarantineEvidenceV1],
+    required_cells: &'a [String],
+    results: Vec<BehaviorResultV1<'a>>,
+    summary: BehaviorSummaryV1,
+}
+
+#[derive(Serialize)]
+struct BehaviorIdentityV1<'a> {
+    source_commit: &'a str,
+    binary_sha256: &'a str,
+    config_sha256: &'a str,
+    fixture_sha256: &'a str,
+    provider: &'a str,
+    model: &'a str,
+}
+
+#[derive(Serialize)]
+struct BehaviorToolV1<'a> {
+    tool_name: &'a str,
+    request_sha256: &'a str,
+    result_sha256: &'a str,
+    exit_state: &'a str,
+    idempotency_key_sha256: &'a Evidence<String>,
+}
+
+#[derive(Serialize)]
+struct BehaviorProcessV1<'a> {
+    cancellation_requested: bool,
+    orphan_count: &'a Evidence<u64>,
+}
+
+#[derive(Serialize)]
+struct BehaviorRecoveryV1<'a> {
+    action: &'a str,
+    unresolved_side_effects: &'a [String],
+}
+
+#[derive(Serialize)]
+struct BehaviorResultV1<'a> {
+    cell_id: &'a str,
+    task: &'a str,
+    provider: &'a str,
+    platform: &'a str,
+    passed: bool,
+    failures: &'a [FailureEvidenceV1],
+    usability: &'a [UsabilityEvidenceV1],
+    cost_microusd: u64,
+}
+
+#[derive(Serialize)]
+struct BehaviorSummaryV1 {
+    passed: u64,
+    failed: u64,
+    total_cost_microusd: u64,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum VerifiedAuthority {
     LocalNonAuthoritative,
@@ -320,6 +393,24 @@ impl EvidenceReceiptV1 {
             body,
             authority: AuthorityClaimV1::Local,
         })
+    }
+
+    /// Hash the repeatable behavior contract while excluding run identity,
+    /// provenance invocation, timings, process identity, and resource samples.
+    /// The full receipt remains content-addressed by `body_sha256`; this second
+    /// digest is only the cross-run determinism oracle.
+    pub fn behavior_sha256(&self) -> Result<String, ReceiptError> {
+        if self.schema != RECEIPT_SCHEMA || self.schema_version != RECEIPT_SCHEMA_VERSION {
+            return Err(ReceiptError::UnsupportedSchema {
+                schema: self.schema.clone(),
+                version: self.schema_version,
+            });
+        }
+        validate_body(&self.body)?;
+        if body_digest(&self.body)? != self.body_sha256 {
+            return Err(ReceiptError::DigestMismatch);
+        }
+        behavior_digest(&self.body)
     }
 
     /// Attach a detached CI signature. Possession of this object never makes
@@ -759,6 +850,69 @@ fn body_digest(body: &ReceiptBodyV1) -> Result<String, ReceiptError> {
     let bytes = serde_json::to_vec(body)
         .map_err(|error| ReceiptError::InvalidEvidence(format!("canonical JSON: {error}")))?;
     Ok(format!("{:x}", Sha256::digest(bytes)))
+}
+
+fn behavior_digest(body: &ReceiptBodyV1) -> Result<String, ReceiptError> {
+    let projection = BehaviorProjectionV1 {
+        schema: BEHAVIOR_SCHEMA,
+        schema_version: BEHAVIOR_SCHEMA_VERSION,
+        identity: BehaviorIdentityV1 {
+            source_commit: &body.identity.source_commit,
+            binary_sha256: &body.identity.binary_sha256,
+            config_sha256: &body.identity.config_sha256,
+            fixture_sha256: &body.identity.fixture_sha256,
+            provider: &body.identity.provider,
+            model: &body.identity.model,
+        },
+        target: &body.target,
+        policy: &body.policy,
+        provider: &body.provider,
+        tools: body
+            .tools
+            .iter()
+            .map(|tool| BehaviorToolV1 {
+                tool_name: &tool.tool_name,
+                request_sha256: &tool.request_sha256,
+                result_sha256: &tool.result_sha256,
+                exit_state: &tool.exit_state,
+                idempotency_key_sha256: &tool.idempotency_key_sha256,
+            })
+            .collect(),
+        decisions: &body.decisions,
+        boundaries: &body.boundaries,
+        process: BehaviorProcessV1 {
+            cancellation_requested: body.process.cancellation_requested,
+            orphan_count: &body.process.orphan_count,
+        },
+        recovery: BehaviorRecoveryV1 {
+            action: &body.recovery.action,
+            unresolved_side_effects: &body.recovery.unresolved_side_effects,
+        },
+        canary_scans: &body.canary_scans,
+        assertions: &body.assertions,
+        quarantines: &body.quarantines,
+        required_cells: &body.required_cells,
+        results: body
+            .results
+            .iter()
+            .map(|result| BehaviorResultV1 {
+                cell_id: &result.cell_id,
+                task: &result.task,
+                provider: &result.provider,
+                platform: &result.platform,
+                passed: result.passed,
+                failures: &result.failures,
+                usability: &result.usability,
+                cost_microusd: result.cost_microusd,
+            })
+            .collect(),
+        summary: BehaviorSummaryV1 {
+            passed: body.summary.passed,
+            failed: body.summary.failed,
+            total_cost_microusd: body.summary.total_cost_microusd,
+        },
+    };
+    hash_serializable(&projection)
 }
 
 fn sha256(bytes: &[u8]) -> String {
