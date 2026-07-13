@@ -14,6 +14,84 @@ fn provider(model: &str) -> ProviderConfig {
     ProviderConfig::new(ProviderId::DeepSeek, model).with_api_key("fixture-key")
 }
 
+#[cfg(unix)]
+#[derive(Debug, Clone, Copy)]
+struct OrphanState {
+    pid: u32,
+    port: u16,
+    heartbeat: u64,
+}
+
+#[cfg(unix)]
+fn read_orphan_state(path: &std::path::Path) -> Option<OrphanState> {
+    let contents = std::fs::read_to_string(path).ok()?;
+    let value = |name: &str| contents.lines().find_map(|line| line.strip_prefix(name));
+    Some(OrphanState {
+        pid: value("pid=")?.parse().ok()?,
+        port: value("port=")?.parse().ok()?,
+        heartbeat: value("heartbeat=")?.parse().ok()?,
+    })
+}
+
+#[cfg(unix)]
+async fn wait_for_orphan_state(path: &std::path::Path, timeout: Duration) -> Option<OrphanState> {
+    let deadline = tokio::time::Instant::now() + timeout;
+    loop {
+        if let Some(state) = read_orphan_state(path) {
+            return Some(state);
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return None;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+}
+
+#[cfg(unix)]
+fn process_exists(pid: u32) -> bool {
+    // SAFETY: signal 0 performs only an existence/permission check.
+    let result = unsafe { libc::kill(pid as libc::pid_t, 0) };
+    result == 0
+        || !matches!(
+            std::io::Error::last_os_error().raw_os_error(),
+            Some(libc::ESRCH)
+        )
+}
+
+#[cfg(unix)]
+fn listener_accepts_connections(port: u16) -> bool {
+    let address = std::net::SocketAddr::from(([127, 0, 0, 1], port));
+    std::net::TcpStream::connect_timeout(&address, Duration::from_millis(50)).is_ok()
+}
+
+#[cfg(unix)]
+async fn wait_for_orphan_cleanup(state: OrphanState, timeout: Duration) -> bool {
+    let deadline = tokio::time::Instant::now() + timeout;
+    loop {
+        if !process_exists(state.pid) && !listener_accepts_connections(state.port) {
+            return true;
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return false;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
+#[cfg(unix)]
+async fn emergency_kill_orphan(state: OrphanState) {
+    if process_exists(state.pid) {
+        // SAFETY: the fixture deliberately makes itself the leader of a fresh
+        // process group whose id equals its pid. This cleanup targets only that
+        // test-owned group, then the pid as a fallback.
+        unsafe {
+            libc::kill(-(state.pid as libc::pid_t), libc::SIGKILL);
+            libc::kill(state.pid as libc::pid_t, libc::SIGKILL);
+        }
+        let _ = wait_for_orphan_cleanup(state, Duration::from_secs(1)).await;
+    }
+}
+
 #[tokio::test]
 async fn turn_deadline_is_enforced_as_over_time() {
     let scenario = Scenario::new("turn_deadline", Category::Hardening)
@@ -143,6 +221,47 @@ async fn oversized_unterminated_stdout_is_a_bounded_runner_error() {
         result.wall_time < Duration::from_secs(1),
         "output limit should fail before the scenario deadline: {:?}",
         result.wall_time
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn timeout_reaps_detached_descendant_and_listener() {
+    let control_dir = tempfile::tempdir().expect("create external orphan control dir");
+    let control_path = control_dir.path().join("orphan-state");
+    let model = format!("fixture-orphan:{}", control_path.display());
+    let scenario = Scenario::new("detached_orphan", Category::Hardening)
+        .max_total_time(Duration::from_secs(2))
+        .turn(Turn::new("spawn detached listener").max_time(Duration::from_millis(500)));
+
+    let result = run_with_binary(&scenario, &provider(&model), fixture())
+        .await
+        .expect("timeout returns a failed scenario result");
+    assert!(
+        result
+            .failures
+            .iter()
+            .any(|failure| matches!(failure, Failure::OverTime { .. })),
+        "fixture must exercise the turn-timeout cleanup path: {:?}",
+        result.failures
+    );
+
+    let state = wait_for_orphan_state(&control_path, Duration::from_secs(1))
+        .await
+        .expect("detached fixture must publish pid, port, and heartbeat");
+    let cleaned = wait_for_orphan_cleanup(state, Duration::from_millis(500)).await;
+    let final_state = read_orphan_state(&control_path).unwrap_or(state);
+
+    // This test is intentionally red against direct-child-only cleanup. Always
+    // reap the escaped fixture before asserting so a red run leaves no residue.
+    if !cleaned {
+        emergency_kill_orphan(final_state).await;
+    }
+
+    assert!(
+        cleaned,
+        "timeout left detached descendant pid={} listening on 127.0.0.1:{}; heartbeat advanced {} -> {}",
+        state.pid, state.port, state.heartbeat, final_state.heartbeat
     );
 }
 

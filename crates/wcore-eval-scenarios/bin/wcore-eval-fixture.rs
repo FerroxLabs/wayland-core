@@ -6,6 +6,11 @@ use std::time::Duration;
 const SOURCE_COMMIT: &str = "0123456789abcdef0123456789abcdef01234567";
 
 fn main() {
+    #[cfg(unix)]
+    if let Some(control_path) = argument_value("--orphan-listener") {
+        run_orphan_listener(std::path::Path::new(&control_path));
+    }
+
     if std::env::args_os().any(|arg| arg == "--build-info") {
         println!(
             "wayland-core {} (source {SOURCE_COMMIT})",
@@ -36,6 +41,10 @@ fn main() {
                     .get("msg_id")
                     .and_then(serde_json::Value::as_str)
                     .unwrap_or("fixture");
+                #[cfg(unix)]
+                if let Some(control_path) = model.strip_prefix("fixture-orphan:") {
+                    spawn_detached_orphan(std::path::Path::new(control_path));
+                }
                 if model == "fixture-oversized-stdout" {
                     let mut stdout = std::io::stdout().lock();
                     stdout
@@ -117,6 +126,48 @@ fn main() {
             Some("stop") => break,
             _ => {}
         }
+    }
+}
+
+#[cfg(unix)]
+fn spawn_detached_orphan(control_path: &std::path::Path) {
+    use std::os::unix::process::CommandExt;
+
+    let executable = std::env::current_exe().expect("resolve fixture executable");
+    let mut command = std::process::Command::new(executable);
+    command
+        .arg("--orphan-listener")
+        .arg(control_path)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    command.process_group(0);
+    command.spawn().expect("spawn detached orphan fixture");
+
+    let deadline = std::time::Instant::now() + Duration::from_secs(1);
+    while !control_path.exists() && std::time::Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert!(control_path.exists(), "orphan fixture did not become ready");
+
+    loop {
+        std::thread::sleep(Duration::from_secs(60));
+    }
+}
+
+#[cfg(unix)]
+fn run_orphan_listener(control_path: &std::path::Path) -> ! {
+    let listener = std::net::TcpListener::bind(("127.0.0.1", 0))
+        .expect("bind orphan fixture loopback listener");
+    let port = listener.local_addr().expect("read listener address").port();
+    let pid = std::process::id();
+    let mut heartbeat = 0u64;
+
+    loop {
+        let state = format!("pid={pid}\nport={port}\nheartbeat={heartbeat}\n");
+        std::fs::write(control_path, state).expect("write orphan fixture control state");
+        heartbeat = heartbeat.saturating_add(1);
+        std::thread::sleep(Duration::from_millis(20));
     }
 }
 
