@@ -6260,19 +6260,85 @@ skills_lifecycle = true
         assert!(!cfg.observability.structured_traces);
     }
 
+    fn lifecycle_config(value: Option<bool>, memory: bool) -> ConfigFile {
+        let lifecycle = value
+            .map(|enabled| format!("[observability]\nskills_lifecycle = {enabled}\n"))
+            .unwrap_or_default();
+        let memory = format!("[memory]\nenabled = {memory}\n");
+        toml::from_str(&format!("{lifecycle}{memory}")).unwrap()
+    }
+
     #[test]
-    fn observability_skills_lifecycle_merges_global_and_project() {
-        // Project-on, global-off → on. (Mirrors structured_traces merge.)
-        let global: ConfigFile = toml::from_str("").unwrap();
-        let project: ConfigFile = toml::from_str(
-            r#"
-[observability]
-skills_lifecycle = true
-        "#,
-        )
-        .unwrap();
-        let merged = merge_config_files(global, project);
-        assert!(merged.observability.skills_lifecycle);
+    fn observability_skills_lifecycle_false_is_monotonic_across_sources() {
+        for global in [false, true] {
+            for project in [false, true] {
+                for memory in [false, true] {
+                    let merged = merge_config_files(
+                        lifecycle_config(Some(global), memory),
+                        lifecycle_config(Some(project), memory),
+                    );
+                    assert_eq!(
+                        merged.observability.skills_lifecycle,
+                        global && project,
+                        "global={global}, project={project}, memory={memory}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn observability_skills_lifecycle_absence_does_not_erase_explicit_false() {
+        let absent_absent =
+            merge_config_files(lifecycle_config(None, false), lifecycle_config(None, false));
+        assert!(
+            absent_absent.observability.skills_lifecycle,
+            "the smart default remains enabled when neither source configures lifecycle"
+        );
+
+        let global_false = merge_config_files(
+            lifecycle_config(Some(false), false),
+            lifecycle_config(None, false),
+        );
+        assert!(
+            !global_false.observability.skills_lifecycle,
+            "project absence must not erase a global opt-out"
+        );
+
+        let project_false = merge_config_files(
+            lifecycle_config(None, false),
+            lifecycle_config(Some(false), false),
+        );
+        assert!(
+            !project_false.observability.skills_lifecycle,
+            "global absence must not erase a project opt-out"
+        );
+    }
+
+    #[test]
+    fn observability_file_layer_preserves_skills_lifecycle_presence() {
+        fn serialized_value(source: &str) -> Option<bool> {
+            let config: ConfigFile = toml::from_str(source).unwrap();
+            let value = toml::Value::try_from(&config).unwrap();
+            value
+                .get("observability")
+                .and_then(|observability| observability.get("skills_lifecycle"))
+                .and_then(toml::Value::as_bool)
+        }
+
+        assert_eq!(
+            serialized_value("[observability]\nstructured_traces = true\n"),
+            None,
+            "an omitted lifecycle value must remain distinguishable from default true"
+        );
+        assert_eq!(
+            serialized_value("[observability]\nskills_lifecycle = false\n"),
+            Some(false)
+        );
+        assert_eq!(
+            serialized_value("[observability]\nskills_lifecycle = true\n"),
+            Some(true)
+        );
     }
 
     // -------------------------------------------------------------------------

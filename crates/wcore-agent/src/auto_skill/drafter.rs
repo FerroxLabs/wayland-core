@@ -296,10 +296,11 @@ mod tests {
 
     #[test]
     fn draft_writes_md_and_json_to_skill_dir() {
-        let tmp = tempfile::tempdir().unwrap();
+        let legacy_root = tempfile::tempdir().unwrap();
+        let loader_root = tempfile::tempdir().unwrap();
         let drafter = SkillDrafter::with_loader_root(
-            tmp.path().to_path_buf(),
-            tmp.path().to_path_buf(),
+            legacy_root.path().to_path_buf(),
+            loader_root.path().to_path_buf(),
             None,
         );
         let trigger = fake_trigger();
@@ -319,6 +320,16 @@ mod tests {
         assert_eq!(manifest["needs_review"], serde_json::Value::Bool(true));
         assert_eq!(manifest["evidence_count"], serde_json::json!(3));
         assert_eq!(manifest["scorer"], serde_json::json!("auto_drafter"));
+        assert!(
+            !legacy_root.path().join(&res.name).exists(),
+            "F06 must publish one canonical draft only"
+        );
+        assert!(
+            !wcore_skills::bundled::get_bundled_skills()
+                .iter()
+                .any(|skill| skill.name == res.name),
+            "generated content must never enter the process-global bundled registry"
+        );
     }
 
     #[test]

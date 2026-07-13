@@ -145,9 +145,7 @@ async fn unreviewed_auto_draft_loads_but_is_hidden_from_the_model() {
 
 #[tokio::test]
 #[serial(wayland_home_env)]
-async fn reviewed_auto_draft_is_visible_to_the_model() {
-    // Once a human reviews a draft (`needs_review: false`) it becomes a normal
-    // model-visible skill — the gate keys off the flag, not on auto_drafted.
+async fn generated_provenance_stays_quarantined_when_review_flag_is_false() {
     let home = TempDir::new().unwrap();
     let _guard = WaylandHomeGuard::set(home.path());
     write_auto_skill_with_manifest(home.path(), "auto-reviewed", false);
@@ -160,7 +158,82 @@ async fn reviewed_auto_draft_is_visible_to_the_model() {
         .find(|s| s.name.ends_with("auto-reviewed"))
         .expect("a reviewed draft loads");
     assert!(
+        hit.disable_model_invocation,
+        "F06 quarantines generated provenance until governed F23 promotion"
+    );
+}
+
+fn write_released_generated_body(home: &Path, name: &str, manifest: Option<&str>) {
+    let dir = home.join("skills").join("auto").join(name);
+    fs::create_dir_all(&dir).unwrap();
+    fs::write(
+        dir.join("SKILL.md"),
+        format!(
+            "# Auto-drafted skill: {name}\n\n\
+             > NOTE: This skill was auto-drafted from a streak of successful turns with similar \
+             task signatures. Review and edit before treating it as canonical.\n\n\
+             Signature: `read-write`\n"
+        ),
+    )
+    .unwrap();
+    if let Some(body) = manifest {
+        fs::write(dir.join("manifest.json"), body).unwrap();
+    }
+}
+
+#[tokio::test]
+#[serial(wayland_home_env)]
+async fn released_manifestless_generated_body_is_quarantined() {
+    let home = TempDir::new().unwrap();
+    let _guard = WaylandHomeGuard::set(home.path());
+    write_released_generated_body(home.path(), "auto-read-write", None);
+
+    let cwd = TempDir::new().unwrap();
+    let skills = load_all_skills(cwd.path(), &[], false, None).await;
+    let hit = skills
+        .iter()
+        .find(|s| s.name.ends_with("auto-read-write"))
+        .expect("released generated draft remains inspectable");
+    assert!(
+        hit.disable_model_invocation,
+        "a released manifest-less generated draft must fail closed"
+    );
+}
+
+#[tokio::test]
+#[serial(wayland_home_env)]
+async fn malformed_manifest_does_not_unquarantine_released_generated_body() {
+    let home = TempDir::new().unwrap();
+    let _guard = WaylandHomeGuard::set(home.path());
+    write_released_generated_body(home.path(), "auto-malformed", Some("{not-json"));
+
+    let cwd = TempDir::new().unwrap();
+    let skills = load_all_skills(cwd.path(), &[], false, None).await;
+    let hit = skills
+        .iter()
+        .find(|s| s.name.ends_with("auto-malformed"))
+        .expect("generated draft with damaged metadata remains inspectable");
+    assert!(
+        hit.disable_model_invocation,
+        "damaged metadata must not turn generated content into a model-visible skill"
+    );
+}
+
+#[tokio::test]
+#[serial(wayland_home_env)]
+async fn user_authored_auto_prefixed_skill_remains_visible() {
+    let home = TempDir::new().unwrap();
+    let _guard = WaylandHomeGuard::set(home.path());
+    write_auto_skill(home.path(), "auto-user-authored");
+
+    let cwd = TempDir::new().unwrap();
+    let skills = load_all_skills(cwd.path(), &[], false, None).await;
+    let hit = skills
+        .iter()
+        .find(|s| s.name.ends_with("auto-user-authored"))
+        .expect("ordinary auto-prefixed skill loads");
+    assert!(
         !hit.disable_model_invocation,
-        "a reviewed draft (needs_review=false) stays model-visible"
+        "name shape alone must not classify user content as generated"
     );
 }

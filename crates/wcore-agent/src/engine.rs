@@ -16035,6 +16035,44 @@ mod user_model_writeback_tests {
         );
     }
 
+    #[test]
+    fn auto_skill_lifecycle_off_blocks_injected_drafter_before_bucketing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let skill_dir = tmp.path().join("skills").join("auto");
+        let db = Arc::new(wcore_memory::db::Db::open_memory().unwrap());
+        let store = Arc::new(wcore_evolve::prompt_store::PromptStore::new(db));
+        let drafter = Arc::new(crate::auto_skill::SkillDrafter::new(
+            skill_dir.clone(),
+            Some(store.clone()),
+        ));
+        let mut engine = make_engine();
+        assert!(
+            !engine.skills_lifecycle,
+            "fixture must exercise the off path"
+        );
+        engine.set_skill_drafter(drafter);
+
+        for input in [
+            "refactor the code",
+            "the code refactor",
+            "please refactor code",
+        ] {
+            engine.observe_auto_skill(input, None, StopReason::EndTurn, 1);
+        }
+
+        assert!(
+            !skill_dir.exists(),
+            "lifecycle-off observation must not write generated content"
+        );
+        assert!(
+            store
+                .best_for_skill("auto-code-refactor", "auto_drafter", 10)
+                .unwrap()
+                .is_empty(),
+            "lifecycle-off observation must not record PromptStore candidates"
+        );
+    }
+
     /// Three consecutive successful turns on the same task signature,
     /// with a drafter installed, produces an on-disk auto-draft file
     /// AND a PromptStore record. Closes the v0.8.1 U6 wire end-to-end.
@@ -16053,6 +16091,7 @@ mod user_model_writeback_tests {
         ));
 
         let mut engine = make_engine();
+        engine.skills_lifecycle = true;
         engine.set_skill_drafter(drafter);
         assert!(engine.skill_drafter().is_some());
 

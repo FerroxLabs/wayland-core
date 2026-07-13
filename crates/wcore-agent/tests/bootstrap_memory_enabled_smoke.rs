@@ -137,3 +137,48 @@ async fn bootstrap_with_memory_disabled_spawns_no_scheduler() {
          (disabled={disabled_count}, enabled={enabled_count})"
     );
 }
+
+#[tokio::test]
+async fn lifecycle_off_keeps_memory_but_omits_legacy_skill_drafter() {
+    let mut cfg = cfg_with_memory(true);
+    cfg.observability.skills_lifecycle = false;
+    let workdir = tempfile::TempDir::new().expect("workdir");
+
+    let result = AgentBootstrap::new(cfg, workdir.path().to_str().unwrap(), null_output())
+        .build()
+        .await
+        .expect("memory must remain usable when only skill lifecycle is disabled");
+
+    let episode = wcore_memory::v2_types::Episode {
+        id: wcore_memory::v2_types::EpisodeId::new(),
+        tier: wcore_memory::v2_types::Tier::Project,
+        ts: 1_700_000_000,
+        episode_type: "containment-proof".to_string(),
+        summary: "ordinary memory survives lifecycle opt-out".to_string(),
+        atomic_facts: Vec::new(),
+        source: "test".to_string(),
+        source_product: "wcore-agent-test".to_string(),
+        session_id: None,
+        project_root: Some(workdir.path().to_string_lossy().into_owned()),
+        decay_score: 1.0,
+        status: wcore_memory::v2_types::EpisodeStatus::Active,
+    };
+    let episode_id = result
+        .engine
+        .memory_api()
+        .record_episode(episode.clone(), wcore_memory::AccessToken::System)
+        .await
+        .expect("real memory must accept a project episode");
+    assert_eq!(episode_id, episode.id);
+    let loaded = result
+        .engine
+        .memory_api()
+        .get_episode(&episode_id, wcore_memory::AccessToken::System)
+        .await
+        .expect("real memory must read back the episode");
+    assert_eq!(loaded.summary, episode.summary);
+    assert!(
+        result.engine.skill_drafter().is_none(),
+        "skills_lifecycle=false must prevent legacy SkillDrafter construction"
+    );
+}

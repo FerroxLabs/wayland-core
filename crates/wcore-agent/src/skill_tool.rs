@@ -549,6 +549,28 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn model_cannot_execute_or_enumerate_hidden_skill_by_name() {
+        let mut hidden = make_skill("auto-quarantined", "SECRET GENERATED BODY");
+        hidden.disable_model_invocation = true;
+        let tool = tool_with(vec![hidden, make_skill("commit", "visible body")]);
+
+        let guessed = tool.execute(json!({ "skill": "auto-quarantined" })).await;
+        assert!(
+            guessed.is_error,
+            "a hidden skill must be not-found to the model"
+        );
+        assert!(guessed.content.contains("not found"));
+        assert!(!guessed.content.contains("SECRET GENERATED BODY"));
+
+        let missing = tool.execute(json!({ "skill": "missing" })).await;
+        assert!(missing.content.contains("commit"));
+        assert!(
+            !missing.content.contains("auto-quarantined"),
+            "model-facing diagnostics must enumerate visible names only"
+        );
+    }
+
+    #[tokio::test]
     async fn test_leading_slash_stripped() {
         let tool = tool_with(vec![make_skill("commit", "body")]);
         let result = tool.execute(json!({ "skill": "/commit" })).await;

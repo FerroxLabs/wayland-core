@@ -80,35 +80,50 @@ async fn read_procedure_status(
 
 #[tokio::test(flavor = "current_thread")]
 #[serial]
-async fn skills_promote_transitions_staged_to_active() {
+async fn skills_promote_is_suspended_before_db_or_filesystem_mutation() {
     let (project, memory_root, id) =
         fixture_with_staged_procedure("auto-grep-glob-grep-glob-grep").await;
+    let wayland_home = TempDir::new().unwrap();
+    let unrelated = wayland_home
+        .path()
+        .join("skills")
+        .join("auto")
+        .join("auto-unrelated");
+    fs::create_dir_all(&unrelated).unwrap();
+    fs::write(unrelated.join("SKILL.md"), "# generated draft\n").unwrap();
 
     let bin = env!("CARGO_BIN_EXE_wayland-core");
     let out = std::process::Command::new(bin)
         .args(["--skills-promote", &id.0.to_string()])
         .current_dir(project.path())
         .env("WCORE_MEMORY_DIR", memory_root.path())
+        .env("WAYLAND_HOME", wayland_home.path())
         .output()
         .expect("run cli");
     assert!(
-        out.status.success(),
-        "CLI exit: {}\nstderr: {}\nstdout: {}",
-        out.status,
-        String::from_utf8_lossy(&out.stderr),
-        String::from_utf8_lossy(&out.stdout),
+        !out.status.success(),
+        "promotion must fail closed until F23 supplies governed activation"
     );
-    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(
-        stdout.contains("promoted procedure") && stdout.contains("staged → active"),
-        "expected promotion confirmation in stdout; got: {stdout}"
+        stderr.contains("temporarily unavailable") && stderr.contains("governed"),
+        "expected stable containment diagnostic; got: {stderr}"
     );
 
     let status = read_procedure_status(project.path(), id).await;
     assert_eq!(
         status,
-        Some(ProcedureStatus::Active),
-        "procedure must be Active after promote"
+        Some(ProcedureStatus::Staged),
+        "rejected promotion must not change procedure state"
+    );
+    assert!(
+        !wayland_home
+            .path()
+            .join("skills")
+            .join("auto-unrelated")
+            .join("SKILL.md")
+            .exists(),
+        "rejected promotion must not bulk-copy unrelated drafts"
     );
 }
 
@@ -170,8 +185,8 @@ async fn skills_promote_unknown_id_exits_nonzero() {
     );
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(
-        stderr.contains("no procedure with id") || stderr.contains("not found"),
-        "expected not-found diagnostic; got stderr: {stderr}"
+        stderr.contains("temporarily unavailable") && stderr.contains("governed"),
+        "suspension must precede database lookup; got stderr: {stderr}"
     );
 }
 
@@ -196,7 +211,7 @@ async fn skills_promote_rejects_non_uuid() {
     );
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(
-        stderr.contains("invalid procedure id"),
-        "expected UUID-parse diagnostic; got stderr: {stderr}"
+        stderr.contains("temporarily unavailable") && stderr.contains("governed"),
+        "suspension must precede identifier parsing; got stderr: {stderr}"
     );
 }
