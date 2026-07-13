@@ -448,6 +448,7 @@ fn critical_usability_finding_is_a_receipt_gate_failure() {
                 call_id: "call-approved-write".to_string(),
                 approved: true,
             }],
+            cancellation_requested: false,
             shutdown_time: Duration::from_millis(5),
         },
     };

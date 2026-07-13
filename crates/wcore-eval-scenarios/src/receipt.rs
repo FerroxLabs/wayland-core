@@ -653,9 +653,7 @@ impl EvidenceReceiptV1 {
                 peak_cpu_millis: Evidence::Unavailable {
                     code: "resource_sampler_not_enabled".to_string(),
                 },
-                cancellation_requested: result.failures.iter().any(|failure| {
-                    matches!(failure, Failure::Hung { .. } | Failure::OverTime { .. })
-                }),
+                cancellation_requested: result.execution.cancellation_requested,
                 orphan_count: process_orphans,
             },
             recovery: RecoveryEvidenceV1 {

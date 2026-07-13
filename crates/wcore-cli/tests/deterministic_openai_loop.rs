@@ -219,7 +219,7 @@ async fn packaged_core_cancels_an_active_stream() {
 
     assert!(started.elapsed() < Duration::from_secs(3));
     assert!(matches!(result.failures.as_slice(), [Failure::CostMissing]));
-    assert!(result.final_text.is_empty());
+    assert_eq!(result.final_text, "before cancellation");
     assert!(result.execution.cancellation_requested);
     assert!(result.execution.cleanup_verified);
     assert!(observation.complete(), "observation: {observation:?}");

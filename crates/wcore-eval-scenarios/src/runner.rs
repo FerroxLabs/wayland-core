@@ -87,6 +87,7 @@ pub struct ExecutionEvidence {
     pub first_token_time: Option<Duration>,
     pub approval_response_time: Duration,
     pub approval_commands: Vec<ApprovalCommandEvidence>,
+    pub cancellation_requested: bool,
     pub shutdown_time: Duration,
 }
 
@@ -608,6 +609,7 @@ async fn run_session_body(input: SessionRun<'_>) -> anyhow::Result<ScenarioResul
                     first_token_time: None,
                     approval_response_time: Duration::ZERO,
                     approval_commands: Vec::new(),
+                    cancellation_requested: true,
                     shutdown_time,
                 },
             });
@@ -657,6 +659,7 @@ async fn run_session_body(input: SessionRun<'_>) -> anyhow::Result<ScenarioResul
                     first_token_time: None,
                     approval_response_time: Duration::ZERO,
                     approval_commands: Vec::new(),
+                    cancellation_requested: true,
                     shutdown_time,
                 },
             });
@@ -828,6 +831,7 @@ async fn run_session_body(input: SessionRun<'_>) -> anyhow::Result<ScenarioResul
             first_token_time,
             approval_response_time,
             approval_commands,
+            cancellation_requested: scenario.turns.iter().any(|turn| turn.stop_mid_turn),
             shutdown_time,
         },
     };
@@ -1159,10 +1163,10 @@ async fn drive_session(
         let prompt_sent_at = Instant::now();
 
         let mut turn_text = String::new();
-        // D2: Stop-mid-turn — send `stop` once, right after the first event
-        // of this turn arrives, then expect the engine to halt the run future
-        // and emit `stream_end`. `stop_pending` flips false after the send so
-        // it fires exactly once.
+        // D2: Stop-mid-turn — send stop once after the first event that
+        // proves provider/tool work is active. Bootstrap bookkeeping events
+        // do not qualify: stopping on one of those can cancel before the
+        // provider request is even sent, creating a false cancellation proof.
         let mut stop_pending = turn.stop_mid_turn;
 
         loop {
@@ -1191,12 +1195,20 @@ async fn drive_session(
                     break;
                 }
             };
-            // D2: Stop-mid-turn — the first event of the turn proves the
-            // engine started working; send `stop` now to cancel it. The engine
-            // breaks its `engine.run()` future (the `ProtocolCommand::Stop` arm
-            // in the in-turn select loop) and emits this turn's `stream_end`,
-            // which ends the loop below normally.
-            if stop_pending {
+            // D2: wait for observable model/tool activity, then cancel the
+            // active run future. The current event is still dispatched below,
+            // so a triggering text delta remains visible to the evaluator.
+            let ty = ev.get("type").and_then(Value::as_str).unwrap_or("");
+            if stop_pending
+                && matches!(
+                    ty,
+                    "text_delta"
+                        | "thinking"
+                        | "tool_request"
+                        | "tool_running"
+                        | "approval_required"
+                )
+            {
                 stop_pending = false;
                 let stop_cmd = serde_json::json!({"type": "stop"});
                 let mut sline = serde_json::to_vec(&stop_cmd)?;
@@ -1208,7 +1220,6 @@ async fn drive_session(
             // Dispatch by "type" tag — same model the W0 host decoder
             // contract uses. Unknown variants are silently dropped
             // (forward-compat).
-            let ty = ev.get("type").and_then(Value::as_str).unwrap_or("");
             match ty {
                 "text_delta" => {
                     if let Some(t) = ev.get("text").and_then(Value::as_str) {
