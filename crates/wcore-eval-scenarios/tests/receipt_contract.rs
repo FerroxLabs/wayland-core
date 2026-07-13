@@ -13,6 +13,7 @@ use wcore_eval_scenarios::receipt::{
 use wcore_eval_scenarios::report::{ReportRenderError, render_receipt_reports};
 use wcore_eval_scenarios::runner::{ExecutionEvidence, ScenarioResult};
 use wcore_eval_scenarios::scenario::{ApprovalPolicy, Platform};
+use wcore_eval_scenarios::trace::TraceEntry;
 use wcore_eval_scenarios::{ProviderId, ToolTrace};
 
 fn h64(ch: char) -> String {
@@ -416,7 +417,17 @@ fn critical_usability_finding_is_a_receipt_gate_failure() {
         failures: Vec::new(),
         wall_time: Duration::from_millis(50),
         cost_usd: 0.0,
-        trace: ToolTrace::default(),
+        trace: ToolTrace {
+            entries: vec![TraceEntry {
+                call_id: "call-approved-write".to_string(),
+                tool_name: "Write".to_string(),
+                input: r#"{"content":"HELLO"}"#.to_string(),
+                output: "Created approved.txt".to_string(),
+                is_error: false,
+                duration: Some(Duration::from_millis(2)),
+                turn: 0,
+            }],
+        },
         final_text: "apparently successful".to_string(),
         stderr_tail: "panic: background subsystem crashed".to_string(),
         turn_results: Vec::new(),
@@ -452,6 +463,15 @@ fn critical_usability_finding_is_a_receipt_gate_failure() {
     )
     .expect("receipt conversion");
 
+    assert_eq!(receipt.body.decisions.len(), 2);
+    assert_eq!(receipt.body.decisions[0].action, "approval_posture");
+    assert_eq!(receipt.body.decisions[0].decision, "approve_all");
+    assert_eq!(receipt.body.decisions[1].action, "tool_approval_command");
+    assert_eq!(receipt.body.decisions[1].decision, "approve_sent");
+    assert_eq!(
+        receipt.body.decisions[1].resource_sha256,
+        format!("{:x}", Sha256::digest(b"call-approved-write"))
+    );
     assert!(!receipt.body.results[0].passed);
     assert_eq!(receipt.body.results[0].usability[0].code, "panic");
     assert!(
