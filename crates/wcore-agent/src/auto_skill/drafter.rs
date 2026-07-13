@@ -63,7 +63,7 @@ impl SkillDrafter {
     /// of landing in the shared, process-global `app_config_dir()`. Without
     /// this, concurrent drafter tests race on one real config path (#564).
     #[cfg(test)]
-    fn with_loader_root(
+    pub(crate) fn with_loader_root(
         skill_dir: PathBuf,
         loader_root: PathBuf,
         prompt_store: Option<Arc<wcore_evolve::prompt_store::PromptStore>>,

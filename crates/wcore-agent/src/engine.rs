@@ -16082,14 +16082,15 @@ mod user_model_writeback_tests {
     #[test]
     fn auto_skill_three_successes_writes_draft_to_disk() {
         let tmp = tempfile::tempdir().unwrap();
-        let skill_dir = tmp.path().join("skills").join("auto");
+        let skill_dir = tmp.path().join("skills");
 
         // Real PromptStore against an in-memory Db so we can also
         // assert the row landed.
         let db = Arc::new(wcore_memory::db::Db::open_memory().unwrap());
         let store = Arc::new(wcore_evolve::prompt_store::PromptStore::new(db));
-        let drafter = Arc::new(crate::auto_skill::SkillDrafter::new(
-            skill_dir.clone(),
+        let drafter = Arc::new(crate::auto_skill::SkillDrafter::with_loader_root(
+            tmp.path().join("legacy-unused"),
+            tmp.path().to_path_buf(),
             Some(store.clone()),
         ));
 
