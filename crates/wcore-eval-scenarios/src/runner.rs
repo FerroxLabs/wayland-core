@@ -311,17 +311,48 @@ pub(crate) async fn run_session_in(
     cwd: &std::path::Path,
     wayland_home: Option<&std::path::Path>,
 ) -> anyhow::Result<ScenarioResult> {
-    let start = Instant::now();
-
     // Run the scenario's setup hook BEFORE spawning the engine. The closure
     // seeds the working dir — input files to probe, fixture scripts (mock MCP
     // server, shell hooks), and config appends (`[mcp.servers.*]`,
     // `[[hooks.*]]`) onto the tempenv-seeded `.wayland-core/config.toml`. This
     // was previously assigned on `Scenario` but never invoked, so any
     // setup-dependent scenario silently degraded; D6/D7/coverage need it.
-    if let Some(setup) = &scenario.setup {
-        setup(cwd).map_err(|e| anyhow::anyhow!("scenario setup failed: {e}"))?;
+    let outcome = match &scenario.setup {
+        Some(setup) => match setup(cwd) {
+            Ok(()) => run_session_body(scenario, provider, bin, cwd, wayland_home).await,
+            Err(error) => Err(anyhow::anyhow!("scenario setup failed: {error}")),
+        },
+        None => run_session_body(scenario, provider, bin, cwd, wayland_home).await,
+    };
+
+    let cleanup_error = scenario
+        .cleanup
+        .as_ref()
+        .and_then(|cleanup| cleanup(cwd).err());
+
+    match (outcome, cleanup_error) {
+        (Ok(mut result), Some(error)) => {
+            result.failures.push(Failure::RunnerError(format!(
+                "scenario cleanup failed: {error}"
+            )));
+            result.passed = false;
+            Ok(result)
+        }
+        (Err(run_error), Some(cleanup_error)) => Err(anyhow::anyhow!(
+            "{run_error}; scenario cleanup failed: {cleanup_error}"
+        )),
+        (outcome, None) => outcome,
     }
+}
+
+async fn run_session_body(
+    scenario: &crate::scenario::Scenario,
+    provider: &ProviderConfig,
+    bin: &std::path::Path,
+    cwd: &std::path::Path,
+    wayland_home: Option<&std::path::Path>,
+) -> anyhow::Result<ScenarioResult> {
+    let start = Instant::now();
 
     let mut child = spawn_for_run(
         bin,
@@ -359,11 +390,18 @@ pub(crate) async fn run_session_in(
                 let _ = child.start_kill();
                 let _ = child.wait().await;
                 let stderr_tail = stderr_cap.snapshot();
+                let failure = e.downcast_ref::<TurnTimeout>().map_or_else(
+                    || Failure::RunnerError(e.to_string()),
+                    |timeout| Failure::OverTime {
+                        observed_secs: timeout.observed.as_secs_f64(),
+                        budget_secs: timeout.budget.as_secs_f64(),
+                    },
+                );
                 return Ok(ScenarioResult {
                     name: scenario.name.to_string(),
                     provider: provider.id,
                     passed: false,
-                    failures: vec![Failure::RunnerError(e.to_string())],
+                    failures: vec![failure],
                     wall_time: start.elapsed(),
                     cost_usd: 0.0,
                     trace: ToolTrace::default(),
@@ -494,6 +532,17 @@ pub(crate) async fn run_session_in(
     // turn-2 `expect_tool("Write")` — the multi-turn marketer rewrite must
     // actually re-invoke the tool in turn 2.
     for (turn_idx, turn_def) in scenario.turns.iter().enumerate() {
+        let observed_steps = trace
+            .entries
+            .iter()
+            .filter(|entry| entry.turn == turn_idx)
+            .count();
+        if observed_steps > turn_def.max_steps {
+            failures.push(Failure::StepsExceeded {
+                observed: observed_steps,
+                budget: turn_def.max_steps,
+            });
+        }
         for expected_tool in &turn_def.expected_tools {
             if trace.count_in_turn(expected_tool, turn_idx) == 0 {
                 failures.push(Failure::ExpectedToolMissing(format!(
@@ -560,6 +609,48 @@ struct DriveOutput {
     boot_time: Duration,
     /// `info` event messages captured across the run (D1/D2).
     info_events: Vec<String>,
+}
+
+#[derive(Debug, Error)]
+#[error(
+    "turn {turn} exceeded its {budget_secs:.3}s deadline after {observed_secs:.3}s",
+    budget_secs = .budget.as_secs_f64(),
+    observed_secs = .observed.as_secs_f64()
+)]
+struct TurnTimeout {
+    turn: usize,
+    observed: Duration,
+    budget: Duration,
+}
+
+async fn read_turn_event<R>(
+    reader: &mut tokio::io::Lines<BufReader<R>>,
+    turn: usize,
+    started: Instant,
+    budget: Duration,
+) -> anyhow::Result<Option<Value>>
+where
+    R: tokio::io::AsyncRead + Unpin,
+{
+    let observed = started.elapsed();
+    let Some(remaining) = budget.checked_sub(observed) else {
+        return Err(TurnTimeout {
+            turn,
+            observed,
+            budget,
+        }
+        .into());
+    };
+
+    match tokio::time::timeout(remaining, read_one_event(reader)).await {
+        Ok(event) => event,
+        Err(_) => Err(TurnTimeout {
+            turn,
+            observed: started.elapsed(),
+            budget,
+        }
+        .into()),
+    }
 }
 
 /// Build the approval-response command for a tool `call_id` under the given
@@ -724,7 +815,7 @@ async fn drive_session(
             // and a no-op `info` as terminal otherwise. Bounded so neither
             // case can hang us.
             for _ in 0..16 {
-                match read_one_event(&mut reader).await? {
+                match read_turn_event(&mut reader, turn_idx, turn_start, turn.max_time).await? {
                     Some(ev) => {
                         let ty = ev.get("type").and_then(Value::as_str).unwrap_or("");
                         if ty == "config_changed" {
@@ -778,7 +869,7 @@ async fn drive_session(
         let mut stop_pending = turn.stop_mid_turn;
 
         loop {
-            let ev = match read_one_event(&mut reader).await {
+            let ev = match read_turn_event(&mut reader, turn_idx, turn_start, turn.max_time).await {
                 Ok(Some(ev)) => ev,
                 Ok(None) => {
                     runner_error = Some(format!(
@@ -787,6 +878,9 @@ async fn drive_session(
                     break;
                 }
                 Err(e) => {
+                    if e.downcast_ref::<TurnTimeout>().is_some() {
+                        return Err(e);
+                    }
                     runner_error = Some(format!("stdout decode error: {e}"));
                     break;
                 }
