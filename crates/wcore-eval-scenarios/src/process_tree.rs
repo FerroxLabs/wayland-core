@@ -39,13 +39,13 @@ impl ProcessTree {
                         root_pid: None,
                     });
                 }
-                Err(error) if containment_required() => return Err(error),
+                Err(error) if authoritative_required() => return Err(error),
                 Err(_) => {}
             }
         }
 
         #[cfg(not(target_os = "linux"))]
-        if containment_required() {
+        if authoritative_required() {
             return Err(io::Error::new(
                 io::ErrorKind::Unsupported,
                 "authoritative process-tree containment is unavailable on this platform",
@@ -157,7 +157,7 @@ impl Drop for ProcessTree {
     }
 }
 
-fn containment_required() -> bool {
+pub(crate) fn authoritative_required() -> bool {
     std::env::var_os("WCORE_EVAL_REQUIRE_CONTAINMENT").is_some_and(|value| {
         let value = value.to_string_lossy();
         !value.is_empty() && value != "0" && !value.eq_ignore_ascii_case("false")

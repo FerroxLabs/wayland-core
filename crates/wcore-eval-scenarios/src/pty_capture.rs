@@ -148,6 +148,11 @@ impl PtyCapture {
         geometry: PtyGeometry,
         extra_args: &[&str],
     ) -> Result<Self> {
+        if crate::process_tree::authoritative_required() {
+            bail!(
+                "authoritative PTY process-tree containment is unavailable; use a disposable native worker"
+            );
+        }
         // Reuse the json-stream runner's binary discovery so PTY scenarios and
         // pipe scenarios always target the same artifact.
         let bin = crate::runner::discover_binary()
