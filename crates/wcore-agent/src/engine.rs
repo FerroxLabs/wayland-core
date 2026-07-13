@@ -5415,9 +5415,17 @@ impl AgentEngine {
                 // Non-retryable errors (auth/4xx/parse/prompt-too-long)
                 // propagate immediately, exactly as before.
                 let attempt_output = Arc::clone(&self.output);
+                let observed_provider_failure = Arc::new(Mutex::new(None::<String>));
+                let observer_failure = Arc::clone(&observed_provider_failure);
                 let attempt_observer: Arc<
                     dyn Fn(wcore_providers::retry::ProviderAttemptEvidence) + Send + Sync,
                 > = Arc::new(move |evidence| {
+                    if evidence.physical || evidence.failure.is_some() {
+                        *observer_failure
+                            .lock()
+                            .unwrap_or_else(|poisoned| poisoned.into_inner()) =
+                            evidence.failure.clone();
+                    }
                     if evidence.physical {
                         attempt_output.emit_provider_attempt(evidence.failure.as_deref());
                     }
@@ -5433,8 +5441,11 @@ impl AgentEngine {
                 let mut rx = match provider_result {
                     Ok(rx) => rx,
                     Err(e) if e.is_retryable() => {
-                        stream_failure_code =
-                            Some(wcore_providers::retry::provider_failure_code(&e));
+                        stream_failure_code = observed_provider_failure
+                            .lock()
+                            .unwrap_or_else(|poisoned| poisoned.into_inner())
+                            .clone()
+                            .or_else(|| Some(wcore_providers::retry::provider_failure_code(&e)));
                         stream_error = Some(e.to_string());
                         // The provider's HTTP ring already retried this exact
                         // request to exhaustion before surfacing `Err` — mark it
@@ -5539,7 +5550,11 @@ impl AgentEngine {
                             // the request or fails the turn after the
                             // bounded retry budget is spent.
                             stream_error = Some(e);
-                            stream_failure_code = Some("stream_error".to_string());
+                            stream_failure_code = observed_provider_failure
+                                .lock()
+                                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                                .clone()
+                                .or_else(|| Some("stream_error".to_string()));
                             break;
                         }
                         LlmEvent::Citations(urls) => {

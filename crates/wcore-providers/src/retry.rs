@@ -28,6 +28,8 @@ tokio::task_local! {
     static ATTEMPT_OBSERVER: Option<Arc<dyn Fn(ProviderAttemptEvidence) + Send + Sync>>;
 }
 
+pub type ProviderAttemptObserver = Arc<dyn Fn(ProviderAttemptEvidence) + Send + Sync>;
+
 /// Capture physical HTTP attempts made while `future` is running.
 ///
 /// The scope is per task and per provider call, so concurrent agents cannot
@@ -52,10 +54,7 @@ where
 /// Observe attempts and retry decisions synchronously while `future` runs.
 /// Evidence already emitted by the callback survives cancellation of the
 /// provider future; the scope and collector are still isolated per task.
-pub async fn observe_provider_attempts<F>(
-    observer: Arc<dyn Fn(ProviderAttemptEvidence) + Send + Sync>,
-    future: F,
-) -> F::Output
+pub async fn observe_provider_attempts<F>(observer: ProviderAttemptObserver, future: F) -> F::Output
 where
     F: Future,
 {
@@ -65,6 +64,39 @@ where
             ATTEMPT_EVIDENCE.scope(RefCell::new(Vec::new()), future),
         )
         .await
+}
+
+/// Clone the observer currently attached to this provider call so a spawned
+/// response-body task can preserve the same evidence scope.
+pub fn current_attempt_observer() -> Option<ProviderAttemptObserver> {
+    ATTEMPT_OBSERVER
+        .try_with(|observer| observer.clone())
+        .ok()
+        .flatten()
+}
+
+/// Run a spawned response-body future under an observer cloned from its
+/// originating provider call.
+pub async fn scope_attempt_observer<F>(observer: ProviderAttemptObserver, future: F) -> F::Output
+where
+    F: Future,
+{
+    ATTEMPT_OBSERVER.scope(Some(observer), future).await
+}
+
+/// Report a typed provider failure discovered after the physical response
+/// started (for example an SSE stream that closed before its terminal frame).
+pub fn record_provider_failure(failure: impl Into<String>) {
+    let evidence = ProviderAttemptEvidence {
+        physical: false,
+        failure: Some(failure.into()),
+        retrying: false,
+    };
+    let _ = ATTEMPT_OBSERVER.try_with(|observer| {
+        if let Some(observer) = observer {
+            observer(evidence);
+        }
+    });
 }
 
 fn record_attempt(failure: Option<String>, retrying: bool) {

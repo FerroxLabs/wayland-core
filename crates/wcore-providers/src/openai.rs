@@ -1520,15 +1520,22 @@ impl LlmProvider for OpenAIProvider {
         // these headers, so the parse yields `None` and nothing is emitted —
         // the SSE body path is entirely unchanged.
         let provider_meta = parse_flux_response_meta(response.headers());
+        let attempt_observer = crate::retry::current_attempt_observer();
 
         tokio::spawn(async move {
-            if let Some(meta) = provider_meta {
-                let _ = tx.send(meta).await;
-            }
-            let result = if use_responses {
-                process_responses_sse_stream(response, &tx, &debug).await
-            } else {
-                process_sse_stream(response, &tx, &debug).await
+            let process = async {
+                if let Some(meta) = provider_meta {
+                    let _ = tx.send(meta).await;
+                }
+                if use_responses {
+                    process_responses_sse_stream(response, &tx, &debug).await
+                } else {
+                    process_sse_stream(response, &tx, &debug).await
+                }
+            };
+            let result = match attempt_observer {
+                Some(observer) => crate::retry::scope_attempt_observer(observer, process).await,
+                None => process.await,
             };
             if let Err(e) = result {
                 let _ = tx.send(LlmEvent::Error(e.to_string())).await;
@@ -1702,6 +1709,7 @@ pub(crate) async fn process_sse_stream(
                     // D4: `[DONE]` arrived but no `finish_reason` chunk was
                     // ever seen — the stream was cut before the model
                     // finished. Treat as a truncation, not a clean turn.
+                    crate::retry::record_provider_failure("stream_truncated");
                     return Err(ProviderError::Parse(
                         "OpenAI SSE stream sent [DONE] with no finish_reason — \
                          response truncated before completion"
@@ -1731,6 +1739,7 @@ pub(crate) async fn process_sse_stream(
     // spawn forward an `LlmEvent::Error` instead of just closing the
     // channel (which the engine would mis-read as a clean empty turn).
     if !terminal_seen {
+        crate::retry::record_provider_failure("stream_truncated");
         return Err(ProviderError::Connection(
             "OpenAI SSE stream closed before any terminal event ([DONE] / \
              finish_reason / error) — response truncated"
@@ -1818,6 +1827,7 @@ pub(crate) async fn process_responses_sse_stream(
     }
 
     if !terminal_seen {
+        crate::retry::record_provider_failure("stream_truncated");
         return Err(ProviderError::Connection(
             "OpenAI Responses SSE stream closed before any terminal event \
              (response.completed / response.failed / error) — response truncated"
