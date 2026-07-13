@@ -352,3 +352,30 @@ fn critical_usability_finding_is_a_receipt_gate_failure() {
     assert!(!reports.json.contains("background subsystem crashed"));
     assert!(!reports.json.contains("/private/ephemeral"));
 }
+
+#[test]
+fn parser_accepts_additive_v1_fields_and_rejects_ambiguous_json() {
+    let receipt = EvidenceReceiptV1::local(body()).expect("valid receipt");
+    let mut value = serde_json::to_value(&receipt).expect("receipt value");
+    value["future_top_level"] = serde_json::json!({"ignored": true});
+    value["body"]["future_body_field"] = serde_json::json!([1, 2, 3]);
+    let additive = serde_json::to_vec(&value).expect("additive receipt");
+    let (_, verified) = ReceiptVerifier::new()
+        .parse_and_verify(&additive, &VerificationPolicy::default())
+        .expect("v1 additive fields remain compatible");
+    assert_eq!(verified.authority, VerifiedAuthority::LocalNonAuthoritative);
+
+    let canonical = serde_json::to_string(&receipt).expect("receipt JSON");
+    let duplicate = canonical.replacen("\"schema\":", "\"schema\":\"duplicate\",\"schema\":", 1);
+    for invalid in [
+        duplicate,
+        format!("{canonical}{{}}"),
+        canonical[..canonical.len() - 1].to_string(),
+    ] {
+        assert!(matches!(
+            ReceiptVerifier::new()
+                .parse_and_verify(invalid.as_bytes(), &VerificationPolicy::default()),
+            Err(ReceiptError::InvalidJson(_))
+        ));
+    }
+}

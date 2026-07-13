@@ -9,7 +9,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64;
 use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
-use serde::{Deserialize, Serialize};
+use serde::de::{MapAccess, SeqAccess, Visitor};
+use serde::{Deserialize, Deserializer, Serialize};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
@@ -289,6 +290,8 @@ pub struct ReceiptVerifier {
 
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum ReceiptError {
+    #[error("invalid receipt JSON: {0}")]
+    InvalidJson(String),
     #[error("unsupported receipt schema {schema} version {version}")]
     UnsupportedSchema { schema: String, version: u32 },
     #[error("receipt body digest mismatch")]
@@ -611,6 +614,113 @@ impl ReceiptVerifier {
                 })
             }
         }
+    }
+
+    pub fn parse_and_verify(
+        &self,
+        bytes: &[u8],
+        policy: &VerificationPolicy,
+    ) -> Result<(EvidenceReceiptV1, VerifiedReceipt), ReceiptError> {
+        let checked: DuplicateCheckedValue = serde_json::from_slice(bytes)
+            .map_err(|error| ReceiptError::InvalidJson(error.to_string()))?;
+        let receipt = serde_json::from_value(checked.0)
+            .map_err(|error| ReceiptError::InvalidJson(error.to_string()))?;
+        let verified = self.verify(&receipt, policy)?;
+        Ok((receipt, verified))
+    }
+}
+
+struct DuplicateCheckedValue(serde_json::Value);
+
+impl<'de> Deserialize<'de> for DuplicateCheckedValue {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        deserializer.deserialize_any(DuplicateCheckedVisitor)
+    }
+}
+
+struct DuplicateCheckedVisitor;
+
+impl<'de> Visitor<'de> for DuplicateCheckedVisitor {
+    type Value = DuplicateCheckedValue;
+
+    fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("JSON without duplicate object keys")
+    }
+
+    fn visit_bool<E>(self, value: bool) -> Result<Self::Value, E> {
+        Ok(DuplicateCheckedValue(serde_json::Value::Bool(value)))
+    }
+
+    fn visit_i64<E>(self, value: i64) -> Result<Self::Value, E> {
+        Ok(DuplicateCheckedValue(value.into()))
+    }
+
+    fn visit_u64<E>(self, value: u64) -> Result<Self::Value, E> {
+        Ok(DuplicateCheckedValue(value.into()))
+    }
+
+    fn visit_f64<E>(self, value: f64) -> Result<Self::Value, E>
+    where
+        E: serde::de::Error,
+    {
+        serde_json::Number::from_f64(value)
+            .map(serde_json::Value::Number)
+            .map(DuplicateCheckedValue)
+            .ok_or_else(|| E::custom("non-finite JSON number"))
+    }
+
+    fn visit_str<E>(self, value: &str) -> Result<Self::Value, E> {
+        Ok(DuplicateCheckedValue(serde_json::Value::String(
+            value.to_string(),
+        )))
+    }
+
+    fn visit_string<E>(self, value: String) -> Result<Self::Value, E> {
+        Ok(DuplicateCheckedValue(serde_json::Value::String(value)))
+    }
+
+    fn visit_none<E>(self) -> Result<Self::Value, E> {
+        Ok(DuplicateCheckedValue(serde_json::Value::Null))
+    }
+
+    fn visit_unit<E>(self) -> Result<Self::Value, E> {
+        Ok(DuplicateCheckedValue(serde_json::Value::Null))
+    }
+
+    fn visit_some<D>(self, deserializer: D) -> Result<Self::Value, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        DuplicateCheckedValue::deserialize(deserializer)
+    }
+
+    fn visit_seq<A>(self, mut sequence: A) -> Result<Self::Value, A::Error>
+    where
+        A: SeqAccess<'de>,
+    {
+        let mut values = Vec::new();
+        while let Some(value) = sequence.next_element::<DuplicateCheckedValue>()? {
+            values.push(value.0);
+        }
+        Ok(DuplicateCheckedValue(serde_json::Value::Array(values)))
+    }
+
+    fn visit_map<A>(self, mut object: A) -> Result<Self::Value, A::Error>
+    where
+        A: MapAccess<'de>,
+    {
+        let mut values = serde_json::Map::new();
+        while let Some((key, value)) = object.next_entry::<String, DuplicateCheckedValue>()? {
+            if values.insert(key.clone(), value.0).is_some() {
+                return Err(serde::de::Error::custom(format!(
+                    "duplicate JSON object key: {key}"
+                )));
+            }
+        }
+        Ok(DuplicateCheckedValue(serde_json::Value::Object(values)))
     }
 }
 
