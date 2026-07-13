@@ -44,9 +44,13 @@ impl SecretRedactor {
                 *text = redacted;
                 detected
             }
-            serde_json::Value::Array(values) => values
-                .iter_mut()
-                .fold(false, |detected, value| self.value(value) || detected),
+            serde_json::Value::Array(values) => {
+                let mut detected = false;
+                for value in values {
+                    detected |= self.value(value);
+                }
+                detected
+            }
             serde_json::Value::Object(values) => {
                 let mut detected = false;
                 let original = std::mem::take(values);
@@ -160,50 +164,6 @@ fn contains_bytes(haystack: &[u8], needle: &[u8]) -> bool {
             .any(|window| window == needle)
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn redacts_nested_protocol_values_at_capture_time() {
-        const SECRET: &str = "secret-canary-123";
-        let redactor = SecretRedactor::from_secret(Some(SECRET.to_string()));
-        let mut value = serde_json::json!({
-            "message": SECRET,
-            "nested": ["safe", format!("prefix-{SECRET}-suffix")],
-        });
-        value
-            .as_object_mut()
-            .expect("test object")
-            .insert(format!("key-{SECRET}"), serde_json::json!("value"));
-
-        assert!(redactor.value(&mut value));
-        let retained = value.to_string();
-        assert!(!retained.contains(SECRET));
-        assert!(retained.contains(REDACTED));
-    }
-
-    #[test]
-    fn removes_contaminated_artifacts_without_touching_clean_files() {
-        const SECRET: &str = "secret-canary-123";
-        let root = tempfile::tempdir().expect("artifact root");
-        let contaminated = root.path().join("nested").join("leak.txt");
-        std::fs::create_dir_all(contaminated.parent().unwrap()).expect("nested directory");
-        std::fs::write(&contaminated, format!("before {SECRET} after")).expect("write leak");
-        let clean = root.path().join("clean.txt");
-        std::fs::write(&clean, "safe").expect("write clean file");
-
-        let redactor = SecretRedactor::from_secret(Some(SECRET.to_string()));
-        let removed = redactor
-            .remove_contaminated_files(root.path())
-            .expect("scan artifacts");
-
-        assert_eq!(removed, vec![PathBuf::from("nested/leak.txt")]);
-        assert!(!contaminated.exists());
-        assert_eq!(std::fs::read_to_string(clean).unwrap(), "safe");
-    }
-}
-
 fn redact(
     value: &mut String,
     redactor: &SecretRedactor,
@@ -245,5 +205,49 @@ fn redact_failure(failure: &mut Failure, redactor: &SecretRedactor, sinks: &mut 
         | Failure::CostMissing
         | Failure::StepsExceeded { .. }
         | Failure::SecretDetected { .. } => {}
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn redacts_nested_protocol_values_at_capture_time() {
+        const SECRET: &str = "secret-canary-123";
+        let redactor = SecretRedactor::from_secret(Some(SECRET.to_string()));
+        let mut value = serde_json::json!({
+            "message": SECRET,
+            "nested": ["safe", format!("prefix-{SECRET}-suffix")],
+        });
+        value
+            .as_object_mut()
+            .expect("test object")
+            .insert(format!("key-{SECRET}"), serde_json::json!("value"));
+
+        assert!(redactor.value(&mut value));
+        let retained = value.to_string();
+        assert!(!retained.contains(SECRET));
+        assert!(retained.contains(REDACTED));
+    }
+
+    #[test]
+    fn removes_contaminated_artifacts_without_touching_clean_files() {
+        const SECRET: &str = "secret-canary-123";
+        let root = tempfile::tempdir().expect("artifact root");
+        let contaminated = root.path().join("nested").join("leak.txt");
+        std::fs::create_dir_all(contaminated.parent().unwrap()).expect("nested directory");
+        std::fs::write(&contaminated, format!("before {SECRET} after")).expect("write leak");
+        let clean = root.path().join("clean.txt");
+        std::fs::write(&clean, "safe").expect("write clean file");
+
+        let redactor = SecretRedactor::from_secret(Some(SECRET.to_string()));
+        let removed = redactor
+            .remove_contaminated_files(root.path())
+            .expect("scan artifacts");
+
+        assert_eq!(removed, vec![PathBuf::from("nested").join("leak.txt")]);
+        assert!(!contaminated.exists());
+        assert_eq!(std::fs::read_to_string(clean).unwrap(), "safe");
     }
 }
