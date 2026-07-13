@@ -16,6 +16,10 @@ path = "src/lib.rs"
 name = "wayland-eval"
 path = "bin/wayland-eval.rs"
 
+[[bin]]
+name = "wcore-eval-fixture"
+path = "bin/wcore-eval-fixture.rs"
+
 [dependencies]
 # Async runtime — used by the runner for spawn/timeout/stderr-drain.
 tokio        = { workspace = true }
