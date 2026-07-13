@@ -138,3 +138,36 @@ fn verify_binary_proves_identity_without_provider_credentials() {
         output_context(&output)
     );
 }
+
+#[test]
+fn dry_matrix_renders_the_offline_plan_without_binary_discovery() {
+    let output = run(
+        &["--scenario", "canary", "--provider", "matrix", "--dry"],
+        true,
+    );
+
+    assert!(output.status.success(), "{}", output_context(&output));
+    assert!(output.stderr.is_empty(), "{}", output_context(&output));
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("PLAN canary deepseek")
+            && stdout.contains("SKIP canary anthropic")
+            && stdout.contains("SKIP canary openai")
+            && stdout.contains("ESTIMATE upper_bound_usd="),
+        "{}",
+        output_context(&output)
+    );
+}
+
+#[test]
+fn non_finite_budgets_are_usage_errors() {
+    for value in ["NaN", "inf"] {
+        let output = run(&["--scenario", "canary", "--budget", value], true);
+        assert!(!output.status.success(), "{}", output_context(&output));
+        assert!(
+            String::from_utf8_lossy(&output.stderr).contains("finite"),
+            "{}",
+            output_context(&output)
+        );
+    }
+}

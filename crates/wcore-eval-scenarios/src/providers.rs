@@ -278,6 +278,25 @@ mod tests {
     }
 
     #[test]
+    fn matrix_override_and_blank_values_are_explicit() {
+        assert_eq!(
+            provider_override(Some("matrix"), Some("openai")),
+            Ok(Some(ProviderOverride::Matrix))
+        );
+        assert_eq!(provider_override(Some("  \t"), None), Ok(None));
+    }
+
+    #[test]
+    fn whitespace_only_credentials_are_absent() {
+        assert!(!credential_value_present(Some(std::ffi::OsStr::new(
+            " \t\n"
+        ))));
+        assert!(credential_value_present(Some(std::ffi::OsStr::new(
+            "fixture-key"
+        ))));
+    }
+
+    #[test]
     fn invalid_override_is_rejected_before_execution() {
         assert_eq!(
             provider_override(Some("not-a-provider"), None),
