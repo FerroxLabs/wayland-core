@@ -127,7 +127,7 @@ fn prefix_boundary(text: &[u8], start: usize) -> bool {
         || text[start - 1].is_ascii_whitespace()
         || matches!(
             text[start - 1],
-            b'"' | b'\'' | b'(' | b'[' | b'{' | b'=' | b':' | b','
+            b'"' | b'\'' | b'`' | b'(' | b'[' | b'{' | b'=' | b':' | b','
         )
 }
 
@@ -147,4 +147,28 @@ pub(crate) enum WorkspaceEvidenceError {
     UnsafeWorkspace,
     #[error("workspace must be valid UTF-8")]
     NonUtf8Workspace,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::semantic_sha256;
+
+    #[test]
+    fn markdown_code_span_is_a_workspace_boundary() {
+        let first = tempfile::tempdir().unwrap();
+        let second = tempfile::tempdir().unwrap();
+        let first_evidence = format!(
+            "Persistent memory lives at `{}/.wayland-core/memory`.",
+            first.path().display()
+        );
+        let second_evidence = format!(
+            "Persistent memory lives at `{}/.wayland-core/memory`.",
+            second.path().display()
+        );
+
+        assert_eq!(
+            semantic_sha256(b"test", first_evidence.as_bytes(), first.path()).unwrap(),
+            semantic_sha256(b"test", second_evidence.as_bytes(), second.path()).unwrap()
+        );
+    }
 }
