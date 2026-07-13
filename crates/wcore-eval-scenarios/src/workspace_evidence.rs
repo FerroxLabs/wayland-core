@@ -78,7 +78,7 @@ fn hash_json(hasher: &mut Sha256, value: &serde_json::Value, workspace_forms: &[
             hasher.update(b"O");
             hasher.update((values.len() as u64).to_be_bytes());
             let mut entries = values.iter().collect::<Vec<_>>();
-            entries.sort_by(|(left, _), (right, _)| left.cmp(right));
+            entries.sort_by_key(|(key, _)| *key);
             for (key, value) in entries {
                 hash_text(hasher, key.as_bytes(), workspace_forms);
                 hash_json(hasher, value, workspace_forms);
