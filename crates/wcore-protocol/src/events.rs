@@ -14,6 +14,109 @@ fn is_false(b: &bool) -> bool {
     !*b
 }
 
+/// Stable identities for capabilities whose production activation must be
+/// proved rather than inferred from registration or source presence.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CapabilityId {
+    PricingRefresher,
+    MidFlightMonitor,
+    CooldownTracker,
+    LearnedPolicy,
+    SmartHandoff,
+    DelegateIsolation,
+    ProcedureSkillDrafting,
+    LegacyAutoSkillDrafting,
+}
+
+/// Append-only activation stages. A ready capability may be reached more than
+/// once; every successful occurrence completes the
+/// `reached -> outcome_changed -> observed` cycle.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CapabilityStage {
+    Declared,
+    Configured,
+    Constructed,
+    Ready,
+    Reached,
+    OutcomeChanged,
+    Observed,
+    Unavailable,
+}
+
+impl CapabilityStage {
+    /// Whether `next` is a legal next event for one capability within a
+    /// session. `Observed -> Reached` starts another successful occurrence.
+    pub fn allows(self, next: Self) -> bool {
+        matches!(
+            (self, next),
+            (Self::Declared, Self::Configured | Self::Unavailable)
+                | (Self::Configured, Self::Constructed | Self::Unavailable)
+                | (Self::Constructed, Self::Ready | Self::Unavailable)
+                | (Self::Ready | Self::Observed, Self::Reached)
+                | (Self::Reached, Self::OutcomeChanged)
+                | (Self::OutcomeChanged, Self::Observed)
+        )
+    }
+}
+
+/// Stable reasons why an activation chain ended before readiness.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CapabilityReasonCode {
+    DisabledByConfig,
+    DependencyUnavailable,
+    NoProductionConstructor,
+    RuntimePathUnwired,
+    IsolationNotEnforced,
+}
+
+/// One typed claim in a capability's activation chain.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CapabilityActivation {
+    pub capability: CapabilityId,
+    pub stage: CapabilityStage,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<CapabilityReasonCode>,
+}
+
+impl CapabilityActivation {
+    pub const fn stage(capability: CapabilityId, stage: CapabilityStage) -> Self {
+        Self {
+            capability,
+            stage,
+            reason: None,
+        }
+    }
+
+    pub const fn unavailable(capability: CapabilityId, reason: CapabilityReasonCode) -> Self {
+        Self {
+            capability,
+            stage: CapabilityStage::Unavailable,
+            reason: Some(reason),
+        }
+    }
+
+    /// Reject reason-bearing live stages and reason-less unavailability.
+    pub const fn is_well_formed(&self) -> bool {
+        matches!(
+            (self.stage, self.reason),
+            (CapabilityStage::Unavailable, Some(_))
+                | (
+                    CapabilityStage::Declared
+                        | CapabilityStage::Configured
+                        | CapabilityStage::Constructed
+                        | CapabilityStage::Ready
+                        | CapabilityStage::Reached
+                        | CapabilityStage::OutcomeChanged
+                        | CapabilityStage::Observed,
+                    None
+                )
+        )
+    }
+}
+
 /// Events emitted by the agent to the client (Agent -> Client)
 ///
 /// `Clone` is derived (Wave 2) so the in-process TUI bridge can fan an
@@ -28,6 +131,13 @@ pub enum ProtocolEvent {
         #[serde(skip_serializing_if = "Option::is_none")]
         session_id: Option<String>,
         capabilities: Capabilities,
+    },
+    /// Typed capability construction/runtime evidence. Startup events are
+    /// emitted after `Ready`; runtime events are emitted at the real success
+    /// seam. Unknown hosts drop this additive event.
+    CapabilityActivation {
+        #[serde(flatten)]
+        activation: CapabilityActivation,
     },
     StreamStart {
         msg_id: String,
@@ -845,6 +955,73 @@ mod tests {
         };
         let json2 = serde_json::to_value(&event_no_sid).unwrap();
         assert!(json2.get("session_id").is_none());
+    }
+
+    #[test]
+    fn capability_activation_serializes_as_a_flat_additive_event() {
+        let event = ProtocolEvent::CapabilityActivation {
+            activation: CapabilityActivation::unavailable(
+                CapabilityId::DelegateIsolation,
+                CapabilityReasonCode::IsolationNotEnforced,
+            ),
+        };
+
+        assert_eq!(
+            serde_json::to_value(event).unwrap(),
+            json!({
+                "type": "capability_activation",
+                "capability": "delegate_isolation",
+                "stage": "unavailable",
+                "reason": "isolation_not_enforced"
+            })
+        );
+    }
+
+    #[test]
+    fn capability_activation_requires_reason_only_when_unavailable() {
+        assert!(
+            CapabilityActivation::unavailable(
+                CapabilityId::PricingRefresher,
+                CapabilityReasonCode::NoProductionConstructor,
+            )
+            .is_well_formed()
+        );
+        assert!(
+            CapabilityActivation::stage(CapabilityId::SmartHandoff, CapabilityStage::Ready)
+                .is_well_formed()
+        );
+        assert!(
+            !CapabilityActivation {
+                capability: CapabilityId::SmartHandoff,
+                stage: CapabilityStage::Unavailable,
+                reason: None,
+            }
+            .is_well_formed()
+        );
+        assert!(
+            !CapabilityActivation {
+                capability: CapabilityId::SmartHandoff,
+                stage: CapabilityStage::Ready,
+                reason: Some(CapabilityReasonCode::DependencyUnavailable),
+            }
+            .is_well_formed()
+        );
+    }
+
+    #[test]
+    fn capability_activation_transition_cycle_is_explicit() {
+        use CapabilityStage as Stage;
+
+        assert!(Stage::Declared.allows(Stage::Configured));
+        assert!(Stage::Configured.allows(Stage::Constructed));
+        assert!(Stage::Constructed.allows(Stage::Ready));
+        assert!(Stage::Ready.allows(Stage::Reached));
+        assert!(Stage::Reached.allows(Stage::OutcomeChanged));
+        assert!(Stage::OutcomeChanged.allows(Stage::Observed));
+        assert!(Stage::Observed.allows(Stage::Reached));
+        assert!(Stage::Declared.allows(Stage::Unavailable));
+        assert!(!Stage::Unavailable.allows(Stage::Configured));
+        assert!(!Stage::Ready.allows(Stage::Observed));
     }
 
     #[test]
