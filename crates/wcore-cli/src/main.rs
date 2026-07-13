@@ -2848,9 +2848,9 @@ async fn run_json_stream_mode(
     // AFTER ready is on the wire. The command loop integrates the manager
     // into the live engine between turns (see the select below) and emits
     // McpReady / McpFailed per server, exactly like the dynamic
-    // `AddMcpServer` path. A turn that starts before the connects settle
-    // simply runs without the MCP tools — the old behavior was a chat that
-    // never opened at all.
+    // `AddMcpServer` path. The host can open immediately; the first real
+    // message queues behind this already-running handshake so its provider
+    // request cannot race ahead with an incomplete configured-tool set.
     let mut deferred_mcp_rx = deferred_mcp_servers.map(|resolved| {
         let (tx, rx) = tokio::sync::oneshot::channel();
         tokio::spawn(async move {
@@ -3043,6 +3043,25 @@ async fn run_json_stream_mode(
             }
             ProtocolCommand::Stop => return Ok(()),
             other => {
+                // Configured MCP is connected after `ready` so desktop boot is
+                // never gated by a slow server. A user message is a stronger
+                // boundary: processing it before the connect task settles
+                // gives the provider an incomplete tool registry for the
+                // entire first turn. Await only the task already in flight;
+                // `McpManager` bounds every server handshake independently.
+                if matches!(&other, ProtocolCommand::Message { .. })
+                    && let Some(rx) = deferred_mcp_rx.take()
+                    && let Ok((outcome, resolved)) = rx.await
+                {
+                    pending_deferred_mcp = note_deferred_mcp_connect(
+                        outcome,
+                        resolved,
+                        &mut engine,
+                        &writer,
+                        &output,
+                        &mut dynamic_managers,
+                    );
+                }
                 first_cmd = Some(other);
                 break;
             }
