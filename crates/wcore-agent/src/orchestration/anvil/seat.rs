@@ -95,6 +95,19 @@ pub fn materialize_driver_seat(
         Err(e) => return Err(e),
     };
 
+    // Double-ladder guard: Flux's `flux-verified` alias runs the router's OWN
+    // server-side gated climb (Elevation). Driving Anvil's builders through it
+    // would nest two ladders — both paying for iteration, one receipt lying
+    // about the other. The auto path only ever picks `flux-auto` (routing,
+    // no loop); an explicit user config is honored but loudly flagged.
+    if spawner_cfg.model.contains("flux-verified") {
+        notes.push(
+            "driver model `flux-verified` runs the router's own server-side climb — \
+             nested ladders double the work; use `flux-auto` for the driver seat"
+                .to_string(),
+        );
+    }
+
     let label = format!("{}/{}", spawner_cfg.provider_label, spawner_cfg.model);
     Ok(MaterializedSeat {
         spawner: AgentSpawner::new(provider, spawner_cfg),
