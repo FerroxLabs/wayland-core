@@ -119,3 +119,37 @@ impl ToolTrace {
         Ok(Self { entries })
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{ToolTrace, TraceEntry};
+
+    #[test]
+    fn dispatched_count_excludes_unknown_tool_rejections() {
+        let trace = ToolTrace {
+            entries: vec![
+                TraceEntry {
+                    call_id: "rejected".to_string(),
+                    tool_name: "fixture_echo".to_string(),
+                    input: "{}".to_string(),
+                    output: "Unknown tool: fixture_echo".to_string(),
+                    is_error: true,
+                    duration: None,
+                    turn: 0,
+                },
+                TraceEntry {
+                    call_id: "dispatched".to_string(),
+                    tool_name: "fixture_echo".to_string(),
+                    input: "{}".to_string(),
+                    output: "fixture failure".to_string(),
+                    is_error: true,
+                    duration: None,
+                    turn: 1,
+                },
+            ],
+        };
+
+        assert_eq!(trace.dispatched_count_in_turn("fixture_echo", 0), 0);
+        assert_eq!(trace.dispatched_count_in_turn("fixture_echo", 1), 1);
+    }
+}
