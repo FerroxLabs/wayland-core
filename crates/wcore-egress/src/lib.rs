@@ -253,10 +253,12 @@ mod tests {
         });
 
         // Same construction path as `tool()`, with a fast TTL for the test.
+        let recorder = Arc::new(BoundedEgressRecorder::new(2));
         let client = EgressClient::builder()
             .connect_timeout(CONNECT_TIMEOUT)
             .read_timeout(READ_TIMEOUT)
             .timeout(Duration::from_millis(200))
+            .observer(recorder.clone())
             .build()
             .expect("client builds");
 
@@ -265,6 +267,12 @@ mod tests {
         assert!(
             err.is_timeout(),
             "the failure must be a timeout, got: {err}"
+        );
+        assert_eq!(
+            recorder.snapshot().events[0].outcome,
+            EgressOutcome::TransportError {
+                class: EgressTransportErrorClass::Timeout,
+            }
         );
         server.abort();
     }
