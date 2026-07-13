@@ -4,7 +4,9 @@ use std::path::PathBuf;
 
 use clap::Parser;
 use wcore_eval_scenarios::Scenario;
-use wcore_eval_scenarios::artifact::{ArtifactExpectation, inspect_binary, select_candidate};
+use wcore_eval_scenarios::artifact::{
+    ArtifactExpectation, BinaryArtifact, inspect_binary, select_candidate,
+};
 use wcore_eval_scenarios::catalog::{select_scenarios, standard_scenarios};
 use wcore_eval_scenarios::providers::{
     ProviderAvailability, ProviderResolution, provider_override, resolve,
@@ -20,6 +22,10 @@ struct Cli {
     /// Print the selected scenario IDs, one per line, without executing them.
     #[arg(long)]
     list: bool,
+
+    /// Validate and print the selected binary identity without running scenarios.
+    #[arg(long, conflicts_with = "list")]
+    verify_binary: bool,
 
     /// Select an exact scenario ID. Repeat to select multiple scenarios.
     #[arg(long, value_name = "ID", conflicts_with = "filter")]
@@ -76,6 +82,21 @@ async fn execute(cli: Cli) -> i32 {
         }
         return 0;
     }
+    if cli.verify_binary {
+        return match inspect_cli_artifact(&cli) {
+            Ok(artifact) => {
+                println!(
+                    "VERIFIED sha256={} version={} source={} path={}",
+                    artifact.sha256,
+                    artifact.version,
+                    artifact.source_commit,
+                    artifact.path.display()
+                );
+                0
+            }
+            Err(error) => usage_error(error),
+        };
+    }
     if cli.dry {
         return usage_error("--dry cost estimation is not implemented");
     }
@@ -108,29 +129,7 @@ async fn execute(cli: Cli) -> i32 {
         return 0;
     }
 
-    let Some(expected_source_commit) = cli.expected_source_commit.as_deref() else {
-        return usage_error("--expected-source-commit is required when scenarios are runnable");
-    };
-    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let Some(workspace_root) = manifest_dir.parent().and_then(|path| path.parent()) else {
-        return usage_error("could not resolve workspace root");
-    };
-    let environment_binary = std::env::var_os("WCORE_EVAL_BIN");
-    let candidate = match select_candidate(
-        cli.binary.as_deref(),
-        environment_binary.as_deref(),
-        workspace_root,
-    ) {
-        Ok(candidate) => candidate,
-        Err(error) => return usage_error(error),
-    };
-    let artifact = match inspect_binary(
-        &candidate,
-        ArtifactExpectation {
-            version: env!("CARGO_PKG_VERSION"),
-            source_commit: expected_source_commit,
-        },
-    ) {
+    let artifact = match inspect_cli_artifact(&cli) {
         Ok(artifact) => artifact,
         Err(error) => return usage_error(error),
     };
@@ -174,6 +173,32 @@ async fn execute(cli: Cli) -> i32 {
 
     println!("SUMMARY pass={passed} fail={failed} skip={skipped}");
     i32::from(failed > 0)
+}
+
+fn inspect_cli_artifact(cli: &Cli) -> Result<BinaryArtifact, String> {
+    let expected_source_commit = cli.expected_source_commit.as_deref().ok_or_else(|| {
+        "--expected-source-commit is required for binary verification".to_string()
+    })?;
+    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let workspace_root = manifest_dir
+        .parent()
+        .and_then(|path| path.parent())
+        .ok_or_else(|| "could not resolve workspace root".to_string())?;
+    let environment_binary = std::env::var_os("WCORE_EVAL_BIN");
+    let candidate = select_candidate(
+        cli.binary.as_deref(),
+        environment_binary.as_deref(),
+        workspace_root,
+    )
+    .map_err(|error| error.to_string())?;
+    inspect_binary(
+        &candidate,
+        ArtifactExpectation {
+            version: env!("CARGO_PKG_VERSION"),
+            source_commit: expected_source_commit,
+        },
+    )
+    .map_err(|error| error.to_string())
 }
 
 fn print_skips(plans: &[(Scenario, ProviderResolution)]) -> usize {
