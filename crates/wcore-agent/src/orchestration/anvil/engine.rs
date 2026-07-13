@@ -49,6 +49,9 @@ pub struct BuildFeedback {
     pub failing: Vec<CheckId>,
     /// Bounded, sanitized diagnostics (from [`GateReport::diagnostics`]).
     pub diagnostics: String,
+    /// One-shot frontier unblocking guidance from the escalation valve, when a
+    /// stall was diagnosed (spec §6.4). `None` on the un-stalled path.
+    pub valve_guidance: Option<String>,
 }
 
 /// Produces candidate builds. The real implementation forks a sub-agent with
@@ -71,6 +74,32 @@ pub trait Builder: Send + Sync {
 pub trait GateExecutor: Send + Sync {
     /// Run the gate against `worktree` and return its per-check report.
     async fn run(&self, worktree: &Path) -> Result<GateReport, EngineError>;
+}
+
+/// Evidence handed to the escalation valve on a detected stall: the same
+/// fail-set fingerprint has repeated across consecutive candidates.
+#[derive(Debug, Clone)]
+pub struct StallReport {
+    /// The repeated fail-set fingerprint ([`super::climb::FailSet::fail_hash`]).
+    pub fail_hash: u64,
+    /// Consecutive candidates that failed with this exact fingerprint.
+    pub repeats: u32,
+    /// The checks stuck failing.
+    pub failing: Vec<CheckId>,
+    /// Bounded, sanitized diagnostics from the latest failing report.
+    pub diagnostics: String,
+}
+
+/// The escalation valve (spec §6.4): ONE frontier diagnostic turn on a detected
+/// stall. It reads the stall evidence and writes unblocking guidance back INTO
+/// the loop — it never does the work (the moment it does, the loop is a dumb
+/// loop at frontier prices). Real impl: a read-only frontier fork; tests fake.
+#[async_trait]
+pub trait Valve: Send + Sync {
+    /// Diagnose `stall` and return unblocking guidance for the next builder
+    /// attempt (a corrected assumption, a decomposed step, the file the driver
+    /// never opened).
+    async fn diagnose(&self, task: &str, stall: &StallReport) -> Result<String, EngineError>;
 }
 
 /// A climb aborted before it could produce a terminal state through the normal
@@ -96,6 +125,11 @@ pub struct ClimbParams {
     pub max_iterations: u32,
     /// The pinned gate closure digest (hex), for the journal + receipt.
     pub gate_closure_digest: String,
+    /// Consecutive identical fail-hashes that count as a stall (spec §6.4 —
+    /// the "same reason" clause is load-bearing: different failures mean the
+    /// climb is progressing through a hard patch; identical failures mean it
+    /// is walking into the same wall). `0` disables stall detection.
+    pub stall_after: u32,
 }
 
 /// The result of a climb — everything the receipt needs (spec §8).
@@ -112,6 +146,9 @@ pub struct ClimbOutcome {
     pub checks_total: u32,
     /// Iterations performed.
     pub iterations: u32,
+    /// Escalation-valve fires during the climb (spec §6.4; 0 on the happy
+    /// path — the reserve is the point).
+    pub valve_fires: u32,
     /// The winning candidate's worktree, if any reached a keepable state.
     pub best_worktree: Option<PathBuf>,
 }
@@ -135,10 +172,17 @@ pub async fn run_climb(
     params: &ClimbParams,
     builder: &dyn Builder,
     gate: &dyn GateExecutor,
+    valve: Option<&dyn Valve>,
     ledger: &ClimbLedger,
     journal: &mut ClimbJournal,
 ) -> ClimbOutcome {
     let mut iterations: u32 = 0;
+    // Valve bookkeeping (spec §6.4): consecutive identical fail-hashes = a
+    // stall; the valve buys exactly ONE frontier diagnostic turn per climb.
+    let mut last_fail_hash: Option<u64> = None;
+    let mut same_reason: u32 = 0;
+    let mut valve_fires: u32 = 0;
+    let mut guidance: Option<String> = None;
 
     // ── Probe: the initial candidate. ────────────────────────────────────────
     let probe = match builder.build(&params.task, None).await {
@@ -150,9 +194,10 @@ pub async fn run_climb(
         Err(e) => return blocked(format!("probe gate failed: {e}")),
     };
     iterations += 1;
+    track_stall(&report, &mut last_fail_hash, &mut same_reason);
     let mut best = (probe, report.clone());
 
-    if let Some(done) = check_verified(gate, &best, iterations, params).await {
+    if let Some(done) = check_verified(gate, &best, iterations, valve_fires, params).await {
         return done;
     }
 
@@ -161,7 +206,31 @@ pub async fn run_climb(
         if ledger.is_exhausted() {
             break;
         }
-        let feedback = feedback_from(&report);
+
+        // Stall? Buy ONE frontier diagnostic turn, feed the guidance back into
+        // the loop, and resume cheap. The valve never inherits the task; a
+        // valve error must not kill the climb (the loop just stays cheap-dumb).
+        if let Some(v) = valve
+            && params.stall_after > 0
+            && same_reason >= params.stall_after
+            && valve_fires < VALVE_BUDGET
+        {
+            let stall = StallReport {
+                fail_hash: last_fail_hash.unwrap_or_default(),
+                repeats: same_reason,
+                failing: report.fail_set().ids().cloned().collect(),
+                diagnostics: report.diagnostics.tail().to_string(),
+            };
+            valve_fires += 1;
+            journal_valve(journal, &stall, ledger);
+            if let Ok(g) = v.diagnose(&params.task, &stall).await {
+                guidance = Some(g);
+            }
+            same_reason = 0;
+        }
+
+        let mut feedback = feedback_from(&report);
+        feedback.valve_guidance = guidance.clone();
         let candidate = match builder.build(&params.task, Some(&feedback)).await {
             Ok(c) => c,
             // A failed surgical attempt is not fatal — keep the best so far.
@@ -173,6 +242,7 @@ pub async fn run_climb(
                 Err(_) => continue,
             };
         iterations += 1;
+        track_stall(&candidate_report, &mut last_fail_hash, &mut same_reason);
 
         // Accept iff the new fail-set is a non-regression on the current best
         // (spec §6.3 — safety-class never traded).
@@ -187,7 +257,9 @@ pub async fn run_climb(
                 );
                 best = (candidate, candidate_report.clone());
                 report = candidate_report;
-                if let Some(done) = check_verified(gate, &best, iterations, params).await {
+                if let Some(done) =
+                    check_verified(gate, &best, iterations, valve_fires, params).await
+                {
                     return done;
                 }
             }
@@ -196,7 +268,46 @@ pub async fn run_climb(
     }
 
     // ── No stable-green candidate: report honestly. ──────────────────────────
-    terminal_from_best(&best.1, iterations)
+    terminal_from_best(&best.1, iterations, valve_fires)
+}
+
+/// The valve buys at most this many frontier turns per climb (spec §6.4). If
+/// one diagnostic turn didn't unblock the wall, the plan is wrong — that goes
+/// back to the caller as `needs_escalation`, not to more valve spend.
+const VALVE_BUDGET: u32 = 1;
+
+/// Update the consecutive same-fail-hash counter from a report. Green reports
+/// and CHANGED fail-hashes reset the streak (progress through a hard patch is
+/// not a stall — only the same wall, repeatedly, is).
+fn track_stall(report: &GateReport, last: &mut Option<u64>, same_reason: &mut u32) {
+    if report.all_green() {
+        *last = None;
+        *same_reason = 0;
+        return;
+    }
+    let hash = report.fail_set().fail_hash();
+    if *last == Some(hash) {
+        *same_reason += 1;
+    } else {
+        *last = Some(hash);
+        *same_reason = 1;
+    }
+}
+
+/// Journal a valve fire (best-effort, same contract as [`journal_step`]).
+fn journal_valve(journal: &mut ClimbJournal, stall: &StallReport, ledger: &ClimbLedger) {
+    let fail_ids = stall
+        .failing
+        .iter()
+        .map(|c| c.as_str().to_string())
+        .collect();
+    let entry = JournalEntry::new(
+        JournalKind::Valve,
+        format!("valve-{:016x}", stall.fail_hash),
+        ledger.settled_microcents(),
+    )
+    .with_result(0, fail_ids);
+    let _ = journal.append(entry);
 }
 
 /// Run the gate on `candidate`, settle its build cost + a gate-exec entry into
@@ -240,6 +351,7 @@ async fn check_verified(
     gate: &dyn GateExecutor,
     best: &(BuiltCandidate, GateReport),
     iterations: u32,
+    valve_fires: u32,
     params: &ClimbParams,
 ) -> Option<ClimbOutcome> {
     if !best.1.all_green() {
@@ -252,6 +364,7 @@ async fn check_verified(
             checks_passed: best.1.score(),
             checks_total: u32::try_from(best.1.total()).unwrap_or(u32::MAX),
             iterations,
+            valve_fires,
             best_worktree: Some(best.0.worktree.clone()),
         })
     } else {
@@ -262,6 +375,7 @@ async fn check_verified(
             checks_passed: best.1.score(),
             checks_total: u32::try_from(best.1.total()).unwrap_or(u32::MAX),
             iterations,
+            valve_fires,
             best_worktree: Some(best.0.worktree.clone()),
         })
     }
@@ -286,11 +400,13 @@ async fn stability_holds(
     stability.met(passes)
 }
 
-/// Build surgical feedback from the current report.
+/// Build surgical feedback from the current report (valve guidance is folded
+/// in by the loop when a stall was diagnosed).
 fn feedback_from(report: &GateReport) -> BuildFeedback {
     BuildFeedback {
         failing: report.fail_set().ids().cloned().collect(),
         diagnostics: report.diagnostics.tail().to_string(),
+        valve_guidance: None,
     }
 }
 
@@ -315,7 +431,7 @@ fn journal_step(
 }
 
 /// Terminal state when no stable-green candidate was reached.
-fn terminal_from_best(report: &GateReport, iterations: u32) -> ClimbOutcome {
+fn terminal_from_best(report: &GateReport, iterations: u32, valve_fires: u32) -> ClimbOutcome {
     let (terminal, stamp) = if report.all_green() {
         (TerminalState::NeedsEscalation, STAMP_SELF_CHECKED)
     } else {
@@ -327,6 +443,7 @@ fn terminal_from_best(report: &GateReport, iterations: u32) -> ClimbOutcome {
         checks_passed: report.score(),
         checks_total: u32::try_from(report.total()).unwrap_or(u32::MAX),
         iterations,
+        valve_fires,
         best_worktree: None,
     }
 }
@@ -339,6 +456,7 @@ fn blocked(reason: String) -> ClimbOutcome {
         checks_passed: 0,
         checks_total: 0,
         iterations: 0,
+        valve_fires: 0,
         best_worktree: None,
     }
 }
@@ -418,6 +536,7 @@ mod tests {
             stability: StabilityPolicy::new(stability_of, stability_of),
             max_iterations: 5,
             gate_closure_digest: "deadbeef".into(),
+            stall_after: 2,
         }
     }
 
@@ -432,7 +551,15 @@ mod tests {
         let ledger = ClimbLedger::new("t", LedgerCap::unlimited());
         let dir = tempfile::tempdir().unwrap();
         let mut journal = ClimbJournal::open(dir.path().join("j")).unwrap();
-        run_climb(&params(stab_of), &builder, &gate, &ledger, &mut journal).await
+        run_climb(
+            &params(stab_of),
+            &builder,
+            &gate,
+            None,
+            &ledger,
+            &mut journal,
+        )
+        .await
     }
 
     #[tokio::test]
@@ -514,7 +641,179 @@ mod tests {
         let ledger = ClimbLedger::new("t", LedgerCap::unlimited());
         let dir = tempfile::tempdir().unwrap();
         let mut journal = ClimbJournal::open(dir.path().join("j")).unwrap();
-        let out = run_climb(&params(1), &DeadBuilder, &NoGate, &ledger, &mut journal).await;
+        let out = run_climb(
+            &params(1),
+            &DeadBuilder,
+            &NoGate,
+            None,
+            &ledger,
+            &mut journal,
+        )
+        .await;
         assert!(matches!(out.terminal, TerminalState::Blocked(_)));
+    }
+
+    /// A builder that records the feedback it was handed per attempt.
+    struct RecordingBuilder {
+        next: Mutex<u32>,
+        seen_guidance: Mutex<Vec<Option<String>>>,
+    }
+    #[async_trait]
+    impl Builder for RecordingBuilder {
+        async fn build(
+            &self,
+            _task: &str,
+            fb: Option<&BuildFeedback>,
+        ) -> Result<BuiltCandidate, EngineError> {
+            self.seen_guidance
+                .lock()
+                .unwrap()
+                .push(fb.and_then(|f| f.valve_guidance.clone()));
+            let mut n = self.next.lock().unwrap();
+            let id = format!("c{n}");
+            *n += 1;
+            Ok(BuiltCandidate {
+                id: CandidateId::new(id.clone()),
+                worktree: PathBuf::from(format!("/wt/{id}")),
+                spend: LedgerEntry::gate_exec(std::time::Duration::from_millis(1)),
+            })
+        }
+    }
+
+    /// A valve that returns fixed guidance and counts its fires.
+    struct CountingValve {
+        fires: Mutex<u32>,
+    }
+    #[async_trait]
+    impl Valve for CountingValve {
+        async fn diagnose(&self, _task: &str, stall: &StallReport) -> Result<String, EngineError> {
+            *self.fires.lock().unwrap() += 1;
+            assert!(stall.repeats >= 2, "valve fired before the stall rule");
+            assert!(!stall.failing.is_empty());
+            Ok("open src/lib.rs — the driver never reads it".to_string())
+        }
+    }
+
+    #[tokio::test]
+    async fn valve_fires_once_on_stall_and_guidance_reaches_the_builder() {
+        // Same fail-set {b} three times = a stall after the 2nd repeat; the
+        // valve fires ONCE, its guidance rides the next builder feedback, and
+        // the climb then goes green.
+        let builder = RecordingBuilder {
+            next: Mutex::new(0),
+            seen_guidance: Mutex::new(Vec::new()),
+        };
+        let gate = ScriptGate {
+            reports: Mutex::new(
+                vec![
+                    report(vec![ok("a"), bad("b")]), // probe: {b}
+                    report(vec![ok("a"), bad("b")]), // attempt: {b} again → stall
+                    report(vec![ok("a"), ok("b")]),  // post-valve attempt: green
+                ]
+                .into(),
+            ),
+            stable_green: true,
+        };
+        let valve = CountingValve {
+            fires: Mutex::new(0),
+        };
+        let ledger = ClimbLedger::new("t", LedgerCap::unlimited());
+        let dir = tempfile::tempdir().unwrap();
+        let mut journal = ClimbJournal::open(dir.path().join("j")).unwrap();
+        let out = run_climb(
+            &params(1),
+            &builder,
+            &gate,
+            Some(&valve),
+            &ledger,
+            &mut journal,
+        )
+        .await;
+
+        assert_eq!(out.terminal, TerminalState::Verified);
+        assert_eq!(out.valve_fires, 1);
+        assert_eq!(*valve.fires.lock().unwrap(), 1);
+        let seen = builder.seen_guidance.lock().unwrap();
+        // probe: no guidance; attempt 2: no guidance yet (stall detected after
+        // its report); attempt 3: the valve guidance.
+        assert_eq!(seen[0], None);
+        assert_eq!(seen[1], None);
+        assert!(seen[2].as_deref().unwrap_or("").contains("src/lib.rs"));
+    }
+
+    #[tokio::test]
+    async fn valve_budget_is_one_then_honest_escalation() {
+        // The wall never moves: valve fires once, budget exhausted, the climb
+        // ends needs_escalation — never a second frontier turn.
+        let builder = RecordingBuilder {
+            next: Mutex::new(0),
+            seen_guidance: Mutex::new(Vec::new()),
+        };
+        let stuck = || report(vec![ok("a"), bad("b")]);
+        let gate = ScriptGate {
+            reports: Mutex::new(vec![stuck(), stuck(), stuck(), stuck(), stuck()].into()),
+            stable_green: false,
+        };
+        let valve = CountingValve {
+            fires: Mutex::new(0),
+        };
+        let ledger = ClimbLedger::new("t", LedgerCap::unlimited());
+        let dir = tempfile::tempdir().unwrap();
+        let mut journal = ClimbJournal::open(dir.path().join("j")).unwrap();
+        let out = run_climb(
+            &params(1),
+            &builder,
+            &gate,
+            Some(&valve),
+            &ledger,
+            &mut journal,
+        )
+        .await;
+
+        assert_eq!(out.terminal, TerminalState::NeedsEscalation);
+        assert_eq!(out.valve_fires, 1);
+        assert_eq!(*valve.fires.lock().unwrap(), 1);
+    }
+
+    #[tokio::test]
+    async fn changed_fail_hash_resets_the_stall_counter() {
+        // {b} → {c} → {b}: three NOs but never the same wall twice in a row —
+        // no stall, the valve never fires (the "same reason" clause).
+        let builder = RecordingBuilder {
+            next: Mutex::new(0),
+            seen_guidance: Mutex::new(Vec::new()),
+        };
+        let gate = ScriptGate {
+            reports: Mutex::new(
+                vec![
+                    report(vec![ok("a"), bad("b")]),
+                    report(vec![bad("c"), ok("b"), ok("a")]),
+                    report(vec![ok("a"), bad("b")]),
+                    report(vec![bad("c"), ok("b"), ok("a")]),
+                    report(vec![ok("a"), bad("b")]),
+                ]
+                .into(),
+            ),
+            stable_green: false,
+        };
+        let valve = CountingValve {
+            fires: Mutex::new(0),
+        };
+        let ledger = ClimbLedger::new("t", LedgerCap::unlimited());
+        let dir = tempfile::tempdir().unwrap();
+        let mut journal = ClimbJournal::open(dir.path().join("j")).unwrap();
+        let out = run_climb(
+            &params(1),
+            &builder,
+            &gate,
+            Some(&valve),
+            &ledger,
+            &mut journal,
+        )
+        .await;
+
+        assert_eq!(out.valve_fires, 0);
+        assert_eq!(*valve.fires.lock().unwrap(), 0);
+        assert_eq!(out.terminal, TerminalState::NeedsEscalation);
     }
 }

@@ -34,7 +34,7 @@ use super::climb::{CandidateId, CheckOutcome, GateReport, Severity};
 use super::detect::detect_gate_candidates;
 use super::engine::{
     BuildFeedback, Builder, BuiltCandidate, ClimbOutcome, ClimbParams, EngineError, GateExecutor,
-    run_climb,
+    StallReport, Valve, run_climb,
 };
 use super::gates::{BaselineProbe, GateClosure, GateSpec, ProbeOpts, StabilityPolicy};
 use super::journal::ClimbJournal;
@@ -247,6 +247,76 @@ working directory given in the task — use that ABSOLUTE path as the root for e
 the shell's current directory, which is NOT the working directory). Make the smallest change that \
 satisfies the task. Do not explain — just make the edits.";
 
+/// System prompt for the escalation valve (spec §6.4): one read-only frontier
+/// diagnostic turn. It names what the driver keeps missing — it NEVER does the
+/// work (the moment it does, the loop is a dumb loop at frontier prices).
+const VALVE_SYSTEM_PROMPT: &str = "You are the escalation valve of a gated forge. A cheaper builder \
+has failed the SAME gate checks several times in a row. Read the stall evidence (and repository files \
+if needed — you have read-only tools). Do NOT do the work. In ONE reply: name what the builder keeps \
+missing, correct any wrong assumption it is carrying, and rewrite the next step so a mid-tier model \
+can execute it.";
+
+/// A [`Valve`] that forks a READ-ONLY frontier sub-agent for one diagnostic
+/// turn. Empty `allowed_tools` = the spawner's read-only set (Read/Grep/Glob).
+pub struct SpawnValve<'a> {
+    spawner: &'a dyn Spawner,
+}
+
+impl<'a> SpawnValve<'a> {
+    /// Build a valve over the (frontier/session-seat) `spawner`.
+    #[must_use]
+    pub fn new(spawner: &'a dyn Spawner) -> Self {
+        Self { spawner }
+    }
+}
+
+#[async_trait]
+impl Valve for SpawnValve<'_> {
+    async fn diagnose(&self, task: &str, stall: &StallReport) -> Result<String, EngineError> {
+        let failing: Vec<&str> = stall
+            .failing
+            .iter()
+            .map(super::climb::CheckId::as_str)
+            .collect();
+        let prompt = format!(
+            "Task the builder is stuck on: {task}\n\nThe gate has failed with the SAME fail-set \
+             {repeats} consecutive times.\nStuck checks: {checks}\nDiagnostics (bounded):\n{diag}\n\n\
+             One reply: what is the builder missing, which assumption is wrong, and what exact next \
+             step should it take?",
+            repeats = stall.repeats,
+            checks = failing.join(", "),
+            diag = stall.diagnostics,
+        );
+        let sub = SubAgentConfig {
+            name: format!("valve-{:016x}", stall.fail_hash),
+            prompt,
+            max_turns: 4,
+            max_tokens: 4096,
+            system_prompt: Some(VALVE_SYSTEM_PROMPT.to_string()),
+            provider: None,
+            model: None,
+            temperature: None,
+        };
+        let overrides = ForkOverrides {
+            model: None,
+            effort: None,
+            allowed_tools: Vec::new(), // read-only (Read/Grep/Glob)
+        };
+        let result = self.spawner.spawn_fork(sub, overrides).await;
+        eprintln!(
+            "[anvil-forge] valve fired: error={} turns={} tokens={}+{}",
+            result.is_error, result.turns, result.usage.input_tokens, result.usage.output_tokens,
+        );
+        if result.is_error {
+            return Err(EngineError::Builder(format!(
+                "valve agent errored: {}",
+                result.text
+            )));
+        }
+        Ok(result.text)
+    }
+}
+
 /// Compose the builder prompt from the task, the candidate's ABSOLUTE worktree
 /// root (a forked builder does not inherit it as its shell cwd — A1-minimal
 /// isolation limitation), and (for a surgical attempt) the failing checks.
@@ -263,9 +333,13 @@ fn build_prompt(task: &str, feedback: Option<&BuildFeedback>, worktree: &Path) -
                 .iter()
                 .map(super::climb::CheckId::as_str)
                 .collect();
+            let guidance = match &fb.valve_guidance {
+                Some(g) => format!("\n\nUnblocking guidance from a senior diagnostic pass:\n{g}"),
+                None => String::new(),
+            };
             format!(
                 "Working directory (root for ALL file paths): {root}\n\nTask: {task}\n\n\
-                 The gate still fails these checks: {}.\nDiagnostics (bounded):\n{}\n\n\
+                 The gate still fails these checks: {}.\nDiagnostics (bounded):\n{}{guidance}\n\n\
                  Fix ONLY what is needed to make the gate pass; keep every file under {root}.",
                 failing.join(", "),
                 fb.diagnostics,
@@ -285,6 +359,7 @@ pub async fn drive_climb_full(
     cfg: &AnvilConfig,
     workspace: &Path,
     spawner: &dyn Spawner,
+    valve_spawner: Option<&dyn Spawner>,
     emitter: &Arc<dyn ProtocolEmitter>,
     session_id: Option<String>,
 ) -> Result<ClimbOutcome, ForgeError> {
@@ -367,9 +442,17 @@ pub async fn drive_climb_full(
         stability: StabilityPolicy::new(1, 1),
         max_iterations: 3,
         gate_closure_digest: digest.clone(),
+        // Stall rule (spec §6.4): two consecutive identical fail-sets buys
+        // the one frontier diagnostic turn. Sized to max_iterations=3.
+        stall_after: 2,
     };
 
-    let outcome = run_climb(&params, &builder, &gate, &ledger, &mut journal).await;
+    // The valve (spec §6.4), when a frontier seat was supplied: one read-only
+    // diagnostic turn on a detected stall, guidance back into the loop.
+    let valve = valve_spawner.map(SpawnValve::new);
+    let valve_ref: Option<&dyn Valve> = valve.as_ref().map(|v| v as &dyn Valve);
+
+    let outcome = run_climb(&params, &builder, &gate, valve_ref, &ledger, &mut journal).await;
 
     emit_receipt(emitter, &outcome, &ledger, &digest, task, session_id);
     Ok(outcome)
@@ -393,6 +476,7 @@ fn emit_receipt(
         checks_total: outcome.checks_total,
         coverage: None,
         iterations: outcome.iterations,
+        valve_fires: outcome.valve_fires,
         cost_microcents: spend.cost_microcents,
         priced: spend.priced,
         gate_closure_digest: gate_closure_digest.to_string(),
@@ -465,6 +549,7 @@ mod tests {
     #[test]
     fn artifact_digest_is_stable_and_hex() {
         let out = ClimbOutcome {
+            valve_fires: 0,
             terminal: TerminalState::Verified,
             stamp: "verified".into(),
             checks_passed: 3,
@@ -482,6 +567,7 @@ mod tests {
     #[test]
     fn surgical_prompt_lists_failing_checks() {
         let fb = BuildFeedback {
+            valve_guidance: None,
             failing: vec!["gate".into()],
             diagnostics: "boom".into(),
         };

@@ -137,10 +137,28 @@ impl Tool for ForgeTool {
             }
         };
 
+        // Valve seat (spec §6.4): the session/frontier model, read-only, one
+        // diagnostic turn on a stall. Best-effort — a forge without a valve
+        // is still a forge.
+        let valve_seat = super::seat::materialize_valve_seat(&self.session_cfg).ok();
+        let valve_spawner = valve_seat
+            .as_ref()
+            .map(|s| &s.spawner as &dyn wcore_types::spawner::Spawner);
+
         let captured = Arc::new(CapturedEmitter(Mutex::new(Vec::new())));
         let emitter: Arc<dyn ProtocolEmitter> = captured.clone();
 
-        match drive_climb_full(task, &self.anvil, &workspace, &seat.spawner, &emitter, None).await {
+        match drive_climb_full(
+            task,
+            &self.anvil,
+            &workspace,
+            &seat.spawner,
+            valve_spawner,
+            &emitter,
+            None,
+        )
+        .await
+        {
             Ok(outcome) => {
                 let receipts = captured.0.lock().join("\n");
                 let worktree = outcome
@@ -156,14 +174,15 @@ impl Tool for ForgeTool {
                 ToolResult {
                     content: format!(
                         "Forged: {stamp} · {passed}/{total} checks · {iters} iteration(s) · \
-                         driver seat {seat_label}\nterminal: {terminal:?}\ncandidate worktree: \
-                         {worktree}\nreceipt: {receipts}{notes}\n\nIf verified, review the \
-                         candidate worktree and merge/cherry-pick its branch; the user's tree \
-                         was not modified.",
+                         {fires} valve fire(s) · driver seat {seat_label}\nterminal: \
+                         {terminal:?}\ncandidate worktree: {worktree}\nreceipt: \
+                         {receipts}{notes}\n\nIf verified, review the candidate worktree and \
+                         merge/cherry-pick its branch; the user's tree was not modified.",
                         stamp = outcome.stamp,
                         passed = outcome.checks_passed,
                         total = outcome.checks_total,
                         iters = outcome.iterations,
+                        fires = outcome.valve_fires,
                         seat_label = seat.label,
                         terminal = outcome.terminal,
                     ),

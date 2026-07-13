@@ -92,3 +92,18 @@ pub fn materialize_driver_seat(
         notes,
     })
 }
+
+/// Materialize the VALVE seat (spec §6.4): the session provider + model — the
+/// frontier judgment the user already chose — in the trusted posture. The
+/// valve forks read-only, so auto-approve here only normalizes fork behavior.
+pub fn materialize_valve_seat(session_cfg: &Config) -> anyhow::Result<MaterializedSeat> {
+    let mut cfg = session_cfg.clone();
+    cfg.tools.auto_approve = true;
+    let provider = crate::bootstrap::create_provider_with_oauth(&cfg)?;
+    let label = format!("{}/{}", cfg.provider_label, cfg.model);
+    Ok(MaterializedSeat {
+        spawner: AgentSpawner::new(provider, cfg),
+        label,
+        notes: Vec::new(),
+    })
+}

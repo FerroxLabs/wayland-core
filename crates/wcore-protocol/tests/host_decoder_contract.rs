@@ -684,6 +684,7 @@ fn sample_receipt() -> ProtocolEvent {
         checks_total: 14,
         coverage: None,
         iterations: 3,
+        valve_fires: 0,
         cost_microcents: 7_000,
         priced: true,
         gate_closure_digest: "sha256:gate".into(),

@@ -10,7 +10,7 @@ use std::sync::Arc;
 
 use clap::Args;
 use wcore_agent::orchestration::anvil::forge::drive_climb_full;
-use wcore_agent::orchestration::anvil::seat::materialize_driver_seat;
+use wcore_agent::orchestration::anvil::seat::{materialize_driver_seat, materialize_valve_seat};
 use wcore_config::config::{CliArgs, Config, load_merged_config_file};
 use wcore_protocol::writer::{ProtocolEmitter, ProtocolWriter};
 
@@ -50,22 +50,50 @@ pub async fn run_forge(args: ForgeArgs) -> anyhow::Result<()> {
     eprintln!("forge: driver seat = {}", seat.label);
     let spawner = seat.spawner;
 
+    // Valve seat (spec §6.4): the session/frontier model, read-only, one
+    // diagnostic turn on a stall. Best-effort — a forge without a valve is
+    // still a forge (it just stays cheap-dumb on a stall).
+    let valve_seat = match materialize_valve_seat(&session_cfg) {
+        Ok(s) => {
+            eprintln!("forge: valve seat = {}", s.label);
+            Some(s)
+        }
+        Err(e) => {
+            eprintln!("forge: no valve seat ({e}); climbing without escalation");
+            None
+        }
+    };
+
     // The top-level protocol writer — the AnvilReceipt is trusted ONLY from this
     // top-level emission (host trust boundary, spec §8).
     let emitter: Arc<dyn ProtocolEmitter> = Arc::new(ProtocolWriter::new());
 
     let workspace = std::env::current_dir()?;
 
-    match drive_climb_full(&args.task, &cf.anvil, &workspace, &spawner, &emitter, None).await {
+    let valve_spawner = valve_seat
+        .as_ref()
+        .map(|s| &s.spawner as &dyn wcore_types::spawner::Spawner);
+    match drive_climb_full(
+        &args.task,
+        &cf.anvil,
+        &workspace,
+        &spawner,
+        valve_spawner,
+        &emitter,
+        None,
+    )
+    .await
+    {
         Ok(outcome) => {
             // The receipt already went to stdout; this is a human summary on stderr.
             eprintln!(
-                "forge: terminal={:?} stamp={} checks={}/{} iterations={}",
+                "forge: terminal={:?} stamp={} checks={}/{} iterations={} valve_fires={}",
                 outcome.terminal,
                 outcome.stamp,
                 outcome.checks_passed,
                 outcome.checks_total,
                 outcome.iterations,
+                outcome.valve_fires,
             );
             Ok(())
         }

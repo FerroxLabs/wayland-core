@@ -527,6 +527,10 @@ pub enum ProtocolEvent {
         coverage: Option<String>,
         /// Climb iterations performed.
         iterations: u32,
+        /// Escalation-valve fires during the climb (spec §6.4). `0` on the
+        /// happy path; defaulted for decoders of pre-valve receipts.
+        #[serde(default)]
+        valve_fires: u32,
         /// Settled cost across the whole climb, in micro-cents. When `priced`
         /// is false this is NOT a real price — the host renders "unpriced",
         /// never $0 (spec §2).

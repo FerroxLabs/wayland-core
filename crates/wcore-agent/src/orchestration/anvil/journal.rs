@@ -36,6 +36,8 @@ pub enum JournalKind {
     Candidate,
     /// A candidate was promoted to the working best.
     Promote,
+    /// The escalation valve bought one frontier diagnostic turn (spec §6.4).
+    Valve,
     /// The climb reached a terminal state (spec §6.5).
     Terminal,
 }
