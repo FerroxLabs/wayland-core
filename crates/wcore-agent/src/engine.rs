@@ -3559,6 +3559,11 @@ impl AgentEngine {
                 Ok(_id) => {
                     let payload = wcore_skills::draft::render_skill_drafted_payload(&candidate);
                     self.output.emit_trace(msg_id, &payload);
+                    for activation in crate::capability_activation::successful_occurrence(
+                        wcore_protocol::events::CapabilityId::ProcedureSkillDrafting,
+                    ) {
+                        self.output.emit_capability_activation(&activation);
+                    }
                 }
                 Err(e) => {
                     // Staging failure must not break the turn — log and
@@ -3911,13 +3916,20 @@ impl AgentEngine {
             return;
         };
         match drafter.draft(&trigger) {
-            Ok(res) => tracing::info!(
-                target: "wcore_agent::auto_skill",
-                name = %res.name,
-                evidence = trigger.trajectories.len(),
-                md = %res.md_path.display(),
-                "auto-drafted skill from observed-turn streak"
-            ),
+            Ok(res) => {
+                tracing::info!(
+                    target: "wcore_agent::auto_skill",
+                    name = %res.name,
+                    evidence = trigger.trajectories.len(),
+                    md = %res.md_path.display(),
+                    "auto-drafted skill from observed-turn streak"
+                );
+                for activation in crate::capability_activation::successful_occurrence(
+                    wcore_protocol::events::CapabilityId::LegacyAutoSkillDrafting,
+                ) {
+                    self.output.emit_capability_activation(&activation);
+                }
+            }
             Err(e) => tracing::warn!(
                 target: "wcore_agent::auto_skill",
                 error = %e,
@@ -4419,16 +4431,25 @@ impl AgentEngine {
             decay_score: 1.0,
             status: EpisodeStatus::Active,
         };
-        if let Err(e) = self
+        match self
             .memory_api
             .record_episode(ep, wcore_memory::AccessToken::MainAgent)
             .await
         {
-            tracing::warn!(
-                target: "wcore_agent::memory",
-                error = %e,
-                "#280 smart handoff record_episode failed; continuing"
-            );
+            Ok(_) => {
+                for activation in crate::capability_activation::successful_occurrence(
+                    wcore_protocol::events::CapabilityId::SmartHandoff,
+                ) {
+                    self.output.emit_capability_activation(&activation);
+                }
+            }
+            Err(e) => {
+                tracing::warn!(
+                    target: "wcore_agent::memory",
+                    error = %e,
+                    "#280 smart handoff record_episode failed; continuing"
+                );
+            }
         }
     }
 
@@ -15184,6 +15205,9 @@ mod approval_bridge_engine_tests {
         }
 
         let mut engine = make_engine();
+        let sink = crate::test_utils::TestSink::new();
+        let activation_events = sink.handle();
+        engine.output = Arc::new(sink);
         let mem = Arc::new(CapturingMemory::default());
         engine.memory_api = mem.clone();
         engine.conversation_id = "conv-280".into();
@@ -15216,6 +15240,13 @@ mod approval_bridge_engine_tests {
         assert!(ep.summary.contains("looking into it"));
         // Non-destructive: the buffer was not touched.
         assert_eq!(engine.messages.len(), before);
+        let events = activation_events.snapshot();
+        let stages: Vec<&str> = events
+            .iter()
+            .filter(|event| event["capability"] == "smart_handoff")
+            .filter_map(|event| event["stage"].as_str())
+            .collect();
+        assert_eq!(stages, ["reached", "outcome_changed", "observed"]);
     }
 
     /// A memory backend that errors must NOT abort the handoff path — the error
@@ -15329,6 +15360,9 @@ mod approval_bridge_engine_tests {
         }
 
         let mut engine = make_engine();
+        let sink = crate::test_utils::TestSink::new();
+        let activation_events = sink.handle();
+        engine.output = Arc::new(sink);
         engine.memory_api = Arc::new(FailingMemory::default());
         engine.messages = vec![Message::now(
             Role::User,
@@ -15339,6 +15373,13 @@ mod approval_bridge_engine_tests {
         // Must not panic / propagate.
         engine.write_smart_handoff().await;
         assert_eq!(engine.messages.len(), 1);
+        assert!(
+            activation_events
+                .snapshot()
+                .iter()
+                .all(|event| event["capability"] != "smart_handoff"),
+            "a failed memory write must not claim a capability outcome"
+        );
     }
 
     // --- #280 smart compaction through run_compaction() (integration) ------
@@ -16167,6 +16208,9 @@ mod user_model_writeback_tests {
         let mut engine = make_engine();
         engine.skills_lifecycle = true;
         engine.set_skill_drafter(drafter);
+        let sink = crate::test_utils::TestSink::new();
+        let activation_events = sink.handle();
+        engine.output = Arc::new(sink);
         assert!(engine.skill_drafter().is_some());
 
         // Three successive successes that ALL normalize to the same
@@ -16226,6 +16270,13 @@ mod user_model_writeback_tests {
             all_rows.iter().any(|r| r.scorer == "auto_drafter"),
             "PromptStore row must use scorer='auto_drafter'"
         );
+        let events = activation_events.snapshot();
+        let stages: Vec<&str> = events
+            .iter()
+            .filter(|event| event["capability"] == "legacy_auto_skill_drafting")
+            .filter_map(|event| event["stage"].as_str())
+            .collect();
+        assert_eq!(stages, ["reached", "outcome_changed", "observed"]);
     }
 
     /// A failure breaks the streak: 2 successes + 1 failure + 1 success

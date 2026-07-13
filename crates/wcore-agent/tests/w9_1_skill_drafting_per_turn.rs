@@ -94,8 +94,14 @@ fn count_skill_drafted_events(events: &[Value]) -> usize {
 
 #[tokio::test]
 async fn engine_emits_skill_drafted_trace_after_three_identical_turns() {
+    let memory_dir = tempfile::tempdir().expect("memory tempdir");
+    let memory = wcore_memory::open_for_test(memory_dir.path())
+        .await
+        .expect("test memory");
+    let memory_api: Arc<dyn MemoryApi> = Arc::new(memory.clone());
     let (mut engine, _handle) =
         AgentBootstrap::build_for_test(minimal_config(true), five_tool_repeat_script());
+    engine.set_memory_api(memory_api);
 
     // Drive turns until max_turns trips. `run` loops internally on
     // ToolUse outcomes; max_turns=3 returns MaxTurns after the third
@@ -141,6 +147,21 @@ async fn engine_emits_skill_drafted_trace_after_three_identical_turns() {
         "repeat_count should be at least 3 (the min_repeats floor); got {:?}",
         payload["repeat_count"]
     );
+    let stages: Vec<&str> = events
+        .iter()
+        .filter(|event| event["capability"] == "procedure_skill_drafting")
+        .filter_map(|event| event["stage"].as_str())
+        .collect();
+    assert_eq!(stages, ["reached", "outcome_changed", "observed"]);
+    let procedures = memory
+        .list_procedures(Tier::Project, AccessToken::System)
+        .await
+        .expect("list procedures");
+    assert_eq!(
+        procedures.len(),
+        1,
+        "the activation must bind to a real draft"
+    );
 }
 
 #[tokio::test]
@@ -169,6 +190,12 @@ async fn engine_skips_skill_drafting_when_gate_off() {
         drafted, 0,
         "skills_lifecycle = false MUST suppress all skill_drafted emissions; \
          got {drafted}"
+    );
+    assert!(
+        events
+            .iter()
+            .all(|event| event["capability"] != "procedure_skill_drafting"),
+        "the disabled path must not emit runtime activation evidence"
     );
 
     let procedures = memory
@@ -205,6 +232,14 @@ async fn engine_deduplicates_repeated_skill_drafted_emissions() {
     assert_eq!(
         drafted, 1,
         "exactly one skill_drafted emission expected across 6 identical turns \
-         (signature-dedup invariant); got {drafted}"
+        (signature-dedup invariant); got {drafted}"
+    );
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| event["capability"] == "procedure_skill_drafting")
+            .count(),
+        3,
+        "one real draft should emit one three-stage runtime cycle"
     );
 }

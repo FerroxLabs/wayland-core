@@ -168,6 +168,14 @@ pub trait OutputSink: Send + Sync {
     /// retry decision.
     fn emit_provider_failure(&self, _failure: &str) {}
 
+    /// F05: emit one typed capability-activation fact. Default no-op keeps
+    /// terminal and test sinks quiet; protocol-capable hosts override it.
+    fn emit_capability_activation(
+        &self,
+        _activation: &wcore_protocol::events::CapabilityActivation,
+    ) {
+    }
+
     /// W7 S4: emit ApprovalRequired (host renders modal). Default
     /// no-op; `ProtocolSink` overrides and gates on
     /// `with_hitl_suspend(true)`.

@@ -801,6 +801,15 @@ impl OutputSink for ProtocolSink {
         });
     }
 
+    fn emit_capability_activation(
+        &self,
+        activation: &wcore_protocol::events::CapabilityActivation,
+    ) {
+        let _ = self.writer.emit(&ProtocolEvent::CapabilityActivation {
+            activation: activation.clone(),
+        });
+    }
+
     /// W8a A.7: emit `ProtocolEvent::BudgetExceeded` unconditionally.
     /// No capability flag (audit F5 — host-tolerated additive variant);
     /// fires once per session when the first ExecutionBudget cap trips.
