@@ -2254,6 +2254,7 @@ impl AgentBootstrap {
             registry.set_workspace_policy(policy);
         }
 
+        let skills_lifecycle_enabled = self.config.observability.skills_lifecycle;
         let mut engine = if let Some(session) = self.resume_session {
             AgentEngine::resume_with_provider(
                 provider.clone(),
@@ -2339,9 +2340,7 @@ impl AgentBootstrap {
         // `Db` is available — without one we have no PromptStore and the
         // closed-loop seed pathway is dead. The bucketer itself is always
         // live on the engine; without a drafter it just observes.
-        if self.config.observability.skills_lifecycle
-            && let Some(db_arc) = mem_db_for_router.clone()
-        {
+        if skills_lifecycle_enabled && let Some(db_arc) = mem_db_for_router.clone() {
             // `$WAYLAND_HOME` resolution: prefer the explicit env var,
             // fall back to `~/.wayland`. Matches the pattern used elsewhere
             // in the project for user-facing on-disk artifacts.
