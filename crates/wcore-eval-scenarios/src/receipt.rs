@@ -123,8 +123,8 @@ pub struct ProviderEvidenceV1 {
     pub output_tokens: Evidence<u64>,
     pub cache_read_tokens: Evidence<u64>,
     pub cache_write_tokens: Evidence<u64>,
-    pub cost_usd: f64,
-    pub limit_usd: f64,
+    pub cost_microusd: u64,
+    pub limit_microusd: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -168,7 +168,7 @@ pub struct ProcessEvidenceV1 {
     pub peak_memory_bytes: Evidence<u64>,
     pub peak_cpu_millis: Evidence<u64>,
     pub cancellation_requested: bool,
-    pub orphan_count: u64,
+    pub orphan_count: Evidence<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -224,7 +224,7 @@ pub struct CellResultV1 {
     pub failures: Vec<FailureEvidenceV1>,
     pub usability: Vec<UsabilityEvidenceV1>,
     pub wall_time_ms: u64,
-    pub cost_usd: f64,
+    pub cost_microusd: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -244,7 +244,7 @@ pub struct UsabilityEvidenceV1 {
 pub struct SummaryEvidenceV1 {
     pub passed: u64,
     pub failed: u64,
-    pub total_cost_usd: f64,
+    pub total_cost_microusd: u64,
     pub wall_time_ms: u64,
 }
 
@@ -404,10 +404,6 @@ fn validate_body(body: &ReceiptBodyV1) -> Result<(), ReceiptError> {
         &body.policy.effective_policy_sha256,
         64,
     )?;
-    require_finite_nonnegative("provider.cost_usd", body.provider.cost_usd)?;
-    require_finite_nonnegative("provider.limit_usd", body.provider.limit_usd)?;
-    require_finite_nonnegative("summary.total_cost_usd", body.summary.total_cost_usd)?;
-
     if body.required_cells.is_empty() {
         return Err(ReceiptError::InvalidEvidence(
             "required_cells must not be empty".to_string(),
@@ -428,14 +424,13 @@ fn validate_body(body: &ReceiptBodyV1) -> Result<(), ReceiptError> {
 
     let mut passed = 0_u64;
     let mut failed = 0_u64;
-    let mut total_cost = 0.0;
+    let mut total_cost_microusd = 0_u64;
     let mut wall_time_ms = 0_u64;
     for result in &body.results {
         require_nonempty("result.cell_id", &result.cell_id)?;
         require_nonempty("result.task", &result.task)?;
         require_nonempty("result.provider", &result.provider)?;
         require_nonempty("result.platform", &result.platform)?;
-        require_finite_nonnegative("result.cost_usd", result.cost_usd)?;
         let critical_usability = result
             .usability
             .iter()
@@ -457,13 +452,13 @@ fn validate_body(body: &ReceiptBodyV1) -> Result<(), ReceiptError> {
         } else {
             failed += 1;
         }
-        total_cost += result.cost_usd;
+        total_cost_microusd = total_cost_microusd.saturating_add(result.cost_microusd);
         wall_time_ms = wall_time_ms.saturating_add(result.wall_time_ms);
     }
     if body.summary.passed != passed
         || body.summary.failed != failed
         || body.summary.wall_time_ms != wall_time_ms
-        || (body.summary.total_cost_usd - total_cost).abs() > 1e-9
+        || body.summary.total_cost_microusd != total_cost_microusd
     {
         return Err(ReceiptError::InvalidEvidence(
             "summary does not match derived result totals".to_string(),
@@ -522,7 +517,7 @@ fn gate_passed(body: &ReceiptBodyV1) -> bool {
     body.results.iter().all(|result| result.passed)
         && body.canary_scans.scan_complete
         && body.canary_scans.detections() == 0
-        && body.process.orphan_count == 0
+        && matches!(body.process.orphan_count, Evidence::Observed { value: 0 })
         && body.recovery.unresolved_side_effects.is_empty()
         && body.assertions.iter().all(|assertion| assertion.passed)
 }
@@ -544,15 +539,6 @@ fn require_sha256(field: &str, value: &str, length: usize) -> Result<(), Receipt
     {
         return Err(ReceiptError::InvalidEvidence(format!(
             "{field} must be {length} lowercase hexadecimal characters"
-        )));
-    }
-    Ok(())
-}
-
-fn require_finite_nonnegative(field: &str, value: f64) -> Result<(), ReceiptError> {
-    if !value.is_finite() || value < 0.0 {
-        return Err(ReceiptError::InvalidEvidence(format!(
-            "{field} must be finite and non-negative"
         )));
     }
     Ok(())

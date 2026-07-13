@@ -1,7 +1,9 @@
 //! Redacted console and machine-readable report projections.
 
 use serde_json::{Value, json};
+use thiserror::Error;
 
+use crate::receipt::{CellResultV1, EvidenceReceiptV1};
 use crate::runner::{Failure, ScenarioResult};
 
 /// One run's in-memory summary. Receipt construction copies only the safe,
@@ -136,4 +138,205 @@ fn failure_code(failure: &Failure) -> &'static str {
 
 fn escape_markdown(value: &str) -> String {
     value.replace('|', "\\|").replace(['\r', '\n'], " ")
+}
+
+/// All human and machine projections from one canonical evidence receipt.
+/// Only `json` is the authoritative envelope; every other projection carries
+/// its content digest so consumers can join it back to that envelope.
+#[derive(Debug, Clone)]
+pub struct ReceiptReports {
+    pub json: String,
+    pub jsonl: String,
+    pub junit: String,
+    pub console: String,
+    pub markdown: String,
+}
+
+#[derive(Debug, Error)]
+pub enum ReportRenderError {
+    #[error("could not serialize {format} report: {source}")]
+    Serialize {
+        format: &'static str,
+        #[source]
+        source: serde_json::Error,
+    },
+    #[error("secret material detected in rendered {0} report")]
+    SecretDetected(&'static str),
+}
+
+pub fn render_receipt_reports(
+    receipt: &EvidenceReceiptV1,
+    forbidden_secrets: &[String],
+) -> Result<ReceiptReports, ReportRenderError> {
+    let reports = ReceiptReports {
+        json: serde_json::to_string_pretty(receipt).map_err(|source| {
+            ReportRenderError::Serialize {
+                format: "JSON",
+                source,
+            }
+        })?,
+        jsonl: render_receipt_jsonl(receipt)?,
+        junit: render_receipt_junit(receipt),
+        console: render_receipt_console(receipt),
+        markdown: render_receipt_markdown(receipt),
+    };
+    for (format, output) in [
+        ("JSON", &reports.json),
+        ("JSONL", &reports.jsonl),
+        ("JUnit", &reports.junit),
+        ("console", &reports.console),
+        ("Markdown", &reports.markdown),
+    ] {
+        if forbidden_secrets
+            .iter()
+            .any(|secret| !secret.is_empty() && output.contains(secret))
+        {
+            return Err(ReportRenderError::SecretDetected(format));
+        }
+    }
+    Ok(reports)
+}
+
+fn render_receipt_jsonl(receipt: &EvidenceReceiptV1) -> Result<String, ReportRenderError> {
+    let mut lines = Vec::with_capacity(receipt.body.results.len() + 2);
+    lines.push(json!({
+        "type": "receipt_header",
+        "schema": receipt.schema,
+        "schema_version": receipt.schema_version,
+        "body_sha256": receipt.body_sha256,
+        "run_id": receipt.body.run_id,
+    }));
+    for result in &receipt.body.results {
+        lines.push(json!({
+            "type": "cell_result",
+            "body_sha256": receipt.body_sha256,
+            "result": result,
+        }));
+    }
+    lines.push(json!({
+        "type": "receipt_trailer",
+        "body_sha256": receipt.body_sha256,
+        "summary": receipt.body.summary,
+    }));
+    let encoded = lines
+        .iter()
+        .map(serde_json::to_string)
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|source| ReportRenderError::Serialize {
+            format: "JSONL",
+            source,
+        })?;
+    Ok(format!("{}\n", encoded.join("\n")))
+}
+
+fn render_receipt_console(receipt: &EvidenceReceiptV1) -> String {
+    let mut lines = vec![format!(
+        "RECEIPT {} authority={}",
+        receipt.body_sha256,
+        authority_label(receipt)
+    )];
+    for result in &receipt.body.results {
+        lines.push(format_cell(result));
+    }
+    lines.push(format!(
+        "SUMMARY pass={} fail={} cost_microusd={} wall_time_ms={}",
+        receipt.body.summary.passed,
+        receipt.body.summary.failed,
+        receipt.body.summary.total_cost_microusd,
+        receipt.body.summary.wall_time_ms
+    ));
+    lines.join("\n")
+}
+
+fn render_receipt_markdown(receipt: &EvidenceReceiptV1) -> String {
+    let mut output = format!(
+        "# Wayland evaluation receipt\n\n- Receipt: `{}`\n- Authority claim: `{}`\n\n| Cell | Task | Provider | Platform | Verdict | Failures |\n|---|---|---|---|---|---|\n",
+        receipt.body_sha256,
+        authority_label(receipt)
+    );
+    for result in &receipt.body.results {
+        let failures = result
+            .failures
+            .iter()
+            .map(|failure| failure.code.as_str())
+            .collect::<Vec<_>>()
+            .join(", ");
+        output.push_str(&format!(
+            "| {} | {} | {} | {} | {} | {} |\n",
+            escape_markdown(&result.cell_id),
+            escape_markdown(&result.task),
+            escape_markdown(&result.provider),
+            escape_markdown(&result.platform),
+            if result.passed { "pass" } else { "fail" },
+            escape_markdown(&failures),
+        ));
+    }
+    output
+}
+
+fn render_receipt_junit(receipt: &EvidenceReceiptV1) -> String {
+    let mut output = format!(
+        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<testsuite name=\"wayland-eval\" tests=\"{}\" failures=\"{}\" time=\"{:.3}\" receipt_sha256=\"{}\">\n",
+        receipt.body.results.len(),
+        receipt.body.summary.failed,
+        receipt.body.summary.wall_time_ms as f64 / 1000.0,
+        escape_xml(&receipt.body_sha256),
+    );
+    for result in &receipt.body.results {
+        output.push_str(&format!(
+            "  <testcase name=\"{}\" classname=\"{}.{}\" time=\"{:.3}\">",
+            escape_xml(&result.task),
+            escape_xml(&result.provider),
+            escape_xml(&result.platform),
+            result.wall_time_ms as f64 / 1000.0,
+        ));
+        if !result.passed {
+            let codes = result
+                .failures
+                .iter()
+                .map(|failure| failure.code.as_str())
+                .collect::<Vec<_>>()
+                .join(",");
+            output.push_str(&format!(
+                "<failure type=\"evaluation\" message=\"{}\" />",
+                escape_xml(&codes)
+            ));
+        }
+        output.push_str("</testcase>\n");
+    }
+    output.push_str("</testsuite>\n");
+    output
+}
+
+fn format_cell(result: &CellResultV1) -> String {
+    let failures = result
+        .failures
+        .iter()
+        .map(|failure| failure.code.as_str())
+        .collect::<Vec<_>>()
+        .join(",");
+    format!(
+        "{} {} provider={} platform={} failures={}",
+        if result.passed { "PASS" } else { "FAIL" },
+        result.task,
+        result.provider,
+        result.platform,
+        failures
+    )
+}
+
+fn authority_label(receipt: &EvidenceReceiptV1) -> &'static str {
+    match &receipt.authority {
+        crate::receipt::AuthorityClaimV1::Local => "local_non_authoritative",
+        crate::receipt::AuthorityClaimV1::Ci { .. } => "ci_claim_unverified",
+    }
+}
+
+fn escape_xml(value: &str) -> String {
+    value
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+        .replace('\'', "&apos;")
 }

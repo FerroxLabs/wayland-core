@@ -6,6 +6,7 @@ use wcore_eval_scenarios::receipt::{
     ReceiptVerifier, RecoveryEvidenceV1, SummaryEvidenceV1, TargetEvidenceV1, TimingEvidenceV1,
     VerificationPolicy, VerifiedAuthority,
 };
+use wcore_eval_scenarios::report::{ReportRenderError, render_receipt_reports};
 
 fn h64(ch: char) -> String {
     std::iter::repeat_n(ch, 64).collect()
@@ -64,8 +65,8 @@ fn body() -> ReceiptBodyV1 {
             output_tokens: Evidence::observed(8),
             cache_read_tokens: Evidence::observed(0),
             cache_write_tokens: Evidence::observed(0),
-            cost_usd: 0.001,
-            limit_usd: 0.01,
+            cost_microusd: 1_000,
+            limit_microusd: 10_000,
         },
         tools: Vec::new(),
         decisions: Vec::new(),
@@ -80,7 +81,7 @@ fn body() -> ReceiptBodyV1 {
             peak_memory_bytes: Evidence::observed(1024),
             peak_cpu_millis: Evidence::observed(10),
             cancellation_requested: false,
-            orphan_count: 0,
+            orphan_count: Evidence::observed(0),
         },
         recovery: RecoveryEvidenceV1 {
             journal_cursor_sha256: Evidence::Unavailable {
@@ -106,12 +107,12 @@ fn body() -> ReceiptBodyV1 {
             failures: Vec::new(),
             usability: Vec::new(),
             wall_time_ms: 250,
-            cost_usd: 0.001,
+            cost_microusd: 1_000,
         }],
         summary: SummaryEvidenceV1 {
             passed: 1,
             failed: 0,
-            total_cost_usd: 0.001,
+            total_cost_microusd: 1_000,
             wall_time_ms: 250,
         },
     }
@@ -244,4 +245,46 @@ fn claimed_ci_authority_cannot_be_unsigned() {
             .expect_err("empty signature must fail"),
         ReceiptError::MalformedSignature
     );
+}
+
+#[test]
+fn all_projections_share_the_receipt_and_exact_failure_identity() {
+    let mut failed = body();
+    failed.results[0].passed = false;
+    failed.results[0]
+        .failures
+        .push(wcore_eval_scenarios::receipt::FailureEvidenceV1 {
+            code: "secret_detected".to_string(),
+            detail_sha256: Evidence::observed(h64('1')),
+        });
+    failed.summary.passed = 0;
+    failed.summary.failed = 1;
+    let receipt = EvidenceReceiptV1::local(failed).expect("valid failed receipt");
+    let reports = render_receipt_reports(&receipt, &[]).expect("render projections");
+
+    for output in [
+        &reports.json,
+        &reports.jsonl,
+        &reports.junit,
+        &reports.console,
+        &reports.markdown,
+    ] {
+        assert!(output.contains(&receipt.body_sha256));
+        assert!(output.contains("deterministic-edit"));
+        assert!(output.contains("secret_detected"));
+    }
+    assert_eq!(reports.jsonl.lines().count(), 3);
+    assert!(reports.junit.starts_with("<?xml version=\"1.0\""));
+}
+
+#[test]
+fn projection_secret_scan_fails_before_any_report_is_returned() {
+    let canary = "receipt-projection-canary".to_string();
+    let mut contaminated = body();
+    contaminated.run_id = canary.clone();
+    let receipt = EvidenceReceiptV1::local(contaminated).expect("structurally valid receipt");
+    assert!(matches!(
+        render_receipt_reports(&receipt, &[canary]),
+        Err(ReportRenderError::SecretDetected("JSON"))
+    ));
 }
