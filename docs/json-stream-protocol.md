@@ -1232,6 +1232,35 @@ under the Host Decoder Contract.
 `egress_denied`. Hosts MUST treat the value as an open string and MUST NOT parse
 human-readable provider error messages to infer it.
 
+### 1.N+5b capability_activation (F05)
+
+Immediately after `ready`, Core emits typed activation facts for each audited
+capability. This is runtime truth, not a feature advertisement: a capability
+ends startup either at `ready` or at `unavailable` with a stable reason. A
+capability that later performs a real side effect emits a repeatable
+`reached` → `outcome_changed` → `observed` cycle only after that side effect
+succeeds.
+
+```json
+{ "type": "capability_activation", "capability": "smart_handoff", "stage": "declared" }
+{ "type": "capability_activation", "capability": "smart_handoff", "stage": "configured" }
+{ "type": "capability_activation", "capability": "smart_handoff", "stage": "constructed" }
+{ "type": "capability_activation", "capability": "smart_handoff", "stage": "ready" }
+{ "type": "capability_activation", "capability": "delegate_isolation", "stage": "unavailable", "reason": "isolation_not_enforced" }
+```
+
+| Field | Type | Description |
+|---|---|---|
+| `capability` | string | Stable identity: `pricing_refresher`, `mid_flight_monitor`, `cooldown_tracker`, `learned_policy`, `smart_handoff`, `delegate_isolation`, `procedure_skill_drafting`, or `legacy_auto_skill_drafting`. |
+| `stage` | string | `declared`, `configured`, `constructed`, `ready`, `reached`, `outcome_changed`, `observed`, or terminal `unavailable`. |
+| `reason` | string? | Required only for `unavailable`: `disabled_by_config`, `dependency_unavailable`, `no_production_constructor`, `runtime_path_unwired`, or `isolation_not_enforced`. |
+
+These events are always-on additive diagnostics and have no `Ready.capabilities`
+flag. Hosts SHOULD retain only the latest fact per capability for status UI,
+while evaluators SHOULD validate the complete ordered chain. Unknown capability,
+stage, and reason strings must be handled as forward-compatible values rather
+than granting authority or implying availability.
+
 ### 1.N+6 browser_event (W8c.1)
 
 Browser-suite op event. Emitted by the engine once per completed
