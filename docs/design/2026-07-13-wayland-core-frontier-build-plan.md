@@ -353,7 +353,7 @@ The ledger contains thirty-one bounded tasks. Each task should map to one or mor
 
 **Goal:** Replace overloaded Force semantics with explicit Smart, Managed and Dangerous contracts.
 
-**Work:** typed posture/policy bundle; approval-bypass and sandbox-bypass separation; local-only dangerous activation; session expiry; managed deny; protocol and CLI vocabulary migration. Foreign aliases such as `--dangerously-skip-permissions` must either map honestly to approval bypass with a loud compatibility notice or be rejected; no alias may imply that sandbox/managed controls were disabled when they were retained.
+**Work:** typed posture/policy bundle; approval-bypass and sandbox-bypass separation; local-only dangerous activation; session expiry; managed deny; protocol and CLI vocabulary migration. F07 owns the minimum per-session sandbox runtime, fail-closed omission behavior and child-runtime propagation needed to make sandbox-bypass semantics truthful; F09 retains the remaining global-state migration and the complete cross-session proof. Foreign aliases such as `--dangerously-skip-permissions` must either map honestly to approval bypass with a loud compatibility notice or be rejected; no alias may imply that sandbox/managed controls were disabled when they were retained.
 
 **Primary paths:** `wcore-config/src/config.rs`; `wcore-protocol/src/commands.rs`, `events.rs`; CLI argument handling; permissions/sandbox entry points.
 
@@ -377,7 +377,7 @@ The ledger contains thirty-one bounded tasks. Each task should map to one or mor
 
 **Goal:** Eliminate cross-session authority leakage and output-path inconsistencies.
 
-**Work:** replace process-global mutable egress policy, sandbox override, bundled-skill registry, MCP and doorbell state with runtime/session-scoped handles; central ToolResult redaction before any transport/model/log sink; protect `.env`, secret patterns, UNC and non-regular paths, and encoded/split canaries.
+**Work:** complete the runtime/session scoping begun for the F07 sandbox authority by replacing the remaining process-global mutable egress policy, legacy sandbox compatibility paths, bundled-skill registry, MCP and doorbell state with scoped handles; central ToolResult redaction before any transport/model/log sink; protect `.env`, secret patterns, UNC and non-regular paths, and encoded/split canaries.
 
 **Primary paths:** egress bridge, permissions runtime, MCP runtime, tool-result emission, path validation, observability/protocol sinks.
 

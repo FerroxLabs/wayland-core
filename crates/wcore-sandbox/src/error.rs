@@ -4,6 +4,15 @@ use thiserror::Error;
 
 #[derive(Debug, Error)]
 pub enum SandboxError {
+    /// Persistent or remotely supplied configuration attempted to disable
+    /// containment. Full bypass requires a resolver-produced local launch
+    /// grant and cannot be selected through config or environment state.
+    #[error(
+        "sandbox bypass cannot be activated by configuration or environment; use an explicit local Dangerous launch"
+    )]
+    UnsafeBypassSource,
+    #[error("unknown sandbox backend selection: {0}")]
+    UnknownBackend(String),
     /// The caller asked for sandboxed execution but the command does not
     /// require it; callers should bypass to a direct exec. Returned by
     /// trait helpers (not by `execute` itself).

@@ -29,6 +29,7 @@ use std::sync::Mutex;
 use std::sync::OnceLock;
 use std::sync::RwLock;
 use std::time::{Duration, Instant};
+use wcore_types::execution_policy::DangerousSessionGrant;
 
 /// Operator opt-in that permits running model-driven commands with NO
 /// isolation when the platform's real sandbox is unavailable. Without it
@@ -287,6 +288,7 @@ pub enum ResourceLimitEnforcement {
     Enforced,
 }
 
+#[derive(Clone)]
 pub struct SandboxRegistry {
     backend: Arc<dyn backends::SandboxBackend>,
 }
@@ -316,6 +318,96 @@ impl SandboxRegistry {
     pub fn is_available(&self) -> bool {
         self.backend.is_available()
     }
+    pub fn enforces_read_deny(&self) -> bool {
+        self.backend.enforces_read_deny()
+    }
+    pub fn blocks_powershell(&self) -> bool {
+        self.backend.blocks_powershell()
+    }
+
+    /// Resolve one immutable, containment-required backend for an agent
+    /// session. Environment may select another real backend (Docker), but
+    /// neither environment nor persisted config may select `none`.
+    pub fn required_for_session(config_backend: Option<&str>) -> Result<Self> {
+        let choice = std::env::var(SANDBOX_ENV)
+            .ok()
+            .or_else(|| config_backend.map(str::to_owned));
+        let normalized = choice.as_deref().map(str::trim).filter(|s| !s.is_empty());
+
+        let backend: Box<dyn backends::SandboxBackend> = match normalized {
+            None => real_platform_backend().unwrap_or_else(|| Box::new(FailClosedBackend::new())),
+            Some("docker") => {
+                use backends::SandboxBackend as _;
+                let docker = backends::docker::DockerBackend::new();
+                if docker.is_available() {
+                    Box::new(docker)
+                } else {
+                    tracing::error!(
+                        target: "wcore_sandbox",
+                        "Docker was selected for this session but is unavailable; failing closed"
+                    );
+                    Box::new(FailClosedBackend::new())
+                }
+            }
+            Some("none") => return Err(SandboxError::UnsafeBypassSource),
+            Some(other) => return Err(SandboxError::UnknownBackend(other.to_string())),
+        };
+
+        if no_sandbox_opt_in() {
+            tracing::warn!(
+                target: "wcore_sandbox",
+                "WAYLAND_ALLOW_NO_SANDBOX/config allow_no_sandbox is ignored for hosted sessions; \
+                 containment bypass requires an explicit local Dangerous launch"
+            );
+        }
+        Ok(Self::new(Arc::from(backend)))
+    }
+
+    /// Construct a production session runtime that deliberately has no OS
+    /// sandbox. The private fields on `DangerousSessionGrant` and its lack of
+    /// deserialization keep config/wire inputs away from this authority path.
+    /// [`Self::new`] remains public for trusted host integration and tests;
+    /// production launch code must use a validated policy constructor.
+    pub fn dangerous(grant: &DangerousSessionGrant) -> Self {
+        backends::no_sandbox::warn_once_sandbox_disabled();
+        tracing::warn!(
+            target: "wcore_sandbox",
+            activation_id = grant.activation_id(),
+            ttl_millis = grant.ttl_millis(),
+            "Dangerous session runtime selected: OS sandbox is disabled"
+        );
+        Self::new(Arc::new(backends::no_sandbox::NoSandboxBackend::new()))
+    }
+}
+
+/// Return the real native backend when one is available. This helper never
+/// consults process-global configuration and never falls back to NoSandbox.
+fn real_platform_backend() -> Option<Box<dyn backends::SandboxBackend>> {
+    #[cfg(target_os = "linux")]
+    {
+        use backends::SandboxBackend as _;
+        let bwrap = backends::bwrap::BubblewrapBackend::new();
+        if bwrap.is_available() {
+            return Some(Box::new(bwrap));
+        }
+    }
+    #[cfg(target_os = "macos")]
+    {
+        use backends::SandboxBackend as _;
+        let sbx = backends::sandbox_exec::SandboxExecBackend::new();
+        if sbx.is_available() {
+            return Some(Box::new(sbx));
+        }
+    }
+    #[cfg(target_os = "windows")]
+    {
+        use backends::SandboxBackend as _;
+        let appc = backends::appcontainer::AppContainerBackend::new();
+        if appc.is_available() {
+            return Some(Box::new(appc));
+        }
+    }
+    None
 }
 
 /// Choose the default backend for the current platform.
@@ -377,33 +469,7 @@ pub fn default_for_platform() -> Box<dyn backends::SandboxBackend> {
             _ => {}
         }
     }
-    #[cfg(target_os = "linux")]
-    {
-        use backends::SandboxBackend as _;
-        let bwrap = backends::bwrap::BubblewrapBackend::new();
-        if bwrap.is_available() {
-            return Box::new(bwrap);
-        }
-        // S7 may add Docker fallback here; for now, fail closed (or
-        // NoSandbox under explicit opt-in).
-    }
-    #[cfg(target_os = "macos")]
-    {
-        use backends::SandboxBackend as _;
-        let sbx = backends::sandbox_exec::SandboxExecBackend::new();
-        if sbx.is_available() {
-            return Box::new(sbx);
-        }
-    }
-    #[cfg(target_os = "windows")]
-    {
-        use backends::SandboxBackend as _;
-        let appc = backends::appcontainer::AppContainerBackend::new();
-        if appc.is_available() {
-            return Box::new(appc);
-        }
-    }
-    unsandboxed_fallback()
+    real_platform_backend().unwrap_or_else(unsandboxed_fallback)
 }
 
 /// Crate-wide serialization lock for tests that mutate the process-global
@@ -558,6 +624,68 @@ mod fail_closed_tests {
             "no_sandbox",
             "WAYLAND_SANDBOX=none + opt-in must honor the no-op backend"
         );
+    }
+
+    #[test]
+    fn required_session_rejects_environment_bypass_pair() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let _g = EnvGuard::capture();
+        EnvGuard::set_sandbox(Some("none"));
+        EnvGuard::set_allow(Some("1"));
+
+        assert!(matches!(
+            SandboxRegistry::required_for_session(None),
+            Err(SandboxError::UnsafeBypassSource)
+        ));
+    }
+
+    #[test]
+    fn required_session_rejects_persisted_none() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let _g = EnvGuard::capture();
+        EnvGuard::set_sandbox(None);
+        EnvGuard::set_allow(None);
+
+        assert!(matches!(
+            SandboxRegistry::required_for_session(Some("none")),
+            Err(SandboxError::UnsafeBypassSource)
+        ));
+    }
+
+    #[test]
+    fn session_runtimes_do_not_follow_later_global_changes() {
+        use wcore_types::execution_policy::{
+            ApprovalPolicy, BaselineExecutionPolicy, DangerousLaunchRequest, PolicySource,
+            resolve_dangerous_launch,
+        };
+
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let _g = EnvGuard::capture();
+        EnvGuard::set_sandbox(None);
+        EnvGuard::set_allow(None);
+
+        let required = SandboxRegistry::required_for_session(None).unwrap();
+        let required_name = required.backend_name();
+        assert_ne!(required_name, "no_sandbox");
+
+        let baseline =
+            BaselineExecutionPolicy::smart(ApprovalPolicy::Prompt, PolicySource::Default);
+        let grant = resolve_dangerous_launch(
+            &baseline,
+            DangerousLaunchRequest::cli(60, "isolation-test"),
+            10_000,
+        )
+        .unwrap();
+        let dangerous = SandboxRegistry::dangerous(&grant);
+        assert_eq!(dangerous.backend_name(), "no_sandbox");
+
+        EnvGuard::set_sandbox(Some("none"));
+        EnvGuard::set_allow(Some("1"));
+        set_config_sandbox(Some("none".into()), Some(true));
+
+        assert_eq!(required.backend_name(), required_name);
+        assert_ne!(required.backend_name(), dangerous.backend_name());
+        assert_eq!(dangerous.backend_name(), "no_sandbox");
     }
 
     #[test]

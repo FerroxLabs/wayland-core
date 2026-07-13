@@ -676,14 +676,20 @@ impl AgentBootstrap {
             self.config.tools.env_passthrough.iter(),
         );
 
-        // #327: install the config-sourced sandbox toggle so `[tools]
-        // sandbox` / `[tools] allow_no_sandbox` are honored by
-        // `wcore_sandbox::default_for_platform`. The `WAYLAND_SANDBOX` /
-        // `WAYLAND_ALLOW_NO_SANDBOX` env vars still take precedence.
-        wcore_sandbox::set_config_sandbox(
-            self.config.tools.sandbox.clone(),
-            self.config.tools.allow_no_sandbox,
-        );
+        // F07: resolve one immutable sandbox runtime for this session. A
+        // persisted config or environment may select another real backend,
+        // but cannot disable containment; only a resolver-produced local
+        // Dangerous launch grant can construct that runtime.
+        let sandbox_runtime = Arc::new(wcore_sandbox::SandboxRegistry::required_for_session(
+            self.config.tools.sandbox.as_deref(),
+        )?);
+        if self.config.tools.allow_no_sandbox == Some(true) {
+            tracing::warn!(
+                target: "wcore_agent::bootstrap",
+                "[tools] allow_no_sandbox is ignored for hosted sessions; use an explicit local Dangerous launch"
+            );
+        }
+        registry.set_sandbox_runtime(sandbox_runtime);
 
         registry.register(Box::new(wcore_tools::read::ReadTool::new(
             file_cache.clone(),
@@ -1871,6 +1877,7 @@ impl AgentBootstrap {
         });
         let mut spawner_builder =
             crate::spawner::AgentSpawner::new(provider.clone(), self.config.clone())
+                .with_sandbox_runtime(registry.sandbox_runtime())
                 .with_bus(Arc::clone(&agent_bus));
         if let Some(tracker) = council_budget_tracker.as_ref() {
             // TODO(stage3): use the live per-conversation session id.
@@ -2054,7 +2061,7 @@ impl AgentBootstrap {
                 crate::channel_tools::apply_posture(
                     &mut dispatch_reg,
                     scope,
-                    wcore_tools::bash::platform_enforces_read_deny(),
+                    registry.sandbox_runtime().enforces_read_deny(),
                 );
             }
             let shared = Arc::new(tokio::sync::RwLock::new(dispatch_reg));
@@ -2200,7 +2207,7 @@ impl AgentBootstrap {
             // Bash from the Workspace schema so the LLM isn't offered a
             // tool that would always refuse at exec time. The exec-time
             // gate in bash.rs remains the authoritative boundary.
-            let enforces = wcore_tools::bash::platform_enforces_read_deny();
+            let enforces = registry.sandbox_runtime().enforces_read_deny();
             crate::channel_tools::apply_posture(&mut registry, scope, enforces);
             tracing::info!(
                 target: "wcore_agent::bootstrap",

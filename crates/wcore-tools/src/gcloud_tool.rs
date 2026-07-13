@@ -7,11 +7,10 @@
 // *before* execution; anything not on the list (`create`, `delete`,
 // `set-*`, `deploy`, ...) is rejected loud.
 //
-// Execution mirrors `bash.rs`: the assembled argv runs through the
-// platform sandbox backend (`default_for_platform()` +
-// `SandboxBackend::execute`) with host-env inheritance and
-// `NetworkPolicy::Inherit` (gcloud is an API client and needs egress).
-// All sandboxed via Tier S.
+// Execution mirrors `bash.rs`: hosted dispatch runs the assembled argv through
+// the immutable session sandbox in `ToolContext`, with curated host-env
+// inheritance and `NetworkPolicy::Inherit` (gcloud is an API client and needs
+// egress). All sandboxed via Tier S.
 
 use std::time::Duration;
 
@@ -20,11 +19,13 @@ use serde_json::{Value, json};
 
 use wcore_protocol::events::ToolCategory;
 use wcore_sandbox::{
-    NetworkPolicy, SandboxCommand, SandboxManifest, SandboxOutput, default_for_platform,
+    FailClosedBackend, NetworkPolicy, SandboxCommand, SandboxManifest, SandboxOutput,
+    SandboxRegistry,
 };
 use wcore_types::tool::{JsonSchema, ToolResult};
 
 use crate::Tool;
+use crate::context::ToolContext;
 
 /// Wall-clock timeout for a gcloud invocation. gcloud round-trips to
 /// Google APIs; 120s matches BashTool's default.
@@ -186,6 +187,65 @@ fn build_manifest() -> SandboxManifest {
 /// Read-only `gcloud` CLI wrapper.
 pub struct GcloudTool;
 
+impl GcloudTool {
+    async fn execute_with_runtime(&self, input: Value, runtime: &SandboxRegistry) -> ToolResult {
+        let group: Vec<String> = input
+            .get("group")
+            .and_then(|v| v.as_array())
+            .map(|a| {
+                a.iter()
+                    .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        let Some(verb) = input.get("verb").and_then(|v| v.as_str()) else {
+            return ToolResult {
+                content: "Missing required parameter: verb".to_string(),
+                is_error: true,
+            };
+        };
+
+        let args: Vec<String> = input
+            .get("args")
+            .and_then(|v| v.as_array())
+            .map(|a| {
+                a.iter()
+                    .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        let project = input.get("project").and_then(|v| v.as_str());
+        let format = input.get("format").and_then(|v| v.as_str());
+
+        // Read-only allowlist check — refuse before spawning gcloud.
+        if let Err(reason) = validate_invocation(&group, verb) {
+            return ToolResult {
+                content: reason,
+                is_error: true,
+            };
+        }
+
+        let argv = build_argv(&group, verb, &args, project, format);
+        let manifest = build_manifest();
+        let cmd = SandboxCommand { argv, cwd: None };
+
+        let timeout = Duration::from_millis(TIMEOUT_MS);
+        match tokio::time::timeout(timeout, runtime.execute(&manifest, cmd)).await {
+            Ok(Ok(output)) => output_to_result(output),
+            Ok(Err(e)) => ToolResult {
+                content: format!("Failed to execute gcloud: {e}"),
+                is_error: true,
+            },
+            Err(_) => ToolResult {
+                content: format!("gcloud command timed out after {TIMEOUT_MS}ms"),
+                is_error: true,
+            },
+        }
+    }
+}
+
 #[async_trait]
 impl Tool for GcloudTool {
     fn name(&self) -> &str {
@@ -252,62 +312,15 @@ impl Tool for GcloudTool {
     }
 
     async fn execute(&self, input: Value) -> ToolResult {
-        let group: Vec<String> = input
-            .get("group")
-            .and_then(|v| v.as_array())
-            .map(|a| {
-                a.iter()
-                    .filter_map(|v| v.as_str().map(|s| s.to_string()))
-                    .collect()
-            })
-            .unwrap_or_default();
+        // Compatibility path for direct Tool callers without a ToolContext.
+        // Validation still runs, but valid subprocess execution fails closed;
+        // hosted agent dispatch must supply its immutable session runtime.
+        let runtime = SandboxRegistry::new(std::sync::Arc::new(FailClosedBackend::new()));
+        self.execute_with_runtime(input, &runtime).await
+    }
 
-        let Some(verb) = input.get("verb").and_then(|v| v.as_str()) else {
-            return ToolResult {
-                content: "Missing required parameter: verb".to_string(),
-                is_error: true,
-            };
-        };
-
-        let args: Vec<String> = input
-            .get("args")
-            .and_then(|v| v.as_array())
-            .map(|a| {
-                a.iter()
-                    .filter_map(|v| v.as_str().map(|s| s.to_string()))
-                    .collect()
-            })
-            .unwrap_or_default();
-
-        let project = input.get("project").and_then(|v| v.as_str());
-        let format = input.get("format").and_then(|v| v.as_str());
-
-        // Read-only allowlist check — refuse before spawning gcloud.
-        if let Err(reason) = validate_invocation(&group, verb) {
-            return ToolResult {
-                content: reason,
-                is_error: true,
-            };
-        }
-
-        let argv = build_argv(&group, verb, &args, project, format);
-
-        let backend = default_for_platform();
-        let manifest = build_manifest();
-        let cmd = SandboxCommand { argv, cwd: None };
-
-        let timeout = Duration::from_millis(TIMEOUT_MS);
-        match tokio::time::timeout(timeout, backend.execute(&manifest, cmd)).await {
-            Ok(Ok(output)) => output_to_result(output),
-            Ok(Err(e)) => ToolResult {
-                content: format!("Failed to execute gcloud: {e}"),
-                is_error: true,
-            },
-            Err(_) => ToolResult {
-                content: format!("gcloud command timed out after {TIMEOUT_MS}ms"),
-                is_error: true,
-            },
-        }
+    async fn execute_with_ctx(&self, input: Value, ctx: &ToolContext) -> ToolResult {
+        self.execute_with_runtime(input, &ctx.sandbox).await
     }
 
     fn describe(&self, input: &Value) -> String {
@@ -330,6 +343,33 @@ impl Tool for GcloudTool {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    struct InjectedBackend;
+
+    #[async_trait]
+    impl wcore_sandbox::backends::SandboxBackend for InjectedBackend {
+        async fn execute(
+            &self,
+            _manifest: &SandboxManifest,
+            cmd: SandboxCommand,
+        ) -> wcore_sandbox::Result<SandboxOutput> {
+            assert_eq!(cmd.argv.first().map(String::as_str), Some("gcloud"));
+            Ok(SandboxOutput {
+                exit_code: 0,
+                stdout: b"gcloud-injected-runtime".to_vec(),
+                stderr: Vec::new(),
+                resource_limits: wcore_sandbox::ResourceLimitEnforcement::None,
+            })
+        }
+
+        fn name(&self) -> &'static str {
+            "gcloud_injected_test"
+        }
+
+        fn is_available(&self) -> bool {
+            true
+        }
+    }
 
     #[test]
     fn read_only_verb_list_is_allowed() {
@@ -469,5 +509,21 @@ mod tests {
             .await;
         assert!(result.is_error);
         assert!(result.content.contains("not a read-only operation"));
+    }
+
+    #[tokio::test]
+    async fn execute_with_ctx_uses_injected_session_runtime() {
+        let runtime =
+            std::sync::Arc::new(SandboxRegistry::new(std::sync::Arc::new(InjectedBackend)));
+        let ctx = ToolContext::test_default().with_sandbox(runtime);
+        let input = json!({"group": ["projects"], "verb": "describe"});
+
+        let result = GcloudTool.execute_with_ctx(input.clone(), &ctx).await;
+        assert!(!result.is_error, "{}", result.content);
+        assert!(result.content.contains("gcloud-injected-runtime"));
+
+        let direct = GcloudTool.execute(input).await;
+        assert!(direct.is_error);
+        assert!(direct.content.contains("sandbox UNAVAILABLE"));
     }
 }

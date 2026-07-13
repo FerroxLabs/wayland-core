@@ -737,6 +737,7 @@ async fn execute_single_with_streaming(
             if let Some(policy) = registry.workspace_policy() {
                 tool_ctx = tool_ctx.with_workspace(policy);
             }
+            tool_ctx = tool_ctx.with_sandbox(registry.sandbox_runtime());
             // W8b.2.A-5: per-tool budget tracking. When the caller
             // supplied a tracker, start a RAII handle BEFORE dispatch.
             // The handle commits elapsed runtime on drop (cancel-safe

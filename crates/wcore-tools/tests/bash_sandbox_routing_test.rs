@@ -11,10 +11,16 @@
 //! `WAYLAND_SANDBOX` is process-global, so every test in this file is
 //! serialized with `#[serial]` and sets the env var itself.
 
-use std::sync::Mutex;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 
+use async_trait::async_trait;
 use serde_json::json;
 use serial_test::serial;
+use wcore_sandbox::backends::SandboxBackend;
+use wcore_sandbox::{
+    ResourceLimitEnforcement, SandboxCommand, SandboxManifest, SandboxOutput, SandboxRegistry,
+};
 use wcore_tools::bash::BashTool;
 use wcore_tools::context::ToolContext;
 use wcore_tools::{Tool, ToolOutputSink};
@@ -58,6 +64,67 @@ impl CapSink {
     fn chunks(&self) -> Vec<String> {
         self.0.lock().unwrap().clone()
     }
+}
+
+struct CountingBackend {
+    calls: AtomicUsize,
+}
+
+impl CountingBackend {
+    fn new() -> Self {
+        Self {
+            calls: AtomicUsize::new(0),
+        }
+    }
+}
+
+#[async_trait]
+impl SandboxBackend for CountingBackend {
+    async fn execute(
+        &self,
+        _manifest: &SandboxManifest,
+        _cmd: SandboxCommand,
+    ) -> wcore_sandbox::Result<SandboxOutput> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        Ok(SandboxOutput {
+            exit_code: 0,
+            stdout: b"injected-session-backend\n".to_vec(),
+            stderr: Vec::new(),
+            resource_limits: ResourceLimitEnforcement::Enforced,
+        })
+    }
+
+    fn name(&self) -> &'static str {
+        "counting"
+    }
+
+    fn is_available(&self) -> bool {
+        true
+    }
+}
+
+#[tokio::test]
+#[serial]
+async fn ctx_paths_execute_through_injected_session_runtime() {
+    force_no_sandbox();
+    let backend = Arc::new(CountingBackend::new());
+    let runtime = Arc::new(SandboxRegistry::new(backend.clone()));
+    let ctx = ToolContext::test_default().with_sandbox(runtime);
+    let tool = BashTool;
+
+    let buffered = tool
+        .execute_with_ctx(json!({"command": "echo ignored"}), &ctx)
+        .await;
+    assert!(!buffered.is_error, "unexpected error: {}", buffered.content);
+    assert!(buffered.content.contains("injected-session-backend"));
+
+    let sink = CapSink::new();
+    let streamed = tool
+        .execute_streaming_with_ctx(json!({"command": "echo ignored"}), &ctx, &sink)
+        .await;
+    assert!(!streamed.is_error, "unexpected error: {}", streamed.content);
+    assert!(streamed.content.contains("injected-session-backend"));
+    assert_eq!(backend.calls.load(Ordering::SeqCst), 2);
 }
 
 /// Path 1 of 4: `execute` — buffered, routed through `SandboxBackend::execute`.

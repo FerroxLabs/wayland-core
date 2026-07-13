@@ -25,6 +25,7 @@ use sha2::{Digest, Sha256};
 use wcore_config::anvil::AnvilConfig;
 use wcore_protocol::events::ProtocolEvent;
 use wcore_protocol::writer::ProtocolEmitter;
+use wcore_sandbox::SandboxRegistry;
 use wcore_sandbox::backends::SandboxBackend;
 use wcore_swarm::worktree::WorktreeManager;
 use wcore_types::spawner::{ForkOverrides, Spawner, SubAgentConfig};
@@ -100,6 +101,37 @@ pub struct SandboxGate {
     opts: ProbeOpts,
 }
 
+/// Adapter that lets Anvil's existing gate-closure seam execute through the
+/// immutable sandbox runtime selected for the parent agent session.
+struct SessionSandboxBackend(Arc<SandboxRegistry>);
+
+#[async_trait]
+impl SandboxBackend for SessionSandboxBackend {
+    async fn execute(
+        &self,
+        manifest: &wcore_sandbox::SandboxManifest,
+        cmd: wcore_sandbox::SandboxCommand,
+    ) -> wcore_sandbox::Result<wcore_sandbox::SandboxOutput> {
+        self.0.execute(manifest, cmd).await
+    }
+
+    fn name(&self) -> &'static str {
+        self.0.backend_name()
+    }
+
+    fn is_available(&self) -> bool {
+        self.0.is_available()
+    }
+
+    fn enforces_read_deny(&self) -> bool {
+        self.0.enforces_read_deny()
+    }
+
+    fn blocks_powershell(&self) -> bool {
+        self.0.blocks_powershell()
+    }
+}
+
 impl SandboxGate {
     /// Build a sandbox-backed gate executor.
     #[must_use]
@@ -109,6 +141,17 @@ impl SandboxGate {
             backend,
             opts,
         }
+    }
+
+    /// Build a gate from the immutable sandbox runtime carried by the parent
+    /// session's [`wcore_tools::context::ToolContext`].
+    #[must_use]
+    pub(crate) fn from_session_runtime(
+        closure: GateClosure,
+        runtime: Arc<SandboxRegistry>,
+        opts: ProbeOpts,
+    ) -> Self {
+        Self::new(closure, Box::new(SessionSandboxBackend(runtime)), opts)
     }
 }
 
@@ -415,6 +458,9 @@ fn build_prompt(task: &str, feedback: Option<&BuildFeedback>, worktree: &Path) -
 /// `emitter` (the top-level protocol writer — the receipt is trusted ONLY from
 /// this top-level emission, spec §8). `workspace` is the git repo root the forge
 /// runs against.
+// The forge entry point already carries the independently owned climb inputs;
+// the session sandbox is an authority value and must remain explicit here.
+#[allow(clippy::too_many_arguments)]
 pub async fn drive_climb_full(
     task: &str,
     cfg: &AnvilConfig,
@@ -423,6 +469,7 @@ pub async fn drive_climb_full(
     valve_spawner: Option<&dyn Spawner>,
     emitter: &Arc<dyn ProtocolEmitter>,
     session_id: Option<String>,
+    sandbox: Arc<SandboxRegistry>,
 ) -> Result<ClimbOutcome, ForgeError> {
     if !cfg.enabled {
         return Err(ForgeError::Disabled);
@@ -468,8 +515,9 @@ pub async fn drive_climb_full(
         .await
         .map_err(|e| ForgeError::Worktree(format!("probe worktree: {e}")))?;
 
-    // Sandbox backend + read/write allowlists (worktree + system toolchain).
-    let backend = wcore_sandbox::default_for_platform();
+    // Sandbox read/write allowlists (worktree + system toolchain). The backend
+    // is the immutable runtime inherited from the parent ToolContext; Anvil
+    // must not reselect containment from process-global state mid-session.
     let mut fs_read_allow: Vec<PathBuf> = SYSTEM_READ_ROOTS.iter().map(PathBuf::from).collect();
     fs_read_allow.push(workspace.to_path_buf());
     let opts = ProbeOpts {
@@ -507,7 +555,8 @@ pub async fn drive_climb_full(
             inputs,
         };
         let closure = GateClosure::pin(spec, &[]).map_err(|e| ForgeError::Gate(e.to_string()))?;
-        match closure.run_at(&*backend, &opts, &probe_wt).await {
+        let probe_backend = SessionSandboxBackend(Arc::clone(&sandbox));
+        match closure.run_at(&probe_backend, &opts, &probe_wt).await {
             BaselineProbe::CannotExecute(why) => refusals.push(format!("`{shown}`: {why}")),
             BaselineProbe::Ran { .. } => {
                 adopted = Some((closure, shown));
@@ -530,7 +579,7 @@ pub async fn drive_climb_full(
     let ledger = ClimbLedger::new(task, LedgerCap::unlimited());
 
     // Seams (worktree manager constructed above, before adoption).
-    let gate = SandboxGate::new(closure, backend, opts);
+    let gate = SandboxGate::from_session_runtime(closure, sandbox, opts);
 
     let params = ClimbParams {
         task: task.to_string(),
@@ -653,6 +702,86 @@ fn artifact_digest(outcome: &ClimbOutcome) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+    struct RecordingBackend {
+        calls: AtomicUsize,
+        saw_network_deny: AtomicBool,
+    }
+
+    #[async_trait]
+    impl SandboxBackend for RecordingBackend {
+        async fn execute(
+            &self,
+            manifest: &wcore_sandbox::SandboxManifest,
+            _cmd: wcore_sandbox::SandboxCommand,
+        ) -> wcore_sandbox::Result<wcore_sandbox::SandboxOutput> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            self.saw_network_deny.store(
+                manifest.network == wcore_sandbox::NetworkPolicy::Deny,
+                Ordering::SeqCst,
+            );
+            Ok(wcore_sandbox::SandboxOutput {
+                exit_code: 0,
+                stdout: Vec::new(),
+                stderr: Vec::new(),
+                resource_limits: wcore_sandbox::ResourceLimitEnforcement::Enforced,
+            })
+        }
+
+        fn name(&self) -> &'static str {
+            "anvil_recording"
+        }
+
+        fn is_available(&self) -> bool {
+            true
+        }
+    }
+
+    #[tokio::test]
+    async fn tool_context_runtime_reaches_executable_gate() {
+        let dir = tempfile::tempdir().unwrap();
+        let backend = Arc::new(RecordingBackend {
+            calls: AtomicUsize::new(0),
+            saw_network_deny: AtomicBool::new(false),
+        });
+        let runtime = Arc::new(SandboxRegistry::new(backend.clone()));
+        let ctx = wcore_tools::context::ToolContext {
+            call_id: "forge-test".to_string(),
+            cancel: tokio_util::sync::CancellationToken::new(),
+            vfs: Arc::new(wcore_tools::vfs::RealFs),
+            source_agent: None,
+            sink: Arc::new(wcore_tools::NullToolOutputSink),
+            file_write_notifier: None,
+            workspace: None,
+            sandbox: Arc::clone(&runtime),
+        };
+        let closure = GateClosure::pin(
+            GateSpec {
+                argv: vec!["gate-under-test".to_string()],
+                cwd: dir.path().to_path_buf(),
+                env_allowlist: Vec::new(),
+                inputs: Vec::new(),
+            },
+            &[],
+        )
+        .unwrap();
+        let gate = SandboxGate::from_session_runtime(
+            closure,
+            Arc::clone(&ctx.sandbox),
+            ProbeOpts {
+                timeout: Duration::from_secs(1),
+                fs_read_allow: vec![dir.path().to_path_buf()],
+                fs_write_allow: vec![dir.path().to_path_buf()],
+            },
+        );
+
+        let report = gate.run(dir.path()).await.unwrap();
+
+        assert_eq!(report.exit_code, 0);
+        assert_eq!(backend.calls.load(Ordering::SeqCst), 1);
+        assert!(backend.saw_network_deny.load(Ordering::SeqCst));
+    }
 
     #[test]
     fn terminal_state_strings_are_canonical() {

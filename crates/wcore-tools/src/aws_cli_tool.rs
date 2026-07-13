@@ -19,11 +19,10 @@
 //!
 //! ## Sandbox
 //!
-//! The assembled `aws ...` argv is run through the sandbox backend
-//! (`wcore_sandbox::default_for_platform()` + `SandboxBackend::execute`)
-//! exactly as `BashTool` runs shell commands — see [`crate::bash`]. The
-//! sandbox confines filesystem / syscalls; network is `Inherit` since
-//! the AWS CLI must reach AWS endpoints.
+//! The assembled `aws ...` argv is run through the immutable session sandbox
+//! carried by [`crate::context::ToolContext`], exactly as `BashTool` runs shell
+//! commands — see [`crate::bash`]. The sandbox confines filesystem / syscalls;
+//! network is `Inherit` since the AWS CLI must reach AWS endpoints.
 //!
 //! ## Env (D.1 Round 1 — HIGH-2; D.2 Round 2 — MED)
 //!
@@ -61,11 +60,13 @@ use wcore_protocol::events::ToolCategory;
 #[cfg(test)]
 use wcore_sandbox::ResourceLimitEnforcement;
 use wcore_sandbox::{
-    NetworkPolicy, SandboxCommand, SandboxManifest, SandboxOutput, default_for_platform,
+    FailClosedBackend, NetworkPolicy, SandboxCommand, SandboxManifest, SandboxOutput,
+    SandboxRegistry,
 };
 use wcore_types::tool::{JsonSchema, ToolResult};
 
 use crate::Tool;
+use crate::context::ToolContext;
 
 /// Command timeout for an `aws` invocation.
 const TIMEOUT_MS: u64 = 120_000;
@@ -251,6 +252,54 @@ fn err_result(message: impl Into<String>) -> ToolResult {
 /// `aws_cli` tool — read-only AWS CLI wrapper.
 pub struct AwsCliTool;
 
+impl AwsCliTool {
+    async fn execute_with_runtime(&self, input: Value, runtime: &SandboxRegistry) -> ToolResult {
+        let Some(service) = str_field(&input, "service") else {
+            return err_result("Missing required parameter: 'service'");
+        };
+        let Some(operation) = str_field(&input, "operation") else {
+            return err_result("Missing required parameter: 'operation'");
+        };
+
+        // Read-only allowlist check — refuse before spawning the CLI.
+        if let OperationCheck::Rejected { reason } = validate_operation(operation) {
+            return err_result(format!("Refused: {reason}"));
+        }
+
+        let args = args_field(&input);
+        let argv = build_argv(
+            service,
+            operation,
+            &args,
+            str_field(&input, "region"),
+            str_field(&input, "profile"),
+            str_field(&input, "output"),
+        );
+
+        // Inherit network (the CLI must reach AWS) with a curated env —
+        // PATH/HOME + non-secret AWS_* discovery vars, plus the AWS
+        // credential vars force-allowed through for this tool so env-var
+        // AWS auth works (D.1 R1 HIGH-2 + D.2 R2 MED).
+        let manifest = SandboxManifest {
+            network: NetworkPolicy::Inherit,
+            env: crate::env_passthrough::build_sandboxed_env_with_force_allow(
+                &[],
+                AWS_ENV_PREFIXES,
+                AWS_FORCE_ALLOW,
+            ),
+            ..Default::default()
+        };
+        let cmd = SandboxCommand { argv, cwd: None };
+        let timeout = Duration::from_millis(TIMEOUT_MS);
+
+        match tokio::time::timeout(timeout, runtime.execute(&manifest, cmd)).await {
+            Ok(Ok(output)) => output_to_result(output),
+            Ok(Err(e)) => err_result(format!("Failed to execute aws CLI: {e}")),
+            Err(_) => err_result(format!("aws CLI command timed out after {TIMEOUT_MS}ms")),
+        }
+    }
+}
+
 #[async_trait]
 impl Tool for AwsCliTool {
     fn name(&self) -> &str {
@@ -315,51 +364,15 @@ impl Tool for AwsCliTool {
     }
 
     async fn execute(&self, input: Value) -> ToolResult {
-        let Some(service) = str_field(&input, "service") else {
-            return err_result("Missing required parameter: 'service'");
-        };
-        let Some(operation) = str_field(&input, "operation") else {
-            return err_result("Missing required parameter: 'operation'");
-        };
+        // Compatibility path for direct Tool callers without a ToolContext.
+        // Validation still runs, but valid subprocess execution fails closed;
+        // hosted agent dispatch must supply its immutable session runtime.
+        let runtime = SandboxRegistry::new(std::sync::Arc::new(FailClosedBackend::new()));
+        self.execute_with_runtime(input, &runtime).await
+    }
 
-        // Read-only allowlist check — refuse before spawning the CLI.
-        if let OperationCheck::Rejected { reason } = validate_operation(operation) {
-            return err_result(format!("Refused: {reason}"));
-        }
-
-        let args = args_field(&input);
-        let argv = build_argv(
-            service,
-            operation,
-            &args,
-            str_field(&input, "region"),
-            str_field(&input, "profile"),
-            str_field(&input, "output"),
-        );
-
-        // Inherit network (the CLI must reach AWS) with a curated env —
-        // PATH/HOME + non-secret AWS_* discovery vars, plus the AWS
-        // credential vars force-allowed through for this tool so env-var
-        // AWS auth works (D.1 R1 HIGH-2 + D.2 R2 MED).
-        let manifest = SandboxManifest {
-            network: NetworkPolicy::Inherit,
-            env: crate::env_passthrough::build_sandboxed_env_with_force_allow(
-                &[],
-                AWS_ENV_PREFIXES,
-                AWS_FORCE_ALLOW,
-            ),
-            ..Default::default()
-        };
-        let cmd = SandboxCommand { argv, cwd: None };
-
-        let backend = default_for_platform();
-        let timeout = Duration::from_millis(TIMEOUT_MS);
-
-        match tokio::time::timeout(timeout, backend.execute(&manifest, cmd)).await {
-            Ok(Ok(output)) => output_to_result(output),
-            Ok(Err(e)) => err_result(format!("Failed to execute aws CLI: {e}")),
-            Err(_) => err_result(format!("aws CLI command timed out after {TIMEOUT_MS}ms")),
-        }
+    async fn execute_with_ctx(&self, input: Value, ctx: &ToolContext) -> ToolResult {
+        self.execute_with_runtime(input, &ctx.sandbox).await
     }
 
     fn describe(&self, input: &Value) -> String {
@@ -377,6 +390,33 @@ pub fn register_aws_cli_tool(registry: &mut crate::registry::ToolRegistry) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    struct InjectedBackend;
+
+    #[async_trait]
+    impl wcore_sandbox::backends::SandboxBackend for InjectedBackend {
+        async fn execute(
+            &self,
+            _manifest: &SandboxManifest,
+            cmd: SandboxCommand,
+        ) -> wcore_sandbox::Result<SandboxOutput> {
+            assert_eq!(cmd.argv.first().map(String::as_str), Some("aws"));
+            Ok(SandboxOutput {
+                exit_code: 0,
+                stdout: b"aws-injected-runtime".to_vec(),
+                stderr: Vec::new(),
+                resource_limits: ResourceLimitEnforcement::None,
+            })
+        }
+
+        fn name(&self) -> &'static str {
+            "aws_injected_test"
+        }
+
+        fn is_available(&self) -> bool {
+            true
+        }
+    }
 
     // ----------------------------------------------------------------
     // Read-only allowlist validation.
@@ -564,5 +604,21 @@ mod tests {
             reg.tool_names().iter().any(|n| n == "aws_cli"),
             "aws_cli missing from registry"
         );
+    }
+
+    #[tokio::test]
+    async fn execute_with_ctx_uses_injected_session_runtime() {
+        let runtime =
+            std::sync::Arc::new(SandboxRegistry::new(std::sync::Arc::new(InjectedBackend)));
+        let ctx = ToolContext::test_default().with_sandbox(runtime);
+        let input = json!({"service": "ec2", "operation": "describe-instances"});
+
+        let result = AwsCliTool.execute_with_ctx(input.clone(), &ctx).await;
+        assert!(!result.is_error, "{}", result.content);
+        assert!(result.content.contains("aws-injected-runtime"));
+
+        let direct = AwsCliTool.execute(input).await;
+        assert!(direct.is_error);
+        assert!(direct.content.contains("sandbox UNAVAILABLE"));
     }
 }

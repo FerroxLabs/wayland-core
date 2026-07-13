@@ -38,6 +38,12 @@ pub struct ToolRegistry {
     /// `Workspace` posture (`Contained`). Threaded onto every dispatched
     /// `ToolContext` so BashTool can root its OS sandbox at the workspace.
     workspace_policy: Option<Arc<crate::workspace_policy::WorkspacePolicy>>,
+
+    /// Immutable per-session OS sandbox runtime threaded into every
+    /// `ToolContext`. The default fails closed so a host that forgets to
+    /// install a session runtime cannot inherit process-global bypass state;
+    /// production bootstrap replaces it with the resolved session runtime.
+    sandbox_runtime: Arc<wcore_sandbox::SandboxRegistry>,
 }
 
 impl Default for ToolRegistry {
@@ -52,6 +58,9 @@ impl ToolRegistry {
             breakers: Arc::new(RwLock::new(HashMap::new())),
             tool_vfs: None,
             workspace_policy: None,
+            sandbox_runtime: Arc::new(wcore_sandbox::SandboxRegistry::new(Arc::new(
+                wcore_sandbox::FailClosedBackend::new(),
+            ))),
         }
     }
 
@@ -74,6 +83,14 @@ impl ToolRegistry {
 
     pub fn workspace_policy(&self) -> Option<Arc<crate::workspace_policy::WorkspacePolicy>> {
         self.workspace_policy.clone()
+    }
+
+    pub fn set_sandbox_runtime(&mut self, runtime: Arc<wcore_sandbox::SandboxRegistry>) {
+        self.sandbox_runtime = runtime;
+    }
+
+    pub fn sandbox_runtime(&self) -> Arc<wcore_sandbox::SandboxRegistry> {
+        Arc::clone(&self.sandbox_runtime)
     }
 
     /// Drop every registered tool for which `keep` returns `false`.
@@ -445,6 +462,25 @@ mod tests {
         let policy = Arc::new(WorkspacePolicy::trusted_local(dir.path()));
         reg.set_workspace_policy(Arc::clone(&policy));
         assert_eq!(reg.workspace_policy().unwrap().root(), policy.root());
+    }
+
+    #[test]
+    fn sandbox_runtime_is_preserved_by_arc_identity() {
+        let mut reg = ToolRegistry::new();
+        let runtime = Arc::new(wcore_sandbox::SandboxRegistry::new(Arc::new(
+            wcore_sandbox::FailClosedBackend::new(),
+        )));
+        reg.set_sandbox_runtime(Arc::clone(&runtime));
+
+        assert!(Arc::ptr_eq(&runtime, &reg.sandbox_runtime()));
+    }
+
+    #[test]
+    fn sandbox_runtime_defaults_fail_closed() {
+        assert_eq!(
+            ToolRegistry::new().sandbox_runtime().backend_name(),
+            "fail_closed"
+        );
     }
 
     /// A minimal Tool implementation used only in tests

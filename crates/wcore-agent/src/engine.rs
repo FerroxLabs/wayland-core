@@ -3403,7 +3403,7 @@ impl AgentEngine {
             .unwrap_or_else(|| std::sync::Arc::new(wcore_tools::vfs::RealFs));
         let mut ctx = wcore_tools::context::ToolContext::new(
             String::new(),
-            wcore_tools::context::ToolContext::test_default().cancel,
+            tokio_util::sync::CancellationToken::new(),
             vfs,
             None,
             std::sync::Arc::new(wcore_tools::NullToolOutputSink),
@@ -3411,6 +3411,10 @@ impl AgentEngine {
         if let Some(notifier) = self.tool_write_notifier.get() {
             ctx = ctx.with_file_write_notifier(Arc::clone(notifier));
         }
+        if let Some(policy) = self.tools.workspace_policy() {
+            ctx = ctx.with_workspace(policy);
+        }
+        ctx = ctx.with_sandbox(self.tools.sandbox_runtime());
         ctx
     }
 
@@ -6944,6 +6948,7 @@ impl AgentEngine {
             std::sync::Arc::clone(&self.provider),
             self.config.clone(),
         )
+        .with_sandbox_runtime(self.tools.sandbox_runtime())
         // Bind sub-agents to the engine's cancel token so a host cancel stops
         // the whole workflow rather than letting 20+ sub-agents run to
         // completion and burn LLM calls.
@@ -7259,6 +7264,7 @@ impl AgentEngine {
             std::sync::Arc::clone(&self.provider),
             self.config.clone(),
         )
+        .with_sandbox_runtime(self.tools.sandbox_runtime())
         .with_provider_resolver(std::sync::Arc::new(
             crate::orchestration::council::CouncilProviderResolver::new(
                 base.clone(),

@@ -8,10 +8,10 @@
 //! spawned. Rejection is by allowlist, never denylist: anything unknown is
 //! refused.
 //!
-//! Like [`crate::bash::BashTool`], the actual invocation is routed through
-//! the sandbox backend (`wcore_sandbox::default_for_platform()` +
-//! `SandboxBackend::execute`) so the kubectl child is filesystem- and
-//! syscall-confined per Tier S — never a raw `Command::new`.
+//! Like [`crate::bash::BashTool`], hosted dispatch routes the actual invocation
+//! through the immutable session sandbox in [`crate::context::ToolContext`] so
+//! the kubectl child is filesystem- and syscall-confined per Tier S — never a
+//! raw `Command::new`.
 //!
 //! Output is truncated to keep a verbose `kubectl describe` from blowing
 //! the model's context window.
@@ -23,11 +23,13 @@ use serde_json::{Value, json};
 
 use wcore_protocol::events::ToolCategory;
 use wcore_sandbox::{
-    NetworkPolicy, SandboxCommand, SandboxManifest, SandboxOutput, default_for_platform,
+    FailClosedBackend, NetworkPolicy, SandboxCommand, SandboxManifest, SandboxOutput,
+    SandboxRegistry,
 };
 use wcore_types::tool::{JsonSchema, ToolResult};
 
 use crate::Tool;
+use crate::context::ToolContext;
 
 /// Closed allowlist of `kubectl` verbs this tool will run. Every verb here
 /// is read-only — it inspects cluster state but never mutates it. A verb
@@ -197,6 +199,46 @@ impl KubectlTool {
     pub fn new() -> Self {
         Self
     }
+
+    async fn execute_with_runtime(&self, input: Value, runtime: &SandboxRegistry) -> ToolResult {
+        let Some(verb) = input.get("verb").and_then(|v| v.as_str()) else {
+            return ToolResult {
+                content: "Missing required parameter: verb".to_string(),
+                is_error: true,
+            };
+        };
+
+        // Allowlist check FIRST — before any argv is built or process spawned.
+        let verb = match validate_verb(verb) {
+            Ok(v) => v,
+            Err(reason) => {
+                return ToolResult {
+                    content: reason,
+                    is_error: true,
+                };
+            }
+        };
+
+        let args = parse_args(&input);
+        let namespace = input.get("namespace").and_then(|v| v.as_str());
+        let context = input.get("context").and_then(|v| v.as_str());
+        let argv = build_argv(verb, &args, namespace, context);
+
+        let (manifest, cmd) = build_sandbox_pieces(argv);
+        let timeout = Duration::from_millis(KUBECTL_TIMEOUT_MS);
+
+        match tokio::time::timeout(timeout, runtime.execute(&manifest, cmd)).await {
+            Ok(Ok(output)) => output_to_result(output),
+            Ok(Err(e)) => ToolResult {
+                content: format!("Failed to execute kubectl: {e}"),
+                is_error: true,
+            },
+            Err(_) => ToolResult {
+                content: format!("kubectl timed out after {KUBECTL_TIMEOUT_MS}ms"),
+                is_error: true,
+            },
+        }
+    }
 }
 
 #[async_trait]
@@ -254,44 +296,15 @@ impl Tool for KubectlTool {
     }
 
     async fn execute(&self, input: Value) -> ToolResult {
-        let Some(verb) = input.get("verb").and_then(|v| v.as_str()) else {
-            return ToolResult {
-                content: "Missing required parameter: verb".to_string(),
-                is_error: true,
-            };
-        };
+        // Compatibility path for direct Tool callers without a ToolContext.
+        // Validation still runs, but valid subprocess execution fails closed;
+        // hosted agent dispatch must supply its immutable session runtime.
+        let runtime = SandboxRegistry::new(std::sync::Arc::new(FailClosedBackend::new()));
+        self.execute_with_runtime(input, &runtime).await
+    }
 
-        // Allowlist check FIRST — before any argv is built or process spawned.
-        let verb = match validate_verb(verb) {
-            Ok(v) => v,
-            Err(reason) => {
-                return ToolResult {
-                    content: reason,
-                    is_error: true,
-                };
-            }
-        };
-
-        let args = parse_args(&input);
-        let namespace = input.get("namespace").and_then(|v| v.as_str());
-        let context = input.get("context").and_then(|v| v.as_str());
-        let argv = build_argv(verb, &args, namespace, context);
-
-        let backend = default_for_platform();
-        let (manifest, cmd) = build_sandbox_pieces(argv);
-        let timeout = Duration::from_millis(KUBECTL_TIMEOUT_MS);
-
-        match tokio::time::timeout(timeout, backend.execute(&manifest, cmd)).await {
-            Ok(Ok(output)) => output_to_result(output),
-            Ok(Err(e)) => ToolResult {
-                content: format!("Failed to execute kubectl: {e}"),
-                is_error: true,
-            },
-            Err(_) => ToolResult {
-                content: format!("kubectl timed out after {KUBECTL_TIMEOUT_MS}ms"),
-                is_error: true,
-            },
-        }
+    async fn execute_with_ctx(&self, input: Value, ctx: &ToolContext) -> ToolResult {
+        self.execute_with_runtime(input, &ctx.sandbox).await
     }
 
     fn max_result_size(&self) -> usize {
@@ -321,6 +334,33 @@ impl Tool for KubectlTool {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    struct InjectedBackend;
+
+    #[async_trait]
+    impl wcore_sandbox::backends::SandboxBackend for InjectedBackend {
+        async fn execute(
+            &self,
+            _manifest: &SandboxManifest,
+            cmd: SandboxCommand,
+        ) -> wcore_sandbox::Result<SandboxOutput> {
+            assert_eq!(cmd.argv.first().map(String::as_str), Some("kubectl"));
+            Ok(SandboxOutput {
+                exit_code: 0,
+                stdout: b"kubectl-injected-runtime".to_vec(),
+                stderr: Vec::new(),
+                resource_limits: wcore_sandbox::ResourceLimitEnforcement::None,
+            })
+        }
+
+        fn name(&self) -> &'static str {
+            "kubectl_injected_test"
+        }
+
+        fn is_available(&self) -> bool {
+            true
+        }
+    }
 
     #[test]
     fn read_only_verb_builds_the_right_argv() {
@@ -424,6 +464,24 @@ mod tests {
         assert!(res.content.contains("not a read-only kubectl verb"));
     }
 
+    #[tokio::test]
+    async fn execute_with_ctx_uses_injected_session_runtime() {
+        let runtime =
+            std::sync::Arc::new(SandboxRegistry::new(std::sync::Arc::new(InjectedBackend)));
+        let ctx = ToolContext::test_default().with_sandbox(runtime);
+        let input = json!({"verb": "get", "args": ["pods"]});
+
+        let result = KubectlTool::new()
+            .execute_with_ctx(input.clone(), &ctx)
+            .await;
+        assert!(!result.is_error, "{}", result.content);
+        assert!(result.content.contains("kubectl-injected-runtime"));
+
+        let direct = KubectlTool::new().execute(input).await;
+        assert!(direct.is_error);
+        assert!(direct.content.contains("sandbox UNAVAILABLE"));
+    }
+
     #[test]
     fn describe_renders_verb_and_args() {
         let tool = KubectlTool::new();
@@ -438,8 +496,12 @@ mod tests {
     #[ignore = "requires kubectl installed and a reachable cluster"]
     async fn execute_version_against_live_kubectl() {
         let tool = KubectlTool::new();
+        let runtime = std::sync::Arc::new(
+            SandboxRegistry::required_for_session(None).expect("sandbox runtime"),
+        );
+        let ctx = ToolContext::test_default().with_sandbox(runtime);
         let res = tool
-            .execute(json!({ "verb": "version", "args": ["--client"] }))
+            .execute_with_ctx(json!({ "verb": "version", "args": ["--client"] }), &ctx)
             .await;
         assert!(!res.is_error, "kubectl version failed: {}", res.content);
     }

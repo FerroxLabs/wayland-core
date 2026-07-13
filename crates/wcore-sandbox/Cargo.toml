@@ -12,6 +12,7 @@ rust-version.workspace = true
 # bollard transitive graph stay out of the default workspace build.
 
 [dependencies]
+wcore-types.workspace = true
 serde       = { workspace = true, features = ["derive"] }
 toml.workspace        = true
 thiserror.workspace   = true

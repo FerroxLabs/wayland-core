@@ -142,13 +142,12 @@ fn downgrade_powershell_for_sandbox(argv: &mut Vec<String>, blocks_powershell: b
     *argv = vec!["cmd".to_string(), "/C".to_string(), command];
 }
 
-/// Whether the platform's default sandbox backend enforces secret-read-deny
-/// at the OS layer (`SandboxBackend::enforces_read_deny()`).
+/// Whether a freshly selected legacy platform backend enforces
+/// secret-read-deny at the OS layer (`SandboxBackend::enforces_read_deny()`).
 ///
-/// Used by `wcore-agent` bootstrap to gate the Workspace-posture `Bash` UX
-/// drop without requiring `wcore-agent` to take a direct dep on
-/// `wcore-sandbox`. This is the identical probe `default_for_platform()`
-/// uses at exec time — calling it at bootstrap is a UX-only signal.
+/// Retained for direct compatibility tests. Hosted sessions must query their
+/// registry-owned [`SandboxRegistry`] so capability checks and execution use
+/// the same immutable backend.
 pub fn platform_enforces_read_deny() -> bool {
     default_for_platform().enforces_read_deny()
 }
@@ -787,11 +786,9 @@ impl Tool for BashTool {
             .unwrap_or(DEFAULT_TIMEOUT_MS)
             .min(MAX_TIMEOUT_MS);
         let timeout = Duration::from_millis(timeout_ms);
-        let backend = default_for_platform();
-        // Task 8 — exec-time capability gate (TOCTOU-free boundary). The same
-        // `default_for_platform()` that would run the command decides whether it
-        // may run. A bootstrap-only probe would be bypassable because
-        // default_for_platform() re-resolves on each call.
+        let backend = Arc::clone(&ctx.sandbox);
+        // Task 8 — exec-time capability gate. The same immutable session
+        // runtime that executes the command decides whether it may run.
         if let Some(p) = ctx.workspace.as_deref()
             && p.secret_read_deny_required()
             && !backend.enforces_read_deny()
@@ -857,10 +854,10 @@ impl Tool for BashTool {
 
         // Task 8 — exec-time capability gate (streaming path, same logic as
         // execute_with_ctx). Must check BEFORE wrapping in Arc.
-        let backend_probe = default_for_platform();
+        let backend = Arc::clone(&ctx.sandbox);
         if let Some(p) = ctx.workspace.as_deref()
             && p.secret_read_deny_required()
-            && !backend_probe.enforces_read_deny()
+            && !backend.enforces_read_deny()
         {
             return ToolResult {
                 content: "Refused: shell is unavailable because the active sandbox \
@@ -870,7 +867,6 @@ impl Tool for BashTool {
                 is_error: true,
             };
         }
-        let backend: Arc<dyn SandboxBackend> = Arc::from(backend_probe);
         let (manifest, mut cmd) = build_sandbox_pieces(command, ctx.workspace.as_deref());
         downgrade_powershell_for_sandbox(&mut cmd.argv, backend.blocks_powershell());
         let net = manifest.network.clone();

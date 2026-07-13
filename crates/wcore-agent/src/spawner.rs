@@ -144,6 +144,10 @@ impl Drop for LifecycleGuard {
 pub struct AgentSpawner {
     provider: Arc<dyn LlmProvider>,
     base_config: Config,
+    /// Immutable sandbox selected by the parent session. Every child registry
+    /// receives this exact `Arc`; spawning must never re-read process-global
+    /// sandbox settings or select a different backend mid-session.
+    sandbox_runtime: Arc<wcore_sandbox::SandboxRegistry>,
     /// v0.8.0 Task J — optional `AgentBus` for lifecycle event
     /// publication. `None` preserves the legacy "silent spawner"
     /// behaviour expected by older tests; production callers attach the
@@ -175,15 +179,32 @@ pub struct AgentSpawner {
 
 impl AgentSpawner {
     pub fn new(provider: Arc<dyn LlmProvider>, config: Config) -> Self {
+        let sandbox_runtime = ToolRegistry::new().sandbox_runtime();
         Self {
             provider,
             base_config: config,
+            sandbox_runtime,
             bus: None,
             cancel: tokio_util::sync::CancellationToken::new(),
             resolver: None,
             budget_tracker: None,
             budget_identity: None,
         }
+    }
+
+    /// Bind spawned children to the parent session's immutable sandbox.
+    pub fn with_sandbox_runtime(mut self, runtime: Arc<wcore_sandbox::SandboxRegistry>) -> Self {
+        self.sandbox_runtime = runtime;
+        self
+    }
+
+    /// Return the sandbox runtime inherited by spawned children.
+    pub fn sandbox_runtime(&self) -> &Arc<wcore_sandbox::SandboxRegistry> {
+        &self.sandbox_runtime
+    }
+
+    fn child_tool_registry(&self, allowed: &[String]) -> ToolRegistry {
+        build_tool_registry(allowed, Arc::clone(&self.sandbox_runtime))
     }
 
     /// Bind the spawner to the parent engine's cancellation token so a host
@@ -295,7 +316,7 @@ impl AgentSpawner {
             Err(result) => return result,
         };
 
-        let tools = build_tool_registry(&[]);
+        let tools = self.child_tool_registry(&[]);
         let output: Arc<dyn OutputSink> = Arc::new(NullSink);
         let mut engine = AgentEngine::new_with_provider(provider, config, tools, output);
         // Bind the child to the parent cancel token so a host cancel stops it.
@@ -533,7 +554,7 @@ impl AgentSpawner {
             Err(result) => return result,
         };
 
-        let tools = build_tool_registry(&[]);
+        let tools = self.child_tool_registry(&[]);
         // v0.9.4 W1.1b: keep a clone of the sink BEFORE moving it into the
         // engine so we can call emit_info/emit_error AFTER engine.run() returns.
         // The clone is cheap (Arc bump); the engine holds the primary ref.
@@ -645,6 +666,7 @@ impl AgentSpawner {
         Self {
             provider: self.provider.clone(),
             base_config: self.base_config.clone(),
+            sandbox_runtime: Arc::clone(&self.sandbox_runtime),
             bus: self.bus.clone(),
             cancel: self.cancel.clone(),
             // CRITICAL (crucible): the resolver MUST be carried into every
@@ -733,7 +755,7 @@ impl Spawner for AgentSpawner {
             Err(result) => return result,
         };
 
-        let tools = build_tool_registry(&overrides.allowed_tools);
+        let tools = self.child_tool_registry(&overrides.allowed_tools);
         let output: Arc<dyn OutputSink> = Arc::new(NullSink);
         let mut engine = AgentEngine::new_with_provider(provider, config, tools, output);
         // Bind the child to the parent cancel token so a host cancel stops it.
@@ -853,7 +875,10 @@ type ToolFactory = fn() -> Box<dyn wcore_tools::Tool>;
 /// Bash/Write/Edit. Destructive tools require explicit opt-in via `allowed`.
 const READ_ONLY_TOOLS: &[&str] = &["Read", "Grep", "Glob"];
 
-fn build_tool_registry(allowed: &[String]) -> ToolRegistry {
+fn build_tool_registry(
+    allowed: &[String],
+    sandbox_runtime: Arc<wcore_sandbox::SandboxRegistry>,
+) -> ToolRegistry {
     let all: &[(&str, ToolFactory)] = &[
         ("Read", || Box::new(ReadTool::new(None))),
         ("Write", || Box::new(WriteTool::new(None))),
@@ -864,6 +889,7 @@ fn build_tool_registry(allowed: &[String]) -> ToolRegistry {
     ];
 
     let mut registry = ToolRegistry::new();
+    registry.set_sandbox_runtime(sandbox_runtime);
     for (name, make_tool) in all {
         // Security audit H-7 / M-9: an empty `allowed` list no longer means
         // "register everything". It defaults to a read-only subset so a
@@ -1069,7 +1095,15 @@ mod crucible_provider_resolution_tests {
 
 #[cfg(test)]
 mod phase7_tests {
-    use super::{ForkOverrides, SubAgentConfig, build_tool_registry};
+    use std::sync::Arc;
+
+    use super::{AgentSpawner, ForkOverrides, SubAgentConfig, build_tool_registry};
+    use wcore_config::config::Config;
+    use wcore_providers::LlmProvider;
+
+    fn test_sandbox_runtime() -> Arc<wcore_sandbox::SandboxRegistry> {
+        wcore_tools::registry::ToolRegistry::new().sandbox_runtime()
+    }
 
     #[test]
     fn tc_7_1_fork_overrides_default_values() {
@@ -1085,7 +1119,7 @@ mod phase7_tests {
     // Bash/Write/Edit.
     #[test]
     fn tc_7_40_build_tool_registry_empty_allowed_is_read_only() {
-        let registry = build_tool_registry(&[]);
+        let registry = build_tool_registry(&[], test_sandbox_runtime());
         // Read-only tools ARE registered.
         for name in &["Read", "Grep", "Glob"] {
             assert!(
@@ -1106,7 +1140,10 @@ mod phase7_tests {
     // named in `allowed` (the opt-in path).
     #[test]
     fn tc_7_42_build_tool_registry_destructive_requires_opt_in() {
-        let registry = build_tool_registry(&["Bash".to_string(), "Write".to_string()]);
+        let registry = build_tool_registry(
+            &["Bash".to_string(), "Write".to_string()],
+            test_sandbox_runtime(),
+        );
         assert!(
             registry.get("Bash").is_some(),
             "explicit Bash opt-in honored"
@@ -1126,10 +1163,35 @@ mod phase7_tests {
     #[test]
     fn tc_7_43_build_tool_registry_filters_to_allowed() {
         let allowed = vec!["Bash".to_string(), "Read".to_string()];
-        let registry = build_tool_registry(&allowed);
+        let registry = build_tool_registry(&allowed, test_sandbox_runtime());
         assert!(registry.get("Bash").is_some());
         assert!(registry.get("Read").is_some());
         assert!(registry.get("Write").is_none());
+    }
+
+    #[test]
+    fn child_registry_inherits_exact_parent_sandbox_runtime() {
+        let runtime = test_sandbox_runtime();
+        let provider: Arc<dyn LlmProvider> =
+            Arc::new(crate::test_utils::ScriptedProvider::new(Vec::new()));
+        let spawner = AgentSpawner::new(provider, Config::default())
+            .with_sandbox_runtime(Arc::clone(&runtime));
+        let registry = spawner.child_tool_registry(&[]);
+
+        assert!(Arc::ptr_eq(&runtime, &registry.sandbox_runtime()));
+    }
+
+    #[test]
+    fn cloned_spawner_preserves_exact_parent_sandbox_runtime() {
+        let runtime = test_sandbox_runtime();
+        let provider: Arc<dyn LlmProvider> =
+            Arc::new(crate::test_utils::ScriptedProvider::new(Vec::new()));
+        let spawner = AgentSpawner::new(provider, Config::default())
+            .with_sandbox_runtime(Arc::clone(&runtime));
+        let cloned = spawner.clone_for_spawn();
+
+        assert!(Arc::ptr_eq(&runtime, spawner.sandbox_runtime()));
+        assert!(Arc::ptr_eq(&runtime, cloned.sandbox_runtime()));
     }
 
     #[test]

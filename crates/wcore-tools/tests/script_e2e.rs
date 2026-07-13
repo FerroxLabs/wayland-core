@@ -123,15 +123,13 @@ async fn script_step_inherits_parent_vfs_sandbox() {
     let outside = TempDir::new().unwrap();
 
     let vfs = SandboxedFs::new(RealFs, inside.path().to_path_buf());
-    let ctx = ToolContext {
-        call_id: String::new(),
-        cancel: tokio_util::sync::CancellationToken::new(),
-        vfs: Arc::new(vfs),
-        source_agent: None,
-        sink: Arc::new(wcore_tools::NullToolOutputSink),
-        file_write_notifier: None,
-        workspace: None,
-    };
+    let ctx = ToolContext::new(
+        String::new(),
+        tokio_util::sync::CancellationToken::new(),
+        Arc::new(vfs),
+        None,
+        Arc::new(wcore_tools::NullToolOutputSink),
+    );
 
     let disp = ctx_aware_dispatcher();
     let tool = ScriptTool::new(Arc::clone(&disp));
