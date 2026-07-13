@@ -1,6 +1,7 @@
 //! Exact packaged-binary selection and identity validation for evaluation runs.
 
 use std::ffi::OsStr;
+use std::fs;
 use std::fs::File;
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -20,6 +21,20 @@ pub struct BinaryArtifact {
     pub sha256: String,
     pub version: String,
     pub source_commit: String,
+}
+
+#[derive(Debug)]
+pub struct SealedBinaryArtifact {
+    artifact: BinaryArtifact,
+    _directory: tempfile::TempDir,
+}
+
+impl std::ops::Deref for SealedBinaryArtifact {
+    type Target = BinaryArtifact;
+
+    fn deref(&self) -> &Self::Target {
+        &self.artifact
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -83,6 +98,66 @@ pub fn inspect_binary(
     inspect_with_probe(path, expected, probe_build_info)
 }
 
+/// Copy the selected candidate into a private temporary directory retained for
+/// the evaluation lifetime, then validate and execute that copy.
+pub fn seal_binary(
+    path: &Path,
+    expected: ArtifactExpectation<'_>,
+) -> Result<SealedBinaryArtifact, ArtifactError> {
+    seal_with_probe(path, expected, probe_build_info)
+}
+
+pub fn seal_with_probe<F>(
+    path: &Path,
+    expected: ArtifactExpectation<'_>,
+    probe: F,
+) -> Result<SealedBinaryArtifact, ArtifactError>
+where
+    F: FnOnce(&Path) -> Result<ProbeOutput, ArtifactError>,
+{
+    let source = path.canonicalize().map_err(|error| {
+        ArtifactError::Invalid(format!(
+            "{} cannot be canonicalized: {error}",
+            path.display()
+        ))
+    })?;
+    let metadata = source.metadata().map_err(|error| {
+        ArtifactError::Invalid(format!("{} cannot be inspected: {error}", source.display()))
+    })?;
+    if !metadata.is_file() {
+        return Err(ArtifactError::Invalid(format!(
+            "{} is not a regular file",
+            source.display()
+        )));
+    }
+
+    let directory = tempfile::Builder::new()
+        .prefix("wayland-eval-artifact-")
+        .tempdir()
+        .map_err(|error| ArtifactError::Invalid(format!("create private copy: {error}")))?;
+    let sealed_path = directory
+        .path()
+        .join(format!("wayland-core{}", std::env::consts::EXE_SUFFIX));
+    fs::copy(&source, &sealed_path).map_err(|error| {
+        ArtifactError::Invalid(format!(
+            "copy {} to private artifact: {error}",
+            source.display()
+        ))
+    })?;
+    fs::set_permissions(&sealed_path, metadata.permissions()).map_err(|error| {
+        ArtifactError::Invalid(format!(
+            "set private artifact permissions for {}: {error}",
+            sealed_path.display()
+        ))
+    })?;
+
+    let artifact = inspect_with_probe(&sealed_path, expected, probe)?;
+    Ok(SealedBinaryArtifact {
+        artifact,
+        _directory: directory,
+    })
+}
+
 /// Validate a selected artifact using an injected provenance probe. Production
 /// uses the bounded process probe; unit tests remain offline and cross-platform.
 pub fn inspect_with_probe<F>(
@@ -122,6 +197,13 @@ where
     validate_commit(expected.source_commit, "expected")?;
     let sha256 = sha256_file(&path)?;
     let output = probe(&path)?;
+    let post_probe_sha256 = sha256_file(&path)?;
+    if post_probe_sha256 != sha256 {
+        return Err(ArtifactError::Invalid(format!(
+            "{} changed during inspection",
+            path.display()
+        )));
+    }
     if !output.success {
         return Err(ArtifactError::Probe(
             "--build-info exited unsuccessfully (stderr omitted)".into(),
@@ -147,6 +229,17 @@ where
         version,
         source_commit,
     })
+}
+
+pub fn verify_artifact_digest(artifact: &BinaryArtifact) -> Result<(), ArtifactError> {
+    let observed = sha256_file(&artifact.path)?;
+    if observed != artifact.sha256 {
+        return Err(ArtifactError::Mismatch(format!(
+            "artifact digest changed: {observed} != inspected {}",
+            artifact.sha256
+        )));
+    }
+    Ok(())
 }
 
 fn sha256_file(path: &Path) -> Result<String, ArtifactError> {

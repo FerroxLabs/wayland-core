@@ -5,7 +5,8 @@ use std::path::PathBuf;
 use clap::Parser;
 use wcore_eval_scenarios::Scenario;
 use wcore_eval_scenarios::artifact::{
-    ArtifactExpectation, BinaryArtifact, inspect_binary, select_candidate,
+    ArtifactExpectation, SealedBinaryArtifact, seal_binary, select_candidate,
+    verify_artifact_digest,
 };
 use wcore_eval_scenarios::catalog::{select_scenarios, standard_scenarios};
 use wcore_eval_scenarios::providers::{
@@ -180,7 +181,24 @@ async fn execute(cli: Cli) -> i32 {
     let mut total_cost = 0.0;
     'scenarios: for (scenario, resolution, _) in &plans {
         for provider in &resolution.runnable {
-            match run_with_binary(scenario, provider, &artifact.path).await {
+            if let Err(error) = verify_artifact_digest(&artifact) {
+                failed += 1;
+                println!(
+                    "FAIL {} {} artifact_integrity={error}",
+                    scenario.name, provider.id
+                );
+                continue;
+            }
+            let run_result = run_with_binary(scenario, provider, &artifact.path).await;
+            if let Err(error) = verify_artifact_digest(&artifact) {
+                failed += 1;
+                println!(
+                    "FAIL {} {} artifact_integrity={error}",
+                    scenario.name, provider.id
+                );
+                continue;
+            }
+            match run_result {
                 Ok(result) if result.passed => {
                     total_cost += result.cost_usd;
                     passed += 1;
@@ -220,7 +238,7 @@ async fn execute(cli: Cli) -> i32 {
     i32::from(failed > 0)
 }
 
-fn inspect_cli_artifact(cli: &Cli) -> Result<BinaryArtifact, String> {
+fn inspect_cli_artifact(cli: &Cli) -> Result<SealedBinaryArtifact, String> {
     let expected_source_commit = cli.expected_source_commit.as_deref().ok_or_else(|| {
         "--expected-source-commit is required for binary verification".to_string()
     })?;
@@ -236,7 +254,7 @@ fn inspect_cli_artifact(cli: &Cli) -> Result<BinaryArtifact, String> {
         workspace_root,
     )
     .map_err(|error| error.to_string())?;
-    inspect_binary(
+    seal_binary(
         &candidate,
         ArtifactExpectation {
             version: env!("CARGO_PKG_VERSION"),
