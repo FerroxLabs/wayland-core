@@ -90,7 +90,9 @@ impl Tool for ForgeTool {
                     "type": "string",
                     "description": "The change to forge, stated as intent with its finish line \
                                     (e.g. \"fix the failing auth tests\", \"make `cargo test -p x` pass \
-                                    after adding retry backoff\")."
+                                    after adding retry backoff\"). Use paths RELATIVE to the repo root \
+                                    only — never absolute paths: the forge builds in its own isolated \
+                                    worktree and supplies the working directory itself."
                 }
             },
             "required": ["task"]

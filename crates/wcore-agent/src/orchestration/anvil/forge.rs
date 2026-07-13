@@ -244,8 +244,10 @@ impl Builder for SpawnBuilder<'_> {
 const FORGE_SYSTEM_PROMPT: &str = "You are a forge builder. Implement the requested change using the \
 Write/Edit/Bash tools so the project's gate passes. ALL files you create or edit MUST live under the \
 working directory given in the task — use that ABSOLUTE path as the root for every path (do NOT rely on \
-the shell's current directory, which is NOT the working directory). Make the smallest change that \
-satisfies the task. Do not explain — just make the edits.";
+the shell's current directory, which is NOT the working directory). If the task text mentions any OTHER \
+absolute path, remap it into the working directory (same relative location) — never write outside the \
+working directory. Make the smallest change that satisfies the task. Do not explain — just make the \
+edits.";
 
 /// System prompt for the escalation valve (spec §6.4): one read-only frontier
 /// diagnostic turn. It names what the driver keeps missing — it NEVER does the
