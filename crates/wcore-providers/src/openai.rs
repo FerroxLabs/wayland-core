@@ -61,9 +61,19 @@ pub struct OpenAIProvider {
 }
 
 impl OpenAIProvider {
+    fn build_client(compat: &ProviderCompat) -> wcore_egress::EgressClient {
+        compat
+            .read_timeout_ms
+            .map_or_else(crate::http_client::build, |milliseconds| {
+                crate::http_client::build_with_read_timeout(std::time::Duration::from_millis(
+                    milliseconds,
+                ))
+            })
+    }
+
     pub fn new(api_key: &str, base_url: &str, compat: ProviderCompat, debug: DebugConfig) -> Self {
         Self {
-            client: crate::http_client::build(),
+            client: Self::build_client(&compat),
             keys: Arc::new(Mutex::new(KeyPool::new(split_keys(api_key)))),
             bearer: None,
             base_url: base_url.to_string(),
@@ -85,7 +95,7 @@ impl OpenAIProvider {
         debug: DebugConfig,
     ) -> Self {
         Self {
-            client: crate::http_client::build(),
+            client: Self::build_client(&compat),
             keys: Arc::new(Mutex::new(KeyPool::new(Vec::new()))),
             bearer: Some(bearer),
             base_url: base_url.to_string(),

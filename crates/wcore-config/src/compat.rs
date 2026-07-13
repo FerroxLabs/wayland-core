@@ -61,6 +61,12 @@ pub struct ProviderCompat {
     /// Default: "max_tokens" for all providers.
     pub max_tokens_field: Option<String>,
 
+    /// Between-bytes timeout for streaming provider responses, in milliseconds.
+    /// `None` uses the hardened global default. This is a generic transport
+    /// policy override for endpoints whose expected silent gaps differ from
+    /// that default; it must never be selected by inspecting a provider URL.
+    pub read_timeout_ms: Option<u64>,
+
     /// Merge consecutive assistant messages (text concat + tool_calls merge).
     /// Default: true for openai.
     pub merge_assistant_messages: Option<bool>,
@@ -811,6 +817,7 @@ impl ProviderCompat {
     pub fn merge(defaults: Self, user: Self) -> Self {
         Self {
             max_tokens_field: user.max_tokens_field.or(defaults.max_tokens_field),
+            read_timeout_ms: user.read_timeout_ms.or(defaults.read_timeout_ms),
             merge_assistant_messages: user
                 .merge_assistant_messages
                 .or(defaults.merge_assistant_messages),
@@ -1240,6 +1247,23 @@ mod tests {
         assert!(merged.ensure_alternation());
         assert!(merged.merge_same_role());
         assert!(merged.auto_tool_id());
+    }
+
+    #[test]
+    fn test_merge_user_read_timeout_overrides_default() {
+        let defaults = ProviderCompat {
+            read_timeout_ms: Some(300_000),
+            ..ProviderCompat::openai_defaults()
+        };
+        let user = ProviderCompat {
+            read_timeout_ms: Some(75),
+            ..ProviderCompat::default()
+        };
+
+        assert_eq!(
+            ProviderCompat::merge(defaults, user).read_timeout_ms,
+            Some(75)
+        );
     }
 
     #[test]
