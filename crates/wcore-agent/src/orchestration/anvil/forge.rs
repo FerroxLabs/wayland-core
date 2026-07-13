@@ -162,21 +162,26 @@ pub struct SpawnBuilder<'a> {
     spawner: &'a dyn Spawner,
     worktrees: WorktreeManager,
     base_ref: String,
+    id_prefix: String,
     counter: Mutex<u32>,
 }
 
 impl<'a> SpawnBuilder<'a> {
     /// Build a spawn-backed builder rooted at `worktrees`, branching candidates
-    /// off `base_ref` (e.g. `"HEAD"`).
+    /// off `base_ref` (e.g. `"HEAD"`). `id_prefix` scopes candidate ids (and
+    /// therefore worktree/branch names) so a retried climb attempt never
+    /// collides with the previous attempt's trees.
     pub fn new(
         spawner: &'a dyn Spawner,
         worktrees: WorktreeManager,
         base_ref: impl Into<String>,
+        id_prefix: impl Into<String>,
     ) -> Self {
         Self {
             spawner,
             worktrees,
             base_ref: base_ref.into(),
+            id_prefix: id_prefix.into(),
             counter: Mutex::new(0),
         }
     }
@@ -195,7 +200,7 @@ impl Builder for SpawnBuilder<'_> {
             *c += 1;
             v
         };
-        let id = format!("cand-{n}");
+        let id = format!("{}cand-{n}", self.id_prefix);
         let branch = format!("anvil/{id}");
         let worktree = self
             .worktrees
@@ -525,7 +530,6 @@ pub async fn drive_climb_full(
     let ledger = ClimbLedger::new(task, LedgerCap::unlimited());
 
     // Seams (worktree manager constructed above, before adoption).
-    let builder = SpawnBuilder::new(spawner, worktrees, "HEAD");
     let gate = SandboxGate::new(closure, backend, opts);
 
     let params = ClimbParams {
@@ -548,7 +552,32 @@ pub async fn drive_climb_full(
     let valve = valve_spawner.map(|s| SpawnValve::new(s, gate_desc.as_str()));
     let valve_ref: Option<&dyn Valve> = valve.as_ref().map(|v| v as &dyn Valve);
 
-    let outcome = run_climb(&params, &builder, &gate, valve_ref, &ledger, &mut journal).await;
+    // Climb on the routed driver seat; if it cannot produce even a probe
+    // candidate (e.g. a router lane the fork engine can't drive yet), retry
+    // ONCE on the session seat — the same spawner the valve uses. Runtime
+    // half of the "seat routing can only cheapen a forge, never break it"
+    // contract; the materialization half lives in `anvil::seat`.
+    let builder = SpawnBuilder::new(spawner, worktrees, "HEAD", "");
+    let mut outcome = run_climb(&params, &builder, &gate, valve_ref, &ledger, &mut journal).await;
+    let probe_never_built = matches!(
+        &outcome.terminal,
+        TerminalState::Blocked(reason) if reason.contains("probe builder failed")
+    );
+    if probe_never_built && let Some(session_sp) = valve_spawner {
+        eprintln!("[anvil-forge] driver seat failed at runtime; session seat retries the climb");
+        let retry_trees =
+            WorktreeManager::new(workspace).map_err(|e| ForgeError::Worktree(e.to_string()))?;
+        let retry_builder = SpawnBuilder::new(session_sp, retry_trees, "HEAD", "r1-");
+        outcome = run_climb(
+            &params,
+            &retry_builder,
+            &gate,
+            valve_ref,
+            &ledger,
+            &mut journal,
+        )
+        .await;
+    }
 
     emit_receipt(emitter, &outcome, &ledger, &digest, task, session_id);
     Ok(outcome)
