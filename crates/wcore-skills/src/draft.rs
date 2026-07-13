@@ -38,8 +38,12 @@ pub const RELEASED_AUTO_DRAFT_NOTE: &str = "> NOTE: This skill was auto-drafted 
 /// Classify only the released generator body shape. Name prefix alone is not
 /// provenance: users may intentionally author ordinary `auto-*` skills.
 pub fn is_released_generated_skill(name: &str, content: &str) -> bool {
-    let expected_header = format!("# Auto-drafted skill: {name}\n\n");
-    name.starts_with("auto-")
+    // Loader namespaces follow the directory hierarchy (for example
+    // `auto:auto-read-write`), while the released body header records the
+    // leaf directory name only.
+    let leaf_name = name.rsplit(':').next().unwrap_or(name);
+    let expected_header = format!("# Auto-drafted skill: {leaf_name}\n\n");
+    leaf_name.starts_with("auto-")
         && content.starts_with(&expected_header)
         && content.contains(RELEASED_AUTO_DRAFT_NOTE)
         && content.contains("\n\nSignature: `")
