@@ -47,6 +47,8 @@ ed25519-dalek = { workspace = true }
 # `#[allow(clippy::disallowed_methods)]` (see judge.rs) rather than routing
 # through wcore-egress, which would add an internal-crate edge this crate avoids.
 reqwest      = { workspace = true }
+# Correct HTTP parsing for the loopback-only scripted OpenAI fixture.
+axum         = "0.7"
 # D8 PTY TUI capture — drive wayland-core's ratatui TUI under a pseudo-terminal
 # and read the rendered screen. Direct deps (not in [workspace.dependencies])
 # but already in the lockfile via wcore-cli's TUI harness; vt100 pinned <0.16 to

@@ -44,6 +44,7 @@ pub mod cost;
 pub mod coverage;
 pub mod cron_scenarios;
 pub mod cross_session;
+pub mod fixtures;
 pub mod hook_scenarios;
 pub mod judge;
 pub mod mcp_scenarios;
