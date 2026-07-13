@@ -1,5 +1,6 @@
 //! FIFO-scripted OpenAI-compatible loopback fixture.
 
+use std::collections::BTreeMap;
 use std::convert::Infallible;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -284,6 +285,9 @@ pub struct FixtureRequestRecord {
     pub path: String,
     pub body_sha256: String,
     pub semantic_body_sha256: String,
+    /// Per-leaf semantic hashes for diagnosing a repeatability mismatch
+    /// without retaining or printing request content.
+    pub semantic_leaf_sha256: BTreeMap<String, String>,
     pub model: Option<String>,
 }
 
@@ -441,19 +445,18 @@ async fn handle_chat_completion(
     body: Bytes,
 ) -> Response {
     let body_sha256 = format!("{:x}", Sha256::digest(&body));
-    let semantic_body_sha256 = {
-        let workspace_root = state
-            .lock()
-            .expect("OpenAI fixture state lock")
-            .workspace_root
-            .clone();
-        match workspace_root {
-            Some(workspace) => {
-                workspace_evidence::semantic_sha256(b"openai-request-body", &body, &workspace)
-            }
-            None => Ok(body_sha256.clone()),
+    let workspace_root = state
+        .lock()
+        .expect("OpenAI fixture state lock")
+        .workspace_root
+        .clone();
+    let semantic_body_sha256 = match workspace_root.as_deref() {
+        Some(workspace) => {
+            workspace_evidence::semantic_sha256(b"openai-request-body", &body, workspace)
         }
+        None => Ok(body_sha256.clone()),
     };
+    let semantic_leaf_sha256 = semantic_leaf_hashes(&body, workspace_root.as_deref());
     let model = serde_json::from_slice::<serde_json::Value>(&body)
         .ok()
         .and_then(|value| {
@@ -470,6 +473,12 @@ async fn handle_chat_completion(
                 .push(format!("workspace_evidence_error:{error}"));
             body_sha256.clone()
         });
+        let semantic_leaf_sha256 = semantic_leaf_sha256.unwrap_or_else(|error| {
+            state
+                .violations
+                .push(format!("semantic_leaf_evidence_error:{error}"));
+            BTreeMap::new()
+        });
         let sequence = state.requests.len() as u64 + 1;
         state.requests.push(FixtureRequestRecord {
             sequence,
@@ -477,6 +486,7 @@ async fn handle_chat_completion(
             path: "/v1/chat/completions".to_string(),
             body_sha256,
             semantic_body_sha256,
+            semantic_leaf_sha256,
             model,
         });
         state.request_instants.push(tokio::time::Instant::now());
@@ -530,6 +540,59 @@ async fn handle_chat_completion(
             sse_response(complete_text_sse("released", false))
         }
     }
+}
+
+fn semantic_leaf_hashes(
+    body: &[u8],
+    workspace: Option<&Path>,
+) -> Result<BTreeMap<String, String>, String> {
+    let Some(workspace) = workspace else {
+        return Ok(BTreeMap::new());
+    };
+    let value: serde_json::Value =
+        serde_json::from_slice(body).map_err(|error| error.to_string())?;
+    let mut hashes = BTreeMap::new();
+    collect_semantic_leaf_hashes("", &value, workspace, &mut hashes)?;
+    Ok(hashes)
+}
+
+fn collect_semantic_leaf_hashes(
+    pointer: &str,
+    value: &serde_json::Value,
+    workspace: &Path,
+    hashes: &mut BTreeMap<String, String>,
+) -> Result<(), String> {
+    match value {
+        serde_json::Value::Array(values) if !values.is_empty() => {
+            for (index, value) in values.iter().enumerate() {
+                collect_semantic_leaf_hashes(
+                    &format!("{pointer}/{index}"),
+                    value,
+                    workspace,
+                    hashes,
+                )?;
+            }
+        }
+        serde_json::Value::Object(values) if !values.is_empty() => {
+            for (key, value) in values {
+                let key = key.replace('~', "~0").replace('/', "~1");
+                collect_semantic_leaf_hashes(
+                    &format!("{pointer}/{key}"),
+                    value,
+                    workspace,
+                    hashes,
+                )?;
+            }
+        }
+        _ => {
+            let encoded = serde_json::to_vec(value).map_err(|error| error.to_string())?;
+            let digest =
+                workspace_evidence::semantic_sha256(b"openai-request-leaf", &encoded, workspace)
+                    .map_err(|error| error.to_string())?;
+            hashes.insert(pointer.to_string(), digest);
+        }
+    }
+    Ok(())
 }
 
 fn text_delta_frame(text: &str) -> String {

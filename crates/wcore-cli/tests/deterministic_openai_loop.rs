@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
@@ -398,6 +399,7 @@ struct SealedRun {
     workspace: PathBuf,
     repository_sha256: String,
     openai_behavior_sha256: String,
+    openai_request_leaves: Vec<BTreeMap<String, String>>,
     fixture_manifest: CompositeFixtureManifest,
     receipt: EvidenceReceiptV1,
 }
@@ -718,6 +720,11 @@ async fn run_sealed_repository_once(run_id: &str) -> SealedRun {
         openai_behavior_sha256: openai_observation
             .behavior_sha256()
             .expect("OpenAI behavior digest"),
+        openai_request_leaves: openai_observation
+            .requests
+            .iter()
+            .map(|request| request.semantic_leaf_sha256.clone())
+            .collect(),
         fixture_manifest: manifest,
         receipt,
     }
@@ -730,6 +737,10 @@ async fn packaged_f04_run_is_repeatable_and_content_addressed() {
 
     assert_ne!(first.workspace, second.workspace);
     assert_eq!(first.repository_sha256, second.repository_sha256);
+    assert_eq!(
+        first.openai_request_leaves, second.openai_request_leaves,
+        "OpenAI request leaf evidence diverged"
+    );
     assert_eq!(first.openai_behavior_sha256, second.openai_behavior_sha256);
     assert_eq!(
         first.fixture_manifest.components(),
