@@ -1,13 +1,23 @@
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::Duration;
 
+use sha2::{Digest, Sha256};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use wcore_egress::{BoundedEgressRecorder, EgressClient, EgressOutcome};
 use wcore_eval_scenarios::assertions::Assertion;
+use wcore_eval_scenarios::fixtures::manifest::{CompositeFixtureManifest, FixtureComponents};
 use wcore_eval_scenarios::fixtures::mcp::{McpHttpFixture, McpHttpMode};
 use wcore_eval_scenarios::fixtures::openai::{
     OpenAiFixtureObservation, OpenAiFixtureScript, OpenAiStep,
 };
-use wcore_eval_scenarios::fixtures::repository::SeededRepository;
+use wcore_eval_scenarios::fixtures::remote_execution::{
+    FixtureArtifact, OutputChannel, RemoteExecutionFixture, RemoteExecutionScript, RemoteTask,
+    ResourceBudget, ScriptedOutcome, ScriptedOutputEvent,
+};
+use wcore_eval_scenarios::fixtures::repository::{SeededRepository, repository_tree_sha256};
 use wcore_eval_scenarios::providers::{ProviderConfig, ProviderId};
+use wcore_eval_scenarios::receipt::{Evidence, EvidenceReceiptV1, ReceiptMetadataV1};
 use wcore_eval_scenarios::runner::{
     Failure, ScenarioResult, run_with_binary, run_with_binary_in_environment,
 };
@@ -381,4 +391,306 @@ async fn packaged_core_satisfies_a_hidden_repository_outcome() {
     assert_eq!(result.trace.count("Edit"), 1);
     assert_eq!(observation.requests.len(), 3);
     assert!(observation.complete());
+}
+
+struct SealedRun {
+    workspace: PathBuf,
+    repository_sha256: String,
+    openai_behavior_sha256: String,
+    receipt: EvidenceReceiptV1,
+}
+
+fn sha256(bytes: &[u8]) -> String {
+    format!("{:x}", Sha256::digest(bytes))
+}
+
+fn remote_fixture_sha256(repository_sha256: &str) -> String {
+    let limits = ResourceBudget::new(2_000, 64 * 1024 * 1024, 30_000, 1024 * 1024)
+        .expect("remote fixture limits");
+    let fixture =
+        RemoteExecutionFixture::new("fixture-local", "worker-01", "fixture-v1", limits, [23; 32])
+            .expect("remote fixture");
+    let task = RemoteTask::new(
+        "task-001",
+        repository_sha256,
+        b"verify the materialized repository".to_vec(),
+        ResourceBudget::new(500, 1024 * 1024, 5_000, 4096).expect("remote task limits"),
+    )
+    .expect("remote task");
+    let script = RemoteExecutionScript::new(
+        [ScriptedOutputEvent::new(
+            2,
+            OutputChannel::Stdout,
+            "repository verified",
+        )],
+        ScriptedOutcome::success(
+            FixtureArtifact::new("dist/result.txt", b"verified\n".to_vec())
+                .expect("remote artifact"),
+        ),
+    );
+    let receipt = fixture.execute(&task, &script).expect("remote execution");
+    receipt
+        .verify(fixture.identity(), &fixture.verifying_key())
+        .expect("remote fixture attestation");
+    receipt.body_sha256
+}
+
+async fn observe_egress_fixture() -> String {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("egress fixture listener");
+    let address = listener.local_addr().expect("egress fixture address");
+    let server = tokio::spawn(async move {
+        let (mut socket, _) = listener.accept().await.expect("egress fixture accept");
+        let mut buffer = [0_u8; 2048];
+        let _ = socket.read(&mut buffer).await.expect("egress request read");
+        socket
+            .write_all(b"HTTP/1.1 204 No Content\r\nContent-Length: 0\r\n\r\n")
+            .await
+            .expect("egress response write");
+    });
+    let recorder = Arc::new(BoundedEgressRecorder::new(1));
+    let response = EgressClient::tool()
+        .with_observer(recorder.clone())
+        .post(format!("http://{address}/fixture/status"))
+        .body("fixture-request")
+        .send()
+        .await
+        .expect("observed egress request");
+    assert_eq!(response.status().as_u16(), 204);
+    server.await.expect("egress fixture server");
+    let observation = recorder.snapshot();
+    assert_eq!(observation.dropped_events, 0);
+    assert_eq!(observation.events.len(), 1);
+    assert_eq!(
+        observation.events[0].outcome,
+        EgressOutcome::HttpResponse { status: 204 }
+    );
+    sha256(b"wcore-f04-egress-script-v1:POST:/fixture/status:204")
+}
+
+async fn run_sealed_repository_once(run_id: &str) -> SealedRun {
+    let repository = SeededRepository::new([
+        ("README.md", "fixture repository\n"),
+        ("src/settings.toml", "port = 8080\nmode = \"legacy\"\n"),
+    ])
+    .expect("valid repository fixture");
+    let seed_provider = ProviderConfig::new(ProviderId::OpenAI, "fixture-chat-v1")
+        .with_api_key("fixture-local-token");
+    let env = tempenv::build_with(
+        &seed_provider,
+        &TempEnvOptions {
+            budget_max_cost_usd: Some(0.10),
+        },
+    )
+    .expect("prepare hermetic seal environment");
+    let workspace = env.path().to_path_buf();
+    let repository_root = workspace.join("repository");
+    let settings_path = repository_root.join("src").join("settings.toml");
+    let mcp = McpHttpFixture::start(McpHttpMode::SseResponse)
+        .await
+        .expect("start MCP fixture");
+    let mcp_url = mcp.url().to_string();
+    let mcp_fixture_sha256 = mcp.fixture_sha256().to_string();
+    let openai_script = OpenAiFixtureScript::new([
+        OpenAiStep::tool_call(
+            "call-seal-read",
+            "Read",
+            serde_json::json!({"file_path": settings_path.to_string_lossy()}),
+        ),
+        OpenAiStep::tool_call(
+            "call-seal-edit",
+            "Edit",
+            serde_json::json!({
+                "file_path": settings_path.to_string_lossy(),
+                "old_string": "port = 8080",
+                "new_string": "port = 9090"
+            }),
+        ),
+        OpenAiStep::tool_call(
+            "call-seal-mcp",
+            "fixture_echo",
+            serde_json::json!({"text": "F04-SEALED"}),
+        ),
+        OpenAiStep::text("Repository and MCP verification completed"),
+    ]);
+    let openai = openai_script
+        .start_for_workspace(&workspace)
+        .await
+        .expect("start workspace-aware OpenAI fixture");
+    let openai_fixture_sha256 = openai.fixture_sha256().to_string();
+    let provider = ProviderConfig::new(ProviderId::OpenAI, "fixture-chat-v1")
+        .with_api_key("fixture-local-token")
+        .with_base_url(openai.base_url());
+    let setup_repository = repository.clone();
+    let scenario = Scenario::new("packaged_f04_repeatability", Category::Hardening)
+        .max_total_time(Duration::from_secs(30))
+        .setup(move |cwd| {
+            setup_repository.materialize(&cwd.join("repository"))?;
+            let config_path = cwd.join(".wayland-core").join("config.toml");
+            let mut config = std::fs::read_to_string(&config_path)?;
+            config.push_str(&format!(
+                "\n[mcp.servers.fixture]\ntransport = \"streamable-http\"\nurl = \"{mcp_url}\"\nallow_local = true\ndeferred = false\n"
+            ));
+            std::fs::write(config_path, config)?;
+            Ok(())
+        })
+        .turn(
+            Turn::new("Update the repository, call fixture_echo, then report completion.")
+                .max_time(Duration::from_secs(20))
+                .expect_tool("Read")
+                .expect_tool("Edit")
+                .expect_tool("fixture_echo")
+                .assert(Assertion::Contains(
+                    "Repository and MCP verification completed",
+                ))
+                .assert(Assertion::FileContains {
+                    path: "repository/src/settings.toml",
+                    needle: "port = 9090",
+                }),
+        );
+
+    let mut result = run_with_binary_in_environment(
+        &scenario,
+        &provider,
+        Path::new(env!("CARGO_BIN_EXE_wayland-core")),
+        &env,
+    )
+    .await
+    .expect("packaged F04 seal run");
+    let openai_observation = openai.shutdown().await.expect("OpenAI fixture shutdown");
+    let mcp_observation = mcp.shutdown().await.expect("MCP fixture shutdown");
+    assert!(result.passed, "unexpected failures: {:?}", result.failures);
+    assert_eq!(
+        result
+            .trace
+            .entries
+            .iter()
+            .map(|entry| entry.tool_name.as_str())
+            .collect::<Vec<_>>(),
+        ["Read", "Edit", "fixture_echo"]
+    );
+    assert!(openai_observation.complete());
+    assert!(mcp_observation.complete(), "{mcp_observation:?}");
+    result.execution.provider_attempts = Some(openai_observation.attempts());
+
+    let final_repository_sha256 =
+        repository_tree_sha256(&repository_root).expect("materialized repository digest");
+    let hidden_outcome_sha256 = sha256(b"file_contains\0repository/src/settings.toml\0port = 9090");
+    let egress_fixture_sha256 = observe_egress_fixture().await;
+    let remote_execution_sha256 = remote_fixture_sha256(repository.fixture_sha256());
+    let manifest = CompositeFixtureManifest::new(
+        FixtureComponents::new(
+            openai_fixture_sha256,
+            repository.fixture_sha256(),
+            hidden_outcome_sha256,
+            mcp_fixture_sha256,
+            egress_fixture_sha256,
+            remote_execution_sha256,
+        )
+        .expect("complete fixture identities"),
+    );
+    let binary_sha256 =
+        sha256(&std::fs::read(env!("CARGO_BIN_EXE_wayland-core")).expect("read packaged binary"));
+    let source_commit = std::env::var("WCORE_F04_SOURCE_COMMIT").unwrap_or_else(|_| "a".repeat(40));
+    let receipt = EvidenceReceiptV1::from_scenario_result(
+        ReceiptMetadataV1 {
+            run_id: run_id.to_string(),
+            source_commit,
+            binary_sha256,
+            fixture_sha256: manifest.fixture_sha256().to_string(),
+            model: "fixture-chat-v1".to_string(),
+            build: Evidence::Unavailable {
+                code: "local_run".to_string(),
+            },
+        },
+        &result,
+        0.10,
+    )
+    .expect("sealed evidence receipt");
+
+    SealedRun {
+        workspace,
+        repository_sha256: final_repository_sha256,
+        openai_behavior_sha256: openai_observation
+            .behavior_sha256()
+            .expect("OpenAI behavior digest"),
+        receipt,
+    }
+}
+
+#[tokio::test]
+async fn packaged_f04_run_is_repeatable_and_content_addressed() {
+    let first = run_sealed_repository_once("f04-repeat-1").await;
+    let second = run_sealed_repository_once("f04-repeat-2").await;
+
+    assert_ne!(first.workspace, second.workspace);
+    assert_eq!(first.repository_sha256, second.repository_sha256);
+    assert_eq!(first.openai_behavior_sha256, second.openai_behavior_sha256);
+    assert_eq!(
+        first.receipt.body.identity.fixture_sha256,
+        second.receipt.body.identity.fixture_sha256
+    );
+    assert_eq!(
+        first.receipt.body.identity.config_sha256,
+        second.receipt.body.identity.config_sha256
+    );
+    assert_eq!(first.receipt.body.tools.len(), 3);
+    assert_eq!(
+        first.receipt.body.tools.len(),
+        second.receipt.body.tools.len()
+    );
+    for (first_tool, second_tool) in first
+        .receipt
+        .body
+        .tools
+        .iter()
+        .zip(&second.receipt.body.tools)
+    {
+        assert_eq!(first_tool.tool_name, second_tool.tool_name);
+        assert_eq!(first_tool.request_sha256, second_tool.request_sha256);
+        assert_eq!(first_tool.result_sha256, second_tool.result_sha256);
+        assert_eq!(first_tool.exit_state, second_tool.exit_state);
+    }
+    assert_ne!(first.receipt.body_sha256, second.receipt.body_sha256);
+    let behavior_sha256 = first
+        .receipt
+        .behavior_sha256()
+        .expect("first receipt behavior digest");
+    assert_eq!(
+        behavior_sha256,
+        second
+            .receipt
+            .behavior_sha256()
+            .expect("second receipt behavior digest")
+    );
+
+    if let Some(directory) = std::env::var_os("WCORE_F04_EVIDENCE_DIR") {
+        let directory = PathBuf::from(directory);
+        std::fs::create_dir_all(&directory).expect("create F04 evidence directory");
+        std::fs::write(
+            directory.join("repeat-1-receipt.json"),
+            serde_json::to_vec_pretty(&first.receipt).expect("serialize first receipt"),
+        )
+        .expect("write first receipt");
+        std::fs::write(
+            directory.join("repeat-2-receipt.json"),
+            serde_json::to_vec_pretty(&second.receipt).expect("serialize second receipt"),
+        )
+        .expect("write second receipt");
+        std::fs::write(
+            directory.join("repeatability.json"),
+            serde_json::to_vec_pretty(&serde_json::json!({
+                "schema": "wayland.eval.f04-repeatability",
+                "schema_version": 1,
+                "behavior_sha256": behavior_sha256,
+                "fixture_sha256": first.receipt.body.identity.fixture_sha256,
+                "openai_behavior_sha256": first.openai_behavior_sha256,
+                "repository_sha256": first.repository_sha256,
+                "runs": 2,
+            }))
+            .expect("serialize repeatability summary"),
+        )
+        .expect("write repeatability summary");
+    }
 }
