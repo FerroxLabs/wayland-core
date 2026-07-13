@@ -5,8 +5,10 @@
 //! pre-flight estimates, and the strict-mode SKIP/FAIL logic.
 
 use std::fmt;
+use std::str::FromStr;
 
 use serde::{Deserialize, Serialize};
+use thiserror::Error;
 
 /// Logical provider id — passed to `wayland-core --provider <id>` and
 /// used to look up env-var names + default model strings.
@@ -47,6 +49,19 @@ impl fmt::Display for ProviderId {
     }
 }
 
+impl FromStr for ProviderId {
+    type Err = ResolveError;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "deepseek" => Ok(Self::DeepSeek),
+            "anthropic" => Ok(Self::Anthropic),
+            "openai" => Ok(Self::OpenAI),
+            other => Err(ResolveError::InvalidProvider(other.to_string())),
+        }
+    }
+}
+
 /// Per-scenario provider selection — the scenario builder picks one of
 /// these; the runner resolves `Default` against `WCORE_EVAL_PROVIDER`
 /// and `Matrix` by running the scenario once per supported provider.
@@ -78,6 +93,65 @@ pub struct ProviderConfig {
     /// `[provider.<id>] api_key = "..."`. If `None`, the runner reads
     /// `id.env_var()` at spawn time.
     pub api_key: Option<String>,
+}
+
+/// Credential presence snapshot used to plan runs without exposing or copying
+/// the credential values themselves.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ProviderAvailability {
+    pub deepseek: bool,
+    pub anthropic: bool,
+    pub openai: bool,
+}
+
+impl ProviderAvailability {
+    pub fn all() -> Self {
+        Self {
+            deepseek: true,
+            anthropic: true,
+            openai: true,
+        }
+    }
+
+    pub fn has(self, provider: ProviderId) -> bool {
+        match provider {
+            ProviderId::DeepSeek => self.deepseek,
+            ProviderId::Anthropic => self.anthropic,
+            ProviderId::OpenAI => self.openai,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProviderSkip {
+    pub provider: ProviderId,
+    pub missing_key: &'static str,
+}
+
+#[derive(Debug, Clone)]
+pub struct ProviderResolution {
+    pub runnable: Vec<ProviderConfig>,
+    pub skipped: Vec<ProviderSkip>,
+}
+
+#[derive(Debug, Error, PartialEq, Eq)]
+pub enum ResolveError {
+    #[error("unknown provider `{0}` (expected deepseek, anthropic, or openai)")]
+    InvalidProvider(String),
+    #[error("missing required provider credentials: {providers:?}")]
+    MissingCredentials { providers: Vec<ProviderId> },
+}
+
+/// Parse provider overrides with the documented CLI-over-environment
+/// precedence. Empty values are treated as absent rather than as provider IDs.
+pub fn provider_override(
+    cli: Option<&str>,
+    environment: Option<&str>,
+) -> Result<Option<ProviderId>, ResolveError> {
+    cli.filter(|value| !value.is_empty())
+        .or_else(|| environment.filter(|value| !value.is_empty()))
+        .map(ProviderId::from_str)
+        .transpose()
 }
 
 impl ProviderConfig {
@@ -114,10 +188,140 @@ impl ProviderConfig {
 /// resolution as "no providers to run" rather than panicking. T4 will
 /// replace this body with the per-provider model tables, API-key
 /// availability checks, and strict-mode SKIP/FAIL logic.
-pub fn resolve(_choice: ProviderChoice) -> Vec<ProviderConfig> {
+pub fn resolve(
+    _choice: ProviderChoice,
+    _provider_override: Option<ProviderId>,
+    _availability: ProviderAvailability,
+    _strict: bool,
+) -> Result<ProviderResolution, ResolveError> {
     // Honest exit until T4 lands: no providers resolved. Replacing
     // `todo!()` with an empty result keeps the `#![deny(clippy::todo)]`
     // crate-level gate satisfied while ensuring runtime behaviour is
     // visibly-incomplete (zero providers run) rather than a panic.
-    Vec::new()
+    Ok(ProviderResolution {
+        runnable: Vec::new(),
+        skipped: Vec::new(),
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn ids(resolution: &ProviderResolution) -> Vec<ProviderId> {
+        resolution.runnable.iter().map(|run| run.id).collect()
+    }
+
+    #[test]
+    fn override_precedence_is_cli_then_environment() {
+        assert_eq!(
+            provider_override(Some("openai"), Some("anthropic")),
+            Ok(Some(ProviderId::OpenAI))
+        );
+        assert_eq!(
+            provider_override(None, Some("anthropic")),
+            Ok(Some(ProviderId::Anthropic))
+        );
+        assert_eq!(provider_override(None, None), Ok(None));
+    }
+
+    #[test]
+    fn invalid_override_is_rejected_before_execution() {
+        assert_eq!(
+            provider_override(Some("not-a-provider"), None),
+            Err(ResolveError::InvalidProvider("not-a-provider".into()))
+        );
+    }
+
+    #[test]
+    fn forced_and_overridden_providers_use_explicit_models() {
+        let forced = resolve(
+            ProviderChoice::ForceAnthropic,
+            None,
+            ProviderAvailability::all(),
+            false,
+        )
+        .unwrap();
+        assert_eq!(ids(&forced), [ProviderId::Anthropic]);
+        assert_eq!(forced.runnable[0].model, "claude-sonnet-4-6");
+
+        let overridden = resolve(
+            ProviderChoice::ForceAnthropic,
+            Some(ProviderId::OpenAI),
+            ProviderAvailability::all(),
+            false,
+        )
+        .unwrap();
+        assert_eq!(ids(&overridden), [ProviderId::OpenAI]);
+        assert_eq!(overridden.runnable[0].model, "gpt-4o");
+    }
+
+    #[test]
+    fn matrix_is_stable_and_lenient_mode_records_skips() {
+        let resolution = resolve(
+            ProviderChoice::Matrix,
+            None,
+            ProviderAvailability {
+                deepseek: true,
+                anthropic: false,
+                openai: true,
+            },
+            false,
+        )
+        .unwrap();
+
+        assert_eq!(ids(&resolution), [ProviderId::DeepSeek, ProviderId::OpenAI]);
+        assert_eq!(
+            resolution.skipped,
+            [ProviderSkip {
+                provider: ProviderId::Anthropic,
+                missing_key: "ANTHROPIC_API_KEY",
+            }]
+        );
+    }
+
+    #[test]
+    fn strict_mode_rejects_any_missing_required_provider() {
+        let error = resolve(
+            ProviderChoice::Matrix,
+            None,
+            ProviderAvailability {
+                deepseek: true,
+                anthropic: false,
+                openai: false,
+            },
+            true,
+        )
+        .unwrap_err();
+
+        assert_eq!(
+            error,
+            ResolveError::MissingCredentials {
+                providers: vec![ProviderId::Anthropic, ProviderId::OpenAI]
+            }
+        );
+    }
+
+    #[test]
+    fn zero_runnable_providers_is_never_an_unexplained_success() {
+        let lenient = resolve(
+            ProviderChoice::ForceDeepSeek,
+            None,
+            ProviderAvailability::default(),
+            false,
+        )
+        .unwrap();
+        assert!(lenient.runnable.is_empty());
+        assert_eq!(lenient.skipped.len(), 1);
+
+        assert!(matches!(
+            resolve(
+                ProviderChoice::ForceDeepSeek,
+                None,
+                ProviderAvailability::default(),
+                true
+            ),
+            Err(ResolveError::MissingCredentials { .. })
+        ));
+    }
 }
