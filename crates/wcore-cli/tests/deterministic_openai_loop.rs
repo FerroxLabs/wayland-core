@@ -440,6 +440,27 @@ fn sha256(bytes: &[u8]) -> String {
     format!("{:x}", Sha256::digest(bytes))
 }
 
+fn assert_request_leaves_equal(
+    first: &[BTreeMap<String, String>],
+    second: &[BTreeMap<String, String>],
+) {
+    assert_eq!(first.len(), second.len(), "OpenAI request count diverged");
+    for (request_index, (first_request, second_request)) in first.iter().zip(second).enumerate() {
+        let pointers = first_request.keys().chain(second_request.keys());
+        for pointer in pointers {
+            let first_digest = first_request.get(pointer);
+            let second_digest = second_request.get(pointer);
+            assert_eq!(
+                first_digest,
+                second_digest,
+                "OpenAI request {} diverged at {}",
+                request_index + 1,
+                pointer
+            );
+        }
+    }
+}
+
 fn remote_fixture_sha256(repository_sha256: &str) -> String {
     let limits = ResourceBudget::new(2_000, 64 * 1024 * 1024, 30_000, 1024 * 1024)
         .expect("remote fixture limits");
@@ -737,10 +758,7 @@ async fn packaged_f04_run_is_repeatable_and_content_addressed() {
 
     assert_ne!(first.workspace, second.workspace);
     assert_eq!(first.repository_sha256, second.repository_sha256);
-    assert_eq!(
-        first.openai_request_leaves, second.openai_request_leaves,
-        "OpenAI request leaf evidence diverged"
-    );
+    assert_request_leaves_equal(&first.openai_request_leaves, &second.openai_request_leaves);
     assert_eq!(first.openai_behavior_sha256, second.openai_behavior_sha256);
     assert_eq!(
         first.fixture_manifest.components(),
