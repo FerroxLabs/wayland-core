@@ -6,7 +6,7 @@ use wcore_eval_scenarios::fixtures::openai::{
     OpenAiFixtureObservation, OpenAiFixtureScript, OpenAiStep,
 };
 use wcore_eval_scenarios::providers::{ProviderConfig, ProviderId};
-use wcore_eval_scenarios::runner::{ScenarioResult, run_with_binary};
+use wcore_eval_scenarios::runner::{Failure, ScenarioResult, run_with_binary};
 use wcore_eval_scenarios::scenario::{ApprovalPolicy, Category, Scenario, Turn};
 
 async fn run_script(
@@ -14,7 +14,7 @@ async fn run_script(
     steps: impl IntoIterator<Item = OpenAiStep>,
     expected: &'static str,
 ) -> (ScenarioResult, OpenAiFixtureObservation) {
-    run_script_with_approval(name, steps, expected, ApprovalPolicy::Yolo, false).await
+    run_script_with_approval(name, steps, expected, ApprovalPolicy::Yolo).await
 }
 
 async fn run_script_with_approval(
@@ -22,7 +22,6 @@ async fn run_script_with_approval(
     steps: impl IntoIterator<Item = OpenAiStep>,
     expected: &'static str,
     approval: ApprovalPolicy,
-    stop_mid_turn: bool,
 ) -> (ScenarioResult, OpenAiFixtureObservation) {
     let fixture = OpenAiFixtureScript::new(steps)
         .start()
@@ -31,18 +30,14 @@ async fn run_script_with_approval(
     let provider = ProviderConfig::new(ProviderId::OpenAI, "fixture-chat-v1")
         .with_api_key("fixture-local-token")
         .with_base_url(fixture.base_url());
-    let turn = Turn::new("Return the deterministic fixture answer.")
-        .max_time(Duration::from_secs(10))
-        .assert(Assertion::Contains(expected));
-    let turn = if stop_mid_turn {
-        turn.stop_mid_turn()
-    } else {
-        turn
-    };
     let scenario = Scenario::new(name, Category::Hardening)
         .max_total_time(Duration::from_secs(20))
         .approval(approval)
-        .turn(turn);
+        .turn(
+            Turn::new("Return the deterministic fixture answer.")
+                .max_time(Duration::from_secs(10))
+                .assert(Assertion::Contains(expected)),
+        );
 
     let result = run_with_binary(
         &scenario,
@@ -158,7 +153,6 @@ async fn packaged_core_executes_an_approved_write() {
         ],
         "approved write completed",
         ApprovalPolicy::ApproveAll,
-        false,
     )
     .await;
 
@@ -187,7 +181,6 @@ async fn packaged_core_blocks_a_denied_write() {
         ],
         "denied write handled",
         ApprovalPolicy::DenyAll,
-        false,
     )
     .await;
 
@@ -200,17 +193,34 @@ async fn packaged_core_blocks_a_denied_write() {
 #[tokio::test]
 async fn packaged_core_cancels_an_active_stream() {
     let started = std::time::Instant::now();
-    let (result, observation) = run_script_with_approval(
-        "packaged_openai_cancellation",
-        [OpenAiStep::text_then_stall("before cancellation", 10_000)],
-        "before cancellation",
-        ApprovalPolicy::Yolo,
-        true,
+    let fixture =
+        OpenAiFixtureScript::new([OpenAiStep::text_then_stall("before cancellation", 10_000)])
+            .start()
+            .await
+            .expect("start OpenAI fixture");
+    let provider = ProviderConfig::new(ProviderId::OpenAI, "fixture-chat-v1")
+        .with_api_key("fixture-local-token")
+        .with_base_url(fixture.base_url());
+    let scenario = Scenario::new("packaged_openai_cancellation", Category::Hardening)
+        .max_total_time(Duration::from_secs(5))
+        .turn(
+            Turn::new("Start a response and wait.")
+                .max_time(Duration::from_secs(3))
+                .stop_mid_turn(),
+        );
+    let result = run_with_binary(
+        &scenario,
+        &provider,
+        Path::new(env!("CARGO_BIN_EXE_wayland-core")),
     )
-    .await;
+    .await
+    .expect("packaged cancellation run");
+    let observation = fixture.shutdown().await.expect("fixture shutdown");
 
     assert!(started.elapsed() < Duration::from_secs(3));
-    assert_eq!(result.final_text, "before cancellation");
+    assert!(matches!(result.failures.as_slice(), [Failure::CostMissing]));
+    assert!(result.final_text.is_empty());
     assert!(result.execution.cleanup_verified);
+    assert!(observation.complete(), "observation: {observation:?}");
     assert_eq!(observation.requests.len(), 1);
 }
