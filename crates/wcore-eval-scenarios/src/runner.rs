@@ -1048,6 +1048,7 @@ async fn drive_session(
     // empty input (the prior behaviour).
     let mut pending_inputs: std::collections::HashMap<String, (String, Instant)> =
         std::collections::HashMap::new();
+    let mut denied_calls = std::collections::HashSet::new();
     // #278 — `session_cost` is emitted by the engine BEFORE `stream_end`
     // (engine.rs `fire_on_session_end` runs inside `engine.run()`; the
     // json-stream loop emits `stream_end` only after `engine.run()` returns).
@@ -1243,6 +1244,30 @@ async fn drive_session(
                         stdin.flush().await?;
                         approval_response_time =
                             approval_response_time.saturating_add(approval_started.elapsed());
+                        if approval == crate::scenario::ApprovalPolicy::DenyAll {
+                            let tool_name = ev
+                                .get("tool")
+                                .and_then(|tool| tool.get("name"))
+                                .and_then(Value::as_str)
+                                .unwrap_or("")
+                                .to_string();
+                            let pending = pending_inputs.remove(&call_id);
+                            let input = pending
+                                .as_ref()
+                                .map(|(input, _)| input.clone())
+                                .unwrap_or_default();
+                            let duration = pending.map(|(_, started)| started.elapsed());
+                            denied_calls.insert(call_id.clone());
+                            trace.entries.push(TraceEntry {
+                                call_id,
+                                tool_name,
+                                input,
+                                output: "denied by eval approval policy".to_string(),
+                                is_error: true,
+                                duration,
+                                turn: turn_idx,
+                            });
+                        }
                     }
                 }
                 "tool_result" => {
@@ -1270,15 +1295,27 @@ async fn drive_session(
                         .map(|(input, _)| input.clone())
                         .unwrap_or_default();
                     let duration = pending.map(|(_, started)| started.elapsed());
-                    trace.entries.push(TraceEntry {
-                        call_id,
-                        tool_name,
-                        input,
-                        output,
-                        is_error,
-                        duration,
-                        turn: turn_idx,
-                    });
+                    if denied_calls.remove(&call_id)
+                        && let Some(denied) = trace
+                            .entries
+                            .iter_mut()
+                            .find(|entry| entry.call_id == call_id)
+                    {
+                        denied.tool_name = tool_name;
+                        denied.output = output;
+                        denied.is_error = is_error;
+                        denied.duration = duration.or(denied.duration);
+                    } else {
+                        trace.entries.push(TraceEntry {
+                            call_id,
+                            tool_name,
+                            input,
+                            output,
+                            is_error,
+                            duration,
+                            turn: turn_idx,
+                        });
+                    }
                 }
                 "stream_end" => {
                     // Only THIS turn's stream_end ends the turn. The engine
