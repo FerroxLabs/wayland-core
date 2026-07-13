@@ -171,3 +171,67 @@ fn non_finite_budgets_are_usage_errors() {
         );
     }
 }
+
+#[test]
+fn failed_canary_aborts_every_remaining_run_cell() {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_wayland-eval"));
+    command.args([
+        "--scenario",
+        "canary",
+        "--scenario",
+        "qa_slash_style",
+        "--provider",
+        "deepseek",
+        "--binary",
+        fixture(),
+        "--expected-source-commit",
+        COMMIT,
+    ]);
+    command.env("DEEPSEEK_API_KEY", "fixture-key");
+    command.env("WCORE_EVAL_FIXTURE_FAIL_CANARY", "1");
+    command.env_remove("ANTHROPIC_API_KEY");
+    command.env_remove("OPENAI_API_KEY");
+    let output = command.output().expect("run failing canary");
+
+    assert!(!output.status.success(), "{}", output_context(&output));
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("FAIL canary deepseek"), "{stdout}");
+    assert!(
+        stdout.contains("ABORTED qa_slash_style deepseek reason=canary"),
+        "{stdout}"
+    );
+    assert!(
+        stdout.contains("SUMMARY pass=0 fail=1 skip=0 aborted=1"),
+        "{stdout}"
+    );
+}
+
+#[test]
+fn budget_reservation_aborts_before_spending() {
+    let output = run(
+        &[
+            "--scenario",
+            "canary",
+            "--provider",
+            "deepseek",
+            "--budget",
+            "0.01",
+            "--binary",
+            fixture(),
+            "--expected-source-commit",
+            COMMIT,
+        ],
+        true,
+    );
+
+    assert!(!output.status.success(), "{}", output_context(&output));
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("ABORTED canary deepseek reason=budget"),
+        "{stdout}"
+    );
+    assert!(
+        stdout.contains("SUMMARY pass=0 fail=0 skip=0 aborted=1"),
+        "{stdout}"
+    );
+}
