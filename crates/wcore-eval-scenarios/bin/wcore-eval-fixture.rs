@@ -15,6 +15,7 @@ fn main() {
     }
 
     let model = argument_value("--model").unwrap_or_default();
+    let fail_canary = std::env::var_os("WCORE_EVAL_FIXTURE_FAIL_CANARY").is_some();
 
     emit(&serde_json::json!({
         "type": "ready",
@@ -34,10 +35,19 @@ fn main() {
                     .get("msg_id")
                     .and_then(serde_json::Value::as_str)
                     .unwrap_or("fixture");
+                let is_canary = command
+                    .get("content")
+                    .and_then(serde_json::Value::as_str)
+                    .is_some_and(|prompt| prompt.contains("single word READY"));
+                let text = if fail_canary && is_canary {
+                    "WRONG"
+                } else {
+                    "READY"
+                };
                 emit(&serde_json::json!({
                     "type": "text_delta",
                     "msg_id": msg_id,
-                    "text": "READY"
+                    "text": text
                 }));
                 if model == "fixture-slow" {
                     std::thread::sleep(Duration::from_millis(250));

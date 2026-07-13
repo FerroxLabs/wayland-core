@@ -166,7 +166,7 @@ async fn execute(cli: Cli) -> i32 {
 
     if runnable_count == 0 {
         let skipped = print_skips(&plans);
-        println!("SUMMARY pass=0 fail=0 skip={skipped}");
+        println!("SUMMARY pass=0 fail=0 skip={skipped} aborted=0");
         return 0;
     }
 
@@ -178,64 +178,106 @@ async fn execute(cli: Cli) -> i32 {
     let mut passed = 0usize;
     let mut failed = 0usize;
     let skipped = print_skips(&plans);
+    let run_cells: Vec<_> = plans
+        .iter()
+        .flat_map(|(scenario, resolution, _)| {
+            resolution
+                .runnable
+                .iter()
+                .map(move |provider| (scenario, provider))
+        })
+        .collect();
+    let mut aborted = 0usize;
     let mut total_cost = 0.0;
-    'scenarios: for (scenario, resolution, _) in &plans {
-        for provider in &resolution.runnable {
-            if let Err(error) = verify_artifact_digest(&artifact) {
-                failed += 1;
-                println!(
-                    "FAIL {} {} artifact_integrity={error}",
-                    scenario.name, provider.id
-                );
-                continue;
-            }
+    for (index, (scenario, provider)) in run_cells.iter().enumerate() {
+        if cli
+            .budget
+            .is_some_and(|budget| total_cost + scenario.max_total_cost_usd > budget)
+        {
+            aborted += print_aborted(&run_cells[index..], "budget");
+            break;
+        }
+
+        let mut cell_failed = false;
+        if let Err(error) = verify_artifact_digest(&artifact) {
+            failed += 1;
+            cell_failed = true;
+            println!(
+                "FAIL {} {} artifact_integrity={error}",
+                scenario.name, provider.id
+            );
+        } else {
             let run_result = run_with_binary(scenario, provider, &artifact.path).await;
             if let Err(error) = verify_artifact_digest(&artifact) {
                 failed += 1;
+                cell_failed = true;
                 println!(
                     "FAIL {} {} artifact_integrity={error}",
                     scenario.name, provider.id
                 );
-                continue;
-            }
-            match run_result {
-                Ok(result) if result.passed => {
-                    total_cost += result.cost_usd;
-                    passed += 1;
-                    println!(
-                        "PASS {} {} os={} approval={}",
-                        scenario.name, provider.id, result.platform, result.approval
-                    );
+            } else {
+                match run_result {
+                    Ok(result) if result.passed => {
+                        total_cost += result.cost_usd;
+                        if cli.budget.is_some_and(|budget| total_cost > budget) {
+                            failed += 1;
+                            cell_failed = true;
+                            println!(
+                                "FAIL {} {} os={} approval={} reason=budget_overshoot",
+                                scenario.name, provider.id, result.platform, result.approval
+                            );
+                        } else {
+                            passed += 1;
+                            println!(
+                                "PASS {} {} os={} approval={}",
+                                scenario.name, provider.id, result.platform, result.approval
+                            );
+                        }
+                    }
+                    Ok(result) => {
+                        total_cost += result.cost_usd;
+                        failed += 1;
+                        cell_failed = true;
+                        println!(
+                            "FAIL {} {} os={} approval={} failures={}",
+                            scenario.name,
+                            provider.id,
+                            result.platform,
+                            result.approval,
+                            result.failures.len()
+                        );
+                    }
+                    Err(error) => {
+                        failed += 1;
+                        cell_failed = true;
+                        println!("FAIL {} {} runner={error}", scenario.name, provider.id);
+                    }
                 }
-                Ok(result) => {
-                    total_cost += result.cost_usd;
-                    failed += 1;
-                    println!(
-                        "FAIL {} {} os={} approval={} failures={}",
-                        scenario.name,
-                        provider.id,
-                        result.platform,
-                        result.approval,
-                        result.failures.len()
-                    );
-                }
-                Err(error) => {
-                    failed += 1;
-                    println!("FAIL {} {} runner={error}", scenario.name, provider.id);
-                }
             }
-            if let Some(budget) = cli.budget
-                && total_cost > budget
-            {
-                failed += 1;
-                eprintln!("wayland-eval: run cost ${total_cost:.6} exceeded --budget ${budget:.6}");
-                break 'scenarios;
-            }
+        }
+
+        if cell_failed && scenario.name == "canary" {
+            aborted += print_aborted(&run_cells[index + 1..], "canary");
+            break;
+        }
+        if cli.budget.is_some_and(|budget| total_cost > budget) {
+            aborted += print_aborted(&run_cells[index + 1..], "budget");
+            break;
         }
     }
 
-    println!("SUMMARY pass={passed} fail={failed} skip={skipped}");
-    i32::from(failed > 0)
+    println!("SUMMARY pass={passed} fail={failed} skip={skipped} aborted={aborted}");
+    i32::from(failed > 0 || aborted > 0)
+}
+
+fn print_aborted(
+    cells: &[(&Scenario, &wcore_eval_scenarios::providers::ProviderConfig)],
+    reason: &str,
+) -> usize {
+    for (scenario, provider) in cells {
+        println!("ABORTED {} {} reason={reason}", scenario.name, provider.id);
+    }
+    cells.len()
 }
 
 fn inspect_cli_artifact(cli: &Cli) -> Result<SealedBinaryArtifact, String> {
