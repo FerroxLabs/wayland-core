@@ -120,9 +120,9 @@ pub struct TimingEvidenceV1 {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProviderEvidenceV1 {
-    pub attempts: u64,
+    pub attempts: Evidence<u64>,
     pub typed_failures: Vec<String>,
-    pub retries: u64,
+    pub retries: Evidence<u64>,
     pub input_tokens: Evidence<u64>,
     pub output_tokens: Evidence<u64>,
     pub cache_read_tokens: Evidence<u64>,
@@ -153,10 +153,10 @@ pub struct DecisionEvidenceV1 {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BoundaryEvidenceV1 {
-    pub egress_attempted: Vec<String>,
-    pub egress_allowed: Vec<String>,
-    pub egress_denied: Vec<String>,
-    pub filesystem_deltas: Vec<FilesystemDeltaV1>,
+    pub egress_attempted: Evidence<Vec<String>>,
+    pub egress_allowed: Evidence<Vec<String>>,
+    pub egress_denied: Evidence<Vec<String>>,
+    pub filesystem_deltas: Evidence<Vec<FilesystemDeltaV1>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -493,12 +493,16 @@ impl EvidenceReceiptV1 {
                 shutdown_ms: Evidence::observed(result.execution.shutdown_time.as_millis() as u64),
             },
             provider: ProviderEvidenceV1 {
-                attempts: 1,
+                attempts: Evidence::Unavailable {
+                    code: "provider_attempts_not_emitted".to_string(),
+                },
                 typed_failures: failure_evidence
                     .iter()
                     .map(|failure| failure.code.clone())
                     .collect(),
-                retries: 0,
+                retries: Evidence::Unavailable {
+                    code: "provider_retries_not_emitted".to_string(),
+                },
                 input_tokens: Evidence::Unavailable {
                     code: "provider_usage_not_emitted".to_string(),
                 },
@@ -523,10 +527,18 @@ impl EvidenceReceiptV1 {
                 decision: result.approval.to_string(),
             }],
             boundaries: BoundaryEvidenceV1 {
-                egress_attempted: Vec::new(),
-                egress_allowed: Vec::new(),
-                egress_denied: Vec::new(),
-                filesystem_deltas: Vec::new(),
+                egress_attempted: Evidence::Unavailable {
+                    code: "egress_recorder_not_enabled".to_string(),
+                },
+                egress_allowed: Evidence::Unavailable {
+                    code: "egress_recorder_not_enabled".to_string(),
+                },
+                egress_denied: Evidence::Unavailable {
+                    code: "egress_recorder_not_enabled".to_string(),
+                },
+                filesystem_deltas: Evidence::Unavailable {
+                    code: "filesystem_delta_recorder_not_enabled".to_string(),
+                },
             },
             process: ProcessEvidenceV1 {
                 tree_sha256: result.execution.process_tree_sha256.clone(),
@@ -828,6 +840,8 @@ fn validate_body(body: &ReceiptBodyV1) -> Result<(), ReceiptError> {
     for failure in &body.provider.typed_failures {
         require_nonempty("provider.typed_failures", failure)?;
     }
+    validate_evidence("provider.attempts", &body.provider.attempts)?;
+    validate_evidence("provider.retries", &body.provider.retries)?;
     for tool in &body.tools {
         require_sha256("tools.call_id_sha256", &tool.call_id_sha256, 64)?;
         require_nonempty("tools.tool_name", &tool.tool_name)?;
@@ -849,10 +863,22 @@ fn validate_body(body: &ReceiptBodyV1) -> Result<(), ReceiptError> {
         require_nonempty("decisions.scope", &decision.scope)?;
         require_nonempty("decisions.decision", &decision.decision)?;
     }
-    for delta in &body.boundaries.filesystem_deltas {
-        require_sha256("filesystem.path_sha256", &delta.path_sha256, 64)?;
-        require_nonempty("filesystem.operation", &delta.operation)?;
-        validate_sha_evidence("filesystem.content_sha256", &delta.content_sha256)?;
+    validate_evidence(
+        "boundaries.egress_attempted",
+        &body.boundaries.egress_attempted,
+    )?;
+    validate_evidence("boundaries.egress_allowed", &body.boundaries.egress_allowed)?;
+    validate_evidence("boundaries.egress_denied", &body.boundaries.egress_denied)?;
+    validate_evidence(
+        "boundaries.filesystem_deltas",
+        &body.boundaries.filesystem_deltas,
+    )?;
+    if let Evidence::Observed { value: deltas } = &body.boundaries.filesystem_deltas {
+        for delta in deltas {
+            require_sha256("filesystem.path_sha256", &delta.path_sha256, 64)?;
+            require_nonempty("filesystem.operation", &delta.operation)?;
+            validate_sha_evidence("filesystem.content_sha256", &delta.content_sha256)?;
+        }
     }
     require_sha256("process.tree_sha256", &body.process.tree_sha256, 64)?;
     validate_evidence("process.peak_memory_bytes", &body.process.peak_memory_bytes)?;
@@ -1006,11 +1032,28 @@ fn check_expected(field: &str, expected: Option<&str>, observed: &str) -> Result
 
 fn gate_passed(body: &ReceiptBodyV1) -> bool {
     body.results.iter().all(|result| result.passed)
+        && matches!(&body.identity.build, Evidence::Observed { .. })
+        && evidence_observed(&body.provider.attempts)
+        && evidence_observed(&body.provider.retries)
+        && evidence_observed(&body.provider.input_tokens)
+        && evidence_observed(&body.provider.output_tokens)
+        && evidence_observed(&body.provider.cache_read_tokens)
+        && evidence_observed(&body.provider.cache_write_tokens)
+        && evidence_observed(&body.boundaries.egress_attempted)
+        && evidence_observed(&body.boundaries.egress_allowed)
+        && evidence_observed(&body.boundaries.egress_denied)
+        && evidence_observed(&body.boundaries.filesystem_deltas)
+        && evidence_observed(&body.process.peak_memory_bytes)
+        && evidence_observed(&body.process.peak_cpu_millis)
         && body.canary_scans.scan_complete
         && body.canary_scans.detections() == 0
         && matches!(body.process.orphan_count, Evidence::Observed { value: 0 })
         && body.recovery.unresolved_side_effects.is_empty()
         && body.assertions.iter().all(|assertion| assertion.passed)
+}
+
+fn evidence_observed<T>(evidence: &Evidence<T>) -> bool {
+    matches!(evidence, Evidence::Observed { .. })
 }
 
 fn require_nonempty(field: &str, value: &str) -> Result<(), ReceiptError> {

@@ -65,9 +65,9 @@ fn body() -> ReceiptBodyV1 {
             shutdown_ms: Evidence::observed(10),
         },
         provider: ProviderEvidenceV1 {
-            attempts: 1,
+            attempts: Evidence::observed(1),
             typed_failures: Vec::new(),
-            retries: 0,
+            retries: Evidence::observed(0),
             input_tokens: Evidence::observed(12),
             output_tokens: Evidence::observed(8),
             cache_read_tokens: Evidence::observed(0),
@@ -84,10 +84,10 @@ fn body() -> ReceiptBodyV1 {
             decision: "approve_all".to_string(),
         }],
         boundaries: BoundaryEvidenceV1 {
-            egress_attempted: Vec::new(),
-            egress_allowed: Vec::new(),
-            egress_denied: Vec::new(),
-            filesystem_deltas: Vec::new(),
+            egress_attempted: Evidence::observed(Vec::new()),
+            egress_allowed: Evidence::observed(Vec::new()),
+            egress_denied: Evidence::observed(Vec::new()),
+            filesystem_deltas: Evidence::observed(Vec::new()),
         },
         process: ProcessEvidenceV1 {
             tree_sha256: h64('f'),
@@ -149,6 +149,19 @@ fn local_receipt_is_valid_but_never_authoritative() {
         .expect("local receipt integrity must verify");
     assert_eq!(verified.authority, VerifiedAuthority::LocalNonAuthoritative);
     assert!(verified.gate_passed);
+}
+
+#[test]
+fn explicit_unavailable_measurements_cannot_satisfy_the_milestone_gate() {
+    let mut incomplete = body();
+    incomplete.boundaries.egress_attempted = Evidence::Unavailable {
+        code: "recorder_not_enabled".to_string(),
+    };
+    let receipt = EvidenceReceiptV1::local(incomplete).expect("honest local receipt");
+    let verified = ReceiptVerifier::new()
+        .verify(&receipt, &VerificationPolicy::default())
+        .expect("receipt remains structurally valid");
+    assert!(!verified.gate_passed);
 }
 
 #[test]

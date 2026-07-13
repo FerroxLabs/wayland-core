@@ -457,10 +457,10 @@ fn build_and_persist_receipt(
         scenario.max_total_cost_usd,
     )
     .map_err(|error| error.to_string())?;
-    let gate_passed = ReceiptVerifier::new()
+    ReceiptVerifier::new()
         .verify(&receipt, &VerificationPolicy::default())
-        .map_err(|error| error.to_string())?
-        .gate_passed;
+        .map_err(|error| error.to_string())?;
+    let cell_passed = receipt.body.results[0].passed;
 
     if let Some(report_dir) = &cli.report_dir {
         let forbidden_secrets = provider.resolved_key().into_iter().collect::<Vec<_>>();
@@ -472,7 +472,7 @@ fn build_and_persist_receipt(
             &reports,
         )?;
     }
-    Ok(gate_passed)
+    Ok(cell_passed)
 }
 
 fn persist_receipt_reports(
