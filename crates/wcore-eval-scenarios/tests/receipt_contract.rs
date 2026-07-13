@@ -8,7 +8,7 @@ use wcore_eval_scenarios::receipt::{
     CanaryScanEvidenceV1, CellResultV1, DecisionEvidenceV1, Evidence, EvidenceReceiptV1,
     IdentityEvidenceV1, PolicyEvidenceV1, ProcessEvidenceV1, ProviderEvidenceV1, ReceiptBodyV1,
     ReceiptError, ReceiptMetadataV1, ReceiptVerifier, RecoveryEvidenceV1, SummaryEvidenceV1,
-    TargetEvidenceV1, TimingEvidenceV1, VerificationPolicy, VerifiedAuthority,
+    TargetEvidenceV1, TimingEvidenceV1, ToolEvidenceV1, VerificationPolicy, VerifiedAuthority,
 };
 use wcore_eval_scenarios::report::{ReportRenderError, render_receipt_reports};
 use wcore_eval_scenarios::runner::{ExecutionEvidence, ScenarioResult};
@@ -162,6 +162,82 @@ fn explicit_unavailable_measurements_cannot_satisfy_the_milestone_gate() {
         .verify(&receipt, &VerificationPolicy::default())
         .expect("receipt remains structurally valid");
     assert!(!verified.gate_passed);
+}
+
+#[test]
+fn behavior_digest_excludes_volatile_execution_identity() {
+    let first = EvidenceReceiptV1::local(body()).expect("first receipt");
+    let mut repeated = body();
+    repeated.run_id = "run-002".to_string();
+    repeated.identity.build = Evidence::observed(BuildProvenanceV1 {
+        repository: "FerroxLabs/wayland-core".to_string(),
+        source_ref: "refs/heads/frontier/m0".to_string(),
+        workflow: "frontier-eval".to_string(),
+        invocation_id: "ci-456".to_string(),
+    });
+    repeated.timings.boot_ms = Evidence::observed(211);
+    repeated.timings.first_token_ms = Evidence::observed(77);
+    repeated.timings.completion_ms = Evidence::observed(399);
+    repeated.process.tree_sha256 = h64('9');
+    repeated.process.peak_memory_bytes = Evidence::observed(2048);
+    repeated.process.peak_cpu_millis = Evidence::observed(20);
+    repeated.results[0].wall_time_ms = 499;
+    repeated.summary.wall_time_ms = 499;
+    let repeated = EvidenceReceiptV1::local(repeated).expect("repeated receipt");
+
+    assert_ne!(first.body_sha256, repeated.body_sha256);
+    assert_eq!(
+        first.behavior_sha256().expect("first behavior digest"),
+        repeated
+            .behavior_sha256()
+            .expect("repeated behavior digest")
+    );
+}
+
+#[test]
+fn behavior_digest_binds_fixture_tool_and_result_semantics() {
+    let baseline = EvidenceReceiptV1::local(body()).expect("baseline receipt");
+    let baseline_digest = baseline.behavior_sha256().expect("baseline digest");
+
+    let mut changed_fixture = body();
+    changed_fixture.identity.fixture_sha256 = h64('8');
+    assert_ne!(
+        baseline_digest,
+        EvidenceReceiptV1::local(changed_fixture)
+            .expect("changed fixture receipt")
+            .behavior_sha256()
+            .expect("changed fixture digest")
+    );
+
+    let mut changed_tool = body();
+    changed_tool.tools.push(ToolEvidenceV1 {
+        call_id_sha256: h64('1'),
+        tool_name: "Write".to_string(),
+        request_sha256: h64('2'),
+        result_sha256: h64('3'),
+        duration_ms: Evidence::observed(12),
+        exit_state: "success".to_string(),
+        idempotency_key_sha256: Evidence::Unavailable {
+            code: "not_emitted".to_string(),
+        },
+    });
+    assert_ne!(
+        baseline_digest,
+        EvidenceReceiptV1::local(changed_tool)
+            .expect("changed tool receipt")
+            .behavior_sha256()
+            .expect("changed tool digest")
+    );
+
+    let mut changed_result = body();
+    changed_result.results[0].task = "different-task".to_string();
+    assert_ne!(
+        baseline_digest,
+        EvidenceReceiptV1::local(changed_result)
+            .expect("changed result receipt")
+            .behavior_sha256()
+            .expect("changed result digest")
+    );
 }
 
 #[test]
