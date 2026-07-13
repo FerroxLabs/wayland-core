@@ -1,7 +1,7 @@
 # Wayland Core Frontier Build Plan
 
 > **Authority:** Canonical technical build plan for the Wayland Core frontier program
-> **Status:** Cross-audited and conditionally approved; implementation has not started under this plan
+> **Status:** Cross-audited and approved; implementation active (live ownership via `wl`, completion via evidence receipts)
 > **Date:** 2026-07-13
 > **Baseline:** Wayland Core `112c91c03564d0d5fd2672dc0f76846bd8756a58`
 > **Companion evidence:** [evaluation charter](2026-07-13-wayland-core-frontier-evaluation-program.md) and [gap audit](2026-07-13-wayland-core-frontier-gap-audit-and-execution-plan.md)
