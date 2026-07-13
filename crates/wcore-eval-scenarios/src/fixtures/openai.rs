@@ -584,14 +584,33 @@ fn collect_semantic_leaf_hashes(
                 )?;
             }
         }
+        serde_json::Value::String(text) if text.contains('\n') => {
+            for (line, text) in text.split('\n').enumerate() {
+                insert_semantic_leaf_hash(
+                    &format!("{pointer}#line={line}"),
+                    &serde_json::Value::String(text.to_string()),
+                    workspace,
+                    hashes,
+                )?;
+            }
+        }
         _ => {
-            let encoded = serde_json::to_vec(value).map_err(|error| error.to_string())?;
-            let digest =
-                workspace_evidence::semantic_sha256(b"openai-request-leaf", &encoded, workspace)
-                    .map_err(|error| error.to_string())?;
-            hashes.insert(pointer.to_string(), digest);
+            insert_semantic_leaf_hash(pointer, value, workspace, hashes)?;
         }
     }
+    Ok(())
+}
+
+fn insert_semantic_leaf_hash(
+    pointer: &str,
+    value: &serde_json::Value,
+    workspace: &Path,
+    hashes: &mut BTreeMap<String, String>,
+) -> Result<(), String> {
+    let encoded = serde_json::to_vec(value).map_err(|error| error.to_string())?;
+    let digest = workspace_evidence::semantic_sha256(b"openai-request-leaf", &encoded, workspace)
+        .map_err(|error| error.to_string())?;
+    hashes.insert(pointer.to_string(), digest);
     Ok(())
 }
 
