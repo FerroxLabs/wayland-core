@@ -161,6 +161,51 @@ async fn cleanup_runs_after_a_successful_scenario() {
 }
 
 #[tokio::test]
+async fn capability_startup_events_after_ready_satisfy_frozen_gate() {
+    let scenario =
+        Scenario::new("capability_honesty", Category::Hardening).turn(Turn::new("finish"));
+
+    let result = run_with_binary(&scenario, &provider("fixture"), fixture())
+        .await
+        .expect("scenario completes");
+
+    assert!(
+        !result.failures.iter().any(|failure| matches!(
+            failure,
+            Failure::AssertionFailed { assertion, .. } if assertion == "CapabilityHonesty"
+        )),
+        "startup events emitted immediately after Ready were not captured: {:?}",
+        result.failures
+    );
+}
+
+#[tokio::test]
+async fn missing_capability_startup_event_fails_frozen_gate() {
+    let scenario =
+        Scenario::new("capability_honesty_missing", Category::Hardening).turn(Turn::new("finish"));
+
+    let result = run_with_binary(
+        &scenario,
+        &provider("fixture-missing-capability"),
+        fixture(),
+    )
+    .await
+    .expect("runner returns a failed scenario result");
+
+    assert!(
+        result.failures.iter().any(|failure| matches!(
+            failure,
+            Failure::AssertionFailed { assertion, observed }
+                if assertion == "CapabilityHonesty"
+                    && observed.contains("DelegateIsolation: missing declared")
+                    && observed.contains("activation proof rate 0.875")
+        )),
+        "missing startup proof must fail the frozen threshold: {:?}",
+        result.failures
+    );
+}
+
+#[tokio::test]
 async fn cleanup_runs_when_setup_fails() {
     let cleanups = Arc::new(AtomicUsize::new(0));
     let observed = Arc::clone(&cleanups);

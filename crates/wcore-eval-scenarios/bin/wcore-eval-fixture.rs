@@ -4,6 +4,9 @@ use std::io::{BufRead, Write};
 use std::time::Duration;
 
 use sha2::{Digest, Sha256};
+use wcore_protocol::events::{
+    CapabilityActivation, CapabilityId, CapabilityReasonCode, ProtocolEvent,
+};
 
 const SOURCE_COMMIT: &str = "0123456789abcdef0123456789abcdef01234567";
 
@@ -34,6 +37,7 @@ fn main() {
         "type": "ready",
         "capabilities": {"cost_attribution": true}
     }));
+    emit_capability_startup(&model);
 
     let mut completed_turns = 0u32;
     for line in std::io::stdin().lock().lines() {
@@ -140,6 +144,61 @@ fn main() {
             })),
             Some("stop") => break,
             _ => {}
+        }
+    }
+}
+
+fn emit_capability_startup(model: &str) {
+    let capabilities = [
+        (
+            CapabilityId::PricingRefresher,
+            CapabilityReasonCode::NoProductionConstructor,
+        ),
+        (
+            CapabilityId::MidFlightMonitor,
+            CapabilityReasonCode::RuntimePathUnwired,
+        ),
+        (
+            CapabilityId::CooldownTracker,
+            CapabilityReasonCode::NoProductionConstructor,
+        ),
+        (
+            CapabilityId::LearnedPolicy,
+            CapabilityReasonCode::RuntimePathUnwired,
+        ),
+        (
+            CapabilityId::SmartHandoff,
+            CapabilityReasonCode::DisabledByConfig,
+        ),
+        (
+            CapabilityId::DelegateIsolation,
+            CapabilityReasonCode::IsolationNotEnforced,
+        ),
+        (
+            CapabilityId::ProcedureSkillDrafting,
+            CapabilityReasonCode::DisabledByConfig,
+        ),
+        (
+            CapabilityId::LegacyAutoSkillDrafting,
+            CapabilityReasonCode::DisabledByConfig,
+        ),
+    ];
+
+    for (capability, reason) in capabilities {
+        if model == "fixture-missing-capability" && capability == CapabilityId::DelegateIsolation {
+            continue;
+        }
+        for activation in [
+            CapabilityActivation::stage(
+                capability,
+                wcore_protocol::events::CapabilityStage::Declared,
+            ),
+            CapabilityActivation::unavailable(capability, reason),
+        ] {
+            emit(
+                &serde_json::to_value(ProtocolEvent::CapabilityActivation { activation })
+                    .expect("serialize capability fixture event"),
+            );
         }
     }
 }

@@ -38,6 +38,7 @@
 
 pub mod artifact;
 pub mod assertions;
+mod capability_honesty;
 pub mod catalog;
 mod child_env;
 pub mod cost;

@@ -33,6 +33,7 @@ use thiserror::Error;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, Command};
 
+use crate::capability_honesty::CapabilityEvidence;
 use crate::child_env::ChildEnvironment;
 use crate::cost::CostReport;
 use crate::process_tree::ProcessTree;
@@ -583,6 +584,7 @@ async fn run_session_body(input: SessionRun<'_>) -> anyhow::Result<ScenarioResul
         provider_retries,
         provider_typed_failures,
         provider_usage,
+        capability_honesty_error,
     ) = match result {
         Ok(Ok(drive_out)) => (
             drive_out.turn_results,
@@ -600,6 +602,7 @@ async fn run_session_body(input: SessionRun<'_>) -> anyhow::Result<ScenarioResul
             drive_out.provider_retries,
             drive_out.provider_typed_failures,
             drive_out.provider_usage,
+            drive_out.capability_honesty_error,
         ),
         Ok(Err(e)) => {
             let shutdown_started = Instant::now();
@@ -745,6 +748,12 @@ async fn run_session_body(input: SessionRun<'_>) -> anyhow::Result<ScenarioResul
     let mut failures: Vec<Failure> = Vec::new();
     if let Some(err) = hit_internal_error {
         failures.push(Failure::RunnerError(err));
+    }
+    if let Some(observed) = capability_honesty_error {
+        failures.push(Failure::AssertionFailed {
+            assertion: "CapabilityHonesty".to_string(),
+            observed,
+        });
     }
     if let Some(error) = cleanup_error {
         failures.push(Failure::RunnerError(format!(
@@ -944,6 +953,7 @@ struct DriveOutput {
     provider_retries: Option<u64>,
     provider_typed_failures: Vec<String>,
     provider_usage: Option<ProviderUsageEvidence>,
+    capability_honesty_error: Option<String>,
 }
 
 #[derive(Debug, Error)]
@@ -1135,6 +1145,7 @@ async fn drive_session(
     // Cold-boot latency clock: from here (≈ just after spawn) to the `ready`
     // event = the engine's bootstrap time (a usability/perf metric).
     let drive_start = Instant::now();
+    let mut capability_evidence = CapabilityEvidence::default();
 
     // Consume engine bootstrap output up to AND INCLUDING the `ready` event
     // before sending the first user message, so we don't race bootstrap. We
@@ -1147,6 +1158,7 @@ async fn drive_session(
         for _ in 0..256 {
             match read_one_event(&mut reader, &redactor, &secret_detected).await? {
                 Some(ev) => {
+                    capability_evidence.capture(&ev);
                     if ev.get("type").and_then(Value::as_str) == Some("ready") {
                         saw_ready = true;
                         break;
@@ -1224,7 +1236,8 @@ async fn drive_session(
             // `config_changed` as the terminal event when a change happened,
             // and a no-op `info` as terminal otherwise. Bounded so neither
             // case can hang us.
-            for _ in 0..16 {
+            let mut response_events = 0usize;
+            while response_events < 16 {
                 match read_turn_event(
                     &mut reader,
                     turn_idx,
@@ -1236,7 +1249,12 @@ async fn drive_session(
                 .await?
                 {
                     Some(ev) => {
+                        capability_evidence.capture(&ev);
                         let ty = ev.get("type").and_then(Value::as_str).unwrap_or("");
+                        if ty == "capability_activation" {
+                            continue;
+                        }
+                        response_events += 1;
                         if ty == "config_changed" {
                             capture_config_changed(&ev, &mut info_events);
                             // Terminal for a successful change.
@@ -1317,6 +1335,7 @@ async fn drive_session(
                     break;
                 }
             };
+            capability_evidence.capture(&ev);
             // D2: wait for observable model/tool activity, then cancel the
             // active run future. The current event is still dispatched below,
             // so a triggering text delta remains visible to the evaluator.
@@ -1611,6 +1630,7 @@ async fn drive_session(
     loop {
         match read_one_event(&mut reader, &redactor, &secret_detected).await {
             Ok(Some(ev)) => {
+                capability_evidence.capture(&ev);
                 if let Some(c) = crate::cost::parse(&ev) {
                     cost = Some(c);
                 }
@@ -1641,6 +1661,7 @@ async fn drive_session(
         provider_retries,
         provider_typed_failures,
         provider_usage,
+        capability_honesty_error: capability_evidence.enforce_frozen_thresholds().err(),
     })
 }
 
