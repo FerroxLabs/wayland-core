@@ -506,7 +506,7 @@ enum TopCmd {
     },
     /// Anvil (gated forge) — forge a candidate that passes a REAL executable
     /// gate (tests / build / lint), then stamp a verified receipt. Requires
-    /// `[anvil] enabled = true`; kill-switched until the A1 slice completes.
+    /// ON by default; `[anvil] enabled = false` is the kill-switch. Empty gate config auto-detects the workspace suite.
     Forge(wcore_cli::anvil::ForgeArgs),
     /// v0.7.0 Task 1.C.1: print resolved project context from WAYLAND.md /
     /// AGENTS.md / .wayland/context.md / CLAUDE.md walking up from cwd.

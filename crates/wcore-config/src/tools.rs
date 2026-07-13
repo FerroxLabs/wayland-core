@@ -58,6 +58,12 @@ pub struct DeferColdConfig {
 
 impl DeferColdConfig {
     /// The high-frequency core loop tools plus the hydration tool.
+    ///
+    /// `Forge` rides hot deliberately (A1.9): its description carries the
+    /// smart-loop routing law ("iterate-until-verified with a real gate ->
+    /// Forge; judgment work -> Crucible"), and a router folded to a bare
+    /// catalog name is invisible - the model cannot route to a description
+    /// it never sees. Schema cost is one string field.
     pub fn default_hot_allowlist() -> Vec<String> {
         [
             "Read",
@@ -67,6 +73,7 @@ impl DeferColdConfig {
             "Grep",
             "Glob",
             "ToolSearch",
+            "Forge",
         ]
         .into_iter()
         .map(String::from)
