@@ -177,10 +177,15 @@ impl ClimbJournal {
             source: e,
         })?;
         line.push('\n');
+        // Open read+WRITE (NOT append): the torn-tail heal below calls `set_len`,
+        // which on Windows needs write-data access an append-only handle lacks
+        // (FILE_APPEND_DATA is not FILE_WRITE_DATA). We seek to the end ourselves
+        // before writing, so this is a true append on every platform. The journal
+        // is single-writer, so O_APPEND's atomicity is not needed.
         let mut file = OpenOptions::new()
             .read(true)
+            .write(true)
             .create(true)
-            .append(true)
             .open(&self.path)
             .map_err(|source| JournalError::Io {
                 path: self.path.clone(),
@@ -194,7 +199,9 @@ impl ClimbJournal {
             path: self.path.clone(),
             source,
         })?;
-        file.write_all(line.as_bytes())
+        // Write at the true end of file (heal may have left the cursor mid-file).
+        file.seek(SeekFrom::End(0))
+            .and_then(|_| file.write_all(line.as_bytes()))
             .and_then(|()| file.sync_all())
             .map_err(|source| JournalError::Io {
                 path: self.path.clone(),
