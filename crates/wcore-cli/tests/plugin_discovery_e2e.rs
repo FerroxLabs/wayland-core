@@ -25,7 +25,7 @@ use tempfile::TempDir;
 /// Spawn the release-or-debug binary with the minimal flags needed to
 /// reach `protocol_sink.emit_ready_with_plugins(...)` and return the
 /// parsed first line of stdout.
-fn first_ready_event() -> serde_json::Value {
+fn first_startup_events() -> [serde_json::Value; 2] {
     // Use a clean, empty cwd so no `.wayland-core.toml` from the dev
     // environment perturbs config resolution. Also isolates the
     // session db / skills lookup from polluting the host project.
@@ -56,16 +56,22 @@ fn first_ready_event() -> serde_json::Value {
     std::thread::spawn(move || {
         use std::io::{BufRead, BufReader};
         let mut reader = BufReader::new(&mut stdout);
-        let mut line = String::new();
-        let result = match reader.read_line(&mut line) {
-            Ok(0) => Err("child closed stdout before emitting Ready".to_string()),
-            Ok(_) => Ok(line),
-            Err(e) => Err(format!("stdout read error: {e}")),
-        };
+        let mut lines = Vec::with_capacity(2);
+        let result = (|| {
+            for _ in 0..2 {
+                let mut line = String::new();
+                match reader.read_line(&mut line) {
+                    Ok(0) => return Err("child closed stdout during startup events".to_string()),
+                    Ok(_) => lines.push(line),
+                    Err(e) => return Err(format!("stdout read error: {e}")),
+                }
+            }
+            Ok(lines)
+        })();
         let _ = tx.send(result);
     });
 
-    let first_line = rx
+    let lines = rx
         .recv_timeout(Duration::from_secs(30))
         .expect("did not receive any stdout line within 30s")
         .expect("stdout read failed");
@@ -96,13 +102,20 @@ fn first_ready_event() -> serde_json::Value {
         }
     }
 
-    serde_json::from_str(&first_line)
-        .unwrap_or_else(|e| panic!("first stdout line was not JSON ({e}): {first_line:?}"))
+    lines
+        .into_iter()
+        .map(|line| {
+            serde_json::from_str(&line)
+                .unwrap_or_else(|e| panic!("startup stdout line was not JSON ({e}): {line:?}"))
+        })
+        .collect::<Vec<_>>()
+        .try_into()
+        .expect("exactly two startup lines")
 }
 
 #[test]
 fn ready_event_has_plugin_capability_flags() {
-    let event = first_ready_event();
+    let [event, activation] = first_startup_events();
 
     assert_eq!(
         event["type"], "ready",
@@ -113,6 +126,10 @@ fn ready_event_has_plugin_capability_flags() {
     assert!(
         caps.is_object(),
         "Ready event missing capabilities object: {event}"
+    );
+    assert_eq!(
+        activation["type"], "capability_activation",
+        "capability activation must follow Ready, got: {activation}"
     );
 
     // The wayland-browser plugin must produce a true `browser_suite` flag.

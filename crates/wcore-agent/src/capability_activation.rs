@@ -8,6 +8,7 @@ use wcore_protocol::events::{
 /// implication.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct StartupCapabilityInputs {
+    pub smart_compaction_enabled: bool,
     pub smart_handoff_enabled: bool,
     pub skills_lifecycle_enabled: bool,
     pub memory_constructed: bool,
@@ -80,7 +81,7 @@ pub fn startup_activations(inputs: StartupCapabilityInputs) -> Vec<CapabilityAct
         CapabilityReasonCode::RuntimePathUnwired,
     );
 
-    if !inputs.smart_handoff_enabled {
+    if !inputs.smart_compaction_enabled || !inputs.smart_handoff_enabled {
         unavailable(
             &mut events,
             CapabilityId::SmartHandoff,
@@ -185,6 +186,7 @@ mod tests {
     #[test]
     fn default_startup_reports_all_eight_capabilities_honestly() {
         let events = startup_activations(StartupCapabilityInputs {
+            smart_compaction_enabled: false,
             smart_handoff_enabled: false,
             skills_lifecycle_enabled: false,
             memory_constructed: false,
@@ -206,6 +208,7 @@ mod tests {
     #[test]
     fn live_memory_paths_become_ready_but_dormant_assets_do_not() {
         let events = startup_activations(StartupCapabilityInputs {
+            smart_compaction_enabled: true,
             smart_handoff_enabled: true,
             skills_lifecycle_enabled: true,
             memory_constructed: true,
@@ -235,6 +238,7 @@ mod tests {
     #[test]
     fn configured_memory_failure_is_not_reported_as_disabled_or_ready() {
         let events = startup_activations(StartupCapabilityInputs {
+            smart_compaction_enabled: true,
             smart_handoff_enabled: true,
             skills_lifecycle_enabled: true,
             memory_constructed: false,
@@ -253,6 +257,28 @@ mod tests {
                 Some(CapabilityReasonCode::DependencyUnavailable)
             );
         }
+    }
+
+    #[test]
+    fn handoff_flag_cannot_claim_ready_while_smart_compaction_is_disabled() {
+        let events = startup_activations(StartupCapabilityInputs {
+            smart_compaction_enabled: false,
+            smart_handoff_enabled: true,
+            skills_lifecycle_enabled: false,
+            memory_constructed: true,
+            legacy_drafter_constructed: false,
+        });
+        assert_legal_chains(&events);
+        let statuses = final_statuses(&events);
+
+        assert_eq!(
+            statuses[&CapabilityId::SmartHandoff].stage,
+            CapabilityStage::Unavailable
+        );
+        assert_eq!(
+            statuses[&CapabilityId::SmartHandoff].reason,
+            Some(CapabilityReasonCode::DisabledByConfig)
+        );
     }
 
     #[test]

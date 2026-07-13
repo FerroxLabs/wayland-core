@@ -188,6 +188,28 @@ fn emit_capability_startup(model: &str) {
         if model == "fixture-missing-capability" && capability == CapabilityId::DelegateIsolation {
             continue;
         }
+        if model == "fixture-unconstructed-capability" && capability == CapabilityId::SmartHandoff {
+            for activation in [
+                CapabilityActivation::stage(
+                    capability,
+                    wcore_protocol::events::CapabilityStage::Declared,
+                ),
+                CapabilityActivation::stage(
+                    capability,
+                    wcore_protocol::events::CapabilityStage::Configured,
+                ),
+                CapabilityActivation::stage(
+                    capability,
+                    wcore_protocol::events::CapabilityStage::Ready,
+                ),
+            ] {
+                emit(
+                    &serde_json::to_value(ProtocolEvent::CapabilityActivation { activation })
+                        .expect("serialize capability fixture event"),
+                );
+            }
+            continue;
+        }
         for activation in [
             CapabilityActivation::stage(
                 capability,

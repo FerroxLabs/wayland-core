@@ -88,6 +88,36 @@ async fn bootstrap_builds_engine_with_model_in_prompt() {
     assert!(result.mcp_managers.is_empty());
 }
 
+#[tokio::test]
+#[serial]
+async fn default_bootstrap_does_not_report_smart_handoff_ready() {
+    let (_plugins, _env) = isolated_plugins();
+    let config = minimal_config();
+    assert!(!config.compact.smart_enabled);
+    assert!(config.compact.smart_handoff_to_memory);
+    let workdir = tempfile::TempDir::new().expect("workdir");
+    let result = AgentBootstrap::new(config, workdir.path().to_str().unwrap(), null_output())
+        .build()
+        .await
+        .expect("bootstrap should succeed");
+
+    let smart_handoff = result
+        .capability_activations
+        .iter()
+        .rfind(|activation| {
+            activation.capability == wcore_protocol::events::CapabilityId::SmartHandoff
+        })
+        .expect("smart handoff startup truth");
+    assert_eq!(
+        smart_handoff.stage,
+        wcore_protocol::events::CapabilityStage::Unavailable
+    );
+    assert_eq!(
+        smart_handoff.reason,
+        Some(wcore_protocol::events::CapabilityReasonCode::DisabledByConfig)
+    );
+}
+
 /// #141 audit item 5 — prove the env flag actually installs
 /// `HostDelegatedTransport` at the registration site: with
 /// `WAYLAND_SEND_MESSAGE_HOST_DELEGATE=1`, an executed `send_message` parks

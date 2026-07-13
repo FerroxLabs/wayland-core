@@ -1239,6 +1239,7 @@ impl AgentBootstrap {
         // flag is observability-only). When only `memory.enabled` is on we
         // open `Memory` + spawn the scheduler. When neither is on we stay
         // on `NullMemory`.
+        let smart_compaction_enabled = self.config.compact.smart_enabled;
         let smart_handoff_enabled = self.config.compact.smart_handoff_to_memory;
         let skills_lifecycle_enabled = self.config.observability.skills_lifecycle;
         let want_memory = self.config.memory.enabled || skills_lifecycle_enabled;
@@ -2394,6 +2395,7 @@ impl AgentBootstrap {
 
         let capability_activations = crate::capability_activation::startup_activations(
             crate::capability_activation::StartupCapabilityInputs {
+                smart_compaction_enabled,
                 smart_handoff_enabled,
                 skills_lifecycle_enabled,
                 memory_constructed,

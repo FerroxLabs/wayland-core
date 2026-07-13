@@ -206,6 +206,32 @@ async fn missing_capability_startup_event_fails_frozen_gate() {
 }
 
 #[tokio::test]
+async fn ready_without_construction_fails_frozen_capability_gate() {
+    let scenario = Scenario::new("capability_honesty_unconstructed", Category::Hardening)
+        .turn(Turn::new("finish"));
+
+    let result = run_with_binary(
+        &scenario,
+        &provider("fixture-unconstructed-capability"),
+        fixture(),
+    )
+    .await
+    .expect("runner returns a failed scenario result");
+
+    assert!(
+        result.failures.iter().any(|failure| matches!(
+            failure,
+            Failure::AssertionFailed { assertion, observed }
+                if assertion == "CapabilityHonesty"
+                    && observed.contains("SmartHandoff: illegal transition Configured -> Ready")
+                    && observed.contains("activation proof rate 0.875")
+        )),
+        "constructed stage must be required before ready: {:?}",
+        result.failures
+    );
+}
+
+#[tokio::test]
 async fn cleanup_runs_when_setup_fails() {
     let cleanups = Arc::new(AtomicUsize::new(0));
     let observed = Arc::clone(&cleanups);
