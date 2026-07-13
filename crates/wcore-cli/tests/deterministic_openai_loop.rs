@@ -293,7 +293,9 @@ async fn packaged_core_calls_a_streamable_http_mcp_tool() {
             .trace
             .entries
             .iter()
-            .any(|entry| entry.output.contains("CORE-MCP-ROUNDTRIP"))
+            .any(|entry| entry.output.contains("CORE-MCP-ROUNDTRIP")),
+        "trace did not retain MCP output: {:?}",
+        result.trace
     );
     assert_eq!(openai_observation.requests.len(), 2);
     assert!(openai_observation.complete());
