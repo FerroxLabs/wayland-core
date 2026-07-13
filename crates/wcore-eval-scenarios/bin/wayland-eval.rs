@@ -36,7 +36,7 @@ struct Cli {
     #[arg(long, conflicts_with = "scenario")]
     filter: Option<String>,
 
-    /// Provider override — `deepseek` | `anthropic` | `openai`.
+    /// Provider override — `deepseek` | `anthropic` | `openai` | `matrix`.
     #[arg(long, conflicts_with = "list")]
     provider: Option<String>,
 
@@ -98,11 +98,11 @@ async fn execute(cli: Cli) -> i32 {
             Err(error) => usage_error(error),
         };
     }
-    if cli.dry {
-        return usage_error("--dry cost estimation is not implemented");
-    }
-    if cli.budget.is_some_and(|budget| budget < 0.0) {
-        return usage_error("--budget must be non-negative");
+    if cli
+        .budget
+        .is_some_and(|budget| !budget.is_finite() || budget < 0.0)
+    {
+        return usage_error("--budget must be finite and non-negative");
     }
 
     let environment_provider = std::env::var("WCORE_EVAL_PROVIDER").ok();
@@ -137,6 +137,30 @@ async fn execute(cli: Cli) -> i32 {
         };
         runnable_count += resolution.runnable.len();
         plans.push((scenario, resolution, platform));
+    }
+
+    if cli.dry {
+        let skipped = print_skips(&plans);
+        let mut runnable = 0usize;
+        let mut upper_bound_usd = 0.0;
+        for (scenario, resolution, _) in &plans {
+            for provider in &resolution.runnable {
+                println!(
+                    "PLAN {} {} os={} approval={} max_cost_usd={:.6}",
+                    scenario.name,
+                    provider.id,
+                    Platform::current(),
+                    scenario.approval,
+                    scenario.max_total_cost_usd
+                );
+                runnable += 1;
+                upper_bound_usd += scenario.max_total_cost_usd;
+            }
+        }
+        println!(
+            "ESTIMATE upper_bound_usd={upper_bound_usd:.6} runnable={runnable} skip={skipped}"
+        );
+        return 0;
     }
 
     if runnable_count == 0 {

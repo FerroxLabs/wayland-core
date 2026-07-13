@@ -4,6 +4,7 @@
 //! tables, the API-key availability checks, the cost-rate table for
 //! pre-flight estimates, and the strict-mode SKIP/FAIL logic.
 
+use std::ffi::OsStr;
 use std::fmt;
 use std::str::FromStr;
 
@@ -123,16 +124,22 @@ impl ProviderAvailability {
 
     /// Snapshot credential presence without copying values into the run plan.
     pub fn from_environment() -> Self {
-        fn present(name: &str) -> bool {
-            std::env::var_os(name).is_some_and(|value| !value.is_empty())
-        }
-
         Self {
-            deepseek: present(ProviderId::DeepSeek.env_var()),
-            anthropic: present(ProviderId::Anthropic.env_var()),
-            openai: present(ProviderId::OpenAI.env_var()),
+            deepseek: credential_value_present(
+                std::env::var_os(ProviderId::DeepSeek.env_var()).as_deref(),
+            ),
+            anthropic: credential_value_present(
+                std::env::var_os(ProviderId::Anthropic.env_var()).as_deref(),
+            ),
+            openai: credential_value_present(
+                std::env::var_os(ProviderId::OpenAI.env_var()).as_deref(),
+            ),
         }
     }
+}
+
+fn credential_value_present(value: Option<&OsStr>) -> bool {
+    value.is_some_and(|value| !value.to_string_lossy().trim().is_empty())
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -149,10 +156,28 @@ pub struct ProviderResolution {
 
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum ResolveError {
-    #[error("unknown provider `{0}` (expected deepseek, anthropic, or openai)")]
+    #[error("unknown provider `{0}` (expected deepseek, anthropic, openai, or matrix)")]
     InvalidProvider(String),
     #[error("missing required provider credentials: {providers:?}")]
     MissingCredentials { providers: Vec<ProviderId> },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProviderOverride {
+    Provider(ProviderId),
+    Matrix,
+}
+
+impl FromStr for ProviderOverride {
+    type Err = ResolveError;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        if value == "matrix" {
+            Ok(Self::Matrix)
+        } else {
+            ProviderId::from_str(value).map(Self::Provider)
+        }
+    }
 }
 
 /// Parse provider overrides with the documented CLI-over-environment
@@ -160,10 +185,11 @@ pub enum ResolveError {
 pub fn provider_override(
     cli: Option<&str>,
     environment: Option<&str>,
-) -> Result<Option<ProviderId>, ResolveError> {
-    cli.filter(|value| !value.is_empty())
-        .or_else(|| environment.filter(|value| !value.is_empty()))
-        .map(ProviderId::from_str)
+) -> Result<Option<ProviderOverride>, ResolveError> {
+    cli.map(str::trim)
+        .filter(|value| !value.is_empty())
+        .or_else(|| environment.map(str::trim).filter(|value| !value.is_empty()))
+        .map(ProviderOverride::from_str)
         .transpose()
 }
 
@@ -190,6 +216,7 @@ impl ProviderConfig {
         self.api_key
             .clone()
             .or_else(|| std::env::var(self.id.env_var()).ok())
+            .filter(|value| !value.trim().is_empty())
     }
 }
 
@@ -199,7 +226,7 @@ impl ProviderConfig {
 /// selected provider is unavailable.
 pub fn resolve(
     choice: ProviderChoice,
-    provider_override: Option<ProviderId>,
+    provider_override: Option<ProviderOverride>,
     availability: ProviderAvailability,
     strict: bool,
 ) -> Result<ProviderResolution, ResolveError> {
@@ -209,17 +236,17 @@ pub fn resolve(
         ProviderId::OpenAI,
     ];
 
-    let selected: &[ProviderId] = if let Some(provider) = &provider_override {
-        std::slice::from_ref(provider)
-    } else {
-        match choice {
+    let selected: &[ProviderId] = match &provider_override {
+        Some(ProviderOverride::Provider(provider)) => std::slice::from_ref(provider),
+        Some(ProviderOverride::Matrix) => &MATRIX,
+        None => match choice {
             ProviderChoice::Default | ProviderChoice::ForceDeepSeek => {
                 std::slice::from_ref(&MATRIX[0])
             }
             ProviderChoice::ForceAnthropic => std::slice::from_ref(&MATRIX[1]),
             ProviderChoice::ForceOpenAI => std::slice::from_ref(&MATRIX[2]),
             ProviderChoice::Matrix => &MATRIX,
-        }
+        },
     };
 
     let missing: Vec<ProviderId> = selected
@@ -268,11 +295,11 @@ mod tests {
     fn override_precedence_is_cli_then_environment() {
         assert_eq!(
             provider_override(Some("openai"), Some("anthropic")),
-            Ok(Some(ProviderId::OpenAI))
+            Ok(Some(ProviderOverride::Provider(ProviderId::OpenAI)))
         );
         assert_eq!(
             provider_override(None, Some("anthropic")),
-            Ok(Some(ProviderId::Anthropic))
+            Ok(Some(ProviderOverride::Provider(ProviderId::Anthropic)))
         );
         assert_eq!(provider_override(None, None), Ok(None));
     }
@@ -318,7 +345,7 @@ mod tests {
 
         let overridden = resolve(
             ProviderChoice::ForceAnthropic,
-            Some(ProviderId::OpenAI),
+            Some(ProviderOverride::Provider(ProviderId::OpenAI)),
             ProviderAvailability::all(),
             false,
         )
