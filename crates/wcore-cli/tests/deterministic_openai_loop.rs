@@ -14,7 +14,7 @@ async fn run_script(
     steps: impl IntoIterator<Item = OpenAiStep>,
     expected: &'static str,
 ) -> (ScenarioResult, OpenAiFixtureObservation) {
-    run_script_with_approval(name, steps, expected, ApprovalPolicy::Yolo).await
+    run_script_with_approval(name, steps, expected, ApprovalPolicy::Yolo, false).await
 }
 
 async fn run_script_with_approval(
@@ -22,6 +22,7 @@ async fn run_script_with_approval(
     steps: impl IntoIterator<Item = OpenAiStep>,
     expected: &'static str,
     approval: ApprovalPolicy,
+    stop_mid_turn: bool,
 ) -> (ScenarioResult, OpenAiFixtureObservation) {
     let fixture = OpenAiFixtureScript::new(steps)
         .start()
@@ -30,14 +31,18 @@ async fn run_script_with_approval(
     let provider = ProviderConfig::new(ProviderId::OpenAI, "fixture-chat-v1")
         .with_api_key("fixture-local-token")
         .with_base_url(fixture.base_url());
+    let turn = Turn::new("Return the deterministic fixture answer.")
+        .max_time(Duration::from_secs(10))
+        .assert(Assertion::Contains(expected));
+    let turn = if stop_mid_turn {
+        turn.stop_mid_turn()
+    } else {
+        turn
+    };
     let scenario = Scenario::new(name, Category::Hardening)
         .max_total_time(Duration::from_secs(20))
         .approval(approval)
-        .turn(
-            Turn::new("Return the deterministic fixture answer.")
-                .max_time(Duration::from_secs(10))
-                .assert(Assertion::Contains(expected)),
-        );
+        .turn(turn);
 
     let result = run_with_binary(
         &scenario,
@@ -153,6 +158,7 @@ async fn packaged_core_executes_an_approved_write() {
         ],
         "approved write completed",
         ApprovalPolicy::ApproveAll,
+        false,
     )
     .await;
 
@@ -181,6 +187,7 @@ async fn packaged_core_blocks_a_denied_write() {
         ],
         "denied write handled",
         ApprovalPolicy::DenyAll,
+        false,
     )
     .await;
 
@@ -188,4 +195,22 @@ async fn packaged_core_blocks_a_denied_write() {
     assert_eq!(result.approval, ApprovalPolicy::DenyAll);
     assert_eq!(result.trace.count("Write"), 1);
     assert_eq!(observation.requests.len(), 2);
+}
+
+#[tokio::test]
+async fn packaged_core_cancels_an_active_stream() {
+    let started = std::time::Instant::now();
+    let (result, observation) = run_script_with_approval(
+        "packaged_openai_cancellation",
+        [OpenAiStep::text_then_stall("before cancellation", 10_000)],
+        "before cancellation",
+        ApprovalPolicy::Yolo,
+        true,
+    )
+    .await;
+
+    assert!(started.elapsed() < Duration::from_secs(3));
+    assert_eq!(result.final_text, "before cancellation");
+    assert!(result.execution.cleanup_verified);
+    assert_eq!(observation.requests.len(), 1);
 }
