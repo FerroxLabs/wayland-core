@@ -123,4 +123,26 @@ mod tests {
         let ev = json!(42);
         assert!(parse(&ev).is_none());
     }
+
+    #[test]
+    fn parse_rejects_negative_totals_and_rows() {
+        let negative_total = json!({
+            "type": "session_cost",
+            "total_cost_usd": -0.01,
+            "per_turn": [],
+        });
+        assert!(parse(&negative_total).is_none());
+
+        let negative_row = json!({
+            "type": "session_cost",
+            "total_cost_usd": 0.01,
+            "per_turn": [{
+                "turn": 0,
+                "model": "fixture",
+                "provider": "deepseek",
+                "cost_usd": -0.01,
+            }],
+        });
+        assert!(parse(&negative_row).is_none());
+    }
 }

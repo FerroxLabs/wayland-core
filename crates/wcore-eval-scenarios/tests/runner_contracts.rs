@@ -91,3 +91,33 @@ async fn cleanup_runs_when_setup_fails() {
     assert!(error.to_string().contains("scenario setup failed"));
     assert_eq!(cleanups.load(Ordering::SeqCst), 1);
 }
+
+#[tokio::test]
+async fn latest_multi_turn_cost_aggregate_wins() {
+    let scenario = Scenario::new("latest_cost", Category::Hardening)
+        .turn(Turn::new("first"))
+        .turn(Turn::new("second"));
+
+    let result = run_with_binary(&scenario, &provider("fixture-cost"), fixture())
+        .await
+        .expect("scenario completes");
+
+    assert_eq!(result.cost_usd, 0.02);
+}
+
+#[tokio::test]
+async fn missing_cost_evidence_fails_closed() {
+    let scenario =
+        Scenario::new("missing_cost", Category::Hardening).turn(Turn::new("no accounting"));
+
+    let result = run_with_binary(&scenario, &provider("fixture-no-cost"), fixture())
+        .await
+        .expect("runner returns a failed result");
+
+    assert!(
+        result
+            .failures
+            .iter()
+            .any(|failure| matches!(failure, Failure::CostMissing))
+    );
+}
