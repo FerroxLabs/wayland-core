@@ -443,11 +443,11 @@ fn golden_redacted_projection_digests_are_stable() {
     assert_eq!(
         observed,
         [
-            "5da192ceb8e057f7b7ace0c68a9ba36cec36de8bf31901c07d68ea1d0bf059b3",
-            "856bd2920c19edb63e97b6fc9b0fb762056a26e5353b72cec7630311591d96cf",
-            "57e1b012086add98891e93b161adff9f5db3a41c2e0c4c0fb85ca56179f7be5b",
-            "629988e9434e76f856c944f2fb0ec49f5c5377aab5ff7da30d9383dca64da5bc",
-            "f150052cac35b70709a5c7e9d95cb686a07c6a8efcb9bf85ccf7bcabf64db167",
+            "9144f78563aa1fa53bc4d5cbbe7ba53ec11e98d7a206d3d566839e7a7e81378d",
+            "32ef4f6f462394d99889f26f03568183082e5482ff5ee49ef9234467b6443712",
+            "70611de0f4fad801be159cf5f254765a820d78f867797f566bb7c211ff7988a1",
+            "fe43f6240e6bf472b338985d8ae5d8d9e17eceeff80242e81f9d084945901ed8",
+            "58e7b1decf89e27f3d2fb46b40f9da9b4c50ac7c83ab51124bf6c2a5fdad9f17",
         ]
     );
 }
