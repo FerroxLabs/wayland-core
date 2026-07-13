@@ -2,6 +2,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use ed25519_dalek::SigningKey;
+use sha2::{Digest, Sha256};
 use wcore_eval_scenarios::receipt::{
     AssertionEvidenceV1, AuthorityClaimV1, BoundaryEvidenceV1, BuildProvenanceV1,
     CanaryScanEvidenceV1, CellResultV1, Evidence, EvidenceReceiptV1, IdentityEvidenceV1,
@@ -378,4 +379,30 @@ fn parser_accepts_additive_v1_fields_and_rejects_ambiguous_json() {
             Err(ReceiptError::InvalidJson(_))
         ));
     }
+}
+
+#[test]
+fn golden_redacted_projection_digests_are_stable() {
+    let mut failed = body();
+    failed.results[0].passed = false;
+    failed.results[0]
+        .failures
+        .push(wcore_eval_scenarios::receipt::FailureEvidenceV1 {
+            code: "runner_error".to_string(),
+            detail_sha256: Evidence::observed(h64('1')),
+        });
+    failed.summary.passed = 0;
+    failed.summary.failed = 1;
+    let receipt = EvidenceReceiptV1::local(failed).expect("golden receipt");
+    let reports = render_receipt_reports(&receipt, &[]).expect("golden projections");
+    let observed = [
+        reports.json,
+        reports.jsonl,
+        reports.junit,
+        reports.console,
+        reports.markdown,
+    ]
+    .map(|report| format!("{:x}", Sha256::digest(report.as_bytes())));
+
+    assert_eq!(observed, ["pending"; 5]);
 }
