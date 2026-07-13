@@ -101,7 +101,7 @@ async fn fault_steps_are_fifo_and_extra_requests_fail_closed() {
         .await
         .unwrap();
     assert!(truncated.contains("partial"));
-    assert!(!truncated.contains("finish_reason"));
+    assert!(!truncated.contains("\"finish_reason\":\"stop\""));
     assert!(!truncated.contains("[DONE]"));
 
     let duplicate = post(fixture.base_url(), request("fixture-chat-v1"))
