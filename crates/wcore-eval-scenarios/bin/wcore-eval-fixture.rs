@@ -85,6 +85,14 @@ fn main() {
                 if model == "fixture-steps" {
                     for step in 0..2 {
                         emit(&serde_json::json!({
+                            "type": "tool_request",
+                            "call_id": format!("fixture-{step}"),
+                            "tool": {
+                                "name": "Read",
+                                "args": {"path": format!("fixture-{step}.txt")}
+                            }
+                        }));
+                        emit(&serde_json::json!({
                             "type": "tool_result",
                             "call_id": format!("fixture-{step}"),
                             "tool_name": "Read",
