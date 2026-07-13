@@ -42,6 +42,7 @@
 
 mod client;
 mod error;
+mod observer;
 mod policy;
 mod request;
 mod url_allow;
@@ -50,6 +51,10 @@ pub use client::{
     CONNECT_TIMEOUT, EgressClient, EgressClientBuilder, READ_TIMEOUT, TOOL_REQUEST_TIMEOUT,
 };
 pub use error::EgressError;
+pub use observer::{
+    BoundedEgressRecorder, EgressDestination, EgressEvent, EgressObserver, EgressOutcome,
+    EgressRecorderSnapshot, EgressTransportErrorClass, NoopEgressObserver, SharedEgressObserver,
+};
 pub use policy::{
     AllowAllPolicy, EgressDecision, EgressPolicy, GlobalDefaultPolicy, SharedPolicy,
     default_policy, global_policy_installed, install_global_policy,
@@ -107,6 +112,28 @@ mod tests {
             EgressDecision::Deny {
                 reason: "denied by test policy".into(),
             }
+        }
+    }
+
+    #[derive(Debug)]
+    struct PendingPolicy {
+        entered: Arc<tokio::sync::Notify>,
+    }
+
+    #[async_trait::async_trait]
+    impl EgressPolicy for PendingPolicy {
+        async fn check(&self, _request: &reqwest::Request) -> EgressDecision {
+            self.entered.notify_one();
+            std::future::pending().await
+        }
+    }
+
+    #[derive(Debug)]
+    struct PanickingObserver;
+
+    impl EgressObserver for PanickingObserver {
+        fn observe(&self, _event: EgressEvent) {
+            panic!("observer failure must not affect egress");
         }
     }
 
@@ -297,6 +324,239 @@ mod tests {
             .await
             .expect("body decodes");
         assert_eq!(body, "hello");
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn observer_records_one_normalized_event_for_an_allowed_request() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+
+        const SECRET: &str = "WCORE-CANARY-allowed-7a2d";
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            if let Ok((mut sock, _)) = listener.accept().await {
+                let mut buf = [0u8; 2048];
+                let _ = sock.read(&mut buf).await;
+                let resp = "HTTP/1.1 204 No Content\r\nContent-Length: 0\r\n\r\n";
+                let _ = sock.write_all(resp.as_bytes()).await;
+                let _ = sock.flush().await;
+            }
+        });
+
+        let recorder = Arc::new(BoundedEgressRecorder::new(4));
+        let client = EgressClient::tool().with_observer(recorder.clone());
+        let response = client
+            .post(format!("http://{addr}/private/{SECRET}?token={SECRET}"))
+            .bearer_auth(SECRET)
+            .body(SECRET)
+            .send()
+            .await
+            .expect("request completes");
+        assert_eq!(response.status().as_u16(), 204);
+
+        let snapshot = recorder.snapshot();
+        assert_eq!(snapshot.dropped_events, 0);
+        assert_eq!(snapshot.events.len(), 1);
+        let event = &snapshot.events[0];
+        assert_eq!(event.attempt_id, 1);
+        assert_eq!(event.method, "POST");
+        assert_eq!(event.destination.scheme, "http");
+        assert_eq!(event.destination.host, "127.0.0.1");
+        assert_eq!(event.destination.effective_port, Some(addr.port()));
+        assert_eq!(event.destination.path_query_sha256.len(), 64);
+        assert_eq!(event.outcome, EgressOutcome::HttpResponse { status: 204 });
+        assert!(!format!("{event:?}").contains(SECRET));
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn denied_request_records_one_event_without_network_io() {
+        use tokio::net::TcpListener;
+
+        const SECRET: &str = "WCORE-CANARY-denied-b61e";
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let recorder = Arc::new(BoundedEgressRecorder::new(4));
+        let client = EgressClient::tool()
+            .with_policy(Arc::new(DenyAll))
+            .with_observer(recorder.clone());
+
+        let error = client
+            .get(format!("http://{addr}/{SECRET}?secret={SECRET}"))
+            .send()
+            .await
+            .expect_err("DenyAll must stop the request");
+        assert!(error.is_denied());
+        let accepted = tokio::time::timeout(Duration::from_millis(150), listener.accept()).await;
+        assert!(accepted.is_err(), "denial must precede network I/O");
+
+        let snapshot = recorder.snapshot();
+        assert_eq!(snapshot.dropped_events, 0);
+        assert_eq!(snapshot.events.len(), 1);
+        assert_eq!(snapshot.events[0].outcome, EgressOutcome::Denied);
+        assert!(!format!("{:?}", snapshot.events[0]).contains(SECRET));
+        assert!(!format!("{:?}", snapshot.events[0]).contains("denied by test policy"));
+    }
+
+    #[tokio::test]
+    async fn transport_failure_records_one_stable_error_class() {
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        drop(listener);
+
+        let recorder = Arc::new(BoundedEgressRecorder::new(4));
+        let client = EgressClient::builder()
+            .connect_timeout(Duration::from_secs(1))
+            .timeout(Duration::from_secs(2))
+            .observer(recorder.clone())
+            .build()
+            .expect("client builds");
+        let error = client
+            .get(format!("http://{addr}/"))
+            .send()
+            .await
+            .expect_err("closed listener must refuse the connection");
+        assert!(matches!(error, EgressError::Transport(_)));
+
+        let snapshot = recorder.snapshot();
+        assert_eq!(snapshot.events.len(), 1);
+        assert_eq!(
+            snapshot.events[0].outcome,
+            EgressOutcome::TransportError {
+                class: EgressTransportErrorClass::Connect,
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn client_and_builder_clones_share_observer_and_attempt_ids() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            for _ in 0..3 {
+                if let Ok((mut sock, _)) = listener.accept().await {
+                    let mut buf = [0u8; 1024];
+                    let _ = sock.read(&mut buf).await;
+                    let resp = "HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+                    let _ = sock.write_all(resp.as_bytes()).await;
+                    let _ = sock.flush().await;
+                }
+            }
+        });
+
+        let recorder = Arc::new(BoundedEgressRecorder::new(4));
+        let client = EgressClient::tool().with_observer(recorder.clone());
+        let cloned_client = client.clone();
+        let first = client.get(format!("http://{addr}/clone"));
+        let retry = first.try_clone().expect("empty request body is cloneable");
+        first.send().await.expect("first request completes");
+        retry.send().await.expect("cloned request completes");
+        cloned_client
+            .get(format!("http://{addr}/client-clone"))
+            .send()
+            .await
+            .expect("request from cloned client completes");
+
+        let snapshot = recorder.snapshot();
+        assert_eq!(snapshot.events.len(), 3);
+        assert_eq!(snapshot.events[0].attempt_id, 1);
+        assert_eq!(snapshot.events[1].attempt_id, 2);
+        assert_eq!(snapshot.events[2].attempt_id, 3);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn cancellation_while_policy_is_pending_records_before_decision() {
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let recorder = Arc::new(BoundedEgressRecorder::new(4));
+        let client = EgressClient::tool()
+            .with_policy(Arc::new(PendingPolicy {
+                entered: entered.clone(),
+            }))
+            .with_observer(recorder.clone());
+
+        let request = tokio::spawn(client.get("http://127.0.0.1:1/pending").send());
+        tokio::time::timeout(Duration::from_secs(2), entered.notified())
+            .await
+            .expect("policy check starts");
+        request.abort();
+        let _ = request.await;
+
+        let snapshot = recorder.snapshot();
+        assert_eq!(snapshot.events.len(), 1);
+        assert_eq!(
+            snapshot.events[0].outcome,
+            EgressOutcome::AbandonedBeforeDecision
+        );
+    }
+
+    #[tokio::test]
+    async fn cancellation_after_allow_records_after_allow() {
+        use tokio::io::AsyncReadExt;
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let accepted = Arc::new(tokio::sync::Notify::new());
+        let server_accepted = accepted.clone();
+        let server = tokio::spawn(async move {
+            if let Ok((mut sock, _)) = listener.accept().await {
+                let mut buf = [0u8; 1024];
+                let _ = sock.read(&mut buf).await;
+                server_accepted.notify_one();
+                std::future::pending::<()>().await;
+            }
+        });
+
+        let recorder = Arc::new(BoundedEgressRecorder::new(4));
+        let client = EgressClient::tool().with_observer(recorder.clone());
+        let request = tokio::spawn(client.get(format!("http://{addr}/pending")).send());
+        tokio::time::timeout(Duration::from_secs(2), accepted.notified())
+            .await
+            .expect("server accepts request");
+        request.abort();
+        let _ = request.await;
+
+        let snapshot = recorder.snapshot();
+        assert_eq!(snapshot.events.len(), 1);
+        assert_eq!(
+            snapshot.events[0].outcome,
+            EgressOutcome::AbandonedAfterAllow
+        );
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn panicking_observer_does_not_change_successful_request() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            if let Ok((mut sock, _)) = listener.accept().await {
+                let mut buf = [0u8; 1024];
+                let _ = sock.read(&mut buf).await;
+                let resp = "HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n";
+                let _ = sock.write_all(resp.as_bytes()).await;
+                let _ = sock.flush().await;
+            }
+        });
+
+        let response = EgressClient::tool()
+            .with_observer(Arc::new(PanickingObserver))
+            .get(format!("http://{addr}/"))
+            .send()
+            .await
+            .expect("observer panic must be fail-open");
+        assert_eq!(response.status().as_u16(), 200);
         server.abort();
     }
 }

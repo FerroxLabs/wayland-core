@@ -9,9 +9,14 @@
 //! 1:1 to reqwest so call sites read unchanged.
 
 use std::fmt::Display;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use crate::error::EgressError;
+use crate::observer::{
+    EgressAttemptGuard, EgressOutcome, SharedEgressObserver, classify_transport_error,
+};
 use crate::policy::{EgressDecision, SharedPolicy};
 
 /// Builds and sends a single outbound request through the egress chokepoint.
@@ -22,6 +27,8 @@ use crate::policy::{EgressDecision, SharedPolicy};
 pub struct EgressRequestBuilder {
     client: reqwest::Client,
     policy: SharedPolicy,
+    observer: SharedEgressObserver,
+    next_attempt_id: Arc<AtomicU64>,
     inner: reqwest::RequestBuilder,
 }
 
@@ -29,11 +36,15 @@ impl EgressRequestBuilder {
     pub(crate) fn new(
         client: reqwest::Client,
         policy: SharedPolicy,
+        observer: SharedEgressObserver,
+        next_attempt_id: Arc<AtomicU64>,
         inner: reqwest::RequestBuilder,
     ) -> Self {
         Self {
             client,
             policy,
+            observer,
+            next_attempt_id,
             inner,
         }
     }
@@ -116,6 +127,8 @@ impl EgressRequestBuilder {
         self.inner.try_clone().map(|inner| Self {
             client: self.client.clone(),
             policy: self.policy.clone(),
+            observer: self.observer.clone(),
+            next_attempt_id: self.next_attempt_id.clone(),
             inner,
         })
     }
@@ -127,9 +140,30 @@ impl EgressRequestBuilder {
     /// circuits the network call entirely.
     pub async fn send(self) -> Result<reqwest::Response, EgressError> {
         let request = self.inner.build()?;
+        let attempt_id = self.next_attempt_id.fetch_add(1, Ordering::Relaxed);
+        let mut observation = EgressAttemptGuard::new(self.observer.clone(), attempt_id, &request);
         match self.policy.check(&request).await {
-            EgressDecision::Allow => Ok(self.client.execute(request).await?),
-            EgressDecision::Deny { reason } => Err(EgressError::Denied(reason)),
+            EgressDecision::Allow => {
+                observation.mark_allowed();
+                match self.client.execute(request).await {
+                    Ok(response) => {
+                        observation.finish(EgressOutcome::HttpResponse {
+                            status: response.status().as_u16(),
+                        });
+                        Ok(response)
+                    }
+                    Err(error) => {
+                        observation.finish(EgressOutcome::TransportError {
+                            class: classify_transport_error(&error),
+                        });
+                        Err(EgressError::Transport(error))
+                    }
+                }
+            }
+            EgressDecision::Deny { reason } => {
+                observation.finish(EgressOutcome::Denied);
+                Err(EgressError::Denied(reason))
+            }
         }
     }
 }
