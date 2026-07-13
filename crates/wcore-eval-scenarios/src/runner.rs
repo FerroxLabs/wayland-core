@@ -28,6 +28,7 @@ use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 use thiserror::Error;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, Command};
@@ -71,6 +72,18 @@ pub struct ScenarioResult {
     /// acknowledgements like "style updated", mode changes, engine notices).
     /// Asserted via [`crate::assertions::Assertion::InfoContains`].
     pub info_events: Vec<String>,
+    pub execution: ExecutionEvidence,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ExecutionEvidence {
+    pub config_sha256: String,
+    pub sandbox_backend: String,
+    pub process_tree_sha256: String,
+    pub containment_authoritative: bool,
+    pub cleanup_verified: bool,
+    pub artifact_scan_complete: bool,
+    pub shutdown_time: Duration,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -354,7 +367,26 @@ pub(crate) async fn run_session_in(
     // setup-dependent scenario silently degraded; D6/D7/coverage need it.
     let outcome = match &scenario.setup {
         Some(setup) => match setup(cwd) {
-            Ok(()) => {
+            Ok(()) => match tempenv::config_sha256(cwd) {
+                Ok(config_sha256) => {
+                    run_session_body(
+                        scenario,
+                        provider,
+                        bin,
+                        cwd,
+                        wayland_home,
+                        secret.as_deref(),
+                        &redactor,
+                        config_sha256,
+                    )
+                    .await
+                }
+                Err(error) => Err(anyhow::anyhow!("could not hash effective config: {error}")),
+            },
+            Err(error) => Err(anyhow::anyhow!("scenario setup failed: {error}")),
+        },
+        None => match tempenv::config_sha256(cwd) {
+            Ok(config_sha256) => {
                 run_session_body(
                     scenario,
                     provider,
@@ -363,23 +395,12 @@ pub(crate) async fn run_session_in(
                     wayland_home,
                     secret.as_deref(),
                     &redactor,
+                    config_sha256,
                 )
                 .await
             }
-            Err(error) => Err(anyhow::anyhow!("scenario setup failed: {error}")),
+            Err(error) => Err(anyhow::anyhow!("could not hash effective config: {error}")),
         },
-        None => {
-            run_session_body(
-                scenario,
-                provider,
-                bin,
-                cwd,
-                wayland_home,
-                secret.as_deref(),
-                &redactor,
-            )
-            .await
-        }
     };
 
     let cleanup_error = scenario
@@ -403,6 +424,7 @@ pub(crate) async fn run_session_in(
     let artifact_scan = redactor.remove_contaminated_files(cwd);
     let result = match (result, artifact_scan) {
         (Ok(mut result), Ok(contaminated)) => {
+            result.execution.artifact_scan_complete = true;
             for path in contaminated {
                 result.failures.push(Failure::SecretDetected {
                     sink: format!("artifact:{}", path.display()),
@@ -412,6 +434,7 @@ pub(crate) async fn run_session_in(
             Ok(result)
         }
         (Ok(mut result), Err(error)) => {
+            result.execution.artifact_scan_complete = false;
             result.failures.push(Failure::RunnerError(format!(
                 "artifact secret scan failed: {error}"
             )));
@@ -436,11 +459,14 @@ async fn run_session_body(
     wayland_home: Option<&std::path::Path>,
     secret: Option<&str>,
     redactor: &SecretRedactor,
+    config_sha256: String,
 ) -> anyhow::Result<ScenarioResult> {
     let start = Instant::now();
 
     let mut process_tree = ProcessTree::prepare()
         .map_err(|error| anyhow::anyhow!("process containment unavailable: {error}"))?;
+    let sandbox_backend = process_tree.backend_name().to_string();
+    let containment_authoritative = process_tree.is_authoritative();
 
     let mut child = spawn_for_run_with_secret(
         bin,
@@ -455,6 +481,14 @@ async fn run_session_body(
     process_tree
         .bind(&child)
         .map_err(|error| anyhow::anyhow!("could not bind evaluator child: {error}"))?;
+    let process_tree_sha256 = format!(
+        "{:x}",
+        Sha256::digest(format!(
+            "{}:{}",
+            sandbox_backend,
+            process_tree.root_pid().unwrap_or_default()
+        ))
+    );
 
     // Detach stderr first so we never deadlock on a full pipe.
     let stderr = child.stderr.take().expect("piped stderr");
@@ -487,7 +521,10 @@ async fn run_session_body(
                 drive_out.info_events,
             ),
             Ok(Err(e)) => {
+                let shutdown_started = Instant::now();
                 let cleanup_error = process_tree.terminate(&mut child).await.err();
+                let cleanup_verified = cleanup_error.is_none();
+                let shutdown_time = shutdown_started.elapsed();
                 stderr_cap.finish().await;
                 let stderr_tail = stderr_cap.snapshot();
                 let failure = e.downcast_ref::<TurnTimeout>().map_or_else(
@@ -520,12 +557,24 @@ async fn run_session_body(
                     workdir: cwd.to_path_buf(),
                     boot_time: Duration::ZERO,
                     info_events: Vec::new(),
+                    execution: ExecutionEvidence {
+                        config_sha256,
+                        sandbox_backend,
+                        process_tree_sha256,
+                        containment_authoritative,
+                        cleanup_verified,
+                        artifact_scan_complete: false,
+                        shutdown_time,
+                    },
                 });
             }
             Err(_elapsed) => {
                 // M-1: timeout fired. Kill explicitly, reap, then record
                 // Hung with the stderr tail snapshot.
+                let shutdown_started = Instant::now();
                 let cleanup_error = process_tree.terminate(&mut child).await.err();
+                let cleanup_verified = cleanup_error.is_none();
+                let shutdown_time = shutdown_started.elapsed();
                 stderr_cap.finish().await;
                 let stderr_tail = stderr_cap.snapshot();
                 let mut failures = vec![Failure::Hung {
@@ -553,6 +602,15 @@ async fn run_session_body(
                     workdir: cwd.to_path_buf(),
                     boot_time: Duration::ZERO,
                     info_events: Vec::new(),
+                    execution: ExecutionEvidence {
+                        config_sha256,
+                        sandbox_backend,
+                        process_tree_sha256,
+                        containment_authoritative,
+                        cleanup_verified,
+                        artifact_scan_complete: false,
+                        shutdown_time,
+                    },
                 });
             }
         };
@@ -560,6 +618,7 @@ async fn run_session_body(
     // Normal-path child shutdown. The drive loop already sent `stop`
     // and consumed the trailing `session_cost`; the child should exit
     // promptly. Give a short grace, then kill if it lingers.
+    let shutdown_started = Instant::now();
     let shutdown = tokio::time::timeout(Duration::from_secs(8), child.wait()).await;
     let (exit_code, cleanup_error) = match shutdown {
         Ok(Ok(status)) => (
@@ -576,6 +635,8 @@ async fn run_session_body(
             (-1, cleanup_error)
         }
     };
+    let cleanup_verified = cleanup_error.is_none();
+    let shutdown_time = shutdown_started.elapsed();
 
     stderr_cap.finish().await;
     let stderr_tail = stderr_cap.snapshot();
@@ -708,6 +769,15 @@ async fn run_session_body(
         workdir: cwd.to_path_buf(),
         boot_time,
         info_events,
+        execution: ExecutionEvidence {
+            config_sha256,
+            sandbox_backend,
+            process_tree_sha256,
+            containment_authoritative,
+            cleanup_verified,
+            artifact_scan_complete: false,
+            shutdown_time,
+        },
     };
     let mut result_level_failures: Vec<Failure> = Vec::new();
     for turn_def in &scenario.turns {

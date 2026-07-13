@@ -22,6 +22,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use sha2::{Digest, Sha256};
 use tempfile::TempDir;
 
 use crate::providers::ProviderConfig;
@@ -123,6 +124,11 @@ impl TempEnv {
     pub fn sessions_dir(&self) -> &Path {
         &self.sessions_dir
     }
+}
+
+pub(crate) fn config_sha256(root: &Path) -> anyhow::Result<String> {
+    let config = fs::read(root.join(".wayland-core").join("config.toml"))?;
+    Ok(format!("{:x}", Sha256::digest(config)))
 }
 
 /// Minimal TOML basic-string escaper — handles backslash + quote +

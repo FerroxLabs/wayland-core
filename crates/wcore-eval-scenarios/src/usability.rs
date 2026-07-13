@@ -278,6 +278,7 @@ mod tests {
             workdir: std::path::PathBuf::from("/tmp/x"),
             boot_time: Duration::from_millis(500),
             info_events: vec![],
+            execution: crate::runner::ExecutionEvidence::default(),
         }
     }
 

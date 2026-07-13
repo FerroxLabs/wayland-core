@@ -81,4 +81,4 @@ pub use trace::{ToolTrace, TraceEntry};
 
 // The runner produces a `ScenarioResult` — promoted to the crate root
 // so callers don't need to know which sub-module owns the shape.
-pub use runner::{Failure, ScenarioResult, TurnResult};
+pub use runner::{ExecutionEvidence, Failure, ScenarioResult, TurnResult};

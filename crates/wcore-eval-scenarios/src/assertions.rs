@@ -1138,6 +1138,7 @@ mod wave_1_1_tests {
             workdir: std::path::PathBuf::new(),
             boot_time: Duration::ZERO,
             info_events: Vec::new(),
+            execution: crate::runner::ExecutionEvidence::default(),
         }
     }
 

@@ -29,6 +29,7 @@ fn failed_report() -> Report {
         workdir: PathBuf::from("/private/host/path"),
         boot_time: Duration::from_millis(250),
         info_events: Vec::new(),
+        execution: wcore_eval_scenarios::ExecutionEvidence::default(),
     });
     report
 }

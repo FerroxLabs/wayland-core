@@ -29,6 +29,28 @@ enum Backend {
 }
 
 impl ProcessTree {
+    pub(crate) fn backend_name(&self) -> &'static str {
+        match &self.backend {
+            #[cfg(target_os = "linux")]
+            Backend::Cgroup(_) => "cgroup-v2",
+            #[cfg(unix)]
+            Backend::ProcessGroup => "process-group-best-effort",
+            #[cfg(not(unix))]
+            Backend::DirectChild => "direct-child-best-effort",
+        }
+    }
+
+    pub(crate) fn root_pid(&self) -> Option<u32> {
+        self.root_pid
+    }
+
+    pub(crate) fn is_authoritative(&self) -> bool {
+        #[cfg(target_os = "linux")]
+        return matches!(&self.backend, Backend::Cgroup(_));
+        #[cfg(not(target_os = "linux"))]
+        false
+    }
+
     pub(crate) fn prepare() -> io::Result<Self> {
         #[cfg(target_os = "linux")]
         {
