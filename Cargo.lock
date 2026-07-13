@@ -9732,6 +9732,7 @@ dependencies = [
  "toml",
  "tracing",
  "vt100",
+ "wcore-config",
  "wcore-protocol",
 ]
 
