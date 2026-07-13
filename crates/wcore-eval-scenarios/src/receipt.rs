@@ -5,7 +5,6 @@
 //! configured trusted key; it is never trusted from a boolean in the receipt.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::path::Path;
 
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64;
@@ -17,6 +16,7 @@ use thiserror::Error;
 
 use crate::runner::{Failure, ScenarioResult};
 use crate::usability::{self, Severity};
+use crate::workspace_evidence;
 
 pub const RECEIPT_SCHEMA: &str = "wayland.eval.receipt";
 pub const RECEIPT_SCHEMA_VERSION: u32 = 1;
@@ -138,6 +138,8 @@ pub struct ProviderEvidenceV1 {
 pub struct ToolEvidenceV1 {
     pub call_id_sha256: String,
     pub tool_name: String,
+    /// Domain-separated semantic hashes. Only the evaluator-owned absolute
+    /// workspace root is erased; path suffixes and all outside data remain.
     pub request_sha256: String,
     pub result_sha256: String,
     pub duration_ms: Evidence<u64>,
@@ -485,13 +487,23 @@ impl EvidenceReceiptV1 {
             .entries
             .iter()
             .map(|entry| {
-                let request = normalize_trace_evidence(&entry.input, &result.workdir)?;
-                let output = normalize_trace_evidence(&entry.output, &result.workdir)?;
+                let request_sha256 = workspace_evidence::semantic_sha256(
+                    b"tool-request",
+                    entry.input.as_bytes(),
+                    &result.workdir,
+                )
+                .map_err(|error| ReceiptError::InvalidEvidence(error.to_string()))?;
+                let result_sha256 = workspace_evidence::semantic_sha256(
+                    b"tool-result",
+                    entry.output.as_bytes(),
+                    &result.workdir,
+                )
+                .map_err(|error| ReceiptError::InvalidEvidence(error.to_string()))?;
                 Ok(ToolEvidenceV1 {
                     call_id_sha256: sha256(entry.call_id.as_bytes()),
                     tool_name: entry.tool_name.clone(),
-                    request_sha256: sha256(&request),
-                    result_sha256: sha256(&output),
+                    request_sha256,
+                    result_sha256,
                     duration_ms: entry.duration.map_or_else(
                         || Evidence::Unavailable {
                             code: "duration_not_observed".to_string(),
@@ -955,42 +967,6 @@ fn behavior_digest(body: &ReceiptBodyV1) -> Result<String, ReceiptError> {
 
 fn sha256(bytes: &[u8]) -> String {
     format!("{:x}", Sha256::digest(bytes))
-}
-
-fn normalize_trace_evidence(text: &str, workdir: &Path) -> Result<Vec<u8>, ReceiptError> {
-    let workspace = workdir.to_string_lossy();
-    if workspace.is_empty() {
-        return Ok(text.as_bytes().to_vec());
-    }
-
-    let mut value = match serde_json::from_str::<serde_json::Value>(text) {
-        Ok(value @ (serde_json::Value::Array(_) | serde_json::Value::Object(_))) => value,
-        _ => {
-            return Ok(text.replace(workspace.as_ref(), "<WORKSPACE>").into_bytes());
-        }
-    };
-    normalize_json_strings(&mut value, workspace.as_ref());
-    serde_json::to_vec(&value)
-        .map_err(|error| ReceiptError::InvalidEvidence(format!("trace normalization: {error}")))
-}
-
-fn normalize_json_strings(value: &mut serde_json::Value, workspace: &str) {
-    match value {
-        serde_json::Value::String(text) => {
-            *text = text.replace(workspace, "<WORKSPACE>");
-        }
-        serde_json::Value::Array(values) => {
-            for value in values {
-                normalize_json_strings(value, workspace);
-            }
-        }
-        serde_json::Value::Object(values) => {
-            for value in values.values_mut() {
-                normalize_json_strings(value, workspace);
-            }
-        }
-        serde_json::Value::Null | serde_json::Value::Bool(_) | serde_json::Value::Number(_) => {}
-    }
 }
 
 fn hash_serializable(value: &impl Serialize) -> Result<String, ReceiptError> {

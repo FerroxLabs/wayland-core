@@ -72,7 +72,10 @@ fn traced_result(workdir: &str, external_path: &str) -> ScenarioResult {
     }
 }
 
-fn receipt_from_trace(run_id: &str, result: &ScenarioResult) -> EvidenceReceiptV1 {
+fn try_receipt_from_trace(
+    run_id: &str,
+    result: &ScenarioResult,
+) -> Result<EvidenceReceiptV1, ReceiptError> {
     EvidenceReceiptV1::from_scenario_result(
         ReceiptMetadataV1 {
             run_id: run_id.to_string(),
@@ -87,7 +90,10 @@ fn receipt_from_trace(run_id: &str, result: &ScenarioResult) -> EvidenceReceiptV
         result,
         0.01,
     )
-    .expect("receipt conversion")
+}
+
+fn receipt_from_trace(run_id: &str, result: &ScenarioResult) -> EvidenceReceiptV1 {
+    try_receipt_from_trace(run_id, result).expect("receipt conversion")
 }
 
 fn body() -> ReceiptBodyV1 {
@@ -258,11 +264,69 @@ fn behavior_digest_excludes_volatile_execution_identity() {
 
     assert_ne!(first.body_sha256, repeated.body_sha256);
     assert_eq!(
+        first.body.tools[0].request_sha256,
+        repeated.body.tools[0].request_sha256
+    );
+    assert_eq!(
+        first.body.tools[0].result_sha256,
+        repeated.body.tools[0].result_sha256
+    );
+    assert_eq!(
         first.behavior_sha256().expect("first behavior digest"),
         repeated
             .behavior_sha256()
             .expect("repeated behavior digest")
     );
+}
+
+#[test]
+fn workspace_token_cannot_collide_with_literal_or_sibling_paths() {
+    let rooted = receipt_from_trace(
+        "run-rooted",
+        &traced_result("/private/run-a", "/etc/wayland/policy.toml"),
+    );
+    let mut literal_result = traced_result("/private/run-b", "/etc/wayland/policy.toml");
+    literal_result.trace.entries[0].input = serde_json::json!({
+        "file_path": "<WORKSPACE>/src/settings.toml",
+        "policy_path": "/etc/wayland/policy.toml",
+    })
+    .to_string();
+    literal_result.trace.entries[0].output = "Edited <WORKSPACE>/src/settings.toml".to_string();
+    let literal = receipt_from_trace("run-literal", &literal_result);
+
+    assert_ne!(
+        rooted.behavior_sha256().expect("rooted behavior digest"),
+        literal.behavior_sha256().expect("literal behavior digest")
+    );
+
+    let first_sibling = receipt_from_trace(
+        "run-sibling-a",
+        &traced_result("/private/run-a", "/private/run-a-outside/policy.toml"),
+    );
+    let second_sibling = receipt_from_trace(
+        "run-sibling-b",
+        &traced_result("/private/run-b", "/private/run-b-outside/policy.toml"),
+    );
+    assert_ne!(
+        first_sibling
+            .behavior_sha256()
+            .expect("first sibling behavior digest"),
+        second_sibling
+            .behavior_sha256()
+            .expect("second sibling behavior digest")
+    );
+}
+
+#[test]
+fn trace_evidence_rejects_an_unsafe_workspace_root() {
+    for workdir in ["", ".", "/"] {
+        let error = try_receipt_from_trace(
+            "unsafe-workspace",
+            &traced_result(workdir, "/etc/wayland/policy.toml"),
+        )
+        .expect_err("unsafe workspace must fail closed");
+        assert!(matches!(error, ReceiptError::InvalidEvidence(_)));
+    }
 }
 
 #[test]

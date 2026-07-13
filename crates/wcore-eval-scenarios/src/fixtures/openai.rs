@@ -1,6 +1,7 @@
 //! FIFO-scripted OpenAI-compatible loopback fixture.
 
 use std::convert::Infallible;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use axum::Router;
@@ -16,6 +17,8 @@ use sha2::{Digest, Sha256};
 use thiserror::Error;
 use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
+
+use crate::workspace_evidence;
 
 const FIXTURE_PROTOCOL_VERSION: u32 = 1;
 const MAX_SCRIPT_STEPS: usize = 256;
@@ -131,12 +134,35 @@ impl OpenAiFixtureScript {
     }
 
     pub async fn start(&self) -> Result<RunningOpenAiFixture, OpenAiFixtureError> {
+        self.start_with_workspace(None).await
+    }
+
+    /// Start a fixture whose content and observation identities normalize the
+    /// caller-owned temporary workspace while retaining every other value.
+    pub async fn start_for_workspace(
+        &self,
+        workspace: &Path,
+    ) -> Result<RunningOpenAiFixture, OpenAiFixtureError> {
+        self.start_with_workspace(Some(workspace)).await
+    }
+
+    async fn start_with_workspace(
+        &self,
+        workspace: Option<&Path>,
+    ) -> Result<RunningOpenAiFixture, OpenAiFixtureError> {
         self.validate()?;
         let canonical = serde_json::to_vec(self)
             .map_err(|error| OpenAiFixtureError::InvalidScript(error.to_string()))?;
-        let fixture_sha256 = format!("{:x}", Sha256::digest(canonical));
+        let fixture_sha256 = match workspace {
+            Some(workspace) => {
+                workspace_evidence::semantic_sha256(b"openai-fixture-script", &canonical, workspace)
+                    .map_err(|error| OpenAiFixtureError::InvalidScript(error.to_string()))?
+            }
+            None => format!("{:x}", Sha256::digest(canonical)),
+        };
         let state = Arc::new(Mutex::new(FixtureState {
             steps: self.steps.clone(),
+            workspace_root: workspace.map(Path::to_path_buf),
             cursor: 0,
             requests: Vec::new(),
             request_instants: Vec::new(),
@@ -257,6 +283,7 @@ pub struct FixtureRequestRecord {
     pub method: String,
     pub path: String,
     pub body_sha256: String,
+    pub semantic_body_sha256: String,
     pub model: Option<String>,
 }
 
@@ -290,6 +317,49 @@ impl OpenAiFixtureObservation {
     pub fn inter_request_delays_ms(&self) -> &[u64] {
         &self.inter_request_delays_ms
     }
+
+    /// Hash request semantics and fixture outcomes while excluding ports,
+    /// elapsed retry timing, and the caller-owned temporary workspace.
+    pub fn behavior_sha256(&self) -> Result<String, serde_json::Error> {
+        let projection = OpenAiObservationBehavior {
+            protocol_version: FIXTURE_PROTOCOL_VERSION,
+            requests: self
+                .requests
+                .iter()
+                .map(|request| FixtureRequestBehavior {
+                    sequence: request.sequence,
+                    method: &request.method,
+                    path: &request.path,
+                    semantic_body_sha256: &request.semantic_body_sha256,
+                    model: request.model.as_deref(),
+                })
+                .collect(),
+            consumed_steps: self.consumed_steps,
+            expected_steps: self.expected_steps,
+            violations: &self.violations,
+            injected_faults: &self.injected_faults,
+        };
+        serde_json::to_vec(&projection).map(|bytes| format!("{:x}", Sha256::digest(bytes)))
+    }
+}
+
+#[derive(Serialize)]
+struct OpenAiObservationBehavior<'a> {
+    protocol_version: u32,
+    requests: Vec<FixtureRequestBehavior<'a>>,
+    consumed_steps: usize,
+    expected_steps: usize,
+    violations: &'a [String],
+    injected_faults: &'a [String],
+}
+
+#[derive(Serialize)]
+struct FixtureRequestBehavior<'a> {
+    sequence: u64,
+    method: &'a str,
+    path: &'a str,
+    semantic_body_sha256: &'a str,
+    model: Option<&'a str>,
 }
 
 pub struct RunningOpenAiFixture {
@@ -359,6 +429,7 @@ impl Drop for RunningOpenAiFixture {
 #[derive(Debug)]
 struct FixtureState {
     steps: Vec<OpenAiStep>,
+    workspace_root: Option<PathBuf>,
     cursor: usize,
     requests: Vec<FixtureRequestRecord>,
     request_instants: Vec<tokio::time::Instant>,
@@ -370,6 +441,19 @@ async fn handle_chat_completion(
     body: Bytes,
 ) -> Response {
     let body_sha256 = format!("{:x}", Sha256::digest(&body));
+    let semantic_body_sha256 = {
+        let workspace_root = state
+            .lock()
+            .expect("OpenAI fixture state lock")
+            .workspace_root
+            .clone();
+        match workspace_root {
+            Some(workspace) => {
+                workspace_evidence::semantic_sha256(b"openai-request-body", &body, &workspace)
+            }
+            None => Ok(body_sha256.clone()),
+        }
+    };
     let model = serde_json::from_slice::<serde_json::Value>(&body)
         .ok()
         .and_then(|value| {
@@ -380,12 +464,19 @@ async fn handle_chat_completion(
         });
     let step = {
         let mut state = state.lock().expect("OpenAI fixture state lock");
+        let semantic_body_sha256 = semantic_body_sha256.unwrap_or_else(|error| {
+            state
+                .violations
+                .push(format!("workspace_evidence_error:{error}"));
+            body_sha256.clone()
+        });
         let sequence = state.requests.len() as u64 + 1;
         state.requests.push(FixtureRequestRecord {
             sequence,
             method: "POST".to_string(),
             path: "/v1/chat/completions".to_string(),
             body_sha256,
+            semantic_body_sha256,
             model,
         });
         state.request_instants.push(tokio::time::Instant::now());

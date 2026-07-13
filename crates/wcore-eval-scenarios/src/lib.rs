@@ -64,6 +64,7 @@ pub mod stderr_capture;
 pub mod tempenv;
 pub mod trace;
 pub mod usability;
+mod workspace_evidence;
 
 // Public API re-exports — the surface external callers (scenario tests,
 // the wayland-eval binary, future T6-T8 dispatch agents) import.

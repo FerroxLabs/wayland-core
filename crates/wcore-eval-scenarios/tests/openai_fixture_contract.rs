@@ -1,3 +1,4 @@
+use std::path::Path;
 use std::time::Duration;
 
 use serde_json::json;
@@ -73,6 +74,64 @@ async fn success_is_valid_sse_and_records_one_redacted_request() {
     assert_eq!(first_digest, second.fixture_sha256());
     let _ = post(second.base_url(), request("fixture-chat-v1")).await;
     assert!(second.shutdown().await.unwrap().complete());
+}
+
+#[tokio::test]
+async fn workspace_aware_identity_is_root_independent_and_collision_free() {
+    let first_root = "/private/openai-run-a";
+    let second_root = "/private/openai-run-b";
+    let first_script = OpenAiFixtureScript::new([OpenAiStep::tool_call(
+        "call-edit",
+        "Edit",
+        json!({"file_path": format!("{first_root}/src/settings.toml")}),
+    )]);
+    let second_script = OpenAiFixtureScript::new([OpenAiStep::tool_call(
+        "call-edit",
+        "Edit",
+        json!({"file_path": format!("{second_root}/src/settings.toml")}),
+    )]);
+    let first = first_script
+        .start_for_workspace(Path::new(first_root))
+        .await
+        .expect("first workspace fixture");
+    let second = second_script
+        .start_for_workspace(Path::new(second_root))
+        .await
+        .expect("second workspace fixture");
+
+    assert_eq!(first.fixture_sha256(), second.fixture_sha256());
+    let mut first_request = request("fixture-chat-v1");
+    first_request["messages"][0]["content"] = json!(format!("Edit {first_root}/src/settings.toml"));
+    let mut second_request = request("fixture-chat-v1");
+    second_request["messages"][0]["content"] =
+        json!(format!("Edit {second_root}/src/settings.toml"));
+    assert!(
+        post(first.base_url(), first_request)
+            .await
+            .status()
+            .is_success()
+    );
+    assert!(
+        post(second.base_url(), second_request)
+            .await
+            .status()
+            .is_success()
+    );
+
+    let first = first.shutdown().await.expect("first shutdown");
+    let second = second.shutdown().await.expect("second shutdown");
+    assert_ne!(
+        first.requests[0].body_sha256,
+        second.requests[0].body_sha256
+    );
+    assert_eq!(
+        first.requests[0].semantic_body_sha256,
+        second.requests[0].semantic_body_sha256
+    );
+    assert_eq!(
+        first.behavior_sha256().expect("first behavior digest"),
+        second.behavior_sha256().expect("second behavior digest")
+    );
 }
 
 #[tokio::test]
