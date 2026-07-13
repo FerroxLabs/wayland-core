@@ -157,9 +157,8 @@ mod tests {
             _cx: &mut std::task::Context<'_>,
             buf: &mut tokio::io::ReadBuf<'_>,
         ) -> std::task::Poll<std::io::Result<()>> {
-            use std::io::Read;
             let mut tmp = vec![0u8; buf.remaining()];
-            let n = self.0.read(&mut tmp)?;
+            let n = std::io::Read::read(&mut self.0, &mut tmp)?;
             buf.put_slice(&tmp[..n]);
             std::task::Poll::Ready(Ok(()))
         }
