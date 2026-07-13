@@ -428,7 +428,7 @@ async fn load_skill_file(
 /// `auto_drafted=true` manifest is authoritative regardless of review status.
 /// Missing or damaged metadata falls back to the exact released body marker;
 /// an `auto-*` name by itself never quarantines user-authored content.
-async fn is_generated_draft(skill_dir: &Path, name: &str, content: &str) -> bool {
+pub(crate) async fn is_generated_draft(skill_dir: &Path, name: &str, content: &str) -> bool {
     let manifest = skill_dir.join("manifest.json");
     if let Ok(bytes) = tokio::fs::read(&manifest).await
         && serde_json::from_slice::<serde_json::Value>(&bytes)

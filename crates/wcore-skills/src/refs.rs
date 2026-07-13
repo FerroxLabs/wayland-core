@@ -286,7 +286,26 @@ impl SkillCatalog {
             if local.disable_model_invocation {
                 return Err(ResolveError::NotFound(normalized.to_string()));
             }
-            return self.resolve(normalized).await;
+            let resolved = self.resolve(normalized).await?;
+            let generated = if local.inline_content.is_none() {
+                match local.file_path.parent() {
+                    Some(skill_dir) => {
+                        crate::loader::is_generated_draft(
+                            skill_dir,
+                            &resolved.name,
+                            &resolved.content,
+                        )
+                        .await
+                    }
+                    None => false,
+                }
+            } else {
+                false
+            };
+            if resolved.disable_model_invocation || generated {
+                return Err(ResolveError::NotFound(normalized.to_string()));
+            }
+            return Ok(resolved);
         }
 
         // An unrestricted operator lookup may already have cached a sibling
