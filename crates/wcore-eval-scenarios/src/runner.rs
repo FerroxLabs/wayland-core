@@ -812,7 +812,7 @@ async fn run_session_body(input: SessionRun<'_>) -> anyhow::Result<ScenarioResul
             });
         }
         for expected_tool in &turn_def.expected_tools {
-            if trace.count_in_turn(expected_tool, turn_idx) == 0 {
+            if trace.dispatched_count_in_turn(expected_tool, turn_idx) == 0 {
                 failures.push(Failure::ExpectedToolMissing(format!(
                     "{expected_tool} (turn {turn_idx})"
                 )));

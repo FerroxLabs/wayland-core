@@ -55,6 +55,25 @@ impl ToolTrace {
             .count()
     }
 
+    /// Count calls that reached a registered tool during `turn`.
+    ///
+    /// The engine emits a terminal result for an unknown model-supplied tool
+    /// name to keep provider history well formed. That rejection is useful
+    /// trace evidence, but it is not proof that an expected tool dispatched.
+    /// Real tools may legitimately return errors, so only the engine's
+    /// canonical unknown-tool result is excluded.
+    pub fn dispatched_count_in_turn(&self, tool: &str, turn: usize) -> usize {
+        let unknown_result = format!("Unknown tool: {tool}");
+        self.entries
+            .iter()
+            .filter(|entry| {
+                entry.tool_name == tool
+                    && entry.turn == turn
+                    && !(entry.is_error && entry.output == unknown_result)
+            })
+            .count()
+    }
+
     /// Parse a session JSON file (the engine writes one per session to
     /// `[session].directory`) into a `ToolTrace`. Used as a cross-check
     /// against the live json-stream events; a unit test asserts the two
