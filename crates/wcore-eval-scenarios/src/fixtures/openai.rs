@@ -21,6 +21,8 @@ const MAX_TEXT_BYTES: usize = 64 * 1024;
 const MAX_REQUEST_BYTES: usize = 1024 * 1024;
 const MAX_STALL_MS: u64 = 60_000;
 const MAX_RETRY_AFTER_MS: u64 = 60_000;
+const MAX_TOOL_IDENTIFIER_BYTES: usize = 256;
+const MAX_TOOL_ARGUMENT_BYTES: usize = 64 * 1024;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OpenAiFixtureScript {
@@ -31,12 +33,29 @@ pub struct OpenAiFixtureScript {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum OpenAiStep {
-    Text { text: String },
-    HttpError { status: u16 },
-    RateLimited { retry_after_ms: u64 },
-    Truncated { text: String },
-    DuplicateText { text: String },
-    StallBeforeHeaders { delay_ms: u64 },
+    Text {
+        text: String,
+    },
+    HttpError {
+        status: u16,
+    },
+    RateLimited {
+        retry_after_ms: u64,
+    },
+    Truncated {
+        text: String,
+    },
+    DuplicateText {
+        text: String,
+    },
+    ToolCall {
+        id: String,
+        name: String,
+        arguments: serde_json::Value,
+    },
+    StallBeforeHeaders {
+        delay_ms: u64,
+    },
 }
 
 impl OpenAiStep {
@@ -58,6 +77,18 @@ impl OpenAiStep {
 
     pub fn duplicate_text(text: impl Into<String>) -> Self {
         Self::DuplicateText { text: text.into() }
+    }
+
+    pub fn tool_call(
+        id: impl Into<String>,
+        name: impl Into<String>,
+        arguments: serde_json::Value,
+    ) -> Self {
+        Self::ToolCall {
+            id: id.into(),
+            name: name.into(),
+            arguments,
+        }
     }
 
     pub fn stall_before_headers(delay_ms: u64) -> Self {
@@ -143,6 +174,28 @@ impl OpenAiFixtureScript {
                     if *retry_after_ms == 0 || *retry_after_ms > MAX_RETRY_AFTER_MS {
                         return Err(OpenAiFixtureError::InvalidScript(format!(
                             "retry-after must be between 1 and {MAX_RETRY_AFTER_MS} milliseconds"
+                        )));
+                    }
+                }
+                OpenAiStep::ToolCall {
+                    id,
+                    name,
+                    arguments,
+                } => {
+                    if id.is_empty()
+                        || name.is_empty()
+                        || id.len() > MAX_TOOL_IDENTIFIER_BYTES
+                        || name.len() > MAX_TOOL_IDENTIFIER_BYTES
+                    {
+                        return Err(OpenAiFixtureError::InvalidScript(
+                            "tool id and name must contain 1..=256 bytes".to_string(),
+                        ));
+                    }
+                    let arguments = serde_json::to_vec(arguments)
+                        .map_err(|error| OpenAiFixtureError::InvalidScript(error.to_string()))?;
+                    if arguments.len() > MAX_TOOL_ARGUMENT_BYTES {
+                        return Err(OpenAiFixtureError::InvalidScript(format!(
+                            "tool arguments exceed {MAX_TOOL_ARGUMENT_BYTES} bytes"
                         )));
                     }
                 }
@@ -301,6 +354,11 @@ async fn handle_chat_completion(
         ),
         OpenAiStep::Truncated { text } => sse_response(text_delta_frame(&text)),
         OpenAiStep::DuplicateText { text } => sse_response(complete_text_sse(&text, true)),
+        OpenAiStep::ToolCall {
+            id,
+            name,
+            arguments,
+        } => sse_response(tool_call_sse(&id, &name, &arguments)),
         OpenAiStep::StallBeforeHeaders { delay_ms } => {
             tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
             sse_response(complete_text_sse("released", false))
@@ -347,6 +405,44 @@ fn complete_text_sse(text: &str, duplicate: bool) -> String {
     });
     let repeated = if duplicate { delta.as_str() } else { "" };
     format!("{delta}{repeated}data: {finish}\n\ndata: {usage}\n\ndata: [DONE]\n\n")
+}
+
+fn tool_call_sse(id: &str, name: &str, arguments: &serde_json::Value) -> String {
+    let call = json!({
+        "id": "fixture-completion",
+        "object": "chat.completion.chunk",
+        "created": 0,
+        "model": "fixture-chat-v1",
+        "choices": [{
+            "index": 0,
+            "delta": {
+                "tool_calls": [{
+                    "index": 0,
+                    "id": id,
+                    "type": "function",
+                    "function": {
+                        "name": name,
+                        "arguments": arguments.to_string()
+                    }
+                }]
+            },
+            "finish_reason": null
+        }]
+    });
+    let finish = json!({
+        "id": "fixture-completion",
+        "object": "chat.completion.chunk",
+        "created": 0,
+        "model": "fixture-chat-v1",
+        "choices": [{"index": 0, "delta": {}, "finish_reason": "tool_calls"}],
+        "usage": {
+            "prompt_tokens": 7,
+            "completion_tokens": 3,
+            "total_tokens": 10,
+            "prompt_tokens_details": {"cached_tokens": 0}
+        }
+    });
+    format!("data: {call}\n\ndata: {finish}\n\ndata: [DONE]\n\n")
 }
 
 fn sse_response(body: String) -> Response {
