@@ -1,13 +1,18 @@
 //! CLI surface: `wayland-core forge "<task>"` — the explicit Anvil verb.
 //!
 //! Mirrors [`crate::crucible::run_crucible`]: it enforces the `[anvil] enabled`
-//! kill-switch before doing anything, then routes to the `drive_climb` engine
-//! seam. A1 skeleton — the climb currently returns an honest
-//! not-yet-implemented terminal; the real loop lands in later A1 slices.
+//! kill-switch, resolves a provider + spawner + protocol emitter, then drives a
+//! real gated-forge climb ([`drive_climb_full`]) which forks a builder into an
+//! isolated worktree, runs the configured gate, climbs, and emits an
+//! `AnvilReceipt` (on stdout, as a JSON-stream event).
+
+use std::sync::Arc;
 
 use clap::Args;
-use wcore_agent::orchestration::anvil::drive_climb;
-use wcore_config::config::load_merged_config_file;
+use wcore_agent::orchestration::anvil::forge::drive_climb_full;
+use wcore_agent::spawner::AgentSpawner;
+use wcore_config::config::{CliArgs, Config, load_merged_config_file};
+use wcore_protocol::writer::{ProtocolEmitter, ProtocolWriter};
 
 /// Arguments for `wayland-core forge`.
 #[derive(Args, Debug)]
@@ -24,13 +29,43 @@ pub async fn run_forge(args: ForgeArgs) -> anyhow::Result<()> {
     if !cf.anvil.enabled {
         anyhow::bail!(
             "Anvil is disabled. Set `enabled = true` under `[anvil]` in your config \
-             to forge gated tasks. (A1 is kill-switched until the slice completes.)"
+             to forge gated tasks."
+        );
+    }
+    if cf.anvil.gate.is_empty() {
+        anyhow::bail!(
+            "Anvil has no gate configured. Set `[anvil] gate = [\"cargo\", \"test\"]` \
+             (the argv Anvil runs to verify a forged candidate)."
         );
     }
 
-    match drive_climb(&args.task, &cf.anvil).await {
-        Ok(result) => {
-            println!("forge: {:?}", result.terminal);
+    // Resolve the session provider + a spawner to fork builder sub-agents with.
+    // Anvil A1 runs in a TRUSTED / auto-approve posture (spec §5): a forked
+    // builder has no approval channel, so its Write/Edit/Bash tools must be
+    // pre-approved or they fail closed. The explicit `forge` verb opts the
+    // session into auto-approve so the builder can actually make the change.
+    let mut session_cfg = Config::resolve(&CliArgs::default())?;
+    session_cfg.tools.auto_approve = true;
+    let provider = wcore_agent::bootstrap::create_provider_with_oauth(&session_cfg)?;
+    let spawner = AgentSpawner::new(provider, session_cfg.clone());
+
+    // The top-level protocol writer — the AnvilReceipt is trusted ONLY from this
+    // top-level emission (host trust boundary, spec §8).
+    let emitter: Arc<dyn ProtocolEmitter> = Arc::new(ProtocolWriter::new());
+
+    let workspace = std::env::current_dir()?;
+
+    match drive_climb_full(&args.task, &cf.anvil, &workspace, &spawner, &emitter, None).await {
+        Ok(outcome) => {
+            // The receipt already went to stdout; this is a human summary on stderr.
+            eprintln!(
+                "forge: terminal={:?} stamp={} checks={}/{} iterations={}",
+                outcome.terminal,
+                outcome.stamp,
+                outcome.checks_passed,
+                outcome.checks_total,
+                outcome.iterations,
+            );
             Ok(())
         }
         Err(e) => anyhow::bail!("forge: {e}"),
