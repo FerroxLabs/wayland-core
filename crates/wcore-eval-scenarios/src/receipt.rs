@@ -444,12 +444,7 @@ impl EvidenceReceiptV1 {
                 })
             })
             .collect::<Result<Vec<_>, ReceiptError>>()?;
-        let mut provider_typed_failures = result.execution.provider_typed_failures.clone();
-        for failure in &failure_evidence {
-            if !provider_typed_failures.contains(&failure.code) {
-                provider_typed_failures.push(failure.code.clone());
-            }
-        }
+        let provider_typed_failures = result.execution.provider_typed_failures.clone();
         let usability = usability::scan(result)
             .into_iter()
             .map(|finding| UsabilityEvidenceV1 {

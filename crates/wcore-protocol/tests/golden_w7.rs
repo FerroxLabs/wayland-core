@@ -103,6 +103,39 @@ fn golden_provider_circuit_event_closed_w7() {
 }
 
 #[test]
+fn golden_provider_attempt() {
+    let failed = ProtocolEvent::ProviderAttempt {
+        failure: Some("http_503".into()),
+    };
+    let got = serde_json::to_value(&failed).unwrap();
+    assert_eq!(
+        got,
+        json!({
+            "type": "provider_attempt",
+        "failure": "http_503",
+        })
+    );
+
+    let success = ProtocolEvent::ProviderAttempt { failure: None };
+    let got = serde_json::to_value(&success).unwrap();
+    assert!(got.get("failure").is_none());
+
+    let retry = ProtocolEvent::ProviderRetry {
+        failure: Some("http_503".into()),
+    };
+    let got = serde_json::to_value(&retry).unwrap();
+    assert_eq!(got["type"], "provider_retry");
+    assert_eq!(got["failure"], "http_503");
+
+    let failure = ProtocolEvent::ProviderFailure {
+        failure: "stream_truncated".into(),
+    };
+    let got = serde_json::to_value(&failure).unwrap();
+    assert_eq!(got["type"], "provider_failure");
+    assert_eq!(got["failure"], "stream_truncated");
+}
+
+#[test]
 fn golden_approval_required_w7() {
     let event = ProtocolEvent::ApprovalRequired {
         call_id: "c-1".into(),

@@ -231,6 +231,26 @@ pub enum ProtocolEvent {
         #[serde(skip_serializing_if = "Option::is_none")]
         error: Option<String>,
     },
+    /// One physical provider request attempt. Always emitted so evaluators and
+    /// hosts can distinguish real recovery from a fixture-side request count.
+    /// Unknown hosts drop this additive event under the W0 decoder contract.
+    ProviderAttempt {
+        /// Stable failure class (`http_503`, `timeout`, `stream_truncated`, ...).
+        #[serde(skip_serializing_if = "Option::is_none")]
+        failure: Option<String>,
+    },
+    /// Core scheduled another provider attempt after a typed failure. Kept
+    /// separate from `ProviderAttempt` so a retry decision never inflates the
+    /// physical-attempt count.
+    ProviderRetry {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        failure: Option<String>,
+    },
+    /// A typed provider failure discovered after the physical send completed
+    /// (for example a truncated SSE body). It does not imply a retry.
+    ProviderFailure {
+        failure: String,
+    },
     /// W7: S4 approval requested — engine wants the host's permission
     /// before proceeding with `call_id`. `resume_token` echoes back in
     /// the host's `ApprovalResume` command. Gated by the W0-reserved

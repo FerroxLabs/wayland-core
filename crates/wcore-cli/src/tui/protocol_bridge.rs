@@ -901,6 +901,9 @@ fn apply_event_inner(app: &mut App, event: ProtocolEvent) {
         // json-stream hosts; the in-process TUI never runs delegated (no
         // host to fulfil the send), so it has no view impact here.
         ProtocolEvent::Ready { .. }
+        | ProtocolEvent::ProviderAttempt { .. }
+        | ProtocolEvent::ProviderRetry { .. }
+        | ProtocolEvent::ProviderFailure { .. }
         | ProtocolEvent::TraceEvent { .. }
         | ProtocolEvent::PluginEvent { .. }
         | ProtocolEvent::EvolutionEvent { .. }

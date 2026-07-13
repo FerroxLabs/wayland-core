@@ -66,7 +66,7 @@ impl OpenAIProvider {
             .read_timeout_ms
             .map_or_else(crate::http_client::build, |milliseconds| {
                 crate::http_client::build_with_read_timeout(std::time::Duration::from_millis(
-                    milliseconds,
+                    milliseconds.get(),
                 ))
             })
     }
@@ -1455,6 +1455,7 @@ impl LlmProvider for OpenAIProvider {
                 status,
                 ref message,
             }) if body_has_tools && is_tools_unsupported_error(status, message) => {
+                crate::retry::mark_last_attempt_retrying();
                 tracing::warn!(
                     model = %request.model,
                     "model does not support tools; retrying request without tools (#389)"
@@ -1494,6 +1495,7 @@ impl LlmProvider for OpenAIProvider {
                         .as_deref()
                         .is_some_and(|fb| fb != primary) =>
             {
+                crate::retry::mark_last_attempt_retrying();
                 let fallback = self
                     .compat
                     .auth_fallback_base_url

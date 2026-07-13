@@ -157,6 +157,17 @@ pub trait OutputSink: Send + Sync {
     ) {
     }
 
+    /// Emit one physical provider attempt with its typed outcome. Default
+    /// no-op for non-protocol sinks; JSON-stream output is always-on evidence.
+    fn emit_provider_attempt(&self, _failure: Option<&str>) {}
+
+    /// Emit an actual Core retry decision, separately from the physical send.
+    fn emit_provider_retry(&self, _failure: Option<&str>) {}
+
+    /// Emit a typed provider failure without claiming another physical send or
+    /// retry decision.
+    fn emit_provider_failure(&self, _failure: &str) {}
+
     /// W7 S4: emit ApprovalRequired (host renders modal). Default
     /// no-op; `ProtocolSink` overrides and gates on
     /// `with_hitl_suspend(true)`.

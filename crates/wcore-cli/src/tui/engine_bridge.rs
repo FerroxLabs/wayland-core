@@ -436,6 +436,24 @@ impl OutputSink for ChannelSink {
         });
     }
 
+    fn emit_provider_attempt(&self, failure: Option<&str>) {
+        self.send(ProtocolEvent::ProviderAttempt {
+            failure: failure.map(String::from),
+        });
+    }
+
+    fn emit_provider_retry(&self, failure: Option<&str>) {
+        self.send(ProtocolEvent::ProviderRetry {
+            failure: failure.map(String::from),
+        });
+    }
+
+    fn emit_provider_failure(&self, failure: &str) {
+        self.send(ProtocolEvent::ProviderFailure {
+            failure: failure.to_string(),
+        });
+    }
+
     fn emit_approval_required(
         &self,
         call_id: &str,

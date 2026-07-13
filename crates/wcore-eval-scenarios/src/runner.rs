@@ -579,6 +579,9 @@ async fn run_session_body(input: SessionRun<'_>) -> anyhow::Result<ScenarioResul
         first_token_time,
         approval_response_time,
         approval_commands,
+        provider_attempts,
+        provider_retries,
+        provider_typed_failures,
         provider_usage,
     ) = match result {
         Ok(Ok(drive_out)) => (
@@ -593,6 +596,9 @@ async fn run_session_body(input: SessionRun<'_>) -> anyhow::Result<ScenarioResul
             drive_out.first_token_time,
             drive_out.approval_response_time,
             drive_out.approval_commands,
+            drive_out.provider_attempts,
+            drive_out.provider_retries,
+            drive_out.provider_typed_failures,
             drive_out.provider_usage,
         ),
         Ok(Err(e)) => {
@@ -873,9 +879,9 @@ async fn run_session_body(input: SessionRun<'_>) -> anyhow::Result<ScenarioResul
             first_token_time,
             approval_response_time,
             approval_commands,
-            provider_attempts: None,
-            provider_retries: None,
-            provider_typed_failures: Vec::new(),
+            provider_attempts,
+            provider_retries,
+            provider_typed_failures,
             provider_usage,
             cancellation_requested: scenario.turns.iter().any(|turn| turn.stop_mid_turn),
             shutdown_time,
@@ -934,6 +940,9 @@ struct DriveOutput {
     first_token_time: Option<Duration>,
     approval_response_time: Duration,
     approval_commands: Vec<ApprovalCommandEvidence>,
+    provider_attempts: Option<u64>,
+    provider_retries: Option<u64>,
+    provider_typed_failures: Vec<String>,
     provider_usage: Option<ProviderUsageEvidence>,
 }
 
@@ -1162,6 +1171,9 @@ async fn drive_session(
     let mut first_token_time = None;
     let mut approval_response_time = Duration::ZERO;
     let mut approval_commands = Vec::new();
+    let mut provider_attempts = None;
+    let mut provider_retries = None;
+    let mut provider_typed_failures = Vec::new();
     let mut provider_usage = None;
     // D3: how to answer the engine's approval gate (only fires when the
     // scenario spawned WITHOUT `--yolo`, i.e. policy != Yolo).
@@ -1468,6 +1480,30 @@ async fn drive_session(
                         runner_error = Some(error);
                     }
                 }
+                "provider_attempt" => {
+                    provider_attempts = Some(provider_attempts.unwrap_or(0_u64).saturating_add(1));
+                    provider_retries.get_or_insert(0);
+                    if let Some(failure) = ev.get("failure").and_then(Value::as_str)
+                        && !provider_typed_failures.iter().any(|seen| seen == failure)
+                    {
+                        provider_typed_failures.push(failure.to_string());
+                    }
+                }
+                "provider_retry" => {
+                    provider_retries = Some(provider_retries.unwrap_or(0_u64).saturating_add(1));
+                    if let Some(failure) = ev.get("failure").and_then(Value::as_str)
+                        && !provider_typed_failures.iter().any(|seen| seen == failure)
+                    {
+                        provider_typed_failures.push(failure.to_string());
+                    }
+                }
+                "provider_failure" => {
+                    if let Some(failure) = ev.get("failure").and_then(Value::as_str)
+                        && !provider_typed_failures.iter().any(|seen| seen == failure)
+                    {
+                        provider_typed_failures.push(failure.to_string());
+                    }
+                }
                 "stream_end" => {
                     if let Some(usage) = parse_provider_usage(&ev) {
                         provider_usage = Some(usage);
@@ -1601,6 +1637,9 @@ async fn drive_session(
         first_token_time,
         approval_response_time,
         approval_commands,
+        provider_attempts,
+        provider_retries,
+        provider_typed_failures,
         provider_usage,
     })
 }

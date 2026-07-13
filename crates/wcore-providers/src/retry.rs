@@ -1,4 +1,6 @@
+use std::cell::RefCell;
 use std::future::Future;
+use std::sync::Arc;
 use std::time::Duration;
 
 use wcore_egress::{EgressError, EgressRequestBuilder};
@@ -8,6 +10,134 @@ use super::ProviderError;
 /// Default retry policy for provider HTTP calls: 3 attempts, 250 ms → 1 s → 4 s.
 pub const DEFAULT_MAX_RETRIES: u32 = 2; // 1 initial + 2 retries = 3 total attempts
 pub const INITIAL_BACKOFF: Duration = Duration::from_millis(250);
+
+/// One physical provider HTTP attempt observed by the retry ring.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProviderAttemptEvidence {
+    /// True for a physical HTTP send; false for a retry decision made by a
+    /// provider wrapper after that send completed.
+    pub physical: bool,
+    /// Stable machine-readable failure class, absent on a successful response.
+    pub failure: Option<String>,
+    /// Whether Core immediately scheduled another physical attempt.
+    pub retrying: bool,
+}
+
+tokio::task_local! {
+    static ATTEMPT_EVIDENCE: RefCell<Vec<ProviderAttemptEvidence>>;
+    static ATTEMPT_OBSERVER: Option<Arc<dyn Fn(ProviderAttemptEvidence) + Send + Sync>>;
+}
+
+/// Capture physical HTTP attempts made while `future` is running.
+///
+/// The scope is per task and per provider call, so concurrent agents cannot
+/// leak evidence into one another. Providers that do not use this retry ring
+/// simply return an empty evidence vector.
+pub async fn capture_provider_attempts<F>(future: F) -> (F::Output, Vec<ProviderAttemptEvidence>)
+where
+    F: Future,
+{
+    ATTEMPT_OBSERVER
+        .scope(
+            None,
+            ATTEMPT_EVIDENCE.scope(RefCell::new(Vec::new()), async move {
+                let output = future.await;
+                let evidence = ATTEMPT_EVIDENCE.with(|slot| slot.take());
+                (output, evidence)
+            }),
+        )
+        .await
+}
+
+/// Observe attempts and retry decisions synchronously while `future` runs.
+/// Evidence already emitted by the callback survives cancellation of the
+/// provider future; the scope and collector are still isolated per task.
+pub async fn observe_provider_attempts<F>(
+    observer: Arc<dyn Fn(ProviderAttemptEvidence) + Send + Sync>,
+    future: F,
+) -> F::Output
+where
+    F: Future,
+{
+    ATTEMPT_OBSERVER
+        .scope(
+            Some(observer),
+            ATTEMPT_EVIDENCE.scope(RefCell::new(Vec::new()), future),
+        )
+        .await
+}
+
+fn record_attempt(failure: Option<String>, retrying: bool) {
+    let evidence = ProviderAttemptEvidence {
+        physical: true,
+        failure,
+        retrying,
+    };
+    let _ = ATTEMPT_EVIDENCE.try_with(|slot| slot.borrow_mut().push(evidence.clone()));
+    let _ = ATTEMPT_OBSERVER.try_with(|observer| {
+        if let Some(observer) = observer {
+            observer(evidence);
+        }
+    });
+}
+
+/// Mark the most recently recorded physical attempt as followed by a
+/// provider-level retry outside `builder_send_with_retry` (for example a
+/// capability fallback or alternate authentication host).
+pub fn mark_last_attempt_retrying() {
+    let _ = ATTEMPT_EVIDENCE.try_with(|slot| {
+        if let Some(last) = slot.borrow_mut().last_mut() {
+            last.retrying = true;
+            let decision = ProviderAttemptEvidence {
+                physical: false,
+                failure: last.failure.clone(),
+                retrying: true,
+            };
+            let _ = ATTEMPT_OBSERVER.try_with(|observer| {
+                if let Some(observer) = observer {
+                    observer(decision);
+                }
+            });
+        }
+    });
+}
+
+fn egress_failure_code(error: &EgressError) -> &'static str {
+    match error {
+        EgressError::Transport(error) if error.is_timeout() => "timeout",
+        EgressError::Transport(error) if error.is_connect() => "connection",
+        EgressError::Transport(error) if error.is_body() || error.is_decode() => "stream_body",
+        EgressError::Transport(_) => "transport",
+        EgressError::Denied(_) => "egress_denied",
+        EgressError::BodyTooLarge { .. } => "response_body_too_large",
+    }
+}
+
+/// Stable machine-readable class for a provider error observed above the HTTP
+/// retry ring. Unlike `Display`, this is safe to aggregate in receipts.
+pub fn provider_failure_code(error: &ProviderError) -> String {
+    match error {
+        ProviderError::Http(error) if error.is_timeout() => "timeout".to_string(),
+        ProviderError::Http(error) if error.is_connect() => "connection".to_string(),
+        ProviderError::Http(_) => "http_transport".to_string(),
+        ProviderError::Egress(error) => egress_failure_code(error).to_string(),
+        ProviderError::Api { status, .. } => format!("http_{status}"),
+        ProviderError::Parse(_) => "provider_parse".to_string(),
+        ProviderError::RateLimited { .. } => "http_429".to_string(),
+        ProviderError::PromptTooLong(_) => "prompt_too_long".to_string(),
+        ProviderError::Connection(message)
+            if message.to_ascii_lowercase().contains("timed out") =>
+        {
+            "timeout".to_string()
+        }
+        ProviderError::Connection(_) => "connection".to_string(),
+        ProviderError::MissingApiKey => "missing_api_key".to_string(),
+        ProviderError::PremiumLocked { .. } => "premium_locked".to_string(),
+        ProviderError::UpgradeRequired { .. } => "upgrade_required".to_string(),
+        ProviderError::SpendCeilingUnresolved { .. } => "spend_ceiling_unresolved".to_string(),
+        ProviderError::ContextOverflow { .. } => "context_overflow".to_string(),
+    }
+}
 
 /// Retry a fallible async operation with exponential backoff.
 ///
@@ -163,7 +293,18 @@ pub async fn builder_send_with_retry(
         let try_builder = match builder.try_clone() {
             Some(b) => b,
             None => {
-                return builder.send().await.map_err(provider_error_from_egress);
+                return match builder.send().await {
+                    Ok(response) => {
+                        let failure = (!response.status().is_success())
+                            .then(|| format!("http_{}", response.status().as_u16()));
+                        record_attempt(failure, false);
+                        Ok(response)
+                    }
+                    Err(error) => {
+                        record_attempt(Some(egress_failure_code(&error).to_string()), false);
+                        Err(provider_error_from_egress(error))
+                    }
+                };
             }
         };
         match try_builder.send().await {
@@ -182,6 +323,7 @@ pub async fn builder_send_with_retry(
                 let status = resp.status().as_u16();
                 let transient_5xx = status >= 500 || status == 408;
                 if transient_5xx && attempt < DEFAULT_MAX_RETRIES {
+                    record_attempt(Some(format!("http_{status}")), true);
                     tracing::warn!(
                         attempt = attempt + 1,
                         total = DEFAULT_MAX_RETRIES + 1,
@@ -196,9 +338,12 @@ pub async fn builder_send_with_retry(
                     });
                     continue;
                 }
+                let failure = (!resp.status().is_success()).then(|| format!("http_{status}"));
+                record_attempt(failure, false);
                 return Ok(resp);
             }
             Err(e) => {
+                let failure_code = egress_failure_code(&e).to_string();
                 // H-2 / secrets-26: strip the URL before formatting so a
                 // credential-in-URL provider can't leak the key into the
                 // returned error or the `[retry]` tracing warning below.
@@ -209,6 +354,7 @@ pub async fn builder_send_with_retry(
                     other => return Err(other),
                 };
                 if attempt < DEFAULT_MAX_RETRIES {
+                    record_attempt(Some(failure_code.clone()), true);
                     // M3 fix: 1-based attempt over total attempts.
                     tracing::warn!(
                         attempt = attempt + 1,
@@ -218,6 +364,9 @@ pub async fn builder_send_with_retry(
                     );
                     tokio::time::sleep(backoff).await;
                     backoff = (backoff * 4).min(Duration::from_secs(4));
+                }
+                if attempt == DEFAULT_MAX_RETRIES {
+                    record_attempt(Some(failure_code), false);
                 }
                 last_err = Some(provider_err);
             }
@@ -399,6 +548,71 @@ mod tests {
     async fn test_retry_succeeds_first_try() {
         let result = with_retry(2, || async { Ok::<_, ProviderError>(42) }).await;
         assert_eq!(result.unwrap(), 42);
+    }
+
+    #[tokio::test]
+    async fn provider_attempt_capture_is_scoped_and_ordered() {
+        let (output, evidence) = capture_provider_attempts(async {
+            record_attempt(Some("http_503".to_string()), true);
+            record_attempt(None, false);
+            42
+        })
+        .await;
+
+        assert_eq!(output, 42);
+        assert_eq!(
+            evidence,
+            vec![
+                ProviderAttemptEvidence {
+                    physical: true,
+                    failure: Some("http_503".to_string()),
+                    retrying: true,
+                },
+                ProviderAttemptEvidence {
+                    physical: true,
+                    failure: None,
+                    retrying: false,
+                },
+            ]
+        );
+        assert!(ATTEMPT_EVIDENCE.try_with(|_| ()).is_err());
+    }
+
+    #[tokio::test]
+    async fn provider_attempt_capture_does_not_cross_concurrent_tasks() {
+        let first = tokio::spawn(capture_provider_attempts(async {
+            record_attempt(Some("timeout".to_string()), false);
+        }));
+        let second = tokio::spawn(capture_provider_attempts(async {
+            record_attempt(None, false);
+        }));
+
+        let (_, first) = first.await.expect("first capture task");
+        let (_, second) = second.await.expect("second capture task");
+        assert_eq!(first[0].failure.as_deref(), Some("timeout"));
+        assert_eq!(second[0].failure, None);
+    }
+
+    #[tokio::test]
+    async fn live_attempt_observer_survives_future_cancellation() {
+        let observed = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let sink = Arc::clone(&observed);
+        let observer: Arc<dyn Fn(ProviderAttemptEvidence) + Send + Sync> =
+            Arc::new(move |evidence| sink.lock().expect("observer lock").push(evidence));
+
+        let future = observe_provider_attempts(observer, async {
+            record_attempt(Some("timeout".to_string()), false);
+            std::future::pending::<()>().await;
+        });
+        assert!(
+            tokio::time::timeout(Duration::from_millis(1), future)
+                .await
+                .is_err()
+        );
+
+        let observed = observed.lock().expect("observed lock");
+        assert_eq!(observed.len(), 1);
+        assert_eq!(observed[0].failure.as_deref(), Some("timeout"));
     }
 
     #[tokio::test]

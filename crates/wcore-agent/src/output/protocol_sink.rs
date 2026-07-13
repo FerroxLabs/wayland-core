@@ -783,6 +783,24 @@ impl OutputSink for ProtocolSink {
         });
     }
 
+    fn emit_provider_attempt(&self, failure: Option<&str>) {
+        let _ = self.writer.emit(&ProtocolEvent::ProviderAttempt {
+            failure: failure.map(String::from),
+        });
+    }
+
+    fn emit_provider_retry(&self, failure: Option<&str>) {
+        let _ = self.writer.emit(&ProtocolEvent::ProviderRetry {
+            failure: failure.map(String::from),
+        });
+    }
+
+    fn emit_provider_failure(&self, failure: &str) {
+        let _ = self.writer.emit(&ProtocolEvent::ProviderFailure {
+            failure: failure.to_string(),
+        });
+    }
+
     /// W8a A.7: emit `ProtocolEvent::BudgetExceeded` unconditionally.
     /// No capability flag (audit F5 — host-tolerated additive variant);
     /// fires once per session when the first ExecutionBudget cap trips.

@@ -5342,6 +5342,7 @@ impl AgentEngine {
                 let mut attempt_usage = TokenUsage::default();
                 let mut done_seen = false;
                 let mut stream_error: Option<String> = None;
+                let mut stream_failure_code: Option<String> = None;
                 // Finding #174 (nested re-bill): set ONLY when `stream()` itself
                 // returns a retryable `Err` — i.e. the provider's HTTP ring
                 // (`builder_send_with_retry`, up to 3 sends) already spent its
@@ -5413,9 +5414,27 @@ impl AgentEngine {
                 // `http_ring_exhausted` and the budget guard below).
                 // Non-retryable errors (auth/4xx/parse/prompt-too-long)
                 // propagate immediately, exactly as before.
-                let mut rx = match self.provider.stream(&request).await {
+                let attempt_output = Arc::clone(&self.output);
+                let attempt_observer: Arc<
+                    dyn Fn(wcore_providers::retry::ProviderAttemptEvidence) + Send + Sync,
+                > = Arc::new(move |evidence| {
+                    if evidence.physical {
+                        attempt_output.emit_provider_attempt(evidence.failure.as_deref());
+                    }
+                    if evidence.retrying {
+                        attempt_output.emit_provider_retry(evidence.failure.as_deref());
+                    }
+                });
+                let provider_result = wcore_providers::retry::observe_provider_attempts(
+                    attempt_observer,
+                    self.provider.stream(&request),
+                )
+                .await;
+                let mut rx = match provider_result {
                     Ok(rx) => rx,
                     Err(e) if e.is_retryable() => {
+                        stream_failure_code =
+                            Some(wcore_providers::retry::provider_failure_code(&e));
                         stream_error = Some(e.to_string());
                         // The provider's HTTP ring already retried this exact
                         // request to exhaustion before surfacing `Err` — mark it
@@ -5438,6 +5457,8 @@ impl AgentEngine {
                         routed_model,
                         ..
                     }) if !overflow_retried => {
+                        self.output.emit_provider_failure("context_overflow");
+                        self.output.emit_provider_retry(Some("context_overflow"));
                         overflow_retried = true;
                         self.output.emit_info(&format!(
                             "context overflow on {routed_model} ({required_tokens} tokens > \
@@ -5460,7 +5481,11 @@ impl AgentEngine {
                         request.client_context_tokens = Some(recount);
                         continue 'stream;
                     }
-                    Err(e) => return Err(e.into()),
+                    Err(e) => {
+                        let failure = wcore_providers::retry::provider_failure_code(&e);
+                        self.output.emit_provider_failure(&failure);
+                        return Err(e.into());
+                    }
                 };
 
                 while let Some(event) = rx.recv().await {
@@ -5514,6 +5539,7 @@ impl AgentEngine {
                             // the request or fails the turn after the
                             // bounded retry budget is spent.
                             stream_error = Some(e);
+                            stream_failure_code = Some("stream_error".to_string());
                             break;
                         }
                         LlmEvent::Citations(urls) => {
@@ -5755,6 +5781,9 @@ impl AgentEngine {
                 let reason = stream_error.clone().unwrap_or_else(|| {
                     "provider stream closed before a Done event (truncated response)".to_string()
                 });
+                let failure_code =
+                    stream_failure_code.unwrap_or_else(|| "stream_truncated".to_string());
+                self.output.emit_provider_failure(&failure_code);
                 // v0.9.1.1 B6: HTTP 4xx errors (especially 400
                 // `invalid_request_error`) are NOT transient — retrying
                 // sends the same malformed request and burns the retry
@@ -5822,6 +5851,7 @@ impl AgentEngine {
                         return Err(AgentError::ApiError(gate_msg));
                     }
                     stream_attempt += 1;
+                    self.output.emit_provider_retry(Some(failure_code.as_str()));
                     // Linear backoff: 500ms, 1000ms.
                     let backoff = std::time::Duration::from_millis(500 * stream_attempt as u64);
                     self.output.emit_info(&format!(

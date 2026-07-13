@@ -65,7 +65,7 @@ pub struct ProviderCompat {
     /// `None` uses the hardened global default. This is a generic transport
     /// policy override for endpoints whose expected silent gaps differ from
     /// that default; it must never be selected by inspecting a provider URL.
-    pub read_timeout_ms: Option<u64>,
+    pub read_timeout_ms: Option<std::num::NonZeroU64>,
 
     /// Merge consecutive assistant messages (text concat + tool_calls merge).
     /// Default: true for openai.
@@ -1252,18 +1252,28 @@ mod tests {
     #[test]
     fn test_merge_user_read_timeout_overrides_default() {
         let defaults = ProviderCompat {
-            read_timeout_ms: Some(300_000),
+            read_timeout_ms: std::num::NonZeroU64::new(300_000),
             ..ProviderCompat::openai_defaults()
         };
         let user = ProviderCompat {
-            read_timeout_ms: Some(75),
+            read_timeout_ms: std::num::NonZeroU64::new(75),
             ..ProviderCompat::default()
         };
 
         assert_eq!(
-            ProviderCompat::merge(defaults, user).read_timeout_ms,
+            ProviderCompat::merge(defaults, user)
+                .read_timeout_ms
+                .map(std::num::NonZeroU64::get),
             Some(75)
         );
+    }
+
+    #[test]
+    fn read_timeout_rejects_zero() {
+        let parsed = serde_json::from_value::<ProviderCompat>(serde_json::json!({
+            "read_timeout_ms": 0
+        }));
+        assert!(parsed.is_err(), "a zero read timeout must fail closed");
     }
 
     #[test]
