@@ -130,6 +130,15 @@ async fn completed_tool_calls_obey_the_per_turn_step_ceiling() {
             budget: 1
         }
     )));
+    assert!(
+        result
+            .trace
+            .entries
+            .iter()
+            .all(|entry| entry.duration.is_some()),
+        "every correlated tool request/result must carry a duration: {:?}",
+        result.trace.entries
+    );
 }
 
 #[tokio::test]

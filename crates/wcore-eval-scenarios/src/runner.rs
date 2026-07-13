@@ -1000,7 +1000,7 @@ async fn drive_session(
     // JSON keyed by `call_id` here, then attach it to the `TraceEntry` when the
     // result lands. Best-effort: a result with no pending request falls back to
     // empty input (the prior behaviour).
-    let mut pending_inputs: std::collections::HashMap<String, String> =
+    let mut pending_inputs: std::collections::HashMap<String, (String, Instant)> =
         std::collections::HashMap::new();
     // #278 — `session_cost` is emitted by the engine BEFORE `stream_end`
     // (engine.rs `fire_on_session_end` runs inside `engine.run()`; the
@@ -1166,10 +1166,14 @@ async fn drive_session(
                         .and_then(|t| t.get("args"))
                         .or_else(|| ev.get("input"))
                         .or_else(|| ev.get("arguments"));
-                    if !call_id.is_empty()
-                        && let Some(v) = input_val
-                    {
-                        pending_inputs.insert(call_id.clone(), v.to_string());
+                    if !call_id.is_empty() {
+                        pending_inputs.insert(
+                            call_id.clone(),
+                            (
+                                input_val.map(ToString::to_string).unwrap_or_default(),
+                                Instant::now(),
+                            ),
+                        );
                     }
                     // D3: in non-`Yolo` mode the engine emits `tool_request`
                     // and then BLOCKS on `request_approval(call_id)` (no
@@ -1204,14 +1208,19 @@ async fn drive_session(
                     let is_error = ev.get("status").and_then(Value::as_str) == Some("error");
                     // Attach the pending input captured from `tool_request`;
                     // empty (prior behaviour) when no matching request was seen.
-                    let input = pending_inputs.remove(&call_id).unwrap_or_default();
+                    let pending = pending_inputs.remove(&call_id);
+                    let input = pending
+                        .as_ref()
+                        .map(|(input, _)| input.clone())
+                        .unwrap_or_default();
+                    let duration = pending.map(|(_, started)| started.elapsed());
                     trace.entries.push(TraceEntry {
                         call_id,
                         tool_name,
                         input,
                         output,
                         is_error,
-                        duration: None,
+                        duration,
                         turn: turn_idx,
                     });
                 }
