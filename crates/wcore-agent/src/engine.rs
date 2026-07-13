@@ -16041,11 +16041,13 @@ mod user_model_writeback_tests {
     #[test]
     fn auto_skill_lifecycle_off_blocks_injected_drafter_before_bucketing() {
         let tmp = tempfile::tempdir().unwrap();
-        let skill_dir = tmp.path().join("skills").join("auto");
+        let generated_name = "auto-code-refactor";
+        let skill_dir = tmp.path().join("skills").join(generated_name);
         let db = Arc::new(wcore_memory::db::Db::open_memory().unwrap());
         let store = Arc::new(wcore_evolve::prompt_store::PromptStore::new(db));
-        let drafter = Arc::new(crate::auto_skill::SkillDrafter::new(
-            skill_dir.clone(),
+        let drafter = Arc::new(crate::auto_skill::SkillDrafter::with_loader_root(
+            tmp.path().join("legacy-unused"),
+            tmp.path().to_path_buf(),
             Some(store.clone()),
         ));
         let mut engine = make_engine();
@@ -16069,10 +16071,33 @@ mod user_model_writeback_tests {
         );
         assert!(
             store
-                .best_for_skill("auto-code-refactor", "auto_drafter", 10)
+                .best_for_skill(generated_name, "auto_drafter", 10)
                 .unwrap()
                 .is_empty(),
             "lifecycle-off observation must not record PromptStore candidates"
+        );
+        assert!(
+            !wcore_skills::bundled::get_bundled_skills()
+                .iter()
+                .any(|skill| skill.name == generated_name),
+            "lifecycle-off observation must not register generated bundled content"
+        );
+
+        // Prove the disabled calls never reached the bucketer. If they had,
+        // either of the first two enabled calls would complete the threshold
+        // of three and write a draft.
+        engine.skills_lifecycle = true;
+        for input in ["refactor the code", "the code refactor"] {
+            engine.observe_auto_skill(input, None, StopReason::EndTurn, 1);
+            assert!(
+                !skill_dir.exists(),
+                "disabled observations must not pre-seed the bucketer"
+            );
+        }
+        engine.observe_auto_skill("please refactor code", None, StopReason::EndTurn, 1);
+        assert!(
+            skill_dir.join("SKILL.md").is_file(),
+            "the third enabled observation should prove the fixture can draft"
         );
     }
 

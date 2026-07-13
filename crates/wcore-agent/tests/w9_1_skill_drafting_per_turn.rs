@@ -15,10 +15,14 @@
 //!    payloads even when the same 3-turn pattern is driven. This is the
 //!    capability-gate invariant the W9 design contract pins in §5.3.
 
+use std::sync::Arc;
+
 use serde_json::{Value, json};
 use wcore_agent::bootstrap::AgentBootstrap;
 use wcore_config::compat::ProviderCompat;
 use wcore_config::config::{Config, ProviderType};
+use wcore_memory::v2_types::Tier;
+use wcore_memory::{AccessToken, MemoryApi};
 use wcore_types::llm::LlmEvent;
 use wcore_types::message::{FinishReason, StopReason, TokenUsage};
 
@@ -144,8 +148,15 @@ async fn engine_skips_skill_drafting_when_gate_off() {
     // Same 3-turn pattern, but `skills_lifecycle = false`. No
     // skill_drafted TraceEvent must ever fire — the capability-gate
     // invariant from W9 design contract §5.3.
+    let memory_dir = tempfile::tempdir().expect("memory tempdir");
+    let memory = wcore_memory::open_for_test(memory_dir.path())
+        .await
+        .expect("test memory");
+    let memory_api: Arc<dyn MemoryApi> = Arc::new(memory.clone());
+
     let (mut engine, _handle) =
         AgentBootstrap::build_for_test(minimal_config(false), five_tool_repeat_script());
+    engine.set_memory_api(memory_api);
 
     let _ = engine
         .run_synthetic_turn("trigger pattern detection")
@@ -158,6 +169,15 @@ async fn engine_skips_skill_drafting_when_gate_off() {
         drafted, 0,
         "skills_lifecycle = false MUST suppress all skill_drafted emissions; \
          got {drafted}"
+    );
+
+    let procedures = memory
+        .list_procedures(Tier::Project, AccessToken::System)
+        .await
+        .expect("list procedures");
+    assert!(
+        procedures.is_empty(),
+        "skills_lifecycle = false MUST prevent DraftWriter P4 mutation; got {procedures:?}"
     );
 }
 
