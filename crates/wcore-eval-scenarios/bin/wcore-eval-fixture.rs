@@ -35,6 +35,14 @@ fn main() {
                     .get("msg_id")
                     .and_then(serde_json::Value::as_str)
                     .unwrap_or("fixture");
+                if model == "fixture-oversized-stdout" {
+                    let mut stdout = std::io::stdout().lock();
+                    stdout
+                        .write_all(&vec![b'x'; 256 * 1024])
+                        .expect("write oversized unterminated stdout event");
+                    stdout.flush().expect("flush oversized stdout event");
+                    continue;
+                }
                 let is_canary = command
                     .get("content")
                     .and_then(serde_json::Value::as_str)

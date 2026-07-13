@@ -156,4 +156,26 @@ mod tests {
         assert!(snap.contains("line-119"), "missing last line: {snap:?}");
         assert!(!snap.contains("line-5\n"), "head should be evicted");
     }
+
+    #[tokio::test]
+    async fn newline_free_payload_is_byte_bounded() {
+        const MAX_CAPTURE_BYTES: usize = 64 * 1024;
+        const TAIL: &[u8] = b"stderr-tail-sentinel";
+
+        let mut bytes = vec![b'x'; 256 * 1024];
+        bytes.extend_from_slice(TAIL);
+        let cap = StderrCapture::spawn(CursorAdapter(Cursor::new(bytes)));
+        sleep(Duration::from_millis(50)).await;
+
+        let snap = cap.snapshot();
+        assert!(
+            snap.ends_with(std::str::from_utf8(TAIL).unwrap()),
+            "bounded capture must retain the newest stderr bytes"
+        );
+        assert!(
+            snap.len() <= MAX_CAPTURE_BYTES,
+            "newline-free stderr exceeded {MAX_CAPTURE_BYTES} bytes: captured {}",
+            snap.len()
+        );
+    }
 }

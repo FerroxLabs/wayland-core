@@ -123,6 +123,30 @@ async fn missing_cost_evidence_fails_closed() {
 }
 
 #[tokio::test]
+async fn oversized_unterminated_stdout_is_a_bounded_runner_error() {
+    let scenario = Scenario::new("oversized_stdout", Category::Hardening)
+        .max_total_time(Duration::from_secs(2))
+        .turn(Turn::new("emit oversized protocol data").max_time(Duration::from_millis(250)));
+
+    let result = run_with_binary(&scenario, &provider("fixture-oversized-stdout"), fixture())
+        .await
+        .expect("runner returns a typed failure result");
+
+    assert!(
+        result.failures.iter().any(|failure| {
+            matches!(failure, Failure::RunnerError(message) if message.contains("stdout event exceeded 65536 bytes"))
+        }),
+        "oversized protocol data must be classified as a bounded runner error, got {:?}",
+        result.failures
+    );
+    assert!(
+        result.wall_time < Duration::from_secs(1),
+        "output limit should fail before the scenario deadline: {:?}",
+        result.wall_time
+    );
+}
+
+#[tokio::test]
 async fn run_is_hermetic_and_redacts_child_secret_exfiltration() {
     const SECRET: &str = "wcore-canary-secret-7f84c1";
     let _poison = EnvGuard::poison();
