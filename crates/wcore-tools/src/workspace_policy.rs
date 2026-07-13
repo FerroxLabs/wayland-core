@@ -294,6 +294,52 @@ impl WorkspacePolicy {
         self
     }
 
+    /// #234: the OS-sandbox read-deny list AS OF NOW, recomputed per Bash exec.
+    ///
+    /// Identical to [`secret_deny_paths`](Self::secret_deny_paths) EXCEPT it
+    /// re-walks the workspace for project-committed secrets, so a secret CREATED
+    /// AFTER bootstrap (a pulled `*.pem`, a generated `terraform.tfstate`) is
+    /// denied on the very next Bash command. This closes the TOCTOU gap between
+    /// the frozen construction-time list — which `bash.rs` fed to the OS sandbox
+    /// — and the dynamic [`is_project_secret`](Self::is_project_secret) guard the
+    /// in-process file tools (`SecretDenyFs`) already enforce per-access. Before
+    /// this, `Bash cat terraform.tfstate` could read a secret that `Read` refused.
+    ///
+    /// Scope: this closes the CROSS-command window (a secret created by an earlier
+    /// command, read by a later one). The INTRA-command window is inherent to a
+    /// static pre-exec OS-sandbox deny list and is NOT closed — a single compound
+    /// command that both creates and reads a secret (`terraform apply && cat
+    /// terraform.tfstate`) generates it AFTER this walk, so it is absent for that
+    /// exec. The file tools' per-access guard covers that case; `Bash`-as-subprocess
+    /// structurally cannot. Exfil is blunted by the default `network = Deny`.
+    ///
+    /// Gated on [`secret_read_deny_required`](Self::secret_read_deny_required):
+    /// only postures that ALREADY deny project secrets (Contained, or Full/remote
+    /// via [`with_project_secret_deny`](Self::with_project_secret_deny)) get the
+    /// fresh walk. A genuinely-local keyboard session (Trusted, flag unset) is
+    /// returned UNCHANGED — the operator may still read their own `.env` (Sean's
+    /// #667 ruling). Reuses the SAME `project_committed_secrets` walk the frozen
+    /// list is built from, so the two cannot drift and its anti-bypass properties
+    /// (a `.gitignore`d `.env` is still denied, a symlink-to-secret is masked,
+    /// only under-mounted paths are emitted) are inherited verbatim.
+    ///
+    /// Also denies the git CONTENT stores ([`git_content_stores`]) so a committed
+    /// secret cannot be reconstructed from `.git/objects` via `Bash("git show
+    /// HEAD:.env")` and friends — the sibling of the typed-GitTool drop (MF1).
+    pub fn secret_deny_paths_dynamic(&self) -> Vec<PathBuf> {
+        if !self.secret_read_deny_required {
+            return self.secret_deny.clone();
+        }
+        let readable_canon =
+            readable_canon_roots(&self.root, &self.writable_extra, &self.readable_extra);
+        let mut out = self.secret_deny.clone();
+        out.extend(project_committed_secrets(&self.root, &readable_canon));
+        out.extend(git_content_stores(&self.root));
+        out.sort();
+        out.dedup();
+        out
+    }
+
     /// #667 (F2): true when `Bash` must be REFUSED on a backend that cannot
     /// enforce `fs_read_deny` at the OS layer — because this policy relies on
     /// that enforcement to keep secrets unreadable from the shell. Replaces the
@@ -451,6 +497,14 @@ fn project_committed_secrets(root: &Path, readable_canon: &[PathBuf]) -> Vec<Pat
     };
 
     let mut out: Vec<PathBuf> = Vec::new();
+    // NO directory prune: the file tools' `is_project_secret` predicate covers a
+    // secret ANYWHERE under root, so this list must too — pruning `node_modules`/
+    // `target`/`.wcache` would deny a committed secret to Read/Edit/Grep while
+    // leaving it READABLE via `Bash cat node_modules/vendor/x.pem` (the two layers
+    // must not diverge). The per-exec #234 DoS is killed instead by a LEXICAL
+    // prefilter: we canonicalize (an expensive symlink-resolving syscall) ONLY for
+    // secret-NAMED files and for symlinks — not for every entry. Visiting (readdir)
+    // a large `node_modules` is cheap; canonicalizing every file in it was the cost.
     let walker = ignore::WalkBuilder::new(root)
         .standard_filters(false) // a .gitignore'd .env must still be denied
         .hidden(false)
@@ -458,22 +512,53 @@ fn project_committed_secrets(root: &Path, readable_canon: &[PathBuf]) -> Vec<Pat
         .build();
     for entry in walker.flatten() {
         let path = entry.path();
-        let Ok(canon) = std::fs::canonicalize(path) else {
+        let is_symlink = entry.path_is_symlink();
+        if !is_symlink {
+            // Regular file: cheap lexical check on the raw name FIRST; only a
+            // secret-named file is worth the canonicalize syscall.
+            if !entry.file_type().is_some_and(|t| t.is_file()) || !is_secret_path_static(path) {
+                continue;
+            }
+            if let Ok(canon) = std::fs::canonicalize(path)
+                && under_mounted(&canon)
+            {
+                out.push(canon);
+            }
             continue;
-        };
-        // Direct secret files.
-        if entry.file_type().is_some_and(|t| t.is_file())
-            && is_secret_path_static(path)
+        }
+        // Symlink (rare): resolve the target and deny the link's own canonical
+        // path if the TARGET is a secret, masking a benign-named link to a secret
+        // (`notes.txt` → `.env`). Must canonicalize regardless of the link's name.
+        // External-target residual (target not under a mounted root) is documented
+        // in the plan — backstopped by network-Deny.
+        if let Ok(canon) = std::fs::canonicalize(path)
+            && is_secret_path_static(&canon)
             && under_mounted(&canon)
         {
-            out.push(canon.clone());
-        }
-        // Symlink whose RESOLVED target is a secret → deny the link's
-        // own (canonicalized) path so the read-through is masked.
-        // External-target residual (target not under a mounted root) is
-        // documented in the plan — backstopped by network-Deny.
-        if entry.path_is_symlink() && is_secret_path_static(&canon) && under_mounted(&canon) {
             out.push(canon);
+        }
+    }
+    out
+}
+
+/// Git CONTENT stores under `root` that must be OS-sandbox-denied for reads in a
+/// secret-deny posture. A committed secret's bytes live in the object store, NOT
+/// as a working-tree path, so `Bash("git show HEAD:.env")` / `git cat-file` /
+/// `git log -p` / `git blame` reconstruct the committed secret from there,
+/// sailing past the working-tree `.env` deny. The typed `GitTool` is already
+/// dropped in these postures (MF1); denying the object store closes the sibling
+/// Bash+git door ROBUSTLY — one mechanism kills every content-emitting git verb
+/// and every shell-syntax variant, versus enumerating git's sprawling read
+/// surface. `.git/refs`/`HEAD` stay readable, so `git rev-parse` (a SHA, no
+/// content) still works. Covers the main store, submodule stores (`.git/modules`)
+/// and LFS (`.git/lfs`). Empirically verified on the box (bwrap `--tmpfs` shadows
+/// the dir → `git show`/`cat-file`/`log -p` all fail).
+fn git_content_stores(root: &Path) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    for rel in [".git/objects", ".git/modules", ".git/lfs"] {
+        let p = root.join(rel);
+        if p.exists() {
+            out.push(std::fs::canonicalize(&p).unwrap_or(p));
         }
     }
     out
@@ -960,6 +1045,183 @@ mod tests {
         assert!(
             WorkspacePolicy::contained(root).secret_read_deny_required(),
             "Contained must require read-deny enforcement"
+        );
+    }
+
+    // ── #234: Bash OS-deny recomputed per-exec (post-bootstrap TOCTOU) ─────────
+
+    /// #234 core: a Full/remote policy denies a secret CREATED AFTER
+    /// construction via `secret_deny_paths_dynamic()`, while the frozen
+    /// `secret_deny_paths()` (what `bash.rs` used before) MISSES it — proving the
+    /// dynamic re-walk is what closes the `Bash cat terraform.tfstate` gap.
+    #[test]
+    fn dynamic_deny_catches_post_bootstrap_secret_remote() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        // Full/remote posture: project-secret denial active at construction,
+        // but no secrets exist yet.
+        let p = WorkspacePolicy::trusted_local(root).with_project_secret_deny();
+
+        // Secrets appear AFTER bootstrap — the TOCTOU window.
+        std::fs::write(root.join("deploy.pem"), b"-----BEGIN KEY-----").unwrap();
+        std::fs::write(root.join("terraform.tfstate"), b"{}").unwrap();
+        let pem = std::fs::canonicalize(root.join("deploy.pem")).unwrap();
+        let tf = std::fs::canonicalize(root.join("terraform.tfstate")).unwrap();
+
+        assert!(
+            !p.secret_deny_paths().contains(&pem) && !p.secret_deny_paths().contains(&tf),
+            "frozen list must MISS post-bootstrap secrets (that is the #234 gap)"
+        );
+        let dynamic = p.secret_deny_paths_dynamic();
+        assert!(
+            dynamic.contains(&pem),
+            "dynamic deny must include the post-bootstrap *.pem; got {dynamic:?}"
+        );
+        assert!(
+            dynamic.contains(&tf),
+            "dynamic deny must include the post-bootstrap terraform.tfstate; got {dynamic:?}"
+        );
+    }
+
+    /// #234 anti-bypass: the dynamic walk must NOT honor `.gitignore` — secrets
+    /// are routinely gitignored, so an ignore-respecting walk would skip exactly
+    /// what must be denied. (Inherited from `project_committed_secrets`, pinned
+    /// here for the dynamic path.)
+    #[test]
+    fn dynamic_deny_ignores_gitignore_for_secrets() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::write(root.join(".gitignore"), b"*.pem\n").unwrap();
+        let p = WorkspacePolicy::trusted_local(root).with_project_secret_deny();
+        std::fs::write(root.join("id.pem"), b"k").unwrap();
+        let pem = std::fs::canonicalize(root.join("id.pem")).unwrap();
+        assert!(
+            p.secret_deny_paths_dynamic().contains(&pem),
+            "a gitignored secret must STILL be denied (honoring .gitignore is the bypass)"
+        );
+    }
+
+    /// #234 exemption preserved: a bare local-keyboard session (Trusted, no
+    /// project-secret denial) gets NO dynamic walk — `secret_deny_paths_dynamic`
+    /// equals the frozen list and the operator may still read their own `.env`.
+    #[test]
+    fn dynamic_deny_local_keyboard_unchanged() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let p = WorkspacePolicy::trusted_local(root);
+        std::fs::write(root.join(".env"), b"SECRET=x").unwrap();
+        assert_eq!(
+            p.secret_deny_paths_dynamic(),
+            p.secret_deny_paths().to_vec(),
+            "local keyboard session stays exempt — no dynamic walk"
+        );
+        let env = std::fs::canonicalize(root.join(".env")).unwrap();
+        assert!(
+            !p.secret_deny_paths_dynamic().contains(&env),
+            "local .env must remain readable for the genuinely-local operator"
+        );
+    }
+
+    /// #234: the Contained posture also picks up a post-bootstrap secret through
+    /// the dynamic re-walk.
+    #[test]
+    fn dynamic_deny_catches_post_bootstrap_secret_contained() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let p = WorkspacePolicy::contained(root);
+        std::fs::write(root.join("secrets.pem"), b"k").unwrap();
+        let pem = std::fs::canonicalize(root.join("secrets.pem")).unwrap();
+        assert!(
+            p.secret_deny_paths_dynamic().contains(&pem),
+            "Contained must dynamically deny a post-bootstrap secret; got {:?}",
+            p.secret_deny_paths_dynamic()
+        );
+    }
+
+    /// MF3 (auditor) — the walk must NOT prune for detection: a secret INSIDE a
+    /// `node_modules`/`target`/`.wcache` dir is denied to Bash just as the file
+    /// tools' `is_project_secret` denies it, so `Bash cat node_modules/vendor/x.pem`
+    /// cannot read what `Read` refuses. The earlier prune (my #234 DoS fix) opened
+    /// exactly this hole; the fix is a lexical-first walk (no prune), not coverage
+    /// dropping. Nested ordinary-dir secret still caught (control).
+    #[test]
+    fn dynamic_deny_covers_secret_inside_machine_dirs() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let p = WorkspacePolicy::trusted_local(root).with_project_secret_deny();
+
+        // Committed secrets that happen to live under machine-named dirs — MUST
+        // be denied (the file tools' predicate denies them, so Bash must too).
+        for d in ["target", ".wcache", "node_modules"] {
+            std::fs::create_dir_all(root.join(d).join("vendor")).unwrap();
+            std::fs::write(root.join(d).join("vendor").join("x.pem"), b"k").unwrap();
+        }
+        // Ordinary nested secret (control).
+        std::fs::create_dir_all(root.join("deploy").join("keys")).unwrap();
+        std::fs::write(root.join("deploy").join("keys").join("prod.pem"), b"k").unwrap();
+
+        let dynamic = p.secret_deny_paths_dynamic();
+        for d in ["target", ".wcache", "node_modules"] {
+            let secret = std::fs::canonicalize(root.join(d).join("vendor").join("x.pem")).unwrap();
+            assert!(
+                dynamic.contains(&secret),
+                "a committed secret under {d}/ MUST be denied (no prune); got {dynamic:?}"
+            );
+        }
+        let real =
+            std::fs::canonicalize(root.join("deploy").join("keys").join("prod.pem")).unwrap();
+        assert!(
+            dynamic.contains(&real),
+            "nested ordinary secret must be denied"
+        );
+    }
+
+    /// MF4 (auditor) — the Contained posture must not under-deny secrets under
+    /// machine-named dirs (the base branch denied them; the prune had regressed
+    /// this). Restored by dropping the prune.
+    #[test]
+    fn contained_denies_secret_inside_machine_dirs() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::create_dir_all(root.join("node_modules").join("v")).unwrap();
+        std::fs::write(root.join("node_modules").join("v").join("id.pem"), b"k").unwrap();
+        let p = WorkspacePolicy::contained(root);
+        let secret =
+            std::fs::canonicalize(root.join("node_modules").join("v").join("id.pem")).unwrap();
+        // Both the frozen construction-time list and the dynamic list must cover it.
+        assert!(
+            p.secret_deny_paths().contains(&secret),
+            "Contained construction-time deny must cover node_modules secret; got {:?}",
+            p.secret_deny_paths()
+        );
+        assert!(
+            p.secret_deny_paths_dynamic().contains(&secret),
+            "Contained dynamic deny must cover node_modules secret; got {:?}",
+            p.secret_deny_paths_dynamic()
+        );
+    }
+
+    /// Auditor round-2 HIGH: the git object store must be in Bash's fs_read_deny
+    /// for secret-deny postures so `git show HEAD:<committed secret>` cannot
+    /// reconstruct it from `.git/objects`. Local keyboard stays exempt.
+    #[test]
+    fn dynamic_deny_covers_git_object_store() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::create_dir_all(root.join(".git").join("objects")).unwrap();
+        let objects = std::fs::canonicalize(root.join(".git").join("objects")).unwrap();
+
+        let remote = WorkspacePolicy::trusted_local(root).with_project_secret_deny();
+        assert!(
+            remote.secret_deny_paths_dynamic().contains(&objects),
+            "Full/remote Bash deny must include .git/objects (git-show leak); got {:?}",
+            remote.secret_deny_paths_dynamic()
+        );
+
+        let local = WorkspacePolicy::trusted_local(root);
+        assert!(
+            !local.secret_deny_paths_dynamic().contains(&objects),
+            "local keyboard must NOT newly-deny .git/objects (exempt)"
         );
     }
 

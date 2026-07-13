@@ -96,6 +96,43 @@ async fn conversational_posture_drops_all_host_tools() {
 }
 
 #[tokio::test]
+async fn full_channel_remote_drops_search_and_git() {
+    // MF1 (Git blame/diff/log-p reads a committed secret) + #232 (Grep/Glob
+    // recursive scan escapes the read guards): a Full channel-remote engine —
+    // built via the SAME production bootstrap a remote sender's turn uses — must
+    // NOT expose Grep/Glob/Git. Proven end-to-end through `build()`, not just at
+    // the `keep_under` unit layer.
+    let tmp = tempdir().unwrap();
+    let ws = tmp.path().to_str().unwrap().to_string();
+    let sink: Arc<dyn OutputSink> = Arc::new(NullSink);
+
+    let result = AgentBootstrap::new(bootstrap_config(), ws.clone(), sink)
+        .without_channels(true)
+        .channel_tool_posture(ChannelToolScope {
+            posture: ChannelToolPosture::Full,
+            workspace_root: ws.into(),
+        })
+        .build()
+        .await
+        .expect("bootstrap");
+
+    let names = result.engine.tool_names();
+    for gone in ["Grep", "Glob", "Git"] {
+        assert!(
+            !names.iter().any(|n| n == gone),
+            "Full channel-remote must drop secret-read path '{gone}', got: {names:?}"
+        );
+    }
+    // Full is otherwise full host access — the drop is surgical.
+    for kept in ["Read", "Write", "Edit", "Bash"] {
+        assert!(
+            names.iter().any(|n| n == kept),
+            "Full channel-remote keeps host tool '{kept}', got: {names:?}"
+        );
+    }
+}
+
+#[tokio::test]
 async fn workspace_posture_jails_filesystem_reads() {
     let inside = tempdir().unwrap();
     let outside = tempdir().unwrap();

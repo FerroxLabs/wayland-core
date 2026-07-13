@@ -104,7 +104,13 @@ const WORKSPACE_FS_TOOLS: &[&str] = &["Read", "Write", "Edit", "Bash"];
 /// `apply_posture` is never called without a channel scope. Operator-wired
 /// MCP tools are exempt (deliberate extensions). `.env` is separately fully
 /// closed (rg skips dotfiles by default).
-const FULL_CHANNEL_DENY: &[&str] = &["Grep", "Glob"];
+// MF1 (auditor): `Git` is dropped from Full channel-remote alongside Grep/Glob.
+// The typed GitTool reads git-TRACKED content via `blame`/`diff`/`log -p`/`show`
+// (e.g. a committed `.env`) straight from the object store, bypassing the
+// SecretDenyFs read-path guard and the OS-sandbox `fs_read_deny` (which cover the
+// working tree, not `.git/objects`). A LOCAL Full session keeps Git (apply_posture
+// never runs there).
+const FULL_CHANNEL_DENY: &[&str] = &["Grep", "Glob", "Git"];
 
 /// Operator-wired MCP tools are kept under restricted postures: they are
 /// deliberate, named extensions the operator installed, not ambient host
@@ -155,7 +161,7 @@ fn keep_under(posture: ChannelToolPosture, tool: &dyn Tool, read_deny_enforced: 
 /// For [`ChannelToolPosture::Full`] it drops only the unconfined-search tools
 /// ([`FULL_CHANNEL_DENY`]) and installs no jail; every other tool survives.
 /// Never called for a local CLI engine (which has no scope), so a LOCAL Full
-/// session keeps `Grep`/`Glob`. Must run AFTER the full toolset — including
+/// session keeps `Grep`/`Glob`/`Git`. Must run AFTER the full toolset — including
 /// MCP tools — is registered, and BEFORE the registry is moved into the engine.
 pub fn apply_posture(
     registry: &mut ToolRegistry,
@@ -163,7 +169,7 @@ pub fn apply_posture(
     read_deny_enforced: bool,
 ) {
     // Runs for every posture, including Full: the Full arm of `keep_under`
-    // drops `FULL_CHANNEL_DENY` (Grep/Glob) while keeping all else. Only
+    // drops `FULL_CHANNEL_DENY` (Grep/Glob/Git) while keeping all else. Only
     // channel/remote engines reach here, so local Full is untouched.
     let posture = scope.posture;
     registry.retain(|t| keep_under(posture, t, read_deny_enforced));
@@ -473,8 +479,9 @@ mod tests {
             ),
             "operator MCP tool must survive Full even if it name-collides with a denied builtin"
         );
-        // Full is still full host access for everything else.
-        for name in ["Read", "Write", "Edit", "Bash", "kubectl", "Git"] {
+        // Full is still full host access for everything else (Git now dropped —
+        // see MF1; it is asserted-dropped via the FULL_CHANNEL_DENY loop above).
+        for name in ["Read", "Write", "Edit", "Bash", "kubectl"] {
             assert!(
                 keep_under(
                     ChannelToolPosture::Full,
@@ -493,10 +500,11 @@ mod tests {
     /// NOT `Mcp`) and assert the concrete types are dropped end-to-end — the
     /// unit-`FakeTool` tests above can't catch a drift in the real tools.
     #[test]
-    fn real_grep_glob_builtins_denied_by_identity_under_full() {
+    fn real_grep_glob_git_builtins_denied_by_identity_under_full() {
         let grep = wcore_tools::grep::GrepTool;
         let glob = wcore_tools::glob::GlobTool;
-        for t in [&grep as &dyn Tool, &glob as &dyn Tool] {
+        let git = wcore_tools::git::GitTool;
+        for t in [&grep as &dyn Tool, &glob as &dyn Tool, &git as &dyn Tool] {
             assert!(
                 FULL_CHANNEL_DENY.contains(&t.name()),
                 "builtin '{}' must be listed in FULL_CHANNEL_DENY",
