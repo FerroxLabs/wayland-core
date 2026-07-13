@@ -185,6 +185,8 @@ impl ClimbJournal {
         let mut file = OpenOptions::new()
             .read(true)
             .write(true)
+            // Preserve existing entries (we seek to end to append); NOT truncate.
+            .truncate(false)
             .create(true)
             .open(&self.path)
             .map_err(|source| JournalError::Io {
