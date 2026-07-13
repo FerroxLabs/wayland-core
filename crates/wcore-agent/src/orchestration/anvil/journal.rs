@@ -295,8 +295,9 @@ impl ClimbJournal {
 
 #[cfg(test)]
 mod tests {
+    // `Write` (for `write_all`/`writeln!`) comes in via `use super::*` (the
+    // module imports it for the torn-tail heal), so no separate import here.
     use super::*;
-    use std::io::Write as _;
 
     fn tmp_journal() -> (tempfile::TempDir, PathBuf) {
         let dir = tempfile::tempdir().expect("tempdir");
