@@ -22,7 +22,7 @@ pub(crate) fn semantic_sha256(
         }
         _ => hash_text(&mut hasher, evidence, &workspace_forms),
     }
-    Ok(format!("{hasher:x}"))
+    Ok(format!("{:x}", hasher.finalize()))
 }
 
 fn workspace_forms(workspace: &Path) -> Result<Vec<Vec<u8>>, WorkspaceEvidenceError> {
@@ -40,15 +40,20 @@ fn workspace_forms(workspace: &Path) -> Result<Vec<Vec<u8>>, WorkspaceEvidenceEr
     if native.is_empty() {
         return Err(WorkspaceEvidenceError::UnsafeWorkspace);
     }
-    let mut forms = vec![native.as_bytes().to_vec()];
+    let native_form = native.as_bytes().to_vec();
     #[cfg(windows)]
     {
+        let mut forms = vec![native_form];
         let slash = native.replace('\\', "/").into_bytes();
         if slash != forms[0] {
             forms.push(slash);
         }
+        Ok(forms)
     }
-    Ok(forms)
+    #[cfg(not(windows))]
+    {
+        Ok(vec![native_form])
+    }
 }
 
 fn hash_json(hasher: &mut Sha256, value: &serde_json::Value, workspace_forms: &[Vec<u8>]) {
