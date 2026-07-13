@@ -441,6 +441,12 @@ impl EvidenceReceiptV1 {
                 })
             })
             .collect::<Result<Vec<_>, ReceiptError>>()?;
+        let mut provider_typed_failures = result.execution.provider_typed_failures.clone();
+        for failure in &failure_evidence {
+            if !provider_typed_failures.contains(&failure.code) {
+                provider_typed_failures.push(failure.code.clone());
+            }
+        }
         let usability = usability::scan(result)
             .into_iter()
             .map(|finding| UsabilityEvidenceV1 {
@@ -604,28 +610,43 @@ impl EvidenceReceiptV1 {
                 shutdown_ms: Evidence::observed(result.execution.shutdown_time.as_millis() as u64),
             },
             provider: ProviderEvidenceV1 {
-                attempts: Evidence::Unavailable {
-                    code: "provider_attempts_not_emitted".to_string(),
-                },
-                typed_failures: failure_evidence
-                    .iter()
-                    .map(|failure| failure.code.clone())
-                    .collect(),
-                retries: Evidence::Unavailable {
-                    code: "provider_retries_not_emitted".to_string(),
-                },
-                input_tokens: Evidence::Unavailable {
-                    code: "provider_usage_not_emitted".to_string(),
-                },
-                output_tokens: Evidence::Unavailable {
-                    code: "provider_usage_not_emitted".to_string(),
-                },
-                cache_read_tokens: Evidence::Unavailable {
-                    code: "provider_usage_not_emitted".to_string(),
-                },
-                cache_write_tokens: Evidence::Unavailable {
-                    code: "provider_usage_not_emitted".to_string(),
-                },
+                attempts: result.execution.provider_attempts.map_or_else(
+                    || Evidence::Unavailable {
+                        code: "provider_attempts_not_emitted".to_string(),
+                    },
+                    Evidence::observed,
+                ),
+                typed_failures: provider_typed_failures,
+                retries: result.execution.provider_retries.map_or_else(
+                    || Evidence::Unavailable {
+                        code: "provider_retries_not_emitted".to_string(),
+                    },
+                    Evidence::observed,
+                ),
+                input_tokens: result.execution.provider_usage.as_ref().map_or_else(
+                    || Evidence::Unavailable {
+                        code: "provider_usage_not_emitted".to_string(),
+                    },
+                    |usage| Evidence::observed(usage.input_tokens),
+                ),
+                output_tokens: result.execution.provider_usage.as_ref().map_or_else(
+                    || Evidence::Unavailable {
+                        code: "provider_usage_not_emitted".to_string(),
+                    },
+                    |usage| Evidence::observed(usage.output_tokens),
+                ),
+                cache_read_tokens: result.execution.provider_usage.as_ref().map_or_else(
+                    || Evidence::Unavailable {
+                        code: "provider_usage_not_emitted".to_string(),
+                    },
+                    |usage| Evidence::observed(usage.cache_read_tokens),
+                ),
+                cache_write_tokens: result.execution.provider_usage.as_ref().map_or_else(
+                    || Evidence::Unavailable {
+                        code: "provider_usage_not_emitted".to_string(),
+                    },
+                    |usage| Evidence::observed(usage.cache_write_tokens),
+                ),
                 cost_microusd,
                 limit_microusd,
             },

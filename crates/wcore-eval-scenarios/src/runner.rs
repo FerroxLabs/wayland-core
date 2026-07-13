@@ -87,8 +87,24 @@ pub struct ExecutionEvidence {
     pub first_token_time: Option<Duration>,
     pub approval_response_time: Duration,
     pub approval_commands: Vec<ApprovalCommandEvidence>,
+    #[serde(default)]
+    pub provider_attempts: Option<u64>,
+    #[serde(default)]
+    pub provider_retries: Option<u64>,
+    #[serde(default)]
+    pub provider_typed_failures: Vec<String>,
+    #[serde(default)]
+    pub provider_usage: Option<ProviderUsageEvidence>,
     pub cancellation_requested: bool,
     pub shutdown_time: Duration,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ProviderUsageEvidence {
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub cache_read_tokens: u64,
+    pub cache_write_tokens: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -547,6 +563,7 @@ async fn run_session_body(input: SessionRun<'_>) -> anyhow::Result<ScenarioResul
         first_token_time,
         approval_response_time,
         approval_commands,
+        provider_usage,
     ) = match result {
         Ok(Ok(drive_out)) => (
             drive_out.turn_results,
@@ -560,6 +577,7 @@ async fn run_session_body(input: SessionRun<'_>) -> anyhow::Result<ScenarioResul
             drive_out.first_token_time,
             drive_out.approval_response_time,
             drive_out.approval_commands,
+            drive_out.provider_usage,
         ),
         Ok(Err(e)) => {
             let shutdown_started = Instant::now();
@@ -609,6 +627,10 @@ async fn run_session_body(input: SessionRun<'_>) -> anyhow::Result<ScenarioResul
                     first_token_time: None,
                     approval_response_time: Duration::ZERO,
                     approval_commands: Vec::new(),
+                    provider_attempts: None,
+                    provider_retries: None,
+                    provider_typed_failures: Vec::new(),
+                    provider_usage: None,
                     cancellation_requested: true,
                     shutdown_time,
                 },
@@ -659,6 +681,10 @@ async fn run_session_body(input: SessionRun<'_>) -> anyhow::Result<ScenarioResul
                     first_token_time: None,
                     approval_response_time: Duration::ZERO,
                     approval_commands: Vec::new(),
+                    provider_attempts: None,
+                    provider_retries: None,
+                    provider_typed_failures: Vec::new(),
+                    provider_usage: None,
                     cancellation_requested: true,
                     shutdown_time,
                 },
@@ -831,6 +857,10 @@ async fn run_session_body(input: SessionRun<'_>) -> anyhow::Result<ScenarioResul
             first_token_time,
             approval_response_time,
             approval_commands,
+            provider_attempts: None,
+            provider_retries: None,
+            provider_typed_failures: Vec::new(),
+            provider_usage,
             cancellation_requested: scenario.turns.iter().any(|turn| turn.stop_mid_turn),
             shutdown_time,
         },
@@ -888,6 +918,7 @@ struct DriveOutput {
     first_token_time: Option<Duration>,
     approval_response_time: Duration,
     approval_commands: Vec<ApprovalCommandEvidence>,
+    provider_usage: Option<ProviderUsageEvidence>,
 }
 
 #[derive(Debug, Error)]
@@ -1055,6 +1086,7 @@ async fn drive_session(
     let mut first_token_time = None;
     let mut approval_response_time = Duration::ZERO;
     let mut approval_commands = Vec::new();
+    let mut provider_usage = None;
     // D3: how to answer the engine's approval gate (only fires when the
     // scenario spawned WITHOUT `--yolo`, i.e. policy != Yolo).
     let approval = scenario.approval;
@@ -1347,6 +1379,9 @@ async fn drive_session(
                     }
                 }
                 "stream_end" => {
+                    if let Some(usage) = parse_provider_usage(&ev) {
+                        provider_usage = Some(usage);
+                    }
                     // Only THIS turn's stream_end ends the turn. The engine
                     // echoes the msg_id we sent (`set_current_msg_id` +
                     // `emit_stream_end(&msg_id)` in the json-stream loop), so a
@@ -1453,6 +1488,9 @@ async fn drive_session(
                 if let Some(c) = crate::cost::parse(&ev) {
                     cost = Some(c);
                 }
+                if let Some(usage) = parse_provider_usage(&ev) {
+                    provider_usage = Some(usage);
+                }
                 // Drain to EOF either way — leaving bytes in the pipe
                 // can stall the child's exit.
             }
@@ -1473,6 +1511,27 @@ async fn drive_session(
         first_token_time,
         approval_response_time,
         approval_commands,
+        provider_usage,
+    })
+}
+
+fn parse_provider_usage(event: &Value) -> Option<ProviderUsageEvidence> {
+    if event.get("type").and_then(Value::as_str) != Some("stream_end") {
+        return None;
+    }
+    let usage = event.get("usage")?;
+    Some(ProviderUsageEvidence {
+        input_tokens: usage.get("input_tokens")?.as_u64()?,
+        output_tokens: usage.get("output_tokens")?.as_u64()?,
+        cache_read_tokens: usage
+            .get("cache_read_tokens")
+            .and_then(Value::as_u64)
+            .unwrap_or(0),
+        cache_write_tokens: usage
+            .get("cache_write_tokens")
+            .and_then(Value::as_u64)
+            .or_else(|| usage.get("cache_creation_tokens").and_then(Value::as_u64))
+            .unwrap_or(0),
     })
 }
 

@@ -107,6 +107,19 @@ impl OpenAiStep {
     pub fn stall_before_headers(delay_ms: u64) -> Self {
         Self::StallBeforeHeaders { delay_ms }
     }
+
+    fn failure_code(&self) -> Option<String> {
+        match self {
+            Self::HttpError { status } => Some(format!("http_{status}")),
+            Self::RateLimited { .. } => Some("rate_limited".to_string()),
+            Self::Truncated { .. } => Some("truncated_stream".to_string()),
+            Self::StallBeforeHeaders { .. } => Some("response_timeout".to_string()),
+            Self::Text { .. }
+            | Self::DuplicateText { .. }
+            | Self::ToolCall { .. }
+            | Self::TextThenStall { .. } => None,
+        }
+    }
 }
 
 impl OpenAiFixtureScript {
@@ -252,11 +265,25 @@ pub struct OpenAiFixtureObservation {
     pub consumed_steps: usize,
     pub expected_steps: usize,
     pub violations: Vec<String>,
+    retry_count: u64,
+    failure_codes: Vec<String>,
 }
 
 impl OpenAiFixtureObservation {
     pub fn complete(&self) -> bool {
         self.consumed_steps == self.expected_steps && self.violations.is_empty()
+    }
+
+    pub fn attempts(&self) -> u64 {
+        self.requests.len() as u64
+    }
+
+    pub fn retries(&self) -> u64 {
+        self.retry_count
+    }
+
+    pub fn typed_failures(&self) -> &[String] {
+        &self.failure_codes
     }
 }
 
@@ -279,11 +306,25 @@ impl RunningOpenAiFixture {
 
     pub fn observation(&self) -> OpenAiFixtureObservation {
         let state = self.state.lock().expect("OpenAI fixture state lock");
+        let failure_codes = state
+            .steps
+            .iter()
+            .take(state.cursor)
+            .filter_map(OpenAiStep::failure_code)
+            .collect();
+        let retry_count = state
+            .steps
+            .iter()
+            .take(state.cursor.saturating_sub(1))
+            .filter(|step| step.failure_code().is_some())
+            .count() as u64;
         OpenAiFixtureObservation {
             requests: state.requests.clone(),
             consumed_steps: state.cursor,
             expected_steps: state.steps.len(),
             violations: state.violations.clone(),
+            retry_count,
+            failure_codes,
         }
     }
 

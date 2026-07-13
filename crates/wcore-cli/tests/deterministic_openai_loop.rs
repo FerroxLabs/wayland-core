@@ -46,7 +46,7 @@ async fn run_script_with_approval(
     )
     .await;
     let observation = fixture.shutdown().await.expect("fixture shutdown");
-    let result = result.expect("packaged Core run");
+    let mut result = result.expect("packaged Core run");
 
     assert!(result.passed, "unexpected failures: {:?}", result.failures);
     assert!(observation.complete(), "observation: {observation:?}");
@@ -56,6 +56,9 @@ async fn run_script_with_approval(
             .iter()
             .all(|request| request.model.as_deref() == Some("fixture-chat-v1"))
     );
+    result.execution.provider_attempts = Some(observation.attempts());
+    result.execution.provider_retries = Some(observation.retries());
+    result.execution.provider_typed_failures = observation.typed_failures().to_vec();
     (result, observation)
 }
 
@@ -70,6 +73,14 @@ async fn packaged_core_completes_a_scripted_openai_turn() {
 
     assert!(result.final_text.contains("fixture answer"));
     assert_eq!(observation.requests.len(), 1);
+    assert_eq!(result.execution.provider_attempts, Some(1));
+    assert_eq!(result.execution.provider_retries, Some(0));
+    let usage = result
+        .execution
+        .provider_usage
+        .expect("packaged stream_end usage");
+    assert_eq!(usage.input_tokens, 7);
+    assert_eq!(usage.output_tokens, 3);
 }
 
 #[tokio::test]
