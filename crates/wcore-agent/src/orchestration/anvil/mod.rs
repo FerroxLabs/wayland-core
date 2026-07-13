@@ -16,6 +16,10 @@
 
 /// The climb decision core: per-check gate model, fail-set acceptance, order.
 pub mod climb;
+/// The climb engine loop (probe → gate → surgical → terminal) over injected seams.
+pub mod engine;
+/// The real forge wiring: sandbox gate + spawn builder + `drive_climb_full` + receipt.
+pub mod forge;
 /// Gate closure pinning, the pre-climb probe, injection fencing, flake policy.
 pub mod gates;
 /// Append-only climb journal for crash recovery + idempotent resume.
@@ -113,14 +117,20 @@ mod tests {
 
     #[tokio::test]
     async fn drive_climb_refuses_when_disabled() {
-        let cfg = AnvilConfig { enabled: false };
+        let cfg = AnvilConfig {
+            enabled: false,
+            ..Default::default()
+        };
         let err = drive_climb("task", &cfg).await.unwrap_err();
         assert!(matches!(err, AnvilError::Disabled));
     }
 
     #[tokio::test]
     async fn drive_climb_enabled_returns_blocked_skeleton() {
-        let cfg = AnvilConfig { enabled: true };
+        let cfg = AnvilConfig {
+            enabled: true,
+            ..Default::default()
+        };
         let res = drive_climb("task", &cfg).await.unwrap();
         assert!(matches!(res.terminal, TerminalState::Blocked(_)));
         // The skeleton must never claim verification.

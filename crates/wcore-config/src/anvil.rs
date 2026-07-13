@@ -21,6 +21,12 @@ pub struct AnvilConfig {
     /// subcommand (and, later, the `/forge` verb and auto-detector) refuse.
     /// Every A1 PR lands behind this flag until the slice is complete.
     pub enabled: bool,
+    /// The Tier-1 gate command as an argv (e.g. `["cargo", "test"]`). The forge
+    /// runs this against each candidate; a `0` exit means the candidate passes.
+    /// EMPTY (the default) means no gate is configured — the forge refuses, since
+    /// a gated-forge with no gate can verify nothing (fails safe).
+    #[serde(default)]
+    pub gate: Vec<String>,
 }
 
 #[cfg(test)]
