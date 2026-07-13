@@ -266,8 +266,11 @@ fn spawn_for_run_with_secret(
         .arg("--provider")
         .arg(provider.id.cli_name())
         .arg("--model")
-        .arg(&provider.model)
-        .current_dir(cwd)
+        .arg(&provider.model);
+    if let Some(base_url) = &provider.base_url {
+        cmd.arg("--base-url").arg(base_url);
+    }
+    cmd.current_dir(cwd)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())

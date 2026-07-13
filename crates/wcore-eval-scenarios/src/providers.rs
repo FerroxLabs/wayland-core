@@ -94,6 +94,9 @@ pub struct ProviderConfig {
     /// `[provider.<id>] api_key = "..."`. If `None`, the runner reads
     /// `id.env_var()` at spawn time.
     pub api_key: Option<String>,
+    /// Optional API root forwarded as `--base-url`. This lets deterministic
+    /// scenarios exercise the production provider against a loopback fixture.
+    pub base_url: Option<String>,
 }
 
 impl fmt::Debug for ProviderConfig {
@@ -102,6 +105,7 @@ impl fmt::Debug for ProviderConfig {
             .field("id", &self.id)
             .field("model", &self.model)
             .field("api_key", &self.api_key.as_ref().map(|_| "[REDACTED]"))
+            .field("base_url", &self.base_url.as_ref().map(|_| "[CONFIGURED]"))
             .finish()
     }
 }
@@ -211,11 +215,17 @@ impl ProviderConfig {
             id,
             model: model.into(),
             api_key: None,
+            base_url: None,
         }
     }
 
     pub fn with_api_key(mut self, key: impl Into<String>) -> Self {
         self.api_key = Some(key.into());
+        self
+    }
+
+    pub fn with_base_url(mut self, base_url: impl Into<String>) -> Self {
+        self.base_url = Some(base_url.into());
         self
     }
 
@@ -431,5 +441,19 @@ mod tests {
             ),
             Err(ResolveError::MissingCredentials { .. })
         ));
+    }
+
+    #[test]
+    fn provider_debug_redacts_credentials_and_base_url() {
+        let config = ProviderConfig::new(ProviderId::OpenAI, "fixture-chat-v1")
+            .with_api_key("fixture-secret")
+            .with_base_url("http://fixture-user:fixture-password@127.0.0.1:1");
+        let debug = format!("{config:?}");
+
+        assert!(!debug.contains("fixture-secret"));
+        assert!(!debug.contains("fixture-user"));
+        assert!(!debug.contains("fixture-password"));
+        assert!(debug.contains("[REDACTED]"));
+        assert!(debug.contains("[CONFIGURED]"));
     }
 }
