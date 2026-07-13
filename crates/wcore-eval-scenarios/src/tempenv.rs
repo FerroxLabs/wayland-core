@@ -211,4 +211,19 @@ mod tests {
     fn escape_quotes_and_backslashes() {
         assert_eq!(escape_toml_basic(r#"a"b\c"#), r#"a\"b\\c"#);
     }
+
+    #[test]
+    fn config_digest_ignores_the_hermetic_root() {
+        let provider =
+            ProviderConfig::new(ProviderId::OpenAI, "fixture-chat-v1").with_api_key("test-key");
+        let first = build(&provider).expect("first environment");
+        let second = build(&provider).expect("second environment");
+
+        assert_ne!(first.path(), second.path());
+        assert_eq!(
+            config_sha256(first.path()).expect("first config digest"),
+            config_sha256(second.path()).expect("second config digest"),
+            "receipt behavior identity must not depend on a random temp path"
+        );
+    }
 }
