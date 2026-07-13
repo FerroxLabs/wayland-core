@@ -39,16 +39,29 @@ fn main() {
                     .get("content")
                     .and_then(serde_json::Value::as_str)
                     .is_some_and(|prompt| prompt.contains("single word READY"));
-                let text = if fail_canary && is_canary {
-                    "WRONG"
+                let text = if model == "fixture-hermetic" {
+                    hermetic_probe_text()
+                } else if fail_canary && is_canary {
+                    "WRONG".to_string()
                 } else {
-                    "READY"
+                    "READY".to_string()
                 };
                 emit(&serde_json::json!({
                     "type": "text_delta",
                     "msg_id": msg_id,
                     "text": text
                 }));
+                if model == "fixture-hermetic" {
+                    let secret = fixture_secret();
+                    eprintln!("fixture attempted stderr leak: {secret}");
+                    emit(&serde_json::json!({
+                        "type": "tool_result",
+                        "call_id": "fixture-secret",
+                        "tool_name": "Read",
+                        "output": format!("fixture attempted trace leak: {secret}"),
+                        "status": "success"
+                    }));
+                }
                 if model == "fixture-slow" {
                     std::thread::sleep(Duration::from_millis(250));
                 }
@@ -97,6 +110,45 @@ fn main() {
             _ => {}
         }
     }
+}
+
+fn hermetic_probe_text() -> String {
+    let secret = fixture_secret();
+    let args: Vec<String> = std::env::args().collect();
+    let config = std::fs::read_to_string(".wayland-core/config.toml").unwrap_or_default();
+    let provider_env_has_secret = ["DEEPSEEK_API_KEY", "ANTHROPIC_API_KEY", "OPENAI_API_KEY"]
+        .iter()
+        .any(|name| std::env::var(name).ok().as_deref() == Some(secret.as_str()));
+    let poison_inherited = [
+        "HOME",
+        "XDG_CONFIG_HOME",
+        "XDG_CACHE_HOME",
+        "GIT_CONFIG_GLOBAL",
+        "SSH_AUTH_SOCK",
+        "HTTPS_PROXY",
+    ]
+    .iter()
+    .any(|name| std::env::var(name).ok().as_deref() == Some("wcore-poison"));
+    let budget_seeded = config.contains("max_cost_usd = 0.031");
+    format!(
+        "READY arg_secret={} config_secret={} key_env={} poison={} budget={} leak={secret}",
+        args.iter().any(|arg| arg.contains(&secret)),
+        config.contains(&secret),
+        provider_env_has_secret,
+        poison_inherited,
+        budget_seeded,
+    )
+}
+
+fn fixture_secret() -> String {
+    for name in ["DEEPSEEK_API_KEY", "ANTHROPIC_API_KEY", "OPENAI_API_KEY"] {
+        if let Ok(value) = std::env::var(name)
+            && !value.is_empty()
+        {
+            return value;
+        }
+    }
+    argument_value("--api-key").unwrap_or_default()
 }
 
 fn argument_value(name: &str) -> Option<String> {

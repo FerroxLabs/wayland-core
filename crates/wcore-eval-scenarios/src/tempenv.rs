@@ -179,14 +179,15 @@ mod tests {
     }
 
     #[test]
-    fn seeded_config_includes_provider_api_key() {
+    fn seeded_config_never_contains_provider_api_key() {
         let p = ProviderConfig::new(ProviderId::Anthropic, "claude-sonnet-4-6")
             .with_api_key("sk-ant-test-12345");
         let env = build(&p).expect("build env");
         let cfg = fs::read_to_string(env.path().join(".wayland-core/config.toml"))
             .expect("seeded config exists");
         assert!(cfg.contains("[provider.anthropic]"), "config: {cfg}");
-        assert!(cfg.contains("sk-ant-test-12345"), "config: {cfg}");
+        assert!(!cfg.contains("api_key"), "config: {cfg}");
+        assert!(!cfg.contains("sk-ant-test-12345"), "config: {cfg}");
     }
 
     #[test]
