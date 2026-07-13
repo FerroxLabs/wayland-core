@@ -155,7 +155,7 @@ fn normalize_fixture_config(value: &mut toml::Value, root: &str) {
             }
         }
         toml::Value::Table(values) => {
-            for value in values.values_mut() {
+            for (_, value) in values.iter_mut() {
                 normalize_fixture_config(value, root);
             }
         }
