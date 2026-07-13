@@ -650,9 +650,24 @@ async fn run_sealed_repository_once(run_id: &str) -> SealedRun {
     let read = &result.trace.entries[0];
     let edit = &result.trace.entries[1];
     let mcp_call = &result.trace.entries[2];
-    assert!(read.input.contains(workspace_text.as_ref()));
-    assert!(edit.input.contains(workspace_text.as_ref()));
-    assert!(edit.output.contains(workspace_text.as_ref()));
+    assert!(
+        read.input.contains(workspace_text.as_ref()),
+        "Read input did not retain {}: {}",
+        workspace.display(),
+        read.input
+    );
+    assert!(
+        edit.input.contains(workspace_text.as_ref()),
+        "Edit input did not retain {}: {}",
+        workspace.display(),
+        edit.input
+    );
+    assert!(
+        edit.output.contains(workspace_text.as_ref()),
+        "Edit output did not retain {}: {}",
+        workspace.display(),
+        edit.output
+    );
     assert!(mcp_call.input.contains("F04-SEALED"));
     assert!(mcp_call.output.contains("F04-SEALED"));
     result.execution.provider_attempts = Some(openai_observation.attempts());
