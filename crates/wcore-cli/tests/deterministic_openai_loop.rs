@@ -2,6 +2,7 @@ use std::path::Path;
 use std::time::Duration;
 
 use wcore_eval_scenarios::assertions::Assertion;
+use wcore_eval_scenarios::fixtures::mcp::{McpHttpFixture, McpHttpMode};
 use wcore_eval_scenarios::fixtures::openai::{
     OpenAiFixtureObservation, OpenAiFixtureScript, OpenAiStep,
 };
@@ -235,4 +236,66 @@ async fn packaged_core_cancels_an_active_stream() {
     assert!(result.execution.cleanup_verified);
     assert!(observation.complete(), "observation: {observation:?}");
     assert_eq!(observation.requests.len(), 1);
+}
+
+#[tokio::test]
+async fn packaged_core_calls_a_streamable_http_mcp_tool() {
+    let mcp = McpHttpFixture::start(McpHttpMode::SseResponse)
+        .await
+        .expect("start MCP fixture");
+    let mcp_url = mcp.url().to_string();
+    let openai = OpenAiFixtureScript::new([
+        OpenAiStep::tool_call(
+            "call-mcp-echo",
+            "fixture_echo",
+            serde_json::json!({"text": "CORE-MCP-ROUNDTRIP"}),
+        ),
+        OpenAiStep::text("MCP roundtrip completed"),
+    ])
+    .start()
+    .await
+    .expect("start OpenAI fixture");
+    let provider = ProviderConfig::new(ProviderId::OpenAI, "fixture-chat-v1")
+        .with_api_key("fixture-local-token")
+        .with_base_url(openai.base_url());
+    let scenario = Scenario::new("packaged_mcp_roundtrip", Category::Hardening)
+        .max_total_time(Duration::from_secs(20))
+        .setup(move |cwd| {
+            let config_path = cwd.join(".wayland-core").join("config.toml");
+            let mut config = std::fs::read_to_string(&config_path)?;
+            config.push_str(&format!(
+                "\n[mcp.servers.fixture]\ntransport = \"streamable-http\"\nurl = \"{mcp_url}\"\nallow_local = true\ndeferred = false\n"
+            ));
+            std::fs::write(config_path, config)?;
+            Ok(())
+        })
+        .turn(
+            Turn::new("Use fixture_echo with CORE-MCP-ROUNDTRIP, then confirm completion.")
+                .max_time(Duration::from_secs(10))
+                .expect_tool("fixture_echo")
+                .assert(Assertion::Contains("MCP roundtrip completed")),
+        );
+
+    let result = run_with_binary(
+        &scenario,
+        &provider,
+        Path::new(env!("CARGO_BIN_EXE_wayland-core")),
+    )
+    .await
+    .expect("packaged MCP run");
+    let openai_observation = openai.shutdown().await.expect("OpenAI fixture shutdown");
+    let mcp_observation = mcp.shutdown().await.expect("MCP fixture shutdown");
+
+    assert!(result.passed, "unexpected failures: {:?}", result.failures);
+    assert_eq!(result.trace.count("fixture_echo"), 1);
+    assert!(
+        result
+            .trace
+            .entries
+            .iter()
+            .any(|entry| entry.output.contains("CORE-MCP-ROUNDTRIP"))
+    );
+    assert_eq!(openai_observation.requests.len(), 2);
+    assert!(openai_observation.complete());
+    assert!(mcp_observation.complete(), "{mcp_observation:?}");
 }
