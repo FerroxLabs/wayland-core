@@ -234,11 +234,13 @@ fn resource_request_is_denied_before_task_acceptance() {
         }
     ));
     assert!(receipt.body.artifact.is_none());
-    assert!(!receipt
-        .body
-        .events
-        .iter()
-        .any(|event| matches!(&event.event, RemoteExecutionEventKind::TaskAccepted { .. })));
+    assert!(
+        !receipt
+            .body
+            .events
+            .iter()
+            .any(|event| matches!(&event.event, RemoteExecutionEventKind::TaskAccepted { .. }))
+    );
 }
 
 #[test]
@@ -274,6 +276,29 @@ fn artifact_over_task_output_budget_is_denied_after_acceptance() {
 }
 
 #[test]
+fn output_budget_counts_streamed_text_and_artifact_together() {
+    let fixture = fixture();
+    let task = task(ResourceBudget::new(500, 1024 * 1024, 5_000, 4).unwrap());
+    let script = RemoteExecutionScript::new(
+        [ScriptedOutputEvent::new(2, OutputChannel::Stdout, "12")],
+        ScriptedOutcome::success(FixtureArtifact::new("result.bin", b"345".to_vec()).unwrap()),
+    );
+
+    let receipt = fixture.execute(&task, &script).expect("bounded receipt");
+    assert!(matches!(
+        receipt.body.terminal,
+        TerminalStatus::ResourceDenied {
+            resource: ResourceKind::OutputBytes,
+            requested: 5,
+            limit: 4,
+        }
+    ));
+    receipt
+        .verify(fixture.identity(), &fixture.verifying_key())
+        .expect("aggregate denial verifies");
+}
+
+#[test]
 fn receipt_tampering_or_unpinned_backend_is_rejected() {
     let fixture = fixture();
     let task = task(ResourceBudget::new(500, 1024 * 1024, 5_000, 4096).unwrap());
@@ -282,9 +307,11 @@ fn receipt_tampering_or_unpinned_backend_is_rejected() {
 
     let mut tampered_body = receipt.clone();
     tampered_body.body.task.input_sha256 = h64('f');
-    assert!(tampered_body
-        .verify(fixture.identity(), &fixture.verifying_key())
-        .is_err());
+    assert!(
+        tampered_body
+            .verify(fixture.identity(), &fixture.verifying_key())
+            .is_err()
+    );
 
     let other = RemoteExecutionFixture::new(
         "fixture-other",
@@ -316,6 +343,20 @@ fn fixture_rejects_non_portable_artifacts_and_unbounded_inputs() {
     assert!(FixtureArtifact::new("../escape", Vec::new()).is_err());
     assert!(FixtureArtifact::new("C:\\escape", Vec::new()).is_err());
     assert!(FixtureArtifact::new("nested\\escape", Vec::new()).is_err());
+    assert!(FixtureArtifact::new("CON.txt", Vec::new()).is_err());
+    assert!(FixtureArtifact::new("nested/bad\nname", Vec::new()).is_err());
+
+    let invalid_reason =
+        RemoteExecutionScript::new([], ScriptedOutcome::cancelled("raw reason with spaces"));
+    assert_eq!(
+        fixture()
+            .execute(
+                &task(ResourceBudget::new(500, 1024 * 1024, 5_000, 4096).unwrap()),
+                &invalid_reason,
+            )
+            .unwrap_err(),
+        RemoteFixtureError::InvalidReason
+    );
 
     let oversized = vec![0_u8; 1024 * 1024 + 1];
     assert_eq!(

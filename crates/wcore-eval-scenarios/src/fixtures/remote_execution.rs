@@ -10,7 +10,10 @@ use base64::engine::general_purpose::STANDARD as BASE64;
 use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use thiserror::Error;
+
+#[path = "remote_execution_error.rs"]
+mod error;
+pub use error::RemoteFixtureError;
 
 const FIXTURE_PROTOCOL_VERSION: u32 = 1;
 const RECEIPT_SCHEMA: &str = "wayland.remote-execution-fixture-receipt";
@@ -477,25 +480,34 @@ impl RemoteExecutionFixture {
         }
 
         let next_sequence = events.len() as u64 + 1;
+        let produced_output_bytes = script
+            .events
+            .iter()
+            .map(|event| event.text.len() as u64)
+            .sum::<u64>()
+            .saturating_add(match &script.outcome {
+                ScriptedOutcome::Success { artifact } => artifact.bytes.len() as u64,
+                _ => 0,
+            });
+        if produced_output_bytes > task.resources.output_bytes {
+            let terminal = TerminalStatus::ResourceDenied {
+                resource: ResourceKind::OutputBytes,
+                requested: produced_output_bytes,
+                limit: task.resources.output_bytes,
+            };
+            events.push(RemoteExecutionEvent {
+                sequence: next_sequence,
+                event: RemoteExecutionEventKind::ResourceDenied {
+                    resource: ResourceKind::OutputBytes,
+                    requested: produced_output_bytes,
+                    limit: task.resources.output_bytes,
+                },
+            });
+            return self.attest(task, events, None, terminal);
+        }
         let (artifact, terminal) = match &script.outcome {
             ScriptedOutcome::Success { artifact } => {
                 let artifact_bytes = artifact.bytes.len() as u64;
-                if artifact_bytes > task.resources.output_bytes {
-                    let terminal = TerminalStatus::ResourceDenied {
-                        resource: ResourceKind::OutputBytes,
-                        requested: artifact_bytes,
-                        limit: task.resources.output_bytes,
-                    };
-                    events.push(RemoteExecutionEvent {
-                        sequence: next_sequence,
-                        event: RemoteExecutionEventKind::ResourceDenied {
-                            resource: ResourceKind::OutputBytes,
-                            requested: artifact_bytes,
-                            limit: task.resources.output_bytes,
-                        },
-                    });
-                    return self.attest(task, events, None, terminal);
-                }
                 let evidence = ArtifactEvidence {
                     name: artifact.name.clone(),
                     sha256: sha256(&artifact.bytes),
@@ -804,6 +816,10 @@ fn validate_receipt_semantics(body: &RemoteExecutionReceiptBody) -> Result<(), R
             limit: MAX_TOTAL_EVENT_TEXT_BYTES,
         });
     }
+    let artifact_bytes = body.artifact.as_ref().map_or(0, |artifact| artifact.bytes);
+    if total_text.saturating_add(artifact_bytes) > body.task.resources.output_bytes {
+        return Err(RemoteFixtureError::InvalidReceiptSemantics);
+    }
     match &body.terminal {
         TerminalStatus::Failure { code } => validate_identifier("failure_code", code)?,
         TerminalStatus::Timeout { limit_ms } if *limit_ms != body.task.resources.wall_time_ms => {
@@ -905,13 +921,34 @@ fn validate_identifier(field: &'static str, value: &str) -> Result<(), RemoteFix
 }
 
 fn validate_reason(reason: &str) -> Result<(), RemoteFixtureError> {
-    if reason.is_empty() || reason.len() > MAX_REASON_BYTES {
+    if reason.is_empty()
+        || reason.len() > MAX_REASON_BYTES
+        || !reason
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
+    {
         return Err(RemoteFixtureError::InvalidReason);
     }
     Ok(())
 }
 
 fn validate_artifact_name(name: &str) -> Result<(), RemoteFixtureError> {
+    fn portable_component(component: &str) -> bool {
+        const RESERVED: [&str; 4] = ["CON", "PRN", "AUX", "NUL"];
+        let stem = component.split('.').next().unwrap_or_default();
+        let stem_upper = stem.to_ascii_uppercase();
+        !component.is_empty()
+            && !matches!(component, "." | "..")
+            && !component.ends_with('.')
+            && component
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
+            && !RESERVED.contains(&stem_upper.as_str())
+            && !(stem_upper.len() == 4
+                && (stem_upper.starts_with("COM") || stem_upper.starts_with("LPT"))
+                && matches!(stem_upper.as_bytes()[3], b'1'..=b'9'))
+    }
+
     if name.is_empty()
         || name.len() > MAX_IDENTIFIER_BYTES
         || name.starts_with('/')
@@ -920,7 +957,7 @@ fn validate_artifact_name(name: &str) -> Result<(), RemoteFixtureError> {
         || name.contains(':')
         || name
             .split('/')
-            .any(|component| component.is_empty() || matches!(component, "." | ".."))
+            .any(|component| !portable_component(component))
     {
         return Err(RemoteFixtureError::InvalidArtifactName);
     }
@@ -944,48 +981,4 @@ fn sha256(bytes: &[u8]) -> String {
 
 fn signature_message(body_sha256: &str) -> Vec<u8> {
     format!("{RECEIPT_SCHEMA}:{RECEIPT_SCHEMA_VERSION}:{body_sha256}").into_bytes()
-}
-
-#[derive(Debug, Error, PartialEq, Eq)]
-pub enum RemoteFixtureError {
-    #[error("invalid fixture identifier: {field}")]
-    InvalidIdentifier { field: &'static str },
-    #[error("invalid SHA-256 digest: {field}")]
-    InvalidDigest { field: &'static str },
-    #[error("fixture resource budgets must be non-zero")]
-    InvalidResourceBudget,
-    #[error("fixture input exceeds {limit} bytes")]
-    InputTooLarge { limit: usize },
-    #[error("fixture artifact exceeds {limit} bytes")]
-    ArtifactTooLarge { limit: usize },
-    #[error("fixture artifact name is not a portable normalized relative path")]
-    InvalidArtifactName,
-    #[error("fixture terminal reason is empty or too large")]
-    InvalidReason,
-    #[error("fixture script exceeds {limit} output events")]
-    TooManyEvents { limit: usize },
-    #[error("fixture event sequence mismatch: expected {expected}, observed {observed}")]
-    InvalidEventSequence { expected: u64, observed: u64 },
-    #[error("fixture event text exceeds {limit} bytes")]
-    EventTextTooLarge { limit: usize },
-    #[error("fixture total event text exceeds {limit} bytes")]
-    TotalEventTextTooLarge { limit: usize },
-    #[error("fixture serialization failed: {0}")]
-    Serialize(String),
-    #[error("unsupported remote fixture receipt schema")]
-    UnsupportedReceiptSchema,
-    #[error("unsupported remote fixture protocol")]
-    UnsupportedFixtureProtocol,
-    #[error("remote fixture receipt backend identity mismatch")]
-    BackendIdentityMismatch,
-    #[error("remote fixture receipt body digest mismatch")]
-    ReceiptDigestMismatch,
-    #[error("remote fixture receipt event digest mismatch")]
-    EventDigestMismatch,
-    #[error("remote fixture receipt has invalid event or terminal semantics")]
-    InvalidReceiptSemantics,
-    #[error("remote fixture attestation signature is malformed")]
-    MalformedSignature,
-    #[error("remote fixture attestation signature verification failed")]
-    InvalidSignature,
 }
