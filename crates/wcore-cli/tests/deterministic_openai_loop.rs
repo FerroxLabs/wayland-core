@@ -8,8 +8,11 @@ use wcore_eval_scenarios::fixtures::openai::{
 };
 use wcore_eval_scenarios::fixtures::repository::SeededRepository;
 use wcore_eval_scenarios::providers::{ProviderConfig, ProviderId};
-use wcore_eval_scenarios::runner::{Failure, ScenarioResult, run_with_binary};
+use wcore_eval_scenarios::runner::{
+    Failure, ScenarioResult, run_with_binary, run_with_binary_in_environment,
+};
 use wcore_eval_scenarios::scenario::{ApprovalPolicy, Category, Scenario, Turn};
+use wcore_eval_scenarios::tempenv::{self, TempEnvOptions};
 
 async fn run_script(
     name: &'static str,
@@ -310,12 +313,29 @@ async fn packaged_core_satisfies_a_hidden_repository_outcome() {
         ("src/settings.toml", "port = 8080\nmode = \"legacy\"\n"),
     ])
     .expect("valid repository fixture");
+    let seed_provider = ProviderConfig::new(ProviderId::OpenAI, "fixture-chat-v1")
+        .with_api_key("fixture-local-token");
+    let env = tempenv::build_with(
+        &seed_provider,
+        &TempEnvOptions {
+            budget_max_cost_usd: Some(0.10),
+        },
+    )
+    .expect("prepare hermetic repository environment");
+    let settings_path = env.path().join("src").join("settings.toml");
     let openai = OpenAiFixtureScript::new([
+        OpenAiStep::tool_call(
+            "call-seeded-read",
+            "Read",
+            serde_json::json!({
+                "file_path": settings_path.to_string_lossy()
+            }),
+        ),
         OpenAiStep::tool_call(
             "call-seeded-edit",
             "Edit",
             serde_json::json!({
-                "file_path": "src/settings.toml",
+                "file_path": settings_path.to_string_lossy(),
                 "old_string": "port = 8080",
                 "new_string": "port = 9090"
             }),
@@ -334,6 +354,7 @@ async fn packaged_core_satisfies_a_hidden_repository_outcome() {
         .turn(
             Turn::new("Apply the requested repository update and report completion.")
                 .max_time(Duration::from_secs(10))
+                .expect_tool("Read")
                 .expect_tool("Edit")
                 .assert(Assertion::Contains("Repository update completed"))
                 .assert(Assertion::FileContains {
@@ -342,10 +363,11 @@ async fn packaged_core_satisfies_a_hidden_repository_outcome() {
                 }),
         );
 
-    let result = run_with_binary(
+    let result = run_with_binary_in_environment(
         &scenario,
         &provider,
         Path::new(env!("CARGO_BIN_EXE_wayland-core")),
+        env,
     )
     .await
     .expect("packaged seeded-repository run");
@@ -353,6 +375,6 @@ async fn packaged_core_satisfies_a_hidden_repository_outcome() {
 
     assert!(result.passed, "unexpected failures: {:?}", result.failures);
     assert_eq!(result.trace.count("Edit"), 1);
-    assert_eq!(observation.requests.len(), 2);
+    assert_eq!(observation.requests.len(), 3);
     assert!(observation.complete());
 }

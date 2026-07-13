@@ -372,6 +372,22 @@ pub async fn run_with_binary(
     run_session_in(scenario, provider, bin, env.path(), Some(env.path())).await
 }
 
+/// Drive a scenario inside a caller-prepared hermetic environment.
+///
+/// This is the deterministic-fixture seam for scripts that must name files in
+/// the scenario workspace before the provider fixture starts. The caller owns
+/// environment construction; this function retains the environment for the
+/// complete run and otherwise uses the same setup, containment, cleanup,
+/// assertion, and secret-scanning path as [`run_with_binary`].
+pub async fn run_with_binary_in_environment(
+    scenario: &crate::scenario::Scenario,
+    provider: &ProviderConfig,
+    bin: &std::path::Path,
+    env: crate::tempenv::TempEnv,
+) -> anyhow::Result<ScenarioResult> {
+    run_session_in(scenario, provider, bin, env.path(), Some(env.path())).await
+}
+
 /// Drive ONE session of a scenario inside an already-prepared working
 /// directory `cwd`, returning the assembled + asserted [`ScenarioResult`].
 ///
