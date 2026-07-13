@@ -83,6 +83,9 @@ pub struct ExecutionEvidence {
     pub containment_authoritative: bool,
     pub cleanup_verified: bool,
     pub artifact_scan_complete: bool,
+    pub prompt_dispatch_time: Duration,
+    pub first_token_time: Option<Duration>,
+    pub approval_response_time: Duration,
     pub shutdown_time: Duration,
 }
 
@@ -509,111 +512,130 @@ async fn run_session_body(
     );
     let result = tokio::time::timeout(scenario.max_total_time, drive).await;
 
-    let (turn_results, trace, final_text, cost_report, hit_internal_error, boot_time, info_events) =
-        match result {
-            Ok(Ok(drive_out)) => (
-                drive_out.turn_results,
-                drive_out.trace,
-                drive_out.final_text,
-                drive_out.cost,
-                drive_out.runner_error,
-                drive_out.boot_time,
-                drive_out.info_events,
-            ),
-            Ok(Err(e)) => {
-                let shutdown_started = Instant::now();
-                let cleanup_error = process_tree.terminate(&mut child).await.err();
-                let cleanup_verified = cleanup_error.is_none();
-                let shutdown_time = shutdown_started.elapsed();
-                stderr_cap.finish().await;
-                let stderr_tail = stderr_cap.snapshot();
-                let failure = e.downcast_ref::<TurnTimeout>().map_or_else(
-                    || Failure::RunnerError(e.to_string()),
-                    |timeout| Failure::OverTime {
-                        observed_secs: timeout.observed.as_secs_f64(),
-                        budget_secs: timeout.budget.as_secs_f64(),
-                    },
-                );
-                let mut failures = vec![failure];
-                if let Some(error) = cleanup_error {
-                    failures.push(Failure::RunnerError(format!(
-                        "process-tree cleanup failed: {error}"
-                    )));
-                }
-                add_capture_failures(&mut failures, &stderr_cap, &stdout_secret_detected);
-                return Ok(ScenarioResult {
-                    name: scenario.name.to_string(),
-                    provider: provider.id,
-                    platform: crate::scenario::Platform::current(),
-                    approval: scenario.approval,
-                    passed: false,
-                    failures,
-                    wall_time: start.elapsed(),
-                    cost_usd: 0.0,
-                    trace: ToolTrace::default(),
-                    final_text: String::new(),
-                    stderr_tail,
-                    turn_results: Vec::new(),
-                    workdir: cwd.to_path_buf(),
-                    boot_time: Duration::ZERO,
-                    info_events: Vec::new(),
-                    execution: ExecutionEvidence {
-                        config_sha256,
-                        sandbox_backend,
-                        process_tree_sha256,
-                        containment_authoritative,
-                        cleanup_verified,
-                        artifact_scan_complete: false,
-                        shutdown_time,
-                    },
-                });
+    let (
+        turn_results,
+        trace,
+        final_text,
+        cost_report,
+        hit_internal_error,
+        boot_time,
+        info_events,
+        prompt_dispatch_time,
+        first_token_time,
+        approval_response_time,
+    ) = match result {
+        Ok(Ok(drive_out)) => (
+            drive_out.turn_results,
+            drive_out.trace,
+            drive_out.final_text,
+            drive_out.cost,
+            drive_out.runner_error,
+            drive_out.boot_time,
+            drive_out.info_events,
+            drive_out.prompt_dispatch_time,
+            drive_out.first_token_time,
+            drive_out.approval_response_time,
+        ),
+        Ok(Err(e)) => {
+            let shutdown_started = Instant::now();
+            let cleanup_error = process_tree.terminate(&mut child).await.err();
+            let cleanup_verified = cleanup_error.is_none();
+            let shutdown_time = shutdown_started.elapsed();
+            stderr_cap.finish().await;
+            let stderr_tail = stderr_cap.snapshot();
+            let failure = e.downcast_ref::<TurnTimeout>().map_or_else(
+                || Failure::RunnerError(e.to_string()),
+                |timeout| Failure::OverTime {
+                    observed_secs: timeout.observed.as_secs_f64(),
+                    budget_secs: timeout.budget.as_secs_f64(),
+                },
+            );
+            let mut failures = vec![failure];
+            if let Some(error) = cleanup_error {
+                failures.push(Failure::RunnerError(format!(
+                    "process-tree cleanup failed: {error}"
+                )));
             }
-            Err(_elapsed) => {
-                // M-1: timeout fired. Kill explicitly, reap, then record
-                // Hung with the stderr tail snapshot.
-                let shutdown_started = Instant::now();
-                let cleanup_error = process_tree.terminate(&mut child).await.err();
-                let cleanup_verified = cleanup_error.is_none();
-                let shutdown_time = shutdown_started.elapsed();
-                stderr_cap.finish().await;
-                let stderr_tail = stderr_cap.snapshot();
-                let mut failures = vec![Failure::Hung {
-                    stderr_tail: stderr_tail.clone(),
-                }];
-                if let Some(error) = cleanup_error {
-                    failures.push(Failure::RunnerError(format!(
-                        "process-tree cleanup failed: {error}"
-                    )));
-                }
-                add_capture_failures(&mut failures, &stderr_cap, &stdout_secret_detected);
-                return Ok(ScenarioResult {
-                    name: scenario.name.to_string(),
-                    provider: provider.id,
-                    platform: crate::scenario::Platform::current(),
-                    approval: scenario.approval,
-                    passed: false,
-                    failures,
-                    wall_time: start.elapsed(),
-                    cost_usd: 0.0,
-                    trace: ToolTrace::default(),
-                    final_text: String::new(),
-                    stderr_tail,
-                    turn_results: Vec::new(),
-                    workdir: cwd.to_path_buf(),
-                    boot_time: Duration::ZERO,
-                    info_events: Vec::new(),
-                    execution: ExecutionEvidence {
-                        config_sha256,
-                        sandbox_backend,
-                        process_tree_sha256,
-                        containment_authoritative,
-                        cleanup_verified,
-                        artifact_scan_complete: false,
-                        shutdown_time,
-                    },
-                });
+            add_capture_failures(&mut failures, &stderr_cap, &stdout_secret_detected);
+            return Ok(ScenarioResult {
+                name: scenario.name.to_string(),
+                provider: provider.id,
+                platform: crate::scenario::Platform::current(),
+                approval: scenario.approval,
+                passed: false,
+                failures,
+                wall_time: start.elapsed(),
+                cost_usd: 0.0,
+                trace: ToolTrace::default(),
+                final_text: String::new(),
+                stderr_tail,
+                turn_results: Vec::new(),
+                workdir: cwd.to_path_buf(),
+                boot_time: Duration::ZERO,
+                info_events: Vec::new(),
+                execution: ExecutionEvidence {
+                    config_sha256,
+                    sandbox_backend,
+                    process_tree_sha256,
+                    containment_authoritative,
+                    cleanup_verified,
+                    artifact_scan_complete: false,
+                    prompt_dispatch_time: Duration::ZERO,
+                    first_token_time: None,
+                    approval_response_time: Duration::ZERO,
+                    shutdown_time,
+                },
+            });
+        }
+        Err(_elapsed) => {
+            // M-1: timeout fired. Kill explicitly, reap, then record
+            // Hung with the stderr tail snapshot.
+            let shutdown_started = Instant::now();
+            let cleanup_error = process_tree.terminate(&mut child).await.err();
+            let cleanup_verified = cleanup_error.is_none();
+            let shutdown_time = shutdown_started.elapsed();
+            stderr_cap.finish().await;
+            let stderr_tail = stderr_cap.snapshot();
+            let mut failures = vec![Failure::Hung {
+                stderr_tail: stderr_tail.clone(),
+            }];
+            if let Some(error) = cleanup_error {
+                failures.push(Failure::RunnerError(format!(
+                    "process-tree cleanup failed: {error}"
+                )));
             }
-        };
+            add_capture_failures(&mut failures, &stderr_cap, &stdout_secret_detected);
+            return Ok(ScenarioResult {
+                name: scenario.name.to_string(),
+                provider: provider.id,
+                platform: crate::scenario::Platform::current(),
+                approval: scenario.approval,
+                passed: false,
+                failures,
+                wall_time: start.elapsed(),
+                cost_usd: 0.0,
+                trace: ToolTrace::default(),
+                final_text: String::new(),
+                stderr_tail,
+                turn_results: Vec::new(),
+                workdir: cwd.to_path_buf(),
+                boot_time: Duration::ZERO,
+                info_events: Vec::new(),
+                execution: ExecutionEvidence {
+                    config_sha256,
+                    sandbox_backend,
+                    process_tree_sha256,
+                    containment_authoritative,
+                    cleanup_verified,
+                    artifact_scan_complete: false,
+                    prompt_dispatch_time: Duration::ZERO,
+                    first_token_time: None,
+                    approval_response_time: Duration::ZERO,
+                    shutdown_time,
+                },
+            });
+        }
+    };
 
     // Normal-path child shutdown. The drive loop already sent `stop`
     // and consumed the trailing `session_cost`; the child should exit
@@ -776,6 +798,9 @@ async fn run_session_body(
             containment_authoritative,
             cleanup_verified,
             artifact_scan_complete: false,
+            prompt_dispatch_time,
+            first_token_time,
+            approval_response_time,
             shutdown_time,
         },
     };
@@ -828,6 +853,9 @@ struct DriveOutput {
     boot_time: Duration,
     /// `info` event messages captured across the run (D1/D2).
     info_events: Vec<String>,
+    prompt_dispatch_time: Duration,
+    first_token_time: Option<Duration>,
+    approval_response_time: Duration,
 }
 
 #[derive(Debug, Error)]
@@ -991,6 +1019,9 @@ async fn drive_session(
     let mut turn_results: Vec<TurnResult> = Vec::new();
     let mut runner_error: Option<String> = None;
     let mut info_events: Vec<String> = Vec::new();
+    let mut prompt_dispatch_time = Duration::ZERO;
+    let mut first_token_time = None;
+    let mut approval_response_time = Duration::ZERO;
     // D3: how to answer the engine's approval gate (only fires when the
     // scenario spawned WITHOUT `--yolo`, i.e. policy != Yolo).
     let approval = scenario.approval;
@@ -1088,10 +1119,14 @@ async fn drive_session(
             "msg_id": msg_id,
             "content": turn.prompt,
         });
+        let prompt_dispatch_started = Instant::now();
         let mut line = serde_json::to_vec(&cmd)?;
         line.push(b'\n');
         stdin.write_all(&line).await?;
         stdin.flush().await?;
+        prompt_dispatch_time =
+            prompt_dispatch_time.saturating_add(prompt_dispatch_started.elapsed());
+        let prompt_sent_at = Instant::now();
 
         let mut turn_text = String::new();
         // D2: Stop-mid-turn — send `stop` once, right after the first event
@@ -1147,6 +1182,9 @@ async fn drive_session(
             match ty {
                 "text_delta" => {
                     if let Some(t) = ev.get("text").and_then(Value::as_str) {
+                        if first_token_time.is_none() && !t.is_empty() {
+                            first_token_time = Some(prompt_sent_at.elapsed());
+                        }
                         turn_text.push_str(t);
                     }
                 }
@@ -1183,10 +1221,13 @@ async fn drive_session(
                     // call_id with no pending approval (auto-approved tools like
                     // Read/Glob), so responding to every request is safe.
                     if let Some(cmd) = approval_command(approval, &call_id) {
+                        let approval_started = Instant::now();
                         let mut line = serde_json::to_vec(&cmd)?;
                         line.push(b'\n');
                         stdin.write_all(&line).await?;
                         stdin.flush().await?;
+                        approval_response_time =
+                            approval_response_time.saturating_add(approval_started.elapsed());
                     }
                 }
                 "tool_result" => {
@@ -1278,10 +1319,13 @@ async fn drive_session(
                         .unwrap_or("")
                         .to_string();
                     if let Some(cmd) = approval_command(approval, &call_id) {
+                        let approval_started = Instant::now();
                         let mut line = serde_json::to_vec(&cmd)?;
                         line.push(b'\n');
                         stdin.write_all(&line).await?;
                         stdin.flush().await?;
+                        approval_response_time =
+                            approval_response_time.saturating_add(approval_started.elapsed());
                     }
                 }
                 _ => {}
@@ -1340,6 +1384,9 @@ async fn drive_session(
         runner_error,
         boot_time,
         info_events,
+        prompt_dispatch_time,
+        first_token_time,
+        approval_response_time,
     })
 }
 

@@ -341,6 +341,9 @@ fn critical_usability_finding_is_a_receipt_gate_failure() {
             containment_authoritative: true,
             cleanup_verified: true,
             artifact_scan_complete: true,
+            prompt_dispatch_time: Duration::from_millis(1),
+            first_token_time: Some(Duration::from_millis(2)),
+            approval_response_time: Duration::from_millis(1),
             shutdown_time: Duration::from_millis(5),
         },
     };

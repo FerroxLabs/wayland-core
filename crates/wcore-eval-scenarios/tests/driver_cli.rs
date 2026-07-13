@@ -287,6 +287,14 @@ fn fixture_run_publishes_one_redacted_receipt_bundle() {
     assert_eq!(receipt.body.identity.source_commit, COMMIT);
     assert_eq!(receipt.body.identity.binary_sha256.len(), 64);
     assert!(matches!(
+        receipt.body.timings.first_token_ms,
+        wcore_eval_scenarios::receipt::Evidence::Observed { .. }
+    ));
+    assert!(matches!(
+        receipt.body.timings.prompt_ms,
+        wcore_eval_scenarios::receipt::Evidence::Observed { .. }
+    ));
+    assert!(matches!(
         wcore_eval_scenarios::receipt::ReceiptVerifier::new()
             .verify(
                 &receipt,

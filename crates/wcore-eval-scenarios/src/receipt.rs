@@ -476,16 +476,19 @@ impl EvidenceReceiptV1 {
             timings: TimingEvidenceV1 {
                 boot_ms: Evidence::observed(result.boot_time.as_millis() as u64),
                 ready_ms: Evidence::observed(result.boot_time.as_millis() as u64),
-                prompt_ms: Evidence::Unavailable {
-                    code: "protocol_v1_does_not_timestamp_prompt".to_string(),
-                },
-                first_token_ms: Evidence::Unavailable {
-                    code: "protocol_v1_does_not_timestamp_first_token".to_string(),
-                },
+                prompt_ms: Evidence::observed(
+                    result.execution.prompt_dispatch_time.as_millis() as u64
+                ),
+                first_token_ms: result.execution.first_token_time.map_or_else(
+                    || Evidence::Unavailable {
+                        code: "no_text_delta_observed".to_string(),
+                    },
+                    |duration| Evidence::observed(duration.as_millis() as u64),
+                ),
                 tool_ms: Evidence::observed(tool_ms),
-                approval_ms: Evidence::Unavailable {
-                    code: "protocol_v1_does_not_timestamp_approval".to_string(),
-                },
+                approval_ms: Evidence::observed(
+                    result.execution.approval_response_time.as_millis() as u64,
+                ),
                 completion_ms: Evidence::observed(result.wall_time.as_millis() as u64),
                 shutdown_ms: Evidence::observed(result.execution.shutdown_time.as_millis() as u64),
             },
