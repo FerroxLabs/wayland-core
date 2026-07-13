@@ -55,6 +55,7 @@ vt100        = "0.15"
 # Wire-format types — reuse the engine's authoritative ProtocolEvent /
 # ProtocolCommand enums instead of redefining shapes that would drift.
 wcore-protocol = { workspace = true }
+wcore-config = { workspace = true }
 
 [dev-dependencies]
 # Tests need the wayland-core binary available — declaring wcore-cli as

@@ -60,6 +60,10 @@ struct Cli {
     /// Hard USD ceiling for the whole run.
     #[arg(long, conflicts_with = "list")]
     budget: Option<f64>,
+
+    /// Atomically persist the same status lines written to stdout.
+    #[arg(long, value_name = "PATH")]
+    output: Option<PathBuf>,
 }
 
 #[tokio::main]
@@ -71,6 +75,7 @@ async fn main() {
 }
 
 async fn execute(cli: Cli) -> i32 {
+    let mut status = StatusOutput::default();
     let scenarios = match standard_scenarios()
         .and_then(|catalog| select_scenarios(catalog, &cli.scenario, cli.filter.as_deref()))
     {
@@ -80,24 +85,25 @@ async fn execute(cli: Cli) -> i32 {
 
     if cli.list {
         for scenario in scenarios {
-            println!("{}", scenario.name);
+            status.line(scenario.name);
         }
-        return 0;
+        return finish_output(&cli, &status, 0);
     }
     if cli.verify_binary {
-        return match inspect_cli_artifact(&cli) {
+        let code = match inspect_cli_artifact(&cli) {
             Ok(artifact) => {
-                println!(
+                status.line(format!(
                     "VERIFIED sha256={} version={} source={} path={}",
                     artifact.sha256,
                     artifact.version,
                     artifact.source_commit,
                     artifact.path.display()
-                );
+                ));
                 0
             }
             Err(error) => usage_error(error),
         };
+        return finish_output(&cli, &status, code);
     }
     if cli
         .budget
@@ -141,33 +147,33 @@ async fn execute(cli: Cli) -> i32 {
     }
 
     if cli.dry {
-        let skipped = print_skips(&plans);
+        let skipped = print_skips(&plans, &mut status);
         let mut runnable = 0usize;
         let mut upper_bound_usd = 0.0;
         for (scenario, resolution, _) in &plans {
             for provider in &resolution.runnable {
-                println!(
+                status.line(format!(
                     "PLAN {} {} os={} approval={} max_cost_usd={:.6}",
                     scenario.name,
                     provider.id,
                     Platform::current(),
                     scenario.approval,
                     scenario.max_total_cost_usd
-                );
+                ));
                 runnable += 1;
                 upper_bound_usd += scenario.max_total_cost_usd;
             }
         }
-        println!(
+        status.line(format!(
             "ESTIMATE upper_bound_usd={upper_bound_usd:.6} runnable={runnable} skip={skipped}"
-        );
-        return 0;
+        ));
+        return finish_output(&cli, &status, 0);
     }
 
     if runnable_count == 0 {
-        let skipped = print_skips(&plans);
-        println!("SUMMARY pass=0 fail=0 skip={skipped} aborted=0");
-        return 0;
+        let skipped = print_skips(&plans, &mut status);
+        status.line(format!("SUMMARY pass=0 fail=0 skip={skipped} aborted=0"));
+        return finish_output(&cli, &status, 0);
     }
 
     let artifact = match inspect_cli_artifact(&cli) {
@@ -177,7 +183,7 @@ async fn execute(cli: Cli) -> i32 {
 
     let mut passed = 0usize;
     let mut failed = 0usize;
-    let skipped = print_skips(&plans);
+    let skipped = print_skips(&plans, &mut status);
     let run_cells: Vec<_> = plans
         .iter()
         .flat_map(|(scenario, resolution, _)| {
@@ -194,7 +200,7 @@ async fn execute(cli: Cli) -> i32 {
             .budget
             .is_some_and(|budget| total_cost + scenario.max_total_cost_usd > budget)
         {
-            aborted += print_aborted(&run_cells[index..], "budget");
+            aborted += print_aborted(&run_cells[index..], "budget", &mut status);
             break;
         }
 
@@ -202,19 +208,19 @@ async fn execute(cli: Cli) -> i32 {
         if let Err(error) = verify_artifact_digest(&artifact) {
             failed += 1;
             cell_failed = true;
-            println!(
+            status.line(format!(
                 "FAIL {} {} artifact_integrity={error}",
                 scenario.name, provider.id
-            );
+            ));
         } else {
             let run_result = run_with_binary(scenario, provider, &artifact.path).await;
             if let Err(error) = verify_artifact_digest(&artifact) {
                 failed += 1;
                 cell_failed = true;
-                println!(
+                status.line(format!(
                     "FAIL {} {} artifact_integrity={error}",
                     scenario.name, provider.id
-                );
+                ));
             } else {
                 match run_result {
                     Ok(result) if result.passed => {
@@ -222,60 +228,69 @@ async fn execute(cli: Cli) -> i32 {
                         if cli.budget.is_some_and(|budget| total_cost > budget) {
                             failed += 1;
                             cell_failed = true;
-                            println!(
+                            status.line(format!(
                                 "FAIL {} {} os={} approval={} reason=budget_overshoot",
                                 scenario.name, provider.id, result.platform, result.approval
-                            );
+                            ));
                         } else {
                             passed += 1;
-                            println!(
+                            status.line(format!(
                                 "PASS {} {} os={} approval={}",
                                 scenario.name, provider.id, result.platform, result.approval
-                            );
+                            ));
                         }
                     }
                     Ok(result) => {
                         total_cost += result.cost_usd;
                         failed += 1;
                         cell_failed = true;
-                        println!(
+                        status.line(format!(
                             "FAIL {} {} os={} approval={} failures={}",
                             scenario.name,
                             provider.id,
                             result.platform,
                             result.approval,
                             result.failures.len()
-                        );
+                        ));
                     }
-                    Err(error) => {
+                    Err(_error) => {
                         failed += 1;
                         cell_failed = true;
-                        println!("FAIL {} {} runner={error}", scenario.name, provider.id);
+                        status.line(format!(
+                            "FAIL {} {} reason=runner_error",
+                            scenario.name, provider.id
+                        ));
                     }
                 }
             }
         }
 
         if cell_failed && scenario.name == "canary" {
-            aborted += print_aborted(&run_cells[index + 1..], "canary");
+            aborted += print_aborted(&run_cells[index + 1..], "canary", &mut status);
             break;
         }
         if cli.budget.is_some_and(|budget| total_cost > budget) {
-            aborted += print_aborted(&run_cells[index + 1..], "budget");
+            aborted += print_aborted(&run_cells[index + 1..], "budget", &mut status);
             break;
         }
     }
 
-    println!("SUMMARY pass={passed} fail={failed} skip={skipped} aborted={aborted}");
-    i32::from(failed > 0 || aborted > 0)
+    status.line(format!(
+        "SUMMARY pass={passed} fail={failed} skip={skipped} aborted={aborted}"
+    ));
+    finish_output(&cli, &status, i32::from(failed > 0 || aborted > 0))
 }
 
 fn print_aborted(
     cells: &[(&Scenario, &wcore_eval_scenarios::providers::ProviderConfig)],
     reason: &str,
+    status: &mut StatusOutput,
 ) -> usize {
     for (scenario, provider) in cells {
-        println!("ABORTED {} {} reason={reason}", scenario.name, provider.id);
+        status.line(format!(
+            "ABORTED {} {} reason={reason}",
+            scenario.name, provider.id
+        ));
     }
     cells.len()
 }
@@ -306,7 +321,10 @@ fn inspect_cli_artifact(cli: &Cli) -> Result<SealedBinaryArtifact, String> {
     .map_err(|error| error.to_string())
 }
 
-fn print_skips(plans: &[(Scenario, ProviderResolution, PlatformDisposition)]) -> usize {
+fn print_skips(
+    plans: &[(Scenario, ProviderResolution, PlatformDisposition)],
+    status: &mut StatusOutput,
+) -> usize {
     let mut count = 0;
     for (scenario, resolution, platform) in plans {
         if let PlatformDisposition::Skipped { current, supported } = platform {
@@ -315,22 +333,22 @@ fn print_skips(plans: &[(Scenario, ProviderResolution, PlatformDisposition)]) ->
                 .map(ToString::to_string)
                 .collect::<Vec<_>>()
                 .join(",");
-            println!(
+            status.line(format!(
                 "SKIP {} os={} approval={} unsupported_os={} supported={}",
                 scenario.name, current, scenario.approval, current, supported
-            );
+            ));
             count += 1;
             continue;
         }
         for skip in &resolution.skipped {
-            println!(
+            status.line(format!(
                 "SKIP {} {} os={} approval={} missing={}",
                 scenario.name,
                 skip.provider,
                 Platform::current(),
                 scenario.approval,
                 skip.missing_key
-            );
+            ));
             count += 1;
         }
     }
@@ -340,4 +358,39 @@ fn print_skips(plans: &[(Scenario, ProviderResolution, PlatformDisposition)]) ->
 fn usage_error(error: impl std::fmt::Display) -> i32 {
     eprintln!("wayland-eval: {error}");
     2
+}
+
+#[derive(Default)]
+struct StatusOutput {
+    lines: Vec<String>,
+}
+
+impl StatusOutput {
+    fn line(&mut self, line: impl Into<String>) {
+        let line = line.into();
+        println!("{line}");
+        self.lines.push(line);
+    }
+
+    fn bytes(&self) -> Vec<u8> {
+        let mut output = self.lines.join("\n").into_bytes();
+        if !output.is_empty() {
+            output.push(b'\n');
+        }
+        output
+    }
+}
+
+fn finish_output(cli: &Cli, status: &StatusOutput, code: i32) -> i32 {
+    let Some(path) = &cli.output else {
+        return code;
+    };
+    if let Err(error) = wcore_config::atomic_write(path, &status.bytes()) {
+        eprintln!(
+            "wayland-eval: could not persist output to {}: {error}",
+            path.display()
+        );
+        return 2;
+    }
+    code
 }
