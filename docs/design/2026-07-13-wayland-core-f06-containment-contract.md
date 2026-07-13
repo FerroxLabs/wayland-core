@@ -1,6 +1,6 @@
 # Wayland Core F06 Skill-Lifecycle Containment Contract
 
-**Status:** approved design contract; implementation not yet started
+**Status:** emergency containment implemented and code-verified; packaged M0 proof remains dependent on F01-F05
 
 **Baseline:** `a9202f5` on `frontier/m0`, production source unchanged from Wayland Core `0.12.25`
 
@@ -208,3 +208,44 @@ Stop and amend this contract before proceeding if:
 - disabling lifecycle necessarily disables ordinary memory;
 - safe promotion can be preserved only by implementing F23's governance transaction;
 - a required change alters the Desktop/Core wire protocol.
+
+## 13. Implementation and audit receipt
+
+The emergency containment code candidate is `490fcb4718c749bd4746a2577b07855e77a38c1a` on `frontier/m0`. The implementation sequence is preserved as separate contract, red-test, fix, proof-hardening, and audit-remediation commits:
+
+| Commit | Purpose |
+|---|---|
+| `80d0d17` | Lock this containment contract. |
+| `95c3207` | Preserve the released failure chain as red tests. |
+| `5a048a3`–`dc074e7` | Implement lifecycle authority, zero-mutation gates, canonical drafting, provenance quarantine, model-safe resolution, router/slash containment, and promotion suspension. |
+| `7ade844`–`8de09e5` | Correct test destinations and close real-memory/bucketer proof gaps. |
+| `32301e6`, `aae9050` | Synchronize the `0.12.25` dependency lock and record the baseline erratum. |
+| `ce5fdb6` | Correct stale lifecycle-merge documentation found during cross-audit. |
+| `f774118`, `490fcb4` | Reproduce and close lazy local visibility/provenance revalidation gaps. |
+
+Verification on the isolated Hetzner worktree with Rust `1.95.0` and `--locked --offline`:
+
+- both lazy-resolution regressions failed on `f774118` for their intended reasons and passed on `490fcb4`;
+- focused lifecycle, drafting, loader, resolver, `SkillTool`, router, slash, promotion, and real-memory tests passed;
+- `cargo nextest run --workspace` passed all 10,130 executed tests, with 34 skipped and three slow tests;
+- `cargo fmt --all -- --check` passed;
+- workspace/all-target clippy passed with warnings denied; the only emitted notice is the pre-existing future-incompatibility report for `imap-proto 0.10.2`;
+- the final release binary must be rebuilt after this receipt commit so its embedded source commit and digest bind to the exact candidate.
+
+Cross-audit reconciliation:
+
+| Reviewer finding | Decision | Evidence or remediation |
+|---|---|---|
+| Gemini: lifecycle-off real-memory path lacked a direct zero-procedure assertion | Accepted | Added in `8de09e5`. |
+| Gemini: hidden names/errors were untested | Rejected as stale | Existing `SkillTool` tests already prove guessed hidden names fail and diagnostics omit them. |
+| Grok: injected legacy drafter proof did not show disabled calls leave the bucketer/global registry untouched | Accepted | Strengthened in `8de09e5`; enabled control proves disabled observations do not pre-seed the bucketer. |
+| Grok: operator-written provenance can be stripped | Accepted threat-model limit | An operator with direct skill-directory write authority can author or alter skills; governed identity, approval, and signed promotion remain F23. |
+| Fable: slash refusal and operator documentation were absent | Rejected as packet omission | `slash/skill.rs` refuses quarantined run guidance and tests it; `docs/advanced.md` documents quarantine and suspended promotion. |
+| Fable: promotion test checked the wrong/non-hermetic destination | Rejected | `app_config_dir()` resolves to `WAYLAND_HOME`; the test checks the exact former canonical copy destination inside a temporary home. |
+| Fable: fresh drafts might omit `auto_drafted=true` | Rejected as stale | Production emits it, the drafter test asserts it exactly, and loader tests prove manifest-only quarantine independent of the legacy note. |
+| Fable: model names might traverse sibling paths | Rejected | Cross-project resolution scans fixed roots and uses the supplied name only in metadata equality; it never joins the name into a path. |
+| Fable: lazy local visibility might trust a stale catalog ref | Accepted | Two red tests in `f774118`; `490fcb4` rechecks resolved hidden metadata and durable generated provenance before model return. |
+| Fable: merge comment contradicted false-dominant behavior | Accepted | Corrected in `ce5fdb6`. |
+| Fable: touched crates might still use Rust 2021 | Rejected | The workspace edition is 2024. |
+
+No accepted high- or critical-severity finding remains in the emergency containment slice. This receipt closes F06 code containment, not F06 packaged proof or the M0 gate; F01-F05 must still provide the real evaluator, hermetic runner, receipts, deterministic fixtures, capability truth, and three-platform evidence.
