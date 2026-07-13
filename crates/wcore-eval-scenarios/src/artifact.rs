@@ -428,4 +428,48 @@ mod tests {
             );
         }
     }
+
+    #[test]
+    fn mutation_during_the_identity_probe_is_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("core");
+        make_file(&path, b"original");
+
+        let error = inspect_with_probe(
+            &path,
+            ArtifactExpectation {
+                version: "0.12.25",
+                source_commit: COMMIT,
+            },
+            |probed| {
+                make_file(probed, b"replacement");
+                good_probe(probed)
+            },
+        )
+        .unwrap_err();
+
+        assert!(error.to_string().contains("changed during inspection"));
+    }
+
+    #[test]
+    fn execution_artifact_is_a_private_sealed_copy() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("core");
+        make_file(&source, b"original");
+        let source = source.canonicalize().unwrap();
+
+        let sealed = seal_with_probe(
+            &source,
+            ArtifactExpectation {
+                version: "0.12.25",
+                source_commit: COMMIT,
+            },
+            good_probe,
+        )
+        .unwrap();
+
+        assert_ne!(sealed.path, source);
+        assert!(sealed.path.exists());
+        assert_eq!(fs::read(&sealed.path).unwrap(), b"original");
+    }
 }
