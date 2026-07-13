@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::Arc;
 
@@ -195,6 +195,26 @@ fn apply_no_memory_flag(config: &mut Config, no_memory: bool) {
     }
 }
 
+/// Consume an evaluator-supplied credential file exactly once. The path may
+/// appear in argv; the credential itself never does, and the file is removed
+/// before provider bootstrap can spawn hooks, tools, plugins, or MCP servers.
+fn read_one_use_api_key(path: &Path) -> anyhow::Result<String> {
+    const MAX_CREDENTIAL_BYTES: u64 = 16 * 1024;
+    let metadata = std::fs::symlink_metadata(path)?;
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        anyhow::bail!("--api-key-file must name a regular non-symlink file");
+    }
+    if metadata.len() == 0 || metadata.len() > MAX_CREDENTIAL_BYTES {
+        let _ = std::fs::remove_file(path);
+        anyhow::bail!("--api-key-file must contain 1..={MAX_CREDENTIAL_BYTES} bytes");
+    }
+    let read = std::fs::read(path);
+    let removed = std::fs::remove_file(path);
+    let bytes = read.map_err(|error| anyhow::anyhow!("read --api-key-file: {error}"))?;
+    removed.map_err(|error| anyhow::anyhow!("remove --api-key-file: {error}"))?;
+    String::from_utf8(bytes).map_err(|_| anyhow::anyhow!("--api-key-file was not valid UTF-8"))
+}
+
 #[derive(Parser)]
 #[command(
     name = "wayland-core",
@@ -209,6 +229,10 @@ struct Cli {
     /// API key
     #[arg(short = 'k', long, env = "API_KEY")]
     api_key: Option<String>,
+
+    /// Internal one-use credential transport for isolated hosts/evaluators.
+    #[arg(long, hide = true, value_name = "PATH", conflicts_with = "api_key")]
+    api_key_file: Option<PathBuf>,
 
     /// Base URL for the API
     #[arg(short, long, env = "BASE_URL")]
@@ -750,7 +774,10 @@ fn init_failure_message(err: &anyhow::Error, provider_label: &str) -> String {
 }
 
 async fn run() -> anyhow::Result<ExitCode> {
-    let cli = Cli::parse();
+    let mut cli = Cli::parse();
+    if let Some(path) = cli.api_key_file.take() {
+        cli.api_key = Some(read_one_use_api_key(&path)?);
+    }
 
     // v0.9.1 W2 cycle-2 HIGH 2: when the binary will enter the
     // alt-screen TUI, route INFO/WARN traces and startup notices to a
@@ -3893,6 +3920,33 @@ mod tests {
                 "--force must override config {m:?} to Force"
             );
         }
+    }
+
+    #[test]
+    fn one_use_api_key_is_consumed_and_removed() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let path = directory.path().join("credential");
+        std::fs::write(&path, b"secret-canary").expect("write credential");
+
+        let secret = read_one_use_api_key(&path).expect("consume credential");
+
+        assert_eq!(secret, "secret-canary");
+        assert!(
+            !path.exists(),
+            "credential file must be removed before boot"
+        );
+    }
+
+    #[test]
+    fn oversized_one_use_api_key_is_rejected_and_removed() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let path = directory.path().join("credential");
+        std::fs::write(&path, vec![b'x'; 16 * 1024 + 1]).expect("write credential");
+
+        let error = read_one_use_api_key(&path).expect_err("oversized credential must fail");
+
+        assert!(error.to_string().contains("1..=16384 bytes"));
+        assert!(!path.exists(), "rejected credential file must be removed");
     }
 
     #[test]

@@ -15,6 +15,7 @@ fn main() {
     }
 
     let model = argument_value("--model").unwrap_or_default();
+    let secret = load_fixture_secret();
     let fail_canary = std::env::var_os("WCORE_EVAL_FIXTURE_FAIL_CANARY").is_some();
 
     emit(&serde_json::json!({
@@ -48,7 +49,7 @@ fn main() {
                     .and_then(serde_json::Value::as_str)
                     .is_some_and(|prompt| prompt.contains("single word READY"));
                 let text = if model == "fixture-hermetic" {
-                    hermetic_probe_text()
+                    hermetic_probe_text(&secret)
                 } else if fail_canary && is_canary {
                     "WRONG".to_string()
                 } else {
@@ -60,7 +61,6 @@ fn main() {
                     "text": text
                 }));
                 if model == "fixture-hermetic" {
-                    let secret = fixture_secret();
                     eprintln!("fixture attempted stderr leak: {secret}");
                     emit(&serde_json::json!({
                         "type": "tool_result",
@@ -120,8 +120,7 @@ fn main() {
     }
 }
 
-fn hermetic_probe_text() -> String {
-    let secret = fixture_secret();
+fn hermetic_probe_text(secret: &str) -> String {
     let args: Vec<String> = std::env::args().collect();
     let config = std::fs::read_to_string(".wayland-core/config.toml").unwrap_or_default();
     let provider_env_has_secret = [
@@ -131,7 +130,7 @@ fn hermetic_probe_text() -> String {
         "OPENAI_API_KEY",
     ]
     .iter()
-    .any(|name| std::env::var(name).ok().as_deref() == Some(secret.as_str()));
+    .any(|name| std::env::var(name).ok().as_deref() == Some(secret));
     let poison_inherited = [
         "HOME",
         "XDG_CONFIG_HOME",
@@ -146,15 +145,20 @@ fn hermetic_probe_text() -> String {
     let budget_seeded = config.contains("max_cost_usd = 0.031");
     format!(
         "READY arg_secret={} config_secret={} key_env={} poison={} budget={} leak={secret}",
-        args.iter().any(|arg| arg.contains(&secret)),
-        config.contains(&secret),
+        args.iter().any(|arg| arg.contains(secret)),
+        config.contains(secret),
         provider_env_has_secret,
         poison_inherited,
         budget_seeded,
     )
 }
 
-fn fixture_secret() -> String {
+fn load_fixture_secret() -> String {
+    if let Some(path) = argument_value("--api-key-file") {
+        let value = std::fs::read_to_string(&path).expect("read one-use credential file");
+        std::fs::remove_file(&path).expect("remove one-use credential file");
+        return value;
+    }
     for name in [
         "API_KEY",
         "DEEPSEEK_API_KEY",

@@ -1,20 +1,24 @@
 //! Explicit environment plan for every evaluated child process.
 
 use std::ffi::OsString;
-use std::path::Path;
+use std::fs::OpenOptions;
+use std::io::Write;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
-use crate::providers::ProviderConfig;
+static CREDENTIAL_FILE_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Debug, Clone)]
 pub(crate) struct ChildEnvironment {
     variables: Vec<(OsString, OsString)>,
+    credential_file: Option<PathBuf>,
 }
 
 impl ChildEnvironment {
     pub(crate) fn build(
         cwd: &Path,
         wayland_home: &Path,
-        provider: Option<&ProviderConfig>,
+        secret: Option<&str>,
     ) -> std::io::Result<Self> {
         let env_root = wayland_home.join("eval-environment");
         let home = env_root.join("home");
@@ -51,26 +55,33 @@ impl ChildEnvironment {
             ("NO_COLOR".into(), "1".into()),
         ];
 
-        copy_if_present(&mut variables, "PATH");
+        variables.push(("PATH".into(), controlled_path()));
         #[cfg(windows)]
         for name in ["SystemRoot", "WINDIR", "COMSPEC", "PATHEXT"] {
             copy_if_present(&mut variables, name);
-        }
-
-        if let Some(secret) = provider.and_then(ProviderConfig::resolved_key) {
-            variables.push(("API_KEY".into(), secret.into()));
         }
 
         // This is an explicit deterministic-fixture control, not an ambient
         // product input. F04 replaces it with the fixture protocol.
         copy_if_present(&mut variables, "WCORE_EVAL_FIXTURE_FAIL_CANARY");
 
-        Ok(Self { variables })
+        let credential_file = secret
+            .filter(|value| !value.is_empty())
+            .map(|value| write_credential_file(&env_root, value))
+            .transpose()?;
+
+        Ok(Self {
+            variables,
+            credential_file,
+        })
     }
 
     pub(crate) fn apply_tokio(&self, command: &mut tokio::process::Command) {
         command.env_clear();
         command.envs(self.variables.iter().cloned());
+        if let Some(path) = &self.credential_file {
+            command.arg("--api-key-file").arg(path);
+        }
     }
 
     #[cfg(unix)]
@@ -78,6 +89,10 @@ impl ChildEnvironment {
         command.env_clear();
         for (key, value) in &self.variables {
             command.env(key, value);
+        }
+        if let Some(path) = &self.credential_file {
+            command.arg("--api-key-file");
+            command.arg(path);
         }
     }
 }
@@ -90,4 +105,40 @@ fn copy_if_present(variables: &mut Vec<(OsString, OsString)>, name: &str) {
     if let Some(value) = std::env::var_os(name) {
         variables.push((name.into(), value));
     }
+}
+
+fn controlled_path() -> OsString {
+    if let Some(path) = std::env::var_os("WCORE_EVAL_TOOL_PATH").filter(|value| !value.is_empty()) {
+        return path;
+    }
+    #[cfg(windows)]
+    {
+        let root = std::env::var_os("SystemRoot").unwrap_or_else(|| r"C:\Windows".into());
+        let root = PathBuf::from(root);
+        return std::env::join_paths([root.join("System32"), root])
+            .unwrap_or_else(|_| r"C:\Windows\System32;C:\Windows".into());
+    }
+    #[cfg(not(windows))]
+    {
+        "/usr/local/bin:/usr/bin:/bin:/opt/homebrew/bin".into()
+    }
+}
+
+fn write_credential_file(root: &Path, secret: &str) -> std::io::Result<PathBuf> {
+    let sequence = CREDENTIAL_FILE_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let path = root.join(format!(
+        "provider-credential-{}-{sequence}",
+        std::process::id()
+    ));
+    let mut options = OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut file = options.open(&path)?;
+    file.write_all(secret.as_bytes())?;
+    file.sync_all()?;
+    Ok(path)
 }

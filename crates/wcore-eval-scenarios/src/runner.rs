@@ -210,12 +210,24 @@ pub fn spawn_for_run(
     yolo: bool,
     wayland_home: Option<&std::path::Path>,
 ) -> Result<Child, SpawnError> {
+    let secret = provider.resolved_key();
+    spawn_for_run_with_secret(bin, cwd, provider, yolo, wayland_home, secret.as_deref())
+}
+
+fn spawn_for_run_with_secret(
+    bin: &std::path::Path,
+    cwd: &std::path::Path,
+    provider: &ProviderConfig,
+    yolo: bool,
+    wayland_home: Option<&std::path::Path>,
+    secret: Option<&str>,
+) -> Result<Child, SpawnError> {
     let mut cmd = Command::new(bin);
     let isolated_home = wayland_home.unwrap_or(cwd);
-    ChildEnvironment::build(cwd, isolated_home, Some(provider))?.apply_tokio(&mut cmd);
+    ChildEnvironment::build(cwd, isolated_home, secret)?.apply_tokio(&mut cmd);
     // Build an allowlisted child environment before adding any scenario
-    // arguments. Credentials enter only through the generic API_KEY variable;
-    // they never appear in argv or the persisted scenario config.
+    // arguments. Credentials enter through a one-use file that Core deletes
+    // before bootstrap; they never appear in argv, env, or persisted config.
     // D3: only force-approve when the scenario's policy is `Yolo`. Without
     // `--yolo` the engine boots in `Default` approval mode and emits
     // `ApprovalRequired` per mutating tool, which the runner answers per policy.
@@ -313,7 +325,8 @@ pub(crate) async fn run_session_in(
     cwd: &std::path::Path,
     wayland_home: Option<&std::path::Path>,
 ) -> anyhow::Result<ScenarioResult> {
-    let redactor = SecretRedactor::from_secret(provider.resolved_key());
+    let secret = provider.resolved_key();
+    let redactor = SecretRedactor::from_secret(secret.clone());
     // Run the scenario's setup hook BEFORE spawning the engine. The closure
     // seeds the working dir — input files to probe, fixture scripts (mock MCP
     // server, shell hooks), and config appends (`[mcp.servers.*]`,
@@ -322,10 +335,30 @@ pub(crate) async fn run_session_in(
     // setup-dependent scenario silently degraded; D6/D7/coverage need it.
     let outcome = match &scenario.setup {
         Some(setup) => match setup(cwd) {
-            Ok(()) => run_session_body(scenario, provider, bin, cwd, wayland_home).await,
+            Ok(()) => {
+                run_session_body(
+                    scenario,
+                    provider,
+                    bin,
+                    cwd,
+                    wayland_home,
+                    secret.as_deref(),
+                )
+                .await
+            }
             Err(error) => Err(anyhow::anyhow!("scenario setup failed: {error}")),
         },
-        None => run_session_body(scenario, provider, bin, cwd, wayland_home).await,
+        None => {
+            run_session_body(
+                scenario,
+                provider,
+                bin,
+                cwd,
+                wayland_home,
+                secret.as_deref(),
+            )
+            .await
+        }
     };
 
     let cleanup_error = scenario
@@ -357,15 +390,17 @@ async fn run_session_body(
     bin: &std::path::Path,
     cwd: &std::path::Path,
     wayland_home: Option<&std::path::Path>,
+    secret: Option<&str>,
 ) -> anyhow::Result<ScenarioResult> {
     let start = Instant::now();
 
-    let mut child = spawn_for_run(
+    let mut child = spawn_for_run_with_secret(
         bin,
         cwd,
         provider,
         scenario.approval == crate::scenario::ApprovalPolicy::Yolo,
         wayland_home,
+        secret,
     )
     .map_err(|e| anyhow::anyhow!(e.to_string()))?;
 

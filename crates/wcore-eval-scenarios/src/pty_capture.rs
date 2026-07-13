@@ -171,7 +171,8 @@ impl PtyCapture {
         for arg in extra_args {
             cmd.arg(arg);
         }
-        ChildEnvironment::build(env.path(), env.path(), Some(provider))?.apply_pty(&mut cmd);
+        let secret = provider.resolved_key();
+        ChildEnvironment::build(env.path(), env.path(), secret.as_deref())?.apply_pty(&mut cmd);
         cmd.cwd(env.path());
         // Override the noninteractive default from ChildEnvironment: a
         // TTY-capable TERM is required for the TUI launch gate.
