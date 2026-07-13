@@ -3573,10 +3573,11 @@ fn merge_config_files(global: ConfigFile, project: ConfigFile) -> ConfigFile {
 
     let debug = DebugConfig::merge(global.debug, project.debug);
 
-    // Observability is an additive opt-in: project's structured_traces
-    // wins when it is `true`; otherwise inherit the global setting. This
-    // mirrors the bool-only fields elsewhere — there is no "explicit false"
-    // marker because the on-disk default is already false.
+    // Most observability flags are additive opt-ins: a true value in either
+    // source enables them. `skills_lifecycle` is presence-aware and
+    // false-dominant instead: an explicit false in either source disables the
+    // mutation boundary, while absence on both sides preserves the smart-on
+    // default.
     let observability = ObservabilityFileConfig {
         structured_traces: project.observability.structured_traces
             || global.observability.structured_traces,
