@@ -54,6 +54,7 @@ pub mod providers;
 #[cfg(unix)]
 pub mod pty_capture;
 pub mod qa;
+pub mod receipt;
 mod redaction;
 pub mod report;
 pub mod runner;

@@ -40,6 +40,8 @@ clap         = { workspace = true }
 tracing      = { workspace = true }
 # Content-address the exact Core binary exercised by an evaluation run.
 sha2         = { workspace = true }
+base64       = { workspace = true }
+ed25519-dalek = { workspace = true }
 # Direct HTTPS for the D9 LLM-as-judge grader (semantic eval). The eval crate
 # is a test harness, so its one raw reqwest call carries a scoped
 # `#[allow(clippy::disallowed_methods)]` (see judge.rs) rather than routing
