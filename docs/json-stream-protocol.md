@@ -1206,6 +1206,32 @@ baseline as any other unknown event. Hosts that render it typically
 surface a banner ("anthropic down, fallback active") and a transient
 indicator on recovery.
 
+### 1.N+5a provider_attempt / provider_retry / provider_failure (F04)
+
+Core emits provider evidence events for every physical request and retry
+decision. These events are always enabled so evaluators and diagnostics can
+distinguish real engine recovery from fixture-side request counts. They are
+additive diagnostics: hosts that do not recognize them MUST drop them silently
+under the Host Decoder Contract.
+
+```json
+{ "type": "provider_attempt", "failure": "http_503" }
+{ "type": "provider_retry", "failure": "http_503" }
+{ "type": "provider_attempt" }
+{ "type": "provider_failure", "failure": "stream_truncated" }
+```
+
+| Event | Field | Type | Description |
+|---|---|---|---|
+| `provider_attempt` | `failure` | string? | One physical provider request. Omitted when that request reached a usable response. |
+| `provider_retry` | `failure` | string? | Core scheduled another request after the typed failure. This is not an additional physical-attempt count. |
+| `provider_failure` | `failure` | string | A failure discovered after the physical request completed, such as a truncated SSE body. It does not by itself imply a retry. |
+
+`failure` is a stable machine-readable class such as `http_429`, `http_503`,
+`timeout`, `connection`, `stream_truncated`, `context_overflow`, or
+`egress_denied`. Hosts MUST treat the value as an open string and MUST NOT parse
+human-readable provider error messages to infer it.
+
 ### 1.N+6 browser_event (W8c.1)
 
 Browser-suite op event. Emitted by the engine once per completed
