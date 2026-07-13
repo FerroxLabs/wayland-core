@@ -278,7 +278,7 @@ pub struct ConfigFile {
     pub debug: DebugConfig,
 
     #[serde(default)]
-    pub observability: ObservabilityConfig,
+    pub observability: ObservabilityFileConfig,
 
     /// W7 F8-3: provider resilience chain (`ResilientProvider` wrap).
     /// Off by default — see [`ProviderChainConfig`].
@@ -563,6 +563,42 @@ pub struct ObservabilityConfig {
     /// sub-agent tools still gate through the normal approval path.
     #[serde(default)]
     pub workflow_live_mode: bool,
+}
+
+/// Presence-aware on-disk `[observability]` shape.
+///
+/// `skills_lifecycle` is the one observability switch whose explicit `false`
+/// is an authority boundary. Keeping it optional here distinguishes an omitted
+/// value from the resolved smart default (`true`) while [`ObservabilityConfig`]
+/// remains a plain runtime value.
+#[derive(Debug, Clone, Deserialize, Serialize, Default)]
+pub struct ObservabilityFileConfig {
+    #[serde(default)]
+    pub structured_traces: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub skills_lifecycle: Option<bool>,
+    #[serde(default)]
+    pub online_evolution: bool,
+    #[serde(default)]
+    pub workflow_detection_enabled: bool,
+    #[serde(default)]
+    pub workflow_live_mode: bool,
+}
+
+impl ObservabilityFileConfig {
+    fn resolve(self) -> ObservabilityConfig {
+        ObservabilityConfig {
+            structured_traces: self.structured_traces,
+            skills_lifecycle: self.skills_lifecycle.unwrap_or(true),
+            online_evolution: self.online_evolution,
+            workflow_detection_enabled: self.workflow_detection_enabled,
+            workflow_live_mode: self.workflow_live_mode,
+        }
+    }
+
+    fn resolved_skills_lifecycle(&self) -> bool {
+        self.skills_lifecycle.unwrap_or(true)
+    }
 }
 
 impl Default for ObservabilityConfig {
@@ -1989,7 +2025,7 @@ impl Config {
             vertex: merged.vertex,
             mcp: merged.mcp,
             debug: merged.debug,
-            observability: merged.observability,
+            observability: merged.observability.resolve(),
             provider_chain: merged.provider_chain,
             budget: merged.budget,
             storage: merged.storage,
@@ -3541,11 +3577,13 @@ fn merge_config_files(global: ConfigFile, project: ConfigFile) -> ConfigFile {
     // wins when it is `true`; otherwise inherit the global setting. This
     // mirrors the bool-only fields elsewhere — there is no "explicit false"
     // marker because the on-disk default is already false.
-    let observability = ObservabilityConfig {
+    let observability = ObservabilityFileConfig {
         structured_traces: project.observability.structured_traces
             || global.observability.structured_traces,
-        skills_lifecycle: project.observability.skills_lifecycle
-            || global.observability.skills_lifecycle,
+        skills_lifecycle: Some(
+            project.observability.resolved_skills_lifecycle()
+                && global.observability.resolved_skills_lifecycle(),
+        ),
         online_evolution: project.observability.online_evolution
             || global.observability.online_evolution,
         workflow_detection_enabled: project.observability.workflow_detection_enabled
@@ -6223,11 +6261,13 @@ structured_traces = true
         // must agree, since a no-config first run uses `ConfigFile::default()`.
         let from_toml: ConfigFile = toml::from_str("").unwrap();
         assert!(
-            from_toml.observability.skills_lifecycle,
+            from_toml.observability.resolved_skills_lifecycle(),
             "skills_lifecycle must default ON (serde/TOML-omitted path)"
         );
         assert!(
-            ConfigFile::default().observability.skills_lifecycle,
+            ConfigFile::default()
+                .observability
+                .resolved_skills_lifecycle(),
             "skills_lifecycle must default ON (struct Default path — no-config first run)"
         );
     }
@@ -6242,7 +6282,7 @@ skills_lifecycle = false
         )
         .unwrap();
         assert!(
-            !cfg.observability.skills_lifecycle,
+            !cfg.observability.resolved_skills_lifecycle(),
             "explicit opt-out must be honored"
         );
     }
@@ -6254,7 +6294,7 @@ skills_lifecycle = false
 skills_lifecycle = true
         "#;
         let cfg: ConfigFile = toml::from_str(toml_src).unwrap();
-        assert!(cfg.observability.skills_lifecycle);
+        assert!(cfg.observability.resolved_skills_lifecycle());
         // Independent from structured_traces — flipping one must not flip
         // the other.
         assert!(!cfg.observability.structured_traces);
@@ -6278,7 +6318,7 @@ skills_lifecycle = true
                         lifecycle_config(Some(project), memory),
                     );
                     assert_eq!(
-                        merged.observability.skills_lifecycle,
+                        merged.observability.resolved_skills_lifecycle(),
                         global && project,
                         "global={global}, project={project}, memory={memory}"
                     );
@@ -6292,7 +6332,7 @@ skills_lifecycle = true
         let absent_absent =
             merge_config_files(lifecycle_config(None, false), lifecycle_config(None, false));
         assert!(
-            absent_absent.observability.skills_lifecycle,
+            absent_absent.observability.resolved_skills_lifecycle(),
             "the smart default remains enabled when neither source configures lifecycle"
         );
 
@@ -6301,7 +6341,7 @@ skills_lifecycle = true
             lifecycle_config(None, false),
         );
         assert!(
-            !global_false.observability.skills_lifecycle,
+            !global_false.observability.resolved_skills_lifecycle(),
             "project absence must not erase a global opt-out"
         );
 
@@ -6310,7 +6350,7 @@ skills_lifecycle = true
             lifecycle_config(Some(false), false),
         );
         assert!(
-            !project_false.observability.skills_lifecycle,
+            !project_false.observability.resolved_skills_lifecycle(),
             "global absence must not erase a project opt-out"
         );
     }

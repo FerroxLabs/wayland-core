@@ -1719,7 +1719,7 @@ impl AgentBootstrap {
         // construction below.
         let skill_router_to_install: wcore_skills::SkillRouter = {
             let mut sk_router = wcore_skills::SkillRouter::new();
-            let candidate_names: Vec<String> = catalog.refs().map(|r| r.name.clone()).collect();
+            let candidate_names: Vec<String> = catalog.visible().map(|r| r.name.clone()).collect();
             // Layer 1 — GEPA winners. Requires a real Db handle; the
             // `NullMemory` fallback skips this branch entirely.
             if let Some(db_arc) = mem_db_for_router.clone() {
@@ -1744,20 +1744,22 @@ impl AgentBootstrap {
                 // in session 1; here in session 2 the router consumes it so
                 // the freshly-learned skill is preferred. Idempotent against
                 // the `bench` pass above — a real GEPA winner keeps priority.
-                match store.seed_pairs_for(&candidate_names, "auto_drafter", 1) {
-                    Ok(pairs) => {
-                        let n = sk_router.restore_seeds(pairs);
-                        tracing::debug!(
+                if self.config.observability.skills_lifecycle {
+                    match store.seed_pairs_for(&candidate_names, "auto_drafter", 1) {
+                        Ok(pairs) => {
+                            let n = sk_router.restore_seeds(pairs);
+                            tracing::debug!(
+                                target: "wcore_agent::bootstrap",
+                                seeded = n,
+                                "skill_router: hydrated auto-drafted skills (auto_drafter scorer)"
+                            );
+                        }
+                        Err(e) => tracing::warn!(
                             target: "wcore_agent::bootstrap",
-                            seeded = n,
-                            "skill_router: hydrated auto-drafted skills (auto_drafter scorer)"
-                        );
+                            error = %e,
+                            "skill_router: auto-draft seed hydration failed (continuing)"
+                        ),
                     }
-                    Err(e) => tracing::warn!(
-                        target: "wcore_agent::bootstrap",
-                        error = %e,
-                        "skill_router: auto-draft seed hydration failed (continuing)"
-                    ),
                 }
             }
             // Layer 2 — prioritizer-based head-start. Always runs; the
@@ -2337,7 +2339,9 @@ impl AgentBootstrap {
         // `Db` is available — without one we have no PromptStore and the
         // closed-loop seed pathway is dead. The bucketer itself is always
         // live on the engine; without a drafter it just observes.
-        if let Some(db_arc) = mem_db_for_router.clone() {
+        if self.config.observability.skills_lifecycle
+            && let Some(db_arc) = mem_db_for_router.clone()
+        {
             // `$WAYLAND_HOME` resolution: prefer the explicit env var,
             // fall back to `~/.wayland`. Matches the pattern used elsewhere
             // in the project for user-facing on-disk artifacts.

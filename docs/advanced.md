@@ -471,7 +471,7 @@ compact_bash = false   # default: true
 
 ## Skills lifecycle (W9)
 
-When `observability.skills_lifecycle = true` in `wcore.toml`, three subsystems become available to the engine:
+The skills lifecycle is enabled by default. When enabled, three subsystems become available to the engine:
 
 - **F10 autonomous skill creation.** A `PatternDetector` over recent `TurnTrace` history flags repeated tool-call sequences (length ≥ 5, repeats ≥ 3, stable input-key shape). Matches are written via `DraftWriter::stage` as P4 procedures with `status = Staged`. Staged skills are visible to `wcore skills audit` and operator promotion paths but never auto-load into the model's context. When `structured_traces` is also on, a `TraceEvent` with payload `{ "kind": "skill_drafted", "name": ..., ... }` is emitted on each stage.
 - **F11 curator.** Runs on `on_session_end`. Reads active P4 procedures, scores them as `success_ratio · ln(1 + use_count)`, dedupes overlapping descriptions (Levenshtein ≤ 5 keeps the higher-scored entry), and archives entries with `use_count ≥ 5` and `success_ratio < 0.20`. `Pinned` procedures are never touched.
@@ -485,14 +485,21 @@ When `observability.skills_lifecycle = true` in `wcore.toml`, three subsystems b
 
 ### Enabling
 
-The `skills_lifecycle` flag is **default-off**. Turn it on per project in `.wayland-core.toml`:
+The `skills_lifecycle` flag is **default-on**. An operator can disable it globally or per project:
 
 ```toml
 [observability]
-skills_lifecycle = true
+skills_lifecycle = false
 ```
 
-The flag is also valid in the global config file under the same `[observability]` section; the project value ORs with the global value, mirroring `structured_traces`.
+The flag is also valid in the global config file under the same `[observability]` section. An explicit `false` in either source wins; an absent value keeps the smart default enabled. Disabling the lifecycle does not disable memory itself.
+
+Generated drafts are written once to the canonical skills directory with an
+`auto_drafted` manifest. They remain inspectable but hidden from model listings,
+routers, guessed-name execution, and cross-project resolution. Review metadata
+does not grant activation authority. `--skills-promote` is temporarily
+unavailable until F23 provides a governed one-procedure-to-one-artifact
+promotion transaction; `--skills-archive` remains available.
 
 ### Status in this release
 

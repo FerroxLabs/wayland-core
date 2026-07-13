@@ -2138,89 +2138,13 @@ async fn run_skills_audit(stale_after_days: u64) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// W9.1 T4 (T11): promote a Staged or Pinned procedure to Active. Opens
-/// the project's `.wayland-core/memory/memory.db` rooted at CWD, looks
-/// up the procedure by id at `Tier::Project`, validates the transition
-/// against the state-machine, and writes the new status via
-/// `upsert_procedure` (same row, same id, same artifact — only `status`
-/// changes).
-///
-/// F-069: after the DB transition, also attempts to copy the on-disk auto-
-/// draft from `<config_dir>/wayland-core/skills/<name>/` (where
-/// `SkillDrafter` writes it) to `<config_dir>/wayland-core/skills/<name>/`
-/// (already there — the draft IS at the loader-visible path post F-038).
-/// For backwards-compat with old drafts written to WAYLAND_HOME, we also
-/// check `<WAYLAND_HOME>/skills/auto/<name>/SKILL.md` and copy it to the
-/// loader-visible path if the config-dir copy is missing.
-async fn run_skills_promote(id: &str) -> anyhow::Result<()> {
-    transition_procedure(
-        id,
-        wcore_memory::v2_types::ProcedureStatus::Active,
-        "promote",
+/// Promotion is suspended until F23 supplies a governed transaction that
+/// binds one reviewed procedure id to one canonical skill artifact. Reject
+/// before UUID parsing, database access, or filesystem mutation.
+async fn run_skills_promote(_id: &str) -> anyhow::Result<()> {
+    anyhow::bail!(
+        "skill promotion is temporarily unavailable while governed promotion is being implemented"
     )
-    .await?;
-
-    // F-069: best-effort migration of old WAYLAND_HOME-format drafts into
-    // the loader-visible config-dir path. Runs after the DB transition so
-    // a DB failure does not trigger a misleading disk move.
-    try_migrate_draft_to_loader_path(id).await;
-    Ok(())
-}
-
-/// F-069: if a draft exists at the legacy `$WAYLAND_HOME/skills/auto/<name>/SKILL.md`
-/// location but not at `<config_dir>/wayland-core/skills/<name>/SKILL.md`,
-/// copy it to the loader-visible path. Best-effort — failure is logged, not
-/// returned.
-async fn try_migrate_draft_to_loader_path(_procedure_id: &str) {
-    // Derive candidate skill name from procedure id (heuristic: auto-<sig>).
-    // We check both patterns in case the operator passed a UUID vs. a name.
-    let Some(config_dir) = wcore_config::config::app_config_dir() else {
-        return;
-    };
-    let wayland_home = std::env::var("WAYLAND_HOME")
-        .map(std::path::PathBuf::from)
-        .ok()
-        .or_else(|| dirs::home_dir().map(|h| h.join(".wayland")))
-        .unwrap_or_else(|| std::path::PathBuf::from(".wayland"));
-
-    let legacy_auto_dir = wayland_home.join("skills").join("auto");
-    if !legacy_auto_dir.is_dir() {
-        return;
-    }
-
-    // Walk legacy auto dir looking for a directory whose name contains the
-    // procedure_id suffix (or starts with "auto-").
-    let read_dir = match std::fs::read_dir(&legacy_auto_dir) {
-        Ok(rd) => rd,
-        Err(_) => return,
-    };
-    for entry in read_dir.flatten() {
-        let skill_name = entry.file_name().to_string_lossy().into_owned();
-        let src_skill_md = entry.path().join("SKILL.md");
-        if !src_skill_md.exists() {
-            continue;
-        }
-        let dst_skill_dir = config_dir.join("skills").join(&skill_name);
-        let dst_skill_md = dst_skill_dir.join("SKILL.md");
-        if dst_skill_md.exists() {
-            // Already at loader-visible path — nothing to migrate.
-            continue;
-        }
-        if let Err(e) = std::fs::create_dir_all(&dst_skill_dir)
-            .and_then(|_| std::fs::copy(&src_skill_md, &dst_skill_md).map(|_| ()))
-        {
-            tracing::warn!(
-                "F-069: failed to migrate draft {} to loader path: {}",
-                skill_name,
-                e
-            );
-        } else {
-            println!(
-                "info: migrated draft '{skill_name}' to loader-visible path at {}",
-                dst_skill_dir.display()
-            );
-        }
-    }
 }
 
 /// W9.1 T4 (T11): archive a Staged or Active procedure. The state-

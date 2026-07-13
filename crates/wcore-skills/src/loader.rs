@@ -408,13 +408,11 @@ async fn load_skill_file(
         skill_root.as_deref(),
     );
 
-    // Auto-drafted skills carry a sibling `manifest.json` written by the
-    // SkillDrafter. Until a human reviews one (`needs_review: true`), it must
-    // NOT be advertised to the model: an unreviewed draft in the catalog makes
-    // models notice it and narrate skipping it into user-facing output (e.g. a
-    // skill drafted from trivial test turns). Keep it LOADED — so the user can
-    // still review or explicitly invoke it — but hide it from model invocation.
-    if draft_needs_review(skill_dir).await {
+    // F06: generated provenance remains quarantined until F23 supplies a
+    // governed promotion transaction. Review flags are not activation
+    // authority. Keep drafts loaded for operator inspection, but never expose
+    // them to model-facing catalog surfaces.
+    if is_generated_draft(skill_dir, &resolved_name, &parsed.content).await {
         metadata.disable_model_invocation = true;
     }
 
@@ -426,20 +424,21 @@ async fn load_skill_file(
     })
 }
 
-/// True when `skill_dir` holds an auto-drafted skill that has not been reviewed
-/// yet — a sibling `manifest.json` with `"needs_review": true` (written by the
-/// `SkillDrafter`). Best-effort: a missing, unreadable, or malformed manifest,
-/// or one without the flag, means "not a pending draft" (`false`), so
-/// hand-authored skills are completely unaffected.
-async fn draft_needs_review(skill_dir: &Path) -> bool {
+/// Generated provenance classifier for current and released drafts. A valid
+/// `auto_drafted=true` manifest is authoritative regardless of review status.
+/// Missing or damaged metadata falls back to the exact released body marker;
+/// an `auto-*` name by itself never quarantines user-authored content.
+async fn is_generated_draft(skill_dir: &Path, name: &str, content: &str) -> bool {
     let manifest = skill_dir.join("manifest.json");
-    let Ok(bytes) = tokio::fs::read(&manifest).await else {
-        return false;
-    };
-    serde_json::from_slice::<serde_json::Value>(&bytes)
-        .ok()
-        .and_then(|v| v.get("needs_review").and_then(serde_json::Value::as_bool))
-        .unwrap_or(false)
+    if let Ok(bytes) = tokio::fs::read(&manifest).await
+        && serde_json::from_slice::<serde_json::Value>(&bytes)
+            .ok()
+            .and_then(|v| v.get("auto_drafted").and_then(serde_json::Value::as_bool))
+            .unwrap_or(false)
+    {
+        return true;
+    }
+    crate::draft::is_released_generated_skill(name, content)
 }
 
 // ---------------------------------------------------------------------------

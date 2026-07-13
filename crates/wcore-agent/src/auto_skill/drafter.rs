@@ -6,11 +6,8 @@
 //!   `<config_dir>/wayland-core/skills/auto-<sig>/SKILL.md`  — loader-visible
 //!   `<config_dir>/wayland-core/skills/auto-<sig>/manifest.json` — metadata
 //!
-//! A secondary write to `self.skill_dir` (WAYLAND_HOME-based) is attempted as
-//! a best-effort fallback and logged on failure.
-//!
-//! Additionally, the draft is registered in-process via `register_bundled_skill`
-//! so the current session's catalog sees it immediately (no next-boot wait).
+//! Generated drafts remain quarantined and are not registered into the
+//! process-global bundled registry. F23 will provide governed promotion.
 //!
 //! The store record is best-effort: a failure does NOT prevent the on-
 //! disk draft from landing, and is logged at WARN. Disk failure DOES bubble
@@ -80,17 +77,9 @@ impl SkillDrafter {
 
     /// Draft a candidate skill from the trigger.
     ///
-    /// F-038: writes in directory format (`<skill_name>/SKILL.md`) to two
-    /// locations so the loader can discover the draft on next boot:
-    ///
-    /// 1. **Loader-visible path** — `<config_dir>/wayland-core/skills/auto-<sig>/SKILL.md`
-    ///    (matches `user_skills_dir()` in `wcore-skills::paths`).
-    /// 2. **Legacy path** — `<self.skill_dir>/auto-<sig>/SKILL.md` (the path
-    ///    bootstrap wires from `$WAYLAND_HOME/skills/auto/`). Written as a
-    ///    best-effort fallback; failure is logged but does NOT abort the draft.
-    ///
-    /// The manifest JSON is written alongside the `SKILL.md` in the skill
-    /// subdirectory as `manifest.json`.
+    /// Writes one canonical directory-format draft at the loader-visible path.
+    /// Generated provenance is atomically published before `SKILL.md`, so an
+    /// interrupted write fails closed as a quarantined/incomplete artifact.
     ///
     /// If configured, also records into the PromptStore for SkillRouter
     /// hydration on next boot.
@@ -108,10 +97,7 @@ impl SkillDrafter {
             .or_else(wcore_config::config::app_config_dir)
             .map(|d| d.join("skills").join(&name))
             .unwrap_or_else(|| self.skill_dir.join(&name));
-        let md_path = loader_dir.join("SKILL.md");
         std::fs::create_dir_all(&loader_dir)?;
-        std::fs::write(&md_path, &body)?;
-
         let json_path = loader_dir.join("manifest.json");
         let manifest = serde_json::json!({
             "name": name,
@@ -123,59 +109,11 @@ impl SkillDrafter {
             "score": AUTO_DRAFT_SCORE,
             "scorer": AUTO_DRAFT_SCORER,
         });
-        std::fs::write(&json_path, serde_json::to_string_pretty(&manifest)?)?;
+        let manifest_bytes = serde_json::to_vec_pretty(&manifest)?;
+        wcore_config::atomic_write(&json_path, &manifest_bytes)?;
 
-        // Secondary write: legacy path under self.skill_dir (WAYLAND_HOME/skills/auto/).
-        // Best-effort — a failure here does not abort the draft.
-        let legacy_dir = self.skill_dir.join(&name);
-        if let Err(e) = std::fs::create_dir_all(&legacy_dir)
-            .and_then(|_| std::fs::write(legacy_dir.join("SKILL.md"), &body))
-        {
-            tracing::warn!(
-                target: "wcore_agent::auto_skill",
-                error = %e,
-                skill = %name,
-                legacy_dir = %legacy_dir.display(),
-                "SkillDrafter: legacy path write failed (loader-visible path succeeded)"
-            );
-        }
-
-        // In-process registration: make the draft reachable in the CURRENT
-        // session's skill catalog without waiting for next boot.
-        // This is best-effort — registration failures are logged and swallowed.
-        {
-            use wcore_skills::bundled::{BundledSkillDefinition, register_bundled_skill};
-            // Leak the strings so they satisfy the 'static bound of BundledSkillDefinition.
-            // Plugin lifetime == process lifetime — the leak is intentional.
-            let static_name: &'static str = Box::leak(name.clone().into_boxed_str());
-            let static_desc: &'static str = Box::leak(
-                format!(
-                    "Auto-drafted skill from {} successful turns",
-                    trigger.trajectories.len()
-                )
-                .into_boxed_str(),
-            );
-            let static_content: &'static str = Box::leak(body.clone().into_boxed_str());
-            register_bundled_skill(BundledSkillDefinition {
-                name: static_name,
-                description: static_desc,
-                when_to_use: None,
-                argument_hint: None,
-                allowed_tools: &[],
-                model: None,
-                disable_model_invocation: false,
-                user_invocable: true,
-                context: None,
-                agent: None,
-                files: &[],
-                content: static_content,
-            });
-            tracing::debug!(
-                target: "wcore_agent::auto_skill",
-                skill = %name,
-                "auto-draft registered in-process via bundled-skill registry"
-            );
-        }
+        let md_path = loader_dir.join("SKILL.md");
+        wcore_config::atomic_write(&md_path, body.as_bytes())?;
 
         if let Some(store) = &self.prompt_store {
             let metadata = serde_json::json!({
@@ -221,10 +159,8 @@ impl SkillDrafter {
 fn compose_body(name: &str, trigger: &DraftTrigger) -> String {
     let mut out = String::new();
     out.push_str(&format!("# Auto-drafted skill: {name}\n\n"));
-    out.push_str(
-        "> NOTE: This skill was auto-drafted from a streak of successful turns with similar \
-         task signatures. Review and edit before treating it as canonical.\n\n",
-    );
+    out.push_str(wcore_skills::draft::RELEASED_AUTO_DRAFT_NOTE);
+    out.push_str("\n\n");
     out.push_str(&format!("Signature: `{}`\n\n", trigger.signature));
     out.push_str(&format!(
         "Evidence: {} successful turns\n\n",

@@ -128,11 +128,7 @@ impl SkillTool {
 
     /// Build a comma-separated list of available skill names for error messages.
     fn available_names(&self) -> String {
-        self.catalog
-            .refs()
-            .map(|r| r.name.clone())
-            .collect::<Vec<_>>()
-            .join(", ")
+        self.catalog.visible_names().join(", ")
     }
 
     /// v0.7.0 1.D.5 — body of `execute()`. Returns `(skill_name_opt,
@@ -154,7 +150,7 @@ impl SkillTool {
 
         // X1 (Task 5): resolve through the catalog — reads body from disk
         // on first activation, hits LRU thereafter.
-        let skill = match self.catalog.resolve(skill_name).await {
+        let skill = match self.catalog.resolve_for_model(skill_name).await {
             Ok(s) => s,
             Err(wcore_skills::refs::ResolveError::NotFound(_)) => {
                 let available = self.available_names();

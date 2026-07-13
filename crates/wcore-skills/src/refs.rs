@@ -275,6 +275,46 @@ impl SkillCatalog {
         Ok(arc)
     }
 
+    /// Resolve a skill on behalf of the model. Unlike [`Self::resolve`], this
+    /// treats model-hidden skills as absent, including guessed names and
+    /// cross-project matches. Operator-facing inspection paths may continue
+    /// to use the unrestricted resolver.
+    pub async fn resolve_for_model(&self, name: &str) -> Result<Arc<SkillMetadata>, ResolveError> {
+        let normalized = name.trim_start_matches('/');
+
+        if let Some(local) = self.refs.iter().find(|r| r.name == normalized) {
+            if local.disable_model_invocation {
+                return Err(ResolveError::NotFound(normalized.to_string()));
+            }
+            return self.resolve(normalized).await;
+        }
+
+        // An unrestricted operator lookup may already have cached a sibling
+        // project skill. Re-check its resolved metadata before returning it to
+        // the model rather than treating the cache as an authority boundary.
+        {
+            let mut cache = self.cache.lock().await;
+            if let Some(hit) = cache.get(normalized) {
+                if hit.disable_model_invocation {
+                    return Err(ResolveError::NotFound(normalized.to_string()));
+                }
+                return Ok(Arc::clone(hit));
+            }
+        }
+
+        let Some(meta) = self.resolve_cross_project(normalized).await else {
+            return Err(ResolveError::NotFound(normalized.to_string()));
+        };
+        if meta.disable_model_invocation {
+            return Err(ResolveError::NotFound(normalized.to_string()));
+        }
+
+        let arc = Arc::new(meta);
+        let mut cache = self.cache.lock().await;
+        cache.put(normalized.to_string(), Arc::clone(&arc));
+        Ok(arc)
+    }
+
     /// W6 — widen a resolution miss across sibling projects.
     ///
     /// Consults `wcore_memory::cross_project::discover_projects` against the
@@ -465,6 +505,18 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn model_resolver_rejects_hidden_eager_skill() {
+        let mut hidden = make_ref("hidden", "generated");
+        hidden.disable_model_invocation = true;
+        let cat = SkillCatalog::from_refs(vec![hidden]);
+
+        assert!(matches!(
+            cat.resolve_for_model("hidden").await,
+            Err(ResolveError::NotFound(name)) if name == "hidden"
+        ));
+    }
+
+    #[tokio::test]
     async fn resolve_io_error_surfaces_typed_error() {
         let mut r = make_ref("ghost", "");
         r.file_path = std::path::PathBuf::from("/nonexistent/ghost/SKILL.md");
@@ -512,6 +564,27 @@ mod tests {
             .expect("skill resolves from sibling project");
         assert_eq!(m.name, "shared");
         assert!(m.content.contains("sibling body for shared"));
+    }
+
+    #[tokio::test]
+    async fn model_resolver_rejects_generated_sibling_project_skill() {
+        let root = tempfile::tempdir().unwrap();
+        make_sibling_project(root.path(), "other-project", "auto-shared");
+        let manifest = root
+            .path()
+            .join("other-project/.wayland-core/skills/auto-shared/manifest.json");
+        std::fs::write(manifest, r#"{"auto_drafted":true,"needs_review":false}"#).unwrap();
+
+        let cat =
+            SkillCatalog::from_refs(vec![]).with_cross_project_root(root.path().to_path_buf());
+        assert!(matches!(
+            cat.resolve_for_model("auto-shared").await,
+            Err(ResolveError::NotFound(name)) if name == "auto-shared"
+        ));
+        assert!(
+            cat.resolve("auto-shared").await.is_ok(),
+            "operator-facing resolution remains available for inspection"
+        );
     }
 
     #[tokio::test]

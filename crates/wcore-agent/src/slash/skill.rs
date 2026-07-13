@@ -111,23 +111,26 @@ impl SkillHandler {
                 // telemetry). Calling out from a slash handler would bypass the
                 // approval pipeline + the procedural-memory recording.
                 // Instead, validate the skill exists and instruct the user.
-                let exists = catalog.find(name).is_some();
-                if exists {
-                    Ok(SlashOutcome::Handled {
+                match catalog.find(name) {
+                    Some(skill) if skill.disable_model_invocation => Ok(SlashOutcome::Handled {
+                        output: Some(format!(
+                            "/skill run '{name}': this skill is quarantined and cannot be run."
+                        )),
+                    }),
+                    Some(_) => Ok(SlashOutcome::Handled {
                         output: Some(format!(
                             "/skill run '{name}': skill exists in the catalog. \
                              Skill dispatch flows through the agent's SkillTool — \
                              ask the agent to use the skill (e.g. \"use the {name} skill\") \
                              so the request goes through the approval + telemetry pipeline."
                         )),
-                    })
-                } else {
-                    Ok(SlashOutcome::Handled {
+                    }),
+                    None => Ok(SlashOutcome::Handled {
                         output: Some(format!(
                             "/skill run '{name}': no skill named '{name}' in the catalog. \
                              Run `/skill list` to see available skills."
                         )),
-                    })
+                    }),
                 }
             }
         }
@@ -293,5 +296,34 @@ mod tests {
         // Must NOT contain the stub-mode placeholder.
         assert!(!s.contains("3.C.4"), "runtime run leaked stub string: {s}");
         assert!(s.contains("no skill named"), "got: {s}");
+    }
+
+    #[test]
+    fn runtime_run_rejects_model_hidden_skill() {
+        let hidden = wcore_skills::refs::SkillRef {
+            name: "auto-hidden".to_string(),
+            display_name: None,
+            description: "generated".to_string(),
+            when_to_use: None,
+            paths: Vec::new(),
+            source: wcore_skills::types::SkillSource::Project,
+            loaded_from: wcore_skills::types::LoadedFrom::Skills,
+            file_path: std::path::PathBuf::from("unused"),
+            content_length_hint: 0,
+            user_invocable: true,
+            disable_model_invocation: true,
+            has_artifacts: false,
+            inline_content: None,
+        };
+        let handler = SkillHandler::Runtime {
+            catalog: Arc::new(SkillCatalog::from_refs(vec![hidden])),
+        };
+        let inv = parse("/skill run auto-hidden").unwrap();
+        let out = handler.invoke(&inv).unwrap();
+        let SlashOutcome::Handled { output: Some(s) } = out else {
+            panic!();
+        };
+        assert!(s.contains("quarantined") && s.contains("cannot be run"));
+        assert!(!s.contains("ask the agent"));
     }
 }

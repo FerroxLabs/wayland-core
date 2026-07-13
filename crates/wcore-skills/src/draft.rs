@@ -30,6 +30,21 @@ pub const DEFAULT_MIN_REPEATS: usize = 3;
 /// while still excluding trivial 1-2 tool turns).
 pub const DEFAULT_MIN_SEQ_LEN: usize = 5;
 
+/// Exact marker emitted by the released legacy `SkillDrafter` body format.
+/// F06 uses it with the generated name/header shape to quarantine already
+/// released drafts whose manifest is missing or damaged.
+pub const RELEASED_AUTO_DRAFT_NOTE: &str = "> NOTE: This skill was auto-drafted from a streak of successful turns with similar task signatures. Review and edit before treating it as canonical.";
+
+/// Classify only the released generator body shape. Name prefix alone is not
+/// provenance: users may intentionally author ordinary `auto-*` skills.
+pub fn is_released_generated_skill(name: &str, content: &str) -> bool {
+    let expected_header = format!("# Auto-drafted skill: {name}\n\n");
+    name.starts_with("auto-")
+        && content.starts_with(&expected_header)
+        && content.contains(RELEASED_AUTO_DRAFT_NOTE)
+        && content.contains("\n\nSignature: `")
+}
+
 #[derive(Debug, Clone)]
 pub struct PatternDetector {
     pub min_repeats: usize,

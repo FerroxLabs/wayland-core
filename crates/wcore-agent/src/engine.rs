@@ -3871,6 +3871,9 @@ impl AgentEngine {
         stop_reason: StopReason,
         turns: usize,
     ) {
+        if !self.skills_lifecycle {
+            return;
+        }
         let outcome = match stop_reason {
             StopReason::EndTurn | StopReason::ToolUse => crate::auto_skill::TurnOutcome::Success,
             _ => crate::auto_skill::TurnOutcome::Failure,
@@ -4451,7 +4454,7 @@ impl AgentEngine {
         if let Some(router) = self.skill_router.as_ref()
             && let Some(catalog) = self.skill_catalog.as_ref()
         {
-            let candidates: Vec<String> = catalog.refs().map(|r| r.name.clone()).collect();
+            let candidates: Vec<String> = catalog.visible().map(|r| r.name.clone()).collect();
             if !candidates.is_empty() {
                 // `choose` lives on the `DecisionRouter` trait, in the
                 // sibling `wcore-dispatch` crate. Importing it inline
