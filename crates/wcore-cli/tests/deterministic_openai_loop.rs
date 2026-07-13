@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
@@ -63,7 +64,7 @@ async fn run_script_with_approval(
     )
     .await;
     let observation = fixture.shutdown().await.expect("fixture shutdown");
-    let mut result = result.expect("packaged Core run");
+    let result = result.expect("packaged Core run");
 
     assert!(result.passed, "unexpected failures: {:?}", result.failures);
     assert!(observation.complete(), "observation: {observation:?}");
@@ -73,7 +74,43 @@ async fn run_script_with_approval(
             .iter()
             .all(|request| request.model.as_deref() == Some("fixture-chat-v1"))
     );
-    result.execution.provider_attempts = Some(observation.attempts());
+    (result, observation)
+}
+
+async fn run_script_with_timeout(
+    name: &'static str,
+    steps: impl IntoIterator<Item = OpenAiStep>,
+) -> (ScenarioResult, OpenAiFixtureObservation) {
+    let fixture = OpenAiFixtureScript::new(steps)
+        .start()
+        .await
+        .expect("start timeout fixture");
+    let provider = ProviderConfig::new(ProviderId::OpenAI, "fixture-chat-v1")
+        .with_api_key("fixture-local-token")
+        .with_base_url(fixture.base_url());
+    let env = tempenv::build(&provider).expect("build timeout environment");
+    let mut config = std::fs::OpenOptions::new()
+        .append(true)
+        .open(env.path().join(".wayland-core/config.toml"))
+        .expect("open timeout config");
+    writeln!(config, "\n[providers.openai.compat]\nread_timeout_ms = 75")
+        .expect("write timeout config");
+    let scenario = Scenario::new(name, Category::Hardening)
+        .max_total_time(Duration::from_secs(12))
+        .approval(ApprovalPolicy::Yolo)
+        .turn(
+            Turn::new("Return the deterministic fixture answer.").max_time(Duration::from_secs(8)),
+        );
+
+    let result = run_with_binary_in_environment(
+        &scenario,
+        &provider,
+        Path::new(env!("CARGO_BIN_EXE_wayland-core")),
+        &env,
+    )
+    .await
+    .expect("packaged timeout run");
+    let observation = fixture.shutdown().await.expect("timeout fixture shutdown");
     (result, observation)
 }
 
@@ -89,7 +126,7 @@ async fn packaged_core_completes_a_scripted_openai_turn() {
     assert!(result.final_text.contains("fixture answer"));
     assert_eq!(observation.requests.len(), 1);
     assert_eq!(result.execution.provider_attempts, Some(1));
-    assert_eq!(result.execution.provider_retries, None);
+    assert_eq!(result.execution.provider_retries, Some(0));
     let usage = result
         .execution
         .provider_usage
@@ -113,6 +150,9 @@ async fn packaged_core_recovers_after_two_503_responses() {
 
     assert_eq!(result.final_text, "recovered after 503");
     assert_eq!(observation.requests.len(), 3);
+    assert_eq!(result.execution.provider_attempts, Some(3));
+    assert_eq!(result.execution.provider_retries, Some(2));
+    assert_eq!(result.execution.provider_typed_failures, ["http_503"]);
 }
 
 #[tokio::test]
@@ -129,12 +169,49 @@ async fn packaged_core_recovers_after_a_bounded_429() {
 
     assert_eq!(result.final_text, "recovered after 429");
     assert_eq!(observation.requests.len(), 2);
+    assert_eq!(result.execution.provider_attempts, Some(2));
+    assert_eq!(result.execution.provider_retries, Some(1));
+    assert_eq!(result.execution.provider_typed_failures, ["http_429"]);
     let delay_ms = observation.inter_request_delays_ms()[0];
     assert!(delay_ms >= 8, "retry ignored the 10 ms hint: {delay_ms} ms");
     assert!(
         delay_ms < 1_000,
         "retry used a fallback delay instead of the fixture hint: {delay_ms} ms"
     );
+}
+
+#[tokio::test]
+async fn packaged_core_recovers_after_a_real_read_timeout() {
+    let (result, observation) = run_script_with_timeout(
+        "packaged_openai_timeout_retry",
+        [
+            OpenAiStep::stall_before_headers(250),
+            OpenAiStep::text("recovered after timeout"),
+        ],
+    )
+    .await;
+
+    assert!(result.passed, "unexpected failures: {:?}", result.failures);
+    assert_eq!(result.final_text, "recovered after timeout");
+    assert_eq!(observation.requests.len(), 2);
+    assert_eq!(result.execution.provider_attempts, Some(2));
+    assert_eq!(result.execution.provider_retries, Some(1));
+    assert_eq!(result.execution.provider_typed_failures, ["timeout"]);
+}
+
+#[tokio::test]
+async fn packaged_core_exhausts_a_real_read_timeout() {
+    let (result, observation) = run_script_with_timeout(
+        "packaged_openai_timeout_exhausted",
+        std::iter::repeat_with(|| OpenAiStep::stall_before_headers(250)).take(6),
+    )
+    .await;
+
+    assert!(!result.passed, "terminal timeout must fail the scenario");
+    assert_eq!(observation.requests.len(), 6);
+    assert_eq!(result.execution.provider_attempts, Some(6));
+    assert_eq!(result.execution.provider_retries, Some(5));
+    assert_eq!(result.execution.provider_typed_failures, ["timeout"]);
 }
 
 #[tokio::test]
@@ -151,6 +228,12 @@ async fn packaged_core_recovers_after_a_truncated_stream() {
 
     assert!(result.final_text.ends_with("recovered after truncation"));
     assert_eq!(observation.requests.len(), 2);
+    assert_eq!(result.execution.provider_attempts, Some(2));
+    assert_eq!(result.execution.provider_retries, Some(1));
+    assert_eq!(
+        result.execution.provider_typed_failures,
+        ["stream_truncated"]
+    );
 }
 
 #[tokio::test]
@@ -648,7 +731,7 @@ async fn run_sealed_repository_once(run_id: &str) -> SealedRun {
                 .assert(hidden_outcome.assertion()),
         );
 
-    let mut result = run_with_binary_in_environment(
+    let result = run_with_binary_in_environment(
         &scenario,
         &provider,
         Path::new(env!("CARGO_BIN_EXE_wayland-core")),
@@ -694,8 +777,6 @@ async fn run_sealed_repository_once(run_id: &str) -> SealedRun {
     );
     assert!(mcp_call.input.contains("F04-SEALED"));
     assert!(mcp_call.output.contains("F04-SEALED"));
-    result.execution.provider_attempts = Some(openai_observation.attempts());
-
     let final_repository_sha256 =
         repository_tree_sha256(&repository_root).expect("materialized repository digest");
     assert_eq!(
