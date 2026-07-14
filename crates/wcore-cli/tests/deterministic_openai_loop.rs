@@ -8,6 +8,9 @@ use serde::Serialize;
 use sha2::{Digest, Sha256};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use wcore_egress::{BoundedEgressRecorder, EgressClient, EgressOutcome};
+use wcore_eval_scenarios::artifact::{
+    ArtifactExpectation, SealedBinaryArtifact, seal_binary, verify_artifact_digest,
+};
 use wcore_eval_scenarios::assertions::Assertion;
 use wcore_eval_scenarios::fixtures::manifest::{CompositeFixtureManifest, FixtureComponents};
 use wcore_eval_scenarios::fixtures::mcp::{McpHttpFixture, McpHttpMode};
@@ -20,7 +23,9 @@ use wcore_eval_scenarios::fixtures::remote_execution::{
 };
 use wcore_eval_scenarios::fixtures::repository::{SeededRepository, repository_tree_sha256};
 use wcore_eval_scenarios::providers::{ProviderConfig, ProviderId};
-use wcore_eval_scenarios::receipt::{Evidence, EvidenceReceiptV1, ReceiptMetadataV1};
+use wcore_eval_scenarios::receipt::{
+    Evidence, EvidenceReceiptV1, ReceiptMetadataV1, milestone_evidence_gaps,
+};
 use wcore_eval_scenarios::runner::{
     Failure, ScenarioResult, run_with_binary, run_with_binary_in_environment,
 };
@@ -524,6 +529,27 @@ fn sha256(bytes: &[u8]) -> String {
     format!("{:x}", Sha256::digest(bytes))
 }
 
+fn sealed_f04_binary() -> SealedBinaryArtifact {
+    let source_commit = std::env::var("WCORE_F04_SOURCE_COMMIT")
+        .unwrap_or_else(|_| env!("WAYLAND_SOURCE_SHA").to_string());
+    let path = std::env::var_os("WCORE_EVAL_BIN")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(env!("CARGO_BIN_EXE_wayland-core")));
+    if std::env::var_os("WCORE_F04_REQUIRE_PREBUILT").is_some()
+        && std::env::var_os("WCORE_EVAL_BIN").is_none()
+    {
+        panic!("WCORE_F04_REQUIRE_PREBUILT requires an exact WCORE_EVAL_BIN artifact");
+    }
+    seal_binary(
+        &path,
+        ArtifactExpectation {
+            version: env!("CARGO_PKG_VERSION"),
+            source_commit: &source_commit,
+        },
+    )
+    .expect("seal exact F04 Core artifact")
+}
+
 fn assert_request_leaves_equal(
     first: &[BTreeMap<String, String>],
     second: &[BTreeMap<String, String>],
@@ -643,6 +669,7 @@ async fn observe_egress_fixture() -> String {
 }
 
 async fn run_sealed_repository_once(run_id: &str) -> SealedRun {
+    let artifact = sealed_f04_binary();
     let repository = SeededRepository::new([
         ("README.md", "fixture repository\n"),
         ("src/settings.toml", "port = 8080\nmode = \"legacy\"\n"),
@@ -731,14 +758,10 @@ async fn run_sealed_repository_once(run_id: &str) -> SealedRun {
                 .assert(hidden_outcome.assertion()),
         );
 
-    let result = run_with_binary_in_environment(
-        &scenario,
-        &provider,
-        Path::new(env!("CARGO_BIN_EXE_wayland-core")),
-        &env,
-    )
-    .await
-    .expect("packaged F04 seal run");
+    let result = run_with_binary_in_environment(&scenario, &provider, &artifact.path, &env)
+        .await
+        .expect("packaged F04 seal run");
+    verify_artifact_digest(&artifact).expect("F04 Core artifact changed during execution");
     let openai_observation = openai.shutdown().await.expect("OpenAI fixture shutdown");
     let mcp_observation = mcp.shutdown().await.expect("MCP fixture shutdown");
     assert!(result.passed, "unexpected failures: {:?}", result.failures);
@@ -798,20 +821,11 @@ async fn run_sealed_repository_once(run_id: &str) -> SealedRun {
         )
         .expect("complete fixture identities"),
     );
-    let binary_sha256 =
-        sha256(&std::fs::read(env!("CARGO_BIN_EXE_wayland-core")).expect("read packaged binary"));
-    let source_commit = env!("WAYLAND_SOURCE_SHA").to_string();
-    if let Ok(expected) = std::env::var("WCORE_F04_SOURCE_COMMIT") {
-        assert_eq!(
-            expected, source_commit,
-            "WCORE_F04_SOURCE_COMMIT must match the source embedded in the tested binary"
-        );
-    }
     let receipt = EvidenceReceiptV1::from_scenario_result(
         ReceiptMetadataV1 {
             run_id: run_id.to_string(),
-            source_commit,
-            binary_sha256,
+            source_commit: artifact.source_commit,
+            binary_sha256: artifact.sha256,
             fixture_sha256: manifest.fixture_sha256().to_string(),
             model: "fixture-chat-v1".to_string(),
             build: Evidence::Unavailable {
@@ -927,5 +941,39 @@ async fn packaged_f04_run_is_repeatable_and_content_addressed() {
             .expect("serialize repeatability summary"),
         )
         .expect("write repeatability summary");
+        std::fs::write(
+            directory.join("fixture-manifest.json"),
+            serde_json::to_vec_pretty(&first.fixture_manifest).expect("serialize fixture manifest"),
+        )
+        .expect("write fixture manifest");
+        std::fs::write(
+            directory.join("authority-policy-observation.json"),
+            serde_json::to_vec_pretty(&serde_json::json!({
+                "schema": "wayland.eval.authority-policy-observation",
+                "schema_version": 1,
+                "config_sha256": first.receipt.body.identity.config_sha256,
+                "fixture_sha256": first.receipt.body.identity.fixture_sha256,
+                "provider": first.receipt.body.identity.provider,
+                "model": first.receipt.body.identity.model,
+                "target_os": first.receipt.body.target.os,
+                "target_architecture": first.receipt.body.target.architecture,
+                "sandbox_backend": first.receipt.body.target.sandbox_backend,
+                "policy_posture": first.receipt.body.policy.posture,
+                "effective_policy_sha256": first.receipt.body.policy.effective_policy_sha256,
+                "required_cells": first.receipt.body.required_cells,
+            }))
+            .expect("serialize authority policy observation"),
+        )
+        .expect("write authority policy observation");
+        std::fs::write(
+            directory.join("milestone-evidence-gaps.json"),
+            serde_json::to_vec_pretty(&serde_json::json!({
+                "schema": "wayland.eval.milestone-evidence-gaps",
+                "schema_version": 1,
+                "missing": milestone_evidence_gaps(&first.receipt.body),
+            }))
+            .expect("serialize milestone evidence gaps"),
+        )
+        .expect("write milestone evidence gaps");
     }
 }
