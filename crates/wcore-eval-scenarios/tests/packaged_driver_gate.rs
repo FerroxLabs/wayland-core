@@ -343,7 +343,21 @@ async fn packaged_core_identity_and_driver_gates_are_enforced() {
         .shutdown()
         .await
         .expect("stop passing OpenAI fixture");
-    assert!(passed.status.success(), "{}", context(&passed));
+    let receipt_path = std::fs::read_dir(&report_root)
+        .expect("packaged report root")
+        .next()
+        .expect("one packaged report cell")
+        .expect("packaged report entry")
+        .path()
+        .join("receipt.json");
+    let local_json = std::fs::read(&receipt_path).expect("packaged wayland-eval receipt");
+    let local: wcore_eval_scenarios::receipt::EvidenceReceiptV1 =
+        serde_json::from_slice(&local_json).expect("parse packaged receipt");
+    assert!(
+        passed.status.success(),
+        "{}\nreceipt: {local:#?}",
+        context(&passed)
+    );
     let passed_stdout = String::from_utf8_lossy(&passed.stdout);
     assert!(
         passed_stdout.contains("PASS canary openai")
@@ -356,16 +370,6 @@ async fn packaged_core_identity_and_driver_gates_are_enforced() {
         "real packaged Core did not consume the passing fixture"
     );
 
-    let receipt_path = std::fs::read_dir(&report_root)
-        .expect("packaged report root")
-        .next()
-        .expect("one packaged report cell")
-        .expect("packaged report entry")
-        .path()
-        .join("receipt.json");
-    let local_json = std::fs::read(&receipt_path).expect("packaged wayland-eval receipt");
-    let local: wcore_eval_scenarios::receipt::EvidenceReceiptV1 =
-        serde_json::from_slice(&local_json).expect("parse packaged receipt");
     assert_eq!(
         local.body.identity.fixture_sha256, expected_fixture_sha256,
         "wayland-eval did not bind the verified live fixture artifacts"
@@ -583,7 +587,8 @@ async fn packaged_candidate_cannot_replace_authenticated_egress_evidence() {
             .body
             .tools
             .iter()
-            .any(|tool| tool.tool_name == "Bash" && tool.exit_state == "success")
+            .any(|tool| tool.tool_name == "Bash" && tool.exit_state == "success"),
+        "receipt: {receipt:#?}"
     );
     assert!(matches!(
         receipt.body.boundaries.egress_attempted,
