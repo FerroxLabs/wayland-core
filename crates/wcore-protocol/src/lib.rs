@@ -3,6 +3,7 @@
 
 pub mod commands;
 pub mod events;
+pub mod output_pump;
 pub mod reader;
 pub mod writer;
 

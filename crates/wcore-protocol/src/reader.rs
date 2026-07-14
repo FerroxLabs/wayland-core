@@ -1,4 +1,8 @@
-use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncReadExt, BufReader};
+use std::io::{BufRead, BufReader, Read};
+use std::ops::{Deref, DerefMut};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+
 use tokio::sync::mpsc;
 
 use crate::commands::ProtocolCommand;
@@ -12,26 +16,78 @@ use crate::commands::ProtocolCommand;
 /// stdio transport's `MAX_LINE_BYTES` (see `wcore-mcp` transport/stdio.rs).
 const MAX_LINE_BYTES: u64 = 8 * 1024 * 1024;
 
-/// Reads JSON Lines from stdin in a background task.
-/// Returns a channel receiver for parsed commands.
+/// Commands are never dropped: the dedicated reader thread blocks when this
+/// queue is full, applying backpressure to the host pipe instead of growing
+/// process memory without bound.
+const STDIN_COMMAND_CAPACITY: usize = 64;
+
+/// Receiver for JSON-stream commands read from process stdin.
 ///
-/// Wave RA — `unbounded_channel` is intentional here. The producer side
-/// is stdin from the host (Electron / CLI front-end); the rate is
-/// human-input or host-script throughput, never a tight loop. Bounding
-/// the channel could DROP a user command (e.g. an Approve / Cancel)
-/// under transient consumer backpressure, which is materially worse
-/// than the memory cost of one extra in-flight ProtocolCommand. The
-/// documented exception is recorded inline.
-pub fn spawn_stdin_reader() -> mpsc::UnboundedReceiver<ProtocolCommand> {
-    let (tx, rx) = mpsc::unbounded_channel();
+/// Dropping this value cooperatively closes command admission. A reader thread
+/// already blocked in an operating-system stdin read cannot be interrupted
+/// portably, so that thread is intentionally detached from Tokio: it owns only
+/// stdin, the bounded sender, and this cancellation flag, and is terminated by
+/// the operating system when the process exits. It therefore cannot delay
+/// Tokio runtime shutdown or retain cleanup-critical resources.
+pub struct StdinReader {
+    receiver: mpsc::Receiver<ProtocolCommand>,
+    cancelled: Arc<AtomicBool>,
+}
 
-    tokio::spawn(async move {
-        let stdin = tokio::io::stdin();
-        let reader = BufReader::new(stdin);
-        read_commands(reader, tx).await;
-    });
+impl StdinReader {
+    pub async fn recv(&mut self) -> Option<ProtocolCommand> {
+        self.receiver.recv().await
+    }
 
-    rx
+    /// Close command admission while preserving the receiver's buffered
+    /// commands, matching Tokio receiver semantics.
+    pub fn close(&mut self) {
+        self.cancelled.store(true, Ordering::Release);
+        self.receiver.close();
+    }
+}
+
+impl Deref for StdinReader {
+    type Target = mpsc::Receiver<ProtocolCommand>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.receiver
+    }
+}
+
+impl DerefMut for StdinReader {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.receiver
+    }
+}
+
+impl Drop for StdinReader {
+    fn drop(&mut self) {
+        self.close();
+    }
+}
+
+/// Reads JSON Lines from stdin on a dedicated operating-system thread.
+/// Returns a bounded, backpressured command receiver.
+pub fn spawn_stdin_reader() -> StdinReader {
+    let (tx, receiver) = mpsc::channel(STDIN_COMMAND_CAPACITY);
+    let cancelled = Arc::new(AtomicBool::new(false));
+    let thread_cancelled = Arc::clone(&cancelled);
+
+    let spawned = std::thread::Builder::new()
+        .name("wcore-json-stdin".to_string())
+        .spawn(move || {
+            let stdin = std::io::stdin();
+            read_commands(BufReader::new(stdin.lock()), tx, &thread_cancelled);
+        });
+    if let Err(error) = spawned {
+        tracing::error!(%error, "could not start protocol stdin reader");
+    }
+
+    StdinReader {
+        receiver,
+        cancelled,
+    }
 }
 
 /// Drive one capped line read per iteration, parse it, and forward parsed
@@ -40,9 +96,10 @@ pub fn spawn_stdin_reader() -> mpsc::UnboundedReceiver<ProtocolCommand> {
 ///
 /// Generic over the reader so the byte-cap behavior is unit-testable without
 /// touching the real stdin.
-async fn read_commands<R: AsyncBufRead + Unpin>(
+fn read_commands<R: BufRead>(
     mut reader: R,
-    tx: mpsc::UnboundedSender<ProtocolCommand>,
+    tx: mpsc::Sender<ProtocolCommand>,
+    cancelled: &AtomicBool,
 ) {
     // Capped line reader. `read_until` on a `take(MAX_LINE_BYTES)` limiter
     // stops at the byte cap even if no newline arrives, so an endless
@@ -50,15 +107,17 @@ async fn read_commands<R: AsyncBufRead + Unpin>(
     // detected as "filled the cap without a terminating newline".
     let mut raw: Vec<u8> = Vec::new();
     loop {
+        if cancelled.load(Ordering::Acquire) {
+            break;
+        }
         raw.clear();
         let read = match (&mut reader)
             .take(MAX_LINE_BYTES)
             .read_until(b'\n', &mut raw)
-            .await
         {
             Ok(n) => n,
             Err(e) => {
-                eprintln!("[protocol] stdin read error: {e}");
+                tracing::warn!(error = %e, "protocol stdin read failed");
                 break;
             }
         };
@@ -72,11 +131,11 @@ async fn read_commands<R: AsyncBufRead + Unpin>(
         // discard the rest of the oversized line up to the next newline so
         // its tail is not mis-parsed as a fresh command, then resume.
         if read as u64 >= MAX_LINE_BYTES && raw.last() != Some(&b'\n') {
-            eprintln!(
-                "[protocol] Line exceeded {MAX_LINE_BYTES} byte cap — \
-                 discarding oversized input and resuming"
+            tracing::warn!(
+                max_line_bytes = MAX_LINE_BYTES,
+                "protocol line exceeded byte cap; discarding oversized input and resuming"
             );
-            if !discard_to_newline(&mut reader).await {
+            if !discard_to_newline(&mut reader, cancelled) {
                 break; // EOF or error while discarding — stop the reader
             }
             // `clear()` retains the multi-MiB capacity; reallocate so one
@@ -90,9 +149,12 @@ async fn read_commands<R: AsyncBufRead + Unpin>(
         if trimmed.is_empty() {
             continue;
         }
+        if cancelled.load(Ordering::Acquire) {
+            break;
+        }
         match serde_json::from_str::<ProtocolCommand>(trimmed) {
             Ok(cmd) => {
-                if tx.send(cmd).is_err() {
+                if tx.blocking_send(cmd).is_err() {
                     break;
                 }
             }
@@ -102,10 +164,9 @@ async fn read_commands<R: AsyncBufRead + Unpin>(
                 // integration issues can identify the problem
                 // without reading protocol docs. Example of the
                 // minimal required shape is shown in the hint.
-                eprintln!(
-                    "[protocol] Invalid command: {e} \
-                     (expected JSON with a \"type\" field, e.g. \
-                     {{\"type\":\"message\",\"msg_id\":\"1\",\"content\":\"hello\"}})"
+                tracing::warn!(
+                    error = %e,
+                    "invalid protocol command; expected JSON with a type field"
                 );
             }
         }
@@ -116,12 +177,18 @@ async fn read_commands<R: AsyncBufRead + Unpin>(
 /// remainder of an oversized line is consumed without buffering it. Reads in
 /// bounded chunks via `fill_buf`/`consume` — never accumulates the discarded
 /// bytes. Returns `false` on EOF or read error (caller should stop).
-async fn discard_to_newline<R: AsyncBufRead + Unpin>(reader: &mut R) -> bool {
+fn discard_to_newline<R: BufRead>(reader: &mut R, cancelled: &AtomicBool) -> bool {
     loop {
-        let buf = match reader.fill_buf().await {
+        if cancelled.load(Ordering::Acquire) {
+            return false;
+        }
+        let buf = match reader.fill_buf() {
             Ok(b) => b,
             Err(e) => {
-                eprintln!("[protocol] stdin read error while discarding: {e}");
+                tracing::warn!(
+                    error = %e,
+                    "protocol stdin read failed while discarding oversized input"
+                );
                 return false;
             }
         };
@@ -148,9 +215,10 @@ mod tests {
     /// A line exceeding `MAX_LINE_BYTES` is rejected (never forwarded) and a
     /// following valid line still parses — proving the reader resumes at the
     /// next newline rather than OOMing or mis-parsing the oversized tail.
-    #[tokio::test]
-    async fn oversized_line_is_skipped_then_next_line_parses() {
-        let (tx, mut rx) = mpsc::unbounded_channel();
+    #[test]
+    fn oversized_line_is_skipped_then_next_line_parses() {
+        let (tx, mut rx) = mpsc::channel(4);
+        let cancelled = AtomicBool::new(false);
 
         // One oversized newline-free run (cap + slack), a newline, then a
         // valid command. The oversized run must not be buffered whole.
@@ -161,20 +229,21 @@ mod tests {
         input.push(b'\n');
 
         let reader = BufReader::new(std::io::Cursor::new(input));
-        read_commands(reader, tx).await;
+        read_commands(reader, tx, &cancelled);
 
         // Only the valid command comes through; the oversized line yields
         // no ProtocolCommand.
-        let first = rx.recv().await;
+        let first = rx.blocking_recv();
         assert_eq!(first, Some(ProtocolCommand::Ping));
-        assert!(rx.recv().await.is_none(), "no extra commands expected");
+        assert!(rx.blocking_recv().is_none(), "no extra commands expected");
     }
 
     /// A normal line parses, and an oversized line in the middle of a stream
     /// does not corrupt the lines around it.
-    #[tokio::test]
-    async fn valid_line_before_and_after_oversized_line() {
-        let (tx, mut rx) = mpsc::unbounded_channel();
+    #[test]
+    fn valid_line_before_and_after_oversized_line() {
+        let (tx, mut rx) = mpsc::channel(4);
+        let cancelled = AtomicBool::new(false);
 
         let mut input = Vec::new();
         input.extend_from_slice(br#"{"type":"ping"}"#);
@@ -185,19 +254,23 @@ mod tests {
         input.push(b'\n');
 
         let reader = BufReader::new(std::io::Cursor::new(input));
-        read_commands(reader, tx).await;
+        read_commands(reader, tx, &cancelled);
 
-        assert_eq!(rx.recv().await, Some(ProtocolCommand::Ping));
-        assert_eq!(rx.recv().await, Some(ProtocolCommand::Ping));
-        assert!(rx.recv().await.is_none(), "only two valid pings expected");
+        assert_eq!(rx.blocking_recv(), Some(ProtocolCommand::Ping));
+        assert_eq!(rx.blocking_recv(), Some(ProtocolCommand::Ping));
+        assert!(
+            rx.blocking_recv().is_none(),
+            "only two valid pings expected"
+        );
     }
 
     /// A line exactly at the cap that IS newline-terminated is valid input,
     /// not an overflow — boundary check so we don't reject legitimate large
     /// (but bounded) commands.
-    #[tokio::test]
-    async fn line_at_cap_with_newline_is_not_treated_as_overflow() {
-        let (tx, mut rx) = mpsc::unbounded_channel();
+    #[test]
+    fn line_at_cap_with_newline_is_not_treated_as_overflow() {
+        let (tx, mut rx) = mpsc::channel(4);
+        let cancelled = AtomicBool::new(false);
 
         // A valid command padded with trailing JSON whitespace up to just
         // under the cap, then a newline. `read_until` reads cap-or-fewer
@@ -209,9 +282,20 @@ mod tests {
         input.push(b'\n');
 
         let reader = BufReader::new(std::io::Cursor::new(input));
-        read_commands(reader, tx).await;
+        read_commands(reader, tx, &cancelled);
 
-        assert_eq!(rx.recv().await, Some(ProtocolCommand::Ping));
-        assert!(rx.recv().await.is_none());
+        assert_eq!(rx.blocking_recv(), Some(ProtocolCommand::Ping));
+        assert!(rx.blocking_recv().is_none());
+    }
+
+    #[test]
+    fn cancelled_reader_admits_no_commands() {
+        let (tx, mut rx) = mpsc::channel(1);
+        let cancelled = AtomicBool::new(true);
+        let reader = BufReader::new(std::io::Cursor::new(b"{\"type\":\"ping\"}\n"));
+
+        read_commands(reader, tx, &cancelled);
+
+        assert!(rx.blocking_recv().is_none());
     }
 }
