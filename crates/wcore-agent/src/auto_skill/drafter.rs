@@ -6,8 +6,8 @@
 //!   `<config_dir>/wayland-core/skills/auto-<sig>/SKILL.md`  — loader-visible
 //!   `<config_dir>/wayland-core/skills/auto-<sig>/manifest.json` — metadata
 //!
-//! Generated drafts remain quarantined and are not registered into the
-//! process-global bundled registry. F23 will provide governed promotion.
+//! Generated drafts remain quarantined and are not registered into any
+//! session-owned bundled catalog. F23 will provide governed promotion.
 //!
 //! The store record is best-effort: a failure does NOT prevent the on-
 //! disk draft from landing, and is logged at WARN. Disk failure DOES bubble
@@ -259,12 +259,6 @@ mod tests {
         assert!(
             !legacy_root.path().join(&res.name).exists(),
             "F06 must publish one canonical draft only"
-        );
-        assert!(
-            !wcore_skills::bundled::get_bundled_skills()
-                .iter()
-                .any(|skill| skill.name == res.name),
-            "generated content must never enter the process-global bundled registry"
         );
     }
 

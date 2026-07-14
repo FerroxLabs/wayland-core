@@ -16037,6 +16037,7 @@ mod user_model_writeback_tests {
             source: SkillSource::Project,
             loaded_from: LoadedFrom::Skills,
             file_path: std::path::PathBuf::from(format!("/tmp/{name}/SKILL.md")),
+            skill_root: None,
             content_length_hint: 0,
             user_invocable: true,
             disable_model_invocation,
@@ -16199,13 +16200,6 @@ mod user_model_writeback_tests {
                 .is_empty(),
             "lifecycle-off observation must not record PromptStore candidates"
         );
-        assert!(
-            !wcore_skills::bundled::get_bundled_skills()
-                .iter()
-                .any(|skill| skill.name == generated_name),
-            "lifecycle-off observation must not register generated bundled content"
-        );
-
         // Prove the disabled calls never reached the bucketer. If they had,
         // either of the first two enabled calls would complete the threshold
         // of three and write a draft.

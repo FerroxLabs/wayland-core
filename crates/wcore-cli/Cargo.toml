@@ -233,10 +233,12 @@ workspace-hack.workspace = true
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.59", features = [
   "Win32_Foundation",
+  "Win32_System_Console",
   "Win32_System_Threading",
 ] }
 
 [dev-dependencies]
+libc.workspace = true
 # v0.9.4 S0.4: criterion bench harness for agent_nav_perf bench.
 criterion.workspace = true
 # v0.8.1 U9: mockito mocks the GitHub Releases API in the

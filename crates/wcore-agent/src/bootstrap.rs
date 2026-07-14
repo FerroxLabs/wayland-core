@@ -212,6 +212,25 @@ pub struct AgentBootstrap {
     approval_manager: Option<Arc<wcore_protocol::ToolApprovalManager>>,
 }
 
+/// Build the bundled/plugin catalog owned by one bootstrap invocation.
+///
+/// Keeping this constructor at the production call boundary makes reuse of a
+/// prior session's mutable catalog impossible: every call starts from a fresh
+/// embedded catalog and consumes only that invocation's plugin specs.
+fn build_session_bundled_catalog(
+    plugin_skills: Vec<wcore_plugin_api::BundledSkillSpec>,
+) -> wcore_skills::bundled::BundledSkillCatalog {
+    let mut catalog = wcore_skills::bundled::init_bundled_skills();
+    for skill_spec in plugin_skills {
+        let name = skill_spec.name.clone();
+        catalog.register(crate::plugins::skill_delivery::spec_to_bundled_entry(
+            skill_spec,
+        ));
+        tracing::debug!(skill = %name, "plugin skill registered into session catalog");
+    }
+    catalog
+}
+
 impl AgentBootstrap {
     pub fn new(config: Config, workspace: impl Into<String>, output: Arc<dyn OutputSink>) -> Self {
         Self {
@@ -1483,21 +1502,11 @@ impl AgentBootstrap {
         // Build one catalog for this bootstrap. Embedded definitions are
         // inserted first, then plugin definitions are appended in discovery
         // order, preserving the existing bundled/plugin precedence.
-        let mut bundled_catalog = wcore_skills::bundled::init_bundled_skills();
+        let bundled_catalog = build_session_bundled_catalog(applied.plugin_skills);
         tracing::debug!(
             target: "wcore_agent::bootstrap",
             "bundled skill catalog initialised for session"
         );
-
-        // Move plugin-contributed skills into this bootstrap's catalog before
-        // loading refs. No plugin entry can become visible to another session.
-        for skill_spec in applied.plugin_skills {
-            let name = skill_spec.name.clone();
-            bundled_catalog.register(crate::plugins::skill_delivery::spec_to_bundled_entry(
-                skill_spec,
-            ));
-            tracing::debug!(skill = %name, "plugin skill registered into session catalog");
-        }
 
         // X1 (Task 5): load the catalog lazily. Bodies are NOT pinned in
         // memory — SkillCatalog::resolve() reads them on demand on first
@@ -3572,7 +3581,45 @@ mod consent_gate_tests {
 mod tests {
     use super::*;
     use std::collections::HashMap;
-    use wcore_plugin_api::{McpServerSpec, McpTransport};
+    use wcore_plugin_api::{BundledSkillSpec, McpServerSpec, McpTransport};
+
+    fn bootstrap_skill(name: &str) -> BundledSkillSpec {
+        BundledSkillSpec {
+            name: name.into(),
+            description: format!("{name} fixture"),
+            when_to_use: None,
+            argument_hint: None,
+            allowed_tools: Vec::new(),
+            model: None,
+            disable_model_invocation: false,
+            user_invocable: true,
+            context: None,
+            agent: None,
+            files: Vec::new(),
+            content: name.into(),
+        }
+    }
+
+    #[test]
+    fn production_bootstrap_catalog_constructor_is_fresh_per_call() {
+        let first = build_session_bundled_catalog(vec![bootstrap_skill("first-only")]);
+        let second = build_session_bundled_catalog(vec![bootstrap_skill("second-only")]);
+        let first_names: Vec<_> = first
+            .get_bundled_skills()
+            .into_iter()
+            .map(|skill| skill.name)
+            .collect();
+        let second_names: Vec<_> = second
+            .get_bundled_skills()
+            .into_iter()
+            .map(|skill| skill.name)
+            .collect();
+
+        assert!(first_names.iter().any(|name| name == "first-only"));
+        assert!(!first_names.iter().any(|name| name == "second-only"));
+        assert!(second_names.iter().any(|name| name == "second-only"));
+        assert!(!second_names.iter().any(|name| name == "first-only"));
+    }
 
     /// MF2 (auditor): the ScriptTool dispatcher mini-registry must obey the SAME
     /// channel posture as the main registry — otherwise `Script([{tool:Grep}])` /

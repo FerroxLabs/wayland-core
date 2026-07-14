@@ -6,8 +6,25 @@
 mod hello;
 
 use std::path::PathBuf;
+use std::sync::OnceLock;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::types::{ExecutionContext, LoadedFrom, SkillMetadata, SkillSource};
+
+#[cfg(not(windows))]
+static BUNDLED_SKILL_EXTRACT_ROOT: OnceLock<Result<PathBuf, String>> = OnceLock::new();
+
+#[cfg(windows)]
+#[derive(Debug)]
+struct WindowsBundledSkillRoot {
+    path: PathBuf,
+    dir: Option<std::sync::Arc<cap_std::fs::Dir>>,
+}
+
+#[cfg(windows)]
+static WINDOWS_BUNDLED_SKILL_EXTRACT_ROOT: OnceLock<
+    Result<std::sync::Mutex<WindowsBundledSkillRoot>, String>,
+> = OnceLock::new();
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -30,7 +47,7 @@ pub struct BundledSkillDefinition {
     pub context: Option<&'static str>,
     pub agent: Option<&'static str>,
     /// Embedded reference files: (relative_path, content) pairs.
-    /// Extracted to disk on first invocation via `extract_bundled_skill_files`.
+    /// Extracted to disk when the owning catalog is prepared.
     pub files: &'static [(&'static str, &'static str)],
     /// Skill body content (Markdown).
     pub content: &'static str,
@@ -91,9 +108,51 @@ impl From<BundledSkillDefinition> for BundledSkillEntry {
 /// Entries retain insertion order. `embedded()` installs embedded definitions
 /// first; bootstrap then appends plugin entries so existing precedence stays
 /// embedded-first, plugin-second.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct BundledSkillCatalog {
     entries: Vec<BundledSkillEntry>,
+    // SkillRefs outlive the bootstrap-local catalog, so this root is retained
+    // until the existing process-level cleanup removes the private temp tree.
+    extraction_root: Option<PathBuf>,
+    #[cfg(windows)]
+    extraction_dir: Option<std::sync::Arc<cap_std::fs::Dir>>,
+}
+
+impl Default for BundledSkillCatalog {
+    fn default() -> Self {
+        static NEXT_CATALOG_ID: AtomicU64 = AtomicU64::new(0);
+
+        let catalog_id = NEXT_CATALOG_ID.fetch_add(1, Ordering::Relaxed);
+        #[cfg(not(windows))]
+        let process_root = bundled_skill_extract_root()
+            .map_err(|error| {
+                tracing::warn!(%error, "bundled skill reference extraction disabled");
+                error
+            })
+            .ok();
+
+        #[cfg(windows)]
+        let (extraction_root, extraction_dir) = match windows_bundled_skill_extract_root() {
+            Ok((process_root, dir)) => (
+                Some(process_root.join(format!("catalog-{catalog_id}"))),
+                Some(dir),
+            ),
+            Err(error) => {
+                tracing::warn!(%error, "bundled skill capability root unavailable");
+                (None, None)
+            }
+        };
+
+        #[cfg(not(windows))]
+        let extraction_root = process_root.map(|root| root.join(format!("catalog-{catalog_id}")));
+
+        Self {
+            entries: Vec::new(),
+            extraction_root,
+            #[cfg(windows)]
+            extraction_dir,
+        }
+    }
 }
 
 impl BundledSkillCatalog {
@@ -120,15 +179,48 @@ impl BundledSkillCatalog {
     /// Convert this catalog to runtime metadata and extract reference files.
     pub async fn prepare_bundled_skills(&self) -> Vec<SkillMetadata> {
         let mut skills = self.get_bundled_skills();
+        let Some(extraction_root) = self.extraction_root.as_ref() else {
+            return skills;
+        };
 
-        for entry in self.entries.iter().filter(|entry| !entry.files.is_empty()) {
+        for (entry_index, entry) in self
+            .entries
+            .iter()
+            .enumerate()
+            .filter(|(_, entry)| !entry.files.is_empty())
+        {
             let files: Vec<(&str, &str)> = entry
                 .files
                 .iter()
                 .map(|(path, content)| (path.as_str(), content.as_str()))
                 .collect();
-            if let Some(dir) = extract_bundled_skill_files(&entry.name, &files).await
-                && let Some(meta) = skills.iter_mut().find(|meta| meta.name == entry.name)
+            let dir = extraction_root.join(format!("skill-{entry_index}"));
+            #[cfg(windows)]
+            let extracted = match self.extraction_dir.as_ref() {
+                Some(root_dir) => {
+                    let relative_dir = PathBuf::from(
+                        extraction_root
+                            .file_name()
+                            .expect("catalog extraction root has a final component"),
+                    )
+                    .join(format!("skill-{entry_index}"));
+                    extract_bundled_skill_files_to_dir_windows(
+                        root_dir.clone(),
+                        &entry.name,
+                        relative_dir,
+                        dir.clone(),
+                        &files,
+                    )
+                    .await
+                }
+                None => None,
+            };
+            #[cfg(not(windows))]
+            let extracted =
+                extract_bundled_skill_files_to_dir(&entry.name, dir.clone(), &files).await;
+
+            if let Some(dir) = extracted
+                && let Some(meta) = skills.get_mut(entry_index)
             {
                 meta.skill_root = Some(dir.to_string_lossy().into_owned());
             }
@@ -145,28 +237,6 @@ impl BundledSkillCatalog {
 /// Append one compile-time bundled definition to an explicit catalog.
 pub fn register_bundled_skill(catalog: &mut BundledSkillCatalog, def: BundledSkillDefinition) {
     catalog.register(def.into());
-}
-
-/// Get embedded-only bundled skills as `SkillMetadata`.
-///
-/// Does NOT extract files to disk — `skill_root` is always `None` for skills
-/// that have embedded files. Use `prepare_bundled_skills()` from an async
-/// context to get metadata with `skill_root` populated.
-pub fn get_bundled_skills() -> Vec<SkillMetadata> {
-    BundledSkillCatalog::embedded().get_bundled_skills()
-}
-
-/// Async version: get bundled skills with file extraction.
-///
-/// For each skill that has embedded `files`, calls `extract_bundled_skill_files`
-/// and sets `skill_root` to the extraction directory on success. File extraction
-/// failure is non-fatal — `skill_root` remains `None` and the skill still works.
-///
-/// Called from `load_all_skills()` (async context). Not suitable for sync callers.
-pub async fn prepare_bundled_skills() -> Vec<SkillMetadata> {
-    BundledSkillCatalog::embedded()
-        .prepare_bundled_skills()
-        .await
 }
 
 /// Initialize all built-in bundled skills.
@@ -192,54 +262,160 @@ pub fn init_bundled_skills() -> BundledSkillCatalog {
     }
 }
 
-/// Returns the extraction directory for a bundled skill's reference files.
-///
-/// Path: `$TMPDIR/wayland-core-bundled-skills-{pid}/{skill_name}`
-/// Uses PID as a per-process nonce to prevent symlink pre-creation attacks.
-pub fn get_bundled_skill_extract_dir(skill_name: &str) -> PathBuf {
-    let pid = std::process::id();
-    let tmp = std::env::temp_dir();
-    tmp.join(format!("wayland-core-bundled-skills-{pid}"))
-        .join(skill_name)
-}
-
 /// F-086: remove the per-process bundled-skill extraction root directory.
 ///
-/// Called at graceful shutdown to clean up the `$TMPDIR/wayland-core-bundled-skills-{pid}/`
-/// directory that `extract_bundled_skill_files` creates. Best-effort: failures
+/// Called at graceful shutdown to clean up the `$TMPDIR/wayland-core-bundled-skills-{uuid}/`
+/// directory that catalog preparation creates. Best-effort: failures
 /// are silently ignored (the OS will eventually purge `$TMPDIR`).
 ///
 /// Register this with an `atexit`-style hook or call from the CLI's shutdown
 /// path to prevent temp-dir accumulation across restarts.
 pub fn cleanup_bundled_skill_extract_dir() {
-    let pid = std::process::id();
-    let root = std::env::temp_dir().join(format!("wayland-core-bundled-skills-{pid}"));
-    if root.is_dir() {
-        let _ = std::fs::remove_dir_all(&root);
+    #[cfg(not(windows))]
+    {
+        if let Some(Ok(root)) = BUNDLED_SKILL_EXTRACT_ROOT.get()
+            && root.is_dir()
+        {
+            let _ = std::fs::remove_dir_all(root);
+        }
+    }
+    #[cfg(windows)]
+    {
+        let Some(Ok(root)) = WINDOWS_BUNDLED_SKILL_EXTRACT_ROOT.get() else {
+            return;
+        };
+        let Ok(mut root) = root.lock() else {
+            return;
+        };
+        let path = root.path.clone();
+        let retained_handle = root.dir.take();
+        drop(root);
+        // The CLI guard is declared before bootstrap/session state, so normal
+        // reverse drop order releases every catalog clone before this point.
+        drop(retained_handle);
+        let _ = std::fs::remove_dir_all(path);
     }
 }
 
-/// Extract a bundled skill's reference files to disk.
-///
-/// Security properties:
-/// - Directory created with mode 0o700 (owner-only).
-/// - Files written with `create_new(true)` (O_CREAT|O_EXCL) to prevent
-///   overwriting existing files.
-/// - On Unix, O_NOFOLLOW is added via `OpenOptionsExt` to prevent symlink
-///   attacks on the final path component.
-/// - Relative paths validated: `..` components and absolute paths are rejected.
-///
-/// Returns the extraction directory on success, or `None` if extraction fails.
-/// Failure is non-fatal — the skill continues to work without a `skill_root`.
-pub async fn extract_bundled_skill_files(
+#[cfg(not(windows))]
+fn bundled_skill_extract_root() -> std::io::Result<PathBuf> {
+    match BUNDLED_SKILL_EXTRACT_ROOT
+        .get_or_init(|| create_bundled_skill_extract_root().map_err(|error| error.to_string()))
+    {
+        Ok(root) => Ok(root.clone()),
+        Err(error) => Err(std::io::Error::other(error.clone())),
+    }
+}
+
+#[cfg(not(windows))]
+fn create_bundled_skill_extract_root() -> std::io::Result<PathBuf> {
+    // Resolve any platform-managed symlinks in the OS temp path once, before
+    // joining our exclusively-created leaf. No attacker-precreated path
+    // component is followed during the leaf creation itself.
+    let temp_root = std::fs::canonicalize(std::env::temp_dir())?;
+
+    for _ in 0..16 {
+        let candidate = temp_root.join(format!(
+            "wayland-core-bundled-skills-{}",
+            uuid::Uuid::new_v4()
+        ));
+        match create_owner_only_process_root(&candidate) {
+            Ok(()) => return Ok(candidate),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(error),
+        }
+    }
+
+    Err(std::io::Error::new(
+        std::io::ErrorKind::AlreadyExists,
+        "could not allocate a unique bundled skill extraction root",
+    ))
+}
+
+#[cfg(not(windows))]
+fn create_owner_only_process_root(path: &std::path::Path) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        std::fs::DirBuilder::new().mode(0o700).create(path)
+    }
+    #[cfg(not(unix))]
+    {
+        std::fs::create_dir(path)
+    }
+}
+
+#[cfg(windows)]
+fn windows_bundled_skill_extract_root()
+-> std::io::Result<(PathBuf, std::sync::Arc<cap_std::fs::Dir>)> {
+    let root = WINDOWS_BUNDLED_SKILL_EXTRACT_ROOT.get_or_init(|| {
+        create_windows_bundled_skill_extract_root()
+            .map(std::sync::Mutex::new)
+            .map_err(|error| error.to_string())
+    });
+    let root = root
+        .as_ref()
+        .map_err(|error| std::io::Error::other(error.clone()))?;
+    let root = root
+        .lock()
+        .map_err(|_| std::io::Error::other("bundled skill root lock poisoned"))?;
+    let dir = root.dir.as_ref().cloned().ok_or_else(|| {
+        std::io::Error::other("bundled skill root has already entered shutdown cleanup")
+    })?;
+    Ok((root.path.clone(), dir))
+}
+
+#[cfg(windows)]
+fn create_windows_bundled_skill_extract_root() -> std::io::Result<WindowsBundledSkillRoot> {
+    let temp_root = std::fs::canonicalize(std::env::temp_dir())?;
+
+    for _ in 0..16 {
+        let candidate = temp_root.join(format!(
+            "wayland-core-bundled-skills-{}",
+            uuid::Uuid::new_v4()
+        ));
+        match create_windows_owner_only_directory(&candidate) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(error),
+        }
+
+        // Pin the exact leaf before ACL hardening. The handle is opened
+        // no-follow and without FILE_SHARE_DELETE, so the directory cannot be
+        // renamed or replaced while its protected DACL is installed.
+        let dir = match open_windows_capability_root(&candidate) {
+            Ok(dir) => dir,
+            Err(error) => {
+                let _ = std::fs::remove_dir(&candidate);
+                return Err(error);
+            }
+        };
+        if let Err(error) = restrict_windows_handle_acl(&dir, true) {
+            drop(dir);
+            let _ = std::fs::remove_dir(&candidate);
+            return Err(error);
+        }
+        return Ok(WindowsBundledSkillRoot {
+            path: candidate,
+            dir: Some(std::sync::Arc::new(dir)),
+        });
+    }
+
+    Err(std::io::Error::new(
+        std::io::ErrorKind::AlreadyExists,
+        "could not allocate a unique bundled skill extraction root",
+    ))
+}
+
+#[cfg(not(windows))]
+async fn extract_bundled_skill_files_to_dir(
     skill_name: &str,
+    dir: PathBuf,
     files: &[(&str, &str)],
 ) -> Option<PathBuf> {
     if files.is_empty() {
         return None;
     }
-
-    let dir = get_bundled_skill_extract_dir(skill_name);
 
     match write_skill_files(&dir, files).await {
         Ok(()) => Some(dir),
@@ -250,6 +426,45 @@ pub async fn extract_bundled_skill_files(
                 skill_name,
                 dir.display(),
                 e
+            );
+            None
+        }
+    }
+}
+
+#[cfg(windows)]
+async fn extract_bundled_skill_files_to_dir_windows(
+    root_dir: std::sync::Arc<cap_std::fs::Dir>,
+    skill_name: &str,
+    relative_dir: PathBuf,
+    absolute_dir: PathBuf,
+    files: &[(&str, &str)],
+) -> Option<PathBuf> {
+    if files.is_empty() {
+        return None;
+    }
+
+    let skill_name = skill_name.to_owned();
+    let files: Vec<(String, String)> = files
+        .iter()
+        .map(|(path, content)| ((*path).to_owned(), (*content).to_owned()))
+        .collect();
+    let extraction_dir = absolute_dir.clone();
+    let result = tokio::task::spawn_blocking(move || {
+        write_skill_files_windows(&root_dir, &relative_dir, &extraction_dir, &files)
+    })
+    .await
+    .map_err(std::io::Error::other)
+    .and_then(|result| result);
+
+    match result {
+        Ok(()) => Some(absolute_dir),
+        Err(error) => {
+            eprintln!(
+                "[wayland-core] failed to extract bundled skill '{}' to {}: {}",
+                skill_name,
+                absolute_dir.display(),
+                error
             );
             None
         }
@@ -292,7 +507,7 @@ fn entry_to_metadata(entry: &BundledSkillEntry) -> SkillMetadata {
         loaded_from: LoadedFrom::Bundled,
         content: entry.content.clone(),
         content_length,
-        // skill_root is set later by extract_bundled_skill_files in load_all_skills
+        // skill_root is set later when the owning catalog is prepared.
         skill_root: None,
         max_turns: None,
         max_tokens: None,
@@ -303,6 +518,7 @@ fn entry_to_metadata(entry: &BundledSkillEntry) -> SkillMetadata {
 // Internal: file extraction
 // ---------------------------------------------------------------------------
 
+#[cfg(not(windows))]
 async fn write_skill_files(dir: &std::path::Path, files: &[(&str, &str)]) -> std::io::Result<()> {
     use std::collections::HashMap;
 
@@ -331,12 +547,7 @@ async fn write_skill_files(dir: &std::path::Path, files: &[(&str, &str)]) -> std
 }
 
 /// Create a directory (and all parents) with owner-only permissions.
-/// Unix: 0o700 via DirBuilderExt. Windows: create then restrict via icacls
-/// (remove inherited ACEs, grant current user Full Control only).
-///
-/// Audit W-3 fix (E2E-WINDOWS-ADDENDUM-2026-05-24 §2.2):
-/// The previous `#[cfg(not(unix))]` branch used `create_dir_all()` with no
-/// ACL restriction, leaving bundled skill directories world-readable on Windows.
+#[cfg(not(windows))]
 async fn create_dir_secure(dir: &std::path::Path) -> std::io::Result<()> {
     let dir = dir.to_owned();
     tokio::task::spawn_blocking(move || {
@@ -348,29 +559,7 @@ async fn create_dir_secure(dir: &std::path::Path) -> std::io::Result<()> {
                 .mode(0o700)
                 .create(&dir)
         }
-        #[cfg(windows)]
-        {
-            std::fs::create_dir_all(&dir)?;
-            // Remove inherited ACEs and grant the current user Full Control
-            // only. icacls is present on all Windows >= Vista.
-            // /reset  — restore inherited ACEs first (clean slate)
-            // /inheritance:r — remove inheritance
-            // /grant:r "%USERNAME%:(OI)(CI)F" — owner Full Control, inheritable
-            // Errors are logged but do not fail the install: the directory is
-            // under %APPDATA% which is already user-scoped; ACL tightening is
-            // defence-in-depth.
-            let path_str = dir.to_string_lossy().to_string();
-            let username = std::env::var("USERNAME").unwrap_or_else(|_| "%USERNAME%".to_string());
-            let grant_arg = format!("{username}:(OI)(CI)F");
-            let _ = std::process::Command::new("icacls")
-                .args([&path_str, "/reset", "/q"])
-                .output();
-            let _ = std::process::Command::new("icacls")
-                .args([&path_str, "/inheritance:r", "/grant:r", &grant_arg, "/q"])
-                .output();
-            Ok(())
-        }
-        #[cfg(not(any(unix, windows)))]
+        #[cfg(not(unix))]
         {
             std::fs::create_dir_all(&dir)
         }
@@ -379,8 +568,364 @@ async fn create_dir_secure(dir: &std::path::Path) -> std::io::Result<()> {
     .map_err(std::io::Error::other)?
 }
 
-/// Write `content` to `path` using O_CREAT|O_EXCL (and O_NOFOLLOW on Unix).
-/// Fails if the file already exists or if `path` is a symlink (Unix only).
+#[cfg(windows)]
+struct WindowsTokenUser {
+    // `TOKEN_USER` contains a pointer into this allocation. Store machine
+    // words rather than bytes so dereferencing the header is aligned.
+    buffer: Vec<usize>,
+}
+
+#[cfg(windows)]
+impl WindowsTokenUser {
+    fn sid(&self) -> windows_sys::Win32::Security::PSID {
+        use windows_sys::Win32::Security::TOKEN_USER;
+
+        // SAFETY: `current_windows_token_user` sizes and fills this allocation
+        // with GetTokenInformation(TokenUser), and Vec<usize> supplies the
+        // alignment required by TOKEN_USER.
+        unsafe { (*(self.buffer.as_ptr().cast::<TOKEN_USER>())).User.Sid }
+    }
+}
+
+#[cfg(windows)]
+fn current_windows_token_user() -> std::io::Result<WindowsTokenUser> {
+    use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
+    use windows_sys::Win32::Foundation::{ERROR_INSUFFICIENT_BUFFER, HANDLE};
+    use windows_sys::Win32::Security::{GetTokenInformation, TOKEN_QUERY, TokenUser};
+    use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
+
+    let mut token: HANDLE = std::ptr::null_mut();
+    // SAFETY: token is a valid out-pointer and the returned handle is
+    // transferred immediately into OwnedHandle.
+    if unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) } == 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    // SAFETY: OpenProcessToken returned ownership of this valid handle.
+    let token = unsafe { OwnedHandle::from_raw_handle(token) };
+
+    let mut needed = 0;
+    // SAFETY: the null/zero probe is the documented sizing call.
+    if unsafe {
+        GetTokenInformation(
+            token.as_raw_handle(),
+            TokenUser,
+            std::ptr::null_mut(),
+            0,
+            &mut needed,
+        )
+    } != 0
+    {
+        return Err(std::io::Error::other(
+            "GetTokenInformation(TokenUser) sizing unexpectedly succeeded",
+        ));
+    }
+    let sizing_error = std::io::Error::last_os_error();
+    if sizing_error.raw_os_error() != Some(ERROR_INSUFFICIENT_BUFFER as i32) || needed == 0 {
+        return Err(sizing_error);
+    }
+
+    let words = (needed as usize).div_ceil(std::mem::size_of::<usize>());
+    let mut buffer = vec![0usize; words];
+    // SAFETY: buffer is writable for at least `needed` bytes and token remains
+    // owned for the duration of the call.
+    if unsafe {
+        GetTokenInformation(
+            token.as_raw_handle(),
+            TokenUser,
+            buffer.as_mut_ptr().cast(),
+            needed,
+            &mut needed,
+        )
+    } == 0
+    {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(WindowsTokenUser { buffer })
+}
+
+#[cfg(windows)]
+struct WindowsLocalAlloc(*mut core::ffi::c_void);
+
+#[cfg(windows)]
+impl Drop for WindowsLocalAlloc {
+    fn drop(&mut self) {
+        use windows_sys::Win32::Foundation::LocalFree;
+
+        if !self.0.is_null() {
+            // SAFETY: SetEntriesInAclW allocates this buffer with LocalAlloc.
+            unsafe {
+                LocalFree(self.0);
+            }
+        }
+    }
+}
+
+#[cfg(windows)]
+impl WindowsLocalAlloc {
+    fn as_acl(&self) -> *mut windows_sys::Win32::Security::ACL {
+        self.0.cast()
+    }
+}
+
+#[cfg(windows)]
+fn windows_token_user_acl(
+    token_user: &WindowsTokenUser,
+    directory: bool,
+) -> std::io::Result<WindowsLocalAlloc> {
+    use windows_sys::Win32::Security::Authorization::{
+        EXPLICIT_ACCESS_W, GRANT_ACCESS, SetEntriesInAclW, TRUSTEE_IS_SID, TRUSTEE_IS_USER,
+    };
+    use windows_sys::Win32::Security::{CONTAINER_INHERIT_ACE, OBJECT_INHERIT_ACE};
+    use windows_sys::Win32::Storage::FileSystem::FILE_ALL_ACCESS;
+
+    // SAFETY: EXPLICIT_ACCESS_W is a plain C record and zero is the required
+    // initial state for fields not assigned below.
+    let mut access: EXPLICIT_ACCESS_W = unsafe { std::mem::zeroed() };
+    access.grfAccessPermissions = FILE_ALL_ACCESS;
+    access.grfAccessMode = GRANT_ACCESS;
+    access.grfInheritance = if directory {
+        CONTAINER_INHERIT_ACE | OBJECT_INHERIT_ACE
+    } else {
+        0
+    };
+    access.Trustee.TrusteeForm = TRUSTEE_IS_SID;
+    access.Trustee.TrusteeType = TRUSTEE_IS_USER;
+    access.Trustee.ptstrName = token_user.sid().cast();
+
+    let mut dacl = std::ptr::null_mut();
+    // SAFETY: access points to a live TokenUser SID for this call and dacl is a
+    // valid out-pointer. Passing no old ACL constructs exactly one allow ACE.
+    let result = unsafe { SetEntriesInAclW(1, &access, std::ptr::null(), &mut dacl) };
+    if result != 0 {
+        return Err(std::io::Error::from_raw_os_error(result as i32));
+    }
+    if dacl.is_null() {
+        return Err(std::io::Error::other(
+            "SetEntriesInAclW returned a null DACL",
+        ));
+    }
+    Ok(WindowsLocalAlloc(dacl.cast()))
+}
+
+#[cfg(windows)]
+fn with_windows_owner_only_security_descriptor<T>(
+    directory: bool,
+    operation: impl FnOnce(*mut core::ffi::c_void) -> std::io::Result<T>,
+) -> std::io::Result<T> {
+    use windows_sys::Win32::Security::{
+        InitializeSecurityDescriptor, SE_DACL_PROTECTED, SECURITY_DESCRIPTOR,
+        SetSecurityDescriptorControl, SetSecurityDescriptorDacl, SetSecurityDescriptorOwner,
+    };
+
+    const SECURITY_DESCRIPTOR_REVISION: u32 = 1;
+
+    let token_user = current_windows_token_user()?;
+    let dacl = windows_token_user_acl(&token_user, directory)?;
+    // SAFETY: SECURITY_DESCRIPTOR is initialized by the API before use.
+    let mut descriptor: SECURITY_DESCRIPTOR = unsafe { std::mem::zeroed() };
+    let descriptor_ptr = std::ptr::addr_of_mut!(descriptor).cast();
+    // SAFETY: descriptor_ptr names writable storage for SECURITY_DESCRIPTOR.
+    if unsafe { InitializeSecurityDescriptor(descriptor_ptr, SECURITY_DESCRIPTOR_REVISION) } == 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    // SAFETY: TokenUser and DACL storage remain live through the operation.
+    if unsafe { SetSecurityDescriptorOwner(descriptor_ptr, token_user.sid(), 0) } == 0
+        || unsafe { SetSecurityDescriptorDacl(descriptor_ptr, 1, dacl.as_acl(), 0) } == 0
+        || unsafe {
+            SetSecurityDescriptorControl(descriptor_ptr, SE_DACL_PROTECTED, SE_DACL_PROTECTED)
+        } == 0
+    {
+        return Err(std::io::Error::last_os_error());
+    }
+
+    operation(descriptor_ptr)
+}
+
+/// Create the process root with its final owner-only policy already attached.
+/// This closes the inherited-ACL interval that would exist between a normal
+/// directory create and the first retained-handle ACL update.
+#[cfg(windows)]
+fn create_windows_owner_only_directory(path: &std::path::Path) -> std::io::Result<()> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Security::SECURITY_ATTRIBUTES;
+    use windows_sys::Win32::Storage::FileSystem::CreateDirectoryW;
+
+    let mut wide: Vec<u16> = path.as_os_str().encode_wide().collect();
+    wide.push(0);
+    with_windows_owner_only_security_descriptor(true, |descriptor| {
+        let attributes = SECURITY_ATTRIBUTES {
+            nLength: std::mem::size_of::<SECURITY_ATTRIBUTES>() as u32,
+            lpSecurityDescriptor: descriptor,
+            bInheritHandle: 0,
+        };
+        // SAFETY: wide is NUL-terminated and attributes references live
+        // TokenUser, ACL, and descriptor storage for the create call.
+        if unsafe { CreateDirectoryW(wide.as_ptr(), &attributes) } == 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        Ok(())
+    })
+}
+
+/// Atomically create one child beneath a retained directory handle with its
+/// final TokenUser owner and protected owner-only DACL. The path is a single
+/// counted component, so no ambient path lookup or reparse traversal occurs.
+#[cfg(windows)]
+fn create_windows_relative_object(
+    base: &cap_std::fs::Dir,
+    name: &std::ffi::OsStr,
+    directory: bool,
+) -> std::io::Result<std::fs::File> {
+    use std::os::windows::ffi::OsStrExt;
+    use std::os::windows::io::{AsRawHandle, FromRawHandle};
+    use windows_sys::Wdk::Foundation::OBJECT_ATTRIBUTES;
+    use windows_sys::Wdk::Storage::FileSystem::{
+        FILE_CREATE, FILE_DIRECTORY_FILE, FILE_NON_DIRECTORY_FILE, FILE_OPEN_REPARSE_POINT,
+        FILE_SYNCHRONOUS_IO_NONALERT, NtCreateFile,
+    };
+    use windows_sys::Win32::Foundation::{HANDLE, STATUS_OBJECT_NAME_COLLISION, UNICODE_STRING};
+    use windows_sys::Win32::Storage::FileSystem::{
+        FILE_ALL_ACCESS, FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_NORMAL, FILE_SHARE_READ,
+        FILE_SHARE_WRITE,
+    };
+    use windows_sys::Win32::System::IO::IO_STATUS_BLOCK;
+
+    let path = std::path::Path::new(name);
+    let mut components = path.components();
+    if !matches!(components.next(), Some(std::path::Component::Normal(_)))
+        || components.next().is_some()
+    {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("invalid retained-handle child name: {}", path.display()),
+        ));
+    }
+
+    let mut wide: Vec<u16> = name.encode_wide().collect();
+    let byte_len = wide
+        .len()
+        .checked_mul(std::mem::size_of::<u16>())
+        .ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "Windows child name is too long",
+            )
+        })?;
+    let byte_len = u16::try_from(byte_len).map_err(|_| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "Windows child name is too long",
+        )
+    })?;
+    let unicode_name = UNICODE_STRING {
+        Length: byte_len,
+        MaximumLength: byte_len,
+        Buffer: wide.as_mut_ptr(),
+    };
+
+    with_windows_owner_only_security_descriptor(directory, |descriptor| {
+        let attributes = OBJECT_ATTRIBUTES {
+            Length: std::mem::size_of::<OBJECT_ATTRIBUTES>() as u32,
+            RootDirectory: base.as_raw_handle(),
+            ObjectName: &unicode_name,
+            Attributes: 0x40, // OBJ_CASE_INSENSITIVE
+            SecurityDescriptor: descriptor,
+            SecurityQualityOfService: std::ptr::null(),
+        };
+        // SAFETY: IO_STATUS_BLOCK is an out-parameter initialized by
+        // NtCreateFile before it is observed.
+        let mut io_status: IO_STATUS_BLOCK = unsafe { std::mem::zeroed() };
+        let mut handle: HANDLE = std::ptr::null_mut();
+        let create_options = FILE_OPEN_REPARSE_POINT
+            | FILE_SYNCHRONOUS_IO_NONALERT
+            | if directory {
+                FILE_DIRECTORY_FILE
+            } else {
+                FILE_NON_DIRECTORY_FILE
+            };
+        let file_attributes = if directory {
+            FILE_ATTRIBUTE_DIRECTORY
+        } else {
+            FILE_ATTRIBUTE_NORMAL
+        };
+        // SAFETY: the retained base handle, counted name, security descriptor,
+        // and all out-parameters remain live for the duration of the call.
+        let status = unsafe {
+            NtCreateFile(
+                &mut handle,
+                FILE_ALL_ACCESS,
+                &attributes,
+                &mut io_status,
+                std::ptr::null(),
+                file_attributes,
+                FILE_SHARE_READ | FILE_SHARE_WRITE,
+                FILE_CREATE,
+                create_options,
+                std::ptr::null(),
+                0,
+            )
+        };
+        if status == STATUS_OBJECT_NAME_COLLISION {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::AlreadyExists,
+                format!("retained-handle child already exists: {}", path.display()),
+            ));
+        }
+        if status < 0 {
+            // SAFETY: translating an NTSTATUS has no pointer preconditions.
+            let code = unsafe { windows_sys::Win32::Foundation::RtlNtStatusToDosError(status) };
+            return Err(std::io::Error::from_raw_os_error(code as i32));
+        }
+        if handle.is_null() {
+            return Err(std::io::Error::other(
+                "NtCreateFile succeeded without returning a handle",
+            ));
+        }
+        // SAFETY: successful NtCreateFile transfers ownership of the handle.
+        Ok(unsafe { std::fs::File::from_raw_handle(handle) })
+    })
+}
+
+/// Replace the DACL on the exact retained handle with one protected allow ACE
+/// for the current process TokenUser. No executable lookup, mutable account
+/// name, or ambient pathname participates in the operation.
+#[cfg(windows)]
+fn restrict_windows_handle_acl<T: std::os::windows::io::AsRawHandle>(
+    handle: &T,
+    directory: bool,
+) -> std::io::Result<()> {
+    use windows_sys::Win32::Security::Authorization::{SE_FILE_OBJECT, SetSecurityInfo};
+    use windows_sys::Win32::Security::{
+        DACL_SECURITY_INFORMATION, OWNER_SECURITY_INFORMATION, PROTECTED_DACL_SECURITY_INFORMATION,
+    };
+
+    let token_user = current_windows_token_user()?;
+    let dacl = windows_token_user_acl(&token_user, directory)?;
+
+    // SAFETY: the caller retained this live file/directory handle with
+    // WRITE_DAC and WRITE_OWNER. The DACL buffer and TokenUser SID remain live
+    // for the call.
+    let result = unsafe {
+        SetSecurityInfo(
+            handle.as_raw_handle(),
+            SE_FILE_OBJECT,
+            DACL_SECURITY_INFORMATION
+                | OWNER_SECURITY_INFORMATION
+                | PROTECTED_DACL_SECURITY_INFORMATION,
+            token_user.sid(),
+            std::ptr::null_mut(),
+            dacl.as_acl(),
+            std::ptr::null(),
+        )
+    };
+    if result != 0 {
+        return Err(std::io::Error::from_raw_os_error(result as i32));
+    }
+    Ok(())
+}
+
+/// Write `content` to `path` using O_CREAT|O_EXCL and O_NOFOLLOW.
+#[cfg(not(windows))]
 async fn safe_write_file(path: &std::path::Path, content: &str) -> std::io::Result<()> {
     let file = open_secure(path).await?;
     let mut file = tokio::fs::File::from_std(file);
@@ -389,12 +934,8 @@ async fn safe_write_file(path: &std::path::Path, content: &str) -> std::io::Resu
     file.flush().await
 }
 
-/// Open a file for writing with O_CREAT|O_EXCL (+ O_NOFOLLOW on Unix, mode 0o600).
-/// On Windows: exclusive create + post-create icacls ACL restriction.
-///
-/// Audit W-3 fix (E2E-WINDOWS-ADDENDUM-2026-05-24 §2.2):
-/// The previous Windows branch opened with no mode restriction. Files now get
-/// icacls ACL tightening after creation (same defence-in-depth as the dir).
+/// Open a file for writing with O_CREAT|O_EXCL and O_NOFOLLOW (mode 0o600).
+#[cfg(not(windows))]
 async fn open_secure(path: &std::path::Path) -> std::io::Result<std::fs::File> {
     let path = path.to_owned();
     // Use spawn_blocking because OpenOptions with custom_flags is synchronous.
@@ -411,23 +952,7 @@ async fn open_secure(path: &std::path::Path) -> std::io::Result<std::fs::File> {
                 .custom_flags(libc::O_NOFOLLOW)
                 .open(&path)
         }
-        #[cfg(windows)]
-        {
-            // Exclusive create — no O_NOFOLLOW equivalent on Windows.
-            let file = std::fs::OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .open(&path)?;
-            // Tighten ACLs: remove inheritance, grant current user only.
-            let path_str = path.to_string_lossy().to_string();
-            let username = std::env::var("USERNAME").unwrap_or_else(|_| "%USERNAME%".to_string());
-            let grant_arg = format!("{username}:F");
-            let _ = std::process::Command::new("icacls")
-                .args([&path_str, "/inheritance:r", "/grant:r", &grant_arg, "/q"])
-                .output();
-            Ok(file)
-        }
-        #[cfg(not(any(unix, windows)))]
+        #[cfg(not(unix))]
         {
             std::fs::OpenOptions::new()
                 .write(true)
@@ -437,6 +962,179 @@ async fn open_secure(path: &std::path::Path) -> std::io::Result<std::fs::File> {
     })
     .await
     .map_err(std::io::Error::other)?
+}
+
+/// Open the unpredictable process root as a retained Windows directory
+/// capability. `FILE_FLAG_OPEN_REPARSE_POINT` rejects a reparse-point root,
+/// and omitting `FILE_SHARE_DELETE` prevents it being renamed underneath the
+/// handle-relative operations below.
+#[cfg(windows)]
+fn open_windows_capability_root(path: &std::path::Path) -> std::io::Result<cap_std::fs::Dir> {
+    use std::os::windows::fs::{MetadataExt, OpenOptionsExt};
+    use windows_sys::Win32::Foundation::GENERIC_READ;
+    use windows_sys::Win32::Storage::FileSystem::{
+        FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_REPARSE_POINT, FILE_FLAG_BACKUP_SEMANTICS,
+        FILE_FLAG_OPEN_REPARSE_POINT, FILE_SHARE_READ, FILE_SHARE_WRITE, READ_CONTROL, WRITE_DAC,
+        WRITE_OWNER,
+    };
+
+    let file = std::fs::OpenOptions::new()
+        .access_mode(GENERIC_READ | READ_CONTROL | WRITE_DAC | WRITE_OWNER)
+        .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE)
+        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
+        .open(path)?;
+    let attributes = file.metadata()?.file_attributes();
+    if attributes & FILE_ATTRIBUTE_DIRECTORY == 0 {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!(
+                "bundled skill capability root is not a directory: {}",
+                path.display()
+            ),
+        ));
+    }
+    if attributes & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            format!(
+                "bundled skill capability root is a reparse point: {}",
+                path.display()
+            ),
+        ));
+    }
+    Ok(cap_std::fs::Dir::from_std_file(file))
+}
+
+/// Windows extraction creates every descendant through `NtCreateFile`
+/// relative to a retained directory handle. Each create receives the final
+/// TokenUser owner and protected DACL atomically; existing components are
+/// reopened without following reparse points and hardened through that handle.
+#[cfg(windows)]
+fn write_skill_files_windows(
+    root_dir: &cap_std::fs::Dir,
+    relative_dir: &std::path::Path,
+    absolute_dir: &std::path::Path,
+    files: &[(String, String)],
+) -> std::io::Result<()> {
+    use std::io::Write;
+
+    let skill_dir = ensure_windows_directory(root_dir, relative_dir)?;
+
+    for (rel_path, content) in files {
+        let target = resolve_skill_file_path(std::path::Path::new(""), rel_path)?;
+        let parent = target.parent().ok_or_else(|| {
+            std::io::Error::new(std::io::ErrorKind::InvalidInput, "path has no parent")
+        })?;
+        let parent_dir = ensure_windows_directory(&skill_dir, parent)?;
+        let file_name = target.file_name().ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!("bundled skill file path has no file name: {rel_path}"),
+            )
+        })?;
+
+        let mut file = create_windows_relative_object(&parent_dir, file_name, false)?;
+        let absolute_path = absolute_dir.join(&target);
+        if let Err(error) = restrict_windows_handle_acl(&file, false) {
+            drop(file);
+            let cleanup_error = parent_dir.remove_file(file_name).err();
+            return Err(match cleanup_error {
+                Some(cleanup_error) => std::io::Error::other(format!(
+                    "{error}; additionally failed to remove unsecured file {}: {cleanup_error}",
+                    absolute_path.display()
+                )),
+                None => error,
+            });
+        }
+        file.write_all(content.as_bytes())?;
+        file.flush()?;
+    }
+
+    Ok(())
+}
+
+/// Create and reopen every relative directory component through a retained
+/// capability. Reopening with `FollowSymlinks::No` rejects junctions and other
+/// reparse points before they can become the base for the next component.
+#[cfg(windows)]
+fn ensure_windows_directory(
+    base: &cap_std::fs::Dir,
+    relative: &std::path::Path,
+) -> std::io::Result<cap_std::fs::Dir> {
+    use std::path::Component;
+
+    let mut current = base.try_clone()?;
+    for component in relative.components() {
+        let Component::Normal(name) = component else {
+            if component == Component::CurDir {
+                continue;
+            }
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!(
+                    "invalid capability-relative directory: {}",
+                    relative.display()
+                ),
+            ));
+        };
+
+        let child = match create_windows_relative_object(&current, name, true) {
+            Ok(file) => windows_directory_from_file(file)?,
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                open_windows_child_directory(&current, name)?
+            }
+            Err(error) => return Err(error),
+        };
+        restrict_windows_handle_acl(&child, true)?;
+        current = child;
+    }
+    Ok(current)
+}
+
+#[cfg(windows)]
+fn open_windows_child_directory(
+    base: &cap_std::fs::Dir,
+    name: &std::ffi::OsStr,
+) -> std::io::Result<cap_std::fs::Dir> {
+    use cap_fs_ext::{FollowSymlinks, OpenOptionsFollowExt};
+    use cap_std::fs::OpenOptionsExt as _;
+    use windows_sys::Win32::Foundation::GENERIC_READ;
+    use windows_sys::Win32::Storage::FileSystem::{
+        FILE_FLAG_BACKUP_SEMANTICS, FILE_SHARE_READ, FILE_SHARE_WRITE, READ_CONTROL, WRITE_DAC,
+        WRITE_OWNER,
+    };
+
+    let mut options = cap_std::fs::OpenOptions::new();
+    options
+        .access_mode(GENERIC_READ | READ_CONTROL | WRITE_DAC | WRITE_OWNER)
+        .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE)
+        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS);
+    options.follow(FollowSymlinks::No);
+    let file = base.open_with(name, &options)?.into_std();
+    windows_directory_from_file(file)
+}
+
+#[cfg(windows)]
+fn windows_directory_from_file(file: std::fs::File) -> std::io::Result<cap_std::fs::Dir> {
+    use std::os::windows::fs::MetadataExt;
+    use windows_sys::Win32::Storage::FileSystem::{
+        FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_REPARSE_POINT,
+    };
+
+    let attributes = file.metadata()?.file_attributes();
+    if attributes & FILE_ATTRIBUTE_DIRECTORY == 0 {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "bundled skill extraction component is not a directory",
+        ));
+    }
+    if attributes & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "bundled skill extraction component is a reparse point",
+        ));
+    }
+    Ok(cap_std::fs::Dir::from_std_file(file))
 }
 
 /// Validate and resolve a skill-relative path.
@@ -453,11 +1151,20 @@ fn resolve_skill_file_path(base_dir: &std::path::Path, rel_path: &str) -> std::i
 
     for component in normalized.components() {
         use std::path::Component;
-        if matches!(component, Component::ParentDir) {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                format!("bundled skill file path escapes skill dir: {rel_path}"),
-            ));
+        match component {
+            Component::Normal(_) | Component::CurDir => {}
+            Component::ParentDir => {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    format!("bundled skill file path escapes skill dir: {rel_path}"),
+                ));
+            }
+            Component::Prefix(_) | Component::RootDir => {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    format!("bundled skill file path must be relative: {rel_path}"),
+                ));
+            }
         }
     }
 

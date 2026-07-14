@@ -122,6 +122,7 @@ fn tc_7_3_section_ordering() {
         source: SkillSource::User,
         loaded_from: LoadedFrom::Skills,
         file_path: std::path::PathBuf::from("/tmp/test-skill/SKILL.md"),
+        skill_root: None,
         content_length_hint: 0,
         user_invocable: true,
         disable_model_invocation: false,

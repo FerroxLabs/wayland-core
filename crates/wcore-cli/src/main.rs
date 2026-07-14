@@ -702,6 +702,59 @@ fn json_stream_profile_guard(
     Ok(())
 }
 
+/// Own the process-level bundled reference tree outside the cancellable root
+/// future. On signal shutdown, `run_until_shutdown` first drops that future
+/// (releasing session/catalog handles), then this guard removes the exact root
+/// while the entry thread unwinds normally.
+struct BundledSkillTmpCleanup;
+
+impl Drop for BundledSkillTmpCleanup {
+    fn drop(&mut self) {
+        wcore_skills::bundled::cleanup_bundled_skill_extract_dir();
+    }
+}
+
+async fn shutdown_signal() {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{SignalKind, signal};
+
+        let mut term = signal(SignalKind::terminate()).expect("SIGTERM handler install");
+        let mut int = signal(SignalKind::interrupt()).expect("SIGINT handler install");
+        let mut hup = signal(SignalKind::hangup()).expect("SIGHUP handler install");
+        tokio::select! {
+            _ = term.recv() => {}
+            _ = int.recv()  => {}
+            _ = hup.recv()  => {}
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        tokio::signal::ctrl_c()
+            .await
+            .expect("Ctrl+C handler install");
+    }
+}
+
+async fn run_until_shutdown<R, S>(run_future: R, signal_future: S) -> anyhow::Result<ExitCode>
+where
+    R: std::future::Future<Output = anyhow::Result<ExitCode>>,
+    S: std::future::Future<Output = ()>,
+{
+    let mut run_future = Box::pin(run_future);
+    tokio::select! {
+        result = &mut run_future => result,
+        _ = signal_future => {
+            // Explicitly drop all bootstrap/session state before the outer
+            // cleanup guard runs. This also releases every Windows capability
+            // handle clone so the no-delete process root can be removed.
+            drop(run_future);
+            wcore_cli::profile_router::reap_all_children_blocking();
+            Ok(ExitCode::SUCCESS)
+        }
+    }
+}
+
 fn main() -> anyhow::Result<ExitCode> {
     // Resolve the active isolated profile ONCE, here at process entry, and
     // materialize it into WAYLAND_HOME (C2). This MUST precede
@@ -734,10 +787,14 @@ fn main() -> anyhow::Result<ExitCode> {
         .name("wcore-main".into())
         .stack_size(ENTRY_STACK_SIZE)
         .spawn(|| {
+            // Declared before runtime/bootstrap state. Normal reverse drop
+            // order shuts down the runtime first; signal shutdown additionally
+            // drops the root future before returning from block_on.
+            let _bundled_skill_cleanup = BundledSkillTmpCleanup;
             let runtime = tokio::runtime::Builder::new_multi_thread()
                 .enable_all()
                 .build()?;
-            runtime.block_on(run())
+            runtime.block_on(run_until_shutdown(run(), shutdown_signal()))
         })
         .map_err(|e| anyhow::anyhow!("failed to spawn wcore-cli entry thread: {e}"))?;
     entry
@@ -895,78 +952,6 @@ async fn run() -> anyhow::Result<ExitCode> {
             }
         }
     };
-
-    // F-062: install signal handlers (SIGTERM / SIGINT / SIGHUP) that
-    // remove the crash sentinel before exit so the next restart does NOT
-    // falsely report a crash. Without these handlers, SIGTERM from the OS
-    // (e.g. `kill`, systemd, launchd) bypasses Drop and leaves the flag
-    // behind, causing every restart to claim the prior run crashed.
-    //
-    // Implementation: spawn a background task that waits for any of the
-    // three signals, removes the sentinel file best-effort, and calls
-    // std::process::exit(0). The tokio runtime is shut down by exit() so
-    // all other tasks are cancelled; the sentinel file removal is the
-    // only ordering-critical step.
-    #[cfg(unix)]
-    {
-        let sentinel_path_for_sig = wcore_cli::crash_sentinel::CrashSentinel::default_path();
-        tokio::spawn(async move {
-            use tokio::signal::unix::{SignalKind, signal};
-            let mut term = signal(SignalKind::terminate()).expect("SIGTERM handler install");
-            let mut int = signal(SignalKind::interrupt()).expect("SIGINT handler install");
-            let mut hup = signal(SignalKind::hangup()).expect("SIGHUP handler install");
-            tokio::select! {
-                _ = term.recv() => {}
-                _ = int.recv()  => {}
-                _ = hup.recv()  => {}
-            }
-            // Best-effort: remove the sentinel so the next restart
-            // doesn't falsely report a crash.
-            let _ = std::fs::remove_file(&sentinel_path_for_sig);
-            // PR-7: reap any live per-profile supervisor children before exit.
-            // std::process::exit bypasses Drop, so the router's Drop-based
-            // reaping never runs on a signal — without this, SIGTERM/SIGINT/
-            // SIGHUP orphans every credential-bearing `acp serve --profile` child.
-            wcore_cli::profile_router::reap_all_children_blocking();
-            std::process::exit(0);
-        });
-    }
-    // Audit W-2 fix (E2E-WINDOWS-ADDENDUM-2026-05-24 §2.2):
-    // On Windows there is no SIGTERM/SIGINT/SIGHUP — the previous code had
-    // no #[cfg(not(unix))] branch, so the sentinel was never cleaned up when
-    // the Electron app (or OS) killed the engine process via TerminateProcess.
-    // This caused every Windows restart to falsely report a crash.
-    // Ctrl+C is the closest Windows equivalent an external manager can send
-    // before falling back to TerminateProcess.
-    #[cfg(not(unix))]
-    {
-        let sentinel_path_for_sig = wcore_cli::crash_sentinel::CrashSentinel::default_path();
-        tokio::spawn(async move {
-            // On Windows, tokio::signal::ctrl_c() fires on Ctrl+C (CTRL_C_EVENT
-            // and CTRL_BREAK_EVENT). This is what the Electron wrapper sends
-            // before a hard kill.
-            let _ = tokio::signal::ctrl_c().await;
-            let _ = std::fs::remove_file(&sentinel_path_for_sig);
-            // PR-7: reap live per-profile children before exit (exit bypasses
-            // Drop). Without this, a Ctrl+C / TerminateProcess orphans every
-            // credential-bearing `acp serve --profile` child.
-            wcore_cli::profile_router::reap_all_children_blocking();
-            std::process::exit(0);
-        });
-    }
-
-    // F-086: register a cleanup guard for the per-process bundled-skill
-    // extraction directory (`$TMPDIR/wayland-core-bundled-skills-{pid}/`).
-    // The guard's Drop impl calls `cleanup_bundled_skill_extract_dir()` so
-    // the temp directory is removed on both graceful exit and panic unwind,
-    // preventing accumulation across restarts.
-    struct BundledSkillTmpCleanup;
-    impl Drop for BundledSkillTmpCleanup {
-        fn drop(&mut self) {
-            wcore_skills::bundled::cleanup_bundled_skill_extract_dir();
-        }
-    }
-    let _bundled_skill_cleanup = BundledSkillTmpCleanup;
 
     // M5.4: subcommand short-circuit. Subcommands run before any of the
     // flag-driven modes (doctor, REPL, etc.) so a user who runs
@@ -1590,8 +1575,8 @@ async fn run() -> anyhow::Result<ExitCode> {
         // B3: disarm the crash sentinel at the earliest known-clean point.
         // The Drop impl on `_sentinel_guard` also fires when `main` returns,
         // but an explicit early disarm closes the window between TUI exit
-        // and any post-TUI cleanup (MCP shutdown etc.) where a signal-based
-        // `process::exit` could bypass Drop.
+        // and any post-TUI cleanup (MCP shutdown etc.) before the outer signal
+        // race has a chance to cancel the root future.
         if let Some(ref mut g) = _sentinel_guard {
             let _ = g.disarm();
         }
@@ -3651,6 +3636,149 @@ mod tests {
         fn emit(&self, event: &ProtocolEvent) -> std::io::Result<()> {
             self.events.lock().unwrap().push(event.clone());
             Ok(())
+        }
+    }
+
+    async fn pending_bundled_reference_session(
+        extracted_root: Arc<std::sync::Mutex<Option<PathBuf>>>,
+        ready: tokio::sync::oneshot::Sender<()>,
+    ) -> anyhow::Result<ExitCode> {
+        use wcore_skills::bundled::{BundledSkillCatalog, BundledSkillEntry};
+
+        let mut catalog = BundledSkillCatalog::new();
+        catalog.register(BundledSkillEntry {
+            name: "signal-cleanup".into(),
+            description: "signal cleanup fixture".into(),
+            when_to_use: None,
+            argument_hint: None,
+            allowed_tools: Vec::new(),
+            model: None,
+            disable_model_invocation: false,
+            user_invocable: false,
+            context: None,
+            agent: None,
+            files: vec![("reference.txt".into(), "exact reference bytes".into())],
+            content: "fixture".into(),
+        });
+        let skills = catalog.prepare_bundled_skills().await;
+        let skill_root = PathBuf::from(
+            skills[0]
+                .skill_root
+                .as_deref()
+                .expect("reference extraction must succeed"),
+        );
+        let process_root = skill_root
+            .parent()
+            .and_then(Path::parent)
+            .expect("skill root must be nested under catalog and process roots")
+            .to_owned();
+        assert_eq!(
+            std::fs::read(skill_root.join("reference.txt")).expect("read reference bytes"),
+            b"exact reference bytes"
+        );
+        *extracted_root.lock().expect("record extraction root") = Some(process_root);
+        ready.send(()).expect("signal trigger must be waiting");
+        std::future::pending().await
+    }
+
+    #[cfg(unix)]
+    fn raise_native_shutdown_signal(kind: &str) {
+        let signal = match kind {
+            "sigint" => libc::SIGINT,
+            "sigterm" => libc::SIGTERM,
+            "sighup" => libc::SIGHUP,
+            other => panic!("unsupported native test signal: {other}"),
+        };
+        // SAFETY: raise delivers a known signal constant to this subprocess;
+        // shutdown_signal installed the matching Tokio handler before the
+        // extraction future sends its ready notification.
+        assert_eq!(unsafe { libc::raise(signal) }, 0);
+    }
+
+    #[cfg(windows)]
+    fn raise_native_shutdown_signal(kind: &str) {
+        use windows_sys::Win32::System::Console::{CTRL_C_EVENT, GenerateConsoleCtrlEvent};
+
+        assert_eq!(kind, "ctrl-c");
+        // SAFETY: the parent launches this helper with CREATE_NEW_CONSOLE, so
+        // group zero targets only this subprocess's console. Tokio's Ctrl+C
+        // handler is installed before the extraction future signals ready.
+        assert_ne!(unsafe { GenerateConsoleCtrlEvent(CTRL_C_EVENT, 0) }, 0);
+    }
+
+    #[tokio::test]
+    #[ignore = "native signal subprocess helper"]
+    async fn signal_shutdown_native_subprocess() {
+        let kind = std::env::var("WCORE_TEST_SHUTDOWN_SIGNAL")
+            .expect("native signal kind supplied by parent test");
+        let extracted_root = Arc::new(std::sync::Mutex::new(None::<PathBuf>));
+        let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
+        let session = pending_bundled_reference_session(extracted_root.clone(), ready_tx);
+        let trigger = tokio::spawn(async move {
+            ready_rx
+                .await
+                .expect("reference extraction reaches signal point");
+            tokio::task::yield_now().await;
+            raise_native_shutdown_signal(&kind);
+        });
+
+        let cleanup = BundledSkillTmpCleanup;
+        let status = run_until_shutdown(session, shutdown_signal())
+            .await
+            .expect("native signal shutdown must complete cleanly");
+        trigger.await.expect("native signal trigger task");
+        assert_eq!(status, ExitCode::SUCCESS);
+        let process_root = extracted_root
+            .lock()
+            .expect("read extraction root")
+            .clone()
+            .expect("subprocess records extraction root");
+        assert!(process_root.exists());
+        drop(cleanup);
+        assert!(
+            !process_root.exists(),
+            "native signal shutdown must remove the exact UUID root"
+        );
+    }
+
+    #[tokio::test]
+    async fn native_shutdown_signals_remove_exact_bundled_root() {
+        #[cfg(unix)]
+        let signals = ["sigint", "sigterm", "sighup"];
+        #[cfg(windows)]
+        let signals = ["ctrl-c"];
+
+        let current_exe = std::env::current_exe().expect("current test executable");
+        let current_exe = current_exe.to_string_lossy().into_owned();
+        for signal in signals {
+            let mut child = wcore_config::shell::shell_command_argv(
+                &current_exe,
+                &[
+                    "--exact",
+                    "tests::signal_shutdown_native_subprocess",
+                    "--ignored",
+                    "--nocapture",
+                ],
+            );
+            child.kill_on_drop(true);
+            child.env("WCORE_TEST_SHUTDOWN_SIGNAL", signal);
+            #[cfg(windows)]
+            {
+                use std::os::windows::process::CommandExt as _;
+                use windows_sys::Win32::System::Threading::CREATE_NEW_CONSOLE;
+
+                child.as_std_mut().creation_flags(CREATE_NEW_CONSOLE);
+            }
+            let output = tokio::time::timeout(std::time::Duration::from_secs(60), child.output())
+                .await
+                .unwrap_or_else(|_| panic!("native {signal} cleanup subprocess timed out"))
+                .expect("run native signal subprocess");
+            assert!(
+                output.status.success(),
+                "native {signal} cleanup subprocess failed; stdout={} stderr={}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
         }
     }
 

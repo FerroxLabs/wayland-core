@@ -232,24 +232,27 @@ async fn e7_system_prompt_injection() {
     let skill_refs: Vec<wcore_skills::refs::SkillRef> = skills
         .iter()
         .cloned()
-        .map(|m| wcore_skills::refs::SkillRef {
-            name: m.name,
-            display_name: m.display_name,
-            description: m.description,
-            when_to_use: m.when_to_use,
-            paths: m.paths,
-            source: m.source,
-            loaded_from: m.loaded_from,
-            file_path: m
-                .skill_root
-                .as_deref()
-                .map(|root| std::path::Path::new(root).join("SKILL.md"))
-                .unwrap_or_default(),
-            content_length_hint: m.content_length,
-            user_invocable: m.user_invocable,
-            disable_model_invocation: m.disable_model_invocation,
-            has_artifacts: false,
-            inline_content: None,
+        .map(|m| {
+            let skill_root = m.skill_root.as_deref().map(std::path::PathBuf::from);
+            wcore_skills::refs::SkillRef {
+                name: m.name,
+                display_name: m.display_name,
+                description: m.description,
+                when_to_use: m.when_to_use,
+                paths: m.paths,
+                source: m.source,
+                loaded_from: m.loaded_from,
+                file_path: skill_root
+                    .as_ref()
+                    .map(|root| root.join("SKILL.md"))
+                    .unwrap_or_default(),
+                skill_root,
+                content_length_hint: m.content_length,
+                user_invocable: m.user_invocable,
+                disable_model_invocation: m.disable_model_invocation,
+                has_artifacts: false,
+                inline_content: None,
+            }
         })
         .collect();
 

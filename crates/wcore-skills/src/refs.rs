@@ -31,6 +31,9 @@ pub struct SkillRef {
     /// Canonical filesystem path of the SKILL.md (or .md) file. Used by
     /// `resolve()` to read the body on first activation.
     pub file_path: PathBuf,
+    /// Root directory for bundled reference files. Kept separately because
+    /// bundled bodies resolve from `inline_content`, not from `file_path`.
+    pub skill_root: Option<PathBuf>,
     /// Approximate body byte count from the loader pass. Used by audit
     /// to flag huge skills; never used for budgeting.
     pub content_length_hint: usize,
@@ -232,7 +235,11 @@ impl SkillCatalog {
         let skill_root: Option<String>;
         if let Some(inline) = &r.inline_content {
             raw = inline.clone();
-            skill_root = None;
+            skill_root = r
+                .skill_root
+                .as_deref()
+                .and_then(|root| root.to_str())
+                .map(str::to_owned);
         } else {
             // Read body off disk (async).
             let bytes = tokio::fs::read(&r.file_path)
@@ -243,9 +250,10 @@ impl SkillCatalog {
                 })?;
             raw = String::from_utf8_lossy(&bytes).into_owned();
             skill_root = r
-                .file_path
-                .parent()
-                .and_then(|p| p.to_str())
+                .skill_root
+                .as_deref()
+                .or_else(|| r.file_path.parent())
+                .and_then(|root| root.to_str())
                 .map(str::to_owned);
         }
 
@@ -387,6 +395,7 @@ impl SkillCatalog {
 /// `inline_content` so `resolve()` can return it directly without attempting
 /// any disk read against the virtual `<virtual:name>` path.
 pub fn metadata_to_ref(m: &SkillMetadata) -> SkillRef {
+    let skill_root = m.skill_root.as_deref().map(std::path::PathBuf::from);
     let file_path = m
         .skill_root
         .as_deref()
@@ -411,6 +420,7 @@ pub fn metadata_to_ref(m: &SkillMetadata) -> SkillRef {
         source: m.source,
         loaded_from: m.loaded_from,
         file_path,
+        skill_root,
         content_length_hint: m.content_length,
         user_invocable: m.user_invocable,
         disable_model_invocation: m.disable_model_invocation,
@@ -450,6 +460,7 @@ mod tests {
             source: SkillSource::Project,
             loaded_from: LoadedFrom::Skills,
             file_path: std::path::PathBuf::from(format!("/tmp/{name}/SKILL.md")),
+            skill_root: None,
             content_length_hint: 0,
             user_invocable: true,
             disable_model_invocation: false,

@@ -9504,6 +9504,7 @@ dependencies = [
  "futures-util",
  "humantime",
  "humantime-serde",
+ "libc",
  "mockito",
  "nucleo",
  "open",
@@ -10114,6 +10115,8 @@ version = "0.12.25"
 dependencies = [
  "anyhow",
  "async-trait",
+ "cap-fs-ext",
+ "cap-std",
  "chrono",
  "dirs",
  "filetime",

@@ -36,14 +36,18 @@ chrono.workspace       = true
 [target.'cfg(unix)'.dependencies]
 libc.workspace = true
 
-# Audit W-3 fix: restrict bundled-skill dir/file permissions on Windows.
-# windows-sys is already a workspace dep (see wcore-sandbox/Cargo.toml).
-# We need Win32_Security for SetSecurityInfo + related types.
+# Audit W-3 fix: capability-relative bundled-skill extraction on Windows.
 [target.'cfg(windows)'.dependencies]
+cap-fs-ext = "=3.4.5"
+cap-std = "=3.4.5"
 windows-sys = { version = "0.59", features = [
+  "Wdk_Foundation",
+  "Wdk_Storage_FileSystem",
   "Win32_Foundation",
   "Win32_Security",
+  "Win32_Security_Authorization",
   "Win32_Storage_FileSystem",
+  "Win32_System_IO",
   "Win32_System_Threading",
 ] }
 

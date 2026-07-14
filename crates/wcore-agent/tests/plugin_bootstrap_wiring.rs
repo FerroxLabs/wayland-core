@@ -32,6 +32,7 @@ use wcore_plugin_api::{
 };
 use wcore_protocol::events::ToolCategory;
 use wcore_skills::bundled::BundledSkillCatalog;
+use wcore_skills::refs::SkillCatalog;
 use wcore_tools::registry::ToolRegistry;
 
 // ── fixtures ─────────────────────────────────────────────────────────────────
@@ -96,6 +97,19 @@ fn plugin_skill(name: &str, content: &str) -> BundledSkillSpec {
         files: vec![],
         content: content.into(),
     }
+}
+
+fn plugin_skill_with_file(
+    name: &str,
+    content: &str,
+    file_path: &str,
+    file_content: &str,
+) -> BundledSkillSpec {
+    let mut skill = plugin_skill(name, content);
+    skill
+        .files
+        .push((file_path.to_owned(), file_content.to_owned()));
+    skill
 }
 
 // ── 1. tools → ToolRegistry ──────────────────────────────────────────────────
@@ -267,68 +281,133 @@ fn plugin_skill_flows_out_and_reaches_session_catalog() {
     );
 }
 
+async fn load_plugin_catalog(specs: Vec<BundledSkillSpec>) -> SkillCatalog {
+    let mut bundled = BundledSkillCatalog::embedded();
+    for spec in specs {
+        bundled.register(spec_to_bundled_entry(spec));
+    }
+    let workspace = tempfile::tempdir().expect("session workspace");
+    let refs = wcore_skills::loader::load_catalog_with_bundled(
+        workspace.path(),
+        &[],
+        true,
+        None,
+        &bundled,
+    )
+    .await;
+    SkillCatalog::from_refs(refs)
+}
+
+async fn resolve_plugin_fixture(
+    catalog: &SkillCatalog,
+    name: &str,
+    file_name: &str,
+) -> (String, std::path::PathBuf, String) {
+    let skill = catalog.resolve(name).await.expect("fixture skill resolves");
+    let root = skill
+        .skill_root
+        .as_deref()
+        .map(std::path::PathBuf::from)
+        .expect("fixture reference root survives resolve");
+    let file = tokio::fs::read_to_string(root.join(file_name))
+        .await
+        .expect("fixture reference is readable");
+    (skill.content.clone(), root, file)
+}
+
 #[tokio::test]
-async fn same_name_plugin_content_cannot_cross_sessions_a_then_b_then_a() {
+async fn fresh_catalogs_are_isolated_across_a_then_b_then_a() {
     const NAME: &str = "same-name-session-skill";
-    const CONTENT_A: &str = "session A content";
-    const CONTENT_B: &str = "session B content";
+    const FILE_NAME: &str = "references/session.txt";
 
-    let (a_ready_tx, a_ready_rx) = tokio::sync::oneshot::channel();
-    let (b_done_tx, b_done_rx) = tokio::sync::oneshot::channel();
+    let a1 = load_plugin_catalog(vec![
+        plugin_skill_with_file(NAME, "session A content", FILE_NAME, "session A reference"),
+        plugin_skill("session-a-only", "A sentinel"),
+    ])
+    .await;
+    assert!(a1.resolve("session-a-only").await.is_ok());
+    assert!(matches!(
+        a1.resolve("session-b-only").await,
+        Err(wcore_skills::refs::ResolveError::NotFound(_))
+    ));
+    let a1_result = resolve_plugin_fixture(&a1, NAME, FILE_NAME).await;
 
-    let session_a = async move {
-        let mut catalog = BundledSkillCatalog::embedded();
-        catalog.register(spec_to_bundled_entry(plugin_skill(NAME, CONTENT_A)));
-        a_ready_tx.send(()).expect("session B should be waiting");
+    let b = load_plugin_catalog(vec![
+        plugin_skill_with_file(NAME, "session B content", FILE_NAME, "session B reference"),
+        plugin_skill("session-b-only", "B sentinel"),
+    ])
+    .await;
+    assert!(b.resolve("session-b-only").await.is_ok());
+    assert!(matches!(
+        b.resolve("session-a-only").await,
+        Err(wcore_skills::refs::ResolveError::NotFound(_))
+    ));
+    let b_result = resolve_plugin_fixture(&b, NAME, FILE_NAME).await;
 
-        b_done_rx
-            .await
-            .expect("session B should finish before session A resumes");
-        let workspace = tempfile::tempdir().expect("session A workspace");
-        let refs = wcore_skills::loader::load_catalog_with_bundled(
-            workspace.path(),
-            &[],
-            true,
-            None,
-            &catalog,
-        )
-        .await;
-        refs.into_iter()
-            .find(|skill| skill.name == NAME)
-            .and_then(|skill| skill.inline_content)
-            .expect("session A skill should be loaded")
+    let a2 = load_plugin_catalog(vec![
+        plugin_skill_with_file(NAME, "session A content", FILE_NAME, "session A reference"),
+        plugin_skill("session-a-only", "A sentinel"),
+    ])
+    .await;
+    assert!(a2.resolve("session-a-only").await.is_ok());
+    assert!(matches!(
+        a2.resolve("session-b-only").await,
+        Err(wcore_skills::refs::ResolveError::NotFound(_))
+    ));
+    let a2_result = resolve_plugin_fixture(&a2, NAME, FILE_NAME).await;
+
+    assert_eq!(a1_result.0, "session A content");
+    assert_eq!(a1_result.2, "session A reference");
+    assert_eq!(b_result.0, "session B content");
+    assert_eq!(b_result.2, "session B reference");
+    assert_eq!(a2_result.0, a1_result.0);
+    assert_eq!(a2_result.2, a1_result.2);
+    assert_ne!(a1_result.1, b_result.1);
+    assert_ne!(a1_result.1, a2_result.1, "A2 must be a fresh catalog");
+    assert_ne!(b_result.1, a2_result.1);
+}
+
+#[tokio::test]
+async fn parallel_same_name_catalog_extraction_keeps_reference_bytes_isolated() {
+    const NAME: &str = "parallel-same-name-skill";
+    const FILE_NAME: &str = "guide.md";
+    let barrier = Arc::new(tokio::sync::Barrier::new(2));
+
+    let session = |content: &'static str, file: &'static str| {
+        let barrier = barrier.clone();
+        async move {
+            let mut bundled = BundledSkillCatalog::embedded();
+            bundled.register(spec_to_bundled_entry(plugin_skill_with_file(
+                NAME, content, FILE_NAME, file,
+            )));
+            let workspace = tempfile::tempdir().expect("parallel workspace");
+            barrier.wait().await;
+            let refs = wcore_skills::loader::load_catalog_with_bundled(
+                workspace.path(),
+                &[],
+                true,
+                None,
+                &bundled,
+            )
+            .await;
+            let catalog = SkillCatalog::from_refs(refs);
+            resolve_plugin_fixture(&catalog, NAME, FILE_NAME).await
+        }
     };
 
-    let session_b = async move {
-        a_ready_rx
-            .await
-            .expect("session A should assemble its catalog first");
-        let mut catalog = BundledSkillCatalog::embedded();
-        catalog.register(spec_to_bundled_entry(plugin_skill(NAME, CONTENT_B)));
-        let workspace = tempfile::tempdir().expect("session B workspace");
-        let refs = wcore_skills::loader::load_catalog_with_bundled(
-            workspace.path(),
-            &[],
-            true,
-            None,
-            &catalog,
-        )
-        .await;
-        let content = refs
-            .into_iter()
-            .find(|skill| skill.name == NAME)
-            .and_then(|skill| skill.inline_content)
-            .expect("session B skill should be loaded");
-        b_done_tx.send(()).expect("session A should be waiting");
-        content
-    };
-
-    let (content_a, content_b) = tokio::join!(session_a, session_b);
-    assert_eq!(content_b, CONTENT_B, "session B must see its own content");
-    assert_eq!(
-        content_a, CONTENT_A,
-        "session A must retain its own content"
+    let (a, b) = tokio::join!(
+        session("parallel A content", "parallel A bytes"),
+        session("parallel B content", "parallel B bytes")
     );
+    assert_eq!(
+        (a.0.as_str(), a.2.as_str()),
+        ("parallel A content", "parallel A bytes")
+    );
+    assert_eq!(
+        (b.0.as_str(), b.2.as_str()),
+        ("parallel B content", "parallel B bytes")
+    );
+    assert_ne!(a.1, b.1, "parallel catalogs must use distinct roots");
 }
 
 // ── 5. rules → plugin_rules ──────────────────────────────────────────────────

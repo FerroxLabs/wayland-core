@@ -341,6 +341,11 @@ The ledger contains thirty-one bounded tasks. Each task should map to one or mor
 
 #### F06 — Contain the split skill-drafting path
 
+**Session-catalog follow-up:** `2026-07-14-wayland-core-f06-session-catalog-addendum.md`
+resolves the conflict between the frozen emergency-containment scope and this
+plan's requirement to eliminate process-global cross-session catalog pollution.
+It explicitly owns the pre-1.0 Rust API migration and reference-file isolation.
+
 **Goal:** Stop the current autonomous-skill authority split immediately, then prove `skills_lifecycle = false` is effective while preserving later lifecycle redesign.
 
 **Work:**

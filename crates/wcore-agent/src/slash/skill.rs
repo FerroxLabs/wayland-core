@@ -309,6 +309,7 @@ mod tests {
             source: wcore_skills::types::SkillSource::Project,
             loaded_from: wcore_skills::types::LoadedFrom::Skills,
             file_path: std::path::PathBuf::from("unused"),
+            skill_root: None,
             content_length_hint: 0,
             user_invocable: true,
             disable_model_invocation: true,
