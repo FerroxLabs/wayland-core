@@ -518,13 +518,13 @@ mod tests {
                 "Read",
                 &input_a,
                 false,
-                &format!("unchanged at line {}", 100 + pass),
+                &format!("unchanged request_id {}", 100 + pass),
             );
             mon.record_tool_outcome(
                 "Grep",
                 &input_b,
                 false,
-                &format!("no match at byte {}", 200 + pass),
+                &format!("no match timestamp_ms {}", 200 + pass),
             );
         }
         assert_eq!(mon.tick(), MonitorAction::ReplanRepeatedRoute);
@@ -534,13 +534,13 @@ mod tests {
                 "Read",
                 &input_a,
                 false,
-                &format!("unchanged at line {}", 300 + pass),
+                &format!("unchanged request_id {}", 300 + pass),
             );
             mon.record_tool_outcome(
                 "Grep",
                 &input_b,
                 false,
-                &format!("no match at byte {}", 400 + pass),
+                &format!("no match timestamp_ms {}", 400 + pass),
             );
         }
         assert_eq!(mon.tick(), MonitorAction::StopRepeatedRoute);
