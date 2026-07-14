@@ -52,6 +52,7 @@ use tokio::sync::Mutex;
 use wcore_channels::ChannelToolPosture;
 use wcore_config::config::Config;
 use wcore_providers::LlmProvider;
+use wcore_types::execution_policy::{ApprovalPolicy, PolicySource};
 
 use crate::bootstrap::AgentBootstrap;
 use crate::channel_inbound::TurnDispatcher;
@@ -82,6 +83,12 @@ pub struct ChannelTurnDispatcher {
     /// stay bare-URL summaries. Resolves image/audio attachments to derived
     /// text before the turn prompt is built.
     media: Option<Arc<ChannelMediaEnricher>>,
+}
+
+fn remote_channel_config(mut config: Config) -> Config {
+    config.tools.auto_approve = false;
+    config.retain_default_tool_allow_list();
+    config
 }
 
 impl ChannelTurnDispatcher {
@@ -186,18 +193,17 @@ impl ChannelTurnDispatcher {
         // `.expect()`s a protocol writer (engine.rs `approval_channel`
         // builder), which channel turns deliberately lack — installing a
         // manager without a writer would panic every turn. Instead we drive
-        // the engine through its default `ToolConfirmer` path with
-        // `tools.auto_approve` FORCED OFF in the per-session config clone
-        // below. With auto-approve off, read-only tools (Read/Grep/Glob, which
-        // are on the default allow_list) still run, while mutating tools fall
-        // through to confirmation. There is no interactive approver on a
-        // channel, so a mutating tool gate-then-denies (or, if stdin is a TTY,
-        // would block waiting for input it never gets) — both outcomes are the
-        // intended safe behaviour for v1: a channel user cannot silently run a
-        // shell or write files. Operators who set `--auto-approve` for their
-        // local CLI do NOT thereby grant it to channel senders.
-        let mut config = self.config.clone();
-        config.tools.auto_approve = false;
+        // the engine through its default `ToolConfirmer` path. Remote channel
+        // turns are always typed Smart/Prompt below. Clear the
+        // legacy boolean here as defense in depth; the typed builder also
+        // normalizes both compatibility fields before any skill checker,
+        // spawner, or engine is built. Read-only tools on the default
+        // allow-list still run, while mutating tools fail closed because a
+        // channel has no interactive terminal approver.
+        // A local convenience allow-list is not remote authority. Channel
+        // sessions have no interactive approver, so inheriting Bash/Write/MCP
+        // entries would silently bypass the explicit Prompt posture.
+        let config = remote_channel_config(self.config.clone());
 
         // Load-or-create the session for this id. `init_session` CREATES a
         // session and hard-errors ("Session ID '…' already exists") if the id
@@ -214,6 +220,7 @@ impl ChannelTurnDispatcher {
         let is_new = existing.is_none();
 
         let mut bootstrap = AgentBootstrap::new(config, self.cwd.clone(), output)
+            .with_smart_execution_policy(ApprovalPolicy::Prompt, PolicySource::Protocol)
             .provider(self.provider.clone())
             // MANDATORY: stop the per-session engine from re-registering
             // channels / spawning pollers / spawning another subscriber.
@@ -405,5 +412,17 @@ mod tests {
     fn hashed_session_id_is_forty_hex_chars() {
         let id = ChannelTurnDispatcher::hashed_session_id("anything");
         assert_eq!(id.len(), 40, "first-40-hex-chars of the SHA-256 digest");
+    }
+
+    #[test]
+    fn remote_sessions_drop_local_tool_grants() {
+        let mut config = Config::default();
+        config.tools.auto_approve = true;
+        config.tools.allow_list = vec!["Read".into(), "Bash".into(), "Grep".into(), "Write".into()];
+
+        let remote = remote_channel_config(config);
+
+        assert!(!remote.tools.auto_approve);
+        assert_eq!(remote.tools.allow_list, vec!["Read", "Grep"]);
     }
 }

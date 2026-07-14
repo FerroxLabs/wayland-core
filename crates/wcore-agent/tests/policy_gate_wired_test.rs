@@ -339,7 +339,6 @@ async fn policy_allow_still_honors_protocol_denial() {
         manager: manager.clone(),
         writer: emitter.clone(),
         msg_id: "policy-and-approval".into(),
-        auto_approve: false,
     });
 
     let result = run_guarded_call(cfg).await;
@@ -369,6 +368,41 @@ async fn policy_allow_still_honors_protocol_denial() {
 }
 
 #[tokio::test]
+async fn live_mode_deescalation_revokes_boot_bypass() {
+    let manager = Arc::new(ToolApprovalManager::new());
+    manager.set_mode(SessionMode::Force);
+    let emitter = Arc::new(ResolvingEmitter {
+        events: Mutex::new(Vec::new()),
+        manager: manager.clone(),
+        approve: false,
+        resolved_synchronously: std::sync::atomic::AtomicBool::new(false),
+    });
+    let mut cfg = cfg_with_gate(Some(allow_guarded_gate()));
+    // Model the launch-time Bypass snapshot that previously stayed ORed into
+    // the protocol path after the host visibly tightened its mode.
+    cfg.confirmer = auto_approve_confirmer();
+    cfg.approval = Some(wcore_agent::orchestration::node_executor::ApprovalChannel {
+        manager: manager.clone(),
+        writer: emitter.clone(),
+        msg_id: "live-deescalation".into(),
+    });
+
+    manager.set_mode(SessionMode::Default);
+    let result = run_guarded_call(cfg).await;
+
+    assert!(emitter.resolved_synchronously.load(Ordering::SeqCst));
+    match result {
+        ContentBlock::ToolResult {
+            is_error, content, ..
+        } => {
+            assert!(is_error);
+            assert_eq!(content, "Tool denied: denied by host");
+        }
+        other => panic!("expected ToolResult, got {other:?}"),
+    }
+}
+
+#[tokio::test]
 async fn protocol_approval_is_bound_to_original_tool_input() {
     let manager = Arc::new(ToolApprovalManager::new());
     let emitter = Arc::new(ResolvingEmitter {
@@ -382,7 +416,6 @@ async fn protocol_approval_is_bound_to_original_tool_input() {
         manager: manager.clone(),
         writer: emitter.clone(),
         msg_id: "approval-input-binding".into(),
-        auto_approve: false,
     });
 
     let mut hooks = HookEngine::new(HooksConfig::default());
@@ -415,7 +448,6 @@ async fn scoped_auto_approval_is_bound_to_original_tool_input() {
         manager,
         writer: emitter.clone(),
         msg_id: "scoped-approval-input-binding".into(),
-        auto_approve: false,
     });
 
     let mut hooks = HookEngine::new(HooksConfig::default());
@@ -459,7 +491,6 @@ async fn failed_tool_request_emission_drops_pending_approval() {
         &manager,
         &writer,
         "failed-emission",
-        false,
         &[],
         None,
         CompactionLevel::Off,
@@ -489,7 +520,6 @@ async fn policy_allow_still_honors_protocol_force() {
         manager,
         writer: emitter.clone(),
         msg_id: "policy-and-force".into(),
-        auto_approve: false,
     });
 
     let mut hooks = HookEngine::new(HooksConfig::default());
@@ -510,7 +540,7 @@ async fn policy_allow_still_honors_protocol_force() {
         !events
             .iter()
             .any(|event| matches!(event, ProtocolEvent::ToolRequest { .. })),
-        "Force must not prompt after the policy floor allows the call"
+        "Force must not prompt after the ACL gate allows the call"
     );
 }
 
@@ -533,7 +563,6 @@ async fn policy_deny_beats_protocol_force() {
         manager,
         writer: emitter.clone(),
         msg_id: "deny-beats-force".into(),
-        auto_approve: true,
     });
 
     let result = run_guarded_call(cfg).await;
@@ -587,7 +616,6 @@ async fn mixed_policy_batch_preserves_order_and_deny_beats_force() {
         manager,
         writer: emitter.clone(),
         msg_id: "mixed-deny-and-force".into(),
-        auto_approve: true,
     });
 
     let results = run_calls_with_hooks(

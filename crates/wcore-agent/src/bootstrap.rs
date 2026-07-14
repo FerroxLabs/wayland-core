@@ -8,7 +8,9 @@ use wcore_mcp::manager::McpManager;
 use wcore_observability::sink::SpanSink;
 use wcore_plugin_api::registry::providers::PluginProvider;
 use wcore_providers::{CircuitConfig, LlmProvider, ResilientProvider};
-use wcore_types::execution_policy::DangerousSessionGrant;
+use wcore_types::execution_policy::{
+    ApprovalPolicy, BaselineExecutionPolicy, DangerousSessionGrant, PolicySource,
+};
 // E-H2: `CircuitReporter` / `NoOpCircuitReporter` are referenced by
 // fully-qualified path in the resilience wiring below.
 
@@ -200,6 +202,14 @@ pub struct AgentBootstrap {
     /// Trusted, resolver-produced local Dangerous lease. No config, wire,
     /// environment, TUI, or ACP surface populates this field.
     dangerous_grant: Option<DangerousSessionGrant>,
+    /// Explicit trusted Smart policy selected by a local launch surface.
+    /// Managed is deliberately not accepted here until its immutable floor is
+    /// distributed across every execution path.
+    smart_policy: Option<BaselineExecutionPolicy>,
+    /// Shared live posture authority for TUI/protocol hosts. When installed,
+    /// bootstrap binds both the parent approval flow and future child configs
+    /// to this same manager.
+    approval_manager: Option<Arc<wcore_protocol::ToolApprovalManager>>,
 }
 
 impl AgentBootstrap {
@@ -220,6 +230,8 @@ impl AgentBootstrap {
             defer_config_mcp: false,
             active_assistant: None,
             dangerous_grant: None,
+            smart_policy: None,
+            approval_manager: None,
         }
     }
 
@@ -280,6 +292,29 @@ impl AgentBootstrap {
     /// wired to any user-facing host surface until containment proof is green.
     pub fn with_dangerous_grant(mut self, grant: DangerousSessionGrant) -> Self {
         self.dangerous_grant = Some(grant);
+        self
+    }
+
+    /// Select the typed Smart approval posture for this session. Smart always
+    /// retains the required sandbox; only a resolver-produced Dangerous grant
+    /// can bypass containment.
+    pub fn with_smart_execution_policy(
+        mut self,
+        approvals: ApprovalPolicy,
+        source: PolicySource,
+    ) -> Self {
+        self.smart_policy = Some(BaselineExecutionPolicy::smart(approvals, source));
+        self
+    }
+
+    /// Install the host session's live approval manager before child-capable
+    /// tools are built. This keeps runtime mode changes authoritative for both
+    /// the parent and subsequently spawned children.
+    pub fn with_approval_manager(
+        mut self,
+        manager: Arc<wcore_protocol::ToolApprovalManager>,
+    ) -> Self {
+        self.approval_manager = Some(manager);
         self
     }
 
@@ -357,13 +392,23 @@ impl AgentBootstrap {
         let session_cancel_root = CancellationToken::new();
         let session_runtime = SessionRuntimeHandle::new(session_cancel_root.clone());
         let mut session_guard = SessionRuntimeGuard::new(session_runtime.clone());
+        anyhow::ensure!(
+            self.dangerous_grant.is_none() || self.smart_policy.is_none(),
+            "a session cannot combine Smart policy with a Dangerous grant"
+        );
         let dangerous_grant = self.dangerous_grant.take();
         if dangerous_grant.is_some() {
             // Dangerous is one typed authority bundle: its resolver-produced
             // lease bypasses both interactive approvals and the sandbox. Set
             // this before any confirmer, skill checker, spawner, or engine is
             // built so every execution path observes the same posture.
-            self.config.tools.auto_approve = true;
+            self.config
+                .set_smart_approval_policy(ApprovalPolicy::Bypass);
+        } else if let Some(policy) = self.smart_policy.take() {
+            // An explicit typed launch selection is authoritative over both
+            // legacy approval fields. Normalizing them also carries the exact
+            // posture into every child Config clone and transient spawner.
+            self.config.set_smart_approval_policy(policy.approvals());
         }
 
         // Wave OL: provider construction is now DEFERRED until after
@@ -1831,13 +1876,14 @@ impl AgentBootstrap {
             self.config.tools.skills.allow.clone(),
             self.config.tools.auto_approve,
         );
-        // F-013: capture permission-checker config for the cron skill_sink
-        // closure before self.config moves into AgentEngine::new_with_provider
-        // below (~line 1147). The cron sink builds a fresh SkillPermissionChecker
-        // from these values for each fire — identical policy to the session sink.
+        // F-013: capture the static skill rules plus the live host authority
+        // for the cron skill_sink before self.config moves below. The manager
+        // is consulted at each fire; no boot-time Force snapshot survives a
+        // host downgrade to Default or AutoEdit.
         let cron_skill_deny_rules = self.config.tools.skills.deny.clone();
         let cron_skill_allow_rules = self.config.tools.skills.allow.clone();
         let cron_skill_auto_approve = self.config.tools.auto_approve;
+        let cron_skill_approval_manager = self.approval_manager.as_ref().cloned();
         // v0.7.0 1.D.5 — wire ProceduralSkillTelemetrySink when memory
         // is enabled so SkillTool invocations feed the procedural-memory
         // loop (M3.5). Without this, the prior wiring path had a sink
@@ -1852,8 +1898,17 @@ impl AgentBootstrap {
             } else {
                 Arc::new(wcore_skills::telemetry::NullTelemetrySink)
             };
+        let mut skill_tool =
+            crate::skill_tool::SkillTool::new(Arc::clone(&catalog), cwd.to_string(), skill_checker);
+        // The resolved skill may hide writes, shell, hooks, or elevated tools
+        // behind the default-allow-listed `Skill` tool name. A host-backed
+        // session consults its live authority for those capabilities; a
+        // standalone session retains the normalized typed launch posture.
+        if let Some(manager) = self.approval_manager.as_ref() {
+            skill_tool = skill_tool.with_live_approval_manager(Arc::clone(manager));
+        }
         registry.register(Box::new(
-            crate::skill_tool::SkillTool::new(Arc::clone(&catalog), cwd.to_string(), skill_checker)
+            skill_tool
                 .with_telemetry_sink(skill_telemetry_sink)
                 // GHSA-8r7g H-1: gate project/legacy skill frontmatter hooks
                 // behind the operator's global opt-in (default-deny otherwise).
@@ -1912,6 +1967,9 @@ impl AgentBootstrap {
                 .with_sandbox_runtime(registry.sandbox_runtime())
                 .with_session_runtime(session_runtime.clone())
                 .with_bus(Arc::clone(&agent_bus));
+        if let Some(manager) = self.approval_manager.as_ref() {
+            spawner_builder = spawner_builder.with_approval_manager(Arc::clone(manager));
+        }
         if let Some(tracker) = council_budget_tracker.as_ref() {
             // TODO(stage3): use the live per-conversation session id.
             spawner_builder = spawner_builder
@@ -2324,6 +2382,9 @@ impl AgentBootstrap {
         } else {
             AgentEngine::new_with_provider(provider.clone(), self.config, registry, self.output)
         };
+        if let Some(manager) = self.approval_manager.take() {
+            engine.set_approval_manager(manager);
+        }
         engine.set_plan_active_flag(plan_active_flag);
         // Token-opt (diff-resend): give the engine the shared file cache so it
         // can bump the compaction generation after each compaction pass,
@@ -2919,6 +2980,7 @@ impl AgentBootstrap {
             let deny_rules = cron_skill_deny_rules;
             let allow_rules = cron_skill_allow_rules;
             let auto_approve = cron_skill_auto_approve;
+            let approval_manager = cron_skill_approval_manager;
             let cwd_for_cron = cwd.to_string();
             Arc::new(move |skill_name: String, args: serde_json::Value| {
                 let catalog = Arc::clone(&catalog_for_cron);
@@ -2927,6 +2989,7 @@ impl AgentBootstrap {
                     allow_rules.clone(),
                     auto_approve,
                 );
+                let approval_manager = approval_manager.clone();
                 let cwd = cwd_for_cron.clone();
                 Box::pin(async move {
                     // Aud-12 / M-18 (+ B8 follow-up): the cron runner's
@@ -2971,7 +3034,10 @@ impl AgentBootstrap {
                             }
                         }
                     }
-                    let tool = crate::skill_tool::SkillTool::new(catalog, cwd, checker);
+                    let mut tool = crate::skill_tool::SkillTool::new(catalog, cwd, checker);
+                    if let Some(manager) = approval_manager {
+                        tool = tool.with_live_approval_manager(manager);
+                    }
                     let input = serde_json::json!({ "skill": skill_name, "args": args });
                     let result = wcore_tools::Tool::execute(&tool, input).await;
                     if result.is_error {

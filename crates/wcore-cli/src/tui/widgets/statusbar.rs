@@ -193,7 +193,7 @@ pub fn status_bar(f: &mut Frame, area: Rect, app: &App, t: &Theme, _sample: Syst
         format!(" {} ", mode_label(&app.mode)),
         bar_style,
     ));
-    if app.config.force {
+    if matches!(&app.mode, wcore_protocol::commands::SessionMode::Force) {
         spans.push(Span::styled(
             " · FORCE ",
             Style::default()
@@ -570,27 +570,28 @@ mod tests {
     }
 
     #[test]
-    fn status_bar_renders_the_force_badge_when_force_is_on() {
+    fn status_bar_renders_the_force_badge_for_active_force_mode() {
         let mut app = App::new();
         app.config.provider = "anthropic".into();
         app.config.model = "sonnet-4-6".into();
-        app.config.force = true;
+        app.mode = wcore_protocol::commands::SessionMode::Force;
         let line = render(&app, &Theme::hearth(), 100);
         assert!(
             line.contains("FORCE"),
-            "force badge missing while force is on:\n{line}"
+            "force badge missing while Force is active:\n{line}"
         );
     }
 
     #[test]
-    fn status_bar_hides_the_force_badge_when_force_is_off() {
+    fn status_bar_hides_stale_force_badge_after_deescalation() {
         let mut app = App::new();
         app.config.model = "local".into();
-        assert!(!app.config.force);
+        app.config.force = true;
+        app.mode = wcore_protocol::commands::SessionMode::Default;
         let line = render(&app, &Theme::hearth(), 100);
         assert!(
             !line.contains("FORCE"),
-            "force badge leaked while force is off:\n{line}"
+            "launch authority leaked a stale FORCE badge after de-escalation:\n{line}"
         );
     }
 

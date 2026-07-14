@@ -1108,6 +1108,56 @@ pub struct Config {
     pub crucible: crate::crucible::CrucibleConfig,
 }
 
+impl Config {
+    /// Resolve the legacy configuration surfaces into the typed Smart
+    /// approval policy consumed by the agent runtime.
+    ///
+    /// `tools.auto_approve` remains the compatibility override used by older
+    /// callers and `--auto-approve`; when set it is equivalent to Bypass.
+    /// Otherwise `[default] approval_mode` supplies the three-way posture.
+    pub fn smart_approval_policy(&self) -> wcore_types::execution_policy::ApprovalPolicy {
+        use wcore_types::execution_policy::ApprovalPolicy;
+
+        if self.tools.auto_approve {
+            return ApprovalPolicy::Bypass;
+        }
+
+        match self.approval_mode {
+            ApprovalMode::Default => ApprovalPolicy::Prompt,
+            ApprovalMode::AutoEdit => ApprovalPolicy::AutoEdit,
+            ApprovalMode::Force => ApprovalPolicy::Bypass,
+        }
+    }
+
+    /// Normalize compatibility fields to an already-resolved Smart policy.
+    /// This is used only after a trusted launch surface has selected the
+    /// session policy; lower-trust serialized inputs cannot call it.
+    pub fn set_smart_approval_policy(
+        &mut self,
+        policy: wcore_types::execution_policy::ApprovalPolicy,
+    ) {
+        use wcore_types::execution_policy::ApprovalPolicy;
+
+        self.approval_mode = match policy {
+            ApprovalPolicy::Prompt => ApprovalMode::Default,
+            ApprovalPolicy::AutoEdit => ApprovalMode::AutoEdit,
+            ApprovalPolicy::Bypass => ApprovalMode::Force,
+        };
+        self.tools.auto_approve = matches!(policy, ApprovalPolicy::Bypass);
+    }
+
+    /// Strip user-added tool grants while preserving Wayland's audited
+    /// read-only defaults. Remote launch surfaces use this so local Bash/Write
+    /// convenience grants never become network authority, without disabling
+    /// safe inspection tools such as Read/Grep/Glob.
+    pub fn retain_default_tool_allow_list(&mut self) {
+        let defaults = default_allow_list();
+        self.tools
+            .allow_list
+            .retain(|name| defaults.iter().any(|allowed| allowed == name));
+    }
+}
+
 impl std::fmt::Debug for Config {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Config")
@@ -6210,6 +6260,72 @@ enabled = false
         }
         assert_eq!(ApprovalMode::Force.as_str(), "force");
         assert_eq!(ApprovalMode::from_wire("garbage"), ApprovalMode::Default);
+    }
+
+    #[test]
+    fn smart_approval_policy_converges_legacy_surfaces() {
+        use wcore_types::execution_policy::ApprovalPolicy;
+
+        for (mode, expected) in [
+            (ApprovalMode::Default, ApprovalPolicy::Prompt),
+            (ApprovalMode::AutoEdit, ApprovalPolicy::AutoEdit),
+            (ApprovalMode::Force, ApprovalPolicy::Bypass),
+        ] {
+            let config = Config {
+                approval_mode: mode,
+                ..Default::default()
+            };
+            assert_eq!(config.smart_approval_policy(), expected);
+        }
+
+        let legacy = Config {
+            approval_mode: ApprovalMode::Default,
+            tools: ToolsConfig {
+                auto_approve: true,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        assert_eq!(
+            legacy.smart_approval_policy(),
+            ApprovalPolicy::Bypass,
+            "legacy auto-approve remains an explicit compatibility override"
+        );
+    }
+
+    #[test]
+    fn typed_smart_policy_normalizes_both_legacy_fields() {
+        use wcore_types::execution_policy::ApprovalPolicy;
+
+        let mut config = Config {
+            tools: ToolsConfig {
+                auto_approve: true,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        config.set_smart_approval_policy(ApprovalPolicy::AutoEdit);
+        assert_eq!(config.approval_mode, ApprovalMode::AutoEdit);
+        assert!(!config.tools.auto_approve);
+        assert_eq!(config.smart_approval_policy(), ApprovalPolicy::AutoEdit);
+
+        config.set_smart_approval_policy(ApprovalPolicy::Bypass);
+        assert_eq!(config.approval_mode, ApprovalMode::Force);
+        assert!(config.tools.auto_approve);
+
+        config.set_smart_approval_policy(ApprovalPolicy::Prompt);
+        assert_eq!(config.approval_mode, ApprovalMode::Default);
+        assert!(!config.tools.auto_approve);
+    }
+
+    #[test]
+    fn remote_allow_list_retains_only_audited_defaults() {
+        let mut config = Config::default();
+        config.tools.allow_list = vec!["Read".into(), "Bash".into(), "Grep".into(), "Write".into()];
+
+        config.retain_default_tool_allow_list();
+
+        assert_eq!(config.tools.allow_list, vec!["Read", "Grep"]);
     }
 
     #[test]

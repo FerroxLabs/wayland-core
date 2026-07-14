@@ -1,8 +1,11 @@
 use std::collections::HashSet;
 use std::io::{self, BufRead, IsTerminal, Write};
 
+use wcore_protocol::events::ToolCategory;
+use wcore_types::execution_policy::ApprovalPolicy;
+
 pub struct ToolConfirmer {
-    auto_approve: bool,
+    approval_policy: ApprovalPolicy,
     allow_list: HashSet<String>,
 }
 
@@ -15,22 +18,78 @@ pub enum ConfirmResult {
 
 impl ToolConfirmer {
     pub fn new(auto_approve: bool, allow_list: Vec<String>) -> Self {
+        let policy = if auto_approve {
+            ApprovalPolicy::Bypass
+        } else {
+            ApprovalPolicy::Prompt
+        };
+        Self::with_policy(policy, allow_list)
+    }
+
+    /// Construct a confirmer from the typed Smart approval policy.
+    pub fn with_policy(policy: ApprovalPolicy, allow_list: Vec<String>) -> Self {
         Self {
-            auto_approve,
+            approval_policy: policy,
             allow_list: allow_list.into_iter().collect(),
         }
     }
 
     /// Returns whether auto-approve is enabled
     pub fn is_auto_approve(&self) -> bool {
-        self.auto_approve
+        self.approval_policy == ApprovalPolicy::Bypass
+    }
+
+    /// Return the typed approval policy active for this session.
+    pub fn approval_policy(&self) -> ApprovalPolicy {
+        self.approval_policy
     }
 
     /// Returns whether this call would require an interactive decision.
     /// Callers use this before `check` to bind an approval to the exact
     /// arguments that were shown to the user.
     pub fn requires_confirmation(&self, tool_name: &str) -> bool {
-        !self.auto_approve && !self.allow_list.contains(tool_name)
+        self.requires_confirmation_for(tool_name, ToolCategory::Exec)
+    }
+
+    /// Category-aware confirmation predicate used by the production
+    /// dispatcher. AutoEdit is intentionally narrower than the protocol's
+    /// historical category-wide shortcut: only the built-in file Write/Edit
+    /// tools are auto-approved. Other Edit/Info tools can mutate remote or
+    /// durable state and therefore still require a decision.
+    pub fn requires_confirmation_for(&self, tool_name: &str, category: ToolCategory) -> bool {
+        if tool_name == "AskUserQuestion" {
+            return true;
+        }
+        if self.allow_list.contains(tool_name) {
+            return false;
+        }
+
+        match self.approval_policy {
+            ApprovalPolicy::Prompt => true,
+            ApprovalPolicy::AutoEdit => {
+                !(category == ToolCategory::Edit && matches!(tool_name, "Write" | "Edit"))
+            }
+            ApprovalPolicy::Bypass => false,
+        }
+    }
+
+    /// Whether approval authority is scoped to the exact input currently
+    /// being dispatched. Interactive decisions and AutoEdit's narrow file
+    /// grant are input-bound, so hooks cannot mutate approved arguments into a
+    /// different operation. Blanket Bypass and explicit tool-name allow-list
+    /// grants are deliberately unbound.
+    pub fn approval_is_input_bound(&self, tool_name: &str) -> bool {
+        if tool_name == "AskUserQuestion" {
+            return true;
+        }
+        if self.allow_list.contains(tool_name) {
+            return false;
+        }
+
+        match self.approval_policy {
+            ApprovalPolicy::Prompt | ApprovalPolicy::AutoEdit => true,
+            ApprovalPolicy::Bypass => false,
+        }
     }
 
     /// Add a tool name to the allow list at runtime.
@@ -41,7 +100,17 @@ impl ToolConfirmer {
 
     /// Check if the tool needs confirmation. Returns the user's decision.
     pub fn check(&mut self, tool_name: &str, tool_input_display: &str) -> ConfirmResult {
-        if self.auto_approve || self.allow_list.contains(tool_name) {
+        self.check_for(tool_name, ToolCategory::Exec, tool_input_display)
+    }
+
+    /// Category-aware confirmation check used by the production dispatcher.
+    pub fn check_for(
+        &mut self,
+        tool_name: &str,
+        category: ToolCategory,
+        tool_input_display: &str,
+    ) -> ConfirmResult {
+        if !self.requires_confirmation_for(tool_name, category) {
             return ConfirmResult::Approved;
         }
 
@@ -195,5 +264,55 @@ mod tests {
         // We can't test the Denied path without stdin, but we verify allow_list state:
         assert!(confirmer.allow_list.contains("Read"));
         assert!(!confirmer.allow_list.contains("Write"));
+    }
+
+    #[test]
+    fn typed_policy_confirmation_matrix_is_fail_closed() {
+        let prompt = ToolConfirmer::with_policy(ApprovalPolicy::Prompt, vec![]);
+        let auto_edit = ToolConfirmer::with_policy(ApprovalPolicy::AutoEdit, vec![]);
+        let bypass = ToolConfirmer::with_policy(ApprovalPolicy::Bypass, vec![]);
+
+        for category in [
+            ToolCategory::Info,
+            ToolCategory::Edit,
+            ToolCategory::Exec,
+            ToolCategory::Mcp,
+        ] {
+            assert!(prompt.requires_confirmation_for("AnyTool", category));
+            assert!(!bypass.requires_confirmation_for("AnyTool", category));
+        }
+
+        assert!(!auto_edit.requires_confirmation_for("Write", ToolCategory::Edit));
+        assert!(!auto_edit.requires_confirmation_for("Edit", ToolCategory::Edit));
+        assert!(auto_edit.approval_is_input_bound("Write"));
+        assert!(auto_edit.approval_is_input_bound("Edit"));
+
+        // Category alone grants no authority: remote and durable-state tools
+        // are classified Info/Edit too, so unknown names stay gated.
+        assert!(auto_edit.requires_confirmation_for("Notion", ToolCategory::Edit));
+        assert!(auto_edit.requires_confirmation_for("RecordEpisode", ToolCategory::Info));
+        assert!(auto_edit.requires_confirmation_for("Bash", ToolCategory::Exec));
+        assert!(auto_edit.requires_confirmation_for("McpTool", ToolCategory::Mcp));
+    }
+
+    #[test]
+    fn ask_user_question_always_requires_a_host_response() {
+        for policy in [
+            ApprovalPolicy::Prompt,
+            ApprovalPolicy::AutoEdit,
+            ApprovalPolicy::Bypass,
+        ] {
+            let confirmer = ToolConfirmer::with_policy(policy, vec!["AskUserQuestion".into()]);
+            assert!(confirmer.requires_confirmation_for("AskUserQuestion", ToolCategory::Info));
+            assert!(confirmer.approval_is_input_bound("AskUserQuestion"));
+        }
+    }
+
+    #[test]
+    fn tool_name_allow_list_remains_deliberately_unbound() {
+        let confirmer =
+            ToolConfirmer::with_policy(ApprovalPolicy::Prompt, vec!["TrustedLocalTool".into()]);
+        assert!(!confirmer.requires_confirmation_for("TrustedLocalTool", ToolCategory::Exec));
+        assert!(!confirmer.approval_is_input_bound("TrustedLocalTool"));
     }
 }

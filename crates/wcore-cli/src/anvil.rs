@@ -43,7 +43,14 @@ pub async fn run_forge(args: ForgeArgs) -> anyhow::Result<()> {
     // materialization failure — seat routing can only cheapen a forge,
     // never break it.
     let session_cfg = Config::resolve(&CliArgs::default())?;
-    let seat = materialize_driver_seat(&cf.anvil, &session_cfg)?;
+    wcore_agent::egress::install_egress_policy(&session_cfg);
+    let sandbox = Arc::new(wcore_sandbox::SandboxRegistry::required_for_session(
+        session_cfg.tools.sandbox.as_deref(),
+    )?);
+    let mut seat = materialize_driver_seat(&cf.anvil, &session_cfg)?;
+    seat.spawner = seat
+        .spawner
+        .with_sandbox_runtime(std::sync::Arc::clone(&sandbox));
     for note in &seat.notes {
         eprintln!("forge: {note}");
     }
@@ -54,7 +61,10 @@ pub async fn run_forge(args: ForgeArgs) -> anyhow::Result<()> {
     // diagnostic turn on a stall. Best-effort — a forge without a valve is
     // still a forge (it just stays cheap-dumb on a stall).
     let valve_seat = match materialize_valve_seat(&session_cfg) {
-        Ok(s) => {
+        Ok(mut s) => {
+            s.spawner = s
+                .spawner
+                .with_sandbox_runtime(std::sync::Arc::clone(&sandbox));
             eprintln!("forge: valve seat = {}", s.label);
             Some(s)
         }
@@ -81,6 +91,7 @@ pub async fn run_forge(args: ForgeArgs) -> anyhow::Result<()> {
         valve_spawner,
         &emitter,
         None,
+        sandbox,
     )
     .await
     {

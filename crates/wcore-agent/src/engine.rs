@@ -2100,8 +2100,10 @@ impl AgentEngine {
         let workflow_live_mode = config.observability.workflow_live_mode;
         let retained_config = config.clone();
         let system_prompt = config.system_prompt.clone().unwrap_or_default();
-        let confirmer =
-            ToolConfirmer::new(config.tools.auto_approve, config.tools.allow_list.clone());
+        let confirmer = ToolConfirmer::with_policy(
+            config.smart_approval_policy(),
+            config.tools.allow_list.clone(),
+        );
 
         let session_manager = if config.session.enabled {
             Some(SessionManager::new(
@@ -2284,8 +2286,10 @@ impl AgentEngine {
         let workflow_live_mode = config.observability.workflow_live_mode;
         let retained_config = config.clone();
         let system_prompt = config.system_prompt.clone().unwrap_or_default();
-        let confirmer =
-            ToolConfirmer::new(config.tools.auto_approve, config.tools.allow_list.clone());
+        let confirmer = ToolConfirmer::with_policy(
+            config.smart_approval_policy(),
+            config.tools.allow_list.clone(),
+        );
 
         let session_manager = if config.session.enabled {
             Some(SessionManager::new(
@@ -6388,15 +6392,10 @@ impl AgentEngine {
                     .as_ref()
                     .expect("protocol writer required for approval")
                     .clone();
-                // SAFETY: see confirm_call in orchestration/mod.rs —
-                // ToolConfirmer's critical sections cannot panic so
-                // the std::sync::Mutex can never be poisoned.
-                let auto_approve = self.confirmer.lock().unwrap().is_auto_approve();
                 ApprovalChannel {
                     manager: mgr.clone(),
                     writer,
                     msg_id: self.current_msg_id.clone(),
-                    auto_approve,
                 }
             });
             let exec_cfg = AgentExecutorConfig {
@@ -6970,6 +6969,7 @@ impl AgentEngine {
             self.config.clone(),
         )
         .with_sandbox_runtime(self.tools.sandbox_runtime())
+        .with_approval_manager(std::sync::Arc::clone(manager))
         // Bind sub-agents to the engine's cancel token so a host cancel stops
         // the whole workflow rather than letting 20+ sub-agents run to
         // completion and burn LLM calls.
@@ -7293,6 +7293,9 @@ impl AgentEngine {
             ),
         ))
         .with_cancel(self.cancel_token.clone());
+        if let Some(manager) = &self.approval_manager {
+            spawner = spawner.with_approval_manager(std::sync::Arc::clone(manager));
+        }
         if cfg.daily_cap_usd.is_some() || cfg.max_cost_usd.is_some() {
             let tracker = std::sync::Arc::new(parking_lot::Mutex::new(
                 wcore_budget::BudgetTracker::new(wcore_budget::BudgetCap::default()),

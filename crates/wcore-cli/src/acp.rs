@@ -418,9 +418,10 @@ async fn serve(args: AcpServeArgs) -> anyhow::Result<()> {
     }
     let turn_engine = Arc::new(engine);
 
-    let a2a = Arc::new(crate::acp_engine::EngineA2aHandler::new(
-        agent_id, config, cwd,
-    ));
+    let a2a = Arc::new(
+        crate::acp_engine::EngineA2aHandler::new(agent_id, config, cwd)
+            .force_tools(args.allow_all_tools),
+    );
     let mut acp_server = AcpServer::new()
         .with_a2a_handler(a2a)
         .with_turn_engine(turn_engine);

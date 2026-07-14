@@ -763,9 +763,17 @@ impl ConfigSurface {
                     .unwrap_or(0);
                 let next = (idx as isize + delta).rem_euclid(len as isize) as usize;
                 self.current.approval = ApprovalMode::ALL[next];
+                self.current.tools_auto_approve = self.current.approval == ApprovalMode::Force;
             }
             Row::PlanFirst => self.current.plan_first = !self.current.plan_first,
-            Row::Tools => self.current.tools_auto_approve = !self.current.tools_auto_approve,
+            Row::Tools => {
+                self.current.tools_auto_approve = !self.current.tools_auto_approve;
+                if self.current.tools_auto_approve {
+                    self.current.approval = ApprovalMode::Force;
+                } else if self.current.approval == ApprovalMode::Force {
+                    self.current.approval = ApprovalMode::Default;
+                }
+            }
             Row::Compaction => {
                 let len = Compaction::ALL.len();
                 let idx = Compaction::ALL
@@ -4039,11 +4047,14 @@ mod tests {
         assert_eq!(surface.current.approval, ApprovalMode::Default);
         surface.handle_key(ch(' '), &mut app);
         assert_eq!(surface.current.approval, ApprovalMode::AutoEdit);
+        assert!(!surface.current.tools_auto_approve);
         surface.handle_key(ch(' '), &mut app);
         assert_eq!(surface.current.approval, ApprovalMode::Force);
+        assert!(surface.current.tools_auto_approve);
         // Cycles back around to Default.
         surface.handle_key(ch(' '), &mut app);
         assert_eq!(surface.current.approval, ApprovalMode::Default);
+        assert!(!surface.current.tools_auto_approve);
     }
 
     #[test]

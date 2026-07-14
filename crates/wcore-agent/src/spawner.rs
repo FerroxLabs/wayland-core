@@ -148,6 +148,10 @@ pub struct AgentSpawner {
     /// receives this exact `Arc`; spawning must never re-read process-global
     /// sandbox settings or select a different backend mid-session.
     sandbox_runtime: Arc<wcore_sandbox::SandboxRegistry>,
+    /// Shared live posture authority for host-backed sessions. Read only when
+    /// deriving a child config so runtime de-escalation applies to descendants
+    /// that have not started yet.
+    approval_manager: Option<Arc<wcore_protocol::ToolApprovalManager>>,
     /// v0.8.0 Task J — optional `AgentBus` for lifecycle event
     /// publication. `None` preserves the legacy "silent spawner"
     /// behaviour expected by older tests; production callers attach the
@@ -188,6 +192,7 @@ impl AgentSpawner {
             provider,
             base_config: config,
             sandbox_runtime,
+            approval_manager: None,
             bus: None,
             cancel: tokio_util::sync::CancellationToken::new(),
             session_runtime: None,
@@ -200,6 +205,15 @@ impl AgentSpawner {
     /// Bind spawned children to the parent session's immutable sandbox.
     pub fn with_sandbox_runtime(mut self, runtime: Arc<wcore_sandbox::SandboxRegistry>) -> Self {
         self.sandbox_runtime = runtime;
+        self
+    }
+
+    /// Bind child posture derivation to the host session's live manager.
+    pub fn with_approval_manager(
+        mut self,
+        manager: Arc<wcore_protocol::ToolApprovalManager>,
+    ) -> Self {
+        self.approval_manager = Some(manager);
         self
     }
 
@@ -640,6 +654,9 @@ impl AgentSpawner {
     /// inside any sub-agent it delegates to.
     fn child_config(&self, sub_config: &SubAgentConfig) -> Config {
         let mut config = self.base_config.clone();
+        if let Some(manager) = &self.approval_manager {
+            config.set_smart_approval_policy(manager.current_approval_policy());
+        }
         config.max_turns = Some(sub_config.max_turns);
         config.max_tokens = sub_config.max_tokens;
         // #112 — a per-spawn cap is ALWAYS deliberate: it must bind on the
@@ -688,6 +705,7 @@ impl AgentSpawner {
             provider: self.provider.clone(),
             base_config: self.base_config.clone(),
             sandbox_runtime: Arc::clone(&self.sandbox_runtime),
+            approval_manager: self.approval_manager.clone(),
             bus: self.bus.clone(),
             cancel: self.cancel.clone(),
             session_runtime: self.session_runtime.clone(),
@@ -1240,14 +1258,17 @@ mod posture_inheritance_tests {
     //! on every spawn, so a parent that prompts for Bash/Write/Edit was
     //! silently bypassed by a `Delegate`/`Spawn` call. These tests assert the
     //! child config built by `AgentSpawner::child_config` carries the parent's
-    //! `auto_approve` and `allow_list` unchanged.
+    //! typed approval policy, legacy `auto_approve`, and `allow_list` unchanged.
 
     use std::sync::Arc;
 
     use async_trait::async_trait;
     use tokio::sync::mpsc;
     use wcore_config::config::{Config, ToolsConfig};
+    use wcore_protocol::ToolApprovalManager;
+    use wcore_protocol::commands::SessionMode;
     use wcore_providers::{LlmProvider, ProviderError};
+    use wcore_types::execution_policy::ApprovalPolicy;
     use wcore_types::llm::{LlmEvent, LlmRequest};
 
     use super::{AgentSpawner, SubAgentConfig};
@@ -1325,6 +1346,31 @@ mod posture_inheritance_tests {
         assert!(
             child.tools.auto_approve,
             "child must inherit parent's auto_approve=true"
+        );
+    }
+
+    #[test]
+    fn typed_posture_tracks_live_manager_through_child_clones() {
+        let mut parent = config_with_posture(false, vec![]);
+        parent.set_smart_approval_policy(ApprovalPolicy::AutoEdit);
+        let manager = Arc::new(ToolApprovalManager::new());
+        manager.set_mode(SessionMode::AutoEdit);
+        let spawner = AgentSpawner::new(Arc::new(NeverProvider), parent)
+            .with_approval_manager(Arc::clone(&manager));
+
+        let direct_child = spawner.child_config(&sub_config());
+
+        assert_eq!(
+            direct_child.smart_approval_policy(),
+            ApprovalPolicy::AutoEdit,
+            "direct children must inherit the typed AutoEdit posture"
+        );
+        manager.set_mode(SessionMode::Default);
+        let cloned_child = spawner.clone_for_spawn().child_config(&sub_config());
+        assert_eq!(cloned_child.smart_approval_policy(), ApprovalPolicy::Prompt);
+        assert!(
+            !cloned_child.tools.auto_approve,
+            "runtime de-escalation must revoke bypass for fleet/parallel children"
         );
     }
 

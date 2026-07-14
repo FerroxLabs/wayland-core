@@ -44,6 +44,7 @@ use wcore_protocol::reader::spawn_stdin_reader;
 use wcore_protocol::writer::{ProtocolEmitter, ProtocolWriter};
 use wcore_protocol::{ToolApprovalManager, ToolApprovalResult};
 use wcore_providers::LlmProvider;
+use wcore_types::execution_policy::{ApprovalPolicy, PolicySource};
 
 // v0.8.0 N.1+N.2+N.3 — slash-runtime dispatch helpers.
 //
@@ -1613,6 +1614,7 @@ async fn run() -> anyhow::Result<ExitCode> {
     }
 
     let provider_name = config.provider_label.clone();
+    let smart_policy = local_smart_policy(&config, cli.force);
 
     // Bootstrap engine with full feature initialization. Phase 1B-2 — this
     // build backs both the long-running interactive line-REPL and the
@@ -1620,6 +1622,7 @@ async fn run() -> anyhow::Result<ExitCode> {
     // primary interactive session listens to configured channels (the
     // short-lived one-shot simply aborts the subscriber on exit).
     let mut bootstrap = AgentBootstrap::new(config, &cwd, output.clone())
+        .with_smart_execution_policy(smart_policy, PolicySource::LocalCliLaunch)
         .plugin_provider_router(make_plugin_provider_router())
         .enable_inbound_dispatch(true);
 
@@ -1834,37 +1837,20 @@ fn resolve_resume(
 /// when a config already exists (the `wayland-core setup` re-entry
 /// point). When `false` the first-run gate decides: Onboarding on a true
 /// first run, Workspace otherwise.
-/// Map the persisted config approval posture to the engine's runtime
-/// `SessionMode`. Keeps `wcore-config` decoupled from `wcore-protocol`.
-fn approval_mode_to_session(
-    mode: wcore_config::config::ApprovalMode,
-) -> wcore_protocol::commands::SessionMode {
+fn approval_policy_to_session(policy: ApprovalPolicy) -> wcore_protocol::commands::SessionMode {
     use wcore_protocol::commands::SessionMode;
-    match mode {
-        wcore_config::config::ApprovalMode::Default => SessionMode::Default,
-        wcore_config::config::ApprovalMode::AutoEdit => SessionMode::AutoEdit,
-        wcore_config::config::ApprovalMode::Force => SessionMode::Force,
+    match policy {
+        ApprovalPolicy::Prompt => SessionMode::Default,
+        ApprovalPolicy::AutoEdit => SessionMode::AutoEdit,
+        ApprovalPolicy::Bypass => SessionMode::Force,
     }
 }
 
-/// Boot-time approval posture from local trust sources: the config's
-/// `[default] approval_mode`, with `--force` (or `WAYLAND_ALLOW_WIRE_FORCE`,
-/// surfaced by the caller as `force`) overriding to `Force`. This is the
-/// LOCAL operator's posture — distinct from a wire-originated mode change,
-/// which goes through the GHSA-8r7g-gated `set_mode_from_wire`.
-///
-/// wayland#241: both the TUI (`run_tui_mode`) and json-stream
-/// (`run_json_stream_mode`) paths seed through this one helper so they can't
-/// drift — the json-stream path previously skipped the config seed entirely,
-/// silently ignoring a user's `approval_mode = "auto-edit"` / `"force"`.
-fn initial_session_mode(
-    config_mode: wcore_config::config::ApprovalMode,
-    force: bool,
-) -> wcore_protocol::commands::SessionMode {
+fn local_smart_policy(config: &Config, force: bool) -> ApprovalPolicy {
     if force {
-        wcore_protocol::commands::SessionMode::Force
+        ApprovalPolicy::Bypass
     } else {
-        approval_mode_to_session(config_mode)
+        config.smart_approval_policy()
     }
 }
 
@@ -1913,12 +1899,13 @@ async fn run_tui_mode(
     }
 
     // The status-bar snapshot is taken from the resolved config before
-    // it is moved into the bootstrap. `--force` is reflected on the view
-    // so the status bar can paint the `· FORCE` badge.
+    // it is moved into the bootstrap. Keep `--force` as launch authority
+    // for rebinds; the status bar renders active posture from `App::mode`.
     let mut config_view = tui::config_view_from(&config);
     config_view.force = force;
     let context_view = tui::context_view_from(&config);
     let provider_name = config.provider_label.clone();
+    let smart_policy = local_smart_policy(&config, force);
 
     // Snapshot the registered hooks BEFORE `config` is moved into the
     // bootstrap below. `/hooks` reads this immutable list (the dispatch is
@@ -1966,13 +1953,15 @@ async fn run_tui_mode(
     // Seed the initial approval posture from config (`[default] approval_mode`,
     // editable via /config); `--force` overrides to Force. When Force, the
     // TUI's approval modal never opens (no `ApprovalRequired` event) and the
-    // status bar renders the FORCE badge so the mode is visible.
-    approval_manager.set_mode(initial_session_mode(config.approval_mode, force));
+    // status bar renders the live mode so later de-escalation is visible.
+    approval_manager.set_mode(approval_policy_to_session(smart_policy));
 
     // Phase 1B-2 — the interactive TUI is a primary long-running session, so
     // opt into inbound channel dispatch (the InboundSubscriber turns admitted
     // channel messages into agent turns for the lifetime of this session).
     let mut bootstrap = AgentBootstrap::new(config, cwd, output.clone())
+        .with_smart_execution_policy(smart_policy, PolicySource::LocalCliLaunch)
+        .with_approval_manager(approval_manager.clone())
         .plugin_provider_router(make_plugin_provider_router())
         .enable_inbound_dispatch(true);
 
@@ -2052,7 +2041,6 @@ async fn run_tui_mode(
     // The engine REQUIRES a protocol writer once an approval manager is
     // set (the per-turn `ApprovalChannel` emits `ToolRequest` /
     // `ApprovalRequired` through it) — so both must be wired together.
-    engine.set_approval_manager(approval_manager.clone());
     // Wave 6 #24 — use the dedupe variant so a self-gating engine site (the
     // live-workflow gate emits `ToolRequest` + its own `ApprovalRequired`)
     // yields exactly ONE gate frame, not the synthesized + explicit pair (which
@@ -2125,6 +2113,7 @@ async fn run_tui_mode(
         engine: tui_engine,
         events: rx,
         config: config_view,
+        initial_mode: approval_policy_to_session(smart_policy),
         context: context_view,
         first_run,
         force_onboarding,
@@ -2560,7 +2549,7 @@ type PendingConfig = (
 ///
 /// The engine's orchestration approval path
 /// (`execute_tool_calls_with_approval`) emits a `ToolRequest` ONLY when a tool
-/// actually needs human approval — auto-approved categories and allow-listed
+/// actually needs human approval — auto-approved tools/grants and allow-listed
 /// read-only tools skip the request entirely, and under a Force posture no
 /// `ToolRequest` is emitted at all. So a `ToolRequest` reaching this writer
 /// unambiguously means "the engine is parked on
@@ -2581,10 +2570,10 @@ type PendingConfig = (
 /// recorded so the engine's own subsequent `ApprovalRequired` for the same
 /// call_id is suppressed, leaving exactly one gate frame per call.
 struct GatingProtocolWriter {
-    inner: Arc<ProtocolWriter>,
+    inner: Arc<dyn ProtocolEmitter>,
     /// The live approval posture. The gate frame is synthesized ONLY when the
     /// tool will actually be parked (`!is_auto_approved`); under Force (or for
-    /// an auto-approved category) the engine auto-runs the tool, so emitting an
+    /// an auto-approved tool/grant) the engine auto-runs the tool, so emitting an
     /// `ApprovalRequired` would be a false gate the host would wait on forever.
     approval: Arc<ToolApprovalManager>,
     /// call_ids for which this writer already synthesized an
@@ -2599,7 +2588,7 @@ struct GatingProtocolWriter {
 
 impl GatingProtocolWriter {
     fn new(
-        inner: Arc<ProtocolWriter>,
+        inner: Arc<dyn ProtocolEmitter>,
         approval: Arc<ToolApprovalManager>,
         approval_bridge: Option<Arc<wcore_agent::approval::ApprovalBridge>>,
     ) -> Self {
@@ -2642,9 +2631,13 @@ impl ProtocolEmitter for GatingProtocolWriter {
                 wcore_protocol::events::ToolCategory::Info => "info",
             };
             // Only synthesize the gate when the tool will actually be parked.
-            // Under Force (or an auto-approved category) the engine auto-runs
+            // Under Force (or an auto-approved tool/grant) the engine auto-runs
             // the tool, so a gate frame here would be a false gate.
-            if !self.approval.is_auto_approved(reason) {
+            if !self.approval.is_auto_approved_tool_cmd(
+                reason,
+                Some(&tool.name),
+                tool.args.get("command").and_then(|value| value.as_str()),
+            ) {
                 if let Ok(mut seen) = self.synthesized.lock() {
                     seen.insert(call_id.clone());
                 }
@@ -2687,6 +2680,7 @@ async fn run_json_stream_mode(
     assistant: Option<String>,
 ) -> anyhow::Result<()> {
     let writer = Arc::new(ProtocolWriter::new());
+    let smart_policy = local_smart_policy(&config, force);
 
     // F-009: pre-compute cost_attribution from the config compat rows BEFORE
     // config is moved into AgentBootstrap. Bootstrap applies the same gate
@@ -2733,7 +2727,7 @@ async fn run_json_stream_mode(
     // `"force"` was silently ignored for the desktop host — every mutating
     // tool then waited on an approval the host never sent. `--force` still
     // overrides to Force (F-002).
-    approval_manager.set_mode(initial_session_mode(config.approval_mode, force));
+    approval_manager.set_mode(approval_policy_to_session(smart_policy));
     let output: Arc<dyn OutputSink> = protocol_sink.clone();
 
     let provider_name = config.provider_label.clone();
@@ -2768,6 +2762,8 @@ async fn run_json_stream_mode(
     // desktop app), so
     // opt into inbound channel dispatch.
     let mut bootstrap = AgentBootstrap::new(config, cwd, output.clone())
+        .with_smart_execution_policy(smart_policy, PolicySource::LocalCliLaunch)
+        .with_approval_manager(approval_manager.clone())
         .plugin_provider_router(make_plugin_provider_router())
         .enable_inbound_dispatch(true)
         .active_assistant(assistant.clone())
@@ -2868,7 +2864,6 @@ async fn run_json_stream_mode(
         rx
     });
 
-    engine.set_approval_manager(approval_manager.clone());
     // D012 (P0 security): install the gating writer as the engine's
     // tool-lifecycle emitter so a gated mutating tool emits a host-visible
     // `ApprovalRequired` frame before it runs (the engine's orchestration gate
@@ -3647,6 +3642,18 @@ mod tests {
     use serde_json::{Value, json};
     use wcore_mcp::manager::McpManager;
 
+    #[derive(Default)]
+    struct CapturingProtocolEmitter {
+        events: std::sync::Mutex<Vec<ProtocolEvent>>,
+    }
+
+    impl ProtocolEmitter for CapturingProtocolEmitter {
+        fn emit(&self, event: &ProtocolEvent) -> std::io::Result<()> {
+            self.events.lock().unwrap().push(event.clone());
+            Ok(())
+        }
+    }
+
     #[test]
     fn json_stream_guard_blocks_profile_intent_without_home() {
         // Host passed --profile but no WAYLAND_HOME materialized → refuse.
@@ -3920,20 +3927,21 @@ mod tests {
         use wcore_protocol::commands::SessionMode;
 
         // Config posture is honored when --force is absent.
-        assert_eq!(
-            initial_session_mode(ApprovalMode::Default, false),
-            SessionMode::Default
-        );
-        assert_eq!(
-            initial_session_mode(ApprovalMode::AutoEdit, false),
-            SessionMode::AutoEdit,
-            "config auto-edit must reach the session (the #241 regression)"
-        );
-        assert_eq!(
-            initial_session_mode(ApprovalMode::Force, false),
-            SessionMode::Force,
-            "config force must reach the session without --force"
-        );
+        for (mode, expected) in [
+            (ApprovalMode::Default, SessionMode::Default),
+            (ApprovalMode::AutoEdit, SessionMode::AutoEdit),
+            (ApprovalMode::Force, SessionMode::Force),
+        ] {
+            let config = Config {
+                approval_mode: mode,
+                ..Default::default()
+            };
+            assert_eq!(
+                approval_policy_to_session(local_smart_policy(&config, false)),
+                expected,
+                "config {mode:?} must reach the session"
+            );
+        }
 
         // --force overrides every config posture to Force.
         for m in [
@@ -3941,12 +3949,69 @@ mod tests {
             ApprovalMode::AutoEdit,
             ApprovalMode::Force,
         ] {
+            let config = Config {
+                approval_mode: m,
+                ..Default::default()
+            };
             assert_eq!(
-                initial_session_mode(m, true),
+                approval_policy_to_session(local_smart_policy(&config, true)),
                 SessionMode::Force,
                 "--force must override config {m:?} to Force"
             );
         }
+
+        let legacy = Config {
+            tools: wcore_config::config::ToolsConfig {
+                auto_approve: true,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        assert_eq!(
+            approval_policy_to_session(local_smart_policy(&legacy, false)),
+            SessionMode::Force,
+            "legacy auto-approve must converge with the typed policy"
+        );
+        let view = wcore_cli::tui::config_view_from(&legacy);
+        assert_eq!(view.approval, "force");
+        assert!(view.tools_auto_approve);
+    }
+
+    #[test]
+    fn auto_edit_gate_visibility_is_tool_name_aware() {
+        use wcore_protocol::commands::SessionMode;
+        use wcore_protocol::events::{ToolCategory, ToolInfo};
+
+        let manager = Arc::new(ToolApprovalManager::new());
+        manager.set_mode(SessionMode::AutoEdit);
+        let capture = Arc::new(CapturingProtocolEmitter::default());
+        let inner: Arc<dyn ProtocolEmitter> = capture.clone();
+        let writer = GatingProtocolWriter::new(inner, manager, None);
+
+        for (call_id, name) in [("remote-edit", "Notion"), ("local-write", "Write")] {
+            writer
+                .emit(&ProtocolEvent::ToolRequest {
+                    msg_id: "m".into(),
+                    call_id: call_id.into(),
+                    tool: ToolInfo {
+                        name: name.into(),
+                        category: ToolCategory::Edit,
+                        args: json!({}),
+                        description: String::new(),
+                    },
+                })
+                .unwrap();
+        }
+
+        let events = capture.events.lock().unwrap();
+        assert!(events.iter().any(|event| matches!(
+            event,
+            ProtocolEvent::ApprovalRequired { call_id, .. } if call_id == "remote-edit"
+        )));
+        assert!(!events.iter().any(|event| matches!(
+            event,
+            ProtocolEvent::ApprovalRequired { call_id, .. } if call_id == "local-write"
+        )));
     }
 
     #[test]

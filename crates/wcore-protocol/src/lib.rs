@@ -420,9 +420,10 @@ impl ToolApprovalManager {
         true
     }
 
-    /// Category-only auto-approve check. Thin wrapper over
-    /// [`is_auto_approved_cmd`] with no command string, so prefix rules are
-    /// never consulted. Kept for callers that have no command context.
+    /// Category-only auto-approve check. AutoEdit deliberately cannot grant
+    /// through this legacy API because a category does not identify whether
+    /// the tool is the built-in `Write`/`Edit` pair or a remote/durable
+    /// mutator sharing that category.
     pub fn is_auto_approved(&self, category: &str) -> bool {
         self.is_auto_approved_cmd(category, None)
     }
@@ -434,13 +435,28 @@ impl ToolApprovalManager {
     /// is supplied, so `command == None` is byte-identical to the pre-W0
     /// `is_auto_approved` behavior.
     pub fn is_auto_approved_cmd(&self, category: &str, command: Option<&str>) -> bool {
+        self.is_auto_approved_tool_cmd(category, None, command)
+    }
+
+    /// Tool-aware auto-approve check used by execution paths. AutoEdit is
+    /// intentionally limited to the exact built-in `Write` and `Edit` tools;
+    /// category-wide approval would silently authorize remote or durable
+    /// mutations that happen to report `Info` or `Edit`.
+    pub fn is_auto_approved_tool_cmd(
+        &self,
+        category: &str,
+        tool_name: Option<&str>,
+        command: Option<&str>,
+    ) -> bool {
         // Check session mode first
         let mode_approved = self
             .session_mode
             .lock()
             .map(|mode| match *mode {
                 SessionMode::Force => true,
-                SessionMode::AutoEdit => category == "info" || category == "edit",
+                SessionMode::AutoEdit => {
+                    category == "edit" && matches!(tool_name, Some("Write" | "Edit"))
+                }
                 SessionMode::Default => false,
             })
             .unwrap_or(false);
@@ -540,7 +556,7 @@ impl ToolApprovalManager {
     /// peer). Both privilege-escalating modes are gated behind the local
     /// operator opt-in ([`set_allow_wire_force`](Self::set_allow_wire_force)):
     /// `Force` auto-approves every tool, and `AutoEdit` auto-approves the
-    /// `edit` category (file Write/Edit) — so a wire peer setting `AutoEdit`
+    /// built-in file Write/Edit tools — so a wire peer setting `AutoEdit`
     /// gets write-without-consent (a git hook / `.bashrc` / `authorized_keys`
     /// write is write-to-RCE). Only `Default` (which asks for everything) is
     /// safe to accept from an un-opted-in wire peer. Without the opt-in an
@@ -576,6 +592,21 @@ impl ToolApprovalManager {
             })
             .unwrap_or("default")
             .to_string()
+    }
+
+    /// Return the live session posture in the provider-neutral execution
+    /// policy vocabulary. Child-agent builders use this at spawn time so a
+    /// host tightening Force to Default cannot leave descendants on the
+    /// launch-time bypass snapshot.
+    pub fn current_approval_policy(&self) -> wcore_types::execution_policy::ApprovalPolicy {
+        self.session_mode
+            .lock()
+            .map(|mode| match *mode {
+                SessionMode::Default => wcore_types::execution_policy::ApprovalPolicy::Prompt,
+                SessionMode::AutoEdit => wcore_types::execution_policy::ApprovalPolicy::AutoEdit,
+                SessionMode::Force => wcore_types::execution_policy::ApprovalPolicy::Bypass,
+            })
+            .unwrap_or(wcore_types::execution_policy::ApprovalPolicy::Prompt)
     }
 
     pub fn drop_pending(&self, call_id: &str) {
@@ -672,8 +703,8 @@ mod tests {
         // A wire peer cannot escalate to Force by default.
         assert!(!mgr.set_mode_from_wire(SessionMode::Force));
         assert_eq!(mgr.current_mode(), "default");
-        // AutoEdit is ALSO privilege-escalating (it auto-approves the `edit`
-        // category = file Write/Edit), so a bare wire peer cannot set it either
+        // AutoEdit is ALSO privilege-escalating (it auto-approves the built-in
+        // file Write/Edit tools), so a bare wire peer cannot set it either
         // — write-without-consent is write-to-RCE (GHSA-8r7g).
         assert!(!mgr.set_mode_from_wire(SessionMode::AutoEdit));
         assert_eq!(mgr.current_mode(), "default");
@@ -705,11 +736,16 @@ mod tests {
     // --- SessionMode: auto_edit mode ---
 
     #[test]
-    fn auto_edit_mode_approves_info_and_edit() {
+    fn auto_edit_mode_only_approves_builtin_write_and_edit() {
         let mgr = ToolApprovalManager::new();
         mgr.set_mode(SessionMode::AutoEdit);
-        assert!(mgr.is_auto_approved("info"));
-        assert!(mgr.is_auto_approved("edit"));
+        assert!(mgr.is_auto_approved_tool_cmd("edit", Some("Write"), None));
+        assert!(mgr.is_auto_approved_tool_cmd("edit", Some("Edit"), None));
+        assert!(!mgr.is_auto_approved_tool_cmd("info", Some("Write"), None));
+        assert!(!mgr.is_auto_approved_tool_cmd("edit", Some("Notion"), None));
+        assert!(!mgr.is_auto_approved_tool_cmd("info", Some("RecordEpisode"), None));
+        assert!(!mgr.is_auto_approved("edit"));
+        assert!(!mgr.is_auto_approved("info"));
     }
 
     #[test]
@@ -734,7 +770,7 @@ mod tests {
         let mgr = ToolApprovalManager::new();
         mgr.set_mode(SessionMode::Force);
         assert!(mgr.is_auto_approved("info"));
-        assert!(mgr.is_auto_approved("edit"));
+        assert!(mgr.is_auto_approved_tool_cmd("edit", Some("Write"), None));
         assert!(mgr.is_auto_approved("exec"));
         assert!(mgr.is_auto_approved("mcp"));
     }
@@ -804,7 +840,7 @@ mod tests {
 
         // Switch to auto_edit
         mgr.set_mode(SessionMode::AutoEdit);
-        assert!(mgr.is_auto_approved("edit"));
+        assert!(mgr.is_auto_approved_tool_cmd("edit", Some("Write"), None));
         assert!(!mgr.is_auto_approved("exec"));
 
         // Switch to force
@@ -986,12 +1022,12 @@ mod tests {
         // Switch to auto_edit: exec still approved via user "always"
         mgr.set_mode(SessionMode::AutoEdit);
         assert!(mgr.is_auto_approved("exec"));
-        assert!(mgr.is_auto_approved("info")); // from mode
+        assert!(mgr.is_auto_approved_tool_cmd("edit", Some("Write"), None));
 
         // Switch back to default: exec still approved via user "always"
         mgr.set_mode(SessionMode::Default);
         assert!(mgr.is_auto_approved("exec"));
-        assert!(!mgr.is_auto_approved("info")); // mode no longer provides this
+        assert!(!mgr.is_auto_approved_tool_cmd("edit", Some("Write"), None));
     }
 
     // --- W5.6 H-2: ApprovalScope::Always must scope to tool name, not category ---

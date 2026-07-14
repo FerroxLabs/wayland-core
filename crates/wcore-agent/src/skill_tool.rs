@@ -16,6 +16,7 @@ use wcore_skills::telemetry::{
     NullTelemetrySink, SkillOutcome, SkillTelemetryEvent, SkillTelemetrySink,
 };
 use wcore_skills::types::ExecutionContext;
+use wcore_types::execution_policy::ApprovalPolicy;
 use wcore_types::tool::{JsonSchema, ToolResult};
 
 use wcore_tools::Tool;
@@ -36,6 +37,10 @@ pub struct SkillTool {
     cwd: String,
     /// Permission checker for skill-level deny/allow rules.
     checker: SkillPermissionChecker,
+    /// Host-backed sessions resolve elevated-skill authority from this shared
+    /// manager on every invocation. Standalone sessions without a manager
+    /// retain the checker's normalized typed launch posture.
+    approval_manager: Option<Arc<wcore_protocol::ToolApprovalManager>>,
     /// Session ID passed to prepare_inline_content for ${WCORE_SESSION_ID} substitution
     /// (also expands the legacy ${AIONRS_SESSION_ID} alias).
     /// None if sessions are disabled or not yet initialised.
@@ -62,6 +67,7 @@ impl SkillTool {
             catalog,
             cwd,
             checker,
+            approval_manager: None,
             session_id: None,
             spawner: None,
             telemetry_sink: Arc::new(NullTelemetrySink),
@@ -80,6 +86,7 @@ impl SkillTool {
             catalog,
             cwd,
             checker,
+            approval_manager: None,
             session_id,
             spawner: None,
             telemetry_sink: Arc::new(NullTelemetrySink),
@@ -99,6 +106,7 @@ impl SkillTool {
             catalog,
             cwd,
             checker,
+            approval_manager: None,
             session_id,
             spawner,
             telemetry_sink: Arc::new(NullTelemetrySink),
@@ -124,6 +132,32 @@ impl SkillTool {
     pub fn with_trust_project_hooks(mut self, trust: bool) -> Self {
         self.trust_project_hooks = trust;
         self
+    }
+
+    /// Require invocation-time approval authority from the host session.
+    ///
+    /// A poisoned manager resolves to Prompt through
+    /// `current_approval_policy`, so it cannot fall back to a stale
+    /// launch-time `auto_approve` snapshot.
+    pub fn with_live_approval_manager(
+        mut self,
+        manager: Arc<wcore_protocol::ToolApprovalManager>,
+    ) -> Self {
+        self.approval_manager = Some(manager);
+        self
+    }
+
+    fn permission_for(&self, skill: &wcore_skills::types::SkillMetadata) -> SkillPermission {
+        let Some(manager) = self.approval_manager.as_ref() else {
+            return self.checker.check(skill);
+        };
+
+        let auto_approve = manager.current_approval_policy() == ApprovalPolicy::Bypass;
+        self.checker.check_with_auto_approve(skill, auto_approve)
+    }
+
+    fn skill_is_authorized(&self, skill: &wcore_skills::types::SkillMetadata) -> bool {
+        self.permission_for(skill) == SkillPermission::Allow
     }
 
     /// Build a comma-separated list of available skill names for error messages.
@@ -177,7 +211,7 @@ impl SkillTool {
         };
 
         // Check skill-level permissions (applies to both inline and fork modes).
-        match self.checker.check(&skill) {
+        match self.permission_for(&skill) {
             SkillPermission::Deny => {
                 return (
                     Some(skill.name.clone()),
@@ -377,6 +411,9 @@ impl Tool for SkillTool {
         // catalogs return None here — `execute()` is the only place that
         // can guarantee metadata is loaded.
         let skill = self.catalog.find_metadata_sync(skill_name)?;
+        if !self.skill_is_authorized(&skill) {
+            return None;
+        }
         // Fork skills run in their own sub-agent context; modifiers must not
         // propagate back to the parent conversation.
         if skill.execution_context == ExecutionContext::Fork {
@@ -388,6 +425,9 @@ impl Tool for SkillTool {
     fn skill_hooks_for(&self, input: &serde_json::Value) -> Option<HooksConfig> {
         let skill_name = input["skill"].as_str()?;
         let skill = self.catalog.find_metadata_sync(skill_name)?;
+        if !self.skill_is_authorized(&skill) {
+            return None;
+        }
         let config = parse_skill_hooks(
             skill.hooks_raw.as_ref(),
             &skill.name,
@@ -592,10 +632,79 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn live_posture_revokes_elevated_skill_without_rebuilding_tool() {
+        let mut skill = make_skill("hooked", "instructions");
+        skill.hooks_raw = Some(json!({
+            "PreToolUse": [{"hooks": [{"type": "command", "command": "echo pre"}]}]
+        }));
+        let manager = Arc::new(wcore_protocol::ToolApprovalManager::new());
+        manager.set_mode(wcore_protocol::commands::SessionMode::Force);
+        let tool = SkillTool::new(
+            Arc::new(wcore_skills::refs::SkillCatalog::from_metadata_vec(vec![
+                skill,
+            ])),
+            "/tmp".to_string(),
+            SkillPermissionChecker::new(vec![], vec![], false),
+        )
+        .with_live_approval_manager(Arc::clone(&manager));
+
+        let allowed = tool.execute(json!({ "skill": "hooked" })).await;
+        assert!(!allowed.is_error);
+        assert!(
+            tool.skill_hooks_for(&json!({ "skill": "hooked" }))
+                .is_some()
+        );
+
+        manager.set_mode(wcore_protocol::commands::SessionMode::Default);
+        let revoked = tool.execute(json!({ "skill": "hooked" })).await;
+        assert!(revoked.is_error);
+        assert!(revoked.content.contains("requires user approval"));
+        assert!(
+            tool.skill_hooks_for(&json!({ "skill": "hooked" }))
+                .is_none()
+        );
+
+        manager.set_mode(wcore_protocol::commands::SessionMode::AutoEdit);
+        let auto_edit = tool.execute(json!({ "skill": "hooked" })).await;
+        assert!(
+            auto_edit.is_error,
+            "AutoEdit must not authorize skill hooks"
+        );
+    }
+
+    #[tokio::test]
+    async fn standalone_tool_preserves_normalized_bypass_snapshot() {
+        let mut elevated = make_skill("hooked", "instructions");
+        elevated.hooks_raw = Some(json!({
+            "PreToolUse": [{"hooks": [{"type": "command", "command": "echo pre"}]}]
+        }));
+        let tool = SkillTool::new(
+            Arc::new(wcore_skills::refs::SkillCatalog::from_metadata_vec(vec![
+                elevated,
+            ])),
+            "/tmp".to_string(),
+            SkillPermissionChecker::new(vec![], vec![], true),
+        );
+
+        let result = tool.execute(json!({ "skill": "hooked" })).await;
+        assert!(!result.is_error);
+        assert!(
+            tool.skill_hooks_for(&json!({ "skill": "hooked" }))
+                .is_some()
+        );
+    }
+
+    #[tokio::test]
     async fn test_fork_skill_returns_error() {
         let mut skill = make_skill("fork-skill", "body");
         skill.execution_context = ExecutionContext::Fork;
-        let tool = tool_with(vec![skill]);
+        let tool = SkillTool::new(
+            Arc::new(wcore_skills::refs::SkillCatalog::from_metadata_vec(vec![
+                skill,
+            ])),
+            "/tmp".to_string(),
+            SkillPermissionChecker::new(vec![], vec!["fork-skill".to_string()], false),
+        );
         let result = tool.execute(json!({ "skill": "fork-skill" })).await;
         assert!(result.is_error);
         assert!(result.content.contains("fork execution context"));
@@ -957,7 +1066,13 @@ mod supplemental_tests_p6 {
     fn tc_6_17_skill_with_model_returns_some() {
         let mut skill = base_skill("model-skill");
         skill.model = Some("test-model".to_string());
-        let tool = tool_with(vec![skill]);
+        let tool = SkillTool::new(
+            Arc::new(wcore_skills::refs::SkillCatalog::from_metadata_vec(vec![
+                skill,
+            ])),
+            "/tmp".to_string(),
+            SkillPermissionChecker::new(vec![], vec!["model-skill".to_string()], false),
+        );
 
         let modifier = tool.context_modifier_for(&json!({"skill": "model-skill"}));
         assert!(modifier.is_some());
@@ -972,7 +1087,13 @@ mod supplemental_tests_p6 {
     fn tc_6_18_skill_with_effort_returns_some() {
         let mut skill = base_skill("effort-skill");
         skill.effort = Some(EffortLevel::High);
-        let tool = tool_with(vec![skill]);
+        let tool = SkillTool::new(
+            Arc::new(wcore_skills::refs::SkillCatalog::from_metadata_vec(vec![
+                skill,
+            ])),
+            "/tmp".to_string(),
+            SkillPermissionChecker::new(vec![], vec!["effort-skill".to_string()], false),
+        );
 
         let modifier = tool.context_modifier_for(&json!({"skill": "effort-skill"}));
         assert!(modifier.is_some());
@@ -986,7 +1107,13 @@ mod supplemental_tests_p6 {
     fn tc_6_19_skill_with_allowed_tools_returns_some() {
         let mut skill = base_skill("tools-skill");
         skill.allowed_tools = vec!["Bash".to_string(), "Read".to_string()];
-        let tool = tool_with(vec![skill]);
+        let tool = SkillTool::new(
+            Arc::new(wcore_skills::refs::SkillCatalog::from_metadata_vec(vec![
+                skill,
+            ])),
+            "/tmp".to_string(),
+            SkillPermissionChecker::new(vec![], vec!["tools-skill".to_string()], false),
+        );
 
         let modifier = tool.context_modifier_for(&json!({"skill": "tools-skill"}));
         assert!(modifier.is_some());
@@ -999,7 +1126,13 @@ mod supplemental_tests_p6 {
     fn tc_6_19b_leading_slash_stripped_in_context_modifier_for() {
         let mut skill = base_skill("slash-skill");
         skill.model = Some("m".to_string());
-        let tool = tool_with(vec![skill]);
+        let tool = SkillTool::new(
+            Arc::new(wcore_skills::refs::SkillCatalog::from_metadata_vec(vec![
+                skill,
+            ])),
+            "/tmp".to_string(),
+            SkillPermissionChecker::new(vec![], vec!["slash-skill".to_string()], false),
+        );
 
         // /slash-skill should resolve to slash-skill
         let modifier = tool.context_modifier_for(&json!({"skill": "/slash-skill"}));
@@ -1046,7 +1179,13 @@ mod supplemental_tests_p6 {
     fn tc_6_17b_context_modifier_for_does_not_mutate_tool() {
         let mut skill = base_skill("pure-skill");
         skill.model = Some("model-x".to_string());
-        let tool = tool_with(vec![skill]);
+        let tool = SkillTool::new(
+            Arc::new(wcore_skills::refs::SkillCatalog::from_metadata_vec(vec![
+                skill,
+            ])),
+            "/tmp".to_string(),
+            SkillPermissionChecker::new(vec![], vec!["pure-skill".to_string()], false),
+        );
 
         // Call twice — result must be identical (no state mutation)
         let m1 = tool.context_modifier_for(&json!({"skill": "pure-skill"}));
@@ -1315,6 +1454,20 @@ mod phase7_tests {
         )
     }
 
+    fn tool_with_spawner_allowed(
+        skills: Vec<SkillMetadata>,
+        allowed_skill: &str,
+        spawner: Option<Arc<dyn Spawner>>,
+    ) -> SkillTool {
+        SkillTool::with_spawner(
+            Arc::new(wcore_skills::refs::SkillCatalog::from_metadata_vec(skills)),
+            "/tmp".to_string(),
+            SkillPermissionChecker::new(vec![], vec![allowed_skill.to_string()], false),
+            None,
+            spawner,
+        )
+    }
+
     fn tool_no_spawner(skills: Vec<SkillMetadata>) -> SkillTool {
         tool_with_spawner(skills, None)
     }
@@ -1393,8 +1546,9 @@ mod phase7_tests {
     #[tokio::test]
     async fn tc_7_21_fork_skill_takes_fork_path() {
         let spawner = MockSpawner::success("fork result");
-        let tool = tool_with_spawner(
+        let tool = tool_with_spawner_allowed(
             vec![make_fork_skill("fork-skill", "fork content")],
+            "fork-skill",
             Some(spawner.clone() as Arc<dyn Spawner>),
         );
         let result = tool.execute(json!({"skill": "fork-skill"})).await;
@@ -1414,7 +1568,11 @@ mod phase7_tests {
     // TC-7.12: no spawner — fork skill returns clear error message
     #[tokio::test]
     async fn tc_7_12_fork_skill_no_spawner_returns_error() {
-        let tool = tool_no_spawner(vec![make_fork_skill("needs-spawner", "content")]);
+        let tool = tool_with_spawner_allowed(
+            vec![make_fork_skill("needs-spawner", "content")],
+            "needs-spawner",
+            None,
+        );
         let result = tool.execute(json!({"skill": "needs-spawner"})).await;
         assert!(result.is_error, "should be error without spawner");
         assert!(
@@ -1445,7 +1603,7 @@ mod phase7_tests {
     fn tc_7_22_context_modifier_for_inline_returns_some() {
         let mut skill = make_inline_skill("inline-with-model", "content");
         skill.model = Some("my-model".to_string());
-        let tool = tool_no_spawner(vec![skill]);
+        let tool = tool_with_spawner_allowed(vec![skill], "inline-with-model", None);
         let modifier = tool.context_modifier_for(&json!({"skill": "inline-with-model"}));
         assert!(
             modifier.is_some(),
@@ -1473,8 +1631,7 @@ mod phase7_tests {
                 make_fork_skill("fork-allowed", "content"),
             ])),
             "/tmp".to_string(),
-            // deny_list empty, allow_list empty = allow all
-            SkillPermissionChecker::new(vec![], vec![], false),
+            SkillPermissionChecker::new(vec![], vec!["fork-allowed".to_string()], false),
             None,
             Some(spawner as Arc<dyn Spawner>),
         );
@@ -1625,8 +1782,9 @@ mod phase7_tests {
         let spawner = Arc::new(SlowSpawner {
             delay: Duration::from_secs(60),
         });
-        let tool = tool_with_spawner(
+        let tool = tool_with_spawner_allowed(
             vec![make_fork_skill("slow", "body")],
+            "slow",
             Some(spawner as Arc<dyn Spawner>),
         );
         let ctx = fresh_ctx();
@@ -1659,8 +1817,9 @@ mod phase7_tests {
         let spawner = Arc::new(SlowSpawner {
             delay: Duration::from_millis(50),
         });
-        let tool = tool_with_spawner(
+        let tool = tool_with_spawner_allowed(
             vec![make_fork_skill("quick-fork", "body")],
+            "quick-fork",
             Some(spawner as Arc<dyn Spawner>),
         );
         let ctx = fresh_ctx();
@@ -1727,7 +1886,10 @@ mod phase11_tests {
         SkillTool::new(
             Arc::new(wcore_skills::refs::SkillCatalog::from_metadata_vec(skills)),
             "/tmp".to_string(),
-            SkillPermissionChecker::new(vec![], vec![], false),
+            // This module tests hook parsing/trust behavior, not the skill
+            // authorization boundary. Explicitly allow the fixtures so those
+            // concerns remain isolated.
+            SkillPermissionChecker::new(vec![], vec!["*".to_string()], false),
         )
     }
 

@@ -53,6 +53,7 @@ use wcore_config::config::Config;
 use wcore_protocol::ToolApprovalManager;
 use wcore_protocol::events::{FinishReason, ProtocolEvent, ToolStatus};
 use wcore_protocol::writer::ProtocolEmitter;
+use wcore_types::execution_policy::{ApprovalPolicy, PolicySource};
 
 use crate::tui::{ChannelEmitter, ChannelSink};
 
@@ -78,6 +79,11 @@ type RelayHandle = Arc<Mutex<Option<UnboundedSender<ProtocolEvent>>>>;
 /// reaper still auto-denying a genuinely-abandoned gate. Force sessions never
 /// gate and keep the default TTL regardless.
 const DEFAULT_POSTURE_API_APPROVAL_TTL: std::time::Duration = std::time::Duration::from_secs(300);
+
+fn network_session_config(mut config: Config) -> Config {
+    config.retain_default_tool_allow_list();
+    config
+}
 
 /// An [`OutputSink`] that forwards every call onto the relay's current
 /// sender by delegating to a [`ChannelSink`] bound to it. Reuses the TUI
@@ -934,9 +940,20 @@ impl EngineTurnEngine {
         // config overlay + declared tool allowlist. Fails CLOSED — an id that is
         // not in the authorized roster yields the base config and no allowlist.
         let (session_config, persona_tools) = self.engine_inputs_for(agent);
+        // Network sessions never inherit the local CLI's convenience grants.
+        // `force_tools` is the only authority that enables unattended tools;
+        // persona_tools narrows registry visibility and is not an approval ACL.
+        let session_config = network_session_config(session_config);
+        let smart_policy = if self.force_tools {
+            ApprovalPolicy::Bypass
+        } else {
+            ApprovalPolicy::Prompt
+        };
 
         let output: Arc<dyn OutputSink> = Arc::new(RelaySink::new(relay.clone()));
         let mut bootstrap = AgentBootstrap::new(session_config.clone(), self.cwd.clone(), output)
+            .with_smart_execution_policy(smart_policy, PolicySource::Acp)
+            .with_approval_manager(approval_manager.clone())
             .tool_allowlist(persona_tools);
         if let Some(provider) = &self.provider {
             bootstrap = bootstrap.provider(provider.clone());
@@ -953,7 +970,6 @@ impl EngineTurnEngine {
             .map_err(|e| AcpError::Protocol(format!("engine init_session failed: {e}")))?;
         engine.rebind_memory_session().await;
         engine.run_session_start_hooks().await;
-        engine.set_approval_manager(approval_manager.clone());
         // GHSA-8r7g M1 (wayland#497): bind the engine's ApprovalBridge so
         // bridge-backed gate frames on the ACP relay carry the secret
         // resume_token (parity with the stdin/TUI transports).
@@ -1083,6 +1099,13 @@ impl EngineA2aHandler {
             agent_id: agent_id.into(),
             inner: EngineTurnEngine::new(config, cwd),
         }
+    }
+
+    /// Apply the same explicit unattended-tool authority as the REST turn
+    /// engine. The server owns this decision; A2A wire input cannot set it.
+    pub fn force_tools(mut self, force: bool) -> Self {
+        self.inner = self.inner.force_tools(force);
+        self
     }
 
     /// Test/embedding seam: build the handler over a pre-constructed
@@ -1652,6 +1675,20 @@ mod tests {
         assert!(reply.agent_id.is_empty(), "anonymous: no agent_id");
         assert!(reply.version.is_empty(), "anonymous: no version");
         assert!(reply.capabilities.tools.is_empty());
+    }
+
+    #[test]
+    fn network_sessions_drop_local_grants_and_a2a_honors_force() {
+        let mut config = placeholder_config();
+        config.tools.allow_list = vec!["Read".into(), "Bash".into(), "Grep".into()];
+        assert_eq!(
+            network_session_config(config).tools.allow_list,
+            vec!["Read", "Grep"]
+        );
+
+        let handler = EngineA2aHandler::new("server-agent", placeholder_config(), ".".to_string())
+            .force_tools(true);
+        assert!(handler.inner.force_tools);
     }
 
     /// A minimal `Config` for tests that never reach an engine build. Mirrors

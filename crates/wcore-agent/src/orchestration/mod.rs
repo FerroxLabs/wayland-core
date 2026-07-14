@@ -264,7 +264,8 @@ impl PolicyFilteredCalls {
     }
 }
 
-/// Apply the policy floor before selecting a host or terminal approval path.
+/// Apply the optional actor/tool ACL gate before selecting a host or terminal
+/// approval path. This is not the immutable Managed execution-policy floor.
 /// The index tags let the caller restore the model's original call order.
 fn filter_tool_calls_by_policy(
     tool_calls: &[ContentBlock],
@@ -383,7 +384,7 @@ pub async fn execute_tool_calls_with_budget(
                 (0..batch.calls.len()).map(|_| None).collect();
             let mut approved = Vec::new();
             for (batch_idx, call) in batch.calls.iter().enumerate() {
-                match confirm_call(confirmer, call)? {
+                match confirm_call(registry, confirmer, call)? {
                     ConfirmedCall::Denied(denied) => {
                         batch_outcomes[batch_idx] = Some((denied, None, None, false));
                     }
@@ -438,7 +439,7 @@ pub async fn execute_tool_calls_with_budget(
             }
         } else {
             for call in &batch.calls {
-                match confirm_call(confirmer, call)? {
+                match confirm_call(registry, confirmer, call)? {
                     ConfirmedCall::Denied(denied) => {
                         results.push(denied);
                         modifiers.push(None);
@@ -506,6 +507,7 @@ enum ConfirmedCall {
 }
 
 fn confirm_call(
+    registry: &ToolRegistry,
     confirmer: &Arc<Mutex<ToolConfirmer>>,
     call: &ContentBlock,
 ) -> Result<ConfirmedCall, ExecutionControl> {
@@ -518,6 +520,10 @@ fn confirm_call(
         });
     };
 
+    let category = registry
+        .get(name)
+        .map(|tool| tool.category_for(input))
+        .unwrap_or(ToolCategory::Exec);
     let input_display = serde_json::to_string(input).unwrap_or_default();
     // SAFETY: `Mutex<ToolConfirmer>` is held by short critical
     // sections (`check`, `is_auto_approve`, `add_to_allow_list`); the
@@ -529,8 +535,8 @@ fn confirm_call(
     // would break every caller, so we keep std::sync and document
     // the invariant.
     let mut confirmer = confirmer.lock().unwrap();
-    let approval_bound = confirmer.requires_confirmation(name);
-    let result = confirmer.check(name, &truncate_display(&input_display, 200));
+    let approval_bound = confirmer.approval_is_input_bound(name);
+    let result = confirmer.check_for(name, category, &truncate_display(&input_display, 200));
 
     match result {
         ConfirmResult::Approved => Ok(ConfirmedCall::Execute { approval_bound }),
@@ -1022,7 +1028,6 @@ pub async fn execute_tool_calls_with_approval(
     approval_manager: &Arc<ToolApprovalManager>,
     writer: &Arc<dyn ProtocolEmitter>,
     msg_id: &str,
-    auto_approve: bool,
     allow_list: &[String],
     mut hooks: Option<&mut HookEngine>,
     compaction_level: wcore_compact::CompactionLevel,
@@ -1069,10 +1074,17 @@ pub async fn execute_tool_calls_with_approval(
         // calls, not every Exec-category tool (Write, Edit, etc.).
         let tool_name_approved = allow_list.contains(&name.to_string())
             || approval_manager.is_tool_name_auto_approved(name);
-        let globally_approved = auto_approve || approval_manager.current_mode() == "force";
+        // The shared manager is the sole live posture authority for host-backed
+        // sessions. A boot-time confirmer snapshot would make Force -> Default
+        // de-escalation cosmetic while tools continued to bypass approval.
+        let globally_approved = approval_manager.current_mode() == "force";
         let scoped_auto_approval = !globally_approved
             && !tool_name_approved
-            && approval_manager.is_auto_approved_cmd(&category.to_string(), command);
+            && approval_manager.is_auto_approved_tool_cmd(
+                &category.to_string(),
+                Some(name),
+                command,
+            );
         let needs_approval = name == "AskUserQuestion"
             || (!globally_approved && !tool_name_approved && !scoped_auto_approval);
         // Category-, mode- and prefix-scoped rules authorize the arguments
@@ -1922,9 +1934,8 @@ mod tests {
             &mgr,
             &writer,
             "msg-1",
-            false, // auto_approve: false → gate fires, approval is needed
-            &[],   // allow_list empty
-            None,  // no hook engine
+            &[],  // allow_list empty
+            None, // no hook engine
             wcore_compact::CompactionLevel::Off,
             false,
             &tokio_util::sync::CancellationToken::new(),
@@ -1986,7 +1997,6 @@ mod tests {
             &mgr,
             &writer,
             "msg-2",
-            false,
             &[],
             None,
             wcore_compact::CompactionLevel::Off,
@@ -2076,7 +2086,6 @@ mod tests {
                 &mgr,
                 &writer,
                 "msg-par",
-                false, // approval gate ON for every call
                 &[],
                 None,
                 wcore_compact::CompactionLevel::Off,

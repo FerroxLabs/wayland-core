@@ -1535,7 +1535,7 @@ impl TuiEngine {
         // D007: the resolved approval posture — applied to the shared
         // manager in the task below AND returned so the router can sync the
         // status-bar badge (`app.mode`) to match the live gate.
-        let session_mode = approval_mode_to_session(config.approval_mode);
+        let session_mode = approval_policy_to_session(config.smart_approval_policy());
         // M4: a fresh ConfigView the router mirrors onto `App::config` so the
         // next `/config` on_enter re-seeds from the just-saved truth.
         let config_view = super::config_view_from(&config);
@@ -1546,7 +1546,7 @@ impl TuiEngine {
         // arms, so the spawned task must move a distinct clone, not `engine`.
         let engine_for_task = engine.clone();
         let approval = self.approval.clone();
-        let task_mode = approval_mode_to_session(config.approval_mode);
+        let task_mode = approval_policy_to_session(config.smart_approval_policy());
         // N1: a session launched with runtime --force is pinned to Force, which
         // is NOT persisted to disk; blindly re-resolving the disk approval would
         // silently downgrade the live gate (and flip the badge) off Force. When
@@ -2273,6 +2273,20 @@ pub fn approval_mode_to_session(
         wcore_config::config::ApprovalMode::Default => SessionMode::Default,
         wcore_config::config::ApprovalMode::AutoEdit => SessionMode::AutoEdit,
         wcore_config::config::ApprovalMode::Force => SessionMode::Force,
+    }
+}
+
+/// Map the converged typed approval posture to the live host session mode.
+/// Unlike the legacy config-enum helper, this includes normalization of
+/// `tools.auto_approve` performed by `Config::smart_approval_policy`.
+pub fn approval_policy_to_session(
+    policy: wcore_types::execution_policy::ApprovalPolicy,
+) -> wcore_protocol::commands::SessionMode {
+    use wcore_protocol::commands::SessionMode;
+    match policy {
+        wcore_types::execution_policy::ApprovalPolicy::Prompt => SessionMode::Default,
+        wcore_types::execution_policy::ApprovalPolicy::AutoEdit => SessionMode::AutoEdit,
+        wcore_types::execution_policy::ApprovalPolicy::Bypass => SessionMode::Force,
     }
 }
 
@@ -3232,9 +3246,9 @@ mod tests {
         // `Force` auto-approves every category.
         manager.set_mode(SessionMode::Force);
         assert!(manager.is_auto_approved("exec"));
-        // `AutoEdit` auto-approves `edit` + `info`, not `exec`.
+        // `AutoEdit` auto-approves only the built-in Write/Edit tools.
         manager.set_mode(SessionMode::AutoEdit);
-        assert!(manager.is_auto_approved("edit"));
+        assert!(manager.is_auto_approved_tool_cmd("edit", Some("Write"), None));
         assert!(!manager.is_auto_approved("exec"));
         // `Default` auto-approves nothing.
         manager.set_mode(SessionMode::Default);

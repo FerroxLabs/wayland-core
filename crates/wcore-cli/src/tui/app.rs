@@ -1223,10 +1223,9 @@ pub struct ConfigView {
     /// Whether plan-first is enabled (`[plan] plan_first`) — the agent is
     /// nudged to plan before large/risky changes.
     pub plan_first: bool,
-    /// `--force` (`--yolo`, `--dangerously-skip-permissions`) is active:
-    /// every tool call is auto-approved by the engine's approval manager
-    /// (`SessionMode::Force`). The status bar appends a `· FORCE` badge
-    /// so the mode is impossible to miss.
+    /// Whether `--force` (`--yolo`, `--dangerously-skip-permissions`) granted
+    /// launch authority to use Force. This remains true after a live posture
+    /// de-escalation; render active posture from [`App::mode`], not this flag.
     pub force: bool,
     /// The active provider's resolved `ProviderCompat` cost-per-token
     /// values (`cost_per_input_token`, `cost_per_output_token`,

@@ -194,6 +194,10 @@ pub struct TuiSession {
     pub events: UnboundedReceiver<ProtocolEvent>,
     /// The resolved-config snapshot shown in the status bar.
     pub config: app::ConfigView,
+    /// Typed posture that was installed in the shared approval manager at
+    /// launch. The status bar must display this exact authority, including
+    /// config-selected AutoEdit/Bypass and legacy auto-approve resolution.
+    pub initial_mode: wcore_protocol::commands::SessionMode,
     /// The context-window size for the status meter.
     pub context: app::ContextView,
     /// True when no global config file exists yet — a true first run.
@@ -219,6 +223,7 @@ pub struct TuiSession {
 /// resolved engine `Config`. Called by `main.rs` before the `Config` is
 /// moved into the engine bootstrap.
 pub fn config_view_from(config: &wcore_config::config::Config) -> app::ConfigView {
+    let smart_policy = config.smart_approval_policy();
     app::ConfigView {
         provider: config.provider_label.clone(),
         model: config.model.clone(),
@@ -226,11 +231,16 @@ pub fn config_view_from(config: &wcore_config::config::Config) -> app::ConfigVie
         memory_enabled: config.memory.enabled,
         max_turns: config.max_turns,
         compaction: config.compact.compaction.to_string(),
-        approval: config.approval_mode.as_str().to_string(),
+        approval: match smart_policy {
+            wcore_types::execution_policy::ApprovalPolicy::Prompt => "default",
+            wcore_types::execution_policy::ApprovalPolicy::AutoEdit => "auto-edit",
+            wcore_types::execution_policy::ApprovalPolicy::Bypass => "force",
+        }
+        .to_string(),
         plan_first: config.plan.plan_first,
-        // The TUI host (`main.rs::run_tui_mode`) sets this from `cli.force`
-        // after this snapshot is taken — it is not a resolved-config
-        // field, so the default here is `false`.
+        // The TUI host (`main.rs::run_tui_mode`) sets this launch-authority
+        // flag from `cli.force` after this snapshot is taken. Active posture
+        // lives in `App::mode`, so the default here is `false`.
         force: false,
         // The active provider's resolved `ProviderCompat` cost overrides,
         // seeded so the Expert tier shows + persists the real pricing.
@@ -242,7 +252,10 @@ pub fn config_view_from(config: &wcore_config::config::Config) -> app::ConfigVie
         },
         // S5 Essentials: tools posture + budget cap, read straight from the
         // resolved config so the home shows the live values.
-        tools_auto_approve: config.tools.auto_approve,
+        tools_auto_approve: matches!(
+            smart_policy,
+            wcore_types::execution_policy::ApprovalPolicy::Bypass
+        ),
         tools_allow_list: config.tools.allow_list.clone(),
         tools_verify_edits: config.tools.verify_edits,
         budget_max_cost_usd: config.budget.max_cost_usd,
@@ -483,13 +496,10 @@ async fn run_loop(
     if let Some(s) = session {
         {
             let mut guard = app.lock().expect("fresh app lock");
-            // Force mode is applied at the engine boot in `main.rs` —
-            // the approval manager is already in `Force`. Mirror the
-            // mode onto `App` so the status bar's mode label and the
-            // FORCE badge agree.
-            if s.config.force {
-                guard.mode = wcore_protocol::commands::SessionMode::Force;
-            }
+            // Mirror the exact typed launch posture already installed in the
+            // approval manager. Config-selected AutoEdit/Bypass must never run
+            // behind a misleading Default badge.
+            guard.mode = s.initial_mode;
             guard.config = s.config;
             guard.context = s.context;
             // Resume repaint: seed the rebuilt prior conversation into the

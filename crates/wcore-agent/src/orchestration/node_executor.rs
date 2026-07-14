@@ -144,7 +144,6 @@ pub struct ApprovalChannel {
     pub manager: Arc<ToolApprovalManager>,
     pub writer: Arc<dyn ProtocolEmitter>,
     pub msg_id: String,
-    pub auto_approve: bool,
 }
 
 /// Production `NodeExecutor` adapter — wraps `execute_tool_calls_*`.
@@ -308,7 +307,6 @@ async fn dispatch_once(
             &approval.manager,
             &approval.writer,
             &approval.msg_id,
-            approval.auto_approve,
             &cfg.allow_list,
             hooks.as_mut(),
             cfg.compaction_level,
@@ -446,7 +444,6 @@ mod tests {
             manager,
             writer,
             msg_id: "test_msg".into(),
-            auto_approve: true,
         });
         let cell = Arc::new(TokioMutex::new(TurnCell::new(vec![], None)));
         let exec: Arc<dyn NodeExecutor> = Arc::new(AgentNodeExecutor::new(cfg, cell.clone()));

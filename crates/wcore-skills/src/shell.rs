@@ -58,6 +58,16 @@ pub async fn execute_shell_commands(
     Ok(result)
 }
 
+/// Return whether activating this skill body can execute embedded shell.
+///
+/// MCP-provided skills are intentionally excluded because
+/// [`execute_shell_commands`] returns their content unchanged. Keeping this
+/// predicate beside the parser prevents permission checks from drifting away
+/// from the syntax that the executor actually recognizes.
+pub fn contains_shell_commands(content: &str, loaded_from: LoadedFrom) -> bool {
+    loaded_from != LoadedFrom::Mcp && !extract_shell_matches(content).is_empty()
+}
+
 // ---------------------------------------------------------------------------
 // Error type
 // ---------------------------------------------------------------------------
@@ -362,6 +372,23 @@ mod tests {
         let content = "No commands here.";
         let result = run(content).await.unwrap();
         assert_eq!(result, content);
+    }
+
+    #[test]
+    fn shell_presence_matches_executor_syntax_and_mcp_behavior() {
+        assert!(contains_shell_commands(
+            "before !`echo hi` after",
+            LoadedFrom::Skills
+        ));
+        assert!(contains_shell_commands(
+            "```!\necho hi\n```",
+            LoadedFrom::Skills
+        ));
+        assert!(!contains_shell_commands(
+            "plain instructions",
+            LoadedFrom::Skills
+        ));
+        assert!(!contains_shell_commands("!`echo ignored`", LoadedFrom::Mcp));
     }
 
     #[tokio::test]
