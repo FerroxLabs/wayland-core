@@ -98,3 +98,34 @@ fn component_identities_require_lowercase_sha256() {
         );
     }
 }
+
+#[test]
+fn serialized_manifest_round_trips_and_verifies() {
+    let manifest = CompositeFixtureManifest::new(components(['1', '2', '3', '4', '5', '6']));
+
+    let encoded = serde_json::to_vec(&manifest).expect("serialize fixture manifest");
+    let decoded: CompositeFixtureManifest =
+        serde_json::from_slice(&encoded).expect("deserialize fixture manifest");
+
+    assert_eq!(decoded, manifest);
+    decoded.verify().expect("verify fixture manifest");
+}
+
+#[test]
+fn deserialized_manifest_rejects_tampered_identity_and_schema() {
+    let manifest = CompositeFixtureManifest::new(components(['1', '2', '3', '4', '5', '6']));
+    let mut value = serde_json::to_value(&manifest).expect("serialize fixture manifest");
+    value["fixture_sha256"] = serde_json::Value::String(digest('0'));
+    let tampered: CompositeFixtureManifest =
+        serde_json::from_value(value).expect("deserialize tampered manifest");
+    assert_eq!(tampered.verify(), Err(FixtureManifestError::DigestMismatch));
+
+    let mut value = serde_json::to_value(&manifest).expect("serialize fixture manifest");
+    value["schema"] = serde_json::Value::String("attacker-controlled-schema".to_string());
+    let tampered: CompositeFixtureManifest =
+        serde_json::from_value(value).expect("deserialize tampered manifest");
+    assert_eq!(
+        tampered.verify(),
+        Err(FixtureManifestError::UnsupportedSchema)
+    );
+}

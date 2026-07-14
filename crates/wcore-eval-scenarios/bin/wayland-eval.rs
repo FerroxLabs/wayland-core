@@ -10,6 +10,7 @@ use wcore_eval_scenarios::artifact::{
     verify_artifact_digest,
 };
 use wcore_eval_scenarios::catalog::{select_scenarios, standard_scenarios};
+use wcore_eval_scenarios::fixtures::manifest::CompositeFixtureManifest;
 use wcore_eval_scenarios::providers::{
     ProviderAvailability, ProviderConfig, ProviderResolution, provider_override, resolve,
 };
@@ -87,6 +88,15 @@ struct Cli {
         conflicts_with_all = ["list", "verify_binary", "dry"]
     )]
     report_dir: Option<PathBuf>,
+
+    /// Content-addressed deterministic fixture manifest bound into receipts.
+    #[arg(
+        long,
+        value_name = "PATH",
+        requires = "report_dir",
+        conflicts_with_all = ["list", "verify_binary", "dry"]
+    )]
+    fixture_manifest: Option<PathBuf>,
 }
 
 #[tokio::main]
@@ -209,6 +219,10 @@ async fn execute(cli: Cli) -> i32 {
         Ok(artifact) => artifact,
         Err(error) => return usage_error(error),
     };
+    let fixture_sha256 = match load_fixture_sha256(&cli) {
+        Ok(value) => value,
+        Err(error) => return usage_error(error),
+    };
 
     let mut passed = 0usize;
     let mut failed = 0usize;
@@ -262,7 +276,13 @@ async fn execute(cli: Cli) -> i32 {
                             result.passed = false;
                         }
                         match build_and_persist_receipt(
-                            &cli, &artifact, scenario, provider, &result, index,
+                            &cli,
+                            &artifact,
+                            scenario,
+                            provider,
+                            &result,
+                            index,
+                            fixture_sha256.as_deref(),
                         ) {
                             Ok(gate_passed) if gate_passed => {
                                 passed += 1;
@@ -447,10 +467,16 @@ fn build_and_persist_receipt(
     provider: &ProviderConfig,
     result: &wcore_eval_scenarios::ScenarioResult,
     index: usize,
+    fixture_sha256: Option<&str>,
 ) -> Result<bool, String> {
-    let fixture_sha256 = format!(
-        "{:x}",
-        Sha256::digest(format!("{}:{}", artifact.sha256, scenario.name))
+    let fixture_sha256 = fixture_sha256.map_or_else(
+        || {
+            format!(
+                "{:x}",
+                Sha256::digest(format!("{}:{}", artifact.sha256, scenario.name))
+            )
+        },
+        str::to_owned,
     );
     let receipt = EvidenceReceiptV1::from_scenario_result(
         ReceiptMetadataV1 {
@@ -488,6 +514,39 @@ fn build_and_persist_receipt(
         )?;
     }
     Ok(cell_passed)
+}
+
+fn load_fixture_sha256(cli: &Cli) -> Result<Option<String>, String> {
+    let Some(path) = &cli.fixture_manifest else {
+        if authority_evidence_requested() {
+            return Err(
+                "--fixture-manifest is required when authoritative evidence is requested"
+                    .to_string(),
+            );
+        }
+        return Ok(None);
+    };
+    let bytes = std::fs::read(path).map_err(|error| {
+        format!(
+            "could not read fixture manifest {}: {error}",
+            path.display()
+        )
+    })?;
+    let manifest: CompositeFixtureManifest = serde_json::from_slice(&bytes)
+        .map_err(|error| format!("invalid fixture manifest {}: {error}", path.display()))?;
+    manifest
+        .verify()
+        .map_err(|error| format!("invalid fixture manifest {}: {error}", path.display()))?;
+    Ok(Some(manifest.fixture_sha256().to_string()))
+}
+
+fn authority_evidence_requested() -> bool {
+    std::env::var("WCORE_EVAL_REQUIRE_AUTHORITY_EVIDENCE").is_ok_and(|value| {
+        matches!(
+            value.trim().to_ascii_lowercase().as_str(),
+            "1" | "true" | "yes" | "on"
+        )
+    })
 }
 
 fn persist_receipt_reports(

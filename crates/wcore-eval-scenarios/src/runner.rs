@@ -23,7 +23,7 @@
 use std::path::PathBuf;
 use std::process::Stdio;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
@@ -37,7 +37,6 @@ use crate::capability_honesty::CapabilityEvidence;
 use crate::child_env::ChildEnvironment;
 use crate::cost::CostReport;
 pub use crate::egress_evidence::ManagedHttpEgressEvidence;
-use crate::egress_evidence::read as read_egress_evidence;
 pub use crate::filesystem_evidence::FilesystemDeltaEvidence;
 use crate::filesystem_evidence::Snapshot as FilesystemSnapshot;
 use crate::process_tree::ProcessTree;
@@ -293,7 +292,7 @@ pub fn spawn_for_run(
 #[derive(Default)]
 struct SpawnInstrumentation<'a> {
     process_tree: Option<&'a ProcessTree>,
-    egress_evidence_path: Option<&'a std::path::Path>,
+    egress_capture: Option<&'a crate::egress_evidence::Capture>,
 }
 
 fn spawn_for_run_with_secret(
@@ -308,8 +307,8 @@ fn spawn_for_run_with_secret(
     let mut cmd = Command::new(bin);
     let isolated_home = wayland_home.unwrap_or(cwd);
     ChildEnvironment::build(cwd, isolated_home, secret)?.apply_tokio(&mut cmd);
-    if let Some(path) = instrumentation.egress_evidence_path {
-        cmd.env("WCORE_EVAL_EGRESS_EVIDENCE", path);
+    if let Some(capture) = instrumentation.egress_capture {
+        capture.configure(&mut cmd);
     }
     // Build an allowlisted child environment before adding any scenario
     // arguments. Credentials enter through a one-use file that Core deletes
@@ -565,15 +564,13 @@ async fn run_session_body(input: SessionRun<'_>) -> anyhow::Result<ScenarioResul
         config_sha256,
     } = input;
     let start = Instant::now();
-    static EGRESS_EVIDENCE_COUNTER: AtomicU64 = AtomicU64::new(0);
     let authority_evidence_required = authority_evidence_required();
-    let egress_evidence_path = authority_evidence_required.then(|| {
-        cwd.join(".wayland-core").join(format!(
-            "eval-egress-{}-{}.jsonl",
-            std::process::id(),
-            EGRESS_EVIDENCE_COUNTER.fetch_add(1, Ordering::Relaxed)
-        ))
-    });
+    let egress_capture = authority_evidence_required
+        .then(|| crate::egress_evidence::Capture::create(cwd))
+        .transpose()
+        .map_err(|error| {
+            anyhow::anyhow!("could not prepare authenticated egress capture: {error}")
+        })?;
 
     let mut process_tree = ProcessTree::prepare()
         .map_err(|error| anyhow::anyhow!("process containment unavailable: {error}"))?;
@@ -589,7 +586,7 @@ async fn run_session_body(input: SessionRun<'_>) -> anyhow::Result<ScenarioResul
         secret,
         SpawnInstrumentation {
             process_tree: Some(&process_tree),
-            egress_evidence_path: egress_evidence_path.as_deref(),
+            egress_capture: egress_capture.as_ref(),
         },
     )
     .map_err(|e| anyhow::anyhow!(e.to_string()))?;
@@ -810,18 +807,17 @@ async fn run_session_body(input: SessionRun<'_>) -> anyhow::Result<ScenarioResul
     let wall_time = start.elapsed();
 
     let mut failures: Vec<Failure> = Vec::new();
-    let managed_http_egress =
-        egress_evidence_path
-            .as_deref()
-            .and_then(|path| match read_egress_evidence(path) {
-                Ok(evidence) => Some(evidence),
-                Err(error) => {
-                    failures.push(Failure::RunnerError(format!(
-                        "managed HTTP egress evidence incomplete: {error}"
-                    )));
-                    None
-                }
-            });
+    let managed_http_egress = egress_capture
+        .as_ref()
+        .and_then(|capture| match capture.read() {
+            Ok(evidence) => Some(evidence),
+            Err(error) => {
+                failures.push(Failure::RunnerError(format!(
+                    "managed HTTP egress evidence incomplete: {error}"
+                )));
+                None
+            }
+        });
     if authority_evidence_required
         && (process_tree.peak_memory_bytes().is_none() || process_tree.peak_cpu_millis().is_none())
     {

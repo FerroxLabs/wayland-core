@@ -216,6 +216,30 @@ fn read_one_use_api_key(path: &Path) -> anyhow::Result<String> {
     String::from_utf8(bytes).map_err(|_| anyhow::anyhow!("--api-key-file was not valid UTF-8"))
 }
 
+fn read_one_use_eval_egress_key(path: &Path) -> anyhow::Result<ed25519_dalek::SigningKey> {
+    let metadata = std::fs::symlink_metadata(path)?;
+    if metadata.file_type().is_symlink() || !metadata.is_file() || metadata.len() != 32 {
+        let _ = std::fs::remove_file(path);
+        anyhow::bail!("--eval-egress-key-file must contain exactly 32 bytes in a regular file");
+    }
+    let read = std::fs::read(path);
+    let removed = std::fs::remove_file(path);
+    let mut bytes =
+        read.map_err(|error| anyhow::anyhow!("read --eval-egress-key-file: {error}"))?;
+    if bytes.len() != 32 {
+        bytes.fill(0);
+        removed.map_err(|error| anyhow::anyhow!("remove --eval-egress-key-file: {error}"))?;
+        anyhow::bail!("--eval-egress-key-file must contain exactly 32 bytes");
+    }
+    let mut seed = [0_u8; 32];
+    seed.copy_from_slice(&bytes);
+    bytes.fill(0);
+    let key = ed25519_dalek::SigningKey::from_bytes(&seed);
+    seed.fill(0);
+    removed.map_err(|error| anyhow::anyhow!("remove --eval-egress-key-file: {error}"))?;
+    Ok(key)
+}
+
 #[derive(Parser)]
 #[command(
     name = "wayland-core",
@@ -234,6 +258,10 @@ struct Cli {
     /// Internal one-use credential transport for isolated hosts/evaluators.
     #[arg(long, hide = true, value_name = "PATH", conflicts_with = "api_key")]
     api_key_file: Option<PathBuf>,
+
+    /// Internal one-use evaluator evidence signing key transport.
+    #[arg(long, hide = true, value_name = "PATH")]
+    eval_egress_key_file: Option<PathBuf>,
 
     /// Base URL for the API
     #[arg(short, long, env = "BASE_URL")]
@@ -833,7 +861,12 @@ fn init_failure_message(err: &anyhow::Error, provider_label: &str) -> String {
 
 async fn run() -> anyhow::Result<ExitCode> {
     let mut cli = Cli::parse();
-    wcore_agent::egress::install_eval_egress_observer()?;
+    let eval_egress_key = cli
+        .eval_egress_key_file
+        .take()
+        .map(|path| read_one_use_eval_egress_key(&path))
+        .transpose()?;
+    wcore_agent::egress::install_eval_egress_observer(eval_egress_key)?;
     if let Some(path) = cli.api_key_file.take() {
         cli.api_key = Some(read_one_use_api_key(&path)?);
     }
@@ -4171,6 +4204,31 @@ mod tests {
 
         assert!(error.to_string().contains("1..=16384 bytes"));
         assert!(!path.exists(), "rejected credential file must be removed");
+    }
+
+    #[test]
+    fn one_use_eval_egress_key_is_consumed_and_removed() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let path = directory.path().join("egress-signing-key");
+        let seed = [7_u8; 32];
+        std::fs::write(&path, seed).expect("write signing key");
+
+        let key = read_one_use_eval_egress_key(&path).expect("consume signing key");
+
+        assert_eq!(key.to_bytes(), seed);
+        assert!(!path.exists(), "signing key must be removed before boot");
+    }
+
+    #[test]
+    fn invalid_one_use_eval_egress_key_is_rejected_and_removed() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let path = directory.path().join("egress-signing-key");
+        std::fs::write(&path, [7_u8; 31]).expect("write invalid signing key");
+
+        let error = read_one_use_eval_egress_key(&path).expect_err("short key must fail");
+
+        assert!(error.to_string().contains("exactly 32 bytes"));
+        assert!(!path.exists(), "rejected signing key must be removed");
     }
 
     #[test]
