@@ -617,17 +617,243 @@ mod windows {
 
 #[cfg(target_os = "linux")]
 mod linux {
+    use std::collections::VecDeque;
     use std::fs::{File, OpenOptions};
     use std::io::{self, Read};
     use std::os::fd::AsRawFd;
     use std::os::unix::process::CommandExt;
     use std::path::{Path, PathBuf};
+    #[cfg(test)]
+    use std::sync::atomic::AtomicUsize;
     use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::mpsc::{self, Receiver, SyncSender, TryRecvError, TrySendError};
+    use std::sync::{Arc, Mutex, OnceLock};
     use std::time::{Duration, Instant};
 
     use tokio::process::Command;
 
     static CGROUP_COUNTER: AtomicU64 = AtomicU64::new(0);
+    const CLEANUP_QUEUE_CAPACITY: usize = 1_024;
+    const MAX_RECORDED_FAILURES: usize = 64;
+
+    static CLEANUP_REAPER: OnceLock<Result<CleanupReaper, String>> = OnceLock::new();
+
+    #[derive(Debug)]
+    enum ReaperMessage {
+        Cleanup(PathBuf),
+        #[cfg(test)]
+        Flush(mpsc::Sender<()>),
+    }
+
+    #[derive(Debug)]
+    struct PendingCleanup {
+        path: PathBuf,
+        deadline: Instant,
+    }
+
+    #[derive(Debug)]
+    struct CleanupReaper {
+        sender: SyncSender<ReaperMessage>,
+        failures: Arc<Mutex<VecDeque<String>>>,
+        #[cfg(test)]
+        worker_count: Arc<AtomicUsize>,
+    }
+
+    impl CleanupReaper {
+        fn spawn() -> io::Result<Self> {
+            Self::spawn_with_capacity(CLEANUP_QUEUE_CAPACITY)
+        }
+
+        fn spawn_with_capacity(capacity: usize) -> io::Result<Self> {
+            let (sender, receiver) = mpsc::sync_channel(capacity);
+            let failures = Arc::new(Mutex::new(VecDeque::new()));
+            let worker_failures = Arc::clone(&failures);
+            #[cfg(test)]
+            let worker_count = Arc::new(AtomicUsize::new(0));
+            #[cfg(test)]
+            let thread_worker_count = Arc::clone(&worker_count);
+            std::thread::Builder::new()
+                .name("wcore-eval-cgroup-reaper".to_string())
+                .spawn(move || {
+                    #[cfg(test)]
+                    thread_worker_count.fetch_add(1, Ordering::SeqCst);
+                    cleanup_worker(receiver, &worker_failures);
+                    #[cfg(test)]
+                    thread_worker_count.fetch_sub(1, Ordering::SeqCst);
+                })?;
+            Ok(Self {
+                sender,
+                failures,
+                #[cfg(test)]
+                worker_count,
+            })
+        }
+
+        fn enqueue(&self, path: PathBuf) -> io::Result<()> {
+            match self.sender.try_send(ReaperMessage::Cleanup(path)) {
+                Ok(()) => Ok(()),
+                Err(TrySendError::Full(ReaperMessage::Cleanup(path))) => {
+                    let message = format!(
+                        "cgroup cleanup queue saturated before accepting {}",
+                        path.display()
+                    );
+                    record_failure(&self.failures, message.clone());
+                    Err(io::Error::other(message))
+                }
+                Err(TrySendError::Disconnected(ReaperMessage::Cleanup(path))) => {
+                    let message = format!(
+                        "cgroup cleanup worker disconnected before accepting {}",
+                        path.display()
+                    );
+                    record_failure(&self.failures, message.clone());
+                    Err(io::Error::other(message))
+                }
+                #[cfg(test)]
+                Err(TrySendError::Full(ReaperMessage::Flush(_)))
+                | Err(TrySendError::Disconnected(ReaperMessage::Flush(_))) => {
+                    unreachable!("enqueue sends only cleanup messages")
+                }
+            }
+        }
+
+        fn check_failures(&self) -> io::Result<()> {
+            let failures = self
+                .failures
+                .lock()
+                .map_err(|_| io::Error::other("cgroup cleanup failure registry was poisoned"))?;
+            if failures.is_empty() {
+                Ok(())
+            } else {
+                Err(io::Error::other(format!(
+                    "prior cgroup cleanup failures: {}",
+                    failures.iter().cloned().collect::<Vec<_>>().join("; ")
+                )))
+            }
+        }
+
+        #[cfg(test)]
+        fn flush(&self) -> io::Result<()> {
+            let (sender, receiver) = mpsc::channel();
+            self.sender
+                .send(ReaperMessage::Flush(sender))
+                .map_err(|_| io::Error::other("cgroup cleanup worker disconnected"))?;
+            receiver
+                .recv_timeout(Duration::from_secs(5))
+                .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "cleanup flush timed out"))
+        }
+    }
+
+    fn cleanup_reaper() -> io::Result<&'static CleanupReaper> {
+        match CLEANUP_REAPER
+            .get_or_init(|| CleanupReaper::spawn().map_err(|error| error.to_string()))
+        {
+            Ok(reaper) => Ok(reaper),
+            Err(error) => Err(io::Error::other(format!(
+                "could not start cgroup cleanup worker: {error}"
+            ))),
+        }
+    }
+
+    fn cleanup_worker(receiver: Receiver<ReaperMessage>, failures: &Arc<Mutex<VecDeque<String>>>) {
+        let mut pending = Vec::<PendingCleanup>::new();
+        #[cfg(test)]
+        let mut flush_waiters = Vec::<mpsc::Sender<()>>::new();
+        let mut disconnected = false;
+
+        loop {
+            match receiver.recv_timeout(Duration::from_millis(20)) {
+                Ok(message) => accept_message(
+                    message,
+                    &mut pending,
+                    #[cfg(test)]
+                    &mut flush_waiters,
+                ),
+                Err(mpsc::RecvTimeoutError::Timeout) => {}
+                Err(mpsc::RecvTimeoutError::Disconnected) => disconnected = true,
+            }
+            loop {
+                match receiver.try_recv() {
+                    Ok(message) => accept_message(
+                        message,
+                        &mut pending,
+                        #[cfg(test)]
+                        &mut flush_waiters,
+                    ),
+                    Err(TryRecvError::Empty) => break,
+                    Err(TryRecvError::Disconnected) => {
+                        disconnected = true;
+                        break;
+                    }
+                }
+            }
+
+            let now = Instant::now();
+            pending.retain(|task| match cleanup_path(&task.path) {
+                Ok(true) => false,
+                Ok(false) if now < task.deadline => true,
+                Ok(false) => {
+                    record_failure(
+                        failures,
+                        format!("cgroup remained populated: {}", task.path.display()),
+                    );
+                    false
+                }
+                Err(error) => {
+                    record_failure(
+                        failures,
+                        format!("could not clean cgroup {}: {error}", task.path.display()),
+                    );
+                    false
+                }
+            });
+
+            #[cfg(test)]
+            if pending.is_empty() {
+                for waiter in flush_waiters.drain(..) {
+                    let _ = waiter.send(());
+                }
+            }
+            if disconnected && pending.is_empty() {
+                break;
+            }
+        }
+    }
+
+    fn accept_message(
+        message: ReaperMessage,
+        pending: &mut Vec<PendingCleanup>,
+        #[cfg(test)] flush_waiters: &mut Vec<mpsc::Sender<()>>,
+    ) {
+        match message {
+            ReaperMessage::Cleanup(path) => pending.push(PendingCleanup {
+                path,
+                deadline: Instant::now() + Duration::from_secs(5),
+            }),
+            #[cfg(test)]
+            ReaperMessage::Flush(waiter) => flush_waiters.push(waiter),
+        }
+    }
+
+    fn cleanup_path(path: &Path) -> io::Result<bool> {
+        if !path.exists() {
+            return Ok(true);
+        }
+        if is_populated(&path.join("cgroup.events"))? {
+            return Ok(false);
+        }
+        std::fs::remove_dir(path)?;
+        Ok(true)
+    }
+
+    fn record_failure(failures: &Arc<Mutex<VecDeque<String>>>, message: String) {
+        tracing::error!(target: "wcore_eval", error = %message, "persistent cgroup cleanup failure");
+        if let Ok(mut failures) = failures.lock() {
+            if failures.len() == MAX_RECORDED_FAILURES {
+                failures.pop_front();
+            }
+            failures.push_back(message);
+        }
+    }
 
     #[derive(Debug)]
     pub(super) struct Cgroup {
@@ -644,6 +870,8 @@ mod linux {
 
     impl Cgroup {
         pub(super) fn create() -> io::Result<Self> {
+            let reaper = cleanup_reaper()?;
+            reaper.check_failures()?;
             let self_cgroup = std::fs::read_to_string("/proc/self/cgroup")?;
             let mountinfo = std::fs::read_to_string("/proc/self/mountinfo")?;
             let current = unified_path(&self_cgroup)?;
@@ -745,23 +973,9 @@ mod linux {
                 return;
             }
             let path = self.path.clone();
-            let _ = std::thread::Builder::new()
-                .name("wcore-eval-cgroup-reaper".to_string())
-                .spawn(move || {
-                    let deadline = Instant::now() + Duration::from_secs(5);
-                    loop {
-                        match is_populated(&path.join("cgroup.events")) {
-                            Ok(false) => {
-                                let _ = std::fs::remove_dir(&path);
-                                break;
-                            }
-                            Ok(true) if Instant::now() < deadline => {
-                                std::thread::sleep(Duration::from_millis(20));
-                            }
-                            Ok(true) | Err(_) => break,
-                        }
-                    }
-                });
+            if let Err(error) = cleanup_reaper().and_then(|reaper| reaper.enqueue(path)) {
+                tracing::error!(target: "wcore_eval", error = %error, "could not enqueue cgroup cleanup");
+            }
         }
     }
 
