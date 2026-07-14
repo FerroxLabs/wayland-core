@@ -165,6 +165,28 @@ fn binary_discovery_rejects_missing_override() {
     );
 }
 
+#[test]
+fn binary_discovery_honors_absolute_cargo_target_dir() {
+    let temp = tempfile::TempDir::new().expect("target tempdir");
+    let bin_name = if cfg!(windows) {
+        "wayland-core.exe"
+    } else {
+        "wayland-core"
+    };
+    let expected = temp.path().join("debug").join(bin_name);
+    std::fs::create_dir_all(expected.parent().expect("debug target parent"))
+        .expect("create debug target");
+    std::fs::write(&expected, []).expect("seed binary artifact");
+
+    let eval_bin = EnvGuard::remove("WCORE_EVAL_BIN");
+    let target_dir = EnvGuard::set("CARGO_TARGET_DIR", temp.path());
+    let discovered = discover_binary().expect("discover binary in CARGO_TARGET_DIR");
+    drop(target_dir);
+    drop(eval_bin);
+
+    assert_eq!(discovered, expected);
+}
+
 /// Minimal RAII env-var guard for the discovery test. `tokio::test`
 /// processes share env state with sibling tests; nextest's
 /// `[profile.eval] test-threads = 1` makes this safe in the eval
@@ -181,6 +203,14 @@ impl EnvGuard {
         // marked unsafe in newer std editions because of the FFI race
         // on libc envp, which we explicitly avoid here.
         unsafe { std::env::set_var(key, value.as_ref()) };
+        Self { key, prev }
+    }
+
+    fn remove(key: &'static str) -> Self {
+        let prev = std::env::var_os(key);
+        // SAFETY: see `set`; this test process does not share its environment
+        // with another nextest case.
+        unsafe { std::env::remove_var(key) };
         Self { key, prev }
     }
 }

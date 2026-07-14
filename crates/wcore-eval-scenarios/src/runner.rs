@@ -187,7 +187,9 @@ pub enum SpawnError {
 /// Resolution order (first hit wins):
 /// 1. `WCORE_EVAL_BIN` env var — explicit override; tests can pin a
 ///    specific build.
-/// 2. `target/release/wayland-core` then `target/debug/wayland-core`
+/// 2. `CARGO_TARGET_DIR/{release,debug}/wayland-core` when Cargo is using a
+///    non-default artifact directory.
+/// 3. `target/release/wayland-core` then `target/debug/wayland-core`
 ///    by walking up from `CARGO_MANIFEST_DIR` two levels (mirrors the
 ///    pattern in `crates/wcore-cli/tests/release_binary_smoke.rs`).
 ///
@@ -224,6 +226,15 @@ pub fn discover_binary() -> Result<PathBuf, SpawnError> {
         "wayland-core"
     };
 
+    if let Some(target_dir) = std::env::var_os("CARGO_TARGET_DIR").map(PathBuf::from) {
+        for profile in ["release", "debug"] {
+            let cand = target_dir.join(profile).join(bin_name);
+            if cand.exists() {
+                return Ok(cand);
+            }
+        }
+    }
+
     for profile in ["release", "debug"] {
         let cand = workspace_root.join("target").join(profile).join(bin_name);
         if cand.exists() {
@@ -232,8 +243,9 @@ pub fn discover_binary() -> Result<PathBuf, SpawnError> {
     }
 
     Err(SpawnError::BinaryMissing(format!(
-        "no wayland-core binary at {}/target/{{release,debug}}/{bin_name}; \
-         pre-build it (`cargo build -p wcore-cli`) or set WCORE_EVAL_BIN",
+        "no wayland-core binary in CARGO_TARGET_DIR or at \
+         {}/target/{{release,debug}}/{bin_name}; pre-build it \
+         (`cargo build -p wcore-cli`) or set WCORE_EVAL_BIN",
         workspace_root.display()
     )))
 }

@@ -131,7 +131,8 @@ fn seed_desktop_jobs_json(wayland_home: &Path) {
 // ---------------------------------------------------------------------------
 
 /// Locate the binary to use for json-stream tests: WCORE_EVAL_BIN env var
-/// first, then target/{release,debug}/wayland-core relative to workspace root.
+/// first, then Cargo's integration-test binary, then the legacy workspace
+/// target/{release,debug}/wayland-core locations.
 /// Returns None (SKIP) if the binary can't be found.
 fn maybe_eval_binary() -> Option<std::path::PathBuf> {
     if let Ok(p) = std::env::var("WCORE_EVAL_BIN") {
@@ -139,6 +140,10 @@ fn maybe_eval_binary() -> Option<std::path::PathBuf> {
         if pb.exists() {
             return Some(pb);
         }
+    }
+    let cargo_bin = std::path::PathBuf::from(binary());
+    if cargo_bin.exists() {
+        return Some(cargo_bin);
     }
     // Walk up from this file's manifest dir to workspace root.
     let manifest_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
@@ -829,13 +834,15 @@ async fn r009_pricing_gpt4o_mini_accurate() {
 
     let provider = ProviderConfig::new(ProviderId::OpenAI, "gpt-4o-mini").with_api_key(key);
 
-    let result = match wcore_eval_scenarios::runner::run(&scenario, &provider).await {
-        Ok(r) => r,
-        Err(e) => {
-            eprintln!("[R-009 SKIP] runner error: {e}");
-            return;
-        }
-    };
+    let bin = maybe_eval_binary().expect("wayland-core test binary");
+    let result =
+        match wcore_eval_scenarios::runner::run_with_binary(&scenario, &provider, &bin).await {
+            Ok(r) => r,
+            Err(e) => {
+                eprintln!("[R-009 SKIP] runner error: {e}");
+                return;
+            }
+        };
 
     // Hard assertion: session_cost event must arrive (cost_usd > 0) AND
     // cost must be within a wide sanity band (any positive value < $0.10).
@@ -1020,12 +1027,14 @@ async fn r011_channels_auto_register_logs() {
     let provider = ProviderConfig::new(ProviderId::Anthropic, "claude-sonnet-4-20250514")
         .with_api_key("sk-ant-harness-r011-000000".to_string());
 
-    let result = match wcore_eval_scenarios::runner::run(&scenario, &provider).await {
-        Ok(r) => r,
-        Err(e) => {
-            panic!("R-011 FAIL: runner error: {e}");
-        }
-    };
+    let bin = maybe_eval_binary().expect("wayland-core test binary");
+    let result =
+        match wcore_eval_scenarios::runner::run_with_binary(&scenario, &provider, &bin).await {
+            Ok(r) => r,
+            Err(e) => {
+                panic!("R-011 FAIL: runner error: {e}");
+            }
+        };
 
     // Hard assertion: the F-014 fix MUST produce at least one of these
     // substrings in stderr at RUST_LOG=info. Absence = FAIL (not WARN).
@@ -1095,12 +1104,14 @@ async fn r012_honcho_fallback_on_no_key() {
     // user_model_backend field check. Both must pass.
 
     // --- Layer 2: Scenario runner (StderrContainsAny on fallback log) ---
-    let result = match wcore_eval_scenarios::runner::run(&scenario, &provider).await {
-        Ok(r) => r,
-        Err(e) => {
-            panic!("R-012 FAIL: runner error: {e}");
-        }
-    };
+    let bin = maybe_eval_binary().expect("wayland-core test binary");
+    let result =
+        match wcore_eval_scenarios::runner::run_with_binary(&scenario, &provider, &bin).await {
+            Ok(r) => r,
+            Err(e) => {
+                panic!("R-012 FAIL: runner error: {e}");
+            }
+        };
 
     // Hard assertion: at least one fallback-log substring must appear.
     // Closes the WARN-and-return-Ok silent-pass from the old code.
