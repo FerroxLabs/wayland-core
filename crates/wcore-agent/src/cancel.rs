@@ -68,11 +68,20 @@ pub struct SessionTermination {
 pub struct SessionControl {
     root: CancellationToken,
     termination: SessionTermination,
+    handle: SessionRuntimeHandle,
 }
 
 impl SessionControl {
-    fn new(root: CancellationToken, termination: SessionTermination) -> Self {
-        Self { root, termination }
+    fn new(
+        root: CancellationToken,
+        termination: SessionTermination,
+        handle: SessionRuntimeHandle,
+    ) -> Self {
+        Self {
+            root,
+            termination,
+            handle,
+        }
     }
 
     /// Return a descendant suitable for observation and turn-scoped work.
@@ -92,6 +101,7 @@ impl SessionControl {
     pub fn cancel(&self) {
         self.termination.mark(SessionTerminationReason::Cancelled);
         self.root.cancel();
+        self.handle.active_turn_token().cancel();
     }
 }
 
@@ -188,7 +198,11 @@ impl SessionRuntimeGuard {
     }
 
     pub(crate) fn control(&self) -> SessionControl {
-        SessionControl::new(self.root.clone(), self.termination.clone())
+        SessionControl::new(
+            self.root.clone(),
+            self.termination.clone(),
+            self.handle.clone(),
+        )
     }
 
     /// Attach the session budget watcher to the immutable root. A budget trip
@@ -205,11 +219,15 @@ impl SessionRuntimeGuard {
             "session budget watcher may only be attached once"
         );
         let termination = self.termination.clone();
+        let root = self.root.clone();
+        let handle = self.handle.clone();
         self.budget_guard = Some(budget_guard_for_token_with_callbacks(
             self.root.clone(),
             budget,
             move || {
                 termination.mark(SessionTerminationReason::BudgetExceeded);
+                root.cancel();
+                handle.active_turn_token().cancel();
             },
             on_exceeded,
         ));
@@ -224,6 +242,7 @@ impl SessionRuntimeGuard {
     }
 
     pub(crate) fn set_active_turn(&mut self, token: CancellationToken) {
+        self.handle.active_turn_token().cancel();
         if let Some(handle) = self.turn_bridge.take() {
             handle.abort();
         }
@@ -265,11 +284,13 @@ impl SessionRuntimeGuard {
             .ok_or(wcore_types::execution_policy::ExecutionPolicyError::DangerousExpiryOverflow)?;
         let root = self.root.clone();
         let termination = self.termination.clone();
+        let handle = self.handle.clone();
         self.dangerous_deadline = Some(deadline);
         self.dangerous_expiry = Some(tokio::spawn(async move {
             tokio::time::sleep_until(deadline).await;
             termination.mark(SessionTerminationReason::DangerousLeaseExpired);
             root.cancel();
+            handle.active_turn_token().cancel();
         }));
         Ok(())
     }
@@ -285,6 +306,7 @@ impl Drop for SessionRuntimeGuard {
         self.termination
             .mark(SessionTerminationReason::EngineDropped);
         self.root.cancel();
+        self.handle.active_turn_token().cancel();
         if let Some(handle) = self.turn_bridge.take() {
             handle.abort();
         }
@@ -498,11 +520,14 @@ mod tests {
     fn host_control_marks_cancellation_before_firing_root() {
         let root = CancellationToken::new();
         let termination = SessionTermination::new();
-        let control = SessionControl::new(root.clone(), termination.clone());
+        let active_turn = CancellationToken::new();
+        let handle = SessionRuntimeHandle::new(active_turn.clone());
+        let control = SessionControl::new(root.clone(), termination.clone(), handle);
 
         control.cancel();
 
         assert!(root.is_cancelled());
+        assert!(active_turn.is_cancelled());
         assert_eq!(
             termination.reason(),
             Some(SessionTerminationReason::Cancelled)
@@ -513,12 +538,72 @@ mod tests {
     fn host_child_cannot_cancel_session_root() {
         let root = CancellationToken::new();
         let termination = SessionTermination::new();
-        let control = SessionControl::new(root.clone(), termination);
+        let handle = SessionRuntimeHandle::new(root.child_token());
+        let control = SessionControl::new(root.clone(), termination, handle);
 
         control.child_token().cancel();
 
         assert!(!root.is_cancelled());
         assert!(!control.is_cancelled());
+    }
+
+    #[tokio::test]
+    async fn replacing_active_turn_cancels_previous_turn() {
+        let root = CancellationToken::new();
+        let mut guard = SessionRuntimeGuard::new(root);
+        let previous = CancellationToken::new();
+        guard.set_active_turn(previous.clone());
+
+        guard.set_active_turn(CancellationToken::new());
+
+        assert!(
+            previous.is_cancelled(),
+            "replaced turn work must not escape later session cancellation"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn budget_terminalizes_active_turn_before_blocking_callback() {
+        let root = CancellationToken::new();
+        let mut guard = SessionRuntimeGuard::new(root);
+        let active_turn = CancellationToken::new();
+        guard.set_active_turn(active_turn.clone());
+        let budget = crate::budget::ExecutionBudget {
+            max_wall_time: Some(Duration::ZERO),
+            ..Default::default()
+        }
+        .start_root();
+        let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        guard.attach_budget_with_callback(budget, move |_| {
+            let _ = entered_tx.send(());
+            let _ = release_rx.recv();
+        });
+
+        tokio::time::timeout(Duration::from_secs(1), entered_rx)
+            .await
+            .expect("callback must start")
+            .expect("callback must signal entry");
+        assert!(
+            active_turn.is_cancelled(),
+            "budget cancellation must reach the active turn before telemetry can block"
+        );
+        release_tx.send(()).expect("release callback");
+    }
+
+    #[tokio::test]
+    async fn dropping_runtime_guard_cancels_active_host_turn() {
+        let root = CancellationToken::new();
+        let mut guard = SessionRuntimeGuard::new(root);
+        let active_turn = CancellationToken::new();
+        guard.set_active_turn(active_turn.clone());
+
+        drop(guard);
+
+        assert!(
+            active_turn.is_cancelled(),
+            "engine shutdown must synchronously cancel the active host turn"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
