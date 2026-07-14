@@ -63,9 +63,15 @@ pub struct MidFlightMonitor {
     /// Most recent error signatures, oldest at front, newest at back.
     /// Capacity-bounded to `WINDOW_LEN`.
     recent_errors: VecDeque<String>,
-    recent_tool_outcomes: VecDeque<String>,
+    recent_tool_outcomes: VecDeque<ToolOutcomeObservation>,
     last_replanned_route: Option<Vec<String>>,
     consecutive_output_stalls: u32,
+}
+
+#[derive(Clone)]
+struct ToolOutcomeObservation {
+    normalized: String,
+    raw: String,
 }
 
 impl MidFlightMonitor {
@@ -116,15 +122,19 @@ impl MidFlightMonitor {
         is_error: bool,
         outcome: &str,
     ) {
-        let signature = format!(
+        let normalized = format!(
             "{tool_name}|{}|{}|{}",
             normalized_action_json(input, None),
             if is_error { "error" } else { "success" },
-            Self::root_cause_signature(outcome)
+            if is_error {
+                Self::root_cause_signature(outcome)
+            } else {
+                stable_success_signature(outcome)
+            }
         );
         if let Some(route) = &self.last_replanned_route {
             let expected = &route[self.recent_tool_outcomes.len() % route.len()];
-            if &signature != expected {
+            if &normalized != expected {
                 // The agent materially deviated from the route after the
                 // replan. A later return to the old route is a new incident,
                 // not proof that the earlier directive was ignored.
@@ -134,7 +144,10 @@ impl MidFlightMonitor {
         if self.recent_tool_outcomes.len() == ROUTE_WINDOW_LEN {
             self.recent_tool_outcomes.pop_front();
         }
-        self.recent_tool_outcomes.push_back(signature);
+        self.recent_tool_outcomes.push_back(ToolOutcomeObservation {
+            normalized,
+            raw: format!("{tool_name}|{}|{is_error}|{outcome}", input),
+        });
     }
 
     /// Provider-retry boundaries consume only budget/stall signals. Route and
@@ -188,11 +201,7 @@ impl MidFlightMonitor {
     }
 
     fn repeated_route(&self) -> Option<Vec<String>> {
-        // A one-step "cycle" is ambiguous: a tool may legitimately iterate
-        // while returning changing progress. Existing LoopGuard already owns
-        // exact one-call repetition. Route detection therefore starts at two
-        // distinct normalized steps and targets A/B (or longer) oscillation.
-        for cycle_len in 2..=MAX_ROUTE_CYCLE_LEN {
+        for cycle_len in 1..=MAX_ROUTE_CYCLE_LEN {
             let repeated_len = cycle_len * ROUTE_REPEAT_THRESHOLD;
             if self.recent_tool_outcomes.len() < repeated_len {
                 continue;
@@ -203,11 +212,23 @@ impl MidFlightMonitor {
                 .skip(self.recent_tool_outcomes.len() - repeated_len)
                 .cloned()
                 .collect::<Vec<_>>();
-            let cycle = &tail[..cycle_len];
-            if cycle.windows(2).any(|pair| pair[0] != pair[1])
-                && tail.chunks_exact(cycle_len).all(|chunk| chunk == cycle)
-            {
-                return Some(cycle.to_vec());
+            let cycle = tail[..cycle_len]
+                .iter()
+                .map(|observation| observation.normalized.clone())
+                .collect::<Vec<_>>();
+            let normalized_repeats = tail.chunks_exact(cycle_len).all(|chunk| {
+                chunk
+                    .iter()
+                    .map(|observation| &observation.normalized)
+                    .eq(cycle.iter())
+            });
+            // Exact single-call repetition is already owned by LoopGuard.
+            // The monitor handles a one-step route only when raw outcomes
+            // differ but collapse after explicit volatile-field normalization.
+            let raw_varies =
+                cycle_len > 1 || tail.windows(2).any(|pair| pair[0].raw != pair[1].raw);
+            if normalized_repeats && raw_varies {
+                return Some(cycle);
             }
         }
         None
@@ -341,6 +362,35 @@ fn looks_like_uuid(value: &str) -> bool {
                 8 | 13 | 18 | 23 => character == '-',
                 _ => character.is_ascii_hexdigit(),
             })
+}
+
+fn stable_success_signature(message: &str) -> String {
+    let mut output = Vec::new();
+    let mut previous_was_volatile_label = false;
+    for raw_token in message.split_whitespace() {
+        let trimmed = raw_token.trim_end_matches(|character: char| ",;:.".contains(character));
+        let (token, volatile_label) = if let Some((label, _)) = trimmed.split_once('=') {
+            if is_volatile_action_key(label) {
+                (format!("{label}=<volatile>"), false)
+            } else {
+                (trimmed.to_string(), false)
+            }
+        } else if previous_was_volatile_label {
+            ("<volatile>".to_string(), false)
+        } else if looks_like_uuid(trimmed) {
+            ("<uuid>".to_string(), false)
+        } else if trimmed.contains('/') || trimmed.contains('\\') {
+            (MidFlightMonitor::root_cause_signature(trimmed), false)
+        } else {
+            (
+                trimmed.to_string(),
+                is_volatile_action_key(trimmed.trim_end_matches([':', '='])),
+            )
+        };
+        output.push(token);
+        previous_was_volatile_label = volatile_label;
+    }
+    output.join(" ")
 }
 
 #[cfg(test)]
@@ -542,6 +592,34 @@ mod tests {
             );
         }
         assert_eq!(productive.tick(), MonitorAction::Continue);
+    }
+
+    #[test]
+    fn one_step_route_normalizes_volatile_success_metadata() {
+        let view = ExecutionBudget::default().start_root();
+        let mut mon = MidFlightMonitor::new(view);
+        let input = serde_json::json!({"path": "stable"});
+        for request_id in 1000..1000 + ROUTE_REPEAT_THRESHOLD {
+            mon.record_tool_outcome(
+                "Read",
+                &input,
+                false,
+                &format!("unchanged request_id {request_id}"),
+            );
+        }
+        assert_eq!(mon.tick(), MonitorAction::ReplanRepeatedRoute);
+    }
+
+    #[test]
+    fn successful_progress_numbers_remain_distinct() {
+        assert_ne!(
+            stable_success_signature("10 tests failed"),
+            stable_success_signature("9 tests failed")
+        );
+        assert_eq!(
+            stable_success_signature("unchanged request_id 1000"),
+            stable_success_signature("unchanged request_id 1001")
+        );
     }
 
     #[test]

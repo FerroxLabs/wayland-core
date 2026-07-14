@@ -166,7 +166,45 @@ impl Tool for VolatileSuccessTool {
             .calls
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         ToolResult {
-            content: format!("unchanged observation {call}"),
+            content: format!("unchanged request_id {call}"),
+            is_error: false,
+        }
+    }
+}
+
+struct ImprovingTool {
+    name: &'static str,
+    remaining: Arc<std::sync::atomic::AtomicU32>,
+}
+
+#[async_trait]
+impl Tool for ImprovingTool {
+    fn name(&self) -> &str {
+        self.name
+    }
+
+    fn description(&self) -> &str {
+        "Returns a meaningfully improving numeric outcome"
+    }
+
+    fn input_schema(&self) -> serde_json::Value {
+        json!({"type": "object"})
+    }
+
+    fn category(&self) -> wcore_protocol::events::ToolCategory {
+        wcore_protocol::events::ToolCategory::Info
+    }
+
+    fn is_concurrency_safe(&self, _input: &serde_json::Value) -> bool {
+        true
+    }
+
+    async fn execute(&self, _input: serde_json::Value) -> ToolResult {
+        let remaining = self
+            .remaining
+            .fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+        ToolResult {
+            content: format!("{remaining} tests failed"),
             is_error: false,
         }
     }
@@ -361,6 +399,75 @@ async fn normalized_alternating_route_replans_once_then_stops_if_ignored() {
     assert_monitor_decision(&events, "replan", "repeated_tool_route");
     assert_monitor_decision(&events, "stop", "repeated_tool_route");
     assert_midflight_monitor_occurrences(&events, 2);
+}
+
+#[tokio::test]
+async fn one_step_volatile_route_replans_once_then_stops_if_ignored() {
+    let turns = (0..6)
+        .map(|index| named_turn(index, "route_single"))
+        .collect();
+    let provider = Arc::new(RecordingProvider::new(turns));
+    let requests = provider.requests();
+    let mut registry = ToolRegistry::new();
+    registry.register(Box::new(VolatileSuccessTool {
+        name: "route_single",
+        calls: std::sync::atomic::AtomicU32::new(1000),
+    }));
+    let sink = Arc::new(TestSink::new());
+    let handle = sink.handle();
+    let output: Arc<dyn OutputSink> = sink;
+    let mut config = test_config();
+    config.max_turns = Some(30);
+    let mut engine = AgentEngine::new_with_provider(provider, config, registry, output);
+
+    let result = engine
+        .run("repeat one volatile route", "")
+        .await
+        .expect("the monitor stops an ignored one-step route cleanly");
+    assert_eq!(result.finish_reason, FinishReason::MaxTurns);
+    assert_eq!(requests.lock().unwrap().len(), 6);
+    let events = handle.snapshot();
+    assert_monitor_decision(&events, "replan", "repeated_tool_route");
+    assert_monitor_decision(&events, "stop", "repeated_tool_route");
+    assert_midflight_monitor_occurrences(&events, 2);
+}
+
+#[tokio::test]
+async fn improving_numeric_outcomes_do_not_trip_route_monitor() {
+    let turns = (0..10)
+        .map(|index| named_turn(index, if index % 2 == 0 { "test_a" } else { "test_b" }))
+        .collect();
+    let provider = Arc::new(RecordingProvider::new(turns));
+    let remaining = Arc::new(std::sync::atomic::AtomicU32::new(10));
+    let mut registry = ToolRegistry::new();
+    registry.register(Box::new(ImprovingTool {
+        name: "test_a",
+        remaining: Arc::clone(&remaining),
+    }));
+    registry.register(Box::new(ImprovingTool {
+        name: "test_b",
+        remaining,
+    }));
+    let sink = Arc::new(TestSink::new());
+    let handle = sink.handle();
+    let output: Arc<dyn OutputSink> = sink;
+    let mut config = test_config();
+    config.max_turns = Some(10);
+    let mut engine = AgentEngine::new_with_provider(provider, config, registry, output);
+
+    let result = engine
+        .run("iterate until the tests pass", "")
+        .await
+        .expect("meaningful numeric progress must reach the normal turn cap");
+    assert_eq!(result.turns, 10);
+    assert_eq!(result.finish_reason, FinishReason::MaxTurns);
+    assert!(
+        handle
+            .snapshot()
+            .iter()
+            .all(|event| event["type"].as_str() != Some("mid_flight_monitor_decision")),
+        "meaningful numeric progress must not be classified as a route loop"
+    );
 }
 
 #[tokio::test]
