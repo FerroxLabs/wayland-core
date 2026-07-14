@@ -25,18 +25,17 @@ use wcore_tools::context::ToolContext;
 #[cfg(unix)]
 use wcore_tools::vfs::RealFs;
 
+fn no_sandbox_runtime() -> std::sync::Arc<wcore_sandbox::SandboxRegistry> {
+    std::sync::Arc::new(wcore_sandbox::SandboxRegistry::new(std::sync::Arc::new(
+        wcore_sandbox::backends::no_sandbox::NoSandboxBackend::new(),
+    )))
+}
+
 #[tokio::test]
 #[cfg(unix)]
-#[serial_test::serial]
 async fn bash_tool_kills_long_sleep_on_cancel() {
-    // Exercise the real cancel path, not the sandbox's fail-closed refusal
-    // (bwrap can't spawn in an unprivileged CI container). Opt into the
-    // documented no-sandbox degraded mode.
-    // SAFETY: test-only env mutation; `#[serial]` prevents env races.
-    unsafe {
-        std::env::set_var("WAYLAND_SANDBOX", "none");
-        std::env::set_var("WAYLAND_ALLOW_NO_SANDBOX", "1");
-    }
+    // This is a cancellation test, so inject a deterministic execution
+    // backend instead of depending on host sandbox availability.
     let cancel = CancellationToken::new();
     let cancel2 = cancel.clone();
     // Fire the cancel after 100ms.
@@ -50,7 +49,8 @@ async fn bash_tool_kills_long_sleep_on_cancel() {
         Arc::new(RealFs),
         None,
         Arc::new(NullToolOutputSink),
-    );
+    )
+    .with_sandbox(no_sandbox_runtime());
     let start = Instant::now();
     let result = BashTool
         .execute_with_ctx(json!({ "command": "sleep 30" }), &ctx)
@@ -74,17 +74,8 @@ async fn bash_tool_kills_long_sleep_on_cancel() {
 }
 
 #[tokio::test]
-#[serial_test::serial]
 async fn bash_tool_ctx_passthrough_runs_normally_when_no_cancel() {
-    // Exercise the real exec path, not the sandbox's fail-closed refusal
-    // (bwrap can't spawn in an unprivileged CI container). Opt into the
-    // documented no-sandbox degraded mode.
-    // SAFETY: test-only env mutation; `#[serial]` prevents env races.
-    unsafe {
-        std::env::set_var("WAYLAND_SANDBOX", "none");
-        std::env::set_var("WAYLAND_ALLOW_NO_SANDBOX", "1");
-    }
-    let ctx = ToolContext::test_default();
+    let ctx = ToolContext::test_default().with_sandbox(no_sandbox_runtime());
     let result = BashTool
         .execute_with_ctx(json!({ "command": "echo bash_ctx_ok" }), &ctx)
         .await;

@@ -170,9 +170,18 @@ async fn e5_shell_expansion() {
     let (_guard, root) = make_project();
     let cwd = root.to_string_lossy().to_string();
     let skills = load_all_skills(&root, &[], false, None).await;
-    let tool = make_tool(skills, &cwd);
+    let approval_manager = Arc::new(wcore_protocol::ToolApprovalManager::new());
+    approval_manager.set_mode(wcore_protocol::commands::SessionMode::Force);
+    let tool = make_tool(skills, &cwd).with_live_approval_manager(approval_manager);
 
-    let result = tool.execute(json!({"skill": "shell-demo"})).await;
+    let ctx = wcore_tools::context::ToolContext::test_default().with_sandbox(std::sync::Arc::new(
+        wcore_sandbox::SandboxRegistry::new(std::sync::Arc::new(
+            wcore_sandbox::backends::no_sandbox::NoSandboxBackend::new(),
+        )),
+    ));
+    let result = tool
+        .execute_with_ctx(json!({"skill": "shell-demo"}), &ctx)
+        .await;
     assert!(!result.is_error, "E5 FAIL: error: {}", result.content);
 
     let today = chrono::Local::now().format("%Y-%m-%d").to_string();
