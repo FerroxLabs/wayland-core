@@ -86,6 +86,7 @@ windows-sys = { version = "0.59", features = [
 
 [dev-dependencies]
 wcore-mcp = { workspace = true }
+wcore-egress = { workspace = true }
 # Tests need the wayland-core binary available — declaring wcore-cli as
 # an artifact dev-dep would also work, but the runner already supports
 # binary discovery via WCORE_EVAL_BIN env + relative target/ walk

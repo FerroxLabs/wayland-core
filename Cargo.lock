@@ -9742,6 +9742,7 @@ dependencies = [
  "tracing",
  "vt100",
  "wcore-config",
+ "wcore-egress",
  "wcore-mcp",
  "wcore-protocol",
  "windows-sys 0.59.0",

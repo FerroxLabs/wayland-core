@@ -62,6 +62,15 @@ impl SeededRepository {
         &self.fixture_sha256
     }
 
+    /// Canonical bytes used both to configure and identify this fixture.
+    pub fn artifact_bytes(&self) -> Result<Vec<u8>, RepositoryError> {
+        serde_json::to_vec(&CanonicalRepository {
+            protocol_version: FIXTURE_PROTOCOL_VERSION,
+            files: &self.files,
+        })
+        .map_err(RepositoryError::Serialize)
+    }
+
     /// Write the seed without following pre-existing symlinks below `root`.
     pub fn materialize(&self, root: &Path) -> Result<(), RepositoryError> {
         std::fs::create_dir_all(root).map_err(|source| RepositoryError::Io {

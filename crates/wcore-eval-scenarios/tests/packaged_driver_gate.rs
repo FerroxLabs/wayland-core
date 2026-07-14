@@ -1,17 +1,30 @@
 #![cfg(feature = "packaged-driver-gate")]
 
+use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Output;
+use std::sync::Arc;
 
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64;
 use ed25519_dalek::SigningKey;
+use serde::Serialize;
 use sha2::{Digest, Sha256};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::process::Command;
+use wcore_egress::{BoundedEgressRecorder, EgressClient, EgressOutcome};
 use wcore_eval_scenarios::assertions::Assertion;
-use wcore_eval_scenarios::fixtures::manifest::{CompositeFixtureManifest, FixtureComponents};
+use wcore_eval_scenarios::fixtures::manifest::{
+    BoundCompositeFixtureManifest, FixtureArtifactPaths,
+};
+use wcore_eval_scenarios::fixtures::mcp::{McpHttpFixture, McpHttpMode};
 use wcore_eval_scenarios::fixtures::openai::{OpenAiFixtureScript, OpenAiStep};
+use wcore_eval_scenarios::fixtures::remote_execution::{
+    FixtureArtifact, OutputChannel, RemoteExecutionFixture, RemoteExecutionScript, RemoteTask,
+    ResourceBudget, ScriptedOutcome, ScriptedOutputEvent,
+};
+use wcore_eval_scenarios::fixtures::repository::{SeededRepository, repository_tree_sha256};
 use wcore_eval_scenarios::providers::{ProviderConfig, ProviderId};
 use wcore_eval_scenarios::receipt::{ReceiptVerifier, VerificationPolicy, VerifiedAuthority};
 use wcore_eval_scenarios::receipt_policy::{
@@ -22,6 +35,8 @@ use wcore_eval_scenarios::runner::discover_binary;
 use wcore_eval_scenarios::runner::run_with_binary;
 use wcore_eval_scenarios::runner::run_with_binary_in_paths;
 use wcore_eval_scenarios::scenario::{Category, Scenario, Turn};
+use wcore_mcp::config::{McpServerConfig, TransportType};
+use wcore_mcp::manager::McpManager;
 use wcore_protocol::events::{CapabilityId, CapabilityReasonCode};
 
 fn expected_source_commit() -> String {
@@ -55,18 +70,198 @@ fn digest(byte: u8) -> String {
     format!("{byte:02x}").repeat(32)
 }
 
-fn fixture_manifest() -> CompositeFixtureManifest {
-    CompositeFixtureManifest::new(
-        FixtureComponents::new(
-            digest(1),
-            digest(2),
-            digest(3),
-            digest(4),
-            digest(5),
-            digest(6),
-        )
-        .expect("valid packaged fixture component identities"),
+#[derive(Serialize)]
+struct HiddenOutcomeArtifact<'a> {
+    path: &'a str,
+    needle: &'a str,
+    repository_sha256: &'a str,
+}
+
+#[derive(Serialize)]
+struct EgressArtifact<'a> {
+    method: &'a str,
+    scheme: &'a str,
+    host: &'a str,
+    path_query_sha256: &'a str,
+    outcome: &'a str,
+}
+
+async fn observed_egress_artifact() -> Vec<u8> {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind egress fixture");
+    let address = listener.local_addr().expect("egress fixture address");
+    let server = tokio::spawn(async move {
+        let (mut socket, _) = listener.accept().await.expect("accept egress request");
+        let mut buffer = [0_u8; 2048];
+        let _ = socket.read(&mut buffer).await.expect("read egress request");
+        socket
+            .write_all(b"HTTP/1.1 204 No Content\r\nContent-Length: 0\r\n\r\n")
+            .await
+            .expect("write egress response");
+    });
+    let recorder = Arc::new(BoundedEgressRecorder::new(1));
+    let response = EgressClient::tool()
+        .with_observer(recorder.clone())
+        .post(format!("http://{address}/fixture/status"))
+        .body("fixture-request")
+        .send()
+        .await
+        .expect("send observed egress request");
+    assert_eq!(response.status().as_u16(), 204);
+    server.await.expect("join egress fixture");
+    let observation = recorder.snapshot();
+    assert_eq!(observation.dropped_events, 0);
+    assert_eq!(observation.events.len(), 1);
+    let event = &observation.events[0];
+    assert_eq!(event.outcome, EgressOutcome::HttpResponse { status: 204 });
+    serde_json::to_vec(&EgressArtifact {
+        method: &event.method,
+        scheme: &event.destination.scheme,
+        host: &event.destination.host,
+        path_query_sha256: &event.destination.path_query_sha256,
+        outcome: "http_204",
+    })
+    .expect("serialize observed egress artifact")
+}
+
+fn verified_remote_artifact(repository_sha256: &str) -> Vec<u8> {
+    let limits = ResourceBudget::new(2_000, 64 * 1024 * 1024, 30_000, 1024 * 1024)
+        .expect("remote fixture limits");
+    let fixture =
+        RemoteExecutionFixture::new("fixture-local", "worker-01", "fixture-v1", limits, [23; 32])
+            .expect("remote fixture");
+    let task = RemoteTask::new(
+        "task-001",
+        repository_sha256,
+        b"verify the materialized repository".to_vec(),
+        ResourceBudget::new(500, 1024 * 1024, 5_000, 4096).expect("remote task limits"),
     )
+    .expect("remote task");
+    let script = RemoteExecutionScript::new(
+        [ScriptedOutputEvent::new(
+            2,
+            OutputChannel::Stdout,
+            "repository verified",
+        )],
+        ScriptedOutcome::success(
+            FixtureArtifact::new("dist/result.txt", b"verified\n".to_vec())
+                .expect("remote artifact"),
+        ),
+    );
+    let receipt = fixture.execute(&task, &script).expect("remote execution");
+    receipt
+        .verify(fixture.identity(), &fixture.verifying_key())
+        .expect("verify remote fixture attestation");
+    serde_json::to_vec(&receipt).expect("serialize verified remote receipt")
+}
+
+async fn write_fixture_binding(
+    root: &Path,
+    openai_script: &OpenAiFixtureScript,
+) -> (BoundCompositeFixtureManifest, PathBuf, PathBuf) {
+    let artifacts = root.join("fixture-artifacts");
+    fs::create_dir(&artifacts).expect("create fixture artifact directory");
+    let openai_path = artifacts.join("openai.json");
+    fs::write(
+        &openai_path,
+        serde_json::to_vec(openai_script).expect("serialize live OpenAI fixture"),
+    )
+    .expect("write live OpenAI fixture");
+    let repository = SeededRepository::new([
+        ("README.md", "packaged fixture repository\n"),
+        ("status.txt", "READY\n"),
+    ])
+    .expect("construct seeded repository fixture");
+    let repository_root = root.join("live-repository");
+    repository
+        .materialize(&repository_root)
+        .expect("materialize seeded repository fixture");
+    let repository_sha256 =
+        repository_tree_sha256(&repository_root).expect("hash materialized repository fixture");
+    assert_eq!(repository_sha256, repository.fixture_sha256());
+    let repository_artifact = repository
+        .artifact_bytes()
+        .expect("serialize seeded repository fixture");
+    fs::write(artifacts.join("repository.json"), repository_artifact)
+        .expect("write repository fixture artifact");
+
+    let status = fs::read_to_string(repository_root.join("status.txt"))
+        .expect("read hidden outcome fixture");
+    assert!(status.contains("READY"));
+    let hidden_outcome = serde_json::to_vec(&HiddenOutcomeArtifact {
+        path: "status.txt",
+        needle: "READY",
+        repository_sha256: &repository_sha256,
+    })
+    .expect("serialize proven hidden outcome");
+    fs::write(artifacts.join("hidden-outcome.json"), hidden_outcome)
+        .expect("write hidden outcome artifact");
+
+    let mcp = McpHttpFixture::start(McpHttpMode::SseResponse)
+        .await
+        .expect("start live MCP fixture");
+    let mut configs = HashMap::new();
+    configs.insert(
+        "fixture".to_string(),
+        McpServerConfig {
+            transport: TransportType::StreamableHttp,
+            command: None,
+            args: None,
+            env: None,
+            url: Some(mcp.url().to_string()),
+            headers: None,
+            deferred: Some(false),
+            allow_local: true,
+            only_for_assistant: None,
+        },
+    );
+    let manager = McpManager::connect_all(&configs)
+        .await
+        .expect("connect live MCP fixture");
+    let outcome = manager
+        .call_tool(
+            "fixture",
+            "fixture_echo",
+            serde_json::json!({"text": "BOUND"}),
+        )
+        .await
+        .expect("call live MCP fixture");
+    assert_eq!(outcome.text, "BOUND");
+    manager.shutdown().await;
+    let mcp_observation = mcp.shutdown().await.expect("stop live MCP fixture");
+    assert!(mcp_observation.complete(), "{mcp_observation:?}");
+    let mcp_artifact = serde_json::to_vec(&(1_u32, McpHttpMode::SseResponse))
+        .expect("serialize exercised MCP fixture mode");
+    fs::write(artifacts.join("mcp.json"), mcp_artifact).expect("write MCP fixture artifact");
+
+    fs::write(
+        artifacts.join("egress.json"),
+        observed_egress_artifact().await,
+    )
+    .expect("write observed egress artifact");
+    fs::write(
+        artifacts.join("remote-execution.json"),
+        verified_remote_artifact(&repository_sha256),
+    )
+    .expect("write verified remote fixture artifact");
+    let paths = FixtureArtifactPaths::new(
+        "fixture-artifacts/openai.json",
+        "fixture-artifacts/repository.json",
+        "fixture-artifacts/hidden-outcome.json",
+        "fixture-artifacts/mcp.json",
+        "fixture-artifacts/egress.json",
+        "fixture-artifacts/remote-execution.json",
+    );
+    let binding = BoundCompositeFixtureManifest::from_artifacts(root, paths)
+        .expect("bind live packaged fixture artifacts");
+    let manifest_path = root.join("fixture-manifest.json");
+    fs::write(
+        &manifest_path,
+        serde_json::to_vec_pretty(&binding).expect("serialize bound fixture manifest"),
+    )
+    .expect("write bound fixture manifest");
+    (binding, manifest_path, openai_path)
 }
 
 async fn driver(core: &Path, source: &str, extra_args: &[&str]) -> Output {
@@ -82,6 +277,9 @@ async fn driver(core: &Path, source: &str, extra_args: &[&str]) -> Output {
         .env_remove("DEEPSEEK_API_KEY")
         .env_remove("WCORE_EVAL_BIN")
         .env_remove("WCORE_EVAL_PROVIDER");
+    if extra_args.contains(&"--fixture-manifest") {
+        command.env("WCORE_EVAL_REQUIRE_AUTHORITY_EVIDENCE", "1");
+    }
     command.output().await.expect("execute wayland-eval driver")
 }
 
@@ -98,32 +296,32 @@ fn context(output: &Output) -> String {
 async fn packaged_core_identity_and_driver_gates_are_enforced() {
     let source = expected_source_commit();
     let core = packaged_core();
-    let digest = sha256(&core);
+    let core_digest = sha256(&core);
 
     let verified = driver(&core, &source, &["--verify-binary"]).await;
     assert!(verified.status.success(), "{}", context(&verified));
     let verified_stdout = String::from_utf8_lossy(&verified.stdout);
     assert!(
-        verified_stdout.contains(&format!("sha256={digest}"))
+        verified_stdout.contains(&format!("sha256={core_digest}"))
             && verified_stdout.contains(&format!("source={source}")),
         "driver did not bind the expected source and exact packaged bytes: {}",
         context(&verified)
     );
 
-    let passing_fixture = OpenAiFixtureScript::new([OpenAiStep::text("READY")])
+    let passing_script = OpenAiFixtureScript::new([OpenAiStep::text("READY")]);
+    let evidence_root = tempfile::tempdir().expect("packaged authority evidence root");
+    let (binding, manifest_path, openai_path) =
+        write_fixture_binding(evidence_root.path(), &passing_script).await;
+    let expected_fixture_sha256 = binding.manifest().fixture_sha256().to_string();
+    let live_script: OpenAiFixtureScript =
+        serde_json::from_slice(&fs::read(&openai_path).expect("read bound live OpenAI fixture"))
+            .expect("parse bound live OpenAI fixture");
+    let passing_fixture = live_script
         .start()
         .await
         .expect("start passing OpenAI fixture");
     let passing_base_url = passing_fixture.base_url().to_string();
-    let evidence_root = tempfile::tempdir().expect("packaged authority evidence root");
-    let manifest_path = evidence_root.path().join("fixture-manifest.json");
     let report_root = evidence_root.path().join("reports");
-    let manifest = fixture_manifest();
-    std::fs::write(
-        &manifest_path,
-        serde_json::to_vec_pretty(&manifest).expect("serialize fixture manifest"),
-    )
-    .expect("write fixture manifest");
     let passed = driver(
         &core,
         &source,
@@ -169,9 +367,8 @@ async fn packaged_core_identity_and_driver_gates_are_enforced() {
     let local: wcore_eval_scenarios::receipt::EvidenceReceiptV1 =
         serde_json::from_slice(&local_json).expect("parse packaged receipt");
     assert_eq!(
-        local.body.identity.fixture_sha256,
-        manifest.fixture_sha256(),
-        "wayland-eval did not bind the supplied fixture manifest"
+        local.body.identity.fixture_sha256, expected_fixture_sha256,
+        "wayland-eval did not bind the verified live fixture artifacts"
     );
     let signing_key = SigningKey::from_bytes(&[42; 32]);
     let provenance = CiProvenanceV1 {
@@ -211,13 +408,13 @@ async fn packaged_core_identity_and_driver_gates_are_enforced() {
         source_commit: signed.body.identity.source_commit.clone(),
         binary_sha256: signed.body.identity.binary_sha256.clone(),
         config_sha256: signed.body.identity.config_sha256.clone(),
-        fixture_sha256: signed.body.identity.fixture_sha256.clone(),
+        fixture_sha256: expected_fixture_sha256.clone(),
         provider: signed.body.identity.provider.clone(),
         model: signed.body.identity.model.clone(),
-        repository: provenance.repository,
-        source_ref: provenance.source_ref,
-        workflow: provenance.workflow,
-        invocation_id: provenance.invocation_id,
+        repository: provenance.repository.clone(),
+        source_ref: provenance.source_ref.clone(),
+        workflow: provenance.workflow.clone(),
+        invocation_id: provenance.invocation_id.clone(),
         target_os: signed.body.target.os.clone(),
         target_architecture: signed.body.target.architecture.clone(),
         sandbox_backend: signed.body.target.sandbox_backend.clone(),
@@ -226,9 +423,56 @@ async fn packaged_core_identity_and_driver_gates_are_enforced() {
         required_cells: signed.body.required_cells.clone(),
     };
     let signed_json = serde_json::to_vec(&signed).expect("signed packaged receipt JSON");
+    verify_authoritative_receipt(&signed_json, &policy)
+        .expect("real packaged receipt must satisfy the authoritative gate");
+
+    let signed_path = evidence_root.path().join("signed-receipt.json");
+    let policy_path = evidence_root.path().join("authority-policy.json");
+    fs::write(&signed_path, &signed_json).expect("write signed packaged receipt");
+    fs::write(
+        &policy_path,
+        serde_json::to_vec_pretty(&policy).expect("serialize packaged authority policy"),
+    )
+    .expect("write packaged authority policy");
+    let authoritative = Command::new(env!("CARGO_BIN_EXE_wayland-receipt"))
+        .args([
+            "verify",
+            "--receipt",
+            signed_path.to_str().expect("UTF-8 signed receipt path"),
+            "--trust-policy",
+            policy_path.to_str().expect("UTF-8 authority policy path"),
+        ])
+        .output()
+        .await
+        .expect("execute authoritative packaged verifier");
+    assert!(
+        authoritative.status.success(),
+        "{}",
+        context(&authoritative)
+    );
+    assert!(
+        String::from_utf8_lossy(&authoritative.stdout).contains("AUTHORITATIVE PASS"),
+        "{}",
+        context(&authoritative)
+    );
+
+    let mut mislabeled_body = local.body.clone();
+    mislabeled_body.identity.fixture_sha256 = digest(9);
+    let mislabeled_local = wcore_eval_scenarios::receipt::EvidenceReceiptV1::local(mislabeled_body)
+        .expect("structurally valid mislabeled local receipt");
+    let mislabeled_signed = sign_ci_receipt(
+        &serde_json::to_vec(&mislabeled_local).expect("serialize mislabeled local receipt"),
+        "release-ci",
+        BASE64.encode(signing_key.to_bytes()).as_bytes(),
+        provenance.clone(),
+    )
+    .expect("attest mislabeled receipt for policy regression");
     assert!(matches!(
-        verify_authoritative_receipt(&signed_json, &policy),
-        Err(AuthorityError::MilestoneGateFailed(_))
+        verify_authoritative_receipt(
+            &serde_json::to_vec(&mislabeled_signed).expect("serialize mislabeled signed receipt"),
+            &policy,
+        ),
+        Err(AuthorityError::PolicyMismatch("fixture_sha256"))
     ));
 
     let failing_fixture = OpenAiFixtureScript::new([OpenAiStep::text("WRONG")])
@@ -273,12 +517,6 @@ async fn packaged_candidate_cannot_replace_authenticated_egress_evidence() {
     let core = packaged_core();
     let root = tempfile::tempdir().expect("egress replacement evidence root");
     let report_root = root.path().join("reports");
-    let manifest_path = root.path().join("fixture-manifest.json");
-    std::fs::write(
-        &manifest_path,
-        serde_json::to_vec_pretty(&fixture_manifest()).expect("serialize fixture manifest"),
-    )
-    .expect("write fixture manifest");
     let forged_digest = "0".repeat(64);
     let command = format!(
         "p=$(find .wayland-core -name 'eval-egress-*.jsonl' -print -quit); \
@@ -286,17 +524,22 @@ async fn packaged_candidate_cannot_replace_authenticated_egress_evidence() {
          printf '%s\\n' '{{\"record\":\"header\",\"version\":2}}' \
          '{{\"record\":\"footer\",\"complete\":true,\"event_count\":0,\"transcript_sha256\":\"{forged_digest}\",\"signature_base64\":\"AAAA\"}}' > \"$p\""
     );
-    let fixture = OpenAiFixtureScript::new([
+    let attack_script = OpenAiFixtureScript::new([
         OpenAiStep::tool_call(
             "replace-egress-evidence",
             "Bash",
             serde_json::json!({"command": command}),
         ),
         OpenAiStep::text("READY"),
-    ])
-    .start()
-    .await
-    .expect("start replacement attack fixture");
+    ]);
+    let (_, manifest_path, openai_path) = write_fixture_binding(root.path(), &attack_script).await;
+    let live_script: OpenAiFixtureScript =
+        serde_json::from_slice(&fs::read(openai_path).expect("read bound attack fixture"))
+            .expect("parse bound attack fixture");
+    let fixture = live_script
+        .start()
+        .await
+        .expect("start replacement attack fixture");
     let output = Command::new(env!("CARGO_BIN_EXE_wayland-eval"))
         .args([
             "--scenario",
