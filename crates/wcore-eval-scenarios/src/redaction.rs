@@ -71,10 +71,6 @@ impl SecretRedactor {
     /// Scan the isolated worktree without following symlinks. Files retaining
     /// provider material are unlinked so they cannot be collected as evidence.
     pub(crate) fn remove_contaminated_files(&self, root: &Path) -> std::io::Result<Vec<PathBuf>> {
-        if self.secrets.is_empty() {
-            return Ok(Vec::new());
-        }
-
         let mut pending = vec![root.to_path_buf()];
         let mut files = 0_usize;
         let mut total_bytes = 0_u64;

@@ -38,7 +38,7 @@ use crate::child_env::ChildEnvironment;
 use crate::cost::CostReport;
 pub use crate::egress_evidence::ManagedHttpEgressEvidence;
 pub use crate::filesystem_evidence::FilesystemDeltaEvidence;
-use crate::filesystem_evidence::Snapshot as FilesystemSnapshot;
+use crate::filesystem_evidence::{EvidenceRoots, Snapshot as FilesystemSnapshot};
 use crate::process_tree::ProcessTree;
 use crate::providers::{ProviderConfig, ProviderId};
 use crate::redaction::SecretRedactor;
@@ -103,6 +103,10 @@ pub struct ExecutionEvidence {
     pub managed_http_egress: Option<ManagedHttpEgressEvidence>,
     #[serde(default)]
     pub filesystem_deltas: Option<Vec<FilesystemDeltaEvidence>>,
+    /// True only after snapshots of every required workspace and engine-state
+    /// root succeed both before and after the candidate session.
+    #[serde(default)]
+    pub filesystem_snapshot_complete: bool,
     #[serde(default)]
     pub peak_memory_bytes: Option<u64>,
     #[serde(default)]
@@ -476,6 +480,7 @@ pub(crate) async fn run_session_in(
 ) -> anyhow::Result<ScenarioResult> {
     let secret = provider.resolved_key();
     let redactor = SecretRedactor::from_secret(secret.clone());
+    let evidence_roots = EvidenceRoots::new(cwd, wayland_home)?;
     // Run the scenario's setup hook BEFORE spawning the engine. The closure
     // seeds the working dir — input files to probe, fixture scripts (mock MCP
     // server, shell hooks), and config appends (`[mcp.servers.*]`,
@@ -487,15 +492,19 @@ pub(crate) async fn run_session_in(
     });
     let outcome = match setup_result {
         Ok(()) => {
-            run_prepared_session(
+            let config_sha256 = tempenv::config_sha256(cwd)
+                .map_err(|error| anyhow::anyhow!("could not hash effective config: {error}"))?;
+            run_prepared_session(SessionRun {
                 scenario,
                 provider,
                 bin,
                 cwd,
                 wayland_home,
-                secret.as_deref(),
-                &redactor,
-            )
+                secret: secret.as_deref(),
+                redactor: &redactor,
+                config_sha256,
+                evidence_roots: &evidence_roots,
+            })
             .await
         }
         Err(error) => Err(error),
@@ -519,14 +528,12 @@ pub(crate) async fn run_session_in(
         )),
         (outcome, None) => outcome,
     };
-    let artifact_scan = redactor.remove_contaminated_files(cwd);
+    let artifact_scan = scan_artifacts(&redactor, &evidence_roots);
     let result = match (result, artifact_scan) {
         (Ok(mut result), Ok(contaminated)) => {
             result.execution.artifact_scan_complete = true;
-            for path in contaminated {
-                result.failures.push(Failure::SecretDetected {
-                    sink: format!("artifact:{}", path.display()),
-                });
+            for sink in contaminated {
+                result.failures.push(Failure::SecretDetected { sink });
             }
             result.passed = result.failures.is_empty();
             Ok(result)
@@ -549,34 +556,38 @@ pub(crate) async fn run_session_in(
         .map_err(|error| anyhow::anyhow!(redactor.text(error.to_string()).0))
 }
 
-async fn run_prepared_session(
-    scenario: &crate::scenario::Scenario,
-    provider: &ProviderConfig,
-    bin: &std::path::Path,
-    cwd: &std::path::Path,
-    wayland_home: Option<&std::path::Path>,
-    secret: Option<&str>,
-    redactor: &SecretRedactor,
-) -> anyhow::Result<ScenarioResult> {
-    let before = FilesystemSnapshot::capture(cwd)
-        .map_err(|error| anyhow::anyhow!("could not snapshot scenario workspace: {error}"))?;
-    let config_sha256 = tempenv::config_sha256(cwd)
-        .map_err(|error| anyhow::anyhow!("could not hash effective config: {error}"))?;
-    let mut result = run_session_body(SessionRun {
-        scenario,
-        provider,
-        bin,
-        cwd,
-        wayland_home,
-        secret,
-        redactor,
-        config_sha256,
-    })
-    .await?;
-    let after = FilesystemSnapshot::capture(cwd)
-        .map_err(|error| anyhow::anyhow!("could not snapshot scenario workspace: {error}"))?;
+async fn run_prepared_session(input: SessionRun<'_>) -> anyhow::Result<ScenarioResult> {
+    let evidence_roots = input.evidence_roots;
+    let before = FilesystemSnapshot::capture(evidence_roots)
+        .map_err(|error| anyhow::anyhow!("could not snapshot scenario evidence roots: {error}"))?;
+    let mut result = run_session_body(input).await?;
+    let after = FilesystemSnapshot::capture(evidence_roots)
+        .map_err(|error| anyhow::anyhow!("could not snapshot scenario evidence roots: {error}"))?;
     result.execution.filesystem_deltas = Some(before.delta(after));
+    result.execution.filesystem_snapshot_complete = true;
     Ok(result)
+}
+
+fn scan_artifacts(
+    redactor: &SecretRedactor,
+    roots: &EvidenceRoots,
+) -> std::io::Result<Vec<String>> {
+    let mut contaminated = Vec::new();
+    for root in roots.scan_roots() {
+        // Validate every required physical root even when there is no provider
+        // secret to search for. Completeness must describe coverage, not merely
+        // whether the redactor had a needle.
+        let _ = std::fs::read_dir(root)?;
+        for relative in redactor.remove_contaminated_files(root)? {
+            let classified = roots.classify(&root.join(relative))?;
+            contaminated.push(format!(
+                "artifact:{}:{}",
+                classified.scope,
+                classified.relative.display()
+            ));
+        }
+    }
+    Ok(contaminated)
 }
 
 struct SessionRun<'a> {
@@ -588,6 +599,7 @@ struct SessionRun<'a> {
     secret: Option<&'a str>,
     redactor: &'a SecretRedactor,
     config_sha256: String,
+    evidence_roots: &'a EvidenceRoots,
 }
 
 async fn run_session_body(input: SessionRun<'_>) -> anyhow::Result<ScenarioResult> {
@@ -600,6 +612,7 @@ async fn run_session_body(input: SessionRun<'_>) -> anyhow::Result<ScenarioResul
         secret,
         redactor,
         config_sha256,
+        evidence_roots: _,
     } = input;
     let authority_evidence_required = authority_evidence_required();
     let egress_capture = authority_evidence_required
@@ -755,6 +768,7 @@ async fn run_session_body(input: SessionRun<'_>) -> anyhow::Result<ScenarioResul
                     provider_usage: None,
                     managed_http_egress: None,
                     filesystem_deltas: None,
+                    filesystem_snapshot_complete: false,
                     peak_memory_bytes: process_tree.peak_memory_bytes(),
                     peak_cpu_millis: process_tree.peak_cpu_millis(),
                     cancellation_requested: true,
@@ -813,6 +827,7 @@ async fn run_session_body(input: SessionRun<'_>) -> anyhow::Result<ScenarioResul
                     provider_usage: None,
                     managed_http_egress: None,
                     filesystem_deltas: None,
+                    filesystem_snapshot_complete: false,
                     peak_memory_bytes: process_tree.peak_memory_bytes(),
                     peak_cpu_millis: process_tree.peak_cpu_millis(),
                     cancellation_requested: true,
@@ -1016,6 +1031,7 @@ async fn run_session_body(input: SessionRun<'_>) -> anyhow::Result<ScenarioResul
             provider_usage,
             managed_http_egress,
             filesystem_deltas: None,
+            filesystem_snapshot_complete: false,
             peak_memory_bytes: process_tree.peak_memory_bytes(),
             peak_cpu_millis: process_tree.peak_cpu_millis(),
             cancellation_requested: scenario.turns.iter().any(|turn| turn.stop_mid_turn),
@@ -1957,5 +1973,46 @@ mod structured_trace_tests {
         let error = capture_structured_tool_inputs(&event, &mut trace, &mut inputs).unwrap_err();
 
         assert!(error.contains("tool name mismatch"), "{error}");
+    }
+}
+
+#[cfg(test)]
+mod evidence_root_tests {
+    use super::scan_artifacts;
+    use crate::filesystem_evidence::EvidenceRoots;
+    use crate::redaction::SecretRedactor;
+
+    const SECRET: &str = "home-only-secret-canary";
+
+    #[test]
+    fn secret_canary_only_in_wayland_home_is_detected_with_scope() {
+        let parent = tempfile::tempdir().unwrap();
+        let workspace = parent.path().join("workspace");
+        let home = parent.path().join("home");
+        std::fs::create_dir_all(&workspace).unwrap();
+        std::fs::create_dir_all(&home).unwrap();
+        let leaked = home.join("memory.db");
+        std::fs::write(&leaked, format!("persisted {SECRET}")).unwrap();
+        let roots = EvidenceRoots::new(&workspace, [&home]).unwrap();
+        let redactor = SecretRedactor::from_secret(Some(SECRET.to_string()));
+
+        let contaminated = scan_artifacts(&redactor, &roots).unwrap();
+
+        assert_eq!(
+            contaminated,
+            ["artifact:engine_state:memory.db".to_string()]
+        );
+        assert!(!leaked.exists());
+    }
+
+    #[test]
+    fn unavailable_required_root_makes_artifact_scan_incomplete() {
+        let workspace = tempfile::tempdir().unwrap();
+        let home = tempfile::tempdir().unwrap();
+        let roots = EvidenceRoots::new(workspace.path(), [home.path()]).unwrap();
+        std::fs::remove_dir(home.path()).unwrap();
+        let redactor = SecretRedactor::from_secret(Some(SECRET.to_string()));
+
+        assert!(scan_artifacts(&redactor, &roots).is_err());
     }
 }

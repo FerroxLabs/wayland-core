@@ -702,29 +702,30 @@ impl EvidenceReceiptV1 {
                     },
                     |egress| Evidence::observed(egress.denied.clone()),
                 ),
-                filesystem_deltas: result.execution.filesystem_deltas.as_ref().map_or_else(
-                    || Evidence::Unavailable {
-                        code: "filesystem_delta_recorder_not_enabled".to_string(),
+                filesystem_deltas: match (
+                    result.execution.filesystem_snapshot_complete,
+                    result.execution.filesystem_deltas.as_ref(),
+                ) {
+                    (true, Some(deltas)) => Evidence::observed(
+                        deltas
+                            .iter()
+                            .map(|delta| FilesystemDeltaV1 {
+                                scope: delta.scope.clone(),
+                                path_sha256: delta.path_sha256.clone(),
+                                operation: delta.operation.clone(),
+                                content_sha256: delta.content_sha256.clone().map_or_else(
+                                    || Evidence::Unavailable {
+                                        code: "file_deleted".to_string(),
+                                    },
+                                    Evidence::observed,
+                                ),
+                            })
+                            .collect(),
+                    ),
+                    _ => Evidence::Unavailable {
+                        code: "filesystem_delta_recorder_incomplete".to_string(),
                     },
-                    |deltas| {
-                        Evidence::observed(
-                            deltas
-                                .iter()
-                                .map(|delta| FilesystemDeltaV1 {
-                                    scope: delta.scope.clone(),
-                                    path_sha256: delta.path_sha256.clone(),
-                                    operation: delta.operation.clone(),
-                                    content_sha256: delta.content_sha256.clone().map_or_else(
-                                        || Evidence::Unavailable {
-                                            code: "file_deleted".to_string(),
-                                        },
-                                        Evidence::observed,
-                                    ),
-                                })
-                                .collect(),
-                        )
-                    },
-                ),
+                },
             },
             process: ProcessEvidenceV1 {
                 tree_sha256: result.execution.process_tree_sha256.clone(),

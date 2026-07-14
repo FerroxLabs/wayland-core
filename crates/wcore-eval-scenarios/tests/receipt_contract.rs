@@ -18,7 +18,9 @@ use wcore_eval_scenarios::receipt_policy::{
     AuthorityError, CiProvenanceV1, sign_ci_receipt, verify_authoritative_receipt,
 };
 use wcore_eval_scenarios::report::{ReportRenderError, render_receipt_reports};
-use wcore_eval_scenarios::runner::{ApprovalCommandEvidence, ExecutionEvidence, ScenarioResult};
+use wcore_eval_scenarios::runner::{
+    ApprovalCommandEvidence, ExecutionEvidence, FilesystemDeltaEvidence, ScenarioResult,
+};
 use wcore_eval_scenarios::scenario::{ApprovalPolicy, Platform};
 use wcore_eval_scenarios::trace::TraceEntry;
 use wcore_eval_scenarios::{ProviderId, ToolTrace};
@@ -75,6 +77,7 @@ fn traced_result(workdir: &str, external_path: &str) -> ScenarioResult {
             provider_usage: None,
             managed_http_egress: None,
             filesystem_deltas: None,
+            filesystem_snapshot_complete: false,
             peak_memory_bytes: None,
             peak_cpu_millis: None,
             cancellation_requested: false,
@@ -105,6 +108,31 @@ fn try_receipt_from_trace(
 
 fn receipt_from_trace(run_id: &str, result: &ScenarioResult) -> EvidenceReceiptV1 {
     try_receipt_from_trace(run_id, result).expect("receipt conversion")
+}
+
+#[test]
+fn filesystem_evidence_is_observed_only_after_capture_completes() {
+    let mut result = traced_result("/private/ephemeral", "/outside/policy.toml");
+
+    let incomplete = receipt_from_trace("filesystem-incomplete", &result);
+    assert!(matches!(
+        incomplete.body.boundaries.filesystem_deltas,
+        Evidence::Unavailable { ref code }
+            if code == "filesystem_delta_recorder_incomplete"
+    ));
+
+    result.execution.filesystem_deltas = Some(vec![FilesystemDeltaEvidence {
+        scope: "engine_state".to_string(),
+        path_sha256: h64('7'),
+        operation: "created".to_string(),
+        content_sha256: Some(h64('8')),
+    }]);
+    result.execution.filesystem_snapshot_complete = true;
+    let complete = receipt_from_trace("filesystem-complete", &result);
+    assert!(matches!(
+        complete.body.boundaries.filesystem_deltas,
+        Evidence::Observed { ref value } if value.len() == 1
+    ));
 }
 
 fn body() -> ReceiptBodyV1 {
@@ -911,6 +939,7 @@ fn critical_usability_finding_is_a_receipt_gate_failure() {
             }),
             managed_http_egress: None,
             filesystem_deltas: None,
+            filesystem_snapshot_complete: false,
             peak_memory_bytes: None,
             peak_cpu_millis: None,
             cancellation_requested: false,
