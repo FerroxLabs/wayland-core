@@ -1,6 +1,6 @@
 # Wayland Core F06 Session-Catalog Addendum
 
-**Status:** implementation candidate; remote proof and cross-audit pending
+**Status:** implemented; targeted Linux remote proof complete; native Windows proof pending
 
 **Parent contracts:**
 
@@ -113,7 +113,23 @@ disk-skill precedence, or the F23 promotion transaction. F09 still owns the
 remaining process-global policy and runtime state. No Desktop/Core protocol
 schema changes are introduced here.
 
-## 7. Rollback
+## 7. Verification record
+
+The committed seal passed these Hetzner gates through `remote-cargo.sh`:
+
+- `cargo check -p wcore-skills --tests`
+- `cargo test -p wcore-skills`
+- `cargo test -p wcore-agent --test plugin_bootstrap_wiring`
+- `cargo test -p wcore-agent --test memory_context_integration --test skills_e2e --test tool_guidance_prompt_test`
+- `cargo test -p wcore-cli native_shutdown_signals_remove_exact_bundled_root -- --nocapture`
+
+The cross-critique command ran with reduced lineage because one auditor emitted
+no parseable findings; the contributing auditor's findings were generic
+project-level objections unrelated to this F06 diff. The available remote
+toolchain has no Windows target, so the Windows ACL and junction tests remain
+source-reviewed but not natively executed.
+
+## 8. Rollback
 
 Reverting this addendum's code restores the released global API but reopens
 cross-session catalog contamination. Such a rollback requires an explicit
