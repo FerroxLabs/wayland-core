@@ -243,6 +243,7 @@ impl MidFlightMonitor {
     /// same signature.
     pub fn root_cause_signature(message: &str) -> String {
         let mut out = String::with_capacity(message.len());
+        let mut previous_previous_token = None::<String>;
         let mut previous_token = None::<String>;
         for raw_token in message.split_whitespace() {
             let trimmed = raw_token.trim_end_matches(|c: char| ",;:.".contains(c));
@@ -290,6 +291,10 @@ impl MidFlightMonitor {
                     && previous_token.as_deref().is_some_and(|previous| {
                         matches!(previous, "http" | "status" | "status_code")
                             || previous.starts_with("http/")
+                            || (previous == "code"
+                                && previous_previous_token.as_deref().is_some_and(|label| {
+                                    matches!(label, "http" | "status") || label.starts_with("http/")
+                                }))
                     });
                 if !is_contextual_status {
                     continue;
@@ -299,6 +304,7 @@ impl MidFlightMonitor {
                 out.push(' ');
             }
             out.push_str(&token);
+            previous_previous_token = previous_token;
             previous_token = Some(token.to_ascii_lowercase());
         }
         out
@@ -440,6 +446,12 @@ mod tests {
         let other_resource = MidFlightMonitor::root_cause_signature("HTTP 401 for /tmp/auth.json");
         assert_ne!(unauthorized, server_error);
         assert_ne!(unauthorized, other_resource);
+
+        let verbose_unauthorized =
+            MidFlightMonitor::root_cause_signature("HTTP status code 401 for /tmp/api.json");
+        let verbose_server_error =
+            MidFlightMonitor::root_cause_signature("HTTP status code 500 for /tmp/api.json");
+        assert_ne!(verbose_unauthorized, verbose_server_error);
     }
 
     #[test]

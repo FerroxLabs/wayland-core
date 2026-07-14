@@ -3,9 +3,14 @@
 F10 governs observable no-progress after provider attempts and tool outcomes.
 It owns normalized repeated errors, normalized one-step and multi-step tool
 routes, repeated completed provider attempts with no output after a failed tool
-round, and run-budget decisions. A replan is claimed only after its directive is
-committed to the next provider request; an ignored repeated route stops with a
-Continue-able `max_turns` finish.
+round, and the resulting replan/stop decisions. A replan is claimed only after
+its directive is committed to the next provider request; an ignored repeated
+route stops with a Continue-able `max_turns` finish.
+
+F10 does not claim live run-budget enforcement. Its generic monitor returns a
+budget stop when given a charged, capped `ExecutionBudgetView`, but the
+production `AgentEngine::run` path currently supplies an uncapped default view.
+F11 owns binding and charging production token, cost, and wall-time budgets.
 
 F10 does not claim an absolute timeout around a provider future that never opens
 a stream or a stream receiver that never yields an event. F15 explicitly owns
