@@ -801,6 +801,16 @@ impl OutputSink for ProtocolSink {
         });
     }
 
+    fn emit_midflight_monitor_decision(
+        &self,
+        directive: wcore_protocol::events::MonitorDirective,
+        reason: wcore_protocol::events::MonitorReason,
+    ) {
+        let _ = self
+            .writer
+            .emit(&ProtocolEvent::MidFlightMonitorDecision { directive, reason });
+    }
+
     fn emit_capability_activation(
         &self,
         activation: &wcore_protocol::events::CapabilityActivation,

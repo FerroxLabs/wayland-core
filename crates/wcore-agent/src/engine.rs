@@ -9,7 +9,7 @@ use wcore_observability::SOURCE_PRODUCT;
 use wcore_observability::cache::mark_cache_boundaries;
 use wcore_observability::cost::estimate_turn_cost;
 use wcore_observability::trace::{ToolCallTrace, TurnTrace, WorkflowDetectionRecord};
-use wcore_protocol::events::ToolCategory;
+use wcore_protocol::events::{MonitorDirective, MonitorReason, ToolCategory};
 use wcore_providers::{LlmProvider, ProviderError, create_provider};
 use wcore_tools::registry::ToolRegistry;
 use wcore_types::llm::{LlmEvent, LlmRequest};
@@ -5959,7 +5959,7 @@ impl AgentEngine {
                         || attempt_usage.output_tokens > 0;
                     self.midflight_monitor
                         .record_stream_attempt(!failed_tools.is_empty(), produced_output);
-                    match self.midflight_monitor.tick() {
+                    match self.midflight_monitor.tick_provider() {
                         MonitorAction::StopOutputStall => {
                             let gate_msg = format!(
                                 "Provider stream failed twice in a row with no output while \
@@ -5969,6 +5969,10 @@ impl AgentEngine {
                              (last stream error: {reason})",
                                 failed_tools.join("`, `"),
                             );
+                            self.output.emit_midflight_monitor_decision(
+                                MonitorDirective::Stop,
+                                MonitorReason::OutputStall,
+                            );
                             self.output.emit_error(&gate_msg, false);
                             self.emit_midflight_monitor_occurrence();
                             return Err(AgentError::ApiError(gate_msg));
@@ -5977,20 +5981,18 @@ impl AgentEngine {
                             let observed = run_budget.observed_for(reason);
                             let limit = run_budget.limit_for(reason);
                             self.output.emit_budget_exceeded(reason, &observed, &limit);
+                            self.output.emit_midflight_monitor_decision(
+                                MonitorDirective::Stop,
+                                MonitorReason::BudgetExceeded,
+                            );
                             self.emit_midflight_monitor_occurrence();
                             return self
                                 .finish_run_terminated(user_input, turn + 1, FinishReason::Length)
                                 .await;
                         }
-                        MonitorAction::ReplanRepeatedError => {
-                            let gate_msg =
-                                "Mid-flight monitor stopped a provider retry because the \
-                                same underlying tool error requires a different strategy."
-                                    .to_string();
-                            self.output.emit_error(&gate_msg, false);
-                            self.emit_midflight_monitor_occurrence();
-                            return Err(AgentError::ApiError(gate_msg));
-                        }
+                        MonitorAction::ReplanRepeatedError
+                        | MonitorAction::ReplanRepeatedRoute
+                        | MonitorAction::StopRepeatedRoute => {}
                         MonitorAction::Continue => {}
                     }
                     stream_attempt += 1;
@@ -6695,7 +6697,7 @@ impl AgentEngine {
             // #475 failure-loop breaker: set to the offending (tool, failure-count)
             // the first time a tool's consecutive-error streak trips the threshold.
             let mut failure_break: Option<(String, u32)> = None;
-            let mut monitor_replan = false;
+            let mut monitor_replan: Option<MonitorReason> = None;
             // Display tool results AND populate the matching ToolCallTrace.
             for result in &outcome.results {
                 if let ContentBlock::ToolResult {
@@ -6715,23 +6717,21 @@ impl AgentEngine {
                             None
                         })
                         .unwrap_or("unknown");
+                    let tool_input = tool_calls
+                        .iter()
+                        .find_map(|call| match call {
+                            ContentBlock::ToolUse { id, input, .. } if id == tool_use_id => {
+                                Some(input)
+                            }
+                            _ => None,
+                        })
+                        .unwrap_or(&serde_json::Value::Null);
 
                     // Runaway-loop breaker: signature this call+outcome and trip
                     // if the same (tool, args, result) has repeated consecutively
                     // past the threshold. Checked once; the first trip wins.
                     if loop_break.is_none() {
-                        let tool_input = tool_calls.iter().find_map(|c| match c {
-                            ContentBlock::ToolUse { id, input, .. } if id == tool_use_id => {
-                                Some(input)
-                            }
-                            _ => None,
-                        });
-                        let sig = loop_call_signature(
-                            tool_name,
-                            tool_input.unwrap_or(&serde_json::Value::Null),
-                            *is_error,
-                            content,
-                        );
+                        let sig = loop_call_signature(tool_name, tool_input, *is_error, content);
                         if let Some(count) = loop_guard.observe(sig) {
                             loop_break = Some((tool_name.to_string(), count));
                         }
@@ -6765,6 +6765,8 @@ impl AgentEngine {
                     if *is_error {
                         self.midflight_monitor.record_error(content);
                     }
+                    self.midflight_monitor
+                        .record_tool_outcome(tool_name, tool_input, *is_error, content);
 
                     self.output.emit_tool_result(tool_name, *is_error, content);
 
@@ -6934,17 +6936,46 @@ impl AgentEngine {
             match self.midflight_monitor.tick() {
                 MonitorAction::Continue => {}
                 MonitorAction::ReplanRepeatedError => {
-                    monitor_replan = true;
+                    monitor_replan = Some(MonitorReason::RepeatedError);
                     self.output.emit_info(
                         "Mid-flight monitor: the same underlying tool error repeated. \
                          The next turn must change strategy instead of retrying it.",
                     );
+                }
+                MonitorAction::ReplanRepeatedRoute => {
+                    monitor_replan = Some(MonitorReason::RepeatedToolRoute);
+                    self.output.emit_info(
+                        "Mid-flight monitor: the same normalized tool route repeated without \
+                         progress. The next turn must materially change the tool sequence, \
+                         arguments, or strategy.",
+                    );
+                }
+                MonitorAction::StopRepeatedRoute => {
+                    self.repair_orphaned_tool_use();
+                    self.output.emit_midflight_monitor_decision(
+                        MonitorDirective::Stop,
+                        MonitorReason::RepeatedToolRoute,
+                    );
+                    self.output.emit_error(
+                        "Run stopped: the same normalized tool route repeated after the \
+                         mid-flight monitor required a strategy change. Continue with a \
+                         materially different tool sequence or explain the blocker.",
+                        false,
+                    );
+                    self.emit_midflight_monitor_occurrence();
+                    return self
+                        .finish_run_terminated(user_input, turn + 1, FinishReason::MaxTurns)
+                        .await;
                 }
                 MonitorAction::CancelBudget { reason } => {
                     let observed = run_budget.observed_for(reason);
                     let limit = run_budget.limit_for(reason);
                     self.repair_orphaned_tool_use();
                     self.output.emit_budget_exceeded(reason, &observed, &limit);
+                    self.output.emit_midflight_monitor_decision(
+                        MonitorDirective::Stop,
+                        MonitorReason::BudgetExceeded,
+                    );
                     self.output.emit_error(
                         &format!(
                             "Run stopped: execution budget cap '{reason}' exceeded \
@@ -7047,12 +7078,26 @@ impl AgentEngine {
             // full output via `emit_tool_result` above; only the model's copy is
             // deduped.
             self.dedup_repeated_tool_outputs(&mut tool_results_content, &tool_calls);
-            if monitor_replan {
+            if let Some(reason) = monitor_replan {
+                let directive = match reason {
+                    MonitorReason::RepeatedError => {
+                        "Mid-flight monitor directive: repeated attempts are failing for the \
+                         same root cause. Do not repeat the same call or argument pattern; \
+                         inspect the error, choose a materially different approach, or explain \
+                         the blocker."
+                    }
+                    MonitorReason::RepeatedToolRoute => {
+                        "Mid-flight monitor directive: this normalized tool route is repeating \
+                         without progress. Materially change the tool sequence, arguments, or \
+                         strategy; do not repeat the same route."
+                    }
+                    MonitorReason::OutputStall | MonitorReason::BudgetExceeded => {
+                        "Mid-flight monitor directive: materially change strategy before \
+                         continuing."
+                    }
+                };
                 tool_results_content.push(ContentBlock::Text {
-                    text: "Mid-flight monitor directive: repeated attempts are failing for the \
-                           same root cause. Do not repeat the same call or argument pattern; inspect \
-                           the error, choose a materially different approach, or explain the blocker."
-                        .to_string(),
+                    text: directive.to_string(),
                 });
             }
             if let Some(edit_msg) = self.drain_external_edits_message() {
@@ -7061,10 +7106,12 @@ impl AgentEngine {
 
             self.messages
                 .push(Message::now(Role::User, tool_results_content));
-            if monitor_replan {
+            if let Some(reason) = monitor_replan {
                 // The directive now exists in the committed transcript and
                 // will affect the next provider request, so the monitor owns
                 // a real outcome change rather than merely an intention.
+                self.output
+                    .emit_midflight_monitor_decision(MonitorDirective::Replan, reason);
                 self.emit_midflight_monitor_occurrence();
             }
 
@@ -19262,8 +19309,16 @@ mod retry_wedge_protection_tests {
             }
             other => panic!("expected the progress-gate ApiError, got {other:?}"),
         }
-        let monitor_stages: Vec<_> = sink_handle
-            .snapshot()
+        let events = sink_handle.snapshot();
+        assert!(
+            events.iter().any(|event| {
+                event["type"].as_str() == Some("mid_flight_monitor_decision")
+                    && event["directive"].as_str() == Some("stop")
+                    && event["reason"].as_str() == Some("output_stall")
+            }),
+            "the output-stall stop must have a typed host-visible reason: {events:?}"
+        );
+        let monitor_stages: Vec<_> = events
             .into_iter()
             .filter(|event| {
                 event["type"].as_str() == Some("capability_activation")

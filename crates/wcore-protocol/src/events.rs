@@ -117,6 +117,25 @@ impl CapabilityActivation {
     }
 }
 
+/// Typed control-flow directive emitted by the mid-flight monitor.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MonitorDirective {
+    Continue,
+    Replan,
+    Stop,
+}
+
+/// Stable reason classes for monitor control-flow decisions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MonitorReason {
+    OutputStall,
+    RepeatedError,
+    RepeatedToolRoute,
+    BudgetExceeded,
+}
+
 /// Events emitted by the agent to the client (Agent -> Client)
 ///
 /// `Clone` is derived (Wave 2) so the in-process TUI bridge can fan an
@@ -370,6 +389,13 @@ pub enum ProtocolEvent {
     /// (for example a truncated SSE body). It does not imply a retry.
     ProviderFailure {
         failure: String,
+    },
+    /// F10 always-on structured monitor decision. Hosts use this additive
+    /// event to distinguish a deliberate stop/replan from a generic engine
+    /// error or informational string.
+    MidFlightMonitorDecision {
+        directive: MonitorDirective,
+        reason: MonitorReason,
     },
     /// W7: S4 approval requested — engine wants the host's permission
     /// before proceeding with `call_id`. `resume_token` echoes back in
@@ -1350,6 +1376,18 @@ mod tests {
         let json = serde_json::to_value(&event).unwrap();
         assert_eq!(json["type"], "pong");
         assert_eq!(json.as_object().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn midflight_monitor_decision_serializes_typed_control_flow() {
+        let event = ProtocolEvent::MidFlightMonitorDecision {
+            directive: MonitorDirective::Replan,
+            reason: MonitorReason::RepeatedToolRoute,
+        };
+        let json = serde_json::to_value(event).unwrap();
+        assert_eq!(json["type"], "mid_flight_monitor_decision");
+        assert_eq!(json["directive"], "replan");
+        assert_eq!(json["reason"], "repeated_tool_route");
     }
 
     #[test]

@@ -168,6 +168,15 @@ pub trait OutputSink: Send + Sync {
     /// retry decision.
     fn emit_provider_failure(&self, _failure: &str) {}
 
+    /// F10: emit a typed monitor control-flow decision. Default no-op for
+    /// non-protocol sinks; JSON and test sinks preserve the stable reason.
+    fn emit_midflight_monitor_decision(
+        &self,
+        _directive: wcore_protocol::events::MonitorDirective,
+        _reason: wcore_protocol::events::MonitorReason,
+    ) {
+    }
+
     /// F05: emit one typed capability-activation fact. Default no-op keeps
     /// terminal and test sinks quiet; protocol-capable hosts override it.
     fn emit_capability_activation(

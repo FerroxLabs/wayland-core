@@ -24,6 +24,10 @@ use wcore_types::tool::ToolResult;
 use common::{MockLlmProvider, MockTool, test_config};
 
 fn assert_midflight_monitor_observed(events: &[serde_json::Value]) {
+    assert_midflight_monitor_occurrences(events, 1);
+}
+
+fn assert_midflight_monitor_occurrences(events: &[serde_json::Value], count: usize) {
     let stages: Vec<_> = events
         .iter()
         .filter(|event| {
@@ -32,11 +36,22 @@ fn assert_midflight_monitor_observed(events: &[serde_json::Value]) {
         })
         .filter_map(|event| event["stage"].as_str())
         .collect();
+    let expected = ["reached", "outcome_changed", "observed"].repeat(count);
     assert_eq!(
-        stages,
-        ["reached", "outcome_changed", "observed"],
+        stages, expected,
         "a monitor-owned outcome must emit complete runtime proof; construction is emitted \
          once by production bootstrap: {events:?}"
+    );
+}
+
+fn assert_monitor_decision(events: &[serde_json::Value], directive: &str, reason: &str) {
+    assert!(
+        events.iter().any(|event| {
+            event["type"].as_str() == Some("mid_flight_monitor_decision")
+                && event["directive"].as_str() == Some(directive)
+                && event["reason"].as_str() == Some(reason)
+        }),
+        "missing monitor decision {directive}/{reason}: {events:?}"
     );
 }
 
@@ -117,6 +132,44 @@ impl LlmProvider for RecordingProvider {
 
 struct SequencedErrorTool {
     errors: Mutex<Vec<String>>,
+}
+
+struct VolatileSuccessTool {
+    name: &'static str,
+    calls: std::sync::atomic::AtomicU32,
+}
+
+#[async_trait]
+impl Tool for VolatileSuccessTool {
+    fn name(&self) -> &str {
+        self.name
+    }
+
+    fn description(&self) -> &str {
+        "Returns the same outcome with a volatile counter"
+    }
+
+    fn input_schema(&self) -> serde_json::Value {
+        json!({"type": "object"})
+    }
+
+    fn category(&self) -> wcore_protocol::events::ToolCategory {
+        wcore_protocol::events::ToolCategory::Info
+    }
+
+    fn is_concurrency_safe(&self, _input: &serde_json::Value) -> bool {
+        true
+    }
+
+    async fn execute(&self, _input: serde_json::Value) -> ToolResult {
+        let call = self
+            .calls
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        ToolResult {
+            content: format!("unchanged observation {call}"),
+            is_error: false,
+        }
+    }
 }
 
 #[async_trait]
@@ -263,7 +316,51 @@ async fn repeated_root_error_injects_a_changed_strategy_directive() {
         final_request.contains("Mid-flight monitor directive"),
         "the turn after the third normalized root error must carry changed-strategy guidance: {final_request}"
     );
-    assert_midflight_monitor_observed(&handle.snapshot());
+    let events = handle.snapshot();
+    assert_monitor_decision(&events, "replan", "repeated_error");
+    assert_midflight_monitor_observed(&events);
+}
+
+#[tokio::test]
+async fn normalized_alternating_route_replans_once_then_stops_if_ignored() {
+    let turns = (0..12)
+        .map(|index| named_turn(index, if index % 2 == 0 { "route_a" } else { "route_b" }))
+        .collect();
+    let provider = Arc::new(RecordingProvider::new(turns));
+    let requests = provider.requests();
+
+    let mut registry = ToolRegistry::new();
+    registry.register(Box::new(VolatileSuccessTool {
+        name: "route_a",
+        calls: std::sync::atomic::AtomicU32::new(0),
+    }));
+    registry.register(Box::new(VolatileSuccessTool {
+        name: "route_b",
+        calls: std::sync::atomic::AtomicU32::new(0),
+    }));
+
+    let sink = Arc::new(TestSink::new());
+    let handle = sink.handle();
+    let output: Arc<dyn OutputSink> = sink;
+    let mut config = test_config();
+    config.max_turns = Some(30);
+    let mut engine = AgentEngine::new_with_provider(provider, config, registry, output);
+
+    let result = engine
+        .run("repeat the alternating route", "")
+        .await
+        .expect("the monitor stops an ignored route loop cleanly");
+
+    assert_eq!(result.finish_reason, FinishReason::MaxTurns);
+    assert_eq!(
+        requests.lock().unwrap().len(),
+        12,
+        "three A/B cycles trigger one replan; three more trigger a bounded stop"
+    );
+    let events = handle.snapshot();
+    assert_monitor_decision(&events, "replan", "repeated_tool_route");
+    assert_monitor_decision(&events, "stop", "repeated_tool_route");
+    assert_midflight_monitor_occurrences(&events, 2);
 }
 
 #[tokio::test]
