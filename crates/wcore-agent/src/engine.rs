@@ -4504,12 +4504,25 @@ impl AgentEngine {
         }
     }
 
+    fn emit_midflight_monitor_ready(&self) {
+        use wcore_protocol::events::{CapabilityActivation, CapabilityId, CapabilityStage};
+
+        for stage in [CapabilityStage::Constructed, CapabilityStage::Ready] {
+            self.output
+                .emit_capability_activation(&CapabilityActivation::stage(
+                    CapabilityId::MidFlightMonitor,
+                    stage,
+                ));
+        }
+    }
+
     /// Run the agent loop with user input
     pub async fn run(&mut self, user_input: &str, msg_id: &str) -> Result<AgentResult, AgentError> {
-        // F10: one monitor per production run. The view is charged from the
-        // accepted provider usage below; wall time starts at run entry.
-        let run_budget = crate::budget::ExecutionBudget::from(&self.config.budget).start_root();
+        // F10 owns no-progress governance. F11 binds proactive session-wide
+        // accounting; do not create a second per-run spend envelope here.
+        let run_budget = crate::budget::ExecutionBudget::default().start_root();
         let mut midflight_monitor = MidFlightMonitor::new(run_budget.clone());
+        self.emit_midflight_monitor_ready();
         // methodology #27: production caller for StyleDetector::observe (Task 1.B.3)
         if let Ok(mut det) = self.style_detector.lock() {
             det.observe(user_input);
@@ -5504,11 +5517,19 @@ impl AgentEngine {
                         attempt_output.emit_provider_retry(evidence.failure.as_deref());
                     }
                 });
-                let provider_result = wcore_providers::retry::observe_provider_attempts(
-                    attempt_observer,
-                    self.provider.stream(&request),
-                )
-                .await;
+                let provider_cancel = self.cancel_token.clone();
+                let provider_result = tokio::select! {
+                    biased;
+                    _ = provider_cancel.cancelled() => {
+                        self.output.emit_info("Run cancelled while waiting for the provider.");
+                        self.save_session();
+                        return Err(AgentError::UserAborted);
+                    }
+                    result = wcore_providers::retry::observe_provider_attempts(
+                        attempt_observer,
+                        self.provider.stream(&request),
+                    ) => result,
+                };
                 let mut rx = match provider_result {
                     Ok(rx) => rx,
                     Err(e) if e.is_retryable() => {
@@ -5570,7 +5591,18 @@ impl AgentEngine {
                     }
                 };
 
-                while let Some(event) = rx.recv().await {
+                loop {
+                    let receive_cancel = self.cancel_token.clone();
+                    let event = tokio::select! {
+                        biased;
+                        _ = receive_cancel.cancelled() => {
+                            self.output.emit_info("Run cancelled while receiving provider output.");
+                            self.save_session();
+                            return Err(AgentError::UserAborted);
+                        }
+                        event = rx.recv() => event,
+                    };
+                    let Some(event) = event else { break };
                     match event {
                         LlmEvent::TextDelta(text) => {
                             self.output.emit_text_delta(&text, &self.current_msg_id);
@@ -5921,18 +5953,39 @@ impl AgentEngine {
                         || attempt_usage.output_tokens > 0;
                     midflight_monitor
                         .record_stream_attempt(!failed_tools.is_empty(), produced_output);
-                    if matches!(midflight_monitor.tick(), MonitorAction::StopOutputStall) {
-                        let gate_msg = format!(
-                            "Provider stream failed twice in a row with no output while \
+                    match midflight_monitor.tick() {
+                        MonitorAction::StopOutputStall => {
+                            let gate_msg = format!(
+                                "Provider stream failed twice in a row with no output while \
                              the last tool round had failed (`{}`) — retrying the same \
                              context is burning tokens without progress. Fix the failing \
                              tool call (see its error above) or try a different approach. \
                              (last stream error: {reason})",
-                            failed_tools.join("`, `"),
-                        );
-                        self.output.emit_error(&gate_msg, false);
-                        self.emit_midflight_monitor_occurrence();
-                        return Err(AgentError::ApiError(gate_msg));
+                                failed_tools.join("`, `"),
+                            );
+                            self.output.emit_error(&gate_msg, false);
+                            self.emit_midflight_monitor_occurrence();
+                            return Err(AgentError::ApiError(gate_msg));
+                        }
+                        MonitorAction::CancelBudget { reason } => {
+                            let observed = run_budget.observed_for(reason);
+                            let limit = run_budget.limit_for(reason);
+                            self.output.emit_budget_exceeded(reason, &observed, &limit);
+                            self.emit_midflight_monitor_occurrence();
+                            return self
+                                .finish_run_terminated(user_input, turn + 1, FinishReason::Length)
+                                .await;
+                        }
+                        MonitorAction::ReplanRepeatedError => {
+                            let gate_msg =
+                                "Mid-flight monitor stopped a provider retry because the \
+                                same underlying tool error requires a different strategy."
+                                    .to_string();
+                            self.output.emit_error(&gate_msg, false);
+                            self.emit_midflight_monitor_occurrence();
+                            return Err(AgentError::ApiError(gate_msg));
+                        }
+                        MonitorAction::Continue => {}
                     }
                     stream_attempt += 1;
                     self.output.emit_provider_retry(Some(failure_code.as_str()));
@@ -5942,7 +5995,16 @@ impl AgentEngine {
                         "Provider stream failed ({reason}); retrying \
                          (attempt {stream_attempt}/{effective_max_retries})…"
                     ));
-                    tokio::time::sleep(backoff).await;
+                    let backoff_cancel = self.cancel_token.clone();
+                    tokio::select! {
+                        biased;
+                        _ = backoff_cancel.cancelled() => {
+                            self.output.emit_info("Run cancelled during provider retry backoff.");
+                            self.save_session();
+                            return Err(AgentError::UserAborted);
+                        }
+                        _ = tokio::time::sleep(backoff) => {}
+                    }
                     continue 'stream;
                 }
                 // Retry budget exhausted — fail the turn. The provider
@@ -5966,23 +6028,6 @@ impl AgentEngine {
             self.run_usage.output_tokens += turn_usage.output_tokens;
             self.run_usage.cache_creation_tokens += turn_usage.cache_creation_tokens;
             self.run_usage.cache_read_tokens += turn_usage.cache_read_tokens;
-
-            // F10: charge the always-live per-run monitor independently of
-            // the optional session/user BudgetTracker.
-            run_budget.record_tokens(turn_usage.input_tokens, turn_usage.output_tokens);
-            run_budget.record_cost(resolve_turn_cost_usd(
-                self.compat.provider_type(),
-                &effective_model,
-                turn_usage.input_tokens,
-                turn_usage.output_tokens,
-                turn_usage.cache_read_tokens,
-                turn_usage.cache_creation_tokens,
-                &self.compat,
-            ));
-            let monitor_budget_cap = match midflight_monitor.tick() {
-                MonitorAction::CancelBudget { reason } => Some(reason),
-                _ => None,
-            };
 
             // B7 writer-side wiring: mirror this turn's token usage into the
             // live introspection state so `wayland_status` /
@@ -6252,24 +6297,6 @@ impl AgentEngine {
                     ),
                     false,
                 );
-                return self
-                    .finish_run_terminated(user_input, turn + 1, FinishReason::Length)
-                    .await;
-            }
-
-            if let Some(reason) = monitor_budget_cap {
-                let observed = run_budget.observed_for(reason);
-                let limit = run_budget.limit_for(reason);
-                self.repair_orphaned_tool_use();
-                self.output.emit_budget_exceeded(reason, &observed, &limit);
-                self.output.emit_error(
-                    &format!(
-                        "Run stopped: execution budget cap '{reason}' exceeded \
-                         (limit {limit}, observed {observed})."
-                    ),
-                    false,
-                );
-                self.emit_midflight_monitor_occurrence();
                 return self
                     .finish_run_terminated(user_input, turn + 1, FinishReason::Length)
                     .await;
@@ -6893,7 +6920,6 @@ impl AgentEngine {
                     ),
                     false,
                 );
-                self.emit_midflight_monitor_occurrence();
                 // #475 + #457: the retry-cap is a budget guardrail, not a hard
                 // failure — surface finish_reason=max_turns so the host offers
                 // "Continue" (resume with fresh headroom) rather than a
@@ -6923,7 +6949,6 @@ impl AgentEngine {
                     ),
                     false,
                 );
-                self.emit_midflight_monitor_occurrence();
                 return self
                     .finish_run_terminated(user_input, turn + 1, FinishReason::Length)
                     .await;
@@ -19213,8 +19238,14 @@ mod retry_wedge_protection_tests {
             .collect();
         assert_eq!(
             monitor_stages,
-            ["reached", "outcome_changed", "observed"],
-            "the output-stall stop must carry complete monitor runtime proof"
+            [
+                "constructed",
+                "ready",
+                "reached",
+                "outcome_changed",
+                "observed"
+            ],
+            "the output-stall stop must carry construction and complete monitor runtime proof"
         );
     }
 

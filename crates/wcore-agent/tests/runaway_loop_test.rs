@@ -11,7 +11,7 @@ use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use serde_json::json;
-use wcore_agent::engine::AgentEngine;
+use wcore_agent::engine::{AgentEngine, AgentError};
 use wcore_agent::output::OutputSink;
 use wcore_agent::test_utils::TestSink;
 use wcore_providers::{LlmProvider, ProviderError};
@@ -34,8 +34,14 @@ fn assert_midflight_monitor_observed(events: &[serde_json::Value]) {
         .collect();
     assert_eq!(
         stages,
-        ["reached", "outcome_changed", "observed"],
-        "a production stop must emit the monitor's complete runtime proof: {events:?}"
+        [
+            "constructed",
+            "ready",
+            "reached",
+            "outcome_changed",
+            "observed"
+        ],
+        "a monitor-owned outcome must emit construction and complete runtime proof: {events:?}"
     );
 }
 
@@ -66,6 +72,21 @@ fn loop_turn(i: usize) -> Vec<LlmEvent> {
 struct RecordingProvider {
     turns: Mutex<Vec<Vec<LlmEvent>>>,
     requests: Arc<Mutex<Vec<LlmRequest>>>,
+}
+
+struct BlockingProvider {
+    entered: Arc<tokio::sync::Notify>,
+}
+
+#[async_trait]
+impl LlmProvider for BlockingProvider {
+    async fn stream(
+        &self,
+        _request: &LlmRequest,
+    ) -> Result<tokio::sync::mpsc::Receiver<LlmEvent>, ProviderError> {
+        self.entered.notify_one();
+        std::future::pending().await
+    }
 }
 
 impl RecordingProvider {
@@ -181,7 +202,6 @@ async fn repeated_identical_successful_tool_call_converges_via_loopguard() {
         saw_loop_error,
         "expected a visible no-progress-loop error event; got {events:?}"
     );
-    assert_midflight_monitor_observed(&events);
 }
 
 #[tokio::test]
@@ -225,9 +245,9 @@ async fn repeated_root_error_injects_a_changed_strategy_directive() {
     let mut registry = ToolRegistry::new();
     registry.register(Box::new(SequencedErrorTool {
         errors: Mutex::new(vec![
-            "permission denied at /tmp/a line 1".to_string(),
-            "permission denied at /var/b line 2".to_string(),
-            "permission denied at /home/c line 3".to_string(),
+            "permission denied at /tmp/a/work.dat line 1".to_string(),
+            "permission denied at /var/b/work.dat line 2".to_string(),
+            "permission denied at /home/c/work.dat line 3".to_string(),
         ]),
     }));
 
@@ -249,6 +269,42 @@ async fn repeated_root_error_injects_a_changed_strategy_directive() {
         "the turn after the third normalized root error must carry changed-strategy guidance: {final_request}"
     );
     assert_midflight_monitor_observed(&handle.snapshot());
+}
+
+#[tokio::test]
+async fn host_cancel_interrupts_a_provider_that_never_opens_a_stream() {
+    let entered = Arc::new(tokio::sync::Notify::new());
+    let provider = Arc::new(BlockingProvider {
+        entered: Arc::clone(&entered),
+    });
+    let sink = Arc::new(TestSink::new());
+    let handle = sink.handle();
+    let output: Arc<dyn OutputSink> = sink;
+    let mut engine =
+        AgentEngine::new_with_provider(provider, test_config(), ToolRegistry::new(), output);
+    let cancel = engine.cancel_token();
+
+    let run = tokio::spawn(async move { engine.run("wait forever", "").await });
+    tokio::time::timeout(std::time::Duration::from_secs(1), entered.notified())
+        .await
+        .expect("provider call must begin");
+    cancel.cancel();
+    let result = tokio::time::timeout(std::time::Duration::from_secs(1), run)
+        .await
+        .expect("host cancellation must bound provider wait")
+        .expect("run task must join");
+    assert!(matches!(result, Err(AgentError::UserAborted)));
+
+    let monitor_stages: Vec<_> = handle
+        .snapshot()
+        .into_iter()
+        .filter(|event| {
+            event["type"].as_str() == Some("capability_activation")
+                && event["capability"].as_str() == Some("mid_flight_monitor")
+        })
+        .filter_map(|event| event["stage"].as_str().map(str::to_string))
+        .collect();
+    assert_eq!(monitor_stages, ["constructed", "ready"]);
 }
 
 #[tokio::test]

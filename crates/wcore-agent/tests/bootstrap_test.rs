@@ -193,35 +193,6 @@ async fn default_bootstrap_does_not_report_smart_handoff_ready() {
     );
 }
 
-#[tokio::test]
-#[serial]
-async fn bootstrap_reports_midflight_monitor_ready_only_when_production_wired() {
-    let (_plugins, _env) = isolated_plugins();
-    let workdir = tempfile::TempDir::new().expect("workdir");
-    let result = AgentBootstrap::new(
-        minimal_config(),
-        workdir.path().to_str().unwrap(),
-        null_output(),
-    )
-    .build()
-    .await
-    .expect("bootstrap should succeed");
-
-    let monitor = result
-        .capability_activations
-        .iter()
-        .rfind(|activation| {
-            activation.capability == wcore_protocol::events::CapabilityId::MidFlightMonitor
-        })
-        .expect("mid-flight monitor startup truth");
-    assert_eq!(
-        monitor.stage,
-        wcore_protocol::events::CapabilityStage::Ready,
-        "the monitor must remain unavailable until production run() constructs and consumes it"
-    );
-    assert_eq!(monitor.reason, None);
-}
-
 /// #141 audit item 5 — prove the env flag actually installs
 /// `HostDelegatedTransport` at the registration site: with
 /// `WAYLAND_SEND_MESSAGE_HOST_DELEGATE=1`, an executed `send_message` parks

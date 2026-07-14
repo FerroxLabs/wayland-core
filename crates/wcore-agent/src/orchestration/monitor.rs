@@ -122,35 +122,38 @@ impl MidFlightMonitor {
         MonitorAction::Continue
     }
 
-    /// Reduce a free-text error message to a stable root-cause
-    /// signature. Strips:
-    ///   * absolute and relative paths (any token containing a `/`)
-    ///   * decimal numbers (line/byte/PID/timestamp counters)
-    ///   * trailing punctuation
+    /// Reduce a free-text error message to a stable root-cause signature.
+    /// Directory prefixes and volatile counters are removed, while error/status
+    /// codes and resource basenames remain distinct so unrelated failures do
+    /// not collapse into one replan trigger.
     ///
     /// Two errors that differ only by volatile fields will produce the
     /// same signature.
     pub fn root_cause_signature(message: &str) -> String {
         let mut out = String::with_capacity(message.len());
-        for token in message.split_whitespace() {
-            // Drop path-like tokens (contain `/` or `\`).
-            if token.contains('/') || token.contains('\\') {
-                continue;
-            }
-            // Drop pure-number tokens (line/byte counts, PIDs).
-            if token
-                .trim_end_matches(|c: char| !c.is_ascii_digit() && c != '.')
-                .chars()
-                .next()
-                .is_some_and(|c| c.is_ascii_digit())
-            {
-                // Skip if the token *starts* with a digit.
-                continue;
+        for raw_token in message.split_whitespace() {
+            let trimmed = raw_token.trim_end_matches(|c: char| ",;:.".contains(c));
+            let token = if trimmed.contains('/') || trimmed.contains('\\') {
+                trimmed
+                    .rsplit(['/', '\\'])
+                    .find(|part| !part.is_empty())
+                    .unwrap_or("<path>")
+            } else {
+                trimmed
+            };
+            if token.chars().all(|c| c.is_ascii_digit()) {
+                let is_http_status = token.len() == 3
+                    && token
+                        .parse::<u16>()
+                        .is_ok_and(|status| (100..=599).contains(&status));
+                if !is_http_status {
+                    continue;
+                }
             }
             if !out.is_empty() {
                 out.push(' ');
             }
-            out.push_str(token.trim_end_matches(|c: char| ",;:.".contains(c)));
+            out.push_str(token);
         }
         out
     }
@@ -174,8 +177,18 @@ mod tests {
     #[test]
     fn signature_collapses_paths_and_numbers() {
         let a = MidFlightMonitor::root_cause_signature("ENOENT at /tmp/foo.txt line 12 byte 8192");
-        let b = MidFlightMonitor::root_cause_signature("ENOENT at /var/bar.log line 7 byte 4096");
+        let b =
+            MidFlightMonitor::root_cause_signature("ENOENT at /var/run/foo.txt line 7 byte 4096");
         assert_eq!(a, b);
+    }
+
+    #[test]
+    fn signature_preserves_status_codes_and_resource_identity() {
+        let unauthorized = MidFlightMonitor::root_cause_signature("HTTP 401 for /tmp/api.json");
+        let server_error = MidFlightMonitor::root_cause_signature("HTTP 500 for /tmp/api.json");
+        let other_resource = MidFlightMonitor::root_cause_signature("HTTP 401 for /tmp/auth.json");
+        assert_ne!(unauthorized, server_error);
+        assert_ne!(unauthorized, other_resource);
     }
 
     #[test]
