@@ -156,6 +156,7 @@ eval-gate:
 
 # F01 E3: package the real Core CLI, then drive success and hard failure through
 # wayland-eval while binding the run to the clean source commit and binary bytes.
+[unix]
 f01-packaged-driver-gate:
     #!/usr/bin/env bash
     set -euo pipefail
@@ -165,8 +166,17 @@ f01-packaged-driver-gate:
     fi
     export WAYLAND_BUILD_SOURCE_SHA="$(git rev-parse HEAD)"
     vx cargo build --locked -p wcore-cli --bin wayland-core
+    target_dir="${CARGO_TARGET_DIR:-target}"
+    if [[ "$target_dir" != /* ]]; then
+        target_dir="$PWD/$target_dir"
+    fi
+    export WCORE_EVAL_BIN="$target_dir/debug/wayland-core"
     vx cargo test --locked -p wcore-eval-scenarios \
         --features packaged-driver-gate --test packaged_driver_gate
+
+[windows]
+f01-packaged-driver-gate:
+    $dirty = git status --porcelain --untracked-files=normal; if ($dirty) { Write-Error "F01 packaged-driver gate requires a clean source tree"; exit 2 }; $env:WAYLAND_BUILD_SOURCE_SHA = (git rev-parse HEAD).Trim(); vx cargo build --locked -p wcore-cli --bin wayland-core; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }; $target = if ($env:CARGO_TARGET_DIR) { $env:CARGO_TARGET_DIR } else { "target" }; $env:WCORE_EVAL_BIN = [System.IO.Path]::GetFullPath((Join-Path $target "debug/wayland-core.exe")); vx cargo test --locked -p wcore-eval-scenarios --features packaged-driver-gate --test packaged_driver_gate; exit $LASTEXITCODE
 
 # ── Silent-pass CI gate (Wave 0) ───────────────────────────────────────────
 # Fails if any functional todo!() exists in the eval-scenarios assertion/trace

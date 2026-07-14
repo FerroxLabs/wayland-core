@@ -138,6 +138,14 @@ jobs:
         env:
           WCORE_SMOKE_REQUIRE_PREBUILT: "1"
 
+      # F01 E3 runs on every supported native OS. Bind discovery to the exact
+      # pre-built release artifact so a stale debug binary cannot satisfy it.
+      - name: F01 packaged wayland-eval driver gate
+        run: vx cargo test --locked -p wcore-eval-scenarios --features packaged-driver-gate --test packaged_driver_gate
+        env:
+          WAYLAND_BUILD_SOURCE_SHA: ${{ github.sha }}
+          WCORE_EVAL_BIN: ${{ github.workspace }}/target/release/wayland-core${{ runner.os == 'Windows' && '.exe' || '' }}
+
       # Z0 STABILITY MAJOR #4 — eval-gate runs on every PR/main commit so
       # the W10A LOCKED acceptance gate (precision/recall >= 0.80) is enforced
       # by automation, not by convention. Required to pass before merge.
