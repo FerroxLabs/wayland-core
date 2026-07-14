@@ -1,9 +1,4 @@
-//! RED integration contract for typed Smart execution-policy wiring.
-//!
-//! These tests intentionally target the proposed
-//! `AgentBootstrap::with_smart_execution_policy` builder API. Until production
-//! bootstrap and confirmation paths consume the typed policy, this test target
-//! must fail to compile or fail its behavioral assertions.
+//! Integration contract for typed execution-policy wiring.
 
 mod common;
 
@@ -16,8 +11,8 @@ use wcore_agent::output::OutputSink;
 use wcore_config::compat::ProviderCompat;
 use wcore_config::config::{Config, ProviderType};
 use wcore_types::execution_policy::{
-    ApprovalPolicy, BaselineExecutionPolicy, DangerousLaunchRequest, PolicySource,
-    resolve_dangerous_launch,
+    ApprovalPolicy, BaselineExecutionPolicy, DangerousLaunchRequest, ExecutionPosture,
+    ManagedDangerousPolicy, PolicySource, SandboxPolicy, resolve_dangerous_launch,
 };
 use wcore_types::message::FinishReason;
 
@@ -285,7 +280,7 @@ async fn typed_auto_edit_allows_write_but_denies_bash() {
 }
 
 #[tokio::test]
-async fn smart_and_dangerous_authority_cannot_be_combined() {
+async fn resolver_grant_overrides_baseline_as_one_dangerous_bundle() {
     let workspace = tempfile::tempdir().unwrap();
     let baseline = BaselineExecutionPolicy::smart(ApprovalPolicy::Prompt, PolicySource::Default);
     let grant = resolve_dangerous_launch(
@@ -297,19 +292,53 @@ async fn smart_and_dangerous_authority_cannot_be_combined() {
     let sink: Arc<dyn OutputSink> = Arc::new(CapturingSink::default());
 
     let result = AgentBootstrap::new(bootstrap_config(), workspace.path().to_string_lossy(), sink)
-        .with_smart_execution_policy(ApprovalPolicy::Prompt, PolicySource::LocalCliLaunch)
+        .with_execution_policy(baseline)
+        .with_dangerous_grant(grant)
+        .without_channels(true)
+        .build()
+        .await
+        .expect("resolver-produced grant must bind to its validated baseline");
+
+    assert_eq!(
+        result.effective_execution_policy.posture(),
+        ExecutionPosture::Dangerous
+    );
+    assert_eq!(
+        result.effective_execution_policy.approvals(),
+        ApprovalPolicy::Bypass
+    );
+    assert_eq!(
+        result.effective_execution_policy.sandbox(),
+        SandboxPolicy::Bypass
+    );
+}
+
+#[tokio::test]
+async fn smart_grant_cannot_be_rebound_to_a_managed_baseline() {
+    let workspace = tempfile::tempdir().unwrap();
+    let smart = BaselineExecutionPolicy::smart(ApprovalPolicy::Prompt, PolicySource::Default);
+    let grant = resolve_dangerous_launch(
+        &smart,
+        DangerousLaunchRequest::cli(60, "baseline-rebind-test"),
+        0,
+    )
+    .unwrap();
+    let managed =
+        BaselineExecutionPolicy::managed(ApprovalPolicy::Prompt, ManagedDangerousPolicy::Allow);
+    let sink: Arc<dyn OutputSink> = Arc::new(CapturingSink::default());
+
+    let result = AgentBootstrap::new(bootstrap_config(), workspace.path().to_string_lossy(), sink)
+        .with_execution_policy(managed)
         .with_dangerous_grant(grant)
         .without_channels(true)
         .build()
         .await;
-    let error = match result {
-        Ok(_) => panic!("mixed Smart and Dangerous authority must fail closed"),
-        Err(error) => error,
-    };
 
     assert!(
-        error
+        result
+            .err()
+            .expect("grant provenance mismatch must fail closed")
             .to_string()
-            .contains("cannot combine Smart policy with a Dangerous grant")
+            .contains("provenance does not match")
     );
 }

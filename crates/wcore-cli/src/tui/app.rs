@@ -64,6 +64,9 @@ pub struct App {
     /// The session approval mode. Constructed only as `SessionMode::Default`
     /// in Wave 0; mode cycling is Wave 2.
     pub mode: wcore_protocol::commands::SessionMode,
+    /// Immutable launch authority emitted by Core after bootstrap. Approval
+    /// mode can change during a session; sandbox posture cannot.
+    pub execution_policy: Option<wcore_types::execution_policy::EffectiveExecutionPolicy>,
     /// Context-window usage for the status-bar meter.
     pub context: ContextView,
     /// Set true to break the render loop and exit cleanly.
@@ -304,6 +307,7 @@ impl App {
             session: SessionView::default(),
             config: ConfigView::default(),
             mode: wcore_protocol::commands::SessionMode::Default,
+            execution_policy: None,
             context: ContextView::default(),
             quit: false,
             path_map: TreeModel::default(),
@@ -1223,9 +1227,10 @@ pub struct ConfigView {
     /// Whether plan-first is enabled (`[plan] plan_first`) — the agent is
     /// nudged to plan before large/risky changes.
     pub plan_first: bool,
-    /// Whether `--force` (`--yolo`, `--dangerously-skip-permissions`) granted
-    /// launch authority to use Force. This remains true after a live posture
-    /// de-escalation; render active posture from [`App::mode`], not this flag.
+    /// Whether `--force`, `--yolo`, or the approval-only compatibility flag
+    /// `--dangerously-skip-permissions` granted launch authority to use Force.
+    /// This remains true after a live posture de-escalation; render active
+    /// posture from [`App::mode`], not this flag.
     pub force: bool,
     /// The active provider's resolved `ProviderCompat` cost-per-token
     /// values (`cost_per_input_token`, `cost_per_output_token`,

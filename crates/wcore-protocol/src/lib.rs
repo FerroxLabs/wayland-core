@@ -31,6 +31,22 @@ pub const DEFAULT_APPROVAL_TTL: Duration = Duration::from_secs(300);
 /// requester-crashed (`tx.is_closed()`) entries.
 pub const DEFAULT_REAP_INTERVAL: Duration = Duration::from_secs(30);
 
+fn session_mode_strictness(mode: SessionMode) -> u8 {
+    match mode {
+        SessionMode::Default => 2,
+        SessionMode::AutoEdit => 1,
+        SessionMode::Force => 0,
+    }
+}
+
+fn stricter_session_mode(left: SessionMode, right: SessionMode) -> SessionMode {
+    if session_mode_strictness(left) >= session_mode_strictness(right) {
+        left
+    } else {
+        right
+    }
+}
+
 /// W0 — Normalize a UI-committed prefix to its literal command head and
 /// test it against `command`. The normalized form strips a trailing glob/
 /// brace expansion (`cargo {build,test}:*` -> `cargo`) and trims; the match
@@ -176,6 +192,9 @@ pub struct ToolApprovalManager {
     /// `auto_approved`, which is whole-category (bare `Always`).
     auto_approved_prefixes: Mutex<HashMap<String, Vec<String>>>,
     session_mode: Mutex<SessionMode>,
+    /// Non-bypassable approval floor for Managed sessions. `None` keeps the
+    /// ordinary Smart behavior where trusted local UI can change modes.
+    managed_floor: Mutex<Option<SessionMode>>,
     /// GHSA-8r7g — local-operator opt-in gating `SessionMode::Force` requested
     /// over the protocol. `Force` auto-approves every tool, so an untrusted
     /// wire peer (remote ACP, or model-influenced data reaching the command
@@ -203,6 +222,7 @@ impl ToolApprovalManager {
             auto_approved_tool_names: Mutex::new(HashSet::new()),
             auto_approved_prefixes: Mutex::new(HashMap::new()),
             session_mode: Mutex::new(SessionMode::Default),
+            managed_floor: Mutex::new(None),
             allow_wire_force: AtomicBool::new(false),
             ttl,
         }
@@ -539,10 +559,46 @@ impl ToolApprovalManager {
     /// This is the LOCAL, trusted entry point (interactive TUI, CLI). It is
     /// unrestricted by design. Protocol/wire callers must use
     /// [`set_mode_from_wire`](Self::set_mode_from_wire) instead.
-    pub fn set_mode(&self, mode: SessionMode) {
+    pub fn set_mode(&self, mode: SessionMode) -> bool {
+        let effective = self.effective_mode(mode);
         if let Ok(mut current) = self.session_mode.lock() {
-            *current = mode;
+            *current = effective;
         }
+        effective == mode
+    }
+
+    /// Resolve a requested approval mode against the immutable Managed floor
+    /// without mutating session state. Hosts use this to render the same mode
+    /// the gate will enforce.
+    pub fn effective_mode(&self, mode: SessionMode) -> SessionMode {
+        self.managed_floor
+            .lock()
+            .ok()
+            .and_then(|floor| *floor)
+            .map(|floor| stricter_session_mode(mode, floor))
+            .unwrap_or(mode)
+    }
+
+    /// Return the currently enforced approval mode as a typed value.
+    pub fn session_mode(&self) -> SessionMode {
+        self.session_mode
+            .lock()
+            .map(|mode| *mode)
+            .unwrap_or(SessionMode::Default)
+    }
+
+    /// Install the immutable Managed approval floor before any host or TUI
+    /// commands are accepted. Existing mode is clamped immediately.
+    pub fn set_managed_floor(&self, floor: Option<SessionMode>) {
+        if let Ok(mut managed_floor) = self.managed_floor.lock() {
+            *managed_floor = floor;
+        }
+        let current = self
+            .session_mode
+            .lock()
+            .map(|mode| *mode)
+            .unwrap_or(SessionMode::Default);
+        let _ = self.set_mode(current);
     }
 
     /// GHSA-8r7g — grant or revoke the local-operator opt-in that lets a
@@ -570,8 +626,7 @@ impl ToolApprovalManager {
         if escalating && !self.allow_wire_force.load(Ordering::Relaxed) {
             return false;
         }
-        self.set_mode(mode);
-        true
+        self.set_mode(mode)
     }
 
     /// Return the current session mode as a string for capability reporting.
@@ -722,6 +777,24 @@ mod tests {
         assert!(mgr.set_mode_from_wire(SessionMode::AutoEdit));
         assert_eq!(mgr.current_mode(), "auto_edit");
         assert!(mgr.set_mode_from_wire(SessionMode::Force));
+        assert_eq!(mgr.current_mode(), "force");
+    }
+
+    #[test]
+    fn managed_floor_clamps_local_and_wire_mode_changes() {
+        let mgr = ToolApprovalManager::new();
+        mgr.set_managed_floor(Some(SessionMode::Default));
+        mgr.set_allow_wire_force(true);
+
+        assert!(!mgr.set_mode(SessionMode::Force));
+        assert_eq!(mgr.effective_mode(SessionMode::Force), SessionMode::Default);
+        assert_eq!(mgr.session_mode(), SessionMode::Default);
+        assert_eq!(mgr.current_mode(), "default");
+        assert!(!mgr.set_mode_from_wire(SessionMode::AutoEdit));
+        assert_eq!(mgr.current_mode(), "default");
+
+        mgr.set_managed_floor(None);
+        assert!(mgr.set_mode(SessionMode::Force));
         assert_eq!(mgr.current_mode(), "force");
     }
 

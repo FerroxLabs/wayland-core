@@ -9,7 +9,8 @@ use wcore_observability::sink::SpanSink;
 use wcore_plugin_api::registry::providers::PluginProvider;
 use wcore_providers::{CircuitConfig, LlmProvider, ResilientProvider};
 use wcore_types::execution_policy::{
-    ApprovalPolicy, BaselineExecutionPolicy, DangerousSessionGrant, PolicySource,
+    ApprovalPolicy, BaselineExecutionPolicy, DangerousSessionGrant, EffectiveExecutionPolicy,
+    PolicySource,
 };
 // E-H2: `CircuitReporter` / `NoOpCircuitReporter` are referenced by
 // fully-qualified path in the resilience wiring below.
@@ -20,10 +21,22 @@ use crate::engine::AgentEngine;
 use crate::output::OutputSink;
 use crate::session::Session;
 
+fn approval_policy_to_session_mode(
+    policy: ApprovalPolicy,
+) -> wcore_protocol::commands::SessionMode {
+    match policy {
+        ApprovalPolicy::Prompt => wcore_protocol::commands::SessionMode::Default,
+        ApprovalPolicy::AutoEdit => wcore_protocol::commands::SessionMode::AutoEdit,
+        ApprovalPolicy::Bypass => wcore_protocol::commands::SessionMode::Force,
+    }
+}
+
 /// Result of bootstrapping an agent engine with all features initialized.
 pub struct BootstrapResult {
     pub engine: AgentEngine,
     pub provider: Arc<dyn LlmProvider>,
+    /// F07: immutable launch authority snapshot for host/TUI/ACP reporting.
+    pub effective_execution_policy: EffectiveExecutionPolicy,
     /// F05: deterministic construction truth for the audited capability set.
     /// Hosts emit these additive events only after their `Ready` boundary.
     pub capability_activations: Vec<wcore_protocol::events::CapabilityActivation>,
@@ -199,10 +212,10 @@ pub struct AgentBootstrap {
     /// Trusted, resolver-produced local Dangerous lease. No config, wire,
     /// environment, TUI, or ACP surface populates this field.
     dangerous_grant: Option<DangerousSessionGrant>,
-    /// Explicit trusted Smart policy selected by a local launch surface.
-    /// Managed is deliberately not accepted here until its immutable floor is
-    /// distributed across every execution path.
-    smart_policy: Option<BaselineExecutionPolicy>,
+    /// Explicit trusted baseline selected by a local launch/config resolver.
+    /// Lower-trust callers may narrow it but cannot construct Managed or
+    /// Dangerous authority directly.
+    baseline_policy: Option<BaselineExecutionPolicy>,
     /// Shared live posture authority for TUI/protocol hosts. When installed,
     /// bootstrap binds both the parent approval flow and future child configs
     /// to this same manager.
@@ -246,7 +259,7 @@ impl AgentBootstrap {
             defer_config_mcp: false,
             active_assistant: None,
             dangerous_grant: None,
-            smart_policy: None,
+            baseline_policy: None,
             approval_manager: None,
         }
     }
@@ -304,8 +317,8 @@ impl AgentBootstrap {
         self
     }
 
-    /// Install an already validated local Dangerous lease. Deliberately not
-    /// wired to any user-facing host surface until containment proof is green.
+    /// Install an already validated local Dangerous lease. Build rechecks that
+    /// its Managed provenance matches the selected baseline before use.
     pub fn with_dangerous_grant(mut self, grant: DangerousSessionGrant) -> Self {
         self.dangerous_grant = Some(grant);
         self
@@ -319,7 +332,13 @@ impl AgentBootstrap {
         approvals: ApprovalPolicy,
         source: PolicySource,
     ) -> Self {
-        self.smart_policy = Some(BaselineExecutionPolicy::smart(approvals, source));
+        self.baseline_policy = Some(BaselineExecutionPolicy::smart(approvals, source));
+        self
+    }
+
+    /// Install a resolver-produced Smart or Managed baseline.
+    pub fn with_execution_policy(mut self, policy: BaselineExecutionPolicy) -> Self {
+        self.baseline_policy = Some(policy);
         self
     }
 
@@ -409,11 +428,29 @@ impl AgentBootstrap {
         let mut session_guard = SessionRuntimeGuard::new(session_cancel_root);
         let session_runtime = session_guard.observer();
         let cancel_root = session_guard.control();
-        anyhow::ensure!(
-            self.dangerous_grant.is_none() || self.smart_policy.is_none(),
-            "a session cannot combine Smart policy with a Dangerous grant"
-        );
+        let baseline_policy = self
+            .baseline_policy
+            .take()
+            .unwrap_or_else(|| self.config.execution_policy.clone());
         let dangerous_grant = self.dangerous_grant.take();
+        if let Some(grant) = dangerous_grant.as_ref() {
+            anyhow::ensure!(
+                !matches!(
+                    baseline_policy.managed_dangerous_policy(),
+                    Some(wcore_types::execution_policy::ManagedDangerousPolicy::Deny)
+                ),
+                "Dangerous grant conflicts with the selected Managed deny policy"
+            );
+            anyhow::ensure!(
+                grant.managed_floor_active() == baseline_policy.is_managed(),
+                "Dangerous grant provenance does not match the selected execution baseline"
+            );
+        }
+        let effective_execution_policy = match dangerous_grant.as_ref() {
+            Some(grant) => EffectiveExecutionPolicy::dangerous(grant),
+            None => EffectiveExecutionPolicy::baseline(&baseline_policy),
+        };
+        self.config.execution_policy = baseline_policy.clone();
         if dangerous_grant.is_some() {
             // Dangerous is one typed authority bundle: its resolver-produced
             // lease bypasses both interactive approvals and the sandbox. Set
@@ -421,11 +458,17 @@ impl AgentBootstrap {
             // built so every execution path observes the same posture.
             self.config
                 .set_smart_approval_policy(ApprovalPolicy::Bypass);
-        } else if let Some(policy) = self.smart_policy.take() {
+        } else {
             // An explicit typed launch selection is authoritative over both
             // legacy approval fields. Normalizing them also carries the exact
             // posture into every child Config clone and transient spawner.
-            self.config.set_smart_approval_policy(policy.approvals());
+            self.config
+                .set_smart_approval_policy(baseline_policy.approvals());
+        }
+        if let Some(manager) = self.approval_manager.as_ref() {
+            let managed_floor = (baseline_policy.is_managed() && dangerous_grant.is_none())
+                .then(|| approval_policy_to_session_mode(baseline_policy.approvals()));
+            manager.set_managed_floor(managed_floor);
         }
 
         // Wave OL: provider construction is now DEFERRED until after
@@ -3089,6 +3132,7 @@ impl AgentBootstrap {
         Ok(BootstrapResult {
             engine,
             provider,
+            effective_execution_policy,
             capability_activations,
             mcp_managers,
             has_mcp,

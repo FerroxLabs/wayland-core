@@ -130,6 +130,48 @@ impl BaselineExecutionPolicy {
     pub const fn is_managed(&self) -> bool {
         self.managed_dangerous.is_some()
     }
+
+    /// Apply an approval request without allowing a lower-trust caller to
+    /// weaken an installed Managed floor. Smart sessions accept the selected
+    /// approval policy; Managed sessions keep whichever policy asks for more
+    /// consent.
+    pub const fn with_requested_approvals(
+        &self,
+        requested: ApprovalPolicy,
+        source: PolicySource,
+    ) -> Self {
+        if self.is_managed() {
+            Self {
+                posture: ExecutionPosture::Managed,
+                approvals: stricter_approval_policy(self.approvals, requested),
+                sandbox: SandboxPolicy::Required,
+                source: PolicySource::Managed,
+                managed_dangerous: self.managed_dangerous,
+            }
+        } else {
+            Self::smart(requested, source)
+        }
+    }
+
+    pub const fn managed_dangerous_policy(&self) -> Option<ManagedDangerousPolicy> {
+        self.managed_dangerous
+    }
+}
+
+const fn approval_strictness(policy: ApprovalPolicy) -> u8 {
+    match policy {
+        ApprovalPolicy::Prompt => 2,
+        ApprovalPolicy::AutoEdit => 1,
+        ApprovalPolicy::Bypass => 0,
+    }
+}
+
+const fn stricter_approval_policy(left: ApprovalPolicy, right: ApprovalPolicy) -> ApprovalPolicy {
+    if approval_strictness(left) >= approval_strictness(right) {
+        left
+    } else {
+        right
+    }
 }
 
 /// Explicit local process-launch request. This is never deserialized.
@@ -428,6 +470,32 @@ mod tests {
         assert_eq!(effective.posture(), ExecutionPosture::Managed);
         assert_eq!(effective.sandbox(), SandboxPolicy::Required);
         assert!(effective.managed_floor_active());
+    }
+
+    #[test]
+    fn managed_approval_floor_cannot_be_weakened_by_any_request_source() {
+        let baseline =
+            BaselineExecutionPolicy::managed(ApprovalPolicy::Prompt, ManagedDangerousPolicy::Deny);
+
+        for source in [
+            PolicySource::UserConfig,
+            PolicySource::Project,
+            PolicySource::Environment,
+            PolicySource::LocalCliLaunch,
+            PolicySource::DesktopLocalLaunch,
+            PolicySource::Protocol,
+            PolicySource::Acp,
+            PolicySource::Tui,
+            PolicySource::Resume,
+            PolicySource::Child,
+        ] {
+            for requested in [ApprovalPolicy::AutoEdit, ApprovalPolicy::Bypass] {
+                let resolved = baseline.with_requested_approvals(requested, source);
+                assert_eq!(resolved.posture(), ExecutionPosture::Managed);
+                assert_eq!(resolved.approvals(), ApprovalPolicy::Prompt);
+                assert_eq!(resolved.source(), PolicySource::Managed);
+            }
+        }
     }
 
     #[test]

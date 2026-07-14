@@ -949,10 +949,13 @@ impl EngineTurnEngine {
         } else {
             ApprovalPolicy::Prompt
         };
+        let execution_policy = session_config
+            .execution_policy
+            .with_requested_approvals(smart_policy, PolicySource::Acp);
 
         let output: Arc<dyn OutputSink> = Arc::new(RelaySink::new(relay.clone()));
         let mut bootstrap = AgentBootstrap::new(session_config.clone(), self.cwd.clone(), output)
-            .with_smart_execution_policy(smart_policy, PolicySource::Acp)
+            .with_execution_policy(execution_policy)
             .with_approval_manager(approval_manager.clone())
             .tool_allowlist(persona_tools);
         if let Some(provider) = &self.provider {

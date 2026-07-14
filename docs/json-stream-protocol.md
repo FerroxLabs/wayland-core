@@ -76,6 +76,30 @@ Default-off W0 flags are **omitted** from the serialized `capabilities` object
 (`#[serde(skip_serializing_if = "is_false")]`), so v0.1.21 hosts see the original
 seven-field shape unchanged.
 
+### 1.1a `execution_policy`
+
+Emitted immediately after `ready`. It reports the immutable launch authority
+that Core actually enforced; it is not a command and cannot be sent back to
+mint authority.
+
+```json
+{
+  "type": "execution_policy",
+  "policy": {
+    "posture": "smart",
+    "approvals": "bypass",
+    "sandbox": "required",
+    "source": "desktop_local_launch",
+    "managed_floor_active": false
+  }
+}
+```
+
+`posture` is `smart`, `managed`, or `dangerous`. `approvals` is `prompt`,
+`auto_edit`, or `bypass`; `sandbox` is `required` or `bypass`. Dangerous events
+also carry `dangerous_activation_id` and `dangerous_expires_at_unix_ms`.
+Unknown hosts must drop this additive event under the Host Decoder Contract.
+
 ### 1.2 `stream_start`
 
 A new response turn has started.
@@ -1423,7 +1447,10 @@ would drop it silently per W0).
 > The approval gate IS the delegation contract: a host that spawns the
 > engine with `--auto-approve` / `--force` (or grants wire-force via
 > `WAYLAND_ALLOW_WIRE_FORCE=1`) is opting out of that gate and MUST
-> supply its own confirmation UX before fulfilling these requests.
+> supply its own confirmation UX before fulfilling these requests. These
+> approval controls do not disable the OS sandbox. Full Dangerous posture can
+> only be selected at a local process launch and cannot be requested over the
+> JSON stream.
 
 ```json
 {

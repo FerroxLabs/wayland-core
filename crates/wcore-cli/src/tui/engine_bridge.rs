@@ -1249,8 +1249,12 @@ impl TuiEngine {
     /// Apply a session-mode change (`SurfaceAction::SetMode`). The
     /// approval manager auto-approves tool categories per the mode, so
     /// the engine's approval gate honours the change immediately.
-    pub fn set_mode(&self, mode: wcore_protocol::commands::SessionMode) {
-        self.approval.set_mode(mode);
+    pub fn set_mode(
+        &self,
+        mode: wcore_protocol::commands::SessionMode,
+    ) -> wcore_protocol::commands::SessionMode {
+        let _ = self.approval.set_mode(mode);
+        self.approval.session_mode()
     }
 
     /// Switch the engine's active model (the `/model` command). The engine
@@ -1535,7 +1539,7 @@ impl TuiEngine {
         // D007: the resolved approval posture — applied to the shared
         // manager in the task below AND returned so the router can sync the
         // status-bar badge (`app.mode`) to match the live gate.
-        let session_mode = approval_policy_to_session(config.smart_approval_policy());
+        let requested_mode = approval_policy_to_session(config.smart_approval_policy());
         // M4: a fresh ConfigView the router mirrors onto `App::config` so the
         // next `/config` on_enter re-seeds from the just-saved truth.
         let config_view = super::config_view_from(&config);
@@ -1546,13 +1550,18 @@ impl TuiEngine {
         // arms, so the spawned task must move a distinct clone, not `engine`.
         let engine_for_task = engine.clone();
         let approval = self.approval.clone();
-        let task_mode = approval_policy_to_session(config.smart_approval_policy());
         // N1: a session launched with runtime --force is pinned to Force, which
         // is NOT persisted to disk; blindly re-resolving the disk approval would
         // silently downgrade the live gate (and flip the badge) off Force. When
         // the session is force-pinned, preserve the live posture by skipping the
         // approval set_mode below.
         let apply_mode = !force_pinned;
+        let session_mode = if apply_mode {
+            approval.effective_mode(requested_mode)
+        } else {
+            approval.session_mode()
+        };
+        let task_mode = session_mode;
         // F37: claim a generation for THIS rebind request. A later rebind
         // issued while a turn still holds the engine lock will claim a higher
         // generation; the deferred task below checks this before applying so a

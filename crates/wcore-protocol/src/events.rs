@@ -132,6 +132,11 @@ pub enum ProtocolEvent {
         session_id: Option<String>,
         capabilities: Capabilities,
     },
+    /// Immutable execution authority selected at process/session launch.
+    /// This is output-only: wire peers cannot deserialize it into authority.
+    ExecutionPolicy {
+        policy: wcore_types::execution_policy::EffectiveExecutionPolicy,
+    },
     /// Typed capability construction/runtime evidence. Startup events are
     /// emitted after `Ready`; runtime events are emitted at the real success
     /// seam. Unknown hosts drop this additive event.
@@ -922,6 +927,26 @@ pub struct ErrorInfo {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn execution_policy_event_is_typed_and_additive() {
+        use wcore_types::execution_policy::{
+            ApprovalPolicy, BaselineExecutionPolicy, EffectiveExecutionPolicy, PolicySource,
+        };
+
+        let event = ProtocolEvent::ExecutionPolicy {
+            policy: EffectiveExecutionPolicy::baseline(&BaselineExecutionPolicy::smart(
+                ApprovalPolicy::Bypass,
+                PolicySource::LocalCliLaunch,
+            )),
+        };
+        let json = serde_json::to_value(event).unwrap();
+        assert_eq!(json["type"], "execution_policy");
+        assert_eq!(json["policy"]["posture"], "smart");
+        assert_eq!(json["policy"]["approvals"], "bypass");
+        assert_eq!(json["policy"]["sandbox"], "required");
+        assert_eq!(json["policy"]["source"], "local_cli_launch");
+    }
     use serde_json::json;
 
     #[test]

@@ -127,7 +127,7 @@ pub enum ApprovalScope {
 /// foreign agents can drive wcore without an enum rename on either side.
 /// Vocabulary that claims sandbox bypass is rejected: an untrusted wire peer
 /// cannot mint the local lease required for Dangerous authority.
-#[derive(Debug, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum SessionMode {
     Default,

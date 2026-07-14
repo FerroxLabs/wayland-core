@@ -219,8 +219,11 @@ impl ChannelTurnDispatcher {
         let existing = session_mgr.load(hashed_id).ok();
         let is_new = existing.is_none();
 
+        let execution_policy = config
+            .execution_policy
+            .with_requested_approvals(ApprovalPolicy::Prompt, PolicySource::Protocol);
         let mut bootstrap = AgentBootstrap::new(config, self.cwd.clone(), output)
-            .with_smart_execution_policy(ApprovalPolicy::Prompt, PolicySource::Protocol)
+            .with_execution_policy(execution_policy)
             .provider(self.provider.clone())
             // MANDATORY: stop the per-session engine from re-registering
             // channels / spawning pollers / spawning another subscriber.

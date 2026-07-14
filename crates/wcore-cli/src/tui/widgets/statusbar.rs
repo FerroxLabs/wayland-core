@@ -188,12 +188,30 @@ pub fn status_bar(f: &mut Frame, area: Rect, app: &App, t: &Theme, _sample: Syst
     ));
     spans.push(divider(t));
 
-    // Session mode label (the engine's real SessionMode).
-    spans.push(Span::styled(
-        format!(" {} ", mode_label(&app.mode)),
-        bar_style,
-    ));
-    if matches!(&app.mode, wcore_protocol::commands::SessionMode::Force) {
+    // Execution posture is immutable launch authority; SessionMode remains
+    // the live approval posture and is rendered alongside it.
+    let posture = app.execution_policy.as_ref().map(|policy| policy.posture());
+    let primary_label = posture
+        .map(posture_label)
+        .unwrap_or_else(|| mode_label(&app.mode));
+    spans.push(Span::styled(format!(" {primary_label} "), bar_style));
+    if matches!(
+        posture,
+        Some(wcore_types::execution_policy::ExecutionPosture::Dangerous)
+    ) {
+        spans.push(Span::styled(
+            " · DANGEROUS ",
+            Style::default()
+                .bg(t.bg)
+                .fg(t.warning)
+                .add_modifier(Modifier::BOLD),
+        ));
+    } else if posture.is_some() {
+        spans.push(Span::styled(
+            format!(" · {} ", mode_label(&app.mode)),
+            bar_style,
+        ));
+    } else if matches!(&app.mode, wcore_protocol::commands::SessionMode::Force) {
         spans.push(Span::styled(
             " · FORCE ",
             Style::default()
@@ -302,6 +320,15 @@ fn mode_label(mode: &wcore_protocol::commands::SessionMode) -> &'static str {
         SessionMode::Default => "Default",
         SessionMode::AutoEdit => "Auto-edit",
         SessionMode::Force => "Force",
+    }
+}
+
+fn posture_label(posture: wcore_types::execution_policy::ExecutionPosture) -> &'static str {
+    use wcore_types::execution_policy::ExecutionPosture;
+    match posture {
+        ExecutionPosture::Smart => "Smart",
+        ExecutionPosture::Managed => "Managed",
+        ExecutionPosture::Dangerous => "Dangerous",
     }
 }
 
@@ -579,6 +606,35 @@ mod tests {
         assert!(
             line.contains("FORCE"),
             "force badge missing while Force is active:\n{line}"
+        );
+    }
+
+    #[test]
+    fn status_bar_distinguishes_dangerous_from_approval_bypass() {
+        use wcore_types::execution_policy::{
+            ApprovalPolicy, BaselineExecutionPolicy, DangerousLaunchRequest,
+            EffectiveExecutionPolicy, PolicySource, resolve_dangerous_launch,
+        };
+
+        let mut app = App::new();
+        app.config.model = "local".into();
+        let baseline =
+            BaselineExecutionPolicy::smart(ApprovalPolicy::Prompt, PolicySource::LocalCliLaunch);
+        let grant = resolve_dangerous_launch(
+            &baseline,
+            DangerousLaunchRequest::cli(30, "statusbar-dangerous"),
+            0,
+        )
+        .unwrap();
+        app.execution_policy = Some(EffectiveExecutionPolicy::dangerous(&grant));
+        app.mode = wcore_protocol::commands::SessionMode::Force;
+
+        let line = render(&app, &Theme::hearth(), 100);
+        assert!(line.contains("Dangerous"), "posture missing: {line}");
+        assert!(line.contains("DANGEROUS"), "warning badge missing: {line}");
+        assert!(
+            !line.contains(" · FORCE"),
+            "Dangerous must not be mislabeled as approval-only Force: {line}"
         );
     }
 

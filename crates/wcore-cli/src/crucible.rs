@@ -148,7 +148,10 @@ async fn run_advisor_loop(
     }
 
     let config = session_cfg.clone();
-    let smart_policy = config.smart_approval_policy();
+    let execution_policy = config.execution_policy.with_requested_approvals(
+        config.smart_approval_policy(),
+        wcore_types::execution_policy::PolicySource::LocalCliLaunch,
+    );
     wcore_agent::egress::install_egress_policy(&config);
 
     let cwd = std::env::current_dir()
@@ -158,10 +161,7 @@ async fn run_advisor_loop(
         Arc::new(wcore_agent::output::terminal::TerminalSink::new(false));
 
     let result = wcore_agent::bootstrap::AgentBootstrap::new(config, &cwd, output.clone())
-        .with_smart_execution_policy(
-            smart_policy,
-            wcore_types::execution_policy::PolicySource::LocalCliLaunch,
-        )
+        .with_execution_policy(execution_policy)
         .build()
         .await?;
     let mut engine = result.engine;

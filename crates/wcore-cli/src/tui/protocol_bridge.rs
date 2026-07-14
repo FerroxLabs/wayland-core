@@ -116,6 +116,20 @@ pub fn apply_event(app: &mut App, event: ProtocolEvent) {
 /// through every arm.
 fn apply_event_inner(app: &mut App, event: ProtocolEvent) {
     match event {
+        ProtocolEvent::ExecutionPolicy { policy } => {
+            app.mode = match policy.approvals() {
+                wcore_types::execution_policy::ApprovalPolicy::Prompt => {
+                    wcore_protocol::commands::SessionMode::Default
+                }
+                wcore_types::execution_policy::ApprovalPolicy::AutoEdit => {
+                    wcore_protocol::commands::SessionMode::AutoEdit
+                }
+                wcore_types::execution_policy::ApprovalPolicy::Bypass => {
+                    wcore_protocol::commands::SessionMode::Force
+                }
+            };
+            app.execution_policy = Some(policy);
+        }
         // ── Streaming lifecycle ──────────────────────────────────────
         ProtocolEvent::StreamStart { .. } => {
             app.session.streaming_active = true;
@@ -1842,6 +1856,31 @@ mod tests {
     use crate::tui::fixtures;
     use serde_json::json;
     use wcore_protocol::events::{ErrorInfo, OutputType, ToolCategory, ToolInfo};
+
+    #[test]
+    fn execution_policy_event_sets_tui_posture_and_approval_mode() {
+        use wcore_types::execution_policy::{
+            ApprovalPolicy, BaselineExecutionPolicy, EffectiveExecutionPolicy, ExecutionPosture,
+            PolicySource,
+        };
+
+        let mut app = App::new();
+        apply_event(
+            &mut app,
+            ProtocolEvent::ExecutionPolicy {
+                policy: EffectiveExecutionPolicy::baseline(&BaselineExecutionPolicy::smart(
+                    ApprovalPolicy::Bypass,
+                    PolicySource::LocalCliLaunch,
+                )),
+            },
+        );
+
+        assert_eq!(
+            app.execution_policy.as_ref().unwrap().posture(),
+            ExecutionPosture::Smart
+        );
+        assert_eq!(app.mode, wcore_protocol::commands::SessionMode::Force);
+    }
 
     // ── hydrate_history (resume repaint) ─────────────────────────────────
 

@@ -1414,9 +1414,17 @@ impl Router {
                 // push it to the engine's approval manager so the
                 // approval gate honours it immediately.
                 if let Some(engine) = self.engine.as_ref() {
-                    engine.set_mode(clone_mode(&mode));
+                    let requested = clone_mode(&mode);
+                    let effective = engine.set_mode(requested);
+                    if effective != requested {
+                        app.toast =
+                            Some("Managed policy kept the stricter approval mode".to_string());
+                        app.toast_at = Some(std::time::Instant::now());
+                    }
+                    app.mode = effective;
+                } else {
+                    app.mode = mode;
                 }
-                app.mode = mode;
                 false
             }
             // ── Engine-facing actions ────────────────────────────────
@@ -2896,9 +2904,9 @@ fn parse_mode_arg(s: &str) -> Option<wcore_protocol::commands::SessionMode> {
     match s.to_ascii_lowercase().as_str() {
         "default" | "ask" | "normal" => Some(SessionMode::Default),
         "auto-edit" | "auto_edit" | "auto" | "autoedit" | "edit" => Some(SessionMode::AutoEdit),
-        // `dangerously_skip_permissions` (and its kebab form) are the Claude
-        // Code wire aliases `SessionMode` deserialises to `Force`; accept them
-        // here too so a user pasting a foreign agent's flag name is honoured.
+        // `dangerously_skip_permissions` (and its kebab form) are foreign
+        // approval-bypass aliases that `SessionMode` deserialises to `Force`.
+        // They never select Wayland's sandbox-bypassing Dangerous posture.
         "force" | "yolo" | "dangerously_skip_permissions" | "dangerously-skip-permissions" => {
             Some(SessionMode::Force)
         }

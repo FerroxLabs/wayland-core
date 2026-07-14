@@ -44,7 +44,10 @@ use wcore_protocol::reader::spawn_stdin_reader;
 use wcore_protocol::writer::{ProtocolEmitter, ProtocolWriter};
 use wcore_protocol::{ToolApprovalManager, ToolApprovalResult};
 use wcore_providers::LlmProvider;
-use wcore_types::execution_policy::{ApprovalPolicy, PolicySource};
+use wcore_types::execution_policy::{
+    ApprovalPolicy, BaselineExecutionPolicy, DEFAULT_DANGEROUS_SESSION_TTL_SECS,
+    DangerousLaunchRequest, DangerousSessionGrant, PolicySource, resolve_dangerous_launch,
+};
 
 // v0.8.0 N.1+N.2+N.3 — slash-runtime dispatch helpers.
 //
@@ -315,9 +318,25 @@ struct Cli {
     /// once this is set. Equivalent to flipping the engine's session
     /// approval mode to `Force` for the entire run. The TUI surfaces a
     /// `· FORCE` badge in the bottom status bar so the mode is impossible
-    /// to forget. Aliases: `--yolo`, `--dangerously-skip-permissions`.
-    #[arg(long = "force", aliases = ["yolo", "dangerously-skip-permissions"])]
+    /// to forget. Alias: `--yolo`.
+    #[arg(long = "force", alias = "yolo")]
     force: bool,
+
+    /// Compatibility spelling for approval bypass. This does NOT disable the
+    /// OS sandbox. Use `--dangerous` for an explicit, time-bounded local
+    /// sandbox bypass.
+    #[arg(long = "dangerously-skip-permissions", conflicts_with = "dangerous")]
+    dangerously_skip_permissions: bool,
+
+    /// Explicit local Dangerous session: bypass approvals and the OS sandbox
+    /// until the lease expires. Cannot be activated by config, environment,
+    /// protocol, ACP, TUI commands, resumed state, or child agents.
+    #[arg(long, conflicts_with_all = ["force", "dangerously_skip_permissions"])]
+    dangerous: bool,
+
+    /// Dangerous-session lifetime in seconds (maximum one hour).
+    #[arg(long, value_name = "SECONDS", requires = "dangerous")]
+    dangerous_ttl_secs: Option<u64>,
 
     /// Project directory to load .wayland-core.toml from (defaults to CWD)
     #[arg(long)]
@@ -861,6 +880,17 @@ fn init_failure_message(err: &anyhow::Error, provider_label: &str) -> String {
 
 async fn run() -> anyhow::Result<ExitCode> {
     let mut cli = Cli::parse();
+    let approval_bypass = cli.force || cli.dangerously_skip_permissions;
+    let dangerous_ttl_secs = cli
+        .dangerous_ttl_secs
+        .unwrap_or(DEFAULT_DANGEROUS_SESSION_TTL_SECS);
+    if cli.dangerously_skip_permissions {
+        eprintln!(
+            "wayland-core: --dangerously-skip-permissions bypasses approval prompts only; \
+             the OS sandbox remains required. Use --dangerous for an explicit, time-bounded \
+             local sandbox bypass."
+        );
+    }
     let eval_egress_key = cli
         .eval_egress_key_file
         .take()
@@ -1177,7 +1207,14 @@ async fn run() -> anyhow::Result<ExitCode> {
                 let cwd = std::env::current_dir()?.to_string_lossy().to_string();
                 // Setup subcommand never honours --force: the onboarding
                 // flow makes no tool calls. web_search is irrelevant here.
-                run_tui_mode(config, &cwd, None, None, true, false, false).await?;
+                let execution = resolve_local_execution(
+                    &config,
+                    false,
+                    false,
+                    DEFAULT_DANGEROUS_SESSION_TTL_SECS,
+                    false,
+                )?;
+                run_tui_mode(config, &cwd, None, None, true, execution, false).await?;
                 // B3: explicitly disarm the crash sentinel on normal TUI
                 // exit so it isn't present if the process is still alive
                 // during post-TUI cleanup (MCP shutdown, etc.) and then
@@ -1484,7 +1521,10 @@ async fn run() -> anyhow::Result<ExitCode> {
             let missing_credentials = e
                 .downcast_ref::<wcore_config::config::MissingApiKey>()
                 .is_some();
-            if would_open_tui && (missing_credentials || (first_run && !project_config_exists())) {
+            if would_open_tui
+                && !cli.dangerous
+                && (missing_credentials || (first_run && !project_config_exists()))
+            {
                 let cwd = std::env::current_dir()?.to_string_lossy().to_string();
                 // B8-1: install the process-global egress policy BEFORE the
                 // onboarding session runs. The normal install site (below, after
@@ -1497,13 +1537,20 @@ async fn run() -> anyhow::Result<ExitCode> {
                 // onboarding session sees and a later call is a guarded no-op.
                 let onboarding_config = Config::default();
                 wcore_agent::egress::install_egress_policy(&onboarding_config);
+                let execution = resolve_local_execution(
+                    &onboarding_config,
+                    approval_bypass,
+                    false,
+                    dangerous_ttl_secs,
+                    false,
+                )?;
                 run_tui_mode(
                     onboarding_config,
                     &cwd,
                     None,
                     cli.session_id.clone(),
                     true,
-                    cli.force,
+                    execution,
                     cli.search,
                 )
                 .await?;
@@ -1568,6 +1615,13 @@ async fn run() -> anyhow::Result<ExitCode> {
     // path as an explicit `--resume <id>`; `clap`'s `conflicts_with_all`
     // already guarantees only one of `--resume` / `--continue` is set.
     let resume = resolve_resume(cli.resume.clone(), cli.continue_latest, &config)?;
+    let execution = resolve_local_execution(
+        &config,
+        approval_bypass,
+        cli.dangerous,
+        dangerous_ttl_secs,
+        cli.json_stream,
+    )?;
 
     // Branch to JSON stream mode
     if cli.json_stream {
@@ -1576,7 +1630,7 @@ async fn run() -> anyhow::Result<ExitCode> {
             &cwd,
             resume,
             cli.session_id,
-            cli.force,
+            execution,
             cli.assistant.clone(),
         )
         .await;
@@ -1605,7 +1659,7 @@ async fn run() -> anyhow::Result<ExitCode> {
             resume,
             cli.session_id,
             false,
-            cli.force,
+            execution,
             cli.search,
         )
         .await?;
@@ -1636,15 +1690,14 @@ async fn run() -> anyhow::Result<ExitCode> {
     }
 
     let provider_name = config.provider_label.clone();
-    let smart_policy = local_smart_policy(&config, cli.force);
 
     // Bootstrap engine with full feature initialization. Phase 1B-2 — this
     // build backs both the long-running interactive line-REPL and the
     // headless one-shot `-p` path; opt into inbound channel dispatch so the
     // primary interactive session listens to configured channels (the
     // short-lived one-shot simply aborts the subscriber on exit).
-    let mut bootstrap = AgentBootstrap::new(config, &cwd, output.clone())
-        .with_smart_execution_policy(smart_policy, PolicySource::LocalCliLaunch)
+    let mut bootstrap = execution
+        .apply(AgentBootstrap::new(config, &cwd, output.clone()))
         .plugin_provider_router(make_plugin_provider_router())
         .enable_inbound_dispatch(true);
 
@@ -1868,12 +1921,71 @@ fn approval_policy_to_session(policy: ApprovalPolicy) -> wcore_protocol::command
     }
 }
 
-fn local_smart_policy(config: &Config, force: bool) -> ApprovalPolicy {
-    if force {
+struct LocalExecutionSelection {
+    baseline: BaselineExecutionPolicy,
+    dangerous_grant: Option<DangerousSessionGrant>,
+}
+
+impl LocalExecutionSelection {
+    fn approvals(&self) -> ApprovalPolicy {
+        if self.dangerous_grant.is_some() {
+            ApprovalPolicy::Bypass
+        } else {
+            self.baseline.approvals()
+        }
+    }
+
+    fn apply(self, bootstrap: AgentBootstrap) -> AgentBootstrap {
+        let mut bootstrap = bootstrap.with_execution_policy(self.baseline);
+        if let Some(grant) = self.dangerous_grant {
+            bootstrap = bootstrap.with_dangerous_grant(grant);
+        }
+        bootstrap
+    }
+}
+
+fn resolve_local_execution(
+    config: &Config,
+    approval_bypass: bool,
+    dangerous: bool,
+    dangerous_ttl_secs: u64,
+    desktop_launch: bool,
+) -> anyhow::Result<LocalExecutionSelection> {
+    let requested = if approval_bypass {
         ApprovalPolicy::Bypass
     } else {
         config.smart_approval_policy()
-    }
+    };
+    let source = if desktop_launch {
+        PolicySource::DesktopLocalLaunch
+    } else {
+        PolicySource::LocalCliLaunch
+    };
+    let baseline = config
+        .execution_policy
+        .with_requested_approvals(requested, source);
+    let dangerous_grant = if dangerous {
+        let activation_id = format!("{}-{}", std::process::id(), uuid::Uuid::now_v7());
+        let request = if desktop_launch {
+            DangerousLaunchRequest::desktop(dangerous_ttl_secs, activation_id)
+        } else {
+            DangerousLaunchRequest::cli(dangerous_ttl_secs, activation_id)
+        };
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_err(|_| anyhow::anyhow!("system clock is before the Unix epoch"))?
+            .as_millis()
+            .try_into()
+            .map_err(|_| anyhow::anyhow!("system clock does not fit execution-policy metadata"))?;
+        Some(resolve_dangerous_launch(&baseline, request, now)?)
+    } else {
+        None
+    };
+
+    Ok(LocalExecutionSelection {
+        baseline,
+        dangerous_grant,
+    })
 }
 
 /// GHSA-8r7g: the `WAYLAND_ALLOW_WIRE_FORCE` env opt-in that lets a protocol
@@ -1891,7 +2003,7 @@ async fn run_tui_mode(
     resume: Option<String>,
     session_id: Option<String>,
     force_onboarding: bool,
-    force: bool,
+    execution: LocalExecutionSelection,
     web_search: bool,
 ) -> anyhow::Result<()> {
     use wcore_cli::tui;
@@ -1921,13 +2033,14 @@ async fn run_tui_mode(
     }
 
     // The status-bar snapshot is taken from the resolved config before
-    // it is moved into the bootstrap. Keep `--force` as launch authority
+    // it is moved into the bootstrap. Keep approval-bypass launch authority
     // for rebinds; the status bar renders active posture from `App::mode`.
+    let approval_policy = execution.approvals();
+    let approval_bypass = matches!(approval_policy, ApprovalPolicy::Bypass);
     let mut config_view = tui::config_view_from(&config);
-    config_view.force = force;
+    config_view.force = approval_bypass;
     let context_view = tui::context_view_from(&config);
     let provider_name = config.provider_label.clone();
-    let smart_policy = local_smart_policy(&config, force);
 
     // Snapshot the registered hooks BEFORE `config` is moved into the
     // bootstrap below. `/hooks` reads this immutable list (the dispatch is
@@ -1971,18 +2084,18 @@ async fn run_tui_mode(
     let approval_manager = Arc::new(ToolApprovalManager::new());
     // GHSA-8r7g: a protocol peer may escalate to Force only when this local
     // operator opted in at launch (--force or WAYLAND_ALLOW_WIRE_FORCE).
-    approval_manager.set_allow_wire_force(force || wire_force_opt_in_env());
+    approval_manager.set_allow_wire_force(approval_bypass || wire_force_opt_in_env());
     // Seed the initial approval posture from config (`[default] approval_mode`,
     // editable via /config); `--force` overrides to Force. When Force, the
     // TUI's approval modal never opens (no `ApprovalRequired` event) and the
     // status bar renders the live mode so later de-escalation is visible.
-    approval_manager.set_mode(approval_policy_to_session(smart_policy));
+    approval_manager.set_mode(approval_policy_to_session(approval_policy));
 
     // Phase 1B-2 — the interactive TUI is a primary long-running session, so
     // opt into inbound channel dispatch (the InboundSubscriber turns admitted
     // channel messages into agent turns for the lifetime of this session).
-    let mut bootstrap = AgentBootstrap::new(config, cwd, output.clone())
-        .with_smart_execution_policy(smart_policy, PolicySource::LocalCliLaunch)
+    let mut bootstrap = execution
+        .apply(AgentBootstrap::new(config, cwd, output.clone()))
         .with_approval_manager(approval_manager.clone())
         .plugin_provider_router(make_plugin_provider_router())
         .enable_inbound_dispatch(true);
@@ -2008,6 +2121,7 @@ async fn run_tui_mode(
     let (mut boot_terminal, boot_guard) = tui::enter()?;
     let result = tui::splash_while(&mut boot_terminal, mcp_count, bootstrap.build()).await?;
     let startup_capability_activations = result.capability_activations.clone();
+    let effective_execution_policy = result.effective_execution_policy.clone();
     let mut engine = result.engine;
 
     // FluxRouter web_search grounding (contract §5): honour `--search`. A no-op
@@ -2075,6 +2189,9 @@ async fn run_tui_mode(
     for activation in startup_capability_activations {
         let _ = tx.send(wcore_protocol::events::ProtocolEvent::CapabilityActivation { activation });
     }
+    let _ = tx.send(wcore_protocol::events::ProtocolEvent::ExecutionPolicy {
+        policy: effective_execution_policy,
+    });
 
     // Snapshot the loaded skills + MCP servers for the `/skills` and `/mcp`
     // listings. Taken here while `engine` and `result.mcp_managers` are still
@@ -2135,7 +2252,7 @@ async fn run_tui_mode(
         engine: tui_engine,
         events: rx,
         config: config_view,
-        initial_mode: approval_policy_to_session(smart_policy),
+        initial_mode: approval_policy_to_session(approval_policy),
         context: context_view,
         first_run,
         force_onboarding,
@@ -2698,11 +2815,12 @@ async fn run_json_stream_mode(
     cwd: &str,
     resume: Option<String>,
     session_id: Option<String>,
-    force: bool,
+    execution: LocalExecutionSelection,
     assistant: Option<String>,
 ) -> anyhow::Result<()> {
     let writer = Arc::new(ProtocolWriter::new());
-    let smart_policy = local_smart_policy(&config, force);
+    let approval_policy = execution.approvals();
+    let approval_bypass = matches!(approval_policy, ApprovalPolicy::Bypass);
 
     // F-009: pre-compute cost_attribution from the config compat rows BEFORE
     // config is moved into AgentBootstrap. Bootstrap applies the same gate
@@ -2741,7 +2859,7 @@ async fn run_json_stream_mode(
     let approval_manager = Arc::new(ToolApprovalManager::new());
     // GHSA-8r7g: a protocol peer may escalate to Force only when this local
     // operator opted in at launch (--force or WAYLAND_ALLOW_WIRE_FORCE).
-    approval_manager.set_allow_wire_force(force || wire_force_opt_in_env());
+    approval_manager.set_allow_wire_force(approval_bypass || wire_force_opt_in_env());
     // wayland#241: seed the initial approval posture from config
     // (`[default] approval_mode`) via the shared `initial_session_mode`
     // helper, exactly like `run_tui_mode`. The json-stream path previously
@@ -2749,7 +2867,7 @@ async fn run_json_stream_mode(
     // `"force"` was silently ignored for the desktop host — every mutating
     // tool then waited on an approval the host never sent. `--force` still
     // overrides to Force (F-002).
-    approval_manager.set_mode(approval_policy_to_session(smart_policy));
+    approval_manager.set_mode(approval_policy_to_session(approval_policy));
     let output: Arc<dyn OutputSink> = protocol_sink.clone();
 
     let provider_name = config.provider_label.clone();
@@ -2783,8 +2901,8 @@ async fn run_json_stream_mode(
     // json-stream is a primary long-running host session (e.g. the Wayland
     // desktop app), so
     // opt into inbound channel dispatch.
-    let mut bootstrap = AgentBootstrap::new(config, cwd, output.clone())
-        .with_smart_execution_policy(smart_policy, PolicySource::LocalCliLaunch)
+    let mut bootstrap = execution
+        .apply(AgentBootstrap::new(config, cwd, output.clone()))
         .with_approval_manager(approval_manager.clone())
         .plugin_provider_router(make_plugin_provider_router())
         .enable_inbound_dispatch(true)
@@ -2851,6 +2969,9 @@ async fn run_json_stream_mode(
         &initial_plugin_caps,
         engine.advertised_capabilities(),
     );
+    let _ = writer.emit(&ProtocolEvent::ExecutionPolicy {
+        policy: result.effective_execution_policy.clone(),
+    });
     for activation in startup_capability_activations {
         output.emit_capability_activation(&activation);
     }
@@ -4102,7 +4223,17 @@ mod tests {
                 ..Default::default()
             };
             assert_eq!(
-                approval_policy_to_session(local_smart_policy(&config, false)),
+                approval_policy_to_session(
+                    resolve_local_execution(
+                        &config,
+                        false,
+                        false,
+                        DEFAULT_DANGEROUS_SESSION_TTL_SECS,
+                        false,
+                    )
+                    .unwrap()
+                    .approvals(),
+                ),
                 expected,
                 "config {mode:?} must reach the session"
             );
@@ -4119,7 +4250,17 @@ mod tests {
                 ..Default::default()
             };
             assert_eq!(
-                approval_policy_to_session(local_smart_policy(&config, true)),
+                approval_policy_to_session(
+                    resolve_local_execution(
+                        &config,
+                        true,
+                        false,
+                        DEFAULT_DANGEROUS_SESSION_TTL_SECS,
+                        false,
+                    )
+                    .unwrap()
+                    .approvals(),
+                ),
                 SessionMode::Force,
                 "--force must override config {m:?} to Force"
             );
@@ -4133,13 +4274,84 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(
-            approval_policy_to_session(local_smart_policy(&legacy, false)),
+            approval_policy_to_session(
+                resolve_local_execution(
+                    &legacy,
+                    false,
+                    false,
+                    DEFAULT_DANGEROUS_SESSION_TTL_SECS,
+                    false,
+                )
+                .unwrap()
+                .approvals(),
+            ),
             SessionMode::Force,
             "legacy auto-approve must converge with the typed policy"
         );
         let view = wcore_cli::tui::config_view_from(&legacy);
         assert_eq!(view.approval, "force");
         assert!(view.tools_auto_approve);
+    }
+
+    #[test]
+    fn foreign_dangerous_alias_is_approval_only() {
+        use clap::Parser as _;
+        use wcore_types::execution_policy::SandboxPolicy;
+
+        let cli = Cli::try_parse_from(["wayland-core", "--dangerously-skip-permissions"])
+            .expect("compatibility alias must remain accepted");
+        assert!(cli.dangerously_skip_permissions);
+        assert!(!cli.dangerous);
+
+        let selection = resolve_local_execution(
+            &Config::default(),
+            true,
+            false,
+            DEFAULT_DANGEROUS_SESSION_TTL_SECS,
+            false,
+        )
+        .unwrap();
+        assert_eq!(selection.approvals(), ApprovalPolicy::Bypass);
+        assert_eq!(selection.baseline.sandbox(), SandboxPolicy::Required);
+        assert!(selection.dangerous_grant.is_none());
+    }
+
+    #[test]
+    fn dangerous_ttl_requires_an_explicit_dangerous_launch() {
+        use clap::Parser as _;
+
+        assert!(
+            Cli::try_parse_from(["wayland-core", "--dangerous-ttl-secs", "30"]).is_err(),
+            "a lease lifetime cannot imply Dangerous authority"
+        );
+    }
+
+    #[test]
+    fn managed_deny_refuses_local_dangerous_launch() {
+        use wcore_types::execution_policy::ManagedDangerousPolicy;
+
+        let config = Config {
+            execution_policy: BaselineExecutionPolicy::managed(
+                ApprovalPolicy::Prompt,
+                ManagedDangerousPolicy::Deny,
+            ),
+            ..Default::default()
+        };
+        let error = resolve_local_execution(&config, false, true, 30, false)
+            .err()
+            .expect("Managed deny must reject even a local launch");
+        assert!(error.to_string().contains("disabled by managed policy"));
+    }
+
+    #[test]
+    fn desktop_dangerous_launch_is_source_bound() {
+        let selection = resolve_local_execution(&Config::default(), false, true, 30, true)
+            .expect("Desktop process launch is an allowed local source");
+        let grant = selection
+            .dangerous_grant
+            .expect("Dangerous must produce a resolver-owned lease");
+        assert_eq!(grant.source(), PolicySource::DesktopLocalLaunch);
+        assert_eq!(grant.ttl_millis(), 30_000);
     }
 
     #[test]

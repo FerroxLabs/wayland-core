@@ -230,6 +230,63 @@ impl Default for SecurityConfig {
     }
 }
 
+/// Trusted global execution floor. Project files are never allowed to
+/// contribute this block: they travel with cloned repositories and therefore
+/// cannot mint or relax organization policy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+pub struct ExecutionConfig {
+    #[serde(default)]
+    pub managed: bool,
+    #[serde(default)]
+    pub approval_mode: ApprovalMode,
+    #[serde(default)]
+    pub dangerous: ManagedDangerousConfig,
+}
+
+impl Default for ExecutionConfig {
+    fn default() -> Self {
+        Self {
+            managed: false,
+            approval_mode: ApprovalMode::Default,
+            dangerous: ManagedDangerousConfig::Deny,
+        }
+    }
+}
+
+impl ExecutionConfig {
+    pub fn baseline_policy(
+        self,
+        smart_approvals: wcore_types::execution_policy::ApprovalPolicy,
+    ) -> wcore_types::execution_policy::BaselineExecutionPolicy {
+        use wcore_types::execution_policy::{
+            ApprovalPolicy, BaselineExecutionPolicy, ManagedDangerousPolicy, PolicySource,
+        };
+
+        if !self.managed {
+            return BaselineExecutionPolicy::smart(smart_approvals, PolicySource::UserConfig);
+        }
+
+        let approvals = match self.approval_mode {
+            ApprovalMode::Default => ApprovalPolicy::Prompt,
+            ApprovalMode::AutoEdit => ApprovalPolicy::AutoEdit,
+            ApprovalMode::Force => ApprovalPolicy::Bypass,
+        };
+        let dangerous = match self.dangerous {
+            ManagedDangerousConfig::Allow => ManagedDangerousPolicy::Allow,
+            ManagedDangerousConfig::Deny => ManagedDangerousPolicy::Deny,
+        };
+        BaselineExecutionPolicy::managed(approvals, dangerous)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ManagedDangerousConfig {
+    Allow,
+    #[default]
+    Deny,
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize, Default)]
 pub struct ConfigFile {
     #[serde(default)]
@@ -238,6 +295,11 @@ pub struct ConfigFile {
     /// B2 — `[security]` egress policy block.
     #[serde(default)]
     pub security: SecurityConfig,
+
+    /// `[execution]` is an operator/administrator-owned global policy block.
+    /// The project layer is discarded by `merge_config_files`.
+    #[serde(default)]
+    pub execution: ExecutionConfig,
 
     #[serde(default)]
     pub providers: HashMap<String, ProviderConfig>,
@@ -860,15 +922,13 @@ pub struct ToolsConfig {
     pub env_passthrough: Vec<String>,
     /// #327 — sandbox backend selection, mirroring the `WAYLAND_SANDBOX`
     /// env var (`"none"` / `"docker"`; unset = platform default backend).
-    /// The env var, when set, takes precedence for back-compat. `"none"`
-    /// additionally requires `allow_no_sandbox = true` (or the
-    /// `WAYLAND_ALLOW_NO_SANDBOX` env var) or the sandbox fails closed.
+    /// Hosted agent sessions reject `"none"`; the field remains for backend
+    /// selection and legacy callers until F09 removes the global shim.
     #[serde(default)]
     pub sandbox: Option<String>,
-    /// #327 — operator opt-in to run with NO isolation when the platform
-    /// sandbox is unavailable (or `sandbox = "none"`), mirroring the
-    /// `WAYLAND_ALLOW_NO_SANDBOX` env var. The env var, when set, takes
-    /// precedence for back-compat. Defaults to off (fail closed).
+    /// #327 legacy no-isolation opt-in. Hosted agent sessions ignore it and
+    /// require a resolver-produced local Dangerous lease for sandbox bypass;
+    /// retained temporarily for compatibility paths removed in F09.
     #[serde(default)]
     pub allow_no_sandbox: Option<bool>,
 }
@@ -1009,6 +1069,8 @@ pub struct Config {
     pub base_url: String,
     /// B2 — egress security policy (allowlist + on/off). See [`SecurityConfig`].
     pub security: SecurityConfig,
+    /// Immutable typed baseline used by every local, host and child runtime.
+    pub execution_policy: wcore_types::execution_policy::BaselineExecutionPolicy,
     pub model: String,
     pub max_tokens: u32,
     /// #112 — whether `max_tokens` was set EXPLICITLY (CLI `--max-tokens` or a
@@ -1207,6 +1269,7 @@ impl std::fmt::Debug for Config {
             .field("storage", &self.storage)
             .field("memory", &self.memory)
             .field("browser", &self.browser)
+            .field("execution_policy", &self.execution_policy)
             .field("session_cap", &self.session_cap)
             .finish()
     }
@@ -1268,6 +1331,10 @@ impl Default for Config {
             memory: MemoryConfig::default(),
             browser: BrowserConfig::default(),
             security: SecurityConfig::default(),
+            execution_policy: wcore_types::execution_policy::BaselineExecutionPolicy::smart(
+                wcore_types::execution_policy::ApprovalPolicy::Prompt,
+                wcore_types::execution_policy::PolicySource::Default,
+            ),
             session_cap: None,
             crucible: crate::crucible::CrucibleConfig::default(),
         }
@@ -1982,6 +2049,17 @@ impl Config {
             tools.auto_approve = true;
         }
 
+        let requested_approvals = if tools.auto_approve {
+            wcore_types::execution_policy::ApprovalPolicy::Bypass
+        } else {
+            match approval_mode {
+                ApprovalMode::Default => wcore_types::execution_policy::ApprovalPolicy::Prompt,
+                ApprovalMode::AutoEdit => wcore_types::execution_policy::ApprovalPolicy::AutoEdit,
+                ApprovalMode::Force => wcore_types::execution_policy::ApprovalPolicy::Bypass,
+            }
+        };
+        let execution_policy = merged.execution.baseline_policy(requested_approvals);
+
         // Resolve prompt_caching: default true for Anthropic
         let prompt_caching = provider_config
             .prompt_caching
@@ -2083,6 +2161,7 @@ impl Config {
             memory: merged.memory.unwrap_or_default(),
             browser: merged.browser,
             security: merged.security,
+            execution_policy,
             session_cap: merged.session_cap,
             crucible: merged.crucible,
         })
@@ -3383,6 +3462,15 @@ fn mask_value(value: &mut toml::Value) {
 
 /// Merge two config files. Project overrides global.
 fn merge_config_files(global: ConfigFile, project: ConfigFile) -> ConfigFile {
+    // F07: execution policy is administrator/operator-owned. A repository may
+    // request stricter ordinary tool settings elsewhere, but it cannot create,
+    // replace, or relax a Managed floor.
+    if project.execution != ExecutionConfig::default() {
+        tracing::warn!(
+            "ignored project [execution] block; managed execution policy is loaded only from the global config"
+        );
+    }
+    let execution = global.execution;
     let default = DefaultConfig {
         provider: if project.default.provider != default_provider() {
             project.default.provider
@@ -3783,6 +3871,7 @@ fn merge_config_files(global: ConfigFile, project: ConfigFile) -> ConfigFile {
 
     ConfigFile {
         default,
+        execution,
         providers,
         profiles,
         tools,
@@ -3990,6 +4079,13 @@ max_tokens = 64000                 # a CAP; the engine clamps it per-model befor
 # provider = "vertex"
 # model = "claude-sonnet-4-6@20251015"
 # # or: model = "vertex:sonnet" (short-form, see wcore_types::model_aliases)
+
+# Optional global-only administrator execution floor. A project config cannot
+# create or relax this block.
+# [execution]
+# managed = true
+# approval_mode = "default"    # default | auto-edit | force
+# dangerous = "deny"           # allow | deny for explicit local --dangerous
 
 # Tool confirmation settings
 [tools]
@@ -6316,6 +6412,59 @@ enabled = false
         config.set_smart_approval_policy(ApprovalPolicy::Prompt);
         assert_eq!(config.approval_mode, ApprovalMode::Default);
         assert!(!config.tools.auto_approve);
+    }
+
+    #[test]
+    fn managed_execution_config_builds_a_typed_denying_floor() {
+        use wcore_types::execution_policy::{
+            ApprovalPolicy, ExecutionPosture, ManagedDangerousPolicy, PolicySource,
+        };
+
+        let policy = ExecutionConfig {
+            managed: true,
+            approval_mode: ApprovalMode::AutoEdit,
+            dangerous: ManagedDangerousConfig::Deny,
+        }
+        .baseline_policy(ApprovalPolicy::Bypass);
+
+        assert_eq!(policy.posture(), ExecutionPosture::Managed);
+        assert_eq!(policy.approvals(), ApprovalPolicy::AutoEdit);
+        assert_eq!(policy.source(), PolicySource::Managed);
+        assert_eq!(
+            policy.managed_dangerous_policy(),
+            Some(ManagedDangerousPolicy::Deny)
+        );
+    }
+
+    #[test]
+    fn project_execution_block_cannot_replace_the_global_floor() {
+        let global = ConfigFile {
+            execution: ExecutionConfig {
+                managed: true,
+                approval_mode: ApprovalMode::Default,
+                dangerous: ManagedDangerousConfig::Deny,
+            },
+            ..Default::default()
+        };
+        let project = ConfigFile {
+            execution: ExecutionConfig {
+                managed: true,
+                approval_mode: ApprovalMode::Force,
+                dangerous: ManagedDangerousConfig::Allow,
+            },
+            ..Default::default()
+        };
+
+        let merged = merge_config_files(global, project);
+
+        assert_eq!(
+            merged.execution,
+            ExecutionConfig {
+                managed: true,
+                approval_mode: ApprovalMode::Default,
+                dangerous: ManagedDangerousConfig::Deny,
+            }
+        );
     }
 
     #[test]

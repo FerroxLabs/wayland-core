@@ -52,7 +52,10 @@ wayland-core [OPTIONS] [PROMPT]...
 | `--max-tokens <n>` | Max output tokens per response |
 | `--max-turns <n>` | Max agent loop turns |
 | `--system-prompt <text>` | Custom system prompt |
-| `--force` | Approve every tool call without prompting (aliases: `--yolo`, `--dangerously-skip-permissions`) |
+| `--force` | Approve every tool call without prompting while retaining the OS sandbox (alias: `--yolo`) |
+| `--dangerously-skip-permissions` | Compatibility spelling for approval bypass; prints a notice and retains the OS sandbox |
+| `--dangerous` | Start an explicit local session that bypasses approvals and the OS sandbox for a bounded lease |
+| `--dangerous-ttl-secs <n>` | Dangerous lease lifetime; defaults to 15 minutes and is capped at one hour |
 | `--auto-approve` | Skip all tool confirmations |
 | `--project-dir <path>` | Directory to load the project `.wayland-core.toml` from (defaults to CWD) |
 | `--continue`, `-c` | Resume the most-recent session |
@@ -116,7 +119,8 @@ CLI parameters / env vars        (highest priority)
 
 Each level is a `config.toml`-format file. A field set at a lower level is
 overridden by the same field at a higher level; fields you do not set inherit
-from the level below.
+from the level below. The `[execution]` managed-policy block is the exception:
+it is accepted only from the global config and ignored in project files.
 
 #### Global config
 
@@ -198,6 +202,13 @@ provider = "my-service"
 auto_approve = false
 allow_list = ["Read", "Grep", "Glob"]
 
+# Optional global-only administrator floor. Project config cannot set or
+# relax this block. "deny" prevents even a local --dangerous launch.
+[execution]
+managed = false
+approval_mode = "default"   # default | auto-edit | force
+dangerous = "deny"          # allow | deny
+
 [session]
 enabled = true
 directory = ".wayland-core/sessions"
@@ -215,6 +226,23 @@ max_entries = 100
 enabled = true
 plan_directory = ".wayland-core/plans"
 ```
+
+### Execution Postures
+
+Smart is the normal posture: approval behavior is configurable, but the OS
+sandbox remains required. `--force`, `--yolo`, `--auto-approve`, and
+`--dangerously-skip-permissions` affect approvals only; they do not disable
+containment.
+
+Dangerous is a separate local launch posture selected with `--dangerous`. It
+bypasses both approvals and the OS sandbox for a monotonic, time-bounded lease;
+the session is terminated when that lease expires. Config files, environment
+variables, resumed state, child agents, ACP clients, and JSON-stream commands
+cannot create that lease.
+
+Managed installs a global approval floor and an allow/deny decision for local
+Dangerous launches. Lower-trust project, protocol, TUI, ACP, resume, and child
+inputs can tighten the floor but cannot relax it.
 
 ### API Key Resolution Order
 
