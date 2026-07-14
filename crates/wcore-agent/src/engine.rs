@@ -2215,7 +2215,7 @@ impl AgentEngine {
             decay_handles: Vec::new(),
             plugin_runtime_handles: Arc::new(Vec::new()),
             budget_tracker: None,
-            midflight_monitor: MidFlightMonitor::new(
+            midflight_monitor: crate::orchestration::monitor::MidFlightMonitor::new(
                 crate::budget::ExecutionBudget::default().start_root(),
             ),
             policy_gate: None,
@@ -2402,7 +2402,7 @@ impl AgentEngine {
             decay_handles: Vec::new(),
             plugin_runtime_handles: Arc::new(Vec::new()),
             budget_tracker: None,
-            midflight_monitor: MidFlightMonitor::new(
+            midflight_monitor: crate::orchestration::monitor::MidFlightMonitor::new(
                 crate::budget::ExecutionBudget::default().start_root(),
             ),
             policy_gate: None,
@@ -10279,7 +10279,7 @@ mod set_config_tests {
             decay_handles: Vec::new(),
             plugin_runtime_handles: Arc::new(Vec::new()),
             budget_tracker: None,
-            midflight_monitor: MidFlightMonitor::new(
+            midflight_monitor: crate::orchestration::monitor::MidFlightMonitor::new(
                 crate::budget::ExecutionBudget::default().start_root(),
             ),
             policy_gate: None,
@@ -11947,7 +11947,7 @@ mod phase6_tests {
             decay_handles: Vec::new(),
             plugin_runtime_handles: Arc::new(Vec::new()),
             budget_tracker: None,
-            midflight_monitor: MidFlightMonitor::new(
+            midflight_monitor: crate::orchestration::monitor::MidFlightMonitor::new(
                 crate::budget::ExecutionBudget::default().start_root(),
             ),
             policy_gate: None,
@@ -12250,7 +12250,7 @@ mod compact_tests {
             decay_handles: Vec::new(),
             plugin_runtime_handles: Arc::new(Vec::new()),
             budget_tracker: None,
-            midflight_monitor: MidFlightMonitor::new(
+            midflight_monitor: crate::orchestration::monitor::MidFlightMonitor::new(
                 crate::budget::ExecutionBudget::default().start_root(),
             ),
             policy_gate: None,
@@ -13583,7 +13583,7 @@ mod plan_mode_tests {
             decay_handles: Vec::new(),
             plugin_runtime_handles: Arc::new(Vec::new()),
             budget_tracker: None,
-            midflight_monitor: MidFlightMonitor::new(
+            midflight_monitor: crate::orchestration::monitor::MidFlightMonitor::new(
                 crate::budget::ExecutionBudget::default().start_root(),
             ),
             policy_gate: None,
@@ -14019,7 +14019,7 @@ mod hook_integration_tests {
             decay_handles: Vec::new(),
             plugin_runtime_handles: Arc::new(Vec::new()),
             budget_tracker: None,
-            midflight_monitor: MidFlightMonitor::new(
+            midflight_monitor: crate::orchestration::monitor::MidFlightMonitor::new(
                 crate::budget::ExecutionBudget::default().start_root(),
             ),
             policy_gate: None,
@@ -14865,7 +14865,7 @@ mod approval_bridge_engine_tests {
             decay_handles: Vec::new(),
             plugin_runtime_handles: Arc::new(Vec::new()),
             budget_tracker: None,
-            midflight_monitor: MidFlightMonitor::new(
+            midflight_monitor: crate::orchestration::monitor::MidFlightMonitor::new(
                 crate::budget::ExecutionBudget::default().start_root(),
             ),
             policy_gate: None,
@@ -15890,7 +15890,7 @@ mod user_model_writeback_tests {
             decay_handles: Vec::new(),
             plugin_runtime_handles: Arc::new(Vec::new()),
             budget_tracker: None,
-            midflight_monitor: MidFlightMonitor::new(
+            midflight_monitor: crate::orchestration::monitor::MidFlightMonitor::new(
                 crate::budget::ExecutionBudget::default().start_root(),
             ),
             policy_gate: None,
