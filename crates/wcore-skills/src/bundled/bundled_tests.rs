@@ -785,10 +785,12 @@ async fn tc_10_30_windows_acl_subprocess() {
         std::env::var("USERNAME").as_deref(),
         Ok("not-the-token-user")
     );
-    assert!(std::env::current_dir()
-        .expect("hostile subprocess cwd")
-        .join("icacls.exe")
-        .is_file());
+    assert!(
+        std::env::current_dir()
+            .expect("hostile subprocess cwd")
+            .join("icacls.exe")
+            .is_file()
+    );
 
     let mut catalog = BundledSkillCatalog::new();
     register_bundled_skill(
