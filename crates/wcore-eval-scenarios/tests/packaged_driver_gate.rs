@@ -8,14 +8,19 @@ use base64::engine::general_purpose::STANDARD as BASE64;
 use ed25519_dalek::SigningKey;
 use sha2::{Digest, Sha256};
 use tokio::process::Command;
+use wcore_eval_scenarios::assertions::Assertion;
 use wcore_eval_scenarios::fixtures::manifest::{CompositeFixtureManifest, FixtureComponents};
 use wcore_eval_scenarios::fixtures::openai::{OpenAiFixtureScript, OpenAiStep};
+use wcore_eval_scenarios::providers::{ProviderConfig, ProviderId};
 use wcore_eval_scenarios::receipt::{ReceiptVerifier, VerificationPolicy, VerifiedAuthority};
 use wcore_eval_scenarios::receipt_policy::{
     AUTHORITY_POLICY_SCHEMA, AUTHORITY_POLICY_SCHEMA_VERSION, AuthoritativeReceiptPolicyV1,
     AuthorityError, CiProvenanceV1, sign_ci_receipt, verify_authoritative_receipt,
 };
 use wcore_eval_scenarios::runner::discover_binary;
+use wcore_eval_scenarios::runner::run_with_binary;
+use wcore_eval_scenarios::scenario::{Category, Scenario, Turn};
+use wcore_protocol::events::{CapabilityId, CapabilityReasonCode};
 
 fn expected_source_commit() -> String {
     let source = std::env::var("WAYLAND_BUILD_SOURCE_SHA")
@@ -346,4 +351,80 @@ async fn packaged_candidate_cannot_replace_authenticated_egress_evidence() {
             .iter()
             .any(|failure| failure.code == "runner_error")
     );
+}
+
+#[tokio::test]
+async fn packaged_core_proves_capability_unavailability_and_outcome() {
+    let source = expected_source_commit();
+    let core = packaged_core();
+    let digest = sha256(&core);
+    let verified = driver(&core, &source, &["--verify-binary"]).await;
+    assert!(verified.status.success(), "{}", context(&verified));
+    assert!(
+        String::from_utf8_lossy(&verified.stdout).contains(&format!("sha256={digest}")),
+        "capability proof did not bind the packaged bytes: {}",
+        context(&verified)
+    );
+
+    let fixture = OpenAiFixtureScript::new([
+        OpenAiStep::text_with_prompt_tokens("PRIMED", 7_000),
+        OpenAiStep::text("compacted fixture summary"),
+        OpenAiStep::text("OBSERVED"),
+    ])
+    .start()
+    .await
+    .expect("start capability fixture");
+    let provider = ProviderConfig::new(ProviderId::OpenAI, "fixture-chat-v1")
+        .with_api_key("packaged-capability-fixture-key")
+        .with_base_url(fixture.base_url());
+    let scenario = Scenario::new("packaged_capability_activation", Category::Hardening)
+        .max_total_time(std::time::Duration::from_secs(45))
+        .max_total_cost_usd(0.0)
+        .setup(|root| {
+            use std::io::Write;
+
+            let path = root.join(".wayland-core").join("config.toml");
+            let mut config = std::fs::OpenOptions::new().append(true).open(path)?;
+            config.write_all(
+                br#"
+[compact]
+context_window = 10000
+output_reserve = 1000
+autocompact_buffer = 1000
+emergency_buffer = 1000
+smart_enabled = true
+smart_handoff_to_memory = true
+"#,
+            )?;
+            Ok(())
+        })
+        .require_capability_unavailable(
+            CapabilityId::PricingRefresher,
+            CapabilityReasonCode::NoProductionConstructor,
+        )
+        .require_capability_outcome(CapabilityId::SmartHandoff)
+        .turn(Turn::new("Reply exactly PRIMED").assert(Assertion::Contains("PRIMED")))
+        .turn(Turn::new("Reply exactly OBSERVED").assert(Assertion::Contains("OBSERVED")));
+
+    let result = run_with_binary(&scenario, &provider, &core)
+        .await
+        .expect("run packaged capability scenario");
+    let observation = fixture.shutdown().await.expect("stop capability fixture");
+    assert!(
+        result.passed,
+        "packaged capability proof failed: {:?}",
+        result.failures
+    );
+    assert!(
+        observation.complete(),
+        "packaged Core did not consume the capability fixture: {:?}",
+        observation
+    );
+    assert_eq!(
+        sha256(&core),
+        digest,
+        "packaged Core bytes changed during the capability proof"
+    );
+    let reverified = driver(&core, &source, &["--verify-binary"]).await;
+    assert!(reverified.status.success(), "{}", context(&reverified));
 }

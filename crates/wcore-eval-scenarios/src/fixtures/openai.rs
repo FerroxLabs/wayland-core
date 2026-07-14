@@ -42,6 +42,10 @@ pub enum OpenAiStep {
     Text {
         text: String,
     },
+    TextWithPromptTokens {
+        text: String,
+        prompt_tokens: u64,
+    },
     HttpError {
         status: u16,
     },
@@ -71,6 +75,15 @@ pub enum OpenAiStep {
 impl OpenAiStep {
     pub fn text(text: impl Into<String>) -> Self {
         Self::Text { text: text.into() }
+    }
+
+    /// Deterministic pressure fixture for compaction/budget paths whose
+    /// behavior depends on provider-reported usage rather than text length.
+    pub fn text_with_prompt_tokens(text: impl Into<String>, prompt_tokens: u64) -> Self {
+        Self::TextWithPromptTokens {
+            text: text.into(),
+            prompt_tokens,
+        }
     }
 
     pub fn http_error(status: u16) -> Self {
@@ -119,6 +132,7 @@ impl OpenAiStep {
             Self::Truncated { .. } => Some("truncated_stream".to_string()),
             Self::StallBeforeHeaders { .. } => Some("response_timeout".to_string()),
             Self::Text { .. }
+            | Self::TextWithPromptTokens { .. }
             | Self::DuplicateText { .. }
             | Self::ToolCall { .. }
             | Self::TextThenStall { .. } => None,
@@ -215,6 +229,21 @@ impl OpenAiFixtureScript {
                         return Err(OpenAiFixtureError::InvalidScript(format!(
                             "response text exceeds {MAX_TEXT_BYTES} bytes"
                         )));
+                    }
+                }
+                OpenAiStep::TextWithPromptTokens {
+                    text,
+                    prompt_tokens,
+                } => {
+                    if text.len() > MAX_TEXT_BYTES {
+                        return Err(OpenAiFixtureError::InvalidScript(format!(
+                            "response text exceeds {MAX_TEXT_BYTES} bytes"
+                        )));
+                    }
+                    if *prompt_tokens == 0 || *prompt_tokens > 1_000_000 {
+                        return Err(OpenAiFixtureError::InvalidScript(
+                            "prompt_tokens must be between 1 and 1000000".to_string(),
+                        ));
                     }
                 }
                 OpenAiStep::HttpError { status } => {
@@ -507,7 +536,11 @@ async fn handle_chat_completion(
         );
     };
     match step {
-        OpenAiStep::Text { text } => sse_response(complete_text_sse(&text, false)),
+        OpenAiStep::Text { text } => sse_response(complete_text_sse(&text, false, 7)),
+        OpenAiStep::TextWithPromptTokens {
+            text,
+            prompt_tokens,
+        } => sse_response(complete_text_sse(&text, false, prompt_tokens)),
         OpenAiStep::HttpError { status } => {
             let status = StatusCode::from_u16(status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
             json_response(
@@ -526,7 +559,7 @@ async fn handle_chat_completion(
             .to_string(),
         ),
         OpenAiStep::Truncated { text } => sse_response(text_delta_frame(&text)),
-        OpenAiStep::DuplicateText { text } => sse_response(complete_text_sse(&text, true)),
+        OpenAiStep::DuplicateText { text } => sse_response(complete_text_sse(&text, true, 7)),
         OpenAiStep::ToolCall {
             id,
             name,
@@ -537,7 +570,7 @@ async fn handle_chat_completion(
         }
         OpenAiStep::StallBeforeHeaders { delay_ms } => {
             tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
-            sse_response(complete_text_sse("released", false))
+            sse_response(complete_text_sse("released", false, 7))
         }
     }
 }
@@ -632,7 +665,7 @@ fn text_delta_frame(text: &str) -> String {
     format!("data: {frame}\n\n")
 }
 
-fn complete_text_sse(text: &str, duplicate: bool) -> String {
+fn complete_text_sse(text: &str, duplicate: bool, prompt_tokens: u64) -> String {
     let delta = text_delta_frame(text);
     let finish = json!({
         "id": "fixture-completion",
@@ -648,9 +681,9 @@ fn complete_text_sse(text: &str, duplicate: bool) -> String {
         "model": "fixture-chat-v1",
         "choices": [],
         "usage": {
-            "prompt_tokens": 7,
+            "prompt_tokens": prompt_tokens,
             "completion_tokens": 3,
-            "total_tokens": 10,
+            "total_tokens": prompt_tokens + 3,
             "prompt_tokens_details": {"cached_tokens": 0}
         }
     });

@@ -1751,7 +1751,15 @@ async fn drive_session(
         provider_retries,
         provider_typed_failures,
         provider_usage,
-        capability_honesty_error: capability_evidence.enforce_frozen_thresholds().err(),
+        capability_honesty_error: [
+            capability_evidence.enforce_frozen_thresholds().err(),
+            capability_evidence
+                .enforce_expectations(&scenario.capability_expectations)
+                .err(),
+        ]
+        .into_iter()
+        .flatten()
+        .reduce(|left, right| format!("{left}; {right}")),
     })
 }
 

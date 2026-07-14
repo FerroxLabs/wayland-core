@@ -4,6 +4,8 @@ use serde::Deserialize;
 use serde_json::Value;
 use wcore_protocol::events::{CapabilityActivation, CapabilityId, CapabilityStage};
 
+use crate::scenario::CapabilityExpectation;
+
 const ALL_CAPABILITIES: [CapabilityId; 8] = [
     CapabilityId::PricingRefresher,
     CapabilityId::MidFlightMonitor,
@@ -81,6 +83,83 @@ impl CapabilityEvidence {
                     .capability
                     .advertised_activation_proof_rate_min
             ));
+        }
+
+        if issues.is_empty() {
+            Ok(())
+        } else {
+            Err(issues.join("; "))
+        }
+    }
+
+    pub(crate) fn enforce_expectations(
+        &self,
+        expectations: &[CapabilityExpectation],
+    ) -> Result<(), String> {
+        let mut issues = Vec::new();
+        for expectation in expectations {
+            match *expectation {
+                CapabilityExpectation::Unavailable { capability, reason } => {
+                    let events = self
+                        .activations
+                        .get(&capability)
+                        .map(Vec::as_slice)
+                        .unwrap_or_default();
+                    if let Err(error) = validate_chain(events) {
+                        issues.push(format!("{capability:?}: {error}"));
+                        continue;
+                    }
+                    if events
+                        .iter()
+                        .any(|event| event.stage == CapabilityStage::Ready)
+                    {
+                        issues.push(format!(
+                            "{capability:?}: advertised ready before required unavailability"
+                        ));
+                        continue;
+                    }
+                    match events.last() {
+                        Some(event)
+                            if event.stage == CapabilityStage::Unavailable
+                                && event.reason == Some(reason) => {}
+                        Some(event) => issues.push(format!(
+                            "{capability:?}: expected Unavailable({reason:?}), got {:?}({:?})",
+                            event.stage, event.reason
+                        )),
+                        None => issues.push(format!("{capability:?}: missing activation chain")),
+                    }
+                }
+                CapabilityExpectation::OutcomeObserved { capability } => {
+                    let events = self
+                        .activations
+                        .get(&capability)
+                        .map(Vec::as_slice)
+                        .unwrap_or_default();
+                    if let Err(error) = validate_chain(events) {
+                        issues.push(format!("{capability:?}: {error}"));
+                        continue;
+                    }
+                    let expected = [
+                        CapabilityStage::Ready,
+                        CapabilityStage::Reached,
+                        CapabilityStage::OutcomeChanged,
+                        CapabilityStage::Observed,
+                    ];
+                    let mut cursor = 0usize;
+                    for event in events {
+                        if expected.get(cursor) == Some(&event.stage) {
+                            cursor += 1;
+                        }
+                    }
+                    if cursor != expected.len()
+                        || events.last().map(|event| event.stage) != Some(CapabilityStage::Observed)
+                    {
+                        issues.push(format!(
+                            "{capability:?}: missing complete Ready -> Reached -> OutcomeChanged -> Observed cycle"
+                        ));
+                    }
+                }
+            }
         }
 
         if issues.is_empty() {
@@ -289,5 +368,68 @@ mod tests {
             error.contains("invalid stage/reason combination"),
             "{error}"
         );
+    }
+
+    #[test]
+    fn exact_unavailable_expectation_rejects_ready_or_wrong_reason() {
+        let capability = CapabilityId::PricingRefresher;
+        let expectation = [CapabilityExpectation::Unavailable {
+            capability,
+            reason: CapabilityReasonCode::NoProductionConstructor,
+        }];
+
+        let mut wrong_reason = complete_startup_evidence();
+        assert!(
+            wrong_reason
+                .enforce_expectations(&expectation)
+                .unwrap_err()
+                .contains("expected Unavailable(NoProductionConstructor)")
+        );
+
+        wrong_reason.activations.insert(
+            capability,
+            vec![
+                CapabilityActivation::stage(capability, CapabilityStage::Declared),
+                CapabilityActivation::stage(capability, CapabilityStage::Configured),
+                CapabilityActivation::stage(capability, CapabilityStage::Constructed),
+                CapabilityActivation::stage(capability, CapabilityStage::Ready),
+            ],
+        );
+        assert!(
+            wrong_reason
+                .enforce_expectations(&expectation)
+                .unwrap_err()
+                .contains("advertised ready")
+        );
+    }
+
+    #[test]
+    fn outcome_expectation_requires_complete_runtime_cycle() {
+        let capability = CapabilityId::SmartHandoff;
+        let expectation = [CapabilityExpectation::OutcomeObserved { capability }];
+        let mut evidence = complete_startup_evidence();
+        evidence.activations.insert(
+            capability,
+            vec![
+                CapabilityActivation::stage(capability, CapabilityStage::Declared),
+                CapabilityActivation::stage(capability, CapabilityStage::Configured),
+                CapabilityActivation::stage(capability, CapabilityStage::Constructed),
+                CapabilityActivation::stage(capability, CapabilityStage::Ready),
+            ],
+        );
+
+        assert!(
+            evidence
+                .enforce_expectations(&expectation)
+                .unwrap_err()
+                .contains("missing complete Ready")
+        );
+
+        evidence.activations.get_mut(&capability).unwrap().extend([
+            CapabilityActivation::stage(capability, CapabilityStage::Reached),
+            CapabilityActivation::stage(capability, CapabilityStage::OutcomeChanged),
+            CapabilityActivation::stage(capability, CapabilityStage::Observed),
+        ]);
+        assert_eq!(evidence.enforce_expectations(&expectation), Ok(()));
     }
 }

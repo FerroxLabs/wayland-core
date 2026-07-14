@@ -11,6 +11,7 @@ use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
+use wcore_protocol::events::{CapabilityId, CapabilityReasonCode};
 
 use crate::assertions::{Assertion, TraceAssertion};
 use crate::providers::ProviderChoice;
@@ -60,6 +61,21 @@ pub struct Scenario {
     /// `ApprovalRequired` per tool) and the runner auto-responds — letting QA
     /// scenarios exercise the real trust/approval gate.
     pub approval: ApprovalPolicy,
+    /// F05 packaged-proof requirements evaluated against the complete typed
+    /// activation stream. These are outcome gates, not capability advertising.
+    pub capability_expectations: Vec<CapabilityExpectation>,
+}
+
+/// Exact capability truth a scenario requires from the packaged engine.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CapabilityExpectation {
+    Unavailable {
+        capability: CapabilityId,
+        reason: CapabilityReasonCode,
+    },
+    OutcomeObserved {
+        capability: CapabilityId,
+    },
 }
 
 /// How the runner answers the engine's tool-approval gate (D3).
@@ -216,6 +232,7 @@ impl Scenario {
             provider: ProviderChoice::Default,
             strict: false,
             approval: ApprovalPolicy::Yolo,
+            capability_expectations: Vec::new(),
         }
     }
 
@@ -291,6 +308,26 @@ impl Scenario {
 
     pub fn strict(mut self, on: bool) -> Self {
         self.strict = on;
+        self
+    }
+
+    /// Require an exact terminal unavailable state and reason. A transient or
+    /// earlier `ready` claim fails this expectation.
+    pub fn require_capability_unavailable(
+        mut self,
+        capability: CapabilityId,
+        reason: CapabilityReasonCode,
+    ) -> Self {
+        self.capability_expectations
+            .push(CapabilityExpectation::Unavailable { capability, reason });
+        self
+    }
+
+    /// Require the production path to reach a real side effect and emit the
+    /// complete ready/reached/outcome-changed/observed proof cycle.
+    pub fn require_capability_outcome(mut self, capability: CapabilityId) -> Self {
+        self.capability_expectations
+            .push(CapabilityExpectation::OutcomeObserved { capability });
         self
     }
 
