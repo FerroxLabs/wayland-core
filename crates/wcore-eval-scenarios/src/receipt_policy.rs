@@ -78,6 +78,14 @@ pub enum AuthorityError {
     MilestoneGateFailed,
 }
 
+struct SecretBytes(Vec<u8>);
+
+impl Drop for SecretBytes {
+    fn drop(&mut self) {
+        wipe(&mut self.0);
+    }
+}
+
 /// Attach CI provenance and sign a local receipt. The secret is supplied as
 /// bytes by the caller so command-line integrations never need a secret argv.
 pub fn sign_ci_receipt(
@@ -96,8 +104,10 @@ pub fn sign_ci_receipt(
     }
     reject_synthetic_fixture(&receipt)?;
 
-    let key_bytes = decode_32(signing_key_base64).ok_or(AuthorityError::InvalidSigningKey)?;
+    let mut key_bytes =
+        decode_secret_32(signing_key_base64).ok_or(AuthorityError::InvalidSigningKey)?;
     let signing_key = SigningKey::from_bytes(&key_bytes);
+    wipe(&mut key_bytes);
     let mut body = receipt.body;
     body.identity.build = Evidence::observed(BuildProvenanceV1 {
         repository: provenance.repository,
@@ -267,6 +277,20 @@ fn exact(field: &'static str, expected: &str, observed: &str) -> Result<(), Auth
 fn decode_32(encoded: &[u8]) -> Option<[u8; 32]> {
     let decoded = BASE64.decode(trim_ascii(encoded)).ok()?;
     decoded.try_into().ok()
+}
+
+fn decode_secret_32(encoded: &[u8]) -> Option<[u8; 32]> {
+    let decoded = SecretBytes(BASE64.decode(trim_ascii(encoded)).ok()?);
+    decoded.0.as_slice().try_into().ok()
+}
+
+fn wipe(bytes: &mut [u8]) {
+    for byte in bytes {
+        // SAFETY: `byte` is a valid unique reference for this write. Volatile
+        // prevents the compiler from eliding this security-sensitive wipe.
+        unsafe { std::ptr::write_volatile(byte, 0) };
+    }
+    std::sync::atomic::compiler_fence(std::sync::atomic::Ordering::SeqCst);
 }
 
 fn trim_ascii(mut value: &[u8]) -> &[u8] {

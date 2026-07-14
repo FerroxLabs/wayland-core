@@ -43,6 +43,23 @@ enum Command {
     },
 }
 
+struct SecretBytes(Vec<u8>);
+
+impl Drop for SecretBytes {
+    fn drop(&mut self) {
+        wipe(&mut self.0);
+    }
+}
+
+fn wipe(bytes: &mut [u8]) {
+    for byte in bytes {
+        // SAFETY: `byte` is a valid unique reference for this write. Volatile
+        // prevents the compiler from eliding this security-sensitive wipe.
+        unsafe { std::ptr::write_volatile(byte, 0) };
+    }
+    std::sync::atomic::compiler_fence(std::sync::atomic::Ordering::SeqCst);
+}
+
 fn main() {
     if let Err(error) = execute(Cli::parse()) {
         eprintln!("wayland-receipt: {error}");
@@ -64,27 +81,26 @@ fn execute(cli: Cli) -> Result<(), String> {
             let receipt_json = std::fs::read(&receipt).map_err(|error| {
                 format!("could not read receipt {}: {error}", receipt.display())
             })?;
-            let mut secret = Vec::new();
+            let mut secret = SecretBytes(Vec::new());
             std::io::stdin()
                 .take(4097)
-                .read_to_end(&mut secret)
+                .read_to_end(&mut secret.0)
                 .map_err(|error| format!("could not read signing key from stdin: {error}"))?;
-            if secret.len() > 4096 {
+            if secret.0.len() > 4096 {
                 return Err("signing key input exceeds 4096 bytes".to_string());
             }
-            let signing_result = sign_ci_receipt(
+            let signed = sign_ci_receipt(
                 &receipt_json,
                 &key_id,
-                &secret,
+                &secret.0,
                 CiProvenanceV1 {
                     repository,
                     source_ref,
                     workflow,
                     invocation_id,
                 },
-            );
-            secret.fill(0);
-            let signed = signing_result.map_err(|error| error.to_string())?;
+            )
+            .map_err(|error| error.to_string())?;
             let encoded = serde_json::to_vec_pretty(&signed)
                 .map_err(|error| format!("could not encode signed receipt: {error}"))?;
             wcore_config::atomic_write(&output, &encoded).map_err(|error| {

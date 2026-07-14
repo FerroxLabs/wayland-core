@@ -551,6 +551,15 @@ fn authoritative_workflow_rejects_local_incomplete_and_synthetic_receipts() {
     let signing_key = SigningKey::from_bytes(&[12; 32]);
     let local = EvidenceReceiptV1::local(body()).expect("valid local receipt");
     assert!(matches!(
+        sign_ci_receipt(
+            &serde_json::to_vec(&local).unwrap(),
+            "release-ci",
+            b"not-a-signing-key",
+            ci_provenance(),
+        ),
+        Err(AuthorityError::InvalidSigningKey)
+    ));
+    assert!(matches!(
         verify_authoritative_receipt(
             &serde_json::to_vec(&local).unwrap(),
             &authoritative_policy(&signing_key)
