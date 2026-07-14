@@ -2598,6 +2598,7 @@ impl AgentBootstrap {
                 skills_lifecycle_enabled,
                 memory_constructed,
                 legacy_drafter_constructed: engine.skill_drafter().is_some(),
+                midflight_monitor_constructed: engine.midflight_monitor_constructed(),
             },
         );
 

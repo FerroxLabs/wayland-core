@@ -13,6 +13,7 @@ pub struct StartupCapabilityInputs {
     pub skills_lifecycle_enabled: bool,
     pub memory_constructed: bool,
     pub legacy_drafter_constructed: bool,
+    pub midflight_monitor_constructed: bool,
 }
 
 fn unavailable(
@@ -65,11 +66,15 @@ pub fn startup_activations(inputs: StartupCapabilityInputs) -> Vec<CapabilityAct
         CapabilityId::PricingRefresher,
         CapabilityReasonCode::NoProductionConstructor,
     );
-    unavailable(
-        &mut events,
-        CapabilityId::MidFlightMonitor,
-        CapabilityReasonCode::RuntimePathUnwired,
-    );
+    if inputs.midflight_monitor_constructed {
+        ready(&mut events, CapabilityId::MidFlightMonitor);
+    } else {
+        unavailable(
+            &mut events,
+            CapabilityId::MidFlightMonitor,
+            CapabilityReasonCode::NoProductionConstructor,
+        );
+    }
     unavailable(
         &mut events,
         CapabilityId::CooldownTracker,
@@ -191,6 +196,7 @@ mod tests {
             skills_lifecycle_enabled: false,
             memory_constructed: false,
             legacy_drafter_constructed: false,
+            midflight_monitor_constructed: false,
         });
         assert_legal_chains(&events);
         let statuses = final_statuses(&events);
@@ -213,6 +219,7 @@ mod tests {
             skills_lifecycle_enabled: true,
             memory_constructed: true,
             legacy_drafter_constructed: true,
+            midflight_monitor_constructed: true,
         });
         assert_legal_chains(&events);
         let statuses = final_statuses(&events);
@@ -229,10 +236,13 @@ mod tests {
             CapabilityId::CooldownTracker,
             CapabilityId::LearnedPolicy,
             CapabilityId::DelegateIsolation,
-            CapabilityId::MidFlightMonitor,
         ] {
             assert_eq!(statuses[&capability].stage, CapabilityStage::Unavailable);
         }
+        assert_eq!(
+            statuses[&CapabilityId::MidFlightMonitor].stage,
+            CapabilityStage::Ready
+        );
     }
 
     #[test]
@@ -243,6 +253,7 @@ mod tests {
             skills_lifecycle_enabled: true,
             memory_constructed: false,
             legacy_drafter_constructed: false,
+            midflight_monitor_constructed: true,
         });
         assert_legal_chains(&events);
         let statuses = final_statuses(&events);
@@ -267,6 +278,7 @@ mod tests {
             skills_lifecycle_enabled: false,
             memory_constructed: true,
             legacy_drafter_constructed: false,
+            midflight_monitor_constructed: true,
         });
         assert_legal_chains(&events);
         let statuses = final_statuses(&events);

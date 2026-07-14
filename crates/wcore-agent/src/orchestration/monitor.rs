@@ -87,7 +87,7 @@ impl MidFlightMonitor {
     pub fn record_stream_attempt(&mut self, failed_tool_round: bool, produced_output: bool) {
         if failed_tool_round && !produced_output {
             self.consecutive_output_stalls = self.consecutive_output_stalls.saturating_add(1);
-        } else if produced_output {
+        } else {
             self.consecutive_output_stalls = 0;
         }
     }
@@ -131,29 +131,55 @@ impl MidFlightMonitor {
     /// same signature.
     pub fn root_cause_signature(message: &str) -> String {
         let mut out = String::with_capacity(message.len());
+        let mut previous_token = None::<String>;
         for raw_token in message.split_whitespace() {
             let trimmed = raw_token.trim_end_matches(|c: char| ",;:.".contains(c));
             let token = if trimmed.contains('/') || trimmed.contains('\\') {
-                trimmed
-                    .rsplit(['/', '\\'])
-                    .find(|part| !part.is_empty())
-                    .unwrap_or("<path>")
+                let parts = trimmed
+                    .split(['/', '\\'])
+                    .filter(|part| !part.is_empty())
+                    .collect::<Vec<_>>();
+                match (parts.first(), parts.last()) {
+                    (Some(scope), Some(resource)) if scope != resource => {
+                        // Keep the stable scope and resource identity while
+                        // dropping volatile intermediate directories.
+                        // `/etc/config.json` and `/tmp/config.json` must not
+                        // collapse into the same failure.
+                        let resource = if scope.eq_ignore_ascii_case("tmp")
+                            && resource.chars().any(|character| character.is_ascii_digit())
+                        {
+                            resource.rfind('.').map_or_else(
+                                || "<volatile>".to_string(),
+                                |dot| format!("<volatile>{}", &resource[dot..]),
+                            )
+                        } else {
+                            (*resource).to_string()
+                        };
+                        format!("{scope}/{resource}")
+                    }
+                    (_, Some(resource)) => (*resource).to_string(),
+                    _ => "<path>".to_string(),
+                }
             } else {
-                trimmed
+                trimmed.to_string()
             };
             if token.chars().all(|c| c.is_ascii_digit()) {
-                let is_http_status = token.len() == 3
+                let is_contextual_status = token.len() == 3
                     && token
                         .parse::<u16>()
-                        .is_ok_and(|status| (100..=599).contains(&status));
-                if !is_http_status {
+                        .is_ok_and(|status| (100..=599).contains(&status))
+                    && previous_token.as_deref().is_some_and(|previous| {
+                        matches!(previous, "http" | "status" | "status_code")
+                    });
+                if !is_contextual_status {
                     continue;
                 }
             }
             if !out.is_empty() {
                 out.push(' ');
             }
-            out.push_str(token);
+            out.push_str(&token);
+            previous_token = Some(token.to_ascii_lowercase());
         }
         out
     }
@@ -176,9 +202,12 @@ mod tests {
 
     #[test]
     fn signature_collapses_paths_and_numbers() {
-        let a = MidFlightMonitor::root_cause_signature("ENOENT at /tmp/foo.txt line 12 byte 8192");
-        let b =
-            MidFlightMonitor::root_cause_signature("ENOENT at /var/run/foo.txt line 7 byte 4096");
+        let a = MidFlightMonitor::root_cause_signature(
+            "ENOENT at /tmp/run-abc/foo.txt line 12 byte 8192",
+        );
+        let b = MidFlightMonitor::root_cause_signature(
+            "ENOENT at /tmp/run-def/foo.txt line 7 byte 4096",
+        );
         assert_eq!(a, b);
     }
 
@@ -189,6 +218,24 @@ mod tests {
         let other_resource = MidFlightMonitor::root_cause_signature("HTTP 401 for /tmp/auth.json");
         assert_ne!(unauthorized, server_error);
         assert_ne!(unauthorized, other_resource);
+    }
+
+    #[test]
+    fn signature_does_not_confuse_line_numbers_with_http_statuses() {
+        let a = MidFlightMonitor::root_cause_signature("parse failed at line 401");
+        let b = MidFlightMonitor::root_cause_signature("parse failed at line 402");
+        assert_eq!(a, b);
+
+        let unauthorized = MidFlightMonitor::root_cause_signature("HTTP 401 from /tmp/api.json");
+        let forbidden = MidFlightMonitor::root_cause_signature("HTTP 403 from /tmp/api.json");
+        assert_ne!(unauthorized, forbidden);
+    }
+
+    #[test]
+    fn signature_preserves_path_scope() {
+        let system = MidFlightMonitor::root_cause_signature("denied /etc/config.json");
+        let temporary = MidFlightMonitor::root_cause_signature("denied /tmp/config.json");
+        assert_ne!(system, temporary);
     }
 
     #[test]

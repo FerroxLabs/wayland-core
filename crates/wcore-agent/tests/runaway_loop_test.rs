@@ -304,7 +304,11 @@ async fn host_cancel_interrupts_a_provider_that_never_opens_a_stream() {
         })
         .filter_map(|event| event["stage"].as_str().map(str::to_string))
         .collect();
-    assert_eq!(monitor_stages, ["constructed", "ready"]);
+    assert!(
+        monitor_stages.is_empty(),
+        "cancellation alone must not claim a monitor occurrence; the one-time \
+         construction chain belongs to production bootstrap"
+    );
 }
 
 #[tokio::test]

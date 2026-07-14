@@ -193,6 +193,40 @@ async fn default_bootstrap_does_not_report_smart_handoff_ready() {
     );
 }
 
+#[tokio::test]
+#[serial]
+async fn bootstrap_reports_one_legal_midflight_monitor_ready_chain() {
+    let (_plugins, _env) = isolated_plugins();
+    let workdir = tempfile::TempDir::new().expect("workdir");
+    let result = AgentBootstrap::new(
+        minimal_config(),
+        workdir.path().to_str().unwrap(),
+        null_output(),
+    )
+    .build()
+    .await
+    .expect("bootstrap should succeed");
+
+    let stages = result
+        .capability_activations
+        .iter()
+        .filter(|activation| {
+            activation.capability == wcore_protocol::events::CapabilityId::MidFlightMonitor
+        })
+        .map(|activation| activation.stage)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        stages,
+        [
+            wcore_protocol::events::CapabilityStage::Declared,
+            wcore_protocol::events::CapabilityStage::Configured,
+            wcore_protocol::events::CapabilityStage::Constructed,
+            wcore_protocol::events::CapabilityStage::Ready,
+        ]
+    );
+    assert!(stages.windows(2).all(|pair| pair[0].allows(pair[1])));
+}
+
 /// #141 audit item 5 — prove the env flag actually installs
 /// `HostDelegatedTransport` at the registration site: with
 /// `WAYLAND_SEND_MESSAGE_HOST_DELEGATE=1`, an executed `send_message` parks

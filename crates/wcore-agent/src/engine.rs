@@ -1769,6 +1769,10 @@ pub struct AgentEngine {
     /// observability sink. `None` is the default — no caps configured,
     /// no telemetry; matches pre-M5.3 behaviour.
     budget_tracker: Option<Arc<parking_lot::Mutex<wcore_budget::BudgetTracker>>>,
+    /// F10 production monitor instance. It is constructed with the engine so
+    /// startup activation can truthfully report readiness, then reset to the
+    /// current run's budget at each `run()` boundary.
+    midflight_monitor: MidFlightMonitor,
     /// v0.6.1 CRIT-1: opt-in policy gate. When `Some`, every tool call
     /// in `dispatch_once` is checked against the `PolicyEngine` before
     /// it reaches the approval / budget pipeline. `None` (the default)
@@ -2211,6 +2215,9 @@ impl AgentEngine {
             decay_handles: Vec::new(),
             plugin_runtime_handles: Arc::new(Vec::new()),
             budget_tracker: None,
+            midflight_monitor: MidFlightMonitor::new(
+                crate::budget::ExecutionBudget::default().start_root(),
+            ),
             policy_gate: None,
             agent_registry: None,
             plugin_user_models: Vec::new(),
@@ -2395,6 +2402,9 @@ impl AgentEngine {
             decay_handles: Vec::new(),
             plugin_runtime_handles: Arc::new(Vec::new()),
             budget_tracker: None,
+            midflight_monitor: MidFlightMonitor::new(
+                crate::budget::ExecutionBudget::default().start_root(),
+            ),
             policy_gate: None,
             agent_registry: None,
             plugin_user_models: Vec::new(),
@@ -2642,6 +2652,11 @@ impl AgentEngine {
     /// install-from-config wiring works end-to-end.
     pub fn budget_tracker(&self) -> Option<&Arc<parking_lot::Mutex<wcore_budget::BudgetTracker>>> {
         self.budget_tracker.as_ref()
+    }
+
+    pub(crate) fn midflight_monitor_constructed(&self) -> bool {
+        // The monitor is an owned field, not an inferred registration flag.
+        true
     }
 
     /// v0.6.1 CRIT-1: install a `PolicyGate` for this session. Once set,
@@ -4504,25 +4519,12 @@ impl AgentEngine {
         }
     }
 
-    fn emit_midflight_monitor_ready(&self) {
-        use wcore_protocol::events::{CapabilityActivation, CapabilityId, CapabilityStage};
-
-        for stage in [CapabilityStage::Constructed, CapabilityStage::Ready] {
-            self.output
-                .emit_capability_activation(&CapabilityActivation::stage(
-                    CapabilityId::MidFlightMonitor,
-                    stage,
-                ));
-        }
-    }
-
     /// Run the agent loop with user input
     pub async fn run(&mut self, user_input: &str, msg_id: &str) -> Result<AgentResult, AgentError> {
         // F10 owns no-progress governance. F11 binds proactive session-wide
         // accounting; do not create a second per-run spend envelope here.
         let run_budget = crate::budget::ExecutionBudget::default().start_root();
-        let mut midflight_monitor = MidFlightMonitor::new(run_budget.clone());
-        self.emit_midflight_monitor_ready();
+        self.midflight_monitor = MidFlightMonitor::new(run_budget.clone());
         // methodology #27: production caller for StyleDetector::observe (Task 1.B.3)
         if let Ok(mut det) = self.style_detector.lock() {
             det.observe(user_input);
@@ -5894,6 +5896,10 @@ impl AgentEngine {
                     stop_reason = attempt_stop_reason;
                     finish_reason = attempt_finish_reason;
                     turn_usage = attempt_usage;
+                    // A completed provider stream is progress even when it
+                    // ends without text. Do not carry a failed-attempt stall
+                    // into a later tool turn or user run.
+                    self.midflight_monitor.record_stream_attempt(false, false);
                     break 'stream;
                 }
                 let reason = stream_error.clone().unwrap_or_else(|| {
@@ -5951,9 +5957,9 @@ impl AgentEngine {
                         || !thinking_text.is_empty()
                         || !tool_calls.is_empty()
                         || attempt_usage.output_tokens > 0;
-                    midflight_monitor
+                    self.midflight_monitor
                         .record_stream_attempt(!failed_tools.is_empty(), produced_output);
-                    match midflight_monitor.tick() {
+                    match self.midflight_monitor.tick() {
                         MonitorAction::StopOutputStall => {
                             let gate_msg = format!(
                                 "Provider stream failed twice in a row with no output while \
@@ -6757,7 +6763,7 @@ impl AgentEngine {
                     }
 
                     if *is_error {
-                        midflight_monitor.record_error(content);
+                        self.midflight_monitor.record_error(content);
                     }
 
                     self.output.emit_tool_result(tool_name, *is_error, content);
@@ -6864,38 +6870,6 @@ impl AgentEngine {
                 }
             }
 
-            match midflight_monitor.tick() {
-                MonitorAction::Continue => {}
-                MonitorAction::ReplanRepeatedError => {
-                    monitor_replan = true;
-                    self.output.emit_info(
-                        "Mid-flight monitor: the same underlying tool error repeated. \
-                         The next turn must change strategy instead of retrying it.",
-                    );
-                    self.emit_midflight_monitor_occurrence();
-                }
-                MonitorAction::CancelBudget { reason } => {
-                    let observed = run_budget.observed_for(reason);
-                    let limit = run_budget.limit_for(reason);
-                    self.repair_orphaned_tool_use();
-                    self.output.emit_budget_exceeded(reason, &observed, &limit);
-                    self.output.emit_error(
-                        &format!(
-                            "Run stopped: execution budget cap '{reason}' exceeded \
-                             (limit {limit}, observed {observed})."
-                        ),
-                        false,
-                    );
-                    self.emit_midflight_monitor_occurrence();
-                    return self
-                        .finish_run_terminated(user_input, turn + 1, FinishReason::Length)
-                        .await;
-                }
-                MonitorAction::StopOutputStall => {
-                    // Provider stalls terminate inside the stream retry loop.
-                }
-            }
-
             // #475/#160 failure-loop breaker tripped: guarded tools have failed
             // `count` times in a row (tool identity and args both ignored, so a
             // validation-error retry loop that varies its arguments AND a loop
@@ -6952,6 +6926,40 @@ impl AgentEngine {
                 return self
                     .finish_run_terminated(user_input, turn + 1, FinishReason::Length)
                     .await;
+            }
+
+            // Existing failure/loop guards establish ownership first. Only
+            // after neither guard terminates may the monitor claim that its
+            // replan directive changed the next turn.
+            match self.midflight_monitor.tick() {
+                MonitorAction::Continue => {}
+                MonitorAction::ReplanRepeatedError => {
+                    monitor_replan = true;
+                    self.output.emit_info(
+                        "Mid-flight monitor: the same underlying tool error repeated. \
+                         The next turn must change strategy instead of retrying it.",
+                    );
+                }
+                MonitorAction::CancelBudget { reason } => {
+                    let observed = run_budget.observed_for(reason);
+                    let limit = run_budget.limit_for(reason);
+                    self.repair_orphaned_tool_use();
+                    self.output.emit_budget_exceeded(reason, &observed, &limit);
+                    self.output.emit_error(
+                        &format!(
+                            "Run stopped: execution budget cap '{reason}' exceeded \
+                             (limit {limit}, observed {observed})."
+                        ),
+                        false,
+                    );
+                    self.emit_midflight_monitor_occurrence();
+                    return self
+                        .finish_run_terminated(user_input, turn + 1, FinishReason::Length)
+                        .await;
+                }
+                MonitorAction::StopOutputStall => {
+                    // Provider stalls terminate inside the stream retry loop.
+                }
             }
 
             // W1 F9: emit one TurnTrace per turn. Hosts that opt in via
@@ -7053,6 +7061,12 @@ impl AgentEngine {
 
             self.messages
                 .push(Message::now(Role::User, tool_results_content));
+            if monitor_replan {
+                // The directive now exists in the committed transcript and
+                // will affect the next provider request, so the monitor owns
+                // a real outcome change rather than merely an intention.
+                self.emit_midflight_monitor_occurrence();
+            }
 
             // Save session after each turn
             self.save_session();
@@ -10265,6 +10279,9 @@ mod set_config_tests {
             decay_handles: Vec::new(),
             plugin_runtime_handles: Arc::new(Vec::new()),
             budget_tracker: None,
+            midflight_monitor: MidFlightMonitor::new(
+                crate::budget::ExecutionBudget::default().start_root(),
+            ),
             policy_gate: None,
             agent_registry: None,
             plugin_user_models: Vec::new(),
@@ -11930,6 +11947,9 @@ mod phase6_tests {
             decay_handles: Vec::new(),
             plugin_runtime_handles: Arc::new(Vec::new()),
             budget_tracker: None,
+            midflight_monitor: MidFlightMonitor::new(
+                crate::budget::ExecutionBudget::default().start_root(),
+            ),
             policy_gate: None,
             agent_registry: None,
             plugin_user_models: Vec::new(),
@@ -12230,6 +12250,9 @@ mod compact_tests {
             decay_handles: Vec::new(),
             plugin_runtime_handles: Arc::new(Vec::new()),
             budget_tracker: None,
+            midflight_monitor: MidFlightMonitor::new(
+                crate::budget::ExecutionBudget::default().start_root(),
+            ),
             policy_gate: None,
             agent_registry: None,
             plugin_user_models: Vec::new(),
@@ -13560,6 +13583,9 @@ mod plan_mode_tests {
             decay_handles: Vec::new(),
             plugin_runtime_handles: Arc::new(Vec::new()),
             budget_tracker: None,
+            midflight_monitor: MidFlightMonitor::new(
+                crate::budget::ExecutionBudget::default().start_root(),
+            ),
             policy_gate: None,
             agent_registry: None,
             plugin_user_models: Vec::new(),
@@ -13993,6 +14019,9 @@ mod hook_integration_tests {
             decay_handles: Vec::new(),
             plugin_runtime_handles: Arc::new(Vec::new()),
             budget_tracker: None,
+            midflight_monitor: MidFlightMonitor::new(
+                crate::budget::ExecutionBudget::default().start_root(),
+            ),
             policy_gate: None,
             agent_registry: None,
             plugin_user_models: Vec::new(),
@@ -14836,6 +14865,9 @@ mod approval_bridge_engine_tests {
             decay_handles: Vec::new(),
             plugin_runtime_handles: Arc::new(Vec::new()),
             budget_tracker: None,
+            midflight_monitor: MidFlightMonitor::new(
+                crate::budget::ExecutionBudget::default().start_root(),
+            ),
             policy_gate: None,
             agent_registry: None,
             plugin_user_models: Vec::new(),
@@ -15858,6 +15890,9 @@ mod user_model_writeback_tests {
             decay_handles: Vec::new(),
             plugin_runtime_handles: Arc::new(Vec::new()),
             budget_tracker: None,
+            midflight_monitor: MidFlightMonitor::new(
+                crate::budget::ExecutionBudget::default().start_root(),
+            ),
             policy_gate: None,
             agent_registry: None,
             plugin_user_models: Vec::new(),
@@ -19238,14 +19273,9 @@ mod retry_wedge_protection_tests {
             .collect();
         assert_eq!(
             monitor_stages,
-            [
-                "constructed",
-                "ready",
-                "reached",
-                "outcome_changed",
-                "observed"
-            ],
-            "the output-stall stop must carry construction and complete monitor runtime proof"
+            ["reached", "outcome_changed", "observed"],
+            "the output-stall stop must carry complete runtime proof; the one-time \
+             construction chain is emitted by production bootstrap"
         );
     }
 
@@ -19270,6 +19300,125 @@ mod retry_wedge_protection_tests {
             .expect("a single transient failure must still recover");
         assert_eq!(result.text, "recovered");
         assert_eq!(requests.lock().unwrap().len(), 2, "1 initial + 1 retry");
+    }
+
+    #[tokio::test]
+    async fn successful_turn_clears_stall_before_a_later_transient_failure() {
+        let provider = Arc::new(RecordingProvider::new(vec![
+            // First outbound turn: one empty failure, then a successful tool
+            // request. The successful stream must clear the stall streak.
+            vec![LlmEvent::Error("first transient".into())],
+            vec![
+                LlmEvent::ToolUse {
+                    id: "missing-1".into(),
+                    name: "MissingTool".into(),
+                    input: serde_json::json!({}),
+                    extra: None,
+                },
+                done(StopReason::ToolUse, FinishReason::Stop, 100),
+            ],
+            // The missing tool creates another failed tool round. A later
+            // transient provider failure is a fresh streak and may retry.
+            vec![LlmEvent::Error("second transient".into())],
+            vec![
+                LlmEvent::TextDelta("recovered twice".into()),
+                done(StopReason::EndTurn, FinishReason::Stop, 100),
+            ],
+        ]));
+        let requests = provider.recorded();
+        let mut engine = wedge_engine(provider);
+        engine.messages = failed_tool_round_history("prior tool failure");
+
+        let result = engine
+            .run("continue", "m-stall-reset")
+            .await
+            .expect("successful output between failures must reset the stall streak");
+
+        assert_eq!(result.text, "recovered twice");
+        assert_eq!(
+            requests.lock().unwrap().len(),
+            4,
+            "both independent transient failures receive their bounded retry"
+        );
+    }
+
+    struct RepeatedFailTool;
+
+    #[async_trait]
+    impl wcore_tools::Tool for RepeatedFailTool {
+        fn name(&self) -> &str {
+            "RepeatedFail"
+        }
+
+        fn description(&self) -> &str {
+            "deterministic failure fixture"
+        }
+
+        fn input_schema(&self) -> serde_json::Value {
+            serde_json::json!({"type": "object"})
+        }
+
+        fn is_concurrency_safe(&self, _: &serde_json::Value) -> bool {
+            false
+        }
+
+        async fn execute(&self, _: serde_json::Value) -> wcore_types::tool::ToolResult {
+            wcore_types::tool::ToolResult {
+                content: "same root failure".into(),
+                is_error: true,
+            }
+        }
+
+        fn category(&self) -> wcore_protocol::events::ToolCategory {
+            wcore_protocol::events::ToolCategory::Info
+        }
+    }
+
+    #[tokio::test]
+    async fn existing_failure_guard_prevents_false_monitor_outcome_proof() {
+        let tool_calls = (0..10)
+            .map(|index| LlmEvent::ToolUse {
+                id: format!("fail-{index}"),
+                name: "RepeatedFail".into(),
+                input: serde_json::json!({"attempt": index}),
+                extra: None,
+            })
+            .chain(std::iter::once(done(
+                StopReason::ToolUse,
+                FinishReason::Stop,
+                100,
+            )))
+            .collect();
+        let provider = Arc::new(RecordingProvider::new(vec![tool_calls]));
+        let mut tools = ToolRegistry::new();
+        tools.register(Box::new(RepeatedFailTool));
+        let sink = Arc::new(TestSink::new());
+        let sink_handle = sink.handle();
+        let mut engine = super::AgentEngine::new_with_provider(
+            provider,
+            wcore_config::config::Config::default(),
+            tools,
+            sink,
+        );
+
+        let result = engine
+            .run("keep retrying", "m-monitor-precedence")
+            .await
+            .expect("the existing failure guard terminates cleanly");
+        assert_eq!(result.finish_reason, FinishReason::MaxTurns);
+
+        let monitor_stages = sink_handle
+            .snapshot()
+            .into_iter()
+            .filter(|event| {
+                event["type"].as_str() == Some("capability_activation")
+                    && event["capability"].as_str() == Some("mid_flight_monitor")
+            })
+            .count();
+        assert_eq!(
+            monitor_stages, 0,
+            "the monitor must not claim an outcome when FailureGuard owned termination"
+        );
     }
 
     #[test]
