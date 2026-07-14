@@ -943,9 +943,9 @@ strings. A host that wants to render any of these adds the listed
 
 Some event variants ship without a dedicated `Capabilities.*` flag.
 They are always-emitted; hosts that do not know about them silently
-drop the line per the W0 host decoder contract. As of W8c.3:
-`budget_exceeded` is the only host-tolerated variant on this list
-(plus the long-standing `provider_circuit_event`, see §1.N+5).
+drop the line per the W0 host decoder contract. This includes
+`budget_exceeded`, `provider_circuit_event`, provider evidence events,
+`capability_activation`, and `mid_flight_monitor_decision`.
 Rationale: `BudgetExceeded` is a singular event per session (fires
 once when the first budget cap trips); the flag-per-variant overhead
 exceeds the wire-surface savings.
@@ -1341,6 +1341,29 @@ flag. Hosts SHOULD retain only the latest fact per capability for status UI,
 while evaluators SHOULD validate the complete ordered chain. Unknown capability,
 stage, and reason strings must be handled as forward-compatible values rather
 than granting authority or implying availability.
+
+### 1.N+5c mid_flight_monitor_decision (F10)
+
+Core emits this event when the production mid-flight monitor changes control
+flow. It is always-on and additive: hosts that do not recognize the event MUST
+drop it silently under the Host Decoder Contract.
+
+```json
+{ "type": "mid_flight_monitor_decision", "directive": "replan", "reason": "repeated_tool_route" }
+{ "type": "mid_flight_monitor_decision", "directive": "stop", "reason": "output_stall" }
+```
+
+| Field | Type | Description |
+|---|---|---|
+| `directive` | `"replan" \| "stop"` | `replan` means changed-strategy guidance was committed to the next provider request. `stop` means Core bounded the current run. |
+| `reason` | string | Stable class: `output_stall`, `repeated_error`, `repeated_tool_route`, or `budget_exceeded`. Treat future values as open strings. |
+
+For `repeated_tool_route`, the first detected normalized cycle emits `replan`.
+If the same route repeats without material deviation, Core emits `stop` and
+finishes with `max_turns` so the host can offer Continue. `output_stall` covers
+repeated completed provider attempts that return no output after a failed tool
+round; absolute request/stream hang timeouts are an F15 provider-governance
+responsibility, not an implied guarantee of this event.
 
 ### 1.N+6 browser_event (W8c.1)
 

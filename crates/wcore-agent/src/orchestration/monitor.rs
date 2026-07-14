@@ -246,7 +246,10 @@ impl MidFlightMonitor {
         let mut previous_token = None::<String>;
         for raw_token in message.split_whitespace() {
             let trimmed = raw_token.trim_end_matches(|c: char| ",;:.".contains(c));
-            let token = if let Some((scheme, remainder)) = trimmed.split_once("://") {
+            let bare = trim_token_wrappers(trimmed);
+            let token = if is_rfc3339_timestamp(bare) {
+                "<timestamp>".to_string()
+            } else if let Some((scheme, remainder)) = trimmed.split_once("://") {
                 let authority = remainder.split('/').next().unwrap_or(remainder);
                 let resource = remainder.rsplit('/').next().unwrap_or(remainder);
                 format!("{scheme}://{authority}/{resource}")
@@ -369,7 +372,10 @@ fn stable_success_signature(message: &str) -> String {
     let mut previous_was_volatile_label = false;
     for raw_token in message.split_whitespace() {
         let trimmed = raw_token.trim_end_matches(|character: char| ",;:.".contains(character));
-        let (token, volatile_label) = if let Some((label, _)) = trimmed.split_once('=') {
+        let bare = trim_token_wrappers(trimmed);
+        let (token, volatile_label) = if is_rfc3339_timestamp(bare) {
+            ("<timestamp>".to_string(), false)
+        } else if let Some((label, _)) = trimmed.split_once('=') {
             if is_volatile_action_key(label) {
                 (format!("{label}=<volatile>"), false)
             } else {
@@ -391,6 +397,14 @@ fn stable_success_signature(message: &str) -> String {
         previous_was_volatile_label = volatile_label;
     }
     output.join(" ")
+}
+
+fn trim_token_wrappers(token: &str) -> &str {
+    token.trim_matches(|character: char| "[](){}<>\"'".contains(character))
+}
+
+fn is_rfc3339_timestamp(token: &str) -> bool {
+    token.contains('T') && chrono::DateTime::parse_from_rfc3339(token).is_ok()
 }
 
 #[cfg(test)]
@@ -619,6 +633,30 @@ mod tests {
         assert_eq!(
             stable_success_signature("unchanged request_id 1000"),
             stable_success_signature("unchanged request_id 1001")
+        );
+    }
+
+    #[test]
+    fn rfc3339_timestamps_normalize_without_collapsing_dates_or_versions() {
+        assert_eq!(
+            stable_success_signature("[2026-07-14T12:00:01Z] unchanged"),
+            stable_success_signature("[2026-07-14T12:00:02Z] unchanged")
+        );
+        assert_eq!(
+            MidFlightMonitor::root_cause_signature(
+                "failed at 2026-07-14T12:00:01+07:00 endpoint unavailable"
+            ),
+            MidFlightMonitor::root_cause_signature(
+                "failed at 2026-07-14T12:00:02+07:00 endpoint unavailable"
+            )
+        );
+        assert_ne!(
+            stable_success_signature("schema date 2026-07-14 version v2"),
+            stable_success_signature("schema date 2026-07-15 version v2")
+        );
+        assert_ne!(
+            MidFlightMonitor::root_cause_signature("requires schema-v1 on 2026-07-14"),
+            MidFlightMonitor::root_cause_signature("requires schema-v2 on 2026-07-15")
         );
     }
 

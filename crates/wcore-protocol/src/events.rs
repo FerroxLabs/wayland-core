@@ -121,7 +121,6 @@ impl CapabilityActivation {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum MonitorDirective {
-    Continue,
     Replan,
     Stop,
 }
@@ -1388,6 +1387,14 @@ mod tests {
         assert_eq!(json["type"], "mid_flight_monitor_decision");
         assert_eq!(json["directive"], "replan");
         assert_eq!(json["reason"], "repeated_tool_route");
+
+        let stop = serde_json::to_value(ProtocolEvent::MidFlightMonitorDecision {
+            directive: MonitorDirective::Stop,
+            reason: MonitorReason::OutputStall,
+        })
+        .unwrap();
+        assert_eq!(stop["directive"], "stop");
+        assert_eq!(stop["reason"], "output_stall");
     }
 
     #[test]
