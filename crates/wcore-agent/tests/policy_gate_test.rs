@@ -252,3 +252,54 @@ async fn denied_tool_result_content_proves_short_circuit() {
         other => panic!("expected ToolResult, got {other:?}"),
     }
 }
+
+/// Defensive callers may pass a mixed content slice. Non-tool blocks must be
+/// ignored exactly as they are by the underlying dispatcher and must not
+/// corrupt policy result indexing.
+#[tokio::test]
+async fn non_tool_blocks_do_not_corrupt_policy_merge() {
+    let registry = registry_with_echo();
+    let mut engine = PolicyEngine::new();
+    engine.grant(Permission {
+        actor: Actor::User("default".into()),
+        resource: Resource::Tool("echo".into()),
+        action: Action::Invoke,
+    });
+    let gate = PolicyGate::new(Arc::new(engine), Actor::User("default".into()));
+    let calls = vec![
+        ContentBlock::Text {
+            text: "not a tool call".into(),
+        },
+        tool_use("c1", "echo"),
+    ];
+
+    let outcome = execute_tool_calls_with_policy_gate(
+        &registry,
+        &calls,
+        &auto_approve_confirmer(),
+        None,
+        CompactionLevel::Off,
+        false,
+        None,
+        None,
+        Some(&gate),
+        &tokio_util::sync::CancellationToken::new(),
+        None,
+    )
+    .await
+    .expect("mixed defensive input must not panic");
+
+    assert_eq!(outcome.results.len(), 1);
+    match &outcome.results[0] {
+        ContentBlock::ToolResult {
+            tool_use_id,
+            content,
+            is_error,
+        } => {
+            assert_eq!(tool_use_id, "c1");
+            assert_eq!(content, "hello");
+            assert!(!is_error);
+        }
+        other => panic!("expected ToolResult, got {other:?}"),
+    }
+}

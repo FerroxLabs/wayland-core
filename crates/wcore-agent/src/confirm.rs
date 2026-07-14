@@ -26,6 +26,13 @@ impl ToolConfirmer {
         self.auto_approve
     }
 
+    /// Returns whether this call would require an interactive decision.
+    /// Callers use this before `check` to bind an approval to the exact
+    /// arguments that were shown to the user.
+    pub fn requires_confirmation(&self, tool_name: &str) -> bool {
+        !self.auto_approve && !self.allow_list.contains(tool_name)
+    }
+
     /// Add a tool name to the allow list at runtime.
     /// Used by skill context modifiers to grant auto-approval for specified tools.
     pub fn add_to_allow_list(&mut self, name: &str) {

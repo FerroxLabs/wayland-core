@@ -124,6 +124,61 @@ async fn test_execute_concurrent_safe_tools() {
     assert_eq!(content_map.get("id-b"), Some(&"result_b"));
 }
 
+/// Confirmation decisions must not reorder a concurrent-safe batch. Before
+/// the indexed merge, the denial was emitted immediately and moved ahead of
+/// an earlier approved call whose execution completed afterward.
+#[tokio::test]
+async fn concurrent_confirmation_preserves_original_result_order() {
+    let mut registry = ToolRegistry::new();
+    registry.register(Box::new(MockTool::new("allowed", "ran", false)));
+    registry.register(Box::new(MockTool::new("denied", "must-not-run", false)));
+
+    let calls = vec![
+        make_tool_use("id-allowed", "allowed"),
+        make_tool_use("id-denied", "denied"),
+    ];
+    let confirmer = std::sync::Arc::new(std::sync::Mutex::new(
+        wcore_agent::confirm::ToolConfirmer::new(false, vec!["allowed".into()]),
+    ));
+
+    let results = execute_tool_calls(
+        &registry,
+        &calls,
+        &confirmer,
+        None,
+        CompactionLevel::Off,
+        false,
+    )
+    .await
+    .expect("mixed confirmation batch should complete");
+
+    assert_eq!(results.len(), 2);
+    match &results[0] {
+        ContentBlock::ToolResult {
+            tool_use_id,
+            content,
+            is_error,
+        } => {
+            assert_eq!(tool_use_id, "id-allowed");
+            assert_eq!(content, "ran");
+            assert!(!is_error);
+        }
+        other => panic!("expected ToolResult, got {other:?}"),
+    }
+    match &results[1] {
+        ContentBlock::ToolResult {
+            tool_use_id,
+            content,
+            is_error,
+        } => {
+            assert_eq!(tool_use_id, "id-denied");
+            assert_eq!(content, "Tool execution denied by user");
+            assert!(*is_error);
+        }
+        other => panic!("expected ToolResult, got {other:?}"),
+    }
+}
+
 /// Two sequential (non-concurrent) tools execute one after the other and both succeed
 #[tokio::test]
 async fn test_execute_non_concurrent_tools_sequential() {

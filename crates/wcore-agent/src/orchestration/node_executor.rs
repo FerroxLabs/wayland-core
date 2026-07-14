@@ -65,7 +65,7 @@ use crate::hooks::HookEngine;
 use crate::orchestration::graph::NodeExecutor;
 use crate::orchestration::{
     ExecutionControl, StreamingContext, ToolCallOutcome, execute_tool_calls_with_approval,
-    execute_tool_calls_with_budget, execute_tool_calls_with_policy_gate,
+    execute_tool_calls_with_budget, filter_tool_calls_by_policy, merge_policy_outcome,
 };
 use crate::policy_gate::PolicyGate;
 
@@ -291,25 +291,20 @@ async fn dispatch_once(
     // policy source. CallActor type is retained on AgentExecutorConfig
     // because it defaults to Root (zero overhead) and is ready to
     // activate when needed.
-    let outcome = if let Some(gate) = cfg.policy_gate.as_ref() {
-        execute_tool_calls_with_policy_gate(
-            &cfg.tools,
-            tool_calls,
-            &cfg.confirmer,
-            hooks.as_mut(),
-            cfg.compaction_level,
-            cfg.toon_enabled,
-            cfg.streaming.clone(),
-            None,
-            Some(gate),
-            &cfg.cancel,
-            cfg.file_write_notifier.as_ref(),
-        )
-        .await
-    } else if let Some(approval) = cfg.approval.as_ref() {
+    // The policy gate is an unconditional floor, not an alternative approval
+    // rail. Filter first, then send every allowed call through the host or
+    // terminal approval path selected for this session.
+    let filtered = cfg
+        .policy_gate
+        .as_ref()
+        .map(|gate| filter_tool_calls_by_policy(tool_calls, gate));
+    let allowed_calls = filtered.as_ref().map(|calls| calls.allowed_calls());
+    let dispatch_calls = allowed_calls.as_deref().unwrap_or(tool_calls);
+
+    let outcome = if let Some(approval) = cfg.approval.as_ref() {
         execute_tool_calls_with_approval(
             &cfg.tools,
-            tool_calls,
+            dispatch_calls,
             &approval.manager,
             &approval.writer,
             &approval.msg_id,
@@ -325,7 +320,7 @@ async fn dispatch_once(
     } else {
         execute_tool_calls_with_budget(
             &cfg.tools,
-            tool_calls,
+            dispatch_calls,
             &cfg.confirmer,
             hooks.as_mut(),
             cfg.compaction_level,
@@ -336,6 +331,11 @@ async fn dispatch_once(
             cfg.file_write_notifier.as_ref(),
         )
         .await
+    };
+
+    let outcome = match (filtered, outcome) {
+        (Some(filtered), Ok(outcome)) => Ok(merge_policy_outcome(filtered, outcome)),
+        (_, outcome) => outcome,
     };
 
     (outcome, hooks)

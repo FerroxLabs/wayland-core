@@ -107,6 +107,13 @@ pub struct ToolCallOutcome {
     pub cancelled_ids: Vec<String>,
 }
 
+type BatchToolOutcome = (
+    ContentBlock,
+    Option<ContextModifier>,
+    Option<crate::hooks::HookOutcome>,
+    bool,
+);
+
 impl std::ops::Deref for ToolCallOutcome {
     type Target = Vec<ContentBlock>;
     fn deref(&self) -> &Self::Target {
@@ -226,36 +233,8 @@ pub async fn execute_tool_calls_with_policy_gate(
         .await;
     };
 
-    // Partition into allowed + denied. Preserve original order via
-    // index-tagged accumulators so the LLM sees results in call order.
-    let mut allowed: Vec<(usize, ContentBlock)> = Vec::with_capacity(tool_calls.len());
-    let mut denied: Vec<(usize, ContentBlock)> = Vec::new();
-    for (idx, call) in tool_calls.iter().enumerate() {
-        match call {
-            ContentBlock::ToolUse { id, name, .. } => {
-                // Top-level dispatch uses the gate's default actor;
-                // sub-agent attribution is a v0.7 follow-up that needs
-                // source_agent threading through orchestration.
-                match gate.check_tool(name, None) {
-                    Ok(()) => allowed.push((idx, call.clone())),
-                    Err(deny) => denied.push((
-                        idx,
-                        ContentBlock::ToolResult {
-                            tool_use_id: id.clone(),
-                            content: format!("Denied by policy: {deny}"),
-                            is_error: true,
-                        },
-                    )),
-                }
-            }
-            // Non-ToolUse blocks (defensive — orchestration shouldn't
-            // get these in tool_calls, but if it does, pass through
-            // untouched).
-            _ => allowed.push((idx, call.clone())),
-        }
-    }
-
-    let allowed_calls: Vec<ContentBlock> = allowed.iter().map(|(_, c)| c.clone()).collect();
+    let filtered = filter_tool_calls_by_policy(tool_calls, gate);
+    let allowed_calls = filtered.allowed_calls();
     let inner_outcome = execute_tool_calls_with_budget(
         registry,
         &allowed_calls,
@@ -270,16 +249,76 @@ pub async fn execute_tool_calls_with_policy_gate(
     )
     .await?;
 
+    Ok(merge_policy_outcome(filtered, inner_outcome))
+}
+
+struct PolicyFilteredCalls {
+    allowed: Vec<(usize, ContentBlock)>,
+    denied: Vec<(usize, ContentBlock)>,
+    total: usize,
+}
+
+impl PolicyFilteredCalls {
+    fn allowed_calls(&self) -> Vec<ContentBlock> {
+        self.allowed.iter().map(|(_, call)| call.clone()).collect()
+    }
+}
+
+/// Apply the policy floor before selecting a host or terminal approval path.
+/// The index tags let the caller restore the model's original call order.
+fn filter_tool_calls_by_policy(
+    tool_calls: &[ContentBlock],
+    gate: &crate::policy_gate::PolicyGate,
+) -> PolicyFilteredCalls {
+    let mut allowed: Vec<(usize, ContentBlock)> = Vec::with_capacity(tool_calls.len());
+    let mut denied: Vec<(usize, ContentBlock)> = Vec::new();
+    let mut result_idx = 0;
+    for call in tool_calls {
+        match call {
+            ContentBlock::ToolUse { id, name, .. } => {
+                // Top-level dispatch uses the gate's default actor;
+                // sub-agent attribution is a v0.7 follow-up that needs
+                // source_agent threading through orchestration.
+                match gate.check_tool(name, None) {
+                    Ok(()) => allowed.push((result_idx, call.clone())),
+                    Err(deny) => denied.push((
+                        result_idx,
+                        ContentBlock::ToolResult {
+                            tool_use_id: id.clone(),
+                            content: format!("Denied by policy: {deny}"),
+                            is_error: true,
+                        },
+                    )),
+                }
+                result_idx += 1;
+            }
+            // Match the underlying dispatchers: defensive non-ToolUse input
+            // produces no tool result and is excluded from merge indexing.
+            _ => continue,
+        }
+    }
+
+    PolicyFilteredCalls {
+        allowed,
+        denied,
+        total: result_idx,
+    }
+}
+
+fn merge_policy_outcome(
+    filtered: PolicyFilteredCalls,
+    inner_outcome: ToolCallOutcome,
+) -> ToolCallOutcome {
     // Re-merge into original order. `allowed[i]` corresponds to
     // `inner_outcome.results[i]`; `denied[j].0` is its original index.
-    let total = tool_calls.len();
-    let mut results: Vec<Option<ContentBlock>> = (0..total).map(|_| None).collect();
-    let mut modifiers: Vec<Option<Option<ContextModifier>>> = (0..total).map(|_| None).collect();
-    for (allowed_pos, (orig_idx, _)) in allowed.iter().enumerate() {
+    let mut results: Vec<Option<ContentBlock>> = (0..filtered.total).map(|_| None).collect();
+    let mut modifiers: Vec<Option<Option<ContextModifier>>> =
+        (0..filtered.total).map(|_| None).collect();
+    for (allowed_pos, (orig_idx, _)) in filtered.allowed.iter().enumerate() {
         results[*orig_idx] = Some(inner_outcome.results[allowed_pos].clone());
         modifiers[*orig_idx] = Some(inner_outcome.modifiers[allowed_pos].clone());
     }
-    for (orig_idx, denied_block) in denied {
+    for (orig_idx, denied_block) in filtered.denied {
         results[orig_idx] = Some(denied_block);
         modifiers[orig_idx] = Some(None);
     }
@@ -288,7 +327,7 @@ pub async fn execute_tool_calls_with_policy_gate(
     // back to `orig_idx`) or via the `denied` loop (which covers the
     // remaining indices). The two loops partition 0..total, so every
     // `Option` slot is `Some` by the time we reach this point.
-    Ok(ToolCallOutcome {
+    ToolCallOutcome {
         results: results
             .into_iter()
             .map(|r| r.expect("merge covers all indices"))
@@ -302,7 +341,7 @@ pub async fn execute_tool_calls_with_policy_gate(
         // gate only filters denied tools (which never dispatch), so forwarding
         // verbatim keeps the mapping correct.
         cancelled_ids: inner_outcome.cancelled_ids,
-    })
+    }
 }
 
 /// W8b.2.A-5: variant accepting an optional `ToolBudgetTracker` so the
@@ -340,14 +379,17 @@ pub async fn execute_tool_calls_with_budget(
             // For concurrent batch, confirm all first, then execute approved ones.
             // Concurrent tools are never SkillTool (is_concurrency_safe=false for Skill),
             // so no skill hooks merging is needed here.
+            let mut batch_outcomes: Vec<Option<BatchToolOutcome>> =
+                (0..batch.calls.len()).map(|_| None).collect();
             let mut approved = Vec::new();
-            for call in &batch.calls {
+            for (batch_idx, call) in batch.calls.iter().enumerate() {
                 match confirm_call(confirmer, call)? {
-                    Some(denied) => {
-                        results.push(denied);
-                        modifiers.push(None);
+                    ConfirmedCall::Denied(denied) => {
+                        batch_outcomes[batch_idx] = Some((denied, None, None, false));
                     }
-                    None => approved.push(call),
+                    ConfirmedCall::Execute { approval_bound } => {
+                        approved.push((batch_idx, call, approval_bound));
+                    }
                 }
             }
             // Reborrow as shared for concurrent execution. Concurrent
@@ -361,7 +403,7 @@ pub async fn execute_tool_calls_with_budget(
             // safe — every member terminates within its category limit.
             let futures: Vec<_> = approved
                 .iter()
-                .map(|call| {
+                .map(|(_, call, approval_bound)| {
                     execute_single_with_budget(
                         registry,
                         call,
@@ -369,28 +411,39 @@ pub async fn execute_tool_calls_with_budget(
                         compaction_level,
                         toon_enabled,
                         budget,
+                        *approval_bound,
                         cancel,
                         file_write_notifier,
                     )
                 })
                 .collect();
             let batch_results = futures::future::join_all(futures).await;
-            for (block, modifier, post_outcome, was_cancelled) in batch_results {
+            for ((batch_idx, _, _), (block, modifier, post_outcome, was_cancelled)) in
+                approved.into_iter().zip(batch_results)
+            {
+                batch_outcomes[batch_idx] =
+                    Some((block, modifier, Some(post_outcome), was_cancelled));
+            }
+            for outcome in batch_outcomes {
+                let (block, modifier, post_outcome, was_cancelled) =
+                    outcome.expect("confirmation partitions every concurrent call");
                 if was_cancelled && let ContentBlock::ToolResult { tool_use_id, .. } = &block {
                     cancelled_ids.push(tool_use_id.clone());
                 }
                 results.push(block);
                 modifiers.push(modifier);
-                hook_outcomes.push(post_outcome);
+                if let Some(post_outcome) = post_outcome {
+                    hook_outcomes.push(post_outcome);
+                }
             }
         } else {
             for call in &batch.calls {
                 match confirm_call(confirmer, call)? {
-                    Some(denied) => {
+                    ConfirmedCall::Denied(denied) => {
                         results.push(denied);
                         modifiers.push(None);
                     }
-                    None => {
+                    ConfirmedCall::Execute { approval_bound } => {
                         // Reborrow as shared for execute_single, then reclaim mut for merge.
                         let block;
                         let modifier;
@@ -407,6 +460,7 @@ pub async fn execute_tool_calls_with_budget(
                                     toon_enabled,
                                     streaming.clone(),
                                     budget,
+                                    approval_bound,
                                     cancel,
                                     file_write_notifier,
                                 )
@@ -444,16 +498,24 @@ pub enum ExecutionControl {
     Quit,
 }
 
-/// Confirm a single tool call. Returns Ok(Some(result)) if denied, Ok(None) if approved, Err if quit.
+/// Confirm a single tool call and record whether approval was granted for the
+/// displayed arguments rather than inherited from an automatic allow rule.
+enum ConfirmedCall {
+    Execute { approval_bound: bool },
+    Denied(ContentBlock),
+}
+
 fn confirm_call(
     confirmer: &Arc<Mutex<ToolConfirmer>>,
     call: &ContentBlock,
-) -> Result<Option<ContentBlock>, ExecutionControl> {
+) -> Result<ConfirmedCall, ExecutionControl> {
     let ContentBlock::ToolUse {
         id, name, input, ..
     } = call
     else {
-        return Ok(None);
+        return Ok(ConfirmedCall::Execute {
+            approval_bound: false,
+        });
     };
 
     let input_display = serde_json::to_string(input).unwrap_or_default();
@@ -466,14 +528,13 @@ fn confirm_call(
     // The type is public API; converting it to `parking_lot::Mutex`
     // would break every caller, so we keep std::sync and document
     // the invariant.
-    let result = confirmer
-        .lock()
-        .unwrap()
-        .check(name, &truncate_display(&input_display, 200));
+    let mut confirmer = confirmer.lock().unwrap();
+    let approval_bound = confirmer.requires_confirmation(name);
+    let result = confirmer.check(name, &truncate_display(&input_display, 200));
 
     match result {
-        ConfirmResult::Approved => Ok(None),
-        ConfirmResult::Denied => Ok(Some(ContentBlock::ToolResult {
+        ConfirmResult::Approved => Ok(ConfirmedCall::Execute { approval_bound }),
+        ConfirmResult::Denied => Ok(ConfirmedCall::Denied(ContentBlock::ToolResult {
             tool_use_id: id.clone(),
             content: "Tool execution denied by user".to_string(),
             is_error: true,
@@ -511,12 +572,14 @@ impl wcore_tools::ToolOutputSink for ProtocolToolSink {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn execute_single(
     registry: &ToolRegistry,
     call: &ContentBlock,
     hooks: Option<&HookEngine>,
     compaction_level: wcore_compact::CompactionLevel,
     toon_enabled: bool,
+    approval_bound: bool,
     cancel: &CancellationToken,
     file_write_notifier: Option<
         &std::sync::Arc<dyn wcore_tools::file_write_notifier::FileWriteNotifier>,
@@ -535,6 +598,7 @@ async fn execute_single(
         compaction_level,
         toon_enabled,
         None,
+        approval_bound,
         cancel,
         file_write_notifier,
     )
@@ -551,6 +615,7 @@ async fn execute_single_with_budget(
     compaction_level: wcore_compact::CompactionLevel,
     toon_enabled: bool,
     budget: Option<&ToolBudgetTracker>,
+    approval_bound: bool,
     cancel: &CancellationToken,
     file_write_notifier: Option<
         &std::sync::Arc<dyn wcore_tools::file_write_notifier::FileWriteNotifier>,
@@ -570,6 +635,7 @@ async fn execute_single_with_budget(
         toon_enabled,
         None,
         budget,
+        approval_bound,
         cancel,
         file_write_notifier,
     )
@@ -591,6 +657,7 @@ async fn execute_single_with_streaming(
     toon_enabled: bool,
     streaming: Option<StreamingContext>,
     budget: Option<&ToolBudgetTracker>,
+    approval_bound: bool,
     cancel: &CancellationToken,
     file_write_notifier: Option<
         &std::sync::Arc<dyn wcore_tools::file_write_notifier::FileWriteNotifier>,
@@ -628,6 +695,20 @@ async fn execute_single_with_streaming(
                     );
                 }
                 if let Some(v) = outcome.modified_input {
+                    if approval_bound && v != *input {
+                        return (
+                            ContentBlock::ToolResult {
+                                tool_use_id: id.clone(),
+                                content:
+                                    "Blocked by hook: modified tool input requires fresh approval"
+                                        .to_string(),
+                                is_error: true,
+                            },
+                            None,
+                            crate::hooks::HookOutcome::default(),
+                            false,
+                        );
+                    }
                     effective_input = v;
                 }
                 // v0.9.1.2 F10: route hook lifecycle trace to `tracing::debug!`
@@ -966,7 +1047,9 @@ pub async fn execute_tool_calls_with_approval(
         };
 
         let tool = registry.get(name);
-        let category = tool.map(|t| t.category()).unwrap_or(ToolCategory::Exec);
+        let category = tool
+            .map(|t| t.category_for(input))
+            .unwrap_or(ToolCategory::Exec);
         let description = tool.map(|t| t.describe(input)).unwrap_or_default();
 
         // Check if approval is needed. W0: thread the shell command string
@@ -984,26 +1067,41 @@ pub async fn execute_tool_calls_with_approval(
         // W5.6 H-2: also check the tool-name-scoped always-allow set so
         // `ApprovalScope::Always` on "Bash" auto-approves only future Bash
         // calls, not every Exec-category tool (Write, Edit, etc.).
+        let tool_name_approved = allow_list.contains(&name.to_string())
+            || approval_manager.is_tool_name_auto_approved(name);
+        let globally_approved = auto_approve || approval_manager.current_mode() == "force";
+        let scoped_auto_approval = !globally_approved
+            && !tool_name_approved
+            && approval_manager.is_auto_approved_cmd(&category.to_string(), command);
         let needs_approval = name == "AskUserQuestion"
-            || (!auto_approve
-                && !allow_list.contains(&name.to_string())
-                && !approval_manager.is_auto_approved_cmd(&category.to_string(), command)
-                && !approval_manager.is_tool_name_auto_approved(name));
+            || (!globally_approved && !tool_name_approved && !scoped_auto_approval);
+        // Category-, mode- and prefix-scoped rules authorize the arguments
+        // that matched them. A hook may still mutate input after a global or
+        // tool-name-wide grant, but may not widen an input-scoped grant.
+        let approval_bound = needs_approval || scoped_auto_approval;
 
         if needs_approval {
-            // Emit tool_request and wait for approval
-            let _ = writer.emit(&ProtocolEvent::ToolRequest {
-                msg_id: msg_id.to_string(),
-                call_id: id.clone(),
-                tool: ToolInfo {
-                    name: name.clone(),
-                    category,
-                    args: input.clone(),
-                    description,
-                },
-            });
-
+            // Register the pending request before emission. A local desktop
+            // host can answer synchronously from `emit`; emitting first would
+            // race that response against pending-map installation and lose it.
             let rx = approval_manager.request_approval(id, &category, name);
+            if writer
+                .emit(&ProtocolEvent::ToolRequest {
+                    msg_id: msg_id.to_string(),
+                    call_id: id.clone(),
+                    tool: ToolInfo {
+                        name: name.clone(),
+                        category,
+                        args: input.clone(),
+                        description,
+                    },
+                })
+                .is_err()
+            {
+                approval_manager.drop_pending(id);
+                return Err(ExecutionControl::Quit);
+            }
+
             // AUDIT B-7 / D-5: race the approval await against the
             // session-root cancel token. Before this fix a turn
             // cancelled (`Esc`) while parked here dropped the future
@@ -1120,6 +1218,7 @@ pub async fn execute_tool_calls_with_approval(
                 hooks_shared,
                 compaction_level,
                 toon_enabled,
+                approval_bound,
                 cancel,
                 file_write_notifier,
             )
@@ -1554,6 +1653,7 @@ mod tests {
             None,
             wcore_compact::CompactionLevel::Off,
             false,
+            false,
             &CancellationToken::new(),
             None,
         )
@@ -1587,6 +1687,7 @@ mod tests {
             None,
             wcore_compact::CompactionLevel::Off,
             false,
+            false,
             &CancellationToken::new(),
             None,
         )
@@ -1618,6 +1719,7 @@ mod tests {
             None,
             wcore_compact::CompactionLevel::Off,
             false,
+            false,
             &CancellationToken::new(),
             None,
         )
@@ -1647,6 +1749,7 @@ mod tests {
             &call,
             None,
             wcore_compact::CompactionLevel::Off,
+            false,
             false,
             &CancellationToken::new(),
             None,
