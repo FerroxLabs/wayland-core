@@ -6,6 +6,8 @@ use crate::error::Result;
 use crate::manifest::SandboxManifest;
 use crate::{SandboxChunk, SandboxCommand, SandboxOutput};
 use async_trait::async_trait;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use tokio::io::{AsyncRead, AsyncReadExt};
 
 pub mod appcontainer;
 pub mod bwrap;
@@ -15,7 +17,7 @@ pub mod bwrap_landlock;
 pub mod bwrap_seccomp;
 pub mod docker;
 pub mod no_sandbox;
-mod process_tree;
+pub mod process_tree;
 #[cfg(target_os = "macos")]
 pub mod sandbox_exec;
 
@@ -24,6 +26,108 @@ pub mod sandbox_exec;
 /// keeps a native streaming backend from racing far ahead of a slow
 /// consumer.
 const STREAM_CHANNEL_CAP: usize = 64;
+
+/// Aggregate stdout + stderr ceiling for a buffered sandbox execution.
+/// Streaming callers have their own bounded channel/backpressure contract;
+/// buffered hooks, gates, and embedded skills must never grow host memory in
+/// proportion to child output.
+pub(crate) const BUFFERED_OUTPUT_LIMIT_BYTES: usize = 8 * 1024 * 1024;
+
+pub(crate) struct BoundedChildOutput {
+    pub status: std::process::ExitStatus,
+    pub stdout: Vec<u8>,
+    pub stderr: Vec<u8>,
+}
+
+pub(crate) fn reserve_output(used: &AtomicUsize, amount: usize) -> bool {
+    let mut current = used.load(Ordering::Relaxed);
+    loop {
+        let Some(next) = current.checked_add(amount) else {
+            return false;
+        };
+        if next > BUFFERED_OUTPUT_LIMIT_BYTES {
+            return false;
+        }
+        match used.compare_exchange_weak(current, next, Ordering::Relaxed, Ordering::Relaxed) {
+            Ok(_) => return true,
+            Err(observed) => current = observed,
+        }
+    }
+}
+
+async fn read_bounded(
+    mut reader: impl AsyncRead + Unpin,
+    used: Arc<AtomicUsize>,
+) -> Result<Vec<u8>> {
+    let mut output = Vec::new();
+    let mut chunk = [0_u8; 16 * 1024];
+    loop {
+        let count = reader.read(&mut chunk).await?;
+        if count == 0 {
+            return Ok(output);
+        }
+        if !reserve_output(&used, count) {
+            return Err(crate::SandboxError::OutputLimitExceeded {
+                limit_bytes: BUFFERED_OUTPUT_LIMIT_BYTES,
+            });
+        }
+        output.extend_from_slice(&chunk[..count]);
+    }
+}
+
+/// Drain a piped Tokio child without allowing stdout/stderr to exhaust host
+/// memory. The caller retains its process-tree guard; any error (including an
+/// output overflow) returns before disarming that guard, so the whole owned
+/// tree is killed when the execution scope unwinds.
+pub(crate) async fn wait_with_bounded_output(
+    child: &mut tokio::process::Child,
+) -> Result<BoundedChildOutput> {
+    wait_with_bounded_output_on_exit(child, || {}).await
+}
+
+/// Bounded wait variant for callers that own a process group or Job Object.
+/// `on_exit` runs as soon as the direct child exits, before waiting for pipe
+/// EOF, so a background descendant cannot keep the pipes open and perform
+/// delayed work after its parent has completed.
+pub(crate) async fn wait_with_bounded_output_on_exit(
+    child: &mut tokio::process::Child,
+    on_exit: impl FnOnce(),
+) -> Result<BoundedChildOutput> {
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| crate::SandboxError::ExecFailed("child stdout was not piped".into()))?;
+    let stderr = child
+        .stderr
+        .take()
+        .ok_or_else(|| crate::SandboxError::ExecFailed("child stderr was not piped".into()))?;
+    let used = Arc::new(AtomicUsize::new(0));
+    let drains = async {
+        let (stdout, stderr) = tokio::try_join!(
+            read_bounded(stdout, Arc::clone(&used)),
+            read_bounded(stderr, used),
+        )?;
+        Ok::<_, crate::SandboxError>((stdout, stderr))
+    };
+    tokio::pin!(drains);
+    let mut on_exit = Some(on_exit);
+
+    tokio::select! {
+        biased;
+        waited = child.wait() => {
+            let status = waited?;
+            on_exit.take().expect("exit callback runs once")();
+            let (stdout, stderr) = drains.await?;
+            Ok(BoundedChildOutput { status, stdout, stderr })
+        }
+        drained = &mut drains => {
+            let (stdout, stderr) = drained?;
+            let status = child.wait().await?;
+            on_exit.take().expect("exit callback runs once")();
+            Ok(BoundedChildOutput { status, stdout, stderr })
+        }
+    }
+}
 
 #[async_trait]
 pub trait SandboxBackend: Send + Sync + 'static {

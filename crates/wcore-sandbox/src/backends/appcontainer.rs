@@ -378,8 +378,9 @@ mod windows_impl {
     use std::mem;
     use std::os::windows::ffi::{OsStrExt, OsStringExt};
     use std::ptr;
+    use std::sync::atomic::AtomicUsize;
     use std::sync::mpsc;
-    use std::sync::{Mutex, OnceLock};
+    use std::sync::{Arc, Mutex, OnceLock};
     use std::time::Duration;
     use windows_sys::Win32::Foundation::{
         CloseHandle, ERROR_ALREADY_EXISTS, GetLastError, HANDLE, INVALID_HANDLE_VALUE,
@@ -977,6 +978,129 @@ mod windows_impl {
         }
     }
 
+    /// Cross-thread ownership of the AppContainer Job Object. Windows kernel
+    /// handles are process-wide and may be used from any thread; this wrapper
+    /// makes that guarantee explicit for the blocking-worker cancellation path.
+    struct SharedJob(OwnedHandle);
+
+    // SAFETY: HANDLE values are process-wide kernel object references. This
+    // wrapper closes its handle exactly once through OwnedHandle and exposes
+    // only thread-safe Job Object operations.
+    unsafe impl Send for SharedJob {}
+    // SAFETY: see the Send justification above; concurrent termination of the
+    // same Job Object is documented and idempotent for this use.
+    unsafe impl Sync for SharedJob {}
+
+    impl SharedJob {
+        fn terminate(&self) {
+            unsafe {
+                TerminateJobObject(self.0.as_raw(), 1);
+            }
+        }
+
+        fn as_raw(&self) -> HANDLE {
+            self.0.as_raw()
+        }
+    }
+
+    #[derive(Default)]
+    struct JobControlState {
+        cancelled: bool,
+        job: Option<Arc<SharedJob>>,
+    }
+
+    /// Shared cancellation state between the async caller and the Win32
+    /// blocking worker. The worker publishes its Job Object here before spawn;
+    /// dropping the async execution future can then kill the complete tree.
+    #[derive(Default)]
+    struct JobControl {
+        state: Mutex<JobControlState>,
+    }
+
+    impl JobControl {
+        fn lock(&self) -> std::sync::MutexGuard<'_, JobControlState> {
+            self.state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+        }
+
+        fn ensure_active(&self) -> Result<()> {
+            if self.lock().cancelled {
+                Err(SandboxError::Timeout)
+            } else {
+                Ok(())
+            }
+        }
+
+        fn install(&self, job: Arc<SharedJob>) -> Result<()> {
+            let cancelled = {
+                let mut state = self.lock();
+                state.job = Some(Arc::clone(&job));
+                state.cancelled
+            };
+            if cancelled {
+                job.terminate();
+                Err(SandboxError::Timeout)
+            } else {
+                Ok(())
+            }
+        }
+
+        fn cancel(&self) {
+            let job = {
+                let mut state = self.lock();
+                state.cancelled = true;
+                state.job.clone()
+            };
+            if let Some(job) = job {
+                job.terminate();
+            }
+        }
+
+        /// Hold the state lock across the final cancellation check and resume.
+        /// This removes the check/resume TOCTOU window: cancellation either
+        /// wins before resume, or terminates the already-resumed Job tree.
+        fn resume_if_active(&self, thread: HANDLE) -> Result<()> {
+            let state = self.lock();
+            if state.cancelled {
+                return Err(SandboxError::Timeout);
+            }
+            if unsafe { ResumeThread(thread) } == u32::MAX {
+                return Err(SandboxError::ExecFailed(format!(
+                    "ResumeThread: {:#x}",
+                    unsafe { GetLastError() }
+                )));
+            }
+            Ok(())
+        }
+    }
+
+    struct JobCancellationGuard {
+        control: Arc<JobControl>,
+        armed: bool,
+    }
+
+    impl JobCancellationGuard {
+        fn new(control: Arc<JobControl>) -> Self {
+            Self {
+                control,
+                armed: true,
+            }
+        }
+
+        fn disarm(&mut self) {
+            self.armed = false;
+        }
+    }
+
+    impl Drop for JobCancellationGuard {
+        fn drop(&mut self) {
+            if self.armed {
+                self.control.cancel();
+            }
+        }
+    }
+
     /// RAII for a SID allocated with `AllocateAndInitializeSid`.
     struct OwnedSid(*mut core::ffi::c_void);
     impl OwnedSid {
@@ -1136,22 +1260,29 @@ mod windows_impl {
             // effective wait timeout plus a setup grace so a stalled setup call
             // cannot hang the async caller. The grace guarantees this ceiling
             // never preempts a legitimately-timed command (the inner wait always
-            // fires first). Abandoning the blocking task on elapse is safe for
-            // CLEANUP — it reaps its own child via the KILL_ON_JOB_CLOSE Job
-            // Object once its handles drop — but note it is not a cancel: if
-            // the stall was in setup (pre-spawn), the child may still run to
-            // completion (bounded by the inner wait) AFTER the caller was told
-            // Timeout, so a retried mutating command can double-execute. That
-            // matches BashTool's pre-existing outer-timeout semantics.
+            // fires first). Shared Job control turns timeout or future-drop
+            // into an immediate full-tree termination. If cancellation lands
+            // during pre-spawn setup, the worker observes it before process
+            // creation and again atomically before resuming the suspended child.
             let ceiling = manifest
                 .timeout
                 .unwrap_or(Duration::from_secs(60))
                 .saturating_add(Duration::from_secs(15));
-            let handle = tokio::task::spawn_blocking(move || execute_blocking(&manifest, &cmd));
-            match tokio::time::timeout(ceiling, handle).await {
+            let control = Arc::new(JobControl::default());
+            let mut cancellation = JobCancellationGuard::new(Arc::clone(&control));
+            let worker_control = Arc::clone(&control);
+            let handle = tokio::task::spawn_blocking(move || {
+                execute_blocking(&manifest, &cmd, &worker_control)
+            });
+            let result = match tokio::time::timeout(ceiling, handle).await {
                 Ok(joined) => joined.map_err(|e| SandboxError::ExecFailed(format!("join: {e}")))?,
-                Err(_elapsed) => Err(SandboxError::Timeout),
-            }
+                Err(_elapsed) => {
+                    control.cancel();
+                    Err(SandboxError::Timeout)
+                }
+            };
+            cancellation.disarm();
+            result
         }
     }
 
@@ -1210,16 +1341,17 @@ mod windows_impl {
 
         // Hard wall-clock guard: run the probe on a dedicated thread and bound
         // the whole thing with `recv_timeout`, so a stalled setup call upstream
-        // of the wait cannot hang the caller. Orphaning the thread on timeout
-        // is safe — `execute_blocking` reaps its own child and the Job Object
-        // carries KILL_ON_JOB_CLOSE, so the child (and its image scan) is torn
-        // down when the blocking call finally returns and drops its handles.
+        // of the wait cannot hang the caller. A timeout marks shared
+        // cancellation: any published Job is terminated immediately, and a
+        // worker stalled in pre-spawn setup refuses process creation on return.
         const PROBE_WALL_CLOCK: Duration = Duration::from_secs(15);
         let (tx, rx) = mpsc::channel();
+        let control = Arc::new(JobControl::default());
+        let worker_control = Arc::clone(&control);
         if std::thread::Builder::new()
             .name("appcontainer-probe".into())
             .spawn(move || {
-                let _ = tx.send(execute_blocking(&manifest, &cmd));
+                let _ = tx.send(execute_blocking(&manifest, &cmd, &worker_control));
             })
             .is_err()
         {
@@ -1252,6 +1384,7 @@ mod windows_impl {
                 false
             }
             Err(mpsc::RecvTimeoutError::Timeout) => {
+                control.cancel();
                 tracing::error!(
                     target: "wcore_sandbox",
                     guard_secs = PROBE_WALL_CLOCK.as_secs(),
@@ -1264,6 +1397,7 @@ mod windows_impl {
                 false
             }
             Err(mpsc::RecvTimeoutError::Disconnected) => {
+                control.cancel();
                 tracing::error!(
                     target: "wcore_sandbox",
                     "AppContainer probe thread ended without a result; sandbox disabled."
@@ -1273,7 +1407,12 @@ mod windows_impl {
         }
     }
 
-    fn execute_blocking(manifest: &SandboxManifest, cmd: &SandboxCommand) -> Result<SandboxOutput> {
+    fn execute_blocking(
+        manifest: &SandboxManifest,
+        cmd: &SandboxCommand,
+        control: &JobControl,
+    ) -> Result<SandboxOutput> {
+        control.ensure_active()?;
         if cmd.argv.is_empty() {
             return Err(SandboxError::ExecFailed("empty argv".into()));
         }
@@ -1478,7 +1617,8 @@ mod windows_impl {
                     GetLastError()
                 )));
             }
-            let job = OwnedHandle::new(job_raw);
+            let job = Arc::new(SharedJob(OwnedHandle::new(job_raw)));
+            control.install(Arc::clone(&job))?;
 
             let mut limits: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = mem::zeroed();
             // Always-on hardening flags:
@@ -1788,6 +1928,9 @@ mod windows_impl {
             // a lingering conhost can't keep the inherited pipe write-end open.
             let creation_flags =
                 EXTENDED_STARTUPINFO_PRESENT | CREATE_SUSPENDED | 0x0400 /* CREATE_UNICODE_ENVIRONMENT */;
+            // Setup calls above may have blocked while the async caller was
+            // cancelled. Refuse to create a child after that cancellation.
+            control.ensure_active()?;
             let cp_ok = CreateProcessAsUserW(
                 restricted_token.as_raw(),
                 app_name_w.as_ptr(),
@@ -1852,12 +1995,9 @@ mod windows_impl {
             drop(stderr_w);
 
             // ---- 11. Resume + wait ----
-            if ResumeThread(thread.as_raw()) == u32::MAX {
-                TerminateProcess(process.as_raw(), 1);
-                return Err(SandboxError::ExecFailed(format!(
-                    "ResumeThread: {:#x}",
-                    GetLastError()
-                )));
+            if let Err(error) = control.resume_if_active(thread.as_raw()) {
+                job.terminate();
+                return Err(error);
             }
 
             // ---- 11a. Drain the pipes CONCURRENTLY with the child (#520). ----
@@ -1877,8 +2017,11 @@ mod windows_impl {
             let stderr_h = stderr_r.as_raw() as usize;
             // `drain_pipe` is unsafe; the call is bare because this whole fn body
             // is one `unsafe` block and the closures inherit that context.
-            let stdout_reader = std::thread::spawn(move || drain_pipe(stdout_h as _));
-            let stderr_reader = std::thread::spawn(move || drain_pipe(stderr_h as _));
+            let output_bytes = Arc::new(AtomicUsize::new(0));
+            let stdout_output_bytes = Arc::clone(&output_bytes);
+            let stdout_reader =
+                std::thread::spawn(move || drain_pipe(stdout_h as _, stdout_output_bytes));
+            let stderr_reader = std::thread::spawn(move || drain_pipe(stderr_h as _, output_bytes));
 
             let timeout_ms: u32 = match manifest.timeout {
                 Some(d) => clamp_timeout_ms(d),
@@ -1932,8 +2075,8 @@ mod windows_impl {
             // join them to collect the fully-drained output. This MUST run before
             // the deferred error returns so the threads never outlive their
             // handles.
-            let stdout = stdout_reader.join().unwrap_or_default();
-            let mut stderr = stderr_reader.join().unwrap_or_default();
+            let (stdout, stdout_exceeded) = stdout_reader.join().unwrap_or_default();
+            let (mut stderr, stderr_exceeded) = stderr_reader.join().unwrap_or_default();
 
             if let Some((wait_res, last_err)) = wait_err {
                 return Err(SandboxError::ExecFailed(format!(
@@ -1990,6 +2133,11 @@ mod windows_impl {
             if timed_out {
                 return Err(SandboxError::Timeout);
             }
+            if stdout_exceeded || stderr_exceeded {
+                return Err(SandboxError::OutputLimitExceeded {
+                    limit_bytes: super::super::BUFFERED_OUTPUT_LIMIT_BYTES,
+                });
+            }
 
             Ok(SandboxOutput {
                 exit_code: exit_code as i32,
@@ -2000,8 +2148,9 @@ mod windows_impl {
         }
     }
 
-    unsafe fn drain_pipe(h: HANDLE) -> Vec<u8> {
+    unsafe fn drain_pipe(h: HANDLE, output_bytes: Arc<AtomicUsize>) -> (Vec<u8>, bool) {
         let mut out: Vec<u8> = Vec::new();
+        let mut exceeded = false;
         let mut buf = [0u8; 4096];
         loop {
             let mut read: u32 = 0;
@@ -2017,9 +2166,17 @@ mod windows_impl {
             if ok == 0 || read == 0 {
                 break;
             }
-            out.extend_from_slice(&buf[..read as usize]);
+            let read = read as usize;
+            if super::super::reserve_output(&output_bytes, read) {
+                out.extend_from_slice(&buf[..read]);
+            } else {
+                // Keep draining after the ceiling is hit so the child does not
+                // deadlock on a full pipe. Discarding the excess bounds host
+                // memory while still allowing the owned job to exit normally.
+                exceeded = true;
+            }
         }
-        out
+        (out, exceeded)
     }
 
     fn clamp_timeout_ms(d: Duration) -> u32 {
@@ -2334,6 +2491,22 @@ mod windows_impl {
     #[cfg(test)]
     mod tests {
         use super::*;
+
+        #[test]
+        fn cancellation_guard_is_sticky_unless_disarmed() {
+            let cancelled = Arc::new(JobControl::default());
+            drop(JobCancellationGuard::new(Arc::clone(&cancelled)));
+            assert!(matches!(
+                cancelled.ensure_active(),
+                Err(SandboxError::Timeout)
+            ));
+
+            let active = Arc::new(JobControl::default());
+            let mut guard = JobCancellationGuard::new(Arc::clone(&active));
+            guard.disarm();
+            drop(guard);
+            assert!(active.ensure_active().is_ok());
+        }
 
         // ---------- quote_arg ----------
 

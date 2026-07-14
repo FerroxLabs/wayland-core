@@ -28,6 +28,9 @@ pub enum SandboxError {
     /// Wall-clock timeout expired before the child exited.
     #[error("sandbox child timed out")]
     Timeout,
+    /// Captured stdout + stderr exceeded the fixed host-memory ceiling.
+    #[error("sandbox child output exceeded {limit_bytes} bytes")]
+    OutputLimitExceeded { limit_bytes: usize },
     #[error("docker backend disabled (feature `live-docker` off)")]
     DockerDisabled,
     #[error("docker io: {0}")]

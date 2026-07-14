@@ -216,3 +216,90 @@ async fn live_runaway_command_is_bounded_by_timeout() {
         "expected SandboxError::Timeout, got {r:?}"
     );
 }
+
+/// Dropping the async execution future is the session-cancellation path. The
+/// nested `cmd.exe` is a real descendant, so a direct-child kill would leave
+/// its heartbeat advancing after this future is dropped.
+#[tokio::test(flavor = "current_thread")]
+async fn live_future_drop_reaps_descendant_job_tree() {
+    if std::env::var("WAYLAND_SANDBOX_LIVE_WINDOWS").is_err() {
+        return;
+    }
+
+    let public = std::env::var_os("PUBLIC").expect("PUBLIC must be set on Windows");
+    let unique = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("system clock must follow Unix epoch")
+        .as_nanos();
+    let work = std::path::PathBuf::from(public)
+        .join(format!("wcore-job-cancel-{}-{unique}", std::process::id()));
+    std::fs::create_dir_all(&work).expect("create cancellation test directory");
+    let heartbeat = work.join("heartbeat.txt");
+    let script = work.join("heartbeat.cmd");
+    std::fs::write(
+        &script,
+        format!(
+            "@echo off\r\n:loop\r\necho x>>{}\r\nchoice.exe /t 1 /d y /n >nul\r\ngoto loop\r\n",
+            heartbeat.display()
+        ),
+    )
+    .expect("write descendant heartbeat script");
+    // The outer AppContainer process launches a second cmd process to execute
+    // the batch file. There are no nested shell metacharacters in this outer
+    // command, keeping the descendant relationship deterministic.
+    let command = format!("cmd.exe /d /c {}", script.display());
+    let manifest = SandboxManifest {
+        fs_read_allow: vec![work.clone()],
+        fs_write_allow: vec![work.clone()],
+        timeout: Some(Duration::from_secs(60)),
+        ..Default::default()
+    };
+    let backend = AppContainerBackend::new();
+
+    {
+        let execution = backend.execute(
+            &manifest,
+            SandboxCommand {
+                argv: vec!["cmd.exe".into(), "/d".into(), "/c".into(), command],
+                cwd: Some(work.clone()),
+            },
+        );
+        tokio::pin!(execution);
+
+        tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                tokio::select! {
+                    result = &mut execution => {
+                        panic!("runaway descendant exited before cancellation: {result:?}");
+                    }
+                    _ = tokio::time::sleep(Duration::from_millis(100)) => {
+                        if std::fs::metadata(&heartbeat)
+                            .map(|meta| meta.len() > 0)
+                            .unwrap_or(false)
+                        {
+                            break;
+                        }
+                    }
+                }
+            }
+        })
+        .await
+        .expect("descendant must begin writing its heartbeat");
+    }
+
+    // Allow one in-flight write to settle, then prove the descendant no longer
+    // advances. Before shared Job cancellation this file kept growing.
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    let settled = std::fs::metadata(&heartbeat)
+        .expect("heartbeat must remain readable")
+        .len();
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    let final_len = std::fs::metadata(&heartbeat)
+        .expect("heartbeat must remain readable")
+        .len();
+    assert_eq!(
+        final_len, settled,
+        "descendant heartbeat advanced after execution future drop"
+    );
+    std::fs::remove_dir_all(&work).expect("cancelled job must release test directory");
+}

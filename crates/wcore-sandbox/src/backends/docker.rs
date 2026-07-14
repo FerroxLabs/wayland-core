@@ -33,6 +33,108 @@ use crate::manifest::NetworkPolicy;
 #[cfg(feature = "live-docker")]
 use tokio::sync::OnceCell;
 
+#[cfg(feature = "live-docker")]
+const DOCKER_CLEANUP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
+#[cfg(feature = "live-docker")]
+struct ContainerCleanup {
+    client: bollard::Docker,
+    id: Option<String>,
+}
+
+#[cfg(feature = "live-docker")]
+impl ContainerCleanup {
+    fn new(client: bollard::Docker, id: String) -> Self {
+        Self {
+            client,
+            id: Some(id),
+        }
+    }
+
+    async fn remove(&mut self) {
+        use bollard::container::RemoveContainerOptions;
+
+        let Some(id) = self.id.as_ref().cloned() else {
+            return;
+        };
+        let removal = self.client.remove_container(
+            &id,
+            Some(RemoveContainerOptions {
+                force: true,
+                ..Default::default()
+            }),
+        );
+        match tokio::time::timeout(DOCKER_CLEANUP_TIMEOUT, removal).await {
+            Ok(Ok(())) => {
+                // Disarm only after Docker confirms force-removal. If this
+                // future is cancelled, errors, or times out, Drop retains the
+                // id and schedules a detached retry.
+                self.id = None;
+            }
+            Ok(Err(error)) => {
+                tracing::warn!(
+                    target: "wcore_sandbox",
+                    container = %id,
+                    %error,
+                    "Docker sandbox force-removal failed; scheduling a retry"
+                );
+            }
+            Err(_) => {
+                tracing::warn!(
+                    target: "wcore_sandbox",
+                    container = %id,
+                    "Docker sandbox force-removal timed out; scheduling a retry"
+                );
+            }
+        }
+    }
+}
+
+#[cfg(feature = "live-docker")]
+impl Drop for ContainerCleanup {
+    fn drop(&mut self) {
+        let Some(id) = self.id.take() else {
+            return;
+        };
+        let client = self.client.clone();
+        // `execute` is async, so a Tokio handle is normally present. The
+        // detached cleanup is the cancellation path: dropping the backend
+        // future must still force-remove the already-created container.
+        if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+            runtime.spawn(async move {
+                use bollard::container::RemoveContainerOptions;
+                let removal = client.remove_container(
+                    &id,
+                    Some(RemoveContainerOptions {
+                        force: true,
+                        ..Default::default()
+                    }),
+                );
+                match tokio::time::timeout(DOCKER_CLEANUP_TIMEOUT, removal).await {
+                    Ok(Ok(())) => {}
+                    Ok(Err(error)) => tracing::error!(
+                        target: "wcore_sandbox",
+                        container = %id,
+                        %error,
+                        "Docker sandbox detached force-removal failed"
+                    ),
+                    Err(_) => tracing::error!(
+                        target: "wcore_sandbox",
+                        container = %id,
+                        "Docker sandbox detached force-removal timed out"
+                    ),
+                }
+            });
+        } else {
+            tracing::error!(
+                target: "wcore_sandbox",
+                container = %id,
+                "Docker sandbox cleanup lost its Tokio runtime; force-remove this container manually"
+            );
+        }
+    }
+}
+
 pub struct DockerBackend {
     #[cfg(feature = "live-docker")]
     client: OnceCell<bollard::Docker>,
@@ -153,8 +255,8 @@ impl SandboxBackend for DockerBackend {
         cmd: SandboxCommand,
     ) -> Result<SandboxOutput> {
         use bollard::container::{
-            Config, CreateContainerOptions, LogOutput, LogsOptions, RemoveContainerOptions,
-            StartContainerOptions, WaitContainerOptions,
+            Config, CreateContainerOptions, LogOutput, LogsOptions, StartContainerOptions,
+            WaitContainerOptions,
         };
         use bollard::models::HostConfig;
         use futures::stream::StreamExt;
@@ -204,7 +306,7 @@ impl SandboxBackend for DockerBackend {
         let empty_dir = if manifest
             .fs_read_deny
             .iter()
-            .any(|p| std::fs::symlink_metadata(p).map_or(false, |m| m.is_dir()))
+            .any(|p| std::fs::symlink_metadata(p).is_ok_and(|m| m.is_dir()))
         {
             Some(
                 tempfile::TempDir::new()
@@ -298,43 +400,68 @@ impl SandboxBackend for DockerBackend {
             .await
             .map_err(|e| SandboxError::DockerIo(e.to_string()))?;
         let id = created.id;
+        let mut cleanup = ContainerCleanup::new(client.clone(), id.clone());
         client
             .start_container(&id, None::<StartContainerOptions<String>>)
             .await
             .map_err(|e| SandboxError::DockerIo(e.to_string()))?;
         let mut wait = client.wait_container(&id, None::<WaitContainerOptions<String>>);
-        let exit_code: i32 = match wait.next().await {
-            Some(Ok(resp)) => resp.status_code as i32,
-            Some(Err(e)) => return Err(SandboxError::DockerIo(e.to_string())),
-            None => -1,
-        };
         let mut logs = client.logs(
             &id,
             Some(LogsOptions::<String> {
+                follow: true,
                 stdout: true,
                 stderr: true,
                 ..Default::default()
             }),
         );
-        let mut stdout: Vec<u8> = Vec::new();
-        let mut stderr: Vec<u8> = Vec::new();
-        while let Some(chunk) = logs.next().await {
-            match chunk {
-                Ok(LogOutput::StdOut { message }) => stdout.extend_from_slice(&message),
-                Ok(LogOutput::StdErr { message }) => stderr.extend_from_slice(&message),
-                Ok(_) => {}
-                Err(e) => return Err(SandboxError::DockerIo(e.to_string())),
+        let timeout = manifest
+            .timeout
+            .unwrap_or_else(|| std::time::Duration::from_secs(60));
+        let execution = async {
+            let mut stdout: Vec<u8> = Vec::new();
+            let mut stderr: Vec<u8> = Vec::new();
+            let mut exit_code = None;
+            let mut logs_done = false;
+
+            while exit_code.is_none() || !logs_done {
+                tokio::select! {
+                    waited = wait.next(), if exit_code.is_none() => {
+                        exit_code = Some(match waited {
+                            Some(Ok(response)) => response.status_code as i32,
+                            Some(Err(error)) => {
+                                return Err(SandboxError::DockerIo(error.to_string()));
+                            }
+                            None => -1,
+                        });
+                    }
+                    chunk = logs.next(), if !logs_done => {
+                        match chunk {
+                            Some(Ok(LogOutput::StdOut { message })) => {
+                                reserve_docker_output(&stdout, &stderr, message.len())?;
+                                stdout.extend_from_slice(&message);
+                            }
+                            Some(Ok(LogOutput::StdErr { message })) => {
+                                reserve_docker_output(&stdout, &stderr, message.len())?;
+                                stderr.extend_from_slice(&message);
+                            }
+                            Some(Ok(_)) => {}
+                            Some(Err(error)) => {
+                                return Err(SandboxError::DockerIo(error.to_string()));
+                            }
+                            None => logs_done = true,
+                        }
+                    }
+                }
             }
-        }
-        let _ = client
-            .remove_container(
-                &id,
-                Some(RemoveContainerOptions {
-                    force: true,
-                    ..Default::default()
-                }),
-            )
-            .await;
+
+            Ok((exit_code.unwrap_or(-1), stdout, stderr))
+        };
+        let result = tokio::time::timeout(timeout, execution)
+            .await
+            .map_err(|_| SandboxError::Timeout);
+        cleanup.remove().await;
+        let (exit_code, stdout, stderr) = result??;
         Ok(SandboxOutput {
             exit_code,
             stdout,
@@ -351,6 +478,20 @@ impl SandboxBackend for DockerBackend {
     ) -> Result<SandboxOutput> {
         Err(SandboxError::DockerDisabled)
     }
+}
+
+#[cfg(feature = "live-docker")]
+fn reserve_docker_output(stdout: &[u8], stderr: &[u8], amount: usize) -> Result<()> {
+    let next = stdout
+        .len()
+        .checked_add(stderr.len())
+        .and_then(|bytes| bytes.checked_add(amount));
+    if next.is_none_or(|bytes| bytes > super::BUFFERED_OUTPUT_LIMIT_BYTES) {
+        return Err(SandboxError::OutputLimitExceeded {
+            limit_bytes: super::BUFFERED_OUTPUT_LIMIT_BYTES,
+        });
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -415,6 +556,24 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "live-docker")]
+    #[test]
+    fn buffered_output_accepts_exact_limit() {
+        let stdout = vec![0_u8; super::super::BUFFERED_OUTPUT_LIMIT_BYTES - 1];
+        assert!(reserve_docker_output(&stdout, &[], 1).is_ok());
+    }
+
+    #[cfg(feature = "live-docker")]
+    #[test]
+    fn buffered_output_rejects_first_byte_over_limit() {
+        let stdout = vec![0_u8; super::super::BUFFERED_OUTPUT_LIMIT_BYTES];
+        assert!(matches!(
+            reserve_docker_output(&stdout, &[], 1),
+            Err(SandboxError::OutputLimitExceeded { limit_bytes })
+                if limit_bytes == super::super::BUFFERED_OUTPUT_LIMIT_BYTES
+        ));
+    }
+
     /// Task 5 (live integration): a file that is read-allowed under a mounted
     /// root but also listed in `fs_read_deny` must read as empty inside the
     /// container (the `/dev/null` bind shadows it).
@@ -470,5 +629,86 @@ mod tests {
             !output.contains("SECRET"),
             "secret bytes must not be readable under Docker read-deny; got: {output:?}"
         );
+    }
+
+    /// Cancellation proof for the RAII path: once a container exists, dropping
+    /// the future that owns its cleanup guard must schedule force-removal.
+    /// Skips if Docker or the small live-test image is unavailable.
+    #[cfg(feature = "live-docker")]
+    #[tokio::test]
+    async fn cancelled_owner_force_removes_live_container() {
+        use bollard::container::{
+            Config, CreateContainerOptions, InspectContainerOptions, RemoveContainerOptions,
+            StartContainerOptions,
+        };
+
+        let backend = match DockerBackend::connect().await {
+            Ok(backend) => backend,
+            Err(_) => {
+                eprintln!("skip: docker daemon unavailable");
+                return;
+            }
+        };
+        let client = backend.client_ref().await.unwrap().clone();
+        let created = match client
+            .create_container(
+                None::<CreateContainerOptions<String>>,
+                Config {
+                    image: Some("alpine:3.19".to_string()),
+                    cmd: Some(vec![
+                        "sh".to_string(),
+                        "-c".to_string(),
+                        "sleep 30".to_string(),
+                    ]),
+                    ..Default::default()
+                },
+            )
+            .await
+        {
+            Ok(created) => created,
+            Err(error) => {
+                eprintln!("skip: live-test image unavailable ({error})");
+                return;
+            }
+        };
+        let id = created.id;
+        let cleanup = ContainerCleanup::new(client.clone(), id.clone());
+        client
+            .start_container(&id, None::<StartContainerOptions<String>>)
+            .await
+            .unwrap();
+
+        let owner = tokio::spawn(async move {
+            let _cleanup = cleanup;
+            std::future::pending::<()>().await;
+        });
+        tokio::task::yield_now().await;
+        owner.abort();
+        let _ = owner.await;
+
+        let mut removed = false;
+        for _ in 0..50 {
+            if client
+                .inspect_container(&id, None::<InspectContainerOptions>)
+                .await
+                .is_err()
+            {
+                removed = true;
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+        if !removed {
+            let _ = client
+                .remove_container(
+                    &id,
+                    Some(RemoveContainerOptions {
+                        force: true,
+                        ..Default::default()
+                    }),
+                )
+                .await;
+        }
+        assert!(removed, "cancelled Docker owner leaked container {id}");
     }
 }

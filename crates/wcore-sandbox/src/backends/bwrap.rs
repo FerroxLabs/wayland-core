@@ -317,7 +317,7 @@ impl SandboxBackend for BubblewrapBackend {
         // (exercised by --all-features CI) as the foundation for a future
         // inner-command re-exec shim, but production runs seccomp-only.
 
-        let child = command
+        let mut child = command
             .spawn()
             .map_err(|e| SandboxError::ExecFailed(format!("bwrap spawn failed: {e}")))?;
 
@@ -330,11 +330,11 @@ impl SandboxBackend for BubblewrapBackend {
             .timeout
             .unwrap_or_else(|| std::time::Duration::from_secs(30));
 
-        let wait_fut = child.wait_with_output();
+        let wait_fut = super::wait_with_bounded_output(&mut child);
         let output = match tokio::time::timeout(timeout, wait_fut).await {
             Ok(Ok(out)) => out,
             Ok(Err(e)) => {
-                return Err(SandboxError::ExecFailed(format!("bwrap wait failed: {e}")));
+                return Err(e);
             }
             Err(_elapsed) => {
                 // `timeout` dropped `wait_fut` on elapse, which drops the

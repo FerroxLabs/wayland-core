@@ -19,6 +19,7 @@
 pub mod backends;
 pub mod error;
 pub mod manifest;
+pub mod process_capture;
 
 pub use error::{Result, SandboxError};
 pub use manifest::{NetworkPolicy, SandboxManifest, SyscallPolicy};

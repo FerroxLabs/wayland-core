@@ -268,20 +268,22 @@ impl SandboxBackend for SandboxExecBackend {
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
-        // Reap the child if this future is dropped — e.g. when the
-        // `tokio::time::timeout` below elapses and drops the in-flight
-        // `run_fut` (which owns the Child). Without this the sandboxed
-        // process tree escapes on timeout. Mirrors no_sandbox.rs.
+        // Keep the direct-child kill as defense in depth, and isolate the
+        // wrapper into its own process group so the guard below also owns
+        // every sandboxed descendant.
         child_cmd.kill_on_drop(true);
+        super::process_tree::isolate(&mut child_cmd);
 
         let run_fut = async {
-            let child = child_cmd
+            let mut child = child_cmd
                 .spawn()
                 .map_err(|e| SandboxError::ExecFailed(e.to_string()))?;
-            child
-                .wait_with_output()
-                .await
-                .map_err(|e| SandboxError::ExecFailed(e.to_string()))
+            let mut process_tree = super::process_tree::ProcessTreeGuard::new(child.id())
+                .map_err(|e| SandboxError::ExecFailed(format!("process-tree ownership: {e}")))?;
+            let output =
+                super::wait_with_bounded_output_on_exit(&mut child, || process_tree.disarm())
+                    .await?;
+            Ok::<_, SandboxError>(output)
         };
 
         let output = if let Some(timeout) = manifest.timeout {
@@ -612,5 +614,100 @@ mod tests {
         assert_eq!(out.exit_code, 0);
         assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "hi");
         assert_eq!(out.resource_limits, ResourceLimitEnforcement::None);
+    }
+
+    #[cfg(target_os = "macos")]
+    fn delayed_sentinel_command(
+        started: &std::path::Path,
+        sentinel: &std::path::Path,
+    ) -> SandboxCommand {
+        SandboxCommand {
+            argv: vec![
+                "/bin/sh".into(),
+                "-c".into(),
+                "/usr/bin/touch \"$1\"; (sleep 2; /usr/bin/touch \"$2\") & wait".into(),
+                "wcore-sentinel".into(),
+                started.to_string_lossy().into_owned(),
+                sentinel.to_string_lossy().into_owned(),
+            ],
+            cwd: None,
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn timeout_reaps_delayed_background_descendant() {
+        let backend = SandboxExecBackend::new();
+        assert!(backend.is_available(), "sandbox-exec must be available");
+        let dir = tempfile::tempdir().expect("create sentinel directory");
+        let root = std::fs::canonicalize(dir.path()).expect("canonicalize sentinel directory");
+        let started = root.join("started");
+        let sentinel = root.join("escaped");
+        let manifest = SandboxManifest {
+            fs_read_allow: vec![root.clone()],
+            fs_write_allow: vec![root],
+            timeout: Some(std::time::Duration::from_secs(1)),
+            env: vec![("PATH".into(), "/usr/bin:/bin".into())],
+            ..Default::default()
+        };
+
+        let result = backend
+            .execute(&manifest, delayed_sentinel_command(&started, &sentinel))
+            .await;
+        assert!(matches!(result, Err(SandboxError::Timeout)));
+        assert!(
+            started.exists(),
+            "sandboxed command must start before timeout"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(2_250)).await;
+        assert!(
+            !sentinel.exists(),
+            "background descendant wrote after sandbox timeout"
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn future_drop_reaps_delayed_background_descendant() {
+        let backend = SandboxExecBackend::new();
+        assert!(backend.is_available(), "sandbox-exec must be available");
+        let dir = tempfile::tempdir().expect("create sentinel directory");
+        let root = std::fs::canonicalize(dir.path()).expect("canonicalize sentinel directory");
+        let started = root.join("started");
+        let sentinel = root.join("escaped");
+        let manifest = SandboxManifest {
+            fs_read_allow: vec![root.clone()],
+            fs_write_allow: vec![root],
+            env: vec![("PATH".into(), "/usr/bin:/bin".into())],
+            ..Default::default()
+        };
+
+        {
+            let execution =
+                backend.execute(&manifest, delayed_sentinel_command(&started, &sentinel));
+            tokio::pin!(execution);
+            tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                loop {
+                    tokio::select! {
+                        result = &mut execution => {
+                            panic!("sandboxed command exited before cancellation: {result:?}");
+                        }
+                        _ = tokio::time::sleep(std::time::Duration::from_millis(25)) => {
+                            if started.exists() {
+                                break;
+                            }
+                        }
+                    }
+                }
+            })
+            .await
+            .expect("sandboxed command must start");
+        }
+
+        tokio::time::sleep(std::time::Duration::from_millis(2_250)).await;
+        assert!(
+            !sentinel.exists(),
+            "background descendant wrote after execution future drop"
+        );
     }
 }

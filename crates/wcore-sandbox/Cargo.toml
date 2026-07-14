@@ -17,6 +17,7 @@ serde       = { workspace = true, features = ["derive"] }
 toml.workspace        = true
 thiserror.workspace   = true
 tokio       = { workspace = true, features = ["rt", "macros", "time", "process", "io-util"] }
+tokio-util.workspace  = true
 tracing.workspace     = true
 async-trait.workspace = true
 bollard = { version = "0.17", optional = true, default-features = false, features = ["ssl"] }
@@ -54,6 +55,7 @@ windows-sys = { version = "0.59", features = [
   "Win32_Security_Authorization",
   "Win32_Security_Isolation",
   "Win32_System_IO",
+  "Win32_System_Diagnostics_ToolHelp",
   "Win32_System_Threading",
   "Win32_System_JobObjects",
   "Win32_System_Pipes",
