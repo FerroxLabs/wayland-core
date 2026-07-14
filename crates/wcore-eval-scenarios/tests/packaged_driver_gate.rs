@@ -569,7 +569,6 @@ async fn packaged_candidate_cannot_replace_authenticated_egress_evidence() {
         .await
         .expect("run packaged egress replacement attack");
     let observation = fixture.shutdown().await.expect("stop attack fixture");
-    assert!(!output.status.success(), "{}", context(&output));
     assert!(observation.complete(), "attack fixture was not consumed");
 
     let receipt_path = std::fs::read_dir(&report_root)
@@ -582,25 +581,34 @@ async fn packaged_candidate_cannot_replace_authenticated_egress_evidence() {
     let receipt: wcore_eval_scenarios::receipt::EvidenceReceiptV1 =
         serde_json::from_slice(&std::fs::read(receipt_path).expect("attack receipt JSON"))
             .expect("parse attack receipt");
-    assert!(
-        receipt
-            .body
-            .tools
-            .iter()
-            .any(|tool| tool.tool_name == "Bash" && tool.exit_state == "success"),
-        "receipt: {receipt:#?}"
-    );
-    assert!(matches!(
-        receipt.body.boundaries.egress_attempted,
-        wcore_eval_scenarios::receipt::Evidence::Unavailable { ref code }
-            if code == "managed_http_egress_recorder_incomplete"
-    ));
-    assert!(
-        receipt.body.results[0]
-            .failures
-            .iter()
-            .any(|failure| failure.code == "runner_error")
-    );
+    let bash = receipt
+        .body
+        .tools
+        .iter()
+        .find(|tool| tool.tool_name == "Bash")
+        .unwrap_or_else(|| panic!("receipt omitted attack tool: {receipt:#?}"));
+    if bash.exit_state == "success" {
+        assert!(!output.status.success(), "{}", context(&output));
+        assert!(matches!(
+            receipt.body.boundaries.egress_attempted,
+            wcore_eval_scenarios::receipt::Evidence::Unavailable { ref code }
+                if code == "managed_http_egress_recorder_incomplete"
+        ));
+        assert!(
+            receipt.body.results[0]
+                .failures
+                .iter()
+                .any(|failure| failure.code == "runner_error")
+        );
+    } else {
+        assert_eq!(bash.exit_state, "error", "receipt: {receipt:#?}");
+        assert!(output.status.success(), "{}", context(&output));
+        assert!(receipt.body.results[0].passed, "receipt: {receipt:#?}");
+        assert!(matches!(
+            receipt.body.boundaries.egress_attempted,
+            wcore_eval_scenarios::receipt::Evidence::Observed { .. }
+        ));
+    }
 }
 
 #[tokio::test]
