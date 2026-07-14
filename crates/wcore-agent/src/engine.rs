@@ -18708,6 +18708,7 @@ mod retry_wedge_protection_tests {
     use wcore_types::message::{ContentBlock, FinishReason, Message, Role, StopReason, TokenUsage};
 
     use crate::output::OutputSink;
+    use crate::test_utils::TestSink;
 
     struct NullOutput;
     impl OutputSink for NullOutput {
@@ -19161,6 +19162,9 @@ mod retry_wedge_protection_tests {
         ]));
         let requests = provider.recorded();
         let mut engine = wedge_engine(provider);
+        let sink = Arc::new(TestSink::new());
+        let sink_handle = sink.handle();
+        engine.output = sink;
         engine.messages = failed_tool_round_history(&huge_error);
         let result = engine.run("try again", "m-stub-1").await;
 
@@ -19198,6 +19202,20 @@ mod retry_wedge_protection_tests {
             }
             other => panic!("expected the progress-gate ApiError, got {other:?}"),
         }
+        let monitor_stages: Vec<_> = sink_handle
+            .snapshot()
+            .into_iter()
+            .filter(|event| {
+                event["type"].as_str() == Some("capability_activation")
+                    && event["capability"].as_str() == Some("mid_flight_monitor")
+            })
+            .filter_map(|event| event["stage"].as_str().map(str::to_string))
+            .collect();
+        assert_eq!(
+            monitor_stages,
+            ["reached", "outcome_changed", "observed"],
+            "the output-stall stop must carry complete monitor runtime proof"
+        );
     }
 
     #[tokio::test]
