@@ -2601,12 +2601,12 @@ impl AgentEngine {
     pub(crate) fn install_session_cancel_guard(
         &mut self,
         mut runtime: crate::cancel::SessionRuntimeGuard,
-    ) -> tokio_util::sync::CancellationToken {
+    ) {
         let root = runtime.root_token();
-        self.cancel_token = root.clone();
-        runtime.set_active_turn(root.clone());
+        let active_turn = root.child_token();
+        runtime.set_active_turn(active_turn.clone());
+        self.cancel_token = active_turn;
         self.session_runtime = Some(runtime);
-        root
     }
 
     /// AUDIT A2 — install an externally-owned cancellation token for the next
@@ -16557,18 +16557,21 @@ mod audit_2026_05_22_tests {
         .start_root();
         let session_root = tokio_util::sync::CancellationToken::new();
         let runtime = crate::cancel::SessionRuntimeHandle::new(session_root.clone());
-        let guard =
-            crate::cancel::budget_guard_for_token_with_callback(session_root, budget, |_| {});
+        let guard = crate::cancel::budget_guard_for_token_with_callback(
+            session_root.clone(),
+            budget,
+            |_| {},
+        );
         let mut session_guard = crate::cancel::SessionRuntimeGuard::new(runtime.clone());
         session_guard.attach_budget_guard(guard);
-        let observed_root = engine.install_session_cancel_guard(session_guard);
+        engine.install_session_cancel_guard(session_guard);
         let host_turn = tokio_util::sync::CancellationToken::new();
         engine.set_cancel_token(host_turn.clone());
 
         tokio::time::timeout(std::time::Duration::from_millis(250), host_turn.cancelled())
             .await
             .expect("budget expiry must reach the active host turn");
-        assert!(observed_root.is_cancelled());
+        assert!(session_root.is_cancelled());
         assert!(engine.cancel_token().is_cancelled());
         assert!(runtime.active_turn_token().is_cancelled());
     }
@@ -16579,10 +16582,11 @@ mod audit_2026_05_22_tests {
         let budget = crate::budget::ExecutionBudget::default().start_root();
         let root = tokio_util::sync::CancellationToken::new();
         let runtime = crate::cancel::SessionRuntimeHandle::new(root.clone());
-        let guard = crate::cancel::budget_guard_for_token_with_callback(root, budget, |_| {});
+        let guard =
+            crate::cancel::budget_guard_for_token_with_callback(root.clone(), budget, |_| {});
         let mut session_guard = crate::cancel::SessionRuntimeGuard::new(runtime.clone());
         session_guard.attach_budget_guard(guard);
-        let session_root = engine.install_session_cancel_guard(session_guard);
+        engine.install_session_cancel_guard(session_guard);
         let host_turn = tokio_util::sync::CancellationToken::new();
         engine.set_cancel_token(host_turn.clone());
 
@@ -16592,7 +16596,7 @@ mod audit_2026_05_22_tests {
         assert!(engine.cancel_token().is_cancelled());
         assert!(runtime.active_turn_token().is_cancelled());
         assert!(
-            !session_root.is_cancelled(),
+            !root.is_cancelled(),
             "ordinary host cancellation must stop only the current turn"
         );
     }
@@ -16635,7 +16639,7 @@ mod audit_2026_05_22_tests {
         let runtime = crate::cancel::SessionRuntimeHandle::new(root.clone());
         let budget = crate::budget::ExecutionBudget::default().start_root();
         let budget_guard =
-            crate::cancel::budget_guard_for_token_with_callback(root, budget, |_| {});
+            crate::cancel::budget_guard_for_token_with_callback(root.clone(), budget, |_| {});
         let mut session_guard = crate::cancel::SessionRuntimeGuard::new(runtime);
         session_guard.attach_budget_guard(budget_guard);
         let armed_at = tokio::time::Instant::now();
@@ -16647,19 +16651,19 @@ mod audit_2026_05_22_tests {
             .expect("lease must expose its armed monotonic deadline");
         assert!(deadline > armed_at);
         assert!(deadline <= armed_at + std::time::Duration::from_secs(1));
-        let session_root = engine.install_session_cancel_guard(session_guard);
+        engine.install_session_cancel_guard(session_guard);
         let active_turn = tokio_util::sync::CancellationToken::new();
         engine.set_cancel_token(active_turn.clone());
 
         let remaining = deadline.duration_since(armed_at);
         tokio::time::advance(remaining - std::time::Duration::from_millis(1)).await;
         tokio::task::yield_now().await;
-        assert!(!session_root.is_cancelled());
+        assert!(!root.is_cancelled());
         assert!(!active_turn.is_cancelled());
 
         tokio::time::sleep_until(deadline).await;
         tokio::task::yield_now().await;
-        assert!(session_root.is_cancelled());
+        assert!(root.is_cancelled());
         assert!(active_turn.is_cancelled());
 
         let replacement_turn = tokio_util::sync::CancellationToken::new();

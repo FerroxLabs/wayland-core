@@ -16,7 +16,7 @@ use wcore_types::execution_policy::{
 
 use crate::budget::{ExecutionBudget, ExecutionBudgetView};
 use crate::cancel::{
-    CancellationToken, SessionRuntimeGuard, SessionRuntimeHandle,
+    CancellationToken, SessionControl, SessionRuntimeGuard, SessionRuntimeHandle,
     budget_guard_for_token_with_callback,
 };
 use crate::engine::AgentEngine;
@@ -57,18 +57,18 @@ pub struct BootstrapResult {
     /// `Config.budget` via `ExecutionBudget::from(&BudgetConfig)`. All
     /// per-tool `ToolContext.budget` views are sub-budgets of this root.
     pub budget: ExecutionBudgetView,
-    /// W8a A.6: session-root cancellation handle. Linked to `budget`
+    /// W8a A.6: session-root cancellation authority. Linked to `budget`
     /// via `budget_linked` so any cap trip fires the wrapped token
     /// (which propagates to in-flight tools through
-    /// `ToolContext.cancel`). Cancel the session by calling
-    /// `cancel_root.cancel()`; orchestration races every tool dispatch
-    /// against this token (A.4 dispatcher route through
+    /// `ToolContext.cancel`). Cancel the session through this control;
+    /// use `child_token()` for read-only observation. Orchestration races
+    /// every tool dispatch against a descendant token (A.4 route through
     /// `execute_with_ctx`).
     ///
     /// The engine owns the budget watcher and terminal session lifetime;
-    /// this clone is observation/control only. Dropping `BootstrapResult`
+    /// this clone is the explicit host authority. Dropping `BootstrapResult`
     /// after moving out `engine` cannot disable budget cancellation.
-    pub cancel_root: CancellationToken,
+    pub cancel_root: SessionControl,
     /// v0.8.1 U5 — channel runtime. `ChannelManager` is constructed
     /// at boot and seeded by
     /// `wcore_channels_registry::auto_register_from_user_config`,
@@ -410,6 +410,7 @@ impl AgentBootstrap {
         // but the spawner and engine then share this exact token lineage.
         let session_cancel_root = CancellationToken::new();
         let session_runtime = SessionRuntimeHandle::new(session_cancel_root.clone());
+        let cancel_root = session_runtime.control();
         let mut session_guard = SessionRuntimeGuard::new(session_runtime.clone());
         anyhow::ensure!(
             self.dangerous_grant.is_none() || self.smart_policy.is_none(),
@@ -2691,7 +2692,7 @@ impl AgentBootstrap {
             },
         );
         session_guard.attach_budget_guard(cancel_guard);
-        let cancel_root = engine.install_session_cancel_guard(session_guard);
+        engine.install_session_cancel_guard(session_guard);
 
         // F-014 (CRIT, Aud-4/Aud-11): construct ChannelManager, auto-register
         // adapters, lift the manager to Arc<RwLock<ChannelManager>>, (optionally)

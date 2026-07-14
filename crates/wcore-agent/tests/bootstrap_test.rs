@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 use serial_test::serial;
 use wcore_agent::bootstrap::AgentBootstrap;
+use wcore_agent::cancel::SessionTerminationReason;
 use wcore_agent::output::null_sink::NullSink;
 use wcore_config::compat::ProviderCompat;
 use wcore_config::config::{Config, ProviderType};
@@ -86,6 +87,42 @@ async fn bootstrap_builds_engine_with_model_in_prompt() {
     assert!(!result.engine.tool_names().is_empty());
     assert!(!result.has_mcp);
     assert!(result.mcp_managers.is_empty());
+}
+
+#[tokio::test]
+#[serial]
+async fn bootstrap_separates_turn_observation_from_session_authority() {
+    let (_plugins, _env) = isolated_plugins();
+    let workdir = tempfile::TempDir::new().expect("workdir");
+    let result = AgentBootstrap::new(
+        minimal_config(),
+        workdir.path().to_str().unwrap(),
+        null_output(),
+    )
+    .build()
+    .await
+    .expect("bootstrap should succeed");
+
+    let observation = result.cancel_root.child_token();
+    observation.cancel();
+    assert!(observation.is_cancelled());
+    assert!(!result.cancel_root.is_cancelled());
+    assert_eq!(result.cancel_root.termination().reason(), None);
+
+    let active_turn = result.engine.cancel_token();
+    active_turn.cancel();
+    assert!(active_turn.is_cancelled());
+    assert!(
+        !result.cancel_root.is_cancelled(),
+        "turn cancellation must not bypass SessionControl"
+    );
+
+    result.cancel_root.cancel();
+    assert!(result.cancel_root.is_cancelled());
+    assert_eq!(
+        result.cancel_root.termination().reason(),
+        Some(SessionTerminationReason::Cancelled)
+    );
 }
 
 #[tokio::test]
