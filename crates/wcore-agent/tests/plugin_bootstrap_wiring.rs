@@ -10,8 +10,8 @@
 //!   2. agents — the plugin agent is resolvable from the returned registry.
 //!   3. hooks  — the plugin hook flows out in `plugin_hooks` for the engine
 //!      setter.
-//!   4. skills — the plugin skill flows out in `plugin_skills` for the
-//!      `register_bundled_skill` pre-`load_catalog` pass.
+//!   4. skills — the plugin skill flows out in `plugin_skills` for insertion
+//!      into one bootstrap-local catalog before loading refs.
 //!   5. rules  — the plugin rule flows out in `plugin_rules` for
 //!      `build_system_prompt`.
 //!   6. mcp    — the plugin MCP server flows out in `plugin_mcp_servers` for
@@ -23,7 +23,7 @@
 use std::sync::Arc;
 
 use wcore_agent::plugins::runner::PluginHook;
-use wcore_agent::plugins::skill_delivery::spec_to_static_definition;
+use wcore_agent::plugins::skill_delivery::spec_to_bundled_entry;
 use wcore_agent::plugins::{CapturedPluginTool, InitializeOutcome, apply_initialize_outcome};
 use wcore_plugin_api::registry::hooks::HookPhase;
 use wcore_plugin_api::tool::{PluginTool, PluginToolInvocation};
@@ -31,7 +31,7 @@ use wcore_plugin_api::{
     AgentManifest, BundledSkillSpec, McpServerSpec, McpTransport, RuleScope, RuleSpec,
 };
 use wcore_protocol::events::ToolCategory;
-use wcore_skills::bundled::{get_bundled_skills, register_bundled_skill};
+use wcore_skills::bundled::BundledSkillCatalog;
 use wcore_tools::registry::ToolRegistry;
 
 // ── fixtures ─────────────────────────────────────────────────────────────────
@@ -78,6 +78,23 @@ fn agent(name: &str) -> AgentManifest {
         system_prompt: format!("you are {name}"),
         allowed_tools: vec![],
         max_turns: None,
+    }
+}
+
+fn plugin_skill(name: &str, content: &str) -> BundledSkillSpec {
+    BundledSkillSpec {
+        name: name.into(),
+        description: format!("{name} skill"),
+        when_to_use: None,
+        argument_hint: None,
+        allowed_tools: vec![],
+        model: None,
+        disable_model_invocation: false,
+        user_invocable: true,
+        context: None,
+        agent: None,
+        files: vec![],
+        content: content.into(),
     }
 }
 
@@ -215,27 +232,16 @@ fn plugin_hook_flows_out_in_applied_plugin_hooks() {
     ));
 }
 
-// ── 4. skills → plugin_skills (and round-trip via register_bundled_skill) ─────
+// ── 4. skills → plugin_skills → session-local catalog ────────────────────────
 
 #[test]
-fn plugin_skill_flows_out_and_reaches_get_bundled_skills() {
+fn plugin_skill_flows_out_and_reaches_session_catalog() {
     const SKILL_NAME: &str = "tc-1-7-bootstrap-wiring-unique-fixture-skill";
 
     let mut outcome = InitializeOutcome::default();
-    outcome.skills.push(BundledSkillSpec {
-        name: SKILL_NAME.into(),
-        description: "Task 1.7 wiring skill".into(),
-        when_to_use: None,
-        argument_hint: None,
-        allowed_tools: vec![],
-        model: None,
-        disable_model_invocation: false,
-        user_invocable: true,
-        context: None,
-        agent: None,
-        files: vec![],
-        content: "do the wiring".into(),
-    });
+    outcome
+        .skills
+        .push(plugin_skill(SKILL_NAME, "do the wiring"));
 
     let mut registry = ToolRegistry::new();
     let applied = apply_initialize_outcome(
@@ -249,15 +255,79 @@ fn plugin_skill_flows_out_and_reaches_get_bundled_skills() {
     assert_eq!(applied.plugin_skills.len(), 1);
     assert_eq!(applied.plugin_skills[0].name, SKILL_NAME);
 
-    // …and bootstrap's pre-`load_catalog` pass (leak + register) makes it
-    // visible to `get_bundled_skills()` — the same path bootstrap.rs runs.
+    // …and bootstrap's pre-load pass moves it into the current catalog.
+    let mut catalog = BundledSkillCatalog::new();
     for spec in applied.plugin_skills {
-        register_bundled_skill(spec_to_static_definition(spec));
+        catalog.register(spec_to_bundled_entry(spec));
     }
-    let skills = get_bundled_skills();
+    let skills = catalog.get_bundled_skills();
     assert!(
         skills.iter().any(|s| s.name == SKILL_NAME),
-        "plugin skill must reach the bundled-skill registry"
+        "plugin skill must reach the session-local catalog"
+    );
+}
+
+#[tokio::test]
+async fn same_name_plugin_content_cannot_cross_sessions_a_then_b_then_a() {
+    const NAME: &str = "same-name-session-skill";
+    const CONTENT_A: &str = "session A content";
+    const CONTENT_B: &str = "session B content";
+
+    let (a_ready_tx, a_ready_rx) = tokio::sync::oneshot::channel();
+    let (b_done_tx, b_done_rx) = tokio::sync::oneshot::channel();
+
+    let session_a = async move {
+        let mut catalog = BundledSkillCatalog::embedded();
+        catalog.register(spec_to_bundled_entry(plugin_skill(NAME, CONTENT_A)));
+        a_ready_tx.send(()).expect("session B should be waiting");
+
+        b_done_rx
+            .await
+            .expect("session B should finish before session A resumes");
+        let workspace = tempfile::tempdir().expect("session A workspace");
+        let refs = wcore_skills::loader::load_catalog_with_bundled(
+            workspace.path(),
+            &[],
+            true,
+            None,
+            &catalog,
+        )
+        .await;
+        refs.into_iter()
+            .find(|skill| skill.name == NAME)
+            .and_then(|skill| skill.inline_content)
+            .expect("session A skill should be loaded")
+    };
+
+    let session_b = async move {
+        a_ready_rx
+            .await
+            .expect("session A should assemble its catalog first");
+        let mut catalog = BundledSkillCatalog::embedded();
+        catalog.register(spec_to_bundled_entry(plugin_skill(NAME, CONTENT_B)));
+        let workspace = tempfile::tempdir().expect("session B workspace");
+        let refs = wcore_skills::loader::load_catalog_with_bundled(
+            workspace.path(),
+            &[],
+            true,
+            None,
+            &catalog,
+        )
+        .await;
+        let content = refs
+            .into_iter()
+            .find(|skill| skill.name == NAME)
+            .and_then(|skill| skill.inline_content)
+            .expect("session B skill should be loaded");
+        b_done_tx.send(()).expect("session A should be waiting");
+        content
+    };
+
+    let (content_a, content_b) = tokio::join!(session_a, session_b);
+    assert_eq!(content_b, CONTENT_B, "session B must see its own content");
+    assert_eq!(
+        content_a, CONTENT_A,
+        "session A must retain its own content"
     );
 }
 

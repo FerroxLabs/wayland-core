@@ -45,8 +45,24 @@ pub async fn load_all_skills(
     bare: bool,
     mcp_manager: Option<&McpManager>,
 ) -> Vec<SkillMetadata> {
+    let bundled_catalog = bundled::BundledSkillCatalog::embedded();
+    load_all_skills_with_bundled(cwd, add_dirs, bare, mcp_manager, &bundled_catalog).await
+}
+
+/// Load all skills with a caller-owned bundled/plugin catalog.
+///
+/// Bootstrap uses this entry point so plugin entries remain local to the
+/// session being constructed. Catalog insertion order is preserved before
+/// the existing MCP and filesystem precedence rules are applied.
+pub async fn load_all_skills_with_bundled(
+    cwd: &Path,
+    add_dirs: &[PathBuf],
+    bare: bool,
+    mcp_manager: Option<&McpManager>,
+    bundled_catalog: &bundled::BundledSkillCatalog,
+) -> Vec<SkillMetadata> {
     // Resolve bundled skills with file extraction (async context).
-    let bundled_loaded = prepare_bundled_loaded().await;
+    let bundled_loaded = prepare_bundled_loaded(bundled_catalog).await;
 
     let mut all: Vec<LoadedSkill> = Vec::new();
 
@@ -156,7 +172,20 @@ pub async fn load_catalog(
     bare: bool,
     mcp_manager: Option<&McpManager>,
 ) -> Vec<crate::refs::SkillRef> {
-    let full = load_all_skills(cwd, add_dirs, bare, mcp_manager).await;
+    let bundled_catalog = bundled::BundledSkillCatalog::embedded();
+    load_catalog_with_bundled(cwd, add_dirs, bare, mcp_manager, &bundled_catalog).await
+}
+
+/// Load listing refs with a caller-owned bundled/plugin catalog.
+pub async fn load_catalog_with_bundled(
+    cwd: &Path,
+    add_dirs: &[PathBuf],
+    bare: bool,
+    mcp_manager: Option<&McpManager>,
+    bundled_catalog: &bundled::BundledSkillCatalog,
+) -> Vec<crate::refs::SkillRef> {
+    let full =
+        load_all_skills_with_bundled(cwd, add_dirs, bare, mcp_manager, bundled_catalog).await;
     full.into_iter().map(metadata_to_ref).collect()
 }
 
@@ -186,12 +215,15 @@ pub async fn load_plugin_skill_catalog(
         .collect()
 }
 
-/// Call `bundled::prepare_bundled_skills()` and wrap results as `LoadedSkill`.
+/// Prepare one caller-owned bundled catalog and wrap results as `LoadedSkill`.
 ///
 /// Each bundled skill is assigned a virtual path `<bundled:name>` for
 /// deduplication purposes (these paths can never match real filesystem paths).
-async fn prepare_bundled_loaded() -> Vec<LoadedSkill> {
-    bundled::prepare_bundled_skills()
+async fn prepare_bundled_loaded(
+    bundled_catalog: &bundled::BundledSkillCatalog,
+) -> Vec<LoadedSkill> {
+    bundled_catalog
+        .prepare_bundled_skills()
         .await
         .into_iter()
         .map(|meta| {

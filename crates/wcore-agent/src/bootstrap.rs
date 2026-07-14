@@ -1115,8 +1115,8 @@ impl AgentBootstrap {
         //     `builtin_names` snapshot above is the pure-builtin set.
         //   - agents: returned in `applied.agent_registry`, threaded into
         //     `SpawnTool` + the engine after construction.
-        //   - skills: `applied.plugin_skills` registered via
-        //     `register_bundled_skill` BEFORE `load_catalog` (below).
+        //   - skills: `applied.plugin_skills` appended to the session-local
+        //     bundled catalog BEFORE `load_catalog_with_bundled` (below).
         //   - rules: `applied.plugin_rules` passed to `build_system_prompt`.
         //   - hooks: `applied.plugin_hooks` handed to the engine setter
         //     after construction.
@@ -1480,42 +1480,34 @@ impl AgentBootstrap {
             self.config.observability.skills_lifecycle = false;
         }
 
-        // F-036 (HIGH, Aud-2b/Aud-10): call `init_bundled_skills` in
-        // production bootstrap. Previously this was only called in tests, so
-        // fresh installs had zero invokable native skills (the `hello` skill
-        // was invisible). Must run BEFORE plugin registration below so the
-        // global registry is cleared+initialised before plugin skills are
-        // appended. `init_bundled_skills` is idempotent (clear+register).
-        wcore_skills::bundled::init_bundled_skills();
+        // Build one catalog for this bootstrap. Embedded definitions are
+        // inserted first, then plugin definitions are appended in discovery
+        // order, preserving the existing bundled/plugin precedence.
+        let mut bundled_catalog = wcore_skills::bundled::init_bundled_skills();
         tracing::debug!(
             target: "wcore_agent::bootstrap",
-            "F-036: bundled skills initialised (hello registered)"
+            "bundled skill catalog initialised for session"
         );
 
-        // v0.6.4 Task 1.6/1.7 — register plugin-contributed skills into the
-        // process-global bundled-skill registry BEFORE `load_catalog` runs.
-        // `load_catalog` reads `bundled::get_bundled_skills()` first
-        // (highest priority), so a skill registered here surfaces in the
-        // catalog and, transitively, in the system prompt. Each spec is
-        // leaked to `&'static str` fields via `spec_to_static_definition`
-        // (plugin lifetime == process lifetime — leak is correct, see
-        // `skill_delivery.rs`).
+        // Move plugin-contributed skills into this bootstrap's catalog before
+        // loading refs. No plugin entry can become visible to another session.
         for skill_spec in applied.plugin_skills {
             let name = skill_spec.name.clone();
-            wcore_skills::bundled::register_bundled_skill(
-                crate::plugins::skill_delivery::spec_to_static_definition(skill_spec),
-            );
-            tracing::debug!(skill = %name, "plugin skill registered into bundled-skill registry");
+            bundled_catalog.register(crate::plugins::skill_delivery::spec_to_bundled_entry(
+                skill_spec,
+            ));
+            tracing::debug!(skill = %name, "plugin skill registered into session catalog");
         }
 
         // X1 (Task 5): load the catalog lazily. Bodies are NOT pinned in
         // memory — SkillCatalog::resolve() reads them on demand on first
         // activation, with a 32-entry LRU thereafter.
-        let mut skill_refs = wcore_skills::loader::load_catalog(
+        let mut skill_refs = wcore_skills::loader::load_catalog_with_bundled(
             cwd_path,
             &self.extra_skill_dirs,
             false,
             mcp_manager.as_deref(),
+            &bundled_catalog,
         )
         .await;
 
@@ -1565,11 +1557,11 @@ impl AgentBootstrap {
         // NOTE: to flip precedence, add `skills.user_overrides_bundled = true` to wcore.toml
         // and change the splice order in `wcore_skills::loader::load_catalog` (W3-G crate).
         {
-            let bundled_names: std::collections::HashSet<String> =
-                wcore_skills::bundled::get_bundled_skills()
-                    .iter()
-                    .map(|d| d.name.to_string())
-                    .collect();
+            let bundled_names: std::collections::HashSet<String> = bundled_catalog
+                .get_bundled_skills()
+                .iter()
+                .map(|d| d.name.to_string())
+                .collect();
             if !bundled_names.is_empty() {
                 // Scan disk skill dirs for any directory whose name matches a bundled skill.
                 let mut dirs_to_check: Vec<std::path::PathBuf> = Vec::new();

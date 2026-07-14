@@ -6,14 +6,6 @@
 mod hello;
 
 use std::path::PathBuf;
-use std::sync::OnceLock;
-
-// Wave RB STABILITY — replaced `std::sync::Mutex` with
-// `parking_lot::Mutex` so a panic while holding the bundled-skill
-// registry lock does not poison it. The critical sections are short
-// `push` / `iter` operations that cannot leave the registry in an
-// invalid state.
-use parking_lot::Mutex;
 
 use crate::types::{ExecutionContext, LoadedFrom, SkillMetadata, SkillSource};
 
@@ -44,36 +36,127 @@ pub struct BundledSkillDefinition {
     pub content: &'static str,
 }
 
-// ---------------------------------------------------------------------------
-// Global registry
-// ---------------------------------------------------------------------------
+/// Session-owned bundled skill data.
+///
+/// Embedded definitions are copied into this owned shape, while plugin
+/// adapters can move their owned strings into it without leaking memory.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BundledSkillEntry {
+    pub name: String,
+    pub description: String,
+    pub when_to_use: Option<String>,
+    pub argument_hint: Option<String>,
+    pub allowed_tools: Vec<String>,
+    pub model: Option<String>,
+    pub disable_model_invocation: bool,
+    pub user_invocable: bool,
+    /// "inline" | "fork"
+    pub context: Option<String>,
+    pub agent: Option<String>,
+    /// Embedded reference files: (relative_path, content) pairs.
+    pub files: Vec<(String, String)>,
+    /// Skill body content (Markdown).
+    pub content: String,
+}
 
-static REGISTRY: OnceLock<Mutex<Vec<BundledSkillDefinition>>> = OnceLock::new();
+impl From<BundledSkillDefinition> for BundledSkillEntry {
+    fn from(def: BundledSkillDefinition) -> Self {
+        Self {
+            name: def.name.to_owned(),
+            description: def.description.to_owned(),
+            when_to_use: def.when_to_use.map(str::to_owned),
+            argument_hint: def.argument_hint.map(str::to_owned),
+            allowed_tools: def
+                .allowed_tools
+                .iter()
+                .map(|tool| (*tool).to_owned())
+                .collect(),
+            model: def.model.map(str::to_owned),
+            disable_model_invocation: def.disable_model_invocation,
+            user_invocable: def.user_invocable,
+            context: def.context.map(str::to_owned),
+            agent: def.agent.map(str::to_owned),
+            files: def
+                .files
+                .iter()
+                .map(|(path, content)| ((*path).to_owned(), (*content).to_owned()))
+                .collect(),
+            content: def.content.to_owned(),
+        }
+    }
+}
 
-fn registry() -> &'static Mutex<Vec<BundledSkillDefinition>> {
-    REGISTRY.get_or_init(|| Mutex::new(Vec::new()))
+/// Bundled and plugin skills owned by one bootstrap/session.
+///
+/// Entries retain insertion order. `embedded()` installs embedded definitions
+/// first; bootstrap then appends plugin entries so existing precedence stays
+/// embedded-first, plugin-second.
+#[derive(Debug, Default)]
+pub struct BundledSkillCatalog {
+    entries: Vec<BundledSkillEntry>,
+}
+
+impl BundledSkillCatalog {
+    /// Create an empty catalog.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Create a catalog containing only definitions embedded in this binary.
+    pub fn embedded() -> Self {
+        let mut catalog = Self::new();
+        #[cfg(test)]
+        hello::register_hello_skill(&mut catalog);
+        catalog
+    }
+
+    /// Append one owned entry to this catalog.
+    pub fn register(&mut self, entry: BundledSkillEntry) {
+        self.entries.push(entry);
+    }
+
+    /// Convert this catalog to runtime metadata without extracting files.
+    pub fn get_bundled_skills(&self) -> Vec<SkillMetadata> {
+        self.entries.iter().map(entry_to_metadata).collect()
+    }
+
+    /// Convert this catalog to runtime metadata and extract reference files.
+    pub async fn prepare_bundled_skills(&self) -> Vec<SkillMetadata> {
+        let mut skills = self.get_bundled_skills();
+
+        for entry in self.entries.iter().filter(|entry| !entry.files.is_empty()) {
+            let files: Vec<(&str, &str)> = entry
+                .files
+                .iter()
+                .map(|(path, content)| (path.as_str(), content.as_str()))
+                .collect();
+            if let Some(dir) = extract_bundled_skill_files(&entry.name, &files).await
+                && let Some(meta) = skills.iter_mut().find(|meta| meta.name == entry.name)
+            {
+                meta.skill_root = Some(dir.to_string_lossy().into_owned());
+            }
+        }
+
+        skills
+    }
 }
 
 // ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------
 
-/// Register a bundled skill definition into the global registry.
-pub fn register_bundled_skill(def: BundledSkillDefinition) {
-    registry().lock().push(def);
+/// Append one compile-time bundled definition to an explicit catalog.
+pub fn register_bundled_skill(catalog: &mut BundledSkillCatalog, def: BundledSkillDefinition) {
+    catalog.register(def.into());
 }
 
-/// Get all registered bundled skills as `SkillMetadata`.
+/// Get embedded-only bundled skills as `SkillMetadata`.
 ///
 /// Does NOT extract files to disk — `skill_root` is always `None` for skills
 /// that have embedded files. Use `prepare_bundled_skills()` from an async
 /// context to get metadata with `skill_root` populated.
 pub fn get_bundled_skills() -> Vec<SkillMetadata> {
-    registry()
-        .lock()
-        .iter()
-        .map(definition_to_metadata)
-        .collect()
+    BundledSkillCatalog::embedded().get_bundled_skills()
 }
 
 /// Async version: get bundled skills with file extraction.
@@ -84,43 +167,23 @@ pub fn get_bundled_skills() -> Vec<SkillMetadata> {
 ///
 /// Called from `load_all_skills()` (async context). Not suitable for sync callers.
 pub async fn prepare_bundled_skills() -> Vec<SkillMetadata> {
-    let mut skills = get_bundled_skills();
-
-    // Collect (name, files) for skills that have embedded reference files.
-    let defs_with_files: Vec<(String, Vec<(&'static str, &'static str)>)> = {
-        let guard = registry().lock();
-        guard
-            .iter()
-            .filter(|d| !d.files.is_empty())
-            .map(|d| (d.name.to_owned(), d.files.to_vec()))
-            .collect()
-    };
-
-    for (name, files) in defs_with_files {
-        if let Some(dir) = extract_bundled_skill_files(&name, &files).await
-            && let Some(meta) = skills.iter_mut().find(|m| m.name == name)
-        {
-            meta.skill_root = Some(dir.to_string_lossy().into_owned());
-        }
-    }
-
-    skills
+    BundledSkillCatalog::embedded()
+        .prepare_bundled_skills()
+        .await
 }
 
 /// Initialize all built-in bundled skills.
 ///
-/// Clears the registry first to guarantee idempotency — safe to call multiple
-/// times (useful in tests).
-pub fn init_bundled_skills() {
-    clear_bundled_skills_inner();
+/// Returns a fresh catalog each time, so one bootstrap cannot observe entries
+/// appended by another bootstrap.
+pub fn init_bundled_skills() -> BundledSkillCatalog {
     // The only bundled skill today is the `hello` test fixture, which must NOT
     // ship in the production catalog (models notice it and narrate skipping
     // it). Register it solely under `cfg(test)` so the bundled-skill framework
     // stays exercised by TC-10.04 / TC-10.28 without leaking to users. In a
-    // shipped build this clears the registry and registers nothing — correct,
-    // since no production bundled skills exist yet.
-    #[cfg(test)]
-    hello::register_hello_skill();
+    // shipped build this returns an empty catalog — correct, since no
+    // production bundled skills exist yet.
+    BundledSkillCatalog::embedded()
 }
 
 /// Returns the extraction directory for a bundled skill's reference files.
@@ -191,29 +254,29 @@ pub async fn extract_bundled_skill_files(
 // Internal: conversion
 // ---------------------------------------------------------------------------
 
-fn definition_to_metadata(def: &BundledSkillDefinition) -> SkillMetadata {
-    let execution_context = match def.context {
+fn entry_to_metadata(entry: &BundledSkillEntry) -> SkillMetadata {
+    let execution_context = match entry.context.as_deref() {
         Some("fork") => ExecutionContext::Fork,
         _ => ExecutionContext::Inline,
     };
 
-    let content_length = def.content.len();
+    let content_length = entry.content.len();
 
     SkillMetadata {
-        name: def.name.to_owned(),
+        name: entry.name.clone(),
         display_name: None,
-        description: def.description.to_owned(),
+        description: entry.description.clone(),
         has_user_specified_description: true,
-        allowed_tools: def.allowed_tools.iter().map(|s| s.to_string()).collect(),
-        argument_hint: def.argument_hint.map(str::to_owned),
+        allowed_tools: entry.allowed_tools.clone(),
+        argument_hint: entry.argument_hint.clone(),
         argument_names: Vec::new(),
-        when_to_use: def.when_to_use.map(str::to_owned),
+        when_to_use: entry.when_to_use.clone(),
         version: None,
-        model: def.model.map(str::to_owned),
-        disable_model_invocation: def.disable_model_invocation,
-        user_invocable: def.user_invocable,
+        model: entry.model.clone(),
+        disable_model_invocation: entry.disable_model_invocation,
+        user_invocable: entry.user_invocable,
         execution_context,
-        agent: def.agent.map(str::to_owned),
+        agent: entry.agent.clone(),
         effort: None,
         shell: None,
         paths: Vec::new(),
@@ -221,7 +284,7 @@ fn definition_to_metadata(def: &BundledSkillDefinition) -> SkillMetadata {
         hooks_raw: None,
         source: SkillSource::Bundled,
         loaded_from: LoadedFrom::Bundled,
-        content: def.content.to_owned(),
+        content: entry.content.clone(),
         content_length,
         // skill_root is set later by extract_bundled_skill_files in load_all_skills
         skill_root: None,
@@ -393,23 +456,6 @@ fn resolve_skill_file_path(base_dir: &std::path::Path, rel_path: &str) -> std::i
     }
 
     Ok(base_dir.join(normalized))
-}
-
-// ---------------------------------------------------------------------------
-// Test helpers (registry reset only — no test logic here)
-// ---------------------------------------------------------------------------
-
-fn clear_bundled_skills_inner() {
-    registry().lock().clear();
-}
-
-/// Clear the bundled skill registry.
-///
-/// Exposed for test isolation. Production code should use `init_bundled_skills()`
-/// which calls this internally.
-#[cfg(test)]
-pub fn clear_bundled_skills() {
-    clear_bundled_skills_inner();
 }
 
 // ---------------------------------------------------------------------------

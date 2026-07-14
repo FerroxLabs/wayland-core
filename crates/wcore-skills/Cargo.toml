@@ -32,7 +32,6 @@ tracing.workspace      = true
 unicode-width.workspace = true
 lru.workspace          = true
 chrono.workspace       = true
-parking_lot.workspace  = true
 
 [target.'cfg(unix)'.dependencies]
 libc.workspace = true

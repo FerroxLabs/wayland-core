@@ -14,8 +14,8 @@
 //!   `ToolRegistry` (builtins win name collisions).
 //! - agents — fresh `AgentRegistry`.
 //! - hooks — `plugin_hooks` carrier (engine setter, post-construction).
-//! - skills — `plugin_skills` carrier (`register_bundled_skill` before
-//!   `load_catalog`).
+//! - skills — `plugin_skills` carrier (session-local catalog insertion before
+//!   `load_catalog_with_bundled`).
 //! - rules — `plugin_rules` carrier (`build_system_prompt`).
 //! - mcp servers — `plugin_mcp_servers` carrier (`connect_plugin_mcp_servers`
 //!   second pass).
@@ -93,9 +93,8 @@ pub struct AppliedPluginCapabilities {
     /// (and, via `engine.set_agent_registry`, to the engine). Task 1.2.
     pub agent_registry: AgentRegistry,
 
-    /// Plugin-contributed skills. Bootstrap leaks each via
-    /// `skill_delivery::spec_to_static_definition` and feeds it to
-    /// `register_bundled_skill` *before* `load_catalog` runs. Task 1.6 + 1.7.
+    /// Plugin-contributed skills. Bootstrap moves each into its local bundled
+    /// catalog before `load_catalog_with_bundled` runs. Task 1.6 + 1.7.
     pub plugin_skills: Vec<BundledSkillSpec>,
 
     /// Plugin-contributed hooks (Task 1.3). Bootstrap hands these to

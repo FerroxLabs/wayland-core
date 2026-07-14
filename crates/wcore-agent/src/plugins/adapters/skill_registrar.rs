@@ -1,7 +1,5 @@
-//! Skill registrar adapter. W2.5 captures `BundledSkillSpec`s in memory; W8
-//! will delegate to `wcore_skills::bundled::register_bundled_skill` via the
-//! Box::leak String -> &'static str translation noted in the api crate
-//! `bundled_skill_spec` module.
+//! Skill registrar adapter. Captures owned `BundledSkillSpec`s in memory so
+//! bootstrap can move them into its session-local bundled skill catalog.
 
 use wcore_plugin_api::BundledSkillSpec;
 use wcore_plugin_api::registry::skills::SkillRegistrar;

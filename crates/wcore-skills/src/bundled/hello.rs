@@ -1,21 +1,24 @@
-use super::{BundledSkillDefinition, register_bundled_skill};
+use super::{BundledSkillCatalog, BundledSkillDefinition, register_bundled_skill};
 
 /// Register the built-in "hello" skill used to validate the bundled skill framework.
-pub fn register_hello_skill() {
-    register_bundled_skill(BundledSkillDefinition {
-        name: "hello",
-        description: "A simple greeting skill for testing the bundled skill framework.",
-        content: "Hello! I'm a bundled skill. How can I help you today?\n\n$ARGUMENTS",
-        user_invocable: true,
-        when_to_use: None,
-        argument_hint: None,
-        allowed_tools: &[],
-        model: None,
-        disable_model_invocation: false,
-        context: None,
-        agent: None,
-        files: &[],
-    });
+pub fn register_hello_skill(catalog: &mut BundledSkillCatalog) {
+    register_bundled_skill(
+        catalog,
+        BundledSkillDefinition {
+            name: "hello",
+            description: "A simple greeting skill for testing the bundled skill framework.",
+            content: "Hello! I'm a bundled skill. How can I help you today?\n\n$ARGUMENTS",
+            user_invocable: true,
+            when_to_use: None,
+            argument_hint: None,
+            allowed_tools: &[],
+            model: None,
+            disable_model_invocation: false,
+            context: None,
+            agent: None,
+            files: &[],
+        },
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -24,17 +27,15 @@ pub fn register_hello_skill() {
 
 #[cfg(test)]
 mod tests {
-    use super::super::{clear_bundled_skills, get_bundled_skills};
+    use super::super::BundledSkillCatalog;
     use super::register_hello_skill;
-    use serial_test::serial;
 
     // TC-10.18: hello skill fields are correct
     #[test]
-    #[serial]
     fn tc_10_18_hello_skill_fields_correct() {
-        clear_bundled_skills();
-        register_hello_skill();
-        let skills = get_bundled_skills();
+        let mut catalog = BundledSkillCatalog::new();
+        register_hello_skill(&mut catalog);
+        let skills = catalog.get_bundled_skills();
         let hello = skills
             .iter()
             .find(|s| s.name == "hello")

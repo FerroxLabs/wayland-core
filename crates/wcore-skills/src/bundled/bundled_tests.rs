@@ -1,6 +1,6 @@
 // Phase 10 inline tests for src/skills/bundled/mod.rs
 // Covers TC-10.01 ~ TC-10.28 (registration API, field mapping, file extraction,
-// resolve_skill_file_path path validation, prepare_bundled_skills, thread safety).
+// resolve_skill_file_path path validation, prepare_bundled_skills, isolation).
 
 use super::*;
 use serial_test::serial;
@@ -33,11 +33,10 @@ fn minimal_def(name: &'static str) -> BundledSkillDefinition {
 // ---------------------------------------------------------------------------
 
 #[test]
-#[serial]
 fn tc_10_01_register_single_skill() {
-    clear_bundled_skills();
-    register_bundled_skill(minimal_def("tc-01"));
-    let skills = get_bundled_skills();
+    let mut catalog = BundledSkillCatalog::new();
+    register_bundled_skill(&mut catalog, minimal_def("tc-01"));
+    let skills = catalog.get_bundled_skills();
     assert_eq!(skills.len(), 1);
     assert_eq!(skills[0].name, "tc-01");
 }
@@ -47,29 +46,28 @@ fn tc_10_01_register_single_skill() {
 // ---------------------------------------------------------------------------
 
 #[test]
-#[serial]
 fn tc_10_02_register_multiple_accumulate() {
-    clear_bundled_skills();
-    register_bundled_skill(minimal_def("a"));
-    register_bundled_skill(minimal_def("b"));
-    register_bundled_skill(minimal_def("c"));
-    let skills = get_bundled_skills();
+    let mut catalog = BundledSkillCatalog::new();
+    register_bundled_skill(&mut catalog, minimal_def("a"));
+    register_bundled_skill(&mut catalog, minimal_def("b"));
+    register_bundled_skill(&mut catalog, minimal_def("c"));
+    let skills = catalog.get_bundled_skills();
     assert_eq!(skills.len(), 3);
     let names: Vec<&str> = skills.iter().map(|s| s.name.as_str()).collect();
     assert!(names.contains(&"a") && names.contains(&"b") && names.contains(&"c"));
 }
 
 // ---------------------------------------------------------------------------
-// TC-10.03: clear_bundled_skills empties registry
+// TC-10.03: fresh catalogs do not inherit entries
 // ---------------------------------------------------------------------------
 
 #[test]
-#[serial]
-fn tc_10_03_clear_empties_registry() {
-    clear_bundled_skills();
-    register_bundled_skill(minimal_def("to-clear"));
-    clear_bundled_skills();
-    assert!(get_bundled_skills().is_empty());
+fn tc_10_03_fresh_catalog_is_empty() {
+    let mut first = BundledSkillCatalog::new();
+    register_bundled_skill(&mut first, minimal_def("first-only"));
+    let second = BundledSkillCatalog::new();
+    assert_eq!(first.get_bundled_skills().len(), 1);
+    assert!(second.get_bundled_skills().is_empty());
 }
 
 // ---------------------------------------------------------------------------
@@ -77,11 +75,9 @@ fn tc_10_03_clear_empties_registry() {
 // ---------------------------------------------------------------------------
 
 #[test]
-#[serial]
 fn tc_10_04_init_registers_hello() {
-    clear_bundled_skills();
-    init_bundled_skills();
-    let skills = get_bundled_skills();
+    let catalog = init_bundled_skills();
+    let skills = catalog.get_bundled_skills();
     assert!(!skills.is_empty());
     assert!(skills.iter().any(|s| s.name == "hello"));
 }
@@ -91,24 +87,26 @@ fn tc_10_04_init_registers_hello() {
 // ---------------------------------------------------------------------------
 
 #[test]
-#[serial]
 fn tc_10_05_full_field_mapping() {
-    clear_bundled_skills();
-    register_bundled_skill(BundledSkillDefinition {
-        name: "full-skill",
-        description: "desc",
-        when_to_use: Some("when"),
-        argument_hint: Some("arg"),
-        allowed_tools: &["Bash", "Read"],
-        model: Some(ANTHROPIC_OPUS),
-        disable_model_invocation: false,
-        user_invocable: true,
-        context: Some("inline"),
-        agent: Some("my-agent"),
-        files: &[],
-        content: "body",
-    });
-    let skills = get_bundled_skills();
+    let mut catalog = BundledSkillCatalog::new();
+    register_bundled_skill(
+        &mut catalog,
+        BundledSkillDefinition {
+            name: "full-skill",
+            description: "desc",
+            when_to_use: Some("when"),
+            argument_hint: Some("arg"),
+            allowed_tools: &["Bash", "Read"],
+            model: Some(ANTHROPIC_OPUS),
+            disable_model_invocation: false,
+            user_invocable: true,
+            context: Some("inline"),
+            agent: Some("my-agent"),
+            files: &[],
+            content: "body",
+        },
+    );
+    let skills = catalog.get_bundled_skills();
     let m = &skills[0];
     assert_eq!(m.name, "full-skill");
     assert_eq!(m.description, "desc");
@@ -127,11 +125,10 @@ fn tc_10_05_full_field_mapping() {
 // ---------------------------------------------------------------------------
 
 #[test]
-#[serial]
 fn tc_10_06_source_and_loaded_from_bundled() {
-    clear_bundled_skills();
-    register_bundled_skill(minimal_def("src-test"));
-    let skills = get_bundled_skills();
+    let mut catalog = BundledSkillCatalog::new();
+    register_bundled_skill(&mut catalog, minimal_def("src-test"));
+    let skills = catalog.get_bundled_skills();
     let m = &skills[0];
     assert_eq!(m.source, SkillSource::Bundled);
     assert_eq!(m.loaded_from, LoadedFrom::Bundled);
@@ -142,14 +139,16 @@ fn tc_10_06_source_and_loaded_from_bundled() {
 // ---------------------------------------------------------------------------
 
 #[test]
-#[serial]
 fn tc_10_07_context_inline_maps_correctly() {
-    clear_bundled_skills();
-    register_bundled_skill(BundledSkillDefinition {
-        context: Some("inline"),
-        ..minimal_def("ctx-inline")
-    });
-    let m = &get_bundled_skills()[0];
+    let mut catalog = BundledSkillCatalog::new();
+    register_bundled_skill(
+        &mut catalog,
+        BundledSkillDefinition {
+            context: Some("inline"),
+            ..minimal_def("ctx-inline")
+        },
+    );
+    let m = &catalog.get_bundled_skills()[0];
     assert_eq!(m.execution_context, ExecutionContext::Inline);
 }
 
@@ -158,14 +157,16 @@ fn tc_10_07_context_inline_maps_correctly() {
 // ---------------------------------------------------------------------------
 
 #[test]
-#[serial]
 fn tc_10_08_context_fork_maps_correctly() {
-    clear_bundled_skills();
-    register_bundled_skill(BundledSkillDefinition {
-        context: Some("fork"),
-        ..minimal_def("ctx-fork")
-    });
-    let m = &get_bundled_skills()[0];
+    let mut catalog = BundledSkillCatalog::new();
+    register_bundled_skill(
+        &mut catalog,
+        BundledSkillDefinition {
+            context: Some("fork"),
+            ..minimal_def("ctx-fork")
+        },
+    );
+    let m = &catalog.get_bundled_skills()[0];
     assert_eq!(m.execution_context, ExecutionContext::Fork);
 }
 
@@ -174,11 +175,10 @@ fn tc_10_08_context_fork_maps_correctly() {
 // ---------------------------------------------------------------------------
 
 #[test]
-#[serial]
 fn tc_10_09_context_none_defaults_to_inline() {
-    clear_bundled_skills();
-    register_bundled_skill(minimal_def("ctx-none"));
-    let m = &get_bundled_skills()[0];
+    let mut catalog = BundledSkillCatalog::new();
+    register_bundled_skill(&mut catalog, minimal_def("ctx-none"));
+    let m = &catalog.get_bundled_skills()[0];
     assert_eq!(
         m.execution_context,
         ExecutionContext::Inline,
@@ -191,11 +191,10 @@ fn tc_10_09_context_none_defaults_to_inline() {
 // ---------------------------------------------------------------------------
 
 #[test]
-#[serial]
 fn tc_10_10_no_files_skill_root_none() {
-    clear_bundled_skills();
-    register_bundled_skill(minimal_def("no-files"));
-    let m = &get_bundled_skills()[0];
+    let mut catalog = BundledSkillCatalog::new();
+    register_bundled_skill(&mut catalog, minimal_def("no-files"));
+    let m = &catalog.get_bundled_skills()[0];
     assert!(m.skill_root.is_none());
 }
 
@@ -204,14 +203,16 @@ fn tc_10_10_no_files_skill_root_none() {
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
-#[serial]
 async fn tc_10_11_files_skill_root_set_by_prepare() {
-    clear_bundled_skills();
-    register_bundled_skill(BundledSkillDefinition {
-        files: &[("guide.md", "# Guide")],
-        ..minimal_def("file-skill")
-    });
-    let skills = prepare_bundled_skills().await;
+    let mut catalog = BundledSkillCatalog::new();
+    register_bundled_skill(
+        &mut catalog,
+        BundledSkillDefinition {
+            files: &[("guide.md", "# Guide")],
+            ..minimal_def("file-skill")
+        },
+    );
+    let skills = catalog.prepare_bundled_skills().await;
     let m = skills.iter().find(|s| s.name == "file-skill").unwrap();
     assert!(
         m.skill_root.is_some(),
@@ -332,17 +333,16 @@ fn tc_10_17_extract_dir_path_format() {
 }
 
 // ---------------------------------------------------------------------------
-// TC-10.19: get_bundled_skills is idempotent (does not consume registry)
+// TC-10.19: get_bundled_skills is idempotent (does not consume catalog)
 // ---------------------------------------------------------------------------
 
 #[test]
-#[serial]
 fn tc_10_19_get_bundled_skills_idempotent() {
-    clear_bundled_skills();
-    register_bundled_skill(minimal_def("idem-a"));
-    register_bundled_skill(minimal_def("idem-b"));
-    assert_eq!(get_bundled_skills().len(), 2);
-    assert_eq!(get_bundled_skills().len(), 2);
+    let mut catalog = BundledSkillCatalog::new();
+    register_bundled_skill(&mut catalog, minimal_def("idem-a"));
+    register_bundled_skill(&mut catalog, minimal_def("idem-b"));
+    assert_eq!(catalog.get_bundled_skills().len(), 2);
+    assert_eq!(catalog.get_bundled_skills().len(), 2);
 }
 
 // ---------------------------------------------------------------------------
@@ -350,44 +350,40 @@ fn tc_10_19_get_bundled_skills_idempotent() {
 // ---------------------------------------------------------------------------
 
 #[test]
-#[serial]
 fn tc_10_23_content_length_correct() {
-    clear_bundled_skills();
-    register_bundled_skill(BundledSkillDefinition {
-        content: "hello world",
-        ..minimal_def("cl-skill")
-    });
-    let m = &get_bundled_skills()[0];
+    let mut catalog = BundledSkillCatalog::new();
+    register_bundled_skill(
+        &mut catalog,
+        BundledSkillDefinition {
+            content: "hello world",
+            ..minimal_def("cl-skill")
+        },
+    );
+    let m = &catalog.get_bundled_skills()[0];
     assert_eq!(m.content_length, "hello world".len());
 }
 
 // ---------------------------------------------------------------------------
-// TC-10.24: concurrent registration does not panic
+// TC-10.24: embedded definitions stay ahead of appended plugin entries
 // ---------------------------------------------------------------------------
 
 #[test]
-#[serial]
-fn tc_10_24_concurrent_registration_no_panic() {
-    clear_bundled_skills();
-    let handles: Vec<_> = (0..10_u8)
-        .map(|i| {
-            std::thread::spawn(move || {
-                // SAFETY: each thread registers a unique name literal via a
-                // fixed array; we pick from the set of 10 pre-defined literals.
-                let names: [&'static str; 10] =
-                    ["t0", "t1", "t2", "t3", "t4", "t5", "t6", "t7", "t8", "t9"];
-                register_bundled_skill(minimal_def(names[i as usize]));
-            })
-        })
+fn tc_10_24_embedded_then_plugin_insertion_order_is_preserved() {
+    let mut catalog = BundledSkillCatalog::embedded();
+    register_bundled_skill(&mut catalog, minimal_def("plugin-first"));
+    register_bundled_skill(&mut catalog, minimal_def("plugin-second"));
+    let names: Vec<_> = catalog
+        .get_bundled_skills()
+        .into_iter()
+        .map(|skill| skill.name)
         .collect();
-    for h in handles {
-        h.join().expect("thread should not panic");
-    }
-    let skills = get_bundled_skills();
     assert_eq!(
-        skills.len(),
-        10,
-        "all 10 concurrent registrations should be present"
+        names,
+        vec![
+            "hello".to_owned(),
+            "plugin-first".to_owned(),
+            "plugin-second".to_owned()
+        ]
     );
 }
 
@@ -396,14 +392,16 @@ fn tc_10_24_concurrent_registration_no_panic() {
 // ---------------------------------------------------------------------------
 
 #[test]
-#[serial]
 fn tc_10_25_unknown_context_defaults_to_inline() {
-    clear_bundled_skills();
-    register_bundled_skill(BundledSkillDefinition {
-        context: Some("unknown-value"),
-        ..minimal_def("ctx-unknown")
-    });
-    let m = &get_bundled_skills()[0];
+    let mut catalog = BundledSkillCatalog::new();
+    register_bundled_skill(
+        &mut catalog,
+        BundledSkillDefinition {
+            context: Some("unknown-value"),
+            ..minimal_def("ctx-unknown")
+        },
+    );
+    let m = &catalog.get_bundled_skills()[0];
     assert_eq!(m.execution_context, ExecutionContext::Inline);
 }
 
@@ -453,15 +451,22 @@ fn tc_10_27d_resolve_disguised_traversal_rejected() {
 // ---------------------------------------------------------------------------
 
 #[test]
-#[serial]
 fn tc_10_28_init_idempotent() {
-    clear_bundled_skills();
-    init_bundled_skills();
-    init_bundled_skills();
-    let skills = get_bundled_skills();
-    let hello_count = skills.iter().filter(|s| s.name == "hello").count();
+    let first = init_bundled_skills();
+    let second = init_bundled_skills();
+    let first_count = first
+        .get_bundled_skills()
+        .iter()
+        .filter(|skill| skill.name == "hello")
+        .count();
+    let second_count = second
+        .get_bundled_skills()
+        .iter()
+        .filter(|skill| skill.name == "hello")
+        .count();
     assert_eq!(
-        hello_count, 1,
+        (first_count, second_count),
+        (1, 1),
         "init_bundled_skills must be idempotent — hello should appear exactly once"
     );
 }
