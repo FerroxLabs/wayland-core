@@ -43,6 +43,9 @@ pub struct LlmSynthesisAggregator {
     model: Option<String>,
     /// Base config the synthesis sub-agent inherits (policy surface, etc.).
     base: Config,
+    /// Immutable outbound authority inherited from the council's parent
+    /// session. The synthesis child is created after bootstrap scope exits.
+    egress_policy: wcore_egress::SharedPolicy,
     /// Crucible #3: sampling temperature for the synthesis sub-agent
     /// (convergence — runs cooler than the proposers).
     temperature: f32,
@@ -59,8 +62,14 @@ impl LlmSynthesisAggregator {
             provider,
             model,
             base,
+            egress_policy: wcore_egress::default_policy(),
             temperature,
         }
+    }
+
+    pub fn with_egress_policy(mut self, policy: wcore_egress::SharedPolicy) -> Self {
+        self.egress_policy = policy;
+        self
     }
 
     /// The first usable proposal's text — the fallback when the aggregator
@@ -98,7 +107,8 @@ impl Aggregator for LlmSynthesisAggregator {
         // tool registry, so even a successful injection in a proposal cannot
         // reach a side-effecting tool. The provider is the (already-resolved)
         // aggregator provider; `model` is applied via child_config (T2).
-        let spawner = AgentSpawner::new(self.provider.clone(), self.base.clone());
+        let spawner = AgentSpawner::new(self.provider.clone(), self.base.clone())
+            .with_egress_policy(Arc::clone(&self.egress_policy));
         let result = spawner
             .spawn_one(SubAgentConfig {
                 name: "__council_aggregator__".to_string(),

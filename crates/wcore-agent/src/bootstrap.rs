@@ -222,6 +222,10 @@ pub struct AgentBootstrap {
     /// bootstrap binds both the parent approval flow and future child configs
     /// to this same manager.
     approval_manager: Option<Arc<wcore_protocol::ToolApprovalManager>>,
+    /// F09: egress policy owned by this bootstrap/session. Clients created
+    /// during build capture this policy instead of consulting process-global
+    /// mutable state.
+    session_egress_policy: Option<crate::egress::AgentEgressPolicy>,
 }
 
 /// Build the bundled/plugin catalog owned by one bootstrap invocation.
@@ -263,6 +267,7 @@ impl AgentBootstrap {
             dangerous_grant: None,
             baseline_policy: None,
             approval_manager: None,
+            session_egress_policy: None,
         }
     }
 
@@ -421,6 +426,13 @@ impl AgentBootstrap {
 
     /// Build the fully-initialized engine.
     pub async fn build(mut self) -> anyhow::Result<BootstrapResult> {
+        let policy = crate::egress::policy_from_config(&self.config);
+        self.session_egress_policy = Some(policy.clone());
+        let shared: wcore_egress::SharedPolicy = Arc::new(policy);
+        wcore_egress::with_default_policy(shared, self.build_scoped()).await
+    }
+
+    async fn build_scoped(mut self) -> anyhow::Result<BootstrapResult> {
         let cwd = &self.workspace;
         let cwd_path = std::path::Path::new(cwd);
         // Mint the immutable session root before any child-capable tools are
@@ -801,14 +813,6 @@ impl AgentBootstrap {
         // Windows (set once at boot; WAYLAND_BASH_SHELL env still overrides).
         wcore_config::shell::set_bash_shell_config(self.config.tools.windows_shell.clone());
 
-        // #325: install the config-sourced env passthrough allowlist so
-        // `[tools] env_passthrough` actually forwards the named vars into
-        // sandboxed tool children (the sandbox secret filter still drops
-        // secret-shaped names). Skill-declared passthroughs are additive.
-        wcore_tools::env_passthrough::set_config_passthrough(
-            self.config.tools.env_passthrough.iter(),
-        );
-
         // F07: resolve one immutable sandbox runtime for this session. A
         // persisted config or environment may select another real backend,
         // but cannot disable containment; only a resolver-produced local
@@ -816,12 +820,15 @@ impl AgentBootstrap {
         if let Some(grant) = dangerous_grant.as_ref() {
             session_guard.arm_dangerous_lease(grant)?;
         }
-        let sandbox_runtime = Arc::new(match dangerous_grant.as_ref() {
-            Some(grant) => wcore_sandbox::SandboxRegistry::dangerous(grant),
-            None => wcore_sandbox::SandboxRegistry::required_for_session(
-                self.config.tools.sandbox.as_deref(),
-            )?,
-        });
+        let sandbox_runtime = Arc::new(
+            match dangerous_grant.as_ref() {
+                Some(grant) => wcore_sandbox::SandboxRegistry::dangerous(grant),
+                None => wcore_sandbox::SandboxRegistry::required_for_session(
+                    self.config.tools.sandbox.as_deref(),
+                )?,
+            }
+            .with_env_passthrough(self.config.tools.env_passthrough.iter()),
+        );
         if self.config.tools.allow_no_sandbox == Some(true) {
             tracing::warn!(
                 target: "wcore_agent::bootstrap",
@@ -1249,7 +1256,13 @@ impl AgentBootstrap {
                 ),
                 Err(_) => scoped_servers.clone(),
             };
-            match McpManager::connect_all(&resolved_servers).await {
+            let egress_policy: wcore_egress::SharedPolicy = Arc::new(
+                self.session_egress_policy
+                    .as_ref()
+                    .expect("session egress policy is installed before scoped bootstrap")
+                    .clone(),
+            );
+            match McpManager::connect_all_with_policy(&resolved_servers, egress_policy).await {
                 Ok(mgr) => {
                     let mgr = Arc::new(mgr);
                     wcore_mcp::tool_proxy::register_mcp_tools(
@@ -1276,12 +1289,20 @@ impl AgentBootstrap {
         // pre-MCP `builtin_names` snapshot for collision detection. Non-fatal:
         // a failed plugin MCP connect logs and returns `None` (one bad plugin
         // cannot crash boot).
-        if let Some(plugin_mcp_mgr) = crate::plugins::mcp_delivery::connect_plugin_mcp_servers(
-            &applied.plugin_mcp_servers,
-            &mut registry,
-            &builtin_names,
-        )
-        .await
+        let plugin_egress_policy: wcore_egress::SharedPolicy = Arc::new(
+            self.session_egress_policy
+                .as_ref()
+                .expect("session egress policy is installed before scoped bootstrap")
+                .clone(),
+        );
+        if let Some(plugin_mcp_mgr) =
+            crate::plugins::mcp_delivery::connect_plugin_mcp_servers_with_policy(
+                &applied.plugin_mcp_servers,
+                &mut registry,
+                &builtin_names,
+                plugin_egress_policy,
+            )
+            .await
         {
             mcp_managers.push(plugin_mcp_mgr);
         }
@@ -2015,6 +2036,12 @@ impl AgentBootstrap {
         let mut spawner_builder =
             crate::spawner::AgentSpawner::new(provider.clone(), self.config.clone())
                 .with_sandbox_runtime(registry.sandbox_runtime())
+                .with_egress_policy(Arc::new(
+                    self.session_egress_policy
+                        .as_ref()
+                        .expect("session egress policy is installed before scoped bootstrap")
+                        .clone(),
+                ))
                 .with_session_runtime(session_runtime.clone())
                 .with_bus(Arc::clone(&agent_bus));
         if let Some(manager) = self.approval_manager.as_ref() {
@@ -2125,6 +2152,12 @@ impl AgentBootstrap {
             registry.register(Box::new(crate::orchestration::anvil::tool::ForgeTool::new(
                 cf.anvil,
                 self.config.clone(),
+                Arc::new(
+                    self.session_egress_policy
+                        .as_ref()
+                        .expect("session egress policy is installed before tool registration")
+                        .clone(),
+                ),
             )));
         }
 
@@ -2167,15 +2200,10 @@ impl AgentBootstrap {
         // it when the runtime shuts down.
         let _reaper_handle = approval_bridge.spawn_reaper(crate::approval::DEFAULT_REAP_INTERVAL);
 
-        // B2.5 — attach the consent doorbell to the process-global egress policy
-        // (if one was installed at CLI entry). The policy rings this on an `Ask`
-        // verdict (a data-less read to a new domain) to prompt once/always/no
-        // through the same approval bridge + output sink the ScriptTool HITL
-        // path uses. `installed_policy()` is `None` in tests / headless / when
-        // security is off, so this is a cheap no-op there (no allocation, no
-        // boot-cost — unlike the policy *install*, which is deliberately kept at
-        // CLI entry, not here).
-        if let Some(policy) = crate::egress::installed_policy() {
+        // F09: attach the consent doorbell only to this session's policy. A
+        // later ACP/Desktop session therefore cannot repoint an earlier
+        // session's approval bridge.
+        if let Some(policy) = self.session_egress_policy.as_ref() {
             let doorbell = std::sync::Arc::new(crate::egress::BridgeConsentDoorbell::new(
                 approval_bridge.clone(),
                 self.output.clone(),
@@ -2447,6 +2475,10 @@ impl AgentBootstrap {
         } else {
             AgentEngine::new_with_provider(provider.clone(), self.config, registry, self.output)
         };
+        if let Some(policy) = self.session_egress_policy.as_ref() {
+            let policy: wcore_egress::SharedPolicy = Arc::new(policy.clone());
+            engine.set_egress_policy(policy);
+        }
         if let Some(manager) = self.approval_manager.take() {
             engine.set_approval_manager(manager);
         }

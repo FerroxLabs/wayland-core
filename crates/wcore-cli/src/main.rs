@@ -3012,6 +3012,7 @@ async fn run_json_stream_mode(
     };
     let startup_capability_activations = result.capability_activations.clone();
     let mut engine = result.engine;
+    let session_egress_policy = engine.egress_policy();
     let workspace_policy = engine
         .tools()
         .workspace_policy()
@@ -3091,8 +3092,9 @@ async fn run_json_stream_mode(
     // request cannot race ahead with an incomplete configured-tool set.
     let mut deferred_mcp_rx = deferred_mcp_servers.map(|resolved| {
         let (tx, rx) = tokio::sync::oneshot::channel();
+        let egress_policy = session_egress_policy.clone();
         tokio::spawn(async move {
-            let outcome = McpManager::connect_all(&resolved).await;
+            let outcome = McpManager::connect_all_with_policy(&resolved, egress_policy).await;
             let _ = tx.send((outcome, resolved));
         });
         rx
@@ -3220,7 +3222,12 @@ async fn run_json_stream_mode(
                 let mut single_configs = HashMap::new();
                 single_configs.insert(name.clone(), config.clone());
                 eprintln!("[mcp] Connecting to '{name}'...");
-                match McpManager::connect_all(&single_configs).await {
+                match McpManager::connect_all_with_policy(
+                    &single_configs,
+                    session_egress_policy.clone(),
+                )
+                .await
+                {
                     Ok(mgr) => {
                         let tool_names: Vec<String> = mgr
                             .all_tools()

@@ -69,6 +69,7 @@ pub mod inbound_webhook;
 pub mod mcp_curator;
 pub mod orchestration;
 pub mod output;
+mod output_redaction;
 pub mod plan;
 pub mod plugins;
 // v0.7.0 Task 1.C.1 — WAYLAND.md / AGENTS.md / .wayland/context.md /

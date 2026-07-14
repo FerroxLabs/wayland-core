@@ -28,29 +28,6 @@ use wcore_egress::{EgressDecision, EgressPolicy};
 use super::classify::{AllowList, EgressVerdict, classify};
 use super::consent::{ConsentDecision, ConsentDoorbell};
 
-/// Handle to the enforcing policy installed process-wide by
-/// [`install_egress_policy`](super::install::install_egress_policy). Lets a
-/// later bootstrap step inject the consent doorbell (B2.5) onto the live policy
-/// that every `EgressClient` already consults — the policy is installed at CLI
-/// entry (before the engine/bridge exist), so the doorbell must be attached
-/// after the fact. `None` when nothing was installed (headless/tests).
-static INSTALLED: StdRwLock<Option<AgentEgressPolicy>> = StdRwLock::new(None);
-
-/// Remember the freshly-built enforcing policy so bootstrap can later attach a
-/// consent doorbell to it. Called from `install_egress_policy`.
-pub(crate) fn remember_installed(policy: AgentEgressPolicy) {
-    if let Ok(mut slot) = INSTALLED.write() {
-        *slot = Some(policy);
-    }
-}
-
-/// The enforcing policy installed process-wide, if any. Bootstrap uses this to
-/// inject the consent doorbell; returns `None` in non-enforcing/headless/test
-/// contexts (nothing to wire).
-pub fn installed_policy() -> Option<AgentEgressPolicy> {
-    INSTALLED.read().ok().and_then(|slot| slot.clone())
-}
-
 /// Whether the egress boundary is enforced or disabled.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EgressPosture {
@@ -67,9 +44,8 @@ pub enum EgressPosture {
 pub struct AgentEgressPolicy {
     allow: Arc<RwLock<AllowList>>,
     posture: EgressPosture,
-    /// B2.5 — the consent doorbell, injected at bootstrap when an interactive
-    /// surface exists. Shared across clones (and across the process-global
-    /// install) so attaching it post-install takes effect on the live policy.
+    /// B2.5 — the consent doorbell, injected into this session's policy when
+    /// an interactive surface exists. Shared only by clones of that policy.
     /// `None` ⇒ no consent surface ⇒ `Ask` falls back to allow (see
     /// [`resolve_ask`](Self::resolve_ask)).
     doorbell: Arc<StdRwLock<Option<Arc<dyn ConsentDoorbell>>>>,
@@ -100,9 +76,8 @@ impl AgentEgressPolicy {
         self.allow.clone()
     }
 
-    /// Attach the consent doorbell (B2.5). Idempotent/last-writer-wins; shared
-    /// across clones so attaching it to the installed policy takes effect on
-    /// the live one every `EgressClient` consults.
+    /// Attach the consent doorbell (B2.5). Idempotent/last-writer-wins within
+    /// one session policy.
     pub fn set_doorbell(&self, doorbell: Arc<dyn ConsentDoorbell>) {
         if let Ok(mut slot) = self.doorbell.write() {
             *slot = Some(doorbell);

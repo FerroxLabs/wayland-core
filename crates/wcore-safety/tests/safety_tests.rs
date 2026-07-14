@@ -36,6 +36,14 @@ fn scrub_jwt() {
     let input = "token=eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJ1c2VyIn0.SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV";
     let out = s.scrub(input);
     assert!(out.contains("[REDACTED:JWT]"), "got: {out}");
+
+    let split = [
+        "token=eyJ",
+        "hbGciOiJIUzI1NiJ9\n.eyJzdWIiOiJ1c2VyIn0\n.SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV",
+    ]
+    .concat();
+    let out = s.scrub(&split);
+    assert!(out.contains("[REDACTED:JWT]"), "got: {out}");
 }
 
 #[test]
@@ -43,6 +51,14 @@ fn scrub_bearer_token() {
     let s = PIIScrubber;
     let input = "Authorization: Bearer eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9abcdef";
     let out = s.scrub(input);
+    assert!(out.contains("[REDACTED:BEARER_TOKEN]"), "got: {out}");
+
+    let split = [
+        "Authorization: Bearer \neyJ",
+        "hbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9abcdef",
+    ]
+    .concat();
+    let out = s.scrub(&split);
     assert!(out.contains("[REDACTED:BEARER_TOKEN]"), "got: {out}");
 }
 

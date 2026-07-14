@@ -1,6 +1,7 @@
 use std::borrow::Cow;
 use std::sync::OnceLock;
 
+use base64::Engine as _;
 use regex::{Regex, RegexSet};
 
 /// Compiled PII pattern set. Each entry is (label, regex_str).
@@ -18,10 +19,10 @@ static PATTERNS: &[(&str, &str)] = &[
     // JWT: header.payload.signature (all base64url segments)
     (
         "JWT",
-        r"eyJ[A-Za-z0-9_-]+\.eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+",
+        r"eyJ(?:[A-Za-z0-9_-]\s*)+\.\s*eyJ(?:[A-Za-z0-9_-]\s*)+\.\s*(?:[A-Za-z0-9_-]\s*)+",
     ),
     // Bearer token (header value style, >=20 chars of token material)
-    ("BEARER_TOKEN", r"Bearer [A-Za-z0-9._\-]{20,}"),
+    ("BEARER_TOKEN", r"Bearer\s+(?:[A-Za-z0-9._~+\-/=]\s*){20,}"),
     // ── Prior Wayland Python engine redaction port — additional credential prefixes ──
     // GitHub personal access tokens (classic) and fine-grained.
     ("GITHUB_PAT", r"ghp_[A-Za-z0-9]{20,}"),
@@ -68,7 +69,7 @@ static PATTERNS: &[(&str, &str)] = &[
     // PEM-encoded private key blocks (RSA, EC, OPENSSH, generic PRIVATE KEY).
     (
         "PRIVATE_KEY_BLOCK",
-        r"-----BEGIN[A-Z ]*PRIVATE KEY-----[\s\S]*?-----END[A-Z ]*PRIVATE KEY-----",
+        r"-----B\s*E\s*G\s*I\s*N[A-Z\s]*PRIVATE\s+KEY-----[\s\S]*?-----E\s*N\s*D[A-Z\s]*PRIVATE\s+KEY-----",
     ),
     // Database connection-string passwords: protocol://user:PASS@host.
     // Full-match replacement (not group-1) is acceptable here — connection
@@ -76,6 +77,13 @@ static PATTERNS: &[(&str, &str)] = &[
     (
         "DB_CONNECTION_STRING",
         r"(?i)(?:postgres(?:ql)?|mysql|mongodb(?:\+srv)?|redis|amqp)://[^:\s]+:[^@\s]+@\S+",
+    ),
+    // Shell/.env/YAML-style secret assignments. Match secret-bearing key
+    // segments rather than every variable so benign configuration remains
+    // readable while unknown credential values are still scrubbed.
+    (
+        "SECRET_ASSIGNMENT",
+        r"(?im)^\s*(?:export\s+)?(?:[A-Z][A-Z0-9]*_)*(?:API_KEY|TOKEN|SECRET|PASSWORD|PASSWD|PASSPHRASE|PRIVATE_KEY|ACCESS_KEY|CREDENTIALS?|AUTH)(?:_[A-Z0-9]+)*\s*[:=]\s*[^#\r\n]+",
     ),
     // E.164 phone numbers: +<country><6-14 digits>. Negative lookahead via
     // word boundary so adjacent alphanumerics don't reach in.
@@ -89,6 +97,8 @@ static COMPILED: OnceLock<Vec<Regex>> = OnceLock::new();
 
 /// Fast pre-filter: any pattern matches at all?
 static FAST_SET: OnceLock<RegexSet> = OnceLock::new();
+static BASE64_CANDIDATES: OnceLock<Regex> = OnceLock::new();
+static WRAPPED_BASE64_CANDIDATES: OnceLock<Regex> = OnceLock::new();
 
 fn compiled() -> &'static Vec<Regex> {
     COMPILED.get_or_init(|| {
@@ -106,6 +116,69 @@ fn fast_set() -> &'static RegexSet {
     })
 }
 
+fn base64_candidates() -> &'static Regex {
+    BASE64_CANDIDATES.get_or_init(|| {
+        Regex::new(r"[A-Za-z0-9+/_-]{24,}={0,2}")
+            .expect("wcore-safety: invalid base64 candidate regex")
+    })
+}
+
+fn wrapped_base64_candidates() -> &'static Regex {
+    WRAPPED_BASE64_CANDIDATES.get_or_init(|| {
+        Regex::new(r"[A-Za-z0-9+/_-](?:[A-Za-z0-9+/_=\r\n\t ]{22,})")
+            .expect("wcore-safety: invalid wrapped base64 candidate regex")
+    })
+}
+
+fn scrub_direct<'a>(input: &'a str) -> Cow<'a, str> {
+    if !fast_set().is_match(input) {
+        return Cow::Borrowed(input);
+    }
+
+    let mut result = input.to_owned();
+    for (idx, rx) in compiled().iter().enumerate() {
+        let label = PATTERNS[idx].0;
+        let replacement = format!("[REDACTED:{label}]");
+        if label == "SECRET_ASSIGNMENT" {
+            result = rx
+                .replace_all(&result, |captures: &regex::Captures<'_>| {
+                    let matched = captures
+                        .get(0)
+                        .expect("wcore-safety: replacement capture must exist")
+                        .as_str();
+                    if matched.contains("[REDACTED:") {
+                        matched.to_owned()
+                    } else {
+                        replacement.clone()
+                    }
+                })
+                .into_owned();
+        } else {
+            result = rx.replace_all(&result, replacement.as_str()).into_owned();
+        }
+    }
+    Cow::Owned(result)
+}
+
+fn decoded_contains_secret(candidate: &str) -> bool {
+    use base64::engine::general_purpose::{STANDARD, STANDARD_NO_PAD, URL_SAFE, URL_SAFE_NO_PAD};
+
+    [
+        STANDARD.decode(candidate),
+        STANDARD_NO_PAD.decode(candidate),
+        URL_SAFE.decode(candidate),
+        URL_SAFE_NO_PAD.decode(candidate),
+    ]
+    .into_iter()
+    .flatten()
+    .any(|bytes| {
+        matches!(
+            scrub_direct(&String::from_utf8_lossy(&bytes)),
+            Cow::Owned(_)
+        )
+    })
+}
+
 /// Scrubs known PII/credential patterns from a string, replacing each match
 /// with `[REDACTED:<KIND>]`.
 ///
@@ -115,21 +188,76 @@ pub struct PIIScrubber;
 impl PIIScrubber {
     /// Scrub `input`, returning the original slice if nothing matched.
     pub fn scrub<'a>(&self, input: &'a str) -> Cow<'a, str> {
-        // Fast bail-out: if the set finds no match, return borrowed.
-        if !fast_set().is_match(input) {
-            return Cow::Borrowed(input);
+        let direct = scrub_direct(input);
+        // Fast, deterministic MIME-wrapped case: streaming redaction groups a
+        // pure base64 candidate before calling us. Strip arbitrary ASCII
+        // whitespace and decode the whole record before the more permissive
+        // embedded-candidate scan below.
+        let wrapped_record = direct.bytes().any(|byte| byte.is_ascii_whitespace())
+            && direct.bytes().all(|byte| {
+                byte.is_ascii_whitespace()
+                    || byte.is_ascii_alphanumeric()
+                    || matches!(byte, b'+' | b'/' | b'_' | b'-' | b'=')
+            });
+        if wrapped_record {
+            let normalized_record: String = direct
+                .chars()
+                .filter(|ch| !ch.is_ascii_whitespace())
+                .collect();
+            if let Cow::Owned(redacted) = scrub_direct(&normalized_record) {
+                return Cow::Owned(redacted);
+            }
+            if normalized_record.len() >= 24 && decoded_contains_secret(&normalized_record) {
+                return Cow::Owned("[REDACTED:ENCODED_SECRET]".to_string());
+            }
         }
+        let mut last = 0;
+        let mut encoded = None::<String>;
+        for candidate in base64_candidates().find_iter(direct.as_ref()) {
+            if !decoded_contains_secret(candidate.as_str()) {
+                continue;
+            }
+            let out = encoded.get_or_insert_with(|| String::with_capacity(direct.len()));
+            out.push_str(&direct[last..candidate.start()]);
+            out.push_str("[REDACTED:ENCODED_SECRET]");
+            last = candidate.end();
+        }
+        let continuous = if let Some(mut encoded) = encoded {
+            encoded.push_str(&direct[last..]);
+            Cow::Owned(encoded)
+        } else {
+            direct
+        };
 
-        let mut result = input.to_owned();
-        for (idx, rx) in compiled().iter().enumerate() {
-            let label = PATTERNS[idx].0;
-            let replacement = format!("[REDACTED:{label}]");
-            // Replace all non-overlapping matches. For capture-group patterns
-            // (AWS_SECRET_KEY), replace the full match (group 0).
-            let replaced = rx.replace_all(&result, replacement.as_str()).into_owned();
-            result = replaced;
+        let mut last = 0;
+        let mut wrapped = None::<String>;
+        for candidate in wrapped_base64_candidates().find_iter(continuous.as_ref()) {
+            let normalized: String = candidate
+                .as_str()
+                .chars()
+                .filter(|ch| !ch.is_ascii_whitespace())
+                .collect();
+            let contains_direct_secret = matches!(scrub_direct(&normalized), Cow::Owned(_));
+            if !contains_direct_secret
+                && (normalized.len() < 24 || !decoded_contains_secret(&normalized))
+            {
+                continue;
+            }
+            let out = wrapped.get_or_insert_with(|| String::with_capacity(continuous.len()));
+            out.push_str(&continuous[last..candidate.start()]);
+            out.push_str(if contains_direct_secret {
+                "[REDACTED:WHITESPACE_SPLIT_SECRET]"
+            } else {
+                "[REDACTED:ENCODED_SECRET]"
+            });
+            last = candidate.end();
         }
-        Cow::Owned(result)
+        if let Some(mut wrapped) = wrapped {
+            wrapped.push_str(&continuous[last..]);
+            Cow::Owned(wrapped)
+        } else {
+            continuous
+        }
     }
 }
 
@@ -139,11 +267,100 @@ mod tests {
     //! the prior Wayland Python engine's redaction library (T3-4). Existing patterns
     //! (AWS_*, OPENAI_API_KEY, ANTHROPIC_API_KEY, JWT, BEARER_TOKEN) are
     //! covered by ``crates/wcore-safety/tests/safety_tests.rs``.
-    use super::PIIScrubber;
+    use super::{PIIScrubber, decoded_contains_secret, wrapped_base64_candidates};
+    use base64::Engine as _;
 
     fn redacted(input: &str, label: &str) -> bool {
         let s = PIIScrubber;
         s.scrub(input).contains(&format!("[REDACTED:{label}]"))
+    }
+
+    fn test_openai_key() -> String {
+        ["sk", "-", "abcdefghijklmnopqrstuvwxyz0123456789AB"].concat()
+    }
+
+    #[test]
+    fn base64_encoded_secret_is_redacted_without_decoding_normal_payloads() {
+        let secret = test_openai_key();
+        let encoded = base64::engine::general_purpose::STANDARD.encode(&secret);
+        let scrubber = PIIScrubber;
+
+        assert_eq!(
+            scrubber.scrub(&format!("payload={encoded}")),
+            "payload=[REDACTED:ENCODED_SECRET]"
+        );
+        assert_eq!(
+            scrubber.scrub("VGhpcyBpcyBhIG5vcm1hbCBiYXNlNjQgcGF5bG9hZA=="),
+            "VGhpcyBpcyBhIG5vcm1hbCBiYXNlNjQgcGF5bG9hZA=="
+        );
+    }
+
+    #[test]
+    fn padded_and_binary_base64_secrets_are_redacted() {
+        let secret = test_openai_key();
+        let padded = format!("{}{}", "A".repeat(9_000), secret);
+        let padded_encoded = base64::engine::general_purpose::STANDARD.encode(padded);
+        assert_eq!(
+            PIIScrubber.scrub(&padded_encoded),
+            "[REDACTED:ENCODED_SECRET]"
+        );
+
+        let mut binary = vec![0xff, 0xfe];
+        binary.extend_from_slice(secret.as_bytes());
+        binary.push(0xff);
+        let binary_encoded = base64::engine::general_purpose::STANDARD.encode(binary);
+        assert_eq!(
+            PIIScrubber.scrub(&binary_encoded),
+            "[REDACTED:ENCODED_SECRET]"
+        );
+    }
+
+    #[test]
+    fn whitespace_wrapped_base64_secret_is_redacted() {
+        let secret = test_openai_key();
+        let encoded = base64::engine::general_purpose::STANDARD.encode(&secret);
+        let wrapped = encoded
+            .as_bytes()
+            .chunks(9)
+            .map(|chunk| std::str::from_utf8(chunk).unwrap())
+            .collect::<Vec<_>>()
+            .join(" \n\t");
+
+        let candidate = wrapped_base64_candidates()
+            .find(&wrapped)
+            .expect("wrapped candidate");
+        let normalized: String = candidate
+            .as_str()
+            .chars()
+            .filter(|ch| !ch.is_ascii_whitespace())
+            .collect();
+        assert!(decoded_contains_secret(&normalized));
+
+        assert_eq!(PIIScrubber.scrub(&wrapped), "[REDACTED:ENCODED_SECRET]");
+    }
+
+    #[test]
+    fn whitespace_split_direct_secret_is_redacted() {
+        let split = "prefix token=gh\np_abcdefghij\nklmnopqrstuvwxyz012345 suffix";
+        let scrubbed = PIIScrubber.scrub(split);
+
+        assert!(!scrubbed.contains("gh\np_"));
+        assert!(
+            scrubbed.contains("[REDACTED:GITHUB_PAT]"),
+            "got: {scrubbed}"
+        );
+    }
+
+    #[test]
+    fn env_and_case_variant_secret_assignments_are_redacted() {
+        let scrubber = PIIScrubber;
+        let input = "ordinary=value\nMy_Password = hunter2\nservice_auth: opaque-value";
+        let scrubbed = scrubber.scrub(input);
+
+        assert!(scrubbed.contains("ordinary=value"));
+        assert!(!scrubbed.contains("hunter2"));
+        assert!(!scrubbed.contains("opaque-value"));
+        assert_eq!(scrubbed.matches("[REDACTED:SECRET_ASSIGNMENT]").count(), 2);
     }
 
     // ── GitHub family ───────────────────────────────────────────────────

@@ -7,8 +7,9 @@ use wcore_config::config::Config;
 use super::defaults::build_allowlist;
 use super::policy::AgentEgressPolicy;
 
-/// Build the egress policy from `config` and install it as the process-global
-/// policy for every [`wcore_egress::EgressClient`].
+/// Build the egress policy from `config`. AgentBootstrap uses this constructor
+/// to own one policy per session; `install_egress_policy` below remains the
+/// compatibility entry point for process-level callers.
 ///
 /// Idempotent: the underlying install is one-shot (the first call wins), so
 /// repeated calls from sub-agent boots or multiple entry points are no-ops.
@@ -23,28 +24,28 @@ use super::policy::AgentEgressPolicy;
 /// - `[security] enabled = false` → **disabled** (allow-all). This is the
 ///   config-file-only off switch (C8); the operator accepts the exfiltration
 ///   risk. A loud warning is logged.
-pub fn install_egress_policy(config: &Config) {
-    if wcore_egress::global_policy_installed() {
-        return;
-    }
-    let policy: wcore_egress::SharedPolicy = if config.security.enabled {
+pub fn policy_from_config(config: &Config) -> AgentEgressPolicy {
+    if config.security.enabled {
         let allow = build_allowlist(config);
         tracing::info!(
             allowlisted = allow.len(),
             "egress security ENFORCING — exfil-shaped traffic to non-allowlisted external hosts is blocked"
         );
-        let enforcing = AgentEgressPolicy::enforcing(allow);
-        // Remember the enforcing policy so a later bootstrap step can attach the
-        // B2.5 consent doorbell to this exact (live) instance. The policy is
-        // installed here at CLI entry, before the engine/approval bridge exist.
-        super::policy::remember_installed(enforcing.clone());
-        Arc::new(enforcing)
+        AgentEgressPolicy::enforcing(allow)
     } else {
         tracing::warn!(
             "egress security DISABLED via [security] enabled=false — outbound exfiltration is NOT gated"
         );
-        Arc::new(AgentEgressPolicy::disabled())
-    };
+        AgentEgressPolicy::disabled()
+    }
+}
+
+pub fn install_egress_policy(config: &Config) {
+    if wcore_egress::global_policy_installed() {
+        return;
+    }
+    let policy = policy_from_config(config);
+    let policy: wcore_egress::SharedPolicy = Arc::new(policy);
     // One-shot: ignore the Err(returned-policy) if another path won the race.
     let _ = wcore_egress::install_global_policy(policy);
 }

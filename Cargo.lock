@@ -9179,6 +9179,7 @@ dependencies = [
  "wcore-pricing",
  "wcore-protocol",
  "wcore-providers",
+ "wcore-safety",
  "wcore-sandbox",
  "wcore-skills",
  "wcore-swarm",
@@ -10094,6 +10095,7 @@ name = "wcore-safety"
 version = "0.12.25"
 dependencies = [
  "async-trait",
+ "base64 0.22.1",
  "regex",
  "serde",
  "serde_json",

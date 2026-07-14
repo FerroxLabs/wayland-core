@@ -18,5 +18,5 @@ pub use classify::{AllowList, EgressVerdict, classify};
 pub use consent::{ConsentDecision, ConsentDoorbell};
 pub use defaults::build_allowlist;
 pub use evidence::{finalize_eval_egress_observer, install_eval_egress_observer};
-pub use install::install_egress_policy;
-pub use policy::{AgentEgressPolicy, EgressPosture, installed_policy};
+pub use install::{install_egress_policy, policy_from_config};
+pub use policy::{AgentEgressPolicy, EgressPosture};

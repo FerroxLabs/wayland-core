@@ -569,12 +569,26 @@ struct ProtocolToolSink {
     msg_id: String,
     call_id: String,
     tool_name: String,
+    redactor: Mutex<crate::output_redaction::StreamingRedactor>,
 }
 
 impl wcore_tools::ToolOutputSink for ProtocolToolSink {
     fn emit_chunk(&self, chunk: &str) {
-        self.output
-            .emit_tool_chunk(&self.msg_id, &self.call_id, &self.tool_name, chunk);
+        let mut redactor = self.redactor.lock().unwrap_or_else(|p| p.into_inner());
+        if let Some(redacted) = redactor.push(chunk) {
+            self.output
+                .emit_tool_chunk(&self.msg_id, &self.call_id, &self.tool_name, &redacted);
+        }
+    }
+}
+
+impl Drop for ProtocolToolSink {
+    fn drop(&mut self) {
+        let redactor = self.redactor.get_mut().unwrap_or_else(|p| p.into_inner());
+        if let Some(redacted) = redactor.finish() {
+            self.output
+                .emit_tool_chunk(&self.msg_id, &self.call_id, &self.tool_name, &redacted);
+        }
     }
 }
 
@@ -692,7 +706,9 @@ async fn execute_single_with_streaming(
                     return (
                         ContentBlock::ToolResult {
                             tool_use_id: id.clone(),
-                            content: format!("Blocked by hook: {reason}"),
+                            content: crate::output_redaction::redact_tool_output(&format!(
+                                "Blocked by hook: {reason}"
+                            )),
                             is_error: true,
                         },
                         None,
@@ -726,9 +742,11 @@ async fn execute_single_with_streaming(
                 // hook stdout etc.) is filtered through `is_hook_lifecycle_line`
                 // as belt-and-suspenders.
                 for line in outcome.hook_trace.drain(..) {
+                    let line = crate::output_redaction::redact_tool_output(&line);
                     tracing::debug!(target: "wcore_agent::hooks", "{line}");
                 }
                 for line in outcome.log_lines.drain(..) {
+                    let line = crate::output_redaction::redact_tool_output(&line);
                     if is_hook_lifecycle_line(&line) {
                         tracing::debug!(target: "wcore_agent::hooks", "{line}");
                     } else {
@@ -740,7 +758,9 @@ async fn execute_single_with_streaming(
                 return (
                     ContentBlock::ToolResult {
                         tool_use_id: id.clone(),
-                        content: format!("Blocked by hook: {e}"),
+                        content: crate::output_redaction::redact_tool_output(&format!(
+                            "Blocked by hook: {e}"
+                        )),
                         is_error: true,
                     },
                     None,
@@ -864,6 +884,7 @@ async fn execute_single_with_streaming(
                             msg_id: ctx.msg_id.clone(),
                             call_id: id.clone(),
                             tool_name: name.clone(),
+                            redactor: Mutex::new(crate::output_redaction::StreamingRedactor::new()),
                         };
                         AssertUnwindSafe(tool.execute_streaming_with_ctx(
                             effective_input.clone(),
@@ -919,7 +940,9 @@ async fn execute_single_with_streaming(
                 }
                 Ok(Ok(result)) => result,
                 Ok(Err(payload)) => {
-                    let panic_message = extract_panic_message(&payload);
+                    let panic_message = crate::output_redaction::redact_tool_output(
+                        &extract_panic_message(&payload),
+                    );
                     eprintln!(
                         "[tool-panic] tool={} call_id={} panic={}",
                         name, id, panic_message
@@ -949,10 +972,14 @@ async fn execute_single_with_streaming(
             } else {
                 tool.context_modifier_for(&effective_input)
             };
+            // Redact the original result before any truncation or compaction.
+            // Otherwise a secret crossing the truncation boundary can be cut
+            // into a non-matching prefix and escape every downstream scrub.
+            let redacted_content = crate::output_redaction::redact_tool_output(&r.content);
             let error_content = if r.is_error && tool.is_deferred() {
-                maybe_append_deferred_hint(&r.content, tool.input_schema(), &effective_input)
+                maybe_append_deferred_hint(&redacted_content, tool.input_schema(), &effective_input)
             } else {
-                r.content.clone()
+                redacted_content
             };
             let content = truncate_result(&error_content, max_size);
             let content = wcore_compact::compact_output(&content, compaction_level);
@@ -961,6 +988,7 @@ async fn execute_single_with_streaming(
             } else {
                 content
             };
+            let content = crate::output_redaction::redact_tool_output(&content);
             (
                 ToolResult {
                     content,
@@ -993,13 +1021,15 @@ async fn execute_single_with_streaming(
         // `is_hook_lifecycle_line` as belt-and-suspenders in case any
         // future code path pushes a lifecycle line there.
         for msg in outcome.hook_trace.drain(..) {
+            let msg = crate::output_redaction::redact_tool_output(&msg);
             tracing::debug!(target: "wcore_agent::hooks", "{msg}");
         }
         for msg in outcome.log_lines.drain(..) {
+            let msg = crate::output_redaction::redact_tool_output(&msg);
             if is_hook_lifecycle_line(&msg) {
                 tracing::debug!(target: "wcore_agent::hooks", "{msg}");
             } else {
-                eprintln!("{}", msg);
+                eprintln!("{msg}");
             }
         }
         // injected_messages and switch_model bubble up via
@@ -1162,7 +1192,7 @@ pub async fn execute_tool_calls_with_approval(
                     });
                     results.push(ContentBlock::ToolResult {
                         tool_use_id: id.clone(),
-                        content: s,
+                        content: crate::output_redaction::redact_tool_output(&s),
                         is_error: false,
                     });
                     modifiers.push(None);
@@ -1195,7 +1225,9 @@ pub async fn execute_tool_calls_with_approval(
                     });
                     results.push(ContentBlock::ToolResult {
                         tool_use_id: id.clone(),
-                        content: format!("Tool denied: {reason}"),
+                        content: crate::output_redaction::redact_tool_output(&format!(
+                            "Tool denied: {reason}"
+                        )),
                         is_error: true,
                     });
                     modifiers.push(None);

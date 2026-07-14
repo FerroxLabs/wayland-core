@@ -32,9 +32,10 @@ pub struct MaterializedSeat {
 /// provider (e.g. Flux's routed lane). Auto-approve is forced on the seat
 /// config regardless of the session posture — the human decision happens at
 /// the forge boundary (CLI verb / tool approval), machinery runs inside.
-pub fn materialize_driver_seat(
+pub async fn materialize_driver_seat(
     anvil: &AnvilConfig,
     session_cfg: &Config,
+    egress_policy: wcore_egress::SharedPolicy,
 ) -> anyhow::Result<MaterializedSeat> {
     let mut session_seat = session_cfg.clone();
     session_seat.tools.auto_approve = true;
@@ -78,22 +79,23 @@ pub fn materialize_driver_seat(
         }
     };
 
-    let (provider, spawner_cfg) = match crate::bootstrap::create_provider_with_oauth(&driver_cfg) {
-        Ok(p) => (p, driver_cfg),
-        Err(e) if !matches!(plan, DriverSeatPlan::Session) => {
-            // ANY routed seat (cross-family OR in-family model override) that
-            // fails to build falls back to the untouched session seat — the
-            // "never break a forge" contract. The fallback spawner must pair
-            // the session provider with the session config (driver_cfg here
-            // would point forks at the failed seat's model).
-            notes.push(format!("driver seat failed ({e}); session model drives"));
-            let p = crate::bootstrap::create_provider_with_oauth(&session_seat)?;
-            (p, session_seat)
-        }
-        // plan == Session: driver_cfg IS the session seat — nothing to fall
-        // back to; the error is real.
-        Err(e) => return Err(e),
-    };
+    let (provider, spawner_cfg) =
+        match create_provider_with_policy(&driver_cfg, egress_policy.clone()).await {
+            Ok(p) => (p, driver_cfg),
+            Err(e) if !matches!(plan, DriverSeatPlan::Session) => {
+                // ANY routed seat (cross-family OR in-family model override) that
+                // fails to build falls back to the untouched session seat — the
+                // "never break a forge" contract. The fallback spawner must pair
+                // the session provider with the session config (driver_cfg here
+                // would point forks at the failed seat's model).
+                notes.push(format!("driver seat failed ({e}); session model drives"));
+                let p = create_provider_with_policy(&session_seat, egress_policy.clone()).await?;
+                (p, session_seat)
+            }
+            // plan == Session: driver_cfg IS the session seat — nothing to fall
+            // back to; the error is real.
+            Err(e) => return Err(e),
+        };
 
     // Double-ladder guard: Flux's `flux-verified` alias runs the router's OWN
     // server-side gated climb (Elevation). Driving Anvil's builders through it
@@ -110,7 +112,7 @@ pub fn materialize_driver_seat(
 
     let label = format!("{}/{}", spawner_cfg.provider_label, spawner_cfg.model);
     Ok(MaterializedSeat {
-        spawner: AgentSpawner::new(provider, spawner_cfg),
+        spawner: AgentSpawner::new(provider, spawner_cfg).with_egress_policy(egress_policy),
         label,
         notes,
     })
@@ -119,14 +121,27 @@ pub fn materialize_driver_seat(
 /// Materialize the VALVE seat (spec §6.4): the session provider + model — the
 /// frontier judgment the user already chose — in the trusted posture. The
 /// valve forks read-only, so auto-approve here only normalizes fork behavior.
-pub fn materialize_valve_seat(session_cfg: &Config) -> anyhow::Result<MaterializedSeat> {
+pub async fn materialize_valve_seat(
+    session_cfg: &Config,
+    egress_policy: wcore_egress::SharedPolicy,
+) -> anyhow::Result<MaterializedSeat> {
     let mut cfg = session_cfg.clone();
     cfg.tools.auto_approve = true;
-    let provider = crate::bootstrap::create_provider_with_oauth(&cfg)?;
+    let provider = create_provider_with_policy(&cfg, egress_policy.clone()).await?;
     let label = format!("{}/{}", cfg.provider_label, cfg.model);
     Ok(MaterializedSeat {
-        spawner: AgentSpawner::new(provider, cfg),
+        spawner: AgentSpawner::new(provider, cfg).with_egress_policy(egress_policy),
         label,
         notes: Vec::new(),
     })
+}
+
+async fn create_provider_with_policy(
+    config: &Config,
+    policy: wcore_egress::SharedPolicy,
+) -> anyhow::Result<std::sync::Arc<dyn wcore_providers::LlmProvider>> {
+    wcore_egress::with_default_policy(policy, async {
+        crate::bootstrap::create_provider_with_oauth(config)
+    })
+    .await
 }

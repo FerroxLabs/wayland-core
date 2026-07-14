@@ -3,6 +3,8 @@ mod common;
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
+use base64::Engine as _;
+use tempfile::tempdir;
 use tokio::sync::mpsc;
 
 use common::{MockLlmProvider, MockTool, auto_approve_confirmer, test_config};
@@ -12,6 +14,7 @@ use wcore_agent::engine::AgentEngine;
 use wcore_agent::orchestration::execute_tool_calls;
 use wcore_agent::output::OutputSink;
 use wcore_agent::output::null_sink::NullSink;
+use wcore_agent::session::SessionManager;
 use wcore_compact::CompactionLevel;
 use wcore_providers::{LlmProvider, ProviderError};
 use wcore_tools::registry::ToolRegistry;
@@ -22,6 +25,10 @@ const TEST_OUTPUT: &str = "\x1b[32mSTATUS: OK\x1b[0m\n\n\n\n50%\r100%\nCompiling
 
 const TOON_INPUT: &str =
     r#"[{"id":1,"name":"Alice","role":"admin"},{"id":2,"name":"Bob","role":"user"}]"#;
+
+fn test_openai_key() -> String {
+    ["sk", "-", "abcdefghijklmnopqrstuvwxyz0123456789AB"].concat()
+}
 
 fn make_tool_use(id: &str, name: &str) -> ContentBlock {
     ContentBlock::ToolUse {
@@ -82,6 +89,30 @@ async fn case_1_off_passthrough() {
         "Off level should pass content through unchanged"
     );
     eprintln!("[compaction:A] ✓ content unchanged");
+}
+
+#[tokio::test]
+async fn secret_crossing_truncation_boundary_is_redacted_before_cut() {
+    let secret = test_openai_key();
+    let raw = format!("prefix-{secret}-suffix");
+    let mut registry = ToolRegistry::new();
+    registry.register(Box::new(
+        MockTool::new("boundary_tool", &raw, false).with_max_result_size(24),
+    ));
+    let outcome = execute_tool_calls(
+        &registry,
+        &[make_tool_use("boundary", "boundary_tool")],
+        &auto_approve_confirmer(),
+        None,
+        CompactionLevel::Off,
+        false,
+    )
+    .await
+    .expect("tool execution");
+    let content = extract_tool_result_content(&outcome);
+
+    assert!(!content.contains(&secret));
+    assert!(!content.contains("sk-"), "secret prefix escaped: {content}");
 }
 
 #[tokio::test]
@@ -255,6 +286,34 @@ struct CapturingProvider {
     captured: Arc<Mutex<Vec<LlmRequest>>>,
 }
 
+#[derive(Default)]
+struct ToolResultSink {
+    results: Mutex<Vec<String>>,
+}
+
+impl OutputSink for ToolResultSink {
+    fn emit_text_delta(&self, _: &str, _: &str) {}
+    fn emit_thinking(&self, _: &str, _: &str) {}
+    fn emit_tool_call(&self, _: &str, _: &str) {}
+    fn emit_tool_result(&self, _: &str, _: bool, content: &str) {
+        self.results.lock().unwrap().push(content.to_string());
+    }
+    fn emit_stream_start(&self, _: &str) {}
+    fn emit_stream_end(
+        &self,
+        _: &str,
+        _: usize,
+        _: u64,
+        _: u64,
+        _: u64,
+        _: u64,
+        _: wcore_types::message::FinishReason,
+    ) {
+    }
+    fn emit_error(&self, _: &str, _: bool) {}
+    fn emit_info(&self, _: &str) {}
+}
+
 #[async_trait]
 impl LlmProvider for CapturingProvider {
     async fn stream(
@@ -353,6 +412,112 @@ async fn case_6_compressed_content_reaches_llm() {
     );
 
     eprintln!("[compaction:B] ✓ LLM received compressed content");
+}
+
+#[tokio::test]
+async fn secret_tool_result_is_redacted_before_host_provider_and_persistence() {
+    let secret = test_openai_key();
+    let encoded = base64::engine::general_purpose::STANDARD.encode(&secret);
+    let raw_output = format!("literal={secret}\nencoded={encoded}\nMy_Password=hunter2");
+    let captured: Arc<Mutex<Vec<LlmRequest>>> = Arc::new(Mutex::new(Vec::new()));
+    let provider = CapturingProvider {
+        inner: MockLlmProvider::with_turns(vec![
+            vec![
+                LlmEvent::ToolUse {
+                    id: "secret-call".to_string(),
+                    name: "secret_tool".to_string(),
+                    input: json!({}),
+                    extra: None,
+                },
+                LlmEvent::Done {
+                    stop_reason: StopReason::ToolUse,
+                    finish_reason: wcore_types::message::FinishReason::from_stop_reason(
+                        StopReason::ToolUse,
+                    ),
+                    usage: TokenUsage::default(),
+                },
+            ],
+            vec![
+                LlmEvent::TextDelta("done".to_string()),
+                LlmEvent::Done {
+                    stop_reason: StopReason::EndTurn,
+                    finish_reason: wcore_types::message::FinishReason::from_stop_reason(
+                        StopReason::EndTurn,
+                    ),
+                    usage: TokenUsage::default(),
+                },
+            ],
+        ]),
+        captured: Arc::clone(&captured),
+    };
+    let dir = tempdir().expect("session tempdir");
+    let mut config = test_config();
+    config.compact.compaction = CompactionLevel::Off;
+    config.compact.toon = false;
+    config.session.enabled = true;
+    config.session.directory = dir.path().to_string_lossy().into_owned();
+    let mut registry = ToolRegistry::new();
+    registry.register(Box::new(MockTool::new("secret_tool", &raw_output, false)));
+    let sink = Arc::new(ToolResultSink::default());
+    let output: Arc<dyn OutputSink> = sink.clone();
+    let mut engine = AgentEngine::new_with_provider(Arc::new(provider), config, registry, output);
+    engine
+        .init_session("test-provider", "/tmp", None)
+        .expect("session init");
+
+    engine
+        .run("call secret_tool", "")
+        .await
+        .expect("engine run");
+
+    let assert_redacted = |content: &str| {
+        assert!(
+            !content.contains(&secret),
+            "literal secret escaped: {content}"
+        );
+        assert!(
+            !content.contains(&encoded),
+            "encoded secret escaped: {content}"
+        );
+        assert!(
+            !content.contains("hunter2"),
+            "environment secret escaped: {content}"
+        );
+        assert!(content.contains("[REDACTED:OPENAI_API_KEY]"));
+        assert!(content.contains("[REDACTED:ENCODED_SECRET]"));
+        assert!(content.contains("[REDACTED:SECRET_ASSIGNMENT]"));
+    };
+
+    let host_results = sink.results.lock().unwrap();
+    assert_eq!(host_results.len(), 1);
+    assert_redacted(&host_results[0]);
+
+    let requests = captured.lock().unwrap();
+    let provider_result = requests
+        .get(1)
+        .into_iter()
+        .flat_map(|request| &request.messages)
+        .flat_map(|message| &message.content)
+        .find_map(|block| match block {
+            ContentBlock::ToolResult { content, .. } => Some(content.as_str()),
+            _ => None,
+        })
+        .expect("provider follow-up tool result");
+    assert_redacted(provider_result);
+
+    let session = SessionManager::new(dir.path().to_path_buf(), 10)
+        .load("latest")
+        .expect("persisted session");
+    let persisted_result = session
+        .messages
+        .iter()
+        .flat_map(|message| &message.content)
+        .find_map(|block| match block {
+            ContentBlock::ToolResult { content, .. } => Some(content.as_str()),
+            _ => None,
+        })
+        .expect("persisted tool result");
+    assert_redacted(persisted_result);
 }
 
 // ---------------------------------------------------------------------------

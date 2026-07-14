@@ -90,6 +90,8 @@ pub struct McpManager {
     health: HashMap<String, McpServerHealth>,
     /// Monotonically increasing request ID counter for all JSON-RPC calls
     next_id: AtomicU64,
+    /// Immutable authority used by every HTTP transport added to this manager.
+    egress_policy: wcore_egress::SharedPolicy,
 }
 
 impl McpManager {
@@ -102,7 +104,15 @@ impl McpManager {
     /// other servers" guarantee. Running concurrently means a single slow
     /// server delays only itself, not the whole boot.
     pub async fn connect_all(configs: &HashMap<String, McpServerConfig>) -> Result<Self, McpError> {
-        Self::connect_all_with_connect_timeout(configs, CONNECT_TIMEOUT).await
+        Self::connect_all_with_policy(configs, wcore_egress::default_policy()).await
+    }
+
+    /// Connect all servers with an explicit session egress policy.
+    pub async fn connect_all_with_policy(
+        configs: &HashMap<String, McpServerConfig>,
+        egress_policy: wcore_egress::SharedPolicy,
+    ) -> Result<Self, McpError> {
+        Self::connect_all_with_policy_and_timeout(configs, CONNECT_TIMEOUT, egress_policy).await
     }
 
     /// [`connect_all`](Self::connect_all) with an explicit per-server
@@ -113,9 +123,27 @@ impl McpManager {
         configs: &HashMap<String, McpServerConfig>,
         connect_timeout: Duration,
     ) -> Result<Self, McpError> {
-        let connect_futures = configs.iter().map(|(name, config)| async move {
-            let outcome = Self::connect_server_outcome(name, config, connect_timeout).await;
-            (name.clone(), outcome)
+        Self::connect_all_with_policy_and_timeout(
+            configs,
+            connect_timeout,
+            wcore_egress::default_policy(),
+        )
+        .await
+    }
+
+    /// Explicit-policy variant used by hosted sessions and concurrency tests.
+    pub async fn connect_all_with_policy_and_timeout(
+        configs: &HashMap<String, McpServerConfig>,
+        connect_timeout: Duration,
+        egress_policy: wcore_egress::SharedPolicy,
+    ) -> Result<Self, McpError> {
+        let connect_futures = configs.iter().map(|(name, config)| {
+            let policy = egress_policy.clone();
+            async move {
+                let outcome =
+                    Self::connect_server_outcome(name, config, connect_timeout, policy).await;
+                (name.clone(), outcome)
+            }
         });
 
         let results = futures::future::join_all(connect_futures).await;
@@ -156,6 +184,7 @@ impl McpManager {
             servers,
             health,
             next_id: AtomicU64::new(10),
+            egress_policy,
         })
     }
 
@@ -167,8 +196,14 @@ impl McpManager {
         name: &str,
         config: &McpServerConfig,
         connect_timeout: Duration,
+        egress_policy: wcore_egress::SharedPolicy,
     ) -> ConnectOutcome {
-        match timeout(connect_timeout, Self::connect_server(name, config)).await {
+        match timeout(
+            connect_timeout,
+            Self::connect_server(name, config, egress_policy),
+        )
+        .await
+        {
             Ok(Ok(server)) => ConnectOutcome::Ok(Box::new(server)),
             Ok(Err(e)) => ConnectOutcome::Failed(e.to_string()),
             Err(_) => {
@@ -189,7 +224,14 @@ impl McpManager {
         name: String,
         config: &McpServerConfig,
     ) -> Result<Vec<String>, McpError> {
-        match Self::connect_server_outcome(&name, config, CONNECT_TIMEOUT).await {
+        match Self::connect_server_outcome(
+            &name,
+            config,
+            CONNECT_TIMEOUT,
+            self.egress_policy.clone(),
+        )
+        .await
+        {
             ConnectOutcome::Ok(server) => {
                 let tool_names: Vec<String> = server.tools.iter().map(|t| t.name.clone()).collect();
                 eprintln!(
@@ -227,7 +269,11 @@ impl McpManager {
     }
 
     /// Connect to a single MCP server: create transport, initialize, discover tools
-    async fn connect_server(name: &str, config: &McpServerConfig) -> Result<McpServer, McpError> {
+    async fn connect_server(
+        name: &str,
+        config: &McpServerConfig,
+        egress_policy: wcore_egress::SharedPolicy,
+    ) -> Result<McpServer, McpError> {
         let empty_map = HashMap::new();
 
         // 1. Create transport
@@ -246,14 +292,30 @@ impl McpManager {
                     .as_deref()
                     .ok_or_else(|| McpError::InitFailed("SSE transport requires 'url'".into()))?;
                 let headers = config.headers.as_ref().unwrap_or(&empty_map);
-                Box::new(SseTransport::connect(url, headers, config.allow_local).await?)
+                Box::new(
+                    SseTransport::connect_with_policy(
+                        url,
+                        headers,
+                        config.allow_local,
+                        egress_policy,
+                    )
+                    .await?,
+                )
             }
             TransportType::StreamableHttp => {
                 let url = config.url.as_deref().ok_or_else(|| {
                     McpError::InitFailed("streamable-http transport requires 'url'".into())
                 })?;
                 let headers = config.headers.as_ref().unwrap_or(&empty_map);
-                Box::new(StreamableHttpTransport::connect(url, headers, config.allow_local).await?)
+                Box::new(
+                    StreamableHttpTransport::connect_with_policy(
+                        url,
+                        headers,
+                        config.allow_local,
+                        egress_policy,
+                    )
+                    .await?,
+                )
             }
         };
 
@@ -537,6 +599,7 @@ impl McpManager {
                 .map(|(name, h)| (name.to_string(), h))
                 .collect(),
             next_id: AtomicU64::new(10),
+            egress_policy: wcore_egress::default_policy(),
         }
     }
 
@@ -563,6 +626,7 @@ impl McpManager {
             servers,
             health,
             next_id: AtomicU64::new(10),
+            egress_policy: wcore_egress::default_policy(),
         }
     }
 
@@ -594,6 +658,7 @@ impl McpManager {
             servers,
             health,
             next_id: AtomicU64::new(10),
+            egress_policy: wcore_egress::default_policy(),
         }
     }
 }
@@ -618,7 +683,7 @@ mod tests {
     use crate::protocol::JsonRpcResponse;
     use async_trait::async_trait;
     use serde_json::json;
-    use std::sync::Mutex;
+    use std::sync::{Arc, Mutex};
 
     // -----------------------------------------------------------------------
     // MockTransport: returns pre-configured JSON-RPC responses
@@ -686,6 +751,111 @@ mod tests {
 
     fn make_manager_with_servers(entries: Vec<(&str, bool, Box<dyn McpTransport>)>) -> McpManager {
         McpManager::new_for_test(entries)
+    }
+
+    #[tokio::test]
+    async fn concurrent_deferred_managers_retain_distinct_session_policies() {
+        let first: wcore_egress::SharedPolicy = Arc::new(wcore_egress::AllowAllPolicy);
+        let second: wcore_egress::SharedPolicy = Arc::new(wcore_egress::AllowAllPolicy);
+        let empty = HashMap::new();
+
+        let (first_manager, second_manager) = tokio::join!(
+            McpManager::connect_all_with_policy(&empty, first.clone()),
+            McpManager::connect_all_with_policy(&empty, second.clone()),
+        );
+        let first_manager = first_manager.expect("first manager");
+        let second_manager = second_manager.expect("second manager");
+
+        assert!(Arc::ptr_eq(&first_manager.egress_policy, &first));
+        assert!(Arc::ptr_eq(&second_manager.egress_policy, &second));
+        assert!(!Arc::ptr_eq(
+            &first_manager.egress_policy,
+            &second_manager.egress_policy
+        ));
+    }
+
+    #[tokio::test]
+    async fn concurrent_http_managers_enforce_opposite_session_policies() {
+        use wiremock::matchers::{body_string_contains, method};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        #[derive(Debug)]
+        struct DenyAll;
+
+        #[async_trait]
+        impl wcore_egress::EgressPolicy for DenyAll {
+            async fn check(
+                &self,
+                _request: &wcore_egress::reqwest::Request,
+            ) -> wcore_egress::EgressDecision {
+                wcore_egress::EgressDecision::Deny {
+                    reason: "session denied".to_string(),
+                }
+            }
+        }
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(body_string_contains("\"method\":\"initialize\""))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "result": {"protocolVersion": "2025-03-26", "capabilities": {}}
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(body_string_contains(
+                "\"method\":\"notifications/initialized\"",
+            ))
+            .respond_with(ResponseTemplate::new(202))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(body_string_contains("\"method\":\"tools/list\""))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "jsonrpc": "2.0",
+                "id": 2,
+                "result": {"tools": []}
+            })))
+            .mount(&server)
+            .await;
+
+        let config = McpServerConfig {
+            transport: TransportType::StreamableHttp,
+            command: None,
+            args: None,
+            env: None,
+            url: Some(server.uri()),
+            headers: None,
+            deferred: Some(true),
+            allow_local: true,
+            only_for_assistant: None,
+        };
+        let configs = HashMap::from([("deferred".to_string(), config)]);
+        let allow: wcore_egress::SharedPolicy = Arc::new(wcore_egress::AllowAllPolicy);
+        let deny: wcore_egress::SharedPolicy = Arc::new(DenyAll);
+
+        let (allowed, denied) = tokio::join!(
+            McpManager::connect_all_with_policy(&configs, allow),
+            McpManager::connect_all_with_policy(&configs, deny),
+        );
+        let allowed = allowed.expect("allowed manager");
+        let denied = denied.expect("denied manager");
+
+        assert!(matches!(
+            allowed.health().get("deferred"),
+            Some(McpServerHealth::Ready { tool_count: 0 })
+        ));
+        assert!(matches!(
+            denied.health().get("deferred"),
+            Some(McpServerHealth::Failed { reason }) if reason.contains("session denied")
+        ));
+        assert_eq!(
+            server.received_requests().await.expect("request log").len(),
+            3,
+            "the denied session must not emit any network request"
+        );
     }
 
     // -----------------------------------------------------------------------

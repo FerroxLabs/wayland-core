@@ -160,6 +160,10 @@ pub struct AgentSpawner {
     /// receives this exact `Arc`; spawning must never re-read process-global
     /// sandbox settings or select a different backend mid-session.
     sandbox_runtime: Arc<wcore_sandbox::SandboxRegistry>,
+    /// Immutable outbound-network authority inherited from the parent session.
+    /// Child engines must never fall back to a process-global compatibility
+    /// policy after the bootstrap task-local scope has exited.
+    egress_policy: wcore_egress::SharedPolicy,
     /// Shared live posture authority for host-backed sessions. Read only when
     /// deriving a child config so runtime de-escalation applies to descendants
     /// that have not started yet.
@@ -204,6 +208,7 @@ impl AgentSpawner {
             provider,
             base_config: config,
             sandbox_runtime,
+            egress_policy: wcore_egress::default_policy(),
             approval_manager: None,
             bus: None,
             cancel: tokio_util::sync::CancellationToken::new(),
@@ -218,6 +223,18 @@ impl AgentSpawner {
     pub fn with_sandbox_runtime(mut self, runtime: Arc<wcore_sandbox::SandboxRegistry>) -> Self {
         self.sandbox_runtime = runtime;
         self
+    }
+
+    /// Bind every spawned child engine to the parent's session-owned egress
+    /// policy, including children created after bootstrap has returned.
+    pub fn with_egress_policy(mut self, policy: wcore_egress::SharedPolicy) -> Self {
+        self.egress_policy = policy;
+        self
+    }
+
+    /// Clone the immutable outbound authority inherited by child agents.
+    pub(crate) fn egress_policy(&self) -> wcore_egress::SharedPolicy {
+        Arc::clone(&self.egress_policy)
     }
 
     /// Bind child posture derivation to the host session's live manager.
@@ -366,6 +383,7 @@ impl AgentSpawner {
         let tools = self.child_tool_registry(&[]);
         let output: Arc<dyn OutputSink> = Arc::new(NullSink);
         let mut engine = AgentEngine::new_with_provider(provider, config, tools, output);
+        engine.set_egress_policy(self.egress_policy.clone());
         // Bind the child to the parent cancel token so a host cancel stops it.
         engine.set_cancel_token(self.active_cancel_token().child_token());
 
@@ -615,6 +633,7 @@ impl AgentSpawner {
         };
         let terminal_output = Arc::clone(&output);
         let mut engine = AgentEngine::new_with_provider(provider, config, tools, output);
+        engine.set_egress_policy(self.egress_policy.clone());
         // Bind the child to the parent cancel token so a host cancel stops it.
         engine.set_cancel_token(self.active_cancel_token().child_token());
 
@@ -721,6 +740,7 @@ impl AgentSpawner {
             provider: self.provider.clone(),
             base_config: self.base_config.clone(),
             sandbox_runtime: Arc::clone(&self.sandbox_runtime),
+            egress_policy: self.egress_policy.clone(),
             approval_manager: self.approval_manager.clone(),
             bus: self.bus.clone(),
             cancel: self.cancel.clone(),
@@ -814,6 +834,7 @@ impl Spawner for AgentSpawner {
         let tools = self.child_tool_registry(&overrides.allowed_tools);
         let output: Arc<dyn OutputSink> = Arc::new(NullSink);
         let mut engine = AgentEngine::new_with_provider(provider, config, tools, output);
+        engine.set_egress_policy(self.egress_policy.clone());
         // Bind the child to the parent cancel token so a host cancel stops it.
         engine.set_cancel_token(self.active_cancel_token().child_token());
         engine.set_initial_reasoning_effort(overrides.effort.clone());
@@ -1210,6 +1231,18 @@ mod crucible_provider_resolution_tests {
             Arc::ptr_eq(&got, &pinned),
             "cloned spawner must still resolve the pinned provider"
         );
+    }
+
+    #[test]
+    fn clone_for_spawn_preserves_exact_parent_egress_policy() {
+        let parent: Arc<dyn LlmProvider> = Arc::new(StubProvider);
+        let policy: wcore_egress::SharedPolicy = Arc::new(wcore_egress::AllowAllPolicy);
+        let spawner =
+            AgentSpawner::new(parent, Config::default()).with_egress_policy(policy.clone());
+        let cloned = spawner.clone_for_spawn();
+
+        assert!(Arc::ptr_eq(&spawner.egress_policy, &policy));
+        assert!(Arc::ptr_eq(&cloned.egress_policy, &policy));
     }
 
     #[test]

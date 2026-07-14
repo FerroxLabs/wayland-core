@@ -16,6 +16,10 @@ use wcore_types::message::{ContentBlock, FinishReason};
 type Captured = (String, String, String, String);
 type CapturedBuf = Arc<Mutex<Vec<Captured>>>;
 
+fn test_openai_key() -> String {
+    ["sk", "-", "abcdefghijklmnopqrstuvwxyz0123456789AB"].concat()
+}
+
 #[derive(Default)]
 struct CapSink {
     chunks: Mutex<Vec<Captured>>, // msg_id, call_id, tool_name, chunk
@@ -175,6 +179,45 @@ async fn bash_streams_through_dispatcher_when_advertised_on() {
         combined.contains('A') && combined.contains('B') && combined.contains('C'),
         "expected A/B/C in chunks; got {combined:?}"
     );
+}
+
+#[tokio::test]
+async fn bash_stream_secret_is_redacted_before_host_chunks() {
+    let secret = test_openai_key();
+    let registry = make_registry();
+    let confirmer = Arc::new(std::sync::Mutex::new(ToolConfirmer::new(true, vec![])));
+    let chunks: CapturedBuf = Arc::new(Mutex::new(Vec::new()));
+    let sink: Arc<dyn OutputSink> = Arc::new(CapSinkShared {
+        chunks: Arc::clone(&chunks),
+        streaming_on: true,
+    });
+    let calls = vec![bash_call("secret-stream", &format!("printf '{secret}\\n'"))];
+
+    execute_tool_calls_with_streaming(
+        &registry,
+        &calls,
+        &confirmer,
+        None,
+        wcore_compact::CompactionLevel::Off,
+        false,
+        Some(StreamingContext {
+            output: Arc::clone(&sink),
+            msg_id: "secret-message".into(),
+        }),
+        &tokio_util::sync::CancellationToken::new(),
+        None,
+    )
+    .await
+    .expect("streaming dispatch");
+
+    let combined = chunks
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|(_, _, _, chunk)| chunk.as_str())
+        .collect::<String>();
+    assert!(!combined.contains(&secret), "secret escaped host stream");
+    assert!(combined.contains("[REDACTED:OPENAI_API_KEY]"));
 }
 
 #[tokio::test]

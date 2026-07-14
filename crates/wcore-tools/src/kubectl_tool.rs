@@ -163,10 +163,13 @@ const KUBECTL_ENV_ALLOW: &[&str] = &["KUBECONFIG"];
 /// dropped (previously the full host env was copied). `NetworkPolicy::Inherit`
 /// keeps the apiserver reachable; filesystem / syscall confinement still
 /// applies through the real backend.
-fn build_sandbox_pieces(argv: Vec<String>) -> (SandboxManifest, SandboxCommand) {
+fn build_sandbox_pieces(
+    argv: Vec<String>,
+    env_passthrough: Option<&std::collections::HashSet<String>>,
+) -> (SandboxManifest, SandboxCommand) {
     let manifest = SandboxManifest {
         network: NetworkPolicy::Inherit,
-        env: crate::env_passthrough::build_sandboxed_env(KUBECTL_ENV_ALLOW),
+        env: crate::env_passthrough::build_sandboxed_env_for(KUBECTL_ENV_ALLOW, env_passthrough),
         ..Default::default()
     };
     (manifest, SandboxCommand { argv, cwd: None })
@@ -224,7 +227,7 @@ impl KubectlTool {
         let context = input.get("context").and_then(|v| v.as_str());
         let argv = build_argv(verb, &args, namespace, context);
 
-        let (manifest, cmd) = build_sandbox_pieces(argv);
+        let (manifest, cmd) = build_sandbox_pieces(argv, Some(runtime.env_passthrough()));
         let timeout = Duration::from_millis(KUBECTL_TIMEOUT_MS);
 
         match tokio::time::timeout(timeout, runtime.execute(&manifest, cmd)).await {
@@ -334,6 +337,8 @@ impl Tool for KubectlTool {
 mod tests {
     use super::*;
     use serde_json::json;
+    use std::collections::HashSet;
+    use std::sync::{Arc, Mutex};
 
     struct InjectedBackend;
 
@@ -355,6 +360,35 @@ mod tests {
 
         fn name(&self) -> &'static str {
             "kubectl_injected_test"
+        }
+
+        fn is_available(&self) -> bool {
+            true
+        }
+    }
+
+    struct EnvCaptureBackend {
+        captured: Arc<Mutex<Vec<(String, String)>>>,
+    }
+
+    #[async_trait]
+    impl wcore_sandbox::backends::SandboxBackend for EnvCaptureBackend {
+        async fn execute(
+            &self,
+            manifest: &SandboxManifest,
+            _cmd: SandboxCommand,
+        ) -> wcore_sandbox::Result<SandboxOutput> {
+            *self.captured.lock().expect("capture lock") = manifest.env.clone();
+            Ok(SandboxOutput {
+                exit_code: 0,
+                stdout: Vec::new(),
+                stderr: Vec::new(),
+                resource_limits: wcore_sandbox::ResourceLimitEnforcement::None,
+            })
+        }
+
+        fn name(&self) -> &'static str {
+            "kubectl_env_capture_test"
         }
 
         fn is_available(&self) -> bool {
@@ -480,6 +514,69 @@ mod tests {
         let direct = KubectlTool::new().execute(input).await;
         assert!(direct.is_error);
         assert!(direct.content.contains("sandbox UNAVAILABLE"));
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn parallel_session_runtimes_do_not_share_env_passthrough() {
+        const ALPHA: &str = "WCORE_F09_SESSION_ALPHA";
+        const BETA: &str = "WCORE_F09_SESSION_BETA";
+
+        // SAFETY: serial_test excludes other environment-mutating tests.
+        unsafe {
+            std::env::set_var(ALPHA, "alpha-value");
+            std::env::set_var(BETA, "beta-value");
+        }
+
+        let alpha_capture = Arc::new(Mutex::new(Vec::new()));
+        let beta_capture = Arc::new(Mutex::new(Vec::new()));
+        let alpha_runtime = Arc::new(
+            SandboxRegistry::new(Arc::new(EnvCaptureBackend {
+                captured: Arc::clone(&alpha_capture),
+            }))
+            .with_env_passthrough(HashSet::from([ALPHA.to_string()])),
+        );
+        let beta_runtime = Arc::new(
+            SandboxRegistry::new(Arc::new(EnvCaptureBackend {
+                captured: Arc::clone(&beta_capture),
+            }))
+            .with_env_passthrough(HashSet::from([BETA.to_string()])),
+        );
+        let alpha_ctx = ToolContext::test_default().with_sandbox(alpha_runtime);
+        let beta_ctx = ToolContext::test_default().with_sandbox(beta_runtime);
+        let input = json!({"verb": "version"});
+        let alpha_tool = KubectlTool::new();
+        let beta_tool = KubectlTool::new();
+
+        let (alpha_result, beta_result) = tokio::join!(
+            alpha_tool.execute_with_ctx(input.clone(), &alpha_ctx),
+            beta_tool.execute_with_ctx(input, &beta_ctx),
+        );
+
+        // SAFETY: serial_test excludes other environment-mutating tests.
+        unsafe {
+            std::env::remove_var(ALPHA);
+            std::env::remove_var(BETA);
+        }
+
+        assert!(!alpha_result.is_error, "{}", alpha_result.content);
+        assert!(!beta_result.is_error, "{}", beta_result.content);
+        let alpha_env: HashSet<_> = alpha_capture
+            .lock()
+            .expect("alpha capture lock")
+            .iter()
+            .map(|(name, _)| name.clone())
+            .collect();
+        let beta_env: HashSet<_> = beta_capture
+            .lock()
+            .expect("beta capture lock")
+            .iter()
+            .map(|(name, _)| name.clone())
+            .collect();
+        assert!(alpha_env.contains(ALPHA));
+        assert!(!alpha_env.contains(BETA));
+        assert!(beta_env.contains(BETA));
+        assert!(!beta_env.contains(ALPHA));
     }
 
     #[test]

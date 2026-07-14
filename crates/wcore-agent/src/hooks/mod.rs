@@ -121,6 +121,47 @@ pub struct HookOutcome {
     pub fired_actions: Vec<wcore_observability::trace::HookActionRecord>,
 }
 
+impl HookOutcome {
+    /// Scrub untrusted hook-produced text before it can reach history,
+    /// providers, persistence, host output, logs, or traces.
+    fn redact_sensitive(mut self) -> Self {
+        let scrub = |value: &mut String| {
+            *value = crate::output_redaction::redact_tool_output(value);
+        };
+        if let Some(reason) = self.block.as_mut() {
+            scrub(reason);
+        }
+        for message in &mut self.injected_messages {
+            for block in &mut message.content {
+                match block {
+                    ContentBlock::Text { text } => scrub(text),
+                    ContentBlock::ToolResult { content, .. } => scrub(content),
+                    ContentBlock::Thinking { thinking } => scrub(thinking),
+                    ContentBlock::ToolUse { input, extra, .. } => {
+                        redact_json_strings(input);
+                        if let Some(extra) = extra {
+                            redact_json_strings(extra);
+                        }
+                    }
+                    ContentBlock::Image { data, .. } => scrub(data),
+                }
+            }
+        }
+        self.log_lines.iter_mut().for_each(scrub);
+        self.hook_trace.iter_mut().for_each(scrub);
+        self
+    }
+}
+
+fn redact_json_strings(value: &mut Value) {
+    match value {
+        Value::String(text) => *text = crate::output_redaction::redact_tool_output(text),
+        Value::Array(values) => values.iter_mut().for_each(redact_json_strings),
+        Value::Object(values) => values.values_mut().for_each(redact_json_strings),
+        Value::Null | Value::Bool(_) | Value::Number(_) => {}
+    }
+}
+
 /// Current UNIX-epoch milliseconds as `u64`, for stamping `HookActionRecord`s.
 /// Mirrors `crate::agents::bus::now_ms` (which returns `u128`); milliseconds
 /// since epoch fit `u64` for ~584M years, so the cast never truncates in
@@ -272,7 +313,7 @@ impl HookEngine {
                 HookAction::Block { reason } => {
                     outcome.block = Some(reason);
                     // Short-circuit: skip remaining Rust hooks AND shell hooks.
-                    return Ok(outcome);
+                    return Ok(outcome.redact_sensitive());
                 }
                 HookAction::ModifyInput(v) => outcome.modified_input = Some(v),
                 HookAction::InjectMessage(_) => {
@@ -302,7 +343,7 @@ impl HookEngine {
         self.shell
             .run_pre_tool_use(tool_name, effective_input)
             .await?;
-        Ok(outcome)
+        Ok(outcome.redact_sensitive())
     }
 
     pub async fn run_post_tool_use(
@@ -377,7 +418,7 @@ impl HookEngine {
             .run_post_tool_use(tool_name, tool_input, tool_output)
             .await;
         outcome.log_lines.extend(shell_lines);
-        outcome
+        outcome.redact_sensitive()
     }
 
     pub async fn run_stop(&self) -> HookOutcome {
@@ -385,6 +426,7 @@ impl HookEngine {
             log_lines: self.shell.run_stop().await,
             ..Default::default()
         }
+        .redact_sensitive()
     }
 
     /// Fire `SessionStart` plugin hooks once, at the start of a session run.
@@ -406,7 +448,7 @@ impl HookEngine {
             SESSION_START_DISPATCH_TIMEOUT,
         )
         .await;
-        outcome
+        outcome.redact_sensitive()
     }
 
     /// Fire `PrePrompt` plugin hooks once per turn, after the request is
@@ -427,7 +469,7 @@ impl HookEngine {
             PRE_PROMPT_DISPATCH_TIMEOUT,
         )
         .await;
-        outcome
+        outcome.redact_sensitive()
     }
 
     /// Fire `PreCompact` plugin hooks once per turn, immediately before the
@@ -440,7 +482,7 @@ impl HookEngine {
             "pre_compact",
             &format!("(turn {turn}, {message_count} messages)"),
         ));
-        outcome
+        outcome.redact_sensitive()
     }
 
     pub async fn on_turn_start(&self, turn: usize, ctx: &TurnContext) -> HookOutcome {
@@ -500,7 +542,7 @@ impl HookEngine {
             TURN_START_DISPATCH_TIMEOUT,
         )
         .await;
-        outcome
+        outcome.redact_sensitive()
     }
 
     pub async fn on_turn_end(&self, turn: usize, result: &TurnResult) -> HookOutcome {
@@ -556,7 +598,7 @@ impl HookEngine {
         // via `apply_turn_end_outcome`.
         self.dispatch_into(&mut outcome, HookPhase::TurnEnd, TURN_END_DISPATCH_TIMEOUT)
             .await;
-        outcome
+        outcome.redact_sensitive()
     }
 
     pub async fn on_session_end(&self, summary: &SessionEndSummary) -> HookOutcome {
@@ -580,7 +622,7 @@ impl HookEngine {
             "on_session_end",
             &format!("(turns: {})", summary.turns),
         ));
-        outcome
+        outcome.redact_sensitive()
     }
 
     /// Fire all plugin hooks registered at `phase`. Phase 1: each emits a
@@ -615,6 +657,10 @@ impl HookEngine {
 #[cfg(test)]
 mod c1_dispatch_proof {
     use super::*;
+
+    fn test_openai_key() -> String {
+        ["sk", "-", "abcdefghijklmnopqrstuvwxyz0123456789AB"].concat()
+    }
 
     /// Stub backend standing in for the host's real MCP dispatcher.
     struct StubDispatcher {
@@ -691,6 +737,48 @@ mod c1_dispatch_proof {
         // it only appends to injected_messages, so the cached system+tools
         // prefix is structurally untouchable from here.
         assert!(outcome.block.is_none());
+    }
+
+    #[tokio::test]
+    async fn hook_contribution_is_redacted_at_dispatch_boundary() {
+        let secret = test_openai_key();
+        let mut engine = engine_with_session_hook("wayland-ijfw");
+        engine.set_dispatcher(Arc::new(StubDispatcher {
+            text: Some(format!("hook payload: {secret}")),
+            delay: Duration::ZERO,
+        }));
+
+        let outcome = engine.run_session_start().await;
+        let text = sole_text(&outcome);
+        assert!(!text.contains(&secret));
+        assert!(text.contains("[REDACTED:OPENAI_API_KEY]"));
+    }
+
+    #[test]
+    fn hook_injected_image_payload_is_redacted() {
+        use base64::Engine as _;
+
+        let secret = test_openai_key();
+        let encoded = base64::engine::general_purpose::STANDARD.encode(&secret);
+        let outcome = HookOutcome {
+            injected_messages: vec![Message::new(
+                Role::User,
+                vec![ContentBlock::Image {
+                    mime: "image/png".to_string(),
+                    data: encoded.clone(),
+                }],
+            )],
+            ..HookOutcome::default()
+        }
+        .redact_sensitive();
+
+        match &outcome.injected_messages[0].content[0] {
+            ContentBlock::Image { data, .. } => {
+                assert!(!data.contains(&encoded));
+                assert_eq!(data, "[REDACTED:ENCODED_SECRET]");
+            }
+            other => panic!("expected image block, got {other:?}"),
+        }
     }
 
     // CLAIM 3: a dispatcher slower than the timeout yields NO injection and the

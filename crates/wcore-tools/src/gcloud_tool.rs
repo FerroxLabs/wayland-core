@@ -176,10 +176,14 @@ const GCLOUD_ENV_PREFIXES: &[&str] = &["CLOUDSDK_"];
 /// secret-shaped vars (including `CLOUDSDK_AUTH_ACCESS_TOKEN`) are
 /// dropped (previously the full host env was copied). Network is
 /// `Inherit` (gcloud is an API client).
-fn build_manifest() -> SandboxManifest {
+fn build_manifest(env_passthrough: Option<&std::collections::HashSet<String>>) -> SandboxManifest {
     SandboxManifest {
         network: NetworkPolicy::Inherit,
-        env: crate::env_passthrough::build_sandboxed_env_with_prefixes(&[], GCLOUD_ENV_PREFIXES),
+        env: crate::env_passthrough::build_sandboxed_env_with_prefixes_for(
+            &[],
+            GCLOUD_ENV_PREFIXES,
+            env_passthrough,
+        ),
         ..Default::default()
     }
 }
@@ -228,7 +232,7 @@ impl GcloudTool {
         }
 
         let argv = build_argv(&group, verb, &args, project, format);
-        let manifest = build_manifest();
+        let manifest = build_manifest(Some(runtime.env_passthrough()));
         let cmd = SandboxCommand { argv, cwd: None };
 
         let timeout = Duration::from_millis(TIMEOUT_MS);

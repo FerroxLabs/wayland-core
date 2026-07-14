@@ -5,37 +5,15 @@
 //! frontmatter need those vars available in sandboxed execution
 //! environments (`script` / `bash`). By default the sandboxes strip
 //! secrets from the child process environment for security. This
-//! module provides a session-scoped allowlist so skill-declared vars
-//! (and user-configured overrides) pass through.
+//! module builds curated allowlists so skill-declared vars (and
+//! user-configured overrides) pass through.
 //!
-//! Two sources feed the allowlist:
-//!
-//! 1. **Skill declarations** — when a skill is loaded, its
-//!    `required_environment_variables` are registered here via
-//!    [`register_env_passthrough`].
-//! 2. **User config** — the host wires `tools.env_passthrough` from
-//!    `config.yaml` into [`set_config_passthrough`] once at startup.
-//!
-//! Callers (BashTool / ScriptTool / sandbox builders) consult
-//! [`is_env_passthrough`] before stripping a variable from the child
-//! process environment.
-//!
-//! ## Differences from the Python original
-//!
-//! The Python port used a `ContextVar` so each gateway request had its
-//! own allowlist. Wayland runs as a single-tenant CLI / library, so we
-//! use a process-global `RwLock<HashSet<String>>` instead. Tests use
-//! [`clear_env_passthrough`] to reset state between cases.
-//!
-//! Config loading is also lifted out of this module — the helper
-//! exposes an explicit [`set_config_passthrough`] setter so it stays
-//! free of `wcore-config` dependency cycles. Hosts call it once at
-//! boot with whatever they parsed.
+//! Hosted sessions carry the resolved skill and user-config allowlist on
+//! their immutable `SandboxRegistry`. Direct compatibility callers receive
+//! only the fixed safe base allowlist; they cannot mutate process-wide child
+//! environment authority.
 
 use std::collections::HashSet;
-use std::sync::OnceLock;
-
-use parking_lot::RwLock;
 
 /// Base set of environment variable names that are always safe to pass
 /// into a sandboxed child: locale / terminal / toolchain-discovery vars
@@ -118,8 +96,8 @@ fn is_sensitive_env_var(name: &str) -> bool {
 ///
 /// 1. it is on the [`BASE_SANDBOX_ENV_ALLOWLIST`], a caller-supplied
 ///    `extra_allow` list (e.g. `KUBECONFIG` for kubectl, `AWS_*`
-///    discovery vars for the AWS CLI), or the session passthrough
-///    allowlist ([`is_env_passthrough`] — skill / config declared); and
+///    discovery vars for the AWS CLI), or an immutable session passthrough
+///    allowlist resolved from skills and config; and
 /// 2. it does NOT match [`is_sensitive_env_var`] — secret-bearing names
 ///    are dropped unconditionally, so a misconfigured passthrough entry
 ///    cannot leak `*_API_KEY` / `WAYLAND_VAULT_PASSPHRASE` into a tool
@@ -128,6 +106,14 @@ fn is_sensitive_env_var(name: &str) -> bool {
 /// This replaces the historical blanket `std::env::vars().collect()`
 /// copy that broadcast every host secret into every sandboxed command.
 pub fn build_sandboxed_env(extra_allow: &[&str]) -> Vec<(String, String)> {
+    build_sandboxed_env_for(extra_allow, None)
+}
+
+/// Build a sandbox environment using an immutable session allowlist.
+pub fn build_sandboxed_env_for(
+    extra_allow: &[&str],
+    session_allow: Option<&HashSet<String>>,
+) -> Vec<(String, String)> {
     std::env::vars()
         .filter(|(name, _)| {
             if is_sensitive_env_var(name) {
@@ -135,7 +121,7 @@ pub fn build_sandboxed_env(extra_allow: &[&str]) -> Vec<(String, String)> {
             }
             allowlist_contains(BASE_SANDBOX_ENV_ALLOWLIST, name)
                 || allowlist_contains(extra_allow, name)
-                || is_env_passthrough(name)
+                || session_or_legacy_contains(session_allow, name)
         })
         .collect()
 }
@@ -171,7 +157,15 @@ pub fn build_sandboxed_env_with_prefixes(
     extra_allow: &[&str],
     extra_prefixes: &[&str],
 ) -> Vec<(String, String)> {
-    build_sandboxed_env_full(extra_allow, extra_prefixes, &[])
+    build_sandboxed_env_full(extra_allow, extra_prefixes, &[], None)
+}
+
+pub fn build_sandboxed_env_with_prefixes_for(
+    extra_allow: &[&str],
+    extra_prefixes: &[&str],
+    session_allow: Option<&HashSet<String>>,
+) -> Vec<(String, String)> {
+    build_sandboxed_env_full(extra_allow, extra_prefixes, &[], session_allow)
 }
 
 /// Like [`build_sandboxed_env_with_prefixes`] but additionally passes
@@ -187,8 +181,8 @@ pub fn build_sandboxed_env_with_prefixes(
 /// The R1 hardening principle still holds for every *other* path: the
 /// secret filter is bypassed only for the exact names a specific tool
 /// passes here, never broadcast to arbitrary commands. `force_allow` is
-/// matched by exact, case-sensitive name — a prefix or substring is not
-/// enough — so it cannot accidentally widen to the whole `AWS_*` family.
+/// matched as one exact platform environment name (case-insensitive on
+/// Windows, case-sensitive on Unix) — a prefix or substring is never enough.
 ///
 /// `force_allow` wins over `is_sensitive_env_var`; a name on
 /// `force_allow` is kept even if it also matches a secret marker.
@@ -197,7 +191,16 @@ pub fn build_sandboxed_env_with_force_allow(
     extra_prefixes: &[&str],
     force_allow: &[&str],
 ) -> Vec<(String, String)> {
-    build_sandboxed_env_full(extra_allow, extra_prefixes, force_allow)
+    build_sandboxed_env_full(extra_allow, extra_prefixes, force_allow, None)
+}
+
+pub fn build_sandboxed_env_with_force_allow_for(
+    extra_allow: &[&str],
+    extra_prefixes: &[&str],
+    force_allow: &[&str],
+    session_allow: Option<&HashSet<String>>,
+) -> Vec<(String, String)> {
+    build_sandboxed_env_full(extra_allow, extra_prefixes, force_allow, session_allow)
 }
 
 /// Shared implementation behind the public env builders.
@@ -210,12 +213,16 @@ fn build_sandboxed_env_full(
     extra_allow: &[&str],
     extra_prefixes: &[&str],
     force_allow: &[&str],
+    session_allow: Option<&HashSet<String>>,
 ) -> Vec<(String, String)> {
     std::env::vars()
         .filter(|(name, _)| {
             // force_allow is an explicit per-tool credential escape hatch
             // and wins over the secret filter — checked first.
-            if allowlist_contains(force_allow, name) {
+            if force_allow
+                .iter()
+                .any(|allowed| env_name_matches(allowed, name))
+            {
                 return true;
             }
             if is_sensitive_env_var(name) {
@@ -224,9 +231,36 @@ fn build_sandboxed_env_full(
             allowlist_contains(BASE_SANDBOX_ENV_ALLOWLIST, name)
                 || allowlist_contains(extra_allow, name)
                 || prefix_matches(extra_prefixes, name)
-                || is_env_passthrough(name)
+                || session_or_legacy_contains(session_allow, name)
         })
         .collect()
+}
+
+fn env_name_matches(allowed: &str, actual: &str) -> bool {
+    #[cfg(windows)]
+    {
+        allowed.eq_ignore_ascii_case(actual)
+    }
+    #[cfg(not(windows))]
+    {
+        allowed == actual
+    }
+}
+
+fn session_or_legacy_contains(session_allow: Option<&HashSet<String>>, name: &str) -> bool {
+    let Some(session_allow) = session_allow else {
+        return false;
+    };
+    #[cfg(windows)]
+    {
+        session_allow
+            .iter()
+            .any(|allowed| allowed.eq_ignore_ascii_case(name))
+    }
+    #[cfg(not(windows))]
+    {
+        session_allow.contains(name)
+    }
 }
 
 /// Prefix-match check that respects platform env-var semantics —
@@ -246,206 +280,17 @@ fn prefix_matches(prefixes: &[&str], name: &str) -> bool {
     }
 }
 
-/// Skill-registered env var allowlist (mutable across the session).
-fn skill_allowed() -> &'static RwLock<HashSet<String>> {
-    static SKILL: OnceLock<RwLock<HashSet<String>>> = OnceLock::new();
-    SKILL.get_or_init(|| RwLock::new(HashSet::new()))
-}
-
-/// Config-sourced allowlist (set once by the host at startup; never
-/// mutated after — matches the cached `frozenset` semantics of the
-/// Python original).
-fn config_allowed() -> &'static RwLock<HashSet<String>> {
-    static CONFIG: OnceLock<RwLock<HashSet<String>>> = OnceLock::new();
-    CONFIG.get_or_init(|| RwLock::new(HashSet::new()))
-}
-
-/// Register environment variable names as allowed in sandboxed
-/// execution environments.
-///
-/// Typically called when a skill declares
-/// `required_environment_variables`. Empty / whitespace-only names are
-/// silently skipped (matching the Python port's `name.strip()` guard).
-pub fn register_env_passthrough<I, S>(var_names: I)
-where
-    I: IntoIterator<Item = S>,
-    S: AsRef<str>,
-{
-    let mut set = skill_allowed().write();
-    for name in var_names {
-        let trimmed = name.as_ref().trim();
-        if !trimmed.is_empty() {
-            set.insert(trimmed.to_string());
-        }
-    }
-}
-
-/// Install the config-sourced passthrough allowlist (typically from
-/// `tools.env_passthrough` in `config.yaml`).
-///
-/// Called once at host startup. Subsequent calls *replace* the config
-/// allowlist — there's no merge, since the host owns the source of
-/// truth.
-pub fn set_config_passthrough<I, S>(var_names: I)
-where
-    I: IntoIterator<Item = S>,
-    S: AsRef<str>,
-{
-    let mut set = config_allowed().write();
-    set.clear();
-    for name in var_names {
-        let trimmed = name.as_ref().trim();
-        if !trimmed.is_empty() {
-            set.insert(trimmed.to_string());
-        }
-    }
-}
-
-/// Check whether `var_name` is allowed to pass through to sandboxed
-/// environments.
-///
-/// Returns `true` if the variable was registered by a skill *or*
-/// listed in the host-provided config allowlist.
-pub fn is_env_passthrough(var_name: &str) -> bool {
-    if skill_allowed().read().contains(var_name) {
-        return true;
-    }
-    config_allowed().read().contains(var_name)
-}
-
-/// Return the union of skill-registered and config-based passthrough
-/// vars. The returned set is a snapshot — subsequent mutations to the
-/// registries are not reflected.
-pub fn get_all_passthrough() -> HashSet<String> {
-    let mut out = skill_allowed().read().clone();
-    for name in config_allowed().read().iter() {
-        out.insert(name.clone());
-    }
-    out
-}
-
-/// Reset the skill-registered allowlist (e.g. on session reset).
-///
-/// The config-sourced allowlist is **not** cleared — that mirrors the
-/// Python port, where the config cache survived session resets.
-pub fn clear_env_passthrough() {
-    skill_allowed().write().clear();
-}
-
-/// Reset both the skill-registered and config-sourced allowlists.
-/// Primarily for tests that need a clean slate; production code should
-/// prefer [`clear_env_passthrough`] + an explicit
-/// [`set_config_passthrough`] reload.
-pub fn reset_all_for_test() {
-    skill_allowed().write().clear();
-    config_allowed().write().clear();
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use serial_test::serial;
     use std::sync::Mutex;
 
-    /// Tests mutate process-global state; serialize them.
+    /// Tests mutate process environment; serialize them.
     static TEST_LOCK: Mutex<()> = Mutex::new(());
 
     fn guard() -> std::sync::MutexGuard<'static, ()> {
-        let g = TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
-        reset_all_for_test();
-        g
-    }
-
-    #[test]
-    fn registered_var_passes_through() {
-        let _g = guard();
-        register_env_passthrough(["MY_API_KEY"]);
-        assert!(is_env_passthrough("MY_API_KEY"));
-        assert!(!is_env_passthrough("OTHER_VAR"));
-    }
-
-    #[test]
-    fn unregistered_var_is_denied() {
-        let _g = guard();
-        // Default allowlist is empty — nothing should pass.
-        assert!(!is_env_passthrough("PATH"));
-        assert!(!is_env_passthrough("HOME"));
-        assert!(!is_env_passthrough(""));
-    }
-
-    #[test]
-    fn config_passthrough_takes_effect() {
-        let _g = guard();
-        set_config_passthrough(["AWS_REGION", "AWS_PROFILE"]);
-        assert!(is_env_passthrough("AWS_REGION"));
-        assert!(is_env_passthrough("AWS_PROFILE"));
-        assert!(!is_env_passthrough("AWS_SECRET"));
-    }
-
-    #[test]
-    fn skill_and_config_union_via_get_all() {
-        let _g = guard();
-        register_env_passthrough(["SKILL_VAR_A", "SKILL_VAR_B"]);
-        set_config_passthrough(["CFG_VAR_A", "SKILL_VAR_A"]); // overlap on A
-        let all = get_all_passthrough();
-        assert!(all.contains("SKILL_VAR_A"));
-        assert!(all.contains("SKILL_VAR_B"));
-        assert!(all.contains("CFG_VAR_A"));
-        assert_eq!(all.len(), 3, "overlap should dedupe");
-    }
-
-    #[test]
-    fn whitespace_and_empty_names_filtered() {
-        let _g = guard();
-        register_env_passthrough(["", "  ", "  GOOD  ", "\t\n"]);
-        let all = get_all_passthrough();
-        assert_eq!(all.len(), 1);
-        assert!(all.contains("GOOD"), "leading/trailing ws should strip");
-        assert!(!is_env_passthrough("  GOOD  "));
-        assert!(is_env_passthrough("GOOD"));
-    }
-
-    #[test]
-    fn clear_resets_skill_but_keeps_config() {
-        let _g = guard();
-        register_env_passthrough(["SKILL_VAR"]);
-        set_config_passthrough(["CFG_VAR"]);
-        clear_env_passthrough();
-        assert!(!is_env_passthrough("SKILL_VAR"));
-        assert!(
-            is_env_passthrough("CFG_VAR"),
-            "config allowlist must survive session reset (matches Python port)"
-        );
-    }
-
-    #[test]
-    fn set_config_replaces_previous_config() {
-        let _g = guard();
-        set_config_passthrough(["OLD_VAR"]);
-        assert!(is_env_passthrough("OLD_VAR"));
-        set_config_passthrough(["NEW_VAR"]);
-        assert!(!is_env_passthrough("OLD_VAR"), "second call must replace");
-        assert!(is_env_passthrough("NEW_VAR"));
-    }
-
-    #[test]
-    fn register_is_additive_and_idempotent() {
-        let _g = guard();
-        register_env_passthrough(["VAR_A"]);
-        register_env_passthrough(["VAR_A", "VAR_B"]);
-        let all = get_all_passthrough();
-        assert_eq!(all.len(), 2);
-        assert!(all.contains("VAR_A"));
-        assert!(all.contains("VAR_B"));
-    }
-
-    #[test]
-    fn empty_inputs_are_noops() {
-        let _g = guard();
-        register_env_passthrough(Vec::<String>::new());
-        set_config_passthrough(Vec::<&str>::new());
-        assert!(get_all_passthrough().is_empty());
-        assert!(!is_env_passthrough("ANYTHING"));
+        TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner())
     }
 
     // ----------------------------------------------------------------
@@ -477,6 +322,28 @@ mod tests {
                 "{name} must NOT be flagged sensitive"
             );
         }
+    }
+
+    #[test]
+    fn force_allow_uses_platform_exact_name_semantics() {
+        assert!(env_name_matches(
+            "AWS_SECRET_ACCESS_KEY",
+            "AWS_SECRET_ACCESS_KEY"
+        ));
+        assert!(!env_name_matches(
+            "AWS_SECRET_ACCESS_KEY",
+            "AWS_SECRET_ACCESS_KEY_EXTRA"
+        ));
+        #[cfg(windows)]
+        assert!(env_name_matches(
+            "AWS_SECRET_ACCESS_KEY",
+            "Aws_Secret_Access_Key"
+        ));
+        #[cfg(not(windows))]
+        assert!(!env_name_matches(
+            "AWS_SECRET_ACCESS_KEY",
+            "Aws_Secret_Access_Key"
+        ));
     }
 
     #[test]
@@ -532,7 +399,6 @@ mod tests {
         unsafe {
             std::env::set_var("TEST_LEAK_API_KEY", "supersecret");
         }
-        register_env_passthrough(["TEST_LEAK_API_KEY"]);
         let env = build_sandboxed_env(&["TEST_LEAK_API_KEY"]);
         assert!(
             !env.iter().any(|(k, _)| k == "TEST_LEAK_API_KEY"),
@@ -590,10 +456,29 @@ mod tests {
 
     #[test]
     #[serial]
+    fn force_allow_follows_platform_name_casing() {
+        let _g = guard();
+        unsafe {
+            std::env::set_var("AWS_SECRET_ACCESS_KEY", "creds");
+        }
+        let env = build_sandboxed_env_with_force_allow(&[], &[], &["aws_secret_access_key"]);
+        let included = env
+            .iter()
+            .any(|(name, _)| name.eq_ignore_ascii_case("AWS_SECRET_ACCESS_KEY"));
+        #[cfg(windows)]
+        assert!(included, "Windows environment names are case-insensitive");
+        #[cfg(not(windows))]
+        assert!(!included, "Unix environment names are case-sensitive");
+        unsafe {
+            std::env::remove_var("AWS_SECRET_ACCESS_KEY");
+        }
+    }
+
+    #[test]
+    #[serial]
     fn config_passthrough_var_is_applied_to_sandboxed_env() {
-        // #325: a var named in `[tools] env_passthrough` (installed via
-        // set_config_passthrough at bootstrap) must actually appear in the
-        // curated sandbox env — proving the config is no longer inert.
+        // #325: a var resolved from `[tools] env_passthrough` must appear in
+        // the immutable session environment without process-global state.
         let _g = guard();
         unsafe {
             std::env::set_var("TEST_CFG_PASSTHROUGH_VAR", "from-config");
@@ -605,9 +490,8 @@ mod tests {
                 .any(|(k, _)| k == "TEST_CFG_PASSTHROUGH_VAR"),
             "var must be stripped before config passthrough installs it"
         );
-        // Install it the way the host does at bootstrap.
-        set_config_passthrough(["TEST_CFG_PASSTHROUGH_VAR"]);
-        let env = build_sandboxed_env(&[]);
+        let session = HashSet::from(["TEST_CFG_PASSTHROUGH_VAR".to_string()]);
+        let env = build_sandboxed_env_for(&[], Some(&session));
         assert!(
             env.iter()
                 .any(|(k, v)| k == "TEST_CFG_PASSTHROUGH_VAR" && v == "from-config"),
@@ -627,8 +511,8 @@ mod tests {
         unsafe {
             std::env::set_var("TEST_CFG_SECRET_TOKEN", "nope");
         }
-        set_config_passthrough(["TEST_CFG_SECRET_TOKEN"]);
-        let env = build_sandboxed_env(&[]);
+        let session = HashSet::from(["TEST_CFG_SECRET_TOKEN".to_string()]);
+        let env = build_sandboxed_env_for(&[], Some(&session));
         assert!(
             !env.iter().any(|(k, _)| k == "TEST_CFG_SECRET_TOKEN"),
             "a secret-shaped config passthrough var must still be dropped"

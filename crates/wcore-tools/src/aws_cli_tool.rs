@@ -282,10 +282,11 @@ impl AwsCliTool {
         // AWS auth works (D.1 R1 HIGH-2 + D.2 R2 MED).
         let manifest = SandboxManifest {
             network: NetworkPolicy::Inherit,
-            env: crate::env_passthrough::build_sandboxed_env_with_force_allow(
+            env: crate::env_passthrough::build_sandboxed_env_with_force_allow_for(
                 &[],
                 AWS_ENV_PREFIXES,
                 AWS_FORCE_ALLOW,
+                Some(runtime.env_passthrough()),
             ),
             ..Default::default()
         };

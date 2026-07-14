@@ -137,6 +137,7 @@ pub struct MockTool {
     pub tool_description: String,
     pub concurrent_safe: bool,
     pub result: Mutex<ToolResult>,
+    pub max_result_size: usize,
 }
 
 impl MockTool {
@@ -149,6 +150,7 @@ impl MockTool {
                 content: result.to_string(),
                 is_error,
             }),
+            max_result_size: 50_000,
         }
     }
 
@@ -161,7 +163,13 @@ impl MockTool {
                 content: result.to_string(),
                 is_error: false,
             }),
+            max_result_size: 50_000,
         }
+    }
+
+    pub fn with_max_result_size(mut self, max_result_size: usize) -> Self {
+        self.max_result_size = max_result_size;
+        self
     }
 }
 
@@ -189,6 +197,10 @@ impl Tool for MockTool {
 
     async fn execute(&self, _input: Value) -> ToolResult {
         self.result.lock().unwrap().clone()
+    }
+
+    fn max_result_size(&self) -> usize {
+        self.max_result_size
     }
 }
 

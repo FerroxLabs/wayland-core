@@ -47,6 +47,7 @@ impl ProtocolEmitter for CapturedEmitter {
 pub struct ForgeTool {
     anvil: AnvilConfig,
     session_cfg: Config,
+    egress_policy: wcore_egress::SharedPolicy,
 }
 
 impl ForgeTool {
@@ -54,8 +55,16 @@ impl ForgeTool {
     /// config (used to materialize the driver seat lazily, per call — key
     /// state is read when the forge actually runs, not at registration).
     #[must_use]
-    pub fn new(anvil: AnvilConfig, session_cfg: Config) -> Self {
-        Self { anvil, session_cfg }
+    pub fn new(
+        anvil: AnvilConfig,
+        session_cfg: Config,
+        egress_policy: wcore_egress::SharedPolicy,
+    ) -> Self {
+        Self {
+            anvil,
+            session_cfg,
+            egress_policy,
+        }
     }
 
     async fn execute_with_sandbox(
@@ -71,7 +80,13 @@ impl ForgeTool {
         };
 
         // Materialize the driver seat lazily — key state as of NOW.
-        let seat = match super::seat::materialize_driver_seat(&self.anvil, &self.session_cfg) {
+        let seat = match super::seat::materialize_driver_seat(
+            &self.anvil,
+            &self.session_cfg,
+            Arc::clone(&self.egress_policy),
+        )
+        .await
+        {
             Ok(s) => s,
             Err(e) => {
                 return ToolResult {
@@ -94,7 +109,10 @@ impl ForgeTool {
         // Valve seat (spec §6.4): the session/frontier model, read-only, one
         // diagnostic turn on a stall. Best-effort — a forge without a valve
         // is still a forge.
-        let valve_seat = super::seat::materialize_valve_seat(&self.session_cfg).ok();
+        let valve_seat =
+            super::seat::materialize_valve_seat(&self.session_cfg, Arc::clone(&self.egress_policy))
+                .await
+                .ok();
         let valve_spawner = valve_seat
             .as_ref()
             .map(|s| &s.spawner as &dyn wcore_types::spawner::Spawner);

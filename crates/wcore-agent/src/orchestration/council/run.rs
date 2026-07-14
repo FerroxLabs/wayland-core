@@ -382,7 +382,8 @@ pub async fn run_council(
                     model,
                     base.clone(),
                     roster.aggregator_temperature,
-                );
+                )
+                .with_egress_policy(spawner.egress_policy());
                 Some(agg.aggregate(task, &proposals).await)
             }
             Err(_) => None,

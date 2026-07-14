@@ -44,10 +44,13 @@ pub async fn run_forge(args: ForgeArgs) -> anyhow::Result<()> {
     // never break it.
     let session_cfg = Config::resolve(&CliArgs::default())?;
     wcore_agent::egress::install_egress_policy(&session_cfg);
+    let egress_policy: wcore_egress::SharedPolicy =
+        Arc::new(wcore_agent::egress::policy_from_config(&session_cfg));
     let sandbox = Arc::new(wcore_sandbox::SandboxRegistry::required_for_session(
         session_cfg.tools.sandbox.as_deref(),
     )?);
-    let mut seat = materialize_driver_seat(&cf.anvil, &session_cfg)?;
+    let mut seat =
+        materialize_driver_seat(&cf.anvil, &session_cfg, Arc::clone(&egress_policy)).await?;
     seat.spawner = seat
         .spawner
         .with_sandbox_runtime(std::sync::Arc::clone(&sandbox));
@@ -60,7 +63,7 @@ pub async fn run_forge(args: ForgeArgs) -> anyhow::Result<()> {
     // Valve seat (spec §6.4): the session/frontier model, read-only, one
     // diagnostic turn on a stall. Best-effort — a forge without a valve is
     // still a forge (it just stays cheap-dumb on a stall).
-    let valve_seat = match materialize_valve_seat(&session_cfg) {
+    let valve_seat = match materialize_valve_seat(&session_cfg, egress_policy).await {
         Ok(mut s) => {
             s.spawner = s
                 .spawner

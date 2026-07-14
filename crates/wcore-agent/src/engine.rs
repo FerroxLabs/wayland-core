@@ -1506,6 +1506,9 @@ mod loop_guard_tests {
 
 pub struct AgentEngine {
     provider: Arc<dyn LlmProvider>,
+    /// Immutable outbound authority for this session. Runtime-lazy clients
+    /// must clone this handle instead of consulting process or task globals.
+    egress_policy: wcore_egress::SharedPolicy,
     /// Wave OR: the tool registry is Arc-shared so per-turn
     /// [`AgentNodeExecutor`] adapter clones in `engine::run` can satisfy the
     /// `'static + Send + Sync` bound that `ExecutionGraph::execute` (and its
@@ -2123,6 +2126,7 @@ impl AgentEngine {
 
         Self {
             provider,
+            egress_policy: wcore_egress::default_policy(),
             tools: Arc::new(tools),
             messages: Vec::new(),
             // Wave-6 #5: retain the boot prompt so a later rebind preserves the
@@ -2310,6 +2314,7 @@ impl AgentEngine {
 
         Self {
             provider,
+            egress_policy: wcore_egress::default_policy(),
             tools: Arc::new(tools),
             messages: session.messages.clone(),
             // Wave-6 #5: retain the boot prompt so a later rebind preserves the
@@ -2832,6 +2837,16 @@ impl AgentEngine {
     /// the constructor.
     pub fn set_approval_bridge(&mut self, bridge: Arc<ApprovalBridge>) {
         self.approval_bridge = bridge;
+    }
+
+    /// Clone the immutable outbound policy for a runtime-lazy session client.
+    pub fn egress_policy(&self) -> wcore_egress::SharedPolicy {
+        self.egress_policy.clone()
+    }
+
+    /// Install the policy minted by `AgentBootstrap` for this exact session.
+    pub fn set_egress_policy(&mut self, policy: wcore_egress::SharedPolicy) {
+        self.egress_policy = policy;
     }
 
     /// W7 Pre-flight 0: read access to the engine's `MemoryApi` handle.
@@ -6967,6 +6982,7 @@ impl AgentEngine {
             self.config.clone(),
         )
         .with_sandbox_runtime(self.tools.sandbox_runtime())
+        .with_egress_policy(self.egress_policy.clone())
         .with_approval_manager(std::sync::Arc::clone(manager))
         // Bind sub-agents to the engine's cancel token so a host cancel stops
         // the whole workflow rather than letting 20+ sub-agents run to
@@ -7262,6 +7278,7 @@ impl AgentEngine {
             base.clone(),
             providers.clone(),
         )
+        .with_egress_policy(self.egress_policy.clone())
         .resolvable_specs(&candidates);
         if runnable.is_empty() {
             let msg = "crucible: no runnable council candidates — connect a provider \
@@ -7284,11 +7301,13 @@ impl AgentEngine {
             self.config.clone(),
         )
         .with_sandbox_runtime(self.tools.sandbox_runtime())
+        .with_egress_policy(self.egress_policy.clone())
         .with_provider_resolver(std::sync::Arc::new(
             crate::orchestration::council::CouncilProviderResolver::new(
                 base.clone(),
                 providers.clone(),
-            ),
+            )
+            .with_egress_policy(self.egress_policy.clone()),
         ))
         .with_cancel(self.cancel_token.clone());
         if let Some(manager) = &self.approval_manager {
@@ -7378,11 +7397,13 @@ impl AgentEngine {
         };
         let base_refilter = base.clone();
         let providers_refilter = providers.clone();
+        let refilter_egress_policy = self.egress_policy.clone();
         let refilter = move |specs: &[String]| {
             crate::orchestration::council::CouncilProviderResolver::new(
                 base_refilter.clone(),
                 providers_refilter.clone(),
             )
+            .with_egress_policy(refilter_egress_policy.clone())
             .resolvable_specs(specs)
         };
 
@@ -10067,6 +10088,7 @@ mod set_config_tests {
     fn make_engine(model: &str) -> super::AgentEngine {
         super::AgentEngine {
             provider: Arc::new(NullProvider),
+            egress_policy: wcore_egress::default_policy(),
             temperature: None,
             tools: Arc::new(ToolRegistry::new()),
             messages: vec![],
@@ -11730,6 +11752,7 @@ mod phase6_tests {
     fn make_engine(model: &str, allow_list: Vec<String>) -> super::AgentEngine {
         super::AgentEngine {
             provider: Arc::new(NullProvider),
+            egress_policy: wcore_egress::default_policy(),
             temperature: None,
             tools: Arc::new(ToolRegistry::new()),
             messages: vec![],
@@ -12029,6 +12052,7 @@ mod compact_tests {
     ) -> super::AgentEngine {
         super::AgentEngine {
             provider: Arc::new(NullProvider),
+            egress_policy: wcore_egress::default_policy(),
             temperature: None,
             tools: Arc::new(ToolRegistry::new()),
             messages,
@@ -13358,6 +13382,7 @@ mod plan_mode_tests {
         let flag = Arc::new(AtomicBool::new(false));
         super::AgentEngine {
             provider: Arc::new(NullProvider),
+            egress_policy: wcore_egress::default_policy(),
             temperature: None,
             tools: Arc::new(ToolRegistry::new()),
             messages: vec![],
@@ -13790,6 +13815,7 @@ mod hook_integration_tests {
     fn make_engine(model: &str) -> super::AgentEngine {
         super::AgentEngine {
             provider: Arc::new(NullProvider),
+            egress_policy: wcore_egress::default_policy(),
             temperature: None,
             tools: Arc::new(ToolRegistry::new()),
             messages: vec![],
@@ -14632,6 +14658,7 @@ mod approval_bridge_engine_tests {
     fn make_engine() -> super::AgentEngine {
         super::AgentEngine {
             provider: Arc::new(NullProvider),
+            egress_policy: wcore_egress::default_policy(),
             temperature: None,
             tools: Arc::new(ToolRegistry::new()),
             messages: vec![],
@@ -15658,6 +15685,7 @@ mod user_model_writeback_tests {
     fn make_engine() -> super::AgentEngine {
         super::AgentEngine {
             provider: Arc::new(NullProvider),
+            egress_policy: wcore_egress::default_policy(),
             temperature: None,
             tools: Arc::new(ToolRegistry::new()),
             messages: vec![],

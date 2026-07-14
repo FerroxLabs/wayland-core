@@ -46,6 +46,7 @@ wcore-plugin-api.workspace    = true
 wcore-plugin-wasm.workspace       = true
 wcore-plugin-subprocess.workspace = true
 wcore-observability.workspace = true
+wcore-safety.workspace        = true
 # M5.3: ExecutionBudget + ExecutionBudgetView extracted into wcore-budget;
 # `wcore_agent::budget` re-exports them. New BudgetTracker / BudgetCap /
 # BudgetEvent surfaces are also reached via this dep.

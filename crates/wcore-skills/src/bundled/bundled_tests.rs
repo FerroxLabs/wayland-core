@@ -70,6 +70,27 @@ fn tc_10_03_fresh_catalog_is_empty() {
     assert!(second.get_bundled_skills().is_empty());
 }
 
+#[test]
+fn parallel_catalogs_do_not_share_registered_skills() {
+    let first = std::thread::spawn(|| {
+        let mut catalog = BundledSkillCatalog::new();
+        register_bundled_skill(&mut catalog, minimal_def("first-session"));
+        catalog.get_bundled_skills()
+    });
+    let second = std::thread::spawn(|| {
+        let mut catalog = BundledSkillCatalog::new();
+        register_bundled_skill(&mut catalog, minimal_def("second-session"));
+        catalog.get_bundled_skills()
+    });
+
+    let first = first.join().expect("first catalog thread");
+    let second = second.join().expect("second catalog thread");
+    assert_eq!(first.len(), 1);
+    assert_eq!(first[0].name, "first-session");
+    assert_eq!(second.len(), 1);
+    assert_eq!(second[0].name, "second-session");
+}
+
 // ---------------------------------------------------------------------------
 // TC-10.04: init_bundled_skills registers hello skill
 // ---------------------------------------------------------------------------

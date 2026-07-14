@@ -114,6 +114,7 @@ pub struct CouncilProviderResolver {
     base: Config,
     providers: HashMap<String, ProviderConfig>,
     cache: Mutex<HashMap<String, Arc<dyn LlmProvider>>>,
+    egress_policy: wcore_egress::SharedPolicy,
 }
 
 impl CouncilProviderResolver {
@@ -126,7 +127,13 @@ impl CouncilProviderResolver {
             base,
             providers,
             cache: Mutex::new(HashMap::new()),
+            egress_policy: wcore_egress::default_policy(),
         }
+    }
+
+    pub fn with_egress_policy(mut self, policy: wcore_egress::SharedPolicy) -> Self {
+        self.egress_policy = policy;
+        self
     }
 
     /// Resolve a `spec` (`"provider"` or `"provider:model"`) to a keyed
@@ -150,7 +157,9 @@ impl CouncilProviderResolver {
             return Ok((existing.clone(), resolved_model));
         }
 
-        let provider = create_provider(&derived);
+        let provider = wcore_egress::with_default_policy_sync(self.egress_policy.clone(), || {
+            create_provider(&derived)
+        });
         cache.insert(spec.to_string(), provider.clone());
         Ok((provider, resolved_model))
     }

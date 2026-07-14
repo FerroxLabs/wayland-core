@@ -290,7 +290,7 @@ async fn execute_streaming_with_ctx_routes_through_sandbox() {
 /// `env_passthrough::build_sandboxed_env`. This test asserts the new
 /// contract:
 /// - an allowlisted toolchain var (`PATH`) reaches the child;
-/// - a skill/config-registered passthrough var reaches the child;
+/// - a session-scoped passthrough var reaches the child;
 /// - an arbitrary, non-allowlisted, non-registered var does NOT;
 /// - cwd is still inherited.
 #[tokio::test]
@@ -303,19 +303,25 @@ async fn env_and_cwd_are_honored_through_sandbox() {
     unsafe {
         std::env::set_var("S9_BASH_ENV_PROBE", "probe_value_42");
     }
-    // A var registered via the passthrough allowlist — it MUST reach the
-    // child even though it is not on the base allowlist.
-    wcore_tools::env_passthrough::register_env_passthrough(["S9_PASSTHROUGH_PROBE"]);
     unsafe {
         std::env::set_var("S9_PASSTHROUGH_PROBE", "passed_through_99");
     }
     let tool = BashTool;
+    let runtime = Arc::new(
+        SandboxRegistry::new(Arc::new(
+            wcore_sandbox::backends::no_sandbox::NoSandboxBackend::new(),
+        ))
+        .with_env_passthrough(["S9_PASSTHROUGH_PROBE"]),
+    );
+    let ctx = ToolContext::test_default().with_sandbox(runtime);
 
     #[cfg(unix)]
     {
         // PATH is on the base allowlist — it must reach the child so the
         // shell can find binaries.
-        let result = tool.execute(json!({"command": "echo \"$PATH\""})).await;
+        let result = tool
+            .execute_with_ctx(json!({"command": "echo \"$PATH\""}), &ctx)
+            .await;
         assert!(!result.is_error, "unexpected error: {}", result.content);
         assert!(
             result.content.contains('/'),
@@ -323,9 +329,9 @@ async fn env_and_cwd_are_honored_through_sandbox() {
             result.content
         );
 
-        // The registered passthrough var must reach the child.
+        // The session-scoped passthrough var must reach the child.
         let result = tool
-            .execute(json!({"command": "echo \"$S9_PASSTHROUGH_PROBE\""}))
+            .execute_with_ctx(json!({"command": "echo \"$S9_PASSTHROUGH_PROBE\""}), &ctx)
             .await;
         assert!(!result.is_error, "unexpected error: {}", result.content);
         assert!(
@@ -337,7 +343,7 @@ async fn env_and_cwd_are_honored_through_sandbox() {
         // The arbitrary, unregistered var must NOT reach the child — this
         // is the HIGH-2 secret-confinement guarantee.
         let result = tool
-            .execute(json!({"command": "echo \"[$S9_BASH_ENV_PROBE]\""}))
+            .execute_with_ctx(json!({"command": "echo \"[$S9_BASH_ENV_PROBE]\""}), &ctx)
             .await;
         assert!(!result.is_error, "unexpected error: {}", result.content);
         assert!(
@@ -349,7 +355,7 @@ async fn env_and_cwd_are_honored_through_sandbox() {
         // Cwd: `pwd` reflects the directory the command runs in. BashTool
         // does not set an explicit cwd, so the child inherits the engine's
         // working directory — `pwd` must succeed and emit a path.
-        let result = tool.execute(json!({"command": "pwd"})).await;
+        let result = tool.execute_with_ctx(json!({"command": "pwd"}), &ctx).await;
         assert!(!result.is_error, "pwd failed: {}", result.content);
         assert!(
             result.content.contains('/'),
@@ -360,7 +366,7 @@ async fn env_and_cwd_are_honored_through_sandbox() {
     #[cfg(windows)]
     {
         let result = tool
-            .execute(json!({"command": "echo %S9_PASSTHROUGH_PROBE%"}))
+            .execute_with_ctx(json!({"command": "echo %S9_PASSTHROUGH_PROBE%"}), &ctx)
             .await;
         assert!(!result.is_error, "unexpected error: {}", result.content);
         assert!(result.content.contains("passed_through_99"));
@@ -371,7 +377,6 @@ async fn env_and_cwd_are_honored_through_sandbox() {
         std::env::remove_var("S9_BASH_ENV_PROBE");
         std::env::remove_var("S9_PASSTHROUGH_PROBE");
     }
-    wcore_tools::env_passthrough::clear_env_passthrough();
 }
 
 /// The credential-exfiltration denylist must still refuse before any

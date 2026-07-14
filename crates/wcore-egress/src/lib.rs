@@ -58,7 +58,8 @@ pub use observer::{
 };
 pub use policy::{
     AllowAllPolicy, EgressDecision, EgressPolicy, GlobalDefaultPolicy, SharedPolicy,
-    default_policy, global_policy_installed, install_global_policy,
+    default_policy, global_policy_installed, install_global_policy, with_default_policy,
+    with_default_policy_sync,
 };
 pub use request::EgressRequestBuilder;
 pub use url_allow::host_in_allowlist;

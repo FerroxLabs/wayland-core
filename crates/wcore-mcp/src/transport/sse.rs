@@ -47,7 +47,14 @@ impl SseTransport {
         headers: &HashMap<String, String>,
         allow_local: bool,
     ) -> Result<Self, McpError> {
-        Self::connect_with_timeout(url, headers, SSE_REQUEST_TIMEOUT, allow_local).await
+        Self::connect_with_timeout_and_policy(
+            url,
+            headers,
+            SSE_REQUEST_TIMEOUT,
+            allow_local,
+            wcore_egress::default_policy(),
+        )
+        .await
     }
 
     /// [`connect`](Self::connect) with an explicit per-request timeout.
@@ -58,6 +65,41 @@ impl SseTransport {
         headers: &HashMap<String, String>,
         request_timeout: std::time::Duration,
         allow_local: bool,
+    ) -> Result<Self, McpError> {
+        Self::connect_with_timeout_and_policy(
+            url,
+            headers,
+            request_timeout,
+            allow_local,
+            wcore_egress::default_policy(),
+        )
+        .await
+    }
+
+    /// Connect with the production timeout and an explicit session policy.
+    pub async fn connect_with_policy(
+        url: &str,
+        headers: &HashMap<String, String>,
+        allow_local: bool,
+        egress_policy: wcore_egress::SharedPolicy,
+    ) -> Result<Self, McpError> {
+        Self::connect_with_timeout_and_policy(
+            url,
+            headers,
+            SSE_REQUEST_TIMEOUT,
+            allow_local,
+            egress_policy,
+        )
+        .await
+    }
+
+    /// Connect with an explicit session egress policy.
+    pub async fn connect_with_timeout_and_policy(
+        url: &str,
+        headers: &HashMap<String, String>,
+        request_timeout: std::time::Duration,
+        allow_local: bool,
+        egress_policy: wcore_egress::SharedPolicy,
     ) -> Result<Self, McpError> {
         // M-13 (SSRF) — validate the configured URL before we attach any
         // secret-bearing header and open a connection to it. `is_safe_url`
@@ -124,6 +166,7 @@ impl SseTransport {
         // resolver so reqwest can dial 127.0.0.1/::1 for a trusted local SSE
         // server; both variants keep every non-loopback SSRF protection.
         let builder = wcore_egress::EgressClient::builder()
+            .policy(egress_policy)
             .pool_idle_timeout(std::time::Duration::from_secs(5))
             .connect_timeout(std::time::Duration::from_secs(15));
         let builder = if allow_local {
@@ -141,7 +184,7 @@ impl SseTransport {
         };
         let client = builder
             .build()
-            .unwrap_or_else(|_| wcore_egress::EgressClient::new());
+            .map_err(|e| McpError::Transport(format!("HTTP client initialization failed: {e}")))?;
 
         // GET the SSE endpoint to establish the event stream
         let response = client

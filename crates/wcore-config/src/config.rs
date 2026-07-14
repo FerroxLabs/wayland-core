@@ -917,8 +917,8 @@ pub struct ToolsConfig {
     /// everything but a curated base allowlist (locale / `PATH` / etc.);
     /// names listed here are additionally forwarded. Secret-shaped names
     /// (`*_API_KEY`, `*_TOKEN`, `WAYLAND_VAULT_*`, …) are still dropped by
-    /// the sandbox's secret filter even if listed here. Wired at bootstrap
-    /// into `wcore_tools::env_passthrough::set_config_passthrough`.
+    /// the sandbox's secret filter even if listed here. Bootstrap resolves
+    /// this into the immutable session `SandboxRegistry`.
     #[serde(default)]
     pub env_passthrough: Vec<String>,
     /// #327 — sandbox backend selection, mirroring the `WAYLAND_SANDBOX`

@@ -79,6 +79,14 @@ fn build_sandbox_pieces(
     command: &str,
     policy: Option<&crate::workspace_policy::WorkspacePolicy>,
 ) -> (SandboxManifest, SandboxCommand) {
+    build_sandbox_pieces_for_session(command, policy, None)
+}
+
+fn build_sandbox_pieces_for_session(
+    command: &str,
+    policy: Option<&crate::workspace_policy::WorkspacePolicy>,
+    env_passthrough: Option<&std::collections::HashSet<String>>,
+) -> (SandboxManifest, SandboxCommand) {
     // Shell prefix honors the Windows WAYLAND_BASH_SHELL=powershell|pwsh override
     // (BashTool only); defaults to sh -c / cmd /C.
     let mut argv = bash_shell_argv_prefix();
@@ -86,7 +94,7 @@ fn build_sandbox_pieces(
     let mut manifest = SandboxManifest {
         network: default_bash_network_policy(),
         // Curated env — secrets excluded, see the doc-comment above.
-        env: crate::env_passthrough::build_sandboxed_env(&[]),
+        env: crate::env_passthrough::build_sandboxed_env_for(&[], env_passthrough),
         // M-4 / sandbox-3: left Inherit / empty on purpose — see doc above.
         syscall_policy: SyscallPolicy::Inherit,
         ..Default::default()
@@ -802,7 +810,11 @@ impl Tool for BashTool {
                 is_error: true,
             };
         }
-        let (manifest, mut cmd) = build_sandbox_pieces(command, ctx.workspace.as_deref());
+        let (manifest, mut cmd) = build_sandbox_pieces_for_session(
+            command,
+            ctx.workspace.as_deref(),
+            Some(ctx.sandbox.env_passthrough()),
+        );
         downgrade_powershell_for_sandbox(&mut cmd.argv, backend.blocks_powershell());
         let net = manifest.network.clone();
         tokio::select! {
@@ -869,7 +881,11 @@ impl Tool for BashTool {
                 is_error: true,
             };
         }
-        let (manifest, mut cmd) = build_sandbox_pieces(command, ctx.workspace.as_deref());
+        let (manifest, mut cmd) = build_sandbox_pieces_for_session(
+            command,
+            ctx.workspace.as_deref(),
+            Some(ctx.sandbox.env_passthrough()),
+        );
         downgrade_powershell_for_sandbox(&mut cmd.argv, backend.blocks_powershell());
         let net = manifest.network.clone();
 

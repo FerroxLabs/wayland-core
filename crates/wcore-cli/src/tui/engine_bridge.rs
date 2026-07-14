@@ -1956,6 +1956,7 @@ impl TuiEngine {
             });
             return;
         }
+        let egress_policy = engine.lock().await.egress_policy();
 
         // Resolve `${cred:KEY}` header references just before connecting. This
         // is the single-server live-add path: per the `mcp_cred_refs` contract,
@@ -1988,25 +1989,28 @@ impl TuiEngine {
 
         let mut single = std::collections::HashMap::new();
         single.insert(name.clone(), config.clone());
-        let manager = match wcore_mcp::manager::McpManager::connect_all(&single).await {
-            Ok(mgr) => std::sync::Arc::new(mgr),
-            Err(e) => {
-                let reason = format!("{e}");
-                let _ = tx.send(ProtocolEvent::McpFailed {
-                    name: name.clone(),
-                    reason: reason.clone(),
-                });
-                let _ = tx.send(ProtocolEvent::Error {
-                    msg_id: None,
-                    error: ErrorInfo {
-                        code: "mcp_add".to_string(),
-                        message: format!("Couldn't connect MCP server '{name}': {reason}"),
-                        retryable: false,
-                    },
-                });
-                return;
-            }
-        };
+        let manager =
+            match wcore_mcp::manager::McpManager::connect_all_with_policy(&single, egress_policy)
+                .await
+            {
+                Ok(mgr) => std::sync::Arc::new(mgr),
+                Err(e) => {
+                    let reason = format!("{e}");
+                    let _ = tx.send(ProtocolEvent::McpFailed {
+                        name: name.clone(),
+                        reason: reason.clone(),
+                    });
+                    let _ = tx.send(ProtocolEvent::Error {
+                        msg_id: None,
+                        error: ErrorInfo {
+                            code: "mcp_add".to_string(),
+                            message: format!("Couldn't connect MCP server '{name}': {reason}"),
+                            retryable: false,
+                        },
+                    });
+                    return;
+                }
+            };
         // `connect_all` is non-fatal per-server: a server that failed or
         // timed out still returns `Ok` with the cause recorded in
         // `health()`, not `Err`. Surface that honestly instead of falling
