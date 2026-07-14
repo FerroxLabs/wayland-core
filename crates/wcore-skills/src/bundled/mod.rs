@@ -104,10 +104,7 @@ impl BundledSkillCatalog {
 
     /// Create a catalog containing only definitions embedded in this binary.
     pub fn embedded() -> Self {
-        let mut catalog = Self::new();
-        #[cfg(test)]
-        hello::register_hello_skill(&mut catalog);
-        catalog
+        Self::new()
     }
 
     /// Append one owned entry to this catalog.
@@ -183,7 +180,16 @@ pub fn init_bundled_skills() -> BundledSkillCatalog {
     // stays exercised by TC-10.04 / TC-10.28 without leaking to users. In a
     // shipped build this returns an empty catalog — correct, since no
     // production bundled skills exist yet.
-    BundledSkillCatalog::embedded()
+    #[cfg(test)]
+    {
+        let mut catalog = BundledSkillCatalog::embedded();
+        hello::register_hello_skill(&mut catalog);
+        catalog
+    }
+    #[cfg(not(test))]
+    {
+        BundledSkillCatalog::embedded()
+    }
 }
 
 /// Returns the extraction directory for a bundled skill's reference files.
