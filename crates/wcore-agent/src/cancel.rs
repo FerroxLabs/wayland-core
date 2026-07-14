@@ -16,12 +16,118 @@
 //! is aborted and the underlying token reference is released.
 
 use std::ops::Deref;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU8, Ordering};
 use std::time::Duration;
 
 use tokio::task::JoinHandle;
 pub use tokio_util::sync::CancellationToken;
 
 use crate::budget::ExecutionBudgetView;
+
+/// Why a session cancellation root became terminal.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SessionTerminationReason {
+    Cancelled,
+    DangerousLeaseExpired,
+    BudgetExceeded,
+    EngineDropped,
+}
+
+impl SessionTerminationReason {
+    pub fn error_code(self) -> &'static str {
+        match self {
+            Self::Cancelled => "session_cancelled",
+            Self::DangerousLeaseExpired => "dangerous_lease_expired",
+            Self::BudgetExceeded => "session_budget_exceeded",
+            Self::EngineDropped => "session_engine_dropped",
+        }
+    }
+
+    pub fn user_message(self) -> &'static str {
+        match self {
+            Self::Cancelled => "session was cancelled; start a new session",
+            Self::DangerousLeaseExpired => {
+                "Dangerous session authority expired; start a new session"
+            }
+            Self::BudgetExceeded => "session execution budget was exceeded; start a new session",
+            Self::EngineDropped => "session engine shut down",
+        }
+    }
+}
+
+/// Cloneable, read-only view of a session's terminal reason.
+#[derive(Clone)]
+pub struct SessionTermination {
+    reason: Arc<AtomicU8>,
+}
+
+/// Host-facing session lifetime handle. Observation clones cannot revive the
+/// root; explicit host cancellation records its typed reason before firing.
+#[derive(Clone)]
+pub struct SessionControl {
+    root: CancellationToken,
+    termination: SessionTermination,
+}
+
+impl SessionControl {
+    fn new(root: CancellationToken, termination: SessionTermination) -> Self {
+        Self { root, termination }
+    }
+
+    /// Return a descendant suitable for observation and turn-scoped work.
+    /// Cancelling the returned token cannot cancel the session root.
+    pub fn child_token(&self) -> CancellationToken {
+        self.root.child_token()
+    }
+
+    pub fn is_cancelled(&self) -> bool {
+        self.root.is_cancelled()
+    }
+
+    pub fn termination(&self) -> SessionTermination {
+        self.termination.clone()
+    }
+
+    pub fn cancel(&self) {
+        self.termination.mark(SessionTerminationReason::Cancelled);
+        self.root.cancel();
+    }
+}
+
+impl SessionTermination {
+    fn new() -> Self {
+        Self {
+            reason: Arc::new(AtomicU8::new(0)),
+        }
+    }
+
+    pub fn reason(&self) -> Option<SessionTerminationReason> {
+        match self.reason.load(Ordering::Acquire) {
+            1 => Some(SessionTerminationReason::Cancelled),
+            2 => Some(SessionTerminationReason::DangerousLeaseExpired),
+            3 => Some(SessionTerminationReason::BudgetExceeded),
+            4 => Some(SessionTerminationReason::EngineDropped),
+            _ => None,
+        }
+    }
+
+    pub fn reason_or_cancelled(&self) -> SessionTerminationReason {
+        self.reason().unwrap_or(SessionTerminationReason::Cancelled)
+    }
+
+    pub(crate) fn mark(&self, reason: SessionTerminationReason) {
+        let code = match reason {
+            SessionTerminationReason::Cancelled => 1,
+            SessionTerminationReason::DangerousLeaseExpired => 2,
+            SessionTerminationReason::BudgetExceeded => 3,
+            SessionTerminationReason::EngineDropped => 4,
+        };
+        let _ = self
+            .reason
+            .compare_exchange(0, code, Ordering::AcqRel, Ordering::Acquire);
+    }
+}
 
 /// Cloneable observation handle for one session's immutable cancellation root
 /// and replaceable active-turn token. Child spawners can read the current turn
@@ -30,6 +136,7 @@ use crate::budget::ExecutionBudgetView;
 pub(crate) struct SessionRuntimeHandle {
     root: CancellationToken,
     active_turn: std::sync::Arc<parking_lot::RwLock<CancellationToken>>,
+    termination: SessionTermination,
 }
 
 impl SessionRuntimeHandle {
@@ -37,6 +144,7 @@ impl SessionRuntimeHandle {
         Self {
             active_turn: std::sync::Arc::new(parking_lot::RwLock::new(root.clone())),
             root,
+            termination: SessionTermination::new(),
         }
     }
 
@@ -46,6 +154,14 @@ impl SessionRuntimeHandle {
 
     pub(crate) fn active_turn_token(&self) -> CancellationToken {
         self.active_turn.read().clone()
+    }
+
+    pub(crate) fn termination(&self) -> SessionTermination {
+        self.termination.clone()
+    }
+
+    pub(crate) fn control(&self) -> SessionControl {
+        SessionControl::new(self.root.clone(), self.termination.clone())
     }
 
     pub(crate) fn set_active_turn(&self, token: CancellationToken) {
@@ -127,9 +243,11 @@ impl SessionRuntimeGuard {
             .checked_add(remaining)
             .ok_or(wcore_types::execution_policy::ExecutionPolicyError::DangerousExpiryOverflow)?;
         let root = self.handle.root_token();
+        let termination = self.handle.termination();
         self.dangerous_deadline = Some(deadline);
         self.dangerous_expiry = Some(tokio::spawn(async move {
             tokio::time::sleep_until(deadline).await;
+            termination.mark(SessionTerminationReason::DangerousLeaseExpired);
             root.cancel();
         }));
         Ok(())
@@ -143,6 +261,9 @@ impl SessionRuntimeGuard {
 
 impl Drop for SessionRuntimeGuard {
     fn drop(&mut self) {
+        self.handle
+            .termination()
+            .mark(SessionTerminationReason::EngineDropped);
         self.handle.root_token().cancel();
         if let Some(handle) = self.turn_bridge.take() {
             handle.abort();
@@ -320,4 +441,56 @@ pub struct BudgetTripPayload {
     pub reason: String,
     pub observed: String,
     pub limit: String,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn terminal_reason_is_typed_and_first_writer_wins() {
+        let termination = SessionTermination::new();
+        termination.mark(SessionTerminationReason::DangerousLeaseExpired);
+        termination.mark(SessionTerminationReason::EngineDropped);
+
+        assert_eq!(
+            termination.reason(),
+            Some(SessionTerminationReason::DangerousLeaseExpired)
+        );
+        assert_eq!(
+            termination.reason_or_cancelled().user_message(),
+            "Dangerous session authority expired; start a new session"
+        );
+        assert_eq!(
+            termination.reason_or_cancelled().error_code(),
+            "dangerous_lease_expired"
+        );
+    }
+
+    #[test]
+    fn host_control_marks_cancellation_before_firing_root() {
+        let root = CancellationToken::new();
+        let termination = SessionTermination::new();
+        let control = SessionControl::new(root.clone(), termination.clone());
+
+        control.cancel();
+
+        assert!(root.is_cancelled());
+        assert_eq!(
+            termination.reason(),
+            Some(SessionTerminationReason::Cancelled)
+        );
+    }
+
+    #[test]
+    fn host_child_cannot_cancel_session_root() {
+        let root = CancellationToken::new();
+        let termination = SessionTermination::new();
+        let control = SessionControl::new(root.clone(), termination);
+
+        control.child_token().cancel();
+
+        assert!(!root.is_cancelled());
+        assert!(!control.is_cancelled());
+    }
 }
