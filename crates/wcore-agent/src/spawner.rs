@@ -116,6 +116,18 @@ struct LifecycleGuard {
     outcome: TerminalOutcome,
 }
 
+/// Owns parallel child tasks so dropping a parent dispatch future aborts the
+/// children instead of detaching them onto the Tokio runtime.
+struct SpawnTaskSet(Vec<tokio::task::JoinHandle<SubAgentResult>>);
+
+impl Drop for SpawnTaskSet {
+    fn drop(&mut self) {
+        for task in &self.0 {
+            task.abort();
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 enum TerminalOutcome {
     /// Default — nothing fired yet. Drop publishes `Errored("dropped before completion")`.
@@ -410,17 +422,19 @@ impl AgentSpawner {
         sub_configs: Vec<SubAgentConfig>,
         extras: SpawnExtras,
     ) -> Vec<SubAgentResult> {
-        let futures: Vec<_> = sub_configs
-            .into_iter()
-            .map(|config| {
-                let spawner = self.clone_for_spawn();
-                let extras = extras.clone();
-                tokio::spawn(async move { spawner.spawn_one_with_extras(config, extras).await })
-            })
-            .collect();
+        let mut futures = SpawnTaskSet(
+            sub_configs
+                .into_iter()
+                .map(|config| {
+                    let spawner = self.clone_for_spawn();
+                    let extras = extras.clone();
+                    tokio::spawn(async move { spawner.spawn_one_with_extras(config, extras).await })
+                })
+                .collect(),
+        );
 
         let mut results = Vec::new();
-        for future in futures {
+        for future in &mut futures.0 {
             match future.await {
                 Ok(result) => results.push(result),
                 Err(e) => results.push(SubAgentResult {
@@ -543,16 +557,18 @@ impl AgentSpawner {
         &self,
         tasks_and_extras: Vec<(SubAgentConfig, SpawnExtras)>,
     ) -> Vec<SubAgentResult> {
-        let futures: Vec<_> = tasks_and_extras
-            .into_iter()
-            .map(|(config, extras)| {
-                let spawner = self.clone_for_spawn();
-                tokio::spawn(async move { spawner.spawn_one_with_extras(config, extras).await })
-            })
-            .collect();
+        let mut futures = SpawnTaskSet(
+            tasks_and_extras
+                .into_iter()
+                .map(|(config, extras)| {
+                    let spawner = self.clone_for_spawn();
+                    tokio::spawn(async move { spawner.spawn_one_with_extras(config, extras).await })
+                })
+                .collect(),
+        );
 
         let mut results = Vec::new();
-        for future in futures {
+        for future in &mut futures.0 {
             match future.await {
                 Ok(result) => results.push(result),
                 Err(e) => results.push(SubAgentResult {
@@ -946,6 +962,117 @@ fn build_tool_registry(
         }
     }
     registry
+}
+
+#[cfg(test)]
+mod spawn_task_set_tests {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{Arc, Mutex};
+    use std::time::Duration;
+
+    use async_trait::async_trait;
+    use tokio::sync::oneshot;
+    use wcore_config::config::Config;
+    use wcore_providers::{LlmProvider, ProviderError};
+    use wcore_types::llm::{LlmEvent, LlmRequest};
+
+    use super::{AgentSpawner, SpawnTaskSet, SubAgentConfig, SubAgentResult};
+
+    struct DropNotify(Option<oneshot::Sender<()>>);
+
+    impl Drop for DropNotify {
+        fn drop(&mut self) {
+            if let Some(tx) = self.0.take() {
+                let _ = tx.send(());
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn dropping_spawn_task_set_aborts_and_drops_children() {
+        let (started_tx, started_rx) = oneshot::channel();
+        let (dropped_tx, dropped_rx) = oneshot::channel();
+        let child = tokio::spawn(async move {
+            let _drop_notify = DropNotify(Some(dropped_tx));
+            let _ = started_tx.send(());
+            std::future::pending::<()>().await;
+            SubAgentResult::error("unreachable", "unreachable")
+        });
+        let tasks = SpawnTaskSet(vec![child]);
+        started_rx.await.expect("child must start");
+
+        drop(tasks);
+
+        tokio::time::timeout(Duration::from_secs(1), dropped_rx)
+            .await
+            .expect("aborted child must be dropped promptly")
+            .expect("drop notifier must fire");
+    }
+
+    struct HangingProvider {
+        started: Mutex<Option<oneshot::Sender<()>>>,
+        dropped: Mutex<Option<oneshot::Sender<()>>>,
+        calls: AtomicUsize,
+    }
+
+    #[async_trait]
+    impl LlmProvider for HangingProvider {
+        async fn stream(
+            &self,
+            _request: &LlmRequest,
+        ) -> Result<tokio::sync::mpsc::Receiver<LlmEvent>, ProviderError> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            if let Some(tx) = self.started.lock().expect("started mutex").take() {
+                let _ = tx.send(());
+            }
+            let _drop_notify = DropNotify(self.dropped.lock().expect("dropped mutex").take());
+            std::future::pending().await
+        }
+    }
+
+    #[tokio::test]
+    async fn cancelling_legacy_parallel_spawn_aborts_running_children() {
+        let (started_tx, started_rx) = oneshot::channel();
+        let (dropped_tx, dropped_rx) = oneshot::channel();
+        let provider = Arc::new(HangingProvider {
+            started: Mutex::new(Some(started_tx)),
+            dropped: Mutex::new(Some(dropped_tx)),
+            calls: AtomicUsize::new(0),
+        });
+        let spawner = AgentSpawner::new(provider.clone(), Config::default());
+        let child = SubAgentConfig {
+            name: "hanging-child".into(),
+            prompt: "wait".into(),
+            max_turns: 2,
+            max_tokens: 16,
+            system_prompt: None,
+            provider: None,
+            model: None,
+            temperature: None,
+        };
+
+        // This is the model-facing legacy no-relay path. Its own cancellation
+        // must abort the raw child task even though the session token remains live.
+        let parent = tokio::spawn(async move { spawner.spawn_parallel(vec![child]).await });
+        tokio::time::timeout(Duration::from_secs(1), started_rx)
+            .await
+            .expect("legacy child must reach the provider")
+            .expect("started notifier must fire");
+
+        parent.abort();
+        let _ = parent.await;
+
+        tokio::time::timeout(Duration::from_secs(1), dropped_rx)
+            .await
+            .expect("legacy child must be dropped promptly")
+            .expect("drop notifier must fire");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert_eq!(
+            provider.calls.load(Ordering::SeqCst),
+            1,
+            "an aborted child must not resume provider activity"
+        );
+    }
 }
 
 #[cfg(test)]
