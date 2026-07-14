@@ -1,5 +1,6 @@
 #![cfg(feature = "packaged-driver-gate")]
 
+use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Output;
 
@@ -19,6 +20,7 @@ use wcore_eval_scenarios::receipt_policy::{
 };
 use wcore_eval_scenarios::runner::discover_binary;
 use wcore_eval_scenarios::runner::run_with_binary;
+use wcore_eval_scenarios::runner::run_with_binary_in_paths;
 use wcore_eval_scenarios::scenario::{Category, Scenario, Turn};
 use wcore_protocol::events::{CapabilityId, CapabilityReasonCode};
 
@@ -424,6 +426,253 @@ smart_handoff_to_memory = true
         sha256(&core),
         digest,
         "packaged Core bytes changed during the capability proof"
+    );
+    let reverified = driver(&core, &source, &["--verify-binary"]).await;
+    assert!(reverified.status.success(), "{}", context(&reverified));
+}
+
+struct LifecycleMatrixEnv {
+    _root: tempfile::TempDir,
+    home: PathBuf,
+    project: PathBuf,
+}
+
+impl LifecycleMatrixEnv {
+    fn build(global_lifecycle: bool, project_lifecycle: bool, memory_enabled: bool) -> Self {
+        let root = tempfile::tempdir().expect("lifecycle matrix root");
+        let home = root.path().join("home");
+        let project = root.path().join("project");
+        let project_config = project.join(".wayland-core");
+        let sessions = home.join("sessions");
+        fs::create_dir_all(&home).expect("global config root");
+        fs::create_dir_all(&project_config).expect("project config root");
+        fs::create_dir_all(&sessions).expect("matrix session root");
+
+        let session_path = sessions.to_string_lossy().replace('\\', "\\\\");
+        fs::write(
+            home.join("config.toml"),
+            format!(
+                "[session]\ndirectory = \"{session_path}\"\n\n\
+                 [memory]\nenabled = {memory_enabled}\n\n\
+                 [observability]\nskills_lifecycle = {global_lifecycle}\n\n\
+                 [provider.openai]\nmodel = \"fixture-chat-v1\"\n"
+            ),
+        )
+        .expect("write global matrix config");
+        fs::write(
+            project_config.join("config.toml"),
+            format!("[observability]\nskills_lifecycle = {project_lifecycle}\n"),
+        )
+        .expect("write project matrix config");
+
+        Self {
+            _root: root,
+            home,
+            project,
+        }
+    }
+
+    fn generated_artifacts(&self) -> Vec<PathBuf> {
+        let skills = self.home.join("skills");
+        let Ok(entries) = fs::read_dir(skills) else {
+            return Vec::new();
+        };
+        entries
+            .filter_map(Result::ok)
+            .map(|entry| entry.path())
+            .filter(|path| {
+                path.file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| name.starts_with("auto-"))
+            })
+            .collect()
+    }
+}
+
+fn lifecycle_generation_scenario(lifecycle_enabled: bool) -> Scenario {
+    let scenario = Scenario::new("packaged_lifecycle_matrix_generation", Category::Hardening)
+        .max_total_time(std::time::Duration::from_secs(45))
+        .max_total_cost_usd(0.0)
+        .turn(Turn::new("Repeat this exact safe operation").assert(Assertion::Contains("ACK")))
+        .turn(Turn::new("Repeat this exact safe operation").assert(Assertion::Contains("ACK")))
+        .turn(Turn::new("Repeat this exact safe operation").assert(Assertion::Contains("ACK")));
+    if lifecycle_enabled {
+        scenario.require_capability_outcome(CapabilityId::LegacyAutoSkillDrafting)
+    } else {
+        scenario
+            .require_capability_unavailable(
+                CapabilityId::ProcedureSkillDrafting,
+                CapabilityReasonCode::DisabledByConfig,
+            )
+            .require_capability_unavailable(
+                CapabilityId::LegacyAutoSkillDrafting,
+                CapabilityReasonCode::DisabledByConfig,
+            )
+    }
+}
+
+fn lifecycle_catalog_scenario(name: &str) -> Scenario {
+    Scenario::new("packaged_lifecycle_matrix_catalog", Category::Hardening)
+        .max_total_time(std::time::Duration::from_secs(20))
+        .max_total_cost_usd(0.0)
+        .turn(Turn::new("/skill list"))
+        .turn(Turn::new(format!("/skill show {name}")))
+        .turn(Turn::new("Reply exactly CATALOG_OK").assert(Assertion::Contains("CATALOG_OK")))
+}
+
+#[tokio::test]
+async fn packaged_lifecycle_memory_matrix_has_real_effects_and_quarantine() {
+    let source = expected_source_commit();
+    let core = packaged_core();
+    let digest = sha256(&core);
+    let verified = driver(&core, &source, &["--verify-binary"]).await;
+    assert!(verified.status.success(), "{}", context(&verified));
+
+    for global_lifecycle in [false, true] {
+        for project_lifecycle in [false, true] {
+            for memory_enabled in [false, true] {
+                let cell = format!(
+                    "global={global_lifecycle}, project={project_lifecycle}, memory={memory_enabled}"
+                );
+                let env =
+                    LifecycleMatrixEnv::build(global_lifecycle, project_lifecycle, memory_enabled);
+                let fixture = OpenAiFixtureScript::new([
+                    OpenAiStep::text("ACK"),
+                    OpenAiStep::text("ACK"),
+                    OpenAiStep::text("ACK"),
+                ])
+                .start()
+                .await
+                .expect("start lifecycle matrix fixture");
+                let provider = ProviderConfig::new(ProviderId::OpenAI, "fixture-chat-v1")
+                    .with_api_key("packaged-lifecycle-fixture-key")
+                    .with_base_url(fixture.base_url());
+                let lifecycle_enabled = global_lifecycle && project_lifecycle;
+                let generated = run_with_binary_in_paths(
+                    &lifecycle_generation_scenario(lifecycle_enabled),
+                    &provider,
+                    &core,
+                    &env.project,
+                    &env.home,
+                )
+                .await
+                .unwrap_or_else(|error| panic!("generation failed for {cell}: {error}"));
+                let observation = fixture.shutdown().await.expect("stop matrix fixture");
+                assert!(
+                    generated.passed,
+                    "generation failed for {cell}: {:?}",
+                    generated.failures
+                );
+                assert!(observation.complete(), "fixture incomplete for {cell}");
+                let expected_memory_backend = memory_enabled || lifecycle_enabled;
+                assert!(
+                    generated.info_events.iter().any(|event| {
+                        event == &format!("ready: memory_enabled={expected_memory_backend}")
+                    }),
+                    "Ready memory capability did not match config for {cell}: {:?}",
+                    generated.info_events
+                );
+
+                let drafts = env.generated_artifacts();
+                if !lifecycle_enabled {
+                    assert!(
+                        drafts.is_empty(),
+                        "disabled lifecycle produced a disk draft for {cell}: {drafts:?}"
+                    );
+                    continue;
+                }
+
+                assert_eq!(
+                    drafts.len(),
+                    1,
+                    "enabled lifecycle must produce one draft for {cell}: {drafts:?}"
+                );
+                assert!(
+                    drafts[0].join("SKILL.md").is_file()
+                        && drafts[0].join("manifest.json").is_file(),
+                    "enabled lifecycle produced an incomplete draft for {cell}: {:?}",
+                    drafts[0]
+                );
+                let manifest: serde_json::Value = serde_json::from_slice(
+                    &fs::read(drafts[0].join("manifest.json")).expect("read draft manifest"),
+                )
+                .expect("parse draft manifest");
+                assert_eq!(manifest["auto_drafted"], true, "manifest for {cell}");
+                assert_eq!(manifest["needs_review"], true, "manifest for {cell}");
+                let name = manifest["name"]
+                    .as_str()
+                    .expect("generated draft name in manifest");
+
+                let catalog_fixture = OpenAiFixtureScript::new([
+                    OpenAiStep::tool_call(
+                        "hidden-skill-probe",
+                        "Skill",
+                        serde_json::json!({ "skill": name }),
+                    ),
+                    OpenAiStep::text("CATALOG_OK"),
+                ])
+                .start()
+                .await
+                .expect("start catalog matrix fixture");
+                let catalog_provider = ProviderConfig::new(ProviderId::OpenAI, "fixture-chat-v1")
+                    .with_api_key("packaged-catalog-fixture-key")
+                    .with_base_url(catalog_fixture.base_url());
+                let catalog = run_with_binary_in_paths(
+                    &lifecycle_catalog_scenario(name),
+                    &catalog_provider,
+                    &core,
+                    &env.project,
+                    &env.home,
+                )
+                .await
+                .unwrap_or_else(|error| panic!("catalog probe failed for {cell}: {error}"));
+                let catalog_observation = catalog_fixture
+                    .shutdown()
+                    .await
+                    .expect("stop catalog matrix fixture");
+                assert!(
+                    catalog.passed,
+                    "catalog probe failed for {cell}: failures={:?}, stderr={}, info={:?}",
+                    catalog.failures, catalog.stderr_tail, catalog.info_events
+                );
+                assert!(
+                    catalog_observation.complete(),
+                    "catalog fixture incomplete for {cell}"
+                );
+                assert!(
+                    catalog
+                        .info_events
+                        .iter()
+                        .any(|event| event.contains(name) && event.contains("(hidden)"))
+                        && catalog.info_events.iter().any(|event| event.contains(name)
+                            && event.contains("visibility: hidden from model")),
+                    "generated draft was not quarantined for {cell}: {:?}",
+                    catalog.info_events
+                );
+                let hidden_probe = catalog
+                    .trace
+                    .entries
+                    .iter()
+                    .find(|entry| entry.call_id == "hidden-skill-probe")
+                    .unwrap_or_else(|| panic!("hidden skill probe missing for {cell}"));
+                assert_eq!(hidden_probe.tool_name, "Skill", "probe tool for {cell}");
+                assert!(hidden_probe.is_error, "hidden skill executed for {cell}");
+                assert!(
+                    hidden_probe.output.contains("not found")
+                        && !hidden_probe
+                            .output
+                            .contains("Repeat this exact safe operation"),
+                    "hidden skill rejection disclosed its body for {cell}: {}",
+                    hidden_probe.output
+                );
+            }
+        }
+    }
+
+    assert_eq!(
+        sha256(&core),
+        digest,
+        "packaged Core bytes changed during the lifecycle matrix"
     );
     let reverified = driver(&core, &source, &["--verify-binary"]).await;
     assert!(reverified.status.success(), "{}", context(&reverified));

@@ -421,6 +421,22 @@ pub async fn run_with_binary_in_environment(
     run_session_in(scenario, provider, bin, env.path(), Some(env.home())).await
 }
 
+/// Drive a scenario inside caller-owned project and `WAYLAND_HOME` paths.
+///
+/// Unlike [`run_with_binary_in_environment`], this seam keeps the global and
+/// project config roots distinct. It is used by packaged cascade tests that
+/// must prove the production global/project merge rather than a pre-merged
+/// fixture file. The caller owns both paths for the complete run.
+pub async fn run_with_binary_in_paths(
+    scenario: &crate::scenario::Scenario,
+    provider: &ProviderConfig,
+    bin: &std::path::Path,
+    project: &std::path::Path,
+    wayland_home: &std::path::Path,
+) -> anyhow::Result<ScenarioResult> {
+    run_session_in(scenario, provider, bin, project, Some(wayland_home)).await
+}
+
 /// Drive ONE session of a scenario inside an already-prepared working
 /// directory `cwd`, returning the assembled + asserted [`ScenarioResult`].
 ///
@@ -1236,6 +1252,7 @@ async fn drive_session(
     // event = the engine's bootstrap time (a usability/perf metric).
     let drive_start = Instant::now();
     let mut capability_evidence = CapabilityEvidence::default();
+    let mut ready_memory_enabled = false;
 
     // Consume engine bootstrap output up to AND INCLUDING the `ready` event
     // before sending the first user message, so we don't race bootstrap. We
@@ -1250,6 +1267,11 @@ async fn drive_session(
                 Some(ev) => {
                     capability_evidence.capture(&ev);
                     if ev.get("type").and_then(Value::as_str) == Some("ready") {
+                        ready_memory_enabled = ev
+                            .get("capabilities")
+                            .and_then(|capabilities| capabilities.get("memory_enabled"))
+                            .and_then(Value::as_bool)
+                            .unwrap_or(false);
                         saw_ready = true;
                         break;
                     }
@@ -1268,7 +1290,7 @@ async fn drive_session(
     let mut final_text = String::new();
     let mut turn_results: Vec<TurnResult> = Vec::new();
     let mut runner_error: Option<String> = None;
-    let mut info_events: Vec<String> = Vec::new();
+    let mut info_events = vec![format!("ready: memory_enabled={ready_memory_enabled}")];
     let mut prompt_dispatch_time = Duration::ZERO;
     let mut first_token_time = None;
     let mut approval_response_time = Duration::ZERO;
