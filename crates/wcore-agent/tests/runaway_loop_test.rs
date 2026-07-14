@@ -121,6 +121,10 @@ impl Tool for SequencedErrorTool {
         wcore_protocol::events::ToolCategory::Info
     }
 
+    fn is_concurrency_safe(&self, _input: &serde_json::Value) -> bool {
+        true
+    }
+
     async fn execute(&self, _input: serde_json::Value) -> ToolResult {
         ToolResult {
             content: self.errors.lock().unwrap().remove(0),
