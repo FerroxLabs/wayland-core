@@ -34,14 +34,9 @@ fn assert_midflight_monitor_observed(events: &[serde_json::Value]) {
         .collect();
     assert_eq!(
         stages,
-        [
-            "constructed",
-            "ready",
-            "reached",
-            "outcome_changed",
-            "observed"
-        ],
-        "a monitor-owned outcome must emit construction and complete runtime proof: {events:?}"
+        ["reached", "outcome_changed", "observed"],
+        "a monitor-owned outcome must emit complete runtime proof; construction is emitted \
+         once by production bootstrap: {events:?}"
     );
 }
 
