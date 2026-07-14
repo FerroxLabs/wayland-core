@@ -925,6 +925,7 @@ fn apply_event_inner(app: &mut App, event: ProtocolEvent) {
         | ProtocolEvent::ProviderAttempt { .. }
         | ProtocolEvent::ProviderRetry { .. }
         | ProtocolEvent::ProviderFailure { .. }
+        | ProtocolEvent::MidFlightMonitorDecision { .. }
         | ProtocolEvent::TraceEvent { .. }
         | ProtocolEvent::PluginEvent { .. }
         | ProtocolEvent::EvolutionEvent { .. }

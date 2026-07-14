@@ -36,7 +36,9 @@ use tokio::sync::mpsc::UnboundedSender;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use wcore_agent::output::OutputSink;
-use wcore_protocol::events::{ErrorInfo, FinishReason, ProtocolEvent, ToolStatus, Usage};
+use wcore_protocol::events::{
+    ErrorInfo, FinishReason, MonitorDirective, MonitorReason, ProtocolEvent, ToolStatus, Usage,
+};
 use wcore_protocol::writer::ProtocolEmitter;
 use wcore_protocol::{ToolApprovalManager, ToolApprovalResult};
 
@@ -452,6 +454,10 @@ impl OutputSink for ChannelSink {
         self.send(ProtocolEvent::ProviderFailure {
             failure: failure.to_string(),
         });
+    }
+
+    fn emit_midflight_monitor_decision(&self, directive: MonitorDirective, reason: MonitorReason) {
+        self.send(ProtocolEvent::MidFlightMonitorDecision { directive, reason });
     }
 
     fn emit_capability_activation(
@@ -3093,6 +3099,23 @@ mod tests {
             }
             other => panic!("expected Error, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn channel_sink_forwards_midflight_monitor_decision() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let sink = ChannelSink::new(tx);
+        sink.emit_midflight_monitor_decision(
+            MonitorDirective::Replan,
+            MonitorReason::RepeatedToolRoute,
+        );
+        assert!(matches!(
+            rx.try_recv().expect("event forwarded"),
+            ProtocolEvent::MidFlightMonitorDecision {
+                directive: MonitorDirective::Replan,
+                reason: MonitorReason::RepeatedToolRoute,
+            }
+        ));
     }
 
     #[test]
