@@ -28,6 +28,7 @@ use crate::orchestration::graph::{
     ExecutionGraph, GraphConfig, GraphContext, GraphError, NodeExecutor,
 };
 use crate::orchestration::intent::IntentClassifier;
+use crate::orchestration::monitor::{MidFlightMonitor, MonitorAction};
 use crate::orchestration::node_executor::{
     AgentExecutorConfig, AgentNodeExecutor, ApprovalChannel, TurnCell,
 };
@@ -4495,8 +4496,20 @@ impl AgentEngine {
         }
     }
 
+    fn emit_midflight_monitor_occurrence(&self) {
+        for activation in crate::capability_activation::successful_occurrence(
+            wcore_protocol::events::CapabilityId::MidFlightMonitor,
+        ) {
+            self.output.emit_capability_activation(&activation);
+        }
+    }
+
     /// Run the agent loop with user input
     pub async fn run(&mut self, user_input: &str, msg_id: &str) -> Result<AgentResult, AgentError> {
+        // F10: one monitor per production run. The view is charged from the
+        // accepted provider usage below; wall time starts at run entry.
+        let run_budget = crate::budget::ExecutionBudget::from(&self.config.budget).start_root();
+        let mut midflight_monitor = MidFlightMonitor::new(run_budget.clone());
         // methodology #27: production caller for StyleDetector::observe (Task 1.B.3)
         if let Ok(mut det) = self.style_detector.lock() {
             det.observe(user_input);
@@ -5386,11 +5399,6 @@ impl AgentEngine {
             // retry; this guard bounds it so the turn can never loop. After
             // the single retry a recurring wedge is a clean terminal error.
             let mut length_wedge_retried = false;
-            // Spec v1 Task 5 progress gate: consecutive failed stream attempts
-            // whose outbound context carried a failed tool round and which
-            // produced no output at all. Two in a row = no realistic chance
-            // the next full-context re-send fares better — stop instead.
-            let mut no_progress_failures: u32 = 0;
             'stream: loop {
                 // Reset per-attempt accumulators so a retry never
                 // double-commits text/tool-calls from a failed attempt.
@@ -5911,12 +5919,9 @@ impl AgentEngine {
                         || !thinking_text.is_empty()
                         || !tool_calls.is_empty()
                         || attempt_usage.output_tokens > 0;
-                    if !failed_tools.is_empty() && !produced_output {
-                        no_progress_failures += 1;
-                    } else if produced_output {
-                        no_progress_failures = 0;
-                    }
-                    if no_progress_failures >= 2 {
+                    midflight_monitor
+                        .record_stream_attempt(!failed_tools.is_empty(), produced_output);
+                    if matches!(midflight_monitor.tick(), MonitorAction::StopOutputStall) {
                         let gate_msg = format!(
                             "Provider stream failed twice in a row with no output while \
                              the last tool round had failed (`{}`) — retrying the same \
@@ -5926,6 +5931,7 @@ impl AgentEngine {
                             failed_tools.join("`, `"),
                         );
                         self.output.emit_error(&gate_msg, false);
+                        self.emit_midflight_monitor_occurrence();
                         return Err(AgentError::ApiError(gate_msg));
                     }
                     stream_attempt += 1;
@@ -5960,6 +5966,23 @@ impl AgentEngine {
             self.run_usage.output_tokens += turn_usage.output_tokens;
             self.run_usage.cache_creation_tokens += turn_usage.cache_creation_tokens;
             self.run_usage.cache_read_tokens += turn_usage.cache_read_tokens;
+
+            // F10: charge the always-live per-run monitor independently of
+            // the optional session/user BudgetTracker.
+            run_budget.record_tokens(turn_usage.input_tokens, turn_usage.output_tokens);
+            run_budget.record_cost(resolve_turn_cost_usd(
+                self.compat.provider_type(),
+                &effective_model,
+                turn_usage.input_tokens,
+                turn_usage.output_tokens,
+                turn_usage.cache_read_tokens,
+                turn_usage.cache_creation_tokens,
+                &self.compat,
+            ));
+            let monitor_budget_cap = match midflight_monitor.tick() {
+                MonitorAction::CancelBudget { reason } => Some(reason),
+                _ => None,
+            };
 
             // B7 writer-side wiring: mirror this turn's token usage into the
             // live introspection state so `wayland_status` /
@@ -6229,6 +6252,24 @@ impl AgentEngine {
                     ),
                     false,
                 );
+                return self
+                    .finish_run_terminated(user_input, turn + 1, FinishReason::Length)
+                    .await;
+            }
+
+            if let Some(reason) = monitor_budget_cap {
+                let observed = run_budget.observed_for(reason);
+                let limit = run_budget.limit_for(reason);
+                self.repair_orphaned_tool_use();
+                self.output.emit_budget_exceeded(reason, &observed, &limit);
+                self.output.emit_error(
+                    &format!(
+                        "Run stopped: execution budget cap '{reason}' exceeded \
+                         (limit {limit}, observed {observed})."
+                    ),
+                    false,
+                );
+                self.emit_midflight_monitor_occurrence();
                 return self
                     .finish_run_terminated(user_input, turn + 1, FinishReason::Length)
                     .await;
@@ -6621,6 +6662,7 @@ impl AgentEngine {
             // #475 failure-loop breaker: set to the offending (tool, failure-count)
             // the first time a tool's consecutive-error streak trips the threshold.
             let mut failure_break: Option<(String, u32)> = None;
+            let mut monitor_replan = false;
             // Display tool results AND populate the matching ToolCallTrace.
             for result in &outcome.results {
                 if let ContentBlock::ToolResult {
@@ -6685,6 +6727,10 @@ impl AgentEngine {
                         && let Some(count) = failure_guard.observe(*is_error)
                     {
                         failure_break = Some((tool_name.to_string(), count));
+                    }
+
+                    if *is_error {
+                        midflight_monitor.record_error(content);
                     }
 
                     self.output.emit_tool_result(tool_name, *is_error, content);
@@ -6791,6 +6837,38 @@ impl AgentEngine {
                 }
             }
 
+            match midflight_monitor.tick() {
+                MonitorAction::Continue => {}
+                MonitorAction::ReplanRepeatedError => {
+                    monitor_replan = true;
+                    self.output.emit_info(
+                        "Mid-flight monitor: the same underlying tool error repeated. \
+                         The next turn must change strategy instead of retrying it.",
+                    );
+                    self.emit_midflight_monitor_occurrence();
+                }
+                MonitorAction::CancelBudget { reason } => {
+                    let observed = run_budget.observed_for(reason);
+                    let limit = run_budget.limit_for(reason);
+                    self.repair_orphaned_tool_use();
+                    self.output.emit_budget_exceeded(reason, &observed, &limit);
+                    self.output.emit_error(
+                        &format!(
+                            "Run stopped: execution budget cap '{reason}' exceeded \
+                             (limit {limit}, observed {observed})."
+                        ),
+                        false,
+                    );
+                    self.emit_midflight_monitor_occurrence();
+                    return self
+                        .finish_run_terminated(user_input, turn + 1, FinishReason::Length)
+                        .await;
+                }
+                MonitorAction::StopOutputStall => {
+                    // Provider stalls terminate inside the stream retry loop.
+                }
+            }
+
             // #475/#160 failure-loop breaker tripped: guarded tools have failed
             // `count` times in a row (tool identity and args both ignored, so a
             // validation-error retry loop that varies its arguments AND a loop
@@ -6815,6 +6893,7 @@ impl AgentEngine {
                     ),
                     false,
                 );
+                self.emit_midflight_monitor_occurrence();
                 // #475 + #457: the retry-cap is a budget guardrail, not a hard
                 // failure — surface finish_reason=max_turns so the host offers
                 // "Continue" (resume with fresh headroom) rather than a
@@ -6844,6 +6923,7 @@ impl AgentEngine {
                     ),
                     false,
                 );
+                self.emit_midflight_monitor_occurrence();
                 return self
                     .finish_run_terminated(user_input, turn + 1, FinishReason::Length)
                     .await;
@@ -6934,6 +7014,14 @@ impl AgentEngine {
             // full output via `emit_tool_result` above; only the model's copy is
             // deduped.
             self.dedup_repeated_tool_outputs(&mut tool_results_content, &tool_calls);
+            if monitor_replan {
+                tool_results_content.push(ContentBlock::Text {
+                    text: "Mid-flight monitor directive: repeated attempts are failing for the \
+                           same root cause. Do not repeat the same call or argument pattern; inspect \
+                           the error, choose a materially different approach, or explain the blocker."
+                        .to_string(),
+                });
+            }
             if let Some(edit_msg) = self.drain_external_edits_message() {
                 tool_results_content.push(ContentBlock::Text { text: edit_msg });
             }

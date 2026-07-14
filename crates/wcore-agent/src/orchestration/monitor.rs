@@ -12,10 +12,9 @@
 //!    `REPEAT_THRESHOLD` entries share the same root-cause signature,
 //!    the monitor reports [`MonitorAction::ReplanRepeatedError`].
 //!
-//! The walker for this sub-wave doesn't yet plug into the monitor —
-//! that wiring lands when the main loop calls `ExecutionGraph::execute`
-//! (Task C.5 / W8b.2.B.1). This module is otherwise standalone and
-//! testable in isolation.
+//! `AgentEngine::run` owns one monitor per run and consumes its decisions at
+//! provider and tool-result boundaries. The graph walker remains a separate
+//! execution surface; it shares the same budget view through its context.
 
 use std::collections::VecDeque;
 
@@ -27,6 +26,10 @@ const WINDOW_LEN: usize = 8;
 /// How many consecutive identical signatures trip
 /// [`MonitorAction::ReplanRepeatedError`].
 const REPEAT_THRESHOLD: usize = 3;
+
+/// Consecutive failed provider attempts with a failed tool round and no output
+/// before another identical full-context retry is considered wasteful.
+const OUTPUT_STALL_THRESHOLD: u32 = 2;
 
 /// Decision emitted by [`MidFlightMonitor::tick`].
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -41,6 +44,9 @@ pub enum MonitorAction {
     /// The last `REPEAT_THRESHOLD` errors collapsed to the same root
     /// cause. The walker should stop and ask its parent to replan.
     ReplanRepeatedError,
+    /// Repeated provider attempts produced no output while retrying a context
+    /// whose latest tool round had already failed.
+    StopOutputStall,
 }
 
 pub struct MidFlightMonitor {
@@ -48,6 +54,7 @@ pub struct MidFlightMonitor {
     /// Most recent error signatures, oldest at front, newest at back.
     /// Capacity-bounded to `WINDOW_LEN`.
     recent_errors: VecDeque<String>,
+    consecutive_output_stalls: u32,
 }
 
 impl MidFlightMonitor {
@@ -58,6 +65,7 @@ impl MidFlightMonitor {
         Self {
             budget,
             recent_errors: VecDeque::with_capacity(WINDOW_LEN),
+            consecutive_output_stalls: 0,
         }
     }
 
@@ -73,11 +81,25 @@ impl MidFlightMonitor {
         self.recent_errors.push_back(sig);
     }
 
+    /// Record whether a provider attempt made progress. Only an attempt that
+    /// both carried a failed tool round and produced no output counts as a
+    /// stall; any output resets the consecutive streak.
+    pub fn record_stream_attempt(&mut self, failed_tool_round: bool, produced_output: bool) {
+        if failed_tool_round && !produced_output {
+            self.consecutive_output_stalls = self.consecutive_output_stalls.saturating_add(1);
+        } else if produced_output {
+            self.consecutive_output_stalls = 0;
+        }
+    }
+
     /// Inspect the current state and return the next action. Cheap;
     /// call once per turn / graph tick.
     pub fn tick(&mut self) -> MonitorAction {
         if let Some(reason) = self.budget.first_exceeded_reason() {
             return MonitorAction::CancelBudget { reason };
+        }
+        if self.consecutive_output_stalls >= OUTPUT_STALL_THRESHOLD {
+            return MonitorAction::StopOutputStall;
         }
         // Replan when the last REPEAT_THRESHOLD entries collapse to a
         // single signature (i.e. the agent is hitting the same wall
@@ -90,6 +112,10 @@ impl MidFlightMonitor {
                 .take(REPEAT_THRESHOLD)
                 .collect::<Vec<_>>();
             if tail.windows(2).all(|w| w[0] == w[1]) {
+                // The caller injects a changed-strategy instruction into the
+                // next model turn. Consume this streak so a later unrelated
+                // error does not immediately re-trigger the same replan.
+                self.recent_errors.clear();
                 return MonitorAction::ReplanRepeatedError;
             }
         }
@@ -150,5 +176,29 @@ mod tests {
         let a = MidFlightMonitor::root_cause_signature("ENOENT at /tmp/foo.txt line 12 byte 8192");
         let b = MidFlightMonitor::root_cause_signature("ENOENT at /var/bar.log line 7 byte 4096");
         assert_eq!(a, b);
+    }
+
+    #[test]
+    fn output_stall_requires_two_consecutive_empty_failed_rounds() {
+        let view = ExecutionBudget::default().start_root();
+        let mut mon = MidFlightMonitor::new(view);
+        mon.record_stream_attempt(true, false);
+        assert_eq!(mon.tick(), MonitorAction::Continue);
+        mon.record_stream_attempt(false, true);
+        assert_eq!(mon.tick(), MonitorAction::Continue);
+        mon.record_stream_attempt(true, false);
+        mon.record_stream_attempt(true, false);
+        assert_eq!(mon.tick(), MonitorAction::StopOutputStall);
+    }
+
+    #[test]
+    fn repeated_error_replan_consumes_the_triggering_streak() {
+        let view = ExecutionBudget::default().start_root();
+        let mut mon = MidFlightMonitor::new(view);
+        for _ in 0..REPEAT_THRESHOLD {
+            mon.record_error("permission denied at /tmp/work item 42");
+        }
+        assert_eq!(mon.tick(), MonitorAction::ReplanRepeatedError);
+        assert_eq!(mon.tick(), MonitorAction::Continue);
     }
 }

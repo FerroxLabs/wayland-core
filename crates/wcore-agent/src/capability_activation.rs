@@ -65,11 +65,7 @@ pub fn startup_activations(inputs: StartupCapabilityInputs) -> Vec<CapabilityAct
         CapabilityId::PricingRefresher,
         CapabilityReasonCode::NoProductionConstructor,
     );
-    unavailable(
-        &mut events,
-        CapabilityId::MidFlightMonitor,
-        CapabilityReasonCode::RuntimePathUnwired,
-    );
+    ready(&mut events, CapabilityId::MidFlightMonitor);
     unavailable(
         &mut events,
         CapabilityId::CooldownTracker,
@@ -184,7 +180,7 @@ mod tests {
     }
 
     #[test]
-    fn default_startup_reports_all_eight_capabilities_honestly() {
+    fn default_startup_reports_monitor_ready_and_other_capabilities_honestly() {
         let events = startup_activations(StartupCapabilityInputs {
             smart_compaction_enabled: false,
             smart_handoff_enabled: false,
@@ -196,9 +192,18 @@ mod tests {
         let statuses = final_statuses(&events);
 
         assert_eq!(statuses.len(), 8);
-        assert!(statuses.values().all(|event| {
-            event.stage == CapabilityStage::Unavailable && event.reason.is_some()
-        }));
+        assert_eq!(
+            statuses[&CapabilityId::MidFlightMonitor].stage,
+            CapabilityStage::Ready
+        );
+        assert!(
+            statuses
+                .iter()
+                .filter(|(capability, _)| **capability != CapabilityId::MidFlightMonitor)
+                .all(|(_, event)| {
+                    event.stage == CapabilityStage::Unavailable && event.reason.is_some()
+                })
+        );
         assert_eq!(
             statuses[&CapabilityId::DelegateIsolation].reason,
             Some(CapabilityReasonCode::IsolationNotEnforced)
@@ -218,6 +223,7 @@ mod tests {
         let statuses = final_statuses(&events);
 
         for capability in [
+            CapabilityId::MidFlightMonitor,
             CapabilityId::SmartHandoff,
             CapabilityId::ProcedureSkillDrafting,
             CapabilityId::LegacyAutoSkillDrafting,
@@ -226,7 +232,6 @@ mod tests {
         }
         for capability in [
             CapabilityId::PricingRefresher,
-            CapabilityId::MidFlightMonitor,
             CapabilityId::CooldownTracker,
             CapabilityId::LearnedPolicy,
             CapabilityId::DelegateIsolation,
