@@ -73,6 +73,10 @@ fn traced_result(workdir: &str, external_path: &str) -> ScenarioResult {
             provider_retries: Some(0),
             provider_typed_failures: Vec::new(),
             provider_usage: None,
+            managed_http_egress: None,
+            filesystem_deltas: None,
+            peak_memory_bytes: None,
+            peak_cpu_millis: None,
             cancellation_requested: false,
             shutdown_time: Duration::from_millis(1),
         },
@@ -168,6 +172,7 @@ fn body() -> ReceiptBodyV1 {
             decision: "approve_all".to_string(),
         }],
         boundaries: BoundaryEvidenceV1 {
+            egress_scope: "core_managed_http_v1".to_string(),
             egress_attempted: Evidence::observed(Vec::new()),
             egress_allowed: Evidence::observed(Vec::new()),
             egress_denied: Evidence::observed(Vec::new()),
@@ -280,6 +285,25 @@ fn explicit_unavailable_measurements_cannot_satisfy_the_milestone_gate() {
         .verify(&receipt, &VerificationPolicy::default())
         .expect("receipt remains structurally valid");
     assert!(!verified.gate_passed);
+}
+
+#[test]
+fn managed_http_egress_must_be_a_valid_complete_partition() {
+    let mut malformed = body();
+    malformed.boundaries.egress_attempted =
+        Evidence::observed(vec![format!("managed_http:v1:{}", h64('a'))]);
+    assert!(matches!(
+        EvidenceReceiptV1::local(malformed),
+        Err(ReceiptError::InvalidEvidence(_))
+    ));
+
+    let mut unsupported = body();
+    unsupported.boundaries.egress_attempted = Evidence::observed(vec![h64('a')]);
+    unsupported.boundaries.egress_allowed = Evidence::observed(vec![h64('a')]);
+    assert!(matches!(
+        EvidenceReceiptV1::local(unsupported),
+        Err(ReceiptError::InvalidEvidence(_))
+    ));
 }
 
 #[test]
@@ -885,6 +909,10 @@ fn critical_usability_finding_is_a_receipt_gate_failure() {
                 cache_read_tokens: 0,
                 cache_write_tokens: 0,
             }),
+            managed_http_egress: None,
+            filesystem_deltas: None,
+            peak_memory_bytes: None,
+            peak_cpu_millis: None,
             cancellation_requested: false,
             shutdown_time: Duration::from_millis(5),
         },
@@ -986,11 +1014,11 @@ fn golden_redacted_projection_digests_are_stable() {
     assert_eq!(
         observed,
         [
-            "9144f78563aa1fa53bc4d5cbbe7ba53ec11e98d7a206d3d566839e7a7e81378d",
-            "32ef4f6f462394d99889f26f03568183082e5482ff5ee49ef9234467b6443712",
-            "70611de0f4fad801be159cf5f254765a820d78f867797f566bb7c211ff7988a1",
-            "fe43f6240e6bf472b338985d8ae5d8d9e17eceeff80242e81f9d084945901ed8",
-            "58e7b1decf89e27f3d2fb46b40f9da9b4c50ac7c83ab51124bf6c2a5fdad9f17",
+            "eea1cde6dbb93b8f927942fe814d707a20479b7a176018e7b7198932b3e804fc",
+            "faadd6a9bfacf3451b3d30e0f7b406493a97b02958698d59ea093656d67e63e6",
+            "c3418c030c5e83c47b92b9440beadeb31bea06c38d0eebb0744785f09c3b0c7f",
+            "174b5a0f69ef11fd05f8e571a39233111254e19372c0455cd3b57ca91e58726c",
+            "733c1d8b1a88a884c455c6e0e64e287557751535a88078743d7816ad8d55ce6f",
         ]
     );
 }

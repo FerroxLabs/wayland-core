@@ -8,8 +8,8 @@
 //!
 //! [`build`] therefore:
 //! 1. Mints a `TempDir`.
-//! 2. Writes `<tempdir>/.wayland-core/config.toml` with an **absolute**
-//!    `[session].directory = "<tempdir>/sessions"`.
+//! 2. Uses `<tempdir>/.wayland-core` as the isolated `WAYLAND_HOME` and writes
+//!    its config with an **absolute** session directory below that home.
 //! 3. Writes provider identity/model only. Credentials are injected through
 //!    the child-only environment at the final spawn boundary.
 //! 4. Optionally writes `[budget] max_cost_usd = X` for scenarios
@@ -32,7 +32,9 @@ use crate::providers::ProviderConfig;
 /// child process.
 pub struct TempEnv {
     dir: TempDir,
-    /// Cached for ergonomics — same as `dir.path().join("sessions")`.
+    /// Evaluator-owned Core state, isolated from the candidate workspace.
+    home_dir: PathBuf,
+    /// Cached for ergonomics — same as `home_dir.join("sessions")`.
     sessions_dir: PathBuf,
 }
 
@@ -57,11 +59,10 @@ pub fn build(provider: &ProviderConfig) -> anyhow::Result<TempEnv> {
 pub fn build_with(provider: &ProviderConfig, opts: &TempEnvOptions) -> anyhow::Result<TempEnv> {
     let dir = TempDir::new()?;
     let root = dir.path();
-    let sessions_dir = root.join("sessions");
-    fs::create_dir_all(&sessions_dir)?;
-
     let cfg_dir = root.join(".wayland-core");
     fs::create_dir_all(&cfg_dir)?;
+    let sessions_dir = cfg_dir.join("sessions");
+    fs::create_dir_all(&sessions_dir)?;
 
     // Build the TOML by hand — `toml::to_string` of a `serde_json::Value`
     // would re-quote keys awkwardly, and we want the file to read cleanly
@@ -107,7 +108,11 @@ pub fn build_with(provider: &ProviderConfig, opts: &TempEnvOptions) -> anyhow::R
 
     fs::write(cfg_dir.join("config.toml"), toml)?;
 
-    Ok(TempEnv { dir, sessions_dir })
+    Ok(TempEnv {
+        dir,
+        home_dir: cfg_dir,
+        sessions_dir,
+    })
 }
 
 impl TempEnv {
@@ -115,6 +120,10 @@ impl TempEnv {
     /// `current_dir`.
     pub fn path(&self) -> &Path {
         self.dir.path()
+    }
+
+    pub fn home(&self) -> &Path {
+        &self.home_dir
     }
 
     /// Absolute session directory — the engine writes

@@ -9,6 +9,7 @@ pub mod bridge_doorbell;
 pub mod classify;
 pub mod consent;
 pub mod defaults;
+mod evidence;
 pub mod install;
 pub mod policy;
 
@@ -16,5 +17,6 @@ pub use bridge_doorbell::BridgeConsentDoorbell;
 pub use classify::{AllowList, EgressVerdict, classify};
 pub use consent::{ConsentDecision, ConsentDoorbell};
 pub use defaults::build_allowlist;
+pub use evidence::{finalize_eval_egress_observer, install_eval_egress_observer};
 pub use install::install_egress_policy;
 pub use policy::{AgentEgressPolicy, EgressPosture, installed_policy};

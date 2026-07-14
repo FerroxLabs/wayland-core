@@ -9,7 +9,7 @@
 use std::collections::VecDeque;
 use std::fmt::Write as _;
 use std::panic::{AssertUnwindSafe, catch_unwind};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use sha2::{Digest, Sha256};
 
@@ -17,7 +17,7 @@ use sha2::{Digest, Sha256};
 ///
 /// Userinfo, path, query, fragment, headers, and body are never retained. The
 /// path and query are represented only by a length-framed SHA-256 digest.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct EgressDestination {
     pub scheme: String,
     pub host: String,
@@ -26,7 +26,8 @@ pub struct EgressDestination {
 }
 
 /// Stable transport-error classes suitable for deterministic evidence.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum EgressTransportErrorClass {
     Timeout,
     Connect,
@@ -38,7 +39,8 @@ pub enum EgressTransportErrorClass {
 }
 
 /// Terminal outcome of one successfully-built outbound request.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
 pub enum EgressOutcome {
     /// Policy refused the request before network I/O.
     Denied,
@@ -55,7 +57,7 @@ pub enum EgressOutcome {
 }
 
 /// One normalized terminal event for an outbound HTTP attempt.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct EgressEvent {
     pub attempt_id: u64,
     pub method: String,
@@ -74,6 +76,19 @@ pub trait EgressObserver: Send + Sync {
 /// Shared observer handle carried cheaply by clients and request builders.
 pub type SharedEgressObserver = Arc<dyn EgressObserver>;
 
+static GLOBAL_OBSERVER: OnceLock<SharedEgressObserver> = OnceLock::new();
+
+/// Install the process-wide observer used by clients that do not carry an
+/// explicit per-client observer. Installation is one-shot.
+pub fn install_global_observer(observer: SharedEgressObserver) -> Result<(), SharedEgressObserver> {
+    GLOBAL_OBSERVER.set(observer)
+}
+
+/// True when a process-wide observer has been installed.
+pub fn global_observer_installed() -> bool {
+    GLOBAL_OBSERVER.get().is_some()
+}
+
 /// Default observer that intentionally records nothing.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct NoopEgressObserver;
@@ -82,8 +97,21 @@ impl EgressObserver for NoopEgressObserver {
     fn observe(&self, _event: EgressEvent) {}
 }
 
+/// Proxy used by default clients so an observer installed after client
+/// construction still receives subsequent request events.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct GlobalDefaultObserver;
+
+impl EgressObserver for GlobalDefaultObserver {
+    fn observe(&self, event: EgressEvent) {
+        if let Some(observer) = GLOBAL_OBSERVER.get() {
+            notify_fail_open(observer, event);
+        }
+    }
+}
+
 pub(crate) fn default_observer() -> SharedEgressObserver {
-    Arc::new(NoopEgressObserver)
+    Arc::new(GlobalDefaultObserver)
 }
 
 /// Immutable snapshot of a bounded recorder.

@@ -22,6 +22,8 @@ pub(crate) struct ProcessTree {
     backend: Backend,
     root_pid: Option<u32>,
     cleanup_complete: bool,
+    peak_memory_bytes: Option<u64>,
+    peak_cpu_millis: Option<u64>,
 }
 
 #[derive(Debug)]
@@ -65,6 +67,14 @@ impl ProcessTree {
         false
     }
 
+    pub(crate) fn peak_memory_bytes(&self) -> Option<u64> {
+        self.peak_memory_bytes
+    }
+
+    pub(crate) fn peak_cpu_millis(&self) -> Option<u64> {
+        self.peak_cpu_millis
+    }
+
     pub(crate) fn prepare() -> io::Result<Self> {
         #[cfg(target_os = "linux")]
         {
@@ -74,6 +84,8 @@ impl ProcessTree {
                         backend: Backend::Cgroup(cgroup),
                         root_pid: None,
                         cleanup_complete: false,
+                        peak_memory_bytes: None,
+                        peak_cpu_millis: None,
                     });
                 }
                 Err(error) if authoritative_required() => return Err(error),
@@ -99,6 +111,8 @@ impl ProcessTree {
             backend,
             root_pid: None,
             cleanup_complete: false,
+            peak_memory_bytes: None,
+            peak_cpu_millis: None,
         })
     }
 
@@ -240,7 +254,13 @@ impl ProcessTree {
     async fn finish_cleanup(&mut self) -> io::Result<()> {
         match &mut self.backend {
             #[cfg(target_os = "linux")]
-            Backend::Cgroup(cgroup) => cgroup.wait_empty_and_remove().await,
+            Backend::Cgroup(cgroup) => {
+                if let Ok(usage) = cgroup.resource_usage() {
+                    self.peak_memory_bytes = Some(usage.peak_memory_bytes);
+                    self.peak_cpu_millis = Some(usage.cpu_millis);
+                }
+                cgroup.wait_empty_and_remove().await
+            }
             #[cfg(unix)]
             Backend::ProcessGroup => Ok(()),
             #[cfg(windows)]
@@ -616,12 +636,19 @@ mod linux {
         removed: bool,
     }
 
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub(super) struct ResourceUsage {
+        pub(super) peak_memory_bytes: u64,
+        pub(super) cpu_millis: u64,
+    }
+
     impl Cgroup {
         pub(super) fn create() -> io::Result<Self> {
             let self_cgroup = std::fs::read_to_string("/proc/self/cgroup")?;
             let mountinfo = std::fs::read_to_string("/proc/self/mountinfo")?;
             let current = unified_path(&self_cgroup)?;
-            let parent = cgroup_directory(&mountinfo, &current)?;
+            let current = cgroup_directory(&mountinfo, &current)?;
+            let parent = delegated_parent(&current)?;
             let sequence = CGROUP_COUNTER.fetch_add(1, Ordering::Relaxed);
             let path = parent.join(format!("wayland-eval-{}-{sequence}", std::process::id()));
             std::fs::create_dir(&path)?;
@@ -675,6 +702,15 @@ mod linux {
                 Err(error) if error.kind() == io::ErrorKind::NotFound && self.removed => Ok(()),
                 Err(error) => Err(error),
             }
+        }
+
+        pub(super) fn resource_usage(&self) -> io::Result<ResourceUsage> {
+            let memory_peak = std::fs::read_to_string(self.path.join("memory.peak"))?;
+            let cpu_stat = std::fs::read_to_string(self.path.join("cpu.stat"))?;
+            Ok(ResourceUsage {
+                peak_memory_bytes: parse_single_u64("memory.peak", &memory_peak)?,
+                cpu_millis: parse_cpu_usage_micros(&cpu_stat)? / 1_000,
+            })
         }
 
         pub(super) async fn wait_empty_and_remove(&mut self) -> io::Result<()> {
@@ -775,6 +811,48 @@ mod linux {
             .ok_or_else(|| io::Error::other("cgroup.events lacked populated field"))
     }
 
+    fn delegated_parent(current: &Path) -> io::Result<PathBuf> {
+        let Some(configured) = std::env::var_os("WCORE_EVAL_CGROUP_PARENT") else {
+            return Ok(current.to_path_buf());
+        };
+        let configured = PathBuf::from(configured).canonicalize()?;
+        let current = current.canonicalize()?;
+        if current.parent() != Some(configured.as_path()) {
+            return Err(io::Error::other(format!(
+                "WCORE_EVAL_CGROUP_PARENT must be the direct parent of the evaluator cgroup; current={} configured={}",
+                current.display(),
+                configured.display()
+            )));
+        }
+        let enabled = std::fs::read_to_string(configured.join("cgroup.subtree_control"))?;
+        for required in ["cpu", "memory"] {
+            if !enabled
+                .split_whitespace()
+                .any(|controller| controller == required)
+            {
+                return Err(io::Error::other(format!(
+                    "delegated evaluator cgroup has not enabled the {required} controller"
+                )));
+            }
+        }
+        Ok(configured)
+    }
+
+    fn parse_single_u64(name: &str, contents: &str) -> io::Result<u64> {
+        contents
+            .trim()
+            .parse()
+            .map_err(|error| io::Error::other(format!("invalid {name}: {error}")))
+    }
+
+    fn parse_cpu_usage_micros(contents: &str) -> io::Result<u64> {
+        contents
+            .lines()
+            .find_map(|line| line.strip_prefix("usage_usec "))
+            .ok_or_else(|| io::Error::other("cpu.stat lacked usage_usec"))
+            .and_then(|value| parse_single_u64("cpu.stat usage_usec", value))
+    }
+
     #[cfg(test)]
     mod tests {
         use super::*;
@@ -792,6 +870,39 @@ mod linux {
             let path =
                 unified_path("5:cpu:/legacy\n0::/user.slice/eval.scope\n").expect("unified entry");
             assert_eq!(path, Path::new("/user.slice/eval.scope"));
+        }
+        #[test]
+        fn parses_kernel_resource_counters() {
+            assert_eq!(parse_single_u64("memory.peak", "4096\n").unwrap(), 4096);
+            assert_eq!(
+                parse_cpu_usage_micros("usage_usec 9876\nuser_usec 9000\nsystem_usec 876\n")
+                    .unwrap(),
+                9876
+            );
+        }
+
+        #[test]
+        fn cleanup_reaper_handles_burst_on_one_worker() {
+            let reaper = CleanupReaper::spawn_with_capacity(1_024).expect("start cleanup reaper");
+            let paths = tempfile::tempdir().expect("cleanup fixture");
+            for index in 0..512 {
+                reaper
+                    .enqueue(paths.path().join(format!("already-removed-{index}")))
+                    .expect("queue cleanup");
+            }
+            reaper.flush().expect("flush cleanup burst");
+            reaper.check_failures().expect("cleanup burst is clean");
+            assert_eq!(reaper.worker_count.load(Ordering::SeqCst), 1);
+        }
+
+        #[test]
+        fn persistent_cleanup_failure_is_surfaced() {
+            let reaper = CleanupReaper::spawn_with_capacity(1).expect("start cleanup reaper");
+            record_failure(&reaper.failures, "fixture cleanup failure".to_string());
+            let error = reaper
+                .check_failures()
+                .expect_err("persistent cleanup failure must fail closed");
+            assert!(error.to_string().contains("fixture cleanup failure"));
         }
     }
 }

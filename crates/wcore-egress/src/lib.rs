@@ -53,7 +53,8 @@ pub use client::{
 pub use error::EgressError;
 pub use observer::{
     BoundedEgressRecorder, EgressDestination, EgressEvent, EgressObserver, EgressOutcome,
-    EgressRecorderSnapshot, EgressTransportErrorClass, NoopEgressObserver, SharedEgressObserver,
+    EgressRecorderSnapshot, EgressTransportErrorClass, GlobalDefaultObserver, NoopEgressObserver,
+    SharedEgressObserver, global_observer_installed, install_global_observer,
 };
 pub use policy::{
     AllowAllPolicy, EgressDecision, EgressPolicy, GlobalDefaultPolicy, SharedPolicy,

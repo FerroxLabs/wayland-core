@@ -23,7 +23,7 @@
 use std::path::PathBuf;
 use std::process::Stdio;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
@@ -36,6 +36,10 @@ use tokio::process::{Child, Command};
 use crate::capability_honesty::CapabilityEvidence;
 use crate::child_env::ChildEnvironment;
 use crate::cost::CostReport;
+pub use crate::egress_evidence::ManagedHttpEgressEvidence;
+use crate::egress_evidence::read as read_egress_evidence;
+pub use crate::filesystem_evidence::FilesystemDeltaEvidence;
+use crate::filesystem_evidence::Snapshot as FilesystemSnapshot;
 use crate::process_tree::ProcessTree;
 use crate::providers::{ProviderConfig, ProviderId};
 use crate::redaction::SecretRedactor;
@@ -96,6 +100,14 @@ pub struct ExecutionEvidence {
     pub provider_typed_failures: Vec<String>,
     #[serde(default)]
     pub provider_usage: Option<ProviderUsageEvidence>,
+    #[serde(default)]
+    pub managed_http_egress: Option<ManagedHttpEgressEvidence>,
+    #[serde(default)]
+    pub filesystem_deltas: Option<Vec<FilesystemDeltaEvidence>>,
+    #[serde(default)]
+    pub peak_memory_bytes: Option<u64>,
+    #[serde(default)]
+    pub peak_cpu_millis: Option<u64>,
     pub cancellation_requested: bool,
     pub shutdown_time: Duration,
 }
@@ -274,8 +286,14 @@ pub fn spawn_for_run(
         yolo,
         wayland_home,
         secret.as_deref(),
-        None,
+        SpawnInstrumentation::default(),
     )
+}
+
+#[derive(Default)]
+struct SpawnInstrumentation<'a> {
+    process_tree: Option<&'a ProcessTree>,
+    egress_evidence_path: Option<&'a std::path::Path>,
 }
 
 fn spawn_for_run_with_secret(
@@ -285,11 +303,14 @@ fn spawn_for_run_with_secret(
     yolo: bool,
     wayland_home: Option<&std::path::Path>,
     secret: Option<&str>,
-    process_tree: Option<&ProcessTree>,
+    instrumentation: SpawnInstrumentation<'_>,
 ) -> Result<Child, SpawnError> {
     let mut cmd = Command::new(bin);
     let isolated_home = wayland_home.unwrap_or(cwd);
     ChildEnvironment::build(cwd, isolated_home, secret)?.apply_tokio(&mut cmd);
+    if let Some(path) = instrumentation.egress_evidence_path {
+        cmd.env("WCORE_EVAL_EGRESS_EVIDENCE", path);
+    }
     // Build an allowlisted child environment before adding any scenario
     // arguments. Credentials enter through a one-use file that Core deletes
     // before bootstrap; they never appear in argv, env, or persisted config.
@@ -312,7 +333,7 @@ fn spawn_for_run_with_secret(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
-    if let Some(process_tree) = process_tree {
+    if let Some(process_tree) = instrumentation.process_tree {
         process_tree.configure(&mut cmd)?;
     }
     // `wayland_config_dir()` = `$WAYLAND_HOME` resolves the global config layer:
@@ -382,7 +403,7 @@ pub async fn run_with_binary(
                 .then_some(scenario.max_total_cost_usd),
         },
     )?;
-    run_session_in(scenario, provider, bin, env.path(), Some(env.path())).await
+    run_session_in(scenario, provider, bin, env.path(), Some(env.home())).await
 }
 
 /// Drive a scenario inside a caller-prepared hermetic environment.
@@ -398,7 +419,7 @@ pub async fn run_with_binary_in_environment(
     bin: &std::path::Path,
     env: &crate::tempenv::TempEnv,
 ) -> anyhow::Result<ScenarioResult> {
-    run_session_in(scenario, provider, bin, env.path(), Some(env.path())).await
+    run_session_in(scenario, provider, bin, env.path(), Some(env.home())).await
 }
 
 /// Drive ONE session of a scenario inside an already-prepared working
@@ -424,42 +445,23 @@ pub(crate) async fn run_session_in(
     // `[[hooks.*]]`) onto the tempenv-seeded `.wayland-core/config.toml`. This
     // was previously assigned on `Scenario` but never invoked, so any
     // setup-dependent scenario silently degraded; D6/D7/coverage need it.
-    let outcome = match &scenario.setup {
-        Some(setup) => match setup(cwd) {
-            Ok(()) => match tempenv::config_sha256(cwd) {
-                Ok(config_sha256) => {
-                    run_session_body(SessionRun {
-                        scenario,
-                        provider,
-                        bin,
-                        cwd,
-                        wayland_home,
-                        secret: secret.as_deref(),
-                        redactor: &redactor,
-                        config_sha256,
-                    })
-                    .await
-                }
-                Err(error) => Err(anyhow::anyhow!("could not hash effective config: {error}")),
-            },
-            Err(error) => Err(anyhow::anyhow!("scenario setup failed: {error}")),
-        },
-        None => match tempenv::config_sha256(cwd) {
-            Ok(config_sha256) => {
-                run_session_body(SessionRun {
-                    scenario,
-                    provider,
-                    bin,
-                    cwd,
-                    wayland_home,
-                    secret: secret.as_deref(),
-                    redactor: &redactor,
-                    config_sha256,
-                })
-                .await
-            }
-            Err(error) => Err(anyhow::anyhow!("could not hash effective config: {error}")),
-        },
+    let setup_result = scenario.setup.as_ref().map_or(Ok(()), |setup| {
+        setup(cwd).map_err(|error| anyhow::anyhow!("scenario setup failed: {error}"))
+    });
+    let outcome = match setup_result {
+        Ok(()) => {
+            run_prepared_session(
+                scenario,
+                provider,
+                bin,
+                cwd,
+                wayland_home,
+                secret.as_deref(),
+                &redactor,
+            )
+            .await
+        }
+        Err(error) => Err(error),
     };
 
     let cleanup_error = scenario
@@ -510,6 +512,36 @@ pub(crate) async fn run_session_in(
         .map_err(|error| anyhow::anyhow!(redactor.text(error.to_string()).0))
 }
 
+async fn run_prepared_session(
+    scenario: &crate::scenario::Scenario,
+    provider: &ProviderConfig,
+    bin: &std::path::Path,
+    cwd: &std::path::Path,
+    wayland_home: Option<&std::path::Path>,
+    secret: Option<&str>,
+    redactor: &SecretRedactor,
+) -> anyhow::Result<ScenarioResult> {
+    let before = FilesystemSnapshot::capture(cwd)
+        .map_err(|error| anyhow::anyhow!("could not snapshot scenario workspace: {error}"))?;
+    let config_sha256 = tempenv::config_sha256(cwd)
+        .map_err(|error| anyhow::anyhow!("could not hash effective config: {error}"))?;
+    let mut result = run_session_body(SessionRun {
+        scenario,
+        provider,
+        bin,
+        cwd,
+        wayland_home,
+        secret,
+        redactor,
+        config_sha256,
+    })
+    .await?;
+    let after = FilesystemSnapshot::capture(cwd)
+        .map_err(|error| anyhow::anyhow!("could not snapshot scenario workspace: {error}"))?;
+    result.execution.filesystem_deltas = Some(before.delta(after));
+    Ok(result)
+}
+
 struct SessionRun<'a> {
     scenario: &'a crate::scenario::Scenario,
     provider: &'a ProviderConfig,
@@ -533,6 +565,15 @@ async fn run_session_body(input: SessionRun<'_>) -> anyhow::Result<ScenarioResul
         config_sha256,
     } = input;
     let start = Instant::now();
+    static EGRESS_EVIDENCE_COUNTER: AtomicU64 = AtomicU64::new(0);
+    let authority_evidence_required = authority_evidence_required();
+    let egress_evidence_path = authority_evidence_required.then(|| {
+        cwd.join(".wayland-core").join(format!(
+            "eval-egress-{}-{}.jsonl",
+            std::process::id(),
+            EGRESS_EVIDENCE_COUNTER.fetch_add(1, Ordering::Relaxed)
+        ))
+    });
 
     let mut process_tree = ProcessTree::prepare()
         .map_err(|error| anyhow::anyhow!("process containment unavailable: {error}"))?;
@@ -546,7 +587,10 @@ async fn run_session_body(input: SessionRun<'_>) -> anyhow::Result<ScenarioResul
         scenario.approval == crate::scenario::ApprovalPolicy::Yolo,
         wayland_home,
         secret,
-        Some(&process_tree),
+        SpawnInstrumentation {
+            process_tree: Some(&process_tree),
+            egress_evidence_path: egress_evidence_path.as_deref(),
+        },
     )
     .map_err(|e| anyhow::anyhow!(e.to_string()))?;
     process_tree
@@ -669,6 +713,10 @@ async fn run_session_body(input: SessionRun<'_>) -> anyhow::Result<ScenarioResul
                     provider_retries: None,
                     provider_typed_failures: Vec::new(),
                     provider_usage: None,
+                    managed_http_egress: None,
+                    filesystem_deltas: None,
+                    peak_memory_bytes: process_tree.peak_memory_bytes(),
+                    peak_cpu_millis: process_tree.peak_cpu_millis(),
                     cancellation_requested: true,
                     shutdown_time,
                 },
@@ -723,6 +771,10 @@ async fn run_session_body(input: SessionRun<'_>) -> anyhow::Result<ScenarioResul
                     provider_retries: None,
                     provider_typed_failures: Vec::new(),
                     provider_usage: None,
+                    managed_http_egress: None,
+                    filesystem_deltas: None,
+                    peak_memory_bytes: process_tree.peak_memory_bytes(),
+                    peak_cpu_millis: process_tree.peak_cpu_millis(),
                     cancellation_requested: true,
                     shutdown_time,
                 },
@@ -758,6 +810,25 @@ async fn run_session_body(input: SessionRun<'_>) -> anyhow::Result<ScenarioResul
     let wall_time = start.elapsed();
 
     let mut failures: Vec<Failure> = Vec::new();
+    let managed_http_egress =
+        egress_evidence_path
+            .as_deref()
+            .and_then(|path| match read_egress_evidence(path) {
+                Ok(evidence) => Some(evidence),
+                Err(error) => {
+                    failures.push(Failure::RunnerError(format!(
+                        "managed HTTP egress evidence incomplete: {error}"
+                    )));
+                    None
+                }
+            });
+    if authority_evidence_required
+        && (process_tree.peak_memory_bytes().is_none() || process_tree.peak_cpu_millis().is_none())
+    {
+        failures.push(Failure::RunnerError(
+            "authoritative kernel resource evidence unavailable".to_string(),
+        ));
+    }
     if let Some(err) = hit_internal_error {
         failures.push(Failure::RunnerError(err));
     }
@@ -904,6 +975,10 @@ async fn run_session_body(input: SessionRun<'_>) -> anyhow::Result<ScenarioResul
             provider_retries,
             provider_typed_failures,
             provider_usage,
+            managed_http_egress,
+            filesystem_deltas: None,
+            peak_memory_bytes: process_tree.peak_memory_bytes(),
+            peak_cpu_millis: process_tree.peak_cpu_millis(),
             cancellation_requested: scenario.turns.iter().any(|turn| turn.stop_mid_turn),
             shutdown_time,
         },
@@ -941,6 +1016,13 @@ fn add_capture_failures(
             sink: "stdout".to_string(),
         });
     }
+}
+
+fn authority_evidence_required() -> bool {
+    std::env::var_os("WCORE_EVAL_REQUIRE_AUTHORITY_EVIDENCE").is_some_and(|value| {
+        let value = value.to_string_lossy();
+        !value.is_empty() && value != "0" && !value.eq_ignore_ascii_case("false")
+    })
 }
 
 /// Output of the inner stdin/stdout-driving loop. Pulled out so the

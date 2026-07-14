@@ -158,6 +158,10 @@ pub struct DecisionEvidenceV1 {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BoundaryEvidenceV1 {
+    /// Coverage of the egress fields below. This is deliberately narrower
+    /// than whole-process network egress: it covers only Core-managed HTTP
+    /// clients that pass through `wcore-egress`.
+    pub egress_scope: String,
     pub egress_attempted: Evidence<Vec<String>>,
     pub egress_allowed: Evidence<Vec<String>>,
     pub egress_denied: Evidence<Vec<String>>,
@@ -166,6 +170,7 @@ pub struct BoundaryEvidenceV1 {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FilesystemDeltaV1 {
+    pub scope: String,
     pub path_sha256: String,
     pub operation: String,
     pub content_sha256: Evidence<String>,
@@ -267,7 +272,7 @@ struct BehaviorProjectionV1<'a> {
     provider: &'a ProviderEvidenceV1,
     tools: Vec<BehaviorToolV1<'a>>,
     decisions: &'a [DecisionEvidenceV1],
-    boundaries: &'a BoundaryEvidenceV1,
+    boundaries: BehaviorBoundaryV1<'a>,
     process: BehaviorProcessV1<'a>,
     recovery: BehaviorRecoveryV1<'a>,
     canary_scans: &'a CanaryScanEvidenceV1,
@@ -301,6 +306,18 @@ struct BehaviorToolV1<'a> {
 struct BehaviorProcessV1<'a> {
     cancellation_requested: bool,
     orphan_count: &'a Evidence<u64>,
+}
+
+#[derive(Serialize)]
+struct BehaviorBoundaryV1<'a> {
+    egress_scope: &'a str,
+    egress_attempted: &'a Evidence<Vec<String>>,
+    egress_allowed: &'a Evidence<Vec<String>>,
+    egress_denied: &'a Evidence<Vec<String>>,
+    /// Engine state is still present in the full receipt, but session IDs,
+    /// logs, and traces are run evidence rather than a repeatable user-visible
+    /// filesystem outcome.
+    workspace_filesystem_deltas: Evidence<Vec<&'a FilesystemDeltaV1>>,
 }
 
 #[derive(Serialize)]
@@ -666,27 +683,63 @@ impl EvidenceReceiptV1 {
             tools,
             decisions,
             boundaries: BoundaryEvidenceV1 {
-                egress_attempted: Evidence::Unavailable {
-                    code: "egress_recorder_not_enabled".to_string(),
-                },
-                egress_allowed: Evidence::Unavailable {
-                    code: "egress_recorder_not_enabled".to_string(),
-                },
-                egress_denied: Evidence::Unavailable {
-                    code: "egress_recorder_not_enabled".to_string(),
-                },
-                filesystem_deltas: Evidence::Unavailable {
-                    code: "filesystem_delta_recorder_not_enabled".to_string(),
-                },
+                egress_scope: "core_managed_http_v1".to_string(),
+                egress_attempted: result.execution.managed_http_egress.as_ref().map_or_else(
+                    || Evidence::Unavailable {
+                        code: "managed_http_egress_recorder_incomplete".to_string(),
+                    },
+                    |egress| Evidence::observed(egress.attempted.clone()),
+                ),
+                egress_allowed: result.execution.managed_http_egress.as_ref().map_or_else(
+                    || Evidence::Unavailable {
+                        code: "managed_http_egress_recorder_incomplete".to_string(),
+                    },
+                    |egress| Evidence::observed(egress.allowed.clone()),
+                ),
+                egress_denied: result.execution.managed_http_egress.as_ref().map_or_else(
+                    || Evidence::Unavailable {
+                        code: "managed_http_egress_recorder_incomplete".to_string(),
+                    },
+                    |egress| Evidence::observed(egress.denied.clone()),
+                ),
+                filesystem_deltas: result.execution.filesystem_deltas.as_ref().map_or_else(
+                    || Evidence::Unavailable {
+                        code: "filesystem_delta_recorder_not_enabled".to_string(),
+                    },
+                    |deltas| {
+                        Evidence::observed(
+                            deltas
+                                .iter()
+                                .map(|delta| FilesystemDeltaV1 {
+                                    scope: delta.scope.clone(),
+                                    path_sha256: delta.path_sha256.clone(),
+                                    operation: delta.operation.clone(),
+                                    content_sha256: delta.content_sha256.clone().map_or_else(
+                                        || Evidence::Unavailable {
+                                            code: "file_deleted".to_string(),
+                                        },
+                                        Evidence::observed,
+                                    ),
+                                })
+                                .collect(),
+                        )
+                    },
+                ),
             },
             process: ProcessEvidenceV1 {
                 tree_sha256: result.execution.process_tree_sha256.clone(),
-                peak_memory_bytes: Evidence::Unavailable {
-                    code: "resource_sampler_not_enabled".to_string(),
-                },
-                peak_cpu_millis: Evidence::Unavailable {
-                    code: "resource_sampler_not_enabled".to_string(),
-                },
+                peak_memory_bytes: result.execution.peak_memory_bytes.map_or_else(
+                    || Evidence::Unavailable {
+                        code: "resource_sampler_not_enabled".to_string(),
+                    },
+                    Evidence::observed,
+                ),
+                peak_cpu_millis: result.execution.peak_cpu_millis.map_or_else(
+                    || Evidence::Unavailable {
+                        code: "resource_sampler_not_enabled".to_string(),
+                    },
+                    Evidence::observed,
+                ),
                 cancellation_requested: result.execution.cancellation_requested,
                 orphan_count: process_orphans,
             },
@@ -925,7 +978,21 @@ fn behavior_digest(body: &ReceiptBodyV1) -> Result<String, ReceiptError> {
             })
             .collect(),
         decisions: &body.decisions,
-        boundaries: &body.boundaries,
+        boundaries: BehaviorBoundaryV1 {
+            egress_scope: &body.boundaries.egress_scope,
+            egress_attempted: &body.boundaries.egress_attempted,
+            egress_allowed: &body.boundaries.egress_allowed,
+            egress_denied: &body.boundaries.egress_denied,
+            workspace_filesystem_deltas: match &body.boundaries.filesystem_deltas {
+                Evidence::Observed { value } => Evidence::observed(
+                    value
+                        .iter()
+                        .filter(|delta| delta.scope == "workspace")
+                        .collect(),
+                ),
+                Evidence::Unavailable { code } => Evidence::Unavailable { code: code.clone() },
+            },
+        },
         process: BehaviorProcessV1 {
             cancellation_requested: body.process.cancellation_requested,
             orphan_count: &body.process.orphan_count,
@@ -1063,18 +1130,31 @@ fn validate_body(body: &ReceiptBodyV1) -> Result<(), ReceiptError> {
         require_nonempty("decisions.scope", &decision.scope)?;
         require_nonempty("decisions.decision", &decision.decision)?;
     }
+    if body.boundaries.egress_scope != "core_managed_http_v1" {
+        return Err(ReceiptError::InvalidEvidence(format!(
+            "boundaries.egress_scope has unsupported value {}",
+            body.boundaries.egress_scope
+        )));
+    }
     validate_evidence(
         "boundaries.egress_attempted",
         &body.boundaries.egress_attempted,
     )?;
     validate_evidence("boundaries.egress_allowed", &body.boundaries.egress_allowed)?;
     validate_evidence("boundaries.egress_denied", &body.boundaries.egress_denied)?;
+    validate_managed_http_egress(&body.boundaries)?;
     validate_evidence(
         "boundaries.filesystem_deltas",
         &body.boundaries.filesystem_deltas,
     )?;
     if let Evidence::Observed { value: deltas } = &body.boundaries.filesystem_deltas {
         for delta in deltas {
+            if !matches!(delta.scope.as_str(), "workspace" | "engine_state") {
+                return Err(ReceiptError::InvalidEvidence(format!(
+                    "filesystem.scope has unsupported value {}",
+                    delta.scope
+                )));
+            }
             require_sha256("filesystem.path_sha256", &delta.path_sha256, 64)?;
             require_nonempty("filesystem.operation", &delta.operation)?;
             validate_sha_evidence("filesystem.content_sha256", &delta.content_sha256)?;
@@ -1179,6 +1259,64 @@ fn validate_body(body: &ReceiptBodyV1) -> Result<(), ReceiptError> {
     {
         return Err(ReceiptError::InvalidEvidence(
             "summary does not match derived result totals".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_managed_http_egress(boundaries: &BoundaryEvidenceV1) -> Result<(), ReceiptError> {
+    for (field, evidence) in [
+        ("attempted", &boundaries.egress_attempted),
+        ("allowed", &boundaries.egress_allowed),
+        ("denied", &boundaries.egress_denied),
+    ] {
+        if let Evidence::Observed { value } = evidence {
+            for fingerprint in value {
+                let digest = fingerprint
+                    .strip_prefix("managed_http:v1:")
+                    .ok_or_else(|| {
+                        ReceiptError::InvalidEvidence(format!(
+                            "boundaries.egress_{field} contains an unsupported fingerprint"
+                        ))
+                    })?;
+                if digest.len() != 64
+                    || !digest
+                        .bytes()
+                        .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+                {
+                    return Err(ReceiptError::InvalidEvidence(format!(
+                        "boundaries.egress_{field} contains an invalid fingerprint digest"
+                    )));
+                }
+            }
+        }
+    }
+
+    let (
+        Evidence::Observed { value: attempted },
+        Evidence::Observed { value: allowed },
+        Evidence::Observed { value: denied },
+    ) = (
+        &boundaries.egress_attempted,
+        &boundaries.egress_allowed,
+        &boundaries.egress_denied,
+    )
+    else {
+        return Ok(());
+    };
+    let counts = |values: &[String]| {
+        let mut counts = BTreeMap::<String, usize>::new();
+        for value in values {
+            *counts.entry(value.clone()).or_default() += 1;
+        }
+        counts
+    };
+    let mut decided = allowed.clone();
+    decided.extend(denied.iter().cloned());
+    if counts(attempted) != counts(&decided) {
+        return Err(ReceiptError::InvalidEvidence(
+            "managed HTTP egress attempts are not exactly partitioned into allowed and denied"
+                .to_string(),
         ));
     }
     Ok(())

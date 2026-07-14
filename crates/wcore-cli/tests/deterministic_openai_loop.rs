@@ -824,8 +824,8 @@ async fn run_sealed_repository_once(run_id: &str) -> SealedRun {
     let receipt = EvidenceReceiptV1::from_scenario_result(
         ReceiptMetadataV1 {
             run_id: run_id.to_string(),
-            source_commit: artifact.source_commit,
-            binary_sha256: artifact.sha256,
+            source_commit: artifact.source_commit.clone(),
+            binary_sha256: artifact.sha256.clone(),
             fixture_sha256: manifest.fixture_sha256().to_string(),
             model: "fixture-chat-v1".to_string(),
             build: Evidence::Unavailable {
@@ -901,6 +901,20 @@ async fn packaged_f04_run_is_repeatable_and_content_addressed() {
         assert_eq!(first_tool.exit_state, second_tool.exit_state);
     }
     assert_ne!(first.receipt.body_sha256, second.receipt.body_sha256);
+    if let Some(directory) = std::env::var_os("WCORE_F04_EVIDENCE_DIR") {
+        let directory = PathBuf::from(directory);
+        std::fs::create_dir_all(&directory).expect("create F04 evidence directory");
+        std::fs::write(
+            directory.join("repeat-1-receipt.json"),
+            serde_json::to_vec_pretty(&first.receipt).expect("serialize first receipt"),
+        )
+        .expect("write first receipt");
+        std::fs::write(
+            directory.join("repeat-2-receipt.json"),
+            serde_json::to_vec_pretty(&second.receipt).expect("serialize second receipt"),
+        )
+        .expect("write second receipt");
+    }
     let behavior_sha256 = first
         .receipt
         .behavior_sha256()
@@ -915,17 +929,6 @@ async fn packaged_f04_run_is_repeatable_and_content_addressed() {
 
     if let Some(directory) = std::env::var_os("WCORE_F04_EVIDENCE_DIR") {
         let directory = PathBuf::from(directory);
-        std::fs::create_dir_all(&directory).expect("create F04 evidence directory");
-        std::fs::write(
-            directory.join("repeat-1-receipt.json"),
-            serde_json::to_vec_pretty(&first.receipt).expect("serialize first receipt"),
-        )
-        .expect("write first receipt");
-        std::fs::write(
-            directory.join("repeat-2-receipt.json"),
-            serde_json::to_vec_pretty(&second.receipt).expect("serialize second receipt"),
-        )
-        .expect("write second receipt");
         std::fs::write(
             directory.join("repeatability.json"),
             serde_json::to_vec_pretty(&serde_json::json!({

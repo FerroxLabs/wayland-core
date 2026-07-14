@@ -45,6 +45,8 @@ pub mod cost;
 pub mod coverage;
 pub mod cron_scenarios;
 pub mod cross_session;
+mod egress_evidence;
+mod filesystem_evidence;
 pub mod fixtures;
 pub mod hook_scenarios;
 pub mod judge;

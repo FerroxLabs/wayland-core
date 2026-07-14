@@ -833,6 +833,7 @@ fn init_failure_message(err: &anyhow::Error, provider_label: &str) -> String {
 
 async fn run() -> anyhow::Result<ExitCode> {
     let mut cli = Cli::parse();
+    wcore_agent::egress::install_eval_egress_observer()?;
     if let Some(path) = cli.api_key_file.take() {
         cli.api_key = Some(read_one_use_api_key(&path)?);
     }
@@ -1537,7 +1538,7 @@ async fn run() -> anyhow::Result<ExitCode> {
 
     // Branch to JSON stream mode
     if cli.json_stream {
-        run_json_stream_mode(
+        let run_result = run_json_stream_mode(
             config,
             &cwd,
             resume,
@@ -1545,7 +1546,10 @@ async fn run() -> anyhow::Result<ExitCode> {
             cli.force,
             cli.assistant.clone(),
         )
-        .await?;
+        .await;
+        let evidence_result = wcore_agent::egress::finalize_eval_egress_observer();
+        run_result?;
+        evidence_result?;
         return Ok(ExitCode::SUCCESS);
     }
 
