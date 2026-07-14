@@ -1,8 +1,8 @@
 # Wayland Core F01 Evaluation Driver Receipt
 
-**Status:** implemented and code-verified
+**Status:** implemented and independently re-verified
 
-**Implementation source:** `a3a6bb6fde81f4991f5fd76e1e195fe26a347fb7` on `frontier/m0`
+**Implementation baseline:** `c5d10bc28972a121735ff7b7c16d47537eade6ff`
 
 **Scope:** F01 only. This receipt proves selection, planning, execution, gating, and exact evaluated-byte identity. F02 owns hermetic execution and secret/process containment; F03 owns externally authoritative provenance and versioned evidence reports.
 
@@ -10,7 +10,7 @@
 
 `wayland-eval` now:
 
-- selects canonical scenarios by identifier, category, or default suite;
+- selects canonical scenarios by exact identifier, substring filter, or default suite;
 - resolves provider plans with CLI-over-environment precedence, strict missing-provider behavior, and an offline `--dry` matrix;
 - reports provider, approval posture, and target operating system for every planned and executed cell;
 - skips unsupported operating systems leniently or rejects them under `--strict`;
@@ -40,18 +40,25 @@ The implementation is preserved as independent reproductions and fixes:
 | `00ce980`–`b8523c0` | Complete, finite, nonnegative cost evidence. |
 | `4740057`–`eec8f4d` | Canary fail-fast and conservative budget gates. |
 | `24f3232`–`a3a6bb6` | Atomic canonical output destination. |
+| `f02b4b3` | Real packaged Core identity, success, and hard-gate failure proof. |
+| `9ee252a` | Locked workspace graph used by the packaged gate. |
+| `15abbad` | Non-optional Linux CI and local packaged-gate wiring. |
+| `c5d10bc` | Exact release/debug artifact binding for native CI and local recipes. |
 
 ## 3. Verification evidence
 
-Verification ran only in the isolated Hetzner worktree, using pinned Rust `1.95.0` with locked/offline dependencies:
+Verification ran only in the isolated Hetzner worktree, using pinned Rust `1.95.0` with locked dependencies:
 
-- all `wcore-eval-scenarios` tests passed: 133 executed, 4 skipped;
+- all `wcore-eval-scenarios` tests passed: 201 executed, 4 explicitly skipped live or interactive tests;
 - focused CLI, artifact, provider, platform, runner, and cost regression suites passed;
-- `cargo clippy -p wcore-eval-scenarios --all-targets --all-features -- -D warnings` passed;
+- `cargo clippy --locked -p wcore-eval-scenarios --all-targets --all-features -- -D warnings` passed;
 - `cargo fmt --all -- --check` passed;
-- a fresh debug `wayland-core` and `wayland-eval` were built from implementation source `a3a6bb6fde81f4991f5fd76e1e195fe26a347fb7`;
-- Core reported `wayland-core 0.12.25 (source a3a6bb6fde81f4991f5fd76e1e195fe26a347fb7)`; and
-- the sealed verifier accepted SHA-256 `a4be1835138d18cf4a8a464558e2e751aeb2b7d5e107df13ff3dde435b9e5fde` with version `0.12.25` and the exact expected source.
+- a fresh debug `wayland-core` and `wayland-eval` were built from implementation baseline `c5d10bc28972a121735ff7b7c16d47537eade6ff`;
+- Core reported version `0.12.25`;
+- the packaged verifier accepted SHA-256 `1785393ac7aef67121ea50fb5f6a202319dab0075985483548c40c2321c82084` with the exact expected source `c5d10bc28972a121735ff7b7c16d47537eade6ff`; and
+- the same packaged gate drove a deterministic loopback success and a hard-gate failure, requiring zero and nonzero child exit semantics respectively.
+
+Native gate wiring is present in the macOS and Windows matrix and the containerized Linux job. This independent seal executed on Linux only; it does not claim a live macOS or Windows result. The receipt commit changes documentation only, so the implementation baseline above remains the evaluated code identity; the containing commit and its exact rebuilt artifact identity belong in the final seal report.
 
 The digest proves which local bytes were evaluated. The embedded source identity is still self-attestation; it is not a signature or independent supply-chain authority.
 
