@@ -708,11 +708,40 @@ async fn tc_10_29_windows_bundled_skill_extract_succeeds() {
 async fn tc_10_30_windows_acl_uses_token_user_without_launching_icacls() {
     let hostile = tempfile::tempdir().expect("hostile executable directory");
     let marker = hostile.path().join("icacls-launched");
+    let sentinel_source = hostile.path().join("icacls_sentinel.rs");
+    let sentinel_exe = hostile.path().join("icacls.exe");
     std::fs::write(
-        hostile.path().join("icacls.cmd"),
-        b"@echo off\r\n> \"%ICACLS_MARKER%\" echo launched\r\nexit /b 0\r\n",
+        &sentinel_source,
+        r#"fn main() {
+    std::fs::write(std::env::var_os("ICACLS_MARKER").unwrap(), b"launched").unwrap();
+}
+"#,
     )
-    .expect("plant hostile icacls.cmd");
+    .expect("write hostile icacls sentinel source");
+    let sentinel_source = sentinel_source.to_string_lossy().into_owned();
+    let sentinel_exe = sentinel_exe.to_string_lossy().into_owned();
+    let mut compiler = wcore_config::shell::shell_command_argv(
+        "rustc",
+        &[
+            &sentinel_source,
+            "--crate-name",
+            "icacls_sentinel",
+            "-o",
+            &sentinel_exe,
+        ],
+    );
+    compiler.kill_on_drop(true);
+    let compile_output =
+        tokio::time::timeout(std::time::Duration::from_secs(60), compiler.output())
+            .await
+            .expect("hostile icacls sentinel compilation timed out")
+            .expect("compile hostile icacls sentinel");
+    assert!(
+        compile_output.status.success(),
+        "hostile icacls sentinel compilation failed; stdout={} stderr={}",
+        String::from_utf8_lossy(&compile_output.stdout),
+        String::from_utf8_lossy(&compile_output.stderr)
+    );
 
     let current_exe = std::env::current_exe().expect("current test executable");
     let current_exe = current_exe.to_string_lossy().into_owned();
@@ -758,7 +787,7 @@ async fn tc_10_30_windows_acl_subprocess() {
     );
     assert!(std::env::current_dir()
         .expect("hostile subprocess cwd")
-        .join("icacls.cmd")
+        .join("icacls.exe")
         .is_file());
 
     let mut catalog = BundledSkillCatalog::new();
