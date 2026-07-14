@@ -1,6 +1,8 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
+use base64::Engine as _;
+use base64::engine::general_purpose::STANDARD as BASE64;
 use ed25519_dalek::SigningKey;
 use sha2::{Digest, Sha256};
 use wcore_eval_scenarios::receipt::{
@@ -9,6 +11,10 @@ use wcore_eval_scenarios::receipt::{
     IdentityEvidenceV1, PolicyEvidenceV1, ProcessEvidenceV1, ProviderEvidenceV1, ReceiptBodyV1,
     ReceiptError, ReceiptMetadataV1, ReceiptVerifier, RecoveryEvidenceV1, SummaryEvidenceV1,
     TargetEvidenceV1, TimingEvidenceV1, ToolEvidenceV1, VerificationPolicy, VerifiedAuthority,
+};
+use wcore_eval_scenarios::receipt_policy::{
+    AUTHORITY_POLICY_SCHEMA, AUTHORITY_POLICY_SCHEMA_VERSION, AuthoritativeReceiptPolicyV1,
+    AuthorityError, CiProvenanceV1, sign_ci_receipt, verify_authoritative_receipt,
 };
 use wcore_eval_scenarios::report::{ReportRenderError, render_receipt_reports};
 use wcore_eval_scenarios::runner::{ApprovalCommandEvidence, ExecutionEvidence, ScenarioResult};
@@ -215,6 +221,40 @@ fn policy() -> VerificationPolicy {
         repository: Some("FerroxLabs/wayland-core".to_string()),
         source_ref: Some("refs/heads/frontier/m0".to_string()),
         workflow: Some("frontier-eval".to_string()),
+    }
+}
+
+fn authoritative_policy(signing_key: &SigningKey) -> AuthoritativeReceiptPolicyV1 {
+    AuthoritativeReceiptPolicyV1 {
+        schema: AUTHORITY_POLICY_SCHEMA.to_string(),
+        schema_version: AUTHORITY_POLICY_SCHEMA_VERSION,
+        key_id: "release-ci".to_string(),
+        public_key_base64: BASE64.encode(signing_key.verifying_key().as_bytes()),
+        source_commit: "a".repeat(40),
+        binary_sha256: h64('b'),
+        config_sha256: h64('c'),
+        fixture_sha256: h64('d'),
+        provider: "openai".to_string(),
+        model: "fixture-model-v1".to_string(),
+        repository: "FerroxLabs/wayland-core".to_string(),
+        source_ref: "refs/heads/frontier/m0".to_string(),
+        workflow: "frontier-eval".to_string(),
+        invocation_id: "ci-456".to_string(),
+        target_os: "linux".to_string(),
+        target_architecture: "x86_64".to_string(),
+        sandbox_backend: "cgroup-v2".to_string(),
+        policy_posture: "approve_all".to_string(),
+        effective_policy_sha256: h64('e'),
+        required_cells: vec!["deterministic-edit/openai/linux".to_string()],
+    }
+}
+
+fn ci_provenance() -> CiProvenanceV1 {
+    CiProvenanceV1 {
+        repository: "FerroxLabs/wayland-core".to_string(),
+        source_ref: "refs/heads/frontier/m0".to_string(),
+        workflow: "frontier-eval".to_string(),
+        invocation_id: "ci-456".to_string(),
     }
 }
 
@@ -466,6 +506,97 @@ fn unsigned_or_mismatched_ci_provenance_is_rejected() {
             .expect_err("binary provenance mismatch must fail"),
         ReceiptError::ProvenanceMismatch("binary digest".to_string())
     );
+}
+
+#[test]
+fn authoritative_workflow_requires_external_key_and_complete_exact_policy() {
+    let signing_key = SigningKey::from_bytes(&[10; 32]);
+    let local = EvidenceReceiptV1::local(body()).expect("valid local receipt");
+    let local_json = serde_json::to_vec(&local).expect("local receipt JSON");
+    let signed = sign_ci_receipt(
+        &local_json,
+        "release-ci",
+        BASE64.encode(signing_key.to_bytes()).as_bytes(),
+        ci_provenance(),
+    )
+    .expect("CI signer workflow");
+    let signed_json = serde_json::to_vec(&signed).expect("signed receipt JSON");
+
+    let (_, verified) =
+        verify_authoritative_receipt(&signed_json, &authoritative_policy(&signing_key))
+            .expect("complete trusted receipt");
+    assert_eq!(verified.authority, VerifiedAuthority::AuthoritativeCi);
+    assert!(verified.gate_passed);
+
+    let mut wrong_fixture = authoritative_policy(&signing_key);
+    wrong_fixture.fixture_sha256 = h64('9');
+    assert!(matches!(
+        verify_authoritative_receipt(&signed_json, &wrong_fixture),
+        Err(AuthorityError::PolicyMismatch("fixture_sha256"))
+    ));
+
+    let mut wrong_manifest = authoritative_policy(&signing_key);
+    wrong_manifest.required_cells = vec!["canary/openai/linux".to_string()];
+    assert!(matches!(
+        verify_authoritative_receipt(&signed_json, &wrong_manifest),
+        Err(AuthorityError::PolicyMismatch("required_cells"))
+    ));
+
+    let wrong_key = SigningKey::from_bytes(&[11; 32]);
+    assert!(verify_authoritative_receipt(&signed_json, &authoritative_policy(&wrong_key)).is_err());
+}
+
+#[test]
+fn authoritative_workflow_rejects_local_incomplete_and_synthetic_receipts() {
+    let signing_key = SigningKey::from_bytes(&[12; 32]);
+    let local = EvidenceReceiptV1::local(body()).expect("valid local receipt");
+    assert!(matches!(
+        verify_authoritative_receipt(
+            &serde_json::to_vec(&local).unwrap(),
+            &authoritative_policy(&signing_key)
+        ),
+        Err(AuthorityError::Receipt(ReceiptError::UntrustedKey(_)))
+            | Err(AuthorityError::WrongAuthority)
+    ));
+
+    let mut incomplete = body();
+    incomplete.boundaries.egress_attempted = Evidence::Unavailable {
+        code: "recorder_not_enabled".to_string(),
+    };
+    let incomplete = EvidenceReceiptV1::local(incomplete).expect("honest incomplete receipt");
+    let incomplete = sign_ci_receipt(
+        &serde_json::to_vec(&incomplete).unwrap(),
+        "release-ci",
+        BASE64.encode(signing_key.to_bytes()).as_bytes(),
+        ci_provenance(),
+    )
+    .expect("failed evidence may still be attested");
+    assert!(matches!(
+        verify_authoritative_receipt(
+            &serde_json::to_vec(&incomplete).unwrap(),
+            &authoritative_policy(&signing_key)
+        ),
+        Err(AuthorityError::MilestoneGateFailed)
+    ));
+
+    let mut synthetic = body();
+    synthetic.identity.fixture_sha256 = format!(
+        "{:x}",
+        Sha256::digest(format!(
+            "{}:{}",
+            synthetic.identity.binary_sha256, synthetic.results[0].task
+        ))
+    );
+    let synthetic = EvidenceReceiptV1::local(synthetic).expect("structurally valid receipt");
+    assert!(matches!(
+        sign_ci_receipt(
+            &serde_json::to_vec(&synthetic).unwrap(),
+            "release-ci",
+            BASE64.encode(signing_key.to_bytes()).as_bytes(),
+            ci_provenance(),
+        ),
+        Err(AuthorityError::SyntheticFixtureDigest)
+    ));
 }
 
 #[test]

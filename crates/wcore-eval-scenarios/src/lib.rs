@@ -57,6 +57,7 @@ pub mod providers;
 pub mod pty_capture;
 pub mod qa;
 pub mod receipt;
+pub mod receipt_policy;
 mod redaction;
 pub mod report;
 pub mod runner;
