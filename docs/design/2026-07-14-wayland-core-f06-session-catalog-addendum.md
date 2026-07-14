@@ -125,9 +125,12 @@ The committed seal passed these Hetzner gates through `remote-cargo.sh`:
 
 The cross-critique command ran with reduced lineage because one auditor emitted
 no parseable findings; the contributing auditor's findings were generic
-project-level objections unrelated to this F06 diff. The available remote
-toolchain has no Windows target, so the Windows ACL and junction tests remain
-source-reviewed but not natively executed.
+project-level objections unrelated to this F06 diff. The remote host has the
+`x86_64-pc-windows-gnu` Rust standard-library target, but both `--tests` and
+`--lib` cross-check attempts stopped in third-party `ring`/SQLite build scripts
+before F06 code because the host has no `x86_64-w64-mingw32-gcc`. It also has
+no native Windows runner. The Windows ACL, junction, and Ctrl+C tests therefore
+remain source-reviewed but not compiled or executed for Windows.
 
 ## 8. Rollback
 
