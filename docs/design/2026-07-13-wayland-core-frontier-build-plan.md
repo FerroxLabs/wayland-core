@@ -165,6 +165,16 @@ isolated: disposable adversarial workers run hostile corpora against the exact a
 release:  GitHub macOS/Linux/Windows matrix + provenance-bound strict evidence receipts
 ```
 
+Build-host hygiene is part of the gate, not an ad-hoc recovery step. Linux verification uses one
+serial shared Cargo target per gate lane with `CARGO_INCREMENTAL=0`; scratch worktrees must not
+create permanent private target trees. Before a gate, record `df` and the largest build-artifact
+directories and require at least 300 GiB and 20% free space. After every task, remove that task's
+scratch target; after every milestone, prune abandoned Cargo targets and cap the compiler cache at
+20 GiB. Cleanup may remove only reproducible build artifacts and caches--never source worktrees,
+Git objects, receipts, configuration, credentials, service state or soak evidence--and must emit a
+before/after disk receipt. Disk pressure below the threshold blocks the gate rather than allowing a
+partial build to masquerade as a code failure.
+
 ## 4. Verification framework
 
 ### 4.1 Test layers
@@ -365,11 +375,11 @@ The ledger contains thirty-one bounded tasks. Each task should map to one or mor
 
 **Goal:** Keep untrusted repositories useful while preventing them from executing configuration or broadening authority.
 
-**Work:** one precedence resolver for managed/user/session/project/skill/hook/MCP/child inputs; trust-gate executable repository content; allow ordinary sandboxed reads/edits/tests; expose effective-source explanations.
+**Work:** one precedence resolver for managed/user/session/project/skill/hook/MCP/child inputs; trust-gate executable repository content; expose effective-source explanations. Add a capability-aware Trusted Local Smart sandbox profile on macOS that grants only the paths and process capabilities required by detected developer toolchains (including Homebrew, MacPorts, Xcode command-line tools, Git, Cargo, custom SDKs and their certificate/config reads). Canonicalize PATH-resolved executables and derive read-only runtime roots from observed capabilities; do not grant package-manager or toolchain roots broad write access. Surface actionable denial telemetry and let Wayland Desktop approve a session-scoped capability grant without switching off the sandbox. Keep untrusted repositories, Managed sessions and remote sessions on the stricter profile; never convert a missing capability into silent host execution. Dangerous remains the explicit, local, time-bounded sandbox-bypass path. Ordinary reads, edits, builds and tests must work without repeated approvals when their observed requirements fit the effective profile.
 
 **Primary paths:** `wcore-config`; `wcore-permissions`; skills/hooks/MCP bootstrap; Bash/workspace policy; protocol effective-policy events.
 
-**Proof:** exhaustive source-precedence property tests; malicious repository corpus; normal untrusted edit/build task succeeds with low prompt count; executable repo content stays inert until trust.
+**Proof:** exhaustive source-precedence property tests; malicious repository corpus; normal untrusted edit/build task succeeds with low prompt count; executable repo content stays inert until trust. On native macOS, run a positive corpus covering the system and Homebrew variants of Git, Node, Cargo and Xcode-backed compilation, plus negative escape/secret/network tests for every added grant. The gate fails on any unexpected denial, silent unsandboxed fallback, over-broad grant or skipped native case; receipts record the selected backend, detected capabilities and effective grants.
 
 **Dependencies:** F07. **Board crosswalk:** #657, #667, #847.
 
@@ -690,11 +700,13 @@ Collision prohibitions:
 5. Builder implements in an isolated branch/worktree when practical.
 6. Reviewer checks correctness, security, silent failure, platform behavior and test strength.
 7. Lead integrates; conflicts halt rather than auto-resolve.
-8. Run `cargo fmt` locally, then sync the exact commit to Hetzner and assert the SHA.
-9. Run scoped tests first, then required workspace gate. Windows/macOS-specific claims wait for their native CI receipt.
-10. Run the packaged deterministic scenario and emit an evidence receipt.
-11. For security/recovery tasks, run the adversarial/fault case that would falsify the claim.
-12. Update the issue with evidence location; never close it.
+8. Run the build-host disk preflight and prune only eligible reproducible artifacts if required.
+9. Run `cargo fmt` locally, then sync the exact commit to Hetzner and assert the SHA.
+10. Run scoped tests first, then required workspace gate. Windows/macOS-specific claims wait for their native CI receipt.
+11. Run the packaged deterministic scenario and emit an evidence receipt.
+12. For security/recovery tasks, run the adversarial/fault case that would falsify the claim.
+13. Remove the task's scratch target and record the post-gate disk receipt.
+14. Update the issue with evidence location; never close it.
 
 Task micro-audit:
 
