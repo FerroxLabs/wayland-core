@@ -59,13 +59,13 @@ The only emitted toolchain notice is the pre-existing future-incompatibility war
 | Windows JSON-stream runner | Direct-child fallback | Not authoritative; strict mode rejects it until Job Object/gated launch lands |
 | PTY/TUI runner | Hermetic environment and output redaction; direct child cleanup | Not authoritative process-tree ownership; strict mode rejects it |
 
-These are explicit F05/F28 gates, not hidden passes. F02 permits F03 receipt work to proceed because unsupported authority fails closed; M0 and release closure remain forbidden until the required native receipts exist.
+These are explicit F05/F28 gates, not hidden passes. F02 permits F03 receipt work to proceed because unsupported authority fails closed. Cross-platform, security, enterprise, F28/M5, and release claims remain forbidden until the required native receipts exist; M0 instead requires exact-integrated Linux E3 packaged proof.
 
 ## 5. Remaining non-F02 work
 
 - F03 must bind this result to a versioned, content-addressed, provenance-aware receipt instead of relying on this prose record.
 - F04 must replace the transitional ambient fixture control with the deterministic fixture protocol.
-- F05/F28 must run native macOS/Linux/Windows packaging and add Windows Job Object/gated launch plus disposable-worker authority for macOS and PTY paths.
+- F05 activates and proves the integrated Linux capability path for M0. F28 must run native macOS/Linux/Windows packaging and add Windows Job Object/gated launch plus disposable-worker authority for macOS and PTY paths before E5 or release claims.
 - A hostile candidate must run under a dedicated unprivileged identity before Linux cgroup evidence is treated as an adversarial sandbox boundary.
 
 This receipt does not claim that the Hetzner build host is safe for malicious repositories or that a process-group/direct-child fallback owns a descendant tree.

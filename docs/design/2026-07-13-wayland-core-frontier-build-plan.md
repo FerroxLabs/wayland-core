@@ -187,7 +187,7 @@ partial build to masquerade as a code failure.
 | L3 Packaged binary | Exact release binary, isolated home/workspace, JSON stream and TUI/PTY | Every merge candidate |
 | L4 Fault/adversarial | Crash, hang, malformed stream, escape attempts, secret canaries, cross-session races | Every security/recovery wave |
 | L5 Live provider | Pinned real models, repeated trials, fixed tasks, bounded account | Nightly/milestone/release |
-| L6 Platform | Native macOS/Linux/Windows sandbox, path and process behavior | Milestone/release |
+| L6 Platform | Native sandbox, path and process behavior on the platforms required by the milestone's evidence tier | Milestone/release |
 | L7 Peer comparison | Same task intent through Wayland/Hermes/OpenClaw adapters | Frontier release candidate |
 
 Deterministic fixtures gate pull requests. Live-model results measure user outcomes but do not replace deterministic safety tests.
@@ -251,6 +251,8 @@ Before the first candidate run, F00 freezes a versioned threshold manifest cover
 | M5 — Frontier Candidate | All platforms pass strict adversarial, soak, performance, release-integrity and peer-comparison gates | F28–F30 | E5 |
 
 M0–M3 are the serial product spine. M4 capabilities may be developed in parallel only after the M3 lifecycle and protocol contracts are frozen. The full Wayland Desktop program begins detailed implementation planning at the M2 protocol checkpoint and can implement against the frozen M3 contract.
+
+M0's required platform set is Linux at E3. M0 characterizes the integrated packaged binary; it makes no security, enterprise, or cross-platform claim. Native macOS/Linux/Windows E5 certification remains F28/M5 work.
 
 ## 6. Task ledger
 
@@ -782,7 +784,7 @@ Task micro-audit:
 | Every task | Unit/integration reproduction, scoped gate, packaged deterministic scenario |
 | Every merge to main | Full deterministic Linux suite plus affected macOS/Windows matrix |
 | Nightly | Pinned live-provider sample, fault injection, leak/orphan scan and performance trend |
-| Milestone | Full live outcome corpus with repeated trials; native required platforms; independent audit |
+| Milestone | Full live outcome corpus with repeated trials; native platforms required by the milestone's declared evidence tier; independent audit |
 | Release | Strict no-skip E5 matrix, peer comparison, signed/redacted receipts and rollback rehearsal |
 
 Live tests use dedicated provider accounts, explicit budgets and model/version manifests. A provider outage is reported as an unavailable evidence run; it cannot silently turn a required release gate green.

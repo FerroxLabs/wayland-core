@@ -131,6 +131,8 @@ project-level objections unrelated to this F06 diff. The remote host has the
 before F06 code because the host has no `x86_64-w64-mingw32-gcc`. It also has
 no native Windows runner. The Windows ACL, junction, and Ctrl+C tests therefore
 remain source-reviewed but not compiled or executed for Windows.
+That Windows gap is pending F28/M5 and release evidence; it does not substitute
+for or block M0's exact-integrated Linux E3 packaged proof.
 
 ## 8. Rollback
 

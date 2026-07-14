@@ -175,7 +175,7 @@ Minimum F06 proof:
 - cross-audit by an independent reviewer, Sol, and Grok, with every accepted/rejected finding recorded;
 - no changes to Desktop protocol schemas in F06.
 
-Mac and Windows source branches must compile in CI; M0 closure still requires the broader three-OS packaged evidence supplied by F01-F05.
+M0 closure requires exact-integrated Linux E3 packaged proof across F00–F06. Native macOS/Linux/Windows E5 evidence remains an F28/M5 and release prerequisite.
 
 ## 10. Rollback
 
