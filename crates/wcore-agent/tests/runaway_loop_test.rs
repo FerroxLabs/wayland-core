@@ -19,6 +19,22 @@ use wcore_types::message::{FinishReason, StopReason, TokenUsage};
 
 use common::{MockLlmProvider, MockTool, test_config};
 
+fn assert_midflight_monitor_observed(events: &[serde_json::Value]) {
+    let stages: Vec<_> = events
+        .iter()
+        .filter(|event| {
+            event["type"].as_str() == Some("capability_activation")
+                && event["capability"].as_str() == Some("mid_flight_monitor")
+        })
+        .filter_map(|event| event["stage"].as_str())
+        .collect();
+    assert_eq!(
+        stages,
+        ["reached", "outcome_changed", "observed"],
+        "a production stop must emit the monitor's complete runtime proof: {events:?}"
+    );
+}
+
 /// One turn that asks for the same tool with the same args. The id varies per
 /// turn (so per-turn history is well-formed); the breaker keys on
 /// name+args+result, not id, so every turn shares one signature.
@@ -91,6 +107,7 @@ async fn repeated_identical_successful_tool_call_converges_via_loopguard() {
         saw_loop_error,
         "expected a visible no-progress-loop error event; got {events:?}"
     );
+    assert_midflight_monitor_observed(&events);
 }
 
 #[tokio::test]
