@@ -121,11 +121,12 @@ pub enum ApprovalScope {
 /// - `"yolo"` — Gemini CLI (`--yolo` flag surface)
 /// - `"dangerously_skip_permissions"` — Claude Code (snake_case form)
 /// - `"dangerously-skip-permissions"` — Claude Code (kebab-case form)
-/// - `"dangerously_skip_sandbox_and_permissions"` — Codex
 ///
 /// The canonical `"force"` (produced by `rename_all = "snake_case"`) is
 /// always accepted. All aliases deserialise to `SessionMode::Force` so
 /// foreign agents can drive wcore without an enum rename on either side.
+/// Vocabulary that claims sandbox bypass is rejected: an untrusted wire peer
+/// cannot mint the local lease required for Dangerous authority.
 #[derive(Debug, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum SessionMode {
@@ -134,8 +135,7 @@ pub enum SessionMode {
     #[serde(
         alias = "yolo",
         alias = "dangerously_skip_permissions",
-        alias = "dangerously-skip-permissions",
-        alias = "dangerously_skip_sandbox_and_permissions"
+        alias = "dangerously-skip-permissions"
     )]
     Force,
 }
@@ -329,10 +329,7 @@ mod tests {
         }
     }
 
-    // F-004: SessionMode::Force must accept all foreign-agent vocabulary aliases.
-    // Gemini sends "yolo", Claude Code sends "dangerously_skip_permissions" (and
-    // the kebab variant), Codex sends "dangerously_skip_sandbox_and_permissions".
-    // All must deserialise to SessionMode::Force without error.
+    // F-004: SessionMode::Force accepts foreign approval-bypass vocabulary.
     #[test]
     fn set_mode_force_canonical() {
         let json = r#"{"type":"set_mode","mode":"force"}"#;
@@ -382,15 +379,11 @@ mod tests {
     }
 
     #[test]
-    fn set_mode_force_alias_dangerously_skip_sandbox_and_permissions() {
+    fn set_mode_rejects_untrusted_sandbox_bypass_vocabulary() {
         let json = r#"{"type":"set_mode","mode":"dangerously_skip_sandbox_and_permissions"}"#;
-        let cmd: ProtocolCommand = serde_json::from_str(json).unwrap();
-        assert_eq!(
-            cmd,
-            ProtocolCommand::SetMode {
-                mode: SessionMode::Force
-            }
-        );
+        let error = serde_json::from_str::<ProtocolCommand>(json)
+            .expect_err("wire peers cannot mint local Dangerous authority");
+        assert!(error.to_string().contains("unknown variant"));
     }
 
     // W0: ApprovalScope gains the prefix-carrying variant `AlwaysPrefix`.
