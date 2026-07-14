@@ -4521,6 +4521,13 @@ impl AgentEngine {
 
     /// Run the agent loop with user input
     pub async fn run(&mut self, user_input: &str, msg_id: &str) -> Result<AgentResult, AgentError> {
+        // A host Stop cancels only the active turn. Renew that descendant on
+        // the next message without reviving a terminal session root.
+        if self.cancel_token.is_cancelled()
+            && let Some(runtime) = self.session_runtime.as_mut()
+        {
+            self.cancel_token = runtime.install_descendant_turn();
+        }
         // F10 owns no-progress governance. F11 binds proactive session-wide
         // accounting; do not create a second per-run spend envelope here.
         let run_budget = crate::budget::ExecutionBudget::default().start_root();
@@ -5991,6 +5998,7 @@ impl AgentEngine {
                                 .await;
                         }
                         MonitorAction::ReplanRepeatedError
+                        | MonitorAction::StopRepeatedError
                         | MonitorAction::ReplanRepeatedRoute
                         | MonitorAction::StopRepeatedRoute => {}
                         MonitorAction::Continue => {}
@@ -6763,7 +6771,7 @@ impl AgentEngine {
                     }
 
                     if *is_error {
-                        self.midflight_monitor.record_error(content);
+                        self.midflight_monitor.record_tool_error(tool_name, content);
                     }
                     self.midflight_monitor
                         .record_tool_outcome(tool_name, tool_input, *is_error, content);
@@ -6941,6 +6949,23 @@ impl AgentEngine {
                         "Mid-flight monitor: the same underlying tool error repeated. \
                          The next turn must change strategy instead of retrying it.",
                     );
+                }
+                MonitorAction::StopRepeatedError => {
+                    self.repair_orphaned_tool_use();
+                    self.output.emit_midflight_monitor_decision(
+                        MonitorDirective::Stop,
+                        MonitorReason::RepeatedError,
+                    );
+                    self.output.emit_error(
+                        "Run stopped: the same underlying tool error repeated after the \
+                         mid-flight monitor required a strategy change. Continue with a \
+                         materially different approach or explain the blocker.",
+                        false,
+                    );
+                    self.emit_midflight_monitor_occurrence();
+                    return self
+                        .finish_run_terminated(user_input, turn + 1, FinishReason::MaxTurns)
+                        .await;
                 }
                 MonitorAction::ReplanRepeatedRoute => {
                     monitor_replan = Some(MonitorReason::RepeatedToolRoute);
@@ -16623,6 +16648,41 @@ mod audit_2026_05_22_tests {
         calls: Arc<std::sync::atomic::AtomicUsize>,
     }
 
+    struct BlockingThenScriptedProvider {
+        calls: std::sync::atomic::AtomicUsize,
+        entered: Arc<tokio::sync::Notify>,
+    }
+
+    impl BlockingThenScriptedProvider {
+        fn new() -> Self {
+            Self {
+                calls: std::sync::atomic::AtomicUsize::new(0),
+                entered: Arc::new(tokio::sync::Notify::new()),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl LlmProvider for BlockingThenScriptedProvider {
+        async fn stream(
+            &self,
+            _: &LlmRequest,
+        ) -> Result<tokio::sync::mpsc::Receiver<LlmEvent>, ProviderError> {
+            if self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0 {
+                self.entered.notify_one();
+                return std::future::pending().await;
+            }
+            let (tx, rx) = tokio::sync::mpsc::channel(2);
+            tx.send(LlmEvent::TextDelta("session alive".into()))
+                .await
+                .expect("test receiver must remain live");
+            tx.send(done_endturn())
+                .await
+                .expect("test receiver must remain live");
+            Ok(rx)
+        }
+    }
+
     impl ScriptedProvider {
         fn new(scripts: Vec<Script>) -> Self {
             Self {
@@ -16813,6 +16873,44 @@ mod audit_2026_05_22_tests {
             !root.is_cancelled(),
             "ordinary host cancellation must stop only the current turn"
         );
+    }
+
+    #[tokio::test]
+    async fn session_control_stop_allows_the_next_run() {
+        let provider = Arc::new(BlockingThenScriptedProvider::new());
+        let entered = Arc::clone(&provider.entered);
+        let mut engine = engine_with(provider);
+        let root = tokio_util::sync::CancellationToken::new();
+        let mut session_guard = crate::cancel::SessionRuntimeGuard::new(root.clone());
+        let control = session_guard.control();
+        session_guard.attach_budget_with_callback(
+            crate::budget::ExecutionBudget::default().start_root(),
+            |_| {},
+        );
+        engine.install_session_cancel_guard(session_guard);
+        let run = tokio::spawn(async move {
+            let result = engine.run("blocked message", "m-blocked").await;
+            (engine, result)
+        });
+        tokio::time::timeout(std::time::Duration::from_secs(1), entered.notified())
+            .await
+            .expect("the first provider call must be in flight");
+
+        control.cancel_active_turn();
+
+        let (mut engine, stopped) = tokio::time::timeout(std::time::Duration::from_secs(1), run)
+            .await
+            .expect("turn-only Stop must interrupt the in-flight provider")
+            .expect("run task must join");
+        assert!(matches!(stopped, Err(super::AgentError::UserAborted)));
+        assert!(!root.is_cancelled());
+        let result = engine
+            .run("next message", "m-next")
+            .await
+            .expect("a turn-only Stop must not strand the session");
+        assert_eq!(result.text, "session alive");
+        assert!(!engine.cancel_token().is_cancelled());
+        assert!(!control.is_cancelled());
     }
 
     #[tokio::test]

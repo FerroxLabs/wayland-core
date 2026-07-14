@@ -103,6 +103,12 @@ impl SessionControl {
         self.root.cancel();
         self.handle.active_turn_token().cancel();
     }
+
+    /// Cancel only the currently active turn, leaving the session root live so
+    /// a host can submit another message on the same session.
+    pub fn cancel_active_turn(&self) {
+        self.handle.active_turn_token().cancel();
+    }
 }
 
 impl SessionTermination {
@@ -545,6 +551,21 @@ mod tests {
 
         assert!(!root.is_cancelled());
         assert!(!control.is_cancelled());
+    }
+
+    #[test]
+    fn host_control_can_cancel_only_the_active_turn() {
+        let root = CancellationToken::new();
+        let termination = SessionTermination::new();
+        let active_turn = CancellationToken::new();
+        let handle = SessionRuntimeHandle::new(active_turn.clone());
+        let control = SessionControl::new(root.clone(), termination.clone(), handle);
+
+        control.cancel_active_turn();
+
+        assert!(active_turn.is_cancelled());
+        assert!(!root.is_cancelled());
+        assert_eq!(termination.reason(), None);
     }
 
     #[tokio::test]

@@ -131,6 +131,7 @@ impl LlmProvider for RecordingProvider {
 }
 
 struct SequencedErrorTool {
+    name: &'static str,
     errors: Mutex<Vec<String>>,
 }
 
@@ -213,7 +214,7 @@ impl Tool for ImprovingTool {
 #[async_trait]
 impl Tool for SequencedErrorTool {
     fn name(&self) -> &str {
-        "unstable_tool"
+        self.name
     }
 
     fn description(&self) -> &str {
@@ -330,6 +331,7 @@ async fn repeated_root_error_injects_a_changed_strategy_directive() {
 
     let mut registry = ToolRegistry::new();
     registry.register(Box::new(SequencedErrorTool {
+        name: "unstable_tool",
         errors: Mutex::new(vec![
             "permission denied at /tmp/a/work.dat line 1".to_string(),
             "permission denied at /tmp/b/work.dat line 2".to_string(),
@@ -357,6 +359,73 @@ async fn repeated_root_error_injects_a_changed_strategy_directive() {
     let events = handle.snapshot();
     assert_monitor_decision(&events, "replan", "repeated_error");
     assert_midflight_monitor_observed(&events);
+}
+
+#[tokio::test]
+async fn varied_bash_failures_remain_bounded_without_a_turn_cap() {
+    let turns = (0..20)
+        .map(|attempt| {
+            vec![
+                LlmEvent::ToolUse {
+                    id: format!("bash-{attempt}"),
+                    name: "Bash".to_string(),
+                    input: json!({ "command": format!("build target-{attempt}") }),
+                    extra: None,
+                },
+                LlmEvent::Done {
+                    stop_reason: StopReason::ToolUse,
+                    finish_reason: FinishReason::from_stop_reason(StopReason::ToolUse),
+                    usage: TokenUsage::default(),
+                },
+            ]
+        })
+        .collect();
+    let provider = Arc::new(RecordingProvider::new(turns));
+    let requests = provider.requests();
+    let mut registry = ToolRegistry::new();
+    registry.register(Box::new(SequencedErrorTool {
+        name: "Bash",
+        errors: Mutex::new(
+            ["a", "b", "c", "d", "e", "f"]
+                .into_iter()
+                .enumerate()
+                .map(|(attempt, directory)| {
+                    format!(
+                        "compiler missing at /tmp/{directory}/work.dat line {}",
+                        attempt + 1
+                    )
+                })
+                .collect(),
+        ),
+    }));
+    let sink = Arc::new(TestSink::new());
+    let handle = sink.handle();
+    let output: Arc<dyn OutputSink> = sink;
+    let mut config = test_config();
+    config.max_turns = None;
+    let mut engine = AgentEngine::new_with_provider(provider, config, registry, output);
+
+    let result = engine
+        .run("keep changing the build command", "")
+        .await
+        .expect("the monitor must stop repeated Bash root failures cleanly");
+
+    assert_eq!(result.finish_reason, FinishReason::MaxTurns);
+    let request_count = requests.lock().unwrap().len();
+    assert!(
+        request_count < 20,
+        "the repeated-error monitor must bound Bash even after its tool circuit opens; requests={request_count}"
+    );
+    let events = handle.snapshot();
+    assert_monitor_decision(&events, "replan", "repeated_error");
+    assert_monitor_decision(&events, "stop", "repeated_error");
+    assert_midflight_monitor_occurrences(&events, 3); // root failure replan, circuit-open replan, circuit-open stop
+    assert!(
+        events
+            .iter()
+            .all(|event| !event.to_string().contains("times in a row")),
+        "Bash remains outside FailureGuard; the monitor must own this stop: {events:?}"
+    );
 }
 
 #[tokio::test]

@@ -3011,6 +3011,7 @@ async fn run_json_stream_mode(
         }
     };
     let startup_capability_activations = result.capability_activations.clone();
+    let session_control = result.cancel_root.clone();
     let mut engine = result.engine;
     let session_egress_policy = engine.egress_policy();
     let workspace_policy = engine
@@ -3513,8 +3514,8 @@ async fn run_json_stream_mode(
                                     }
                                     ProtocolCommand::Stop => {
                                         // wayland#403 fix-3: Stop CANCELS THE ACTIVE TURN — it must
-                                        // NOT end the session. Dropping `engine_fut` (via the inner
-                                        // `break` below) cancels the turn; we emit `stream_end`
+                                        // NOT end the session. Fire the engine-owned active-turn
+                                        // token before dropping `engine_fut`; we emit `stream_end`
                                         // (FinishReason::Stop) for this msg_id so the host's turn-loop
                                         // gets its terminator and doesn't hang. `stopped` then makes
                                         // the outer loop `continue` (keep reading commands) instead of
@@ -3522,6 +3523,7 @@ async fn run_json_stream_mode(
                                         // ("new chat required") after any mid-turn Stop. Only EOF and
                                         // `/exit` end a json-stream session, matching the TUI (Esc
                                         // cancels the turn, never closes the session).
+                                        session_control.cancel_active_turn();
                                         output.emit_stream_end(&msg_id, 0, 0, 0, 0, 0, FinishReason::Stop);
                                         stopped = true;
                                         break;

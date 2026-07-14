@@ -48,6 +48,8 @@ pub enum MonitorAction {
     /// The last `REPEAT_THRESHOLD` errors collapsed to the same root
     /// cause. The walker should stop and ask its parent to replan.
     ReplanRepeatedError,
+    /// The same root error repeated after a replan directive.
+    StopRepeatedError,
     /// A normalized tool/outcome route is cycling; inject a changed-strategy
     /// directive before allowing another provider turn.
     ReplanRepeatedRoute,
@@ -62,9 +64,10 @@ pub struct MidFlightMonitor {
     budget: ExecutionBudgetView,
     /// Most recent error signatures, oldest at front, newest at back.
     /// Capacity-bounded to `WINDOW_LEN`.
-    recent_errors: VecDeque<String>,
+    recent_errors: VecDeque<(String, bool)>,
     recent_tool_outcomes: VecDeque<ToolOutcomeObservation>,
     last_replanned_route: Option<Vec<String>>,
+    last_replanned_error: Option<String>,
     consecutive_output_stalls: u32,
 }
 
@@ -84,6 +87,7 @@ impl MidFlightMonitor {
             recent_errors: VecDeque::with_capacity(WINDOW_LEN),
             recent_tool_outcomes: VecDeque::with_capacity(ROUTE_WINDOW_LEN),
             last_replanned_route: None,
+            last_replanned_error: None,
             consecutive_output_stalls: 0,
         }
     }
@@ -93,11 +97,29 @@ impl MidFlightMonitor {
     /// line numbers, PIDs, timestamps) are stripped via
     /// [`Self::root_cause_signature`].
     pub fn record_error(&mut self, message: &str) {
+        self.record_error_observation(message, true);
+    }
+
+    /// Record an engine tool error. Only tools excluded from the existing
+    /// FailureGuard need monitor-owned stop escalation; guarded tools keep
+    /// their established termination owner.
+    pub fn record_tool_error(&mut self, tool_name: &str, message: &str) {
+        self.record_error_observation(message, matches!(tool_name, "Bash" | "unknown"));
+    }
+
+    fn record_error_observation(&mut self, message: &str, stop_eligible: bool) {
         let sig = Self::root_cause_signature(message);
+        if self
+            .last_replanned_error
+            .as_ref()
+            .is_some_and(|last| last != &sig)
+        {
+            self.last_replanned_error = None;
+        }
         if self.recent_errors.len() == WINDOW_LEN {
             self.recent_errors.pop_front();
         }
-        self.recent_errors.push_back(sig);
+        self.recent_errors.push_back((sig, stop_eligible));
     }
 
     /// Record whether a provider attempt made progress. Only an attempt that
@@ -122,6 +144,9 @@ impl MidFlightMonitor {
         is_error: bool,
         outcome: &str,
     ) {
+        if !is_error {
+            self.last_replanned_error = None;
+        }
         let normalized = format!(
             "{tool_name}|{}|{}|{}",
             normalized_action_json(input, None),
@@ -180,11 +205,18 @@ impl MidFlightMonitor {
                 .rev()
                 .take(REPEAT_THRESHOLD)
                 .collect::<Vec<_>>();
-            if tail.windows(2).all(|w| w[0] == w[1]) {
+            if tail.windows(2).all(|w| w[0].0 == w[1].0) {
                 // The caller injects a changed-strategy instruction into the
                 // next model turn. Consume this streak so a later unrelated
                 // error does not immediately re-trigger the same replan.
+                let repeated = tail[0].0.clone();
+                let stop_eligible = tail.iter().all(|observation| observation.1);
                 self.recent_errors.clear();
+                if stop_eligible && self.last_replanned_error.as_ref() == Some(&repeated) {
+                    self.last_replanned_error = None;
+                    return MonitorAction::StopRepeatedError;
+                }
+                self.last_replanned_error = stop_eligible.then_some(repeated);
                 return MonitorAction::ReplanRepeatedError;
             }
         }
@@ -341,7 +373,6 @@ fn normalized_action_json(value: &serde_json::Value, key: Option<&str>) -> Strin
                 .collect::<Vec<_>>()
                 .join(",")
         ),
-        serde_json::Value::String(value) if looks_like_uuid(value) => "\"<uuid>\"".to_string(),
         _ => serde_json::to_string(value).unwrap_or_default(),
     }
 }
@@ -362,17 +393,6 @@ fn is_volatile_action_key(key: &str) -> bool {
     )
 }
 
-fn looks_like_uuid(value: &str) -> bool {
-    value.len() == 36
-        && value
-            .chars()
-            .enumerate()
-            .all(|(index, character)| match index {
-                8 | 13 | 18 | 23 => character == '-',
-                _ => character.is_ascii_hexdigit(),
-            })
-}
-
 fn stable_success_signature(message: &str) -> String {
     let mut output = Vec::new();
     let mut previous_was_volatile_label = false;
@@ -389,8 +409,6 @@ fn stable_success_signature(message: &str) -> String {
             }
         } else if previous_was_volatile_label {
             ("<volatile>".to_string(), false)
-        } else if looks_like_uuid(trimmed) {
-            ("<uuid>".to_string(), false)
         } else if trimmed.contains('/') || trimmed.contains('\\') {
             (MidFlightMonitor::root_cause_signature(trimmed), false)
         } else {
@@ -519,6 +537,56 @@ mod tests {
     }
 
     #[test]
+    fn repeated_error_stops_when_the_same_replan_is_ignored() {
+        let view = ExecutionBudget::default().start_root();
+        let mut mon = MidFlightMonitor::new(view);
+        for _ in 0..REPEAT_THRESHOLD {
+            mon.record_error("permission denied at /tmp/a/work item 1");
+        }
+        assert_eq!(mon.tick(), MonitorAction::ReplanRepeatedError);
+
+        for _ in 0..REPEAT_THRESHOLD {
+            mon.record_error("permission denied at /tmp/b/work item 2");
+        }
+        assert_eq!(mon.tick(), MonitorAction::StopRepeatedError);
+    }
+
+    #[test]
+    fn failure_guard_tools_keep_their_existing_stop_owner() {
+        let view = ExecutionBudget::default().start_root();
+        let mut mon = MidFlightMonitor::new(view);
+        for _ in 0..REPEAT_THRESHOLD {
+            mon.record_tool_error("Read", "permission denied at /tmp/a/work item 1");
+        }
+        assert_eq!(mon.tick(), MonitorAction::ReplanRepeatedError);
+        for _ in 0..REPEAT_THRESHOLD {
+            mon.record_tool_error("Read", "permission denied at /tmp/b/work item 2");
+        }
+        assert_eq!(mon.tick(), MonitorAction::ReplanRepeatedError);
+    }
+
+    #[test]
+    fn material_progress_resets_repeated_error_escalation() {
+        let view = ExecutionBudget::default().start_root();
+        let mut mon = MidFlightMonitor::new(view);
+        for _ in 0..REPEAT_THRESHOLD {
+            mon.record_error("permission denied at /tmp/a/work item 1");
+        }
+        assert_eq!(mon.tick(), MonitorAction::ReplanRepeatedError);
+        mon.record_tool_outcome(
+            "Edit",
+            &serde_json::json!({"path": "fixed"}),
+            false,
+            "changed",
+        );
+
+        for _ in 0..REPEAT_THRESHOLD {
+            mon.record_error("permission denied at /tmp/b/work item 2");
+        }
+        assert_eq!(mon.tick(), MonitorAction::ReplanRepeatedError);
+    }
+
+    #[test]
     fn repeated_alternating_route_replans_then_stops_if_ignored() {
         let view = ExecutionBudget::default().start_root();
         let mut mon = MidFlightMonitor::new(view);
@@ -618,6 +686,49 @@ mod tests {
             );
         }
         assert_eq!(productive.tick(), MonitorAction::Continue);
+    }
+
+    #[test]
+    fn semantic_uuid_arguments_remain_distinct() {
+        let view = ExecutionBudget::default().start_root();
+        let mut semantic = MidFlightMonitor::new(view);
+        for suffix in 1..=ROUTE_REPEAT_THRESHOLD {
+            semantic.record_tool_outcome(
+                "Read",
+                &serde_json::json!({
+                    "resource_id": format!("00000000-0000-0000-0000-{suffix:012}")
+                }),
+                false,
+                "same read",
+            );
+        }
+        assert_eq!(semantic.tick(), MonitorAction::Continue);
+
+        let view = ExecutionBudget::default().start_root();
+        let mut volatile = MidFlightMonitor::new(view);
+        for suffix in 1..=ROUTE_REPEAT_THRESHOLD {
+            volatile.record_tool_outcome(
+                "Read",
+                &serde_json::json!({
+                    "request_id": format!("00000000-0000-0000-0000-{suffix:012}")
+                }),
+                false,
+                "same read",
+            );
+        }
+        assert_eq!(volatile.tick(), MonitorAction::ReplanRepeatedRoute);
+    }
+
+    #[test]
+    fn unlabelled_success_uuids_remain_distinct() {
+        assert_ne!(
+            stable_success_signature("opened 00000000-0000-0000-0000-000000000001"),
+            stable_success_signature("opened 00000000-0000-0000-0000-000000000002")
+        );
+        assert_eq!(
+            stable_success_signature("request_id 00000000-0000-0000-0000-000000000001"),
+            stable_success_signature("request_id 00000000-0000-0000-0000-000000000002")
+        );
     }
 
     #[test]

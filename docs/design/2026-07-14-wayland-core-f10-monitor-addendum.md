@@ -7,6 +7,11 @@ round, and the resulting replan/stop decisions. A replan is claimed only after
 its directive is committed to the next provider request; an ignored repeated
 route stops with a Continue-able `max_turns` finish.
 
+Repeated-error stop escalation applies only to Bash and unresolved tool names,
+which the legacy FailureGuard deliberately excludes. Structured tools retain
+FailureGuard as their stop owner; the monitor may replan them but cannot preempt
+that established cap.
+
 F10 does not claim live run-budget enforcement. Its generic monitor returns a
 budget stop when given a charged, capped `ExecutionBudgetView`, but the
 production `AgentEngine::run` path currently supplies an uncapped default view.
@@ -19,8 +24,9 @@ cooldown integration. Host cancellation already interrupts both waits; the
 remaining no-host-cancel hang is an explicit F15 boundary, not an F10 pass.
 
 Success-outcome normalization preserves semantic numbers such as improving test
-counts. It removes only explicit volatile metadata (for example request IDs,
-nonces, PIDs, UUIDs, and RFC3339 timestamps). Error normalization is broader but
+counts. It removes only explicitly labelled volatile metadata (for example
+request IDs, nonces, PIDs, and RFC3339 timestamps). Unlabelled UUIDs and UUIDs
+held in semantic fields remain exact. Error normalization is broader but
 preserves status codes, URL authorities, path scope, resource identity, semantic
 dates, and version-like values. Exact single-call repetition remains owned by
 LoopGuard; the monitor owns one-step repetition only when raw outcomes vary but
