@@ -304,9 +304,23 @@ fn spawn_for_run_with_secret(
     secret: Option<&str>,
     instrumentation: SpawnInstrumentation<'_>,
 ) -> Result<Child, SpawnError> {
-    let mut cmd = Command::new(bin);
     let isolated_home = wayland_home.unwrap_or(cwd);
-    ChildEnvironment::build(cwd, isolated_home, secret)?.apply_tokio(&mut cmd);
+    let child_environment = ChildEnvironment::build(cwd, isolated_home, secret)?;
+    let prepared_executable = instrumentation
+        .process_tree
+        .map(|process_tree| process_tree.prepare_executable(bin))
+        .transpose()?;
+    let executable = prepared_executable
+        .as_ref()
+        .map_or(bin, crate::process_tree::PreparedExecutable::path);
+    let mut cmd = Command::new(executable);
+    child_environment.apply_tokio(&mut cmd);
+    if prepared_executable.is_some() {
+        #[cfg(target_os = "linux")]
+        cmd.env("WCORE_EVAL_PINNED_EXECUTABLE", "/proc/self/exe");
+        #[cfg(not(target_os = "linux"))]
+        cmd.env("WCORE_EVAL_PINNED_EXECUTABLE", executable);
+    }
     if let Some(capture) = instrumentation.egress_capture {
         capture.configure(&mut cmd);
     }
@@ -333,7 +347,13 @@ fn spawn_for_run_with_secret(
         .stderr(Stdio::piped())
         .kill_on_drop(true);
     if let Some(process_tree) = instrumentation.process_tree {
-        process_tree.configure(&mut cmd)?;
+        process_tree.prepare_workspace(cwd)?;
+        if let Some(wayland_home) = wayland_home
+            && !wayland_home.starts_with(cwd)
+        {
+            process_tree.prepare_workspace(wayland_home)?;
+        }
+        process_tree.configure(&mut cmd, prepared_executable.as_ref())?;
     }
     // `wayland_config_dir()` = `$WAYLAND_HOME` resolves the global config layer:
     // MCP servers, skills dir, and memory DBs. D4 cross-session runs pass ONE
@@ -342,7 +362,9 @@ fn spawn_for_run_with_secret(
     // stripping the var (`None`) instead falls back to the developer's real home
     // and dials their actual MCP servers. `None` remains for callers that
     // genuinely want the host default.
-    Ok(cmd.spawn()?)
+    let child = cmd.spawn()?;
+    drop(prepared_executable);
+    Ok(child)
 }
 
 /// Spawn the binary with arbitrary args in an explicit isolated directory —
@@ -579,7 +601,6 @@ async fn run_session_body(input: SessionRun<'_>) -> anyhow::Result<ScenarioResul
         redactor,
         config_sha256,
     } = input;
-    let start = Instant::now();
     let authority_evidence_required = authority_evidence_required();
     let egress_capture = authority_evidence_required
         .then(|| crate::egress_evidence::Capture::create(cwd))
@@ -588,6 +609,12 @@ async fn run_session_body(input: SessionRun<'_>) -> anyhow::Result<ScenarioResul
             anyhow::anyhow!("could not prepare authenticated egress capture: {error}")
         })?;
 
+    // One configured candidate identity cannot safely own two evaluator
+    // workspaces at once. Serialize runs inside this supervisor; the kernel
+    // identity lock in ProcessTree rejects concurrent external supervisors.
+    #[cfg(target_os = "linux")]
+    let _candidate_identity_guard = crate::process_tree::serialize_candidate_identity().await;
+    let start = Instant::now();
     let mut process_tree = ProcessTree::prepare()
         .map_err(|error| anyhow::anyhow!("process containment unavailable: {error}"))?;
     let sandbox_backend = process_tree.backend_name().to_string();

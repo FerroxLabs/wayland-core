@@ -4,8 +4,12 @@ use std::time::Duration;
 
 use wcore_eval_scenarios::assertions::Assertion;
 use wcore_eval_scenarios::providers::{ProviderConfig, ProviderId};
-use wcore_eval_scenarios::runner::{Failure, run_with_binary};
+use wcore_eval_scenarios::runner::{Failure, run_with_binary, run_with_binary_in_environment};
 use wcore_eval_scenarios::scenario::{Category, Scenario, Turn};
+use wcore_eval_scenarios::tempenv;
+
+#[cfg(target_os = "linux")]
+static MIGRATION_CGROUP_COUNTER: AtomicUsize = AtomicUsize::new(0);
 
 fn fixture() -> &'static std::path::Path {
     std::path::Path::new(env!("CARGO_BIN_EXE_wcore-eval-fixture"))
@@ -13,6 +17,17 @@ fn fixture() -> &'static std::path::Path {
 
 fn provider(model: &str) -> ProviderConfig {
     ProviderConfig::new(ProviderId::DeepSeek, model).with_api_key("fixture-key")
+}
+
+fn external_control_dir() -> tempfile::TempDir {
+    let directory = tempfile::tempdir().expect("create external orphan control dir");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(directory.path(), std::fs::Permissions::from_mode(0o733))
+            .expect("make fixture control directory writable by the candidate identity");
+    }
+    directory
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -30,6 +45,62 @@ fn read_orphan_state(path: &std::path::Path) -> Option<OrphanState> {
         port: value("port=")?.parse().ok()?,
         heartbeat: value("heartbeat=")?.parse().ok()?,
     })
+}
+
+#[cfg(target_os = "linux")]
+fn read_migration_state(path: &std::path::Path) -> Option<(OrphanState, String)> {
+    let contents = std::fs::read_to_string(path).ok()?;
+    let migration = contents
+        .lines()
+        .find_map(|line| line.strip_prefix("migration="))?
+        .to_string();
+    Some((read_orphan_state(path)?, migration))
+}
+
+#[cfg(target_os = "linux")]
+fn current_cgroup_directory() -> std::io::Result<std::path::PathBuf> {
+    let current = std::fs::read_to_string("/proc/self/cgroup")?
+        .lines()
+        .find_map(|line| line.strip_prefix("0::"))
+        .map(std::path::PathBuf::from)
+        .ok_or_else(|| std::io::Error::other("no unified cgroup v2 entry"))?;
+    let mountinfo = std::fs::read_to_string("/proc/self/mountinfo")?;
+    for line in mountinfo.lines() {
+        let Some((before, after)) = line.split_once(" - ") else {
+            continue;
+        };
+        if after.split_whitespace().next() != Some("cgroup2") {
+            continue;
+        }
+        let fields = before.split_whitespace().collect::<Vec<_>>();
+        if fields.len() < 5 {
+            continue;
+        }
+        let mount_root = std::path::Path::new(fields[3]);
+        let mount_point = std::path::Path::new(fields[4]);
+        let relative = current.strip_prefix(mount_root).map_err(|_| {
+            std::io::Error::other("current cgroup is outside the cgroup v2 mount root")
+        })?;
+        return Ok(mount_point.join(relative));
+    }
+    Err(std::io::Error::other("no cgroup v2 mount found"))
+}
+
+#[cfg(target_os = "linux")]
+fn remove_empty_cgroup(path: &std::path::Path) -> std::io::Result<()> {
+    let deadline = std::time::Instant::now() + Duration::from_secs(1);
+    loop {
+        match std::fs::remove_dir(path) {
+            Ok(()) => return Ok(()),
+            Err(error)
+                if error.raw_os_error() == Some(libc::EBUSY)
+                    && std::time::Instant::now() < deadline =>
+            {
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            Err(error) => return Err(error),
+        }
+    }
 }
 
 async fn wait_for_orphan_state(path: &std::path::Path, timeout: Duration) -> Option<OrphanState> {
@@ -390,7 +461,7 @@ async fn timeout_reaps_detached_descendant_and_listener() {
         eprintln!("skipping authoritative cgroup contract outside the containment gate");
         return;
     }
-    let control_dir = tempfile::tempdir().expect("create external orphan control dir");
+    let control_dir = external_control_dir();
     let control_path = control_dir.path().join("orphan-state");
     let model = format!("fixture-orphan:{}", control_path.display());
     let scenario = Scenario::new("detached_orphan", Category::Hardening)
@@ -428,9 +499,77 @@ async fn timeout_reaps_detached_descendant_and_listener() {
     );
 }
 
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn candidate_cannot_migrate_descendants_to_parent_or_sibling_cgroups() {
+    if std::env::var_os("WCORE_EVAL_REQUIRE_CONTAINMENT").is_none() {
+        eprintln!("skipping cgroup authority attack outside the containment gate");
+        return;
+    }
+
+    let cgroup_parent = current_cgroup_directory().expect("resolve test cgroup");
+    let sequence = MIGRATION_CGROUP_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let sibling = cgroup_parent.join(format!(
+        "wayland-eval-hostile-sibling-{}-{sequence}",
+        std::process::id()
+    ));
+    std::fs::create_dir(&sibling).expect("create hostile sibling cgroup");
+
+    let seed_provider = provider("fixture");
+    let env = tempenv::build(&seed_provider).expect("create hostile fixture environment");
+    let control_dir = env.path().join("migration-state");
+    std::fs::create_dir(&control_dir).expect("create migration control directory");
+    let model = format!(
+        "fixture-cgroup-migration:{}|{}",
+        sibling.display(),
+        control_dir.display()
+    );
+    let scenario = Scenario::new("cgroup_authority_escape", Category::Hardening)
+        .max_total_time(Duration::from_secs(2))
+        .turn(Turn::new("attempt parent and sibling cgroup migration"));
+
+    let outcome =
+        run_with_binary_in_environment(&scenario, &provider(&model), fixture(), &env).await;
+
+    let mut states = Vec::new();
+    for name in ["parent", "sibling"] {
+        let path = control_dir.join(format!("{name}-state"));
+        let state = wait_for_orphan_state(&path, Duration::from_secs(1))
+            .await
+            .unwrap_or_else(|| panic!("{name} migration fixture did not publish state"));
+        let migration = read_migration_state(&path)
+            .map(|(_, migration)| migration)
+            .expect("migration result must be recorded");
+        states.push((name, state, migration));
+    }
+
+    for (_, state, _) in &states {
+        if !wait_for_orphan_cleanup(*state, Duration::from_millis(500)).await {
+            emergency_kill_owned_orphan(*state).await;
+        }
+    }
+    remove_empty_cgroup(&sibling).expect("remove hostile sibling cgroup");
+
+    let result = outcome.expect("authority attack returns a scenario result");
+    for (name, state, migration) in states {
+        assert!(
+            migration.starts_with("denied:"),
+            "{name} migration was not denied: {migration} (pid={})",
+            state.pid
+        );
+        assert!(
+            !process_exists(state.pid) && !listener_accepts_connections(state.port),
+            "denied {name} migration descendant survived cleanup"
+        );
+    }
+    assert!(result.execution.containment_authoritative);
+    assert!(result.execution.cleanup_verified);
+    assert!(result.passed, "unexpected failures: {:?}", result.failures);
+}
+
 #[tokio::test]
 async fn normal_exit_reaps_owned_descendant_listener() {
-    let control_dir = tempfile::tempdir().expect("create external orphan control dir");
+    let control_dir = external_control_dir();
     let control_path = control_dir.path().join("owned-orphan-state");
     let model = format!("fixture-owned-orphan:{}", control_path.display());
     let scenario = Scenario::new("owned_orphan_normal_exit", Category::Hardening)
@@ -447,7 +586,7 @@ async fn normal_exit_reaps_owned_descendant_listener() {
 
 #[tokio::test]
 async fn timeout_reaps_owned_descendant_listener() {
-    let control_dir = tempfile::tempdir().expect("create external orphan control dir");
+    let control_dir = external_control_dir();
     let control_path = control_dir.path().join("owned-orphan-state");
     let model = format!("fixture-owned-orphan-timeout:{}", control_path.display());
     let scenario = Scenario::new("owned_orphan_timeout", Category::Hardening)
@@ -469,7 +608,7 @@ async fn timeout_reaps_owned_descendant_listener() {
 
 #[tokio::test]
 async fn outer_deadline_reaps_owned_descendant_listener() {
-    let control_dir = tempfile::tempdir().expect("create external orphan control dir");
+    let control_dir = external_control_dir();
     let control_path = control_dir.path().join("owned-orphan-state");
     let model = format!("fixture-owned-orphan-timeout:{}", control_path.display());
     let scenario = Scenario::new("owned_orphan_outer_timeout", Category::Hardening)
@@ -491,7 +630,7 @@ async fn outer_deadline_reaps_owned_descendant_listener() {
 
 #[tokio::test]
 async fn cancellation_reaps_owned_descendant_listener() {
-    let control_dir = tempfile::tempdir().expect("create external orphan control dir");
+    let control_dir = external_control_dir();
     let control_path = control_dir.path().join("owned-orphan-state");
     let stop_marker = control_path.with_extension("stop-observed");
     let model = format!("fixture-owned-orphan-cancel:{}", control_path.display());
@@ -519,7 +658,7 @@ async fn cancellation_reaps_owned_descendant_listener() {
 
 #[tokio::test]
 async fn assertion_failure_still_reaps_owned_descendant_listener() {
-    let control_dir = tempfile::tempdir().expect("create external orphan control dir");
+    let control_dir = external_control_dir();
     let control_path = control_dir.path().join("owned-orphan-state");
     let model = format!("fixture-owned-orphan:{}", control_path.display());
     let scenario = Scenario::new("owned_orphan_assertion", Category::Hardening)
@@ -543,7 +682,7 @@ async fn assertion_failure_still_reaps_owned_descendant_listener() {
 
 #[tokio::test]
 async fn direct_child_early_exit_reaps_owned_descendant_listener() {
-    let control_dir = tempfile::tempdir().expect("create external orphan control dir");
+    let control_dir = external_control_dir();
     let control_path = control_dir.path().join("owned-orphan-state");
     let model = format!("fixture-owned-orphan-exit:{}", control_path.display());
     let scenario = Scenario::new("owned_orphan_early_exit", Category::Hardening)
@@ -562,7 +701,7 @@ async fn direct_child_early_exit_reaps_owned_descendant_listener() {
 
 #[tokio::test]
 async fn dropping_runner_future_reaps_owned_descendant_listener() {
-    let control_dir = tempfile::tempdir().expect("create external orphan control dir");
+    let control_dir = external_control_dir();
     let control_path = control_dir.path().join("owned-orphan-state");
     let task_control_path = control_path.clone();
     let task = tokio::spawn(async move {
@@ -576,7 +715,10 @@ async fn dropping_runner_future_reaps_owned_descendant_listener() {
         run_with_binary(&scenario, &provider(&model), fixture()).await
     });
 
-    let state = wait_for_orphan_state(&control_path, Duration::from_secs(2))
+    // A fixed authoritative candidate identity serializes concurrent evaluator
+    // runs. Allow this cancellation probe to reach the front of that queue
+    // before requiring the descendant to publish its state.
+    let state = wait_for_orphan_state(&control_path, Duration::from_secs(10))
         .await
         .expect("owned descendant must publish before cancellation");
     task.abort();

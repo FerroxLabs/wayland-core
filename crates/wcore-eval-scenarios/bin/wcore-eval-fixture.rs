@@ -20,6 +20,16 @@ fn main() {
         run_orphan_listener(std::path::Path::new(&control_path));
     }
 
+    #[cfg(target_os = "linux")]
+    if let Some(target) = argument_value("--cgroup-migration-target") {
+        let control = argument_value("--cgroup-migration-control")
+            .expect("cgroup migration fixture requires a control path");
+        run_cgroup_migration_listener(
+            std::path::Path::new(&target),
+            std::path::Path::new(&control),
+        );
+    }
+
     if std::env::args_os().any(|arg| arg == "--build-info") {
         println!(
             "wayland-core {} (source {SOURCE_COMMIT})",
@@ -70,6 +80,10 @@ fn main() {
                 }
                 if let Some(control_path) = model.strip_prefix("fixture-owned-orphan:") {
                     spawn_owned_orphan(std::path::Path::new(control_path));
+                }
+                #[cfg(target_os = "linux")]
+                if let Some(spec) = model.strip_prefix("fixture-cgroup-migration:") {
+                    spawn_cgroup_migration_descendants(spec);
                 }
                 if model == "fixture-oversized-stdout" {
                     let mut stdout = std::io::stdout().lock();
@@ -333,7 +347,7 @@ fn mcp_response(
 fn spawn_detached_orphan(control_path: &std::path::Path) {
     use std::os::unix::process::CommandExt;
 
-    let executable = std::env::current_exe().expect("resolve fixture executable");
+    let executable = fixture_executable();
     let mut command = std::process::Command::new(executable);
     command
         .arg("--orphan-listener")
@@ -357,7 +371,7 @@ fn spawn_detached_orphan(control_path: &std::path::Path) {
 
 #[allow(clippy::zombie_processes)] // The evaluator must reap this inherited descendant tree.
 fn spawn_owned_orphan(control_path: &std::path::Path) {
-    let executable = std::env::current_exe().expect("resolve fixture executable");
+    let executable = fixture_executable();
     let mut command = std::process::Command::new(executable);
     command
         .arg("--orphan-listener")
@@ -387,6 +401,73 @@ fn run_orphan_listener(control_path: &std::path::Path) -> ! {
     loop {
         let state = format!("pid={pid}\nport={port}\nheartbeat={heartbeat}\n");
         std::fs::write(control_path, state).expect("write orphan fixture control state");
+        heartbeat = heartbeat.saturating_add(1);
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+fn fixture_executable() -> std::path::PathBuf {
+    std::env::var_os("WCORE_EVAL_PINNED_EXECUTABLE")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| std::env::current_exe().expect("resolve fixture executable"))
+}
+
+#[cfg(target_os = "linux")]
+#[allow(clippy::zombie_processes)] // The evaluator owns and reaps both hostile descendants.
+fn spawn_cgroup_migration_descendants(spec: &str) {
+    let (sibling, control_dir) = spec
+        .split_once('|')
+        .expect("cgroup migration fixture requires sibling|control-dir");
+    let sibling = std::path::Path::new(sibling);
+    let parent = sibling.parent().expect("sibling cgroup must have a parent");
+    let executable = fixture_executable();
+
+    for (name, target) in [("parent", parent), ("sibling", sibling)] {
+        let control = std::path::Path::new(control_dir).join(format!("{name}-state"));
+        std::process::Command::new(&executable)
+            .arg("--cgroup-migration-target")
+            .arg(target)
+            .arg("--cgroup-migration-control")
+            .arg(control)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .expect("spawn cgroup migration fixture");
+    }
+
+    let deadline = std::time::Instant::now() + Duration::from_secs(1);
+    while std::time::Instant::now() < deadline {
+        let parent_ready = std::path::Path::new(control_dir)
+            .join("parent-state")
+            .exists();
+        let sibling_ready = std::path::Path::new(control_dir)
+            .join("sibling-state")
+            .exists();
+        if parent_ready && sibling_ready {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    panic!("cgroup migration fixtures did not become ready");
+}
+
+#[cfg(target_os = "linux")]
+fn run_cgroup_migration_listener(target: &std::path::Path, control: &std::path::Path) -> ! {
+    let migration = match std::fs::write(target.join("cgroup.procs"), b"0") {
+        Ok(()) => "allowed".to_string(),
+        Err(error) => format!("denied:{:?}", error.kind()),
+    };
+    let listener = std::net::TcpListener::bind(("127.0.0.1", 0))
+        .expect("bind migration fixture loopback listener");
+    let port = listener.local_addr().expect("read listener address").port();
+    let pid = std::process::id();
+    let mut heartbeat = 0u64;
+
+    loop {
+        let state =
+            format!("pid={pid}\nport={port}\nheartbeat={heartbeat}\nmigration={migration}\n");
+        std::fs::write(control, state).expect("write migration fixture control state");
         heartbeat = heartbeat.saturating_add(1);
         std::thread::sleep(Duration::from_millis(20));
     }

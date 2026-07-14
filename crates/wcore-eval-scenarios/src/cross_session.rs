@@ -65,6 +65,16 @@ impl CrossSessionEnv {
         let dir = TempDir::new()?;
         let root = dir.path();
 
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+
+            // The privileged evaluator retains ownership of the shared root,
+            // while the unprivileged candidate must traverse it to reach the
+            // separately owned project and home directories.
+            fs::set_permissions(root, fs::Permissions::from_mode(0o711))?;
+        }
+
         let home = root.join("home");
         let project = root.join("project");
         let sessions_dir = home.join("sessions");
@@ -218,5 +228,15 @@ mod tests {
         assert_ne!(env.home(), env.project());
         assert!(env.home().is_dir());
         assert!(env.project().join(".wayland-core").is_dir());
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+
+            let root_mode = fs::metadata(env._dir.path())
+                .expect("read shared root metadata")
+                .permissions()
+                .mode();
+            assert_eq!(root_mode & 0o007, 0o001);
+        }
     }
 }

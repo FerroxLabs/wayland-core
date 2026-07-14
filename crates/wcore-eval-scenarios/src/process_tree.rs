@@ -7,6 +7,7 @@
 //! non-authoritative because a hostile descendant can leave that group.
 
 use std::io;
+use std::path::{Path, PathBuf};
 use std::process::ExitStatus;
 use std::time::Duration;
 
@@ -16,6 +17,15 @@ use tokio::process::{Child, Command};
 use linux::Cgroup;
 #[cfg(windows)]
 use windows::WindowsJob;
+
+#[cfg(target_os = "linux")]
+pub(crate) async fn serialize_candidate_identity() -> tokio::sync::MutexGuard<'static, ()> {
+    static GUARD: std::sync::OnceLock<tokio::sync::Mutex<()>> = std::sync::OnceLock::new();
+    GUARD
+        .get_or_init(|| tokio::sync::Mutex::new(()))
+        .lock()
+        .await
+}
 
 #[derive(Debug)]
 pub(crate) struct ProcessTree {
@@ -36,6 +46,26 @@ enum Backend {
     WindowsJob(WindowsJob),
     #[cfg(not(any(unix, windows)))]
     DirectChild,
+}
+
+#[derive(Debug)]
+pub(crate) struct PreparedExecutable {
+    path: PathBuf,
+    #[cfg(target_os = "linux")]
+    file: Option<std::fs::File>,
+}
+
+impl PreparedExecutable {
+    pub(crate) fn path(&self) -> &Path {
+        &self.path
+    }
+
+    #[cfg(target_os = "linux")]
+    fn raw_fd(&self) -> Option<std::os::fd::RawFd> {
+        use std::os::fd::AsRawFd;
+
+        self.file.as_ref().map(std::fs::File::as_raw_fd)
+    }
 }
 
 impl ProcessTree {
@@ -116,11 +146,17 @@ impl ProcessTree {
         })
     }
 
-    pub(crate) fn configure(&self, command: &mut Command) -> io::Result<()> {
+    pub(crate) fn configure(
+        &self,
+        command: &mut Command,
+        executable: Option<&PreparedExecutable>,
+    ) -> io::Result<()> {
         command.kill_on_drop(true);
         match &self.backend {
             #[cfg(target_os = "linux")]
-            Backend::Cgroup(cgroup) => cgroup.configure(command),
+            Backend::Cgroup(cgroup) => {
+                cgroup.configure(command, executable.and_then(PreparedExecutable::raw_fd))
+            }
             #[cfg(unix)]
             Backend::ProcessGroup => {
                 use std::os::unix::process::CommandExt;
@@ -131,6 +167,26 @@ impl ProcessTree {
             Backend::WindowsJob(job) => job.configure(command),
             #[cfg(not(any(unix, windows)))]
             Backend::DirectChild => Ok(()),
+        }
+    }
+
+    pub(crate) fn prepare_workspace(&self, cwd: &Path) -> io::Result<()> {
+        match &self.backend {
+            #[cfg(target_os = "linux")]
+            Backend::Cgroup(cgroup) => cgroup.prepare_workspace(cwd),
+            _ => Ok(()),
+        }
+    }
+
+    pub(crate) fn prepare_executable(&self, binary: &Path) -> io::Result<PreparedExecutable> {
+        match &self.backend {
+            #[cfg(target_os = "linux")]
+            Backend::Cgroup(cgroup) => cgroup.prepare_executable(binary),
+            _ => Ok(PreparedExecutable {
+                path: binary.to_path_buf(),
+                #[cfg(target_os = "linux")]
+                file: None,
+            }),
         }
     }
 
@@ -618,9 +674,11 @@ mod windows {
 #[cfg(target_os = "linux")]
 mod linux {
     use std::collections::VecDeque;
+    use std::ffi::CString;
     use std::fs::{File, OpenOptions};
     use std::io::{self, Read};
-    use std::os::fd::AsRawFd;
+    use std::os::fd::{AsRawFd, FromRawFd};
+    use std::os::unix::ffi::OsStrExt;
     use std::os::unix::process::CommandExt;
     use std::path::{Path, PathBuf};
     #[cfg(test)]
@@ -633,6 +691,7 @@ mod linux {
     use tokio::process::Command;
 
     static CGROUP_COUNTER: AtomicU64 = AtomicU64::new(0);
+    static MATERIALIZED_FILE_COUNTER: AtomicU64 = AtomicU64::new(0);
     const CLEANUP_QUEUE_CAPACITY: usize = 1_024;
     const MAX_RECORDED_FAILURES: usize = 64;
 
@@ -859,7 +918,165 @@ mod linux {
     pub(super) struct Cgroup {
         path: PathBuf,
         procs: File,
+        identity: CandidateIdentity,
+        _identity_lock: File,
         removed: bool,
+    }
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    struct CandidateIdentity {
+        uid: libc::uid_t,
+        gid: libc::gid_t,
+    }
+
+    impl CandidateIdentity {
+        fn from_environment() -> io::Result<Self> {
+            if unsafe { libc::geteuid() } != 0 {
+                return Err(io::Error::new(
+                    io::ErrorKind::PermissionDenied,
+                    "authoritative Linux evaluation requires a privileged supervisor that can drop the candidate identity",
+                ));
+            }
+            let uid = parse_identity("WCORE_EVAL_CANDIDATE_UID")?;
+            let gid = parse_identity("WCORE_EVAL_CANDIDATE_GID")?;
+            if uid == 0 || gid == 0 {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "evaluator candidate UID and GID must both be non-zero",
+                ));
+            }
+            if uid == unsafe { libc::getuid() } || gid == unsafe { libc::getgid() } {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "evaluator candidate identity must differ from the supervisor identity",
+                ));
+            }
+            Ok(Self { uid, gid })
+        }
+
+        fn drop_in_child(self) -> io::Result<()> {
+            // SAFETY: use raw Linux syscalls rather than glibc's credential
+            // wrappers. The wrappers coordinate credentials across threads and
+            // are not safe in a post-fork child of the Tokio supervisor.
+            unsafe {
+                raw_child_syscall(
+                    libc::SYS_prctl,
+                    &[libc::PR_SET_KEEPCAPS as libc::c_long, 0, 0, 0, 0],
+                )?;
+                raw_child_syscall(
+                    libc::SYS_prctl,
+                    &[
+                        libc::PR_CAP_AMBIENT as libc::c_long,
+                        libc::PR_CAP_AMBIENT_CLEAR_ALL as libc::c_long,
+                        0,
+                        0,
+                        0,
+                    ],
+                )?;
+                raw_child_syscall(libc::SYS_setgroups, &[0, 0])?;
+                raw_child_syscall(
+                    libc::SYS_setresgid,
+                    &[self.gid.into(), self.gid.into(), self.gid.into()],
+                )?;
+                raw_child_syscall(
+                    libc::SYS_setresuid,
+                    &[self.uid.into(), self.uid.into(), self.uid.into()],
+                )?;
+                raw_child_syscall(
+                    libc::SYS_prctl,
+                    &[libc::PR_SET_NO_NEW_PRIVS as libc::c_long, 1, 0, 0, 0],
+                )?;
+                if libc::syscall(libc::SYS_getuid) as libc::uid_t != self.uid
+                    || libc::syscall(libc::SYS_geteuid) as libc::uid_t != self.uid
+                    || libc::syscall(libc::SYS_getgid) as libc::gid_t != self.gid
+                    || libc::syscall(libc::SYS_getegid) as libc::gid_t != self.gid
+                {
+                    return Err(io::Error::from_raw_os_error(libc::EPERM));
+                }
+            }
+            Ok(())
+        }
+
+        fn acquire_exclusive_lock(self) -> io::Result<File> {
+            let path = CString::new(format!(
+                "/run/wayland-eval-identity-{}-{}.lock",
+                self.uid, self.gid
+            ))
+            .expect("numeric identity lock path has no NUL");
+            // SAFETY: `/run` is the root-owned runtime directory. O_NOFOLLOW
+            // rejects a pre-created symlink and the post-open checks reject any
+            // non-root-owned or group/world-writable object.
+            let fd = unsafe {
+                libc::open(
+                    path.as_ptr(),
+                    libc::O_RDWR | libc::O_CREAT | libc::O_CLOEXEC | libc::O_NOFOLLOW,
+                    0o600,
+                )
+            };
+            if fd == -1 {
+                return Err(io::Error::last_os_error());
+            }
+            // SAFETY: `open` returned a new owned descriptor.
+            let file = unsafe { File::from_raw_fd(fd) };
+            let mut stat = std::mem::MaybeUninit::<libc::stat>::uninit();
+            // SAFETY: `stat` is a valid output pointer for this open descriptor.
+            if unsafe { libc::fstat(fd, stat.as_mut_ptr()) } != 0 {
+                return Err(io::Error::last_os_error());
+            }
+            // SAFETY: fstat initialized `stat` on success.
+            let stat = unsafe { stat.assume_init() };
+            if stat.st_uid != 0
+                || stat.st_mode & libc::S_IFMT != libc::S_IFREG
+                || stat.st_mode & 0o022 != 0
+            {
+                return Err(io::Error::new(
+                    io::ErrorKind::PermissionDenied,
+                    "candidate identity lock was not a root-owned private regular file",
+                ));
+            }
+            let deadline = Instant::now() + Duration::from_secs(30);
+            loop {
+                // SAFETY: flock applies to the open file description retained
+                // by Cgroup for the complete authoritative run.
+                if unsafe { libc::flock(fd, libc::LOCK_EX | libc::LOCK_NB) } == 0 {
+                    break;
+                }
+                let error = io::Error::last_os_error();
+                if error.kind() != io::ErrorKind::WouldBlock {
+                    return Err(error);
+                }
+                if Instant::now() >= deadline {
+                    return Err(io::Error::new(
+                        io::ErrorKind::TimedOut,
+                        "candidate identity remained assigned to another evaluator for 30 seconds",
+                    ));
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            ensure_identity_inactive(self)?;
+            Ok(file)
+        }
+    }
+
+    unsafe fn raw_child_syscall(number: libc::c_long, args: &[libc::c_long]) -> io::Result<()> {
+        let result = match args {
+            [] => unsafe { libc::syscall(number) },
+            [a] => unsafe { libc::syscall(number, *a) },
+            [a, b] => unsafe { libc::syscall(number, *a, *b) },
+            [a, b, c] => unsafe { libc::syscall(number, *a, *b, *c) },
+            [a, b, c, d] => unsafe { libc::syscall(number, *a, *b, *c, *d) },
+            [a, b, c, d, e] => unsafe { libc::syscall(number, *a, *b, *c, *d, *e) },
+            _ => return Err(io::Error::from_raw_os_error(libc::EINVAL)),
+        };
+        if result == -1 {
+            // SAFETY: errno is thread-local and reading it does not allocate or
+            // acquire a process-shared lock in the post-fork child.
+            Err(io::Error::from_raw_os_error(unsafe {
+                *libc::__errno_location()
+            }))
+        } else {
+            Ok(())
+        }
     }
 
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -872,6 +1089,8 @@ mod linux {
         pub(super) fn create() -> io::Result<Self> {
             let reaper = cleanup_reaper()?;
             reaper.check_failures()?;
+            let identity = CandidateIdentity::from_environment()?;
+            let identity_lock = identity.acquire_exclusive_lock()?;
             let self_cgroup = std::fs::read_to_string("/proc/self/cgroup")?;
             let mountinfo = std::fs::read_to_string("/proc/self/mountinfo")?;
             let current = unified_path(&self_cgroup)?;
@@ -892,6 +1111,8 @@ mod linux {
                 Ok(Self {
                     path: path.clone(),
                     procs,
+                    identity,
+                    _identity_lock: identity_lock,
                     removed: false,
                 })
             })();
@@ -901,11 +1122,19 @@ mod linux {
             result
         }
 
-        pub(super) fn configure(&self, command: &mut Command) -> io::Result<()> {
+        pub(super) fn configure(
+            &self,
+            command: &mut Command,
+            executable_fd: Option<libc::c_int>,
+        ) -> io::Result<()> {
+            executable_fd.ok_or_else(|| {
+                io::Error::other("authoritative Linux evaluation lacked a pinned executable")
+            })?;
             let procs = self.procs.try_clone()?;
+            let identity = self.identity;
             // SAFETY: the closure runs after fork and before exec. It performs
-            // one async-signal-safe `write(2)` to an already-open fd and does
-            // not allocate, lock, log, or access the filesystem by path.
+            // only async-signal-safe syscalls against already-open fds before
+            // dropping identity. It does not lock, log, or access a path.
             unsafe {
                 command.as_std_mut().pre_exec(move || {
                     let byte = b'0';
@@ -914,14 +1143,24 @@ mod linux {
                         (&byte as *const u8).cast::<libc::c_void>(),
                         1,
                     );
-                    if written == 1 {
-                        Ok(())
-                    } else {
-                        Err(io::Error::last_os_error())
+                    if written != 1 {
+                        return Err(io::Error::last_os_error());
                     }
+                    identity.drop_in_child()
                 });
             }
             Ok(())
+        }
+
+        pub(super) fn prepare_workspace(&self, cwd: &Path) -> io::Result<()> {
+            chown_tree_without_following(cwd, self.identity)
+        }
+
+        pub(super) fn prepare_executable(
+            &self,
+            binary: &Path,
+        ) -> io::Result<super::PreparedExecutable> {
+            prepare_pinned_executable(binary)
         }
 
         pub(super) fn kill(&self) -> io::Result<()> {
@@ -977,6 +1216,376 @@ mod linux {
                 tracing::error!(target: "wcore_eval", error = %error, "could not enqueue cgroup cleanup");
             }
         }
+    }
+
+    fn parse_identity(name: &str) -> io::Result<u32> {
+        let value = std::env::var_os(name).ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("{name} is required for authoritative Linux evaluation"),
+            )
+        })?;
+        value.to_string_lossy().parse::<u32>().map_err(|_| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("{name} must be a decimal numeric identity"),
+            )
+        })
+    }
+
+    fn prepare_pinned_executable(binary: &Path) -> io::Result<super::PreparedExecutable> {
+        let file = File::open(binary)?;
+        let fd = file.as_raw_fd();
+        // The kernel resolves this procfs path before closing CLOEXEC
+        // descriptors during exec. The candidate therefore starts from the
+        // pinned inode without inheriting the descriptor afterward.
+        let path = PathBuf::from(format!("/proc/self/fd/{fd}"));
+        Ok(super::PreparedExecutable {
+            path,
+            file: Some(file),
+        })
+    }
+
+    fn chown_tree_without_following(root: &Path, identity: CandidateIdentity) -> io::Result<()> {
+        let root = CString::new(root.as_os_str().as_bytes()).map_err(|_| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "workspace path contained an interior NUL byte",
+            )
+        })?;
+        // SAFETY: O_NOFOLLOW rejects a symlink root; the returned descriptor
+        // pins the directory against rename/replacement for the complete walk.
+        let fd = unsafe {
+            libc::open(
+                root.as_ptr(),
+                libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC | libc::O_NOFOLLOW,
+            )
+        };
+        if fd == -1 {
+            return Err(io::Error::last_os_error());
+        }
+        // SAFETY: `open` returned a new owned descriptor.
+        let root = unsafe { File::from_raw_fd(fd) };
+        chown_directory_by_fd(&root, identity)
+    }
+
+    fn chown_directory_by_fd(directory: &File, identity: CandidateIdentity) -> io::Result<()> {
+        let fd = directory.as_raw_fd();
+        for entry in std::fs::read_dir(format!("/proc/self/fd/{fd}"))? {
+            let name = entry?.file_name();
+            let name = CString::new(name.as_bytes()).map_err(|_| {
+                io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "workspace entry contained an interior NUL byte",
+                )
+            })?;
+            #[cfg(test)]
+            pause_before_directory_open(name.as_bytes());
+            // O_PATH pins the exact directory entry without opening a FIFO,
+            // device, or other hostile special file. All metadata and
+            // ownership operations below address this descriptor, never the
+            // replaceable parent/name pair.
+            let entry_fd = unsafe {
+                libc::openat(
+                    fd,
+                    name.as_ptr(),
+                    libc::O_PATH | libc::O_CLOEXEC | libc::O_NOFOLLOW,
+                )
+            };
+            if entry_fd == -1 {
+                return Err(io::Error::last_os_error());
+            }
+            // SAFETY: openat returned a new owned descriptor.
+            let entry = unsafe { File::from_raw_fd(entry_fd) };
+            let mut stat = std::mem::MaybeUninit::<libc::stat>::uninit();
+            // SAFETY: entry is an open descriptor and stat points to writable
+            // storage for the kernel result.
+            if unsafe { libc::fstat(entry.as_raw_fd(), stat.as_mut_ptr()) } != 0 {
+                return Err(io::Error::last_os_error());
+            }
+            // SAFETY: fstat initialized `stat` on success.
+            let stat = unsafe { stat.assume_init() };
+            if stat.st_mode & libc::S_IFMT == libc::S_IFDIR {
+                // Resolve `.` from the pinned O_PATH directory descriptor so
+                // rename or replacement of its former name cannot redirect
+                // traversal.
+                let child_fd = unsafe {
+                    libc::openat(
+                        entry.as_raw_fd(),
+                        c".".as_ptr(),
+                        libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC | libc::O_NOFOLLOW,
+                    )
+                };
+                if child_fd == -1 {
+                    return Err(io::Error::last_os_error());
+                }
+                // SAFETY: openat returned a new owned descriptor.
+                let child = unsafe { File::from_raw_fd(child_fd) };
+                chown_directory_by_fd(&child, identity)?;
+            } else if stat.st_mode & libc::S_IFMT == libc::S_IFREG {
+                if stat.st_nlink != 1 {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        "workspace regular file has hard-link aliases",
+                    ));
+                }
+                #[cfg(test)]
+                pause_before_regular_materialization(name.as_bytes());
+                materialize_regular_file(fd, &name, &entry, &stat, identity)?;
+            } else {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "workspace contains an unsupported special file",
+                ));
+            }
+        }
+        // Chown the directory only after all children. This keeps an
+        // unprivileged candidate from gaining mutation rights mid-walk.
+        if unsafe { libc::fchown(fd, identity.uid, identity.gid) } != 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(())
+    }
+
+    fn materialize_regular_file(
+        parent_fd: libc::c_int,
+        name: &std::ffi::CStr,
+        pinned: &File,
+        stat: &libc::stat,
+        identity: CandidateIdentity,
+    ) -> io::Result<()> {
+        // Reopen the exact inode behind the pinned O_PATH descriptor for
+        // reading. No replaceable workspace path is resolved here.
+        let mut source = File::open(format!("/proc/self/fd/{}", pinned.as_raw_fd()))?;
+        let (temporary_name, mut materialized) = create_materialized_file(parent_fd)?;
+        let materialize_result = (|| {
+            io::copy(&mut source, &mut materialized)?;
+            materialized.sync_all()?;
+            if unsafe { libc::fchown(materialized.as_raw_fd(), identity.uid, identity.gid) } != 0 {
+                return Err(io::Error::last_os_error());
+            }
+            // Preserve ordinary access semantics but never reproduce
+            // set-user-ID, set-group-ID, or sticky privilege-bearing bits.
+            let mode = stat.st_mode & 0o777;
+            if unsafe { libc::fchmod(materialized.as_raw_fd(), mode) } != 0 {
+                return Err(io::Error::last_os_error());
+            }
+            // Exchange is atomic: the private candidate-owned inode becomes
+            // the workspace entry while the original caller-owned inode moves
+            // to the temporary name. Any hard-link alias created after the
+            // initial nlink check remains attached only to that unmodified
+            // original inode.
+            exchange_entries(parent_fd, &temporary_name, name)?;
+            #[cfg(test)]
+            pause_after_materialization_exchange(name.to_bytes());
+            let displaced = match metadata_at(parent_fd, &temporary_name) {
+                Ok(displaced) => displaced,
+                Err(error) => {
+                    return restore_exchange(parent_fd, &temporary_name, name, error);
+                }
+            };
+            if displaced.st_dev != stat.st_dev || displaced.st_ino != stat.st_ino {
+                return restore_exchange(
+                    parent_fd,
+                    &temporary_name,
+                    name,
+                    io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        "workspace entry changed during private materialization",
+                    ),
+                );
+            }
+            if unsafe { libc::unlinkat(parent_fd, temporary_name.as_ptr(), 0) } != 0 {
+                return restore_exchange(
+                    parent_fd,
+                    &temporary_name,
+                    name,
+                    io::Error::last_os_error(),
+                );
+            }
+            Ok(())
+        })();
+
+        // Retain every error-path entry for recovery. There is no race-free
+        // pathname unlink here: after an exchange or concurrent namespace
+        // mutation, the temporary name may hold caller data.
+        materialize_result
+    }
+
+    fn create_materialized_file(parent_fd: libc::c_int) -> io::Result<(CString, File)> {
+        for _ in 0..128 {
+            let sequence = MATERIALIZED_FILE_COUNTER.fetch_add(1, Ordering::Relaxed);
+            let name = CString::new(format!(
+                ".wcore-eval-materialize-{}-{sequence}",
+                std::process::id()
+            ))
+            .expect("generated materialization name has no NUL");
+            let fd = unsafe {
+                libc::openat(
+                    parent_fd,
+                    name.as_ptr(),
+                    libc::O_WRONLY
+                        | libc::O_CREAT
+                        | libc::O_EXCL
+                        | libc::O_CLOEXEC
+                        | libc::O_NOFOLLOW,
+                    0o600,
+                )
+            };
+            if fd != -1 {
+                return Ok((name, unsafe { File::from_raw_fd(fd) }));
+            }
+            let error = io::Error::last_os_error();
+            if error.kind() != io::ErrorKind::AlreadyExists {
+                return Err(error);
+            }
+        }
+        Err(io::Error::new(
+            io::ErrorKind::AlreadyExists,
+            "could not allocate a private workspace materialization file",
+        ))
+    }
+
+    fn metadata_at(parent_fd: libc::c_int, name: &std::ffi::CStr) -> io::Result<libc::stat> {
+        let mut stat = std::mem::MaybeUninit::<libc::stat>::uninit();
+        if unsafe {
+            libc::fstatat(
+                parent_fd,
+                name.as_ptr(),
+                stat.as_mut_ptr(),
+                libc::AT_SYMLINK_NOFOLLOW,
+            )
+        } != 0
+        {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(unsafe { stat.assume_init() })
+    }
+
+    fn exchange_entries(
+        parent_fd: libc::c_int,
+        left: &std::ffi::CStr,
+        right: &std::ffi::CStr,
+    ) -> io::Result<()> {
+        if unsafe {
+            libc::renameat2(
+                parent_fd,
+                left.as_ptr(),
+                parent_fd,
+                right.as_ptr(),
+                libc::RENAME_EXCHANGE,
+            )
+        } != 0
+        {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(())
+    }
+
+    fn restore_exchange(
+        parent_fd: libc::c_int,
+        temporary_name: &std::ffi::CStr,
+        original_name: &std::ffi::CStr,
+        cause: io::Error,
+    ) -> io::Result<()> {
+        exchange_entries(parent_fd, temporary_name, original_name).map_err(|restore_error| {
+            io::Error::other(format!(
+                "{cause}; workspace materialization restoration failed: {restore_error}"
+            ))
+        })?;
+        Err(cause)
+    }
+
+    #[cfg(test)]
+    #[derive(Clone)]
+    struct DirectoryOpenPause {
+        name: Vec<u8>,
+        reached: Arc<std::sync::Barrier>,
+        resume: Arc<std::sync::Barrier>,
+    }
+
+    #[cfg(test)]
+    static DIRECTORY_OPEN_PAUSE: OnceLock<Mutex<Option<DirectoryOpenPause>>> = OnceLock::new();
+
+    #[cfg(test)]
+    static REGULAR_MATERIALIZATION_PAUSE: OnceLock<Mutex<Option<DirectoryOpenPause>>> =
+        OnceLock::new();
+
+    #[cfg(test)]
+    static MATERIALIZATION_EXCHANGE_PAUSE: OnceLock<Mutex<Option<DirectoryOpenPause>>> =
+        OnceLock::new();
+
+    #[cfg(test)]
+    fn pause_before_directory_open(name: &[u8]) {
+        let pause = DIRECTORY_OPEN_PAUSE
+            .get_or_init(|| Mutex::new(None))
+            .lock()
+            .ok()
+            .and_then(|pause| pause.as_ref().filter(|pause| pause.name == name).cloned());
+        if let Some(pause) = pause {
+            pause.reached.wait();
+            pause.resume.wait();
+        }
+    }
+
+    #[cfg(test)]
+    fn pause_before_regular_materialization(name: &[u8]) {
+        let pause = REGULAR_MATERIALIZATION_PAUSE
+            .get_or_init(|| Mutex::new(None))
+            .lock()
+            .ok()
+            .and_then(|pause| pause.as_ref().filter(|pause| pause.name == name).cloned());
+        if let Some(pause) = pause {
+            pause.reached.wait();
+            pause.resume.wait();
+        }
+    }
+
+    #[cfg(test)]
+    fn pause_after_materialization_exchange(name: &[u8]) {
+        let pause = MATERIALIZATION_EXCHANGE_PAUSE
+            .get_or_init(|| Mutex::new(None))
+            .lock()
+            .ok()
+            .and_then(|pause| pause.as_ref().filter(|pause| pause.name == name).cloned());
+        if let Some(pause) = pause {
+            pause.reached.wait();
+            pause.resume.wait();
+        }
+    }
+
+    fn ensure_identity_inactive(identity: CandidateIdentity) -> io::Result<()> {
+        for entry in std::fs::read_dir("/proc")? {
+            let entry = entry?;
+            if entry
+                .file_name()
+                .as_bytes()
+                .iter()
+                .any(|byte| !byte.is_ascii_digit())
+            {
+                continue;
+            }
+            let status = match std::fs::read_to_string(entry.path().join("status")) {
+                Ok(status) => status,
+                Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+                Err(error) => return Err(error),
+            };
+            let uid_in_use = status
+                .lines()
+                .find_map(|line| line.strip_prefix("Uid:"))
+                .is_some_and(|ids| {
+                    ids.split_whitespace()
+                        .filter_map(|id| id.parse::<u32>().ok())
+                        .any(|id| id == identity.uid)
+                });
+            if uid_in_use {
+                return Err(io::Error::new(
+                    io::ErrorKind::WouldBlock,
+                    "candidate UID already has a live process; authoritative isolation requires a dedicated idle identity",
+                ));
+            }
+        }
+        Ok(())
     }
 
     fn unified_path(contents: &str) -> io::Result<PathBuf> {
@@ -1092,6 +1701,389 @@ mod linux {
                 parse_cpu_usage_micros("usage_usec 9876\nuser_usec 9000\nsystem_usec 876\n")
                     .unwrap(),
                 9876
+            );
+        }
+
+        #[test]
+        fn pinned_executable_is_cloexec_in_supervisor() {
+            let executable = prepare_pinned_executable(Path::new("/proc/self/exe"))
+                .expect("pin current executable");
+            let fd = executable.raw_fd().expect("pinned executable fd");
+            let flags = unsafe { libc::fcntl(fd, libc::F_GETFD) };
+            assert_ne!(flags, -1);
+            assert_ne!(flags & libc::FD_CLOEXEC, 0);
+        }
+
+        #[test]
+        fn descriptor_walk_rejects_concurrent_directory_swap() {
+            if unsafe { libc::geteuid() } != 0 {
+                return;
+            }
+            use std::os::unix::fs::{MetadataExt, symlink};
+
+            static TEST_SERIAL: Mutex<()> = Mutex::new(());
+            let _serial = TEST_SERIAL.lock().expect("serialize swap hook");
+            let fixture = tempfile::tempdir().expect("create ownership fixture");
+            let workspace = fixture.path().join("workspace");
+            let target = workspace.join("swap-target");
+            let parked = workspace.join("parked-target");
+            let outside = fixture.path().join("outside");
+            std::fs::create_dir_all(target.join("nested")).expect("create workspace target");
+            std::fs::create_dir_all(&outside).expect("create outside directory");
+            let outside_file = outside.join("must-remain-root-owned");
+            std::fs::write(&outside_file, b"host data").expect("seed outside file");
+            let outside_uid = std::fs::symlink_metadata(&outside_file)
+                .expect("outside metadata")
+                .uid();
+
+            let reached = Arc::new(std::sync::Barrier::new(2));
+            let resume = Arc::new(std::sync::Barrier::new(2));
+            *DIRECTORY_OPEN_PAUSE
+                .get_or_init(|| Mutex::new(None))
+                .lock()
+                .expect("install swap hook") = Some(DirectoryOpenPause {
+                name: b"swap-target".to_vec(),
+                reached: Arc::clone(&reached),
+                resume: Arc::clone(&resume),
+            });
+
+            let worker = std::thread::spawn({
+                let workspace = workspace.clone();
+                move || {
+                    chown_tree_without_following(
+                        &workspace,
+                        CandidateIdentity {
+                            uid: 65_532,
+                            gid: 65_532,
+                        },
+                    )
+                }
+            });
+            reached.wait();
+            std::fs::rename(&target, &parked).expect("replace inspected directory");
+            symlink(&outside, &target).expect("install hostile replacement symlink");
+            resume.wait();
+            let error = worker
+                .join()
+                .expect("ownership worker did not panic")
+                .expect_err("raced replacement must fail closed");
+            assert!(
+                error.kind() == io::ErrorKind::InvalidInput
+                    || matches!(
+                        error.raw_os_error(),
+                        Some(libc::ELOOP) | Some(libc::ENOTDIR) | Some(libc::ENOENT)
+                    ),
+                "unexpected race error: {error}"
+            );
+            assert_eq!(
+                std::fs::symlink_metadata(&outside_file)
+                    .expect("outside metadata after attack")
+                    .uid(),
+                outside_uid,
+                "descriptor walk must not chown outside the pinned workspace"
+            );
+            *DIRECTORY_OPEN_PAUSE
+                .get()
+                .expect("swap hook initialized")
+                .lock()
+                .expect("clear swap hook") = None;
+        }
+
+        #[test]
+        fn descriptor_walk_rejects_hard_link_alias_without_touching_external_inode() {
+            if unsafe { libc::geteuid() } != 0 {
+                return;
+            }
+            use std::os::unix::fs::MetadataExt;
+
+            let fixture = tempfile::tempdir().expect("create ownership fixture");
+            let workspace = fixture.path().join("workspace");
+            let outside = fixture.path().join("outside");
+            std::fs::create_dir(&workspace).expect("create workspace");
+            std::fs::create_dir(&outside).expect("create outside directory");
+            let outside_file = outside.join("must-remain-supervisor-owned");
+            let workspace_alias = workspace.join("hostile-hard-link");
+            std::fs::write(&outside_file, b"host data").expect("seed outside file");
+            std::fs::hard_link(&outside_file, &workspace_alias).expect("install hard-link alias");
+            let before = std::fs::metadata(&outside_file).expect("outside metadata");
+            let before_content = std::fs::read(&outside_file).expect("outside content");
+
+            let error = chown_tree_without_following(
+                &workspace,
+                CandidateIdentity {
+                    uid: 65_532,
+                    gid: 65_532,
+                },
+            )
+            .expect_err("multiply-linked file must fail closed");
+
+            assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+            assert!(error.to_string().contains("hard-link aliases"));
+            let after = std::fs::metadata(&outside_file).expect("outside metadata after rejection");
+            assert_eq!(after.uid(), before.uid(), "external owner UID changed");
+            assert_eq!(after.gid(), before.gid(), "external owner GID changed");
+            assert_eq!(
+                std::fs::read(&outside_file).expect("outside content after rejection"),
+                before_content,
+                "external inode content changed"
+            );
+        }
+
+        #[test]
+        fn private_materialization_preserves_alias_created_after_link_check() {
+            if unsafe { libc::geteuid() } != 0 {
+                return;
+            }
+            use std::os::unix::fs::MetadataExt;
+
+            let fixture = tempfile::tempdir().expect("create ownership fixture");
+            let workspace = fixture.path().join("workspace");
+            let outside = fixture.path().join("outside");
+            std::fs::create_dir(&workspace).expect("create workspace");
+            std::fs::create_dir(&outside).expect("create outside directory");
+            let workspace_file = workspace.join("race-target");
+            let outside_alias = outside.join("late-hard-link");
+            std::fs::write(&workspace_file, b"host data").expect("seed workspace file");
+            let before = std::fs::metadata(&workspace_file).expect("workspace metadata");
+            let before_content = std::fs::read(&workspace_file).expect("workspace content");
+
+            let reached = Arc::new(std::sync::Barrier::new(2));
+            let resume = Arc::new(std::sync::Barrier::new(2));
+            *REGULAR_MATERIALIZATION_PAUSE
+                .get_or_init(|| Mutex::new(None))
+                .lock()
+                .expect("install hard-link hook") = Some(DirectoryOpenPause {
+                name: b"race-target".to_vec(),
+                reached: Arc::clone(&reached),
+                resume: Arc::clone(&resume),
+            });
+
+            let worker = std::thread::spawn({
+                let workspace = workspace.clone();
+                move || {
+                    chown_tree_without_following(
+                        &workspace,
+                        CandidateIdentity {
+                            uid: 65_532,
+                            gid: 65_532,
+                        },
+                    )
+                }
+            });
+            reached.wait();
+            std::fs::hard_link(&workspace_file, &outside_alias)
+                .expect("install alias after link-count check");
+            resume.wait();
+            worker
+                .join()
+                .expect("ownership worker did not panic")
+                .expect("private materialization must safely close the late-alias race");
+
+            let outside_after =
+                std::fs::metadata(&outside_alias).expect("outside alias metadata after transfer");
+            assert_eq!(
+                outside_after.uid(),
+                before.uid(),
+                "external owner UID changed"
+            );
+            assert_eq!(
+                outside_after.gid(),
+                before.gid(),
+                "external owner GID changed"
+            );
+            assert_eq!(outside_after.ino(), before.ino(), "external inode changed");
+            assert_eq!(
+                std::fs::read(&outside_alias).expect("outside alias content"),
+                before_content,
+                "external alias content changed"
+            );
+            let workspace_after =
+                std::fs::metadata(&workspace_file).expect("materialized workspace metadata");
+            assert_eq!(workspace_after.uid(), 65_532);
+            assert_eq!(workspace_after.gid(), 65_532);
+            assert_ne!(
+                workspace_after.ino(),
+                before.ino(),
+                "candidate workspace must use a private inode"
+            );
+            *REGULAR_MATERIALIZATION_PAUSE
+                .get()
+                .expect("hard-link hook initialized")
+                .lock()
+                .expect("clear hard-link hook") = None;
+        }
+
+        #[test]
+        fn rollback_failure_retains_displaced_original_inode_for_recovery() {
+            if unsafe { libc::geteuid() } != 0 {
+                return;
+            }
+            use std::os::unix::fs::MetadataExt;
+
+            let fixture = tempfile::tempdir().expect("create ownership fixture");
+            let workspace = fixture.path().join("workspace");
+            std::fs::create_dir(&workspace).expect("create workspace");
+            let workspace_file = workspace.join("rollback-target");
+            let recovery_file = fixture.path().join("recovered-original");
+            std::fs::write(&workspace_file, b"original host data").expect("seed workspace file");
+            let before = std::fs::metadata(&workspace_file).expect("workspace metadata");
+            let before_content = std::fs::read(&workspace_file).expect("workspace content");
+
+            let reached = Arc::new(std::sync::Barrier::new(2));
+            let resume = Arc::new(std::sync::Barrier::new(2));
+            *MATERIALIZATION_EXCHANGE_PAUSE
+                .get_or_init(|| Mutex::new(None))
+                .lock()
+                .expect("install exchange hook") = Some(DirectoryOpenPause {
+                name: b"rollback-target".to_vec(),
+                reached: Arc::clone(&reached),
+                resume: Arc::clone(&resume),
+            });
+
+            let worker = std::thread::spawn({
+                let workspace = workspace.clone();
+                move || {
+                    chown_tree_without_following(
+                        &workspace,
+                        CandidateIdentity {
+                            uid: 65_532,
+                            gid: 65_532,
+                        },
+                    )
+                }
+            });
+            reached.wait();
+            let displaced_name = std::fs::read_dir(&workspace)
+                .expect("list exchanged workspace")
+                .map(|entry| entry.expect("read workspace entry"))
+                .find(|entry| {
+                    entry
+                        .file_name()
+                        .as_bytes()
+                        .starts_with(b".wcore-eval-materialize-")
+                })
+                .expect("find displaced original")
+                .path();
+            std::fs::rename(&displaced_name, &recovery_file)
+                .expect("move displaced original to recovery path");
+            resume.wait();
+            let error = worker
+                .join()
+                .expect("ownership worker did not panic")
+                .expect_err("missing exchange entry must force rollback failure");
+            *MATERIALIZATION_EXCHANGE_PAUSE
+                .get()
+                .expect("exchange hook initialized")
+                .lock()
+                .expect("clear exchange hook") = None;
+
+            assert!(
+                error.to_string().contains("restoration failed"),
+                "unexpected rollback error: {error}"
+            );
+            let recovered = std::fs::metadata(&recovery_file).expect("recovered original metadata");
+            assert_eq!(recovered.dev(), before.dev(), "original device changed");
+            assert_eq!(recovered.ino(), before.ino(), "original inode changed");
+            assert_eq!(recovered.uid(), before.uid(), "original owner UID changed");
+            assert_eq!(recovered.gid(), before.gid(), "original owner GID changed");
+            assert_eq!(
+                std::fs::read(&recovery_file).expect("recovered original content"),
+                before_content,
+                "original inode content changed"
+            );
+            let workspace_after =
+                std::fs::metadata(&workspace_file).expect("private workspace metadata");
+            assert_ne!(
+                workspace_after.ino(),
+                before.ino(),
+                "failed rollback must leave the private inode at the workspace path"
+            );
+        }
+
+        #[test]
+        fn pre_exchange_failure_retains_private_materialization_for_recovery() {
+            if unsafe { libc::geteuid() } != 0 {
+                return;
+            }
+            use std::os::unix::fs::MetadataExt;
+
+            let fixture = tempfile::tempdir().expect("create ownership fixture");
+            let workspace = fixture.path().join("workspace");
+            std::fs::create_dir(&workspace).expect("create workspace");
+            let workspace_file = workspace.join("pre-exchange-target");
+            let recovery_file = fixture.path().join("recovered-original");
+            std::fs::write(&workspace_file, b"original host data").expect("seed workspace file");
+            let before = std::fs::metadata(&workspace_file).expect("workspace metadata");
+            let before_content = std::fs::read(&workspace_file).expect("workspace content");
+
+            let reached = Arc::new(std::sync::Barrier::new(2));
+            let resume = Arc::new(std::sync::Barrier::new(2));
+            *REGULAR_MATERIALIZATION_PAUSE
+                .get_or_init(|| Mutex::new(None))
+                .lock()
+                .expect("install materialization hook") = Some(DirectoryOpenPause {
+                name: b"pre-exchange-target".to_vec(),
+                reached: Arc::clone(&reached),
+                resume: Arc::clone(&resume),
+            });
+
+            let worker = std::thread::spawn({
+                let workspace = workspace.clone();
+                move || {
+                    chown_tree_without_following(
+                        &workspace,
+                        CandidateIdentity {
+                            uid: 65_532,
+                            gid: 65_532,
+                        },
+                    )
+                }
+            });
+            reached.wait();
+            std::fs::rename(&workspace_file, &recovery_file)
+                .expect("move original before exchange");
+            resume.wait();
+            let error = worker
+                .join()
+                .expect("ownership worker did not panic")
+                .expect_err("missing workspace entry must fail before exchange");
+            *REGULAR_MATERIALIZATION_PAUSE
+                .get()
+                .expect("materialization hook initialized")
+                .lock()
+                .expect("clear materialization hook") = None;
+
+            assert_eq!(error.kind(), io::ErrorKind::NotFound);
+            let recovered = std::fs::metadata(&recovery_file).expect("recovered original metadata");
+            assert_eq!(recovered.dev(), before.dev(), "original device changed");
+            assert_eq!(recovered.ino(), before.ino(), "original inode changed");
+            assert_eq!(
+                std::fs::read(&recovery_file).expect("recovered original content"),
+                before_content,
+                "original inode content changed"
+            );
+            let retained = std::fs::read_dir(&workspace)
+                .expect("list failed materialization workspace")
+                .map(|entry| entry.expect("read workspace entry"))
+                .find(|entry| {
+                    entry
+                        .file_name()
+                        .as_bytes()
+                        .starts_with(b".wcore-eval-materialize-")
+                })
+                .expect("private materialization must remain recoverable");
+            let retained_metadata = retained.metadata().expect("retained private metadata");
+            assert_ne!(
+                retained_metadata.ino(),
+                before.ino(),
+                "retained materialization must be a private inode"
+            );
+            assert_eq!(retained_metadata.uid(), 65_532);
+            assert_eq!(retained_metadata.gid(), 65_532);
+            assert_eq!(
+                std::fs::read(retained.path()).expect("retained private content"),
+                before_content,
+                "retained private content changed"
             );
         }
 
