@@ -374,6 +374,18 @@ impl SkillCatalog {
             )
             .await;
             if let Some(hit) = loaded.into_iter().find(|s| s.metadata.name == name) {
+                // The current workspace fingerprint cannot authorize executable
+                // content from an independently discovered sibling repository.
+                // Preserve the useful prompt-only sharing path, but require an
+                // explicit session rooted in that sibling for capabilities.
+                if !crate::permissions::skill_is_prompt_only(&hit.metadata) {
+                    tracing::warn!(
+                        skill = name,
+                        project = %project.project_id,
+                        "ignored executable sibling-project skill without independent workspace trust"
+                    );
+                    continue;
+                }
                 tracing::debug!(
                     skill = name,
                     project = %project.project_id,
@@ -647,6 +659,27 @@ mod tests {
             .expect("skill resolves from sibling project");
         assert_eq!(m.name, "shared");
         assert!(m.content.contains("sibling body for shared"));
+    }
+
+    #[tokio::test]
+    async fn resolve_rejects_executable_sibling_project_skill() {
+        let root = tempfile::tempdir().unwrap();
+        make_sibling_project(root.path(), "other-project", "sibling-exec");
+        let skill = root
+            .path()
+            .join("other-project/.wayland-core/skills/sibling-exec/SKILL.md");
+        std::fs::write(
+            skill,
+            "---\nname: sibling-exec\ndescription: executable sibling\nallowed-tools: [Bash]\n---\n\ndo work\n",
+        )
+        .unwrap();
+
+        let cat =
+            SkillCatalog::from_refs(vec![]).with_cross_project_root(root.path().to_path_buf());
+        assert!(matches!(
+            cat.resolve("sibling-exec").await,
+            Err(ResolveError::NotFound(name)) if name == "sibling-exec"
+        ));
     }
 
     #[tokio::test]

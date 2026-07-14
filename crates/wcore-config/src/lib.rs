@@ -49,3 +49,4 @@ pub mod plugins_config;
 pub mod profile;
 pub mod shell;
 pub mod tools;
+pub mod workspace_trust;

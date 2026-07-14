@@ -67,6 +67,8 @@ pub struct App {
     /// Immutable launch authority emitted by Core after bootstrap. Approval
     /// mode can change during a session; sandbox posture cannot.
     pub execution_policy: Option<wcore_types::execution_policy::EffectiveExecutionPolicy>,
+    /// F08 workspace trust and concrete sandbox grants emitted by Core.
+    pub workspace_policy: Option<wcore_types::workspace_trust::WorkspacePolicyReceipt>,
     /// Context-window usage for the status-bar meter.
     pub context: ContextView,
     /// Set true to break the render loop and exit cleanly.
@@ -308,6 +310,7 @@ impl App {
             config: ConfigView::default(),
             mode: wcore_protocol::commands::SessionMode::Default,
             execution_policy: None,
+            workspace_policy: None,
             context: ContextView::default(),
             quit: false,
             path_map: TreeModel::default(),

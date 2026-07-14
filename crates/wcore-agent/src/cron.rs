@@ -227,6 +227,8 @@ pub async fn build_headless_cron_handler(cwd: &str) -> EngineJobHandler {
         let deny_rules = config.tools.skills.deny.clone();
         let allow_rules = config.tools.skills.allow.clone();
         let auto_approve = config.tools.auto_approve;
+        let workspace_trust = config.workspace_trust.clone();
+        let workspace = cwd_path.to_path_buf();
         let cwd_for_cron = cwd.to_string();
         Arc::new(move |skill_name: String, args: serde_json::Value| {
             let catalog = Arc::clone(&catalog_for_cron);
@@ -234,7 +236,8 @@ pub async fn build_headless_cron_handler(cwd: &str) -> EngineJobHandler {
                 deny_rules.clone(),
                 allow_rules.clone(),
                 auto_approve,
-            );
+            )
+            .with_project_execution_trust_snapshot(&workspace, &workspace_trust);
             let cwd = cwd_for_cron.clone();
             Box::pin(async move {
                 // Aud-12 / M-18 (+ B8 follow-up): the cron runner's

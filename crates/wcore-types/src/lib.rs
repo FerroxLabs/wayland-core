@@ -13,5 +13,6 @@ pub mod skill_types;
 pub mod spawner;
 pub mod tool;
 pub mod utf8_stream;
+pub mod workspace_trust;
 
 pub use cache_tier::{CacheTier, CacheTierConfig, pick_cache_tier, pick_with_config};

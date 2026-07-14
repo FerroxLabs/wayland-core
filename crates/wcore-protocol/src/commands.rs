@@ -63,6 +63,13 @@ pub enum ProtocolCommand {
         #[serde(default)]
         headers: Option<HashMap<String, String>>,
     },
+    /// Request a read-only, process-lifetime developer capability for an
+    /// already-running local Desktop session. Core accepts this only when the
+    /// local launcher opted in and the workspace uses the trusted-local
+    /// sandbox profile. It never widens writes or disables containment.
+    GrantWorkspaceCapability {
+        executable: String,
+    },
     /// W7 S4: resume a session that emitted `ApprovalRequired`. The
     /// host echoes the `resume_token` from the corresponding event so
     /// the engine can route the decision to the right pending bridge.
@@ -280,6 +287,20 @@ mod tests {
         let json = r#"{"type":"ping"}"#;
         let cmd: ProtocolCommand = serde_json::from_str(json).unwrap();
         assert_eq!(cmd, ProtocolCommand::Ping);
+    }
+
+    #[test]
+    fn workspace_capability_grant_deserializes_without_authority_claims() {
+        let command: ProtocolCommand = serde_json::from_str(
+            r#"{"type":"grant_workspace_capability","executable":"/opt/sdk/bin/tool"}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            command,
+            ProtocolCommand::GrantWorkspaceCapability {
+                executable: "/opt/sdk/bin/tool".to_string(),
+            }
+        );
     }
 
     #[test]

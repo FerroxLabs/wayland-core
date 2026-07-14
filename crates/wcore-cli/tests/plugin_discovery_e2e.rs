@@ -24,7 +24,8 @@ use tempfile::TempDir;
 
 /// Spawn the release-or-debug binary with the minimal flags needed to
 /// reach `protocol_sink.emit_ready_with_plugins(...)` and return the
-/// parsed first line of stdout.
+/// parsed Ready event and first capability activation. Additive policy receipts
+/// may appear between them and must not make this inventory test order-fragile.
 fn first_startup_events() -> [serde_json::Value; 2] {
     // Use a clean, empty cwd so no `.wayland-core.toml` from the dev
     // environment perturbs config resolution. Also isolates the
@@ -56,22 +57,42 @@ fn first_startup_events() -> [serde_json::Value; 2] {
     std::thread::spawn(move || {
         use std::io::{BufRead, BufReader};
         let mut reader = BufReader::new(&mut stdout);
-        let mut lines = Vec::with_capacity(2);
+        let mut events = Vec::with_capacity(4);
         let result = (|| {
-            for _ in 0..2 {
+            for _ in 0..16 {
                 let mut line = String::new();
                 match reader.read_line(&mut line) {
                     Ok(0) => return Err("child closed stdout during startup events".to_string()),
-                    Ok(_) => lines.push(line),
+                    Ok(_) => {
+                        let event: serde_json::Value =
+                            serde_json::from_str(&line).map_err(|e| {
+                                format!("startup stdout line was not JSON ({e}): {line:?}")
+                            })?;
+                        let found_activation = event["type"] == "capability_activation";
+                        events.push(event);
+                        if found_activation {
+                            break;
+                        }
+                    }
                     Err(e) => return Err(format!("stdout read error: {e}")),
                 }
             }
-            Ok(lines)
+            let ready = events
+                .iter()
+                .find(|event| event["type"] == "ready")
+                .cloned()
+                .ok_or_else(|| "startup did not emit ready".to_string())?;
+            let activation = events
+                .iter()
+                .find(|event| event["type"] == "capability_activation")
+                .cloned()
+                .ok_or_else(|| "startup did not emit a capability activation".to_string())?;
+            Ok([ready, activation])
         })();
         let _ = tx.send(result);
     });
 
-    let lines = rx
+    let events = rx
         .recv_timeout(Duration::from_secs(30))
         .expect("did not receive any stdout line within 30s")
         .expect("stdout read failed");
@@ -102,15 +123,7 @@ fn first_startup_events() -> [serde_json::Value; 2] {
         }
     }
 
-    lines
-        .into_iter()
-        .map(|line| {
-            serde_json::from_str(&line)
-                .unwrap_or_else(|e| panic!("startup stdout line was not JSON ({e}): {line:?}"))
-        })
-        .collect::<Vec<_>>()
-        .try_into()
-        .expect("exactly two startup lines")
+    events
 }
 
 #[test]

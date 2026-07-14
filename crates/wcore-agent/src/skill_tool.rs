@@ -221,6 +221,15 @@ impl SkillTool {
                     },
                 );
             }
+            SkillPermission::Inert { reason } => {
+                return (
+                    Some(skill.name.clone()),
+                    ToolResult {
+                        content: format!("Skill '{}' is inert. {reason}", skill.name),
+                        is_error: true,
+                    },
+                );
+            }
             SkillPermission::Ask { reason } => {
                 return (
                     Some(skill.name.clone()),

@@ -130,6 +130,9 @@ fn apply_event_inner(app: &mut App, event: ProtocolEvent) {
             };
             app.execution_policy = Some(policy);
         }
+        ProtocolEvent::WorkspacePolicy { policy } => {
+            app.workspace_policy = Some(policy);
+        }
         // ── Streaming lifecycle ──────────────────────────────────────
         ProtocolEvent::StreamStart { .. } => {
             app.session.streaming_active = true;
@@ -1880,6 +1883,33 @@ mod tests {
             ExecutionPosture::Smart
         );
         assert_eq!(app.mode, wcore_protocol::commands::SessionMode::Force);
+    }
+
+    #[test]
+    fn workspace_policy_event_stores_the_effective_receipt() {
+        use wcore_types::workspace_trust::{
+            WorkspacePolicyReceipt, WorkspaceSandboxProfile, resolve_workspace_trust,
+        };
+
+        let mut app = App::new();
+        apply_event(
+            &mut app,
+            ProtocolEvent::WorkspacePolicy {
+                policy: WorkspacePolicyReceipt {
+                    trust: resolve_workspace_trust("fp", []),
+                    profile: WorkspaceSandboxProfile::Strict,
+                    backend: "sandbox-exec".to_string(),
+                    writable_roots: vec!["/workspace".to_string()],
+                    readable_roots: vec!["/workspace".to_string()],
+                    capabilities: Vec::new(),
+                },
+            },
+        );
+
+        let receipt = app.workspace_policy.expect("workspace receipt");
+        assert_eq!(receipt.profile, WorkspaceSandboxProfile::Strict);
+        assert_eq!(receipt.backend, "sandbox-exec");
+        assert!(!receipt.trust.is_trusted());
     }
 
     // ── hydrate_history (resume repaint) ─────────────────────────────────

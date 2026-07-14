@@ -15,8 +15,12 @@
 //! Network is ALWAYS seeded from `default_bash_network_policy()` so the
 //! `WAYLAND_BASH_ALLOW_NETWORK` opt-in survives; it is never hardcoded.
 
+use parking_lot::RwLock;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use thiserror::Error;
 use wcore_sandbox::manifest::NetworkPolicy;
+use wcore_types::workspace_trust::DeveloperCapability;
 
 const SECRET_SUFFIXES: &[&str] = &[
     "/.env",
@@ -113,6 +117,23 @@ pub struct WorkspacePolicy {
     /// project-secret denial (`with_project_secret_deny`, i.e. Full/remote). A
     /// genuinely-local `Trusted` session leaves it false and keeps its shell.
     secret_read_deny_required: bool,
+    developer_capabilities: Arc<RwLock<Vec<DeveloperCapability>>>,
+    /// Read-only roots approved by the local desktop host for this process
+    /// lifetime. This is interior-mutable so an already-running Bash tool sees
+    /// the grant on its next call without replacing the session sandbox.
+    session_read_grants: Arc<RwLock<Vec<PathBuf>>>,
+}
+
+#[derive(Debug, Error)]
+pub enum WorkspaceCapabilityGrantError {
+    #[error("session capability grants require a fingerprint-trusted local workspace")]
+    RequiresTrustedLocal,
+    #[error("capability path is not an executable regular file: {0}")]
+    NotExecutable(PathBuf),
+    #[error("capability executable resolves inside a credential store: {0}")]
+    CredentialPath(PathBuf),
+    #[error("capability path could not be resolved: {0}")]
+    Resolve(#[from] std::io::Error),
 }
 
 impl WorkspacePolicy {
@@ -124,11 +145,22 @@ impl WorkspacePolicy {
         let root = canon(workspace.into());
         let mut writable_extra = scratch_dirs();
         if let Some(home) = dirs::home_dir() {
-            for sub in [".cache", ".cargo", ".npm", ".rustup"] {
-                writable_extra.push(home.join(sub));
+            for sub in [".cache", ".cargo/registry", ".cargo/git", ".npm/_cacache"] {
+                let path = home.join(sub);
+                if path.exists() {
+                    writable_extra.push(canon(path));
+                }
             }
         }
-        let readable_extra: Vec<PathBuf> = dirs::home_dir().into_iter().collect();
+        let developer_capabilities = detect_developer_capabilities();
+        let mut readable_extra = developer_capabilities
+            .iter()
+            .flat_map(|capability| capability.read_only_roots.iter())
+            .map(PathBuf::from)
+            .collect::<Vec<_>>();
+        readable_extra.extend(trusted_config_and_certificate_reads());
+        readable_extra.sort();
+        readable_extra.dedup();
 
         // Compute readable_canon from the same locals readable_roots() uses.
         let readable_canon = readable_canon_roots(&root, &writable_extra, &readable_extra);
@@ -154,6 +186,8 @@ impl WorkspacePolicy {
             // Bash read-deny-enforcement gate does not apply. `with_project_secret_deny`
             // flips this to true for a Full/remote session (#667).
             secret_read_deny_required: false,
+            developer_capabilities: Arc::new(RwLock::new(developer_capabilities)),
+            session_read_grants: Arc::new(RwLock::new(Vec::new())),
         }
     }
 
@@ -196,6 +230,8 @@ impl WorkspacePolicy {
             // Contained denies project secrets → Bash must be refused when the
             // backend can't enforce read-deny (else `cat .env` fails open).
             secret_read_deny_required: true,
+            developer_capabilities: Arc::new(RwLock::new(Vec::new())),
+            session_read_grants: Arc::new(RwLock::new(Vec::new())),
         }
     }
 
@@ -214,6 +250,9 @@ impl WorkspacePolicy {
     pub fn readable_roots(&self) -> Vec<PathBuf> {
         let mut v = self.writable_roots();
         v.extend(self.readable_extra.iter().cloned());
+        v.extend(self.session_read_grants.read().iter().cloned());
+        v.sort();
+        v.dedup();
         v
     }
     pub fn network(&self) -> NetworkPolicy {
@@ -327,14 +366,30 @@ impl WorkspacePolicy {
     /// secret cannot be reconstructed from `.git/objects` via `Bash("git show
     /// HEAD:.env")` and friends — the sibling of the typed-GitTool drop (MF1).
     pub fn secret_deny_paths_dynamic(&self) -> Vec<PathBuf> {
-        if !self.secret_read_deny_required {
-            return self.secret_deny.clone();
+        // Recompute the base deny set against the CURRENT readable roots. A
+        // desktop capability grant can add a read-only runtime mount after
+        // bootstrap; using the construction-time cache here would expose any
+        // credential store newly brought under that mount.
+        let mut readable_canon = self
+            .readable_roots()
+            .into_iter()
+            .map(|path| std::fs::canonicalize(&path).unwrap_or(path))
+            .collect::<Vec<_>>();
+        readable_canon.sort();
+        readable_canon.dedup();
+        // Add project secrets exactly once below for every posture that
+        // requires them. Passing Trusted here avoids a duplicate workspace
+        // walk for Contained policies.
+        let base_trust = if self.secret_read_deny_required {
+            WorkspaceTrust::Trusted
+        } else {
+            self.trust
+        };
+        let mut out = compute_secret_deny(base_trust, &self.root, &readable_canon);
+        if self.secret_read_deny_required {
+            out.extend(project_committed_secrets(&self.root, &readable_canon));
+            out.extend(git_content_stores(&self.root));
         }
-        let readable_canon =
-            readable_canon_roots(&self.root, &self.writable_extra, &self.readable_extra);
-        let mut out = self.secret_deny.clone();
-        out.extend(project_committed_secrets(&self.root, &readable_canon));
-        out.extend(git_content_stores(&self.root));
         out.sort();
         out.dedup();
         out
@@ -348,6 +403,86 @@ impl WorkspacePolicy {
     pub fn secret_read_deny_required(&self) -> bool {
         self.secret_read_deny_required
     }
+
+    pub fn developer_capabilities(&self) -> Vec<DeveloperCapability> {
+        self.developer_capabilities.read().clone()
+    }
+
+    /// Add a read-only developer runtime capability for this session.
+    ///
+    /// The caller supplies an executable selected by the local desktop UI.
+    /// Core canonicalizes it, derives the minimum known runtime roots, and
+    /// never widens writable roots or disables the sandbox. Contained,
+    /// Managed and remote sessions use `WorkspaceTrust::Contained`, so they
+    /// fail closed here even if a wire peer guesses this command.
+    pub fn grant_session_capability(
+        &self,
+        executable: impl AsRef<Path>,
+    ) -> Result<DeveloperCapability, WorkspaceCapabilityGrantError> {
+        if self.trust != WorkspaceTrust::Trusted {
+            return Err(WorkspaceCapabilityGrantError::RequiresTrustedLocal);
+        }
+        let executable = std::fs::canonicalize(executable)?;
+        let metadata = std::fs::metadata(&executable)?;
+        if !metadata.is_file() {
+            return Err(WorkspaceCapabilityGrantError::NotExecutable(executable));
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            if metadata.permissions().mode() & 0o111 == 0 {
+                return Err(WorkspaceCapabilityGrantError::NotExecutable(executable));
+            }
+        }
+        if path_is_in_credential_store(&executable) {
+            return Err(WorkspaceCapabilityGrantError::CredentialPath(executable));
+        }
+        let mut roots = capability_roots(&executable);
+        roots.sort();
+        roots.dedup();
+        {
+            let mut grants = self.session_read_grants.write();
+            grants.extend(roots.iter().cloned());
+            grants.sort();
+            grants.dedup();
+        }
+        let capability = DeveloperCapability {
+            name: executable
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or("custom_tool")
+                .to_string(),
+            executable: executable.to_string_lossy().into_owned(),
+            read_only_roots: roots
+                .into_iter()
+                .map(|path| path.to_string_lossy().into_owned())
+                .collect(),
+        };
+        let mut capabilities = self.developer_capabilities.write();
+        if !capabilities
+            .iter()
+            .any(|existing| existing.executable == capability.executable)
+        {
+            capabilities.push(capability.clone());
+        }
+        Ok(capability)
+    }
+}
+
+fn path_is_in_credential_store(path: &Path) -> bool {
+    if let Some(home) = dirs::home_dir() {
+        for relative in CREDENTIAL_STORES {
+            let store = home.join(relative);
+            let store = std::fs::canonicalize(&store).unwrap_or(store);
+            if path.starts_with(store) {
+                return true;
+            }
+        }
+    }
+    SYSTEM_CREDENTIAL_STORES
+        .iter()
+        .map(Path::new)
+        .any(|store| path.starts_with(store))
 }
 
 /// Free-function body of `is_secret_path` (uses no `self` fields). Extracted
@@ -641,6 +776,143 @@ fn minimal_toolchain_read_dirs() -> Vec<PathBuf> {
     v
 }
 
+fn detect_developer_capabilities() -> Vec<DeveloperCapability> {
+    let mut capabilities = Vec::new();
+    for name in [
+        "git",
+        "cargo",
+        "rustc",
+        "node",
+        "npm",
+        "xcodebuild",
+        "clang",
+        "cmake",
+        "make",
+        "brew",
+        "port",
+    ] {
+        let Some(executable) = resolve_path_executable(name) else {
+            continue;
+        };
+        let mut roots = capability_roots(&executable);
+        roots.sort();
+        roots.dedup();
+        capabilities.push(DeveloperCapability {
+            name: name.to_string(),
+            executable: executable.to_string_lossy().into_owned(),
+            read_only_roots: roots
+                .into_iter()
+                .map(|path| path.to_string_lossy().into_owned())
+                .collect(),
+        });
+    }
+
+    for (name, variable) in [
+        ("custom_sdk", "SDKROOT"),
+        ("developer_dir", "DEVELOPER_DIR"),
+    ] {
+        let Some(path) = std::env::var_os(variable).map(PathBuf::from) else {
+            continue;
+        };
+        let path = canon(path);
+        if !path.is_dir() {
+            continue;
+        }
+        capabilities.push(DeveloperCapability {
+            name: name.to_string(),
+            executable: String::new(),
+            read_only_roots: vec![path.to_string_lossy().into_owned()],
+        });
+    }
+
+    capabilities
+}
+
+fn resolve_path_executable(name: &str) -> Option<PathBuf> {
+    let path = std::env::var_os("PATH")?;
+    #[cfg(windows)]
+    let suffixes: Vec<String> = std::env::var("PATHEXT")
+        .unwrap_or_else(|_| ".COM;.EXE;.BAT;.CMD".to_string())
+        .split(';')
+        .map(|suffix| suffix.to_ascii_lowercase())
+        .collect();
+
+    for directory in std::env::split_paths(&path) {
+        let candidate = directory.join(name);
+        if candidate.is_file() {
+            return std::fs::canonicalize(candidate).ok();
+        }
+        #[cfg(windows)]
+        for suffix in &suffixes {
+            let candidate = directory.join(format!("{name}{suffix}"));
+            if candidate.is_file() {
+                return std::fs::canonicalize(candidate).ok();
+            }
+        }
+    }
+    None
+}
+
+fn capability_roots(executable: &Path) -> Vec<PathBuf> {
+    let mut roots = executable
+        .parent()
+        .map(Path::to_path_buf)
+        .into_iter()
+        .collect::<Vec<_>>();
+    let text = executable.to_string_lossy().replace('\\', "/");
+    for prefix in ["/opt/homebrew", "/opt/local", "/usr/local"] {
+        if text == prefix || text.starts_with(&format!("{prefix}/")) {
+            let path = PathBuf::from(prefix);
+            if path.exists() {
+                roots.push(canon(path));
+            }
+        }
+    }
+    if let Some(index) = text.find(".app/Contents/Developer/") {
+        let developer = PathBuf::from(&text[..index + ".app/Contents/Developer".len()]);
+        if developer.exists() {
+            roots.push(canon(developer));
+        }
+    }
+    if let Some(home) = dirs::home_dir()
+        && executable.starts_with(home.join(".cargo/bin"))
+    {
+        for path in [home.join(".cargo/bin"), home.join(".rustup")] {
+            if path.exists() {
+                roots.push(canon(path));
+            }
+        }
+    }
+    roots
+}
+
+fn trusted_config_and_certificate_reads() -> Vec<PathBuf> {
+    let mut paths = Vec::new();
+    for path in [
+        PathBuf::from("/etc/ssl/certs"),
+        PathBuf::from("/etc/ssl/cert.pem"),
+        PathBuf::from("/etc/paths"),
+        PathBuf::from("/etc/resolv.conf"),
+    ] {
+        if path.exists() {
+            paths.push(canon(path));
+        }
+    }
+    if let Some(home) = dirs::home_dir() {
+        for path in [
+            home.join(".gitconfig"),
+            home.join(".config/git"),
+            home.join(".cargo/config.toml"),
+            home.join(".npmrc"),
+        ] {
+            if path.exists() {
+                paths.push(canon(path));
+            }
+        }
+    }
+    paths
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -661,6 +933,113 @@ mod tests {
         );
         // Trusted reuses the user's global caches — no redirect.
         assert!(p.cache_env().is_empty());
+    }
+
+    #[test]
+    fn trusted_local_never_grants_the_entire_home_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let policy = WorkspacePolicy::trusted_local(dir.path());
+        let Some(home) = dirs::home_dir().and_then(|path| std::fs::canonicalize(path).ok()) else {
+            return;
+        };
+
+        assert!(policy.writable_roots().iter().all(|path| path != &home));
+        assert!(policy.readable_roots().iter().all(|path| path != &home));
+    }
+
+    #[test]
+    fn detected_developer_capability_paths_are_absolute_and_canonical() {
+        let dir = tempfile::tempdir().unwrap();
+        let policy = WorkspacePolicy::trusted_local(dir.path());
+
+        for capability in policy.developer_capabilities() {
+            if !capability.executable.is_empty() {
+                let executable = Path::new(&capability.executable);
+                assert!(executable.is_absolute());
+                assert_eq!(std::fs::canonicalize(executable).unwrap(), executable);
+            }
+            for root in &capability.read_only_roots {
+                let root = Path::new(root);
+                assert!(root.is_absolute());
+                assert_eq!(std::fs::canonicalize(root).unwrap(), root);
+            }
+        }
+    }
+
+    #[test]
+    fn session_capability_grant_is_read_only_and_local_trusted_only() {
+        let workspace = tempfile::tempdir().unwrap();
+        let runtime = tempfile::tempdir().unwrap();
+        let executable = runtime.path().join("custom-tool");
+        std::fs::write(&executable, b"tool").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+
+        let trusted = WorkspacePolicy::trusted_local(workspace.path());
+        let before_writes = trusted.writable_roots();
+        let capability = trusted.grant_session_capability(&executable).unwrap();
+        let runtime_root = std::fs::canonicalize(runtime.path()).unwrap();
+        assert!(trusted.readable_roots().contains(&runtime_root));
+        assert_eq!(trusted.writable_roots(), before_writes);
+        assert_eq!(
+            capability.executable,
+            std::fs::canonicalize(&executable)
+                .unwrap()
+                .to_string_lossy()
+        );
+
+        let contained = WorkspacePolicy::contained(workspace.path());
+        assert!(matches!(
+            contained.grant_session_capability(&executable),
+            Err(WorkspaceCapabilityGrantError::RequiresTrustedLocal)
+        ));
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn session_capability_grant_refreshes_secret_deny_for_new_read_root() {
+        let workspace = tempfile::tempdir().unwrap();
+        // Put the new runtime under HOME rather than the system temp root:
+        // scratch_dirs() intentionally mounts the latter before any grant.
+        let home = dirs::home_dir().expect("test requires a writable home directory");
+        let runtime = tempfile::Builder::new()
+            .prefix("wcore-capability-")
+            .tempdir_in(home)
+            .unwrap();
+        let executable = runtime.path().join("custom-tool");
+        let credential = runtime.path().join("credentials.toml");
+        std::fs::write(&executable, b"tool").unwrap();
+        std::fs::write(&credential, b"secret = true").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+
+        let previous = std::env::var_os("WAYLAND_HOME");
+        // SAFETY: this test is serialized with the other environment-mutating
+        // workspace-policy tests.
+        unsafe { std::env::set_var("WAYLAND_HOME", runtime.path()) };
+        let policy = WorkspacePolicy::trusted_local(workspace.path());
+        assert!(
+            !policy
+                .secret_deny_paths()
+                .contains(&std::fs::canonicalize(&credential).unwrap())
+        );
+        policy.grant_session_capability(&executable).unwrap();
+        let dynamic = policy.secret_deny_paths_dynamic();
+        match previous {
+            Some(value) => unsafe { std::env::set_var("WAYLAND_HOME", value) },
+            None => unsafe { std::env::remove_var("WAYLAND_HOME") },
+        }
+
+        assert!(
+            dynamic.contains(&std::fs::canonicalize(&credential).unwrap()),
+            "a post-bootstrap read grant must refresh credential denials: {dynamic:?}"
+        );
     }
 
     #[test]

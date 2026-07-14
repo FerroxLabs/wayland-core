@@ -292,11 +292,17 @@ pub enum ResourceLimitEnforcement {
 #[derive(Clone)]
 pub struct SandboxRegistry {
     backend: Arc<dyn backends::SandboxBackend>,
+    /// Authority state, not a backend capability. Only `dangerous()` can set
+    /// this after receiving an opaque resolver-issued session grant.
+    bypasses_containment: bool,
 }
 
 impl SandboxRegistry {
     pub fn new(backend: Arc<dyn backends::SandboxBackend>) -> Self {
-        Self { backend }
+        Self {
+            backend,
+            bypasses_containment: false,
+        }
     }
     pub async fn execute(
         &self,
@@ -321,6 +327,9 @@ impl SandboxRegistry {
     }
     pub fn enforces_read_deny(&self) -> bool {
         self.backend.enforces_read_deny()
+    }
+    pub fn bypasses_containment(&self) -> bool {
+        self.bypasses_containment
     }
     pub fn blocks_powershell(&self) -> bool {
         self.backend.blocks_powershell()
@@ -377,7 +386,10 @@ impl SandboxRegistry {
             ttl_millis = grant.ttl_millis(),
             "Dangerous session runtime selected: OS sandbox is disabled"
         );
-        Self::new(Arc::new(backends::no_sandbox::NoSandboxBackend::new()))
+        Self {
+            backend: Arc::new(backends::no_sandbox::NoSandboxBackend::new()),
+            bypasses_containment: true,
+        }
     }
 }
 
@@ -678,7 +690,12 @@ mod fail_closed_tests {
         )
         .unwrap();
         let dangerous = SandboxRegistry::dangerous(&grant);
+        let unauthorised_no_sandbox =
+            SandboxRegistry::new(Arc::new(backends::no_sandbox::NoSandboxBackend::new()));
         assert_eq!(dangerous.backend_name(), "no_sandbox");
+        assert!(dangerous.bypasses_containment());
+        assert!(!required.bypasses_containment());
+        assert!(!unauthorised_no_sandbox.bypasses_containment());
 
         EnvGuard::set_sandbox(Some("none"));
         EnvGuard::set_allow(Some("1"));

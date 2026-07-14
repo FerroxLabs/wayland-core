@@ -137,6 +137,11 @@ pub enum ProtocolEvent {
     ExecutionPolicy {
         policy: wcore_types::execution_policy::EffectiveExecutionPolicy,
     },
+    /// Effective repository trust and sandbox grants. Output-only authority
+    /// receipt; hosts cannot submit this shape to widen a session.
+    WorkspacePolicy {
+        policy: wcore_types::workspace_trust::WorkspacePolicyReceipt,
+    },
     /// Typed capability construction/runtime evidence. Startup events are
     /// emitted after `Ready`; runtime events are emitted at the real success
     /// seam. Unknown hosts drop this additive event.
@@ -1541,5 +1546,30 @@ mod tests {
 
         assert_eq!(json["capabilities"]["browser_suite"], true);
         assert!(json["capabilities"].get("computer_use").is_none());
+    }
+
+    #[test]
+    fn workspace_policy_receipt_serializes_as_output_only_effective_authority() {
+        use wcore_types::workspace_trust::{
+            WorkspacePolicyReceipt, WorkspaceSandboxProfile, resolve_workspace_trust,
+        };
+
+        let event = ProtocolEvent::WorkspacePolicy {
+            policy: WorkspacePolicyReceipt {
+                trust: resolve_workspace_trust("fingerprint", []),
+                profile: WorkspaceSandboxProfile::Strict,
+                backend: "bwrap".to_string(),
+                writable_roots: vec!["/workspace".to_string()],
+                readable_roots: vec!["/workspace".to_string()],
+                capabilities: Vec::new(),
+            },
+        };
+        let json = serde_json::to_value(event).unwrap();
+
+        assert_eq!(json["type"], "workspace_policy");
+        assert_eq!(json["policy"]["profile"], "strict");
+        assert_eq!(json["policy"]["trust"]["level"], "untrusted");
+        assert_eq!(json["policy"]["trust"]["fingerprint"], "fingerprint");
+        assert_eq!(json["policy"]["backend"], "bwrap");
     }
 }

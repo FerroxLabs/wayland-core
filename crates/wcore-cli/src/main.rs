@@ -342,6 +342,23 @@ struct Cli {
     #[arg(long)]
     project_dir: Option<std::path::PathBuf>,
 
+    /// Trust the current repository's executable configuration fingerprint in
+    /// Core's external trust store, then start the session. Material changes
+    /// to hooks, MCP config or project skills automatically revoke eligibility.
+    #[arg(long, conflicts_with = "untrust_workspace")]
+    trust_workspace: bool,
+
+    /// Remove the current repository from Core's external trust store, then
+    /// start with the strict untrusted-workspace profile.
+    #[arg(long, conflicts_with = "trust_workspace")]
+    untrust_workspace: bool,
+
+    /// Permit this JSON-stream host to approve read-only, process-lifetime
+    /// developer capabilities. This launch opt-in does not permit writes,
+    /// untrusted/remote grants, or sandbox bypass.
+    #[arg(long, requires = "json_stream")]
+    allow_host_workspace_grants: bool,
+
     /// Resume a previous session
     #[arg(long)]
     resume: Option<String>,
@@ -1450,6 +1467,24 @@ async fn run() -> anyhow::Result<ExitCode> {
     }
 
     // Resolve config from files + CLI args + env vars
+    let workspace_for_trust = cli.project_dir.clone().unwrap_or(std::env::current_dir()?);
+    let trust_store = wcore_config::workspace_trust::WorkspaceTrustStore::for_current_home();
+    if cli.trust_workspace {
+        let fingerprint = trust_store.grant(&workspace_for_trust)?;
+        eprintln!(
+            "Trusted workspace executable fingerprint {} for {}",
+            &fingerprint.digest[..12],
+            fingerprint.root.display()
+        );
+    } else if cli.untrust_workspace {
+        let removed = trust_store.revoke(&workspace_for_trust)?;
+        eprintln!(
+            "{} workspace trust for {}",
+            if removed { "Removed" } else { "No stored" },
+            workspace_for_trust.display()
+        );
+    }
+
     let cli_args = CliArgs {
         provider: cli.provider,
         api_key: cli.api_key,
@@ -1632,6 +1667,7 @@ async fn run() -> anyhow::Result<ExitCode> {
             cli.session_id,
             execution,
             cli.assistant.clone(),
+            cli.allow_host_workspace_grants,
         )
         .await;
         let evidence_result = wcore_agent::egress::finalize_eval_egress_observer();
@@ -2122,6 +2158,7 @@ async fn run_tui_mode(
     let result = tui::splash_while(&mut boot_terminal, mcp_count, bootstrap.build()).await?;
     let startup_capability_activations = result.capability_activations.clone();
     let effective_execution_policy = result.effective_execution_policy.clone();
+    let workspace_policy_receipt = result.workspace_policy_receipt.clone();
     let mut engine = result.engine;
 
     // FluxRouter web_search grounding (contract §5): honour `--search`. A no-op
@@ -2191,6 +2228,9 @@ async fn run_tui_mode(
     }
     let _ = tx.send(wcore_protocol::events::ProtocolEvent::ExecutionPolicy {
         policy: effective_execution_policy,
+    });
+    let _ = tx.send(wcore_protocol::events::ProtocolEvent::WorkspacePolicy {
+        policy: workspace_policy_receipt,
     });
 
     // Snapshot the loaded skills + MCP servers for the `/skills` and `/mcp`
@@ -2810,6 +2850,48 @@ impl ProtocolEmitter for GatingProtocolWriter {
     }
 }
 
+fn emit_workspace_capability_grant(
+    launch_authorized: bool,
+    policy: &wcore_tools::workspace_policy::WorkspacePolicy,
+    receipt: &mut wcore_types::workspace_trust::WorkspacePolicyReceipt,
+    executable: &str,
+    writer: &ProtocolWriter,
+) {
+    if !launch_authorized {
+        let _ = writer.emit(&ProtocolEvent::Info {
+            msg_id: String::new(),
+            message: "workspace capability grant refused: the local launcher did not opt in with --allow-host-workspace-grants".to_string(),
+        });
+        return;
+    }
+    match policy.grant_session_capability(executable) {
+        Ok(capability) => {
+            receipt.readable_roots = policy
+                .readable_roots()
+                .iter()
+                .map(|path| path.to_string_lossy().into_owned())
+                .collect();
+            receipt.capabilities = policy.developer_capabilities();
+            let _ = writer.emit(&ProtocolEvent::WorkspacePolicy {
+                policy: receipt.clone(),
+            });
+            let _ = writer.emit(&ProtocolEvent::Info {
+                msg_id: String::new(),
+                message: format!(
+                    "workspace capability granted for this session: {} (read-only; sandbox remains active)",
+                    capability.executable
+                ),
+            });
+        }
+        Err(error) => {
+            let _ = writer.emit(&ProtocolEvent::Info {
+                msg_id: String::new(),
+                message: format!("workspace capability grant refused: {error}"),
+            });
+        }
+    }
+}
+
 async fn run_json_stream_mode(
     config: Config,
     cwd: &str,
@@ -2817,6 +2899,7 @@ async fn run_json_stream_mode(
     session_id: Option<String>,
     execution: LocalExecutionSelection,
     assistant: Option<String>,
+    allow_host_workspace_grants: bool,
 ) -> anyhow::Result<()> {
     let writer = Arc::new(ProtocolWriter::new());
     let approval_policy = execution.approvals();
@@ -2929,6 +3012,11 @@ async fn run_json_stream_mode(
     };
     let startup_capability_activations = result.capability_activations.clone();
     let mut engine = result.engine;
+    let workspace_policy = engine
+        .tools()
+        .workspace_policy()
+        .expect("bootstrap installs a workspace policy");
+    let mut workspace_policy_receipt = result.workspace_policy_receipt.clone();
     // wayland#551 — declared-but-still-connecting servers count as MCP
     // capability on the ready frame; their tools register shortly after.
     let initial_has_mcp = result.has_mcp || deferred_mcp_servers.is_some();
@@ -2971,6 +3059,9 @@ async fn run_json_stream_mode(
     );
     let _ = writer.emit(&ProtocolEvent::ExecutionPolicy {
         policy: result.effective_execution_policy.clone(),
+    });
+    let _ = writer.emit(&ProtocolEvent::WorkspacePolicy {
+        policy: workspace_policy_receipt.clone(),
     });
     for activation in startup_capability_activations {
         output.emit_capability_activation(&activation);
@@ -3453,6 +3544,15 @@ async fn run_json_stream_mode(
                                             });
                                         }
                                     }
+                                    ProtocolCommand::GrantWorkspaceCapability { executable } => {
+                                        emit_workspace_capability_grant(
+                                            allow_host_workspace_grants,
+                                            &workspace_policy,
+                                            &mut workspace_policy_receipt,
+                                            &executable,
+                                            &writer,
+                                        );
+                                    }
                                     ProtocolCommand::Ping => {
                                         let _ = writer.emit(&wcore_protocol::events::ProtocolEvent::Pong);
                                     }
@@ -3697,6 +3797,15 @@ async fn run_json_stream_mode(
                 output.emit_error(
                     &format!("AddMcpServer '{name}': rejected — only allowed before first Message"),
                     false,
+                );
+            }
+            ProtocolCommand::GrantWorkspaceCapability { executable } => {
+                emit_workspace_capability_grant(
+                    allow_host_workspace_grants,
+                    &workspace_policy,
+                    &mut workspace_policy_receipt,
+                    &executable,
+                    &writer,
                 );
             }
             ProtocolCommand::Ping => {

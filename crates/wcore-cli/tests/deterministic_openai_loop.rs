@@ -256,26 +256,48 @@ async fn packaged_core_preserves_declared_duplicate_deltas() {
 
 #[tokio::test]
 async fn packaged_core_executes_an_approved_write() {
-    let target_dir = tempfile::tempdir().expect("target tempdir");
-    let target = target_dir.path().join("approved.txt");
-    let (result, observation) = run_script_with_approval(
-        "packaged_openai_approval_allow",
-        [
-            OpenAiStep::tool_call(
-                "call-approved-write",
-                "Write",
-                serde_json::json!({
-                    "file_path": target.to_string_lossy(),
-                    "content": "APPROVED"
-                }),
-            ),
-            OpenAiStep::text("approved write completed"),
-        ],
-        "approved write completed",
-        ApprovalPolicy::ApproveAll,
+    let seed_provider = ProviderConfig::new(ProviderId::OpenAI, "fixture-chat-v1")
+        .with_api_key("fixture-local-token")
+        .with_base_url("http://127.0.0.1:1");
+    let env = tempenv::build(&seed_provider).expect("build retained eval workspace");
+    let target = env.path().join("approved.txt");
+    let fixture = OpenAiFixtureScript::new([
+        OpenAiStep::tool_call(
+            "call-approved-write",
+            "Write",
+            serde_json::json!({
+                "file_path": target.to_string_lossy(),
+                "content": "APPROVED"
+            }),
+        ),
+        OpenAiStep::text("approved write completed"),
+    ])
+    .start()
+    .await
+    .expect("start OpenAI fixture");
+    let provider = ProviderConfig::new(ProviderId::OpenAI, "fixture-chat-v1")
+        .with_api_key("fixture-local-token")
+        .with_base_url(fixture.base_url());
+    let scenario = Scenario::new("packaged_openai_approval_allow", Category::Hardening)
+        .max_total_time(Duration::from_secs(20))
+        .approval(ApprovalPolicy::ApproveAll)
+        .turn(
+            Turn::new("Return the deterministic fixture answer.")
+                .max_time(Duration::from_secs(10))
+                .assert(Assertion::Contains("approved write completed")),
+        );
+    let result = run_with_binary_in_environment(
+        &scenario,
+        &provider,
+        Path::new(env!("CARGO_BIN_EXE_wayland-core")),
+        &env,
     )
-    .await;
+    .await
+    .expect("packaged Core run");
+    let observation = fixture.shutdown().await.expect("fixture shutdown");
 
+    assert!(result.passed, "unexpected failures: {:?}", result.failures);
+    assert!(observation.complete(), "observation: {observation:?}");
     assert_eq!(std::fs::read_to_string(&target).unwrap(), "APPROVED");
     assert_eq!(result.approval, ApprovalPolicy::ApproveAll);
     assert_eq!(result.trace.count("Write"), 1);

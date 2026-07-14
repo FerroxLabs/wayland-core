@@ -172,7 +172,12 @@ async fn e5_shell_expansion() {
     let skills = load_all_skills(&root, &[], false, None).await;
     let approval_manager = Arc::new(wcore_protocol::ToolApprovalManager::new());
     approval_manager.set_mode(wcore_protocol::commands::SessionMode::Force);
-    let tool = make_tool(skills, &cwd).with_live_approval_manager(approval_manager);
+    let tool = SkillTool::new(
+        Arc::new(wcore_skills::refs::SkillCatalog::from_metadata_vec(skills)),
+        cwd.clone(),
+        SkillPermissionChecker::new(vec![], vec![], false).with_project_execution_trust(true),
+    )
+    .with_live_approval_manager(approval_manager);
 
     let ctx = wcore_tools::context::ToolContext::test_default().with_sandbox(std::sync::Arc::new(
         wcore_sandbox::SandboxRegistry::new(std::sync::Arc::new(

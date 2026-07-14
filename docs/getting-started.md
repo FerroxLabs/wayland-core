@@ -58,6 +58,9 @@ wayland-core [OPTIONS] [PROMPT]...
 | `--dangerous-ttl-secs <n>` | Dangerous lease lifetime; defaults to 15 minutes and is capped at one hour |
 | `--auto-approve` | Skip all tool confirmations |
 | `--project-dir <path>` | Directory to load the project `.wayland-core.toml` from (defaults to CWD) |
+| `--trust-workspace` | Trust the current executable repository fingerprint in Core's external user store; material changes make the grant stale |
+| `--untrust-workspace` | Remove the current repository's stored trust decision and launch with the strict profile |
+| `--allow-host-workspace-grants` | With `--json-stream`, let a local host approve read-only developer runtime roots for this process; never disables the sandbox |
 | `--continue`, `-c` | Resume the most-recent session |
 | `--resume <id>` | Resume a previous session |
 | `--session-id <id>` | Use a specific session ID instead of auto-generating one |
@@ -243,6 +246,27 @@ cannot create that lease.
 Managed installs a global approval floor and an allow/deny decision for local
 Dangerous launches. Lower-trust project, protocol, TUI, ACP, resume, and child
 inputs can tighten the floor but cannot relax it.
+
+### Workspace trust
+
+Repository-controlled executable configuration is inert by default. This
+includes project hooks, MCP servers, environment injection, executable skills,
+and other project settings that can cause code to run. Prompt-only project
+guidance and restrictions that make the session safer remain active.
+
+`--trust-workspace` records a hash of the repository's executable configuration
+surface in Core's user-owned configuration directory. Editing that surface
+invalidates the decision automatically; review the change and run the flag
+again to renew it. `--untrust-workspace` removes the decision. Managed, remote,
+and child-agent constraints always select the strict profile even if a local
+fingerprint was previously trusted.
+
+Trusted local sessions use the `trusted_local_smart` sandbox profile. Core
+detects installed developer runtimes and exposes only their required roots as
+read-only, while keeping workspace/cache writes explicit. A Desktop host may
+request an additional read-only runtime root only when Core was launched with
+both `--json-stream` and `--allow-host-workspace-grants`. These grants last for
+the process, do not add writable roots, and are refused for strict sessions.
 
 ### API Key Resolution Order
 

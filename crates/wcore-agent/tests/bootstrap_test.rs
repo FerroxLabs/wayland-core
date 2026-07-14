@@ -968,11 +968,10 @@ async fn w2_v063_bootstrap_skips_kg_when_disabled() {
     assert!(!enabled, "WAYLAND_KG=off must disable KG init in bootstrap");
 }
 
-/// Task 5: a plain (non-channel) bootstrap session must install a Trusted
-/// WorkspacePolicy on the registry so BashTool's OS sandbox is rooted at
-/// the workspace directory.
+/// F08: an ordinary local launch in a repository with no external trust
+/// decision stays strict. Being local is not itself repository trust.
 #[tokio::test]
-async fn bootstrap_workspace_policy_installed_trusted() {
+async fn bootstrap_workspace_policy_defaults_contained_until_trusted() {
     let config = minimal_config();
     let workdir = tempfile::TempDir::new().expect("workdir");
     let result = AgentBootstrap::new(config, workdir.path().to_str().unwrap(), null_output())
@@ -988,7 +987,33 @@ async fn bootstrap_workspace_policy_installed_trusted() {
 
     assert_eq!(
         policy.trust(),
-        wcore_tools::workspace_policy::WorkspaceTrust::Trusted,
-        "non-channel session must get a Trusted workspace policy"
+        wcore_tools::workspace_policy::WorkspaceTrust::Contained,
+        "a repository without a current fingerprint grant must stay strict"
+    );
+}
+
+#[tokio::test]
+async fn bootstrap_workspace_policy_honors_explicit_local_trust_grant() {
+    let mut config = minimal_config();
+    config.workspace_trust = wcore_types::workspace_trust::resolve_workspace_trust(
+        "test-fingerprint",
+        [wcore_types::workspace_trust::WorkspaceTrustInput::grant(
+            wcore_types::workspace_trust::AuthoritySource::LocalSession,
+        )],
+    );
+    let workdir = tempfile::TempDir::new().expect("workdir");
+    let result = AgentBootstrap::new(config, workdir.path().to_str().unwrap(), null_output())
+        .build()
+        .await
+        .expect("bootstrap should succeed");
+    let policy = result.engine.tools().workspace_policy().unwrap();
+
+    assert_eq!(
+        policy.trust(),
+        wcore_tools::workspace_policy::WorkspaceTrust::Trusted
+    );
+    assert_eq!(
+        result.workspace_policy_receipt.profile,
+        wcore_types::workspace_trust::WorkspaceSandboxProfile::TrustedLocalSmart
     );
 }

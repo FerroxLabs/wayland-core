@@ -995,7 +995,12 @@ mod pty {
         let start = Instant::now();
         h.send(b"Q");
         h.wait_for(
-            |s| s.contains('Q') || s.to_lowercase().contains("too large") || s.contains("capped"),
+            |s| {
+                s.contains('Q')
+                    || s.contains("Paste was")
+                    || s.to_lowercase().contains("too large")
+                    || s.contains("capped")
+            },
             Duration::from_secs(2),
             "a keystroke to register (or a cap/toast) after a huge paste",
         );

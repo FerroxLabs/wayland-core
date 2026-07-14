@@ -47,6 +47,7 @@ base64.workspace            = true
 # S11 — interactive passphrase prompt for the EncryptedFile backend.
 rpassword                   = { workspace = true }
 tracing.workspace           = true
+sha2.workspace              = true
 # F-081: URL host validation for OAuth issuer allowlist.
 url.workspace               = true
 # Legacy yaml migration: one-shot import of ~/.wayland/config.yaml into

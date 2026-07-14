@@ -37,6 +37,8 @@ pub struct BootstrapResult {
     pub provider: Arc<dyn LlmProvider>,
     /// F07: immutable launch authority snapshot for host/TUI/ACP reporting.
     pub effective_execution_policy: EffectiveExecutionPolicy,
+    /// F08: output-only trust/capability receipt for the exact session policy.
+    pub workspace_policy_receipt: wcore_types::workspace_trust::WorkspacePolicyReceipt,
     /// F05: deterministic construction truth for the audited capability set.
     /// Hosts emit these additive events only after their `Ready` boundary.
     pub capability_activations: Vec<wcore_protocol::events::CapabilityActivation>,
@@ -1917,6 +1919,10 @@ impl AgentBootstrap {
             self.config.tools.skills.deny.clone(),
             self.config.tools.skills.allow.clone(),
             self.config.tools.auto_approve,
+        )
+        .with_project_execution_trust_snapshot(
+            std::path::Path::new(cwd),
+            &self.config.workspace_trust,
         );
         // F-013: capture the static skill rules plus the live host authority
         // for the cron skill_sink before self.config moves below. The manager
@@ -1925,6 +1931,8 @@ impl AgentBootstrap {
         let cron_skill_deny_rules = self.config.tools.skills.deny.clone();
         let cron_skill_allow_rules = self.config.tools.skills.allow.clone();
         let cron_skill_auto_approve = self.config.tools.auto_approve;
+        let cron_workspace_trust = self.config.workspace_trust.clone();
+        let cron_workspace = std::path::PathBuf::from(cwd);
         let cron_skill_approval_manager = self.approval_manager.as_ref().cloned();
         // v0.7.0 1.D.5 — wire ProceduralSkillTelemetrySink when memory
         // is enabled so SkillTool invocations feed the procedural-memory
@@ -2365,53 +2373,68 @@ impl AgentBootstrap {
         }
 
         // Every session gets a workspace policy so BashTool's OS sandbox is
-        // rooted at the workspace (fixes the empty-allowlist / cwd:None pain
-        // that broke local + desktop builds). A channel `Workspace` posture
-        // already installed a `Contained` policy via `apply_posture`; for
-        // every other path (local CLI / TUI / json-stream / ACP / `Full`
-        // channel) install a `Trusted` policy derived from this session's
-        // working directory.
+        // rooted at the workspace. Only a fingerprint-trusted, non-Managed,
+        // genuinely-local session receives the capability-aware Trusted
+        // profile. Untrusted repositories and every remote session stay in
+        // the Contained profile; repository content cannot select this branch.
+        let is_channel_remote = self.channel_tool_posture.is_some();
         if registry.workspace_policy().is_none() {
-            // #657 (Overwatch ruling, Sean-confirmed): grant Bash network egress
-            // (`Inherit`) only for a genuinely-local session — no channel posture
-            // attached. Any channel path (including `Full`) is a remote sender and
-            // stays on the fail-safe Deny default that `trusted_local` seeds.
-            let is_channel_remote = self.channel_tool_posture.is_some();
-            let network = wcore_tools::workspace_policy::local_bash_network(is_channel_remote);
-            let mut policy = wcore_tools::workspace_policy::WorkspacePolicy::trusted_local(
-                std::path::PathBuf::from(&self.workspace),
-            )
-            .with_network(network);
-            // #667 (Overwatch ruling, Sean-confirmed): a `Full`-posture channel /
-            // remote session lands on a `Trusted` policy but keeps host
-            // filesystem/shell tools, so it must still be denied the PROJECT's own
-            // committed secrets. A genuinely-local keyboard session (posture None)
-            // is EXEMPT: it may read its own `.env`.
-            //   * `with_project_secret_deny` adds the project secrets to
-            //     `secret_deny_paths()` → Bash's OS sandbox refuses them (bash.rs).
-            //   * the `SecretDenyFs` read-path guard (installed below, WITHOUT a
-            //     `SandboxedFs` jail so Full stays unconfined for non-secrets)
-            //     refuses `Read`/`Write`/`Edit` of the same project secrets.
-            // Gated on `Full` specifically (F6): `Workspace` posture already
-            // installed a `Contained` policy above; `Conversational` is stripped of
-            // every filesystem/shell tool, so its per-message workspace walk +
-            // guard would be dead weight with nothing to protect.
-            let is_full_posture = matches!(
-                self.channel_tool_posture.as_ref().map(|s| s.posture),
-                Some(wcore_channels::ChannelToolPosture::Full)
-            );
-            if is_full_posture {
-                policy = policy.with_project_secret_deny();
-            }
+            let strict_workspace = is_channel_remote
+                || self.config.execution_policy.is_managed()
+                || !self.config.workspace_trust.is_trusted();
+            let workspace = std::path::PathBuf::from(&self.workspace);
+            let policy = if strict_workspace {
+                wcore_tools::workspace_policy::WorkspacePolicy::contained(&workspace)
+            } else {
+                wcore_tools::workspace_policy::WorkspacePolicy::trusted_local(&workspace)
+                    .with_network(wcore_tools::workspace_policy::local_bash_network(false))
+            };
             let policy = std::sync::Arc::new(policy);
-            if is_full_posture {
-                registry.set_tool_vfs(std::sync::Arc::new(wcore_tools::vfs::SecretDenyFs::new(
-                    wcore_tools::vfs::RealFs,
-                    std::sync::Arc::clone(&policy),
-                )));
+            if strict_workspace {
+                let jail = wcore_tools::vfs::SandboxedFs::new(
+                    wcore_tools::vfs::SecretDenyFs::new(
+                        wcore_tools::vfs::RealFs,
+                        std::sync::Arc::clone(&policy),
+                    ),
+                    workspace,
+                );
+                registry.set_tool_vfs(std::sync::Arc::new(jail));
             }
             registry.set_workspace_policy(policy);
         }
+
+        let effective_workspace_trust = if is_channel_remote {
+            wcore_types::workspace_trust::EffectiveWorkspaceTrust::untrusted(
+                wcore_types::workspace_trust::AuthoritySource::Remote,
+                self.config.workspace_trust.fingerprint(),
+                "remote sessions always use the strict workspace profile",
+            )
+        } else {
+            self.config.workspace_trust.clone()
+        };
+        let workspace_policy = registry
+            .workspace_policy()
+            .expect("bootstrap installs one workspace policy per session");
+        let workspace_policy_receipt = wcore_types::workspace_trust::WorkspacePolicyReceipt {
+            profile: if workspace_policy.trust() == wcore_tools::WorkspaceTrust::Trusted {
+                wcore_types::workspace_trust::WorkspaceSandboxProfile::TrustedLocalSmart
+            } else {
+                wcore_types::workspace_trust::WorkspaceSandboxProfile::Strict
+            },
+            trust: effective_workspace_trust,
+            backend: registry.sandbox_runtime().backend_name().to_string(),
+            writable_roots: workspace_policy
+                .writable_roots()
+                .iter()
+                .map(|path| path.to_string_lossy().into_owned())
+                .collect(),
+            readable_roots: workspace_policy
+                .readable_roots()
+                .iter()
+                .map(|path| path.to_string_lossy().into_owned())
+                .collect(),
+            capabilities: workspace_policy.developer_capabilities(),
+        };
 
         let mut engine = if let Some(session) = self.resume_session {
             AgentEngine::resume_with_provider(
@@ -3017,6 +3040,8 @@ impl AgentBootstrap {
             let deny_rules = cron_skill_deny_rules;
             let allow_rules = cron_skill_allow_rules;
             let auto_approve = cron_skill_auto_approve;
+            let workspace_trust = cron_workspace_trust;
+            let workspace = cron_workspace;
             let approval_manager = cron_skill_approval_manager;
             let cwd_for_cron = cwd.to_string();
             Arc::new(move |skill_name: String, args: serde_json::Value| {
@@ -3025,7 +3050,8 @@ impl AgentBootstrap {
                     deny_rules.clone(),
                     allow_rules.clone(),
                     auto_approve,
-                );
+                )
+                .with_project_execution_trust_snapshot(&workspace, &workspace_trust);
                 let approval_manager = approval_manager.clone();
                 let cwd = cwd_for_cron.clone();
                 Box::pin(async move {
@@ -3133,6 +3159,7 @@ impl AgentBootstrap {
             engine,
             provider,
             effective_execution_policy,
+            workspace_policy_receipt,
             capability_activations,
             mcp_managers,
             has_mcp,

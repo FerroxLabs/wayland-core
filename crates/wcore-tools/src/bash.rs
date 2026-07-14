@@ -792,6 +792,7 @@ impl Tool for BashTool {
         if let Some(p) = ctx.workspace.as_deref()
             && p.secret_read_deny_required()
             && !backend.enforces_read_deny()
+            && !backend.bypasses_containment()
         {
             return ToolResult {
                 content: "Refused: shell is unavailable because the active sandbox \
@@ -858,6 +859,7 @@ impl Tool for BashTool {
         if let Some(p) = ctx.workspace.as_deref()
             && p.secret_read_deny_required()
             && !backend.enforces_read_deny()
+            && !backend.bypasses_containment()
         {
             return ToolResult {
                 content: "Refused: shell is unavailable because the active sandbox \

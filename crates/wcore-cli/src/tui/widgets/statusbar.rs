@@ -220,6 +220,16 @@ pub fn status_bar(f: &mut Frame, area: Rect, app: &App, t: &Theme, _sample: Syst
                 .add_modifier(Modifier::BOLD),
         ));
     }
+    if app
+        .workspace_policy
+        .as_ref()
+        .is_some_and(|policy| !policy.trust.is_trusted())
+    {
+        spans.push(Span::styled(
+            " · STRICT REPO ",
+            Style::default().bg(t.bg).fg(t.text_muted),
+        ));
+    }
     spans.push(divider(t));
 
     // Context-usage bar (4-threshold + 9-level sub-char fill, S18).

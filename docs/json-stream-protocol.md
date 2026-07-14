@@ -100,6 +100,36 @@ mint authority.
 also carry `dangerous_activation_id` and `dangerous_expires_at_unix_ms`.
 Unknown hosts must drop this additive event under the Host Decoder Contract.
 
+### 1.1b `workspace_policy`
+
+Emitted after `execution_policy` and again when a local host-approved developer
+capability changes the effective read roots. It is an output-only receipt of
+what Core enforces; echoing any field back cannot mint trust or authority.
+
+```json
+{
+  "type": "workspace_policy",
+  "policy": {
+    "trust": {
+      "level": "trusted",
+      "source": "user",
+      "fingerprint": "d14a...",
+      "explanation": "fingerprint-bound local trust decision is current"
+    },
+    "profile": "trusted_local_smart",
+    "backend": "sandbox-exec",
+    "writable_roots": ["/workspace", "/private/tmp"],
+    "readable_roots": ["/opt/homebrew", "/workspace"],
+    "capabilities": []
+  }
+}
+```
+
+The default for a repository without a current external fingerprint decision is
+`strict`. Managed, remote, and child constraints remain strict regardless of a
+stored local decision. Hosts must display the receipt as effective state, not
+as a selectable trust claim.
+
 ### 1.2 `stream_start`
 
 A new response turn has started.
@@ -530,6 +560,32 @@ All fields are optional. Only provided fields are updated.
 
 > **Validation**: The agent validates `thinking` and `effort` values against the current provider's capabilities. If the provider does not support a feature, the change is rejected with a descriptive message in the `info` event. After processing, a `config_changed` event is always emitted with the updated capabilities.
 
+### 2.7a `grant_workspace_capability`
+
+Ask Core to add the minimum runtime roots derived from a local executable as
+read-only mounts for the rest of this process:
+
+```json
+{
+  "type": "grant_workspace_capability",
+  "executable": "/opt/acme-sdk/bin/acme"
+}
+```
+
+Core accepts this command only when all of these are true:
+
+1. The process was launched locally with `--json-stream` and
+   `--allow-host-workspace-grants`.
+2. The current repository fingerprint is trusted and no managed, remote, or
+   child constraint has selected the strict profile.
+3. The canonical target is an executable regular file outside known credential
+   stores.
+
+Success emits an updated `workspace_policy` receipt followed by an `info`
+event. Refusal emits an `info` event explaining the failed condition. The
+command never adds writable roots, changes approval posture, or disables the OS
+sandbox. Hosts should expose it only behind an explicit local approval UI.
+
 ### 2.8 `add_mcp_server`
 
 Dynamically inject an MCP server before the conversation starts. This command is only accepted during the **pre-message phase** — after the `ready` event and before the first `message` command. Any `add_mcp_server` sent after the first `message` is rejected with an error.
@@ -783,6 +839,7 @@ wayland-core --json-stream \
   --base-url <URL> \
   --system-prompt <TEXT> \
   --auto-approve          # Start in yolo mode
+  --allow-host-workspace-grants # Optional local read-only runtime approvals
   --workspace <PATH>      # Working directory for file operations
 ```
 
