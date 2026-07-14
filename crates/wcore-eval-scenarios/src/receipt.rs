@@ -1231,25 +1231,94 @@ fn check_expected(field: &str, expected: Option<&str>, observed: &str) -> Result
 }
 
 fn gate_passed(body: &ReceiptBodyV1) -> bool {
-    body.results.iter().all(|result| result.passed)
-        && matches!(&body.identity.build, Evidence::Observed { .. })
-        && evidence_observed(&body.provider.attempts)
-        && evidence_observed(&body.provider.retries)
-        && evidence_observed(&body.provider.input_tokens)
-        && evidence_observed(&body.provider.output_tokens)
-        && evidence_observed(&body.provider.cache_read_tokens)
-        && evidence_observed(&body.provider.cache_write_tokens)
-        && evidence_observed(&body.boundaries.egress_attempted)
-        && evidence_observed(&body.boundaries.egress_allowed)
-        && evidence_observed(&body.boundaries.egress_denied)
-        && evidence_observed(&body.boundaries.filesystem_deltas)
-        && evidence_observed(&body.process.peak_memory_bytes)
-        && evidence_observed(&body.process.peak_cpu_millis)
-        && body.canary_scans.scan_complete
-        && body.canary_scans.detections() == 0
-        && matches!(body.process.orphan_count, Evidence::Observed { value: 0 })
-        && body.recovery.unresolved_side_effects.is_empty()
-        && body.assertions.iter().all(|assertion| assertion.passed)
+    milestone_evidence_gaps(body).is_empty()
+}
+
+/// Return every field that prevents this receipt from satisfying the release
+/// evidence gate. A signer may attest incomplete evidence, but release tooling
+/// must fail closed with this exact list instead of a generic rejection.
+pub fn milestone_evidence_gaps(body: &ReceiptBodyV1) -> Vec<&'static str> {
+    let mut gaps = Vec::new();
+    if !body.results.iter().all(|result| result.passed) {
+        gaps.push("results.passed");
+    }
+    if !matches!(&body.identity.build, Evidence::Observed { .. }) {
+        gaps.push("identity.build");
+    }
+    push_unobserved(&mut gaps, "provider.attempts", &body.provider.attempts);
+    push_unobserved(&mut gaps, "provider.retries", &body.provider.retries);
+    push_unobserved(
+        &mut gaps,
+        "provider.input_tokens",
+        &body.provider.input_tokens,
+    );
+    push_unobserved(
+        &mut gaps,
+        "provider.output_tokens",
+        &body.provider.output_tokens,
+    );
+    push_unobserved(
+        &mut gaps,
+        "provider.cache_read_tokens",
+        &body.provider.cache_read_tokens,
+    );
+    push_unobserved(
+        &mut gaps,
+        "provider.cache_write_tokens",
+        &body.provider.cache_write_tokens,
+    );
+    push_unobserved(
+        &mut gaps,
+        "boundaries.egress_attempted",
+        &body.boundaries.egress_attempted,
+    );
+    push_unobserved(
+        &mut gaps,
+        "boundaries.egress_allowed",
+        &body.boundaries.egress_allowed,
+    );
+    push_unobserved(
+        &mut gaps,
+        "boundaries.egress_denied",
+        &body.boundaries.egress_denied,
+    );
+    push_unobserved(
+        &mut gaps,
+        "boundaries.filesystem_deltas",
+        &body.boundaries.filesystem_deltas,
+    );
+    push_unobserved(
+        &mut gaps,
+        "process.peak_memory_bytes",
+        &body.process.peak_memory_bytes,
+    );
+    push_unobserved(
+        &mut gaps,
+        "process.peak_cpu_millis",
+        &body.process.peak_cpu_millis,
+    );
+    if !body.canary_scans.scan_complete {
+        gaps.push("canary_scans.scan_complete");
+    }
+    if body.canary_scans.detections() != 0 {
+        gaps.push("canary_scans.detections");
+    }
+    if !matches!(body.process.orphan_count, Evidence::Observed { value: 0 }) {
+        gaps.push("process.orphan_count");
+    }
+    if !body.recovery.unresolved_side_effects.is_empty() {
+        gaps.push("recovery.unresolved_side_effects");
+    }
+    if !body.assertions.iter().all(|assertion| assertion.passed) {
+        gaps.push("assertions.passed");
+    }
+    gaps
+}
+
+fn push_unobserved<T>(gaps: &mut Vec<&'static str>, field: &'static str, value: &Evidence<T>) {
+    if !evidence_observed(value) {
+        gaps.push(field);
+    }
 }
 
 fn evidence_observed<T>(evidence: &Evidence<T>) -> bool {

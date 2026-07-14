@@ -1,4 +1,5 @@
 use std::path::PathBuf;
+use std::process::{Command, Stdio};
 use std::time::Duration;
 
 use base64::Engine as _;
@@ -547,6 +548,128 @@ fn authoritative_workflow_requires_external_key_and_complete_exact_policy() {
 }
 
 #[test]
+fn receipt_cli_builds_external_policy_and_signs_only_through_stdin() {
+    let temp = tempfile::tempdir().expect("receipt CLI tempdir");
+    let local_path = temp.path().join("local.json");
+    let policy_path = temp.path().join("policy.json");
+    let signed_path = temp.path().join("signed.json");
+    let signing_key = SigningKey::from_bytes(&[42; 32]);
+    let local = EvidenceReceiptV1::local(body()).expect("complete local receipt");
+    std::fs::write(
+        &local_path,
+        serde_json::to_vec_pretty(&local).expect("local receipt JSON"),
+    )
+    .expect("write local receipt");
+    let policy = Command::new(env!("CARGO_BIN_EXE_wayland-receipt"))
+        .args([
+            "policy",
+            "--output",
+            policy_path.to_str().unwrap(),
+            "--key-id",
+            "release-ci",
+            "--public-key-base64",
+            &BASE64.encode(signing_key.verifying_key().as_bytes()),
+            "--source-commit",
+            &"a".repeat(40),
+            "--binary-sha256",
+            &h64('b'),
+            "--config-sha256",
+            &h64('c'),
+            "--fixture-sha256",
+            &h64('d'),
+            "--provider",
+            "openai",
+            "--model",
+            "fixture-model-v1",
+            "--repository",
+            "FerroxLabs/wayland-core",
+            "--source-ref",
+            "refs/heads/frontier/m0",
+            "--workflow",
+            "frontier-eval",
+            "--invocation-id",
+            "ci-456",
+            "--target-os",
+            "linux",
+            "--target-architecture",
+            "x86_64",
+            "--sandbox-backend",
+            "cgroup-v2",
+            "--policy-posture",
+            "approve_all",
+            "--effective-policy-sha256",
+            &h64('e'),
+            "--required-cell",
+            "deterministic-edit/openai/linux",
+        ])
+        .output()
+        .expect("execute policy builder");
+    assert!(
+        policy.status.success(),
+        "{}",
+        String::from_utf8_lossy(&policy.stderr)
+    );
+
+    let mut signer = Command::new(env!("CARGO_BIN_EXE_wayland-receipt"))
+        .args([
+            "sign",
+            "--receipt",
+            local_path.to_str().unwrap(),
+            "--output",
+            signed_path.to_str().unwrap(),
+            "--key-id",
+            "release-ci",
+            "--repository",
+            "FerroxLabs/wayland-core",
+            "--source-ref",
+            "refs/heads/frontier/m0",
+            "--workflow",
+            "frontier-eval",
+            "--invocation-id",
+            "ci-456",
+        ])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn receipt signer");
+    let seed = BASE64.encode(signing_key.to_bytes());
+    std::io::Write::write_all(
+        signer.stdin.as_mut().expect("signer stdin"),
+        seed.as_bytes(),
+    )
+    .expect("write signing seed only to stdin");
+    drop(signer.stdin.take());
+    let signed = signer.wait_with_output().expect("wait for receipt signer");
+    assert!(
+        signed.status.success(),
+        "{}",
+        String::from_utf8_lossy(&signed.stderr)
+    );
+
+    let verified = Command::new(env!("CARGO_BIN_EXE_wayland-receipt"))
+        .args([
+            "verify",
+            "--receipt",
+            signed_path.to_str().unwrap(),
+            "--trust-policy",
+            policy_path.to_str().unwrap(),
+        ])
+        .output()
+        .expect("execute authoritative verifier");
+    assert!(
+        verified.status.success(),
+        "{}",
+        String::from_utf8_lossy(&verified.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&verified.stdout).contains("AUTHORITATIVE PASS"),
+        "{}",
+        String::from_utf8_lossy(&verified.stdout)
+    );
+}
+
+#[test]
 fn authoritative_workflow_rejects_local_incomplete_and_synthetic_receipts() {
     let signing_key = SigningKey::from_bytes(&[12; 32]);
     let local = EvidenceReceiptV1::local(body()).expect("valid local receipt");
@@ -585,7 +708,8 @@ fn authoritative_workflow_rejects_local_incomplete_and_synthetic_receipts() {
             &serde_json::to_vec(&incomplete).unwrap(),
             &authoritative_policy(&signing_key)
         ),
-        Err(AuthorityError::MilestoneGateFailed)
+        Err(AuthorityError::MilestoneGateFailed(missing))
+            if missing == ["boundaries.egress_attempted"]
     ));
 
     let mut synthetic = body();

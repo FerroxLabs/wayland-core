@@ -16,6 +16,7 @@ use thiserror::Error;
 use crate::receipt::{
     AuthorityClaimV1, BuildProvenanceV1, Evidence, EvidenceReceiptV1, ReceiptError,
     ReceiptVerifier, VerificationPolicy, VerifiedAuthority, VerifiedReceipt,
+    milestone_evidence_gaps,
 };
 
 pub const AUTHORITY_POLICY_SCHEMA: &str = "wayland.eval.authority-policy";
@@ -74,8 +75,8 @@ pub enum AuthorityError {
     PolicyMismatch(&'static str),
     #[error("fixture digest is a synthetic binary/scenario label, not fixture provenance")]
     SyntheticFixtureDigest,
-    #[error("authoritative receipt does not satisfy the complete milestone evidence gate")]
-    MilestoneGateFailed,
+    #[error("authoritative receipt is missing required milestone evidence: {0:?}")]
+    MilestoneGateFailed(Vec<String>),
 }
 
 struct SecretBytes(Vec<u8>);
@@ -124,7 +125,7 @@ pub fn verify_authoritative_receipt(
     receipt_json: &[u8],
     policy: &AuthoritativeReceiptPolicyV1,
 ) -> Result<(EvidenceReceiptV1, VerifiedReceipt), AuthorityError> {
-    validate_policy(policy)?;
+    validate_authoritative_policy(policy)?;
     let public_key_bytes =
         decode_32(policy.public_key_base64.as_bytes()).ok_or(AuthorityError::InvalidPublicKey)?;
     let public_key = VerifyingKey::from_bytes(&public_key_bytes)
@@ -196,12 +197,19 @@ pub fn verify_authoritative_receipt(
     }
     reject_synthetic_fixture(&receipt)?;
     if !verified.gate_passed {
-        return Err(AuthorityError::MilestoneGateFailed);
+        return Err(AuthorityError::MilestoneGateFailed(
+            milestone_evidence_gaps(&receipt.body)
+                .into_iter()
+                .map(str::to_string)
+                .collect(),
+        ));
     }
     Ok((receipt, verified))
 }
 
-fn validate_policy(policy: &AuthoritativeReceiptPolicyV1) -> Result<(), AuthorityError> {
+pub fn validate_authoritative_policy(
+    policy: &AuthoritativeReceiptPolicyV1,
+) -> Result<(), AuthorityError> {
     if policy.schema != AUTHORITY_POLICY_SCHEMA
         || policy.schema_version != AUTHORITY_POLICY_SCHEMA_VERSION
     {
