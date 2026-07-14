@@ -276,6 +276,12 @@ jobs:
       - name: Release binary smoke (catches plugin dead-code-strip)
         run: $DOCKER_RUN -e WCORE_SMOKE_REQUIRE_PREBUILT=1 "$CI_IMAGE" cargo nextest run -p wcore-cli --test release_binary_smoke
 
+      # F01 E3 — non-optional packaged boundary proof. The release Core binary
+      # built above reports this checkout's exact source SHA; wayland-eval then
+      # verifies its digest and drives both PASS and hard-gate failure locally.
+      - name: F01 packaged wayland-eval driver gate
+        run: $DOCKER_RUN -e WAYLAND_BUILD_SOURCE_SHA=${{ github.sha }} "$CI_IMAGE" cargo test --locked -p wcore-eval-scenarios --features packaged-driver-gate --test packaged_driver_gate
+
       - name: Security audit
         run: $DOCKER_RUN "$CI_IMAGE" cargo audit
 

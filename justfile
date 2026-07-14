@@ -154,6 +154,20 @@ harness:
 eval-gate:
     vx cargo nextest run -p wcore-eval --features acceptance-gate acceptance_gate_meets_precision_recall_threshold --no-fail-fast --run-ignored only
 
+# F01 E3: package the real Core CLI, then drive success and hard failure through
+# wayland-eval while binding the run to the clean source commit and binary bytes.
+f01-packaged-driver-gate:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    if [ -n "$(git status --porcelain --untracked-files=normal)" ]; then
+        echo "F01 packaged-driver gate requires a clean source tree" >&2
+        exit 2
+    fi
+    export WAYLAND_BUILD_SOURCE_SHA="$(git rev-parse HEAD)"
+    vx cargo build --locked -p wcore-cli --bin wayland-core
+    vx cargo test --locked -p wcore-eval-scenarios \
+        --features packaged-driver-gate --test packaged_driver_gate
+
 # ── Silent-pass CI gate (Wave 0) ───────────────────────────────────────────
 # Fails if any functional todo!() exists in the eval-scenarios assertion/trace
 # paths. Belt-and-suspenders: the primary gate is #![deny(clippy::todo)] in
