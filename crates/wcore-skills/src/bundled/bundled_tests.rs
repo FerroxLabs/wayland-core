@@ -707,11 +707,12 @@ async fn tc_10_29_windows_bundled_skill_extract_succeeds() {
 #[tokio::test]
 async fn tc_10_30_windows_acl_uses_token_user_without_launching_icacls() {
     let hostile = tempfile::tempdir().expect("hostile executable directory");
+    let marker = hostile.path().join("icacls-launched");
     std::fs::write(
-        hostile.path().join("icacls.exe"),
-        b"not a Windows executable",
+        hostile.path().join("icacls.cmd"),
+        b"@echo off\r\n> \"%ICACLS_MARKER%\" echo launched\r\nexit /b 0\r\n",
     )
-    .expect("plant hostile icacls.exe");
+    .expect("plant hostile icacls.cmd");
 
     let current_exe = std::env::current_exe().expect("current test executable");
     let current_exe = current_exe.to_string_lossy().into_owned();
@@ -728,17 +729,22 @@ async fn tc_10_30_windows_acl_uses_token_user_without_launching_icacls() {
     child
         .current_dir(hostile.path())
         .env("PATH", &hostile_path)
+        .env("ICACLS_MARKER", &marker)
         .env("USERNAME", "not-the-token-user");
-    let output = child.output().await.expect("run isolated ACL subprocess");
+    child.kill_on_drop(true);
+    let output = tokio::time::timeout(std::time::Duration::from_secs(60), child.output())
+        .await
+        .expect("isolated ACL subprocess timed out")
+        .expect("run isolated ACL subprocess");
     assert!(
         output.status.success(),
         "isolated hostile-environment extraction failed; stdout={} stderr={}",
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
-    assert_eq!(
-        std::fs::read(hostile.path().join("icacls.exe")).expect("read hostile fixture"),
-        b"not a Windows executable"
+    assert!(
+        !marker.exists(),
+        "hostile icacls sentinel must not be launched"
     );
 }
 
@@ -750,12 +756,10 @@ async fn tc_10_30_windows_acl_subprocess() {
         std::env::var("USERNAME").as_deref(),
         Ok("not-the-token-user")
     );
-    assert!(
-        std::env::current_dir()
-            .expect("hostile subprocess cwd")
-            .join("icacls.exe")
-            .is_file()
-    );
+    assert!(std::env::current_dir()
+        .expect("hostile subprocess cwd")
+        .join("icacls.cmd")
+        .is_file());
 
     let mut catalog = BundledSkillCatalog::new();
     register_bundled_skill(
