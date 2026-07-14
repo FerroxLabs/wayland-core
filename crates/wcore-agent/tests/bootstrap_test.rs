@@ -127,6 +127,44 @@ async fn bootstrap_separates_turn_observation_from_session_authority() {
 
 #[tokio::test]
 #[serial]
+async fn bootstrap_budget_trip_keeps_first_typed_termination_reason() {
+    let (_plugins, _env) = isolated_plugins();
+    let workdir = tempfile::TempDir::new().expect("workdir");
+    let mut config = minimal_config();
+    config.budget.max_wall_time_secs = Some(0);
+    let result = AgentBootstrap::new(config, workdir.path().to_str().unwrap(), null_output())
+        .build()
+        .await
+        .expect("bootstrap should succeed");
+
+    let active_turn = result.engine.cancel_token();
+    tokio::time::timeout(std::time::Duration::from_secs(1), active_turn.cancelled())
+        .await
+        .expect("budget trip must cancel the active turn");
+    assert!(result.cancel_root.is_cancelled());
+    assert_eq!(
+        result.cancel_root.termination().reason(),
+        Some(SessionTerminationReason::BudgetExceeded)
+    );
+
+    result.cancel_root.cancel();
+    assert_eq!(
+        result.cancel_root.termination().reason(),
+        Some(SessionTerminationReason::BudgetExceeded),
+        "later host cancellation must not overwrite the first typed reason"
+    );
+
+    let control = result.cancel_root.clone();
+    drop(result.engine);
+    assert_eq!(
+        control.termination().reason(),
+        Some(SessionTerminationReason::BudgetExceeded),
+        "engine drop must not overwrite the first typed reason"
+    );
+}
+
+#[tokio::test]
+#[serial]
 async fn default_bootstrap_does_not_report_smart_handoff_ready() {
     let (_plugins, _env) = isolated_plugins();
     let config = minimal_config();

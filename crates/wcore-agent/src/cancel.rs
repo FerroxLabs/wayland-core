@@ -129,42 +129,27 @@ impl SessionTermination {
     }
 }
 
-/// Cloneable observation handle for one session's immutable cancellation root
-/// and replaceable active-turn token. Child spawners can read the current turn
-/// without gaining authority to mutate the session root.
+/// Cloneable observation handle for one session's replaceable active-turn
+/// token. It deliberately contains no session-root token or termination
+/// authority, so child spawners can only derive descendants of the current
+/// turn.
 #[derive(Clone)]
 pub(crate) struct SessionRuntimeHandle {
-    root: CancellationToken,
     active_turn: std::sync::Arc<parking_lot::RwLock<CancellationToken>>,
-    termination: SessionTermination,
 }
 
 impl SessionRuntimeHandle {
-    pub(crate) fn new(root: CancellationToken) -> Self {
+    fn new(active_turn: CancellationToken) -> Self {
         Self {
-            active_turn: std::sync::Arc::new(parking_lot::RwLock::new(root.clone())),
-            root,
-            termination: SessionTermination::new(),
+            active_turn: std::sync::Arc::new(parking_lot::RwLock::new(active_turn)),
         }
-    }
-
-    pub(crate) fn root_token(&self) -> CancellationToken {
-        self.root.clone()
     }
 
     pub(crate) fn active_turn_token(&self) -> CancellationToken {
         self.active_turn.read().clone()
     }
 
-    pub(crate) fn termination(&self) -> SessionTermination {
-        self.termination.clone()
-    }
-
-    pub(crate) fn control(&self) -> SessionControl {
-        SessionControl::new(self.root.clone(), self.termination.clone())
-    }
-
-    pub(crate) fn set_active_turn(&self, token: CancellationToken) {
+    fn set_active_turn(&self, token: CancellationToken) {
         *self.active_turn.write() = token;
     }
 }
@@ -174,6 +159,8 @@ impl SessionRuntimeHandle {
 /// Keeps the budget watcher intact, owns the root-to-turn bridge, and makes
 /// dropping the engine terminal for every clone of the session root.
 pub(crate) struct SessionRuntimeGuard {
+    root: CancellationToken,
+    termination: SessionTermination,
     handle: SessionRuntimeHandle,
     budget_guard: Option<BudgetGuard>,
     turn_bridge: Option<JoinHandle<()>>,
@@ -182,8 +169,12 @@ pub(crate) struct SessionRuntimeGuard {
 }
 
 impl SessionRuntimeGuard {
-    pub(crate) fn new(handle: SessionRuntimeHandle) -> Self {
+    pub(crate) fn new(root: CancellationToken) -> Self {
+        let termination = SessionTermination::new();
+        let handle = SessionRuntimeHandle::new(root.child_token());
         Self {
+            root,
+            termination,
             handle,
             budget_guard: None,
             turn_bridge: None,
@@ -192,14 +183,44 @@ impl SessionRuntimeGuard {
         }
     }
 
-    pub(crate) fn root_token(&self) -> CancellationToken {
-        self.handle.root_token()
+    pub(crate) fn observer(&self) -> SessionRuntimeHandle {
+        self.handle.clone()
     }
 
-    pub(crate) fn attach_budget_guard(&mut self, guard: BudgetGuard) {
-        if let Some(previous) = self.budget_guard.replace(guard) {
-            drop(previous);
-        }
+    pub(crate) fn control(&self) -> SessionControl {
+        SessionControl::new(self.root.clone(), self.termination.clone())
+    }
+
+    /// Attach the session budget watcher to the immutable root. A budget trip
+    /// claims the typed first-writer slot before cancellation becomes visible.
+    pub(crate) fn attach_budget_with_callback<F>(
+        &mut self,
+        budget: ExecutionBudgetView,
+        on_exceeded: F,
+    ) where
+        F: FnOnce(BudgetTripPayload) + Send + 'static,
+    {
+        assert!(
+            self.budget_guard.is_none(),
+            "session budget watcher may only be attached once"
+        );
+        let termination = self.termination.clone();
+        self.budget_guard = Some(budget_guard_for_token_with_callbacks(
+            self.root.clone(),
+            budget,
+            move || {
+                termination.mark(SessionTerminationReason::BudgetExceeded);
+            },
+            on_exceeded,
+        ));
+    }
+
+    /// Mint and install a fresh active turn below the immutable session root.
+    /// The caller receives only the descendant, never raw root authority.
+    pub(crate) fn install_descendant_turn(&mut self) -> CancellationToken {
+        let token = self.root.child_token();
+        self.set_active_turn(token.clone());
+        token
     }
 
     pub(crate) fn set_active_turn(&mut self, token: CancellationToken) {
@@ -207,7 +228,7 @@ impl SessionRuntimeGuard {
             handle.abort();
         }
         self.handle.set_active_turn(token.clone());
-        let root = self.handle.root_token();
+        let root = self.root.clone();
         if root.is_cancelled() {
             token.cancel();
             return;
@@ -242,8 +263,8 @@ impl SessionRuntimeGuard {
         let deadline = tokio::time::Instant::now()
             .checked_add(remaining)
             .ok_or(wcore_types::execution_policy::ExecutionPolicyError::DangerousExpiryOverflow)?;
-        let root = self.handle.root_token();
-        let termination = self.handle.termination();
+        let root = self.root.clone();
+        let termination = self.termination.clone();
         self.dangerous_deadline = Some(deadline);
         self.dangerous_expiry = Some(tokio::spawn(async move {
             tokio::time::sleep_until(deadline).await;
@@ -261,10 +282,9 @@ impl SessionRuntimeGuard {
 
 impl Drop for SessionRuntimeGuard {
     fn drop(&mut self) {
-        self.handle
-            .termination()
+        self.termination
             .mark(SessionTerminationReason::EngineDropped);
-        self.handle.root_token().cancel();
+        self.root.cancel();
         if let Some(handle) = self.turn_bridge.take() {
             handle.abort();
         }
@@ -386,7 +406,7 @@ pub fn budget_linked_with_callback<F>(
 where
     F: FnOnce(BudgetTripPayload) + Send + 'static,
 {
-    budget_guard_for_token_with_callback(parent.child_token(), budget, on_exceeded)
+    budget_guard_for_token_with_callbacks(parent.child_token(), budget, || {}, on_exceeded)
 }
 
 /// Attach a budget watcher to an existing session token.
@@ -394,30 +414,37 @@ where
 /// Unlike [`budget_linked_with_callback`], this does not mint a child token.
 /// Bootstrap uses it so the engine and every child spawner share one exact
 /// session cancellation root before the budget watcher is installed.
-pub(crate) fn budget_guard_for_token_with_callback<F>(
+fn budget_guard_for_token_with_callbacks<B, F>(
     token: CancellationToken,
     budget: ExecutionBudgetView,
+    before_cancel: B,
     on_exceeded: F,
 ) -> BudgetGuard
 where
+    B: FnOnce() + Send + 'static,
     F: FnOnce(BudgetTripPayload) + Send + 'static,
 {
     let watcher = token.clone();
     let handle = tokio::spawn(async move {
+        let mut before = Some(before_cancel);
         let mut cb = Some(on_exceeded);
         loop {
             if watcher.is_cancelled() {
                 return;
             }
             if let Some(reason) = budget.first_exceeded_reason() {
-                if let Some(callback) = cb.take() {
-                    callback(BudgetTripPayload {
-                        reason: reason.to_string(),
-                        observed: budget.observed_for(reason),
-                        limit: budget.limit_for(reason),
-                    });
+                let payload = BudgetTripPayload {
+                    reason: reason.to_string(),
+                    observed: budget.observed_for(reason),
+                    limit: budget.limit_for(reason),
+                };
+                if let Some(callback) = before.take() {
+                    callback();
                 }
                 watcher.cancel();
+                if let Some(callback) = cb.take() {
+                    callback(payload);
+                }
                 return;
             }
             tokio::select! {
@@ -492,5 +519,57 @@ mod tests {
 
         assert!(!root.is_cancelled());
         assert!(!control.is_cancelled());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn budget_cancels_before_blocking_callback() {
+        let root = CancellationToken::new();
+        let budget = crate::budget::ExecutionBudget {
+            max_wall_time: Some(Duration::ZERO),
+            ..Default::default()
+        }
+        .start_root();
+        let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let _guard = budget_guard_for_token_with_callbacks(
+            root.clone(),
+            budget,
+            || {},
+            move |_| {
+                let _ = entered_tx.send(());
+                let _ = release_rx.recv();
+            },
+        );
+
+        tokio::time::timeout(Duration::from_secs(1), entered_rx)
+            .await
+            .expect("callback must start")
+            .expect("callback must signal entry");
+        assert!(
+            root.is_cancelled(),
+            "budget cancellation must be visible before telemetry can block"
+        );
+        release_tx.send(()).expect("release callback");
+    }
+
+    #[tokio::test]
+    async fn budget_cancellation_survives_panicking_callback() {
+        let root = CancellationToken::new();
+        let budget = crate::budget::ExecutionBudget {
+            max_wall_time: Some(Duration::ZERO),
+            ..Default::default()
+        }
+        .start_root();
+        let _guard = budget_guard_for_token_with_callbacks(
+            root.clone(),
+            budget,
+            || {},
+            |_| panic!("synthetic telemetry panic"),
+        );
+
+        tokio::time::timeout(Duration::from_secs(1), root.cancelled())
+            .await
+            .expect("budget cancellation must survive telemetry panic");
+        assert!(root.is_cancelled());
     }
 }

@@ -1564,18 +1564,19 @@ mod posture_inheritance_tests {
         );
     }
 
-    #[test]
-    fn production_spawner_and_clones_read_latest_session_turn() {
+    #[tokio::test]
+    async fn production_spawner_and_clones_read_latest_session_turn() {
         let root = tokio_util::sync::CancellationToken::new();
-        let runtime = crate::cancel::SessionRuntimeHandle::new(root);
+        let mut guard = crate::cancel::SessionRuntimeGuard::new(root);
+        let runtime = guard.observer();
         let first_turn = tokio_util::sync::CancellationToken::new();
-        runtime.set_active_turn(first_turn.clone());
+        guard.set_active_turn(first_turn.clone());
         let spawner = AgentSpawner::new(Arc::new(NeverProvider), Config::default())
             .with_session_runtime(runtime.clone());
         let first_child = spawner.active_cancel_token().child_token();
 
         let second_turn = tokio_util::sync::CancellationToken::new();
-        runtime.set_active_turn(second_turn.clone());
+        guard.set_active_turn(second_turn.clone());
         let cloned_spawner = spawner.clone_for_spawn();
         let second_child = cloned_spawner.active_cancel_token().child_token();
 

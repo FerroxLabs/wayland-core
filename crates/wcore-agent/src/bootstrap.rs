@@ -15,10 +15,7 @@ use wcore_types::execution_policy::{
 // fully-qualified path in the resilience wiring below.
 
 use crate::budget::{ExecutionBudget, ExecutionBudgetView};
-use crate::cancel::{
-    CancellationToken, SessionControl, SessionRuntimeGuard, SessionRuntimeHandle,
-    budget_guard_for_token_with_callback,
-};
+use crate::cancel::{CancellationToken, SessionControl, SessionRuntimeGuard};
 use crate::engine::AgentEngine;
 use crate::output::OutputSink;
 use crate::session::Session;
@@ -409,9 +406,9 @@ impl AgentBootstrap {
         // built. The budget watcher is attached later, after engine creation,
         // but the spawner and engine then share this exact token lineage.
         let session_cancel_root = CancellationToken::new();
-        let session_runtime = SessionRuntimeHandle::new(session_cancel_root.clone());
-        let cancel_root = session_runtime.control();
-        let mut session_guard = SessionRuntimeGuard::new(session_runtime.clone());
+        let mut session_guard = SessionRuntimeGuard::new(session_cancel_root);
+        let session_runtime = session_guard.observer();
+        let cancel_root = session_guard.control();
         anyhow::ensure!(
             self.dangerous_grant.is_none() || self.smart_policy.is_none(),
             "a session cannot combine Smart policy with a Dangerous grant"
@@ -2680,18 +2677,13 @@ impl AgentBootstrap {
         // watcher's callback never fires.
         let exec_budget: ExecutionBudget = (&budget_cfg).into();
         let budget = exec_budget.start_root();
-        let cancel_guard = budget_guard_for_token_with_callback(
-            session_cancel_root,
-            budget.clone(),
-            move |payload| {
-                sink_for_budget.emit_budget_exceeded(
-                    &payload.reason,
-                    &payload.observed,
-                    &payload.limit,
-                );
-            },
-        );
-        session_guard.attach_budget_guard(cancel_guard);
+        session_guard.attach_budget_with_callback(budget.clone(), move |payload| {
+            sink_for_budget.emit_budget_exceeded(
+                &payload.reason,
+                &payload.observed,
+                &payload.limit,
+            );
+        });
         engine.install_session_cancel_guard(session_guard);
 
         // F-014 (CRIT, Aud-4/Aud-11): construct ChannelManager, auto-register

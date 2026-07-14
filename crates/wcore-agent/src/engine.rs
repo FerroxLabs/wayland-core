@@ -2602,9 +2602,7 @@ impl AgentEngine {
         &mut self,
         mut runtime: crate::cancel::SessionRuntimeGuard,
     ) {
-        let root = runtime.root_token();
-        let active_turn = root.child_token();
-        runtime.set_active_turn(active_turn.clone());
+        let active_turn = runtime.install_descendant_turn();
         self.cancel_token = active_turn;
         self.session_runtime = Some(runtime);
     }
@@ -16556,14 +16554,9 @@ mod audit_2026_05_22_tests {
         }
         .start_root();
         let session_root = tokio_util::sync::CancellationToken::new();
-        let runtime = crate::cancel::SessionRuntimeHandle::new(session_root.clone());
-        let guard = crate::cancel::budget_guard_for_token_with_callback(
-            session_root.clone(),
-            budget,
-            |_| {},
-        );
-        let mut session_guard = crate::cancel::SessionRuntimeGuard::new(runtime.clone());
-        session_guard.attach_budget_guard(guard);
+        let mut session_guard = crate::cancel::SessionRuntimeGuard::new(session_root.clone());
+        let runtime = session_guard.observer();
+        session_guard.attach_budget_with_callback(budget, |_| {});
         engine.install_session_cancel_guard(session_guard);
         let host_turn = tokio_util::sync::CancellationToken::new();
         engine.set_cancel_token(host_turn.clone());
@@ -16581,11 +16574,9 @@ mod audit_2026_05_22_tests {
         let mut engine = engine_with(Arc::new(ScriptedProvider::new(vec![])));
         let budget = crate::budget::ExecutionBudget::default().start_root();
         let root = tokio_util::sync::CancellationToken::new();
-        let runtime = crate::cancel::SessionRuntimeHandle::new(root.clone());
-        let guard =
-            crate::cancel::budget_guard_for_token_with_callback(root.clone(), budget, |_| {});
-        let mut session_guard = crate::cancel::SessionRuntimeGuard::new(runtime.clone());
-        session_guard.attach_budget_guard(guard);
+        let mut session_guard = crate::cancel::SessionRuntimeGuard::new(root.clone());
+        let runtime = session_guard.observer();
+        session_guard.attach_budget_with_callback(budget, |_| {});
         engine.install_session_cancel_guard(session_guard);
         let host_turn = tokio_util::sync::CancellationToken::new();
         engine.set_cancel_token(host_turn.clone());
@@ -16605,12 +16596,9 @@ mod audit_2026_05_22_tests {
     async fn dropping_engine_terminalizes_owned_session_root() {
         let mut engine = engine_with(Arc::new(ScriptedProvider::new(vec![])));
         let root = tokio_util::sync::CancellationToken::new();
-        let runtime = crate::cancel::SessionRuntimeHandle::new(root.clone());
         let budget = crate::budget::ExecutionBudget::default().start_root();
-        let budget_guard =
-            crate::cancel::budget_guard_for_token_with_callback(root.clone(), budget, |_| {});
-        let mut session_guard = crate::cancel::SessionRuntimeGuard::new(runtime);
-        session_guard.attach_budget_guard(budget_guard);
+        let mut session_guard = crate::cancel::SessionRuntimeGuard::new(root.clone());
+        session_guard.attach_budget_with_callback(budget, |_| {});
         engine.install_session_cancel_guard(session_guard);
 
         drop(engine);
@@ -16636,12 +16624,9 @@ mod audit_2026_05_22_tests {
         .expect("trusted local request must resolve");
         let mut engine = engine_with(Arc::new(ScriptedProvider::new(vec![])));
         let root = tokio_util::sync::CancellationToken::new();
-        let runtime = crate::cancel::SessionRuntimeHandle::new(root.clone());
         let budget = crate::budget::ExecutionBudget::default().start_root();
-        let budget_guard =
-            crate::cancel::budget_guard_for_token_with_callback(root.clone(), budget, |_| {});
-        let mut session_guard = crate::cancel::SessionRuntimeGuard::new(runtime);
-        session_guard.attach_budget_guard(budget_guard);
+        let mut session_guard = crate::cancel::SessionRuntimeGuard::new(root.clone());
+        session_guard.attach_budget_with_callback(budget, |_| {});
         let armed_at = tokio::time::Instant::now();
         session_guard
             .arm_dangerous_lease(&grant)
