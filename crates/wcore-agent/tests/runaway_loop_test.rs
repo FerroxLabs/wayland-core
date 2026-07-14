@@ -7,15 +7,19 @@
 
 mod common;
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
+use async_trait::async_trait;
 use serde_json::json;
 use wcore_agent::engine::AgentEngine;
 use wcore_agent::output::OutputSink;
 use wcore_agent::test_utils::TestSink;
+use wcore_providers::{LlmProvider, ProviderError};
+use wcore_tools::Tool;
 use wcore_tools::registry::ToolRegistry;
-use wcore_types::llm::LlmEvent;
+use wcore_types::llm::{LlmEvent, LlmRequest};
 use wcore_types::message::{FinishReason, StopReason, TokenUsage};
+use wcore_types::tool::ToolResult;
 
 use common::{MockLlmProvider, MockTool, test_config};
 
@@ -57,6 +61,72 @@ fn loop_turn(i: usize) -> Vec<LlmEvent> {
             },
         },
     ]
+}
+
+struct RecordingProvider {
+    turns: Mutex<Vec<Vec<LlmEvent>>>,
+    requests: Arc<Mutex<Vec<LlmRequest>>>,
+}
+
+impl RecordingProvider {
+    fn new(turns: Vec<Vec<LlmEvent>>) -> Self {
+        Self {
+            turns: Mutex::new(turns),
+            requests: Arc::new(Mutex::new(Vec::new())),
+        }
+    }
+
+    fn requests(&self) -> Arc<Mutex<Vec<LlmRequest>>> {
+        Arc::clone(&self.requests)
+    }
+}
+
+#[async_trait]
+impl LlmProvider for RecordingProvider {
+    async fn stream(
+        &self,
+        request: &LlmRequest,
+    ) -> Result<tokio::sync::mpsc::Receiver<LlmEvent>, ProviderError> {
+        self.requests.lock().unwrap().push(request.clone());
+        let events = self.turns.lock().unwrap().remove(0);
+        let (tx, rx) = tokio::sync::mpsc::channel(16);
+        tokio::spawn(async move {
+            for event in events {
+                let _ = tx.send(event).await;
+            }
+        });
+        Ok(rx)
+    }
+}
+
+struct SequencedErrorTool {
+    errors: Mutex<Vec<String>>,
+}
+
+#[async_trait]
+impl Tool for SequencedErrorTool {
+    fn name(&self) -> &str {
+        "unstable_tool"
+    }
+
+    fn description(&self) -> &str {
+        "Returns one root error with volatile details"
+    }
+
+    fn input_schema(&self) -> serde_json::Value {
+        json!({"type": "object"})
+    }
+
+    fn category(&self) -> wcore_protocol::events::ToolCategory {
+        wcore_protocol::events::ToolCategory::Info
+    }
+
+    async fn execute(&self, _input: serde_json::Value) -> ToolResult {
+        ToolResult {
+            content: self.errors.lock().unwrap().remove(0),
+            is_error: true,
+        }
+    }
 }
 
 #[tokio::test]
@@ -108,6 +178,73 @@ async fn repeated_identical_successful_tool_call_converges_via_loopguard() {
         "expected a visible no-progress-loop error event; got {events:?}"
     );
     assert_midflight_monitor_observed(&events);
+}
+
+#[tokio::test]
+async fn repeated_root_error_injects_a_changed_strategy_directive() {
+    let mut turns: Vec<Vec<LlmEvent>> = (0..3)
+        .map(|i| {
+            vec![
+                LlmEvent::ToolUse {
+                    id: format!("unstable-{i}"),
+                    name: "unstable_tool".to_string(),
+                    input: json!({ "attempt": i }),
+                    extra: None,
+                },
+                LlmEvent::Done {
+                    stop_reason: StopReason::ToolUse,
+                    finish_reason: FinishReason::from_stop_reason(StopReason::ToolUse),
+                    usage: TokenUsage {
+                        input_tokens: 20,
+                        output_tokens: 5,
+                        ..Default::default()
+                    },
+                },
+            ]
+        })
+        .collect();
+    turns.push(vec![
+        LlmEvent::TextDelta("changed approach".to_string()),
+        LlmEvent::Done {
+            stop_reason: StopReason::EndTurn,
+            finish_reason: FinishReason::Stop,
+            usage: TokenUsage {
+                input_tokens: 20,
+                output_tokens: 5,
+                ..Default::default()
+            },
+        },
+    ]);
+    let provider = Arc::new(RecordingProvider::new(turns));
+    let requests = provider.requests();
+
+    let mut registry = ToolRegistry::new();
+    registry.register(Box::new(SequencedErrorTool {
+        errors: Mutex::new(vec![
+            "permission denied at /tmp/a line 1".to_string(),
+            "permission denied at /var/b line 2".to_string(),
+            "permission denied at /home/c line 3".to_string(),
+        ]),
+    }));
+
+    let sink = Arc::new(TestSink::new());
+    let handle = sink.handle();
+    let output: Arc<dyn OutputSink> = sink;
+    let mut engine = AgentEngine::new_with_provider(provider, test_config(), registry, output);
+    let result = engine
+        .run("recover from the tool error", "")
+        .await
+        .expect("the monitor replans instead of terminating the run");
+    assert_eq!(result.text, "changed approach");
+
+    let requests = requests.lock().unwrap();
+    assert_eq!(requests.len(), 4);
+    let final_request = serde_json::to_string(&requests[3].messages).unwrap();
+    assert!(
+        final_request.contains("Mid-flight monitor directive"),
+        "the turn after the third normalized root error must carry changed-strategy guidance: {final_request}"
+    );
+    assert_midflight_monitor_observed(&handle.snapshot());
 }
 
 #[tokio::test]
