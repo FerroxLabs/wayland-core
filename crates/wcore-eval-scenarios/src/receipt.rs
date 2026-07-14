@@ -527,13 +527,14 @@ impl EvidenceReceiptV1 {
             )
             .as_bytes(),
         );
-        let process_orphans = if result.execution.cleanup_verified {
-            Evidence::observed(0)
-        } else {
-            Evidence::Unavailable {
-                code: "cleanup_not_verified".to_string(),
-            }
-        };
+        let process_orphans =
+            if result.execution.cleanup_verified && result.execution.containment_authoritative {
+                Evidence::observed(0)
+            } else {
+                Evidence::Unavailable {
+                    code: "cleanup_not_verified".to_string(),
+                }
+            };
         let mut canary_scans = CanaryScanEvidenceV1 {
             scan_complete: result.execution.artifact_scan_complete,
             protocol: 0,

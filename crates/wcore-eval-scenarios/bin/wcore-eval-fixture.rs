@@ -16,7 +16,6 @@ fn main() {
         return;
     }
 
-    #[cfg(unix)]
     if let Some(control_path) = argument_value("--orphan-listener") {
         run_orphan_listener(std::path::Path::new(&control_path));
     }
@@ -56,6 +55,22 @@ fn main() {
                 if let Some(control_path) = model.strip_prefix("fixture-orphan:") {
                     spawn_detached_orphan(std::path::Path::new(control_path));
                 }
+                if let Some(control_path) = model.strip_prefix("fixture-owned-orphan-exit:") {
+                    spawn_owned_orphan(std::path::Path::new(control_path));
+                    std::process::exit(0);
+                }
+                if let Some(control_path) = model.strip_prefix("fixture-owned-orphan-timeout:") {
+                    spawn_owned_orphan(std::path::Path::new(control_path));
+                    loop {
+                        std::thread::sleep(Duration::from_secs(60));
+                    }
+                }
+                if let Some(control_path) = model.strip_prefix("fixture-owned-orphan-cancel:") {
+                    spawn_owned_orphan(std::path::Path::new(control_path));
+                }
+                if let Some(control_path) = model.strip_prefix("fixture-owned-orphan:") {
+                    spawn_owned_orphan(std::path::Path::new(control_path));
+                }
                 if model == "fixture-oversized-stdout" {
                     let mut stdout = std::io::stdout().lock();
                     stdout
@@ -80,6 +95,11 @@ fn main() {
                     "msg_id": msg_id,
                     "text": text
                 }));
+                if model.starts_with("fixture-owned-orphan-cancel:") {
+                    // Keep the turn open so the driver must observe activity,
+                    // send `stop`, and take the real mid-turn cancellation path.
+                    continue;
+                }
                 if model == "fixture-hermetic" {
                     eprintln!("fixture attempted stderr leak: {secret}");
                     emit(&serde_json::json!({
@@ -142,7 +162,14 @@ fn main() {
                 "type": "info",
                 "message": "fixture: no changes"
             })),
-            Some("stop") => break,
+            Some("stop") => {
+                if let Some(control_path) = model.strip_prefix("fixture-owned-orphan-cancel:") {
+                    let marker = std::path::Path::new(control_path).with_extension("stop-observed");
+                    std::fs::write(marker, b"stop observed\n")
+                        .expect("publish cancellation observation");
+                }
+                break;
+            }
             _ => {}
         }
     }
@@ -328,7 +355,28 @@ fn spawn_detached_orphan(control_path: &std::path::Path) {
     }
 }
 
-#[cfg(unix)]
+#[allow(clippy::zombie_processes)] // The evaluator must reap this inherited descendant tree.
+fn spawn_owned_orphan(control_path: &std::path::Path) {
+    let executable = std::env::current_exe().expect("resolve fixture executable");
+    let mut command = std::process::Command::new(executable);
+    command
+        .arg("--orphan-listener")
+        .arg(control_path)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    command.spawn().expect("spawn owned orphan fixture");
+
+    let deadline = std::time::Instant::now() + Duration::from_secs(1);
+    while !control_path.exists() && std::time::Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert!(
+        control_path.exists(),
+        "owned orphan fixture did not become ready"
+    );
+}
+
 fn run_orphan_listener(control_path: &std::path::Path) -> ! {
     let listener = std::net::TcpListener::bind(("127.0.0.1", 0))
         .expect("bind orphan fixture loopback listener");

@@ -9743,6 +9743,7 @@ dependencies = [
  "wcore-config",
  "wcore-mcp",
  "wcore-protocol",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]

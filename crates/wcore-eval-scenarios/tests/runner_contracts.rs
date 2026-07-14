@@ -2,6 +2,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
+use wcore_eval_scenarios::assertions::Assertion;
 use wcore_eval_scenarios::providers::{ProviderConfig, ProviderId};
 use wcore_eval_scenarios::runner::{Failure, run_with_binary};
 use wcore_eval_scenarios::scenario::{Category, Scenario, Turn};
@@ -14,7 +15,6 @@ fn provider(model: &str) -> ProviderConfig {
     ProviderConfig::new(ProviderId::DeepSeek, model).with_api_key("fixture-key")
 }
 
-#[cfg(target_os = "linux")]
 #[derive(Debug, Clone, Copy)]
 struct OrphanState {
     pid: u32,
@@ -22,7 +22,6 @@ struct OrphanState {
     heartbeat: u64,
 }
 
-#[cfg(target_os = "linux")]
 fn read_orphan_state(path: &std::path::Path) -> Option<OrphanState> {
     let contents = std::fs::read_to_string(path).ok()?;
     let value = |name: &str| contents.lines().find_map(|line| line.strip_prefix(name));
@@ -33,7 +32,6 @@ fn read_orphan_state(path: &std::path::Path) -> Option<OrphanState> {
     })
 }
 
-#[cfg(target_os = "linux")]
 async fn wait_for_orphan_state(path: &std::path::Path, timeout: Duration) -> Option<OrphanState> {
     let deadline = tokio::time::Instant::now() + timeout;
     loop {
@@ -47,7 +45,7 @@ async fn wait_for_orphan_state(path: &std::path::Path, timeout: Duration) -> Opt
     }
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(unix)]
 fn process_exists(pid: u32) -> bool {
     // SAFETY: signal 0 performs only an existence/permission check.
     let result = unsafe { libc::kill(pid as libc::pid_t, 0) };
@@ -58,17 +56,32 @@ fn process_exists(pid: u32) -> bool {
         )
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(windows)]
+fn process_exists(pid: u32) -> bool {
+    use windows_sys::Win32::Foundation::{CloseHandle, WAIT_OBJECT_0};
+    use windows_sys::Win32::System::Threading::{OpenProcess, SYNCHRONIZE, WaitForSingleObject};
+
+    // SAFETY: the handle is used only for a zero-time liveness query and is
+    // closed on every successful OpenProcess path.
+    let process = unsafe { OpenProcess(SYNCHRONIZE, 0, pid) };
+    if process.is_null() {
+        return false;
+    }
+    let exited = unsafe { WaitForSingleObject(process, 0) } == WAIT_OBJECT_0;
+    unsafe { CloseHandle(process) };
+    !exited
+}
+
 fn listener_accepts_connections(port: u16) -> bool {
     let address = std::net::SocketAddr::from(([127, 0, 0, 1], port));
     std::net::TcpStream::connect_timeout(&address, Duration::from_millis(50)).is_ok()
 }
 
-#[cfg(target_os = "linux")]
 async fn wait_for_orphan_cleanup(state: OrphanState, timeout: Duration) -> bool {
     let deadline = tokio::time::Instant::now() + timeout;
     loop {
-        if !process_exists(state.pid) && !listener_accepts_connections(state.port) {
+        let process_gone = !process_exists(state.pid);
+        if process_gone && !listener_accepts_connections(state.port) {
             return true;
         }
         if tokio::time::Instant::now() >= deadline {
@@ -76,6 +89,37 @@ async fn wait_for_orphan_cleanup(state: OrphanState, timeout: Duration) -> bool 
         }
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
+}
+
+async fn emergency_kill_owned_orphan(state: OrphanState) {
+    #[cfg(unix)]
+    // SAFETY: the owned fixture inherits a fresh evaluator process group. The
+    // negative PID targets that group; the direct PID is a final fallback.
+    unsafe {
+        libc::kill(-(state.pid as libc::pid_t), libc::SIGKILL);
+        libc::kill(state.pid as libc::pid_t, libc::SIGKILL);
+    }
+
+    #[cfg(windows)]
+    {
+        use windows_sys::Win32::Foundation::CloseHandle;
+        use windows_sys::Win32::System::Threading::{
+            OpenProcess, PROCESS_TERMINATE, SYNCHRONIZE, TerminateProcess, WaitForSingleObject,
+        };
+
+        // SAFETY: the fixture PID names a test-owned process. The handle is
+        // bounded-waited and closed on the only successful-open path.
+        let process = unsafe { OpenProcess(PROCESS_TERMINATE | SYNCHRONIZE, 0, state.pid) };
+        if !process.is_null() {
+            unsafe {
+                TerminateProcess(process, 1);
+                WaitForSingleObject(process, 1_000);
+                CloseHandle(process);
+            }
+        }
+    }
+
+    let _ = wait_for_orphan_cleanup(state, Duration::from_secs(1)).await;
 }
 
 #[cfg(target_os = "linux")]
@@ -89,6 +133,41 @@ async fn emergency_kill_orphan(state: OrphanState) {
             libc::kill(state.pid as libc::pid_t, libc::SIGKILL);
         }
         let _ = wait_for_orphan_cleanup(state, Duration::from_secs(1)).await;
+    }
+}
+
+async fn assert_owned_orphan_cleaned(
+    control_path: &std::path::Path,
+    result: &wcore_eval_scenarios::runner::ScenarioResult,
+) {
+    let state = wait_for_orphan_state(control_path, Duration::from_secs(1))
+        .await
+        .expect("owned descendant must publish pid, port, and heartbeat");
+    let cleaned = wait_for_orphan_cleanup(state, Duration::from_secs(1)).await;
+    if !cleaned {
+        emergency_kill_owned_orphan(state).await;
+    }
+    assert!(
+        cleaned,
+        "owned descendant pid={} still listens on 127.0.0.1:{}",
+        state.pid, state.port
+    );
+    if result.execution.containment_authoritative {
+        assert!(
+            result.execution.cleanup_verified,
+            "authoritative runner reported unverified cleanup: {:?}",
+            result.failures
+        );
+    } else {
+        assert!(
+            !result.execution.cleanup_verified,
+            "non-authoritative cleanup must not be reported as verified"
+        );
+    }
+    #[cfg(windows)]
+    {
+        assert!(result.execution.containment_authoritative);
+        assert_eq!(result.execution.sandbox_backend, "windows-job-object");
     }
 }
 
@@ -346,6 +425,172 @@ async fn timeout_reaps_detached_descendant_and_listener() {
         cleaned,
         "timeout left detached descendant pid={} listening on 127.0.0.1:{}; heartbeat advanced {} -> {}",
         state.pid, state.port, state.heartbeat, final_state.heartbeat
+    );
+}
+
+#[tokio::test]
+async fn normal_exit_reaps_owned_descendant_listener() {
+    let control_dir = tempfile::tempdir().expect("create external orphan control dir");
+    let control_path = control_dir.path().join("owned-orphan-state");
+    let model = format!("fixture-owned-orphan:{}", control_path.display());
+    let scenario = Scenario::new("owned_orphan_normal_exit", Category::Hardening)
+        .max_total_time(Duration::from_secs(2))
+        .turn(Turn::new("spawn inherited listener"));
+
+    let result = run_with_binary(&scenario, &provider(&model), fixture())
+        .await
+        .expect("normal run returns a scenario result");
+
+    assert_owned_orphan_cleaned(&control_path, &result).await;
+    assert!(result.passed, "unexpected failures: {:?}", result.failures);
+}
+
+#[tokio::test]
+async fn timeout_reaps_owned_descendant_listener() {
+    let control_dir = tempfile::tempdir().expect("create external orphan control dir");
+    let control_path = control_dir.path().join("owned-orphan-state");
+    let model = format!("fixture-owned-orphan-timeout:{}", control_path.display());
+    let scenario = Scenario::new("owned_orphan_timeout", Category::Hardening)
+        .max_total_time(Duration::from_secs(2))
+        .turn(Turn::new("spawn inherited listener").max_time(Duration::from_millis(250)));
+
+    let result = run_with_binary(&scenario, &provider(&model), fixture())
+        .await
+        .expect("timeout returns a failed scenario result");
+
+    assert_owned_orphan_cleaned(&control_path, &result).await;
+    assert!(
+        result
+            .failures
+            .iter()
+            .any(|failure| matches!(failure, Failure::OverTime { .. }))
+    );
+}
+
+#[tokio::test]
+async fn outer_deadline_reaps_owned_descendant_listener() {
+    let control_dir = tempfile::tempdir().expect("create external orphan control dir");
+    let control_path = control_dir.path().join("owned-orphan-state");
+    let model = format!("fixture-owned-orphan-timeout:{}", control_path.display());
+    let scenario = Scenario::new("owned_orphan_outer_timeout", Category::Hardening)
+        .max_total_time(Duration::from_secs(1))
+        .turn(Turn::new("spawn inherited listener").max_time(Duration::from_secs(5)));
+
+    let result = run_with_binary(&scenario, &provider(&model), fixture())
+        .await
+        .expect("outer timeout returns a failed scenario result");
+
+    assert_owned_orphan_cleaned(&control_path, &result).await;
+    assert!(
+        result
+            .failures
+            .iter()
+            .any(|failure| matches!(failure, Failure::Hung { .. }))
+    );
+}
+
+#[tokio::test]
+async fn cancellation_reaps_owned_descendant_listener() {
+    let control_dir = tempfile::tempdir().expect("create external orphan control dir");
+    let control_path = control_dir.path().join("owned-orphan-state");
+    let stop_marker = control_path.with_extension("stop-observed");
+    let model = format!("fixture-owned-orphan-cancel:{}", control_path.display());
+    let scenario = Scenario::new("owned_orphan_cancellation", Category::Hardening)
+        .max_total_time(Duration::from_secs(2))
+        .turn(Turn::new("spawn inherited listener").stop_mid_turn());
+
+    let result = run_with_binary(&scenario, &provider(&model), fixture())
+        .await
+        .expect("cancelled run returns a scenario result");
+
+    assert_owned_orphan_cleaned(&control_path, &result).await;
+    assert!(result.execution.cancellation_requested);
+    assert!(
+        stop_marker.exists(),
+        "fixture never observed the stop command"
+    );
+    assert!(
+        !result
+            .failures
+            .iter()
+            .any(|failure| matches!(failure, Failure::Hung { .. } | Failure::OverTime { .. }))
+    );
+}
+
+#[tokio::test]
+async fn assertion_failure_still_reaps_owned_descendant_listener() {
+    let control_dir = tempfile::tempdir().expect("create external orphan control dir");
+    let control_path = control_dir.path().join("owned-orphan-state");
+    let model = format!("fixture-owned-orphan:{}", control_path.display());
+    let scenario = Scenario::new("owned_orphan_assertion", Category::Hardening)
+        .max_total_time(Duration::from_secs(2))
+        .turn(
+            Turn::new("spawn inherited listener")
+                .assert(Assertion::Contains("deliberately absent")),
+        );
+
+    let result = run_with_binary(&scenario, &provider(&model), fixture())
+        .await
+        .expect("assertion failure returns a scenario result");
+
+    assert_owned_orphan_cleaned(&control_path, &result).await;
+    assert!(result.failures.iter().any(|failure| matches!(
+        failure,
+        Failure::AssertionFailed { assertion, .. }
+            if assertion.contains("deliberately absent")
+    )));
+}
+
+#[tokio::test]
+async fn direct_child_early_exit_reaps_owned_descendant_listener() {
+    let control_dir = tempfile::tempdir().expect("create external orphan control dir");
+    let control_path = control_dir.path().join("owned-orphan-state");
+    let model = format!("fixture-owned-orphan-exit:{}", control_path.display());
+    let scenario = Scenario::new("owned_orphan_early_exit", Category::Hardening)
+        .max_total_time(Duration::from_secs(2))
+        .turn(Turn::new("spawn inherited listener and exit"));
+
+    let result = run_with_binary(&scenario, &provider(&model), fixture())
+        .await
+        .expect("early exit returns a failed scenario result");
+
+    assert_owned_orphan_cleaned(&control_path, &result).await;
+    assert!(result.failures.iter().any(
+        |failure| matches!(failure, Failure::RunnerError(message) if message.contains("stdout"))
+    ));
+}
+
+#[tokio::test]
+async fn dropping_runner_future_reaps_owned_descendant_listener() {
+    let control_dir = tempfile::tempdir().expect("create external orphan control dir");
+    let control_path = control_dir.path().join("owned-orphan-state");
+    let task_control_path = control_path.clone();
+    let task = tokio::spawn(async move {
+        let model = format!(
+            "fixture-owned-orphan-timeout:{}",
+            task_control_path.display()
+        );
+        let scenario = Scenario::new("owned_orphan_future_drop", Category::Hardening)
+            .max_total_time(Duration::from_secs(30))
+            .turn(Turn::new("spawn inherited listener").max_time(Duration::from_secs(30)));
+        run_with_binary(&scenario, &provider(&model), fixture()).await
+    });
+
+    let state = wait_for_orphan_state(&control_path, Duration::from_secs(2))
+        .await
+        .expect("owned descendant must publish before cancellation");
+    task.abort();
+    let join_error = task.await.expect_err("runner task should be cancelled");
+
+    let cleaned = wait_for_orphan_cleanup(state, Duration::from_secs(2)).await;
+    if !cleaned {
+        emergency_kill_owned_orphan(state).await;
+    }
+    assert!(join_error.is_cancelled());
+    assert!(
+        cleaned,
+        "dropping the runner future left descendant pid={} listening on 127.0.0.1:{}",
+        state.pid, state.port
     );
 }
 

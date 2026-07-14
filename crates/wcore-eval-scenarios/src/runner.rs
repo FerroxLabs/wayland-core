@@ -550,7 +550,8 @@ async fn run_session_body(input: SessionRun<'_>) -> anyhow::Result<ScenarioResul
     )
     .map_err(|e| anyhow::anyhow!(e.to_string()))?;
     process_tree
-        .bind(&child)
+        .bind(&mut child)
+        .await
         .map_err(|error| anyhow::anyhow!("could not bind evaluator child: {error}"))?;
     let process_tree_sha256 = format!(
         "{:x}",
@@ -619,7 +620,7 @@ async fn run_session_body(input: SessionRun<'_>) -> anyhow::Result<ScenarioResul
         Ok(Err(e)) => {
             let shutdown_started = Instant::now();
             let cleanup_error = process_tree.terminate(&mut child).await.err();
-            let cleanup_verified = cleanup_error.is_none();
+            let cleanup_verified = cleanup_error.is_none() && containment_authoritative;
             let shutdown_time = shutdown_started.elapsed();
             stderr_cap.finish().await;
             let stderr_tail = stderr_cap.snapshot();
@@ -678,7 +679,7 @@ async fn run_session_body(input: SessionRun<'_>) -> anyhow::Result<ScenarioResul
             // Hung with the stderr tail snapshot.
             let shutdown_started = Instant::now();
             let cleanup_error = process_tree.terminate(&mut child).await.err();
-            let cleanup_verified = cleanup_error.is_none();
+            let cleanup_verified = cleanup_error.is_none() && containment_authoritative;
             let shutdown_time = shutdown_started.elapsed();
             stderr_cap.finish().await;
             let stderr_tail = stderr_cap.snapshot();
@@ -733,13 +734,12 @@ async fn run_session_body(input: SessionRun<'_>) -> anyhow::Result<ScenarioResul
     // and consumed the trailing `session_cost`; the child should exit
     // promptly. Give a short grace, then kill if it lingers.
     let shutdown_started = Instant::now();
-    let shutdown = tokio::time::timeout(Duration::from_secs(8), child.wait()).await;
+    let shutdown = process_tree
+        .wait_for_exit_and_cleanup(&mut child, Duration::from_secs(8))
+        .await;
     let (exit_code, cleanup_error) = match shutdown {
-        Ok(Ok(status)) => (
-            status.code().unwrap_or(0),
-            process_tree.cleanup_descendants().await.err(),
-        ),
-        Ok(Err(_)) | Err(_) => {
+        Ok(Some((status, cleanup_error))) => (status.code().unwrap_or(0), cleanup_error),
+        Ok(None) | Err(_) => {
             // The child either errored on `wait()` or did not exit within the
             // grace window (it produced its output but hung on shutdown). Kill
             // it and surface a NON-zero sentinel so the `exit_code != 0` gate
@@ -749,7 +749,7 @@ async fn run_session_body(input: SessionRun<'_>) -> anyhow::Result<ScenarioResul
             (-1, cleanup_error)
         }
     };
-    let cleanup_verified = cleanup_error.is_none();
+    let cleanup_verified = cleanup_error.is_none() && containment_authoritative;
     let shutdown_time = shutdown_started.elapsed();
 
     stderr_cap.finish().await;
