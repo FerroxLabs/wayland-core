@@ -12,7 +12,7 @@ use wcore_eval_scenarios::artifact::{
     ArtifactExpectation, SealedBinaryArtifact, seal_binary, verify_artifact_digest,
 };
 use wcore_eval_scenarios::assertions::Assertion;
-use wcore_eval_scenarios::fixtures::manifest::CompositeFixtureManifest;
+use wcore_eval_scenarios::fixtures::manifest::{CompositeFixtureManifest, FixtureComponents};
 use wcore_eval_scenarios::fixtures::mcp::{McpHttpFixture, McpHttpMode};
 use wcore_eval_scenarios::fixtures::openai::{
     OpenAiFixtureObservation, OpenAiFixtureScript, OpenAiStep,
@@ -509,8 +509,8 @@ impl HiddenOutcomeContract {
         }
     }
 
-    fn artifact_bytes(&self) -> Vec<u8> {
-        serde_json::to_vec(&self).expect("hidden outcome contract serialization")
+    fn fixture_sha256(&self) -> String {
+        sha256(&serde_json::to_vec(&self).expect("hidden outcome contract serialization"))
     }
 }
 
@@ -571,7 +571,7 @@ fn assert_request_leaves_equal(
     }
 }
 
-fn remote_fixture_artifact(repository_sha256: &str) -> Vec<u8> {
+fn remote_fixture_sha256(repository_sha256: &str) -> String {
     let limits = ResourceBudget::new(2_000, 64 * 1024 * 1024, 30_000, 1024 * 1024)
         .expect("remote fixture limits");
     let fixture =
@@ -599,10 +599,10 @@ fn remote_fixture_artifact(repository_sha256: &str) -> Vec<u8> {
     receipt
         .verify(fixture.identity(), &fixture.verifying_key())
         .expect("remote fixture attestation");
-    serde_json::to_vec(&receipt).expect("remote fixture receipt serialization")
+    receipt.body_sha256
 }
 
-async fn observe_egress_fixture() -> Vec<u8> {
+async fn observe_egress_fixture() -> String {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
         .expect("egress fixture listener");
@@ -654,16 +654,18 @@ async fn observe_egress_fixture() -> Vec<u8> {
         EgressOutcome::HttpResponse { status: 204 } => "http_204",
         _ => panic!("unexpected egress fixture outcome: {:?}", event.outcome),
     };
-    serde_json::to_vec(&EgressFixtureEvidence {
-        schema: "wayland.eval.f04-egress-fixture.v1",
-        method: &event.method,
-        scheme: &event.destination.scheme,
-        host: &event.destination.host,
-        path_query_sha256: &event.destination.path_query_sha256,
-        request_body_sha256: sha256(b"fixture-request"),
-        outcome,
-    })
-    .expect("egress fixture evidence serialization")
+    sha256(
+        &serde_json::to_vec(&EgressFixtureEvidence {
+            schema: "wayland.eval.f04-egress-fixture.v1",
+            method: &event.method,
+            scheme: &event.destination.scheme,
+            host: &event.destination.host,
+            path_query_sha256: &event.destination.path_query_sha256,
+            request_body_sha256: sha256(b"fixture-request"),
+            outcome,
+        })
+        .expect("egress fixture evidence serialization"),
+    )
 }
 
 async fn run_sealed_repository_once(run_id: &str) -> SealedRun {
@@ -723,8 +725,6 @@ async fn run_sealed_repository_once(run_id: &str) -> SealedRun {
         ),
         OpenAiStep::text("Repository and MCP verification completed"),
     ]);
-    let openai_script_artifact =
-        serde_json::to_vec(&openai_script).expect("OpenAI fixture script serialization");
     let openai = openai_script
         .start_for_workspace(&workspace)
         .await
@@ -807,32 +807,19 @@ async fn run_sealed_repository_once(run_id: &str) -> SealedRun {
         expected_repository.fixture_sha256(),
         "packaged run produced an unexpected extra or missing repository mutation"
     );
-    assert_eq!(
-        openai_fixture_sha256,
-        sha256(&openai_script_artifact),
-        "running OpenAI fixture identity must derive from the live script"
-    );
-    let repository_artifact = repository
-        .artifact_bytes()
-        .expect("seeded repository artifact serialization");
-    assert_eq!(repository.fixture_sha256(), sha256(&repository_artifact));
-    let hidden_outcome_artifact = hidden_outcome.artifact_bytes();
-    let mcp_artifact = serde_json::to_vec(&(1_u32, McpHttpMode::SseResponse))
-        .expect("MCP fixture mode serialization");
-    assert_eq!(
-        mcp_fixture_sha256,
-        sha256(&mcp_artifact),
-        "running MCP fixture identity must derive from its live mode"
-    );
-    let egress_artifact = observe_egress_fixture().await;
-    let remote_execution_artifact = remote_fixture_artifact(repository.fixture_sha256());
-    let manifest = CompositeFixtureManifest::from_artifacts(
-        &openai_script_artifact,
-        &repository_artifact,
-        &hidden_outcome_artifact,
-        &mcp_artifact,
-        &egress_artifact,
-        &remote_execution_artifact,
+    let hidden_outcome_sha256 = hidden_outcome.fixture_sha256();
+    let egress_fixture_sha256 = observe_egress_fixture().await;
+    let remote_execution_sha256 = remote_fixture_sha256(repository.fixture_sha256());
+    let manifest = CompositeFixtureManifest::new(
+        FixtureComponents::new(
+            openai_fixture_sha256,
+            repository.fixture_sha256(),
+            hidden_outcome_sha256,
+            mcp_fixture_sha256,
+            egress_fixture_sha256,
+            remote_execution_sha256,
+        )
+        .expect("complete fixture identities"),
     );
     let receipt = EvidenceReceiptV1::from_scenario_result(
         ReceiptMetadataV1 {
