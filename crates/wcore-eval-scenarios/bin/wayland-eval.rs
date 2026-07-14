@@ -50,6 +50,15 @@ struct Cli {
     #[arg(long, value_name = "PATH", conflicts_with = "list")]
     binary: Option<PathBuf>,
 
+    /// Provider API root override, used by deterministic loopback evaluations.
+    #[arg(
+        long,
+        value_name = "URL",
+        requires = "provider",
+        conflicts_with = "list"
+    )]
+    base_url: Option<String>,
+
     /// Full 40-hex source commit the selected binary must report.
     #[arg(long, value_name = "SHA", conflicts_with = "list")]
     expected_source_commit: Option<String>,
@@ -152,10 +161,16 @@ async fn execute(cli: Cli) -> i32 {
             ));
             continue;
         }
-        let resolution = match resolve(scenario.provider, provider_override, availability, strict) {
-            Ok(resolution) => resolution,
-            Err(error) => return usage_error(format!("{}: {error}", scenario.name)),
-        };
+        let mut resolution =
+            match resolve(scenario.provider, provider_override, availability, strict) {
+                Ok(resolution) => resolution,
+                Err(error) => return usage_error(format!("{}: {error}", scenario.name)),
+            };
+        if let Some(base_url) = &cli.base_url {
+            for provider in &mut resolution.runnable {
+                provider.base_url = Some(base_url.clone());
+            }
+        }
         runnable_count += resolution.runnable.len();
         plans.push((scenario, resolution, platform));
     }

@@ -8,6 +8,11 @@ repository.workspace = true
 rust-version.workspace = true
 publish = false
 
+[features]
+# Explicit E3 gate: requires a separately packaged `wayland-core` binary and
+# an externally pinned source SHA. Ordinary unit runs do not build the CLI.
+packaged-driver-gate = []
+
 [lib]
 name = "wcore_eval_scenarios"
 path = "src/lib.rs"
