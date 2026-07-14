@@ -9121,6 +9121,7 @@ dependencies = [
  "hyper-util",
  "inventory",
  "is-terminal",
+ "libc",
  "mockall",
  "notify",
  "open",
@@ -9562,6 +9563,7 @@ dependencies = [
  "wcore-providers",
  "wcore-replay",
  "wcore-repomap",
+ "wcore-sandbox",
  "wcore-skills",
  "wcore-swarm",
  "wcore-tools",
@@ -9693,6 +9695,7 @@ dependencies = [
  "http 1.4.1",
  "reqwest",
  "serde",
+ "sha2 0.10.9",
  "thiserror 2.0.18",
  "tokio",
  "workspace-hack",
@@ -9720,7 +9723,11 @@ name = "wcore-eval-scenarios"
 version = "0.12.25"
 dependencies = [
  "anyhow",
+ "axum",
+ "base64 0.22.1",
  "clap",
+ "ed25519-dalek",
+ "futures",
  "libc",
  "portable-pty",
  "reqwest",
@@ -9734,6 +9741,7 @@ dependencies = [
  "tracing",
  "vt100",
  "wcore-config",
+ "wcore-mcp",
  "wcore-protocol",
 ]
 
@@ -10013,6 +10021,7 @@ dependencies = [
  "serde",
  "serde_json",
  "tokio",
+ "tracing",
  "wcore-types",
  "workspace-hack",
 ]
@@ -10103,8 +10112,10 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
+ "tokio-util",
  "toml",
  "tracing",
+ "wcore-types",
  "which 6.0.3",
  "windows-sys 0.59.0",
 ]
@@ -10225,6 +10236,7 @@ dependencies = [
  "chrono",
  "serde",
  "serde_json",
+ "thiserror 2.0.18",
 ]
 
 [[package]]
