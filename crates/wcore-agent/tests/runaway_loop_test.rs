@@ -241,8 +241,8 @@ async fn repeated_root_error_injects_a_changed_strategy_directive() {
     registry.register(Box::new(SequencedErrorTool {
         errors: Mutex::new(vec![
             "permission denied at /tmp/a/work.dat line 1".to_string(),
-            "permission denied at /var/b/work.dat line 2".to_string(),
-            "permission denied at /home/c/work.dat line 3".to_string(),
+            "permission denied at /tmp/b/work.dat line 2".to_string(),
+            "permission denied at /tmp/c/work.dat line 3".to_string(),
         ]),
     }));
 
