@@ -279,7 +279,7 @@ async fn forward_durable_stream(
             SessionEvent::StreamBatchCommitted {
                 stream_id: stream_id.clone(),
                 ordinal,
-                events: vec![journal_event],
+                events: vec![journal_event.clone()],
             },
         )
         .await
