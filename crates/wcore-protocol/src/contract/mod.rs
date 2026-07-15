@@ -6,6 +6,7 @@
 
 mod canonical;
 mod check;
+mod fixtures_support;
 mod generate;
 mod spec;
 
