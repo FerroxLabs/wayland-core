@@ -1,7 +1,36 @@
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 /// Schema for a tool parameter, in JSON Schema format
 pub type JsonSchema = Value;
+
+/// Recovery semantics for one concrete tool invocation.
+///
+/// Tool implementations must opt into a stronger contract. Unknown tools,
+/// plugins, and remote adapters therefore remain opaque until they provide a
+/// proving reconciliation implementation.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolEffectKind {
+    /// The host cannot prove whether an interrupted invocation took effect.
+    #[default]
+    Opaque,
+    /// Repeating the invocation cannot create an additional external effect.
+    RepeatSafe,
+    /// A pre/post filesystem receipt can determine or restore the outcome.
+    FilesystemTransactional,
+    /// The remote system enforces a caller-supplied idempotency key.
+    ProviderIdempotent,
+}
+
+/// Provider-neutral declaration of a tool's crash-recovery contract.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ToolEffectContract {
+    pub kind: ToolEffectKind,
+    /// Stable reconciler identifier used to interpret durable receipts.
+    /// `None` means no automatic reconciler is available.
+    pub reconciler: Option<String>,
+}
 
 /// Maximum chars kept from a deferred tool's description.
 ///
@@ -64,6 +93,13 @@ pub struct ToolResult {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn tool_effect_contract_defaults_to_opaque_without_reconciler() {
+        let contract = ToolEffectContract::default();
+        assert_eq!(contract.kind, ToolEffectKind::Opaque);
+        assert!(contract.reconciler.is_none());
+    }
 
     // --- ToolDef construction and field validation ---
 

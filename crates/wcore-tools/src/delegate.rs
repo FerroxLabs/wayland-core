@@ -35,7 +35,7 @@ use serde_json::{Value, json};
 
 use wcore_protocol::events::ToolCategory;
 use wcore_types::spawner::{ForkOverrides, Spawner, SubAgentConfig, SubAgentResult};
-use wcore_types::tool::{JsonSchema, ToolResult};
+use wcore_types::tool::{JsonSchema, ToolEffectContract, ToolResult};
 
 use crate::Tool;
 
@@ -316,6 +316,11 @@ impl Tool for DelegateTool {
         // in the initial system prompt so models invoke it directly without a
         // mandatory ToolSearch round-trip first.
         false
+    }
+
+    fn effect_contract(&self, _input: &Value) -> ToolEffectContract {
+        // Delegated agents can perform arbitrary nested effects with no aggregate reconciler.
+        ToolEffectContract::default()
     }
 
     async fn execute(&self, input: Value) -> ToolResult {

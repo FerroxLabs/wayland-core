@@ -23,13 +23,15 @@ pub use reducer::{provider_request_digest, reduce, replay_state, state_payload_d
 mod snapshot;
 pub use snapshot::*;
 
-pub const SESSION_JOURNAL_SCHEMA_VERSION: u32 = 3;
+pub const SESSION_JOURNAL_SCHEMA_VERSION: u32 = 4;
 pub const GENESIS_CHECKSUM: &str =
     "0000000000000000000000000000000000000000000000000000000000000000";
 const FRAME_MAGIC: &[u8; 4] = b"WJ01";
 const FRAME_HEADER_BYTES: usize = 12;
 const FRAME_DIGEST_BYTES: usize = 32;
 const MAX_FRAME_BYTES: usize = 64 * 1024 * 1024;
+const MAX_EFFECT_CHECKPOINT_BYTES: u64 = 64 * 1024 * 1024;
+const MAX_EFFECT_CHECKPOINT_SESSION_BYTES: u64 = 512 * 1024 * 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[rustfmt::skip]
@@ -191,6 +193,212 @@ impl SessionJournal {
             .map(|writer| writer.state.clone())
     }
 
+    /// Stable session identity used when deriving durable effect keys.
+    pub fn session_id(&self) -> Result<String, JournalError> {
+        self.inner
+            .lock()
+            .map_err(|_| JournalError::WriterPoisoned)
+            .map(|writer| writer.session_id.clone())
+    }
+
+    /// Persist a private content-addressed preimage used by filesystem-effect
+    /// recovery. The journal stores only this digest; raw file contents never
+    /// enter an event frame.
+    pub(crate) fn store_effect_checkpoint(
+        &self,
+        digest: &str,
+        contents: &[u8],
+    ) -> Result<(), JournalError> {
+        if contents.len() as u64 > MAX_EFFECT_CHECKPOINT_BYTES {
+            return Err(JournalError::InvalidTransition(format!(
+                "filesystem effect checkpoint exceeds {MAX_EFFECT_CHECKPOINT_BYTES} bytes"
+            )));
+        }
+        if !valid_sha256_hex(digest) || sha256_hex(contents) != digest {
+            return Err(JournalError::InvalidTransition(
+                "filesystem effect checkpoint digest mismatch".to_string(),
+            ));
+        }
+        let path = self.effect_checkpoint_path(digest)?;
+        let directory = path.parent().expect("checkpoint path has a parent");
+        std::fs::create_dir_all(directory).map_err(|source| JournalError::Io {
+            path: directory.to_path_buf(),
+            source,
+        })?;
+        let directory_metadata =
+            std::fs::symlink_metadata(directory).map_err(|source| JournalError::Io {
+                path: directory.to_path_buf(),
+                source,
+            })?;
+        if directory_metadata.file_type().is_symlink() || !directory_metadata.is_dir() {
+            return Err(JournalError::InvalidTransition(format!(
+                "filesystem effect checkpoint directory is not a private directory: {}",
+                directory.display()
+            )));
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt as _;
+            use std::os::unix::fs::PermissionsExt as _;
+            if directory_metadata.uid() != self.journal_owner_uid()? {
+                return Err(JournalError::InvalidTransition(format!(
+                    "filesystem effect checkpoint directory has the wrong owner: {}",
+                    directory.display()
+                )));
+            }
+            std::fs::set_permissions(directory, std::fs::Permissions::from_mode(0o700)).map_err(
+                |source| JournalError::Io {
+                    path: directory.to_path_buf(),
+                    source,
+                },
+            )?;
+        }
+
+        remove_stale_checkpoint_temps(directory, digest, path.exists())?;
+
+        if path.exists() {
+            self.load_effect_checkpoint(digest)?;
+            return Ok(());
+        }
+        let session_bytes = checkpoint_directory_bytes(directory)?;
+        if session_bytes.saturating_add(contents.len() as u64) > MAX_EFFECT_CHECKPOINT_SESSION_BYTES
+        {
+            return Err(JournalError::InvalidTransition(format!(
+                "filesystem effect checkpoints exceed the {MAX_EFFECT_CHECKPOINT_SESSION_BYTES}-byte session quota"
+            )));
+        }
+
+        let temporary = directory.join(format!(
+            ".{digest}.{}.{}.tmp",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        let mut options = OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt as _;
+            options.mode(0o600);
+        }
+        let mut file = options
+            .open(&temporary)
+            .map_err(|source| JournalError::Io {
+                path: temporary.clone(),
+                source,
+            })?;
+        let publication = (|| {
+            file.write_all(contents)?;
+            file.sync_all()?;
+            match std::fs::hard_link(&temporary, &path) {
+                Ok(()) => Ok(()),
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => Ok(()),
+                Err(error) => Err(error),
+            }
+        })();
+        let _ = std::fs::remove_file(&temporary);
+        publication.map_err(|source| JournalError::Io {
+            path: path.clone(),
+            source,
+        })?;
+        self.load_effect_checkpoint(digest)?;
+        #[cfg(unix)]
+        File::open(directory)
+            .and_then(|directory| directory.sync_all())
+            .map_err(|source| JournalError::Io {
+                path: directory.to_path_buf(),
+                source,
+            })?;
+        Ok(())
+    }
+
+    pub(crate) fn load_effect_checkpoint(&self, digest: &str) -> Result<Vec<u8>, JournalError> {
+        if !valid_sha256_hex(digest) {
+            return Err(JournalError::InvalidTransition(
+                "invalid filesystem effect checkpoint digest".to_string(),
+            ));
+        }
+        let path = self.effect_checkpoint_path(digest)?;
+        let mut metadata = std::fs::symlink_metadata(&path).map_err(|source| JournalError::Io {
+            path: path.clone(),
+            source,
+        })?;
+        if metadata.file_type().is_symlink() || !metadata.is_file() {
+            return Err(JournalError::InvalidTransition(format!(
+                "filesystem effect checkpoint is not a regular file: {}",
+                path.display()
+            )));
+        }
+        if metadata.len() > MAX_EFFECT_CHECKPOINT_BYTES {
+            return Err(JournalError::InvalidTransition(format!(
+                "filesystem effect checkpoint exceeds {MAX_EFFECT_CHECKPOINT_BYTES} bytes: {}",
+                path.display()
+            )));
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
+            if metadata.nlink() > 1 {
+                remove_stale_checkpoint_temps(
+                    path.parent().expect("checkpoint path has a parent"),
+                    digest,
+                    true,
+                )?;
+                metadata = std::fs::symlink_metadata(&path).map_err(|source| JournalError::Io {
+                    path: path.clone(),
+                    source,
+                })?;
+            }
+            if metadata.nlink() != 1
+                || metadata.permissions().mode() & 0o077 != 0
+                || metadata.uid() != self.journal_owner_uid()?
+            {
+                return Err(JournalError::InvalidTransition(format!(
+                    "filesystem effect checkpoint has unsafe links or permissions: {}",
+                    path.display()
+                )));
+            }
+        }
+        let contents = std::fs::read(&path).map_err(|source| JournalError::Io {
+            path: path.clone(),
+            source,
+        })?;
+        if sha256_hex(&contents) != digest {
+            return Err(JournalError::InvalidTransition(format!(
+                "filesystem effect checkpoint content digest mismatch: {}",
+                path.display()
+            )));
+        }
+        Ok(contents)
+    }
+
+    fn effect_checkpoint_path(&self, digest: &str) -> Result<PathBuf, JournalError> {
+        let journal_path = self
+            .inner
+            .lock()
+            .map_err(|_| JournalError::WriterPoisoned)?
+            .path
+            .clone();
+        Ok(effect_checkpoint_directory_for(&journal_path)?.join(digest))
+    }
+
+    #[cfg(unix)]
+    fn journal_owner_uid(&self) -> Result<u32, JournalError> {
+        use std::os::unix::fs::MetadataExt as _;
+
+        let writer = self
+            .inner
+            .lock()
+            .map_err(|_| JournalError::WriterPoisoned)?;
+        writer
+            .file
+            .metadata()
+            .map(|metadata| metadata.uid())
+            .map_err(|source| JournalError::Io {
+                path: writer.path.clone(),
+                source,
+            })
+    }
+
     /// Atomically publish the current reduced state and replace the redundant
     /// log prefix with its final checksum-linked envelope.
     ///
@@ -294,6 +502,9 @@ impl SessionStorageLease {
         // plaintext. The caller retains index authority if any unlink or
         // directory sync fails, making every residual file discoverable.
         let mut first_error = None;
+        if let Err(error) = remove_effect_checkpoint_directory(&self.journal_path) {
+            first_error = Some(error);
+        }
         for path in [
             session_path.to_path_buf(),
             wal_path.to_path_buf(),
@@ -319,6 +530,182 @@ impl SessionStorageLease {
             Some(error) => Err(error),
             None => Ok(()),
         }
+    }
+}
+
+fn effect_checkpoint_directory_for(journal_path: &Path) -> Result<PathBuf, JournalError> {
+    let file_name = journal_path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| {
+            JournalError::InvalidTransition(
+                "session journal filename is not valid UTF-8".to_string(),
+            )
+        })?;
+    Ok(journal_path.with_file_name(format!(".{file_name}.effects")))
+}
+
+fn remove_stale_checkpoint_temps(
+    directory: &Path,
+    digest: &str,
+    published: bool,
+) -> Result<(), JournalError> {
+    let prefix = format!(".{digest}.");
+    let entries = std::fs::read_dir(directory).map_err(|source| JournalError::Io {
+        path: directory.to_path_buf(),
+        source,
+    })?;
+    for entry in entries {
+        let entry = entry.map_err(|source| JournalError::Io {
+            path: directory.to_path_buf(),
+            source,
+        })?;
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else {
+            continue;
+        };
+        if !name.starts_with(&prefix) || !name.ends_with(".tmp") {
+            continue;
+        }
+        let path = entry.path();
+        let metadata = std::fs::symlink_metadata(&path).map_err(|source| JournalError::Io {
+            path: path.clone(),
+            source,
+        })?;
+        if metadata.is_dir() {
+            return Err(JournalError::InvalidTransition(format!(
+                "filesystem effect checkpoint temporary path is a directory: {}",
+                path.display()
+            )));
+        }
+        if published {
+            std::fs::remove_file(&path).map_err(|source| JournalError::Io {
+                path: path.clone(),
+                source,
+            })?;
+        } else if metadata.file_type().is_symlink() || metadata.is_file() {
+            std::fs::remove_file(&path).map_err(|source| JournalError::Io {
+                path: path.clone(),
+                source,
+            })?;
+        }
+    }
+    Ok(())
+}
+
+fn checkpoint_directory_bytes(directory: &Path) -> Result<u64, JournalError> {
+    let mut total = 0_u64;
+    for entry in std::fs::read_dir(directory).map_err(|source| JournalError::Io {
+        path: directory.to_path_buf(),
+        source,
+    })? {
+        let entry = entry.map_err(|source| JournalError::Io {
+            path: directory.to_path_buf(),
+            source,
+        })?;
+        let path = entry.path();
+        let metadata = std::fs::symlink_metadata(&path).map_err(|source| JournalError::Io {
+            path: path.clone(),
+            source,
+        })?;
+        if metadata.file_type().is_symlink() || !metadata.is_file() {
+            return Err(JournalError::InvalidTransition(format!(
+                "filesystem effect checkpoint store contains an unsafe entry: {}",
+                path.display()
+            )));
+        }
+        total = total.checked_add(metadata.len()).ok_or_else(|| {
+            JournalError::InvalidTransition(
+                "filesystem effect checkpoint store size overflow".to_string(),
+            )
+        })?;
+    }
+    Ok(total)
+}
+
+fn remove_effect_checkpoint_directory(journal_path: &Path) -> Result<(), JournalError> {
+    let directory = effect_checkpoint_directory_for(journal_path)?;
+    let metadata = match std::fs::symlink_metadata(&directory) {
+        Ok(metadata) => metadata,
+        Err(source) if source.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(source) => {
+            return Err(JournalError::Io {
+                path: directory,
+                source,
+            });
+        }
+    };
+    if metadata.file_type().is_symlink() {
+        std::fs::remove_file(&directory).map_err(|source| JournalError::Io {
+            path: directory.clone(),
+            source,
+        })?;
+        return snapshot::sync_parent_directory(&directory);
+    }
+    if !metadata.is_dir() {
+        return Err(JournalError::InvalidTransition(format!(
+            "filesystem effect checkpoint path is not a directory: {}",
+            directory.display()
+        )));
+    }
+
+    let mut first_error = None;
+    for entry in std::fs::read_dir(&directory).map_err(|source| JournalError::Io {
+        path: directory.clone(),
+        source,
+    })? {
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(source) => {
+                if first_error.is_none() {
+                    first_error = Some(JournalError::Io {
+                        path: directory.clone(),
+                        source,
+                    });
+                }
+                continue;
+            }
+        };
+        let path = entry.path();
+        match std::fs::symlink_metadata(&path) {
+            Ok(metadata) if metadata.is_dir() => {
+                if first_error.is_none() {
+                    first_error = Some(JournalError::InvalidTransition(format!(
+                        "filesystem effect checkpoint directory contains a subdirectory: {}",
+                        path.display()
+                    )));
+                }
+            }
+            Ok(_) => {
+                if let Err(source) = std::fs::remove_file(&path)
+                    && first_error.is_none()
+                {
+                    first_error = Some(JournalError::Io { path, source });
+                }
+            }
+            Err(source) if source.kind() == std::io::ErrorKind::NotFound => {}
+            Err(source) if first_error.is_none() => {
+                first_error = Some(JournalError::Io { path, source });
+            }
+            Err(_) => {}
+        }
+    }
+    if let Err(source) = std::fs::remove_dir(&directory)
+        && first_error.is_none()
+    {
+        first_error = Some(JournalError::Io {
+            path: directory.clone(),
+            source,
+        });
+    }
+    if first_error.is_none()
+        && let Err(error) = snapshot::sync_parent_directory(&directory)
+    {
+        first_error = Some(error);
+    }
+    match first_error {
+        Some(error) => Err(error),
+        None => Ok(()),
     }
 }
 
@@ -786,6 +1173,13 @@ fn sha256_hex(bytes: &[u8]) -> String {
     hex
 }
 
+fn valid_sha256_hex(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
 fn sha256_bytes(bytes: &[u8]) -> [u8; 32] {
     Sha256::digest(bytes).into()
 }
@@ -793,6 +1187,189 @@ fn sha256_bytes(bytes: &[u8]) -> [u8; 32] {
 #[cfg(test)]
 mod fault_tests {
     use super::*;
+
+    #[test]
+    fn effect_checkpoint_round_trips_and_rejects_digest_mismatch() {
+        let dir = tempfile::tempdir().unwrap();
+        let journal = SessionJournal::open(dir.path().join("session.journal"), "session").unwrap();
+        let contents = b"private preimage";
+        let digest = sha256_hex(contents);
+
+        journal.store_effect_checkpoint(&digest, contents).unwrap();
+        assert_eq!(journal.load_effect_checkpoint(&digest).unwrap(), contents);
+        assert!(matches!(
+            journal.store_effect_checkpoint(&digest, b"different"),
+            Err(JournalError::InvalidTransition(_))
+        ));
+    }
+
+    #[test]
+    fn effect_checkpoint_rejects_tampering() {
+        let dir = tempfile::tempdir().unwrap();
+        let journal_path = dir.path().join("session.journal");
+        let journal = SessionJournal::open(&journal_path, "session").unwrap();
+        let contents = b"private preimage";
+        let digest = sha256_hex(contents);
+        journal.store_effect_checkpoint(&digest, contents).unwrap();
+
+        let checkpoint = journal.effect_checkpoint_path(&digest).unwrap();
+        std::fs::write(&checkpoint, b"tampered").unwrap();
+        assert!(matches!(
+            journal.load_effect_checkpoint(&digest),
+            Err(JournalError::InvalidTransition(_))
+        ));
+    }
+
+    #[test]
+    fn effect_checkpoint_rejects_oversized_file_before_reading_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let journal = SessionJournal::open(dir.path().join("session.journal"), "session").unwrap();
+        let contents = b"private preimage";
+        let digest = sha256_hex(contents);
+        journal.store_effect_checkpoint(&digest, contents).unwrap();
+
+        let checkpoint = journal.effect_checkpoint_path(&digest).unwrap();
+        OpenOptions::new()
+            .write(true)
+            .open(&checkpoint)
+            .unwrap()
+            .set_len(MAX_EFFECT_CHECKPOINT_BYTES + 1)
+            .unwrap();
+        assert!(matches!(
+            journal.load_effect_checkpoint(&digest),
+            Err(JournalError::InvalidTransition(message)) if message.contains("exceeds")
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn effect_checkpoint_repairs_crash_after_publication_link() {
+        let dir = tempfile::tempdir().unwrap();
+        let journal = SessionJournal::open(dir.path().join("session.journal"), "session").unwrap();
+        let contents = b"private preimage";
+        let digest = sha256_hex(contents);
+        journal.store_effect_checkpoint(&digest, contents).unwrap();
+
+        let checkpoint = journal.effect_checkpoint_path(&digest).unwrap();
+        let crash_link = checkpoint
+            .parent()
+            .unwrap()
+            .join(format!(".{digest}.crash.tmp"));
+        std::fs::hard_link(&checkpoint, &crash_link).unwrap();
+
+        assert_eq!(journal.load_effect_checkpoint(&digest).unwrap(), contents);
+        assert!(!crash_link.exists());
+    }
+
+    #[test]
+    fn session_retirement_removes_private_effect_checkpoints() {
+        let dir = tempfile::tempdir().unwrap();
+        let journal_path = dir.path().join("session.journal");
+        let journal = SessionJournal::open(&journal_path, "session").unwrap();
+        let contents = b"private preimage";
+        let digest = sha256_hex(contents);
+        journal.store_effect_checkpoint(&digest, contents).unwrap();
+        let checkpoint_directory = effect_checkpoint_directory_for(&journal_path).unwrap();
+        assert!(checkpoint_directory.exists());
+        drop(journal);
+
+        let lease = SessionJournal::acquire_storage_lease(&journal_path, "session").unwrap();
+        lease
+            .remove_files(
+                &dir.path().join("session.json"),
+                &dir.path().join("session.wal"),
+            )
+            .unwrap();
+        assert!(!checkpoint_directory.exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn effect_checkpoint_rejects_group_or_world_access() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let dir = tempfile::tempdir().unwrap();
+        let journal = SessionJournal::open(dir.path().join("session.journal"), "session").unwrap();
+        let contents = b"private preimage";
+        let digest = sha256_hex(contents);
+        journal.store_effect_checkpoint(&digest, contents).unwrap();
+
+        let checkpoint = journal.effect_checkpoint_path(&digest).unwrap();
+        std::fs::set_permissions(&checkpoint, std::fs::Permissions::from_mode(0o644)).unwrap();
+        assert!(matches!(
+            journal.load_effect_checkpoint(&digest),
+            Err(JournalError::InvalidTransition(_))
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn effect_checkpoint_rejects_unowned_hard_link_alias() {
+        let dir = tempfile::tempdir().unwrap();
+        let journal = SessionJournal::open(dir.path().join("session.journal"), "session").unwrap();
+        let contents = b"private preimage";
+        let digest = sha256_hex(contents);
+        journal.store_effect_checkpoint(&digest, contents).unwrap();
+
+        let checkpoint = journal.effect_checkpoint_path(&digest).unwrap();
+        std::fs::hard_link(&checkpoint, dir.path().join("unowned-alias")).unwrap();
+        assert!(matches!(
+            journal.load_effect_checkpoint(&digest),
+            Err(JournalError::InvalidTransition(message))
+                if message.contains("unsafe links or permissions")
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn effect_checkpoint_rejects_symlink_replacement() {
+        use std::os::unix::fs::symlink;
+
+        let dir = tempfile::tempdir().unwrap();
+        let journal = SessionJournal::open(dir.path().join("session.journal"), "session").unwrap();
+        let contents = b"private preimage";
+        let digest = sha256_hex(contents);
+        journal.store_effect_checkpoint(&digest, contents).unwrap();
+
+        let checkpoint = journal.effect_checkpoint_path(&digest).unwrap();
+        let replacement = dir.path().join("replacement");
+        std::fs::write(&replacement, contents).unwrap();
+        std::fs::remove_file(&checkpoint).unwrap();
+        symlink(&replacement, &checkpoint).unwrap();
+        assert!(matches!(
+            journal.load_effect_checkpoint(&digest),
+            Err(JournalError::InvalidTransition(message))
+                if message.contains("not a regular file")
+        ));
+    }
+
+    #[test]
+    fn effect_checkpoint_store_enforces_session_quota_before_writing() {
+        let dir = tempfile::tempdir().unwrap();
+        let journal = SessionJournal::open(dir.path().join("session.journal"), "session").unwrap();
+        let seed = b"seed";
+        journal
+            .store_effect_checkpoint(&sha256_hex(seed), seed)
+            .unwrap();
+        let checkpoint_directory = journal
+            .effect_checkpoint_path(&sha256_hex(seed))
+            .unwrap()
+            .parent()
+            .unwrap()
+            .to_path_buf();
+        let filler = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(checkpoint_directory.join("quota-filler"))
+            .unwrap();
+        filler.set_len(MAX_EFFECT_CHECKPOINT_SESSION_BYTES).unwrap();
+
+        let next = b"next checkpoint";
+        assert!(matches!(
+            journal.store_effect_checkpoint(&sha256_hex(next), next),
+            Err(JournalError::InvalidTransition(message)) if message.contains("session quota")
+        ));
+    }
 
     #[test]
     fn append_io_failure_permanently_faults_writer() {

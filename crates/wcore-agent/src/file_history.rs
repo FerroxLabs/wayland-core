@@ -32,25 +32,30 @@
 //! conflict-detection guard. SHA-256 makes that economically
 //! impossible.
 //!
-//! Migration: the shadow store is per-session ephemeral state. We
-//! intentionally do NOT carry old `u64` digests across boots — the
-//! `last_engine_digest` field is reset on every `FileHistory::new`
-//! anyway (it lives in the in-memory `cursors` map). Any pre-existing
-//! shadow `.bin` files on disk remain readable (they're just bytes);
-//! only the conflict-detection check changes.
+//! F13 persists both the snapshot cursor and the exact committed postimage
+//! authority next to the shadow bytes. A process restart therefore cannot
+//! silently turn an identity-guarded rollback into an unconditional write.
+//! Legacy shadow buckets without cursor metadata remain inert: their bytes are
+//! never treated as rollback authority.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use parking_lot::Mutex;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
-use wcore_tools::vfs::{RealFs, VfsError, VirtualFs};
+use wcore_tools::vfs::{
+    FileContentIdentity, FileObjectIdentity, FileObservation, RealFs, VfsError, VirtualFs,
+};
 
 /// Maximum snapshots kept per file. FIFO eviction past this cap.
 pub const MAX_SNAPSHOTS_PER_FILE: usize = 10;
+
+const PATH_CURSOR_VERSION: u32 = 1;
+const PATH_CURSOR_FILE: &str = "cursor-v1.json";
 
 /// Wave SD — SHA-256 byte digest. `[u8; 32]` keeps it stack-allocated +
 /// `Copy` so the rollback guard can compare without heap traffic.
@@ -70,24 +75,48 @@ pub enum FileHistoryError {
     },
     #[error("no snapshots recorded for {path:?}")]
     NoSnapshots { path: PathBuf },
+    #[error("invalid durable file-history state for {path:?}: {reason}")]
+    InvalidState { path: PathBuf, reason: String },
+    #[error("failed to serialize durable file-history state: {0}")]
+    Serialize(#[from] serde_json::Error),
 }
 
 /// Per-path bookkeeping: how many snapshots have been written (modulo
-/// `MAX_SNAPSHOTS_PER_FILE`) and the next slot to write into, plus the
-/// digest of the engine's most-recent post-write state (used by
-/// `RollbackTool` to detect external modifications).
-#[derive(Debug, Default, Clone, Copy)]
+/// `MAX_SNAPSHOTS_PER_FILE`), the next slot, and the exact postimage authority
+/// used by `RollbackTool`.
+#[derive(Debug, Default, Clone)]
 struct PathCursor {
     /// Total number of snapshots ever written for this path. Saturates at
     /// `usize::MAX`; only used to compute `snapshots_count()` (capped to
     /// `MAX_SNAPSHOTS_PER_FILE`) and the slot order for reads.
     total: usize,
-    /// Digest of the bytes the engine last wrote to `path` (via the
-    /// `Write`/`Edit` tools, which call `record_post_write_digest`).
-    /// `None` if no engine-side write has been recorded — the conflict
-    /// guard in `RollbackTool` then skips the external-change check
-    /// (we have nothing to compare against).
-    last_engine_digest: Option<ByteDigest>,
+    /// Exact committed postimage which authorizes one rollback. Missing
+    /// authority always fails closed.
+    rollback_authority: Option<RollbackAuthority>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct RollbackAuthority {
+    pub(crate) postimage: FileContentIdentity,
+    pub(crate) object: FileObjectIdentity,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DurablePathCursor {
+    version: u32,
+    path: PathBuf,
+    total: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    rollback_authority: Option<DurableRollbackAuthority>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DurableRollbackAuthority {
+    sha256: ByteDigest,
+    len: u64,
+    object: FileObjectIdentity,
 }
 
 /// Snapshot store. Cheap to clone (Arc fields).
@@ -102,6 +131,9 @@ pub struct FileHistory {
     shadow_root: PathBuf,
     /// Per-path cursors, keyed by the canonical input path.
     cursors: Arc<Mutex<HashMap<PathBuf, PathCursor>>>,
+    /// Serializes lazy metadata loading and durable cursor updates within this
+    /// process. The VFS owns the stronger cross-process mutation boundary.
+    cursor_io: Arc<tokio::sync::Mutex<()>>,
 }
 
 impl FileHistory {
@@ -115,6 +147,7 @@ impl FileHistory {
             vfs_root,
             shadow_root,
             cursors: Arc::new(Mutex::new(HashMap::new())),
+            cursor_io: Arc::new(tokio::sync::Mutex::new(())),
         }
     }
 
@@ -129,26 +162,26 @@ impl FileHistory {
         per_call_vfs: &dyn VirtualFs,
     ) -> Result<(), FileHistoryError> {
         let bytes = per_call_vfs.read(path).await?;
-        let next = {
-            let mut cursors = self.cursors.lock();
-            let entry = cursors.entry(path.to_path_buf()).or_default();
-            let n = entry.total;
-            entry.total = entry.total.saturating_add(1);
-            n
-        };
+        let _io = self.cursor_io.lock().await;
+        let mut cursor = self.load_cursor_locked(path).await?;
+        let next = cursor.total;
         let slot = next % MAX_SNAPSHOTS_PER_FILE;
         let shadow_path = self.shadow_path_for(path, slot);
         self.vfs_root.write(&shadow_path, &bytes).await?;
+        sync_parent_directory(&shadow_path).await?;
+        cursor.total = cursor.total.saturating_add(1);
+        self.persist_cursor_locked(path, &cursor).await?;
+        self.cursors.lock().insert(path.to_path_buf(), cursor);
         Ok(())
     }
 
     /// Number of snapshots currently retained for `path` (saturating at
     /// `MAX_SNAPSHOTS_PER_FILE`).
     pub async fn snapshots_count(&self, path: &Path) -> usize {
-        let cursors = self.cursors.lock();
-        cursors
-            .get(path)
-            .map(|c| c.total.min(MAX_SNAPSHOTS_PER_FILE))
+        let _io = self.cursor_io.lock().await;
+        self.load_cursor_locked(path)
+            .await
+            .map(|cursor| cursor.total.min(MAX_SNAPSHOTS_PER_FILE))
             .unwrap_or(0)
     }
 
@@ -161,16 +194,14 @@ impl FileHistory {
         path: &Path,
         steps_back: usize,
     ) -> Result<Vec<u8>, FileHistoryError> {
-        let (total, available) = {
-            let cursors = self.cursors.lock();
-            let c = cursors
-                .get(path)
-                .copied()
-                .ok_or_else(|| FileHistoryError::NoSnapshots {
-                    path: path.to_path_buf(),
-                })?;
-            (c.total, c.total.min(MAX_SNAPSHOTS_PER_FILE))
-        };
+        let _io = self.cursor_io.lock().await;
+        let cursor = self.load_cursor_locked(path).await?;
+        let (total, available) = (cursor.total, cursor.total.min(MAX_SNAPSHOTS_PER_FILE));
+        if available == 0 {
+            return Err(FileHistoryError::NoSnapshots {
+                path: path.to_path_buf(),
+            });
+        }
         if steps_back >= available {
             return Err(FileHistoryError::StepOutOfRange {
                 path: path.to_path_buf(),
@@ -194,24 +225,62 @@ impl FileHistory {
         Some(byte_digest(&bytes))
     }
 
-    /// Record the digest of the bytes the engine just wrote to `path`.
-    /// Called by `Write`/`Edit` AFTER a successful write so `RollbackTool`
-    /// can later detect external modifications by comparing the live
-    /// file's digest against this recorded value.
-    pub fn record_post_write_digest(&self, path: &Path, bytes: &[u8]) {
-        let mut cursors = self.cursors.lock();
-        let entry = cursors.entry(path.to_path_buf()).or_default();
-        entry.last_engine_digest = Some(byte_digest(bytes));
+    /// Persist the exact committed file identity which authorizes one future
+    /// rollback. Content-only evidence is deliberately insufficient.
+    pub async fn record_committed_postimage(
+        &self,
+        path: &Path,
+        vfs: &dyn VirtualFs,
+    ) -> Result<(), FileHistoryError> {
+        let observed = vfs.observe_file(path).await?;
+        let FileObservation::Present(postimage) = observed.observation else {
+            return Err(FileHistoryError::InvalidState {
+                path: path.to_path_buf(),
+                reason: "committed postimage is absent".to_string(),
+            });
+        };
+        if observed.object.authority.is_empty()
+            || observed.object.path.as_os_str().is_empty()
+            || observed.object.file.is_none()
+        {
+            return Err(FileHistoryError::InvalidState {
+                path: path.to_path_buf(),
+                reason: "committed postimage lacks an exact object identity".to_string(),
+            });
+        }
+
+        let _io = self.cursor_io.lock().await;
+        let mut cursor = self.load_cursor_locked(path).await?;
+        cursor.rollback_authority = Some(RollbackAuthority {
+            postimage,
+            object: observed.object,
+        });
+        self.persist_cursor_locked(path, &cursor).await?;
+        self.cursors.lock().insert(path.to_path_buf(), cursor);
+        Ok(())
     }
 
-    /// Returns the digest of the engine's most-recent post-write bytes for
-    /// `path`, or `None` if no engine write has been recorded. Used by
-    /// `RollbackTool` to gate its external-change guard.
-    pub fn last_engine_write_digest(&self, path: &Path) -> Option<ByteDigest> {
-        self.cursors
-            .lock()
-            .get(path)
-            .and_then(|c| c.last_engine_digest)
+    pub(crate) async fn rollback_authority(
+        &self,
+        path: &Path,
+    ) -> Result<Option<RollbackAuthority>, FileHistoryError> {
+        let _io = self.cursor_io.lock().await;
+        Ok(self.load_cursor_locked(path).await?.rollback_authority)
+    }
+
+    /// Consume rollback authority after a successful CAS. If persistence
+    /// fails, the old guard remains safe because the live object no longer
+    /// matches its recorded postimage.
+    pub(crate) async fn retire_rollback_authority(
+        &self,
+        path: &Path,
+    ) -> Result<(), FileHistoryError> {
+        let _io = self.cursor_io.lock().await;
+        let mut cursor = self.load_cursor_locked(path).await?;
+        cursor.rollback_authority = None;
+        self.persist_cursor_locked(path, &cursor).await?;
+        self.cursors.lock().insert(path.to_path_buf(), cursor);
+        Ok(())
     }
 
     fn shadow_path_for(&self, path: &Path, slot: usize) -> PathBuf {
@@ -219,6 +288,116 @@ impl FileHistory {
             .join(path_bucket(path))
             .join(format!("{slot}.bin"))
     }
+
+    fn cursor_path_for(&self, path: &Path) -> PathBuf {
+        self.shadow_root
+            .join(path_bucket(path))
+            .join(PATH_CURSOR_FILE)
+    }
+
+    async fn load_cursor_locked(&self, path: &Path) -> Result<PathCursor, FileHistoryError> {
+        if let Some(cursor) = self.cursors.lock().get(path).cloned() {
+            return Ok(cursor);
+        }
+        let cursor_path = self.cursor_path_for(path);
+        let bytes = match self.vfs_root.read(&cursor_path).await {
+            Ok(bytes) => bytes,
+            Err(error) if vfs_error_is_not_found(&error) => return Ok(PathCursor::default()),
+            Err(error) => return Err(error.into()),
+        };
+        let durable: DurablePathCursor = serde_json::from_slice(&bytes)?;
+        if durable.version != PATH_CURSOR_VERSION || durable.path != path {
+            return Err(FileHistoryError::InvalidState {
+                path: path.to_path_buf(),
+                reason: "cursor version or path binding does not match".to_string(),
+            });
+        }
+        let rollback_authority = durable
+            .rollback_authority
+            .map(|authority| {
+                if authority.object.authority.is_empty()
+                    || authority.object.path.as_os_str().is_empty()
+                    || authority.object.file.is_none()
+                {
+                    return Err(FileHistoryError::InvalidState {
+                        path: path.to_path_buf(),
+                        reason: "rollback authority lacks an exact object identity".to_string(),
+                    });
+                }
+                Ok(RollbackAuthority {
+                    postimage: FileContentIdentity {
+                        sha256: authority.sha256,
+                        len: authority.len,
+                    },
+                    object: authority.object,
+                })
+            })
+            .transpose()?;
+        let cursor = PathCursor {
+            total: durable.total,
+            rollback_authority,
+        };
+        self.cursors
+            .lock()
+            .insert(path.to_path_buf(), cursor.clone());
+        Ok(cursor)
+    }
+
+    async fn persist_cursor_locked(
+        &self,
+        path: &Path,
+        cursor: &PathCursor,
+    ) -> Result<(), FileHistoryError> {
+        let rollback_authority =
+            cursor
+                .rollback_authority
+                .as_ref()
+                .map(|authority| DurableRollbackAuthority {
+                    sha256: authority.postimage.sha256,
+                    len: authority.postimage.len,
+                    object: authority.object.clone(),
+                });
+        let durable = DurablePathCursor {
+            version: PATH_CURSOR_VERSION,
+            path: path.to_path_buf(),
+            total: cursor.total,
+            rollback_authority,
+        };
+        let bytes = serde_json::to_vec(&durable)?;
+        self.vfs_root
+            .write(&self.cursor_path_for(path), &bytes)
+            .await?;
+        sync_parent_directory(&self.cursor_path_for(path)).await?;
+        Ok(())
+    }
+}
+
+fn vfs_error_is_not_found(error: &VfsError) -> bool {
+    matches!(error, VfsError::NotFound { .. })
+        || matches!(error, VfsError::Io(error) if error.kind() == std::io::ErrorKind::NotFound)
+}
+
+async fn sync_parent_directory(path: &Path) -> Result<(), FileHistoryError> {
+    #[cfg(unix)]
+    {
+        let parent = path
+            .parent()
+            .ok_or_else(|| FileHistoryError::InvalidState {
+                path: path.to_path_buf(),
+                reason: "durable history path has no parent".to_string(),
+            })?;
+        let parent = parent.to_path_buf();
+        tokio::task::spawn_blocking(move || std::fs::File::open(parent)?.sync_all())
+            .await
+            .map_err(|error| FileHistoryError::InvalidState {
+                path: path.to_path_buf(),
+                reason: format!("directory sync task failed: {error}"),
+            })?
+            .map_err(VfsError::Io)?;
+    }
+    #[cfg(not(unix))]
+    let _ = path;
+    Ok(())
 }
 
 /// 16-hex-char path bucket (8 bytes of SHA-256 of the path) — sufficient

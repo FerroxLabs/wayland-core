@@ -58,7 +58,7 @@ use tokio::select;
 use wcore_protocol::events::ToolCategory;
 use wcore_tools::path_validation::validate_user_path;
 use wcore_tools::{Tool, context::ToolContext};
-use wcore_types::tool::{JsonSchema, ToolResult};
+use wcore_types::tool::{JsonSchema, ToolEffectContract, ToolResult};
 
 use crate::op::BrowserOp;
 use crate::policy::{BrowserPolicy, PolicyOutcome};
@@ -429,6 +429,11 @@ impl Tool for BrowserTool {
 
     fn execution_class_for(&self, _input: &Value) -> wcore_tools::ToolExecutionClass {
         wcore_tools::ToolExecutionClass::ProcessSpawning
+    }
+
+    fn effect_contract(&self, _input: &Value) -> ToolEffectContract {
+        // Browser actions can mutate local and remote state without reconciliation.
+        ToolEffectContract::default()
     }
 
     async fn execute(&self, input: Value) -> ToolResult {

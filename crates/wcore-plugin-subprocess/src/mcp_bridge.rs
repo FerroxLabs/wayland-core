@@ -82,7 +82,7 @@ use wcore_mcp::protocol::{
 };
 use wcore_plugin_api::access_gate::PluginAccessGate;
 use wcore_plugin_api::manifest::PluginManifest;
-use wcore_plugin_api::tool::{PluginTool, PluginToolInvocation};
+use wcore_plugin_api::tool::{PluginTool, PluginToolEffectIdentity, PluginToolInvocation};
 use wcore_protocol::events::ToolCategory;
 use wcore_types::tool::ToolResult;
 
@@ -550,10 +550,17 @@ impl McpBridgePluginRunner {
     /// Invoke an MCP tool by name through the bridge. Synthesized
     /// `PluginTool::execute` closures dispatch through here.
     pub async fn call_mcp_tool(&self, name: &str, input: Value) -> Result<ToolOutput> {
-        let params = json!({
-            "name": name,
-            "arguments": input,
-        });
+        self.call_mcp_tool_with_effect_identity(name, input, None)
+            .await
+    }
+
+    pub async fn call_mcp_tool_with_effect_identity(
+        &self,
+        name: &str,
+        input: Value,
+        effect: Option<&PluginToolEffectIdentity>,
+    ) -> Result<ToolOutput> {
+        let params = mcp_call_params(name, input, effect);
         let resp = self.send_request("tools/call", Some(params)).await?;
         let result_value = resp
             .result
@@ -639,6 +646,23 @@ impl McpBridgePluginRunner {
     }
 }
 
+fn mcp_call_params(name: &str, input: Value, effect: Option<&PluginToolEffectIdentity>) -> Value {
+    let mut params = json!({
+        "name": name,
+        "arguments": input,
+    });
+    if let Some(effect) = effect {
+        params["_meta"] = json!({
+            "wayland/durable-effect": {
+                "version": effect.version,
+                "toolExecutionId": effect.tool_execution_id,
+                "idempotencyKey": effect.idempotency_key,
+            }
+        });
+    }
+    params
+}
+
 /// Output of a synthesized [`PluginTool`] backed by an MCP tool. Mirrors
 /// the shape of [`crate::runner::ToolOutput`] so the host loader can treat
 /// MCP-bridge and subprocess-SDK plugins identically.
@@ -677,7 +701,10 @@ fn synthesize_plugin_tool(def: McpToolDef, runner: Arc<McpBridgePluginRunner>) -
             let runner = Arc::clone(&runner);
             let name = tool_name.clone();
             Box::pin(async move {
-                match runner.call_mcp_tool(&name, inv.input).await {
+                match runner
+                    .call_mcp_tool_with_effect_identity(&name, inv.input, inv.caps.effect.as_ref())
+                    .await
+                {
                     Ok(out) => ToolResult {
                         content: out.stdout,
                         is_error: out.is_error,
@@ -703,7 +730,27 @@ fn map_io_err(e: std::io::Error) -> SubprocessPluginError {
 
 #[cfg(test)]
 mod tests {
-    use super::FORWARDED_ENV_VARS;
+    use super::{FORWARDED_ENV_VARS, mcp_call_params};
+    use serde_json::json;
+    use wcore_plugin_api::tool::PluginToolEffectIdentity;
+
+    #[test]
+    fn durable_mcp_call_metadata_is_versioned_and_legacy_shape_is_unchanged() {
+        let input = json!({"amount": 42});
+        let legacy = mcp_call_params("charge", input.clone(), None);
+        assert_eq!(legacy, json!({"name": "charge", "arguments": input}));
+
+        let effect = PluginToolEffectIdentity::v1("execution-42", "stable-key-42");
+        let durable = mcp_call_params("charge", json!({"amount": 42}), Some(&effect));
+        assert_eq!(
+            durable["_meta"]["wayland/durable-effect"],
+            json!({
+                "version": 1,
+                "toolExecutionId": "execution-42",
+                "idempotencyKey": "stable-key-42"
+            })
+        );
+    }
 
     /// env_clear() — secret vars must NOT reach the MCP-bridge child process.
     ///

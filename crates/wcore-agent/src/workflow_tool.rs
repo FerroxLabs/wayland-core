@@ -27,7 +27,7 @@ use crate::output::OutputSink;
 use crate::spawner::AgentSpawner;
 use wcore_protocol::events::ToolCategory;
 use wcore_tools::Tool;
-use wcore_types::tool::{JsonSchema, ToolResult};
+use wcore_types::tool::{JsonSchema, ToolEffectContract, ToolResult};
 
 /// LLM-facing tool that parses and executes an inline RON workflow through the
 /// dynamic-workflow engine.
@@ -110,6 +110,11 @@ impl Tool for WorkflowTool {
 
     fn is_deferred(&self) -> bool {
         false
+    }
+
+    fn effect_contract(&self, _input: &Value) -> ToolEffectContract {
+        // Workflow stages can perform arbitrary nested effects without reconciliation.
+        ToolEffectContract::default()
     }
 
     async fn execute(&self, input: Value) -> ToolResult {

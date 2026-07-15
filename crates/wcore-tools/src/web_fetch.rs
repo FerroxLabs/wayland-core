@@ -57,7 +57,7 @@ use async_trait::async_trait;
 use serde_json::{Value, json};
 
 use wcore_protocol::events::ToolCategory;
-use wcore_types::tool::{JsonSchema, ToolResult};
+use wcore_types::tool::{JsonSchema, ToolEffectContract, ToolResult};
 
 use crate::Tool;
 use crate::url_safety::is_safe_url;
@@ -305,6 +305,11 @@ impl Tool for WebFetchTool {
         ToolCategory::Mcp
     }
 
+    fn effect_contract(&self, _input: &Value) -> ToolEffectContract {
+        // Remote fetches can affect external rate limits and lack a durable reconciler.
+        ToolEffectContract::default()
+    }
+
     async fn execute(&self, input: Value) -> ToolResult {
         let url = match input.get("url").and_then(Value::as_str) {
             Some(s) => s.to_string(),
@@ -365,6 +370,16 @@ pub fn register_web_fetch_tool(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use wcore_types::tool::ToolEffectKind;
+
+    #[test]
+    fn effect_contract_remains_opaque() {
+        let contract = WebFetchTool::default().effect_contract(&json!({
+            "url": "https://example.com"
+        }));
+        assert_eq!(contract.kind, ToolEffectKind::Opaque);
+        assert!(contract.reconciler.is_none());
+    }
 
     #[tokio::test]
     async fn null_backend_returns_fail_loud_error() {

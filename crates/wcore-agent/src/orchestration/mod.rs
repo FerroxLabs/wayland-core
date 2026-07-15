@@ -74,19 +74,82 @@ pub mod template_routing;
 // `ExecutionGraph` walker is untouched.
 pub mod workflow;
 
+#[cfg(test)]
+mod f13_durability_tests;
+
 use crate::confirm::{ConfirmResult, ToolConfirmer};
 use crate::engine::is_hook_lifecycle_line;
 use crate::hooks::HookEngine;
+use crate::journal_effects::{PreparedToolLease, TurnEffectScope};
+use crate::session_journal::{ToolNotStartedReason, ToolUnknownReason};
 use wcore_protocol::events::{OutputType, ProtocolEvent, ToolCategory, ToolInfo, ToolStatus};
 use wcore_protocol::writer::ProtocolEmitter;
 use wcore_protocol::{ToolApprovalManager, ToolApprovalResult};
 use wcore_types::message::ContentBlock;
 use wcore_types::skill_types::ContextModifier;
-use wcore_types::tool::ToolResult;
+use wcore_types::tool::{ToolEffectKind, ToolResult};
 
 use wcore_tools::registry::ToolRegistry;
 
 use crate::tool_budget::ToolBudgetTracker;
+
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum DispatcherCrashCut {
+    BeforePrepared,
+    AfterPrepared,
+    BeforeRunning,
+    AfterRunning,
+    AfterPhysicalEffect,
+    BeforeTerminalAppend,
+    AfterTerminalAppend,
+}
+
+#[cfg(test)]
+tokio::task_local! {
+    static DISPATCHER_CRASH_CUT: std::cell::Cell<Option<DispatcherCrashCut>>;
+}
+
+#[cfg(test)]
+fn inject_dispatcher_crash(cut: DispatcherCrashCut) {
+    let _ = DISPATCHER_CRASH_CUT.try_with(|armed| {
+        if armed.get() == Some(cut) {
+            armed.set(None);
+            panic!("injected dispatcher crash at {cut:?}");
+        }
+    });
+}
+
+#[cfg(test)]
+pub(crate) fn take_dispatcher_crash_cut() -> Option<DispatcherCrashCut> {
+    DISPATCHER_CRASH_CUT
+        .try_with(std::cell::Cell::take)
+        .ok()
+        .flatten()
+}
+
+#[cfg(test)]
+async fn scope_dispatcher_crash_cut<F>(cut: DispatcherCrashCut, future: F) -> F::Output
+where
+    F: std::future::Future,
+{
+    DISPATCHER_CRASH_CUT
+        .scope(std::cell::Cell::new(Some(cut)), future)
+        .await
+}
+
+#[cfg(test)]
+pub(crate) async fn with_dispatcher_crash_after_physical_effect<F>(future: F) -> F::Output
+where
+    F: std::future::Future,
+{
+    DISPATCHER_CRASH_CUT
+        .scope(
+            std::cell::Cell::new(Some(DispatcherCrashCut::AfterPhysicalEffect)),
+            future,
+        )
+        .await
+}
 
 /// The combined output of a tool execution batch: protocol content blocks
 /// paired with per-call context modifiers (None for non-skill tools).
@@ -113,6 +176,12 @@ type BatchToolOutcome = (
     Option<crate::hooks::HookOutcome>,
     bool,
 );
+
+type ObservedToolEffect = Option<(
+    wcore_tools::effects::ToolEffectDisposition,
+    serde_json::Value,
+)>;
+type ToolDispatchResult = std::thread::Result<(ToolResult, ObservedToolEffect)>;
 
 impl std::ops::Deref for ToolCallOutcome {
     type Target = Vec<ContentBlock>;
@@ -262,6 +331,49 @@ impl PolicyFilteredCalls {
     fn allowed_calls(&self) -> Vec<ContentBlock> {
         self.allowed.iter().map(|(_, call)| call.clone()).collect()
     }
+
+    fn journal_denials(
+        &mut self,
+        registry: &ToolRegistry,
+        effect_scope: Option<&TurnEffectScope>,
+        original_calls: &[ContentBlock],
+    ) {
+        let tool_calls = original_calls
+            .iter()
+            .filter(|call| matches!(call, ContentBlock::ToolUse { .. }))
+            .collect::<Vec<_>>();
+        for (ordinal, denied) in &mut self.denied {
+            let Some(call) = tool_calls.get(*ordinal).copied() else {
+                continue;
+            };
+            let ContentBlock::ToolUse {
+                id, name, input, ..
+            } = call
+            else {
+                continue;
+            };
+            let policy = match denied {
+                ContentBlock::ToolResult { content, .. } => content.clone(),
+                _ => "policy gate denied tool invocation".to_string(),
+            };
+            let contract = registry
+                .get(name)
+                .map(|tool| tool.effect_contract(input))
+                .unwrap_or_default();
+            if let Err(error) = record_tool_not_started(
+                effect_scope,
+                id,
+                *ordinal as u64,
+                name,
+                input,
+                input,
+                contract,
+                ToolNotStartedReason::PolicyDenied { policy },
+            ) {
+                *denied = journal_authority_failure(id, error);
+            }
+        }
+    }
 }
 
 /// Apply the optional actor/tool ACL gate before selecting a host or terminal
@@ -359,6 +471,41 @@ pub async fn execute_tool_calls_with_budget(
     registry: &ToolRegistry,
     tool_calls: &[ContentBlock],
     confirmer: &Arc<Mutex<ToolConfirmer>>,
+    hooks: Option<&mut HookEngine>,
+    compaction_level: wcore_compact::CompactionLevel,
+    toon_enabled: bool,
+    streaming: Option<StreamingContext>,
+    budget: Option<&ToolBudgetTracker>,
+    cancel: &CancellationToken,
+    file_write_notifier: Option<
+        &std::sync::Arc<dyn wcore_tools::file_write_notifier::FileWriteNotifier>,
+    >,
+) -> Result<ToolCallOutcome, ExecutionControl> {
+    execute_tool_calls_with_budget_and_effects(
+        registry,
+        tool_calls,
+        confirmer,
+        hooks,
+        compaction_level,
+        toon_enabled,
+        streaming,
+        budget,
+        cancel,
+        file_write_notifier,
+        None,
+        None,
+    )
+    .await
+}
+
+/// Production F13 dispatch entry point. Existing callers deliberately route
+/// through [`execute_tool_calls_with_budget`] with no journal authority; a
+/// persisted engine must supply the active turn scope here.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn execute_tool_calls_with_budget_and_effects(
+    registry: &ToolRegistry,
+    tool_calls: &[ContentBlock],
+    confirmer: &Arc<Mutex<ToolConfirmer>>,
     mut hooks: Option<&mut HookEngine>,
     compaction_level: wcore_compact::CompactionLevel,
     toon_enabled: bool,
@@ -368,6 +515,8 @@ pub async fn execute_tool_calls_with_budget(
     file_write_notifier: Option<
         &std::sync::Arc<dyn wcore_tools::file_write_notifier::FileWriteNotifier>,
     >,
+    effect_scope: Option<&TurnEffectScope>,
+    effect_ordinals: Option<&[u64]>,
 ) -> Result<ToolCallOutcome, ExecutionControl> {
     let mut results = Vec::new();
     let mut modifiers = Vec::new();
@@ -386,6 +535,13 @@ pub async fn execute_tool_calls_with_budget(
             for (batch_idx, call) in batch.calls.iter().enumerate() {
                 match confirm_call(registry, confirmer, call)? {
                     ConfirmedCall::Denied(denied) => {
+                        let denied = record_terminal_denial(
+                            registry,
+                            effect_scope,
+                            durable_tool_call_ordinal(effect_ordinals, tool_calls, call),
+                            call,
+                            denied,
+                        );
                         batch_outcomes[batch_idx] = Some((denied, None, None, false));
                     }
                     ConfirmedCall::Execute { approval_bound } => {
@@ -415,6 +571,8 @@ pub async fn execute_tool_calls_with_budget(
                         *approval_bound,
                         cancel,
                         file_write_notifier,
+                        effect_scope,
+                        durable_tool_call_ordinal(effect_ordinals, tool_calls, call),
                     )
                 })
                 .collect();
@@ -441,7 +599,13 @@ pub async fn execute_tool_calls_with_budget(
             for call in &batch.calls {
                 match confirm_call(registry, confirmer, call)? {
                     ConfirmedCall::Denied(denied) => {
-                        results.push(denied);
+                        results.push(record_terminal_denial(
+                            registry,
+                            effect_scope,
+                            durable_tool_call_ordinal(effect_ordinals, tool_calls, call),
+                            call,
+                            denied,
+                        ));
                         modifiers.push(None);
                     }
                     ConfirmedCall::Execute { approval_bound } => {
@@ -464,6 +628,8 @@ pub async fn execute_tool_calls_with_budget(
                                     approval_bound,
                                     cancel,
                                     file_write_notifier,
+                                    effect_scope,
+                                    durable_tool_call_ordinal(effect_ordinals, tool_calls, call),
                                 )
                                 .await;
                         }
@@ -593,6 +759,139 @@ impl Drop for ProtocolToolSink {
 }
 
 #[allow(clippy::too_many_arguments)]
+fn prepare_tool_effect(
+    effect_scope: Option<&TurnEffectScope>,
+    provider_call_id: &str,
+    ordinal: u64,
+    tool: &str,
+    requested_input: &serde_json::Value,
+    effective_input: &serde_json::Value,
+    contract: wcore_types::tool::ToolEffectContract,
+    effect_receipt: Option<serde_json::Value>,
+) -> Result<Option<PreparedToolLease>, String> {
+    effect_scope
+        .map(|scope| {
+            let prepared = match effect_receipt {
+                Some(receipt) => scope.prepare_tool_with_effect_receipt(
+                    provider_call_id,
+                    ordinal,
+                    tool,
+                    requested_input.clone(),
+                    effective_input.clone(),
+                    contract,
+                    receipt,
+                ),
+                None => scope.prepare_tool_with_contract(
+                    provider_call_id,
+                    ordinal,
+                    tool,
+                    requested_input.clone(),
+                    effective_input.clone(),
+                    contract,
+                ),
+            };
+            prepared.map_err(|error| format!("durable tool intent could not be recorded: {error}"))
+        })
+        .transpose()
+}
+
+async fn store_prepared_effect_checkpoint(
+    effect_scope: Option<&TurnEffectScope>,
+    prepared: Option<&wcore_tools::effects::PreparedToolEffect>,
+) -> Result<(), String> {
+    let (Some(scope), Some(prepared), Some(preimage)) = (
+        effect_scope,
+        prepared,
+        prepared.and_then(|effect| effect.preimage_bytes()),
+    ) else {
+        return Ok(());
+    };
+    let identity = prepared
+        .filesystem_receipt()
+        .checkpoint_identity()
+        .ok_or_else(|| "prepared filesystem preimage has no checkpoint identity".to_string())?;
+    if identity.len != preimage.len() as u64 {
+        return Err("prepared filesystem checkpoint length does not match its receipt".to_string());
+    }
+    let scope = (*scope).clone();
+    let digest = identity.sha256.clone();
+    let preimage = preimage.to_vec();
+    tokio::task::spawn_blocking(move || scope.store_effect_checkpoint(&digest, &preimage))
+        .await
+        .map_err(|error| format!("prepared filesystem checkpoint task failed: {error}"))?
+        .map_err(|error| format!("prepared filesystem checkpoint could not be stored: {error}"))
+}
+
+fn journal_authority_failure(call_id: &str, error: impl std::fmt::Display) -> ContentBlock {
+    ContentBlock::ToolResult {
+        tool_use_id: call_id.to_string(),
+        content: crate::output_redaction::redact_tool_output(&format!(
+            "Tool was not executed because durable session authority failed: {error}"
+        )),
+        is_error: true,
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn record_tool_not_started(
+    effect_scope: Option<&TurnEffectScope>,
+    provider_call_id: &str,
+    ordinal: u64,
+    tool: &str,
+    requested_input: &serde_json::Value,
+    effective_input: &serde_json::Value,
+    contract: wcore_types::tool::ToolEffectContract,
+    reason: ToolNotStartedReason,
+) -> Result<(), String> {
+    prepare_tool_effect(
+        effect_scope,
+        provider_call_id,
+        ordinal,
+        tool,
+        requested_input,
+        effective_input,
+        contract,
+        None,
+    )?
+    .map(|lease| lease.not_started(reason))
+    .transpose()
+    .map_err(|error| format!("durable not-started outcome could not be recorded: {error}"))?;
+    Ok(())
+}
+
+fn record_terminal_denial(
+    registry: &ToolRegistry,
+    effect_scope: Option<&TurnEffectScope>,
+    ordinal: u64,
+    call: &ContentBlock,
+    denied: ContentBlock,
+) -> ContentBlock {
+    let ContentBlock::ToolUse {
+        id, name, input, ..
+    } = call
+    else {
+        return denied;
+    };
+    let contract = registry
+        .get(name)
+        .map(|tool| tool.effect_contract(input))
+        .unwrap_or_default();
+    record_tool_not_started(
+        effect_scope,
+        id,
+        ordinal,
+        name,
+        input,
+        input,
+        contract,
+        ToolNotStartedReason::ApprovalDenied {
+            approval_id: format!("terminal:{id}"),
+        },
+    )
+    .map_or_else(|error| journal_authority_failure(id, error), |()| denied)
+}
+
+#[allow(clippy::too_many_arguments)]
 #[cfg(test)]
 async fn execute_single(
     registry: &ToolRegistry,
@@ -622,6 +921,8 @@ async fn execute_single(
         approval_bound,
         cancel,
         file_write_notifier,
+        None,
+        0,
     )
     .await
 }
@@ -641,6 +942,8 @@ async fn execute_single_with_budget(
     file_write_notifier: Option<
         &std::sync::Arc<dyn wcore_tools::file_write_notifier::FileWriteNotifier>,
     >,
+    effect_scope: Option<&TurnEffectScope>,
+    ordinal: u64,
 ) -> (
     ContentBlock,
     Option<ContextModifier>,
@@ -659,6 +962,8 @@ async fn execute_single_with_budget(
         approval_bound,
         cancel,
         file_write_notifier,
+        effect_scope,
+        ordinal,
     )
     .await
 }
@@ -683,6 +988,8 @@ async fn execute_single_with_streaming(
     file_write_notifier: Option<
         &std::sync::Arc<dyn wcore_tools::file_write_notifier::FileWriteNotifier>,
     >,
+    effect_scope: Option<&TurnEffectScope>,
+    ordinal: u64,
 ) -> (
     ContentBlock,
     Option<ContextModifier>,
@@ -704,33 +1011,60 @@ async fn execute_single_with_streaming(
         match hook_engine.run_pre_tool_use(name, input).await {
             Ok(mut outcome) => {
                 if let Some(reason) = outcome.block.take() {
-                    return (
-                        ContentBlock::ToolResult {
+                    let durable = record_tool_not_started(
+                        effect_scope,
+                        id,
+                        ordinal,
+                        name,
+                        input,
+                        &effective_input,
+                        registry
+                            .get(name)
+                            .map(|tool| tool.effect_contract(&effective_input))
+                            .unwrap_or_default(),
+                        ToolNotStartedReason::HookDenied {
+                            reason: reason.clone(),
+                        },
+                    );
+                    let block = durable.map_or_else(
+                        |error| journal_authority_failure(id, error),
+                        |()| ContentBlock::ToolResult {
                             tool_use_id: id.clone(),
                             content: crate::output_redaction::redact_tool_output(&format!(
                                 "Blocked by hook: {reason}"
                             )),
                             is_error: true,
                         },
-                        None,
-                        crate::hooks::HookOutcome::default(),
-                        false,
                     );
+                    return (block, None, crate::hooks::HookOutcome::default(), false);
                 }
                 if let Some(v) = outcome.modified_input {
                     if approval_bound && v != *input {
-                        return (
-                            ContentBlock::ToolResult {
+                        let reason = "modified tool input requires fresh approval".to_string();
+                        let durable = record_tool_not_started(
+                            effect_scope,
+                            id,
+                            ordinal,
+                            name,
+                            input,
+                            &v,
+                            registry
+                                .get(name)
+                                .map(|tool| tool.effect_contract(&v))
+                                .unwrap_or_default(),
+                            ToolNotStartedReason::HookDenied {
+                                reason: reason.clone(),
+                            },
+                        );
+                        let block = durable.map_or_else(
+                            |error| journal_authority_failure(id, error),
+                            |()| ContentBlock::ToolResult {
                                 tool_use_id: id.clone(),
-                                content:
-                                    "Blocked by hook: modified tool input requires fresh approval"
-                                        .to_string(),
+                                content: format!("Blocked by hook: {reason}"),
                                 is_error: true,
                             },
-                            None,
-                            crate::hooks::HookOutcome::default(),
-                            false,
                         );
+                        return (block, None, crate::hooks::HookOutcome::default(), false);
                     }
                     effective_input = v;
                 }
@@ -756,18 +1090,33 @@ async fn execute_single_with_streaming(
                 }
             }
             Err(e) => {
-                return (
-                    ContentBlock::ToolResult {
+                let reason = e.to_string();
+                let durable = record_tool_not_started(
+                    effect_scope,
+                    id,
+                    ordinal,
+                    name,
+                    input,
+                    &effective_input,
+                    registry
+                        .get(name)
+                        .map(|tool| tool.effect_contract(&effective_input))
+                        .unwrap_or_default(),
+                    ToolNotStartedReason::HookDenied {
+                        reason: reason.clone(),
+                    },
+                );
+                let block = durable.map_or_else(
+                    |error| journal_authority_failure(id, error),
+                    |()| ContentBlock::ToolResult {
                         tool_use_id: id.clone(),
                         content: crate::output_redaction::redact_tool_output(&format!(
-                            "Blocked by hook: {e}"
+                            "Blocked by hook: {reason}"
                         )),
                         is_error: true,
                     },
-                    None,
-                    crate::hooks::HookOutcome::default(),
-                    false,
                 );
+                return (block, None, crate::hooks::HookOutcome::default(), false);
             }
         }
     }
@@ -778,6 +1127,7 @@ async fn execute_single_with_streaming(
     let (result, modifier) = match registry.get(name) {
         Some(tool) => {
             let max_size = tool.max_result_size();
+            let effect_contract = tool.effect_contract(&effective_input);
             // AUDIT B-1 follow-up — pick the timeout category based on
             // THIS call's input, not just the tool's bare `category()`.
             // SkillTool is `Info` (30s) for inline skills (returns
@@ -796,6 +1146,23 @@ async fn execute_single_with_streaming(
             // server is both bounded per-call AND backed off across
             // calls.
             if registry.breaker_is_open(name) {
+                if let Err(error) = record_tool_not_started(
+                    effect_scope,
+                    id,
+                    ordinal,
+                    name,
+                    input,
+                    &effective_input,
+                    effect_contract.clone(),
+                    ToolNotStartedReason::CircuitOpen,
+                ) {
+                    return (
+                        journal_authority_failure(id, error),
+                        None,
+                        crate::hooks::HookOutcome::default(),
+                        false,
+                    );
+                }
                 return (
                     ContentBlock::ToolResult {
                         tool_use_id: id.clone(),
@@ -803,6 +1170,38 @@ async fn execute_single_with_streaming(
                             "Tool '{name}' circuit open: too many recent failures, \
                              try again later"
                         ),
+                        is_error: true,
+                    },
+                    None,
+                    crate::hooks::HookOutcome::default(),
+                    false,
+                );
+            }
+            if cancel.is_cancelled() {
+                let reason = "session cancellation was requested before tool dispatch".to_string();
+                if let Err(error) = record_tool_not_started(
+                    effect_scope,
+                    id,
+                    ordinal,
+                    name,
+                    input,
+                    &effective_input,
+                    effect_contract.clone(),
+                    ToolNotStartedReason::Cancelled {
+                        reason: reason.clone(),
+                    },
+                ) {
+                    return (
+                        journal_authority_failure(id, error),
+                        None,
+                        crate::hooks::HookOutcome::default(),
+                        false,
+                    );
+                }
+                return (
+                    ContentBlock::ToolResult {
+                        tool_use_id: id.clone(),
+                        content: format!("Tool '{name}' was not started: {reason}"),
                         is_error: true,
                     },
                     None,
@@ -856,6 +1255,25 @@ async fn execute_single_with_streaming(
                 Some(tracker) => match tracker.try_start(name, execution_class, category_timeout) {
                     Ok(guard) => Some(guard),
                     Err(error) => {
+                        if let Err(journal_error) = record_tool_not_started(
+                            effect_scope,
+                            id,
+                            ordinal,
+                            name,
+                            input,
+                            &effective_input,
+                            effect_contract.clone(),
+                            ToolNotStartedReason::BudgetDenied {
+                                reason: error.reason.to_string(),
+                            },
+                        ) {
+                            return (
+                                journal_authority_failure(id, journal_error),
+                                None,
+                                crate::hooks::HookOutcome::default(),
+                                false,
+                            );
+                        }
                         return (
                             ContentBlock::ToolResult {
                                 tool_use_id: id.clone(),
@@ -874,6 +1292,224 @@ async fn execute_single_with_streaming(
                 },
                 None => None,
             };
+            let prepared_runtime =
+                match AssertUnwindSafe(tool.prepare_effect(&effective_input, &tool_ctx))
+                    .catch_unwind()
+                    .await
+                {
+                    Ok(Ok(prepared)) => prepared,
+                    Ok(Err(result)) => {
+                        let error = crate::output_redaction::redact_tool_output(&result.content);
+                        if let Err(journal_error) = record_tool_not_started(
+                            effect_scope,
+                            id,
+                            ordinal,
+                            name,
+                            input,
+                            &effective_input,
+                            effect_contract.clone(),
+                            ToolNotStartedReason::InvalidInput {
+                                error: error.clone(),
+                            },
+                        ) {
+                            return (
+                                journal_authority_failure(id, journal_error),
+                                None,
+                                crate::hooks::HookOutcome::default(),
+                                false,
+                            );
+                        }
+                        return (
+                            ContentBlock::ToolResult {
+                                tool_use_id: id.clone(),
+                                content: error,
+                                is_error: result.is_error,
+                            },
+                            None,
+                            crate::hooks::HookOutcome::default(),
+                            false,
+                        );
+                    }
+                    Err(payload) => {
+                        let error = crate::output_redaction::redact_tool_output(
+                            &extract_panic_message(&payload),
+                        );
+                        if let Err(journal_error) = record_tool_not_started(
+                            effect_scope,
+                            id,
+                            ordinal,
+                            name,
+                            input,
+                            &effective_input,
+                            effect_contract.clone(),
+                            ToolNotStartedReason::DispatchFailed {
+                                error: error.clone(),
+                            },
+                        ) {
+                            return (
+                                journal_authority_failure(id, journal_error),
+                                None,
+                                crate::hooks::HookOutcome::default(),
+                                false,
+                            );
+                        }
+                        return (
+                            ContentBlock::ToolResult {
+                                tool_use_id: id.clone(),
+                                content: format!("Tool effect preparation panicked: {error}"),
+                                is_error: true,
+                            },
+                            None,
+                            crate::hooks::HookOutcome::default(),
+                            false,
+                        );
+                    }
+                };
+            let durable_receipt = match prepared_runtime.as_ref() {
+                Some(prepared) => match prepared.durable_receipt() {
+                    Ok(receipt) => Some(receipt),
+                    Err(error) => {
+                        let reason =
+                            format!("prepared effect receipt could not be encoded: {error}");
+                        if let Err(journal_error) = record_tool_not_started(
+                            effect_scope,
+                            id,
+                            ordinal,
+                            name,
+                            input,
+                            &effective_input,
+                            effect_contract.clone(),
+                            ToolNotStartedReason::DispatchFailed {
+                                error: reason.clone(),
+                            },
+                        ) {
+                            return (
+                                journal_authority_failure(id, journal_error),
+                                None,
+                                crate::hooks::HookOutcome::default(),
+                                false,
+                            );
+                        }
+                        return (
+                            ContentBlock::ToolResult {
+                                tool_use_id: id.clone(),
+                                content: reason,
+                                is_error: true,
+                            },
+                            None,
+                            crate::hooks::HookOutcome::default(),
+                            false,
+                        );
+                    }
+                },
+                None => None,
+            };
+            if let Err(error) =
+                store_prepared_effect_checkpoint(effect_scope, prepared_runtime.as_ref()).await
+            {
+                let reason = crate::output_redaction::redact_tool_output(&error);
+                if let Err(journal_error) = record_tool_not_started(
+                    effect_scope,
+                    id,
+                    ordinal,
+                    name,
+                    input,
+                    &effective_input,
+                    effect_contract.clone(),
+                    ToolNotStartedReason::DispatchFailed {
+                        error: reason.clone(),
+                    },
+                ) {
+                    return (
+                        journal_authority_failure(id, journal_error),
+                        None,
+                        crate::hooks::HookOutcome::default(),
+                        false,
+                    );
+                }
+                return (
+                    ContentBlock::ToolResult {
+                        tool_use_id: id.clone(),
+                        content: reason,
+                        is_error: true,
+                    },
+                    None,
+                    crate::hooks::HookOutcome::default(),
+                    false,
+                );
+            }
+            #[cfg(test)]
+            inject_dispatcher_crash(DispatcherCrashCut::BeforePrepared);
+            let prepared_effect = match prepare_tool_effect(
+                effect_scope,
+                id,
+                ordinal,
+                name,
+                input,
+                &effective_input,
+                effect_contract.clone(),
+                durable_receipt,
+            ) {
+                Ok(lease) => lease,
+                Err(error) => {
+                    return (
+                        journal_authority_failure(id, error),
+                        None,
+                        crate::hooks::HookOutcome::default(),
+                        false,
+                    );
+                }
+            };
+            #[cfg(test)]
+            inject_dispatcher_crash(DispatcherCrashCut::AfterPrepared);
+            if cancel.is_cancelled() {
+                let reason =
+                    "session cancellation was requested before physical tool start".to_string();
+                if let Some(prepared) = prepared_effect
+                    && let Err(error) = prepared.not_started(ToolNotStartedReason::Cancelled {
+                        reason: reason.clone(),
+                    })
+                {
+                    return (
+                        journal_authority_failure(id, error),
+                        None,
+                        crate::hooks::HookOutcome::default(),
+                        false,
+                    );
+                }
+                return (
+                    ContentBlock::ToolResult {
+                        tool_use_id: id.clone(),
+                        content: format!("Tool '{name}' was not started: {reason}"),
+                        is_error: true,
+                    },
+                    None,
+                    crate::hooks::HookOutcome::default(),
+                    false,
+                );
+            }
+            let effect_context =
+                prepared_effect
+                    .as_ref()
+                    .map(|lease| wcore_tools::context::ToolEffectContext {
+                        tool_execution_id: lease.id().to_string(),
+                        idempotency_key: lease.idempotency_key().to_string(),
+                    });
+            #[cfg(test)]
+            inject_dispatcher_crash(DispatcherCrashCut::BeforeRunning);
+            let started_effect = match prepared_effect.map(PreparedToolLease::start).transpose() {
+                Ok(lease) => lease,
+                Err(error) => {
+                    return (
+                        journal_authority_failure(id, error),
+                        None,
+                        crate::hooks::HookOutcome::default(),
+                        false,
+                    );
+                }
+            };
+            #[cfg(test)]
+            inject_dispatcher_crash(DispatcherCrashCut::AfterRunning);
             // Wave RB RELIABILITY MAJOR: wrap every tool dispatch in
             // `FutureExt::catch_unwind` so a panic inside the tool's
             // future (programming bug, divide-by-zero, slice OOB, etc.)
@@ -899,7 +1535,17 @@ async fn execute_single_with_streaming(
             // `tool_use` still gets a `tool_result` and the agent loop
             // continues instead of hanging forever.
             let dispatch_fut = async {
-                if let Some(ctx) = streaming.as_ref() {
+                if let Some(prepared) = prepared_runtime {
+                    AssertUnwindSafe(tool.execute_prepared_effect(prepared, &tool_ctx))
+                        .catch_unwind()
+                        .await
+                        .map(|execution| {
+                            (
+                                execution.result,
+                                Some((execution.disposition, execution.observed_receipt)),
+                            )
+                        })
+                } else if let Some(ctx) = streaming.as_ref() {
                     if tool.supports_streaming() && ctx.output.streaming_tools_advertised() {
                         let sink = ProtocolToolSink {
                             output: std::sync::Arc::clone(&ctx.output),
@@ -908,31 +1554,46 @@ async fn execute_single_with_streaming(
                             tool_name: name.clone(),
                             redactor: Mutex::new(crate::output_redaction::StreamingRedactor::new()),
                         };
-                        AssertUnwindSafe(tool.execute_streaming_with_ctx(
+                        AssertUnwindSafe(tool.execute_streaming_with_effect_ctx(
                             effective_input.clone(),
                             &tool_ctx,
+                            effect_context.as_ref(),
                             &sink,
                         ))
                         .catch_unwind()
                         .await
+                        .map(|result| (result, None))
                     } else {
-                        AssertUnwindSafe(tool.execute_with_ctx(effective_input.clone(), &tool_ctx))
-                            .catch_unwind()
-                            .await
-                    }
-                } else {
-                    AssertUnwindSafe(tool.execute_with_ctx(effective_input.clone(), &tool_ctx))
+                        AssertUnwindSafe(tool.execute_with_effect_ctx(
+                            effective_input.clone(),
+                            &tool_ctx,
+                            effect_context.as_ref(),
+                        ))
                         .catch_unwind()
                         .await
+                        .map(|result| (result, None))
+                    }
+                } else {
+                    AssertUnwindSafe(tool.execute_with_effect_ctx(
+                        effective_input.clone(),
+                        &tool_ctx,
+                        effect_context.as_ref(),
+                    ))
+                    .catch_unwind()
+                    .await
+                    .map(|result| (result, None))
                 }
             };
             let timeout = _budget_guard
                 .as_ref()
                 .and_then(crate::tool_budget::ToolRunHandle::dispatch_time_limit)
                 .unwrap_or(category_timeout);
-            let timed: Result<std::thread::Result<ToolResult>, tokio::time::error::Elapsed> =
+            let timed: Result<ToolDispatchResult, tokio::time::error::Elapsed> =
                 tokio::time::timeout(timeout, dispatch_fut).await;
-            let r = match timed {
+            #[cfg(test)]
+            inject_dispatcher_crash(DispatcherCrashCut::AfterPhysicalEffect);
+            let mut unknown_effect = None;
+            let (r, observed_effect) = match timed {
                 Err(_elapsed) => {
                     // Dispatch exceeded its category deadline. Fire the
                     // call's cancel token so a cooperative tool can
@@ -955,13 +1616,26 @@ async fn execute_single_with_streaming(
                             &format!("timed out after {secs:.3}s"),
                         );
                     }
-                    ToolResult {
-                        content: format!(
-                            "Tool '{name}' timed out after {secs:.3}s and was cancelled. \
-                             The operation may be hung; consider a narrower request."
-                        ),
-                        is_error: true,
-                    }
+                    unknown_effect = Some((
+                        ToolUnknownReason::TimedOut {
+                            timeout_ms: timeout.as_millis().min(u128::from(u64::MAX)) as u64,
+                        },
+                        serde_json::json!({
+                            "tool": name,
+                            "call_id": id,
+                            "timeout_ms": timeout.as_millis(),
+                        }),
+                    ));
+                    (
+                        ToolResult {
+                            content: format!(
+                                "Tool '{name}' timed out after {secs:.3}s and was cancelled. \
+                                 The operation may be hung; consider a narrower request."
+                            ),
+                            is_error: true,
+                        },
+                        None,
+                    )
                 }
                 Ok(Ok(result)) => result,
                 Ok(Err(payload)) => {
@@ -976,15 +1650,74 @@ async fn execute_single_with_streaming(
                         ctx.output
                             .emit_tool_panicked(&ctx.msg_id, id, name, &panic_message);
                     }
-                    ToolResult {
-                        content: format!(
-                            "Tool panicked; session continuing. Panic: {}",
-                            panic_message
-                        ),
-                        is_error: true,
-                    }
+                    unknown_effect = Some((
+                        ToolUnknownReason::Panicked {
+                            message: panic_message.clone(),
+                        },
+                        serde_json::json!({
+                            "tool": name,
+                            "call_id": id,
+                            "panic": panic_message.clone(),
+                        }),
+                    ));
+                    (
+                        ToolResult {
+                            content: format!(
+                                "Tool panicked; session continuing. Panic: {}",
+                                panic_message
+                            ),
+                            is_error: true,
+                        },
+                        None,
+                    )
                 }
             };
+            if matches!(
+                observed_effect.as_ref().map(|(disposition, _)| disposition),
+                Some(wcore_tools::effects::ToolEffectDisposition::Unknown)
+            ) {
+                unknown_effect = Some((
+                    ToolUnknownReason::AmbiguousFailure {
+                        error: crate::output_redaction::redact_tool_output(&r.content),
+                    },
+                    observed_effect
+                        .as_ref()
+                        .map(|(_, receipt)| receipt.clone())
+                        .unwrap_or_else(|| serde_json::json!({"outcome":"unknown"})),
+                ));
+            }
+            if unknown_effect.is_none() && call_cancel.is_cancelled() && r.is_error {
+                unknown_effect = Some((
+                    ToolUnknownReason::Cancelled {
+                        reason: "tool cancellation observed after durable start".to_string(),
+                    },
+                    serde_json::json!({
+                        "tool": name,
+                        "call_id": id,
+                        "cancelled": true,
+                    }),
+                ));
+            }
+            if unknown_effect.is_none()
+                && r.is_error
+                && (matches!(effect_contract.kind, ToolEffectKind::Opaque)
+                    || matches!(effect_contract.kind, ToolEffectKind::ProviderIdempotent)
+                    || (matches!(
+                        effect_contract.kind,
+                        ToolEffectKind::FilesystemTransactional
+                    ) && observed_effect.is_none()))
+            {
+                unknown_effect = Some((
+                    ToolUnknownReason::AmbiguousFailure {
+                        error: crate::output_redaction::redact_tool_output(&r.content),
+                    },
+                    serde_json::json!({
+                        "tool": name,
+                        "call_id": id,
+                        "reported_error": true,
+                    }),
+                ));
+            }
             // AUDIT B-4: record the dispatch outcome against the
             // breaker. A timeout or panic counts as a failure (synthetic
             // `is_error: true` results above), so a tool that keeps
@@ -1014,6 +1747,34 @@ async fn execute_single_with_streaming(
                 content
             };
             let content = crate::output_redaction::redact_tool_output(&content);
+            if let Some(lease) = started_effect {
+                let durable_result = serde_json::json!({
+                    "content": content.clone(),
+                    "is_error": r.is_error,
+                    "effect_receipt": observed_effect
+                        .as_ref()
+                        .map(|(_, receipt)| receipt.clone()),
+                });
+                #[cfg(test)]
+                inject_dispatcher_crash(DispatcherCrashCut::BeforeTerminalAppend);
+                let journal_result = if let Some((reason, evidence)) = unknown_effect {
+                    lease.unknown(reason, evidence).map(|_| ())
+                } else if r.is_error {
+                    lease.fail(content.clone(), durable_result)
+                } else {
+                    lease.succeed(durable_result)
+                };
+                if let Err(error) = journal_result {
+                    return (
+                        journal_authority_failure(id, error),
+                        None,
+                        crate::hooks::HookOutcome::default(),
+                        false,
+                    );
+                }
+                #[cfg(test)]
+                inject_dispatcher_crash(DispatcherCrashCut::AfterTerminalAppend);
+            }
             (
                 ToolResult {
                     content,
@@ -1022,13 +1783,40 @@ async fn execute_single_with_streaming(
                 modifier,
             )
         }
-        None => (
-            ToolResult {
-                content: format!("Unknown tool: {}", name),
-                is_error: true,
-            },
-            None,
-        ),
+        None => {
+            let journal_result = prepare_tool_effect(
+                effect_scope,
+                id,
+                ordinal,
+                name,
+                input,
+                &effective_input,
+                wcore_types::tool::ToolEffectContract::default(),
+                None,
+            )
+            .and_then(|lease| {
+                lease
+                    .map(|lease| lease.not_started(ToolNotStartedReason::UnknownTool))
+                    .transpose()
+                    .map_err(|error| error.to_string())
+                    .map(|_| ())
+            });
+            if let Err(error) = journal_result {
+                return (
+                    journal_authority_failure(id, error),
+                    None,
+                    crate::hooks::HookOutcome::default(),
+                    false,
+                );
+            }
+            (
+                ToolResult {
+                    content: format!("Unknown tool: {}", name),
+                    is_error: true,
+                },
+                None,
+            )
+        }
     };
 
     // Run post-tool-use hooks
@@ -1119,7 +1907,7 @@ pub async fn execute_tool_calls_with_approval_and_budget(
     writer: &Arc<dyn ProtocolEmitter>,
     msg_id: &str,
     allow_list: &[String],
-    mut hooks: Option<&mut HookEngine>,
+    hooks: Option<&mut HookEngine>,
     compaction_level: wcore_compact::CompactionLevel,
     toon_enabled: bool,
     budget: Option<&ToolBudgetTracker>,
@@ -1128,13 +1916,52 @@ pub async fn execute_tool_calls_with_approval_and_budget(
         &std::sync::Arc<dyn wcore_tools::file_write_notifier::FileWriteNotifier>,
     >,
 ) -> Result<ToolCallOutcome, ExecutionControl> {
+    execute_tool_calls_with_approval_budget_and_effects(
+        registry,
+        tool_calls,
+        approval_manager,
+        writer,
+        msg_id,
+        allow_list,
+        hooks,
+        compaction_level,
+        toon_enabled,
+        budget,
+        cancel,
+        file_write_notifier,
+        None,
+        None,
+    )
+    .await
+}
+
+/// Host-approval variant of the F13 production dispatch entry point.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn execute_tool_calls_with_approval_budget_and_effects(
+    registry: &ToolRegistry,
+    tool_calls: &[ContentBlock],
+    approval_manager: &Arc<ToolApprovalManager>,
+    writer: &Arc<dyn ProtocolEmitter>,
+    msg_id: &str,
+    allow_list: &[String],
+    mut hooks: Option<&mut HookEngine>,
+    compaction_level: wcore_compact::CompactionLevel,
+    toon_enabled: bool,
+    budget: Option<&ToolBudgetTracker>,
+    cancel: &CancellationToken,
+    file_write_notifier: Option<
+        &std::sync::Arc<dyn wcore_tools::file_write_notifier::FileWriteNotifier>,
+    >,
+    effect_scope: Option<&TurnEffectScope>,
+    effect_ordinals: Option<&[u64]>,
+) -> Result<ToolCallOutcome, ExecutionControl> {
     let mut results = Vec::new();
     let mut modifiers = Vec::new();
     let mut hook_outcomes = Vec::new();
     // `tool_use` ids whose result came from the dispatch timeout-cancel path.
     let mut cancelled_ids = Vec::new();
 
-    for call in tool_calls {
+    for (ordinal, call) in tool_calls.iter().enumerate() {
         let ContentBlock::ToolUse {
             id, name, input, ..
         } = call
@@ -1284,13 +2111,30 @@ pub async fn execute_tool_calls_with_approval_and_budget(
                         call_id: id.clone(),
                         reason: reason.clone(),
                     });
-                    results.push(ContentBlock::ToolResult {
+                    let denied = ContentBlock::ToolResult {
                         tool_use_id: id.clone(),
                         content: crate::output_redaction::redact_tool_output(&format!(
                             "Tool denied: {reason}"
                         )),
                         is_error: true,
-                    });
+                    };
+                    let contract = tool
+                        .map(|tool| tool.effect_contract(input))
+                        .unwrap_or_default();
+                    let denied = record_tool_not_started(
+                        effect_scope,
+                        id,
+                        ordinal as u64,
+                        name,
+                        input,
+                        input,
+                        contract,
+                        ToolNotStartedReason::ApprovalDenied {
+                            approval_id: id.clone(),
+                        },
+                    )
+                    .map_or_else(|error| journal_authority_failure(id, error), |()| denied);
+                    results.push(denied);
                     modifiers.push(None);
                     hook_outcomes.push(crate::hooks::HookOutcome::default());
                     continue;
@@ -1328,6 +2172,11 @@ pub async fn execute_tool_calls_with_approval_and_budget(
                 approval_bound,
                 cancel,
                 file_write_notifier,
+                effect_scope,
+                effect_ordinals
+                    .and_then(|ordinals| ordinals.get(ordinal))
+                    .copied()
+                    .unwrap_or(ordinal as u64),
             )
             .await;
         }
@@ -1495,6 +2344,21 @@ fn truncate_display(s: &str, max: usize) -> String {
 struct Batch<'a> {
     is_concurrent: bool,
     calls: Vec<&'a ContentBlock>,
+}
+
+fn durable_tool_call_ordinal(
+    effect_ordinals: Option<&[u64]>,
+    calls: &[ContentBlock],
+    call: &ContentBlock,
+) -> u64 {
+    let local = calls
+        .iter()
+        .position(|candidate| std::ptr::eq(candidate, call))
+        .expect("partition retains references into the original call slice");
+    effect_ordinals
+        .and_then(|ordinals| ordinals.get(local))
+        .copied()
+        .unwrap_or(local as u64)
 }
 
 fn partition<'a>(registry: &ToolRegistry, calls: &'a [ContentBlock]) -> Vec<Batch<'a>> {
@@ -1752,6 +2616,349 @@ mod tests {
         }));
         registry.register(Box::new(MockNonDeferredTool));
         registry
+    }
+
+    fn effect_fixture() -> (
+        tempfile::TempDir,
+        crate::session_journal::SessionJournal,
+        TurnEffectScope,
+    ) {
+        use crate::journal_effects::JournalEffectCoordinator;
+        use crate::session_journal::{SessionEvent, SessionJournal};
+
+        let dir = tempfile::tempdir().unwrap();
+        let journal = SessionJournal::open(dir.path().join("session.journal"), "session").unwrap();
+        journal
+            .append(SessionEvent::TurnStarted {
+                turn_id: "turn".into(),
+                user_message: "test".into(),
+            })
+            .unwrap();
+        let scope = JournalEffectCoordinator::new(journal.clone()).for_turn("turn");
+        (dir, journal, scope)
+    }
+
+    #[tokio::test]
+    async fn durable_dispatch_terminalizes_success_before_return() {
+        use crate::session_journal::{StoredToolInput, ToolEffectState};
+
+        let registry = make_registry_with_deferred();
+        let (_dir, journal, scope) = effect_fixture();
+        let call = ContentBlock::ToolUse {
+            id: "provider-call".into(),
+            name: "MockNonDeferred".into(),
+            input: json!({"cmd": "ok", "secret": "must-not-persist"}),
+            extra: None,
+        };
+
+        let (result, _, _, _) = execute_single_with_budget(
+            &registry,
+            &call,
+            None,
+            wcore_compact::CompactionLevel::Off,
+            false,
+            None,
+            false,
+            &CancellationToken::new(),
+            None,
+            Some(&scope),
+            7,
+        )
+        .await;
+
+        assert!(!block_is_error(&result));
+        let state = journal.state().unwrap();
+        let tool = state.tools.values().next().expect("one durable tool");
+        assert_eq!(tool.provider_call_id, "provider-call");
+        assert_eq!(tool.ordinal, 7);
+        assert!(matches!(tool.effect, ToolEffectState::Succeeded));
+        assert!(matches!(
+            &tool.requested_input,
+            StoredToolInput::Redacted { .. }
+        ));
+        assert!(
+            !serde_json::to_string(&state)
+                .unwrap()
+                .contains("must-not-persist")
+        );
+    }
+
+    #[tokio::test]
+    async fn opaque_reported_error_is_unknown_not_false_terminal_failure() {
+        use crate::session_journal::{ToolEffectState, ToolUnknownReason};
+
+        let registry = make_registry_with_deferred();
+        let (_dir, journal, scope) = effect_fixture();
+        let call = ContentBlock::ToolUse {
+            id: "provider-call".into(),
+            name: "MockNonDeferred".into(),
+            input: json!({}),
+            extra: None,
+        };
+
+        let (result, _, _, _) = execute_single_with_budget(
+            &registry,
+            &call,
+            None,
+            wcore_compact::CompactionLevel::Off,
+            false,
+            None,
+            false,
+            &CancellationToken::new(),
+            None,
+            Some(&scope),
+            0,
+        )
+        .await;
+
+        assert!(block_is_error(&result));
+        let state = journal.state().unwrap();
+        let tool = state.tools.values().next().expect("one durable tool");
+        assert!(matches!(
+            &tool.effect,
+            ToolEffectState::Unknown {
+                reason: ToolUnknownReason::AmbiguousFailure { .. },
+                ..
+            }
+        ));
+    }
+
+    struct CrashCutOpaqueTool {
+        physical_calls: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    #[async_trait::async_trait]
+    impl Tool for CrashCutOpaqueTool {
+        fn name(&self) -> &str {
+            "CrashCutOpaque"
+        }
+
+        fn description(&self) -> &str {
+            "Opaque physical effect used to prove dispatcher crash boundaries"
+        }
+
+        fn input_schema(&self) -> serde_json::Value {
+            json!({ "type": "object", "additionalProperties": false })
+        }
+
+        fn is_concurrency_safe(&self, _input: &serde_json::Value) -> bool {
+            false
+        }
+
+        async fn execute(&self, _input: serde_json::Value) -> ToolResult {
+            self.physical_calls
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            ToolResult {
+                content: "physical effect committed".to_string(),
+                is_error: false,
+            }
+        }
+
+        fn category(&self) -> ToolCategory {
+            ToolCategory::Exec
+        }
+    }
+
+    fn crash_cut_registry(physical_calls: &Arc<std::sync::atomic::AtomicUsize>) -> ToolRegistry {
+        let mut registry = ToolRegistry::new();
+        registry.register(Box::new(CrashCutOpaqueTool {
+            physical_calls: Arc::clone(physical_calls),
+        }));
+        registry
+    }
+
+    #[tokio::test]
+    async fn live_dispatcher_crash_cuts_replay_without_repeating_opaque_effects() {
+        use crate::journal_effects::JournalEffectCoordinator;
+        use crate::session_journal::{
+            SessionEvent, SessionJournal, ToolEffectState, ToolNotStartedReason, ToolUnknownReason,
+        };
+        use std::cell::Cell;
+        use std::sync::atomic::Ordering;
+
+        let cuts = [
+            (DispatcherCrashCut::BeforePrepared, None, 0),
+            (
+                DispatcherCrashCut::AfterPrepared,
+                Some(ToolEffectState::Prepared),
+                0,
+            ),
+            (
+                DispatcherCrashCut::BeforeRunning,
+                Some(ToolEffectState::Prepared),
+                0,
+            ),
+            (
+                DispatcherCrashCut::AfterRunning,
+                Some(ToolEffectState::Running),
+                0,
+            ),
+            (
+                DispatcherCrashCut::AfterPhysicalEffect,
+                Some(ToolEffectState::Running),
+                1,
+            ),
+            (
+                DispatcherCrashCut::BeforeTerminalAppend,
+                Some(ToolEffectState::Running),
+                1,
+            ),
+            (
+                DispatcherCrashCut::AfterTerminalAppend,
+                Some(ToolEffectState::Succeeded),
+                1,
+            ),
+        ];
+
+        for (cut, expected_effect, expected_physical_calls) in cuts {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("session.journal");
+            let journal = SessionJournal::open(&path, "session").unwrap();
+            journal
+                .append(SessionEvent::TurnStarted {
+                    turn_id: "turn".into(),
+                    user_message: "crash-cut proof".into(),
+                })
+                .unwrap();
+            let scope = JournalEffectCoordinator::new(journal.clone()).for_turn("turn");
+            let physical_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let registry = crash_cut_registry(&physical_calls);
+            let call = ContentBlock::ToolUse {
+                id: "provider-call".into(),
+                name: "CrashCutOpaque".into(),
+                input: json!({}),
+                extra: None,
+            };
+
+            let crashed = DISPATCHER_CRASH_CUT
+                .scope(Cell::new(Some(cut)), async {
+                    AssertUnwindSafe(execute_single_with_budget(
+                        &registry,
+                        &call,
+                        None,
+                        wcore_compact::CompactionLevel::Off,
+                        false,
+                        None,
+                        false,
+                        &CancellationToken::new(),
+                        None,
+                        Some(&scope),
+                        3,
+                    ))
+                    .catch_unwind()
+                    .await
+                })
+                .await;
+            assert!(crashed.is_err(), "{cut:?} did not cut the live dispatcher");
+            assert_eq!(
+                physical_calls.load(Ordering::SeqCst),
+                expected_physical_calls,
+                "{cut:?} crossed the physical boundary at the wrong time"
+            );
+
+            drop(scope);
+            drop(journal);
+            drop(registry);
+
+            let replayed = SessionJournal::recovered_state(&path).unwrap();
+            match expected_effect.as_ref() {
+                None => assert!(replayed.tools.is_empty(), "{cut:?}"),
+                Some(expected) => {
+                    let tool = replayed.tools.values().next().expect("one durable tool");
+                    assert_eq!(&tool.effect, expected, "{cut:?}");
+                }
+            }
+
+            let reopened = SessionJournal::open(&path, "session").unwrap();
+            let replayed_tool_id = reopened.state().unwrap().tools.keys().next().cloned();
+            if let (Some(tool_execution_id), Some(effect)) =
+                (replayed_tool_id.as_ref(), expected_effect.as_ref())
+            {
+                match effect {
+                    ToolEffectState::Prepared => {
+                        reopened
+                            .append(SessionEvent::ToolExecutionNotStarted {
+                                tool_execution_id: tool_execution_id.clone(),
+                                reason: ToolNotStartedReason::Cancelled {
+                                    reason: "injected crash before durable start".to_string(),
+                                },
+                            })
+                            .unwrap();
+                    }
+                    ToolEffectState::Running => {
+                        reopened
+                            .append(SessionEvent::ToolExecutionUnknown {
+                                tool_execution_id: tool_execution_id.clone(),
+                                reason: ToolUnknownReason::Interrupted,
+                                evidence: json!({
+                                    "recovery": "dispatcher_crash_cut_test",
+                                    "cut": format!("{cut:?}"),
+                                }),
+                            })
+                            .unwrap();
+                    }
+                    ToolEffectState::Succeeded => {}
+                    other => panic!("unexpected pre-recovery effect at {cut:?}: {other:?}"),
+                }
+            }
+
+            let restarted_scope = JournalEffectCoordinator::new(reopened.clone()).for_turn("turn");
+            let restarted_registry = crash_cut_registry(&physical_calls);
+            let (restarted_result, _, _, _) = execute_single_with_budget(
+                &restarted_registry,
+                &call,
+                None,
+                wcore_compact::CompactionLevel::Off,
+                false,
+                None,
+                false,
+                &CancellationToken::new(),
+                None,
+                Some(&restarted_scope),
+                3,
+            )
+            .await;
+
+            if expected_effect.is_none() {
+                assert!(
+                    !block_is_error(&restarted_result),
+                    "a crash before prepared must allow the first physical attempt"
+                );
+                assert_eq!(physical_calls.load(Ordering::SeqCst), 1, "{cut:?}");
+                assert!(matches!(
+                    reopened
+                        .state()
+                        .unwrap()
+                        .tools
+                        .values()
+                        .next()
+                        .expect("restarted tool")
+                        .effect,
+                    ToolEffectState::Succeeded
+                ));
+            } else {
+                assert!(
+                    block_is_error(&restarted_result),
+                    "{cut:?} must refuse an automatic duplicate attempt"
+                );
+                assert_eq!(
+                    physical_calls.load(Ordering::SeqCst),
+                    expected_physical_calls,
+                    "{cut:?} repeated an opaque physical effect after restart"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn filtered_dispatch_preserves_original_provider_ordinal() {
+        let calls = vec![ContentBlock::ToolUse {
+            id: "provider-call".into(),
+            name: "MockNonDeferred".into(),
+            input: json!({"cmd": "ok"}),
+            extra: None,
+        }];
+        assert_eq!(durable_tool_call_ordinal(Some(&[9]), &calls, &calls[0]), 9);
     }
 
     #[tokio::test]
@@ -2013,6 +3220,8 @@ mod tests {
             false,
             &CancellationToken::new(),
             None,
+            None,
+            0,
         )
         .await;
 
@@ -2053,6 +3262,8 @@ mod tests {
             false,
             &CancellationToken::new(),
             None,
+            None,
+            0,
         )
         .await;
 

@@ -72,7 +72,7 @@ use async_trait::async_trait;
 use serde_json::{Value, json};
 
 use wcore_protocol::events::ToolCategory;
-use wcore_types::tool::{JsonSchema, ToolResult};
+use wcore_types::tool::{JsonSchema, ToolEffectContract, ToolResult};
 
 use crate::Tool;
 use crate::url_safety::is_safe_url;
@@ -760,6 +760,11 @@ impl Tool for WebTool {
         ToolCategory::Info
     }
 
+    fn effect_contract(&self, _input: &Value) -> ToolEffectContract {
+        // External search, extraction, and crawl backends expose no replay reconciler.
+        ToolEffectContract::default()
+    }
+
     async fn execute(&self, input: Value) -> ToolResult {
         let op_str = match input.get("operation").and_then(Value::as_str) {
             Some(s) => s,
@@ -793,6 +798,14 @@ impl Tool for WebTool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use wcore_types::tool::ToolEffectKind;
+
+    #[test]
+    fn effect_contract_remains_opaque() {
+        let contract = WebTool::default().effect_contract(&json!({ "operation": "search" }));
+        assert_eq!(contract.kind, ToolEffectKind::Opaque);
+        assert!(contract.reconciler.is_none());
+    }
 
     fn parse(result: &ToolResult) -> Value {
         serde_json::from_str(&result.content).expect("ToolResult content must be JSON")

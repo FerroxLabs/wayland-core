@@ -18,7 +18,8 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, duplex};
 use wcore_plugin_api::access_gate::PluginAccessGate;
 use wcore_plugin_subprocess::error::SubprocessPluginError;
 use wcore_plugin_subprocess::rpc::{
-    SubprocessRequest, SubprocessResponse, SubprocessResponseBody, SubprocessVerb, ToolDescriptor,
+    CAPABILITY_CALL_TOOL_V2, SubprocessRequest, SubprocessResponse, SubprocessResponseBody,
+    SubprocessToolEffectIdentity, SubprocessVerb, ToolDescriptor,
 };
 use wcore_plugin_subprocess::runner::{
     LoadedSubprocessPlugin, SubprocessPluginRunner, TransportFactory, TransportSpawn,
@@ -213,6 +214,9 @@ enum FixtureScript {
     CrashOnCall,
     /// Honor Init + ListTools + CallTool with a successful echo response.
     EchoOk,
+    /// Simulate an older plugin that does not advertise or understand the
+    /// versioned durable-effect call verb.
+    LegacyEchoOk,
 }
 
 /// Build a `TransportFactory` whose successive calls return spawns driven
@@ -250,13 +254,17 @@ async fn spawn_for_script(script: FixtureScript) -> TransportSpawn {
         let Some(req) = read_request(&mut reader).await else {
             return;
         };
+        let capabilities = match &script {
+            FixtureScript::EchoOk => vec![CAPABILITY_CALL_TOOL_V2.to_string()],
+            FixtureScript::CrashOnCall | FixtureScript::LegacyEchoOk => Vec::new(),
+        };
         write_response(
             &mut writer,
             &SubprocessResponse::new(
                 req.id,
                 SubprocessResponseBody::InitResult {
                     manifest_version: "0.1.0".into(),
-                    capabilities: vec![],
+                    capabilities,
                 },
             ),
         )
@@ -288,7 +296,7 @@ async fn spawn_for_script(script: FixtureScript) -> TransportSpawn {
                 let _ = read_request(&mut reader).await;
                 drop(writer);
             }
-            FixtureScript::EchoOk => loop {
+            FixtureScript::EchoOk | FixtureScript::LegacyEchoOk => loop {
                 let Some(req) = read_request(&mut reader).await else {
                     break;
                 };
@@ -300,6 +308,31 @@ async fn spawn_for_script(script: FixtureScript) -> TransportSpawn {
                                 req.id,
                                 SubprocessResponseBody::CallToolResult {
                                     stdout: format!("{name}:{input}"),
+                                    structured: Some(input),
+                                    is_error: false,
+                                },
+                            ),
+                        )
+                        .await;
+                    }
+                    SubprocessVerb::CallToolV2 {
+                        name,
+                        input,
+                        effect,
+                    } => {
+                        assert!(
+                            matches!(&script, FixtureScript::EchoOk),
+                            "legacy plugin received unnegotiated call_tool_v2"
+                        );
+                        write_response(
+                            &mut writer,
+                            &SubprocessResponse::new(
+                                req.id,
+                                SubprocessResponseBody::CallToolResult {
+                                    stdout: format!(
+                                        "{name}:{input}:{}:{}",
+                                        effect.tool_execution_id, effect.idempotency_key
+                                    ),
                                     structured: Some(input),
                                     is_error: false,
                                 },
@@ -329,10 +362,10 @@ async fn spawn_for_script(script: FixtureScript) -> TransportSpawn {
 }
 
 #[tokio::test]
-async fn crash_during_call_triggers_restart() {
+async fn crash_during_call_restarts_worker_without_replaying_ambiguous_request() {
     // First instance crashes on the first CallTool. Second instance echoes
-    // back. Runner restarts in-place and the host sees a successful
-    // ToolOutput on the (same) `call_tool` invocation.
+    // back. Runner restarts in-place but the ambiguous first request is not
+    // replayed; a later explicit call uses the fresh worker.
     let factory = make_factory(vec![FixtureScript::CrashOnCall, FixtureScript::EchoOk]);
     let gate = Arc::new(PluginAccessGate);
     let LoadedSubprocessPlugin { runner, tools, .. } =
@@ -341,13 +374,75 @@ async fn crash_during_call_triggers_restart() {
             .expect("initial load");
     assert_eq!(tools.len(), 1, "engine-side tools registered at load time");
 
+    let first = runner.call_tool("echo", json!({"k": "v"})).await;
+    assert!(first.is_err(), "ambiguous call must not be replayed");
+    assert_eq!(runner.crash_count(), 1);
+
     let out = runner
         .call_tool("echo", json!({"k": "v"}))
         .await
-        .expect("call_tool succeeds after transparent restart");
+        .expect("subsequent explicit call uses restarted worker");
     assert!(out.stdout.starts_with("echo:"));
-    // Successful retry resets the crash counter (consecutive-only semantics).
+    // A later successful call resets the consecutive crash counter.
     assert_eq!(runner.crash_count(), 0);
+}
+
+#[tokio::test]
+async fn durable_effect_identity_uses_versioned_call_without_changing_legacy_calls() {
+    let factory = make_factory(vec![FixtureScript::EchoOk]);
+    let gate = Arc::new(PluginAccessGate);
+    let LoadedSubprocessPlugin { runner, .. } =
+        SubprocessPluginRunner::load_with_factory(factory, gate, "p")
+            .await
+            .expect("initial load");
+
+    let out = runner
+        .call_tool_with_effect_identity(
+            "echo",
+            json!({"amount": 42}),
+            Some(SubprocessToolEffectIdentity {
+                version: 1,
+                tool_execution_id: "execution-42".into(),
+                idempotency_key: "stable-key-42".into(),
+            }),
+        )
+        .await
+        .expect("versioned call");
+    assert!(out.stdout.contains("execution-42"));
+    assert!(out.stdout.contains("stable-key-42"));
+
+    let legacy = runner
+        .call_tool("echo", json!({"amount": 7}))
+        .await
+        .expect("legacy call");
+    assert!(!legacy.stdout.contains("execution-42"));
+}
+
+#[tokio::test]
+async fn durable_effect_identity_falls_back_for_legacy_subprocess_plugins() {
+    let factory = make_factory(vec![FixtureScript::LegacyEchoOk]);
+    let gate = Arc::new(PluginAccessGate);
+    let LoadedSubprocessPlugin { runner, .. } =
+        SubprocessPluginRunner::load_with_factory(factory, gate, "legacy")
+            .await
+            .expect("initial load");
+
+    let out = runner
+        .call_tool_with_effect_identity(
+            "echo",
+            json!({"amount": 42}),
+            Some(SubprocessToolEffectIdentity {
+                version: 1,
+                tool_execution_id: "execution-legacy".into(),
+                idempotency_key: "stable-key-legacy".into(),
+            }),
+        )
+        .await
+        .expect("legacy call remains functional");
+
+    assert!(out.stdout.starts_with("echo:"));
+    assert!(!out.stdout.contains("execution-legacy"));
+    assert!(!out.stdout.contains("stable-key-legacy"));
 }
 
 #[tokio::test]
@@ -363,10 +458,8 @@ async fn three_consecutive_crashes_disables_plugin() {
             .await
             .expect("initial load");
 
-    // Strike 1: crash → restart attempt → second instance also crashes on
-    // the retried call. Net effect: strike count climbs as the retry
-    // re-trips. Drive call_tool until the dedicated auto-disable error
-    // surfaces.
+    // Each explicit call takes one strike and restarts only for the next
+    // invocation. Drive calls until the dedicated auto-disable error surfaces.
     let mut last_err: Option<SubprocessPluginError> = None;
     for _ in 0..10 {
         match runner.call_tool("echo", json!({})).await {
@@ -413,11 +506,8 @@ async fn restart_preserves_registered_tools() {
     let tool_names_before: Vec<String> = tools.iter().map(|t| t.name.clone()).collect();
     assert_eq!(tool_names_before, vec!["echo".to_string()]);
 
-    // Trigger restart via a crash-then-success cycle.
-    let _ = runner
-        .call_tool("echo", json!({"x": 1}))
-        .await
-        .expect("post-restart call_tool succeeds");
+    // Trigger restart; the ambiguous call fails without replay.
+    assert!(runner.call_tool("echo", json!({"x": 1})).await.is_err());
 
     // The same `tools` vector returned by load() is still valid (it's owned
     // by the host apply-pipeline, not by the subprocess). The runner

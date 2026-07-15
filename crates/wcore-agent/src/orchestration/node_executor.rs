@@ -62,11 +62,12 @@ use wcore_types::message::ContentBlock;
 
 use crate::confirm::ToolConfirmer;
 use crate::hooks::HookEngine;
+use crate::journal_effects::TurnEffectScope;
 use crate::orchestration::graph::NodeExecutor;
 use crate::orchestration::{
     ExecutionControl, StreamingContext, ToolCallOutcome,
-    execute_tool_calls_with_approval_and_budget, execute_tool_calls_with_budget,
-    filter_tool_calls_by_policy, merge_policy_outcome,
+    execute_tool_calls_with_approval_budget_and_effects,
+    execute_tool_calls_with_budget_and_effects, filter_tool_calls_by_policy, merge_policy_outcome,
 };
 use crate::policy_gate::PolicyGate;
 use crate::tool_budget::ToolBudgetTracker;
@@ -140,6 +141,10 @@ pub struct AgentExecutorConfig {
     /// preventing the agent's own writes from being treated as user edits.
     pub file_write_notifier:
         Option<std::sync::Arc<dyn wcore_tools::file_write_notifier::FileWriteNotifier>>,
+    /// Unit-test-only crash cut captured before the graph walker moves tool
+    /// dispatch into its spawned node task.
+    #[cfg(test)]
+    pub(crate) dispatcher_crash_cut: Option<super::DispatcherCrashCut>,
 }
 
 /// Approval-flow plumbing for JSON-protocol hosts (e.g. Wayland Desktop).
@@ -159,6 +164,9 @@ pub struct ApprovalChannel {
 /// shared `turn_cell.outcome` slot.
 pub struct AgentNodeExecutor {
     cfg: AgentExecutorConfig,
+    /// F13 durable authority is adapter-private so the public
+    /// `AgentExecutorConfig` struct remains source-compatible.
+    effect_scope: Option<TurnEffectScope>,
     /// Per-turn shared state (tool calls in, outcome + hooks out).
     /// `Arc<TokioMutex<...>>` because the executor is held behind an
     /// `Arc<dyn NodeExecutor>` and the graph may invoke `run_agent`
@@ -184,9 +192,15 @@ impl AgentNodeExecutor {
     pub fn new(cfg: AgentExecutorConfig, turn_cell: Arc<TokioMutex<TurnCell>>) -> Self {
         Self {
             cfg,
+            effect_scope: None,
             turn_cell,
             dispatched: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         }
+    }
+
+    pub(crate) fn with_effect_scope(mut self, effect_scope: Option<TurnEffectScope>) -> Self {
+        self.effect_scope = effect_scope;
+        self
     }
 }
 
@@ -260,7 +274,19 @@ impl NodeExecutor for AgentNodeExecutor {
         drop(cell);
 
         // (f) Dispatch with no lock held.
-        let (outcome, hooks_back) = dispatch_once(&self.cfg, &tool_calls, hooks_owned).await;
+        let dispatch = dispatch_once(
+            &self.cfg,
+            &tool_calls,
+            hooks_owned,
+            self.effect_scope.as_ref(),
+        );
+        #[cfg(test)]
+        let (outcome, hooks_back) = match self.cfg.dispatcher_crash_cut {
+            Some(cut) => super::scope_dispatcher_crash_cut(cut, dispatch).await,
+            None => dispatch.await,
+        };
+        #[cfg(not(test))]
+        let (outcome, hooks_back) = dispatch.await;
 
         let carrier = match &outcome {
             Ok(_) => Value::Object(serde_json::Map::new()),
@@ -282,6 +308,7 @@ async fn dispatch_once(
     cfg: &AgentExecutorConfig,
     tool_calls: &[ContentBlock],
     mut hooks: Option<HookEngine>,
+    effect_scope: Option<&TurnEffectScope>,
 ) -> (
     Result<ToolCallOutcome, ExecutionControl>,
     Option<HookEngine>,
@@ -297,15 +324,25 @@ async fn dispatch_once(
     // The policy gate is an unconditional floor, not an alternative approval
     // rail. Filter first, then send every allowed call through the host or
     // terminal approval path selected for this session.
-    let filtered = cfg
+    let mut filtered = cfg
         .policy_gate
         .as_ref()
         .map(|gate| filter_tool_calls_by_policy(tool_calls, gate));
+    if let Some(filtered) = filtered.as_mut() {
+        filtered.journal_denials(&cfg.tools, effect_scope, tool_calls);
+    }
     let allowed_calls = filtered.as_ref().map(|calls| calls.allowed_calls());
     let dispatch_calls = allowed_calls.as_deref().unwrap_or(tool_calls);
+    let effect_ordinals = filtered.as_ref().map(|calls| {
+        calls
+            .allowed
+            .iter()
+            .map(|(original_ordinal, _)| *original_ordinal as u64)
+            .collect::<Vec<_>>()
+    });
 
     let outcome = if let Some(approval) = cfg.approval.as_ref() {
-        execute_tool_calls_with_approval_and_budget(
+        execute_tool_calls_with_approval_budget_and_effects(
             &cfg.tools,
             dispatch_calls,
             &approval.manager,
@@ -318,10 +355,12 @@ async fn dispatch_once(
             cfg.tool_budget.as_ref(),
             &cfg.cancel,
             cfg.file_write_notifier.as_ref(),
+            effect_scope,
+            effect_ordinals.as_deref(),
         )
         .await
     } else {
-        execute_tool_calls_with_budget(
+        execute_tool_calls_with_budget_and_effects(
             &cfg.tools,
             dispatch_calls,
             &cfg.confirmer,
@@ -332,6 +371,8 @@ async fn dispatch_once(
             cfg.tool_budget.as_ref(),
             &cfg.cancel,
             cfg.file_write_notifier.as_ref(),
+            effect_scope,
+            effect_ordinals.as_deref(),
         )
         .await
     };
@@ -379,6 +420,7 @@ mod tests {
             learned_policy: None,
             cancel: CancellationToken::new(),
             file_write_notifier: None,
+            dispatcher_crash_cut: None,
         }
     }
 

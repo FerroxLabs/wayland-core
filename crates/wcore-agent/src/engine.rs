@@ -41,7 +41,10 @@ use crate::output::OutputSink;
 use crate::plan::prompt as plan_prompt;
 use crate::plan::state::PlanState;
 use crate::session::{ActiveSession, Session, SessionManager};
-use crate::session_journal::{SessionEvent, SessionJournal, state_payload_digest};
+use crate::session_journal::{
+    SessionEvent, SessionJournal, ToolEffectState, ToolNotStartedReason, ToolResolution,
+    ToolResolutionSource, ToolUnknownReason, state_payload_digest,
+};
 
 /// Owns one paid-provider admission until authoritative usage is settled.
 ///
@@ -5097,6 +5100,142 @@ impl AgentEngine {
                 interrupted.join(", ")
             )));
         }
+
+        let running_tool_ids = state
+            .tools
+            .iter()
+            .filter(|(_, tool)| matches!(tool.effect, ToolEffectState::Running))
+            .map(|(tool_execution_id, _)| tool_execution_id.clone())
+            .collect::<Vec<_>>();
+        for tool_execution_id in running_tool_ids {
+            self.append_journal_event(SessionEvent::ToolExecutionUnknown {
+                tool_execution_id,
+                reason: ToolUnknownReason::Interrupted,
+                evidence: serde_json::json!({
+                    "recovery": "engine_startup",
+                    "prior_state": "running",
+                }),
+            })
+            .await?;
+        }
+
+        if let Some(turn_id) = interrupted.first() {
+            let refreshed = journal
+                .state()
+                .map_err(|error| AgentError::SessionAuthority(error.to_string()))?;
+            let prepared_tool_ids = refreshed
+                .tools
+                .iter()
+                .filter(|(_, tool)| {
+                    tool.turn_id == turn_id.as_str()
+                        && matches!(tool.effect, ToolEffectState::Prepared)
+                })
+                .map(|(tool_execution_id, _)| tool_execution_id.clone())
+                .collect::<Vec<_>>();
+            for tool_execution_id in prepared_tool_ids {
+                self.append_journal_event(SessionEvent::ToolExecutionNotStarted {
+                    tool_execution_id,
+                    reason: ToolNotStartedReason::Cancelled {
+                        reason: "interrupted before durable tool start".to_string(),
+                    },
+                })
+                .await?;
+            }
+        }
+
+        let refreshed = journal
+            .state()
+            .map_err(|error| AgentError::SessionAuthority(error.to_string()))?;
+        let filesystem_unknowns = refreshed
+            .tools
+            .iter()
+            .filter_map(|(tool_execution_id, tool)| {
+                let reconciler = tool.effect_contract.reconciler.as_deref()?;
+                if !matches!(
+                    tool.effect_contract.kind,
+                    wcore_types::tool::ToolEffectKind::FilesystemTransactional
+                ) || reconciler != wcore_tools::effects::FILESYSTEM_EFFECT_RECONCILER
+                    || !tool.effect.requires_reconciliation()
+                {
+                    return None;
+                }
+                Some((
+                    tool_execution_id.clone(),
+                    reconciler.to_string(),
+                    tool.effect_receipt.clone(),
+                ))
+            })
+            .collect::<Vec<_>>();
+        let tool_vfs = self
+            .tools
+            .tool_vfs()
+            .unwrap_or_else(|| Arc::new(wcore_tools::vfs::RealFs));
+        for (tool_execution_id, reconciler, encoded_receipt) in filesystem_unknowns {
+            let Some(encoded_receipt) = encoded_receipt else {
+                continue;
+            };
+            let Ok(receipt) = serde_json::from_value::<
+                wcore_tools::effects::FilesystemEffectReceiptV1,
+            >(encoded_receipt) else {
+                continue;
+            };
+            if let Some(checkpoint) = receipt.checkpoint_identity() {
+                let journal = (*journal).clone();
+                let digest = checkpoint.sha256.clone();
+                let Ok(Ok(contents)) =
+                    tokio::task::spawn_blocking(move || journal.load_effect_checkpoint(&digest))
+                        .await
+                else {
+                    continue;
+                };
+                if contents.len() as u64 != checkpoint.len {
+                    continue;
+                }
+            }
+            let Ok(reconciliation) = receipt.reconcile(tool_vfs.as_ref()).await else {
+                continue;
+            };
+            let (resolution, observed) = match reconciliation {
+                wcore_tools::effects::FilesystemReconciliation::AlreadyApplied { current } => (
+                    ToolResolution::Succeeded {
+                        result: serde_json::json!({
+                            "recovered": true,
+                            "effect_receipt": receipt,
+                        }),
+                    },
+                    current,
+                ),
+                wcore_tools::effects::FilesystemReconciliation::NotStarted { current } => (
+                    ToolResolution::NotStarted {
+                        reason: ToolNotStartedReason::Cancelled {
+                            reason: "filesystem preimage remained unchanged after interruption"
+                                .to_string(),
+                        },
+                    },
+                    current,
+                ),
+                wcore_tools::effects::FilesystemReconciliation::Conflict { .. } => continue,
+            };
+            let observed = wcore_tools::effects::FilesystemObservationReceipt::from(observed);
+            self.resolve_unknown_tool_effect(
+                tool_execution_id,
+                resolution,
+                ToolResolutionSource::Reconciler { reconciler },
+                serde_json::json!({
+                    "recovery": "engine_startup",
+                    "observed": observed,
+                }),
+            )?;
+        }
+
+        let unresolved = self.tool_effects_requiring_reconciliation()?;
+        if !unresolved.is_empty() {
+            return Err(AgentError::SessionAuthority(format!(
+                "unresolved tool effects require reconciliation before continuation: {}",
+                unresolved.join(", ")
+            )));
+        }
+
         if let Some(turn_id) = interrupted.into_iter().next() {
             self.append_journal_event(SessionEvent::TurnFailed {
                 turn_id,
@@ -5105,6 +5244,42 @@ impl AgentEngine {
             .await?;
         }
         Ok(())
+    }
+
+    /// Return durable tool executions that must be reconciled before the
+    /// engine may start another turn. IDs are stable and sorted by the journal
+    /// reducer's `BTreeMap` ordering.
+    pub fn tool_effects_requiring_reconciliation(&self) -> Result<Vec<String>, AgentError> {
+        let journal = self.session_journal.as_ref().ok_or_else(|| {
+            AgentError::SessionAuthority("session journal is not initialized".to_string())
+        })?;
+        let state = journal
+            .state()
+            .map_err(|error| AgentError::SessionAuthority(error.to_string()))?;
+        Ok(state
+            .tools
+            .iter()
+            .filter(|(_, tool)| tool.effect.requires_reconciliation())
+            .map(|(tool_execution_id, _)| tool_execution_id.clone())
+            .collect())
+    }
+
+    /// Persist an explicit reconciler/operator decision for one unknown tool
+    /// effect. Continuation remains blocked until every unresolved ID has a
+    /// durable resolution.
+    pub fn resolve_unknown_tool_effect(
+        &self,
+        tool_execution_id: impl Into<String>,
+        resolution: ToolResolution,
+        source: ToolResolutionSource,
+        evidence: serde_json::Value,
+    ) -> Result<(), AgentError> {
+        let journal = self.session_journal.as_ref().cloned().ok_or_else(|| {
+            AgentError::SessionAuthority("session journal is not initialized".to_string())
+        })?;
+        crate::journal_effects::JournalEffectCoordinator::new(journal)
+            .resolve_tool(tool_execution_id, resolution, source, evidence)
+            .map_err(|error| AgentError::SessionAuthority(error.to_string()))
     }
 
     async fn sync_journal_conversation(&self, turn_id: &str) -> Result<(), AgentError> {
@@ -7577,6 +7752,19 @@ impl AgentEngine {
                     msg_id: self.current_msg_id.clone(),
                 }
             });
+            let effect_scope = match (self.session_journal.as_ref(), journal_turn_id) {
+                (Some(journal), Some(turn_id)) => Some(
+                    crate::journal_effects::JournalEffectCoordinator::new(journal.clone())
+                        .for_turn(turn_id),
+                ),
+                (Some(_), None) => {
+                    return Err(AgentError::SessionAuthority(
+                        "tool dispatch has journal authority but no active durable turn"
+                            .to_string(),
+                    ));
+                }
+                (None, _) => None,
+            };
             let exec_cfg = AgentExecutorConfig {
                 tools: self.tools.clone(),
                 confirmer: self.confirmer.clone(),
@@ -7612,6 +7800,8 @@ impl AgentEngine {
                 // Write/Edit self-originated writes are suppressed by the
                 // file watcher instead of re-entering context as user edits.
                 file_write_notifier: self.tool_write_notifier().cloned(),
+                #[cfg(test)]
+                dispatcher_crash_cut: crate::orchestration::take_dispatcher_crash_cut(),
             };
             // Move tool_calls + hooks into the per-turn cell. The
             // adapter's `run_agent` consumes `tool_calls` once; hooks
@@ -7621,8 +7811,9 @@ impl AgentEngine {
                 tool_calls.clone(),
                 self.hooks.take(),
             )));
-            let executor: Arc<dyn NodeExecutor> =
-                Arc::new(AgentNodeExecutor::new(exec_cfg, cell.clone()));
+            let executor: Arc<dyn NodeExecutor> = Arc::new(
+                AgentNodeExecutor::new(exec_cfg, cell.clone()).with_effect_scope(effect_scope),
+            );
             // v0.8.0 Task K: route via the unified selector. When the
             // engine has a wired `TemplateRouter`, lock it for the
             // single `choose` call (the scorer mutates RNG state); the
@@ -8225,6 +8416,13 @@ impl AgentEngine {
                 .push(Message::now(Role::User, tool_results_content));
             if let Some(turn_id) = journal_turn_id {
                 self.sync_journal_conversation(turn_id).await?;
+                let unresolved = self.tool_effects_requiring_reconciliation()?;
+                if !unresolved.is_empty() {
+                    return Err(AgentError::SessionAuthority(format!(
+                        "unresolved tool effects require reconciliation before continuation: {}",
+                        unresolved.join(", ")
+                    )));
+                }
             }
             if let Some(reason) = monitor_replan {
                 // The directive now exists in the committed transcript and
@@ -17779,7 +17977,9 @@ mod audit_2026_05_22_tests {
     use wcore_egress::{AllowAllPolicy, EgressClient};
     use wcore_providers::retry::{builder_send_with_retry, scope_max_retries};
     use wcore_providers::{LlmProvider, ProviderError};
+    use wcore_tools::Tool;
     use wcore_tools::registry::ToolRegistry;
+    use wcore_tools::vfs::{FileContentIdentity, RealFs, VirtualFs};
     use wcore_types::llm::{LlmEvent, LlmRequest};
     use wcore_types::message::{FinishReason, StopReason, TokenUsage};
     use wiremock::matchers::method;
@@ -19371,6 +19571,561 @@ mod audit_2026_05_22_tests {
             Some(crate::session_journal::TurnCompletion::Committed { assistant_message })
                 if assistant_message == "session alive"
         )));
+    }
+
+    #[tokio::test]
+    async fn startup_transitions_running_tool_to_unknown_and_blocks_before_provider_dispatch() {
+        let dir = tempfile::tempdir().unwrap();
+        let manager = crate::session::SessionManager::new(dir.path().to_path_buf(), 10);
+        let active = manager
+            .create_for_run("test", "test-model", "/tmp", Some("f1300001"))
+            .unwrap();
+        active
+            .journal
+            .append(crate::session_journal::SessionEvent::TurnStarted {
+                turn_id: "interrupted-turn".into(),
+                user_message: "interrupted".into(),
+            })
+            .unwrap();
+        let scope = crate::journal_effects::JournalEffectCoordinator::new(active.journal.clone())
+            .for_turn("interrupted-turn");
+        let running = scope
+            .prepare_tool(
+                "provider-tool-call",
+                0,
+                "OpaqueRemote",
+                json!({"secret": "requested"}),
+                json!({"secret": "effective"}),
+            )
+            .unwrap()
+            .start()
+            .unwrap();
+        let tool_execution_id = running.id().to_owned();
+        drop(running);
+
+        let provider = Arc::new(ScriptedProvider::new(vec![vec![done_endturn()]]));
+        let calls = provider.call_counter();
+        let mut config = wcore_config::config::Config::default();
+        config.session.enabled = true;
+        config.session.directory = dir.path().to_string_lossy().into_owned();
+        let mut engine = super::AgentEngine::resume_active_with_provider(
+            provider,
+            config,
+            ToolRegistry::new(),
+            Arc::new(NullOutput),
+            active,
+        );
+
+        let error = engine.run("must remain blocked", "m-1").await.unwrap_err();
+        assert!(matches!(
+            &error,
+            super::AgentError::SessionAuthority(message)
+                if message.contains(&tool_execution_id)
+                    && message.contains("require reconciliation")
+        ));
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+        assert_eq!(
+            engine.tool_effects_requiring_reconciliation().unwrap(),
+            vec![tool_execution_id.clone()]
+        );
+        let state = engine.session_journal.as_ref().unwrap().state().unwrap();
+        assert!(matches!(
+            &state.tools[&tool_execution_id].effect,
+            crate::session_journal::ToolEffectState::Unknown {
+                reason: crate::session_journal::ToolUnknownReason::Interrupted,
+                evidence,
+            } if evidence["recovery"] == "engine_startup"
+        ));
+        assert!(state.turns["interrupted-turn"].completion.is_none());
+    }
+
+    struct RestartProofOpaqueTool {
+        physical_calls: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    #[async_trait]
+    impl Tool for RestartProofOpaqueTool {
+        fn name(&self) -> &str {
+            "RestartProofOpaque"
+        }
+
+        fn description(&self) -> &str {
+            "Opaque effect used to prove engine restart recovery"
+        }
+
+        fn input_schema(&self) -> serde_json::Value {
+            json!({"type": "object", "additionalProperties": false})
+        }
+
+        fn is_concurrency_safe(&self, _: &serde_json::Value) -> bool {
+            false
+        }
+
+        async fn execute(&self, _: serde_json::Value) -> wcore_types::tool::ToolResult {
+            self.physical_calls
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            wcore_types::tool::ToolResult {
+                content: "physical effect committed".into(),
+                is_error: false,
+            }
+        }
+
+        fn category(&self) -> wcore_protocol::events::ToolCategory {
+            wcore_protocol::events::ToolCategory::Info
+        }
+    }
+
+    fn restart_proof_registry(
+        physical_calls: &Arc<std::sync::atomic::AtomicUsize>,
+    ) -> ToolRegistry {
+        let mut registry = ToolRegistry::new();
+        registry.register(Box::new(RestartProofOpaqueTool {
+            physical_calls: Arc::clone(physical_calls),
+        }));
+        registry
+    }
+
+    #[tokio::test]
+    async fn actual_dispatch_crash_reopens_engine_and_blocks_opaque_replay() {
+        let server = physical_attempt_server().await;
+        let dir = tempfile::tempdir().unwrap();
+        let manager = crate::session::SessionManager::new(dir.path().to_path_buf(), 10);
+        let active = manager
+            .create_for_run("test", "test-model", "/tmp", Some("f1300006"))
+            .unwrap();
+        let provider = Arc::new(
+            ScriptedProvider::new(vec![vec![
+                LlmEvent::ToolUse {
+                    id: "opaque-call".into(),
+                    name: "RestartProofOpaque".into(),
+                    input: json!({}),
+                    extra: None,
+                },
+                LlmEvent::Done {
+                    stop_reason: StopReason::ToolUse,
+                    finish_reason: FinishReason::Stop,
+                    usage: TokenUsage::default(),
+                },
+            ]])
+            .with_physical_url(server.uri()),
+        );
+        let provider_calls = provider.call_counter();
+        let physical_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let mut config = wcore_config::config::Config::default();
+        config.session.enabled = true;
+        config.session.directory = dir.path().to_string_lossy().into_owned();
+        config.tools.allow_list = vec!["RestartProofOpaque".into()];
+        let mut engine = super::AgentEngine::resume_active_with_provider(
+            provider.clone(),
+            config.clone(),
+            restart_proof_registry(&physical_calls),
+            Arc::new(NullOutput),
+            active,
+        );
+
+        let crashed = crate::orchestration::with_dispatcher_crash_after_physical_effect(
+            engine.run("perform opaque effect", "m-1"),
+        )
+        .await;
+        assert!(
+            crashed.is_err(),
+            "the graph must surface its crashed dispatch task as a failed run: {crashed:?}"
+        );
+        let provider_calls_before_restart =
+            provider_calls.load(std::sync::atomic::Ordering::SeqCst);
+        assert!(
+            provider_calls_before_restart > 0,
+            "the live run must reach the scripted provider"
+        );
+        let pre_restart = engine.session_journal.as_ref().unwrap().state().unwrap();
+        assert_eq!(
+            physical_calls.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "the injected crash must happen after the physical effect; result={crashed:?}; state={pre_restart:?}"
+        );
+        assert!(matches!(
+            pre_restart
+                .tools
+                .values()
+                .next()
+                .expect("the dispatcher must durably start the effect")
+                .effect,
+            crate::session_journal::ToolEffectState::Running
+        ));
+
+        drop(engine);
+        let reopened = manager.load_for_run("f1300006").unwrap();
+        let mut restarted = super::AgentEngine::resume_active_with_provider(
+            provider,
+            config,
+            restart_proof_registry(&physical_calls),
+            Arc::new(NullOutput),
+            reopened,
+        );
+
+        let blocked = restarted.run("must not replay", "m-2").await.unwrap_err();
+        assert!(matches!(
+            &blocked,
+            super::AgentError::SessionAuthority(message)
+                if message.contains("require reconciliation")
+        ));
+        assert_eq!(
+            provider_calls.load(std::sync::atomic::Ordering::SeqCst),
+            provider_calls_before_restart,
+            "startup recovery must block before a second provider call"
+        );
+        assert_eq!(
+            physical_calls.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "startup recovery must not repeat the opaque physical effect"
+        );
+        let state = restarted.session_journal.as_ref().unwrap().state().unwrap();
+        let tool = state
+            .tools
+            .values()
+            .next()
+            .expect("one durable tool effect");
+        assert!(matches!(
+            &tool.effect,
+            crate::session_journal::ToolEffectState::Unknown {
+                reason: crate::session_journal::ToolUnknownReason::Interrupted,
+                evidence,
+            } if evidence["recovery"] == "engine_startup"
+        ));
+    }
+
+    async fn assert_untrusted_filesystem_checkpoint_blocks_restart(corrupt: bool) {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("protected.txt");
+        std::fs::write(&target, b"original bytes").unwrap();
+        let manager = crate::session::SessionManager::new(dir.path().to_path_buf(), 10);
+        let active = manager
+            .create_for_run("test", "test-model", "/tmp", Some("f1300005"))
+            .unwrap();
+        active
+            .journal
+            .append(crate::session_journal::SessionEvent::TurnStarted {
+                turn_id: "interrupted-turn".into(),
+                user_message: "interrupted".into(),
+            })
+            .unwrap();
+
+        let input = json!({
+            "file_path": target,
+            "content": "replacement bytes",
+        });
+        let observed = RealFs.observe_file(&target).await.unwrap();
+        let preimage = FileContentIdentity::from_bytes(b"original bytes");
+        let receipt = wcore_tools::effects::FilesystemEffectReceiptV1 {
+            version: wcore_tools::effects::FILESYSTEM_EFFECT_RECEIPT_VERSION,
+            reconciler: wcore_tools::effects::FILESYSTEM_EFFECT_RECONCILER.into(),
+            path: target.clone(),
+            preparation_object: observed.object,
+            precondition: wcore_tools::effects::FilesystemEffectPrecondition::Present {
+                identity: preimage.into(),
+            },
+            checkpoint_identity: Some(preimage.into()),
+            intended: FileContentIdentity::from_bytes(b"replacement bytes").into(),
+        };
+        let checkpoint = receipt.checkpoint_identity().unwrap().clone();
+        let scope = crate::journal_effects::JournalEffectCoordinator::new(active.journal.clone())
+            .for_turn("interrupted-turn");
+        scope
+            .store_effect_checkpoint(&checkpoint.sha256, b"original bytes")
+            .unwrap();
+        let running = scope
+            .prepare_tool_with_effect_receipt(
+                "provider-tool-call",
+                0,
+                "Write",
+                input.clone(),
+                input,
+                wcore_types::tool::ToolEffectContract {
+                    kind: wcore_types::tool::ToolEffectKind::FilesystemTransactional,
+                    reconciler: Some(wcore_tools::effects::FILESYSTEM_EFFECT_RECONCILER.into()),
+                },
+                serde_json::to_value(receipt).unwrap(),
+            )
+            .unwrap()
+            .start()
+            .unwrap();
+        let tool_execution_id = running.id().to_owned();
+        drop(running);
+
+        let checkpoint_path = dir
+            .path()
+            .join(".f1300005.journal.effects")
+            .join(&checkpoint.sha256);
+        if corrupt {
+            std::fs::write(&checkpoint_path, b"corrupt checkpoint").unwrap();
+        } else {
+            std::fs::remove_file(&checkpoint_path).unwrap();
+        }
+
+        let provider = Arc::new(ScriptedProvider::new(vec![vec![done_endturn()]]));
+        let calls = provider.call_counter();
+        let mut config = wcore_config::config::Config::default();
+        config.session.enabled = true;
+        config.session.directory = dir.path().to_string_lossy().into_owned();
+        let mut engine = super::AgentEngine::resume_active_with_provider(
+            provider,
+            config,
+            ToolRegistry::new(),
+            Arc::new(NullOutput),
+            active,
+        );
+
+        let error = engine.run("must remain blocked", "m-1").await.unwrap_err();
+        assert!(matches!(
+            &error,
+            super::AgentError::SessionAuthority(message)
+                if message.contains(&tool_execution_id)
+                    && message.contains("require reconciliation")
+        ));
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+        assert_eq!(std::fs::read(&target).unwrap(), b"original bytes");
+        let state = engine.session_journal.as_ref().unwrap().state().unwrap();
+        assert!(matches!(
+            &state.tools[&tool_execution_id].effect,
+            crate::session_journal::ToolEffectState::Unknown {
+                reason: crate::session_journal::ToolUnknownReason::Interrupted,
+                ..
+            }
+        ));
+    }
+
+    #[tokio::test]
+    async fn missing_filesystem_checkpoint_blocks_restart_without_dispatch_or_mutation() {
+        assert_untrusted_filesystem_checkpoint_blocks_restart(false).await;
+    }
+
+    #[tokio::test]
+    async fn corrupt_filesystem_checkpoint_blocks_restart_without_dispatch_or_mutation() {
+        assert_untrusted_filesystem_checkpoint_blocks_restart(true).await;
+    }
+
+    #[tokio::test]
+    async fn existing_unknown_is_not_hidden_and_operator_resolution_unblocks_next_turn() {
+        let server = physical_attempt_server().await;
+        let dir = tempfile::tempdir().unwrap();
+        let manager = crate::session::SessionManager::new(dir.path().to_path_buf(), 10);
+        let active = manager
+            .create_for_run("test", "test-model", "/tmp", Some("f1300002"))
+            .unwrap();
+        active
+            .journal
+            .append(crate::session_journal::SessionEvent::TurnStarted {
+                turn_id: "interrupted-turn".into(),
+                user_message: "interrupted".into(),
+            })
+            .unwrap();
+        let unknown = crate::journal_effects::JournalEffectCoordinator::new(active.journal.clone())
+            .for_turn("interrupted-turn")
+            .prepare_tool(
+                "provider-tool-call",
+                0,
+                "OpaqueRemote",
+                json!({}),
+                json!({}),
+            )
+            .unwrap()
+            .start()
+            .unwrap()
+            .unknown(
+                crate::session_journal::ToolUnknownReason::AmbiguousFailure {
+                    error: "remote outcome unavailable".into(),
+                },
+                json!({"adapter": "opaque"}),
+            )
+            .unwrap();
+        let tool_execution_id = unknown.id().to_owned();
+        drop(unknown);
+
+        let provider = Arc::new(
+            ScriptedProvider::new(vec![vec![
+                LlmEvent::TextDelta("continued after resolution".into()),
+                done_endturn(),
+            ]])
+            .with_physical_url(server.uri()),
+        );
+        let calls = provider.call_counter();
+        let mut config = wcore_config::config::Config::default();
+        config.session.enabled = true;
+        config.session.directory = dir.path().to_string_lossy().into_owned();
+        let mut engine = super::AgentEngine::resume_active_with_provider(
+            provider,
+            config,
+            ToolRegistry::new(),
+            Arc::new(NullOutput),
+            active,
+        );
+
+        let blocked = engine.run("blocked", "m-1").await.unwrap_err();
+        assert!(blocked.to_string().contains(&tool_execution_id));
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+
+        engine
+            .resolve_unknown_tool_effect(
+                tool_execution_id.clone(),
+                crate::session_journal::ToolResolution::Succeeded {
+                    result: json!({"receipt": "operator-confirmed"}),
+                },
+                crate::session_journal::ToolResolutionSource::Operator {
+                    operator_id: "operator-1".into(),
+                },
+                json!({"ticket": "INC-1"}),
+            )
+            .unwrap();
+        assert!(
+            engine
+                .tool_effects_requiring_reconciliation()
+                .unwrap()
+                .is_empty()
+        );
+
+        let result = engine.run("continue", "m-2").await.unwrap();
+        assert_eq!(result.text, "continued after resolution");
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+        let state = engine.session_journal.as_ref().unwrap().state().unwrap();
+        assert!(matches!(
+            &state.tools[&tool_execution_id].effect,
+            crate::session_journal::ToolEffectState::Succeeded
+        ));
+        assert!(matches!(
+            state.turns["interrupted-turn"].completion.as_ref(),
+            Some(crate::session_journal::TurnCompletion::Failed { error })
+                if error == "interrupted before a terminal journal event"
+        ));
+    }
+
+    #[tokio::test]
+    async fn newly_unknown_tool_stops_the_live_turn_before_another_provider_call() {
+        let server = physical_attempt_server().await;
+        let dir = tempfile::tempdir().unwrap();
+        let manager = crate::session::SessionManager::new(dir.path().to_path_buf(), 10);
+        let active = manager
+            .create_for_run("test", "test-model", "/tmp", Some("f1300004"))
+            .unwrap();
+        let provider = Arc::new(
+            ScriptedProvider::new(vec![
+                vec![
+                    LlmEvent::ToolUse {
+                        id: "opaque-call".into(),
+                        name: "Flaky".into(),
+                        input: json!({}),
+                        extra: None,
+                    },
+                    LlmEvent::Done {
+                        stop_reason: StopReason::ToolUse,
+                        finish_reason: FinishReason::Stop,
+                        usage: TokenUsage::default(),
+                    },
+                ],
+                vec![LlmEvent::TextDelta("must not run".into()), done_endturn()],
+            ])
+            .with_physical_url(server.uri()),
+        );
+        let calls = provider.call_counter();
+        let mut registry = ToolRegistry::new();
+        registry.register(Box::new(AlwaysFailTool));
+        let mut config = wcore_config::config::Config::default();
+        config.session.enabled = true;
+        config.session.directory = dir.path().to_string_lossy().into_owned();
+        config.tools.allow_list = vec!["Flaky".into()];
+        let mut engine = super::AgentEngine::resume_active_with_provider(
+            provider,
+            config,
+            registry,
+            Arc::new(NullOutput),
+            active,
+        );
+
+        let run = engine.run("run once", "m-1").await;
+        let state = engine.session_journal.as_ref().unwrap().state().unwrap();
+        let error = match run {
+            Err(error) => error,
+            Ok(result) => {
+                panic!("unknown effect did not stop the turn: result={result:?}; state={state:?}")
+            }
+        };
+        assert!(
+            matches!(
+                error,
+                super::AgentError::SessionAuthority(ref message)
+                    if message.contains("require reconciliation")
+            ),
+            "unexpected fail-closed error: {error:?}"
+        );
+        assert_eq!(
+            calls.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "an ambiguous tool result must block the next provider request"
+        );
+        let unknowns = state
+            .tools
+            .values()
+            .filter(|tool| tool.effect.requires_reconciliation())
+            .count();
+        assert_eq!(unknowns, 1);
+    }
+
+    #[tokio::test]
+    async fn prepared_tool_is_terminalized_not_started_before_recovered_turn_fails() {
+        let server = physical_attempt_server().await;
+        let dir = tempfile::tempdir().unwrap();
+        let manager = crate::session::SessionManager::new(dir.path().to_path_buf(), 10);
+        let active = manager
+            .create_for_run("test", "test-model", "/tmp", Some("f1300003"))
+            .unwrap();
+        active
+            .journal
+            .append(crate::session_journal::SessionEvent::TurnStarted {
+                turn_id: "interrupted-turn".into(),
+                user_message: "interrupted".into(),
+            })
+            .unwrap();
+        let prepared =
+            crate::journal_effects::JournalEffectCoordinator::new(active.journal.clone())
+                .for_turn("interrupted-turn")
+                .prepare_tool("provider-tool-call", 0, "Read", json!({}), json!({}))
+                .unwrap();
+        let tool_execution_id = prepared.id().to_owned();
+        drop(prepared);
+
+        let provider = Arc::new(
+            ScriptedProvider::new(vec![vec![
+                LlmEvent::TextDelta("safe continuation".into()),
+                done_endturn(),
+            ]])
+            .with_physical_url(server.uri()),
+        );
+        let calls = provider.call_counter();
+        let mut config = wcore_config::config::Config::default();
+        config.session.enabled = true;
+        config.session.directory = dir.path().to_string_lossy().into_owned();
+        let mut engine = super::AgentEngine::resume_active_with_provider(
+            provider,
+            config,
+            ToolRegistry::new(),
+            Arc::new(NullOutput),
+            active,
+        );
+
+        let result = engine.run("continue", "m-1").await.unwrap();
+        assert_eq!(result.text, "safe continuation");
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+        let state = engine.session_journal.as_ref().unwrap().state().unwrap();
+        assert!(matches!(
+            &state.tools[&tool_execution_id].effect,
+            crate::session_journal::ToolEffectState::NotStarted
+        ));
+        assert!(matches!(
+            state.tools[&tool_execution_id]
+                .not_started_reason
+                .as_ref(),
+            Some(crate::session_journal::ToolNotStartedReason::Cancelled { reason })
+                if reason == "interrupted before durable tool start"
+        ));
     }
 
     #[tokio::test]

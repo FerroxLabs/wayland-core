@@ -11,11 +11,13 @@ use wcore_agent::session_journal::{
     DeliveryUnknownReason, ExternalEffectState, GENESIS_CHECKSUM, JournalEnvelope, JournalError,
     ProviderAttemptNotStartedReason, ProviderAttemptPurpose, ProviderStreamEvent,
     ReducedSessionState, SESSION_JOURNAL_SCHEMA_VERSION, SessionEvent, SessionJournal,
-    SessionSnapshot, ToolNotStartedReason, TurnState, load_snapshot, provider_request_digest,
-    replay_from_snapshot, replay_state, state_payload_digest, verify_chain, write_snapshot,
+    SessionSnapshot, StoredToolInput, ToolEffectState, ToolNotStartedReason, TurnState,
+    load_snapshot, provider_request_digest, replay_from_snapshot, replay_state,
+    state_payload_digest, verify_chain, write_snapshot,
 };
 use wcore_types::llm::LlmRequest;
 use wcore_types::message::{ContentBlock, Message, Role};
+use wcore_types::tool::ToolEffectContract;
 
 fn turn_started(turn_id: &str) -> SessionEvent {
     SessionEvent::TurnStarted {
@@ -51,16 +53,22 @@ fn tool_intent(
     requested_input: serde_json::Value,
     effective_input: serde_json::Value,
 ) -> SessionEvent {
-    SessionEvent::ToolIntentRecorded {
+    let requested_input_digest = state_payload_digest(&requested_input).unwrap();
+    let effective_input_digest = state_payload_digest(&effective_input).unwrap();
+    SessionEvent::ToolIntentRecordedV2 {
         tool_execution_id: tool_execution_id.into(),
+        idempotency_key: format!("fixture-key-{tool_execution_id}"),
+        retry_of: None,
         provider_call_id: provider_call_id.into(),
         turn_id: turn_id.into(),
         ordinal,
         tool: tool.into(),
-        requested_input_digest: state_payload_digest(&requested_input).unwrap(),
-        effective_input_digest: state_payload_digest(&effective_input).unwrap(),
-        requested_input,
-        effective_input,
+        requested_input: StoredToolInput::redacted(requested_input_digest.clone()),
+        requested_input_digest,
+        effective_input: StoredToolInput::redacted(effective_input_digest.clone()),
+        effective_input_digest,
+        effect_contract: ToolEffectContract::default(),
+        effect_receipt: None,
     }
 }
 

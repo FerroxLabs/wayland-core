@@ -6,12 +6,14 @@
 //! policy denial never needs a fabricated start event.
 
 use serde_json::Value;
+use wcore_types::tool::ToolEffectContract;
 
 use crate::session_journal::{
     ApprovalOrigin, ApprovalResolution, BudgetAmount, BudgetOwner, BudgetPurpose,
     ChildNotStartedReason, CompletionOutcome, DeliveryCompletion, DeliveryEvidence,
     DeliveryNotStartedReason, DeliveryOrigin, DeliveryUnknownReason, JournalError, SessionEvent,
-    SessionJournal, ToolNotStartedReason, state_payload_digest,
+    SessionJournal, StoredToolInput, ToolNotStartedReason, ToolResolution, ToolResolutionSource,
+    ToolUnknownReason, state_payload_digest,
 };
 
 /// Session-wide journal authority for effect lifecycles.
@@ -91,6 +93,24 @@ impl JournalEffectCoordinator {
             delivery_id,
         })
     }
+
+    /// Persist a reconciliation decision for an unknown tool effect. This is
+    /// also the restart-safe entry point used when no runtime lease survives.
+    pub fn resolve_tool(
+        &self,
+        tool_execution_id: impl Into<String>,
+        resolution: ToolResolution,
+        source: ToolResolutionSource,
+        evidence: Value,
+    ) -> Result<(), JournalError> {
+        self.journal.append(SessionEvent::ToolExecutionResolved {
+            tool_execution_id: tool_execution_id.into(),
+            resolution,
+            source,
+            evidence,
+        })?;
+        Ok(())
+    }
 }
 
 /// Explicit turn identity and journal authority. This is ordinary cloneable
@@ -107,6 +127,16 @@ impl TurnEffectScope {
         &self.turn_id
     }
 
+    pub fn store_effect_checkpoint(
+        &self,
+        digest: &str,
+        contents: &[u8],
+    ) -> Result<(), JournalError> {
+        self.coordinator
+            .journal
+            .store_effect_checkpoint(digest, contents)
+    }
+
     pub fn prepare_tool(
         &self,
         provider_call_id: impl Into<String>,
@@ -115,25 +145,199 @@ impl TurnEffectScope {
         requested_input: Value,
         effective_input: Value,
     ) -> Result<PreparedToolLease, JournalError> {
+        self.prepare_tool_with_contract(
+            provider_call_id,
+            ordinal,
+            tool,
+            requested_input,
+            effective_input,
+            ToolEffectContract::default(),
+        )
+    }
+
+    pub fn prepare_tool_with_contract(
+        &self,
+        provider_call_id: impl Into<String>,
+        ordinal: u64,
+        tool: impl Into<String>,
+        requested_input: Value,
+        effective_input: Value,
+        effect_contract: ToolEffectContract,
+    ) -> Result<PreparedToolLease, JournalError> {
+        self.prepare_tool_recorded(
+            provider_call_id,
+            ordinal,
+            tool,
+            requested_input,
+            effective_input,
+            effect_contract,
+            None,
+            None,
+            None,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn prepare_tool_with_effect_receipt(
+        &self,
+        provider_call_id: impl Into<String>,
+        ordinal: u64,
+        tool: impl Into<String>,
+        requested_input: Value,
+        effective_input: Value,
+        effect_contract: ToolEffectContract,
+        effect_receipt: Value,
+    ) -> Result<PreparedToolLease, JournalError> {
+        self.prepare_tool_recorded(
+            provider_call_id,
+            ordinal,
+            tool,
+            requested_input,
+            effective_input,
+            effect_contract,
+            Some(effect_receipt),
+            None,
+            None,
+        )
+    }
+
+    /// Prepare an invocation whose exact inputs are recoverable only through
+    /// caller-provided secured envelopes. The key still derives from the exact
+    /// plaintext digests, never from the encrypted representation.
+    #[allow(clippy::too_many_arguments)]
+    pub fn prepare_tool_with_secured_inputs(
+        &self,
+        provider_call_id: impl Into<String>,
+        ordinal: u64,
+        tool: impl Into<String>,
+        requested_input: Value,
+        effective_input: Value,
+        effect_contract: ToolEffectContract,
+        secured_requested_input: Value,
+        secured_effective_input: Value,
+    ) -> Result<PreparedToolLease, JournalError> {
+        self.prepare_tool_recorded(
+            provider_call_id,
+            ordinal,
+            tool,
+            requested_input,
+            effective_input,
+            effect_contract,
+            None,
+            Some(secured_requested_input),
+            Some(secured_effective_input),
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn prepare_tool_recorded(
+        &self,
+        provider_call_id: impl Into<String>,
+        ordinal: u64,
+        tool: impl Into<String>,
+        requested_input: Value,
+        effective_input: Value,
+        effect_contract: ToolEffectContract,
+        effect_receipt: Option<Value>,
+        secured_requested_input: Option<Value>,
+        secured_effective_input: Option<Value>,
+    ) -> Result<PreparedToolLease, JournalError> {
         let tool_execution_id = new_id("tool-execution");
+        let provider_call_id = provider_call_id.into();
+        let tool = tool.into();
         let requested_input_digest = state_payload_digest(&requested_input)?;
         let effective_input_digest = state_payload_digest(&effective_input)?;
+        let requested_input = secured_requested_input.map_or_else(
+            || StoredToolInput::redacted(requested_input_digest.clone()),
+            |envelope| StoredToolInput::Secured {
+                exact_digest: requested_input_digest.clone(),
+                envelope,
+            },
+        );
+        let effective_input = secured_effective_input.map_or_else(
+            || StoredToolInput::redacted(effective_input_digest.clone()),
+            |envelope| StoredToolInput::Secured {
+                exact_digest: effective_input_digest.clone(),
+                envelope,
+            },
+        );
+        let session_id = self.coordinator.journal.session_id()?;
+        let idempotency_key = tool_idempotency_key(
+            &session_id,
+            &self.turn_id,
+            &provider_call_id,
+            ordinal,
+            &tool,
+            &effective_input_digest,
+        )?;
         self.coordinator
             .journal
-            .append(SessionEvent::ToolIntentRecorded {
+            .append(SessionEvent::ToolIntentRecordedV2 {
                 tool_execution_id: tool_execution_id.clone(),
-                provider_call_id: provider_call_id.into(),
+                idempotency_key: idempotency_key.clone(),
+                retry_of: None,
+                provider_call_id,
                 turn_id: self.turn_id.clone(),
                 ordinal,
-                tool: tool.into(),
+                tool,
                 requested_input,
                 requested_input_digest,
                 effective_input,
                 effective_input_digest,
+                effect_contract,
+                effect_receipt,
             })?;
         Ok(PreparedToolLease {
             journal: self.coordinator.journal.clone(),
             tool_execution_id,
+            idempotency_key,
+        })
+    }
+
+    /// Create a new physical-attempt authority after a prior attempt was
+    /// durably proven not to have started. The original attempt remains
+    /// immutable, and the retry reuses its exact stable idempotency key,
+    /// inputs, tool identity, effect contract, and reconciliation receipt.
+    pub fn retry_not_started_tool(
+        &self,
+        prior_tool_execution_id: &str,
+    ) -> Result<PreparedToolLease, JournalError> {
+        let state = self.coordinator.journal.state()?;
+        let prior = state.tools.get(prior_tool_execution_id).ok_or_else(|| {
+            JournalError::InvalidTransition(format!(
+                "unknown tool execution id {prior_tool_execution_id}"
+            ))
+        })?;
+        if prior.turn_id != self.turn_id {
+            return Err(JournalError::InvalidTransition(format!(
+                "tool execution {prior_tool_execution_id} belongs to turn {}, not {}",
+                prior.turn_id, self.turn_id
+            )));
+        }
+
+        let tool_execution_id = new_id("tool-execution");
+        let idempotency_key = prior.idempotency_key.clone();
+        self.coordinator
+            .journal
+            .append(SessionEvent::ToolIntentRecordedV2 {
+                tool_execution_id: tool_execution_id.clone(),
+                idempotency_key: idempotency_key.clone(),
+                retry_of: Some(prior_tool_execution_id.to_owned()),
+                provider_call_id: prior.provider_call_id.clone(),
+                turn_id: prior.turn_id.clone(),
+                ordinal: prior.ordinal,
+                tool: prior.tool.clone(),
+                requested_input: prior.requested_input.clone(),
+                requested_input_digest: prior.requested_input_digest.clone(),
+                effective_input: prior.effective_input.clone(),
+                effective_input_digest: prior.effective_input_digest.clone(),
+                effect_contract: prior.effect_contract.clone(),
+                effect_receipt: prior.effect_receipt.clone(),
+            })?;
+        Ok(PreparedToolLease {
+            journal: self.coordinator.journal.clone(),
+            tool_execution_id,
+            idempotency_key,
         })
     }
 
@@ -199,12 +403,18 @@ impl TurnEffectScope {
 pub struct PreparedToolLease {
     journal: SessionJournal,
     tool_execution_id: String,
+    idempotency_key: String,
 }
 
 impl PreparedToolLease {
     #[must_use]
     pub fn id(&self) -> &str {
         &self.tool_execution_id
+    }
+
+    #[must_use]
+    pub fn idempotency_key(&self) -> &str {
+        &self.idempotency_key
     }
 
     #[must_use]
@@ -228,6 +438,7 @@ impl PreparedToolLease {
         Ok(StartedToolLease {
             journal: self.journal,
             tool_execution_id: self.tool_execution_id,
+            idempotency_key: self.idempotency_key,
         })
     }
 
@@ -245,6 +456,7 @@ impl PreparedToolLease {
 pub struct StartedToolLease {
     journal: SessionJournal,
     tool_execution_id: String,
+    idempotency_key: String,
 }
 
 impl StartedToolLease {
@@ -253,22 +465,74 @@ impl StartedToolLease {
         &self.tool_execution_id
     }
 
-    pub fn finish(self, outcome: CompletionOutcome, result: Value) -> Result<(), JournalError> {
+    #[must_use]
+    pub fn idempotency_key(&self) -> &str {
+        &self.idempotency_key
+    }
+
+    pub fn succeed(self, result: Value) -> Result<(), JournalError> {
         self.journal.append(SessionEvent::ToolExecutionFinished {
             tool_execution_id: self.tool_execution_id,
-            outcome,
+            outcome: CompletionOutcome::Succeeded,
             result,
         })?;
         Ok(())
     }
 
-    /// Consume the runtime lease while preserving the durable `Unknown` state
-    /// established by `ToolExecutionStarted`. No second event is required.
+    /// Record an authoritative terminal failure. Timeouts, cancellation, and
+    /// lost transports must use [`Self::unknown`] instead because they do not
+    /// prove that an external effect failed.
+    pub fn fail(self, error: impl Into<String>, result: Value) -> Result<(), JournalError> {
+        self.journal.append(SessionEvent::ToolExecutionFinished {
+            tool_execution_id: self.tool_execution_id,
+            outcome: CompletionOutcome::Failed {
+                error: error.into(),
+            },
+            result,
+        })?;
+        Ok(())
+    }
+
+    pub fn unknown(
+        self,
+        reason: ToolUnknownReason,
+        evidence: Value,
+    ) -> Result<UnknownToolEffect, JournalError> {
+        self.journal.append(SessionEvent::ToolExecutionUnknown {
+            tool_execution_id: self.tool_execution_id.clone(),
+            reason,
+            evidence,
+        })?;
+        Ok(UnknownToolEffect {
+            coordinator: JournalEffectCoordinator {
+                journal: self.journal,
+            },
+            tool_execution_id: self.tool_execution_id,
+        })
+    }
+}
+
+#[derive(Debug)]
+#[must_use = "an unknown tool effect must be reconciled or surfaced to an operator"]
+pub struct UnknownToolEffect {
+    coordinator: JournalEffectCoordinator,
+    tool_execution_id: String,
+}
+
+impl UnknownToolEffect {
     #[must_use]
-    pub fn leave_unknown(self) -> UnknownEffect {
-        UnknownEffect {
-            effect_id: self.tool_execution_id,
-        }
+    pub fn id(&self) -> &str {
+        &self.tool_execution_id
+    }
+
+    pub fn resolve(
+        self,
+        resolution: ToolResolution,
+        source: ToolResolutionSource,
+        evidence: Value,
+    ) -> Result<(), JournalError> {
+        self.coordinator
+            .resolve_tool(self.tool_execution_id, resolution, source, evidence)
     }
 }
 
@@ -489,13 +753,35 @@ fn new_id(prefix: &str) -> String {
     format!("{prefix}-{}", uuid::Uuid::new_v4())
 }
 
+fn tool_idempotency_key(
+    session_id: &str,
+    turn_id: &str,
+    provider_call_id: &str,
+    ordinal: u64,
+    tool: &str,
+    effective_input_digest: &str,
+) -> Result<String, JournalError> {
+    state_payload_digest(&serde_json::json!([
+        "wayland-tool-effect-v1",
+        session_id,
+        turn_id,
+        provider_call_id,
+        ordinal,
+        tool,
+        effective_input_digest,
+    ]))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::session_journal::{
-        ApprovalDecision, BudgetUnit, DeliveryStage, ExternalEffectState,
+        ApprovalDecision, BudgetUnit, DeliveryStage, ExternalEffectState, StoredToolInput,
+        ToolEffectState, ToolState,
     };
     use serde_json::json;
+    use sha2::{Digest, Sha256};
+    use wcore_types::tool::{ToolEffectContract, ToolEffectKind};
 
     struct Fixture {
         _dir: tempfile::TempDir,
@@ -520,6 +806,24 @@ mod tests {
         }
     }
 
+    fn retry_event(prior_id: &str, new_id: &str, prior: &ToolState) -> SessionEvent {
+        SessionEvent::ToolIntentRecordedV2 {
+            tool_execution_id: new_id.to_owned(),
+            idempotency_key: prior.idempotency_key.clone(),
+            retry_of: Some(prior_id.to_owned()),
+            provider_call_id: prior.provider_call_id.clone(),
+            turn_id: prior.turn_id.clone(),
+            ordinal: prior.ordinal,
+            tool: prior.tool.clone(),
+            requested_input: prior.requested_input.clone(),
+            requested_input_digest: prior.requested_input_digest.clone(),
+            effective_input: prior.effective_input.clone(),
+            effective_input_digest: prior.effective_input_digest.clone(),
+            effect_contract: prior.effect_contract.clone(),
+            effect_receipt: prior.effect_receipt.clone(),
+        }
+    }
+
     #[test]
     fn tool_execution_identity_and_transitions_are_durable() {
         let fixture = fixture();
@@ -534,25 +838,611 @@ mod tests {
             )
             .unwrap();
         let execution_id = prepared.id().to_owned();
+        let idempotency_key = prepared.idempotency_key().to_owned();
         assert_ne!(execution_id, "provider-call-1");
+        assert_eq!(idempotency_key.len(), 64);
         assert!(matches!(
             &fixture.journal.state().unwrap().tools[&execution_id].effect,
-            ExternalEffectState::Prepared
+            ToolEffectState::Prepared
         ));
 
         let started = prepared.start().unwrap();
+        assert_eq!(started.idempotency_key(), idempotency_key);
         assert!(matches!(
             &fixture.journal.state().unwrap().tools[&execution_id].effect,
-            ExternalEffectState::Unknown
+            ToolEffectState::Running
         ));
-        started
-            .finish(CompletionOutcome::Succeeded, json!({"ok": true}))
+        started.succeed(json!({"ok": true})).unwrap();
+        assert!(matches!(
+            &fixture.journal.state().unwrap().tools[&execution_id].effect,
+            ToolEffectState::Succeeded
+        ));
+    }
+
+    #[test]
+    fn not_started_retry_is_a_new_linked_attempt_with_the_same_authority() {
+        let fixture = fixture();
+        let first = fixture
+            .scope
+            .prepare_tool_with_contract(
+                "provider-call-retry",
+                0,
+                "Write",
+                json!({"path": "requested"}),
+                json!({"path": "effective"}),
+                ToolEffectContract {
+                    kind: ToolEffectKind::RepeatSafe,
+                    reconciler: None,
+                },
+            )
+            .unwrap();
+        let first_id = first.id().to_owned();
+        let stable_key = first.idempotency_key().to_owned();
+        first
+            .start()
+            .unwrap()
+            .unknown(
+                ToolUnknownReason::Interrupted,
+                json!({"cut": "after_start"}),
+            )
+            .unwrap()
+            .resolve(
+                ToolResolution::NotStarted {
+                    reason: ToolNotStartedReason::Cancelled {
+                        reason: "reconciled preimage".into(),
+                    },
+                },
+                ToolResolutionSource::Reconciler {
+                    reconciler: "test.reconciler.v1".into(),
+                },
+                json!({"current": "preimage"}),
+            )
+            .unwrap();
+
+        let second = fixture.scope.retry_not_started_tool(&first_id).unwrap();
+        let second_id = second.id().to_owned();
+        assert_ne!(second_id, first_id);
+        assert_eq!(second.idempotency_key(), stable_key);
+
+        let state = fixture.journal.state().unwrap();
+        let first_state = &state.tools[&first_id];
+        let second_state = &state.tools[&second_id];
+        assert!(matches!(first_state.effect, ToolEffectState::NotStarted));
+        assert!(matches!(second_state.effect, ToolEffectState::Prepared));
+        assert_eq!(second_state.retry_of.as_deref(), Some(first_id.as_str()));
+        assert_eq!(second_state.idempotency_key, first_state.idempotency_key);
+        assert_eq!(second_state.requested_input, first_state.requested_input);
+        assert_eq!(second_state.effective_input, first_state.effective_input);
+        assert_eq!(second_state.tool, first_state.tool);
+        assert_eq!(second_state.effect_contract, first_state.effect_contract);
+
+        assert!(fixture.scope.retry_not_started_tool(&first_id).is_err());
+        second
+            .not_started(ToolNotStartedReason::Cancelled {
+                reason: "second attempt did not start".into(),
+            })
+            .unwrap();
+        let third = fixture.scope.retry_not_started_tool(&second_id).unwrap();
+        assert_eq!(third.idempotency_key(), stable_key);
+    }
+
+    #[test]
+    fn retry_reducer_rejects_identity_input_tool_and_contract_drift() {
+        fn prior_not_started() -> Fixture {
+            let fixture = fixture();
+            fixture
+                .scope
+                .prepare_tool_with_contract(
+                    "provider-call-retry-mismatch",
+                    0,
+                    "Write",
+                    json!({"path": "requested"}),
+                    json!({"path": "effective"}),
+                    ToolEffectContract {
+                        kind: ToolEffectKind::RepeatSafe,
+                        reconciler: None,
+                    },
+                )
+                .unwrap()
+                .not_started(ToolNotStartedReason::Cancelled {
+                    reason: "not applied".into(),
+                })
+                .unwrap();
+            fixture
+        }
+
+        type RetryMutation = fn(&mut SessionEvent);
+        let mutations: [RetryMutation; 4] = [
+            |event| {
+                if let SessionEvent::ToolIntentRecordedV2 {
+                    idempotency_key, ..
+                } = event
+                {
+                    *idempotency_key = "different-key".into();
+                }
+            },
+            |event| {
+                if let SessionEvent::ToolIntentRecordedV2 {
+                    effective_input,
+                    effective_input_digest,
+                    ..
+                } = event
+                {
+                    let digest = state_payload_digest(&json!({"path": "different"})).unwrap();
+                    *effective_input = StoredToolInput::redacted(digest.clone());
+                    *effective_input_digest = digest;
+                }
+            },
+            |event| {
+                if let SessionEvent::ToolIntentRecordedV2 { tool, .. } = event {
+                    *tool = "Edit".into();
+                }
+            },
+            |event| {
+                if let SessionEvent::ToolIntentRecordedV2 {
+                    effect_contract, ..
+                } = event
+                {
+                    *effect_contract = ToolEffectContract::default();
+                }
+            },
+        ];
+
+        for (index, mutate) in mutations.into_iter().enumerate() {
+            let fixture = prior_not_started();
+            let state = fixture.journal.state().unwrap();
+            let (prior_id, prior) = state.tools.iter().next().unwrap();
+            let mut event = retry_event(prior_id, &format!("retry-{index}"), prior);
+            mutate(&mut event);
+            assert!(matches!(
+                fixture.journal.append(event),
+                Err(JournalError::InvalidTransition(_))
+            ));
+        }
+    }
+
+    #[test]
+    fn retry_is_forbidden_from_every_state_except_not_started() {
+        let prepared = fixture();
+        let lease = prepared
+            .scope
+            .prepare_tool("provider-prepared", 0, "Read", json!({}), json!({}))
+            .unwrap();
+        let prepared_id = lease.id().to_owned();
+        assert!(prepared.scope.retry_not_started_tool(&prepared_id).is_err());
+
+        let running = fixture();
+        let lease = running
+            .scope
+            .prepare_tool("provider-running", 0, "Bash", json!({}), json!({}))
+            .unwrap();
+        let running_id = lease.id().to_owned();
+        let _started = lease.start().unwrap();
+        assert!(running.scope.retry_not_started_tool(&running_id).is_err());
+
+        let unknown = fixture();
+        let lease = unknown
+            .scope
+            .prepare_tool("provider-unknown", 0, "Bash", json!({}), json!({}))
+            .unwrap();
+        let unknown_id = lease.id().to_owned();
+        let _unknown_effect = lease
+            .start()
+            .unwrap()
+            .unknown(ToolUnknownReason::TransportLost, json!({}))
+            .unwrap();
+        assert!(unknown.scope.retry_not_started_tool(&unknown_id).is_err());
+
+        let succeeded = fixture();
+        let lease = succeeded
+            .scope
+            .prepare_tool("provider-succeeded", 0, "Read", json!({}), json!({}))
+            .unwrap();
+        let succeeded_id = lease.id().to_owned();
+        lease.start().unwrap().succeed(json!({"ok": true})).unwrap();
+        assert!(
+            succeeded
+                .scope
+                .retry_not_started_tool(&succeeded_id)
+                .is_err()
+        );
+
+        let failed = fixture();
+        let lease = failed
+            .scope
+            .prepare_tool("provider-failed", 0, "Read", json!({}), json!({}))
+            .unwrap();
+        let failed_id = lease.id().to_owned();
+        lease
+            .start()
+            .unwrap()
+            .fail("authoritative", json!({"ok": false}))
+            .unwrap();
+        assert!(failed.scope.retry_not_started_tool(&failed_id).is_err());
+    }
+
+    #[test]
+    fn tool_ordinal_uniqueness_is_scoped_to_provider_call_identity() {
+        let fixture = fixture();
+        let first = fixture
+            .scope
+            .prepare_tool("provider-round-1-call", 0, "Read", json!({}), json!({}))
+            .unwrap();
+        let second = fixture
+            .scope
+            .prepare_tool("provider-round-2-call", 0, "Read", json!({}), json!({}))
+            .unwrap();
+        assert_ne!(first.idempotency_key(), second.idempotency_key());
+        assert_eq!(fixture.journal.state().unwrap().tools.len(), 2);
+    }
+
+    #[test]
+    fn idempotency_key_domain_has_a_stable_golden_order() {
+        assert_eq!(
+            tool_idempotency_key(
+                "golden-session",
+                "golden-turn",
+                "golden-provider-call",
+                7,
+                "Bash",
+                "golden-effective-digest",
+            )
+            .unwrap(),
+            "8bd364f6a17070cc764509c3a96481c47b923665a91ea93ada8828e7afebaf23"
+        );
+    }
+
+    #[test]
+    fn authoritative_tool_failure_is_distinct_from_unknown() {
+        let fixture = fixture();
+        let lease = fixture
+            .scope
+            .prepare_tool("provider-call-failed", 5, "Read", json!({}), json!({}))
+            .unwrap();
+        let id = lease.id().to_owned();
+        lease
+            .start()
+            .unwrap()
+            .fail("authoritative failure", json!({"receipt": "failed"}))
             .unwrap();
         assert!(matches!(
-            &fixture.journal.state().unwrap().tools[&execution_id].effect,
-            ExternalEffectState::Completed {
-                outcome: CompletionOutcome::Succeeded
+            &fixture.journal.state().unwrap().tools[&id].effect,
+            ToolEffectState::Failed { error } if error == "authoritative failure"
+        ));
+    }
+
+    #[test]
+    fn deterministic_key_uses_exact_digest_while_inputs_are_redacted() {
+        fn prepare_in(dir: &std::path::Path) -> (String, crate::session_journal::ToolState) {
+            let journal =
+                SessionJournal::open(dir.join("session.journal"), "same-session").unwrap();
+            journal
+                .append(SessionEvent::TurnStarted {
+                    turn_id: "same-turn".into(),
+                    user_message: "test".into(),
+                })
+                .unwrap();
+            let scope = JournalEffectCoordinator::new(journal.clone()).for_turn("same-turn");
+            let lease = scope
+                .prepare_tool(
+                    "provider-call",
+                    7,
+                    "Bash",
+                    json!({"token": "requested-secret"}),
+                    json!({"token": "effective-secret"}),
+                )
+                .unwrap();
+            let id = lease.id().to_owned();
+            (
+                lease.idempotency_key().to_owned(),
+                journal.state().unwrap().tools[&id].clone(),
+            )
+        }
+
+        let first = tempfile::tempdir().unwrap();
+        let second = tempfile::tempdir().unwrap();
+        let (first_key, first_state) = prepare_in(first.path());
+        let (second_key, second_state) = prepare_in(second.path());
+
+        assert_eq!(first_key, second_key);
+        assert_eq!(
+            first_state.effective_input_digest,
+            second_state.effective_input_digest
+        );
+        assert!(matches!(
+            first_state.requested_input,
+            StoredToolInput::Redacted { .. }
+        ));
+        assert!(matches!(
+            first_state.effective_input,
+            StoredToolInput::Redacted { .. }
+        ));
+        assert_eq!(
+            first_key,
+            tool_idempotency_key(
+                "same-session",
+                "same-turn",
+                "provider-call",
+                7,
+                "Bash",
+                &first_state.effective_input_digest,
+            )
+            .unwrap()
+        );
+        let encoded = serde_json::to_string(&first_state).unwrap();
+        assert!(!encoded.contains("requested-secret"));
+        assert!(!encoded.contains("effective-secret"));
+        let journal_bytes = std::fs::read(first.path().join("session.journal")).unwrap();
+        let journal_text = String::from_utf8_lossy(&journal_bytes);
+        assert!(!journal_text.contains("requested-secret"));
+        assert!(!journal_text.contains("effective-secret"));
+    }
+
+    #[test]
+    fn secured_input_envelope_and_contract_are_durable_without_changing_key_digest() {
+        let fixture = fixture();
+        let contract = ToolEffectContract {
+            kind: ToolEffectKind::ProviderIdempotent,
+            reconciler: Some("fixture-by-key-v1".into()),
+        };
+        let exact_effective = json!({"token": "secret"});
+        let expected_digest = state_payload_digest(&exact_effective).unwrap();
+        let lease = fixture
+            .scope
+            .prepare_tool_with_secured_inputs(
+                "provider-call-secured",
+                3,
+                "Remote",
+                json!({"requested": "secret"}),
+                exact_effective,
+                contract.clone(),
+                json!({"ciphertext": "requested-envelope"}),
+                json!({"ciphertext": "effective-envelope"}),
+            )
+            .unwrap();
+        let state = fixture.journal.state().unwrap();
+        let tool = &state.tools[lease.id()];
+        assert_eq!(tool.effect_contract, contract);
+        assert_eq!(tool.effective_input_digest, expected_digest);
+        assert!(matches!(
+            &tool.effective_input,
+            StoredToolInput::Secured { exact_digest, envelope }
+                if exact_digest == &expected_digest
+                    && envelope == &json!({"ciphertext": "effective-envelope"})
+        ));
+    }
+
+    #[test]
+    fn unknown_tool_requires_explicit_durable_operator_resolution() {
+        let fixture = fixture();
+        let unknown = fixture
+            .scope
+            .prepare_tool("provider-call-unknown", 4, "Bash", json!({}), json!({}))
+            .unwrap()
+            .start()
+            .unwrap()
+            .unknown(
+                ToolUnknownReason::Interrupted,
+                json!({"boundary": "post_spawn"}),
+            )
+            .unwrap();
+        let id = unknown.id().to_owned();
+        assert!(matches!(
+            &fixture.journal.state().unwrap().tools[&id].effect,
+            ToolEffectState::Unknown {
+                reason: ToolUnknownReason::Interrupted,
+                ..
             }
+        ));
+
+        unknown
+            .resolve(
+                ToolResolution::Succeeded {
+                    result: json!({"receipt": "operator-confirmed"}),
+                },
+                ToolResolutionSource::Operator {
+                    operator_id: "operator-1".into(),
+                },
+                json!({"ticket": "INC-1"}),
+            )
+            .unwrap();
+        let state = fixture.journal.state().unwrap();
+        let tool = &state.tools[&id];
+        assert!(matches!(tool.effect, ToolEffectState::Succeeded));
+        assert!(matches!(
+            tool.resolution_source,
+            Some(ToolResolutionSource::Operator { ref operator_id }) if operator_id == "operator-1"
+        ));
+        assert_eq!(tool.resolution_evidence, Some(json!({"ticket": "INC-1"})));
+        assert!(matches!(
+            JournalEffectCoordinator::new(fixture.journal.clone()).resolve_tool(
+                id,
+                ToolResolution::Failed {
+                    error: "duplicate resolution".into(),
+                    result: None,
+                },
+                ToolResolutionSource::Operator {
+                    operator_id: "operator-2".into(),
+                },
+                json!({}),
+            ),
+            Err(JournalError::InvalidTransition(_))
+        ));
+    }
+
+    #[test]
+    fn filesystem_receipt_is_durable_and_unknown_can_reconcile_not_started() {
+        let fixture = fixture();
+        let contract = ToolEffectContract {
+            kind: ToolEffectKind::FilesystemTransactional,
+            reconciler: Some(wcore_tools::effects::FILESYSTEM_EFFECT_RECONCILER.into()),
+        };
+        let intended = b"new";
+        let receipt = json!({
+            "version": 1,
+            "reconciler": wcore_tools::effects::FILESYSTEM_EFFECT_RECONCILER,
+            "path": "/workspace/file.txt",
+            "preparation_object": {
+                "authority": "in-memory:test",
+                "path": "/workspace/file.txt",
+                "parent": "in-memory-parent:/workspace"
+            },
+            "precondition": { "state": "absent" },
+            "intended": {
+                "sha256": format!("{:x}", Sha256::digest(intended)),
+                "len": intended.len()
+            },
+        });
+        let unknown = fixture
+            .scope
+            .prepare_tool_with_effect_receipt(
+                "provider-call-fs",
+                8,
+                "Write",
+                json!({"file_path":"/workspace/file.txt","content":"new"}),
+                json!({"file_path":"/workspace/file.txt","content":"new"}),
+                contract.clone(),
+                receipt.clone(),
+            )
+            .unwrap()
+            .start()
+            .unwrap()
+            .unknown(
+                ToolUnknownReason::Interrupted,
+                json!({"boundary":"before_cas"}),
+            )
+            .unwrap();
+        let id = unknown.id().to_owned();
+        let prepared = &fixture.journal.state().unwrap().tools[&id];
+        assert_eq!(prepared.effect_contract, contract);
+        assert_eq!(prepared.effect_receipt, Some(receipt));
+
+        unknown
+            .resolve(
+                ToolResolution::NotStarted {
+                    reason: ToolNotStartedReason::Cancelled {
+                        reason: "preimage remained unchanged".into(),
+                    },
+                },
+                ToolResolutionSource::Reconciler {
+                    reconciler: wcore_tools::effects::FILESYSTEM_EFFECT_RECONCILER.into(),
+                },
+                json!({"observed":"preimage"}),
+            )
+            .unwrap();
+        let resolved = &fixture.journal.state().unwrap().tools[&id];
+        assert!(matches!(resolved.effect, ToolEffectState::NotStarted));
+        assert!(matches!(
+            resolved.not_started_reason,
+            Some(ToolNotStartedReason::Cancelled { .. })
+        ));
+    }
+
+    #[test]
+    fn malformed_filesystem_receipt_cannot_cross_the_durable_start_boundary() {
+        let fixture = fixture();
+        let prepared = fixture
+            .scope
+            .prepare_tool_with_effect_receipt(
+                "provider-call-invalid-fs",
+                0,
+                "Write",
+                json!({"file_path":"/workspace/file.txt","content":"new"}),
+                json!({"file_path":"/workspace/file.txt","content":"new"}),
+                ToolEffectContract {
+                    kind: ToolEffectKind::FilesystemTransactional,
+                    reconciler: Some(wcore_tools::effects::FILESYSTEM_EFFECT_RECONCILER.into()),
+                },
+                json!({
+                    "version": 1,
+                    "reconciler": wcore_tools::effects::FILESYSTEM_EFFECT_RECONCILER,
+                    "path": "/workspace/file.txt"
+                }),
+            )
+            .unwrap();
+        let id = prepared.id().to_owned();
+        assert!(matches!(
+            prepared.start(),
+            Err(JournalError::InvalidTransition(message))
+                if message.contains("malformed effect receipt")
+        ));
+        assert!(matches!(
+            fixture.journal.state().unwrap().tools[&id].effect,
+            ToolEffectState::Prepared
+        ));
+    }
+
+    #[test]
+    fn cancellation_and_result_persistence_failure_cannot_false_terminalize() {
+        let fixture = fixture();
+        let prepared = fixture
+            .scope
+            .prepare_tool("provider-call-persist", 6, "Remote", json!({}), json!({}))
+            .unwrap();
+        let id = prepared.id().to_owned();
+        assert!(matches!(
+            fixture.journal.append(SessionEvent::ToolExecutionUnknown {
+                tool_execution_id: id.clone(),
+                reason: ToolUnknownReason::ResultPersistenceFailed {
+                    error: "not running".into(),
+                },
+                evidence: json!({}),
+            }),
+            Err(JournalError::InvalidTransition(_))
+        ));
+
+        let running = prepared.start().unwrap();
+        assert!(matches!(
+            fixture.journal.append(SessionEvent::ToolExecutionFinished {
+                tool_execution_id: id.clone(),
+                outcome: CompletionOutcome::Cancelled,
+                result: json!({}),
+            }),
+            Err(JournalError::InvalidTransition(_))
+        ));
+        let unknown = running
+            .unknown(
+                ToolUnknownReason::ResultPersistenceFailed {
+                    error: "disk full".into(),
+                },
+                json!({"result_digest": "uncommitted"}),
+            )
+            .unwrap();
+        assert_eq!(unknown.id(), id);
+        assert!(matches!(
+            &fixture.journal.state().unwrap().tools[&id].effect,
+            ToolEffectState::Unknown {
+                reason: ToolUnknownReason::ResultPersistenceFailed { error },
+                ..
+            } if error == "disk full"
+        ));
+    }
+
+    #[test]
+    fn opaque_error_is_durable_as_ambiguous_unknown() {
+        let fixture = fixture();
+        let reason = ToolUnknownReason::AmbiguousFailure {
+            error: "remote returned an unproven error".into(),
+        };
+        assert_eq!(
+            serde_json::to_value(&reason).unwrap()["kind"],
+            "ambiguous_failure"
+        );
+        let unknown = fixture
+            .scope
+            .prepare_tool("provider-call-opaque", 8, "Plugin", json!({}), json!({}))
+            .unwrap()
+            .start()
+            .unwrap()
+            .unknown(reason.clone(), json!({"adapter": "opaque"}))
+            .unwrap();
+        assert!(matches!(
+            &fixture.journal.state().unwrap().tools[unknown.id()].effect,
+            ToolEffectState::Unknown {
+                reason: ToolUnknownReason::AmbiguousFailure { error },
+                evidence,
+            } if error == "remote returned an unproven error"
+                && evidence == &json!({"adapter": "opaque"})
         ));
     }
 
@@ -593,7 +1483,7 @@ mod tests {
         let state = fixture.journal.state().unwrap();
         assert!(matches!(
             &state.tools[&tool_id].effect,
-            ExternalEffectState::NotStarted
+            ToolEffectState::NotStarted
         ));
         assert!(matches!(
             &state.children["child-1"].effect,
@@ -603,6 +1493,48 @@ mod tests {
             &state.deliveries[&delivery_id].effect,
             ExternalEffectState::NotStarted
         ));
+    }
+
+    #[test]
+    fn dispatcher_not_started_reasons_serialize_and_reduce_without_running() {
+        let fixture = fixture();
+        let cases = [
+            (
+                ToolNotStartedReason::HookDenied {
+                    reason: "pre-hook denied".into(),
+                },
+                "hook_denied",
+            ),
+            (
+                ToolNotStartedReason::BudgetDenied {
+                    reason: "tool cap reached".into(),
+                },
+                "budget_denied",
+            ),
+            (ToolNotStartedReason::CircuitOpen, "circuit_open"),
+            (ToolNotStartedReason::UnknownTool, "unknown_tool"),
+        ];
+
+        for (ordinal, (reason, expected_kind)) in cases.into_iter().enumerate() {
+            let encoded = serde_json::to_value(&reason).unwrap();
+            assert_eq!(encoded["kind"], expected_kind);
+            let lease = fixture
+                .scope
+                .prepare_tool(
+                    format!("provider-call-not-started-{ordinal}"),
+                    ordinal as u64 + 20,
+                    "Fixture",
+                    json!({}),
+                    json!({}),
+                )
+                .unwrap();
+            let id = lease.id().to_owned();
+            lease.not_started(reason.clone()).unwrap();
+            let state = fixture.journal.state().unwrap();
+            let tool = &state.tools[&id];
+            assert_eq!(tool.not_started_reason, Some(reason));
+            assert!(matches!(tool.effect, ToolEffectState::NotStarted));
+        }
     }
 
     #[test]

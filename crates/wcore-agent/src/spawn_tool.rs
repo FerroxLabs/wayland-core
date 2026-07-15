@@ -9,7 +9,7 @@ use crate::output::OutputSink;
 use crate::spawner::{AgentSpawner, SpawnExtras, SubAgentConfig};
 use wcore_protocol::events::ToolCategory;
 use wcore_swarm::Topology;
-use wcore_types::tool::{JsonSchema, ToolResult};
+use wcore_types::tool::{JsonSchema, ToolEffectContract, ToolResult};
 
 use wcore_tools::Tool;
 
@@ -126,6 +126,11 @@ impl Tool for SpawnTool {
         // the initial system prompt so models invoke it directly without a
         // mandatory ToolSearch round-trip first.
         false
+    }
+
+    fn effect_contract(&self, _input: &Value) -> ToolEffectContract {
+        // Spawned agents can perform arbitrary nested effects with no aggregate reconciler.
+        ToolEffectContract::default()
     }
 
     async fn execute(&self, input: Value) -> ToolResult {

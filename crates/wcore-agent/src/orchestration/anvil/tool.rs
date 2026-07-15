@@ -22,7 +22,7 @@ use wcore_protocol::events::ToolCategory;
 use wcore_sandbox::SandboxRegistry;
 use wcore_tools::Tool;
 use wcore_tools::context::ToolContext;
-use wcore_types::tool::{JsonSchema, ToolResult};
+use wcore_types::tool::{JsonSchema, ToolEffectContract, ToolResult};
 
 use super::forge::drive_climb_full;
 use crate::output::OutputSink;
@@ -232,6 +232,11 @@ impl Tool for ForgeTool {
 
     fn is_concurrency_safe(&self, _input: &Value) -> bool {
         false // one climb per workspace (the lease enforces it anyway)
+    }
+
+    fn effect_contract(&self, _input: &Value) -> ToolEffectContract {
+        // Forge spans child agents, processes, and repository state without reconciliation.
+        ToolEffectContract::default()
     }
 
     async fn execute(&self, input: Value) -> ToolResult {

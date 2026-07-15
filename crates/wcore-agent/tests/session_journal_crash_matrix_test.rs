@@ -8,9 +8,10 @@ use wcore_agent::session_journal::{
     DeliveryCompletion, DeliveryEvidence, DeliveryNotStartedReason, DeliveryOrigin, DeliveryStage,
     DeliveryUnknownReason, JournalEnvelope, JournalError, ProviderAttemptNotStartedReason,
     ProviderAttemptPurpose, ProviderStreamEvent, ReducedSessionState, SessionEvent, SessionJournal,
-    SessionSnapshot, ToolNotStartedReason, replay_state, snapshot_path_for, state_payload_digest,
-    write_snapshot,
+    SessionSnapshot, StoredToolInput, ToolNotStartedReason, ToolResolution, ToolResolutionSource,
+    ToolUnknownReason, replay_state, snapshot_path_for, state_payload_digest, write_snapshot,
 };
+use wcore_types::tool::ToolEffectContract;
 
 const SESSION_ID: &str = "crash-matrix-session";
 const FRAME_HEADER_BYTES: usize = 12;
@@ -48,6 +49,26 @@ fn conversation_state_event(turn_id: &str, messages: Vec<serde_json::Value>) -> 
 }
 
 fn tool_intent(execution_id: &str, provider_call_id: &str, ordinal: u64) -> SessionEvent {
+    let requested_input = json!({"command": "printf requested"});
+    let effective_input = json!({"command": "printf effective"});
+    SessionEvent::ToolIntentRecordedV2 {
+        tool_execution_id: execution_id.to_owned(),
+        idempotency_key: format!("fixture-key-{execution_id}"),
+        retry_of: None,
+        provider_call_id: provider_call_id.to_owned(),
+        turn_id: "turn-main".to_owned(),
+        ordinal,
+        tool: "bash".to_owned(),
+        requested_input_digest: digest(&requested_input),
+        effective_input_digest: digest(&effective_input),
+        requested_input: StoredToolInput::redacted(digest(&requested_input)),
+        effective_input: StoredToolInput::redacted(digest(&effective_input)),
+        effect_contract: ToolEffectContract::default(),
+        effect_receipt: None,
+    }
+}
+
+fn legacy_tool_intent(execution_id: &str, provider_call_id: &str, ordinal: u64) -> SessionEvent {
     let requested_input = json!({"command": "printf requested"});
     let effective_input = json!({"command": "printf effective"});
     SessionEvent::ToolIntentRecorded {
@@ -155,12 +176,31 @@ fn main_scenario() -> Scenario {
                 outcome: CompletionOutcome::Succeeded,
                 result: json!({"exit_code": 0}),
             },
-            tool_intent("tool-not-started", "provider-call-blocked", 1),
+            legacy_tool_intent("tool-not-started", "provider-call-blocked", 1),
             SessionEvent::ToolExecutionNotStarted {
                 tool_execution_id: "tool-not-started".to_owned(),
                 reason: ToolNotStartedReason::PolicyDenied {
                     policy: "managed".to_owned(),
                 },
+            },
+            tool_intent("tool-reconciled", "provider-call-reconciled", 2),
+            SessionEvent::ToolExecutionStarted {
+                tool_execution_id: "tool-reconciled".to_owned(),
+            },
+            SessionEvent::ToolExecutionUnknown {
+                tool_execution_id: "tool-reconciled".to_owned(),
+                reason: ToolUnknownReason::Interrupted,
+                evidence: json!({"boundary": "post_spawn"}),
+            },
+            SessionEvent::ToolExecutionResolved {
+                tool_execution_id: "tool-reconciled".to_owned(),
+                resolution: ToolResolution::Succeeded {
+                    result: json!({"receipt": "confirmed"}),
+                },
+                source: ToolResolutionSource::Operator {
+                    operator_id: "fixture-operator".to_owned(),
+                },
+                evidence: json!({"ticket": "fixture"}),
             },
             SessionEvent::BudgetReserved {
                 event_id: "budget-reserve-settle".to_owned(),
@@ -338,9 +378,12 @@ fn event_kind(event: &SessionEvent) -> &'static str {
         SessionEvent::ProviderAttemptFinished { .. } => "provider_attempt_finished",
         SessionEvent::ProviderAttemptNotStarted { .. } => "provider_attempt_not_started",
         SessionEvent::ToolIntentRecorded { .. } => "tool_intent_recorded",
+        SessionEvent::ToolIntentRecordedV2 { .. } => "tool_intent_recorded_v2",
         SessionEvent::ToolExecutionStarted { .. } => "tool_execution_started",
         SessionEvent::ToolExecutionFinished { .. } => "tool_execution_finished",
         SessionEvent::ToolExecutionNotStarted { .. } => "tool_execution_not_started",
+        SessionEvent::ToolExecutionUnknown { .. } => "tool_execution_unknown",
+        SessionEvent::ToolExecutionResolved { .. } => "tool_execution_resolved",
         SessionEvent::ApprovalRequested { .. } => "approval_requested",
         SessionEvent::ApprovalResolved { .. } => "approval_resolved",
         SessionEvent::BudgetReserved { .. } => "budget_reserved",
@@ -355,6 +398,7 @@ fn event_kind(event: &SessionEvent) -> &'static str {
         SessionEvent::DeliveryStarted { .. } => "delivery_started",
         SessionEvent::DeliveryNotStarted { .. } => "delivery_not_started",
         SessionEvent::DeliveryFinished { .. } => "delivery_finished",
+        _ => "unknown_session_event",
     }
 }
 
@@ -442,9 +486,12 @@ fn crash_before_during_and_after_every_event_variant_preserves_only_committed_fr
         "provider_attempt_finished",
         "provider_attempt_not_started",
         "tool_intent_recorded",
+        "tool_intent_recorded_v2",
         "tool_execution_started",
         "tool_execution_finished",
         "tool_execution_not_started",
+        "tool_execution_unknown",
+        "tool_execution_resolved",
         "approval_requested",
         "approval_resolved",
         "budget_reserved",

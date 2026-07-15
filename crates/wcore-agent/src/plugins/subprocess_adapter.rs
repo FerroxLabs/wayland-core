@@ -10,6 +10,7 @@ use std::sync::Arc;
 
 use wcore_plugin_api::tool::{PluginTool, PluginToolInvocation};
 use wcore_plugin_subprocess::LoadedSubprocessPlugin;
+use wcore_plugin_subprocess::rpc::SubprocessToolEffectIdentity;
 use wcore_protocol::events::ToolCategory;
 use wcore_types::tool::ToolResult;
 
@@ -39,7 +40,19 @@ pub fn synthesize_initialize_outcome_subprocess(
             let cap_name = cap_name.clone();
             let plugin_id = plugin_id.clone();
             Box::pin(async move {
-                match runner.runner.call_tool(&cap_name, invocation.input).await {
+                let effect = invocation
+                    .caps
+                    .effect
+                    .map(|effect| SubprocessToolEffectIdentity {
+                        version: effect.version,
+                        tool_execution_id: effect.tool_execution_id,
+                        idempotency_key: effect.idempotency_key,
+                    });
+                match runner
+                    .runner
+                    .call_tool_with_effect_identity(&cap_name, invocation.input, effect)
+                    .await
+                {
                     Ok(out) => ToolResult {
                         content: out.stdout,
                         is_error: out.is_error,

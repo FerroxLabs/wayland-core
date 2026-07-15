@@ -83,6 +83,36 @@ pub struct McpCallOutcome {
     pub is_error: bool,
 }
 
+/// Optional versioned durable identity forwarded with an MCP `tools/call`.
+///
+/// This metadata gives a server the stable key needed to implement its own
+/// idempotency protocol. It does not make an otherwise opaque MCP tool
+/// repeat-safe or reconcilable.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct McpToolEffectIdentity {
+    pub version: u32,
+    pub tool_execution_id: String,
+    pub idempotency_key: String,
+}
+
+impl McpToolEffectIdentity {
+    pub fn v1(tool_execution_id: impl Into<String>, idempotency_key: impl Into<String>) -> Self {
+        Self {
+            version: 1,
+            tool_execution_id: tool_execution_id.into(),
+            idempotency_key: idempotency_key.into(),
+        }
+    }
+
+    fn as_meta(&self) -> serde_json::Value {
+        json!({
+            "version": self.version,
+            "toolExecutionId": self.tool_execution_id,
+            "idempotencyKey": self.idempotency_key,
+        })
+    }
+}
+
 /// Manages connections to multiple MCP servers
 pub struct McpManager {
     servers: HashMap<String, McpServer>,
@@ -437,6 +467,20 @@ impl McpManager {
         tool_name: &str,
         arguments: serde_json::Value,
     ) -> Result<McpCallOutcome, McpError> {
+        self.call_tool_with_effect_identity(server_name, tool_name, arguments, None)
+            .await
+    }
+
+    /// Execute an MCP tool while forwarding an optional durable identity in
+    /// the protocol-defined `_meta` extension point. Tool arguments remain
+    /// byte-for-byte structurally separate from host metadata.
+    pub async fn call_tool_with_effect_identity(
+        &self,
+        server_name: &str,
+        tool_name: &str,
+        arguments: serde_json::Value,
+        effect: Option<&McpToolEffectIdentity>,
+    ) -> Result<McpCallOutcome, McpError> {
         let server = self
             .servers
             .get(server_name)
@@ -451,13 +495,20 @@ impl McpManager {
             )));
         }
 
+        let mut params = serde_json::Map::new();
+        params.insert("name".into(), json!(tool_name));
+        params.insert("arguments".into(), arguments);
+        if let Some(effect) = effect {
+            params.insert(
+                "_meta".into(),
+                json!({ "wayland/durable-effect": effect.as_meta() }),
+            );
+        }
+
         let request = JsonRpcRequest::new(
             self.next_id.fetch_add(1, Ordering::Relaxed),
             "tools/call",
-            Some(json!({
-                "name": tool_name,
-                "arguments": arguments
-            })),
+            Some(serde_json::Value::Object(params)),
         );
 
         let response = server.transport.request(&request).await?;

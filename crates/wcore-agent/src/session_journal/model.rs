@@ -1,6 +1,7 @@
 use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
+use wcore_types::tool::ToolEffectContract;
 
 use super::GENESIS_CHECKSUM;
 
@@ -38,14 +39,90 @@ pub enum ProviderAttemptNotStartedReason {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
+#[non_exhaustive]
 pub enum ToolNotStartedReason {
     PolicyDenied { policy: String },
+    HookDenied { reason: String },
+    BudgetDenied { reason: String },
+    CircuitOpen,
+    UnknownTool,
     ApprovalDenied { approval_id: String },
     ApprovalCancelled { approval_id: String },
     ApprovalTimedOut { approval_id: String },
     InvalidInput { error: String },
     DispatchFailed { error: String },
     Cancelled { reason: String },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ToolUnknownReason {
+    Interrupted,
+    TimedOut { timeout_ms: u64 },
+    Cancelled { reason: String },
+    Panicked { message: String },
+    TransportLost,
+    AmbiguousFailure { error: String },
+    ResultPersistenceFailed { error: String },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "source", rename_all = "snake_case")]
+pub enum ToolResolutionSource {
+    Reconciler { reconciler: String },
+    Operator { operator_id: String },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "outcome", rename_all = "snake_case")]
+pub enum ToolResolution {
+    Succeeded {
+        result: serde_json::Value,
+    },
+    Failed {
+        error: String,
+        result: Option<serde_json::Value>,
+    },
+    NotStarted {
+        reason: ToolNotStartedReason,
+    },
+}
+
+/// Durable representation of an input whose exact bytes may contain secrets.
+///
+/// The exact digest remains authoritative for identity and idempotency. The
+/// payload itself is either omitted/redacted or supplied as an independently
+/// secured envelope; raw plaintext has no representation in this schema.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "storage", rename_all = "snake_case")]
+pub enum StoredToolInput {
+    Redacted {
+        exact_digest: String,
+        summary: Option<serde_json::Value>,
+    },
+    Secured {
+        exact_digest: String,
+        envelope: serde_json::Value,
+    },
+}
+
+impl StoredToolInput {
+    #[must_use]
+    pub fn redacted(exact_digest: impl Into<String>) -> Self {
+        Self::Redacted {
+            exact_digest: exact_digest.into(),
+            summary: None,
+        }
+    }
+
+    #[must_use]
+    pub fn exact_digest(&self) -> &str {
+        match self {
+            Self::Redacted { exact_digest, .. } | Self::Secured { exact_digest, .. } => {
+                exact_digest
+            }
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -231,6 +308,11 @@ pub enum ApprovalResolution {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
+// The append-only journal schema is a public, versioned wire contract. Boxing
+// one variant solely to reduce stack size would change its Rust API during the
+// F13 compatibility window even though serde would hide the allocation.
+#[allow(clippy::large_enum_variant)]
+#[non_exhaustive]
 pub enum SessionEvent {
     SessionImported {
         source_schema_version: u32,
@@ -306,6 +388,26 @@ pub enum SessionEvent {
         effective_input: serde_json::Value,
         effective_input_digest: String,
     },
+    /// F13 versioned intent record. The legacy variant remains constructible
+    /// and replayable so downstream producers are not forced to change every
+    /// struct-like enum construction at this boundary.
+    ToolIntentRecordedV2 {
+        tool_execution_id: String,
+        idempotency_key: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        retry_of: Option<String>,
+        provider_call_id: String,
+        turn_id: String,
+        ordinal: u64,
+        tool: String,
+        requested_input: StoredToolInput,
+        requested_input_digest: String,
+        effective_input: StoredToolInput,
+        effective_input_digest: String,
+        effect_contract: ToolEffectContract,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        effect_receipt: Option<serde_json::Value>,
+    },
     ToolExecutionStarted {
         tool_execution_id: String,
     },
@@ -317,6 +419,17 @@ pub enum SessionEvent {
     ToolExecutionNotStarted {
         tool_execution_id: String,
         reason: ToolNotStartedReason,
+    },
+    ToolExecutionUnknown {
+        tool_execution_id: String,
+        reason: ToolUnknownReason,
+        evidence: serde_json::Value,
+    },
+    ToolExecutionResolved {
+        tool_execution_id: String,
+        resolution: ToolResolution,
+        source: ToolResolutionSource,
+        evidence: serde_json::Value,
     },
     ApprovalRequested {
         approval_id: String,
@@ -395,6 +508,29 @@ pub enum ExternalEffectState {
     Completed { outcome: CompletionOutcome },
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
+pub enum ToolEffectState {
+    Prepared,
+    Running,
+    Succeeded,
+    Failed {
+        error: String,
+    },
+    NotStarted,
+    Unknown {
+        reason: ToolUnknownReason,
+        evidence: serde_json::Value,
+    },
+}
+
+impl ToolEffectState {
+    #[must_use]
+    pub fn requires_reconciliation(&self) -> bool {
+        matches!(self, Self::Running | Self::Unknown { .. })
+    }
+}
+
 impl ExternalEffectState {
     #[must_use]
     pub fn requires_reconciliation(&self) -> bool {
@@ -438,17 +574,25 @@ pub struct ProviderAttemptState {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ToolState {
+    pub idempotency_key: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retry_of: Option<String>,
     pub provider_call_id: String,
     pub turn_id: String,
     pub ordinal: u64,
     pub tool: String,
-    pub requested_input: serde_json::Value,
+    pub requested_input: StoredToolInput,
     pub requested_input_digest: String,
-    pub effective_input: serde_json::Value,
+    pub effective_input: StoredToolInput,
     pub effective_input_digest: String,
+    pub effect_contract: ToolEffectContract,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effect_receipt: Option<serde_json::Value>,
     pub result: Option<serde_json::Value>,
     pub not_started_reason: Option<ToolNotStartedReason>,
-    pub effect: ExternalEffectState,
+    pub resolution_source: Option<ToolResolutionSource>,
+    pub resolution_evidence: Option<serde_json::Value>,
+    pub effect: ToolEffectState,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

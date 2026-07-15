@@ -160,6 +160,32 @@ pub struct PluginToolCaps {
     pub call_id: String,
     /// Originating sub-agent name; `None` = main agent.
     pub source_agent: Option<String>,
+    /// Durable execution identity when the host has journaled this physical
+    /// attempt. `None` preserves the Phase-1 direct/legacy invocation shape.
+    /// Receiving this identity does not upgrade the plugin's effect contract.
+    pub effect: Option<PluginToolEffectIdentity>,
+}
+
+/// Versioned durable identity for one plugin-tool attempt.
+///
+/// A plugin may forward the idempotency key to a provider that independently
+/// guarantees repeat safety, but the presence of this value alone does not
+/// make an opaque plugin invocation idempotent or reconcilable.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PluginToolEffectIdentity {
+    pub version: u32,
+    pub tool_execution_id: String,
+    pub idempotency_key: String,
+}
+
+impl PluginToolEffectIdentity {
+    pub fn v1(tool_execution_id: impl Into<String>, idempotency_key: impl Into<String>) -> Self {
+        Self {
+            version: 1,
+            tool_execution_id: tool_execution_id.into(),
+            idempotency_key: idempotency_key.into(),
+        }
+    }
 }
 
 impl PluginToolCaps {
@@ -175,7 +201,15 @@ impl PluginToolCaps {
             cancel,
             call_id: call_id.into(),
             source_agent,
+            effect: None,
         }
+    }
+
+    /// Attach the Phase-2 optional durable identity capability.
+    pub fn with_effect_identity(mut self, effect: PluginToolEffectIdentity) -> Self {
+        self.version = 2;
+        self.effect = Some(effect);
+        self
     }
 }
 
@@ -232,5 +266,20 @@ mod tests {
     fn plugin_tool_is_clone() {
         let t = PluginTool::host_delegated("execute", "d", ToolCategory::Exec);
         let _c = t.clone();
+    }
+
+    #[test]
+    fn durable_identity_is_optional_and_versioned() {
+        let legacy = PluginToolCaps::v1(tokio_util::sync::CancellationToken::new(), "call", None);
+        assert_eq!(legacy.version, 1);
+        assert!(legacy.effect.is_none());
+
+        let durable = PluginToolCaps::v1(tokio_util::sync::CancellationToken::new(), "call", None)
+            .with_effect_identity(PluginToolEffectIdentity::v1("exec", "stable-key"));
+        assert_eq!(durable.version, 2);
+        assert_eq!(
+            durable.effect,
+            Some(PluginToolEffectIdentity::v1("exec", "stable-key"))
+        );
     }
 }

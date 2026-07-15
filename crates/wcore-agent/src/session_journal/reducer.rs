@@ -1,6 +1,6 @@
 //! Deterministic session-journal state reduction and payload digests.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use super::*;
 
@@ -99,6 +99,166 @@ fn require_unknown(effect: &ExternalEffectState, kind: &str, id: &str) -> Result
     }
 }
 
+fn require_tool_prepared(effect: &ToolEffectState, id: &str) -> Result<(), JournalError> {
+    if matches!(effect, ToolEffectState::Prepared) {
+        Ok(())
+    } else {
+        Err(JournalError::InvalidTransition(format!(
+            "tool execution {id} was not prepared"
+        )))
+    }
+}
+
+fn require_tool_running(effect: &ToolEffectState, id: &str) -> Result<(), JournalError> {
+    if matches!(effect, ToolEffectState::Running) {
+        Ok(())
+    } else {
+        Err(JournalError::InvalidTransition(format!(
+            "tool execution {id} is not running"
+        )))
+    }
+}
+
+fn validate_filesystem_start_receipt(tool: &ToolState, id: &str) -> Result<(), JournalError> {
+    if !matches!(
+        tool.effect_contract.kind,
+        wcore_types::tool::ToolEffectKind::FilesystemTransactional
+    ) {
+        return Ok(());
+    }
+    if tool.effect_contract.reconciler.as_deref()
+        != Some(wcore_tools::effects::FILESYSTEM_EFFECT_RECONCILER)
+    {
+        return Err(JournalError::InvalidTransition(format!(
+            "filesystem-transactional tool execution {id} has an unsupported reconciler"
+        )));
+    }
+    let encoded = tool.effect_receipt.clone().ok_or_else(|| {
+        JournalError::InvalidTransition(format!(
+            "filesystem-transactional tool execution {id} has no durable effect receipt"
+        ))
+    })?;
+    let receipt = serde_json::from_value::<wcore_tools::effects::FilesystemEffectReceiptV1>(
+        encoded,
+    )
+    .map_err(|error| {
+        JournalError::InvalidTransition(format!(
+            "filesystem-transactional tool execution {id} has a malformed effect receipt: {error}"
+        ))
+    })?;
+    receipt.validate().map_err(|error| {
+        JournalError::InvalidTransition(format!(
+            "filesystem-transactional tool execution {id} has an invalid effect receipt: {error}"
+        ))
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn validate_tool_retry(
+    state: &ReducedSessionState,
+    retry_of: Option<&str>,
+    idempotency_key: &str,
+    provider_call_id: &str,
+    turn_id: &str,
+    ordinal: u64,
+    tool: &str,
+    requested_input: &StoredToolInput,
+    requested_input_digest: &str,
+    effective_input: &StoredToolInput,
+    effective_input_digest: &str,
+    effect_contract: &wcore_types::tool::ToolEffectContract,
+    effect_receipt: &Option<serde_json::Value>,
+) -> Result<(), JournalError> {
+    let Some(retry_of) = retry_of else {
+        if state.tools.values().any(|existing| {
+            existing.turn_id == turn_id && existing.provider_call_id == provider_call_id
+        }) {
+            return Err(JournalError::InvalidTransition(format!(
+                "turn {turn_id} already has provider tool call {provider_call_id}"
+            )));
+        }
+        if state
+            .tools
+            .values()
+            .any(|existing| existing.idempotency_key == idempotency_key)
+        {
+            return Err(JournalError::InvalidTransition(format!(
+                "duplicate tool idempotency key {idempotency_key}"
+            )));
+        }
+        return Ok(());
+    };
+
+    let prior = state
+        .tools
+        .get(retry_of)
+        .ok_or_else(|| missing("retry source tool execution", retry_of))?;
+    if !matches!(prior.effect, ToolEffectState::NotStarted) {
+        return Err(JournalError::InvalidTransition(format!(
+            "tool execution {retry_of} is not durably not started"
+        )));
+    }
+    if prior.idempotency_key != idempotency_key
+        || prior.provider_call_id != provider_call_id
+        || prior.turn_id != turn_id
+        || prior.ordinal != ordinal
+        || prior.tool != tool
+        || &prior.requested_input != requested_input
+        || prior.requested_input_digest != requested_input_digest
+        || &prior.effective_input != effective_input
+        || prior.effective_input_digest != effective_input_digest
+        || &prior.effect_contract != effect_contract
+        || &prior.effect_receipt != effect_receipt
+    {
+        return Err(JournalError::InvalidTransition(format!(
+            "tool retry does not exactly match source execution {retry_of}"
+        )));
+    }
+
+    let mut ancestors = BTreeSet::new();
+    let mut cursor = Some(retry_of);
+    while let Some(id) = cursor {
+        if !ancestors.insert(id.to_owned()) {
+            return Err(JournalError::InvalidTransition(format!(
+                "tool retry lineage contains a cycle at {id}"
+            )));
+        }
+        let attempt = state
+            .tools
+            .get(id)
+            .ok_or_else(|| missing("retry ancestor tool execution", id))?;
+        cursor = attempt.retry_of.as_deref();
+    }
+
+    if state.tools.iter().any(|(id, existing)| {
+        existing.idempotency_key == idempotency_key && !ancestors.contains(id)
+    }) {
+        return Err(JournalError::InvalidTransition(format!(
+            "duplicate tool idempotency key {idempotency_key} outside retry lineage"
+        )));
+    }
+    if state.tools.iter().any(|(id, existing)| {
+        existing.turn_id == turn_id
+            && existing.provider_call_id == provider_call_id
+            && !ancestors.contains(id)
+    }) {
+        return Err(JournalError::InvalidTransition(format!(
+            "turn {turn_id} already has provider tool call {provider_call_id} outside retry lineage"
+        )));
+    }
+    Ok(())
+}
+
+fn require_tool_unknown(effect: &ToolEffectState, id: &str) -> Result<(), JournalError> {
+    if matches!(effect, ToolEffectState::Unknown { .. }) {
+        Ok(())
+    } else {
+        Err(JournalError::InvalidTransition(format!(
+            "tool execution {id} has no unresolved effect"
+        )))
+    }
+}
+
 fn require_active_turn(state: &ReducedSessionState, turn_id: &str) -> Result<(), JournalError> {
     let turn = state
         .turns
@@ -132,7 +292,7 @@ fn require_approval_origin_prepared(
                 .get(tool_execution_id)
                 .ok_or_else(|| missing("tool execution", tool_execution_id))?;
             require_active_turn(state, &tool.turn_id)?;
-            require_prepared(&tool.effect, "tool execution", tool_execution_id)
+            require_tool_prepared(&tool.effect, tool_execution_id)
         }
         ApprovalOrigin::Child { child_id } => {
             let child = state
@@ -630,35 +790,94 @@ fn apply_event(state: &mut ReducedSessionState, event: &SessionEvent) -> Result<
             if state.tools.contains_key(tool_execution_id) {
                 return Err(duplicate("tool execution", tool_execution_id));
             }
-            if state.tools.values().any(|existing| {
-                existing.turn_id == *turn_id && existing.provider_call_id == *provider_call_id
-            }) {
-                return Err(JournalError::InvalidTransition(format!(
-                    "turn {turn_id} already has provider tool call {provider_call_id}"
-                )));
-            }
-            if state
-                .tools
-                .values()
-                .any(|existing| existing.turn_id == *turn_id && existing.ordinal == *ordinal)
-            {
-                return Err(JournalError::InvalidTransition(format!(
-                    "turn {turn_id} already has tool execution ordinal {ordinal}"
-                )));
-            }
-            if state_payload_digest(requested_input)? != *requested_input_digest {
-                return Err(JournalError::InvalidTransition(format!(
-                    "tool execution {tool_execution_id} requested input digest mismatch"
-                )));
-            }
-            if state_payload_digest(effective_input)? != *effective_input_digest {
-                return Err(JournalError::InvalidTransition(format!(
-                    "tool execution {tool_execution_id} effective input digest mismatch"
-                )));
-            }
             state.tools.insert(
                 tool_execution_id.clone(),
                 ToolState {
+                    idempotency_key: format!("legacy:{tool_execution_id}"),
+                    retry_of: None,
+                    provider_call_id: provider_call_id.clone(),
+                    turn_id: turn_id.clone(),
+                    ordinal: *ordinal,
+                    tool: tool.clone(),
+                    requested_input: StoredToolInput::Secured {
+                        exact_digest: requested_input_digest.clone(),
+                        envelope: requested_input.clone(),
+                    },
+                    requested_input_digest: requested_input_digest.clone(),
+                    effective_input: StoredToolInput::Secured {
+                        exact_digest: effective_input_digest.clone(),
+                        envelope: effective_input.clone(),
+                    },
+                    effective_input_digest: effective_input_digest.clone(),
+                    effect_contract: wcore_types::tool::ToolEffectContract::default(),
+                    effect_receipt: None,
+                    result: None,
+                    not_started_reason: None,
+                    resolution_source: None,
+                    resolution_evidence: None,
+                    effect: ToolEffectState::Prepared,
+                },
+            );
+        }
+        SessionEvent::ToolIntentRecordedV2 {
+            tool_execution_id,
+            idempotency_key,
+            retry_of,
+            provider_call_id,
+            turn_id,
+            ordinal,
+            tool,
+            requested_input,
+            requested_input_digest,
+            effective_input,
+            effective_input_digest,
+            effect_contract,
+            effect_receipt,
+        } => {
+            require_active_turn(state, turn_id)?;
+            if state.tools.contains_key(tool_execution_id) {
+                return Err(duplicate("tool execution", tool_execution_id));
+            }
+            if requested_input.exact_digest() != requested_input_digest {
+                return Err(JournalError::InvalidTransition(format!(
+                    "tool execution {tool_execution_id} requested input record digest mismatch"
+                )));
+            }
+            if effective_input.exact_digest() != effective_input_digest {
+                return Err(JournalError::InvalidTransition(format!(
+                    "tool execution {tool_execution_id} effective input record digest mismatch"
+                )));
+            }
+            if idempotency_key.is_empty() {
+                return Err(JournalError::InvalidTransition(format!(
+                    "tool execution {tool_execution_id} has an empty idempotency key"
+                )));
+            }
+            if effect_receipt.is_some() && effect_contract.reconciler.is_none() {
+                return Err(JournalError::InvalidTransition(format!(
+                    "tool execution {tool_execution_id} has an effect receipt without a reconciler"
+                )));
+            }
+            validate_tool_retry(
+                state,
+                retry_of.as_deref(),
+                idempotency_key,
+                provider_call_id,
+                turn_id,
+                *ordinal,
+                tool,
+                requested_input,
+                requested_input_digest,
+                effective_input,
+                effective_input_digest,
+                effect_contract,
+                effect_receipt,
+            )?;
+            state.tools.insert(
+                tool_execution_id.clone(),
+                ToolState {
+                    idempotency_key: idempotency_key.clone(),
+                    retry_of: retry_of.clone(),
                     provider_call_id: provider_call_id.clone(),
                     turn_id: turn_id.clone(),
                     ordinal: *ordinal,
@@ -667,9 +886,13 @@ fn apply_event(state: &mut ReducedSessionState, event: &SessionEvent) -> Result<
                     requested_input_digest: requested_input_digest.clone(),
                     effective_input: effective_input.clone(),
                     effective_input_digest: effective_input_digest.clone(),
+                    effect_contract: effect_contract.clone(),
+                    effect_receipt: effect_receipt.clone(),
                     result: None,
                     not_started_reason: None,
-                    effect: ExternalEffectState::Prepared,
+                    resolution_source: None,
+                    resolution_evidence: None,
+                    effect: ToolEffectState::Prepared,
                 },
             );
         }
@@ -682,8 +905,9 @@ fn apply_event(state: &mut ReducedSessionState, event: &SessionEvent) -> Result<
                 .clone();
             require_active_turn(state, &turn_id)?;
             let tool = required_mut(&mut state.tools, "tool execution", tool_execution_id)?;
-            require_prepared(&tool.effect, "tool execution", tool_execution_id)?;
-            tool.effect = ExternalEffectState::Unknown;
+            require_tool_prepared(&tool.effect, tool_execution_id)?;
+            validate_filesystem_start_receipt(tool, tool_execution_id)?;
+            tool.effect = ToolEffectState::Running;
         }
         SessionEvent::ToolExecutionFinished {
             tool_execution_id,
@@ -691,10 +915,18 @@ fn apply_event(state: &mut ReducedSessionState, event: &SessionEvent) -> Result<
             result,
         } => {
             let tool = required_mut(&mut state.tools, "tool execution", tool_execution_id)?;
-            require_unknown(&tool.effect, "tool execution", tool_execution_id)?;
+            require_tool_running(&tool.effect, tool_execution_id)?;
             tool.result = Some(result.clone());
-            tool.effect = ExternalEffectState::Completed {
-                outcome: outcome.clone(),
+            tool.effect = match outcome {
+                CompletionOutcome::Succeeded => ToolEffectState::Succeeded,
+                CompletionOutcome::Failed { error } => ToolEffectState::Failed {
+                    error: error.clone(),
+                },
+                CompletionOutcome::Cancelled => {
+                    return Err(JournalError::InvalidTransition(format!(
+                        "tool execution {tool_execution_id} cancellation must be recorded as unknown"
+                    )));
+                }
             };
         }
         SessionEvent::ToolExecutionNotStarted {
@@ -709,9 +941,48 @@ fn apply_event(state: &mut ReducedSessionState, event: &SessionEvent) -> Result<
                 .clone();
             require_active_turn(state, &turn_id)?;
             let tool = required_mut(&mut state.tools, "tool execution", tool_execution_id)?;
-            require_prepared(&tool.effect, "tool execution", tool_execution_id)?;
+            require_tool_prepared(&tool.effect, tool_execution_id)?;
             tool.not_started_reason = Some(reason.clone());
-            tool.effect = ExternalEffectState::NotStarted;
+            tool.effect = ToolEffectState::NotStarted;
+        }
+        SessionEvent::ToolExecutionUnknown {
+            tool_execution_id,
+            reason,
+            evidence,
+        } => {
+            let tool = required_mut(&mut state.tools, "tool execution", tool_execution_id)?;
+            require_tool_running(&tool.effect, tool_execution_id)?;
+            tool.effect = ToolEffectState::Unknown {
+                reason: reason.clone(),
+                evidence: evidence.clone(),
+            };
+        }
+        SessionEvent::ToolExecutionResolved {
+            tool_execution_id,
+            resolution,
+            source,
+            evidence,
+        } => {
+            let tool = required_mut(&mut state.tools, "tool execution", tool_execution_id)?;
+            require_tool_unknown(&tool.effect, tool_execution_id)?;
+            tool.resolution_source = Some(source.clone());
+            tool.resolution_evidence = Some(evidence.clone());
+            match resolution {
+                ToolResolution::Succeeded { result } => {
+                    tool.result = Some(result.clone());
+                    tool.effect = ToolEffectState::Succeeded;
+                }
+                ToolResolution::Failed { error, result } => {
+                    tool.result.clone_from(result);
+                    tool.effect = ToolEffectState::Failed {
+                        error: error.clone(),
+                    };
+                }
+                ToolResolution::NotStarted { reason } => {
+                    tool.not_started_reason = Some(reason.clone());
+                    tool.effect = ToolEffectState::NotStarted;
+                }
+            }
         }
         SessionEvent::ApprovalRequested {
             approval_id,
@@ -987,4 +1258,204 @@ fn apply_event(state: &mut ReducedSessionState, event: &SessionEvent) -> Result<
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tool_effect_transition_properties {
+    use super::*;
+
+    #[derive(Clone, Copy, Debug)]
+    enum StateKind {
+        Prepared,
+        Running,
+        Succeeded,
+        Failed,
+        NotStarted,
+        Unknown,
+    }
+
+    #[derive(Clone, Copy, Debug)]
+    enum EventKind {
+        Start,
+        FinishSucceeded,
+        FinishFailed,
+        FinishCancelled,
+        NotStarted,
+        Unknown,
+        ResolveSucceeded,
+        ResolveFailed,
+        ResolveNotStarted,
+    }
+
+    fn effect(state: StateKind) -> ToolEffectState {
+        match state {
+            StateKind::Prepared => ToolEffectState::Prepared,
+            StateKind::Running => ToolEffectState::Running,
+            StateKind::Succeeded => ToolEffectState::Succeeded,
+            StateKind::Failed => ToolEffectState::Failed {
+                error: "terminal failure".into(),
+            },
+            StateKind::NotStarted => ToolEffectState::NotStarted,
+            StateKind::Unknown => ToolEffectState::Unknown {
+                reason: ToolUnknownReason::Interrupted,
+                evidence: serde_json::json!({"fixture": true}),
+            },
+        }
+    }
+
+    fn state_with_tool(state: StateKind) -> ReducedSessionState {
+        let mut reduced = ReducedSessionState::default();
+        reduced.turns.insert(
+            "turn".into(),
+            TurnState {
+                user_message: "test".into(),
+                completion: None,
+            },
+        );
+        reduced.tools.insert(
+            "tool".into(),
+            ToolState {
+                idempotency_key: "stable-key".into(),
+                retry_of: None,
+                provider_call_id: "provider-call".into(),
+                turn_id: "turn".into(),
+                ordinal: 0,
+                tool: "Opaque".into(),
+                requested_input: StoredToolInput::redacted("requested"),
+                requested_input_digest: "requested".into(),
+                effective_input: StoredToolInput::redacted("effective"),
+                effective_input_digest: "effective".into(),
+                effect_contract: wcore_types::tool::ToolEffectContract::default(),
+                effect_receipt: None,
+                result: None,
+                not_started_reason: None,
+                resolution_source: None,
+                resolution_evidence: None,
+                effect: effect(state),
+            },
+        );
+        reduced
+    }
+
+    fn event(event: EventKind) -> SessionEvent {
+        match event {
+            EventKind::Start => SessionEvent::ToolExecutionStarted {
+                tool_execution_id: "tool".into(),
+            },
+            EventKind::FinishSucceeded => SessionEvent::ToolExecutionFinished {
+                tool_execution_id: "tool".into(),
+                outcome: CompletionOutcome::Succeeded,
+                result: serde_json::json!({"ok": true}),
+            },
+            EventKind::FinishFailed => SessionEvent::ToolExecutionFinished {
+                tool_execution_id: "tool".into(),
+                outcome: CompletionOutcome::Failed {
+                    error: "failed".into(),
+                },
+                result: serde_json::json!({"ok": false}),
+            },
+            EventKind::FinishCancelled => SessionEvent::ToolExecutionFinished {
+                tool_execution_id: "tool".into(),
+                outcome: CompletionOutcome::Cancelled,
+                result: serde_json::json!({"cancelled": true}),
+            },
+            EventKind::NotStarted => SessionEvent::ToolExecutionNotStarted {
+                tool_execution_id: "tool".into(),
+                reason: ToolNotStartedReason::Cancelled {
+                    reason: "before dispatch".into(),
+                },
+            },
+            EventKind::Unknown => SessionEvent::ToolExecutionUnknown {
+                tool_execution_id: "tool".into(),
+                reason: ToolUnknownReason::Interrupted,
+                evidence: serde_json::json!({"cut": "running"}),
+            },
+            EventKind::ResolveSucceeded => SessionEvent::ToolExecutionResolved {
+                tool_execution_id: "tool".into(),
+                resolution: ToolResolution::Succeeded {
+                    result: serde_json::json!({"reconciled": true}),
+                },
+                source: ToolResolutionSource::Operator {
+                    operator_id: "operator".into(),
+                },
+                evidence: serde_json::json!({"ticket": "T-1"}),
+            },
+            EventKind::ResolveFailed => SessionEvent::ToolExecutionResolved {
+                tool_execution_id: "tool".into(),
+                resolution: ToolResolution::Failed {
+                    error: "authoritative failure".into(),
+                    result: None,
+                },
+                source: ToolResolutionSource::Operator {
+                    operator_id: "operator".into(),
+                },
+                evidence: serde_json::json!({"ticket": "T-1"}),
+            },
+            EventKind::ResolveNotStarted => SessionEvent::ToolExecutionResolved {
+                tool_execution_id: "tool".into(),
+                resolution: ToolResolution::NotStarted {
+                    reason: ToolNotStartedReason::Cancelled {
+                        reason: "not dispatched".into(),
+                    },
+                },
+                source: ToolResolutionSource::Operator {
+                    operator_id: "operator".into(),
+                },
+                evidence: serde_json::json!({"ticket": "T-1"}),
+            },
+        }
+    }
+
+    fn allowed(state: StateKind, event: EventKind) -> bool {
+        matches!(
+            (state, event),
+            (
+                StateKind::Prepared,
+                EventKind::Start | EventKind::NotStarted
+            ) | (
+                StateKind::Running,
+                EventKind::FinishSucceeded | EventKind::FinishFailed | EventKind::Unknown
+            ) | (
+                StateKind::Unknown,
+                EventKind::ResolveSucceeded
+                    | EventKind::ResolveFailed
+                    | EventKind::ResolveNotStarted
+            )
+        )
+    }
+
+    #[test]
+    fn every_tool_effect_state_event_pair_obeys_the_locked_transition_property() {
+        let states = [
+            StateKind::Prepared,
+            StateKind::Running,
+            StateKind::Succeeded,
+            StateKind::Failed,
+            StateKind::NotStarted,
+            StateKind::Unknown,
+        ];
+        let events = [
+            EventKind::Start,
+            EventKind::FinishSucceeded,
+            EventKind::FinishFailed,
+            EventKind::FinishCancelled,
+            EventKind::NotStarted,
+            EventKind::Unknown,
+            EventKind::ResolveSucceeded,
+            EventKind::ResolveFailed,
+            EventKind::ResolveNotStarted,
+        ];
+
+        for state in states {
+            for event_kind in events {
+                let mut reduced = state_with_tool(state);
+                let result = apply_event(&mut reduced, &event(event_kind));
+                assert_eq!(
+                    result.is_ok(),
+                    allowed(state, event_kind),
+                    "unexpected transition disposition for {state:?} + {event_kind:?}: {result:?}"
+                );
+            }
+        }
+    }
 }

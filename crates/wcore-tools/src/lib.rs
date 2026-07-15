@@ -35,6 +35,7 @@ pub mod env_passthrough;
 pub mod delegate;
 pub mod dispatcher;
 pub mod edit;
+pub mod effects;
 // T10 (v0.6.3 Tier 2B): read-only email parser — .eml (single message) and
 // .mbox (mailbox) files. Reports headers + body text + attachment metadata
 // (name/size, never content). Pure-Rust `mail-parser` backend.
@@ -263,7 +264,9 @@ use serde_json::Value;
 use wcore_config::hooks::HooksConfig;
 use wcore_protocol::events::ToolCategory;
 use wcore_types::skill_types::ContextModifier;
-use wcore_types::tool::{JsonSchema, ToolResult};
+use wcore_types::tool::{JsonSchema, ToolEffectContract, ToolResult};
+
+use crate::effects::{PreparedToolEffect, ToolEffectExecution};
 
 /// Truncate a string to at most `max_bytes`, snapping to a char boundary.
 pub fn truncate_utf8(s: &str, max_bytes: usize) -> &str {
@@ -359,6 +362,58 @@ pub trait Tool: Send + Sync {
         self.execute(input).await
     }
 
+    /// Execute with an optional durable effect identity. This is a separate,
+    /// defaulted entry point so adding F13 durability does not add a required
+    /// field to the public, externally constructible [`context::ToolContext`].
+    async fn execute_with_effect_ctx(
+        &self,
+        input: Value,
+        ctx: &context::ToolContext,
+        effect: Option<&context::ToolEffectContext>,
+    ) -> ToolResult {
+        let _ = effect;
+        self.execute_with_ctx(input, ctx).await
+    }
+
+    /// Prepare an invocation-specific physical effect before the durable
+    /// `running` boundary. The conservative default has no prepared bridge;
+    /// orchestration must retain the existing execution path and opaque
+    /// recovery semantics in that case.
+    async fn prepare_effect(
+        &self,
+        _input: &Value,
+        _ctx: &context::ToolContext,
+    ) -> Result<Option<PreparedToolEffect>, ToolResult> {
+        Ok(None)
+    }
+
+    /// Execute a previously prepared effect. Tools that return `Some` from
+    /// `prepare_effect` must override this method. The default fails unknown
+    /// rather than falling through to `execute_with_ctx`, which prevents a
+    /// programming error from duplicating a physical effect.
+    async fn execute_prepared_effect(
+        &self,
+        prepared: PreparedToolEffect,
+        _ctx: &context::ToolContext,
+    ) -> ToolEffectExecution {
+        let observed_receipt = prepared.durable_receipt().unwrap_or_else(|error| {
+            serde_json::json!({
+                "outcome": "unknown",
+                "error": format!("failed to serialize prepared receipt: {error}"),
+            })
+        });
+        ToolEffectExecution::unknown(
+            ToolResult {
+                content: format!(
+                    "Tool '{}' prepared an effect but does not implement prepared execution",
+                    self.name()
+                ),
+                is_error: true,
+            },
+            observed_receipt,
+        )
+    }
+
     /// W7 F4: optional streaming variant. Default falls back to
     /// `execute()`. Only `BashTool` overrides this in W7. Tools that
     /// override this MUST also override `supports_streaming()` to
@@ -381,6 +436,18 @@ pub trait Tool: Send + Sync {
     ) -> ToolResult {
         let _ = ctx;
         self.execute_streaming(input, sink).await
+    }
+
+    /// Streaming counterpart to [`Tool::execute_with_effect_ctx`].
+    async fn execute_streaming_with_effect_ctx(
+        &self,
+        input: Value,
+        ctx: &context::ToolContext,
+        effect: Option<&context::ToolEffectContext>,
+        sink: &dyn ToolOutputSink,
+    ) -> ToolResult {
+        let _ = effect;
+        self.execute_streaming_with_ctx(input, ctx, sink).await
     }
 
     /// W7 F4: whether this tool can emit `tool_chunk` events while
@@ -450,6 +517,15 @@ pub trait Tool: Send + Sync {
         ToolExecutionClass::InProcess
     }
 
+    /// Crash-recovery semantics for this concrete invocation.
+    ///
+    /// Tools must explicitly opt into any stronger guarantee. The conservative
+    /// default is opaque so an interrupted invocation is never assumed safe to
+    /// repeat based on its name, category, or execution class.
+    fn effect_contract(&self, _input: &Value) -> ToolEffectContract {
+        ToolEffectContract::default()
+    }
+
     /// Whether this tool's schema should be deferred (sent as name-only stub).
     /// Override to `true` for tools with large schemas or infrequent use.
     fn is_deferred(&self) -> bool {
@@ -494,6 +570,28 @@ impl<T: Tool + ?Sized> Tool for std::sync::Arc<T> {
     async fn execute_with_ctx(&self, input: Value, ctx: &context::ToolContext) -> ToolResult {
         (**self).execute_with_ctx(input, ctx).await
     }
+    async fn execute_with_effect_ctx(
+        &self,
+        input: Value,
+        ctx: &context::ToolContext,
+        effect: Option<&context::ToolEffectContext>,
+    ) -> ToolResult {
+        (**self).execute_with_effect_ctx(input, ctx, effect).await
+    }
+    async fn prepare_effect(
+        &self,
+        input: &Value,
+        ctx: &context::ToolContext,
+    ) -> Result<Option<PreparedToolEffect>, ToolResult> {
+        (**self).prepare_effect(input, ctx).await
+    }
+    async fn execute_prepared_effect(
+        &self,
+        prepared: PreparedToolEffect,
+        ctx: &context::ToolContext,
+    ) -> ToolEffectExecution {
+        (**self).execute_prepared_effect(prepared, ctx).await
+    }
     async fn execute_streaming(&self, input: Value, sink: &dyn ToolOutputSink) -> ToolResult {
         (**self).execute_streaming(input, sink).await
     }
@@ -504,6 +602,17 @@ impl<T: Tool + ?Sized> Tool for std::sync::Arc<T> {
         sink: &dyn ToolOutputSink,
     ) -> ToolResult {
         (**self).execute_streaming_with_ctx(input, ctx, sink).await
+    }
+    async fn execute_streaming_with_effect_ctx(
+        &self,
+        input: Value,
+        ctx: &context::ToolContext,
+        effect: Option<&context::ToolEffectContext>,
+        sink: &dyn ToolOutputSink,
+    ) -> ToolResult {
+        (**self)
+            .execute_streaming_with_effect_ctx(input, ctx, effect, sink)
+            .await
     }
     fn supports_streaming(&self) -> bool {
         (**self).supports_streaming()
@@ -529,6 +638,9 @@ impl<T: Tool + ?Sized> Tool for std::sync::Arc<T> {
     fn execution_class_for(&self, input: &Value) -> ToolExecutionClass {
         (**self).execution_class_for(input)
     }
+    fn effect_contract(&self, input: &Value) -> ToolEffectContract {
+        (**self).effect_contract(input)
+    }
     fn is_deferred(&self) -> bool {
         (**self).is_deferred()
     }
@@ -540,6 +652,96 @@ impl<T: Tool + ?Sized> Tool for std::sync::Arc<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use wcore_types::tool::ToolEffectKind;
+
+    struct DefaultEffectTool;
+
+    #[async_trait]
+    impl Tool for DefaultEffectTool {
+        fn name(&self) -> &str {
+            "default_effect"
+        }
+
+        fn description(&self) -> &str {
+            "test tool"
+        }
+
+        fn input_schema(&self) -> JsonSchema {
+            serde_json::json!({ "type": "object" })
+        }
+
+        fn is_concurrency_safe(&self, _input: &Value) -> bool {
+            true
+        }
+
+        async fn execute(&self, _input: Value) -> ToolResult {
+            ToolResult {
+                content: String::new(),
+                is_error: false,
+            }
+        }
+
+        fn category(&self) -> ToolCategory {
+            ToolCategory::Info
+        }
+    }
+
+    struct RepeatSafeEffectTool;
+
+    #[async_trait]
+    impl Tool for RepeatSafeEffectTool {
+        fn name(&self) -> &str {
+            "repeat_safe_effect"
+        }
+
+        fn description(&self) -> &str {
+            "test tool"
+        }
+
+        fn input_schema(&self) -> JsonSchema {
+            serde_json::json!({ "type": "object" })
+        }
+
+        fn is_concurrency_safe(&self, _input: &Value) -> bool {
+            true
+        }
+
+        async fn execute(&self, _input: Value) -> ToolResult {
+            ToolResult {
+                content: String::new(),
+                is_error: false,
+            }
+        }
+
+        fn category(&self) -> ToolCategory {
+            ToolCategory::Info
+        }
+
+        fn effect_contract(&self, _input: &Value) -> ToolEffectContract {
+            ToolEffectContract {
+                kind: ToolEffectKind::RepeatSafe,
+                reconciler: Some("test-repeat-safe-v1".to_string()),
+            }
+        }
+    }
+
+    #[test]
+    fn tool_effect_contract_defaults_to_opaque() {
+        let contract = DefaultEffectTool.effect_contract(&serde_json::json!({}));
+
+        assert_eq!(contract.kind, ToolEffectKind::Opaque);
+        assert!(contract.reconciler.is_none());
+    }
+
+    #[test]
+    fn tool_can_opt_into_stronger_effect_contract_through_arc() {
+        let tool = std::sync::Arc::new(RepeatSafeEffectTool);
+
+        let contract = tool.effect_contract(&serde_json::json!({}));
+
+        assert_eq!(contract.kind, ToolEffectKind::RepeatSafe);
+        assert_eq!(contract.reconciler.as_deref(), Some("test-repeat-safe-v1"));
+    }
 
     #[test]
     fn truncate_utf8_ascii_within_limit() {

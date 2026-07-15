@@ -1,4 +1,35 @@
 #[test]
+fn legacy_tool_intent_remains_replayable_as_conservative_opaque_state() {
+    let dir = tempfile::tempdir().unwrap();
+    let journal = SessionJournal::open(dir.path().join("session.journal"), "s1").unwrap();
+    journal.append(turn_started("turn")).unwrap();
+    let requested = json!({"cmd": "echo requested"});
+    let effective = json!({"cmd": "echo effective"});
+    let requested_digest = state_payload_digest(&requested).unwrap();
+    let effective_digest = state_payload_digest(&effective).unwrap();
+    journal
+        .append(SessionEvent::ToolIntentRecorded {
+            tool_execution_id: "legacy-execution".into(),
+            provider_call_id: "legacy-provider-call".into(),
+            turn_id: "turn".into(),
+            ordinal: 0,
+            tool: "bash".into(),
+            requested_input: requested,
+            requested_input_digest: requested_digest,
+            effective_input: effective,
+            effective_input_digest: effective_digest,
+        })
+        .unwrap();
+
+    let state = journal.state().unwrap();
+    let tool = state.tools.get("legacy-execution").unwrap();
+    assert_eq!(tool.idempotency_key, "legacy:legacy-execution");
+    assert_eq!(tool.effect_contract, ToolEffectContract::default());
+    assert!(tool.effect_receipt.is_none());
+    assert!(matches!(tool.requested_input, StoredToolInput::Secured { .. }));
+}
+
+#[test]
 fn tool_execution_identity_digests_and_collisions_are_enforced() {
     let dir = tempfile::tempdir().unwrap();
     let journal = SessionJournal::open(dir.path().join("session.journal"), "s1").unwrap();
@@ -34,7 +65,14 @@ fn tool_execution_identity_digests_and_collisions_are_enforced() {
             json!({}),
             json!({}),
         ),
-        tool_intent(
+    ] {
+        assert!(matches!(
+            journal.append(event),
+            Err(JournalError::InvalidTransition(_))
+        ));
+    }
+    journal
+        .append(tool_intent(
             "execution-c",
             "provider-call-c",
             "turn",
@@ -42,41 +80,67 @@ fn tool_execution_identity_digests_and_collisions_are_enforced() {
             "bash",
             json!({}),
             json!({}),
-        ),
-    ] {
-        assert!(matches!(
-            journal.append(event),
-            Err(JournalError::InvalidTransition(_))
-        ));
+        ))
+        .unwrap();
+
+    let mut duplicate_key = tool_intent(
+        "execution-key-collision",
+        "provider-call-key-collision",
+        "turn",
+        9,
+        "bash",
+        json!({}),
+        json!({}),
+    );
+    if let SessionEvent::ToolIntentRecordedV2 {
+        idempotency_key, ..
+    } = &mut duplicate_key
+    {
+        *idempotency_key = "fixture-key-execution-a".into();
     }
+    assert!(matches!(
+        journal.append(duplicate_key),
+        Err(JournalError::InvalidTransition(_))
+    ));
 
     let bad_input = json!({"cmd":"false"});
+    let bad_input_digest = state_payload_digest(&bad_input).unwrap();
     assert!(matches!(
-        journal.append(SessionEvent::ToolIntentRecorded {
+        journal.append(SessionEvent::ToolIntentRecordedV2 {
             tool_execution_id: "execution-d".into(),
+            idempotency_key: "fixture-key-execution-d".into(),
+            retry_of: None,
             provider_call_id: "provider-call-d".into(),
             turn_id: "turn".into(),
             ordinal: 1,
             tool: "bash".into(),
-            requested_input: bad_input.clone(),
+            requested_input: StoredToolInput::redacted(bad_input_digest.clone()),
             requested_input_digest: "wrong".into(),
-            effective_input_digest: state_payload_digest(&bad_input).unwrap(),
-            effective_input: bad_input,
+            effective_input_digest: bad_input_digest.clone(),
+            effective_input: StoredToolInput::redacted(bad_input_digest),
+            effect_contract: ToolEffectContract::default(),
+            effect_receipt: None,
         }),
         Err(JournalError::InvalidTransition(_))
     ));
     let bad_effective = json!({"cmd":"effective"});
+    let bad_effective_digest = state_payload_digest(&bad_effective).unwrap();
+    let empty_digest = state_payload_digest(&json!({})).unwrap();
     assert!(matches!(
-        journal.append(SessionEvent::ToolIntentRecorded {
+        journal.append(SessionEvent::ToolIntentRecordedV2 {
             tool_execution_id: "execution-e".into(),
+            idempotency_key: "fixture-key-execution-e".into(),
+            retry_of: None,
             provider_call_id: "provider-call-e".into(),
             turn_id: "turn".into(),
             ordinal: 1,
             tool: "bash".into(),
-            requested_input_digest: state_payload_digest(&json!({})).unwrap(),
-            requested_input: json!({}),
-            effective_input: bad_effective,
+            requested_input_digest: empty_digest.clone(),
+            requested_input: StoredToolInput::redacted(empty_digest),
+            effective_input: StoredToolInput::redacted(bad_effective_digest),
             effective_input_digest: "wrong".into(),
+            effect_contract: ToolEffectContract::default(),
+            effect_receipt: None,
         }),
         Err(JournalError::InvalidTransition(_))
     ));

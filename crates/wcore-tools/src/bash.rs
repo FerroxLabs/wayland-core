@@ -11,7 +11,7 @@ use wcore_sandbox::{
     NetworkPolicy, SandboxChunk, SandboxCommand, SandboxManifest, SandboxOutput, SyscallPolicy,
     backends::SandboxBackend, default_for_platform,
 };
-use wcore_types::tool::{JsonSchema, ToolResult};
+use wcore_types::tool::{JsonSchema, ToolEffectContract, ToolResult};
 
 use crate::context::ToolContext;
 use crate::{Tool, ToolOutputSink};
@@ -599,6 +599,11 @@ impl Tool for BashTool {
         false
     }
 
+    fn effect_contract(&self, _input: &Value) -> ToolEffectContract {
+        // Shell commands can mutate arbitrary host state with no general reconciler.
+        ToolEffectContract::default()
+    }
+
     async fn execute(&self, input: Value) -> ToolResult {
         // S9: buffered path now routes through the sandbox backend
         // (`SandboxBackend::execute`). On `NoSandboxBackend` (the default
@@ -993,6 +998,14 @@ impl Tool for BashTool {
 mod tests {
     use super::*;
     use serde_json::json;
+    use wcore_types::tool::ToolEffectKind;
+
+    #[test]
+    fn effect_contract_remains_opaque() {
+        let contract = BashTool.effect_contract(&json!({ "command": "true" }));
+        assert_eq!(contract.kind, ToolEffectKind::Opaque);
+        assert!(contract.reconciler.is_none());
+    }
 
     #[tokio::test]
     #[serial_test::serial]

@@ -293,11 +293,12 @@ fn checksum_sequence_previous_and_schema_tampering_fail_closed() {
 }
 
 #[test]
-fn obsolete_journal_schema_is_rejected_before_decoding_incompatible_events() {
+fn unreleased_v3_journal_schema_is_explicitly_rejected_before_event_decode() {
+    assert_eq!(SESSION_JOURNAL_SCHEMA_VERSION, 4);
     let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("v2.journal");
+    let path = dir.path().join("v3.journal");
     let obsolete = serde_json::to_vec(&json!({
-        "schema_version": SESSION_JOURNAL_SCHEMA_VERSION - 1,
+        "schema_version": 3,
         "session_id": "s1",
         "seq": 0,
         "previous_checksum": GENESIS_CHECKSUM,
@@ -313,12 +314,15 @@ fn obsolete_journal_schema_is_rejected_before_decoding_incompatible_events() {
     std::fs::write(&path, frame(&obsolete)).unwrap();
     assert!(matches!(
         SessionJournal::replay(path),
-        Err(JournalError::UnsupportedSchema { found: 2, .. })
+        Err(JournalError::UnsupportedSchema {
+            found: 3,
+            supported: 4
+        })
     ));
 }
 
 #[test]
-fn unresolved_started_external_effects_reduce_to_unknown() {
+fn started_tool_is_running_while_other_unresolved_effects_remain_unknown() {
     let dir = tempfile::tempdir().unwrap();
     let entries = append_events(
         &dir.path().join("session.journal"),
@@ -364,13 +368,14 @@ fn unresolved_started_external_effects_reduce_to_unknown() {
     let state = replay_state(&entries).unwrap();
     for effect in [
         &state.provider_attempts["p"].effect,
-        &state.tools["tool-exec"].effect,
         &state.children["c"].effect,
         &state.deliveries["d"].effect,
     ] {
         assert_eq!(effect, &ExternalEffectState::Unknown);
         assert!(effect.requires_reconciliation());
     }
+    assert_eq!(state.tools["tool-exec"].effect, ToolEffectState::Running);
+    assert!(state.tools["tool-exec"].effect.requires_reconciliation());
 }
 
 #[test]
@@ -948,12 +953,15 @@ fn prepared_provider_tool_and_child_can_finish_without_a_fabricated_start() {
     assert_eq!(state.tools["execution"].provider_call_id, "provider-call");
     assert_eq!(state.tools["execution"].turn_id, "turn");
     assert_eq!(state.tools["execution"].ordinal, 0);
-    assert_eq!(state.tools["execution"].requested_input, requested);
-    assert_eq!(state.tools["execution"].effective_input, effective);
     assert_eq!(
-        state.tools["execution"].effect,
-        ExternalEffectState::NotStarted
+        state.tools["execution"].requested_input.exact_digest(),
+        state_payload_digest(&requested).unwrap()
     );
+    assert_eq!(
+        state.tools["execution"].effective_input.exact_digest(),
+        state_payload_digest(&effective).unwrap()
+    );
+    assert_eq!(state.tools["execution"].effect, ToolEffectState::NotStarted);
     assert_eq!(
         state.tools["execution"].not_started_reason,
         Some(tool_reason)

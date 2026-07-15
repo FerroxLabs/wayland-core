@@ -12,11 +12,13 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use serde_json::Value;
-use wcore_plugin_api::tool::{PluginTool, PluginToolCaps, PluginToolEmit, PluginToolInvocation};
+use wcore_plugin_api::tool::{
+    PluginTool, PluginToolCaps, PluginToolEffectIdentity, PluginToolEmit, PluginToolInvocation,
+};
 use wcore_protocol::events::ToolCategory;
-use wcore_tools::context::ToolContext;
+use wcore_tools::context::{ToolContext, ToolEffectContext};
 use wcore_tools::{NullToolOutputSink, Tool, ToolOutputSink};
-use wcore_types::tool::{JsonSchema, ToolResult};
+use wcore_types::tool::{JsonSchema, ToolEffectContract, ToolResult};
 
 /// Buffering `ToolOutputSink` used by `execute_streaming` (no-ctx path).
 ///
@@ -66,12 +68,19 @@ impl PluginToolAdapter {
         )
     }
 
-    fn caps_from_ctx(ctx: &ToolContext) -> PluginToolCaps {
-        PluginToolCaps::v1(
+    fn caps_from_ctx(ctx: &ToolContext, effect: Option<&ToolEffectContext>) -> PluginToolCaps {
+        let caps = PluginToolCaps::v1(
             ctx.cancel.clone(),
             ctx.call_id.clone(),
             ctx.source_agent.clone(),
-        )
+        );
+        match effect {
+            Some(effect) => caps.with_effect_identity(PluginToolEffectIdentity::v1(
+                effect.tool_execution_id.clone(),
+                effect.idempotency_key.clone(),
+            )),
+            None => caps,
+        }
     }
 }
 
@@ -106,6 +115,11 @@ impl Tool for PluginToolAdapter {
     /// `PluginTool` field can lift this if needed.
     fn is_concurrency_safe(&self, _input: &Value) -> bool {
         false
+    }
+
+    fn effect_contract(&self, _input: &Value) -> ToolEffectContract {
+        // Plugin closures are untrusted effect surfaces with no host reconciler.
+        ToolEffectContract::default()
     }
 
     /// Plugin tools opt INTO streaming — the adapter always routes
@@ -171,7 +185,7 @@ impl Tool for PluginToolAdapter {
         let inv = PluginToolInvocation {
             input,
             emit,
-            caps: Self::caps_from_ctx(ctx),
+            caps: Self::caps_from_ctx(ctx, None),
         };
         (self.inner.execute)(inv).await
     }
@@ -182,15 +196,42 @@ impl Tool for PluginToolAdapter {
         let inv = PluginToolInvocation {
             input,
             emit,
-            caps: Self::caps_from_ctx(ctx),
+            caps: Self::caps_from_ctx(ctx, None),
         };
         (self.inner.execute)(inv).await
+    }
+
+    async fn execute_with_effect_ctx(
+        &self,
+        input: Value,
+        ctx: &ToolContext,
+        effect: Option<&ToolEffectContext>,
+    ) -> ToolResult {
+        let emit = Self::emit_for(ctx.sink.clone());
+        let inv = PluginToolInvocation {
+            input,
+            emit,
+            caps: Self::caps_from_ctx(ctx, effect),
+        };
+        (self.inner.execute)(inv).await
+    }
+
+    async fn execute_streaming_with_effect_ctx(
+        &self,
+        input: Value,
+        ctx: &ToolContext,
+        effect: Option<&ToolEffectContext>,
+        sink: &dyn ToolOutputSink,
+    ) -> ToolResult {
+        let _ = sink;
+        self.execute_with_effect_ctx(input, ctx, effect).await
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
 
     fn echo_tool() -> PluginTool {
         PluginTool {
@@ -239,5 +280,57 @@ mod tests {
             .await;
         assert!(!result.is_error);
         assert_eq!(result.content, r#"{"y":2}"#);
+    }
+
+    #[tokio::test]
+    async fn adapter_reuses_exact_durable_identity_and_legacy_path_has_none() {
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let capture = Arc::clone(&seen);
+        let tool = PluginTool {
+            name: "capture".into(),
+            description: "captures caps".into(),
+            input_schema: serde_json::json!({ "type": "object" }),
+            category: ToolCategory::Info,
+            is_deferred: false,
+            max_result_size: 1_000,
+            execute: Arc::new(move |inv: PluginToolInvocation| {
+                capture.lock().unwrap().push(inv.caps.effect.clone());
+                Box::pin(async {
+                    ToolResult {
+                        content: "ok".into(),
+                        is_error: false,
+                    }
+                })
+            }),
+        };
+        let adapter = PluginToolAdapter::new(tool);
+        let ctx = ToolContext::test_default();
+        let effect = ToolEffectContext {
+            tool_execution_id: "tool-execution-7".into(),
+            idempotency_key: "stable-key-7".into(),
+        };
+
+        adapter
+            .execute_with_effect_ctx(serde_json::json!({ "same": true }), &ctx, Some(&effect))
+            .await;
+        adapter
+            .execute_with_effect_ctx(serde_json::json!({ "same": true }), &ctx, Some(&effect))
+            .await;
+        adapter
+            .execute_with_ctx(
+                serde_json::json!({ "same": true }),
+                &ToolContext::test_default(),
+            )
+            .await;
+        adapter.execute(serde_json::json!({ "same": true })).await;
+
+        let expected = Some(PluginToolEffectIdentity::v1(
+            "tool-execution-7",
+            "stable-key-7",
+        ));
+        assert_eq!(
+            seen.lock().unwrap().as_slice(),
+            &[expected.clone(), expected, None, None]
+        );
     }
 }

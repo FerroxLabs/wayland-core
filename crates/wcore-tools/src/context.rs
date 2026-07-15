@@ -27,6 +27,15 @@ use crate::vfs::{RealFs, VirtualFs};
 use crate::workspace_policy::WorkspacePolicy;
 use crate::{NullToolOutputSink, ToolOutputSink};
 
+/// Durable identity supplied by orchestration for one physical tool attempt.
+/// Adapters may forward the idempotency key without changing their recovery
+/// contract; declaring a stronger contract still requires proving it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ToolEffectContext {
+    pub tool_execution_id: String,
+    pub idempotency_key: String,
+}
+
 /// Per-tool-call context. Cheap to construct in tests via
 /// `ToolContext::test_default()`; orchestration builds one per dispatch
 /// from the root `RootContext` (W8a A.6).

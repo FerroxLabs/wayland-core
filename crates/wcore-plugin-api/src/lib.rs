@@ -79,7 +79,9 @@ pub use rule_spec::{RuleScope, RuleSpec};
 pub use spawn_consent::{
     CONSENT_SIDECAR, McpSpawnConsent, consent_key_from_parts, spawn_consent_key,
 };
-pub use tool::{PluginTool, PluginToolCaps, PluginToolEmit, PluginToolInvocation};
+pub use tool::{
+    PluginTool, PluginToolCaps, PluginToolEffectIdentity, PluginToolEmit, PluginToolInvocation,
+};
 pub use user_model_spec::UserModelSpec;
 
 // Re-exported so plugin authors don't need to add separate `async-trait` and

@@ -24,7 +24,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use thiserror::Error;
 use wcore_protocol::events::ToolCategory;
-use wcore_types::tool::{JsonSchema, ToolResult};
+use wcore_types::tool::{JsonSchema, ToolEffectContract, ToolResult};
 
 use crate::Tool;
 use crate::dispatcher::ToolDispatcher;
@@ -331,6 +331,11 @@ impl Tool for ScriptTool {
 
     fn execution_class_for(&self, _input: &Value) -> crate::ToolExecutionClass {
         crate::ToolExecutionClass::ProcessSpawning
+    }
+
+    fn effect_contract(&self, _input: &Value) -> ToolEffectContract {
+        // Nested steps may mix unrelated effects without an aggregate reconciler.
+        ToolEffectContract::default()
     }
 
     async fn execute(&self, input: Value) -> ToolResult {

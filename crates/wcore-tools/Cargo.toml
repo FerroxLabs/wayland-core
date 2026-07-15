@@ -128,6 +128,9 @@ workspace-hack.workspace = true
 [target.'cfg(target_os = "linux")'.dependencies]
 wcore-sandbox = { workspace = true, features = ["seccomp"] }
 
+[target.'cfg(unix)'.dependencies]
+libc.workspace = true
+
 [features]
 default = ["pdf", "image-inspect", "doc-extract"]
 # Enables postgres_schema_tool::live::TokioPostgresBackend.

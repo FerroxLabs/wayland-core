@@ -5,7 +5,7 @@ use async_trait::async_trait;
 use serde_json::{Value, json};
 
 use wcore_protocol::events::ToolCategory;
-use wcore_types::tool::{JsonSchema, ToolResult};
+use wcore_types::tool::{JsonSchema, ToolEffectContract, ToolResult};
 
 use crate::Tool;
 use crate::context::ToolContext;
@@ -218,6 +218,10 @@ impl Tool for WriteTool {
 
     fn category(&self) -> ToolCategory {
         ToolCategory::Edit
+    }
+
+    fn effect_contract(&self, _input: &Value) -> ToolEffectContract {
+        ToolEffectContract::default()
     }
 
     fn describe(&self, input: &Value) -> String {
