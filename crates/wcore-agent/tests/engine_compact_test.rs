@@ -18,10 +18,14 @@ use wcore_agent::output::OutputSink;
 use wcore_agent::output::terminal::TerminalSink;
 use wcore_agent::session::SessionManager;
 use wcore_config::compact::CompactConfig;
+use wcore_egress::{AllowAllPolicy, EgressClient};
+use wcore_providers::retry::{builder_send_with_retry, scope_max_retries};
 use wcore_providers::{LlmProvider, ProviderError};
 use wcore_tools::registry::ToolRegistry;
 use wcore_types::llm::{LlmEvent, LlmRequest};
 use wcore_types::message::{ContentBlock, Message, Role, StopReason, TokenUsage};
+use wiremock::matchers::method;
+use wiremock::{Mock, MockServer, ResponseTemplate};
 
 use common::test_config;
 
@@ -36,6 +40,7 @@ fn silent_output() -> Arc<dyn OutputSink> {
 struct CompactMockProvider {
     turns: Mutex<VecDeque<Vec<LlmEvent>>>,
     call_count: Mutex<usize>,
+    physical_url: Option<String>,
 }
 
 impl CompactMockProvider {
@@ -43,7 +48,13 @@ impl CompactMockProvider {
         Self {
             turns: Mutex::new(VecDeque::from(turns)),
             call_count: Mutex::new(0),
+            physical_url: None,
         }
+    }
+
+    fn with_physical_url(mut self, url: String) -> Self {
+        self.physical_url = Some(url);
+        self
     }
 
     fn call_count(&self) -> usize {
@@ -58,6 +69,16 @@ impl LlmProvider for CompactMockProvider {
         _request: &LlmRequest,
     ) -> Result<mpsc::Receiver<LlmEvent>, ProviderError> {
         *self.call_count.lock().unwrap() += 1;
+        if let Some(url) = self.physical_url.as_deref() {
+            let client = EgressClient::new().with_policy(Arc::new(AllowAllPolicy));
+            let response = scope_max_retries(0, builder_send_with_retry(client.get(url))).await?;
+            if !response.status().is_success() {
+                return Err(ProviderError::Api {
+                    status: response.status().as_u16(),
+                    message: "fixture response".into(),
+                });
+            }
+        }
         let events = self.turns.lock().unwrap().pop_front().unwrap_or_else(|| {
             vec![LlmEvent::Done {
                 stop_reason: StopReason::EndTurn,
@@ -261,6 +282,11 @@ async fn tc_2_6_04_autocompact_then_continue() {
 
 #[tokio::test]
 async fn tc_2_6_05_session_save_after_compact() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .respond_with(ResponseTemplate::new(200))
+        .mount(&server)
+        .await;
     let dir = tempdir().expect("tempdir");
 
     let turn1 = vec![
@@ -285,11 +311,10 @@ async fn tc_2_6_05_session_save_after_compact() {
     let compact_summary = summary_turn("<summary>Session summary</summary>");
     let turn2 = text_turn("After compact", 10_000);
 
-    let provider = Arc::new(CompactMockProvider::new(vec![
-        turn1,
-        compact_summary,
-        turn2,
-    ]));
+    let provider = Arc::new(
+        CompactMockProvider::new(vec![turn1, compact_summary, turn2])
+            .with_physical_url(server.uri()),
+    );
 
     let mut config = test_config();
     config.compact = CompactConfig::default();
