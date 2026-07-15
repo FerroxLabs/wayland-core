@@ -128,7 +128,7 @@ pub const EVENT_SPECS: &[WireSpec] = &[
     wire!(
         "ready",
         "events/ready.json",
-        ["version", "capabilities"],
+        ["version", "capabilities", "contract"],
         "required",
         "session_id",
         "available"
@@ -478,6 +478,7 @@ pub const SOURCE_INPUTS: &[&str] = &[
     "crates/wcore-protocol/src/contract/canonical.rs",
     "crates/wcore-protocol/src/contract/spec.rs",
     "crates/wcore-protocol/src/contract/generate.rs",
+    "crates/wcore-protocol/src/contract/observation.rs",
     "crates/wcore-protocol/src/contract/check.rs",
     "crates/wcore-protocol/src/bin/wcore-contract.rs",
     "crates/wcore-types/src/execution_policy.rs",

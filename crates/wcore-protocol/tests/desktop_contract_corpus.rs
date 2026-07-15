@@ -92,6 +92,10 @@ fn manifest_pins_generator_and_all_three_digests() {
     }
     assert_eq!(manifest["commands"].as_array().unwrap().len(), 11);
     assert_eq!(manifest["events"].as_array().unwrap().len(), 33);
+    assert_eq!(
+        manifest["capabilities"]["contract_negotiation"],
+        "available"
+    );
     assert_eq!(manifest["capabilities"]["anvil_receipts"], "unavailable");
     assert_eq!(
         manifest["capabilities"]["workflow_lifecycle_v1"],

@@ -52,6 +52,13 @@ version and pins the complete descriptor for the session. A duplicate identical
 `ready` is harmless. A conflicting descriptor, unsupported major version, or
 digest mismatch fails closed for contract-critical features.
 
+`events/ready.json` is part of `fixture_digest`. To avoid a recursive hash,
+the digest domain canonicalizes only `ready.contract.fixture_digest` to 64
+zeroes before hashing. The advertised schema, source-input digest, capability
+statuses, and every other Ready byte remain covered. Runtime Ready reads the
+checked generated manifest embedded at build time; it does not hardcode a
+digest in Rust source.
+
 Minor versions are additive. Existing field meaning, enum meaning, correlation
 identity, ordering, and terminal semantics cannot change within a major
 version. New optional fields and noncritical events are allowed. Removing a

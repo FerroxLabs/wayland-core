@@ -8,6 +8,7 @@ use crate::commands::ProtocolCommand;
 
 use super::ContractResult;
 use super::canonical::{canonical_json, digest_named_bytes};
+use super::observation::{ContractCapabilityStatus, ContractDescriptor};
 use super::spec::{
     COMMAND_SPECS, EVENT_SPECS, PRODUCER_COMMAND_TYPES, PRODUCER_EVENT_TYPES, SOURCE_INPUTS,
     WireSpec, command_fixture_values, compatibility_event_values, event_fixture_values,
@@ -19,13 +20,10 @@ pub const CONTRACT_ROOT: &str = "contracts/desktop/v1";
 
 const DEFERRED: &str = r#"# Deferred Desktop contract adversarial cases
 
-This v1.0 corpus foundation records the current 11-command and 33-event wire.
-It does not invent authority that the current protocol does not carry.
+This v1.0 corpus records the current producer wire. Contract negotiation,
+unknown-critical rejection, and unknown-noncritical dropping are live and
+proved by serialized replay through the reference host observer.
 
-- `unknown_critical_fail_closed`: deferred until events carry top-level
-  `critical` and `contract_version` and Desktop has a contract-aware decoder.
-- `version_mismatch_handshake`: deferred until `ready` advertises a versioned
-  contract descriptor and schema digest.
 - `ordering_duplicate_terminal_reducer`: deferred because ordinary current
   events have no producer event ID or monotonic sequence.
 - `effective_execution_policy_revisions`: deferred; the current event is a
@@ -125,13 +123,38 @@ fn specs_manifest(specs: &[WireSpec]) -> Vec<Value> {
         .collect()
 }
 
-fn fixtures_digest(artifacts: &BTreeMap<String, Vec<u8>>) -> String {
-    digest_named_bytes(artifacts.iter().filter_map(|(path, bytes)| {
+fn fixtures_digest(artifacts: &BTreeMap<String, Vec<u8>>) -> ContractResult<String> {
+    let mut normalized = Vec::new();
+    for (path, bytes) in artifacts {
         let included = ["commands/", "events/", "compat/", "adversarial/"]
             .iter()
             .any(|prefix| path.starts_with(prefix));
-        included.then_some((path.as_str(), bytes.as_slice()))
-    }))
+        if !included {
+            continue;
+        }
+        let mut bytes = bytes.clone();
+        if path == "events/ready.json"
+            || path == "adversarial/events/version-mismatch.jsonl"
+            || path == "adversarial/events/schema-mismatch.jsonl"
+            || path == "adversarial/events/fixture-mismatch.jsonl"
+        {
+            let mut value: Value = serde_json::from_slice(&bytes)?;
+            if let Some(fixture_digest) = value
+                .get_mut("contract")
+                .and_then(Value::as_object_mut)
+                .and_then(|contract| contract.get_mut("fixture_digest"))
+            {
+                *fixture_digest = Value::String(format!("sha256:{}", "0".repeat(64)));
+                bytes = canonical_json(&value)?;
+            }
+        }
+        normalized.push((path.as_str(), bytes));
+    }
+    Ok(digest_named_bytes(
+        normalized
+            .iter()
+            .map(|(path, bytes)| (*path, bytes.as_slice())),
+    ))
 }
 
 fn schemas_digest(artifacts: &BTreeMap<String, Vec<u8>>) -> String {
@@ -139,6 +162,86 @@ fn schemas_digest(artifacts: &BTreeMap<String, Vec<u8>>) -> String {
         path.starts_with("schema/")
             .then_some((path.as_str(), bytes.as_slice()))
     }))
+}
+
+fn contract_capabilities() -> BTreeMap<String, ContractCapabilityStatus> {
+    BTreeMap::from([
+        (
+            "anvil_receipts".into(),
+            ContractCapabilityStatus::Unavailable,
+        ),
+        ("browser_events".into(), ContractCapabilityStatus::ShapeOnly),
+        (
+            "contract_negotiation".into(),
+            ContractCapabilityStatus::Available,
+        ),
+        ("cua_events".into(), ContractCapabilityStatus::ShapeOnly),
+        (
+            "effective_execution_policy_revisions".into(),
+            ContractCapabilityStatus::Unavailable,
+        ),
+        (
+            "host_delegated_delivery".into(),
+            ContractCapabilityStatus::Available,
+        ),
+        ("plugin_events".into(), ContractCapabilityStatus::ShapeOnly),
+        (
+            "workflow_lifecycle_v1".into(),
+            ContractCapabilityStatus::Unavailable,
+        ),
+    ])
+}
+
+fn descriptor(
+    fixture_digest: String,
+    schema_digest: String,
+    source_inputs_digest: String,
+    capabilities: BTreeMap<String, ContractCapabilityStatus>,
+) -> ContractDescriptor {
+    ContractDescriptor {
+        name: CONTRACT_NAME.into(),
+        major: 1,
+        minor: 0,
+        generator: GENERATOR_VERSION.into(),
+        fixture_digest,
+        schema_digest,
+        source_inputs_digest,
+        capabilities,
+    }
+}
+
+fn insert_negotiation_fixtures(
+    artifacts: &mut BTreeMap<String, Vec<u8>>,
+    descriptor: &ContractDescriptor,
+) -> ContractResult<()> {
+    let ready = artifacts
+        .get("events/ready.json")
+        .ok_or_else(|| std::io::Error::other("canonical Ready fixture is missing"))?;
+    let mut ready: Value = serde_json::from_slice(ready)?;
+    ready["contract"] = serde_json::to_value(descriptor)?;
+    artifacts.insert("events/ready.json".into(), canonical_json(&ready)?);
+
+    let mut unsupported_major = descriptor.clone();
+    unsupported_major.major += 1;
+    artifacts.insert(
+        "adversarial/events/version-mismatch.jsonl".into(),
+        canonical_json(&json!({"contract": unsupported_major, "type": "ready"}))?,
+    );
+
+    let mut schema_mismatch = descriptor.clone();
+    schema_mismatch.schema_digest = format!("sha256:{}", "f".repeat(64));
+    artifacts.insert(
+        "adversarial/events/schema-mismatch.jsonl".into(),
+        canonical_json(&json!({"contract": schema_mismatch, "type": "ready"}))?,
+    );
+
+    let mut fixture_mismatch = descriptor.clone();
+    fixture_mismatch.fixture_digest = format!("sha256:{}", "f".repeat(64));
+    artifacts.insert(
+        "adversarial/events/fixture-mismatch.jsonl".into(),
+        canonical_json(&json!({"contract": fixture_mismatch, "type": "ready"}))?,
+    );
+    Ok(())
 }
 
 /// Regenerate every tracked contract artifact in memory.
@@ -181,17 +284,16 @@ pub fn generated_artifacts() -> ContractResult<BTreeMap<String, Vec<u8>>> {
         b"{\"content\":\"hello\",\"msg_id\":7,\"type\":\"message\"}\n".to_vec(),
     );
     artifacts.insert(
-        "adversarial/events/unknown-critical.deferred.jsonl".into(),
-        b"{\"contract_version\":\"1.0\",\"critical\":true,\"type\":\"future_authority\"}\n"
-            .to_vec(),
+        "adversarial/events/unknown-critical.jsonl".into(),
+        b"{\"critical\":true,\"type\":\"future_authority\"}\n".to_vec(),
     );
     artifacts.insert(
         "adversarial/events/unknown-noncritical.jsonl".into(),
-        b"{\"payload\":{},\"type\":\"future_observation\"}\n".to_vec(),
+        b"{\"critical\":false,\"payload\":{},\"type\":\"future_observation\"}\n".to_vec(),
     );
     artifacts.insert(
-        "adversarial/events/version-mismatch.deferred.jsonl".into(),
-        b"{\"contract\":{\"generator\":\"wcore-desktop-contract-gen/1\",\"major\":2,\"minor\":0,\"name\":\"wayland-desktop-core\",\"schema_digest\":\"sha256:unsupported\"},\"type\":\"ready\"}\n".to_vec(),
+        "adversarial/events/unknown-criticality.jsonl".into(),
+        b"{\"payload\":{},\"type\":\"future_unclassified\"}\n".to_vec(),
     );
 
     artifacts.insert(
@@ -211,9 +313,25 @@ pub fn generated_artifacts() -> ContractResult<BTreeMap<String, Vec<u8>>> {
     );
     artifacts.insert("DEFERRED.md".into(), DEFERRED.as_bytes().to_vec());
 
-    let fixture_digest = fixtures_digest(&artifacts);
     let schema_digest = schemas_digest(&artifacts);
     let source_inputs_digest = source_digest()?;
+    let capabilities = contract_capabilities();
+    let provisional = descriptor(
+        format!("sha256:{}", "0".repeat(64)),
+        schema_digest.clone(),
+        source_inputs_digest.clone(),
+        capabilities.clone(),
+    );
+    insert_negotiation_fixtures(&mut artifacts, &provisional)?;
+    let fixture_digest = fixtures_digest(&artifacts)?;
+    let final_descriptor = descriptor(
+        fixture_digest.clone(),
+        schema_digest.clone(),
+        source_inputs_digest.clone(),
+        capabilities.clone(),
+    );
+    insert_negotiation_fixtures(&mut artifacts, &final_descriptor)?;
+    debug_assert_eq!(fixture_digest, fixtures_digest(&artifacts)?);
     let fixture_inventory = artifacts
         .keys()
         .filter(|path| {
@@ -224,21 +342,10 @@ pub fn generated_artifacts() -> ContractResult<BTreeMap<String, Vec<u8>>> {
         .cloned()
         .collect::<Vec<_>>();
     let manifest = json!({
-        "capabilities": {
-            "anvil_receipts": "unavailable",
-            "browser_events": "shape_only",
-            "contract_negotiation": "unavailable",
-            "cua_events": "shape_only",
-            "effective_execution_policy_revisions": "unavailable",
-            "host_delegated_delivery": "available",
-            "plugin_events": "shape_only",
-            "workflow_lifecycle_v1": "unavailable"
-        },
+        "capabilities": capabilities,
         "commands": specs_manifest(COMMAND_SPECS),
         "contract": {"major": 1, "minor": 0, "name": CONTRACT_NAME},
         "deferred_adversarial": [
-            "unknown_critical_fail_closed",
-            "version_mismatch_handshake",
             "ordering_duplicate_terminal_reducer",
             "effective_execution_policy_revisions",
             "workflow_node_child_lifecycle",
@@ -282,7 +389,7 @@ pub fn write_contract() -> ContractResult<()> {
 pub fn manifest_digests() -> ContractResult<(String, String, String)> {
     let artifacts = generated_artifacts()?;
     Ok((
-        fixtures_digest(&artifacts),
+        fixtures_digest(&artifacts)?,
         schemas_digest(&artifacts),
         source_digest()?,
     ))
@@ -315,4 +422,53 @@ pub(crate) fn all_relative_files(root: &Path) -> ContractResult<BTreeSet<String>
         visit(root, root, &mut files)?;
     }
     Ok(files)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::contract::{HostContractObserver, HostObservation, HostObservationError};
+
+    #[test]
+    fn generated_negotiation_fixtures_replay_without_digest_recursion() {
+        let artifacts = generated_artifacts().unwrap();
+        let ready = artifacts.get("events/ready.json").unwrap();
+        let ready_value: Value = serde_json::from_slice(ready).unwrap();
+        let expected: ContractDescriptor =
+            serde_json::from_value(ready_value["contract"].clone()).unwrap();
+        let mut observer = HostContractObserver::new(expected.clone());
+        assert_eq!(
+            observer.observe_json_line(ready),
+            Ok(HostObservation::Negotiated(expected.clone()))
+        );
+
+        assert!(matches!(
+            observer.observe_json_line(
+                artifacts
+                    .get("adversarial/events/unknown-noncritical.jsonl")
+                    .unwrap()
+            ),
+            Ok(HostObservation::DroppedUnknownNonCritical { .. })
+        ));
+        assert!(matches!(
+            observer.observe_json_line(
+                artifacts
+                    .get("adversarial/events/unknown-critical.jsonl")
+                    .unwrap()
+            ),
+            Err(HostObservationError::UnknownCriticalEvent { .. })
+        ));
+
+        let manifest: Value =
+            serde_json::from_slice(artifacts.get("manifest.json").unwrap()).unwrap();
+        assert_eq!(manifest["fixture_digest"], expected.fixture_digest);
+        assert_eq!(
+            manifest["capabilities"]["contract_negotiation"],
+            "available"
+        );
+        assert_eq!(
+            fixtures_digest(&artifacts).unwrap(),
+            expected.fixture_digest
+        );
+    }
 }
