@@ -51,7 +51,7 @@
 //!   per-stage PassThrough path.
 
 use std::collections::{HashMap, HashSet};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use serde_json::Value;
@@ -100,6 +100,8 @@ pub struct WorkflowLifecycleEmitter {
     node_count: usize,
     node_ids: Vec<String>,
     run_id: String,
+    started: AtomicBool,
+    finished: AtomicBool,
     next_sequence: AtomicU64,
     terminal_nodes: Mutex<HashSet<String>>,
     children: Mutex<HashMap<String, ChildSequence>>,
@@ -120,6 +122,8 @@ impl WorkflowLifecycleEmitter {
             node_count,
             node_ids,
             run_id: uuid::Uuid::new_v4().to_string(),
+            started: AtomicBool::new(false),
+            finished: AtomicBool::new(false),
             next_sequence: AtomicU64::new(1),
             terminal_nodes: Mutex::new(HashSet::new()),
             children: Mutex::new(HashMap::new()),
@@ -127,6 +131,9 @@ impl WorkflowLifecycleEmitter {
     }
 
     pub fn start(&self) {
+        if self.started.swap(true, Ordering::AcqRel) {
+            return;
+        }
         self.output
             .emit_correlated_workflow_started(&WorkflowRunStarted {
                 workflow_id: self.workflow_id.clone(),
@@ -145,6 +152,9 @@ impl WorkflowLifecycleEmitter {
         state: WorkflowNodeState,
         failure: Option<WorkflowFailure>,
     ) {
+        if self.finished.load(Ordering::Acquire) {
+            return;
+        }
         let terminal = matches!(
             state,
             WorkflowNodeState::Succeeded
@@ -178,6 +188,9 @@ impl WorkflowLifecycleEmitter {
     }
 
     pub fn child_event(&self, parent_call_id: &str, agent_name: &str, inner: &Value) {
+        if self.finished.load(Ordering::Acquire) {
+            return;
+        }
         let correlation = {
             let mut children = self
                 .children
@@ -216,6 +229,9 @@ impl WorkflowLifecycleEmitter {
     }
 
     pub fn finish(&self, terminal_state: WorkflowTerminalState, failure: Option<WorkflowFailure>) {
+        if self.finished.swap(true, Ordering::AcqRel) {
+            return;
+        }
         self.output
             .emit_correlated_workflow_finished(&WorkflowRunFinished {
                 workflow_id: self.workflow_id.clone(),
@@ -2141,5 +2157,23 @@ Workflow(
 
         lifecycle.finish(WorkflowTerminalState::Succeeded, None);
         assert_eq!(lifecycle.next_sequence.load(Ordering::Relaxed), 5);
+
+        // The run terminal is absorbing too: duplicate finish and late child
+        // evidence cannot allocate new event or sequence identities.
+        lifecycle.finish(WorkflowTerminalState::Failed, None);
+        lifecycle.child_event(
+            "workflow:scan",
+            "scan",
+            &serde_json::json!({"type": "error"}),
+        );
+        assert_eq!(lifecycle.next_sequence.load(Ordering::Relaxed), 5);
+        assert_eq!(
+            lifecycle
+                .children
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())["workflow:scan"]
+                .next_sequence,
+            2
+        );
     }
 }
