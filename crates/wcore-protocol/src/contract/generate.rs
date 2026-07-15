@@ -2,17 +2,19 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 
+use crate::anvil::{anvil_receipt_body_digest, AnvilReceipt};
 use crate::commands::ProtocolCommand;
 
-use super::ContractResult;
 use super::canonical::{canonical_json, digest_named_bytes};
 use super::observation::{ContractCapabilityStatus, ContractDescriptor};
 use super::spec::{
-    COMMAND_SPECS, EVENT_SPECS, PRODUCER_COMMAND_TYPES, PRODUCER_EVENT_TYPES, SOURCE_INPUTS,
-    WireSpec, command_fixture_values, compatibility_event_values, event_fixture_values,
+    anvil_invalidation, anvil_receipt, command_fixture_values, compatibility_event_values,
+    event_fixture_values, workflow_lifecycle_events, WireSpec, COMMAND_SPECS, EVENT_SPECS,
+    PRODUCER_COMMAND_TYPES, PRODUCER_EVENT_TYPES, SOURCE_INPUTS,
 };
+use super::ContractResult;
 
 pub const CONTRACT_NAME: &str = "wayland-desktop-core";
 pub const GENERATOR_VERSION: &str = "wcore-desktop-contract-gen/1";
@@ -24,19 +26,50 @@ This v1.0 corpus records the current producer wire. Contract negotiation,
 unknown-critical rejection, and unknown-noncritical dropping are live and
 proved by serialized replay through the reference host observer.
 
-- `ordering_duplicate_terminal_reducer`: deferred because ordinary current
-  events have no producer event ID or monotonic sequence.
-- `effective_execution_policy_revisions`: deferred; the current event is a
-  launch snapshot without revision/change semantics.
-- `workflow_node_child_lifecycle`: deferred; current workflow IDs collide on
-  repeated runs and there is no node event, run ID, event ID, or sequence.
-- `anvil_origin_replay_mutation_staleness`: deferred and unavailable. The
-  legacy receipt is not promoted by this corpus.
+Policy, workflow, and Anvil sub-contract vectors exercise their current
+producer identities and reducer rules.
+
+Anvil receipts are publication-bound: the producer binds the serialized
+verdict body and immediate post-publication artifact state. Durable Desktop
+replay and a persistent later-mutation watcher remain deferred.
+
+- `ordinary_turn_tool_replay_reducer`: deferred because ordinary turn and tool
+  events still have no producer event ID or monotonic sequence. Workflow,
+  execution-policy, and Anvil streams have their own proved sequencing rules.
+- `anvil_desktop_replay_reducer`: deferred until Desktop consumes the Core
+  reducer and proves restart/replay against this corpus.
+- `anvil_persistent_mutation_watcher`: deferred because Core currently checks
+  immediate post-publication mutation, not later filesystem changes over the
+  full receipt lifetime.
 
 Malformed command fixtures and the current unknown-type behavior are proved by
 `desktop_contract_adversarial.rs`. Browser, CUA, and plugin event fixtures are
 shape-only because no production emitter is proven at this source baseline.
 "#;
+
+fn json_lines(values: impl IntoIterator<Item = Value>) -> ContractResult<Vec<u8>> {
+    let mut bytes = Vec::new();
+    for value in values {
+        bytes.extend(canonical_json(&value)?);
+    }
+    Ok(bytes)
+}
+
+fn event_value(event: &crate::events::ProtocolEvent) -> ContractResult<Value> {
+    Ok(serde_json::to_value(event)?)
+}
+
+fn refresh_anvil_receipt_body_digest(value: &mut Value) -> ContractResult<()> {
+    let mut receipt_value = value.clone();
+    receipt_value
+        .as_object_mut()
+        .expect("receipt event fixture must be an object")
+        .remove("type");
+    let mut receipt: AnvilReceipt = serde_json::from_value(receipt_value)?;
+    receipt.receipt_body_digest = anvil_receipt_body_digest(&receipt)?;
+    value["receipt_body_digest"] = json!(receipt.receipt_body_digest);
+    Ok(())
+}
 
 fn schema_for(specs: &[WireSpec], title: &str) -> Value {
     let one_of = specs
@@ -168,7 +201,7 @@ fn contract_capabilities() -> BTreeMap<String, ContractCapabilityStatus> {
     BTreeMap::from([
         (
             "anvil_receipts".into(),
-            ContractCapabilityStatus::Unavailable,
+            ContractCapabilityStatus::PublicationBound,
         ),
         ("browser_events".into(), ContractCapabilityStatus::ShapeOnly),
         (
@@ -178,7 +211,7 @@ fn contract_capabilities() -> BTreeMap<String, ContractCapabilityStatus> {
         ("cua_events".into(), ContractCapabilityStatus::ShapeOnly),
         (
             "effective_execution_policy_revisions".into(),
-            ContractCapabilityStatus::Unavailable,
+            ContractCapabilityStatus::Available,
         ),
         (
             "host_delegated_delivery".into(),
@@ -187,7 +220,7 @@ fn contract_capabilities() -> BTreeMap<String, ContractCapabilityStatus> {
         ("plugin_events".into(), ContractCapabilityStatus::ShapeOnly),
         (
             "workflow_lifecycle_v1".into(),
-            ContractCapabilityStatus::Unavailable,
+            ContractCapabilityStatus::Available,
         ),
     ])
 }
@@ -258,6 +291,192 @@ pub fn generated_artifacts() -> ContractResult<BTreeMap<String, Vec<u8>>> {
     {
         artifacts.insert(path, canonical_json(&serde_json::to_value(event)?)?);
     }
+
+    let canonical_events = event_fixture_values();
+    let ready = event_value(
+        canonical_events
+            .get("events/ready.json")
+            .expect("ready fixture must exist"),
+    )?;
+    let policy_changed = event_value(
+        canonical_events
+            .get("events/execution_policy.json")
+            .expect("execution policy fixture must exist"),
+    )?;
+
+    artifacts.insert(
+        "adversarial/policy/valid-revisions.jsonl".into(),
+        json_lines([ready.clone(), policy_changed.clone()])?,
+    );
+    artifacts.insert(
+        "adversarial/policy/duplicate-identical.jsonl".into(),
+        json_lines([ready.clone(), ready.clone()])?,
+    );
+    let mut policy_conflict = policy_changed.clone();
+    policy_conflict["revision"] = json!(0);
+    artifacts.insert(
+        "adversarial/policy/duplicate-conflict.jsonl".into(),
+        json_lines([ready.clone(), policy_conflict])?,
+    );
+    let mut policy_gap = policy_changed.clone();
+    policy_gap["revision"] = json!(2);
+    artifacts.insert(
+        "adversarial/policy/revision-gap.jsonl".into(),
+        json_lines([ready.clone(), policy_gap])?,
+    );
+    let mut policy_version = policy_changed.clone();
+    policy_version["contract_version"] = json!("2.0");
+    artifacts.insert(
+        "adversarial/policy/version-mismatch.jsonl".into(),
+        json_lines([ready.clone(), policy_version])?,
+    );
+    let mut policy_noncritical = policy_changed.clone();
+    policy_noncritical["critical"] = json!(false);
+    artifacts.insert(
+        "adversarial/policy/noncritical.jsonl".into(),
+        json_lines([ready.clone(), policy_noncritical])?,
+    );
+
+    let workflow = workflow_lifecycle_events()
+        .iter()
+        .map(event_value)
+        .collect::<ContractResult<Vec<_>>>()?;
+    artifacts.insert(
+        "adversarial/workflow/valid-lifecycle.jsonl".into(),
+        json_lines(workflow.clone())?,
+    );
+    artifacts.insert(
+        "adversarial/workflow/duplicate-identical.jsonl".into(),
+        json_lines([workflow[0].clone(), workflow[0].clone()])?,
+    );
+    let mut workflow_conflict = workflow[0].clone();
+    workflow_conflict["name"] = json!("Conflicting display name");
+    artifacts.insert(
+        "adversarial/workflow/duplicate-conflict.jsonl".into(),
+        json_lines([workflow[0].clone(), workflow_conflict])?,
+    );
+    artifacts.insert(
+        "adversarial/workflow/sequence-gap.jsonl".into(),
+        json_lines([workflow[0].clone(), workflow[2].clone()])?,
+    );
+    let mut early_finish = workflow[5].clone();
+    early_finish["event_id"] = json!("workflow-event-terminal");
+    early_finish["sequence"] = json!(1);
+    artifacts.insert(
+        "adversarial/workflow/after-terminal.jsonl".into(),
+        json_lines([workflow[0].clone(), early_finish, workflow[2].clone()])?,
+    );
+    let mut first_terminal = workflow[4].clone();
+    first_terminal["event_id"] = json!("workflow-event-terminal-node");
+    first_terminal["sequence"] = json!(1);
+    let mut conflicting_terminal = first_terminal.clone();
+    conflicting_terminal["event_id"] = json!("workflow-event-conflicting-terminal");
+    conflicting_terminal["sequence"] = json!(2);
+    conflicting_terminal["state"] = json!("failed");
+    conflicting_terminal["failure"] =
+        json!({"code":"stage_failed","message":"conflicting terminal","retryable":false});
+    artifacts.insert(
+        "adversarial/workflow/conflicting-node-terminal.jsonl".into(),
+        json_lines([workflow[0].clone(), first_terminal, conflicting_terminal])?,
+    );
+    let mut child_gap = workflow[3].clone();
+    child_gap["child_sequence"] = json!(1);
+    artifacts.insert(
+        "adversarial/workflow/child-sequence-gap.jsonl".into(),
+        json_lines([workflow[0].clone(), child_gap])?,
+    );
+    let mut child_conflict = workflow[3].clone();
+    child_conflict["inner"]["text"] = json!("conflicting child output");
+    artifacts.insert(
+        "adversarial/workflow/child-duplicate-conflict.jsonl".into(),
+        json_lines([workflow[0].clone(), workflow[3].clone(), child_conflict])?,
+    );
+
+    let receipt = event_value(&crate::events::ProtocolEvent::AnvilReceipt {
+        receipt: anvil_receipt(),
+    })?;
+    let invalidation = event_value(&crate::events::ProtocolEvent::AnvilReceiptInvalidated {
+        invalidation: anvil_invalidation(),
+    })?;
+    artifacts.insert(
+        "adversarial/anvil/valid-invalidation.jsonl".into(),
+        json_lines([receipt.clone(), invalidation.clone()])?,
+    );
+    let mut altered_invalidation = invalidation.clone();
+    altered_invalidation["reason"] = json!("gate_revoked");
+    artifacts.insert(
+        "adversarial/anvil/altered-invalidation-body.jsonl".into(),
+        json_lines([receipt.clone(), altered_invalidation])?,
+    );
+    artifacts.insert(
+        "adversarial/anvil/duplicate-identical.jsonl".into(),
+        json_lines([receipt.clone(), receipt.clone()])?,
+    );
+    let mut receipt_conflict = receipt.clone();
+    receipt_conflict["stamp"] = json!("conflicting");
+    refresh_anvil_receipt_body_digest(&mut receipt_conflict)?;
+    artifacts.insert(
+        "adversarial/anvil/duplicate-conflict.jsonl".into(),
+        json_lines([receipt.clone(), receipt_conflict])?,
+    );
+    let mut receipt_gap = receipt.clone();
+    receipt_gap["sequence"] = json!(1);
+    refresh_anvil_receipt_body_digest(&mut receipt_gap)?;
+    artifacts.insert(
+        "adversarial/anvil/sequence-gap.jsonl".into(),
+        json_lines([receipt_gap])?,
+    );
+    let mut receipt_version = receipt.clone();
+    receipt_version["contract_version"] = json!("2.0");
+    refresh_anvil_receipt_body_digest(&mut receipt_version)?;
+    artifacts.insert(
+        "adversarial/anvil/version-mismatch.jsonl".into(),
+        json_lines([receipt_version])?,
+    );
+    let mut receipt_extension = receipt.clone();
+    receipt_extension["required_extensions"] = json!(["future-authority-v2"]);
+    refresh_anvil_receipt_body_digest(&mut receipt_extension)?;
+    artifacts.insert(
+        "adversarial/anvil/unknown-critical-extension.jsonl".into(),
+        json_lines([receipt_extension])?,
+    );
+    artifacts.insert(
+        "adversarial/anvil/nested-receipt-inert.jsonl".into(),
+        json_lines([json!({
+            "type":"sub_agent_event",
+            "parent_call_id":"workflow:scan",
+            "agent_name":"untrusted-child",
+            "inner":receipt.clone()
+        })])?,
+    );
+    artifacts.insert(
+        "adversarial/anvil/stale-replay.jsonl".into(),
+        json_lines([receipt.clone(), invalidation.clone(), receipt.clone()])?,
+    );
+    let mut altered_body = receipt.clone();
+    altered_body["terminal_state"] = json!("tampered");
+    artifacts.insert(
+        "adversarial/anvil/altered-body.jsonl".into(),
+        json_lines([altered_body])?,
+    );
+    let mut stale_event = receipt.clone();
+    stale_event["receipt_id"] = json!("receipt-desktop-002");
+    stale_event["event_id"] = json!("anvil-event-002");
+    stale_event["sequence"] = json!(1);
+    refresh_anvil_receipt_body_digest(&mut stale_event)?;
+    artifacts.insert(
+        "adversarial/anvil/out-of-order.jsonl".into(),
+        json_lines([receipt.clone(), invalidation.clone(), stale_event])?,
+    );
+    artifacts.insert(
+        "compat/events/anvil_receipt.legacy.json".into(),
+        canonical_json(&json!({
+            "type":"anvil_receipt",
+            "terminal_state":"verified",
+            "stamp":"verified",
+            "sequence":0
+        }))?,
+    );
 
     artifacts.insert(
         "adversarial/commands/invalid-json.jsonl".into(),
@@ -344,17 +563,26 @@ pub fn generated_artifacts() -> ContractResult<BTreeMap<String, Vec<u8>>> {
     let manifest = json!({
         "capabilities": capabilities,
         "commands": specs_manifest(COMMAND_SPECS),
+        "counts": {
+            "commands": COMMAND_SPECS.len(),
+            "events": EVENT_SPECS.len(),
+            "fixtures": fixture_inventory.len()
+        },
         "contract": {"major": 1, "minor": 0, "name": CONTRACT_NAME},
         "deferred_adversarial": [
-            "ordering_duplicate_terminal_reducer",
-            "effective_execution_policy_revisions",
-            "workflow_node_child_lifecycle",
-            "anvil_origin_replay_mutation_staleness"
+            "ordinary_turn_tool_replay_reducer",
+            "anvil_desktop_replay_reducer",
+            "anvil_persistent_mutation_watcher"
         ],
         "events": specs_manifest(EVENT_SPECS),
         "fixture_digest": fixture_digest,
         "fixture_inventory": fixture_inventory,
         "generator": GENERATOR_VERSION,
+        "subcontracts": {
+            "anvil_receipts": "1.0",
+            "execution_policy": "1.0",
+            "workflow_lifecycle": "1.0"
+        },
         "schema_digest": schema_digest,
         "source_inputs": SOURCE_INPUTS,
         "source_inputs_digest": source_inputs_digest

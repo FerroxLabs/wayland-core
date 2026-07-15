@@ -1,10 +1,19 @@
 use std::collections::BTreeMap;
 
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 
+use crate::anvil::{
+    anvil_invalidation_body_digest, anvil_receipt_body_digest, AnvilInvalidationReason,
+    AnvilReceipt, AnvilReceiptInvalidation, ANVIL_DIGEST_ALGORITHM, ANVIL_RECEIPT_CONTRACT_VERSION,
+    ANVIL_RECEIPT_ORIGIN,
+};
 use crate::events::{
     Capabilities, ErrorInfo, OutputType, ProtocolEvent, ToolCategory, ToolInfo, ToolStatus,
-    TurnCost, Usage,
+    TurnCost, Usage, WorkflowNodeState, WorkflowTerminalState,
+};
+use crate::execution_policy::{ExecutionPolicyChangeReason, ExecutionPolicySequence};
+use wcore_types::execution_policy::{
+    ApprovalPolicy, BaselineExecutionPolicy, EffectiveExecutionPolicy, PolicySource,
 };
 
 use super::fixtures_support::capabilities;
@@ -128,10 +137,25 @@ pub const EVENT_SPECS: &[WireSpec] = &[
     wire!(
         "ready",
         "events/ready.json",
-        ["version", "capabilities", "contract"],
+        ["version", "capabilities", "contract", "execution_policy"],
         "required",
         "session_id",
         "available"
+    ),
+    wire!(
+        "execution_policy",
+        "events/execution_policy.json",
+        [
+            "critical",
+            "contract_version",
+            "revision",
+            "reason",
+            "effective_at_unix_ms",
+            "policy"
+        ],
+        "safety",
+        "revision",
+        "effective_execution_policy_revisions"
     ),
     wire!(
         "stream_start",
@@ -271,10 +295,56 @@ pub const EVENT_SPECS: &[WireSpec] = &[
     wire!(
         "sub_agent_event",
         "events/sub_agent_event.json",
-        ["parent_call_id", "agent_name", "inner"],
+        [
+            "parent_call_id",
+            "agent_name",
+            "inner",
+            "run_id",
+            "child_run_id",
+            "child_sequence",
+            "event_id"
+        ],
         "observation",
-        "parent_call_id",
-        "legacy_identity_only"
+        "child_run_id_and_child_sequence",
+        "workflow_lifecycle_v1"
+    ),
+    wire!(
+        "workflow_started",
+        "events/workflow_started.json",
+        [
+            "workflow_id",
+            "name",
+            "node_count",
+            "run_id",
+            "event_id",
+            "sequence"
+        ],
+        "safety",
+        "run_id_and_sequence",
+        "workflow_lifecycle_v1"
+    ),
+    wire!(
+        "workflow_node_event",
+        "events/workflow_node_event.json",
+        ["run_id", "node_id", "event_id", "sequence", "state"],
+        "safety",
+        "run_id_and_sequence",
+        "workflow_lifecycle_v1"
+    ),
+    wire!(
+        "workflow_finished",
+        "events/workflow_finished.json",
+        [
+            "workflow_id",
+            "succeeded",
+            "run_id",
+            "event_id",
+            "sequence",
+            "terminal_state"
+        ],
+        "safety",
+        "run_id_and_sequence",
+        "workflow_lifecycle_v1"
     ),
     wire!(
         "tool_chunk",
@@ -404,6 +474,46 @@ pub const EVENT_SPECS: &[WireSpec] = &[
         "call_id",
         "host_delegated_delivery"
     ),
+    wire!(
+        "anvil_receipt",
+        "events/anvil_receipt.json",
+        [
+            "receipt_id",
+            "event_id",
+            "origin",
+            "contract_version",
+            "session_id",
+            "run_id",
+            "task_id",
+            "sequence",
+            "artifact_digest",
+            "gate_closure_digest",
+            "receipt_body_digest"
+        ],
+        "safety",
+        "session_id_and_sequence",
+        "anvil_receipts"
+    ),
+    wire!(
+        "anvil_receipt_invalidated",
+        "events/anvil_receipt_invalidated.json",
+        [
+            "receipt_id",
+            "event_id",
+            "origin",
+            "contract_version",
+            "session_id",
+            "run_id",
+            "task_id",
+            "sequence",
+            "reason",
+            "prior_artifact_digest",
+            "invalidation_body_digest"
+        ],
+        "safety",
+        "session_id_and_sequence",
+        "anvil_receipts"
+    ),
 ];
 
 pub const PRODUCER_COMMAND_TYPES: &[&str] = &[
@@ -444,6 +554,7 @@ pub const PRODUCER_EVENT_TYPES: &[&str] = &[
     "session_cost",
     "sub_agent_event",
     "workflow_started",
+    "workflow_node_event",
     "workflow_finished",
     "tool_chunk",
     "provider_circuit_event",
@@ -466,6 +577,7 @@ pub const PRODUCER_EVENT_TYPES: &[&str] = &[
     "host_send_message_request",
     "compact_offload",
     "anvil_receipt",
+    "anvil_receipt_invalidated",
     "pong",
 ];
 
@@ -474,6 +586,9 @@ pub const SOURCE_INPUTS: &[&str] = &[
     "crates/wcore-protocol/src/events.rs",
     "crates/wcore-protocol/src/reader.rs",
     "crates/wcore-protocol/src/writer.rs",
+    "crates/wcore-protocol/src/anvil.rs",
+    "crates/wcore-protocol/src/execution_policy.rs",
+    "crates/wcore-protocol/src/workflow.rs",
     "crates/wcore-protocol/src/contract/mod.rs",
     "crates/wcore-protocol/src/contract/canonical.rs",
     "crates/wcore-protocol/src/contract/spec.rs",
@@ -573,9 +688,158 @@ pub fn command_fixture_values() -> BTreeMap<String, Value> {
     ])
 }
 
+fn execution_policy_sequence() -> (
+    crate::execution_policy::ExecutionPolicySnapshot,
+    crate::execution_policy::ExecutionPolicySnapshot,
+) {
+    let launch = EffectiveExecutionPolicy::baseline(&BaselineExecutionPolicy::smart(
+        ApprovalPolicy::Prompt,
+        PolicySource::DesktopLocalLaunch,
+    ));
+    let mut sequence = ExecutionPolicySequence::launch(launch, 1_721_000_000_000);
+    let initial = sequence.current().clone();
+    let auto_edit = EffectiveExecutionPolicy::baseline(&BaselineExecutionPolicy::smart(
+        ApprovalPolicy::AutoEdit,
+        PolicySource::Protocol,
+    ));
+    let changed = sequence
+        .advance_if_changed(
+            auto_edit,
+            ExecutionPolicyChangeReason::ModeChange,
+            1_721_000_000_100,
+        )
+        .expect("fixture revision cannot overflow")
+        .expect("fixture policy must change")
+        .clone();
+    (initial, changed)
+}
+
+fn digest(byte: char) -> String {
+    format!("sha256:{}", byte.to_string().repeat(64))
+}
+
+pub(super) fn anvil_receipt() -> AnvilReceipt {
+    let mut receipt = AnvilReceipt {
+        receipt_id: "receipt-desktop-001".into(),
+        event_id: "anvil-event-000".into(),
+        origin: ANVIL_RECEIPT_ORIGIN.into(),
+        contract_version: ANVIL_RECEIPT_CONTRACT_VERSION.into(),
+        required_extensions: Vec::new(),
+        session_id: "session-desktop-001".into(),
+        run_id: "anvil-run-001".into(),
+        task_id: "task-desktop-001".into(),
+        sequence: 0,
+        issued_at_unix_ms: 1_721_000_001_000,
+        digest_algorithm: ANVIL_DIGEST_ALGORITHM.into(),
+        artifact_scope: "git:tracked+untracked-excluding-ignored@.".into(),
+        artifact_digest: digest('a'),
+        gate_closure_digest: digest('b'),
+        receipt_body_digest: String::new(),
+        supersedes_receipt_id: None,
+        terminal_state: "verified".into(),
+        stamp: "verified".into(),
+        checks_passed: 14,
+        checks_total: 14,
+        coverage: Some("line:87.5%".into()),
+        iterations: 3,
+        valve_fires: 1,
+        cost_microcents: 7_000,
+        priced: true,
+        engine_version: "0.12.25".into(),
+    };
+    receipt.receipt_body_digest =
+        anvil_receipt_body_digest(&receipt).expect("canonical receipt fixture must serialize");
+    receipt
+}
+
+pub(super) fn anvil_invalidation() -> AnvilReceiptInvalidation {
+    let mut invalidation = AnvilReceiptInvalidation {
+        event_id: "anvil-event-001".into(),
+        origin: ANVIL_RECEIPT_ORIGIN.into(),
+        contract_version: ANVIL_RECEIPT_CONTRACT_VERSION.into(),
+        required_extensions: Vec::new(),
+        receipt_id: "receipt-desktop-001".into(),
+        session_id: "session-desktop-001".into(),
+        run_id: "anvil-run-001".into(),
+        task_id: "task-desktop-001".into(),
+        sequence: 1,
+        issued_at_unix_ms: 1_721_000_002_000,
+        reason: AnvilInvalidationReason::ArtifactMutated,
+        prior_artifact_digest: digest('a'),
+        observed_artifact_digest: Some(digest('c')),
+        invalidation_body_digest: String::new(),
+    };
+    invalidation.invalidation_body_digest = anvil_invalidation_body_digest(&invalidation)
+        .expect("canonical invalidation fixture must serialize");
+    invalidation
+}
+
+pub(super) fn workflow_lifecycle_events() -> Vec<ProtocolEvent> {
+    vec![
+        ProtocolEvent::CorrelatedWorkflowStarted {
+            workflow_id: "desktop-audit".into(),
+            name: "Desktop audit".into(),
+            node_count: 1,
+            run_id: "workflow-run-001".into(),
+            event_id: "workflow-event-000".into(),
+            sequence: 0,
+            parent_run_id: None,
+        },
+        ProtocolEvent::WorkflowNodeEvent {
+            run_id: "workflow-run-001".into(),
+            node_id: "scan".into(),
+            child_run_id: Some("child-run-001".into()),
+            event_id: "workflow-event-001".into(),
+            sequence: 1,
+            state: WorkflowNodeState::Queued,
+            failure: None,
+        },
+        ProtocolEvent::WorkflowNodeEvent {
+            run_id: "workflow-run-001".into(),
+            node_id: "scan".into(),
+            child_run_id: Some("child-run-001".into()),
+            event_id: "workflow-event-002".into(),
+            sequence: 2,
+            state: WorkflowNodeState::Running,
+            failure: None,
+        },
+        ProtocolEvent::CorrelatedSubAgentEvent {
+            parent_call_id: "workflow:scan".into(),
+            agent_name: "scan".into(),
+            inner: json!({"type":"text_delta","text":"scan complete","msg_id":"child-msg-001"}),
+            run_id: "workflow-run-001".into(),
+            child_run_id: "child-run-001".into(),
+            parent_child_run_id: None,
+            child_sequence: 0,
+            event_id: "child-event-000".into(),
+        },
+        ProtocolEvent::WorkflowNodeEvent {
+            run_id: "workflow-run-001".into(),
+            node_id: "scan".into(),
+            child_run_id: Some("child-run-001".into()),
+            event_id: "workflow-event-003".into(),
+            sequence: 3,
+            state: WorkflowNodeState::Succeeded,
+            failure: None,
+        },
+        ProtocolEvent::CorrelatedWorkflowFinished {
+            workflow_id: "desktop-audit".into(),
+            succeeded: true,
+            run_id: "workflow-run-001".into(),
+            event_id: "workflow-event-004".into(),
+            sequence: 4,
+            terminal_state: WorkflowTerminalState::Succeeded,
+            failure: None,
+        },
+    ]
+}
+
 /// Canonical events constructed through the real `ProtocolEvent` enum.
 pub fn event_fixture_values() -> BTreeMap<String, ProtocolEvent> {
     use wcore_types::message::FinishReason;
+
+    let (initial_policy, changed_policy) = execution_policy_sequence();
+    let workflow = workflow_lifecycle_events();
 
     let usage = || Usage {
         input_tokens: 120,
@@ -678,6 +942,12 @@ pub fn event_fixture_values() -> BTreeMap<String, ProtocolEvent> {
             },
         ),
         (
+            "events/execution_policy.json".into(),
+            ProtocolEvent::ExecutionPolicy {
+                snapshot: changed_policy,
+            },
+        ),
+        (
             "events/host_send_message_request.json".into(),
             ProtocolEvent::HostSendMessageRequest {
                 call_id: "call-send-001".into(),
@@ -744,7 +1014,7 @@ pub fn event_fixture_values() -> BTreeMap<String, ProtocolEvent> {
                 session_id: Some("session-desktop-001".into()),
                 capabilities: capabilities(),
                 contract: None,
-                execution_policy: None,
+                execution_policy: Some(initial_policy),
             },
         ),
         (
@@ -777,14 +1047,7 @@ pub fn event_fixture_values() -> BTreeMap<String, ProtocolEvent> {
                 msg_id: "msg-001".into(),
             },
         ),
-        (
-            "events/sub_agent_event.json".into(),
-            ProtocolEvent::SubAgentEvent {
-                parent_call_id: "call-spawn-001".into(),
-                agent_name: "researcher".into(),
-                inner: json!({"type":"text_delta","text":"child output","msg_id":"child-msg-001"}),
-            },
-        ),
+        ("events/sub_agent_event.json".into(), workflow[3].clone()),
         (
             "events/suspend.json".into(),
             ProtocolEvent::Suspend {
@@ -873,6 +1136,24 @@ pub fn event_fixture_values() -> BTreeMap<String, ProtocolEvent> {
                 trace: json!({"span":"provider","duration_ms":42}),
             },
         ),
+        ("events/workflow_finished.json".into(), workflow[5].clone()),
+        (
+            "events/workflow_node_event.json".into(),
+            workflow[2].clone(),
+        ),
+        ("events/workflow_started.json".into(), workflow[0].clone()),
+        (
+            "events/anvil_receipt.json".into(),
+            ProtocolEvent::AnvilReceipt {
+                receipt: anvil_receipt(),
+            },
+        ),
+        (
+            "events/anvil_receipt_invalidated.json".into(),
+            ProtocolEvent::AnvilReceiptInvalidated {
+                invalidation: anvil_invalidation(),
+            },
+        ),
     ])
 }
 
@@ -959,6 +1240,14 @@ pub fn compatibility_event_values() -> BTreeMap<String, ProtocolEvent> {
                 capabilities: Capabilities::default(),
                 contract: None,
                 execution_policy: None,
+            },
+        ),
+        (
+            "compat/events/sub_agent_event.legacy.json".into(),
+            ProtocolEvent::SubAgentEvent {
+                parent_call_id: "call-spawn-legacy".into(),
+                agent_name: "legacy-child".into(),
+                inner: json!({"type":"text_delta","text":"legacy child output","msg_id":"child-msg-legacy"}),
             },
         ),
         (

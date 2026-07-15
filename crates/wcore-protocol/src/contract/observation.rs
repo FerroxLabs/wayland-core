@@ -11,6 +11,7 @@ use super::spec::PRODUCER_EVENT_TYPES;
 #[serde(rename_all = "snake_case")]
 pub enum ContractCapabilityStatus {
     Available,
+    PublicationBound,
     ShapeOnly,
     Unavailable,
 }

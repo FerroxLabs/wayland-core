@@ -5,8 +5,8 @@ use std::path::Path;
 use serde_json::Value;
 use wcore_protocol::commands::ProtocolCommand;
 use wcore_protocol::contract::{
-    COMMAND_SPECS, CONTRACT_ROOT, EVENT_SPECS, GENERATOR_VERSION, canonical_json, check_contract,
-    generated_artifacts,
+    canonical_json, check_contract, generated_artifacts, COMMAND_SPECS, CONTRACT_ROOT, EVENT_SPECS,
+    GENERATOR_VERSION,
 };
 
 fn root() -> std::path::PathBuf {
@@ -28,9 +28,9 @@ fn checked_corpus_matches_real_serializers_byte_for_byte() {
 }
 
 #[test]
-fn inventory_is_exactly_eleven_commands_and_thirty_three_events() {
+fn inventory_is_exactly_eleven_commands_and_thirty_nine_events() {
     assert_eq!(COMMAND_SPECS.len(), 11);
-    assert_eq!(EVENT_SPECS.len(), 33);
+    assert_eq!(EVENT_SPECS.len(), 39);
     assert_eq!(
         COMMAND_SPECS
             .iter()
@@ -45,7 +45,7 @@ fn inventory_is_exactly_eleven_commands_and_thirty_three_events() {
             .map(|spec| spec.wire_type)
             .collect::<BTreeSet<_>>()
             .len(),
-        33
+        39
     );
 }
 
@@ -91,16 +91,33 @@ fn manifest_pins_generator_and_all_three_digests() {
         );
     }
     assert_eq!(manifest["commands"].as_array().unwrap().len(), 11);
-    assert_eq!(manifest["events"].as_array().unwrap().len(), 33);
+    assert_eq!(manifest["events"].as_array().unwrap().len(), 39);
+    assert_eq!(manifest["counts"]["commands"], 11);
+    assert_eq!(manifest["counts"]["events"], 39);
     assert_eq!(
         manifest["capabilities"]["contract_negotiation"],
         "available"
     );
-    assert_eq!(manifest["capabilities"]["anvil_receipts"], "unavailable");
+    assert_eq!(
+        manifest["capabilities"]["anvil_receipts"],
+        "publication_bound"
+    );
     assert_eq!(
         manifest["capabilities"]["workflow_lifecycle_v1"],
-        "unavailable"
+        "available"
     );
+    assert_eq!(
+        manifest["capabilities"]["effective_execution_policy_revisions"],
+        "available"
+    );
+    let invalidation = manifest["events"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|event| event["type"] == "anvil_receipt_invalidated")
+        .expect("authoritative invalidation must be in EVENT_SPECS");
+    assert_eq!(invalidation["criticality"], "safety");
+    assert_eq!(invalidation["capability"], "anvil_receipts");
 }
 
 #[test]
@@ -115,12 +132,50 @@ fn producer_complete_schema_keeps_non_desktop_variants_visible() {
         "grant_workspace_capability",
         "execution_policy",
         "workflow_started",
+        "workflow_node_event",
         "workflow_finished",
         "anvil_receipt",
+        "anvil_receipt_invalidated",
     ] {
         assert!(
             wire.contains(required),
             "producer schema omitted {required}"
         );
     }
+}
+
+#[test]
+fn authority_fixtures_pin_correlated_current_shapes() {
+    let ready: Value =
+        serde_json::from_slice(&fs::read(root().join("events/ready.json")).unwrap()).unwrap();
+    assert_eq!(ready["execution_policy"]["revision"], 0);
+    assert_eq!(ready["execution_policy"]["critical"], true);
+    assert_eq!(ready["execution_policy"]["contract_version"], "1.0");
+
+    let workflow: Value =
+        serde_json::from_slice(&fs::read(root().join("events/workflow_started.json")).unwrap())
+            .unwrap();
+    assert_eq!(workflow["sequence"], 0);
+    assert!(workflow["run_id"].as_str().is_some_and(|id| !id.is_empty()));
+    assert!(workflow["event_id"]
+        .as_str()
+        .is_some_and(|id| !id.is_empty()));
+
+    let receipt: Value =
+        serde_json::from_slice(&fs::read(root().join("events/anvil_receipt.json")).unwrap())
+            .unwrap();
+    assert_eq!(receipt["origin"], "core/anvil");
+    assert_eq!(receipt["sequence"], 0);
+    assert_eq!(receipt["contract_version"], "1.0");
+    assert!(receipt["receipt_body_digest"]
+        .as_str()
+        .is_some_and(|digest| digest.starts_with("sha256:") && digest.len() == 71));
+
+    let invalidation: Value = serde_json::from_slice(
+        &fs::read(root().join("events/anvil_receipt_invalidated.json")).unwrap(),
+    )
+    .unwrap();
+    assert!(invalidation["invalidation_body_digest"]
+        .as_str()
+        .is_some_and(|digest| digest.starts_with("sha256:") && digest.len() == 71));
 }
