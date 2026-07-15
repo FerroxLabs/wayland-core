@@ -4,6 +4,7 @@ use parking_lot::RwLock;
 use wcore_config::compat::ProviderCompat;
 use wcore_config::tools::AdvertisedCapabilitiesConfig;
 use wcore_protocol::events::{Capabilities, ErrorInfo, FinishReason, ProtocolEvent, Usage};
+use wcore_protocol::execution_policy::ExecutionPolicySnapshot;
 use wcore_protocol::writer::{ProtocolEmitter, ProtocolWriter};
 
 use super::OutputSink;
@@ -358,6 +359,33 @@ impl ProtocolSink {
         plugin_caps: &PluginCapabilitySet,
         advertised: &AdvertisedCapabilitiesConfig,
     ) {
+        self.emit_ready_with_plugins_and_policy(
+            compat,
+            has_mcp,
+            session_id,
+            current_mode,
+            has_plugins,
+            plugin_caps,
+            advertised,
+            None,
+        );
+    }
+
+    /// Contract-aware Ready emission. The optional snapshot keeps the legacy
+    /// helper byte-compatible while allowing the Desktop JSON-stream producer
+    /// to publish revision zero before accepting any turn.
+    #[allow(clippy::too_many_arguments)]
+    pub fn emit_ready_with_plugins_and_policy(
+        &self,
+        compat: &ProviderCompat,
+        has_mcp: bool,
+        session_id: Option<String>,
+        current_mode: &str,
+        has_plugins: bool,
+        plugin_caps: &PluginCapabilitySet,
+        advertised: &AdvertisedCapabilitiesConfig,
+        execution_policy: Option<ExecutionPolicySnapshot>,
+    ) {
         let _ = self.writer.emit(&ProtocolEvent::Ready {
             version: env!("CARGO_PKG_VERSION").to_string(),
             session_id,
@@ -369,6 +397,7 @@ impl ProtocolSink {
                 plugin_caps,
                 advertised,
             ),
+            execution_policy,
         });
     }
 

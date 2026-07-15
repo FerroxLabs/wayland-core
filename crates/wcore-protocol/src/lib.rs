@@ -4,6 +4,7 @@
 pub mod commands;
 pub mod contract;
 pub mod events;
+pub mod execution_policy;
 pub mod output_pump;
 pub mod reader;
 pub mod writer;

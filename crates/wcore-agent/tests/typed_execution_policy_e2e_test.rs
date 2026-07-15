@@ -10,9 +10,12 @@ use wcore_agent::bootstrap::AgentBootstrap;
 use wcore_agent::output::OutputSink;
 use wcore_config::compat::ProviderCompat;
 use wcore_config::config::{Config, ProviderType};
+use wcore_protocol::events::ProtocolEvent;
+use wcore_protocol::execution_policy::{ExecutionPolicyChangeReason, ExecutionPolicySequence};
 use wcore_types::execution_policy::{
-    ApprovalPolicy, BaselineExecutionPolicy, DangerousLaunchRequest, ExecutionPosture,
-    ManagedDangerousPolicy, PolicySource, SandboxPolicy, resolve_dangerous_launch,
+    ApprovalPolicy, BaselineExecutionPolicy, DangerousLaunchRequest, EffectiveExecutionPolicy,
+    ExecutionPosture, ManagedDangerousPolicy, PolicySource, SandboxPolicy,
+    resolve_dangerous_launch,
 };
 use wcore_types::message::FinishReason;
 
@@ -340,5 +343,44 @@ async fn smart_grant_cannot_be_rebound_to_a_managed_baseline() {
             .expect("grant provenance mismatch must fail closed")
             .to_string()
             .contains("provenance does not match")
+    );
+}
+
+#[test]
+fn runtime_snapshot_change_preserves_dangerous_authority_origin_and_lease() {
+    let baseline = BaselineExecutionPolicy::smart(ApprovalPolicy::Prompt, PolicySource::Default);
+    let grant = resolve_dangerous_launch(
+        &baseline,
+        DangerousLaunchRequest::desktop(60, "desktop-activation"),
+        1_000,
+    )
+    .unwrap();
+    let initial = EffectiveExecutionPolicy::dangerous(&grant);
+    let initial_json = serde_json::to_value(&initial).unwrap();
+    let mut sequence = ExecutionPolicySequence::launch(initial.clone(), 1_000);
+
+    let snapshot = sequence
+        .advance_if_changed(
+            initial.with_runtime_approvals(ApprovalPolicy::Prompt),
+            ExecutionPolicyChangeReason::ModeChange,
+            1_001,
+        )
+        .unwrap()
+        .unwrap()
+        .clone();
+    let json = serde_json::to_value(ProtocolEvent::ExecutionPolicy { snapshot }).unwrap();
+
+    assert_eq!(json["revision"], 1);
+    assert_eq!(json["reason"], "mode_change");
+    assert_eq!(json["policy"]["approvals"], "prompt");
+    assert_eq!(json["policy"]["sandbox"], "bypass");
+    assert_eq!(json["policy"]["posture"], "dangerous");
+    assert_eq!(
+        json["policy"]["dangerous_activation_id"],
+        initial_json["dangerous_activation_id"]
+    );
+    assert_eq!(
+        json["policy"]["dangerous_expires_at_unix_ms"],
+        initial_json["dangerous_expires_at_unix_ms"]
     );
 }

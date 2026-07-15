@@ -228,11 +228,17 @@ pub enum ProtocolEvent {
         #[serde(skip_serializing_if = "Option::is_none")]
         session_id: Option<String>,
         capabilities: Capabilities,
+        /// Initial complete policy snapshot for contract-aware hosts. Legacy
+        /// producers/tests may omit it; the JSON-stream producer always sets
+        /// it before accepting a turn.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        execution_policy: Option<crate::execution_policy::ExecutionPolicySnapshot>,
     },
-    /// Immutable execution authority selected at process/session launch.
-    /// This is output-only: wire peers cannot deserialize it into authority.
+    /// Complete effective execution-policy snapshot. This is output-only:
+    /// wire peers cannot deserialize it into authority.
     ExecutionPolicy {
-        policy: wcore_types::execution_policy::EffectiveExecutionPolicy,
+        #[serde(flatten)]
+        snapshot: crate::execution_policy::ExecutionPolicySnapshot,
     },
     /// Effective repository trust and sandbox grants. Output-only authority
     /// receipt; hosts cannot submit this shape to widen a session.
@@ -1098,18 +1104,28 @@ mod tests {
 
     #[test]
     fn execution_policy_event_is_typed_and_additive() {
+        use crate::execution_policy::ExecutionPolicySequence;
         use wcore_types::execution_policy::{
             ApprovalPolicy, BaselineExecutionPolicy, EffectiveExecutionPolicy, PolicySource,
         };
 
-        let event = ProtocolEvent::ExecutionPolicy {
-            policy: EffectiveExecutionPolicy::baseline(&BaselineExecutionPolicy::smart(
+        let snapshot = ExecutionPolicySequence::launch(
+            EffectiveExecutionPolicy::baseline(&BaselineExecutionPolicy::smart(
                 ApprovalPolicy::Bypass,
                 PolicySource::LocalCliLaunch,
             )),
-        };
+            1_700_000_000_000,
+        )
+        .current()
+        .clone();
+        let event = ProtocolEvent::ExecutionPolicy { snapshot };
         let json = serde_json::to_value(event).unwrap();
         assert_eq!(json["type"], "execution_policy");
+        assert_eq!(json["critical"], true);
+        assert_eq!(json["contract_version"], "1.0");
+        assert_eq!(json["revision"], 0);
+        assert_eq!(json["reason"], "launch");
+        assert_eq!(json["effective_at_unix_ms"], 1_700_000_000_000_u64);
         assert_eq!(json["policy"]["posture"], "smart");
         assert_eq!(json["policy"]["approvals"], "bypass");
         assert_eq!(json["policy"]["sandbox"], "required");
@@ -1128,6 +1144,7 @@ mod tests {
                 modes: vec!["default".into(), "auto_edit".into(), "force".into()],
                 ..Default::default()
             },
+            execution_policy: None,
         };
         let json = serde_json::to_value(&event).unwrap();
         assert_eq!(json["type"], "ready");
@@ -1145,9 +1162,40 @@ mod tests {
                 modes: vec!["default".into(), "auto_edit".into(), "force".into()],
                 ..Default::default()
             },
+            execution_policy: None,
         };
         let json2 = serde_json::to_value(&event_no_sid).unwrap();
         assert!(json2.get("session_id").is_none());
+    }
+
+    #[test]
+    fn ready_can_expose_the_initial_effective_policy_snapshot() {
+        use crate::execution_policy::ExecutionPolicySequence;
+        use wcore_types::execution_policy::{
+            ApprovalPolicy, BaselineExecutionPolicy, EffectiveExecutionPolicy, PolicySource,
+        };
+
+        let snapshot = ExecutionPolicySequence::launch(
+            EffectiveExecutionPolicy::baseline(&BaselineExecutionPolicy::smart(
+                ApprovalPolicy::Prompt,
+                PolicySource::DesktopLocalLaunch,
+            )),
+            42,
+        )
+        .current()
+        .clone();
+        let json = serde_json::to_value(ProtocolEvent::Ready {
+            version: "0.12.25".to_owned(),
+            session_id: Some("session-1".to_owned()),
+            capabilities: Capabilities::default(),
+            execution_policy: Some(snapshot),
+        })
+        .unwrap();
+
+        assert_eq!(json["execution_policy"]["revision"], 0);
+        assert_eq!(json["execution_policy"]["reason"], "launch");
+        assert_eq!(json["execution_policy"]["critical"], true);
+        assert_eq!(json["execution_policy"]["policy"]["approvals"], "prompt");
     }
 
     #[test]
@@ -1485,6 +1533,7 @@ mod tests {
                 modes: vec!["default".into(), "auto_edit".into(), "force".into()],
                 ..Default::default()
             },
+            execution_policy: None,
         };
         let json = serde_json::to_value(&event).unwrap();
         assert_eq!(json["capabilities"]["thinking"], true);
@@ -1591,6 +1640,7 @@ mod tests {
             version: "0.1.21".into(),
             session_id: None,
             capabilities: Capabilities::default(),
+            execution_policy: None,
         };
         let json = serde_json::to_value(&event).unwrap();
         let caps_obj = &json["capabilities"];
@@ -1724,6 +1774,7 @@ mod tests {
             version: "0.2.0".into(),
             session_id: None,
             capabilities: caps,
+            execution_policy: None,
         };
         let json = serde_json::to_value(&event).unwrap();
 

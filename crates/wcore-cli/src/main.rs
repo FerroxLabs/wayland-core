@@ -40,6 +40,10 @@ use wcore_mcp::manager::McpManager;
 use wcore_mcp::tool_proxy::register_single_server_tools;
 use wcore_protocol::commands::ProtocolCommand;
 use wcore_protocol::events::{FinishReason, ProtocolEvent};
+use wcore_protocol::execution_policy::{
+    ExecutionPolicyChangeReason, ExecutionPolicySequence, ExecutionPolicySequenceError,
+    ExecutionPolicySnapshot,
+};
 use wcore_protocol::reader::spawn_stdin_reader;
 use wcore_protocol::writer::{ProtocolEmitter, ProtocolWriter};
 use wcore_protocol::{ToolApprovalManager, ToolApprovalResult};
@@ -1969,6 +1973,47 @@ struct LocalExecutionSelection {
     dangerous_grant: Option<DangerousSessionGrant>,
 }
 
+fn audit_unix_time_millis() -> anyhow::Result<u64> {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(|_| anyhow::anyhow!("system clock is before the Unix epoch"))?
+        .as_millis()
+        .try_into()
+        .map_err(|_| anyhow::anyhow!("system clock does not fit execution-policy metadata"))
+}
+
+enum WireModeChange {
+    Rejected,
+    Unchanged,
+    Changed(ExecutionPolicySnapshot),
+}
+
+/// Apply one untrusted wire mode request through the live authority gate and
+/// advance the output-only producer sequence only when effective approvals
+/// actually changed.
+fn apply_wire_mode_change(
+    approval_manager: &ToolApprovalManager,
+    sequence: &mut ExecutionPolicySequence,
+    mode: wcore_protocol::commands::SessionMode,
+    effective_at_unix_ms: u64,
+) -> Result<WireModeChange, ExecutionPolicySequenceError> {
+    if !approval_manager.set_mode_from_wire(mode) {
+        return Ok(WireModeChange::Rejected);
+    }
+    let policy = sequence
+        .current()
+        .policy
+        .with_runtime_approvals(approval_manager.current_approval_policy());
+    match sequence.advance_if_changed(
+        policy,
+        ExecutionPolicyChangeReason::ModeChange,
+        effective_at_unix_ms,
+    )? {
+        Some(snapshot) => Ok(WireModeChange::Changed(snapshot.clone())),
+        None => Ok(WireModeChange::Unchanged),
+    }
+}
+
 impl LocalExecutionSelection {
     fn approvals(&self) -> ApprovalPolicy {
         if self.dangerous_grant.is_some() {
@@ -2014,12 +2059,7 @@ fn resolve_local_execution(
         } else {
             DangerousLaunchRequest::cli(dangerous_ttl_secs, activation_id)
         };
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_err(|_| anyhow::anyhow!("system clock is before the Unix epoch"))?
-            .as_millis()
-            .try_into()
-            .map_err(|_| anyhow::anyhow!("system clock does not fit execution-policy metadata"))?;
+        let now = audit_unix_time_millis()?;
         Some(resolve_dangerous_launch(&baseline, request, now)?)
     } else {
         None
@@ -2165,6 +2205,11 @@ async fn run_tui_mode(
     let result = tui::splash_while(&mut boot_terminal, mcp_count, bootstrap.build()).await?;
     let startup_capability_activations = result.capability_activations.clone();
     let effective_execution_policy = result.effective_execution_policy.clone();
+    let execution_policy_sequence = if resume.is_some() {
+        ExecutionPolicySequence::resume(effective_execution_policy, audit_unix_time_millis()?)
+    } else {
+        ExecutionPolicySequence::launch(effective_execution_policy, audit_unix_time_millis()?)
+    };
     let workspace_policy_receipt = result.workspace_policy_receipt.clone();
     let mut engine = result.engine;
 
@@ -2234,7 +2279,7 @@ async fn run_tui_mode(
         let _ = tx.send(wcore_protocol::events::ProtocolEvent::CapabilityActivation { activation });
     }
     let _ = tx.send(wcore_protocol::events::ProtocolEvent::ExecutionPolicy {
-        policy: effective_execution_policy,
+        snapshot: execution_policy_sequence.current().clone(),
     });
     let _ = tx.send(wcore_protocol::events::ProtocolEvent::WorkspacePolicy {
         policy: workspace_policy_receipt,
@@ -3020,6 +3065,17 @@ async fn run_json_stream_mode(
         }
     };
     let startup_capability_activations = result.capability_activations.clone();
+    let mut execution_policy_sequence = if resume.is_some() {
+        ExecutionPolicySequence::resume(
+            result.effective_execution_policy.clone(),
+            audit_unix_time_millis()?,
+        )
+    } else {
+        ExecutionPolicySequence::launch(
+            result.effective_execution_policy.clone(),
+            audit_unix_time_millis()?,
+        )
+    };
     let session_control = result.cancel_root.clone();
     let mut engine = result.engine;
     let session_egress_policy = engine.egress_policy();
@@ -3059,7 +3115,7 @@ async fn run_json_stream_mode(
         protocol_sink.set_user_model_backend(backend.backend_tag());
     }
     let sid = engine.current_session_id();
-    protocol_sink.emit_ready_with_plugins(
+    protocol_sink.emit_ready_with_plugins_and_policy(
         engine.compat(),
         initial_has_mcp,
         sid,
@@ -3067,9 +3123,10 @@ async fn run_json_stream_mode(
         initial_has_plugins,
         &initial_plugin_caps,
         engine.advertised_capabilities(),
+        Some(execution_policy_sequence.current().clone()),
     );
     let _ = writer.emit(&ProtocolEvent::ExecutionPolicy {
-        policy: result.effective_execution_policy.clone(),
+        snapshot: execution_policy_sequence.current().clone(),
     });
     let _ = writer.emit(&ProtocolEvent::WorkspacePolicy {
         policy: workspace_policy_receipt.clone(),
@@ -3562,17 +3619,34 @@ async fn run_json_stream_mode(
                                         // an auto-approving mode (Force or AutoEdit)
                                         // without a local-operator opt-in.
                                         let mode_str = format!("{mode:?}").to_lowercase();
-                                        if approval_manager.set_mode_from_wire(mode) {
-                                            mode_changed = true;
-                                            let _ = writer.emit(&wcore_protocol::events::ProtocolEvent::Info {
-                                                msg_id: String::new(),
-                                                message: format!("mode updated: {}", approval_manager.current_mode()),
-                                            });
-                                        } else {
-                                            let _ = writer.emit(&wcore_protocol::events::ProtocolEvent::Info {
-                                                msg_id: String::new(),
-                                                message: format!("set_mode: '{mode_str}' refused — an auto-approving mode (auto_edit/force) requires a local-operator opt-in (launch with --force or WAYLAND_ALLOW_WIRE_FORCE=1)"),
-                                            });
+                                        match apply_wire_mode_change(
+                                            &approval_manager,
+                                            &mut execution_policy_sequence,
+                                            mode,
+                                            audit_unix_time_millis()?,
+                                        )? {
+                                            WireModeChange::Changed(snapshot) => {
+                                                mode_changed = true;
+                                                let _ = writer.emit(&ProtocolEvent::ExecutionPolicy {
+                                                    snapshot,
+                                                });
+                                                let _ = writer.emit(&wcore_protocol::events::ProtocolEvent::Info {
+                                                    msg_id: String::new(),
+                                                    message: format!("mode updated: {}", approval_manager.current_mode()),
+                                                });
+                                            }
+                                            WireModeChange::Unchanged => {
+                                                let _ = writer.emit(&wcore_protocol::events::ProtocolEvent::Info {
+                                                    msg_id: String::new(),
+                                                    message: format!("mode unchanged: {}", approval_manager.current_mode()),
+                                                });
+                                            }
+                                            WireModeChange::Rejected => {
+                                                let _ = writer.emit(&wcore_protocol::events::ProtocolEvent::Info {
+                                                    msg_id: String::new(),
+                                                    message: format!("set_mode: '{mode_str}' refused — an auto-approving mode (auto_edit/force) requires a local-operator opt-in (launch with --force or WAYLAND_ALLOW_WIRE_FORCE=1)"),
+                                                });
+                                            }
                                         }
                                     }
                                     ProtocolCommand::GrantWorkspaceCapability { executable } => {
@@ -3776,26 +3850,41 @@ async fn run_json_stream_mode(
                 let mode_str = format!("{mode:?}").to_lowercase();
                 // GHSA-8r7g: a wire peer may not escalate to an auto-approving
                 // mode (Force or AutoEdit) without a local-operator opt-in.
-                if !approval_manager.set_mode_from_wire(mode) {
-                    let _ = writer.emit(&wcore_protocol::events::ProtocolEvent::Info {
-                        msg_id: String::new(),
-                        message: format!("set_mode: '{mode_str}' refused — an auto-approving mode (auto_edit/force) requires a local-operator opt-in (launch with --force or WAYLAND_ALLOW_WIRE_FORCE=1)"),
-                    });
-                    eprintln!("[protocol] SetMode refused ({mode_str}, no local opt-in)");
-                } else {
-                    let _ = writer.emit(&wcore_protocol::events::ProtocolEvent::Info {
-                        msg_id: String::new(),
-                        message: format!("mode updated: {}", approval_manager.current_mode()),
-                    });
-                    protocol_sink.emit_config_changed_with_plugins(
-                        engine.compat(),
-                        has_mcp,
-                        &approval_manager.current_mode(),
-                        initial_has_plugins,
-                        &initial_plugin_caps,
-                        engine.advertised_capabilities(),
-                    );
-                    eprintln!("[protocol] SetMode applied: {mode_str}");
+                match apply_wire_mode_change(
+                    &approval_manager,
+                    &mut execution_policy_sequence,
+                    mode,
+                    audit_unix_time_millis()?,
+                )? {
+                    WireModeChange::Rejected => {
+                        let _ = writer.emit(&wcore_protocol::events::ProtocolEvent::Info {
+                            msg_id: String::new(),
+                            message: format!("set_mode: '{mode_str}' refused — an auto-approving mode (auto_edit/force) requires a local-operator opt-in (launch with --force or WAYLAND_ALLOW_WIRE_FORCE=1)"),
+                        });
+                        eprintln!("[protocol] SetMode refused ({mode_str}, no local opt-in)");
+                    }
+                    WireModeChange::Unchanged => {
+                        let _ = writer.emit(&wcore_protocol::events::ProtocolEvent::Info {
+                            msg_id: String::new(),
+                            message: format!("mode unchanged: {}", approval_manager.current_mode()),
+                        });
+                    }
+                    WireModeChange::Changed(snapshot) => {
+                        let _ = writer.emit(&ProtocolEvent::ExecutionPolicy { snapshot });
+                        let _ = writer.emit(&wcore_protocol::events::ProtocolEvent::Info {
+                            msg_id: String::new(),
+                            message: format!("mode updated: {}", approval_manager.current_mode()),
+                        });
+                        protocol_sink.emit_config_changed_with_plugins(
+                            engine.compat(),
+                            has_mcp,
+                            &approval_manager.current_mode(),
+                            initial_has_plugins,
+                            &initial_plugin_caps,
+                            engine.advertised_capabilities(),
+                        );
+                        eprintln!("[protocol] SetMode applied: {mode_str}");
+                    }
                 }
             }
             ProtocolCommand::SetConfig {
@@ -4520,6 +4609,65 @@ mod tests {
             .expect("Dangerous must produce a resolver-owned lease");
         assert_eq!(grant.source(), PolicySource::DesktopLocalLaunch);
         assert_eq!(grant.ttl_millis(), 30_000);
+    }
+
+    #[test]
+    fn wire_mode_changes_advance_only_for_accepted_effective_changes() {
+        use wcore_protocol::commands::SessionMode;
+        use wcore_types::execution_policy::EffectiveExecutionPolicy;
+
+        let manager = ToolApprovalManager::new();
+        manager.set_allow_wire_force(true);
+        let policy = EffectiveExecutionPolicy::baseline(&BaselineExecutionPolicy::smart(
+            ApprovalPolicy::Prompt,
+            PolicySource::DesktopLocalLaunch,
+        ));
+        let mut sequence = ExecutionPolicySequence::launch(policy, 10);
+
+        assert!(matches!(
+            apply_wire_mode_change(&manager, &mut sequence, SessionMode::Default, 11).unwrap(),
+            WireModeChange::Unchanged
+        ));
+        assert_eq!(sequence.current().revision, 0);
+
+        let changed =
+            apply_wire_mode_change(&manager, &mut sequence, SessionMode::AutoEdit, 12).unwrap();
+        assert!(matches!(changed, WireModeChange::Changed(_)));
+        assert_eq!(sequence.current().revision, 1);
+        assert_eq!(
+            sequence.current().policy.approvals(),
+            ApprovalPolicy::AutoEdit
+        );
+
+        assert!(matches!(
+            apply_wire_mode_change(&manager, &mut sequence, SessionMode::AutoEdit, 13).unwrap(),
+            WireModeChange::Unchanged
+        ));
+        assert_eq!(sequence.current().revision, 1);
+    }
+
+    #[test]
+    fn rejected_wire_mode_does_not_advance_or_mutate_policy() {
+        use wcore_protocol::commands::SessionMode;
+        use wcore_types::execution_policy::EffectiveExecutionPolicy;
+
+        let manager = ToolApprovalManager::new();
+        let policy = EffectiveExecutionPolicy::baseline(&BaselineExecutionPolicy::smart(
+            ApprovalPolicy::Prompt,
+            PolicySource::DesktopLocalLaunch,
+        ));
+        let mut sequence = ExecutionPolicySequence::launch(policy, 10);
+
+        assert!(matches!(
+            apply_wire_mode_change(&manager, &mut sequence, SessionMode::Force, 11).unwrap(),
+            WireModeChange::Rejected
+        ));
+        assert_eq!(sequence.current().revision, 0);
+        assert_eq!(
+            sequence.current().policy.approvals(),
+            ApprovalPolicy::Prompt
+        );
+        assert_eq!(manager.session_mode(), SessionMode::Default);
     }
 
     #[test]

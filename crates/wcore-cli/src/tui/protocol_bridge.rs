@@ -116,7 +116,8 @@ pub fn apply_event(app: &mut App, event: ProtocolEvent) {
 /// through every arm.
 fn apply_event_inner(app: &mut App, event: ProtocolEvent) {
     match event {
-        ProtocolEvent::ExecutionPolicy { policy } => {
+        ProtocolEvent::ExecutionPolicy { snapshot } => {
+            let policy = snapshot.policy;
             app.mode = match policy.approvals() {
                 wcore_types::execution_policy::ApprovalPolicy::Prompt => {
                     wcore_protocol::commands::SessionMode::Default
@@ -1864,6 +1865,7 @@ mod tests {
 
     #[test]
     fn execution_policy_event_sets_tui_posture_and_approval_mode() {
+        use wcore_protocol::execution_policy::ExecutionPolicySequence;
         use wcore_types::execution_policy::{
             ApprovalPolicy, BaselineExecutionPolicy, EffectiveExecutionPolicy, ExecutionPosture,
             PolicySource,
@@ -1873,10 +1875,15 @@ mod tests {
         apply_event(
             &mut app,
             ProtocolEvent::ExecutionPolicy {
-                policy: EffectiveExecutionPolicy::baseline(&BaselineExecutionPolicy::smart(
-                    ApprovalPolicy::Bypass,
-                    PolicySource::LocalCliLaunch,
-                )),
+                snapshot: ExecutionPolicySequence::launch(
+                    EffectiveExecutionPolicy::baseline(&BaselineExecutionPolicy::smart(
+                        ApprovalPolicy::Bypass,
+                        PolicySource::LocalCliLaunch,
+                    )),
+                    1,
+                )
+                .current()
+                .clone(),
             },
         );
 

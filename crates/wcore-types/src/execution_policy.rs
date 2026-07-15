@@ -316,6 +316,19 @@ impl EffectiveExecutionPolicy {
     pub const fn managed_floor_active(&self) -> bool {
         self.managed_floor_active
     }
+
+    /// Return an output snapshot with the live approval gate reflected.
+    ///
+    /// This does not create authority: `EffectiveExecutionPolicy` remains
+    /// serialization-only, and the caller must first resolve the request
+    /// through the live approval manager (including any Managed floor). The
+    /// sandbox grant, launch origin, expiry and activation identity are kept
+    /// byte-for-byte from the resolver-produced snapshot.
+    pub fn with_runtime_approvals(&self, approvals: ApprovalPolicy) -> Self {
+        let mut snapshot = self.clone();
+        snapshot.approvals = approvals;
+        snapshot
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
