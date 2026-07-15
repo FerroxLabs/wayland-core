@@ -17753,10 +17753,14 @@ mod audit_2026_05_22_tests {
 
     use async_trait::async_trait;
     use serde_json::json;
+    use wcore_egress::{AllowAllPolicy, EgressClient};
+    use wcore_providers::retry::{builder_send_with_retry, scope_max_retries};
     use wcore_providers::{LlmProvider, ProviderError};
     use wcore_tools::registry::ToolRegistry;
     use wcore_types::llm::{LlmEvent, LlmRequest};
     use wcore_types::message::{FinishReason, StopReason, TokenUsage};
+    use wiremock::matchers::method;
+    use wiremock::{Mock, MockServer, ResponseTemplate};
 
     use crate::approval::ApprovalBridge;
     use crate::confirm::ToolConfirmer;
@@ -17838,11 +17842,13 @@ mod audit_2026_05_22_tests {
     struct ScriptedProvider {
         scripts: Mutex<std::collections::VecDeque<Script>>,
         calls: Arc<std::sync::atomic::AtomicUsize>,
+        physical_url: Option<String>,
     }
 
     struct BlockingThenScriptedProvider {
         calls: std::sync::atomic::AtomicUsize,
         entered: Arc<tokio::sync::Notify>,
+        physical_url: Option<String>,
     }
 
     impl BlockingThenScriptedProvider {
@@ -17850,7 +17856,13 @@ mod audit_2026_05_22_tests {
             Self {
                 calls: std::sync::atomic::AtomicUsize::new(0),
                 entered: Arc::new(tokio::sync::Notify::new()),
+                physical_url: None,
             }
+        }
+
+        fn with_physical_url(mut self, url: String) -> Self {
+            self.physical_url = Some(url);
+            self
         }
     }
 
@@ -17864,6 +17876,7 @@ mod audit_2026_05_22_tests {
                 self.entered.notify_one();
                 return std::future::pending().await;
             }
+            accept_physical_attempt(self.physical_url.as_deref()).await?;
             let (tx, rx) = tokio::sync::mpsc::channel(2);
             tx.send(LlmEvent::TextDelta("session alive".into()))
                 .await
@@ -17880,8 +17893,15 @@ mod audit_2026_05_22_tests {
             Self {
                 scripts: Mutex::new(scripts.into_iter().collect()),
                 calls: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+                physical_url: None,
             }
         }
+
+        fn with_physical_url(mut self, url: String) -> Self {
+            self.physical_url = Some(url);
+            self
+        }
+
         fn call_counter(&self) -> Arc<std::sync::atomic::AtomicUsize> {
             Arc::clone(&self.calls)
         }
@@ -17894,6 +17914,7 @@ mod audit_2026_05_22_tests {
             _: &LlmRequest,
         ) -> Result<tokio::sync::mpsc::Receiver<LlmEvent>, ProviderError> {
             self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            accept_physical_attempt(self.physical_url.as_deref()).await?;
             let script = self.scripts.lock().unwrap().pop_front().unwrap_or_default();
             let (tx, rx) = tokio::sync::mpsc::channel(16);
             tokio::spawn(async move {
@@ -17905,6 +17926,31 @@ mod audit_2026_05_22_tests {
             });
             Ok(rx)
         }
+    }
+
+    async fn accept_physical_attempt(url: Option<&str>) -> Result<(), ProviderError> {
+        let Some(url) = url else {
+            return Ok(());
+        };
+        let client = EgressClient::new().with_policy(Arc::new(AllowAllPolicy));
+        let response = scope_max_retries(0, builder_send_with_retry(client.get(url))).await?;
+        if response.status().is_success() {
+            Ok(())
+        } else {
+            Err(ProviderError::Api {
+                status: response.status().as_u16(),
+                message: "fixture response".into(),
+            })
+        }
+    }
+
+    async fn physical_attempt_server() -> MockServer {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(200))
+            .mount(&server)
+            .await;
+        server
     }
 
     fn done_endturn() -> LlmEvent {
@@ -19151,6 +19197,7 @@ mod audit_2026_05_22_tests {
 
     #[tokio::test]
     async fn persisted_run_journals_exact_conversation_and_one_terminal_transition() {
+        let server = physical_attempt_server().await;
         let dir = tempfile::tempdir().unwrap();
         let manager = crate::session::SessionManager::new(dir.path().to_path_buf(), 10);
         let active = manager
@@ -19159,10 +19206,13 @@ mod audit_2026_05_22_tests {
         let mut config = wcore_config::config::Config::default();
         config.session.enabled = true;
         config.session.directory = dir.path().to_string_lossy().into_owned();
-        let provider = Arc::new(ScriptedProvider::new(vec![vec![
-            LlmEvent::TextDelta("durable answer".into()),
-            done_endturn(),
-        ]]));
+        let provider = Arc::new(
+            ScriptedProvider::new(vec![vec![
+                LlmEvent::TextDelta("durable answer".into()),
+                done_endturn(),
+            ]])
+            .with_physical_url(server.uri()),
+        );
         let mut engine = super::AgentEngine::resume_active_with_provider(
             provider,
             config,
@@ -19258,12 +19308,14 @@ mod audit_2026_05_22_tests {
 
     #[tokio::test]
     async fn dropped_run_is_failed_before_a_new_turn_starts() {
+        let server = physical_attempt_server().await;
         let dir = tempfile::tempdir().unwrap();
         let manager = crate::session::SessionManager::new(dir.path().to_path_buf(), 10);
         let active = manager
             .create_for_run("test", "test-model", "/tmp", Some("deadbeef1200"))
             .unwrap();
-        let provider = Arc::new(BlockingThenScriptedProvider::new());
+        let provider =
+            Arc::new(BlockingThenScriptedProvider::new().with_physical_url(server.uri()));
         let mut config = wcore_config::config::Config::default();
         config.session.enabled = true;
         config.session.directory = dir.path().to_string_lossy().into_owned();
