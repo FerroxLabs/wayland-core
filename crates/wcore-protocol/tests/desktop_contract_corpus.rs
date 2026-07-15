@@ -5,8 +5,8 @@ use std::path::Path;
 use serde_json::Value;
 use wcore_protocol::commands::ProtocolCommand;
 use wcore_protocol::contract::{
-    canonical_json, check_contract, generated_artifacts, COMMAND_SPECS, CONTRACT_ROOT, EVENT_SPECS,
-    GENERATOR_VERSION,
+    canonical_json, check_contract, generated_artifacts, ContractCriticality, COMMAND_SPECS,
+    CONTRACT_ROOT, EVENT_SPECS, GENERATOR_VERSION,
 };
 
 fn root() -> std::path::PathBuf {
@@ -118,6 +118,29 @@ fn manifest_pins_generator_and_all_three_digests() {
         .expect("authoritative invalidation must be in EVENT_SPECS");
     assert_eq!(invalidation["criticality"], "safety");
     assert_eq!(invalidation["capability"], "anvil_receipts");
+}
+
+#[test]
+fn manifest_criticality_uses_only_the_normative_typed_vocabulary() {
+    let manifest: Value =
+        serde_json::from_slice(&fs::read(root().join("manifest.json")).unwrap()).unwrap();
+    for entry in manifest["commands"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .chain(manifest["events"].as_array().unwrap())
+    {
+        let criticality: ContractCriticality = serde_json::from_value(entry["criticality"].clone())
+            .unwrap_or_else(|error| {
+                panic!("{} has non-normative criticality: {error}", entry["type"])
+            });
+        assert!(matches!(
+            criticality,
+            ContractCriticality::Required
+                | ContractCriticality::Safety
+                | ContractCriticality::Observational
+        ));
+    }
 }
 
 #[test]

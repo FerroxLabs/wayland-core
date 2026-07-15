@@ -1,5 +1,6 @@
 use std::collections::BTreeMap;
 
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
 use crate::anvil::{
@@ -18,24 +19,33 @@ use wcore_types::execution_policy::{
 
 use super::fixtures_support::capabilities;
 
+/// Normative authority classification for a producer wire variant.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ContractCriticality {
+    Required,
+    Safety,
+    Observational,
+}
+
 /// One current Desktop-consumed wire variant.
 #[derive(Debug, Clone, Copy)]
 pub struct WireSpec {
     pub wire_type: &'static str,
     pub path: &'static str,
     pub required: &'static [&'static str],
-    pub criticality: &'static str,
+    pub criticality: ContractCriticality,
     pub correlation: &'static str,
     pub capability: &'static str,
 }
 
 macro_rules! wire {
-    ($wire:literal, $path:literal, [$($required:literal),*], $criticality:literal, $correlation:literal, $capability:literal) => {
+    ($wire:literal, $path:literal, [$($required:literal),*], $criticality:ident, $correlation:literal, $capability:literal) => {
         WireSpec {
             wire_type: $wire,
             path: $path,
             required: &["type", $($required),*],
-            criticality: $criticality,
+            criticality: ContractCriticality::$criticality,
             correlation: $correlation,
             capability: $capability,
         }
@@ -47,7 +57,7 @@ pub const COMMAND_SPECS: &[WireSpec] = &[
         "message",
         "commands/message.json",
         ["msg_id", "content"],
-        "safe",
+        Safety,
         "msg_id",
         "available"
     ),
@@ -55,7 +65,7 @@ pub const COMMAND_SPECS: &[WireSpec] = &[
         "stop",
         "commands/stop.json",
         [],
-        "safe",
+        Safety,
         "session",
         "available"
     ),
@@ -63,7 +73,7 @@ pub const COMMAND_SPECS: &[WireSpec] = &[
         "tool_approve",
         "commands/tool_approve.json",
         ["call_id"],
-        "safe",
+        Safety,
         "call_id",
         "available"
     ),
@@ -71,7 +81,7 @@ pub const COMMAND_SPECS: &[WireSpec] = &[
         "tool_deny",
         "commands/tool_deny.json",
         ["call_id"],
-        "safe",
+        Safety,
         "call_id",
         "available"
     ),
@@ -79,7 +89,7 @@ pub const COMMAND_SPECS: &[WireSpec] = &[
         "approval_resume",
         "commands/approval_resume.json",
         ["resume_token", "approved"],
-        "safe",
+        Safety,
         "resume_token",
         "available"
     ),
@@ -87,7 +97,7 @@ pub const COMMAND_SPECS: &[WireSpec] = &[
         "init_history",
         "commands/init_history.json",
         ["text"],
-        "safe",
+        Safety,
         "session",
         "available"
     ),
@@ -95,7 +105,7 @@ pub const COMMAND_SPECS: &[WireSpec] = &[
         "set_mode",
         "commands/set_mode.json",
         ["mode"],
-        "safe",
+        Safety,
         "session",
         "available"
     ),
@@ -103,7 +113,7 @@ pub const COMMAND_SPECS: &[WireSpec] = &[
         "set_config",
         "commands/set_config.json",
         [],
-        "safe",
+        Safety,
         "session",
         "available"
     ),
@@ -111,7 +121,7 @@ pub const COMMAND_SPECS: &[WireSpec] = &[
         "add_mcp_server",
         "commands/add_mcp_server.json",
         ["name", "transport"],
-        "safe",
+        Safety,
         "name",
         "available"
     ),
@@ -119,7 +129,7 @@ pub const COMMAND_SPECS: &[WireSpec] = &[
         "host_send_message_result",
         "commands/host_send_message_result.json",
         ["call_id", "ok"],
-        "safe",
+        Safety,
         "call_id",
         "available"
     ),
@@ -127,7 +137,7 @@ pub const COMMAND_SPECS: &[WireSpec] = &[
         "ping",
         "commands/ping.json",
         [],
-        "observation",
+        Observational,
         "connection",
         "available"
     ),
@@ -138,7 +148,7 @@ pub const EVENT_SPECS: &[WireSpec] = &[
         "ready",
         "events/ready.json",
         ["version", "capabilities", "contract", "execution_policy"],
-        "required",
+        Required,
         "session_id",
         "available"
     ),
@@ -153,7 +163,7 @@ pub const EVENT_SPECS: &[WireSpec] = &[
             "effective_at_unix_ms",
             "policy"
         ],
-        "safety",
+        Safety,
         "revision",
         "effective_execution_policy_revisions"
     ),
@@ -161,7 +171,7 @@ pub const EVENT_SPECS: &[WireSpec] = &[
         "stream_start",
         "events/stream_start.json",
         ["msg_id"],
-        "observation",
+        Observational,
         "msg_id",
         "available"
     ),
@@ -169,7 +179,7 @@ pub const EVENT_SPECS: &[WireSpec] = &[
         "text_delta",
         "events/text_delta.json",
         ["text", "msg_id"],
-        "observation",
+        Observational,
         "msg_id",
         "available"
     ),
@@ -177,7 +187,7 @@ pub const EVENT_SPECS: &[WireSpec] = &[
         "thinking",
         "events/thinking.json",
         ["text", "msg_id"],
-        "observation",
+        Observational,
         "msg_id",
         "available"
     ),
@@ -185,7 +195,7 @@ pub const EVENT_SPECS: &[WireSpec] = &[
         "tool_request",
         "events/tool_request.json",
         ["msg_id", "call_id", "tool"],
-        "safe",
+        Safety,
         "call_id",
         "available"
     ),
@@ -193,7 +203,7 @@ pub const EVENT_SPECS: &[WireSpec] = &[
         "tool_running",
         "events/tool_running.json",
         ["msg_id", "call_id", "tool_name"],
-        "observation",
+        Observational,
         "call_id",
         "available"
     ),
@@ -208,7 +218,7 @@ pub const EVENT_SPECS: &[WireSpec] = &[
             "output",
             "output_type"
         ],
-        "safe",
+        Safety,
         "call_id",
         "available"
     ),
@@ -216,7 +226,7 @@ pub const EVENT_SPECS: &[WireSpec] = &[
         "tool_cancelled",
         "events/tool_cancelled.json",
         ["msg_id", "call_id", "reason"],
-        "safe",
+        Safety,
         "call_id",
         "available"
     ),
@@ -224,7 +234,7 @@ pub const EVENT_SPECS: &[WireSpec] = &[
         "stream_end",
         "events/stream_end.json",
         ["msg_id", "finish_reason"],
-        "safe",
+        Safety,
         "msg_id",
         "available"
     ),
@@ -232,7 +242,7 @@ pub const EVENT_SPECS: &[WireSpec] = &[
         "error",
         "events/error.json",
         ["error"],
-        "safe",
+        Safety,
         "msg_id_or_session",
         "available"
     ),
@@ -240,7 +250,7 @@ pub const EVENT_SPECS: &[WireSpec] = &[
         "info",
         "events/info.json",
         ["msg_id", "message"],
-        "observation",
+        Observational,
         "msg_id",
         "available"
     ),
@@ -248,7 +258,7 @@ pub const EVENT_SPECS: &[WireSpec] = &[
         "config_changed",
         "events/config_changed.json",
         ["capabilities"],
-        "observation",
+        Observational,
         "session",
         "available"
     ),
@@ -256,7 +266,7 @@ pub const EVENT_SPECS: &[WireSpec] = &[
         "mcp_ready",
         "events/mcp_ready.json",
         ["name", "tools"],
-        "observation",
+        Observational,
         "name",
         "available"
     ),
@@ -264,7 +274,7 @@ pub const EVENT_SPECS: &[WireSpec] = &[
         "mcp_failed",
         "events/mcp_failed.json",
         ["name", "reason"],
-        "safe",
+        Safety,
         "name",
         "available"
     ),
@@ -272,7 +282,7 @@ pub const EVENT_SPECS: &[WireSpec] = &[
         "pong",
         "events/pong.json",
         [],
-        "observation",
+        Observational,
         "connection",
         "available"
     ),
@@ -280,7 +290,7 @@ pub const EVENT_SPECS: &[WireSpec] = &[
         "trace_event",
         "events/trace_event.json",
         ["msg_id", "trace"],
-        "observation",
+        Observational,
         "msg_id",
         "structured_traces"
     ),
@@ -288,7 +298,7 @@ pub const EVENT_SPECS: &[WireSpec] = &[
         "session_cost",
         "events/session_cost.json",
         ["session_id", "total_cost_usd", "per_turn"],
-        "observation",
+        Observational,
         "session_id",
         "cost_attribution"
     ),
@@ -304,7 +314,7 @@ pub const EVENT_SPECS: &[WireSpec] = &[
             "child_sequence",
             "event_id"
         ],
-        "observation",
+        Observational,
         "child_run_id_and_child_sequence",
         "workflow_lifecycle_v1"
     ),
@@ -319,7 +329,7 @@ pub const EVENT_SPECS: &[WireSpec] = &[
             "event_id",
             "sequence"
         ],
-        "safety",
+        Safety,
         "run_id_and_sequence",
         "workflow_lifecycle_v1"
     ),
@@ -327,7 +337,7 @@ pub const EVENT_SPECS: &[WireSpec] = &[
         "workflow_node_event",
         "events/workflow_node_event.json",
         ["run_id", "node_id", "event_id", "sequence", "state"],
-        "safety",
+        Safety,
         "run_id_and_sequence",
         "workflow_lifecycle_v1"
     ),
@@ -342,7 +352,7 @@ pub const EVENT_SPECS: &[WireSpec] = &[
             "sequence",
             "terminal_state"
         ],
-        "safety",
+        Safety,
         "run_id_and_sequence",
         "workflow_lifecycle_v1"
     ),
@@ -350,7 +360,7 @@ pub const EVENT_SPECS: &[WireSpec] = &[
         "tool_chunk",
         "events/tool_chunk.json",
         ["msg_id", "call_id", "tool_name", "chunk"],
-        "observation",
+        Observational,
         "call_id",
         "streaming_tools"
     ),
@@ -358,7 +368,7 @@ pub const EVENT_SPECS: &[WireSpec] = &[
         "provider_circuit_event",
         "events/provider_circuit_event.json",
         ["primary", "state"],
-        "safe",
+        Safety,
         "primary",
         "available"
     ),
@@ -366,7 +376,7 @@ pub const EVENT_SPECS: &[WireSpec] = &[
         "approval_required",
         "events/approval_required.json",
         ["call_id", "resume_token", "reason", "context"],
-        "safe",
+        Safety,
         "resume_token",
         "hitl_suspend"
     ),
@@ -374,7 +384,7 @@ pub const EVENT_SPECS: &[WireSpec] = &[
         "suspend",
         "events/suspend.json",
         ["reason", "resume_token"],
-        "safe",
+        Safety,
         "resume_token",
         "hitl_suspend"
     ),
@@ -382,7 +392,7 @@ pub const EVENT_SPECS: &[WireSpec] = &[
         "approval_resume",
         "events/approval_resume.json",
         ["resume_token", "approved"],
-        "safe",
+        Safety,
         "resume_token",
         "hitl_suspend"
     ),
@@ -390,7 +400,7 @@ pub const EVENT_SPECS: &[WireSpec] = &[
         "budget_exceeded",
         "events/budget_exceeded.json",
         ["reason", "observed", "limit"],
-        "safe",
+        Safety,
         "session",
         "available"
     ),
@@ -398,7 +408,7 @@ pub const EVENT_SPECS: &[WireSpec] = &[
         "tool_panicked",
         "events/tool_panicked.json",
         ["msg_id", "call_id", "tool_name", "panic_message"],
-        "safe",
+        Safety,
         "call_id",
         "available"
     ),
@@ -406,7 +416,7 @@ pub const EVENT_SPECS: &[WireSpec] = &[
         "plugin_registration_failed",
         "events/plugin_registration_failed.json",
         ["plugin_name", "surface", "error_kind", "message"],
-        "safe",
+        Safety,
         "plugin_name_and_surface",
         "available"
     ),
@@ -414,7 +424,7 @@ pub const EVENT_SPECS: &[WireSpec] = &[
         "plugin_event",
         "events/plugin_event.json",
         ["plugin_name", "event_type", "payload"],
-        "observation",
+        Observational,
         "plugin_name",
         "shape_only"
     ),
@@ -430,7 +440,7 @@ pub const EVENT_SPECS: &[WireSpec] = &[
             "score",
             "retained"
         ],
-        "observation",
+        Observational,
         "run_id",
         "gepa_enabled"
     ),
@@ -438,7 +448,7 @@ pub const EVENT_SPECS: &[WireSpec] = &[
         "browser_event",
         "events/browser_event.json",
         ["msg_id", "call_id", "op", "summary"],
-        "observation",
+        Observational,
         "call_id",
         "shape_only"
     ),
@@ -446,7 +456,7 @@ pub const EVENT_SPECS: &[WireSpec] = &[
         "browser_policy_denied",
         "events/browser_policy_denied.json",
         ["msg_id", "url", "reason"],
-        "safe",
+        Safety,
         "msg_id",
         "shape_only"
     ),
@@ -454,7 +464,7 @@ pub const EVENT_SPECS: &[WireSpec] = &[
         "cua_event",
         "events/cua_event.json",
         ["msg_id", "call_id", "op", "summary"],
-        "observation",
+        Observational,
         "call_id",
         "shape_only"
     ),
@@ -462,7 +472,7 @@ pub const EVENT_SPECS: &[WireSpec] = &[
         "cua_policy_denied",
         "events/cua_policy_denied.json",
         ["msg_id", "op", "reason"],
-        "safe",
+        Safety,
         "msg_id",
         "shape_only"
     ),
@@ -470,7 +480,7 @@ pub const EVENT_SPECS: &[WireSpec] = &[
         "host_send_message_request",
         "events/host_send_message_request.json",
         ["call_id", "platform", "body"],
-        "safe",
+        Safety,
         "call_id",
         "host_delegated_delivery"
     ),
@@ -490,7 +500,7 @@ pub const EVENT_SPECS: &[WireSpec] = &[
             "gate_closure_digest",
             "receipt_body_digest"
         ],
-        "safety",
+        Safety,
         "session_id_and_sequence",
         "anvil_receipts"
     ),
@@ -510,7 +520,7 @@ pub const EVENT_SPECS: &[WireSpec] = &[
             "prior_artifact_digest",
             "invalidation_body_digest"
         ],
-        "safety",
+        Safety,
         "session_id_and_sequence",
         "anvil_receipts"
     ),
