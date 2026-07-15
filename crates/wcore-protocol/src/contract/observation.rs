@@ -530,7 +530,7 @@ mod tests {
     fn ready_inconsistent_capabilities_and_policy_fail_before_negotiation() {
         let expected = descriptor();
         let mut wrong_mode = ready_value(&expected);
-        wrong_mode["capabilities"]["current_mode"] = json!("force");
+        wrong_mode["capabilities"]["current_mode"] = json!("unadvertised");
 
         let mut unsafe_smart_policy = ready_value(&expected);
         unsafe_smart_policy["execution_policy"]["policy"]["sandbox"] = json!("bypass");
