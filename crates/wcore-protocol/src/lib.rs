@@ -2,6 +2,7 @@
 // Contains: events (agent→host), commands (host→agent), approval manager.
 
 pub mod commands;
+pub mod contract;
 pub mod events;
 pub mod output_pump;
 pub mod reader;

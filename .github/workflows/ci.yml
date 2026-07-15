@@ -116,6 +116,9 @@ jobs:
       - name: Pre-build wcore-cli release binary (smoked by release_binary_smoke tests)
         run: vx cargo build --release -p wcore-cli
 
+      - name: Check Desktop protocol contract corpus drift
+        run: vx cargo run -p wcore-protocol --bin wcore-contract -- check
+
       - name: Check formatting
         run: vx just fmt-check
 

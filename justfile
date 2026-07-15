@@ -42,6 +42,11 @@ test-one NAME:
 test-verbose:
     vx cargo nextest run --workspace --profile default --no-capture
 
+# Regenerate in memory, reject contract drift, then replay the checked corpus.
+desktop-contract-check:
+    vx cargo run -p wcore-protocol --bin wcore-contract -- check
+    vx cargo nextest run -p wcore-protocol --test desktop_contract_corpus --test desktop_contract_adversarial
+
 # ── E2E Tests ──────────────────────────────────────────────────────────────
 # Requires env vars: ANTHROPIC_API_KEY and/or OPENAI_API_KEY
 # Uses the dedicated e2e nextest profile (sequential, long timeout, no retry)
