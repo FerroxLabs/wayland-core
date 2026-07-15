@@ -1104,37 +1104,18 @@ fn run_workflow_owned(
     plan: crate::orchestration::workflow::runner::WorkflowPlan,
     initial: serde_json::Value,
     parent_output: std::sync::Arc<dyn crate::output::OutputSink>,
+    lifecycle: std::sync::Arc<crate::orchestration::workflow::runner::WorkflowLifecycleEmitter>,
 ) -> std::pin::Pin<Box<dyn std::future::Future<Output = RunOwnedOutput> + Send>> {
     // Concrete boxed `Send` return type (see `synthesize_workflow_owned`).
     Box::pin(async move {
-        // ForgeFlows-Live: derive the lifecycle-event fields from the plan.
-        // `run_workflow_owned` has no turn/msg id in scope, so the stable
-        // correlation handle is the plan's own display name (the meta.name
-        // the author declared); the TUI groups runs under one MVP key today,
-        // so the name doubles as the human-readable id. `node_count` counts
-        // the AgentCall nodes — the units the runner actually dispatches and
-        // what the Workflows tab tallies (End/PassThrough/Pipeline-placeholder
-        // nodes are graph plumbing, not agents).
-        let workflow_id = plan.meta.name.clone();
-        let name = plan.meta.name.clone();
-        let node_count = plan
-            .graph
-            .nodes
-            .iter()
-            .filter(|(_, node)| matches!(node, crate::orchestration::graph::Node::AgentCall { .. }))
-            .count();
-
-        // ForgeFlows-Live: bookend the run with WorkflowStarted/Finished so
-        // hosts get a clean lifecycle signal instead of inferring it from the
-        // first `workflow:<node_id>` SubAgentEvent. Both ride the existing
-        // `sub_agent_traces` gate on the sink.
-        parent_output.emit_workflow_started(&workflow_id, &name, node_count);
+        lifecycle.start();
 
         // ForgeFlows-Live Phase 1: wire the parent sink so the live (B6) path's
         // sub-agent events relay back as `SubAgentEvent`, matching the LLM-facing
         // `WorkflowTool` surface.
         let run = crate::orchestration::workflow::runner::WorkflowRunner::new(&spawner)
             .with_parent_output(std::sync::Arc::clone(&parent_output))
+            .with_lifecycle(std::sync::Arc::clone(&lifecycle))
             .run(&plan, initial)
             .await;
 
@@ -1145,7 +1126,27 @@ fn run_workflow_owned(
             Ok(result) => AgentEngine::errored_stage_ids(&result.stage_results).is_empty(),
             Err(_) => false,
         };
-        parent_output.emit_workflow_finished(&workflow_id, succeeded);
+        lifecycle.finish_remaining();
+        let (terminal_state, failure) = if succeeded {
+            (
+                wcore_protocol::events::WorkflowTerminalState::Succeeded,
+                None,
+            )
+        } else {
+            (
+                wcore_protocol::events::WorkflowTerminalState::Failed,
+                Some(wcore_protocol::events::WorkflowFailure {
+                    code: "workflow_failed".to_string(),
+                    message: run
+                        .as_ref()
+                        .err()
+                        .map(ToString::to_string)
+                        .unwrap_or_else(|| "one or more workflow stages failed".to_string()),
+                    retryable: false,
+                }),
+            )
+        };
+        lifecycle.finish(terminal_state, failure);
 
         (plan, run)
     })
@@ -8402,16 +8403,35 @@ impl AgentEngine {
                 // ownership of the plan + spawner and returns them with the
                 // run result so the caller can render the per-stage summary.
                 //
-                // Snapshot the workflow id BEFORE the spawn moves `plan`. It
-                // must equal the `workflow_id` `run_workflow_owned` emits in
-                // `WorkflowStarted` (which is `plan.meta.name`) so the join-
-                // failure arm below can emit the matching `WorkflowFinished`.
-                let workflow_id = plan.meta.name.clone();
+                let node_count = plan
+                    .graph
+                    .nodes
+                    .iter()
+                    .filter(|(_, node)| {
+                        matches!(node, crate::orchestration::graph::Node::AgentCall { .. })
+                    })
+                    .count();
+                let node_ids = plan
+                    .graph
+                    .nodes
+                    .iter()
+                    .map(|(node_id, _)| node_id.clone())
+                    .collect();
+                let lifecycle = std::sync::Arc::new(
+                    crate::orchestration::workflow::runner::WorkflowLifecycleEmitter::new(
+                        std::sync::Arc::clone(&self.output),
+                        plan.meta.name.clone(),
+                        plan.meta.name.clone(),
+                        node_count,
+                        node_ids,
+                    ),
+                );
                 match tokio::spawn(run_workflow_owned(
                     spawner,
                     plan,
                     initial_state,
                     std::sync::Arc::clone(&self.output),
+                    std::sync::Arc::clone(&lifecycle),
                 ))
                 .await
                 {
@@ -8464,7 +8484,15 @@ impl AgentEngine {
                         // WorkflowView stays `finished: None` (orange/running)
                         // forever. Emit it here with the SAME `workflow_id` so
                         // the card resolves to "failed".
-                        self.output.emit_workflow_finished(&workflow_id, false);
+                        lifecycle.finish_remaining();
+                        lifecycle.finish(
+                            wcore_protocol::events::WorkflowTerminalState::Failed,
+                            Some(wcore_protocol::events::WorkflowFailure {
+                                code: "workflow_task_interrupted".to_string(),
+                                message: join_err.to_string(),
+                                retryable: false,
+                            }),
+                        );
                         // GAP-8: the gate already emitted a `ToolRequest` proposal
                         // card for `call_id`, and the user `Approved` it. A
                         // JoinError (the detached run task panicked or was

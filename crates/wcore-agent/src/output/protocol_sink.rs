@@ -928,6 +928,28 @@ impl OutputSink for ProtocolSink {
         });
     }
 
+    fn emit_correlated_sub_agent_event(
+        &self,
+        parent_call_id: &str,
+        agent_name: &str,
+        inner: &serde_json::Value,
+        correlation: &wcore_protocol::events::WorkflowChildCorrelation,
+    ) {
+        if !self.sub_agent_traces_enabled {
+            return;
+        }
+        let _ = self.writer.emit(&ProtocolEvent::CorrelatedSubAgentEvent {
+            parent_call_id: parent_call_id.to_string(),
+            agent_name: agent_name.to_string(),
+            inner: inner.clone(),
+            run_id: correlation.run_id.clone(),
+            child_run_id: correlation.child_run_id.clone(),
+            parent_child_run_id: correlation.parent_child_run_id.clone(),
+            child_sequence: correlation.child_sequence,
+            event_id: correlation.event_id.clone(),
+        });
+    }
+
     /// ForgeFlows-Live: emit `ProtocolEvent::WorkflowStarted` when the sink
     /// was configured with `with_sub_agent_traces(true)`. Shares the
     /// `sub_agent_traces` gate with `emit_sub_agent_event` so hosts that
@@ -943,6 +965,36 @@ impl OutputSink for ProtocolSink {
         });
     }
 
+    fn emit_correlated_workflow_started(&self, event: &wcore_protocol::events::WorkflowRunStarted) {
+        if !self.sub_agent_traces_enabled {
+            return;
+        }
+        let _ = self.writer.emit(&ProtocolEvent::CorrelatedWorkflowStarted {
+            workflow_id: event.workflow_id.clone(),
+            name: event.name.clone(),
+            node_count: event.node_count,
+            run_id: event.run_id.clone(),
+            event_id: event.event_id.clone(),
+            sequence: event.sequence,
+            parent_run_id: event.parent_run_id.clone(),
+        });
+    }
+
+    fn emit_workflow_node_event(&self, event: &wcore_protocol::events::WorkflowNodeLifecycle) {
+        if !self.sub_agent_traces_enabled {
+            return;
+        }
+        let _ = self.writer.emit(&ProtocolEvent::WorkflowNodeEvent {
+            run_id: event.run_id.clone(),
+            node_id: event.node_id.clone(),
+            child_run_id: event.child_run_id.clone(),
+            event_id: event.event_id.clone(),
+            sequence: event.sequence,
+            state: event.state,
+            failure: event.failure.clone(),
+        });
+    }
+
     /// ForgeFlows-Live: emit `ProtocolEvent::WorkflowFinished` under the
     /// same `sub_agent_traces` gate as `emit_workflow_started`.
     fn emit_workflow_finished(&self, workflow_id: &str, succeeded: bool) {
@@ -953,6 +1005,28 @@ impl OutputSink for ProtocolSink {
             workflow_id: workflow_id.to_string(),
             succeeded,
         });
+    }
+
+    fn emit_correlated_workflow_finished(
+        &self,
+        event: &wcore_protocol::events::WorkflowRunFinished,
+    ) {
+        if !self.sub_agent_traces_enabled {
+            return;
+        }
+        let succeeded =
+            event.terminal_state == wcore_protocol::events::WorkflowTerminalState::Succeeded;
+        let _ = self
+            .writer
+            .emit(&ProtocolEvent::CorrelatedWorkflowFinished {
+                workflow_id: event.workflow_id.clone(),
+                succeeded,
+                run_id: event.run_id.clone(),
+                event_id: event.event_id.clone(),
+                sequence: event.sequence,
+                terminal_state: event.terminal_state,
+                failure: event.failure.clone(),
+            });
     }
 
     /// W6 F7. Emits `ProtocolEvent::SessionCost` when

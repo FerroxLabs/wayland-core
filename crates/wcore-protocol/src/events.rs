@@ -135,6 +135,85 @@ pub enum MonitorReason {
     BudgetExceeded,
 }
 
+/// Stable workflow-node lifecycle states exported to host control planes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkflowNodeState {
+    Queued,
+    Running,
+    Suspended,
+    Resumed,
+    Succeeded,
+    Failed,
+    Cancelled,
+    TimedOut,
+    Blocked,
+}
+
+/// Stable terminal states for one workflow execution.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkflowTerminalState {
+    Succeeded,
+    Failed,
+    Cancelled,
+    TimedOut,
+    Blocked,
+}
+
+/// Typed, provider-neutral failure evidence for workflow lifecycle events.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkflowFailure {
+    pub code: String,
+    pub message: String,
+    pub retryable: bool,
+}
+
+/// Correlation metadata attached to a workflow child-agent relay.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkflowChildCorrelation {
+    pub run_id: String,
+    pub child_run_id: String,
+    pub parent_child_run_id: Option<String>,
+    pub child_sequence: u64,
+    pub event_id: String,
+}
+
+/// Complete producer payload for a correlated workflow start.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkflowRunStarted {
+    pub workflow_id: String,
+    pub name: String,
+    pub node_count: usize,
+    pub run_id: String,
+    pub event_id: String,
+    pub sequence: u64,
+    pub parent_run_id: Option<String>,
+}
+
+/// Complete producer payload for one workflow-node lifecycle transition.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkflowNodeLifecycle {
+    pub run_id: String,
+    pub node_id: String,
+    pub child_run_id: Option<String>,
+    pub event_id: String,
+    pub sequence: u64,
+    pub state: WorkflowNodeState,
+    pub failure: Option<WorkflowFailure>,
+}
+
+/// Complete producer payload for a correlated workflow terminal.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkflowRunFinished {
+    pub workflow_id: String,
+    pub run_id: String,
+    pub event_id: String,
+    pub sequence: u64,
+    pub terminal_state: WorkflowTerminalState,
+    pub failure: Option<WorkflowFailure>,
+}
+
 /// Events emitted by the agent to the client (Agent -> Client)
 ///
 /// `Clone` is derived (Wave 2) so the in-process TUI bridge can fan an
@@ -303,6 +382,22 @@ pub enum ProtocolEvent {
         agent_name: String,
         inner: Value,
     },
+    /// Correlated v1 form of `sub_agent_event`. It deliberately serializes
+    /// with the legacy wire tag while keeping the old Rust variant available
+    /// to in-process TUI consumers. Hosts therefore see one additive event
+    /// shape rather than a second event type.
+    #[serde(rename = "sub_agent_event")]
+    CorrelatedSubAgentEvent {
+        parent_call_id: String,
+        agent_name: String,
+        inner: Value,
+        run_id: String,
+        child_run_id: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        parent_child_run_id: Option<String>,
+        child_sequence: u64,
+        event_id: String,
+    },
     /// ForgeFlows-Live: a workflow (ForgeFlows / Dynamic Workflows) run
     /// started. Emitted once, before the first node dispatches, so hosts
     /// (the TUI Workflows tab and the external `wayland` desktop app) get a
@@ -319,6 +414,32 @@ pub enum ProtocolEvent {
         name: String,
         node_count: usize,
     },
+    /// Correlated v1 form of `workflow_started`; see
+    /// [`ProtocolEvent::CorrelatedSubAgentEvent`] for the compatibility
+    /// rationale behind the shared wire tag.
+    #[serde(rename = "workflow_started")]
+    CorrelatedWorkflowStarted {
+        workflow_id: String,
+        name: String,
+        node_count: usize,
+        run_id: String,
+        event_id: String,
+        sequence: u64,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        parent_run_id: Option<String>,
+    },
+    /// One ordered transition for a node in a correlated workflow run.
+    WorkflowNodeEvent {
+        run_id: String,
+        node_id: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        child_run_id: Option<String>,
+        event_id: String,
+        sequence: u64,
+        state: WorkflowNodeState,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        failure: Option<WorkflowFailure>,
+    },
     /// ForgeFlows-Live: a workflow run finished. Emitted once, after the run
     /// completes (success or failure), as the terminal bookend to
     /// `WorkflowStarted`. `succeeded` is `true` only when the run produced
@@ -329,6 +450,19 @@ pub enum ProtocolEvent {
     WorkflowFinished {
         workflow_id: String,
         succeeded: bool,
+    },
+    /// Correlated v1 form of `workflow_finished`. `succeeded` is retained for
+    /// legacy hosts and always agrees with `terminal_state`.
+    #[serde(rename = "workflow_finished")]
+    CorrelatedWorkflowFinished {
+        workflow_id: String,
+        succeeded: bool,
+        run_id: String,
+        event_id: String,
+        sequence: u64,
+        terminal_state: WorkflowTerminalState,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        failure: Option<WorkflowFailure>,
     },
     /// W7: F4 streaming tool-result chunk. Long-running tools (e.g.
     /// `Bash` on a multi-minute build) emit one of these per chunk of

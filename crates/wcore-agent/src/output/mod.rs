@@ -122,15 +122,48 @@ pub trait OutputSink: Send + Sync {
     ) {
     }
 
+    /// Desktop producer contract v1: emit a child relay with durable workflow
+    /// correlation. Non-protocol sinks retain the legacy presentation path.
+    fn emit_correlated_sub_agent_event(
+        &self,
+        parent_call_id: &str,
+        agent_name: &str,
+        inner: &serde_json::Value,
+        _correlation: &wcore_protocol::events::WorkflowChildCorrelation,
+    ) {
+        self.emit_sub_agent_event(parent_call_id, agent_name, inner);
+    }
+
     /// ForgeFlows-Live: a workflow run started. Default no-op; only
     /// `ProtocolSink` configured with `with_sub_agent_traces(true)` emits
     /// the `WorkflowStarted` variant (same gate as `emit_sub_agent_event`).
     fn emit_workflow_started(&self, _workflow_id: &str, _name: &str, _node_count: usize) {}
 
+    /// Desktop producer contract v1: correlated workflow start. Defaulting to
+    /// the legacy method keeps terminal and in-process sinks source-compatible.
+    fn emit_correlated_workflow_started(&self, event: &wcore_protocol::events::WorkflowRunStarted) {
+        self.emit_workflow_started(&event.workflow_id, &event.name, event.node_count);
+    }
+
+    /// Desktop producer contract v1: ordered node lifecycle transition.
+    fn emit_workflow_node_event(&self, _event: &wcore_protocol::events::WorkflowNodeLifecycle) {}
+
     /// ForgeFlows-Live: a workflow run finished. Default no-op; only
     /// `ProtocolSink` configured with `with_sub_agent_traces(true)` emits
     /// the `WorkflowFinished` variant (same gate as `emit_sub_agent_event`).
     fn emit_workflow_finished(&self, _workflow_id: &str, _succeeded: bool) {}
+
+    /// Desktop producer contract v1: correlated workflow terminal. The
+    /// compatibility boolean is derived from the typed terminal state.
+    fn emit_correlated_workflow_finished(
+        &self,
+        event: &wcore_protocol::events::WorkflowRunFinished,
+    ) {
+        self.emit_workflow_finished(
+            &event.workflow_id,
+            event.terminal_state == wcore_protocol::events::WorkflowTerminalState::Succeeded,
+        );
+    }
 
     /// W7 F4: emit a streaming chunk from a long-running tool. Default
     /// no-op; only `ProtocolSink` configured with
