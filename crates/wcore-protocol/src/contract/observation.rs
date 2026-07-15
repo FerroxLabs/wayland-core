@@ -4,6 +4,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use thiserror::Error;
 
+use crate::events::Capabilities;
+
 use super::spec::PRODUCER_EVENT_TYPES;
 
 /// Availability of one producer-contract capability.
@@ -73,6 +75,81 @@ struct EmbeddedContractManifest {
     capabilities: BTreeMap<String, ContractCapabilityStatus>,
 }
 
+/// Descriptive-only view of the initial execution policy. This deliberately
+/// does not deserialize into Core's authority-bearing policy types.
+#[derive(Deserialize)]
+struct ObservedExecutionPolicy {
+    critical: bool,
+    contract_version: String,
+    revision: u64,
+    reason: String,
+    #[serde(rename = "effective_at_unix_ms")]
+    _effective_at_unix_ms: u64,
+    policy: ObservedEffectivePolicy,
+}
+
+#[derive(Deserialize)]
+struct ObservedEffectivePolicy {
+    posture: String,
+    approvals: String,
+    sandbox: String,
+    source: String,
+    managed_floor_active: bool,
+    #[serde(default)]
+    dangerous_activation_id: Option<String>,
+    #[serde(default)]
+    dangerous_expires_at_unix_ms: Option<u64>,
+}
+
+impl ObservedExecutionPolicy {
+    fn validate(&self) -> Result<(), HostObservationError> {
+        if !self.critical
+            || self.revision != 0
+            || !matches!(self.reason.as_str(), "launch" | "resume")
+            || crate::execution_policy::validate_execution_policy_contract_version(
+                &self.contract_version,
+            )
+            .is_err()
+        {
+            return Err(HostObservationError::InvalidReadyField {
+                field: "execution_policy",
+            });
+        }
+
+        let policy = &self.policy;
+        if !matches!(policy.posture.as_str(), "smart" | "managed" | "dangerous")
+            || !matches!(policy.approvals.as_str(), "prompt" | "auto_edit" | "bypass")
+            || !matches!(policy.sandbox.as_str(), "required" | "bypass")
+            || policy.source.is_empty()
+        {
+            return Err(HostObservationError::InvalidReadyField {
+                field: "execution_policy",
+            });
+        }
+
+        let dangerous = policy.posture == "dangerous";
+        let has_dangerous_identity = policy
+            .dangerous_activation_id
+            .as_deref()
+            .is_some_and(|value| !value.is_empty())
+            && policy.dangerous_expires_at_unix_ms.is_some();
+        let policy_is_consistent = if dangerous {
+            policy.approvals == "bypass" && policy.sandbox == "bypass" && has_dangerous_identity
+        } else {
+            policy.sandbox == "required"
+                && policy.dangerous_activation_id.is_none()
+                && policy.dangerous_expires_at_unix_ms.is_none()
+                && (policy.posture != "managed" || policy.managed_floor_active)
+        };
+        if !policy_is_consistent {
+            return Err(HostObservationError::InvalidReadyField {
+                field: "execution_policy",
+            });
+        }
+        Ok(())
+    }
+}
+
 /// Return the contract descriptor compiled into this producer.
 ///
 /// The manifest is generated and byte-checked by `wcore-contract check` in
@@ -120,6 +197,10 @@ pub enum HostObservationError {
     ReadyRequired,
     #[error("ready is missing its contract descriptor")]
     MissingContractDescriptor,
+    #[error("ready is missing required field {field}")]
+    MissingReadyField { field: &'static str },
+    #[error("ready field {field} is malformed or inconsistent")]
+    InvalidReadyField { field: &'static str },
     #[error("ready contract descriptor is malformed")]
     InvalidContractDescriptor,
     #[error("producer contract name is unsupported: {actual}")]
@@ -185,12 +266,55 @@ impl HostContractObserver {
             if self.negotiated {
                 return Err(HostObservationError::DuplicateReady);
             }
+            match object.get("version") {
+                None => {
+                    return Err(HostObservationError::MissingReadyField { field: "version" });
+                }
+                Some(Value::String(version)) if !version.is_empty() => {}
+                Some(_) => {
+                    return Err(HostObservationError::InvalidReadyField { field: "version" });
+                }
+            }
+
+            let raw_capabilities =
+                object
+                    .get("capabilities")
+                    .ok_or(HostObservationError::MissingReadyField {
+                        field: "capabilities",
+                    })?;
+            let capabilities: Capabilities = serde_json::from_value(raw_capabilities.clone())
+                .map_err(|_| HostObservationError::InvalidReadyField {
+                    field: "capabilities",
+                })?;
+            if !capabilities
+                .modes
+                .iter()
+                .any(|mode| mode == &capabilities.current_mode)
+            {
+                return Err(HostObservationError::InvalidReadyField {
+                    field: "capabilities",
+                });
+            }
+
             let raw_descriptor = object
                 .get("contract")
                 .ok_or(HostObservationError::MissingContractDescriptor)?;
             let descriptor: ContractDescriptor = serde_json::from_value(raw_descriptor.clone())
                 .map_err(|_| HostObservationError::InvalidContractDescriptor)?;
             descriptor.validate()?;
+
+            let execution_policy: ObservedExecutionPolicy = serde_json::from_value(
+                object
+                    .get("execution_policy")
+                    .ok_or(HostObservationError::MissingReadyField {
+                        field: "execution_policy",
+                    })?
+                    .clone(),
+            )
+            .map_err(|_| HostObservationError::InvalidReadyField {
+                field: "execution_policy",
+            })?;
+            execution_policy.validate()?;
             if descriptor.name != self.expected.name {
                 return Err(HostObservationError::UnsupportedContractName {
                     actual: descriptor.name,
@@ -269,7 +393,38 @@ mod tests {
     }
 
     fn ready(descriptor: &ContractDescriptor) -> Vec<u8> {
-        serde_json::to_vec(&json!({"contract": descriptor, "type": "ready"})).unwrap()
+        serde_json::to_vec(&ready_value(descriptor)).unwrap()
+    }
+
+    fn ready_value(descriptor: &ContractDescriptor) -> Value {
+        json!({
+            "capabilities": {
+                "current_mode": "default",
+                "effort": true,
+                "effort_levels": ["low", "medium", "high"],
+                "mcp": true,
+                "modes": ["default", "auto_edit", "force"],
+                "thinking": true,
+                "tool_approval": true
+            },
+            "contract": descriptor,
+            "execution_policy": {
+                "contract_version": "1.0",
+                "critical": true,
+                "effective_at_unix_ms": 1,
+                "policy": {
+                    "approvals": "prompt",
+                    "managed_floor_active": false,
+                    "posture": "smart",
+                    "sandbox": "required",
+                    "source": "desktop_local_launch"
+                },
+                "reason": "launch",
+                "revision": 0
+            },
+            "type": "ready",
+            "version": "0.12.25"
+        })
     }
 
     #[test]
@@ -294,6 +449,112 @@ mod tests {
             Err(HostObservationError::UnsupportedContractMajor { actual: 2 })
         );
         assert!(!observer.negotiated());
+    }
+
+    #[test]
+    fn ready_missing_each_required_field_fails_before_negotiation() {
+        let expected = descriptor();
+        for (field, error) in [
+            (
+                "version",
+                HostObservationError::MissingReadyField { field: "version" },
+            ),
+            (
+                "capabilities",
+                HostObservationError::MissingReadyField {
+                    field: "capabilities",
+                },
+            ),
+            ("contract", HostObservationError::MissingContractDescriptor),
+            (
+                "execution_policy",
+                HostObservationError::MissingReadyField {
+                    field: "execution_policy",
+                },
+            ),
+        ] {
+            let mut value = ready_value(&expected);
+            value.as_object_mut().unwrap().remove(field);
+            let mut observer = HostContractObserver::new(expected.clone());
+            assert_eq!(
+                observer.observe_json_line(&serde_json::to_vec(&value).unwrap()),
+                Err(error),
+                "missing {field}"
+            );
+            assert!(!observer.negotiated(), "missing {field}");
+        }
+    }
+
+    #[test]
+    fn ready_malformed_required_shapes_fail_before_negotiation() {
+        let expected = descriptor();
+        for (field, malformed, error) in [
+            (
+                "version",
+                json!(12),
+                HostObservationError::InvalidReadyField { field: "version" },
+            ),
+            (
+                "capabilities",
+                json!([]),
+                HostObservationError::InvalidReadyField {
+                    field: "capabilities",
+                },
+            ),
+            (
+                "contract",
+                json!([]),
+                HostObservationError::InvalidContractDescriptor,
+            ),
+            (
+                "execution_policy",
+                json!({"critical": true}),
+                HostObservationError::InvalidReadyField {
+                    field: "execution_policy",
+                },
+            ),
+        ] {
+            let mut value = ready_value(&expected);
+            value[field] = malformed;
+            let mut observer = HostContractObserver::new(expected.clone());
+            assert_eq!(
+                observer.observe_json_line(&serde_json::to_vec(&value).unwrap()),
+                Err(error),
+                "malformed {field}"
+            );
+            assert!(!observer.negotiated(), "malformed {field}");
+        }
+    }
+
+    #[test]
+    fn ready_inconsistent_capabilities_and_policy_fail_before_negotiation() {
+        let expected = descriptor();
+        let mut wrong_mode = ready_value(&expected);
+        wrong_mode["capabilities"]["current_mode"] = json!("force");
+
+        let mut unsafe_smart_policy = ready_value(&expected);
+        unsafe_smart_policy["execution_policy"]["policy"]["sandbox"] = json!("bypass");
+
+        let mut noncritical_policy = ready_value(&expected);
+        noncritical_policy["execution_policy"]["critical"] = json!(false);
+
+        let mut noninitial_policy = ready_value(&expected);
+        noninitial_policy["execution_policy"]["revision"] = json!(1);
+
+        for (name, value, field) in [
+            ("current mode", wrong_mode, "capabilities"),
+            ("smart sandbox", unsafe_smart_policy, "execution_policy"),
+            ("criticality", noncritical_policy, "execution_policy"),
+            ("initial revision", noninitial_policy, "execution_policy"),
+        ] {
+            let mut observer = HostContractObserver::new(expected.clone());
+            assert_eq!(
+                observer.observe_json_line(&serde_json::to_vec(&value).unwrap()),
+                Err(HostObservationError::InvalidReadyField { field }),
+                "{name}"
+            );
+            assert!(!observer.negotiated(), "{name}");
+        }
     }
 
     #[test]
