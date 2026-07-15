@@ -359,6 +359,12 @@ struct Cli {
     #[arg(long, requires = "json_stream")]
     allow_host_workspace_grants: bool,
 
+    /// Permit this local JSON-stream host to grant additional provider spend
+    /// after Core has emitted a budget-exceeded receipt. Default-deny; managed
+    /// sessions still refuse grants.
+    #[arg(long, requires = "json_stream")]
+    allow_host_budget_grants: bool,
+
     /// Resume a previous session
     #[arg(long)]
     resume: Option<String>,
@@ -1668,6 +1674,7 @@ async fn run() -> anyhow::Result<ExitCode> {
             execution,
             cli.assistant.clone(),
             cli.allow_host_workspace_grants,
+            cli.allow_host_budget_grants,
         )
         .await;
         let evidence_result = wcore_agent::egress::finalize_eval_egress_observer();
@@ -2892,6 +2899,7 @@ fn emit_workspace_capability_grant(
     }
 }
 
+#[allow(clippy::too_many_arguments)] // One explicit boundary argument per host-controlled posture.
 async fn run_json_stream_mode(
     config: Config,
     cwd: &str,
@@ -2900,6 +2908,7 @@ async fn run_json_stream_mode(
     execution: LocalExecutionSelection,
     assistant: Option<String>,
     allow_host_workspace_grants: bool,
+    allow_host_budget_grants: bool,
 ) -> anyhow::Result<()> {
     let writer = Arc::new(ProtocolWriter::new());
     let approval_policy = execution.approvals();
@@ -3447,6 +3456,7 @@ async fn run_json_stream_mode(
 
                 let mut stopped = false;
                 let mut pending_config: Option<PendingConfig> = None;
+                let mut pending_budget_extension: Option<(u64, f64)> = None;
                 let mut mode_changed = false;
                 // CORE-2: an errored run may still have consumed provider
                 // round-trips (total_usage/run_usage grew before the Err),
@@ -3533,6 +3543,18 @@ async fn run_json_stream_mode(
                                         let _ = writer.emit(&wcore_protocol::events::ProtocolEvent::Info {
                                             msg_id: String::new(),
                                             message: "set_config: queued, will apply after current response".to_string(),
+                                        });
+                                    }
+                                    ProtocolCommand::ContinueWithBudget { additional_tokens, additional_cost_usd } => {
+                                        let message = if allow_host_budget_grants {
+                                            pending_budget_extension = Some((additional_tokens, additional_cost_usd));
+                                            "continue_with_budget: queued, will apply after current response".to_string()
+                                        } else {
+                                            "continue_with_budget refused: the local launcher did not opt in with --allow-host-budget-grants".to_string()
+                                        };
+                                        let _ = writer.emit(&wcore_protocol::events::ProtocolEvent::Info {
+                                            msg_id: String::new(),
+                                            message,
                                         });
                                     }
                                     ProtocolCommand::SetMode { mode } => {
@@ -3662,6 +3684,18 @@ async fn run_json_stream_mode(
                     } else {
                         output.emit_stream_end(&msg_id, 0, 0, 0, 0, 0, FinishReason::Error);
                     }
+                }
+
+                if let Some((additional_tokens, additional_cost_usd)) =
+                    pending_budget_extension.take()
+                {
+                    let message = engine
+                        .continue_with_additional_budget(additional_tokens, additional_cost_usd)
+                        .unwrap_or_else(|error| format!("continue_with_budget refused: {error}"));
+                    let _ = writer.emit(&wcore_protocol::events::ProtocolEvent::Info {
+                        msg_id: String::new(),
+                        message,
+                    });
                 }
 
                 if let Some((model, thinking, thinking_budget, effort, compaction)) =
@@ -3801,6 +3835,22 @@ async fn run_json_stream_mode(
                         engine.advertised_capabilities(),
                     );
                 }
+            }
+            ProtocolCommand::ContinueWithBudget {
+                additional_tokens,
+                additional_cost_usd,
+            } => {
+                let message = if allow_host_budget_grants {
+                    engine
+                        .continue_with_additional_budget(additional_tokens, additional_cost_usd)
+                        .unwrap_or_else(|error| format!("continue_with_budget refused: {error}"))
+                } else {
+                    "continue_with_budget refused: the local launcher did not opt in with --allow-host-budget-grants".to_string()
+                };
+                let _ = writer.emit(&wcore_protocol::events::ProtocolEvent::Info {
+                    msg_id: String::new(),
+                    message,
+                });
             }
             ProtocolCommand::AddMcpServer { name, .. } => {
                 output.emit_error(

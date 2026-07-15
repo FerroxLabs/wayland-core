@@ -363,9 +363,9 @@ It also keeps itself from growing unbounded:
 
 **Sessions.** Every run is saved to disk, the provider, model, working directory, token usage, and full message history, under a versioned schema with a migration ladder and WAL crash recovery, so a `SIGKILL` mid-turn does not corrupt the file. Resume the most recent with `-c`, jump to a specific one with `--resume <id>`, see them all with `--list-sessions`, or print what the agent remembers about one with `--memory-show <session>`.
 
-**Cost governance.** Real spend caps that block the next turn when crossed. Set per-session token and dollar caps; a rejected charge does not stick, verified by tests that assert the running total is unchanged after a blocked overrun. A separate execution budget tracks a whole session tree, wall time, tool runtime, process count, agent depth, tokens, and cost, rolling child counters up to ancestors and checking caps in a fixed, deterministic order. Per-turn cost is computed from a real provider-by-model pricing catalog (USD per million tokens, bundled at compile time, 46 sections today) and returned in integer microcents, so a million input tokens at $15/Mtok is exactly 1,500,000,000 microcents, no float drift. The engine charges against the model that was actually dispatched, not the premium tier you asked for.
+**Cost governance.** Real spend caps reserve the next provider call before dispatch and settle it from returned usage afterward. Set per-session input, output, and dollar caps; concurrent reservations are atomic, so parallel calls cannot each spend the same remaining allowance. A separate execution budget tracks the whole session tree—wall time, tool runtime, process-spawning call concurrency, and agent depth—rolling child counters up to ancestors and checking caps in a fixed order. Per-turn cost resolves the provider and model actually dispatched against the bundled pricing catalog; an unpriceable route is rejected while a strict dollar cap is active rather than treated as free.
 
-Two honest limits, stated up front. Caps are **post-hoc, not pre-flight**: a turn is billed by the provider before it is charged against the budget, so a cap cannot un-spend the turn that crossed it, only block the next one. And cost accuracy depends on the catalog, a miss falls back to a heuristic that for some models is $0.00, an honest absent charge rather than a wrong one. The live-pricing refresh diffs OpenRouter against the bundled catalog on a 24-hour TTL but only emits change events for a human to inspect; it never auto-applies a price.
+Two honest limits, stated up front. A transport failure can occur after a provider accepted a request but before usage returns; that ambiguous attempt consumes its conservative reservation so a retry ring cannot exceed the cap. The process concurrency cap limits admitted tool calls that spawn native processes, not every descendant PID inside one admitted shell command; descendant process-tree limits remain the platform sandbox's responsibility.
 
 ```toml
 # .wayland-core.toml — memory is ON by default; spend caps are opt-in
@@ -378,10 +378,10 @@ decay_interval_secs       = 3600   # decay sweep cadence (1 hour)
 [session_cap]
 max_tokens_in  = 200000
 max_tokens_out = 16384
-max_cost_usd   = 1.50              # blocks the NEXT turn once crossed
+max_cost_usd   = 1.50              # reserves before each provider dispatch
 max_wall_time_secs    = 600        # execution-tree caps
 max_tool_runtime_secs = 120
-max_processes         = 8
+max_concurrent_process_tools = 8 # legacy `max_processes` is still accepted
 max_agent_depth       = 4
 ```
 

@@ -634,6 +634,7 @@ async fn packaged_core_proves_capability_unavailability_and_outcome() {
     .expect("start capability fixture");
     let provider = ProviderConfig::new(ProviderId::OpenAI, "fixture-chat-v1")
         .with_api_key("packaged-capability-fixture-key")
+        .with_known_free_cost()
         .with_base_url(fixture.base_url());
     let scenario = Scenario::new("packaged_capability_activation", Category::Hardening)
         .max_total_time(std::time::Duration::from_secs(45))
@@ -802,6 +803,7 @@ async fn packaged_lifecycle_memory_matrix_has_real_effects_and_quarantine() {
                 .expect("start lifecycle matrix fixture");
                 let provider = ProviderConfig::new(ProviderId::OpenAI, "fixture-chat-v1")
                     .with_api_key("packaged-lifecycle-fixture-key")
+                    .with_known_free_cost()
                     .with_base_url(fixture.base_url());
                 let lifecycle_enabled = global_lifecycle && project_lifecycle;
                 let generated = run_with_binary_in_paths(
@@ -872,6 +874,7 @@ async fn packaged_lifecycle_memory_matrix_has_real_effects_and_quarantine() {
                 .expect("start catalog matrix fixture");
                 let catalog_provider = ProviderConfig::new(ProviderId::OpenAI, "fixture-chat-v1")
                     .with_api_key("packaged-catalog-fixture-key")
+                    .with_known_free_cost()
                     .with_base_url(catalog_fixture.base_url());
                 let catalog = run_with_binary_in_paths(
                     &lifecycle_catalog_scenario(name),

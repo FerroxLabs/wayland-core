@@ -563,12 +563,14 @@ impl LlmProvider for AnthropicProvider {
             // skip the primary's certain 401. See `compat.auth_fallback_base_url`.
             Err(ProviderError::Api { status, .. })
                 if matches!(status, 401 | 403)
+                    && !crate::retry::retries_disabled()
                     && self
                         .compat
                         .auth_fallback_base_url
                         .as_deref()
                         .is_some_and(|fb| fb != primary) =>
             {
+                crate::retry::mark_last_attempt_retrying();
                 let fallback = self
                     .compat
                     .auth_fallback_base_url

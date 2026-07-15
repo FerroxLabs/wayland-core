@@ -10,12 +10,16 @@
 //! it because per-tool charging is a different concern (the existing
 //! view rolls counters up to ancestors; per-tool tracking is flat).
 //!
-//! Usage from the dispatcher (call site to be wired by orchestration in
-//! a follow-up; this module ships the API + tests):
+//! Production orchestration classifies each call and admits it through this
+//! tracker before invoking the tool:
 //!
 //! ```ignore
 //! let tracker = ToolBudgetTracker::new();
-//! let guard = tracker.start(tool_name);
+//! let guard = tracker.try_start(
+//!     tool_name,
+//!     tool.execution_class_for(&input),
+//!     category_timeout,
+//! )?;
 //! let result = tool.execute_with_ctx(input, &ctx).await;
 //! drop(guard);  // records elapsed
 //! let usage = tracker.usage_for(tool_name);
@@ -26,11 +30,13 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use parking_lot::Mutex;
+pub use wcore_tools::ToolExecutionClass;
 
 /// Per-tool runtime + call counts. Cheap to clone (Arc-backed).
 #[derive(Clone, Default)]
 pub struct ToolBudgetTracker {
     inner: Arc<Mutex<HashMap<String, ToolUsage>>>,
+    execution_budget: Option<crate::budget::ExecutionBudgetView>,
 }
 
 /// Aggregated usage for a single tool name across a session.
@@ -49,18 +55,124 @@ pub struct ToolRunHandle {
     tool: String,
     started: Instant,
     committed: bool,
+    process_guard: Option<crate::budget::ToolRunGuard>,
+    runtime_guard: Option<wcore_budget::execution::ToolRuntimeGuard>,
+    dispatch_time_limit: Option<Duration>,
 }
+
+/// Admission failure for either the process or aggregate tool-runtime axis.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ToolAdmissionError {
+    pub reason: &'static str,
+    pub observed: String,
+    pub limit: String,
+}
+
+impl std::fmt::Display for ToolAdmissionError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "budget cap '{}' would be exceeded (limit {}, observed {})",
+            self.reason, self.limit, self.observed
+        )
+    }
+}
+
+impl std::error::Error for ToolAdmissionError {}
 
 impl ToolBudgetTracker {
     pub fn new() -> Self {
         Self::default()
     }
 
-    /// Start tracking a tool invocation. Returns a guard that records
-    /// the elapsed runtime on drop. The call-count is incremented
-    /// immediately so `usage_for` shows the call as in-flight.
+    /// Attach the session/turn execution envelope used by production dispatch.
+    pub fn with_execution_budget(budget: crate::budget::ExecutionBudgetView) -> Self {
+        Self {
+            inner: Arc::new(Mutex::new(HashMap::new())),
+            execution_budget: Some(budget),
+        }
+    }
+
+    /// Start tracking an in-process tool invocation. Process-spawning tools
+    /// must use [`Self::try_start`] so admission can fail before dispatch.
     pub fn start(&self, tool: impl Into<String>) -> ToolRunHandle {
-        let tool = tool.into();
+        self.start_admitted(tool.into(), None, None, None)
+    }
+
+    /// Start tracking a classified invocation, atomically reserving a process
+    /// slot and the call's maximum runtime before dispatch. A final call may
+    /// receive a shorter runtime slice when that is all the aggregate envelope
+    /// has left.
+    pub fn try_start(
+        &self,
+        tool: impl Into<String>,
+        class: ToolExecutionClass,
+        requested_runtime: Duration,
+    ) -> Result<ToolRunHandle, ToolAdmissionError> {
+        let process_guard = match (class, self.execution_budget.as_ref()) {
+            (ToolExecutionClass::ProcessSpawning, Some(budget)) => Some(
+                budget
+                    .try_enter_process()
+                    .map_err(|error| ToolAdmissionError {
+                        reason: error.reason,
+                        observed: error.observed.to_string(),
+                        limit: error.limit.to_string(),
+                    })?,
+            ),
+            (ToolExecutionClass::ProcessSpawning | ToolExecutionClass::InProcess, None)
+            | (ToolExecutionClass::InProcess, Some(_)) => None,
+        };
+        let (runtime_guard, dispatch_time_limit) = match self.execution_budget.as_ref() {
+            Some(budget) => {
+                let requested_runtime = budget
+                    .remaining_wall_time()
+                    .map_or(requested_runtime, |remaining| {
+                        requested_runtime.min(remaining)
+                    });
+                let guard =
+                    budget
+                        .try_reserve_tool_runtime(requested_runtime)
+                        .map_err(|error| ToolAdmissionError {
+                            reason: error.reason,
+                            observed: format!("{:.3}s", error.observed.as_secs_f64()),
+                            limit: format!("{:.3}s", error.limit.as_secs_f64()),
+                        })?;
+                let admitted = guard.admitted_runtime();
+                (Some(guard), Some(admitted))
+            }
+            None => (None, Some(requested_runtime)),
+        };
+        Ok(self.start_admitted(
+            tool.into(),
+            process_guard,
+            runtime_guard,
+            dispatch_time_limit,
+        ))
+    }
+
+    /// Remaining time the dispatcher may give a new tool future before the
+    /// session's tool-runtime or wall-time envelope is exhausted.
+    pub fn remaining_dispatch_time(&self) -> Option<Duration> {
+        self.execution_budget
+            .as_ref()
+            .and_then(|budget| budget.remaining_tool_dispatch_time())
+    }
+
+    /// Monotonic deadline; convert with `tokio::time::Instant::from_std`
+    /// before passing it to `tokio::time::timeout_at`.
+    pub fn dispatch_deadline(&self) -> Option<Instant> {
+        self.execution_budget
+            .as_ref()
+            .and_then(|budget| budget.tool_dispatch_deadline())
+    }
+
+    fn start_admitted(
+        &self,
+        tool: String,
+        process_guard: Option<crate::budget::ToolRunGuard>,
+        runtime_guard: Option<wcore_budget::execution::ToolRuntimeGuard>,
+        dispatch_time_limit: Option<Duration>,
+    ) -> ToolRunHandle {
         {
             let mut inner = self.inner.lock();
             let entry = inner.entry(tool.clone()).or_default();
@@ -71,6 +183,9 @@ impl ToolBudgetTracker {
             tool,
             started: Instant::now(),
             committed: false,
+            process_guard,
+            runtime_guard,
+            dispatch_time_limit,
         }
     }
 
@@ -96,6 +211,12 @@ impl ToolBudgetTracker {
 }
 
 impl ToolRunHandle {
+    /// Maximum wall-clock time admitted for this invocation after applying
+    /// category, session wall-time, and aggregate tool-runtime limits.
+    pub fn dispatch_time_limit(&self) -> Option<Duration> {
+        self.dispatch_time_limit
+    }
+
     /// Explicitly commit the elapsed runtime. Idempotent — repeated calls
     /// are no-ops. Useful when the caller wants the runtime accounted
     /// for *before* the guard goes out of scope.
@@ -107,6 +228,14 @@ impl ToolRunHandle {
         let mut inner = self.tracker.inner.lock();
         let entry = inner.entry(self.tool.clone()).or_default();
         entry.total_runtime = entry.total_runtime.saturating_add(elapsed);
+        drop(inner);
+        if let Some(runtime_guard) = self.runtime_guard.as_mut() {
+            runtime_guard.settle(elapsed);
+        } else if let Some(budget) = self.tracker.execution_budget.as_ref() {
+            budget.record_tool_runtime(elapsed);
+        }
+        self.runtime_guard.take();
+        self.process_guard.take();
         self.committed = true;
     }
 }
@@ -184,5 +313,136 @@ mod tests {
         let snapshot = t.all_usage();
         assert!(snapshot.contains_key("Read"));
         assert!(snapshot.contains_key("Write"));
+    }
+
+    #[test]
+    fn in_process_tools_do_not_consume_process_slots() {
+        let budget = crate::budget::ExecutionBudget {
+            max_processes: Some(0),
+            ..Default::default()
+        }
+        .start_root();
+        let tracker = ToolBudgetTracker::with_execution_budget(budget.clone());
+
+        let handle = tracker.start("Read");
+        assert!(!budget.is_exceeded());
+        drop(handle);
+        assert_eq!(tracker.usage_for("Read").calls, 1);
+    }
+
+    #[test]
+    fn process_admission_refuses_before_counting_the_call() {
+        let budget = crate::budget::ExecutionBudget {
+            max_processes: Some(0),
+            ..Default::default()
+        }
+        .start_root();
+        let tracker = ToolBudgetTracker::with_execution_budget(budget);
+
+        let error = match tracker.try_start(
+            "Bash",
+            ToolExecutionClass::ProcessSpawning,
+            Duration::from_secs(1),
+        ) {
+            Ok(_) => panic!("cap zero must reject process-spawning tools"),
+            Err(error) => error,
+        };
+        assert_eq!(error.reason, "max_concurrent_process_tools");
+        assert_eq!(tracker.usage_for("Bash").calls, 0);
+    }
+
+    #[test]
+    fn process_guard_releases_slot_on_drop() {
+        let budget = crate::budget::ExecutionBudget {
+            max_processes: Some(1),
+            ..Default::default()
+        }
+        .start_root();
+        let tracker = ToolBudgetTracker::with_execution_budget(budget);
+
+        let first = tracker
+            .try_start(
+                "Bash",
+                ToolExecutionClass::ProcessSpawning,
+                Duration::from_secs(1),
+            )
+            .expect("first slot is available");
+        assert!(
+            tracker
+                .try_start(
+                    "Script",
+                    ToolExecutionClass::ProcessSpawning,
+                    Duration::from_secs(1),
+                )
+                .is_err()
+        );
+        drop(first);
+        let second = tracker
+            .try_start(
+                "Script",
+                ToolExecutionClass::ProcessSpawning,
+                Duration::from_secs(1),
+            )
+            .expect("dropping the guard releases the slot");
+        drop(second);
+    }
+
+    #[test]
+    fn concurrent_runtime_reservation_limits_each_dispatch() {
+        let budget = crate::budget::ExecutionBudget {
+            max_tool_runtime: Some(Duration::from_millis(50)),
+            ..Default::default()
+        }
+        .start_root();
+        let tracker = ToolBudgetTracker::with_execution_budget(budget.clone());
+
+        let first = tracker
+            .try_start(
+                "Read",
+                ToolExecutionClass::InProcess,
+                Duration::from_secs(30),
+            )
+            .expect("first call reserves the remaining aggregate runtime");
+        assert_eq!(first.dispatch_time_limit(), Some(Duration::from_millis(50)));
+        let error = match tracker.try_start(
+            "Grep",
+            ToolExecutionClass::InProcess,
+            Duration::from_secs(30),
+        ) {
+            Ok(_) => panic!("a sibling cannot reserve the same remaining runtime"),
+            Err(error) => error,
+        };
+        assert_eq!(error.reason, "max_tool_runtime");
+        assert_eq!(tracker.usage_for("Grep").calls, 0);
+
+        drop(first);
+        let second = tracker
+            .try_start(
+                "Grep",
+                ToolExecutionClass::InProcess,
+                Duration::from_secs(30),
+            )
+            .expect("settling the first call refunds its unused reservation");
+        drop(second);
+    }
+
+    #[test]
+    fn tracker_exposes_preemptive_runtime_deadline() {
+        let budget = crate::budget::ExecutionBudget {
+            max_wall_time: Some(Duration::from_secs(1)),
+            max_tool_runtime: Some(Duration::from_millis(50)),
+            ..Default::default()
+        }
+        .start_root();
+        budget.record_tool_runtime(Duration::from_millis(20));
+        let tracker = ToolBudgetTracker::with_execution_budget(budget);
+
+        assert_eq!(
+            tracker.remaining_dispatch_time(),
+            Some(Duration::from_millis(30))
+        );
+        let before = Instant::now();
+        let deadline = tracker.dispatch_deadline().expect("deadline is capped");
+        assert!(deadline >= before + Duration::from_millis(30));
     }
 }

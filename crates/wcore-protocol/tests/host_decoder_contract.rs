@@ -364,6 +364,7 @@ fn engine_emits_session_cost_in_v6_known_type_namespace() {
             model: "m".into(),
             provider: "anthropic".into(),
             cost_usd: 0.0,
+            priced: true,
         }],
     };
     let serialized = serde_json::to_string(&event).unwrap();

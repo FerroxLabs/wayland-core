@@ -1147,6 +1147,24 @@ pub struct SessionCostView {
     pub per_turn: Vec<TurnCostView>,
 }
 
+impl SessionCostView {
+    /// Whether any recorded turn lacks a real metered or known-free price.
+    pub(crate) fn has_unpriced_turns(&self) -> bool {
+        self.per_turn.iter().any(|turn| !turn.priced)
+    }
+
+    /// Format the known session subtotal without hiding turns whose provider
+    /// price is unavailable.
+    pub(crate) fn formatted_total_cost(&self) -> String {
+        let known = format!("${:.4}", self.total_cost_usd);
+        if self.has_unpriced_turns() {
+            format!("{known} + unpriced")
+        } else {
+            known
+        }
+    }
+}
+
 /// One per-turn cost row in a [`SessionCostView`]. Mirrors
 /// `wcore_protocol::events::TurnCost`.
 // v0.9.2 W10: additive `PartialEq` so `SessionCostView` (which holds a
@@ -1161,6 +1179,20 @@ pub struct TurnCostView {
     pub provider: String,
     /// The turn's cost in USD.
     pub cost_usd: f64,
+    /// Whether `cost_usd` is metered or known-free. False means the provider
+    /// price is unknown, so a zero value must not be presented as free.
+    pub priced: bool,
+}
+
+impl TurnCostView {
+    /// Format this row's cost without treating an unknown price as free.
+    pub(crate) fn formatted_cost(&self) -> String {
+        if self.priced {
+            format!("${:.4}", self.cost_usd)
+        } else {
+            "unpriced".to_string()
+        }
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────

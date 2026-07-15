@@ -979,6 +979,10 @@ impl Tool for BashTool {
         ToolCategory::Exec
     }
 
+    fn execution_class_for(&self, _input: &Value) -> crate::ToolExecutionClass {
+        crate::ToolExecutionClass::ProcessSpawning
+    }
+
     fn describe(&self, input: &Value) -> String {
         let cmd = input.get("command").and_then(|v| v.as_str()).unwrap_or("");
         format!("Execute: {}", crate::truncate_utf8(cmd, 80))

@@ -64,10 +64,12 @@ use crate::confirm::ToolConfirmer;
 use crate::hooks::HookEngine;
 use crate::orchestration::graph::NodeExecutor;
 use crate::orchestration::{
-    ExecutionControl, StreamingContext, ToolCallOutcome, execute_tool_calls_with_approval,
-    execute_tool_calls_with_budget, filter_tool_calls_by_policy, merge_policy_outcome,
+    ExecutionControl, StreamingContext, ToolCallOutcome,
+    execute_tool_calls_with_approval_and_budget, execute_tool_calls_with_budget,
+    filter_tool_calls_by_policy, merge_policy_outcome,
 };
 use crate::policy_gate::PolicyGate;
+use crate::tool_budget::ToolBudgetTracker;
 
 /// Per-turn shared state moved into the adapter for the duration of a
 /// graph walk. The engine `take()`s from these cells before invoking
@@ -102,6 +104,8 @@ pub struct AgentExecutorConfig {
     pub compaction_level: wcore_compact::CompactionLevel,
     pub toon_enabled: bool,
     pub streaming: Option<StreamingContext>,
+    /// Shared run-scoped tool accounting backed by the execution envelope.
+    pub tool_budget: Option<ToolBudgetTracker>,
     /// When `Some`, dispatch goes through the JSON-protocol approval
     /// flow (`execute_tool_calls_with_approval`); otherwise it uses the
     /// budget-aware terminal-confirmation path
@@ -301,7 +305,7 @@ async fn dispatch_once(
     let dispatch_calls = allowed_calls.as_deref().unwrap_or(tool_calls);
 
     let outcome = if let Some(approval) = cfg.approval.as_ref() {
-        execute_tool_calls_with_approval(
+        execute_tool_calls_with_approval_and_budget(
             &cfg.tools,
             dispatch_calls,
             &approval.manager,
@@ -311,6 +315,7 @@ async fn dispatch_once(
             hooks.as_mut(),
             cfg.compaction_level,
             cfg.toon_enabled,
+            cfg.tool_budget.as_ref(),
             &cfg.cancel,
             cfg.file_write_notifier.as_ref(),
         )
@@ -324,7 +329,7 @@ async fn dispatch_once(
             cfg.compaction_level,
             cfg.toon_enabled,
             cfg.streaming.clone(),
-            None,
+            cfg.tool_budget.as_ref(),
             &cfg.cancel,
             cfg.file_write_notifier.as_ref(),
         )
@@ -366,6 +371,7 @@ mod tests {
             compaction_level: wcore_compact::CompactionLevel::Off,
             toon_enabled: false,
             streaming: None,
+            tool_budget: None,
             approval: None,
             allow_list: vec![],
             policy_gate: None,

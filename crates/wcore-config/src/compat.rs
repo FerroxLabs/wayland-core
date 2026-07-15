@@ -135,7 +135,7 @@ pub struct ProviderCompat {
     pub provider_type: Option<String>,
 
     /// W6 F7 — USD per input token. Multiply by token count for per-turn cost.
-    /// Set in each provider preset; `None` → 0.0 (free / local provider).
+    /// Set in each provider preset; `None` means no compatibility fallback rate.
     /// Per-provider list price (NOT per-model); per-model pricing is W6.1.
     pub cost_per_input_token: Option<f64>,
 
@@ -147,6 +147,11 @@ pub struct ProviderCompat {
 
     /// W6 F7 — USD per cached input token written (cache creation).
     pub cost_per_cache_write_token: Option<f64>,
+
+    /// Declare an all-zero compatibility rate as known-free rather than
+    /// unpriced. Catalog pricing still wins when an exact model row exists.
+    /// Leave unset for zero-valued sentinels whose real price is unknown.
+    pub cost_is_known_free: Option<bool>,
 
     /// Whether the destination endpoint optimizes request *input* server-side.
     ///
@@ -809,6 +814,7 @@ impl ProviderCompat {
             cost_per_output_token: Some(0.0),
             cost_per_cache_read_token: Some(0.0),
             cost_per_cache_write_token: Some(0.0),
+            cost_is_known_free: Some(true),
             ..Default::default()
         }
     }
@@ -848,6 +854,7 @@ impl ProviderCompat {
             cost_per_cache_write_token: user
                 .cost_per_cache_write_token
                 .or(defaults.cost_per_cache_write_token),
+            cost_is_known_free: user.cost_is_known_free.or(defaults.cost_is_known_free),
             input_optimization: user.input_optimization.or(defaults.input_optimization),
             compact_bash: user.compact_bash.or(defaults.compact_bash),
             include_usage_in_stream: user

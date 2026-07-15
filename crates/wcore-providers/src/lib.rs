@@ -169,6 +169,11 @@ pub enum ProviderError {
         "No API key. Set an api_key via --api-key, the config file, or an API-key environment variable."
     )]
     MissingApiKey,
+    /// The provider wrapper proved that no physical provider request was
+    /// attempted. This is deliberately distinct from `Connection`, whose
+    /// outcome may be ambiguous and therefore remains conservatively billed.
+    #[error("Provider request was not attempted: {reason}")]
+    NotAttempted { reason: String },
     /// FluxRouter 402 — a paid-only capability was requested on a key that is
     /// not entitled to it (free or paid-but-uncleared). This is a FEATURE lock,
     /// not an account state: the user must be on a paid plan with a cleared
@@ -237,6 +242,7 @@ impl ProviderError {
             | ProviderError::PromptTooLong(_)
             // Missing credential is terminal — no retry will conjure a token.
             | ProviderError::MissingApiKey
+            | ProviderError::NotAttempted { .. }
             // Flux 402 entitlement failures are terminal: the same request on
             // the same (unentitled / no-account) key will 402 again. The user
             // must change plan / clear a charge / add a payment method first.

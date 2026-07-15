@@ -1,5 +1,4 @@
 use std::collections::BTreeMap;
-use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
@@ -52,6 +51,7 @@ async fn run_script_with_approval(
         .expect("start OpenAI fixture");
     let provider = ProviderConfig::new(ProviderId::OpenAI, "fixture-chat-v1")
         .with_api_key("fixture-local-token")
+        .with_known_free_cost()
         .with_base_url(fixture.base_url());
     let scenario = Scenario::new(name, Category::Hardening)
         .max_total_time(Duration::from_secs(20))
@@ -92,14 +92,16 @@ async fn run_script_with_timeout(
         .expect("start timeout fixture");
     let provider = ProviderConfig::new(ProviderId::OpenAI, "fixture-chat-v1")
         .with_api_key("fixture-local-token")
+        .with_known_free_cost()
         .with_base_url(fixture.base_url());
-    let env = tempenv::build(&provider).expect("build timeout environment");
-    let mut config = std::fs::OpenOptions::new()
-        .append(true)
-        .open(env.path().join(".wayland-core/config.toml"))
-        .expect("open timeout config");
-    writeln!(config, "\n[providers.openai.compat]\nread_timeout_ms = 75")
-        .expect("write timeout config");
+    let env = tempenv::build_with(
+        &provider,
+        &TempEnvOptions {
+            provider_read_timeout_ms: Some(75),
+            ..TempEnvOptions::default()
+        },
+    )
+    .expect("build timeout environment");
     let scenario = Scenario::new(name, Category::Hardening)
         .max_total_time(Duration::from_secs(12))
         .approval(ApprovalPolicy::Yolo)
@@ -208,14 +210,14 @@ async fn packaged_core_recovers_after_a_real_read_timeout() {
 async fn packaged_core_exhausts_a_real_read_timeout() {
     let (result, observation) = run_script_with_timeout(
         "packaged_openai_timeout_exhausted",
-        std::iter::repeat_with(|| OpenAiStep::stall_before_headers(250)).take(6),
+        std::iter::repeat_with(|| OpenAiStep::stall_before_headers(250)).take(3),
     )
     .await;
 
     assert!(!result.passed, "terminal timeout must fail the scenario");
-    assert_eq!(observation.requests.len(), 6);
-    assert_eq!(result.execution.provider_attempts, Some(6));
-    assert_eq!(result.execution.provider_retries, Some(5));
+    assert_eq!(observation.requests.len(), 3);
+    assert_eq!(result.execution.provider_attempts, Some(3));
+    assert_eq!(result.execution.provider_retries, Some(2));
     assert_eq!(result.execution.provider_typed_failures, ["timeout"]);
 }
 
@@ -258,6 +260,7 @@ async fn packaged_core_preserves_declared_duplicate_deltas() {
 async fn packaged_core_executes_an_approved_write() {
     let seed_provider = ProviderConfig::new(ProviderId::OpenAI, "fixture-chat-v1")
         .with_api_key("fixture-local-token")
+        .with_known_free_cost()
         .with_base_url("http://127.0.0.1:1");
     let env = tempenv::build(&seed_provider).expect("build retained eval workspace");
     let target = env.path().join("approved.txt");
@@ -277,6 +280,7 @@ async fn packaged_core_executes_an_approved_write() {
     .expect("start OpenAI fixture");
     let provider = ProviderConfig::new(ProviderId::OpenAI, "fixture-chat-v1")
         .with_api_key("fixture-local-token")
+        .with_known_free_cost()
         .with_base_url(fixture.base_url());
     let scenario = Scenario::new("packaged_openai_approval_allow", Category::Hardening)
         .max_total_time(Duration::from_secs(20))
@@ -342,6 +346,7 @@ async fn packaged_core_cancels_an_active_stream() {
             .expect("start OpenAI fixture");
     let provider = ProviderConfig::new(ProviderId::OpenAI, "fixture-chat-v1")
         .with_api_key("fixture-local-token")
+        .with_known_free_cost()
         .with_base_url(fixture.base_url());
     let scenario = Scenario::new("packaged_openai_cancellation", Category::Hardening)
         .max_total_time(Duration::from_secs(5))
@@ -391,6 +396,7 @@ async fn packaged_core_calls_a_streamable_http_mcp_tool() {
     .expect("start OpenAI fixture");
     let provider = ProviderConfig::new(ProviderId::OpenAI, "fixture-chat-v1")
         .with_api_key("fixture-local-token")
+        .with_known_free_cost()
         .with_base_url(openai.base_url());
     let scenario = Scenario::new("packaged_mcp_roundtrip", Category::Hardening)
         .max_total_time(Duration::from_secs(20))
@@ -444,11 +450,14 @@ async fn packaged_core_satisfies_a_hidden_repository_outcome() {
     ])
     .expect("valid repository fixture");
     let seed_provider = ProviderConfig::new(ProviderId::OpenAI, "fixture-chat-v1")
-        .with_api_key("fixture-local-token");
+        .with_api_key("fixture-local-token")
+        .with_known_free_cost()
+        .with_base_url("http://127.0.0.1:1");
     let env = tempenv::build_with(
         &seed_provider,
         &TempEnvOptions {
             budget_max_cost_usd: Some(0.10),
+            ..TempEnvOptions::default()
         },
     )
     .expect("prepare hermetic repository environment");
@@ -477,6 +486,7 @@ async fn packaged_core_satisfies_a_hidden_repository_outcome() {
     .expect("start OpenAI fixture");
     let provider = ProviderConfig::new(ProviderId::OpenAI, "fixture-chat-v1")
         .with_api_key("fixture-local-token")
+        .with_known_free_cost()
         .with_base_url(openai.base_url());
     let scenario = Scenario::new("packaged_seeded_repository", Category::Hardening)
         .max_total_time(Duration::from_secs(20))
@@ -736,11 +746,14 @@ async fn run_sealed_repository_once(run_id: &str) -> SealedRun {
         expected_repository_sha256: expected_repository.fixture_sha256().to_string(),
     };
     let seed_provider = ProviderConfig::new(ProviderId::OpenAI, "fixture-chat-v1")
-        .with_api_key("fixture-local-token");
+        .with_api_key("fixture-local-token")
+        .with_known_free_cost()
+        .with_base_url("http://127.0.0.1:1");
     let env = tempenv::build_with(
         &seed_provider,
         &TempEnvOptions {
             budget_max_cost_usd: Some(0.10),
+            ..TempEnvOptions::default()
         },
     )
     .expect("prepare hermetic seal environment");
@@ -781,6 +794,7 @@ async fn run_sealed_repository_once(run_id: &str) -> SealedRun {
         .expect("start workspace-aware OpenAI fixture");
     let provider = ProviderConfig::new(ProviderId::OpenAI, "fixture-chat-v1")
         .with_api_key("fixture-local-token")
+        .with_known_free_cost()
         .with_base_url(openai.base_url());
     let setup_repository = repository.clone();
     let scenario = Scenario::new("packaged_f04_repeatability", Category::Hardening)

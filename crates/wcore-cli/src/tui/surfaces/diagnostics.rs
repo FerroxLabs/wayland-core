@@ -1933,7 +1933,7 @@ impl DiagnosticsSurface {
         lines.push(Line::from(vec![
             Span::styled("  total    ", Style::default().fg(t.text_dim)),
             Span::styled(
-                format!("${:.4}", cost.total_cost_usd),
+                cost.formatted_total_cost(),
                 Style::default().fg(t.orange).add_modifier(Modifier::BOLD),
             ),
             Span::styled(
@@ -1966,7 +1966,7 @@ impl DiagnosticsSurface {
                         format!("{:<24}", format!("{} · {}", row.provider, row.model)),
                         Style::default().fg(t.text_dim),
                     ),
-                    Span::styled(format!("${:.4}", row.cost_usd), Style::default().fg(t.text)),
+                    Span::styled(row.formatted_cost(), Style::default().fg(t.text)),
                 ]));
             }
         }
@@ -2476,12 +2476,14 @@ mod tests {
                     model: "claude-sonnet-4-6".into(),
                     provider: "anthropic".into(),
                     cost_usd: 0.0412,
+                    priced: true,
                 },
                 TurnCostView {
                     turn: 2,
                     model: "claude-sonnet-4-6".into(),
                     provider: "anthropic".into(),
                     cost_usd: 0.0319,
+                    priced: true,
                 },
             ],
         });
@@ -2491,6 +2493,49 @@ mod tests {
         assert!(out.contains("turn   1"), "turn 1 row missing");
         assert!(out.contains("turn   2"), "turn 2 row missing");
         assert!(out.contains("anthropic"), "provider missing");
+    }
+
+    #[test]
+    fn cost_renders_unpriced_and_known_free_turns_distinctly() {
+        use crate::tui::app::{SessionCostView, TurnCostView};
+        let mut surface = DiagnosticsSurface::new();
+        surface.handle_key(key(KeyCode::Char('2')), &mut App::new());
+
+        let mut app = App::new();
+        app.cost = Some(SessionCostView {
+            session_id: "pricing-status".into(),
+            total_cost_usd: 0.0,
+            per_turn: vec![
+                TurnCostView {
+                    turn: 1,
+                    model: "unknown-model".into(),
+                    provider: "custom".into(),
+                    cost_usd: 0.0,
+                    priced: false,
+                },
+                TurnCostView {
+                    turn: 2,
+                    model: "local-model".into(),
+                    provider: "ollama".into(),
+                    cost_usd: 0.0,
+                    priced: true,
+                },
+            ],
+        });
+
+        let out = render_with_app(&mut surface, &app);
+        assert!(
+            out.contains("$0.0000 + unpriced"),
+            "aggregate must disclose its unpriced component: {out}"
+        );
+        assert!(
+            out.contains("custom · unknown-model") && out.contains("unpriced"),
+            "unknown price must not render as free: {out}"
+        );
+        assert!(
+            out.contains("ollama · local-model") && out.contains("$0.0000"),
+            "known-free turn must remain a priced zero: {out}"
+        );
     }
 
     // -- /memory screen ----------------------------------------------------

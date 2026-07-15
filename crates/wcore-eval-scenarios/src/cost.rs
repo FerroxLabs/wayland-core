@@ -19,7 +19,7 @@
 //!   "session_id": "...",
 //!   "total_cost_usd": 0.0123,
 //!   "per_turn": [
-//!     { "turn": 0, "model": "gpt-4o", "provider": "openai", "cost_usd": 0.008 },
+//!     { "turn": 0, "model": "gpt-4o", "provider": "openai", "cost_usd": 0.008, "priced": true },
 //!     ...
 //!   ]
 //! }
@@ -42,6 +42,8 @@ pub struct TurnCost {
     pub model: String,
     pub provider: String,
     pub cost_usd: f64,
+    #[serde(default)]
+    pub priced: bool,
 }
 
 /// Parse a generic decoded JSON event into a [`CostReport`] when it's
@@ -86,6 +88,7 @@ pub fn parse(event: &Value) -> Option<CostReport> {
                 .unwrap_or("")
                 .to_string(),
             cost_usd,
+            priced: row.get("priced").and_then(Value::as_bool).unwrap_or(false),
         };
         per_turn.push(tc);
     }
@@ -107,7 +110,7 @@ mod tests {
             "session_id": "sess-1",
             "total_cost_usd": 0.0123,
             "per_turn": [
-                { "turn": 0, "model": "gpt-4o", "provider": "openai", "cost_usd": 0.0080 },
+                { "turn": 0, "model": "gpt-4o", "provider": "openai", "cost_usd": 0.0080, "priced": true },
                 { "turn": 1, "model": "gpt-4o", "provider": "openai", "cost_usd": 0.0043 },
             ],
         });
@@ -117,6 +120,8 @@ mod tests {
         assert_eq!(cr.per_turn[0].turn, 0);
         assert_eq!(cr.per_turn[1].turn, 1);
         assert_eq!(cr.per_turn[0].provider, "openai");
+        assert!(cr.per_turn[0].priced);
+        assert!(!cr.per_turn[1].priced, "legacy rows default to unpriced");
     }
 
     #[test]

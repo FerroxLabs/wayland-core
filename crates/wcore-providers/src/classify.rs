@@ -207,7 +207,9 @@ fn classify_by_provider_error(err: &ProviderError) -> FailoverReason {
         }
         // Missing credential is a terminal config error, not a productive
         // failover target — another provider has its own (also-required) key.
-        ProviderError::MissingApiKey => FailoverReason::Unknown,
+        ProviderError::MissingApiKey | ProviderError::NotAttempted { .. } => {
+            FailoverReason::Unknown
+        }
         // Flux capability / entitlement gates (402): terminal — not a
         // productive failover target; the typed message is surfaced to the user.
         ProviderError::PremiumLocked { .. }

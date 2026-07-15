@@ -329,6 +329,10 @@ impl Tool for ScriptTool {
         ToolCategory::Exec
     }
 
+    fn execution_class_for(&self, _input: &Value) -> crate::ToolExecutionClass {
+        crate::ToolExecutionClass::ProcessSpawning
+    }
+
     async fn execute(&self, input: Value) -> ToolResult {
         // Legacy entry point — no parent context. Delegate to the
         // ctx-aware path with a synthesised default so sub-steps still

@@ -251,6 +251,9 @@ pub fn status_bar(f: &mut Frame, area: Rect, app: &App, t: &Theme, _sample: Syst
         // health line and Sean's cost = real-or-nothing rule). A recorded zero
         // (Some(0.0)) is honest data and still prints `$0.00`.
         let cost_str = match app.cost.as_ref() {
+            Some(c) if c.has_unpriced_turns() => {
+                format!("{} + unpriced", format_cost(c.total_cost_usd))
+            }
             Some(c) => format_cost(c.total_cost_usd),
             None => "—".to_string(),
         };
@@ -348,7 +351,7 @@ mod tests {
     use ratatui::backend::TestBackend;
 
     use super::*;
-    use crate::tui::app::{App, ContextView, SessionCostView};
+    use crate::tui::app::{App, ContextView, SessionCostView, TurnCostView};
     use crate::tui::theme::Theme;
 
     /// A fixed sample so status-bar render tests are deterministic — no
@@ -550,6 +553,48 @@ mod tests {
         assert!(line.contains("$1.23"), "session cost missing: {line:?}");
         assert!(!line.contains("cpu"), "cpu leaked: {line:?}");
         assert!(!line.contains("ram"), "ram leaked: {line:?}");
+    }
+
+    #[test]
+    fn status_bar_distinguishes_unpriced_from_known_free_cost() {
+        let mut app = App::new();
+        app.cost = Some(SessionCostView {
+            session_id: "unpriced".into(),
+            total_cost_usd: 0.0,
+            per_turn: vec![TurnCostView {
+                turn: 1,
+                model: "unknown-model".into(),
+                provider: "custom".into(),
+                cost_usd: 0.0,
+                priced: false,
+            }],
+        });
+        let unpriced = render(&app, &Theme::hearth(), 140);
+        assert!(
+            unpriced.contains("$0.00 + unpriced"),
+            "unknown price must not render as free: {unpriced:?}"
+        );
+
+        app.cost = Some(SessionCostView {
+            session_id: "known-free".into(),
+            total_cost_usd: 0.0,
+            per_turn: vec![TurnCostView {
+                turn: 1,
+                model: "local-model".into(),
+                provider: "ollama".into(),
+                cost_usd: 0.0,
+                priced: true,
+            }],
+        });
+        let known_free = render(&app, &Theme::hearth(), 140);
+        assert!(
+            known_free.contains("$0.00"),
+            "known-free price must remain zero: {known_free:?}"
+        );
+        assert!(
+            !known_free.contains("unpriced"),
+            "known-free price must not be marked unpriced: {known_free:?}"
+        );
     }
 
     #[test]

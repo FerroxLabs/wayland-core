@@ -46,6 +46,9 @@ pub struct TempEnvOptions {
     /// If set, writes `[budget] max_cost_usd = X` into the seeded
     /// `config.toml` so the engine halts at that cap (H-6).
     pub budget_max_cost_usd: Option<f64>,
+    /// Evaluator-only provider transport override. Emitted in the same compat
+    /// table as known-free billing so fixture config never duplicates a table.
+    pub provider_read_timeout_ms: Option<u64>,
 }
 
 /// Build a fresh hermetic env for one run.
@@ -57,6 +60,9 @@ pub fn build(provider: &ProviderConfig) -> anyhow::Result<TempEnv> {
 }
 
 pub fn build_with(provider: &ProviderConfig, opts: &TempEnvOptions) -> anyhow::Result<TempEnv> {
+    if provider.cost_is_known_free && !provider_uses_loopback(provider) {
+        anyhow::bail!("cost_is_known_free is restricted to evaluator-owned loopback providers");
+    }
     let dir = TempDir::new()?;
     let root = dir.path();
     let cfg_dir = root.join(".wayland-core");
@@ -101,6 +107,17 @@ pub fn build_with(provider: &ProviderConfig, opts: &TempEnvOptions) -> anyhow::R
         escape_toml_basic(&provider.model)
     ));
 
+    if provider.cost_is_known_free || opts.provider_read_timeout_ms.is_some() {
+        toml.push_str(&format!("[providers.{provider_id}.compat]\n"));
+        if provider.cost_is_known_free {
+            toml.push_str("cost_is_known_free = true\n");
+        }
+        if let Some(read_timeout_ms) = opts.provider_read_timeout_ms {
+            toml.push_str(&format!("read_timeout_ms = {read_timeout_ms}\n"));
+        }
+        toml.push('\n');
+    }
+
     if let Some(cap) = opts.budget_max_cost_usd {
         toml.push_str("[budget]\n");
         toml.push_str(&format!("max_cost_usd = {cap}\n\n"));
@@ -113,6 +130,20 @@ pub fn build_with(provider: &ProviderConfig, opts: &TempEnvOptions) -> anyhow::R
         home_dir: cfg_dir,
         sessions_dir,
     })
+}
+
+fn provider_uses_loopback(provider: &ProviderConfig) -> bool {
+    provider
+        .base_url
+        .as_deref()
+        .and_then(|base_url| reqwest::Url::parse(base_url).ok())
+        .and_then(|url| url.host_str().map(str::to_owned))
+        .is_some_and(|host| {
+            host.eq_ignore_ascii_case("localhost")
+                || host
+                    .parse::<std::net::IpAddr>()
+                    .is_ok_and(|address| address.is_loopback())
+        })
 }
 
 impl TempEnv {
@@ -241,6 +272,7 @@ mod tests {
             &p,
             &TempEnvOptions {
                 budget_max_cost_usd: Some(0.05),
+                ..TempEnvOptions::default()
             },
         )
         .expect("build env");
@@ -248,6 +280,36 @@ mod tests {
             .expect("seeded config exists");
         assert!(cfg.contains("[budget]"), "config: {cfg}");
         assert!(cfg.contains("max_cost_usd = 0.05"), "config: {cfg}");
+    }
+
+    #[test]
+    fn known_free_provider_fixture_is_declared_through_compat() {
+        let p = ProviderConfig::new(ProviderId::OpenAI, "fixture-chat-v1")
+            .with_api_key("test-key")
+            .with_base_url("http://127.0.0.1:43111")
+            .with_known_free_cost();
+        let env = build(&p).expect("build env");
+        let cfg = fs::read_to_string(env.path().join(".wayland-core/config.toml"))
+            .expect("seeded config exists");
+        assert!(cfg.contains("[providers.openai.compat]"), "config: {cfg}");
+        assert!(cfg.contains("cost_is_known_free = true"), "config: {cfg}");
+    }
+
+    #[test]
+    fn known_free_declaration_rejects_non_loopback_provider() {
+        let p = ProviderConfig::new(ProviderId::OpenAI, "fixture-chat-v1")
+            .with_api_key("test-key")
+            .with_base_url("https://api.example.com")
+            .with_known_free_cost();
+        let error = match build(&p) {
+            Ok(_) => panic!("remote provider must not be certified free"),
+            Err(error) => error,
+        };
+        assert!(
+            error
+                .to_string()
+                .contains("restricted to evaluator-owned loopback")
+        );
     }
 
     #[test]

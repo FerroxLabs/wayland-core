@@ -253,10 +253,17 @@ pub struct TurnTrace {
     pub output_tokens: u64,
     pub cache_read: u64,
     pub cache_write: u64,
-    /// `cache_read / input_tokens` for this turn. 0.0 when input_tokens == 0.
+    /// Cache reads divided by total input processed for this turn. The input
+    /// categories are disjoint, so the denominator includes uncached input,
+    /// cache reads, and cache creations. Zero when no input was processed.
     pub cache_hit_rate: f64,
     /// USD cost. Populated by W6; W1 leaves it 0.0.
     pub cost_usd: f64,
+    /// Whether `cost_usd` is a real metered or known-free price. Missing on
+    /// legacy traces defaults to false so an ambiguous zero is never called
+    /// free.
+    #[serde(default)]
+    pub cost_priced: bool,
     pub tool_calls: Vec<ToolCallTrace>,
     /// HookActionRecords are populated by W2 hook engine extension. W1 emits
     /// an empty vector.
@@ -271,13 +278,18 @@ pub struct TurnTrace {
 }
 
 impl TurnTrace {
-    /// Compute `cache_hit_rate` from input / cache_read with the zero-input
-    /// guard. Use this instead of inline arithmetic at call sites.
-    pub fn cache_hit_rate_from(input_tokens: u64, cache_read: u64) -> f64 {
-        if input_tokens == 0 {
+    /// Compute `cache_hit_rate` from the provider-neutral disjoint input
+    /// categories. Use this instead of inline arithmetic at call sites.
+    pub fn cache_hit_rate_from(input_tokens: u64, cache_read: u64, cache_write: u64) -> f64 {
+        let total_input = wcore_types::message::TokenUsage::total_input_from(
+            input_tokens,
+            cache_read,
+            cache_write,
+        );
+        if total_input == 0 {
             0.0
         } else {
-            cache_read as f64 / input_tokens as f64
+            cache_read as f64 / total_input as f64
         }
     }
 }
@@ -655,13 +667,14 @@ mod tests {
 
     #[test]
     fn cache_hit_rate_zero_when_input_tokens_zero() {
-        assert_eq!(TurnTrace::cache_hit_rate_from(0, 100), 0.0);
+        assert_eq!(TurnTrace::cache_hit_rate_from(0, 0, 0), 0.0);
     }
 
     #[test]
-    fn cache_hit_rate_is_ratio_otherwise() {
-        let r = TurnTrace::cache_hit_rate_from(1000, 800);
+    fn cache_hit_rate_uses_disjoint_total_input() {
+        let r = TurnTrace::cache_hit_rate_from(100, 800, 100);
         assert!((r - 0.8).abs() < 1e-9);
+        assert!(r <= 1.0);
     }
 
     #[test]
@@ -974,6 +987,10 @@ mod tests {
         });
         let parsed: TurnTrace =
             serde_json::from_value(old).expect("old trace must still deserialize");
+        assert!(
+            !parsed.cost_priced,
+            "legacy cost status defaults to unpriced"
+        );
         assert_eq!(
             parsed.agent_run_id, "",
             "missing agent_run_id defaults to empty"

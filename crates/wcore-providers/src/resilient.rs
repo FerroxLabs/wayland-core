@@ -137,13 +137,21 @@ impl CircuitBreaker {
 pub struct ResilientProvider {
     primary: Arc<dyn LlmProvider>,
     primary_name: String,
-    fallbacks: Vec<(String, Arc<dyn LlmProvider>)>,
+    fallbacks: Vec<ResilientFallback>,
     // F32: `Arc` so the stream-terminal forwarder task can record the breaker
     // verdict (success on `Done`, failure on a terminal mid-stream `Error`)
     // after `stream()` has already returned the channel.
     breaker: Arc<CircuitBreaker>,
     reporter: Arc<dyn CircuitReporter>,
 }
+
+struct ResilientFallback {
+    label: String,
+    pricing_provider: String,
+    model: String,
+    provider: Arc<dyn LlmProvider>,
+}
+
 impl ResilientProvider {
     pub fn new(
         primary_name: impl Into<String>,
@@ -152,10 +160,34 @@ impl ResilientProvider {
         cfg: CircuitConfig,
         reporter: Arc<dyn CircuitReporter>,
     ) -> Self {
+        let fallbacks = fallbacks
+            .into_iter()
+            .map(|(label, provider)| (label.clone(), label.clone(), label, provider))
+            .collect();
+        Self::new_with_fallback_identities(primary_name, primary, fallbacks, cfg, reporter)
+    }
+
+    pub fn new_with_fallback_identities(
+        primary_name: impl Into<String>,
+        primary: Arc<dyn LlmProvider>,
+        fallbacks: Vec<(String, String, String, Arc<dyn LlmProvider>)>,
+        cfg: CircuitConfig,
+        reporter: Arc<dyn CircuitReporter>,
+    ) -> Self {
         Self {
             primary_name: primary_name.into(),
             primary,
-            fallbacks,
+            fallbacks: fallbacks
+                .into_iter()
+                .map(
+                    |(label, pricing_provider, model, provider)| ResilientFallback {
+                        label,
+                        pricing_provider,
+                        model,
+                        provider,
+                    },
+                )
+                .collect(),
             breaker: Arc::new(CircuitBreaker::new(cfg)),
             reporter,
         }
@@ -232,7 +264,10 @@ impl LlmProvider for ResilientProvider {
         &self,
         request: &LlmRequest,
     ) -> Result<mpsc::Receiver<LlmEvent>, ProviderError> {
+        let mut previous_provider = self.primary_name.as_str();
+        let mut previous_attempted = false;
         if self.breaker.before_call().is_some() {
+            previous_attempted = true;
             match self.primary.stream(request).await {
                 Ok(rx) => {
                     // F32: header acceptance is NOT yet a success. stream() returns
@@ -257,8 +292,8 @@ impl LlmProvider for ResilientProvider {
                             .report(&self.primary_name, None, new, Some(&e.to_string()));
                     }
                     if self.fallbacks.is_empty() {
-                        // No fallback to try — surface the primary's error
-                        // rather than the generic "all providers failed".
+                        // No admitted fallback attempt — surface the primary's
+                        // error rather than the generic "all providers failed".
                         return Err(e);
                     }
                     // fall through to fallbacks
@@ -273,6 +308,7 @@ impl LlmProvider for ResilientProvider {
                 // (same policy the fallback loop below applies).
                 Err(e) if is_request_fatal(&e) => return Err(e),
                 Err(e) => {
+                    previous_attempted = crate::retry::configured_fallback_previous_attempted(&e);
                     if self.fallbacks.is_empty() {
                         return Err(e);
                     }
@@ -283,33 +319,63 @@ impl LlmProvider for ResilientProvider {
             // Circuit open + cooldown not elapsed → skip primary, log the skip.
             self.reporter.report(
                 &self.primary_name,
-                self.fallbacks.first().map(|(n, _)| n.as_str()),
+                self.fallbacks
+                    .first()
+                    .map(|fallback| fallback.label.as_str()),
                 CircuitState::Open,
                 Some("circuit open; skipping primary"),
             );
+            if self.fallbacks.is_empty() {
+                return Err(ProviderError::NotAttempted {
+                    reason: "primary circuit is open and no fallback is configured".into(),
+                });
+            }
         }
         // Try each fallback in order.
-        for (name, fb) in &self.fallbacks {
-            match fb.stream(request).await {
+        let mut last_fallback_error = None;
+        for fallback in &self.fallbacks {
+            crate::retry::admit_configured_fallback(
+                previous_provider,
+                &fallback.label,
+                &fallback.pricing_provider,
+                &fallback.model,
+                previous_attempted,
+            )?;
+            let mut fallback_request = request.clone();
+            fallback_request.model.clone_from(&fallback.model);
+            match fallback.provider.stream(&fallback_request).await {
                 Ok(rx) => {
-                    self.reporter
-                        .report(&self.primary_name, Some(name), CircuitState::Open, None);
+                    self.reporter.report(
+                        &self.primary_name,
+                        Some(&fallback.label),
+                        CircuitState::Open,
+                        None,
+                    );
                     return Ok(rx);
                 }
                 // Retryable failures move on to the next fallback.
-                Err(e) if e.is_retryable() => continue,
+                Err(e) if e.is_retryable() => {
+                    previous_provider = &fallback.label;
+                    previous_attempted = true;
+                    last_fallback_error = Some(e);
+                    continue;
+                }
                 // F20: only REQUEST-SEMANTIC errors (would fail on every
                 // provider too) abort the chain. A provider/model-specific
                 // non-retryable error (401/403/404/MissingApiKey — e.g. a
                 // misconfigured first fallback) must NOT abort: continue to the
                 // next fallback. The last entry's error surfaces below.
                 Err(e) if is_request_fatal(&e) => return Err(e),
-                Err(_) => continue,
+                Err(e) => {
+                    previous_provider = &fallback.label;
+                    previous_attempted = crate::retry::configured_fallback_previous_attempted(&e);
+                    last_fallback_error = Some(e);
+                    continue;
+                }
             }
         }
-        Err(ProviderError::Connection(
-            "all providers in chain failed".into(),
-        ))
+        Err(last_fallback_error
+            .unwrap_or_else(|| ProviderError::Connection("all providers in chain failed".into())))
     }
 }
 
@@ -523,6 +589,131 @@ mod tests {
         assert!(matches!(err, ProviderError::Connection(_)));
     }
 
+    #[tokio::test]
+    async fn scoped_zero_preserves_configured_resilient_fallback() {
+        struct CountingFail {
+            calls: AtomicUsize,
+        }
+        #[async_trait]
+        impl LlmProvider for CountingFail {
+            async fn stream(
+                &self,
+                _: &LlmRequest,
+            ) -> Result<mpsc::Receiver<LlmEvent>, ProviderError> {
+                self.calls.fetch_add(1, Ordering::SeqCst);
+                Err(ProviderError::Connection("primary down".into()))
+            }
+        }
+
+        struct CountingOk {
+            calls: AtomicUsize,
+        }
+        #[async_trait]
+        impl LlmProvider for CountingOk {
+            async fn stream(
+                &self,
+                _: &LlmRequest,
+            ) -> Result<mpsc::Receiver<LlmEvent>, ProviderError> {
+                self.calls.fetch_add(1, Ordering::SeqCst);
+                Ok(ok_done_channel())
+            }
+        }
+
+        let primary = Arc::new(CountingFail {
+            calls: AtomicUsize::new(0),
+        });
+        let fallback = Arc::new(CountingOk {
+            calls: AtomicUsize::new(0),
+        });
+        let admissions = Arc::new(AtomicUsize::new(0));
+        let resilient = ResilientProvider::new(
+            "primary",
+            primary.clone(),
+            vec![("fallback".into(), fallback.clone())],
+            CircuitConfig::default(),
+            Arc::new(NoOpCircuitReporter),
+        );
+
+        let admission_count = Arc::clone(&admissions);
+        let admitter: crate::retry::ConfiguredFallbackAdmitter =
+            Arc::new(move |previous, next, _, _, previous_attempted| {
+                assert_eq!((previous, next), ("primary", "fallback"));
+                assert!(previous_attempted);
+                admission_count.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            });
+        let result = crate::retry::scope_configured_fallback_admitter(
+            admitter,
+            crate::retry::scope_max_retries(0, resilient.stream(&dummy_request())),
+        )
+        .await;
+
+        result.expect("configured fallback must remain available when nested retries are disabled");
+        assert_eq!(primary.calls.load(Ordering::SeqCst), 1);
+        assert_eq!(admissions.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            fallback.calls.load(Ordering::SeqCst),
+            1,
+            "zero-retry scope limits each provider send, not configured fallback order"
+        );
+    }
+
+    #[tokio::test]
+    async fn configured_fallback_admission_uses_authoritative_pricing_identity() {
+        struct ModelCapture {
+            seen_models: Arc<Mutex<Vec<String>>>,
+        }
+        #[async_trait]
+        impl LlmProvider for ModelCapture {
+            async fn stream(
+                &self,
+                request: &LlmRequest,
+            ) -> Result<mpsc::Receiver<LlmEvent>, ProviderError> {
+                self.seen_models.lock().push(request.model.clone());
+                Ok(ok_done_channel())
+            }
+        }
+
+        let seen_models = Arc::new(Mutex::new(Vec::new()));
+        let resilient = ResilientProvider::new_with_fallback_identities(
+            "primary",
+            Arc::new(AlwaysFail),
+            vec![(
+                "haiku".into(),
+                "anthropic".into(),
+                "claude-haiku-4-5".into(),
+                Arc::new(ModelCapture {
+                    seen_models: Arc::clone(&seen_models),
+                }) as Arc<dyn LlmProvider>,
+            )],
+            CircuitConfig::default(),
+            Arc::new(NoOpCircuitReporter),
+        );
+        let admissions = Arc::new(AtomicUsize::new(0));
+        let admission_count = Arc::clone(&admissions);
+        let admitter: crate::retry::ConfiguredFallbackAdmitter = Arc::new(
+            move |previous, label, pricing_provider, model, previous_attempted| {
+                assert_eq!(previous, "primary");
+                assert_eq!(label, "haiku");
+                assert_eq!(pricing_provider, "anthropic");
+                assert_eq!(model, "claude-haiku-4-5");
+                assert!(previous_attempted);
+                admission_count.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            },
+        );
+
+        let mut request = dummy_request();
+        request.model = "claude-opus-4-6".into();
+        let result =
+            crate::retry::scope_configured_fallback_admitter(admitter, resilient.stream(&request))
+                .await;
+
+        result.expect("fallback must receive its canonical pricing identity");
+        assert_eq!(admissions.load(Ordering::SeqCst), 1);
+        assert_eq!(seen_models.lock().as_slice(), ["claude-haiku-4-5"]);
+    }
+
     #[test]
     fn circuit_state_as_str_matches_protocol_literals() {
         assert_eq!(CircuitState::Closed.as_str(), "closed");
@@ -604,6 +795,30 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn open_circuit_without_fallback_reports_that_no_request_was_attempted() {
+        let resilient = ResilientProvider::new(
+            "primary",
+            Arc::new(AlwaysFail),
+            vec![],
+            CircuitConfig {
+                fail_threshold: 1,
+                window: Duration::from_secs(30),
+                cooldown: Duration::from_secs(60),
+            },
+            Arc::new(NoOpCircuitReporter),
+        );
+
+        assert!(matches!(
+            resilient.stream(&dummy_request()).await,
+            Err(ProviderError::Connection(_))
+        ));
+        assert!(matches!(
+            resilient.stream(&dummy_request()).await,
+            Err(ProviderError::NotAttempted { .. })
+        ));
+    }
+
     /// Rank 20: once the primary's circuit is Open, a configured fallback must
     /// actually serve the request — the primary is skipped and the fallback's
     /// `Ok` is returned. This proves the failover chain is reachable (a
@@ -651,12 +866,30 @@ mod tests {
             );
         }
         let calls_after_open = primary.calls.load(Ordering::SeqCst);
+        let admissions = Arc::new(AtomicUsize::new(0));
+        let admission_count = Arc::clone(&admissions);
+        let admitter: crate::retry::ConfiguredFallbackAdmitter =
+            Arc::new(move |previous, next, _, _, previous_attempted| {
+                assert_eq!((previous, next), ("primary", "fb"));
+                assert!(
+                    !previous_attempted,
+                    "an open circuit skipped the primary without a paid send"
+                );
+                admission_count.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            });
         // A subsequent call with the circuit Open must skip the primary
         // entirely and still succeed via the fallback.
         assert!(
-            resilient.stream(&dummy_request()).await.is_ok(),
+            crate::retry::scope_configured_fallback_admitter(
+                admitter,
+                resilient.stream(&dummy_request()),
+            )
+            .await
+            .is_ok(),
             "fallback must serve the request once the primary circuit is open"
         );
+        assert_eq!(admissions.load(Ordering::SeqCst), 1);
         assert_eq!(
             primary.calls.load(Ordering::SeqCst),
             calls_after_open,
@@ -718,6 +951,36 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn final_fallback_preserves_typed_no_send_error() {
+        struct MissingKey;
+        #[async_trait]
+        impl LlmProvider for MissingKey {
+            async fn stream(
+                &self,
+                _: &LlmRequest,
+            ) -> Result<mpsc::Receiver<LlmEvent>, ProviderError> {
+                Err(ProviderError::MissingApiKey)
+            }
+        }
+
+        let resilient = ResilientProvider::new(
+            "primary",
+            Arc::new(AlwaysFail),
+            vec![(
+                "no-key".into(),
+                Arc::new(MissingKey) as Arc<dyn LlmProvider>,
+            )],
+            CircuitConfig::default(),
+            Arc::new(NoOpCircuitReporter),
+        );
+
+        assert!(matches!(
+            resilient.stream(&dummy_request()).await,
+            Err(ProviderError::MissingApiKey)
+        ));
+    }
+
     /// F20 (primary boundary): a NON-retryable provider/model-specific error
     /// from the PRIMARY (here MissingApiKey — a misconfigured primary) must fall
     /// through to the fallback chain, not abort before any fallback runs. Before
@@ -742,11 +1005,29 @@ mod tests {
             CircuitConfig::default(),
             Arc::new(NoOpCircuitReporter),
         );
+        let admissions = Arc::new(AtomicUsize::new(0));
+        let admission_count = Arc::clone(&admissions);
+        let admitter: crate::retry::ConfiguredFallbackAdmitter =
+            Arc::new(move |previous, next, _, _, previous_attempted| {
+                assert_eq!((previous, next), ("primary", "good"));
+                assert!(
+                    !previous_attempted,
+                    "MissingApiKey proves the primary never sent a paid request"
+                );
+                admission_count.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            });
         assert!(
-            resilient.stream(&dummy_request()).await.is_ok(),
+            crate::retry::scope_configured_fallback_admitter(
+                admitter,
+                resilient.stream(&dummy_request()),
+            )
+            .await
+            .is_ok(),
             "a non-retryable primary (MissingApiKey) must fall through to the \
              working fallback, not abort before the chain is tried"
         );
+        assert_eq!(admissions.load(Ordering::SeqCst), 1);
     }
 
     /// F20: a REQUEST-SEMANTIC error (413/400/PromptTooLong) from a fallback

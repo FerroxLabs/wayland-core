@@ -38,6 +38,7 @@ use wcore_agent::orchestration::workflow::estimate::{self, CostEstimate};
 use wcore_agent::orchestration::workflow::runner::{WorkflowPlan, WorkflowRunner};
 use wcore_agent::spawner::AgentSpawner;
 use wcore_config::config::{CliArgs, Config};
+use wcore_providers::LlmProvider;
 
 /// `wayland workflow <subcommand>`.
 #[derive(Subcommand, Debug)]
@@ -163,6 +164,18 @@ fn print_list_line(plan: &WorkflowPlan, est: &CostEstimate) {
     println!("{}  ~{} agents{}", plan.meta.name, est.agents, desc);
 }
 
+fn governed_workflow_spawner(
+    provider: Arc<dyn LlmProvider>,
+    config: &Config,
+    agent_bus: Arc<AgentBus>,
+) -> AgentSpawner {
+    wcore_agent::bootstrap::govern_standalone_spawner(
+        AgentSpawner::new(provider, config.clone()),
+        config,
+    )
+    .with_bus(agent_bus)
+}
+
 /// `run <NAME>` — resolve, parse, and execute through `WorkflowRunner`.
 ///
 /// Wires the runner to the same provider/spawner construction path the main
@@ -206,7 +219,7 @@ async fn run_workflow(name: &str) -> anyhow::Result<()> {
     // workflow that pins a node's provider (`Agent((provider: Some(..)))`)
     // resolves it from the on-disk `[providers]` map instead of hard-erroring.
     // Harmless for unpinned workflows (no pin → inherit the parent provider).
-    let mut spawner = AgentSpawner::new(provider, config.clone()).with_bus(agent_bus);
+    let mut spawner = governed_workflow_spawner(provider, &config, agent_bus);
     if let Ok(cf) = wcore_config::config::load_merged_config_file(None)
         && !cf.providers.is_empty()
     {
@@ -346,6 +359,11 @@ fn read_ron_files(dir: &Path) -> std::io::Result<Vec<PathBuf>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use async_trait::async_trait;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use wcore_agent::orchestration::workflow::runner::WorkflowRunError;
+    use wcore_providers::ProviderError;
+    use wcore_types::llm::{LlmEvent, LlmRequest};
 
     /// A minimal, valid single-agent workflow.
     const GOOD: &str = r#"
@@ -385,6 +403,87 @@ Workflow(
 
     /// Syntactically invalid RON — exercises the `Ron` error arm.
     const BAD_SYNTAX: &str = "this is not ron at all {{{";
+
+    struct CountingProvider {
+        calls: AtomicUsize,
+    }
+
+    struct HungProvider;
+
+    #[async_trait]
+    impl LlmProvider for HungProvider {
+        async fn stream(
+            &self,
+            _request: &LlmRequest,
+        ) -> Result<tokio::sync::mpsc::Receiver<LlmEvent>, ProviderError> {
+            let (tx, rx) = tokio::sync::mpsc::channel(1);
+            tokio::spawn(async move {
+                let _held_sender = tx;
+                std::future::pending::<()>().await;
+            });
+            Ok(rx)
+        }
+    }
+
+    #[async_trait]
+    impl LlmProvider for CountingProvider {
+        async fn stream(
+            &self,
+            _request: &LlmRequest,
+        ) -> Result<tokio::sync::mpsc::Receiver<LlmEvent>, ProviderError> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            Err(ProviderError::Connection("test provider called".into()))
+        }
+    }
+
+    #[tokio::test]
+    async fn workflow_spawner_stops_before_provider_call_at_tiny_cap() {
+        let config = Config {
+            budget: wcore_budget::BudgetConfig {
+                max_tokens_in: Some(0),
+                max_tokens_out: Some(0),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let provider = Arc::new(CountingProvider {
+            calls: AtomicUsize::new(0),
+        });
+        let spawner =
+            governed_workflow_spawner(provider.clone(), &config, Arc::new(AgentBus::new(8)));
+        let plan = WorkflowPlan::parse(GOOD).expect("fixture workflow parses");
+
+        let error = WorkflowRunner::new(&spawner)
+            .run(&plan, json!({}))
+            .await
+            .expect_err("zero-token session envelope must stop the workflow");
+
+        assert!(matches!(error, WorkflowRunError::StageFailed { .. }));
+        assert_eq!(provider.calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn workflow_spawner_cancels_a_hung_provider_at_the_wall_cap() {
+        let config = Config {
+            session_cap: Some(wcore_budget::BudgetConfig {
+                max_wall_time_secs: Some(1),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let spawner =
+            governed_workflow_spawner(Arc::new(HungProvider), &config, Arc::new(AgentBus::new(8)));
+        let plan = WorkflowPlan::parse(GOOD).expect("fixture workflow parses");
+
+        let outcome = tokio::time::timeout(
+            std::time::Duration::from_secs(3),
+            WorkflowRunner::new(&spawner).run(&plan, json!({})),
+        )
+        .await
+        .expect("standalone workflow must not outlive its wall-time envelope");
+
+        assert!(matches!(outcome, Err(WorkflowRunError::StageFailed { .. })));
+    }
 
     #[test]
     fn validate_good_file_ok() {

@@ -11,7 +11,7 @@ use wcore_config::config::{
     CliArgs, Config, ProviderType, connected_providers, provider_connected,
 };
 
-use crate::spawner::AgentSpawner;
+use crate::spawner::{AgentSpawner, SpawnerBudgetGovernance};
 
 /// A materialized driver seat: the spawner forge builders fork through, a
 /// human-readable label, and any fallback notes accumulated on the way.
@@ -36,6 +36,7 @@ pub async fn materialize_driver_seat(
     anvil: &AnvilConfig,
     session_cfg: &Config,
     egress_policy: wcore_egress::SharedPolicy,
+    budget_governance: Option<SpawnerBudgetGovernance>,
 ) -> anyhow::Result<MaterializedSeat> {
     let mut session_seat = session_cfg.clone();
     session_seat.tools.auto_approve = true;
@@ -111,8 +112,12 @@ pub async fn materialize_driver_seat(
     }
 
     let label = format!("{}/{}", spawner_cfg.provider_label, spawner_cfg.model);
+    let mut spawner = AgentSpawner::new(provider, spawner_cfg).with_egress_policy(egress_policy);
+    if let Some(governance) = budget_governance {
+        spawner = spawner.with_budget_governance(governance);
+    }
     Ok(MaterializedSeat {
-        spawner: AgentSpawner::new(provider, spawner_cfg).with_egress_policy(egress_policy),
+        spawner,
         label,
         notes,
     })
@@ -124,13 +129,18 @@ pub async fn materialize_driver_seat(
 pub async fn materialize_valve_seat(
     session_cfg: &Config,
     egress_policy: wcore_egress::SharedPolicy,
+    budget_governance: Option<SpawnerBudgetGovernance>,
 ) -> anyhow::Result<MaterializedSeat> {
     let mut cfg = session_cfg.clone();
     cfg.tools.auto_approve = true;
     let provider = create_provider_with_policy(&cfg, egress_policy.clone()).await?;
     let label = format!("{}/{}", cfg.provider_label, cfg.model);
+    let mut spawner = AgentSpawner::new(provider, cfg).with_egress_policy(egress_policy);
+    if let Some(governance) = budget_governance {
+        spawner = spawner.with_budget_governance(governance);
+    }
     Ok(MaterializedSeat {
-        spawner: AgentSpawner::new(provider, cfg).with_egress_policy(egress_policy),
+        spawner,
         label,
         notes: Vec::new(),
     })

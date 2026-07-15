@@ -315,6 +315,10 @@ impl Tool for GcloudTool {
         ToolCategory::Exec
     }
 
+    fn execution_class_for(&self, _input: &Value) -> crate::ToolExecutionClass {
+        crate::ToolExecutionClass::ProcessSpawning
+    }
+
     async fn execute(&self, input: Value) -> ToolResult {
         // Compatibility path for direct Tool callers without a ToolContext.
         // Validation still runs, but valid subprocess execution fails closed;

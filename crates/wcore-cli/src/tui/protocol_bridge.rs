@@ -702,6 +702,7 @@ fn apply_event_inner(app: &mut App, event: ProtocolEvent) {
                         model: t.model,
                         provider: t.provider,
                         cost_usd: t.cost_usd,
+                        priced: t.priced,
                     })
                     .collect(),
             });
@@ -3084,6 +3085,40 @@ mod tests {
         let cost = app.cost.as_ref().expect("app.cost should be populated");
         assert_eq!(cost.session_id, "s1");
         assert!((cost.total_cost_usd - 0.1234).abs() < 1e-9);
+    }
+
+    #[test]
+    fn session_cost_preserves_pricing_status_for_tui_rendering() {
+        use wcore_protocol::events::TurnCost;
+
+        let mut app = App::new();
+        apply_event(
+            &mut app,
+            ProtocolEvent::SessionCost {
+                session_id: "s1".into(),
+                total_cost_usd: 0.0,
+                per_turn: vec![
+                    TurnCost {
+                        turn: 1,
+                        model: "unknown-model".into(),
+                        provider: "custom".into(),
+                        cost_usd: 0.0,
+                        priced: false,
+                    },
+                    TurnCost {
+                        turn: 2,
+                        model: "local-model".into(),
+                        provider: "ollama".into(),
+                        cost_usd: 0.0,
+                        priced: true,
+                    },
+                ],
+            },
+        );
+
+        let rows = &app.cost.as_ref().expect("cost view").per_turn;
+        assert!(!rows[0].priced, "unknown pricing must remain unpriced");
+        assert!(rows[1].priced, "known-free pricing must remain priced");
     }
 
     #[test]

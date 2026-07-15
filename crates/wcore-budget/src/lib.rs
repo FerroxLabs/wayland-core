@@ -24,8 +24,9 @@ pub mod config;
 pub mod execution;
 pub mod tracker;
 
-pub use config::BudgetConfig;
+pub use config::{BudgetConfig, BudgetConfigError};
 pub use execution::{AgentDepthGuard, ExecutionBudget, ExecutionBudgetView, ToolRunGuard};
 pub use tracker::{
-    BudgetCap, BudgetCapBuilder, BudgetError, BudgetEvent, BudgetEventSink, BudgetTracker,
+    BudgetCap, BudgetCapBuilder, BudgetError, BudgetEvent, BudgetEventSink, BudgetReservation,
+    BudgetTracker,
 };

@@ -593,6 +593,7 @@ impl Drop for ProtocolToolSink {
 }
 
 #[allow(clippy::too_many_arguments)]
+#[cfg(test)]
 async fn execute_single(
     registry: &ToolRegistry,
     call: &ContentBlock,
@@ -845,13 +846,34 @@ async fn execute_single_with_streaming(
                 tool_ctx = tool_ctx.with_workspace(policy);
             }
             tool_ctx = tool_ctx.with_sandbox(registry.sandbox_runtime());
-            // W8b.2.A-5: per-tool budget tracking. When the caller
-            // supplied a tracker, start a RAII handle BEFORE dispatch.
-            // The handle commits elapsed runtime on drop (cancel-safe
-            // — partial runtime is recorded even on abort). Skipped
-            // when budget is None so the legacy callers stay
-            // byte-identical.
-            let _budget_guard = budget.map(|t| t.start(name));
+            // F11: classify and admit the concrete call before dispatch. This
+            // is not derived from ToolCategory: authority classification and
+            // host-process consumption are different concerns. The RAII guard
+            // also commits partial runtime on timeout/cancellation.
+            let execution_class = tool.execution_class_for(&effective_input);
+            let category_timeout = tool_dispatch_timeout(category);
+            let _budget_guard = match budget {
+                Some(tracker) => match tracker.try_start(name, execution_class, category_timeout) {
+                    Ok(guard) => Some(guard),
+                    Err(error) => {
+                        return (
+                            ContentBlock::ToolResult {
+                                tool_use_id: id.clone(),
+                                content: format!(
+                                    "Tool '{name}' was not started: budget cap '{}' would be \
+                                     exceeded (limit {}, observed {}).",
+                                    error.reason, error.limit, error.observed
+                                ),
+                                is_error: true,
+                            },
+                            None,
+                            crate::hooks::HookOutcome::default(),
+                            false,
+                        );
+                    }
+                },
+                None => None,
+            };
             // Wave RB RELIABILITY MAJOR: wrap every tool dispatch in
             // `FutureExt::catch_unwind` so a panic inside the tool's
             // future (programming bug, divide-by-zero, slice OOB, etc.)
@@ -904,7 +926,10 @@ async fn execute_single_with_streaming(
                         .await
                 }
             };
-            let timeout = tool_dispatch_timeout(category);
+            let timeout = _budget_guard
+                .as_ref()
+                .and_then(crate::tool_budget::ToolRunHandle::dispatch_time_limit)
+                .unwrap_or(category_timeout);
             let timed: Result<std::thread::Result<ToolResult>, tokio::time::error::Elapsed> =
                 tokio::time::timeout(timeout, dispatch_fut).await;
             let r = match timed {
@@ -917,9 +942,9 @@ async fn execute_single_with_streaming(
                     // Flag the trace: this result was synthesized by the
                     // cancel path, not produced by a completed tool run.
                     was_cancelled = true;
-                    let secs = timeout.as_secs();
+                    let secs = timeout.as_secs_f64();
                     eprintln!(
-                        "[tool-timeout] tool={} call_id={} category={:?} elapsed>{}s",
+                        "[tool-timeout] tool={} call_id={} category={:?} elapsed>{:.3}s",
                         name, id, category, secs
                     );
                     if let Some(ctx) = streaming.as_ref() {
@@ -927,12 +952,12 @@ async fn execute_single_with_streaming(
                             &ctx.msg_id,
                             id,
                             name,
-                            &format!("timed out after {secs}s"),
+                            &format!("timed out after {secs:.3}s"),
                         );
                     }
                     ToolResult {
                         content: format!(
-                            "Tool '{name}' timed out after {secs}s and was cancelled. \
+                            "Tool '{name}' timed out after {secs:.3}s and was cancelled. \
                              The operation may be hung; consider a narrower request."
                         ),
                         is_error: true,
@@ -1059,9 +1084,45 @@ pub async fn execute_tool_calls_with_approval(
     writer: &Arc<dyn ProtocolEmitter>,
     msg_id: &str,
     allow_list: &[String],
+    hooks: Option<&mut HookEngine>,
+    compaction_level: wcore_compact::CompactionLevel,
+    toon_enabled: bool,
+    cancel: &CancellationToken,
+    file_write_notifier: Option<
+        &std::sync::Arc<dyn wcore_tools::file_write_notifier::FileWriteNotifier>,
+    >,
+) -> Result<ToolCallOutcome, ExecutionControl> {
+    execute_tool_calls_with_approval_and_budget(
+        registry,
+        tool_calls,
+        approval_manager,
+        writer,
+        msg_id,
+        allow_list,
+        hooks,
+        compaction_level,
+        toon_enabled,
+        None,
+        cancel,
+        file_write_notifier,
+    )
+    .await
+}
+
+/// Approval-backed dispatch with the same per-tool budget accounting used by
+/// the terminal path. The legacy entry point delegates here with no tracker.
+#[allow(clippy::too_many_arguments)]
+pub async fn execute_tool_calls_with_approval_and_budget(
+    registry: &ToolRegistry,
+    tool_calls: &[ContentBlock],
+    approval_manager: &Arc<ToolApprovalManager>,
+    writer: &Arc<dyn ProtocolEmitter>,
+    msg_id: &str,
+    allow_list: &[String],
     mut hooks: Option<&mut HookEngine>,
     compaction_level: wcore_compact::CompactionLevel,
     toon_enabled: bool,
+    budget: Option<&ToolBudgetTracker>,
     cancel: &CancellationToken,
     file_write_notifier: Option<
         &std::sync::Arc<dyn wcore_tools::file_write_notifier::FileWriteNotifier>,
@@ -1256,12 +1317,14 @@ pub async fn execute_tool_calls_with_approval(
         let was_cancelled;
         {
             let hooks_shared: Option<&HookEngine> = hooks.as_deref();
-            (result, modifier, post_outcome, was_cancelled) = execute_single(
+            (result, modifier, post_outcome, was_cancelled) = execute_single_with_streaming(
                 registry,
                 call,
                 hooks_shared,
                 compaction_level,
                 toon_enabled,
+                None,
+                budget,
                 approval_bound,
                 cancel,
                 file_write_notifier,
@@ -1659,6 +1722,9 @@ mod tests {
                     is_error: true,
                 };
             }
+            if input.get("cmd").and_then(serde_json::Value::as_str) == Some("sleep") {
+                tokio::time::sleep(Duration::from_secs(1)).await;
+            }
             wcore_types::tool::ToolResult {
                 content: "ok".to_string(),
                 is_error: false,
@@ -1666,6 +1732,12 @@ mod tests {
         }
         fn category(&self) -> wcore_protocol::events::ToolCategory {
             wcore_protocol::events::ToolCategory::Exec
+        }
+        fn execution_class_for(
+            &self,
+            _input: &serde_json::Value,
+        ) -> wcore_tools::ToolExecutionClass {
+            wcore_tools::ToolExecutionClass::ProcessSpawning
         }
     }
 
@@ -1912,6 +1984,155 @@ mod tests {
             tracker.usage_for("MockNonDeferred").calls,
             0,
             "legacy path must NOT record into a tracker the caller didn't pass"
+        );
+    }
+
+    #[tokio::test]
+    async fn dispatcher_refuses_process_tool_before_execution_when_cap_is_zero() {
+        let registry = make_registry_with_deferred();
+        let budget = crate::budget::ExecutionBudget {
+            max_processes: Some(0),
+            ..Default::default()
+        }
+        .start_root();
+        let tracker = ToolBudgetTracker::with_execution_budget(budget);
+        let call = ContentBlock::ToolUse {
+            id: "process-denied".into(),
+            name: "MockNonDeferred".into(),
+            input: json!({"cmd": "a"}),
+            extra: None,
+        };
+
+        let (result, _, _, _) = execute_single_with_budget(
+            &registry,
+            &call,
+            None,
+            wcore_compact::CompactionLevel::Off,
+            false,
+            Some(&tracker),
+            false,
+            &CancellationToken::new(),
+            None,
+        )
+        .await;
+
+        let ContentBlock::ToolResult {
+            content, is_error, ..
+        } = result
+        else {
+            panic!("expected paired tool result")
+        };
+        assert!(is_error);
+        assert!(content.contains("max_concurrent_process_tools"));
+        assert_eq!(tracker.usage_for("MockNonDeferred").calls, 0);
+    }
+
+    #[tokio::test]
+    async fn dispatcher_preempts_at_remaining_tool_runtime_budget() {
+        let registry = make_registry_with_deferred();
+        let budget = crate::budget::ExecutionBudget {
+            max_tool_runtime: Some(Duration::from_millis(20)),
+            ..Default::default()
+        }
+        .start_root();
+        let tracker = ToolBudgetTracker::with_execution_budget(budget.clone());
+        let call = ContentBlock::ToolUse {
+            id: "runtime-denied".into(),
+            name: "MockNonDeferred".into(),
+            input: json!({"cmd": "sleep"}),
+            extra: None,
+        };
+
+        let (result, _, _, was_cancelled) = execute_single_with_budget(
+            &registry,
+            &call,
+            None,
+            wcore_compact::CompactionLevel::Off,
+            false,
+            Some(&tracker),
+            false,
+            &CancellationToken::new(),
+            None,
+        )
+        .await;
+
+        let ContentBlock::ToolResult { is_error, .. } = result else {
+            panic!("expected paired tool result")
+        };
+        assert!(is_error);
+        assert!(was_cancelled);
+        assert!(budget.is_exceeded());
+    }
+
+    #[tokio::test]
+    async fn concurrent_dispatch_cannot_multiply_remaining_tool_runtime() {
+        let registry = make_registry_with_deferred();
+        let budget = crate::budget::ExecutionBudget {
+            max_tool_runtime: Some(Duration::from_millis(30)),
+            ..Default::default()
+        }
+        .start_root();
+        let tracker = ToolBudgetTracker::with_execution_budget(budget);
+        let calls = vec![
+            ContentBlock::ToolUse {
+                id: "runtime-first".into(),
+                name: "MockNonDeferred".into(),
+                input: json!({"cmd": "sleep"}),
+                extra: None,
+            },
+            ContentBlock::ToolUse {
+                id: "runtime-second".into(),
+                name: "MockNonDeferred".into(),
+                input: json!({"cmd": "sleep"}),
+                extra: None,
+            },
+        ];
+        let confirmer = Arc::new(std::sync::Mutex::new(ToolConfirmer::new(true, vec![])));
+
+        let outcome = execute_tool_calls_with_budget(
+            &registry,
+            &calls,
+            &confirmer,
+            None,
+            wcore_compact::CompactionLevel::Off,
+            false,
+            None,
+            Some(&tracker),
+            &CancellationToken::new(),
+            None,
+        )
+        .await
+        .expect("dispatch should return paired results");
+
+        assert_eq!(outcome.results.len(), 2);
+        let contents: Vec<_> = outcome
+            .results
+            .iter()
+            .map(|result| match result {
+                ContentBlock::ToolResult { content, .. } => content.as_str(),
+                _ => panic!("expected paired tool result"),
+            })
+            .collect();
+        assert_eq!(
+            contents
+                .iter()
+                .filter(|content| content.contains("max_tool_runtime"))
+                .count(),
+            1,
+            "one sibling must be rejected before execution"
+        );
+        assert_eq!(
+            contents
+                .iter()
+                .filter(|content| content.contains("timed out"))
+                .count(),
+            1,
+            "the admitted sibling retains the remaining per-call deadline"
+        );
+        assert_eq!(
+            tracker.usage_for("MockNonDeferred").calls,
+            1,
+            "only the admitted call may enter the tool"
         );
     }
 

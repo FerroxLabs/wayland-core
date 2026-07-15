@@ -420,11 +420,11 @@ It explicitly owns the pre-1.0 Rust API migration and reference-file isolation.
 
 **Goal:** Give Smart Default finite, practical limits without degrading ordinary work.
 
-**Work:** default session/turn/provider/tool/output/process/child/cost envelopes; pre-call reservation and post-call settlement; limit inheritance; “continue with additional budget” semantics; unpriceable-model handling; cache accounting.
+**Work:** default session/turn/provider/tool/output/process-spawning-concurrency/child/cost envelopes; pre-call reservation and post-call settlement; limit inheritance; “continue with additional budget” semantics; unpriceable-model handling; cache accounting. F11 does not claim that one admitted shell invocation limits every descendant PID; native process-tree PID limits are platform sandbox controls and must be reported separately until all three native backends enforce them.
 
 **Primary paths:** `wcore-budget`; `wcore-agent/src/engine.rs`; configuration and protocol budget events; pricing interfaces.
 
-**Proof:** adversarial loops stop within declared overshoot tolerance; ordinary benchmark completion remains within agreed regression threshold; cached token accounting and unpriceable-provider behavior are correct.
+**Proof:** adversarial loops permit zero provider sends after an admission block, zero concurrent reservation overshoot, zero child/process-spawning-call starts beyond their configured concurrency cap, and at most 100 ms scheduler tolerance on a charged tool-runtime deadline. The ordinary deterministic coding corpus must retain 100% scenario completion and semantic output parity; over at least 20 paired runs, candidate median wall time may regress by at most 10% and p95 by at most 15% against the exact pre-F11 base. Cached token accounting and unpriceable-provider behavior must be correct. These thresholds are fixed before the candidate benchmark is run; any amendment retains both result sets.
 
 **Dependencies:** F04–F05, F10. **Board crosswalk:** #174, #559, #690.
 
@@ -564,6 +564,92 @@ It explicitly owns the pre-1.0 Rust API migration and reference-file isolation.
 
 **Dependencies:** F14, F18–F21.
 
+#### F22A — Establish the canonical durable Goal/Run kernel
+
+**Goal:** Give every long-running objective one durable, inspectable owner
+without creating a second agent, workflow, Fleet, or Anvil state machine.
+
+**Work:** versioned `GoalContract`, `GoalRun`, `LoopPolicy`, execution-strategy
+selection, terminal-state taxonomy, cumulative authority/budget snapshots,
+progress fingerprints, host-origin evidence receipts and typed lifecycle
+commands/events. Extend the F12 journal and F14 continuation cursor rather than
+creating a parallel store. The current heuristic `Intent` remains task-shape
+routing only.
+
+**Primary paths:** session/event journal, engine run controller,
+`wcore-protocol`, standalone TUI/CLI controls and Desktop JSON-stream contract.
+
+**Proof:** crash at every goal transition and resume the same run with exact
+budget, authority, evidence and cursor state; CLI/TUI/Desktop observe identical
+state; invalid transitions and stale commands fail explicitly; a model judge
+cannot mint a `verified` receipt.
+
+**Dependencies:** F11–F14, F18, F21–F22. **Board crosswalk:** #172, #372, #457,
+#690.
+
+#### F22B — Add the durable Fleet task ledger above existing executors
+
+**Goal:** Make parallel work survive restarts and remain attributable without
+replacing `FleetDispatcher`, `AgentSpawner`, or ForgeFlows.
+
+**Work:** durable task DAG, claims, dependencies, attempts, heartbeats,
+idempotency keys, workspace/artifact ownership, structured handoffs, completion
+outbox and parent wake-up. Fleet fanout, direct spawns and ForgeFlows execute
+ledger tasks through the single F19 lifecycle; workers cannot mutate the parent
+goal, authority or global budget.
+
+**Primary paths:** durable child model/spawner, `wcore-swarm`, workflow runner,
+Goal journal and supervision protocol.
+
+**Proof:** kill/restart/reassign during fanout; no duplicate task execution or
+lost completion; one writer per mutable artifact; dependencies unblock exactly
+once; cancellation cascades; all child spend remains inside the parent
+reservation.
+
+**Dependencies:** F18–F22A.
+
+#### F22C — Bind Anvil, ForgeFlows and Council as explicit Goal strategies
+
+**Goal:** Reuse Wayland's strongest execution engines while enforcing exactly
+one outer loop owner.
+
+**Work:** strategy adapters and typed receipts for Direct, ForgeFlows, Fleet,
+Council and Anvil; explicit `loop_owner`; deterministic gates before model
+judgment; Anvil/Flux mutual exclusion; candidate lineage and realized-cost
+binding; no generic retry wrapper around an Anvil climb.
+
+**Primary paths:** Goal controller, orchestration strategy registry, Anvil
+forge/receipts, workflow runner and council result surfaces.
+
+**Proof:** every strategy reaches one canonical terminal transition; Anvil is
+never nested under another retry owner; host evidence alone can produce
+`verified`; unpriced and partially checked outcomes remain explicit; strategy
+failure preserves a resumable Goal record.
+
+**Dependencies:** F20–F22B.
+
+#### F22D — Add bounded session loops and event-driven waiting
+
+**Goal:** Provide `/goal` and `/loop` convenience without turning polling or
+slash parsing into a second runtime.
+
+**Work:** `/goal status|pause|resume|edit|clear|audit`; fixed, dynamic,
+event-driven and manual loop triggers; idle-only dispatch; jitter, expiry,
+iteration/no-progress limits, no catch-up storms and push completion. Slash
+commands and Desktop controls are thin adapters over typed Core commands.
+Persistent routines use the F24 service and existing cron crate after its
+headless dispatch and cryptographic integrity boundaries are corrected.
+
+**Primary paths:** Goal controller, protocol commands/events, CLI/TUI slash
+adapter, Desktop bridge contract, cron/runtime trigger adapter.
+
+**Proof:** session loop never overlaps itself or widens authority; event-driven
+wait consumes no model turns; resume preserves cumulative limits; missed
+intervals do not burst; unattended jobs cannot execute from unauthenticated
+state; standalone and Desktop behavior is equivalent.
+
+**Dependencies:** F22A–F22C; persistent scheduling additionally depends on F24.
+
 #### F23 — Replace autonomous skill paths with one governed lifecycle
 
 **Goal:** Preserve learning/evolution while making generated behavior safe, testable and reversible.
@@ -574,7 +660,7 @@ It explicitly owns the pre-1.0 Rust API migration and reference-file isolation.
 
 **Proof:** generated skill cannot execute before promotion; deterministic eval fixtures reject unsafe/low-quality drafts; promotion is auditable and revocable; previous active version restores; lifecycle-off has zero side effects.
 
-**Dependencies:** F06, F08–F09, F12, F18–F22. **Board crosswalk:** #564, #694.
+**Dependencies:** F06, F08–F09, F12, F18–F22D. **Board crosswalk:** #564, #694.
 
 ### M4 — Complete Core Product
 
@@ -582,7 +668,7 @@ It explicitly owns the pre-1.0 Rust API migration and reference-file isolation.
 
 **Goal:** Provide one durable runtime for channels, schedules, inbound work and Desktop background operation.
 
-**Work:** first reconcile the F00 inventory of existing channel/cron/runtime paths; then implement install/start/stop/restart/status/doctor/logs/drain; systemd/launchd/Windows service adapters; single-instance/profile isolation; upgrade/restart recovery; active-turn visibility; graceful drain. Reuse existing channel and cron crates rather than creating a parallel gateway stack.
+**Work:** first reconcile the F00 inventory of existing channel/cron/runtime paths; then implement install/start/stop/restart/status/doctor/logs/drain; systemd/launchd/Windows service adapters; single-instance/profile isolation; upgrade/restart recovery; active-turn visibility; graceful drain. Reuse existing channel and cron crates rather than creating a parallel gateway stack. Provide the durable trigger host for F22D routines only after headless dispatch is real and persisted job authority is cryptographically authenticated.
 
 **Primary paths:** CLI service commands, runtime host, channels/cron/ACP integration, platform service helpers, protocol status.
 
@@ -676,7 +762,7 @@ F00 -> F06 emergency containment
  -> F10/F11
  -> F12 -> F13 -> F14
  -> F15/F16/F17
- -> F18 -> F19 -> F20/F21 -> F22 -> F23
+ -> F18 -> F19 -> F20/F21 -> F22 -> F22A -> F22B -> F22C -> F22D -> F23
  -> F24/F25/F26/F27
  -> F28 -> F29 -> F30
 ```

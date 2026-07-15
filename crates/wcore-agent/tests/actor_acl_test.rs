@@ -74,6 +74,7 @@ fn cfg(actor: CallActor, learned_policy: Option<Arc<LearnedPolicy>>) -> AgentExe
         compaction_level: CompactionLevel::Off,
         toon_enabled: false,
         streaming: None,
+        tool_budget: None,
         approval: None,
         allow_list: vec![],
         policy_gate: None,

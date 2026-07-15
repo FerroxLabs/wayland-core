@@ -87,12 +87,15 @@ fn cost_ollama_preset_is_zero() {
 }
 
 #[test]
-fn cost_partial_rows_only_charges_set_categories() {
-    // Only input price set; output/cache rows are None and default to 0.
+fn cost_partial_rows_charge_cache_at_the_input_rate() {
+    // Cache tokens are input-side usage. When dedicated cache rows are
+    // unavailable, charge the ordinary input rate rather than treating them
+    // as free. The unset output row remains zero in this reporting helper;
+    // governed admission rejects an unpriced output axis separately.
     let compat = ProviderCompat {
         cost_per_input_token: Some(0.00002),
         ..ProviderCompat::default()
     };
     let cost = estimate_turn_cost(1000, 500, 100, 100, &compat);
-    assert!((cost - 0.02).abs() < 1e-9, "cost was {cost}");
+    assert!((cost - 0.024).abs() < 1e-9, "cost was {cost}");
 }

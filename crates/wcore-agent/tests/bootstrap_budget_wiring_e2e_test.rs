@@ -13,8 +13,8 @@
 //! 3. The installed `BudgetTracker` enforces the configured cap:
 //!    `charge` past the per-session USD limit returns
 //!    `BudgetError::CapExceeded`. A separate test asserts the
-//!    backward-compat path (no `session_cap` ⇒ `engine.budget_tracker()`
-//!    stays `None`).
+//!    Smart Default also installs a finite tracker when no legacy
+//!    `session_cap` block is present.
 
 use std::sync::{Arc, Mutex};
 
@@ -124,19 +124,50 @@ async fn bootstrap_with_session_cap_installs_tracker_and_emits_charge_event() {
 }
 
 #[tokio::test]
-async fn bootstrap_without_session_cap_leaves_budget_tracker_unset() {
+async fn bootstrap_without_session_cap_installs_smart_default_tracker() {
     let tmp = TempDir::new().expect("workdir");
     let workspace = tmp.path().to_str().expect("workdir utf-8").to_string();
 
-    // No session_cap and no span sink — pre-M5.3 wire shape.
+    // No session_cap and no span sink — F11 still installs Smart Default.
     let cfg = Config::default();
     let result = AgentBootstrap::new(cfg, workspace, null_output())
         .build()
         .await
         .expect("bootstrap should succeed");
 
+    let tracker = result
+        .engine
+        .budget_tracker()
+        .expect("Smart Default must install a budget tracker");
+    assert!(tracker.lock().reserve("smart-session", 1, 0.0).is_ok());
+}
+
+#[tokio::test]
+async fn partial_session_cap_keeps_smart_token_ceiling() {
+    let tmp = TempDir::new().expect("workdir");
+    let workspace = tmp.path().to_str().expect("workdir utf-8").to_string();
+    let cfg = Config {
+        session_cap: Some(BudgetConfig {
+            max_cost_usd: Some(50.0),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+
+    let result = AgentBootstrap::new(cfg, workspace, null_output())
+        .build()
+        .await
+        .expect("bootstrap should succeed");
+    let err = result
+        .engine
+        .budget_tracker()
+        .expect("tracker installed")
+        .lock()
+        .reserve("partial-session", u64::MAX, 0.0)
+        .expect_err("omitted token fields must retain the finite Smart ceiling");
+
     assert!(
-        result.engine.budget_tracker().is_none(),
-        "without Config.session_cap, the engine's BudgetTracker must stay None"
+        matches!(err, BudgetError::CapExceeded { ref kind, .. } if kind == "per_session_tokens"),
+        "expected Smart token ceiling, got {err:?}"
     );
 }

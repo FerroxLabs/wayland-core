@@ -96,6 +96,10 @@ impl Tool for GrepTool {
         ToolCategory::Info
     }
 
+    fn execution_class_for(&self, _input: &Value) -> crate::ToolExecutionClass {
+        crate::ToolExecutionClass::ProcessSpawning
+    }
+
     fn describe(&self, input: &Value) -> String {
         let pattern = input.get("pattern").and_then(|v| v.as_str()).unwrap_or("");
         let path = input.get("path").and_then(|v| v.as_str()).unwrap_or(".");

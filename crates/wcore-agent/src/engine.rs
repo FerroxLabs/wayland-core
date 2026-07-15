@@ -40,6 +40,132 @@ use crate::plan::prompt as plan_prompt;
 use crate::plan::state::PlanState;
 use crate::session::{Session, SessionManager};
 
+/// Owns one paid-provider admission until authoritative usage is settled.
+///
+/// Dropping an in-flight provider future does not prove that the provider did
+/// not receive or bill the request. If the surrounding task is aborted or
+/// panics, consume the conservative reservation instead of leaking admission
+/// capacity or pretending the unknown outcome was free.
+struct ProviderBudgetReservation {
+    tracker: Arc<parking_lot::Mutex<wcore_budget::BudgetTracker>>,
+    reservation: Option<wcore_budget::BudgetReservation>,
+    conservative_input_tokens: u64,
+    conservative_output_tokens: u64,
+    conservative_cost_usd: f64,
+}
+
+impl ProviderBudgetReservation {
+    fn new(
+        tracker: Arc<parking_lot::Mutex<wcore_budget::BudgetTracker>>,
+        reservation: wcore_budget::BudgetReservation,
+        conservative_input_tokens: u64,
+        conservative_output_tokens: u64,
+        conservative_cost_usd: f64,
+    ) -> Self {
+        Self {
+            tracker,
+            reservation: Some(reservation),
+            conservative_input_tokens,
+            conservative_output_tokens,
+            conservative_cost_usd,
+        }
+    }
+
+    fn settle(
+        mut self,
+        actual_input_tokens: u64,
+        actual_output_tokens: u64,
+        actual_cost_usd: f64,
+    ) -> Result<(), wcore_budget::BudgetError> {
+        let reservation = self
+            .reservation
+            .take()
+            .expect("provider budget reservation settles exactly once");
+        self.tracker.lock().settle_turn(
+            reservation,
+            actual_input_tokens,
+            actual_output_tokens,
+            actual_cost_usd,
+        )
+    }
+
+    fn conservative_charge(&self) -> (u64, u64, f64) {
+        (
+            self.conservative_input_tokens,
+            self.conservative_output_tokens,
+            self.conservative_cost_usd,
+        )
+    }
+
+    fn release(mut self) {
+        let reservation = self
+            .reservation
+            .take()
+            .expect("provider budget reservation releases exactly once");
+        self.tracker.lock().release(reservation);
+    }
+}
+
+impl Drop for ProviderBudgetReservation {
+    fn drop(&mut self) {
+        if let Some(reservation) = self.reservation.take() {
+            let _ = self.tracker.lock().settle_turn(
+                reservation,
+                self.conservative_input_tokens,
+                self.conservative_output_tokens,
+                self.conservative_cost_usd,
+            );
+        }
+    }
+}
+
+enum ConfiguredFallbackAdmissionFailure {
+    Budget(wcore_budget::BudgetError),
+    Unpriced { provider: String, model: String },
+}
+
+struct ConfiguredFallbackBudgetState {
+    current: Option<ProviderBudgetReservation>,
+    current_provider: String,
+    current_model: String,
+    prior_input_tokens: u64,
+    prior_output_tokens: u64,
+    prior_cost_usd: f64,
+    failure: Option<ConfiguredFallbackAdmissionFailure>,
+}
+
+impl ConfiguredFallbackBudgetState {
+    fn new(
+        current: Option<ProviderBudgetReservation>,
+        current_provider: String,
+        current_model: String,
+    ) -> Self {
+        Self {
+            current,
+            current_provider,
+            current_model,
+            prior_input_tokens: 0,
+            prior_output_tokens: 0,
+            prior_cost_usd: 0.0,
+            failure: None,
+        }
+    }
+
+    fn record_prior_charges(&mut self, budget: &wcore_budget::ExecutionBudgetView) {
+        budget.record_tokens(self.prior_input_tokens, self.prior_output_tokens);
+        budget.record_cost(self.prior_cost_usd);
+        self.prior_input_tokens = 0;
+        self.prior_output_tokens = 0;
+        self.prior_cost_usd = 0.0;
+    }
+
+    fn add_prior_charge(&mut self, input_tokens: u64, output_tokens: u64, cost_usd: f64) {
+        self.prior_input_tokens = self.prior_input_tokens.saturating_add(input_tokens);
+        self.prior_output_tokens = self.prior_output_tokens.saturating_add(output_tokens);
+        self.prior_cost_usd += cost_usd;
+    }
+}
+
 /// W7 (v0.6.3) — resolve the USD cost of one LLM turn from the
 /// `wcore-pricing` provider×model catalog.
 ///
@@ -49,12 +175,13 @@ use crate::session::{Session, SessionManager};
 /// non-fatal and falls back to the `ProviderCompat` heuristic so the
 /// budget charge still happens and the LLM call is never failed.
 ///
-/// Conversion: `estimate_cost_microcents` returns integer microcents
+/// Conversion: `estimate_cost_microcents_resolved` returns integer microcents
 /// where 1 microcent = 1e-6 cent, so 1 USD = 100 cents = 100_000_000
 /// microcents. USD = microcents / 100_000_000. (The W7 spec's
 /// `/100_000` divisor was off by 1000× — verified against
-/// `wcore_pricing::PricingCatalog::estimate_cost_microcents`, which
-/// computes `usd * 100 * 1_000_000`.)
+/// `wcore_pricing::PricingCatalog::estimate_cost_microcents_resolved`, which
+/// delegates literal models to the same `usd * 100 * 1_000_000` calculation
+/// and resolves pinned Flux models to their exact native catalog row.)
 /// Token-opt (read-once): a short human-readable label for a Grep/Glob/Bash
 /// call, used in the backref stub so the model can locate the earlier result.
 fn backref_label(name: &str, input: &serde_json::Value) -> String {
@@ -72,29 +199,109 @@ fn backref_label(name: &str, input: &serde_json::Value) -> String {
     }
 }
 
+#[cfg(test)]
 fn pricing_turn_cost_usd(
     provider: &str,
     model: &str,
     input_tokens: u64,
     output_tokens: u64,
 ) -> Option<f64> {
-    match wcore_pricing::DEFAULT_CATALOG.estimate_cost_microcents(
+    match wcore_pricing::DEFAULT_CATALOG.estimate_cost_microcents_resolved(
         provider,
         model,
         input_tokens,
         output_tokens,
+        1.0,
     ) {
-        Ok(microcents) => Some(microcents as f64 / wcore_types::crucible::MICROCENTS_PER_USD),
-        Err(e) => {
+        Some(microcents) => Some(microcents as f64 / wcore_types::crucible::MICROCENTS_PER_USD),
+        None => {
             tracing::warn!(
                 provider,
                 model,
-                error = %e,
-                "W7: wcore-pricing catalog miss; falling back to ProviderCompat cost heuristic"
+                "W7: wcore-pricing model is unresolvable; falling back to ProviderCompat cost heuristic"
             );
             None
         }
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct ResolvedTurnCost {
+    usd: f64,
+    priced: bool,
+}
+
+fn pricing_turn_cost_with_cache(
+    provider: &str,
+    model: &str,
+    input_tokens: u64,
+    output_tokens: u64,
+    cache_read_tokens: u64,
+    cache_write_tokens: u64,
+) -> Option<ResolvedTurnCost> {
+    match wcore_pricing::DEFAULT_CATALOG.estimate_cost_with_cache_status_resolved(
+        provider,
+        model,
+        input_tokens,
+        output_tokens,
+        cache_read_tokens,
+        cache_write_tokens,
+        1.0,
+    ) {
+        Some(status) => Some(ResolvedTurnCost {
+            usd: status.microcents as f64 / wcore_types::crucible::MICROCENTS_PER_USD,
+            priced: status.priced,
+        }),
+        None => {
+            tracing::warn!(
+                provider,
+                model,
+                "W7: wcore-pricing model is unresolvable; falling back to ProviderCompat cost heuristic"
+            );
+            None
+        }
+    }
+}
+
+/// Return a compat-based estimate only when the compatibility profile carries
+/// a real positive price row. Zero-valued sentinel rows mean "not priced" for
+/// remote OpenAI-compatible providers and must not silently certify a free
+/// call. A catalog row with an actual zero price remains authoritative because
+/// it is resolved before this fallback.
+fn compat_turn_cost_with_cache_usd(
+    input_tokens: u64,
+    output_tokens: u64,
+    cache_read_tokens: u64,
+    cache_write_tokens: u64,
+    compat: &wcore_config::compat::ProviderCompat,
+) -> Option<f64> {
+    if compat.cost_is_known_free.unwrap_or(false) {
+        return Some(0.0);
+    }
+    let rates = [
+        compat.cost_per_input_token,
+        compat.cost_per_output_token,
+        compat.cost_per_cache_read_token,
+        compat.cost_per_cache_write_token,
+    ];
+    let valid = rates
+        .iter()
+        .flatten()
+        .all(|rate| rate.is_finite() && *rate >= 0.0);
+    let input_is_priced = compat.cost_per_input_token.is_some_and(|rate| rate > 0.0);
+    let output_is_priced = compat.cost_per_output_token.is_some_and(|rate| rate > 0.0);
+    let needs_input_price = input_tokens > 0 || cache_read_tokens > 0 || cache_write_tokens > 0;
+    let needs_output_price = output_tokens > 0;
+    (valid && (!needs_input_price || input_is_priced) && (!needs_output_price || output_is_priced))
+        .then(|| {
+            estimate_turn_cost(
+                input_tokens,
+                output_tokens,
+                cache_read_tokens,
+                cache_write_tokens,
+                compat,
+            )
+        })
 }
 
 /// Resolve the USD cost for one turn: try the pricing catalog first (per-model
@@ -107,7 +314,7 @@ fn pricing_turn_cost_usd(
 ///
 /// Fix(pricing-audit-2026-05-24): wiring catalog into the TurnTrace path so
 /// session_cost events reflect real per-model pricing (not compat-row fallback).
-fn resolve_turn_cost_usd(
+fn resolve_turn_cost(
     provider: &str,
     model: &str,
     input_tokens: u64,
@@ -115,16 +322,56 @@ fn resolve_turn_cost_usd(
     cache_read_tokens: u64,
     cache_write_tokens: u64,
     compat: &wcore_config::compat::ProviderCompat,
-) -> f64 {
-    pricing_turn_cost_usd(provider, model, input_tokens, output_tokens).unwrap_or_else(|| {
-        estimate_turn_cost(
-            input_tokens,
-            output_tokens,
-            cache_read_tokens,
-            cache_write_tokens,
-            compat,
-        )
-    })
+) -> ResolvedTurnCost {
+    if let Some(resolved) = pricing_turn_cost_with_cache(
+        provider,
+        model,
+        input_tokens,
+        output_tokens,
+        cache_read_tokens,
+        cache_write_tokens,
+    ) {
+        return resolved;
+    }
+
+    match compat_turn_cost_with_cache_usd(
+        input_tokens,
+        output_tokens,
+        cache_read_tokens,
+        cache_write_tokens,
+        compat,
+    ) {
+        Some(usd) => ResolvedTurnCost { usd, priced: true },
+        None => ResolvedTurnCost {
+            usd: 0.0,
+            priced: false,
+        },
+    }
+}
+
+/// Reserve prompt spend at the most expensive applicable input category.
+/// Before a response arrives we cannot prove how much of the prompt a provider
+/// will classify as ordinary input, cache read, or cache creation. Taking the
+/// maximum prevents a cache-write premium from crossing an admitted USD cap.
+fn resolve_conservative_reservation_cost(
+    provider: &str,
+    model: &str,
+    prompt_tokens: u64,
+    output_tokens: u64,
+    compat: &wcore_config::compat::ProviderCompat,
+) -> ResolvedTurnCost {
+    let candidates = [
+        resolve_turn_cost(provider, model, prompt_tokens, output_tokens, 0, 0, compat),
+        resolve_turn_cost(provider, model, 0, output_tokens, prompt_tokens, 0, compat),
+        resolve_turn_cost(provider, model, 0, output_tokens, 0, prompt_tokens, compat),
+    ];
+    ResolvedTurnCost {
+        usd: candidates
+            .iter()
+            .map(|candidate| candidate.usd)
+            .fold(0.0, f64::max),
+        priced: candidates.iter().all(|candidate| candidate.priced),
+    }
 }
 
 /// Finding #174 — does this turn carry image/vision content that forbids a
@@ -1081,7 +1328,10 @@ mod forgeflow_final_state_tests {
 
 #[cfg(test)]
 mod w7_pricing_budget_tests {
-    use super::pricing_turn_cost_usd;
+    use super::{
+        compat_turn_cost_with_cache_usd, pricing_turn_cost_usd, pricing_turn_cost_with_cache,
+        resolve_conservative_reservation_cost, resolve_turn_cost,
+    };
     use wcore_budget::{BudgetCap, BudgetTracker};
 
     /// A known provider/model with known token counts resolves to the
@@ -1124,6 +1374,101 @@ mod w7_pricing_budget_tests {
         tracker
             .charge("w7-sess", 1500, fallback_cost)
             .expect("charge must still succeed when pricing lookup misses");
+    }
+
+    #[test]
+    fn flux_pinned_model_uses_resolved_native_cache_pricing() {
+        let pinned = pricing_turn_cost_with_cache(
+            "flux-router",
+            "flux-pinned-claude-opus-4-7",
+            1_000,
+            2_000,
+            3_000,
+            4_000,
+        )
+        .expect("pinned model resolves to its native catalog row");
+        let native = pricing_turn_cost_with_cache(
+            "anthropic",
+            "claude-opus-4-7",
+            1_000,
+            2_000,
+            3_000,
+            4_000,
+        )
+        .expect("native model has a catalog row");
+
+        assert_eq!(pinned, native);
+        assert!(pinned.priced);
+        assert!(pinned.usd > 0.0);
+    }
+
+    #[test]
+    fn reservation_covers_cache_creation_premium() {
+        let compat = wcore_config::compat::ProviderCompat::anthropic_defaults();
+        let ordinary = resolve_turn_cost(
+            "anthropic",
+            "claude-opus-4-7",
+            100_000,
+            1_000,
+            0,
+            0,
+            &compat,
+        );
+        let cache_write = resolve_turn_cost(
+            "anthropic",
+            "claude-opus-4-7",
+            0,
+            1_000,
+            0,
+            100_000,
+            &compat,
+        );
+        let reserved = resolve_conservative_reservation_cost(
+            "anthropic",
+            "claude-opus-4-7",
+            100_000,
+            1_000,
+            &compat,
+        );
+
+        assert!(cache_write.usd > ordinary.usd);
+        assert_eq!(reserved, cache_write);
+    }
+
+    #[test]
+    fn zero_compat_sentinel_is_unpriced_not_certified_free() {
+        let compat = wcore_config::compat::ProviderCompat::openai_defaults();
+        assert!(
+            compat_turn_cost_with_cache_usd(1_000, 500, 0, 0, &compat).is_none(),
+            "a zero sentinel on a catalog miss must remain unpriced"
+        );
+
+        let compat = wcore_config::compat::ProviderCompat::anthropic_defaults();
+        assert!(
+            compat_turn_cost_with_cache_usd(1_000, 500, 0, 0, &compat).is_some(),
+            "a positive compatibility price row is a valid fallback"
+        );
+
+        let compat = wcore_config::compat::ProviderCompat::ollama_defaults();
+        assert_eq!(
+            compat_turn_cost_with_cache_usd(1_000, 500, 0, 0, &compat),
+            Some(0.0),
+            "a provider-neutral known-free declaration must preserve a real zero price"
+        );
+    }
+
+    #[test]
+    fn partial_compat_pricing_cannot_certify_an_unpriced_output_axis() {
+        let compat = wcore_config::compat::ProviderCompat {
+            cost_per_input_token: Some(0.000_001),
+            cost_per_output_token: None,
+            ..Default::default()
+        };
+
+        assert!(
+            compat_turn_cost_with_cache_usd(1, 1_000_000, 0, 0, &compat).is_none(),
+            "a priced input axis cannot certify unknown output spend"
+        );
     }
 }
 
@@ -1769,6 +2114,14 @@ pub struct AgentEngine {
     /// observability sink. `None` is the default — no caps configured,
     /// no telemetry; matches pre-M5.3 behaviour.
     budget_tracker: Option<Arc<parking_lot::Mutex<wcore_budget::BudgetTracker>>>,
+    /// Stable tracker identity shared by the parent engine and every child it
+    /// spawns. Session persistence may be disabled for children, so deriving
+    /// admission identity from `current_session_id()` would give each child a
+    /// separate `session-unknown` envelope and bypass the parent's cap.
+    budget_session_id: Option<String>,
+    /// Session-root execution envelope installed by bootstrap. Each `run()`
+    /// derives a child view so turn usage rolls into the session root.
+    execution_budget: crate::budget::ExecutionBudgetView,
     /// F10 production monitor instance. It is constructed with the engine so
     /// startup activation can truthfully report readiness, then reset to the
     /// current run's budget at each `run()` boundary.
@@ -2215,6 +2568,8 @@ impl AgentEngine {
             decay_handles: Vec::new(),
             plugin_runtime_handles: Arc::new(Vec::new()),
             budget_tracker: None,
+            budget_session_id: None,
+            execution_budget: crate::budget::ExecutionBudget::default().start_root(),
             midflight_monitor: crate::orchestration::monitor::MidFlightMonitor::new(
                 crate::budget::ExecutionBudget::default().start_root(),
             ),
@@ -2402,6 +2757,8 @@ impl AgentEngine {
             decay_handles: Vec::new(),
             plugin_runtime_handles: Arc::new(Vec::new()),
             budget_tracker: None,
+            budget_session_id: None,
+            execution_budget: crate::budget::ExecutionBudget::default().start_root(),
             midflight_monitor: crate::orchestration::monitor::MidFlightMonitor::new(
                 crate::budget::ExecutionBudget::default().start_root(),
             ),
@@ -2646,12 +3003,86 @@ impl AgentEngine {
         self.budget_tracker = Some(tracker);
     }
 
+    /// Bind provider reservations and interactive extensions to a stable
+    /// runtime identity shared with spawned children.
+    pub fn set_budget_session_id(&mut self, session_id: impl Into<String>) {
+        self.budget_session_id = Some(session_id.into());
+    }
+
+    fn budget_session_id(&self) -> String {
+        self.budget_session_id
+            .clone()
+            .or_else(|| self.current_session_id())
+            .unwrap_or_else(|| "session-unknown".to_string())
+    }
+
     /// M5.bootstrap-wiring — read access to the optional `BudgetTracker`.
     /// Returns `None` when bootstrap did not install one (the default
     /// when `Config.session_cap` is `None`). Tests use this to assert
     /// install-from-config wiring works end-to-end.
     pub fn budget_tracker(&self) -> Option<&Arc<parking_lot::Mutex<wcore_budget::BudgetTracker>>> {
         self.budget_tracker.as_ref()
+    }
+
+    /// Add locally authorized headroom to this session's provider envelope.
+    /// Managed sessions reject the operation because an interactive host must
+    /// never widen an organization-controlled ceiling.
+    pub fn continue_with_additional_budget(
+        &self,
+        additional_tokens: u64,
+        additional_cost_usd: f64,
+    ) -> Result<String, String> {
+        if self.config.execution_policy.is_managed() {
+            return Err(
+                "managed policy forbids interactive budget increases; update the managed policy"
+                    .to_string(),
+            );
+        }
+        let tracker = self
+            .budget_tracker
+            .as_ref()
+            .ok_or_else(|| "this session has no provider budget tracker".to_string())?;
+        let session_id = self.budget_session_id();
+        tracker
+            .lock()
+            .extend_session(&session_id, additional_tokens, additional_cost_usd)
+            .map_err(|error| error.to_string())?;
+        Ok(format!(
+            "budget extended for this session: +{additional_tokens} tokens, +${additional_cost_usd:.4}"
+        ))
+    }
+
+    /// Install the session-root execution envelope built from resolved config.
+    pub fn set_execution_budget(&mut self, budget: crate::budget::ExecutionBudgetView) {
+        self.execution_budget = budget;
+    }
+
+    pub fn execution_budget(&self) -> &crate::budget::ExecutionBudgetView {
+        &self.execution_budget
+    }
+
+    /// Bind a transient spawner to this engine's live session envelope.
+    ///
+    /// The provider tracker is optional for legacy/test engines, but execution
+    /// and cancellation authority always inherit from the parent. Callers must
+    /// not manufacture a separate provider allowance when the parent has none.
+    fn govern_transient_spawner(
+        &self,
+        spawner: crate::spawner::AgentSpawner,
+    ) -> crate::spawner::AgentSpawner {
+        match self.budget_tracker.as_ref() {
+            Some(tracker) => {
+                spawner.with_budget_governance(crate::spawner::SpawnerBudgetGovernance::new(
+                    Arc::clone(tracker),
+                    self.budget_session_id(),
+                    self.execution_budget.clone(),
+                    self.cancel_token.clone(),
+                ))
+            }
+            None => spawner
+                .with_cancel(self.cancel_token.clone())
+                .with_execution_budget(self.execution_budget.clone()),
+        }
     }
 
     pub(crate) fn midflight_monitor_constructed(&self) -> bool {
@@ -4528,9 +4959,11 @@ impl AgentEngine {
         {
             self.cancel_token = runtime.install_descendant_turn();
         }
-        // F10 owns no-progress governance. F11 binds proactive session-wide
-        // accounting; do not create a second per-run spend envelope here.
-        let run_budget = crate::budget::ExecutionBudget::default().start_root();
+        // F11: derive the turn envelope from the live session root. Every
+        // counter recorded on this child rolls up to the bootstrap-owned root.
+        let run_budget = self.execution_budget.sub_budget(None);
+        let tool_budget =
+            crate::tool_budget::ToolBudgetTracker::with_execution_budget(run_budget.clone());
         self.midflight_monitor = MidFlightMonitor::new(run_budget.clone());
         // methodology #27: production caller for StyleDetector::observe (Task 1.B.3)
         if let Ok(mut det) = self.style_detector.lock() {
@@ -5344,6 +5777,12 @@ impl AgentEngine {
                 self.max_tokens_explicit,
                 self.compat.omit_max_tokens_when_unsized(),
             );
+            // A finite provider ledger can reserve only a wire-bounded output.
+            // Keep omit-safe behavior for legacy/unmetered sessions, but force
+            // the sized cap onto every governed provider call.
+            if self.budget_tracker.is_some() {
+                request.omit_max_tokens = false;
+            }
 
             // #426 / wayland#422 — separate the reasoning budget from the output
             // budget so extended thinking can never starve the visible answer.
@@ -5408,7 +5847,10 @@ impl AgentEngine {
             let stop_reason: StopReason;
             let finish_reason: FinishReason;
             let turn_usage: TokenUsage;
+            let turn_provider: String;
+            let turn_model: String;
             let mut stream_attempt: u32 = 0;
+            let mut provider_budget_cap_hit: Option<wcore_budget::BudgetError> = None;
             // #282 contract V1: a managed Flux client that overflows the routed
             // model's window gets a typed 409 `ProviderError::ContextOverflow`.
             // We compact the conversation and retry the SAME turn EXACTLY ONCE;
@@ -5436,20 +5878,6 @@ impl AgentEngine {
                 let mut done_seen = false;
                 let mut stream_error: Option<String> = None;
                 let mut stream_failure_code: Option<String> = None;
-                // Finding #174 (nested re-bill): set ONLY when `stream()` itself
-                // returns a retryable `Err` — i.e. the provider's HTTP ring
-                // (`builder_send_with_retry`, up to 3 sends) already spent its
-                // full retry budget on this exact request before surfacing the
-                // error here. A mid-stream `LlmEvent::Error` or a truncated
-                // stream does NOT set this: those arrive AFTER `stream()`
-                // returned `Ok(rx)` (the HTTP ring succeeded; the failure is in
-                // the SSE body), so they keep the full engine retry budget and
-                // their retryability is unchanged. When this IS set, granting a
-                // fresh full engine budget on top of an already-exhausted HTTP
-                // ring stacks 3×3=9 full-input re-sends for one logical turn;
-                // we cap the engine ring at a single retry instead (see the
-                // budget guard below).
-                let mut http_ring_exhausted = false;
                 // FluxRouter web_search grounding (contract §5.4): per-attempt
                 // accumulators for the end-of-stream Citations / SearchResults
                 // events. Reset each retry alongside the other accumulators.
@@ -5492,19 +5920,191 @@ impl AgentEngine {
                         .await;
                 }
 
-                // P1 Bug#3 — `stream()` runs `builder_send_with_retry`
-                // internally and can surface a *retryable*
+                // F11 admission control: reserve the worst-case request before
+                // the provider can bill it. Retries reserve independently, so
+                // the next physical call cannot start after the session cap is
+                // exhausted. Actual usage settles this reservation below.
+                let reservation_session_id = self.budget_session_id();
+                let reserved_input = request
+                    .client_context_tokens
+                    .unwrap_or(input_token_estimate as u64);
+                let reserved_output = request.max_tokens as u64;
+                let reservation_provider = self.compat.provider_type.as_deref().unwrap_or("");
+                let reserved_cost = resolve_conservative_reservation_cost(
+                    reservation_provider,
+                    &effective_model,
+                    reserved_input,
+                    reserved_output,
+                    &self.compat,
+                );
+                let monetary_cap_active = self.budget_tracker.as_ref().is_some_and(|tracker| {
+                    tracker.lock().has_session_usd_cap(&reservation_session_id)
+                });
+                let strict_monetary_cap = self.config.execution_policy.is_managed()
+                    || self.config.budget.max_cost_usd.is_some()
+                    || self
+                        .config
+                        .session_cap
+                        .as_ref()
+                        .is_some_and(|cap| cap.max_cost_usd.is_some());
+                if !reserved_cost.priced {
+                    if monetary_cap_active && strict_monetary_cap {
+                        self.output.emit_budget_exceeded(
+                            "unpriced_provider",
+                            &format!("{reservation_provider}/{effective_model}"),
+                            "a provider/model with known pricing",
+                        );
+                        self.output.emit_error(
+                            &format!(
+                                "Provider call not started: pricing is unavailable for \
+                                 {reservation_provider}/{effective_model}, so the explicit or \
+                                 managed USD cap cannot be enforced. Select a priced model or \
+                                 remove the explicit max_cost_usd to use token-only governance."
+                            ),
+                            false,
+                        );
+                        return self
+                            .finish_run_terminated(user_input, turn, FinishReason::Length)
+                            .await;
+                    }
+                    self.output.emit_info(&format!(
+                        "Pricing unavailable for {reservation_provider}/{effective_model}; \
+                         the call remains bounded by the token envelope and cost is unpriced, not $0."
+                    ));
+                }
+                let reserved_cost = reserved_cost.usd;
+                let budget_reservation = if let Some(tracker) = self.budget_tracker.clone() {
+                    let reservation_result = tracker.lock().reserve_turn(
+                        &reservation_session_id,
+                        reserved_input,
+                        reserved_output,
+                        reserved_cost,
+                    );
+                    match reservation_result {
+                        Ok(reservation) => Some(ProviderBudgetReservation::new(
+                            tracker,
+                            reservation,
+                            reserved_input,
+                            reserved_output,
+                            reserved_cost,
+                        )),
+                        Err(wcore_budget::BudgetError::CapExceeded {
+                            kind,
+                            limit,
+                            observed,
+                        }) => {
+                            self.output.emit_budget_exceeded(&kind, &observed, &limit);
+                            self.output.emit_error(
+                                &format!(
+                                    "Provider call not started: budget cap '{kind}' would be exceeded \
+                                     (limit {limit}, reserved total {observed}). Continue with \
+                                     additional budget to authorize more work."
+                                ),
+                                false,
+                            );
+                            return self
+                                .finish_run_terminated(user_input, turn, FinishReason::Length)
+                                .await;
+                        }
+                    }
+                } else {
+                    None
+                };
+                let fallback_budget_state =
+                    Arc::new(Mutex::new(ConfiguredFallbackBudgetState::new(
+                        budget_reservation,
+                        reservation_provider.to_string(),
+                        effective_model.clone(),
+                    )));
+                let fallback_state_for_admission = Arc::clone(&fallback_budget_state);
+                let tracker_for_fallback = self.budget_tracker.clone();
+                let fallback_session_id = reservation_session_id.clone();
+                let fallback_compat = self.compat.clone();
+                let fallback_admitter: wcore_providers::retry::ConfiguredFallbackAdmitter =
+                    Arc::new(move |_, _, next_provider, next_model, previous_attempted| {
+                        let mut state = fallback_state_for_admission
+                            .lock()
+                            .unwrap_or_else(|poisoned| poisoned.into_inner());
+                        if let Some(reservation) = state.current.take() {
+                            if previous_attempted {
+                                let (input_tokens, output_tokens, cost_usd) =
+                                    reservation.conservative_charge();
+                                let settle_result =
+                                    reservation.settle(input_tokens, output_tokens, cost_usd);
+                                state.add_prior_charge(input_tokens, output_tokens, cost_usd);
+                                if let Err(error) = settle_result {
+                                    state.failure =
+                                        Some(ConfiguredFallbackAdmissionFailure::Budget(error));
+                                    return Err(ProviderError::Api {
+                                        status: 400,
+                                        message: "configured fallback denied by budget".into(),
+                                    });
+                                }
+                            } else {
+                                reservation.release();
+                            }
+                        }
+
+                        let next_cost = resolve_conservative_reservation_cost(
+                            next_provider,
+                            next_model,
+                            reserved_input,
+                            reserved_output,
+                            &fallback_compat,
+                        );
+                        if !next_cost.priced && monetary_cap_active && strict_monetary_cap {
+                            state.failure = Some(ConfiguredFallbackAdmissionFailure::Unpriced {
+                                provider: next_provider.to_string(),
+                                model: next_model.to_string(),
+                            });
+                            return Err(ProviderError::Api {
+                                status: 400,
+                                message: "configured fallback pricing is unavailable".into(),
+                            });
+                        }
+                        let next_cost_usd = next_cost.usd;
+                        let next_reservation = if let Some(tracker) = tracker_for_fallback.clone() {
+                            match tracker.lock().reserve_turn(
+                                &fallback_session_id,
+                                reserved_input,
+                                reserved_output,
+                                next_cost_usd,
+                            ) {
+                                Ok(reservation) => Some(ProviderBudgetReservation::new(
+                                    Arc::clone(&tracker),
+                                    reservation,
+                                    reserved_input,
+                                    reserved_output,
+                                    next_cost_usd,
+                                )),
+                                Err(error) => {
+                                    state.failure =
+                                        Some(ConfiguredFallbackAdmissionFailure::Budget(error));
+                                    return Err(ProviderError::Api {
+                                        status: 400,
+                                        message: "configured fallback denied by budget".into(),
+                                    });
+                                }
+                            }
+                        } else {
+                            None
+                        };
+                        state.current = next_reservation;
+                        state.current_provider = next_provider.to_string();
+                        state.current_model = next_model.to_string();
+                        Ok(())
+                    });
+
+                // P1 Bug#3 — `stream()` can surface a *retryable*
                 // `ProviderError::Connection` (a connection reset/drop while
-                // the request was being sent, after the provider's own retry
-                // budget was spent) as the `Err` of this call — NOT as a
+                // the request was being sent) as the `Err` of this call — NOT as a
                 // mid-stream `LlmEvent::Error`. The previous `?` short-
                 // circuited the whole turn here, bypassing the bounded
                 // `'stream` retry loop below even though the identical error
                 // arriving mid-stream WOULD be retried. Funnel a retryable
-                // provider error into the same failed-attempt classifier — but
-                // (finding #174) with a capped engine budget, since the HTTP
-                // ring already exhausted its own retries on this request (see
-                // `http_ring_exhausted` and the budget guard below).
+                // provider error into the same failed-attempt classifier. F11
+                // disables the provider's nested retry ring for this call, so
+                // each engine attempt maps to one admitted physical send.
                 // Non-retryable errors (auth/4xx/parse/prompt-too-long)
                 // propagate immediately, exactly as before.
                 let attempt_output = Arc::clone(&self.output);
@@ -5530,15 +6130,134 @@ impl AgentEngine {
                 let provider_result = tokio::select! {
                     biased;
                     _ = provider_cancel.cancelled() => {
+                        let mut fallback_state = fallback_budget_state
+                            .lock()
+                            .unwrap_or_else(|poisoned| poisoned.into_inner());
+                        fallback_state.record_prior_charges(&run_budget);
+                        if let Some(reservation) = fallback_state.current.take() {
+                            // Cancellation may race a physical send. Once the
+                            // provider future has been polled, its outcome is
+                            // unknown; consume the conservative reservation so
+                            // the session neither understates possible spend
+                            // nor leaves an in-flight reservation stranded.
+                            let (input_tokens, output_tokens, cost_usd) =
+                                reservation.conservative_charge();
+                            run_budget.record_tokens(input_tokens, output_tokens);
+                            run_budget.record_cost(cost_usd);
+                            let _ = reservation.settle(input_tokens, output_tokens, cost_usd);
+                        }
                         self.output.emit_info("Run cancelled while waiting for the provider.");
                         self.save_session();
                         return Err(AgentError::UserAborted);
                     }
-                    result = wcore_providers::retry::observe_provider_attempts(
-                        attempt_observer,
-                        self.provider.stream(&request),
+                    result = wcore_providers::retry::scope_configured_fallback_admitter(
+                        fallback_admitter,
+                        wcore_providers::retry::scope_max_retries(
+                            0,
+                            wcore_providers::retry::observe_provider_attempts(
+                                attempt_observer,
+                                self.provider.stream(&request),
+                            ),
+                        ),
                     ) => result,
                 };
+                let (current_attempt_provider, current_attempt_model, fallback_admission_failure) = {
+                    let mut fallback_state = fallback_budget_state
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner());
+                    fallback_state.record_prior_charges(&run_budget);
+                    (
+                        fallback_state.current_provider.clone(),
+                        fallback_state.current_model.clone(),
+                        fallback_state.failure.take(),
+                    )
+                };
+                if let Some(failure) = fallback_admission_failure {
+                    match failure {
+                        ConfiguredFallbackAdmissionFailure::Budget(
+                            wcore_budget::BudgetError::CapExceeded {
+                                kind,
+                                limit,
+                                observed,
+                            },
+                        ) => {
+                            self.output.emit_budget_exceeded(&kind, &observed, &limit);
+                            self.output.emit_error(
+                                &format!(
+                                    "Configured provider fallback not started: budget cap \
+                                     '{kind}' would be exceeded (limit {limit}, reserved total \
+                                     {observed})."
+                                ),
+                                false,
+                            );
+                        }
+                        ConfiguredFallbackAdmissionFailure::Unpriced { provider, model } => {
+                            self.output.emit_budget_exceeded(
+                                "unpriced_provider",
+                                &format!("{provider}/{model}"),
+                                "a provider/model with known pricing",
+                            );
+                            self.output.emit_error(
+                                &format!(
+                                    "Configured provider fallback not started: pricing is \
+                                     unavailable for {provider}/{model}, so the explicit or \
+                                     managed USD cap cannot be enforced."
+                                ),
+                                false,
+                            );
+                        }
+                    }
+                    return self
+                        .finish_run_terminated(user_input, turn, FinishReason::Length)
+                        .await;
+                }
+                let failed_provider_reservation = if provider_result.is_err() {
+                    fallback_budget_state
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner())
+                        .current
+                        .take()
+                } else {
+                    None
+                };
+                if let Some(reservation) = failed_provider_reservation {
+                    if matches!(
+                        &provider_result,
+                        Err(ProviderError::MissingApiKey | ProviderError::NotAttempted { .. })
+                    ) {
+                        reservation.release();
+                    } else {
+                        // The provider outcome is unknown: consume the conservative
+                        // reservation rather than pretending a failed transport was
+                        // free. This bounds retry rings even when usage is absent.
+                        let (input_tokens, output_tokens, cost_usd) =
+                            reservation.conservative_charge();
+                        run_budget.record_tokens(input_tokens, output_tokens);
+                        run_budget.record_cost(cost_usd);
+                        if let Err(err) = reservation.settle(input_tokens, output_tokens, cost_usd)
+                        {
+                            provider_budget_cap_hit = Some(err);
+                        }
+                        if let Some(wcore_budget::BudgetError::CapExceeded {
+                            kind,
+                            limit,
+                            observed,
+                        }) = provider_budget_cap_hit.take()
+                        {
+                            self.output.emit_budget_exceeded(&kind, &observed, &limit);
+                            self.output.emit_error(
+                                &format!(
+                                    "Run stopped after an unknown provider outcome exhausted \
+                                     budget cap '{kind}' (limit {limit}, observed {observed})."
+                                ),
+                                false,
+                            );
+                            return self
+                                .finish_run_terminated(user_input, turn, FinishReason::Length)
+                                .await;
+                        }
+                    }
+                }
                 let mut rx = match provider_result {
                     Ok(rx) => rx,
                     Err(e) if e.is_retryable() => {
@@ -5548,10 +6267,6 @@ impl AgentEngine {
                             .clone()
                             .or_else(|| Some(wcore_providers::retry::provider_failure_code(&e)));
                         stream_error = Some(e.to_string());
-                        // The provider's HTTP ring already retried this exact
-                        // request to exhaustion before surfacing `Err` — mark it
-                        // so the engine ring does not stack a fresh full budget.
-                        http_ring_exhausted = true;
                         // Skip the recv loop; fall through to the
                         // classifier, which retries or fails the turn.
                         // An already-closed empty receiver makes the
@@ -5605,6 +6320,24 @@ impl AgentEngine {
                     let event = tokio::select! {
                         biased;
                         _ = receive_cancel.cancelled() => {
+                            if let Some(reservation) = fallback_budget_state
+                                .lock()
+                                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                                .current
+                                .take()
+                            {
+                                // A response stream existed, so the request
+                                // reached the provider. Usage is unavailable
+                                // after cancellation; settle the reservation
+                                // conservatively and, critically, release the
+                                // in-flight admission slot for a later turn.
+                                let (input_tokens, output_tokens, cost_usd) =
+                                    reservation.conservative_charge();
+                                run_budget.record_tokens(input_tokens, output_tokens);
+                                run_budget.record_cost(cost_usd);
+                                let _ =
+                                    reservation.settle(input_tokens, output_tokens, cost_usd);
+                            }
                             self.output.emit_info("Run cancelled while receiving provider output.");
                             self.save_session();
                             return Err(AgentError::UserAborted);
@@ -5723,6 +6456,87 @@ impl AgentEngine {
                 // A clean `Done` is success. A mid-stream `LlmEvent::Error`
                 // OR a channel that closed with no `Done` (truncated /
                 // dropped stream) is a FAILED attempt.
+                let completed_provider_reservation = {
+                    fallback_budget_state
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner())
+                        .current
+                        .take()
+                };
+                if let Some(reservation) = completed_provider_reservation {
+                    let completed = done_seen && stream_error.is_none();
+                    let usage_authoritative = attempt_usage.input_tokens > 0
+                        || attempt_usage.output_tokens > 0
+                        || attempt_usage.cache_read_tokens > 0
+                        || attempt_usage.cache_creation_tokens > 0;
+                    let (settled_input, settled_output, settled_cost) =
+                        if completed && usage_authoritative {
+                            let input_tokens = attempt_usage
+                                .input_tokens
+                                .saturating_add(attempt_usage.cache_read_tokens)
+                                .saturating_add(attempt_usage.cache_creation_tokens);
+                            let cost = resolve_turn_cost(
+                                &current_attempt_provider,
+                                &current_attempt_model,
+                                attempt_usage.input_tokens,
+                                attempt_usage.output_tokens,
+                                attempt_usage.cache_read_tokens,
+                                attempt_usage.cache_creation_tokens,
+                                &self.compat,
+                            )
+                            .usd;
+                            (input_tokens, attempt_usage.output_tokens, cost)
+                        } else {
+                            // A failed stream OR a clean Done without non-zero usage
+                            // has unknown final billing. Consume the reservation so
+                            // endpoints that omit streaming usage cannot refund a
+                            // paid call to zero and loop through the envelope.
+                            let (input_tokens, output_tokens, cost_usd) =
+                                reservation.conservative_charge();
+                            run_budget.record_tokens(input_tokens, output_tokens);
+                            run_budget.record_cost(cost_usd);
+                            if completed {
+                                self.output.emit_info(
+                                    "Provider completed without authoritative usage; the \
+                                 conservative reservation was charged.",
+                                );
+                            }
+                            (input_tokens, output_tokens, cost_usd)
+                        };
+                    if let Err(err) =
+                        reservation.settle(settled_input, settled_output, settled_cost)
+                    {
+                        provider_budget_cap_hit = Some(err);
+                    }
+                    if !completed
+                        && let Some(wcore_budget::BudgetError::CapExceeded {
+                            kind,
+                            limit,
+                            observed,
+                        }) = provider_budget_cap_hit.take()
+                    {
+                        self.output.emit_budget_exceeded(&kind, &observed, &limit);
+                        self.output.emit_error(
+                            &format!(
+                                "Run stopped after a failed provider attempt exhausted budget \
+                                 cap '{kind}' (limit {limit}, observed {observed})."
+                            ),
+                            false,
+                        );
+                        return self
+                            .finish_run_terminated(user_input, turn, FinishReason::Length)
+                            .await;
+                    }
+                }
+                if done_seen && stream_error.is_none() && provider_budget_cap_hit.is_some() {
+                    stop_reason = attempt_stop_reason;
+                    finish_reason = attempt_finish_reason;
+                    turn_usage = attempt_usage;
+                    turn_provider = current_attempt_provider;
+                    turn_model = current_attempt_model;
+                    self.midflight_monitor.record_stream_attempt(false, false);
+                    break 'stream;
+                }
                 if done_seen && stream_error.is_none() {
                     // LENGTH-WEDGE GATE — `finish_reason=length` while the
                     // context sits at/over the resolved input ceiling is the
@@ -5762,8 +6576,9 @@ impl AgentEngine {
                         // authoritative when present — providers can count
                         // higher than our estimate, which is exactly how a
                         // wedge slips past the pre-flight guard.
-                        let sent_tokens =
-                            attempt_usage.input_tokens.max(input_token_estimate as u64);
+                        let sent_tokens = attempt_usage
+                            .total_input_tokens()
+                            .max(input_token_estimate as u64);
                         if let Some(ceiling) = ceiling
                             && sent_tokens >= ceiling
                         {
@@ -5903,6 +6718,8 @@ impl AgentEngine {
                     stop_reason = attempt_stop_reason;
                     finish_reason = attempt_finish_reason;
                     turn_usage = attempt_usage;
+                    turn_provider = current_attempt_provider;
+                    turn_model = current_attempt_model;
                     // A completed provider stream is progress even when it
                     // ends without text. Do not carry a failed-attempt stall
                     // into a later tool turn or user run.
@@ -5925,21 +6742,11 @@ impl AgentEngine {
                 // bounded retry for 5xx / truncated streams / network
                 // drops where the next attempt has a real chance.
                 let is_client_error = is_http_4xx_error(&reason);
-                // Finding #174 (nested re-bill cap): when the failure was an
-                // already-HTTP-exhausted provider `Err` (3 sends spent), grant
-                // the engine ring exactly ONE retry instead of the full
-                // `MAX_STREAM_RETRIES` (2). This still retries a genuinely
-                // transient single failure once — the common case — but stops
-                // the engine ring from stacking 3 attempts × 3 HTTP sends = 9
-                // full-input re-sends for one logical turn. A mid-stream error /
-                // truncated stream never sets `http_ring_exhausted`, so its
-                // retryability and budget are unchanged.
-                let effective_max_retries = if http_ring_exhausted {
-                    MAX_STREAM_RETRIES.min(1)
-                } else {
-                    MAX_STREAM_RETRIES
-                };
-                if !is_client_error && stream_attempt < effective_max_retries {
+                // F11 owns retry admission at this layer. The provider call
+                // above runs under `scope_max_retries(0)`, so one engine
+                // attempt is exactly one physical send and one reservation.
+                // Keep the complete bounded engine retry budget here.
+                if !is_client_error && stream_attempt < MAX_STREAM_RETRIES {
                     // Spec v1 Task 5 (clean retry): a retry re-sends the whole
                     // outbound context. When the most recent tool round
                     // carries FAILED tool results, that context is
@@ -6009,7 +6816,7 @@ impl AgentEngine {
                     let backoff = std::time::Duration::from_millis(500 * stream_attempt as u64);
                     self.output.emit_info(&format!(
                         "Provider stream failed ({reason}); retrying \
-                         (attempt {stream_attempt}/{effective_max_retries})…"
+                         (attempt {stream_attempt}/{MAX_STREAM_RETRIES})…"
                     ));
                     let backoff_cancel = self.cancel_token.clone();
                     tokio::select! {
@@ -6049,68 +6856,33 @@ impl AgentEngine {
             // live introspection state so `wayland_status` /
             // `wayland_telemetry_query` report non-zero token counters.
             if let Some(state) = &self.session_state {
-                state.add_token_usage(turn_usage.input_tokens, turn_usage.output_tokens);
+                state.add_token_usage(turn_usage.total_input_tokens(), turn_usage.output_tokens);
             }
 
-            // M5.3 — charge the per-session/per-user budget tracker after the
-            // turn's usage is finalized. Sink-side `BudgetEvent::Charge`
-            // emission happens inside `tracker.charge`.
-            //
-            // AUDIT E-C1 — the `charge()` result is now HONORED. Before,
-            // it was discarded (`let _ = ...`), so a configured
-            // `max_cost_usd` / `max_tokens` cap did nothing and a
-            // runaway tool-call loop burned unbounded cost. The
-            // provider already billed THIS turn, so the cap cannot
-            // un-spend it — but `BudgetError::CapExceeded` is captured
-            // here and, once the assistant message is committed below,
-            // the loop terminates cleanly with a user-visible reason
-            // instead of starting another (paid) turn.
-            //
-            // W7 (v0.6.3) — turn cost is resolved from the `wcore-pricing`
-            // provider×model catalog. A catalog miss is non-fatal: it logs
-            // a warning and falls back to the `ProviderCompat` heuristic so
-            // the charge still happens.
-            let mut budget_cap_hit: Option<wcore_budget::BudgetError> = None;
-            if let Some(tracker) = self.budget_tracker.as_ref() {
-                let session_id = self
-                    .current_session_id()
-                    .unwrap_or_else(|| "session-unknown".to_string());
-                let turn_tokens = turn_usage
+            // The tracker reservation was settled inside the provider-attempt
+            // loop. Mirror authoritative usage into the execution-budget tree
+            // here so the mid-flight monitor and host share the same totals.
+            let budget_cap_hit = provider_budget_cap_hit;
+            // Finding #174: charge the model actually dispatched. Cached input
+            // is accounted at its catalog rate and remains token-visible.
+            let turn_cost = resolve_turn_cost(
+                &turn_provider,
+                &turn_model,
+                turn_usage.input_tokens,
+                turn_usage.output_tokens,
+                turn_usage.cache_read_tokens,
+                turn_usage.cache_creation_tokens,
+                &self.compat,
+            )
+            .usd;
+            run_budget.record_tokens(
+                turn_usage
                     .input_tokens
-                    .saturating_add(turn_usage.output_tokens);
-                let provider = self.compat.provider_type.as_deref().unwrap_or("");
-                // Finding #174: charge the budget against the model ACTUALLY
-                // dispatched (`effective_model`), so a tier-swapped cheap turn
-                // is billed at the cheap model's catalog rate, not the premium
-                // model's.
-                let catalog_cost = pricing_turn_cost_usd(
-                    provider,
-                    &effective_model,
-                    turn_usage.input_tokens,
-                    turn_usage.output_tokens,
-                );
-                if catalog_cost.is_none() {
-                    // Emit host-visible info on catalog miss so operators know to add
-                    // a pricing.toml entry. The tracing::warn! in pricing_turn_cost_usd
-                    // covers log files; this makes it visible in --json-stream output.
-                    self.output.emit_info(&format!(
-                        "cost-catalog miss for {provider}/{model} — billing at compat-fallback rate; add to pricing.toml",
-                        model = &effective_model,
-                    ));
-                }
-                let turn_cost = catalog_cost.unwrap_or_else(|| {
-                    estimate_turn_cost(
-                        turn_usage.input_tokens,
-                        turn_usage.output_tokens,
-                        turn_usage.cache_read_tokens,
-                        turn_usage.cache_creation_tokens,
-                        &self.compat,
-                    )
-                });
-                if let Err(e) = tracker.lock().charge(&session_id, turn_tokens, turn_cost) {
-                    budget_cap_hit = Some(e);
-                }
-            }
+                    .saturating_add(turn_usage.cache_read_tokens)
+                    .saturating_add(turn_usage.cache_creation_tokens),
+                turn_usage.output_tokens,
+            );
+            run_budget.record_cost(turn_cost);
 
             // Track per-turn input tokens for compaction watermarks.
             //
@@ -6120,7 +6892,8 @@ impl AgentEngine {
             // with prefix caching) underreport prompt_tokens, so over-
             // estimating here ensures we never blow the context window.
             let local_estimate = estimate::estimate_tokens_from_messages(&self.messages);
-            let effective_watermark = turn_usage.input_tokens.max(local_estimate);
+            let provider_input = turn_usage.total_input_tokens();
+            let effective_watermark = provider_input.max(local_estimate);
 
             // AUTO-trigger watermark (finding #174): track REAL token
             // pressure so auto-compaction doesn't fire prematurely. The
@@ -6137,8 +6910,8 @@ impl AgentEngine {
                 &self.messages,
                 self.compat.replays_thinking_in_history(),
             );
-            let auto_watermark = if turn_usage.input_tokens > 0 {
-                turn_usage.input_tokens
+            let auto_watermark = if provider_input > 0 {
+                provider_input
             } else {
                 auto_estimate
             };
@@ -6153,15 +6926,15 @@ impl AgentEngine {
             // `/doctor` output and log files, but stays out of the transcript.
             // Same pattern as F10's plugin-hook lifecycle classifier
             // (`run_post_tool_use` routes to `hook_trace`, never `log_lines`).
-            if local_estimate > turn_usage.input_tokens
-                && local_estimate.saturating_sub(turn_usage.input_tokens) > 10_000
+            if local_estimate > provider_input
+                && local_estimate.saturating_sub(provider_input) > 10_000
             {
                 tracing::debug!(
-                    provider_reported = turn_usage.input_tokens,
+                    provider_reported = provider_input,
                     local_estimate = local_estimate,
                     effective = effective_watermark,
                     "Token watermark override: provider={}, local_estimate={}, using={}",
-                    turn_usage.input_tokens,
+                    provider_input,
                     local_estimate,
                     effective_watermark
                 );
@@ -6284,7 +7057,7 @@ impl AgentEngine {
                 let result = TurnResult {
                     turn,
                     tool_call_count: tool_calls.len(),
-                    input_tokens: turn_usage.input_tokens,
+                    input_tokens: turn_usage.total_input_tokens(),
                     output_tokens: turn_usage.output_tokens,
                 };
                 let outcome = hook_engine.on_turn_end(turn, &result).await;
@@ -6321,6 +7094,15 @@ impl AgentEngine {
             if tool_calls.is_empty() {
                 // W1 F9: emit the final turn's trace before returning so
                 // single-turn sessions still produce exactly one TurnTrace.
+                let resolved_cost = resolve_turn_cost(
+                    self.compat.provider_type(),
+                    &effective_model,
+                    turn_usage.input_tokens,
+                    turn_usage.output_tokens,
+                    turn_usage.cache_read_tokens,
+                    turn_usage.cache_creation_tokens,
+                    &self.compat,
+                );
                 let trace = TurnTrace {
                     turn,
                     // Finding #174: attribute to the model ACTUALLY dispatched
@@ -6336,20 +7118,14 @@ impl AgentEngine {
                     cache_hit_rate: TurnTrace::cache_hit_rate_from(
                         turn_usage.input_tokens,
                         turn_usage.cache_read_tokens,
+                        turn_usage.cache_creation_tokens,
                     ),
-                    // Fix(pricing-audit-2026-05-24): use resolve_turn_cost_usd which tries
+                    // Fix(pricing-audit-2026-05-24): use resolve_turn_cost, which tries
                     // the pricing catalog first, then falls back to estimate_turn_cost.
                     // Previously estimate_turn_cost used compat rows directly — with
                     // openai_defaults() now at $0/$0 sentinel, that always returned $0.
-                    cost_usd: resolve_turn_cost_usd(
-                        self.compat.provider_type(),
-                        &effective_model,
-                        turn_usage.input_tokens,
-                        turn_usage.output_tokens,
-                        turn_usage.cache_read_tokens,
-                        turn_usage.cache_creation_tokens,
-                        &self.compat,
-                    ),
+                    cost_usd: resolved_cost.usd,
+                    cost_priced: resolved_cost.priced,
                     tool_calls: vec![],
                     // Drain hook actions fired this turn into the trace.
                     // partial: populated in a future pass when a streaming-drain trigger exists
@@ -6367,6 +7143,7 @@ impl AgentEngine {
                     model: trace.model.clone(),
                     provider: trace.provider.clone(),
                     cost_usd: trace.cost_usd,
+                    priced: trace.cost_priced,
                 });
                 // W9.1 T3 (T10b): feed the trace into the F10 detect flow
                 // even on the no-tool-calls early-return path. Pattern
@@ -6507,6 +7284,7 @@ impl AgentEngine {
                 // buffered-output behaviour (None). The dispatcher further
                 // gates per-tool on `tool.supports_streaming()`.
                 streaming: build_turn_streaming_context(&self.output, &self.current_msg_id),
+                tool_budget: Some(tool_budget.clone()),
                 approval: approval_channel,
                 allow_list: self.allow_list.clone(),
                 // v0.6.1 CRIT-1: clone the optional gate into the per-turn
@@ -7022,6 +7800,15 @@ impl AgentEngine {
             // capabilities.structured_traces consume it; others receive a
             // no-op (ProtocolSink only emits when its builder was configured;
             // terminal / null sinks default to no-op via the trait).
+            let resolved_cost = resolve_turn_cost(
+                self.compat.provider_type(),
+                &effective_model,
+                turn_usage.input_tokens,
+                turn_usage.output_tokens,
+                turn_usage.cache_read_tokens,
+                turn_usage.cache_creation_tokens,
+                &self.compat,
+            );
             let trace = TurnTrace {
                 turn,
                 // Finding #174: attribute to the dispatched model (see the
@@ -7035,17 +7822,11 @@ impl AgentEngine {
                 cache_hit_rate: TurnTrace::cache_hit_rate_from(
                     turn_usage.input_tokens,
                     turn_usage.cache_read_tokens,
+                    turn_usage.cache_creation_tokens,
                 ),
                 // Fix(pricing-audit-2026-05-24): catalog-first cost resolution.
-                cost_usd: resolve_turn_cost_usd(
-                    self.compat.provider_type(),
-                    &effective_model,
-                    turn_usage.input_tokens,
-                    turn_usage.output_tokens,
-                    turn_usage.cache_read_tokens,
-                    turn_usage.cache_creation_tokens,
-                    &self.compat,
-                ),
+                cost_usd: resolved_cost.usd,
+                cost_priced: resolved_cost.priced,
                 tool_calls: tool_call_traces,
                 // Drain hook actions fired this turn into the trace.
                 // partial: populated in a future pass when a streaming-drain trigger exists
@@ -7063,6 +7844,7 @@ impl AgentEngine {
                 model: trace.model.clone(),
                 provider: trace.provider.clone(),
                 cost_usd: trace.cost_usd,
+                priced: trace.cost_priced,
             });
             // W9.1 T3 (T10b): feed the trace into the F10 detect+stage+emit
             // flow. Consumes `trace` — every read above this line has
@@ -7182,11 +7964,10 @@ impl AgentEngine {
         )
         .with_sandbox_runtime(self.tools.sandbox_runtime())
         .with_egress_policy(self.egress_policy.clone())
-        .with_approval_manager(std::sync::Arc::clone(manager))
-        // Bind sub-agents to the engine's cancel token so a host cancel stops
-        // the whole workflow rather than letting 20+ sub-agents run to
-        // completion and burn LLM calls.
-        .with_cancel(self.cancel_token.clone());
+        .with_approval_manager(std::sync::Arc::clone(manager));
+        // Bind sub-agents to the same provider, execution, and cancellation
+        // envelope used by every other transient orchestration path.
+        let spawner = self.govern_transient_spawner(spawner);
 
         // (b) Synthesise the plan on a DETACHED task. The synthesis sub-agent
         // runs its own `engine.run`, which the compiler cannot prove never
@@ -7495,7 +8276,7 @@ impl AgentEngine {
         // yet aggregate across calls in a session — cross-session/process daily
         // spend persistence is the Stage 6 deliverable (spec §9, "Cross-process
         // daily-spend"). Until then each council is bounded by its per-run cap.
-        let mut spawner = crate::spawner::AgentSpawner::new(
+        let spawner = crate::spawner::AgentSpawner::new(
             std::sync::Arc::clone(&self.provider),
             self.config.clone(),
         )
@@ -7507,8 +8288,11 @@ impl AgentEngine {
                 providers.clone(),
             )
             .with_egress_policy(self.egress_policy.clone()),
-        ))
-        .with_cancel(self.cancel_token.clone());
+        ));
+        // A council may select different keyed providers, but every physical
+        // call remains inside the parent's provider/session allowance and every
+        // child shares the parent's execution and cancellation envelope.
+        let mut spawner = self.govern_transient_spawner(spawner);
         if let Some(manager) = &self.approval_manager {
             spawner = spawner.with_approval_manager(std::sync::Arc::clone(manager));
         }
@@ -8558,7 +9342,7 @@ impl AgentEngine {
         if let Some(hook_engine) = self.hooks.as_ref() {
             let summary = SessionEndSummary {
                 turns,
-                total_input_tokens: self.total_usage.input_tokens,
+                total_input_tokens: self.total_usage.total_input_tokens(),
                 total_output_tokens: self.total_usage.output_tokens,
             };
             let outcome = hook_engine.on_session_end(&summary).await;
@@ -10351,6 +11135,8 @@ mod set_config_tests {
             decay_handles: Vec::new(),
             plugin_runtime_handles: Arc::new(Vec::new()),
             budget_tracker: None,
+            budget_session_id: None,
+            execution_budget: crate::budget::ExecutionBudget::default().start_root(),
             midflight_monitor: crate::orchestration::monitor::MidFlightMonitor::new(
                 crate::budget::ExecutionBudget::default().start_root(),
             ),
@@ -12019,6 +12805,8 @@ mod phase6_tests {
             decay_handles: Vec::new(),
             plugin_runtime_handles: Arc::new(Vec::new()),
             budget_tracker: None,
+            budget_session_id: None,
+            execution_budget: crate::budget::ExecutionBudget::default().start_root(),
             midflight_monitor: crate::orchestration::monitor::MidFlightMonitor::new(
                 crate::budget::ExecutionBudget::default().start_root(),
             ),
@@ -12322,6 +13110,8 @@ mod compact_tests {
             decay_handles: Vec::new(),
             plugin_runtime_handles: Arc::new(Vec::new()),
             budget_tracker: None,
+            budget_session_id: None,
+            execution_budget: crate::budget::ExecutionBudget::default().start_root(),
             midflight_monitor: crate::orchestration::monitor::MidFlightMonitor::new(
                 crate::budget::ExecutionBudget::default().start_root(),
             ),
@@ -13655,6 +14445,8 @@ mod plan_mode_tests {
             decay_handles: Vec::new(),
             plugin_runtime_handles: Arc::new(Vec::new()),
             budget_tracker: None,
+            budget_session_id: None,
+            execution_budget: crate::budget::ExecutionBudget::default().start_root(),
             midflight_monitor: crate::orchestration::monitor::MidFlightMonitor::new(
                 crate::budget::ExecutionBudget::default().start_root(),
             ),
@@ -14091,6 +14883,8 @@ mod hook_integration_tests {
             decay_handles: Vec::new(),
             plugin_runtime_handles: Arc::new(Vec::new()),
             budget_tracker: None,
+            budget_session_id: None,
+            execution_budget: crate::budget::ExecutionBudget::default().start_root(),
             midflight_monitor: crate::orchestration::monitor::MidFlightMonitor::new(
                 crate::budget::ExecutionBudget::default().start_root(),
             ),
@@ -14937,6 +15731,8 @@ mod approval_bridge_engine_tests {
             decay_handles: Vec::new(),
             plugin_runtime_handles: Arc::new(Vec::new()),
             budget_tracker: None,
+            budget_session_id: None,
+            execution_budget: crate::budget::ExecutionBudget::default().start_root(),
             midflight_monitor: crate::orchestration::monitor::MidFlightMonitor::new(
                 crate::budget::ExecutionBudget::default().start_root(),
             ),
@@ -15962,6 +16758,8 @@ mod user_model_writeback_tests {
             decay_handles: Vec::new(),
             plugin_runtime_handles: Arc::new(Vec::new()),
             budget_tracker: None,
+            budget_session_id: None,
+            execution_budget: crate::budget::ExecutionBudget::default().start_root(),
             midflight_monitor: crate::orchestration::monitor::MidFlightMonitor::new(
                 crate::budget::ExecutionBudget::default().start_root(),
             ),
@@ -16880,6 +17678,12 @@ mod audit_2026_05_22_tests {
         let provider = Arc::new(BlockingThenScriptedProvider::new());
         let entered = Arc::clone(&provider.entered);
         let mut engine = engine_with(provider);
+        let tracker = Arc::new(parking_lot::Mutex::new(wcore_budget::BudgetTracker::new(
+            wcore_budget::BudgetCap::builder()
+                .per_session_tokens(100_000_000)
+                .build(),
+        )));
+        engine.set_budget_tracker(Arc::clone(&tracker));
         let root = tokio_util::sync::CancellationToken::new();
         let mut session_guard = crate::cancel::SessionRuntimeGuard::new(root.clone());
         let control = session_guard.control();
@@ -16904,6 +17708,11 @@ mod audit_2026_05_22_tests {
             .expect("run task must join");
         assert!(matches!(stopped, Err(super::AgentError::UserAborted)));
         assert!(!root.is_cancelled());
+        assert_eq!(
+            tracker.lock().reserved_totals("session-unknown"),
+            (0, 0.0),
+            "cancelling an in-flight provider call must not strand its reservation"
+        );
         let result = engine
             .run("next message", "m-next")
             .await
@@ -17053,13 +17862,10 @@ mod audit_2026_05_22_tests {
         );
     }
 
-    // --- Finding #174: nested re-bill cap on an HTTP-ring-exhausted Err ----
+    // --- F11: one admitted physical send per engine attempt ---------------
 
-    /// Models the engine entry point that triggers the worst nesting:
-    /// `stream()` itself returns `Err(ProviderError::Connection)` — i.e. the
-    /// provider's HTTP ring (`builder_send_with_retry`) already spent its full
-    /// 3-send budget on this request before surfacing the error. Returns that
-    /// `Err` for the first `fail_calls` calls, then a clean `Done` stream.
+    /// Returns a retryable `Err` for the first `fail_calls` admitted physical
+    /// sends, then a clean `Done` stream.
     struct StreamErrProvider {
         fail_calls: usize,
         calls: Arc<std::sync::atomic::AtomicUsize>,
@@ -17083,9 +17889,7 @@ mod audit_2026_05_22_tests {
         ) -> Result<tokio::sync::mpsc::Receiver<LlmEvent>, ProviderError> {
             let n = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             if n < self.fail_calls {
-                // A retryable Connection error surfaced from `stream()` itself:
-                // the HTTP ring already exhausted its budget on this request.
-                return Err(ProviderError::Connection("http ring exhausted".into()));
+                return Err(ProviderError::Connection("physical send failed".into()));
             }
             let (tx, rx) = tokio::sync::mpsc::channel(16);
             tokio::spawn(async move {
@@ -17097,14 +17901,10 @@ mod audit_2026_05_22_tests {
     }
 
     #[tokio::test]
-    async fn http_exhausted_stream_err_grants_only_one_engine_retry() {
-        // Finding #174 — when `stream()` returns a retryable `Err` (the HTTP
-        // ring already spent its 3-send budget), the engine ring must NOT stack
-        // a fresh full `MAX_STREAM_RETRIES` budget on top. Without the cap a
-        // permanent HTTP-exhausted failure would drive 3 engine attempts (1 +
-        // 2 retries); with the cap it is bounded to 2 (1 + 1 retry), each of
-        // which would re-enter the HTTP ring's 3 sends — so the worst case
-        // drops from 9 full-input re-sends to 6 for one logical turn.
+    async fn retryable_stream_err_uses_the_bounded_engine_retry_budget() {
+        // The provider ring is disabled for production engine calls. A
+        // permanent retryable failure therefore gets exactly three physical
+        // sends: the initial attempt plus two engine-owned retries.
         let provider = Arc::new(StreamErrProvider::new(usize::MAX)); // always fails
         let counter = provider.call_counter();
         let mut engine = engine_with(provider);
@@ -17115,17 +17915,13 @@ mod audit_2026_05_22_tests {
         );
         assert_eq!(
             counter.load(std::sync::atomic::Ordering::SeqCst),
-            2,
-            "an HTTP-ring-exhausted Err must get exactly 1 engine retry \
-             (2 attempts), NOT the full 3 — that is the nested re-bill cap"
+            3,
+            "the engine must make 1 initial send plus 2 bounded retries"
         );
     }
 
     #[tokio::test]
-    async fn http_exhausted_stream_err_still_retries_a_single_transient_failure() {
-        // Finding #174 normal-case guard — the cap must NOT kill resilience for
-        // a genuinely transient single failure. One HTTP-exhausted `Err`
-        // followed by a clean stream must still be retried and recover.
+    async fn retryable_stream_err_recovers_after_one_transient_failure() {
         let provider = Arc::new(StreamErrProvider::new(1)); // fail once, then ok
         let counter = provider.call_counter();
         let mut engine = engine_with(provider);
@@ -17139,6 +17935,289 @@ mod audit_2026_05_22_tests {
             2,
             "1 initial attempt + 1 retry recovers the single transient failure"
         );
+    }
+
+    #[tokio::test]
+    async fn configured_fallback_is_not_sent_when_its_reservation_exceeds_cap() {
+        let primary = Arc::new(StreamErrProvider::new(usize::MAX));
+        let primary_calls = primary.call_counter();
+        let fallback = Arc::new(StreamErrProvider::new(0));
+        let fallback_calls = fallback.call_counter();
+        let primary_provider: Arc<dyn LlmProvider> = primary;
+        let fallback_provider: Arc<dyn LlmProvider> = fallback;
+        let chain = wcore_providers::ProviderChain::new(vec![
+            ("primary", primary_provider),
+            ("fallback", fallback_provider),
+        ]);
+        let mut engine = engine_with(Arc::new(chain));
+        engine.max_tokens = 1;
+        let tracker = Arc::new(parking_lot::Mutex::new(wcore_budget::BudgetTracker::new(
+            wcore_budget::BudgetCap::builder()
+                .per_session_output_tokens(1)
+                .build(),
+        )));
+        engine.set_budget_tracker(Arc::clone(&tracker));
+
+        let result = engine
+            .run("task", "m-1")
+            .await
+            .expect("fallback budget denial is a clean termination");
+
+        assert_eq!(result.stop_reason, StopReason::MaxTurns);
+        assert_eq!(primary_calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert_eq!(fallback_calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+        let session_id = engine
+            .current_session_id()
+            .unwrap_or_else(|| "session-unknown".to_string());
+        assert_eq!(tracker.lock().reserved_totals(&session_id), (0, 0.0));
+        assert!(
+            tracker.lock().session_totals(&session_id).0 > 0,
+            "the ambiguous failed primary send must be conservatively charged"
+        );
+    }
+
+    #[tokio::test]
+    async fn missing_key_releases_primary_reservation_before_fallback() {
+        struct MissingKeyProvider {
+            calls: Arc<std::sync::atomic::AtomicUsize>,
+        }
+        #[async_trait]
+        impl LlmProvider for MissingKeyProvider {
+            async fn stream(
+                &self,
+                _: &LlmRequest,
+            ) -> Result<tokio::sync::mpsc::Receiver<LlmEvent>, ProviderError> {
+                self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                Err(ProviderError::MissingApiKey)
+            }
+        }
+
+        let primary_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let primary: Arc<dyn LlmProvider> = Arc::new(MissingKeyProvider {
+            calls: Arc::clone(&primary_calls),
+        });
+        let fallback = Arc::new(StreamErrProvider::new(0));
+        let fallback_calls = fallback.call_counter();
+        let fallback_provider: Arc<dyn LlmProvider> = fallback;
+        let resilient = wcore_providers::ResilientProvider::new_with_fallback_identities(
+            "primary",
+            primary,
+            vec![(
+                "haiku".into(),
+                "anthropic".into(),
+                "claude-haiku-4-5".into(),
+                fallback_provider,
+            )],
+            wcore_providers::CircuitConfig::default(),
+            Arc::new(wcore_providers::NoOpCircuitReporter),
+        );
+        let mut engine = engine_with(Arc::new(resilient));
+        engine.set_model("claude-opus-4-6");
+        engine.compat = wcore_config::compat::ProviderCompat::anthropic_defaults();
+        engine.max_tokens = 1;
+        let tracker = Arc::new(parking_lot::Mutex::new(wcore_budget::BudgetTracker::new(
+            wcore_budget::BudgetCap::builder()
+                .per_session_output_tokens(1)
+                .build(),
+        )));
+        engine.set_budget_tracker(Arc::clone(&tracker));
+
+        let result = engine
+            .run("task", "m-1")
+            .await
+            .expect("pre-send primary failure must leave room for fallback");
+
+        assert_eq!(result.stop_reason, StopReason::EndTurn);
+        assert_eq!(primary_calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert_eq!(fallback_calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+        let session_id = engine
+            .current_session_id()
+            .unwrap_or_else(|| "session-unknown".to_string());
+        let (charged_tokens, charged_cost) = {
+            let tracker = tracker.lock();
+            assert_eq!(tracker.reserved_totals(&session_id), (0, 0.0));
+            tracker.session_totals(&session_id)
+        };
+        let charged_input = charged_tokens.saturating_sub(1);
+        let expected_fallback_cost = super::resolve_conservative_reservation_cost(
+            "anthropic",
+            "claude-haiku-4-5",
+            charged_input,
+            1,
+            &engine.compat,
+        )
+        .usd;
+        let wrong_primary_cost = super::resolve_conservative_reservation_cost(
+            "anthropic",
+            "claude-opus-4-6",
+            charged_input,
+            1,
+            &engine.compat,
+        )
+        .usd;
+        assert!((charged_cost - expected_fallback_cost).abs() < 1e-12);
+        assert!(
+            (charged_cost - wrong_primary_cost).abs() > 1e-9,
+            "fallback settlement must use the served Haiku SKU, not the primary Opus SKU"
+        );
+        let usd_cap = (expected_fallback_cost + wrong_primary_cost) / 2.0;
+        let expensive_primary_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let expensive_primary: Arc<dyn LlmProvider> = Arc::new(MissingKeyProvider {
+            calls: Arc::clone(&expensive_primary_calls),
+        });
+        let expensive_fallback = Arc::new(StreamErrProvider::new(0));
+        let expensive_fallback_calls = expensive_fallback.call_counter();
+        let expensive_fallback_provider: Arc<dyn LlmProvider> = expensive_fallback;
+        let expensive_resilient = wcore_providers::ResilientProvider::new_with_fallback_identities(
+            "primary",
+            expensive_primary,
+            vec![(
+                "opus".into(),
+                "anthropic".into(),
+                "claude-opus-4-6".into(),
+                expensive_fallback_provider,
+            )],
+            wcore_providers::CircuitConfig::default(),
+            Arc::new(wcore_providers::NoOpCircuitReporter),
+        );
+        let mut expensive_engine = engine_with(Arc::new(expensive_resilient));
+        expensive_engine.set_model("claude-haiku-4-5");
+        expensive_engine.compat = wcore_config::compat::ProviderCompat::anthropic_defaults();
+        expensive_engine.max_tokens = 1;
+        expensive_engine.set_budget_tracker(Arc::new(parking_lot::Mutex::new(
+            wcore_budget::BudgetTracker::new(
+                wcore_budget::BudgetCap::builder()
+                    .per_session_usd(usd_cap)
+                    .build(),
+            ),
+        )));
+
+        let denied = expensive_engine
+            .run("task", "m-2")
+            .await
+            .expect("higher-priced fallback denial is a clean termination");
+
+        assert_eq!(denied.stop_reason, StopReason::MaxTurns);
+        assert_eq!(
+            expensive_primary_calls.load(std::sync::atomic::Ordering::SeqCst),
+            1
+        );
+        assert_eq!(
+            expensive_fallback_calls.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "the higher-priced Opus fallback must be denied before dispatch"
+        );
+    }
+
+    #[tokio::test]
+    async fn missing_key_without_fallback_releases_the_provider_reservation() {
+        struct MissingKeyProvider;
+        #[async_trait]
+        impl LlmProvider for MissingKeyProvider {
+            async fn stream(
+                &self,
+                _: &LlmRequest,
+            ) -> Result<tokio::sync::mpsc::Receiver<LlmEvent>, ProviderError> {
+                Err(ProviderError::MissingApiKey)
+            }
+        }
+
+        let mut engine = engine_with(Arc::new(MissingKeyProvider));
+        let tracker = Arc::new(parking_lot::Mutex::new(wcore_budget::BudgetTracker::new(
+            wcore_budget::BudgetCap::builder()
+                .per_session_output_tokens(100)
+                .build(),
+        )));
+        engine.set_budget_tracker(Arc::clone(&tracker));
+
+        let _ = engine.run("task", "m-1").await;
+        let session_id = engine
+            .current_session_id()
+            .unwrap_or_else(|| "session-unknown".to_string());
+        let tracker = tracker.lock();
+        assert_eq!(tracker.reserved_totals(&session_id), (0, 0.0));
+        assert_eq!(tracker.session_totals(&session_id), (0, 0.0));
+    }
+
+    #[tokio::test]
+    async fn missing_key_in_final_fallback_releases_every_provider_reservation() {
+        struct MissingKeyProvider;
+        #[async_trait]
+        impl LlmProvider for MissingKeyProvider {
+            async fn stream(
+                &self,
+                _: &LlmRequest,
+            ) -> Result<tokio::sync::mpsc::Receiver<LlmEvent>, ProviderError> {
+                Err(ProviderError::MissingApiKey)
+            }
+        }
+
+        let resilient = wcore_providers::ResilientProvider::new_with_fallback_identities(
+            "primary",
+            Arc::new(MissingKeyProvider),
+            vec![(
+                "fallback".into(),
+                "anthropic".into(),
+                "claude-haiku-4-5".into(),
+                Arc::new(MissingKeyProvider) as Arc<dyn LlmProvider>,
+            )],
+            wcore_providers::CircuitConfig::default(),
+            Arc::new(wcore_providers::NoOpCircuitReporter),
+        );
+        let mut engine = engine_with(Arc::new(resilient));
+        let tracker = Arc::new(parking_lot::Mutex::new(wcore_budget::BudgetTracker::new(
+            wcore_budget::BudgetCap::builder()
+                .per_session_output_tokens(100)
+                .build(),
+        )));
+        engine.set_budget_tracker(Arc::clone(&tracker));
+
+        let _ = engine.run("task", "m-1").await;
+        let session_id = engine
+            .current_session_id()
+            .unwrap_or_else(|| "session-unknown".to_string());
+        let tracker = tracker.lock();
+        assert_eq!(tracker.reserved_totals(&session_id), (0, 0.0));
+        assert_eq!(tracker.session_totals(&session_id), (0, 0.0));
+    }
+
+    #[tokio::test]
+    async fn open_circuit_without_fallback_releases_the_provider_reservation() {
+        let primary = Arc::new(StreamErrProvider::new(usize::MAX));
+        let primary_calls = primary.call_counter();
+        let resilient = Arc::new(wcore_providers::ResilientProvider::new(
+            "primary",
+            primary,
+            Vec::new(),
+            wcore_providers::CircuitConfig {
+                fail_threshold: 1,
+                window: std::time::Duration::from_secs(30),
+                cooldown: std::time::Duration::from_secs(60),
+            },
+            Arc::new(wcore_providers::NoOpCircuitReporter),
+        ));
+        assert!(resilient.stream(&LlmRequest::default()).await.is_err());
+
+        let mut engine = engine_with(resilient);
+        let tracker = Arc::new(parking_lot::Mutex::new(wcore_budget::BudgetTracker::new(
+            wcore_budget::BudgetCap::builder()
+                .per_session_output_tokens(100)
+                .build(),
+        )));
+        engine.set_budget_tracker(Arc::clone(&tracker));
+
+        let _ = engine.run("task", "m-1").await;
+        assert_eq!(
+            primary_calls.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "the open circuit must skip the physical provider send"
+        );
+        let session_id = engine
+            .current_session_id()
+            .unwrap_or_else(|| "session-unknown".to_string());
+        let tracker = tracker.lock();
+        assert_eq!(tracker.reserved_totals(&session_id), (0, 0.0));
+        assert_eq!(tracker.session_totals(&session_id), (0, 0.0));
     }
 
     // --- E-C1: budget cap halts the loop ---------------------------------
@@ -17171,7 +18250,7 @@ mod audit_2026_05_22_tests {
         ]]));
         let counter = provider.call_counter();
         let mut engine = engine_with(provider);
-        // 1-token cap — the very first turn's 20k-token charge trips it.
+        // 1-token cap — admission must reject the first paid call up front.
         let cap = wcore_budget::BudgetCap::builder()
             .per_session_tokens(1)
             .build();
@@ -17190,10 +18269,187 @@ mod audit_2026_05_22_tests {
         );
         assert_eq!(
             counter.load(std::sync::atomic::Ordering::SeqCst),
-            1,
-            "the budget cap must stop the loop after the FIRST turn, \
-             not run until max_turns"
+            0,
+            "pre-call reservation must prevent the provider from starting"
         );
+    }
+
+    #[tokio::test]
+    async fn provider_reservation_settles_to_actual_usage() {
+        let provider = Arc::new(ScriptedProvider::new(vec![vec![
+            LlmEvent::TextDelta("done".into()),
+            done_endturn_with(TokenUsage {
+                input_tokens: 10,
+                output_tokens: 5,
+                cache_creation_tokens: 3,
+                cache_read_tokens: 7,
+            }),
+        ]]));
+        let mut engine = engine_with(provider);
+        let tracker = Arc::new(parking_lot::Mutex::new(wcore_budget::BudgetTracker::new(
+            wcore_budget::BudgetCap::builder()
+                .per_session_tokens(1_000_000)
+                .build(),
+        )));
+        engine.set_budget_tracker(tracker.clone());
+
+        engine.run("task", "m-1").await.expect("clean run");
+
+        let session_id = engine
+            .current_session_id()
+            .unwrap_or_else(|| "session-unknown".to_string());
+        assert_eq!(tracker.lock().session_totals(&session_id).0, 25);
+        assert_eq!(tracker.lock().reserved_totals(&session_id), (0, 0.0));
+    }
+
+    #[tokio::test]
+    async fn missing_provider_usage_consumes_the_conservative_reservation() {
+        let provider = Arc::new(ScriptedProvider::new(vec![vec![
+            LlmEvent::TextDelta("done".into()),
+            done_endturn(),
+        ]]));
+        let mut engine = engine_with(provider);
+        engine.max_tokens = 10;
+        let tracker = Arc::new(parking_lot::Mutex::new(wcore_budget::BudgetTracker::new(
+            wcore_budget::BudgetCap::builder()
+                .per_session_tokens(1_000_000)
+                .build(),
+        )));
+        engine.set_budget_tracker(tracker.clone());
+
+        engine.run("task", "m-1").await.expect("clean run");
+
+        let session_id = engine
+            .current_session_id()
+            .unwrap_or_else(|| "session-unknown".to_string());
+        let (charged_tokens, _) = tracker.lock().session_totals(&session_id);
+        assert!(
+            charged_tokens >= 10,
+            "a clean Done without usage must not refund the reservation to zero"
+        );
+        assert_eq!(tracker.lock().reserved_totals(&session_id), (0, 0.0));
+    }
+
+    #[tokio::test]
+    async fn unpriced_provider_is_rejected_while_a_usd_cap_is_active() {
+        let provider = Arc::new(ScriptedProvider::new(vec![vec![done_endturn_with(
+            TokenUsage {
+                input_tokens: 1,
+                output_tokens: 1,
+                ..Default::default()
+            },
+        )]]));
+        let calls = provider.call_counter();
+        let mut engine = engine_with(provider);
+        engine.compat = wcore_config::compat::ProviderCompat {
+            provider_type: Some("custom-unpriced".into()),
+            ..Default::default()
+        };
+        engine.model = "opaque-model".into();
+        engine.config.budget.max_cost_usd = Some(1.0);
+        engine.set_budget_tracker(Arc::new(parking_lot::Mutex::new(
+            wcore_budget::BudgetTracker::new(
+                wcore_budget::BudgetCap::builder()
+                    .per_session_tokens(1_000_000)
+                    .per_session_usd(1.0)
+                    .build(),
+            ),
+        )));
+
+        let result = engine
+            .run("task", "m-1")
+            .await
+            .expect("governance rejection is a clean termination");
+
+        assert_eq!(result.stop_reason, StopReason::MaxTurns);
+        assert_eq!(
+            calls.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "an unpriceable remote call must not start under a USD cap"
+        );
+    }
+
+    #[tokio::test]
+    async fn unpriced_provider_remains_usable_under_implicit_smart_cap() {
+        let provider = Arc::new(ScriptedProvider::new(vec![vec![done_endturn_with(
+            TokenUsage {
+                input_tokens: 1,
+                output_tokens: 1,
+                ..Default::default()
+            },
+        )]]));
+        let calls = provider.call_counter();
+        let mut engine = engine_with(provider);
+        engine.compat = wcore_config::compat::ProviderCompat {
+            provider_type: Some("custom-unpriced".into()),
+            ..Default::default()
+        };
+        engine.model = "opaque-model".into();
+        engine.set_budget_tracker(Arc::new(parking_lot::Mutex::new(
+            wcore_budget::BudgetTracker::new(
+                wcore_budget::BudgetCap::builder()
+                    .per_session_tokens(1_000_000)
+                    .per_session_usd(25.0)
+                    .build(),
+            ),
+        )));
+
+        engine
+            .run("task", "m-1")
+            .await
+            .expect("implicit Smart cap degrades to token-only governance");
+
+        assert_eq!(
+            calls.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "an implicit Smart cost cap must not disable an unpriced provider"
+        );
+    }
+
+    #[test]
+    fn continue_with_budget_reopens_only_the_current_smart_session() {
+        let provider = Arc::new(ScriptedProvider::new(Vec::new()));
+        let mut engine = engine_with(provider);
+        let tracker = Arc::new(parking_lot::Mutex::new(wcore_budget::BudgetTracker::new(
+            wcore_budget::BudgetCap::builder()
+                .per_session_tokens(100)
+                .per_session_usd(1.0)
+                .build(),
+        )));
+        engine.set_budget_tracker(tracker.clone());
+
+        assert!(
+            tracker.lock().reserve("session-unknown", 101, 0.0).is_err(),
+            "Continue is bound to a real budget-exceeded receipt"
+        );
+
+        engine
+            .continue_with_additional_budget(50, 0.50)
+            .expect("Smart session may add explicit headroom");
+
+        assert!(tracker.lock().reserve("session-unknown", 150, 1.50).is_ok());
+        assert!(tracker.lock().reserve("another-session", 101, 0.0).is_err());
+    }
+
+    #[test]
+    fn managed_session_cannot_interactively_widen_budget() {
+        use wcore_types::execution_policy::{
+            ApprovalPolicy, BaselineExecutionPolicy, ManagedDangerousPolicy,
+        };
+
+        let provider = Arc::new(ScriptedProvider::new(Vec::new()));
+        let mut engine = engine_with(provider);
+        engine.config.execution_policy =
+            BaselineExecutionPolicy::managed(ApprovalPolicy::Prompt, ManagedDangerousPolicy::Deny);
+        engine.set_budget_tracker(Arc::new(parking_lot::Mutex::new(
+            wcore_budget::BudgetTracker::new(
+                wcore_budget::BudgetCap::builder()
+                    .per_session_tokens(100)
+                    .build(),
+            ),
+        )));
+
+        assert!(engine.continue_with_additional_budget(1, 0.0).is_err());
     }
 
     #[tokio::test]

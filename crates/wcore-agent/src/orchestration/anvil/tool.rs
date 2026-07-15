@@ -27,6 +27,7 @@ use wcore_tools::context::ToolContext;
 use wcore_types::tool::{JsonSchema, ToolResult};
 
 use super::forge::drive_climb_full;
+use crate::spawner::SpawnerBudgetGovernance;
 
 /// Captures the climb's protocol events (the `AnvilReceipt`) so the receipt
 /// can ride back inside the tool result instead of being written to stdout —
@@ -48,6 +49,7 @@ pub struct ForgeTool {
     anvil: AnvilConfig,
     session_cfg: Config,
     egress_policy: wcore_egress::SharedPolicy,
+    budget_governance: SpawnerBudgetGovernance,
 }
 
 impl ForgeTool {
@@ -59,11 +61,13 @@ impl ForgeTool {
         anvil: AnvilConfig,
         session_cfg: Config,
         egress_policy: wcore_egress::SharedPolicy,
+        budget_governance: SpawnerBudgetGovernance,
     ) -> Self {
         Self {
             anvil,
             session_cfg,
             egress_policy,
+            budget_governance,
         }
     }
 
@@ -84,6 +88,7 @@ impl ForgeTool {
             &self.anvil,
             &self.session_cfg,
             Arc::clone(&self.egress_policy),
+            Some(self.budget_governance.clone()),
         )
         .await
         {
@@ -109,10 +114,13 @@ impl ForgeTool {
         // Valve seat (spec §6.4): the session/frontier model, read-only, one
         // diagnostic turn on a stall. Best-effort — a forge without a valve
         // is still a forge.
-        let valve_seat =
-            super::seat::materialize_valve_seat(&self.session_cfg, Arc::clone(&self.egress_policy))
-                .await
-                .ok();
+        let valve_seat = super::seat::materialize_valve_seat(
+            &self.session_cfg,
+            Arc::clone(&self.egress_policy),
+            Some(self.budget_governance.clone()),
+        )
+        .await
+        .ok();
         let valve_spawner = valve_seat
             .as_ref()
             .map(|s| &s.spawner as &dyn wcore_types::spawner::Spawner);

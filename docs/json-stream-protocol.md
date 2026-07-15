@@ -296,7 +296,12 @@ Current response turn finished.
 |-------|------|-------------|
 | `msg_id` | string | Message ID this turn belongs to |
 | `finish_reason` | `"stop" \| "length" \| "error" \| "max_turns"` | Why the turn ended. `stop`: model finished normally. `length`: hit max_tokens. `error`: provider/runtime error. `max_turns`: the engine hit the per-turn `max_turns` cap (the model did **not** fail) — offer a "Continue" affordance to resume the run rather than a model-error message. Hosts should treat `finish_reason` as an open string and tolerate future values. |
-| `usage` | object? | Token counts (optional; omitted when provider does not report usage) |
+| `usage` | object? | Token counts (optional; omitted when provider does not report usage). In protocol v0.2.0 the three input categories are disjoint: `input_tokens` is uncached input, `cache_read_tokens` is cached input read, and `cache_write_tokens` is input written to cache. Total input processed is their saturating sum. Billing consumers MUST price each category once at its applicable rate; they must not add cache counters to `input_tokens` and then price the cache counters again. |
+
+This v0.2.0 accounting semantic corrects the ambiguous v0.1.21 description
+without changing the JSON field names. A host that previously interpreted
+`input_tokens` as already including the cache counters must update before using
+these values for total-input telemetry, quota enforcement, or billing.
 
 ### 1.10 `error`
 
@@ -585,6 +590,26 @@ Success emits an updated `workspace_policy` receipt followed by an `info`
 event. Refusal emits an `info` event explaining the failed condition. The
 command never adds writable roots, changes approval posture, or disables the OS
 sandbox. Hosts should expose it only behind an explicit local approval UI.
+
+### 2.7b `continue_with_budget`
+
+Add explicit operator-authorized headroom to the active session after a
+provider budget stop:
+
+```json
+{
+  "type": "continue_with_budget",
+  "additional_tokens": 250000,
+  "additional_cost_usd": 2.50
+}
+```
+
+Both fields are optional individually, but at least one must be positive. The
+grant applies only to the current session; it does not widen another session or
+a per-user daily limit. Managed sessions reject interactive increases so a host
+cannot override an organization-controlled ceiling. Core reports acceptance or
+refusal with an `info` event. A host should expose this only as an explicit
+local action after showing the exhausted limit and requested headroom.
 
 ### 2.8 `add_mcp_server`
 
@@ -997,12 +1022,13 @@ Ready event for the session.
     "turn": 0,
     "model": "claude-3-5-haiku",
     "provider": "anthropic-family",
-    "input_tokens": 1000,
+    "input_tokens": 200,
     "output_tokens": 50,
     "cache_read": 800,
     "cache_write": 0,
     "cache_hit_rate": 0.8,
     "cost_usd": 0.0,
+    "cost_priced": false,
     "tool_calls": [
       {
         "call_id": "tu_01",
@@ -1027,12 +1053,13 @@ Ready event for the session.
 | `trace.turn` | u64 | Zero-indexed turn within the session. |
 | `trace.model` | string | Model identifier passed to the provider. |
 | `trace.provider` | string | **Schema-versioned.** W1 emitted coarse provider family (`"anthropic-family"` / `"openai-family"`). W6 upgraded this to the structured per-provider identity sourced from `ProviderCompat.provider_type`: one of `"anthropic"`, `"bedrock"`, `"vertex"`, `"openai"`, `"ollama"`, or `"unknown"`. Hosts MUST tolerate both shapes during the migration window. |
-| `trace.input_tokens` | u64 | Prompt tokens reported by the provider. |
+| `trace.input_tokens` | u64 | Uncached prompt tokens reported by the provider. Protocol v0.2.0 treats this as disjoint from `cache_read` and `cache_write`. |
 | `trace.output_tokens` | u64 | Completion tokens reported by the provider. |
 | `trace.cache_read` | u64 | Provider-reported cache read tokens. |
 | `trace.cache_write` | u64 | Provider-reported cache creation tokens. |
-| `trace.cache_hit_rate` | f64 | `cache_read / input_tokens`. 0.0 when input_tokens is 0. |
-| `trace.cost_usd` | f64 | USD cost for the turn. W6 populates this from the per-provider list-price rows on `ProviderCompat` (per-model pricing is W6.1). Stays `0.0` when no cost row is set (e.g. local providers like Ollama). |
+| `trace.cache_hit_rate` | f64 | `cache_read / (input_tokens + cache_read + cache_write)`, using a saturating denominator. `0.0` when total input is zero. |
+| `trace.cost_usd` | f64 | USD cost for the turn when `cost_priced` is true. A zero with `cost_priced: false` is not a free call. |
+| `trace.cost_priced` | bool | True for metered prices and known-free local inference; false when the active router/model has no authoritative price. Missing on legacy traces defaults to false. |
 | `trace.tool_calls` | array | One `ToolCallTrace` per tool call executed in this turn. |
 | `trace.hook_actions` | array | Hook action records. Empty until W2 wires the hook engine. |
 | `trace.source_product` | string | Always `"wayland-core"` (S5 attribution). |
@@ -1059,8 +1086,8 @@ to subscribe.
   "session_id": "sess-001",
   "total_cost_usd": 0.123456,
   "per_turn": [
-    { "turn": 0, "model": "claude-opus-4-7", "provider": "anthropic", "cost_usd": 0.05 },
-    { "turn": 1, "model": "claude-opus-4-7", "provider": "anthropic", "cost_usd": 0.073456 }
+    { "turn": 0, "model": "claude-opus-4-7", "provider": "anthropic", "cost_usd": 0.05, "priced": true },
+    { "turn": 1, "model": "claude-opus-4-7", "provider": "anthropic", "cost_usd": 0.073456, "priced": true }
   ]
 }
 ```
@@ -1068,8 +1095,8 @@ to subscribe.
 | Field | Type | Description |
 |---|---|---|
 | `session_id` | string | The session id that just terminated. |
-| `total_cost_usd` | f64 | Sum of `per_turn[].cost_usd`. Floating-point arithmetic — hosts that need exact accounting should sum `per_turn` themselves. |
-| `per_turn` | array | Per-turn cost rows. Each is `{ turn, model, provider, cost_usd }`. `provider` matches the structured per-provider identity used in `trace_event.trace.provider`. |
+| `total_cost_usd` | f64 | Sum of `per_turn[].cost_usd`. This is only a complete session price when every row has `priced: true`. |
+| `per_turn` | array | Per-turn cost rows. Each is `{ turn, model, provider, cost_usd, priced }`. `priced: false` means unpriced, never free; missing on legacy rows defaults to false. `provider` matches the structured per-provider identity used in `trace_event.trace.provider`. |
 
 #### Host conformance
 
@@ -1077,7 +1104,8 @@ to subscribe.
 flag. Hosts that did NOT see `cost_attribution: true` on the Ready event
 MUST drop the variant silently per the Host Decoder Contract. Hosts that
 opt in surface it via their cost UI (totals, per-session breakdown,
-billing-export, etc.). Per-turn cost remains available inline on
+billing-export, etc.). Hosts MUST render a row with `priced: false` as
+"unpriced", not `$0`. Per-turn cost remains available inline on
 `trace_event.trace.cost_usd` when `structured_traces` is also enabled.
 
 ### 1.N+2 sub_agent_event (W7)

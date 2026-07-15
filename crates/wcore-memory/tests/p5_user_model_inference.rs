@@ -25,6 +25,7 @@ fn turn_with_calls(turn: usize, tools: Vec<&str>) -> TurnTrace {
         cache_write: 0,
         cache_hit_rate: 0.0,
         cost_usd: 0.0,
+        cost_priced: false,
         tool_calls: tools
             .into_iter()
             .enumerate()

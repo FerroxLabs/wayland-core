@@ -26,9 +26,96 @@ pub struct ProviderAttemptEvidence {
 tokio::task_local! {
     static ATTEMPT_EVIDENCE: RefCell<Vec<ProviderAttemptEvidence>>;
     static ATTEMPT_OBSERVER: Option<Arc<dyn Fn(ProviderAttemptEvidence) + Send + Sync>>;
+    static MAX_RETRIES_OVERRIDE: u32;
+    static CONFIGURED_FALLBACK_ADMITTER: Option<ConfiguredFallbackAdmitter>;
 }
 
 pub type ProviderAttemptObserver = Arc<dyn Fn(ProviderAttemptEvidence) + Send + Sync>;
+pub type ConfiguredFallbackAdmitter =
+    Arc<dyn Fn(&str, &str, &str, &str, bool) -> Result<(), ProviderError> + Send + Sync>;
+
+/// Run `future` with a task-local ceiling on provider retry counts.
+///
+/// The ceiling applies to both generic provider retries and physical HTTP
+/// retries. Setting it to zero permits exactly one attempt. The scope is
+/// task-local, so concurrent provider calls retain their own retry policy.
+pub async fn scope_max_retries<F>(max_retries: u32, future: F) -> F::Output
+where
+    F: Future,
+{
+    let max_retries = effective_max_retries(max_retries);
+    MAX_RETRIES_OVERRIDE.scope(max_retries, future).await
+}
+
+/// Whether the current task-local scope forbids provider-local retry sends.
+///
+/// Provider implementations with manual HTTP/auth/capability retry sends must
+/// consult this in addition to using [`with_retry`] or
+/// [`builder_send_with_retry`]. Configured provider-chain fallback is admitted
+/// separately through [`admit_configured_fallback`].
+pub fn retries_disabled() -> bool {
+    MAX_RETRIES_OVERRIDE
+        .try_with(|max_retries| *max_retries == 0)
+        .unwrap_or(false)
+}
+
+/// Run `future` with a task-local admission hook for configured provider
+/// fallback. The hook runs synchronously immediately before every fallback
+/// provider is dispatched.
+pub async fn scope_configured_fallback_admitter<F>(
+    admitter: ConfiguredFallbackAdmitter,
+    future: F,
+) -> F::Output
+where
+    F: Future,
+{
+    CONFIGURED_FALLBACK_ADMITTER
+        .scope(Some(admitter), future)
+        .await
+}
+
+/// Admit one configured fallback provider before it is dispatched.
+///
+/// `previous_attempted` is false only when the previous provider was skipped
+/// without a physical send (for example because its circuit was already
+/// open). Without an installed hook, configured fallback remains enabled.
+pub fn admit_configured_fallback(
+    previous_provider: &str,
+    next_label: &str,
+    next_provider: &str,
+    next_model: &str,
+    previous_attempted: bool,
+) -> Result<(), ProviderError> {
+    CONFIGURED_FALLBACK_ADMITTER
+        .try_with(|admitter| {
+            admitter.as_ref().map_or(Ok(()), |admitter| {
+                admitter(
+                    previous_provider,
+                    next_label,
+                    next_provider,
+                    next_model,
+                    previous_attempted,
+                )
+            })
+        })
+        .unwrap_or(Ok(()))
+}
+
+/// Whether a provider error proves no paid request could have been sent.
+/// Keep this deliberately narrow: transport failures and HTTP responses are
+/// ambiguous and therefore remain conservatively chargeable.
+pub(crate) fn configured_fallback_previous_attempted(error: &ProviderError) -> bool {
+    !matches!(
+        error,
+        ProviderError::MissingApiKey | ProviderError::NotAttempted { .. }
+    )
+}
+
+fn effective_max_retries(configured: u32) -> u32 {
+    MAX_RETRIES_OVERRIDE
+        .try_with(|max_retries| configured.min(*max_retries))
+        .unwrap_or(configured)
+}
 
 /// Capture physical HTTP attempts made while `future` is running.
 ///
@@ -164,6 +251,7 @@ pub fn provider_failure_code(error: &ProviderError) -> String {
         }
         ProviderError::Connection(_) => "connection".to_string(),
         ProviderError::MissingApiKey => "missing_api_key".to_string(),
+        ProviderError::NotAttempted { .. } => "provider_not_attempted".to_string(),
         ProviderError::PremiumLocked { .. } => "premium_locked".to_string(),
         ProviderError::UpgradeRequired { .. } => "upgrade_required".to_string(),
         ProviderError::SpendCeilingUnresolved { .. } => "spend_ceiling_unresolved".to_string(),
@@ -182,6 +270,7 @@ where
     F: Fn() -> Fut,
     Fut: Future<Output = Result<T, ProviderError>>,
 {
+    let max_retries = effective_max_retries(max_retries);
     let mut backoff = INITIAL_BACKOFF;
     for attempt in 0..=max_retries {
         match f().await {
@@ -315,9 +404,10 @@ pub fn provider_error_from_egress(e: EgressError) -> ProviderError {
 pub async fn builder_send_with_retry(
     builder: EgressRequestBuilder,
 ) -> Result<reqwest::Response, ProviderError> {
+    let max_retries = effective_max_retries(DEFAULT_MAX_RETRIES);
     let mut backoff = INITIAL_BACKOFF;
     let mut last_err: Option<ProviderError> = None;
-    for attempt in 0..=DEFAULT_MAX_RETRIES {
+    for attempt in 0..=max_retries {
         // M2: a non-cloneable body cannot be retried — send the original
         // builder exactly once instead of failing with a misleading
         // "Connection" error. `try_clone()` is deterministic, so it fails
@@ -354,11 +444,11 @@ pub async fn builder_send_with_retry(
                 // returns the response so the provider reads the real body.
                 let status = resp.status().as_u16();
                 let transient_5xx = status >= 500 || status == 408;
-                if transient_5xx && attempt < DEFAULT_MAX_RETRIES {
+                if transient_5xx && attempt < max_retries {
                     record_attempt(Some(format!("http_{status}")), true);
                     tracing::warn!(
                         attempt = attempt + 1,
-                        total = DEFAULT_MAX_RETRIES + 1,
+                        total = max_retries + 1,
                         status,
                         "transient HTTP status; retrying"
                     );
@@ -385,19 +475,19 @@ pub async fn builder_send_with_retry(
                     // exactly as before — only now URL-stripped.
                     other => return Err(other),
                 };
-                if attempt < DEFAULT_MAX_RETRIES {
+                if attempt < max_retries {
                     record_attempt(Some(failure_code.clone()), true);
                     // M3 fix: 1-based attempt over total attempts.
                     tracing::warn!(
                         attempt = attempt + 1,
-                        total = DEFAULT_MAX_RETRIES + 1,
+                        total = max_retries + 1,
                         error = %provider_err,
                         "connection error; retrying"
                     );
                     tokio::time::sleep(backoff).await;
                     backoff = (backoff * 4).min(Duration::from_secs(4));
                 }
-                if attempt == DEFAULT_MAX_RETRIES {
+                if attempt == max_retries {
                     record_attempt(Some(failure_code), false);
                 }
                 last_err = Some(provider_err);
@@ -572,6 +662,8 @@ mod tests {
     use std::sync::atomic::{AtomicU32, Ordering};
 
     use serde_json::json;
+    use wiremock::matchers::method;
+    use wiremock::{Mock, MockServer, ResponseTemplate};
 
     use super::*;
     use crate::ProviderError;
@@ -580,6 +672,74 @@ mod tests {
     async fn test_retry_succeeds_first_try() {
         let result = with_retry(2, || async { Ok::<_, ProviderError>(42) }).await;
         assert_eq!(result.unwrap(), 42);
+    }
+
+    #[tokio::test]
+    async fn scoped_zero_disables_generic_retries() {
+        let attempts = Arc::new(AtomicU32::new(0));
+        let result = scope_max_retries(
+            0,
+            with_retry(DEFAULT_MAX_RETRIES, || {
+                let attempts = Arc::clone(&attempts);
+                async move {
+                    attempts.fetch_add(1, Ordering::SeqCst);
+                    Err::<(), _>(ProviderError::Connection("retryable".into()))
+                }
+            }),
+        )
+        .await;
+
+        assert!(result.is_err());
+        assert_eq!(attempts.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn retries_disabled_only_inside_zero_scope() {
+        assert!(!retries_disabled());
+        assert!(scope_max_retries(0, async { retries_disabled() }).await);
+        assert!(!scope_max_retries(1, async { retries_disabled() }).await);
+        assert!(
+            scope_max_retries(0, scope_max_retries(2, async { retries_disabled() })).await,
+            "a nested scope cannot weaken its parent's retry ceiling"
+        );
+    }
+
+    #[tokio::test]
+    async fn scoped_zero_limits_builder_to_one_physical_attempt() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(503))
+            .mount(&server)
+            .await;
+        let client =
+            wcore_egress::EgressClient::new().with_policy(Arc::new(wcore_egress::AllowAllPolicy));
+
+        let response = scope_max_retries(0, builder_send_with_retry(client.post(server.uri())))
+            .await
+            .expect("the final HTTP response is returned for provider parsing");
+
+        assert_eq!(response.status(), reqwest::StatusCode::SERVICE_UNAVAILABLE);
+        let requests = server.received_requests().await.expect("recorded requests");
+        assert_eq!(requests.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn builder_default_remains_three_physical_attempts() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(503))
+            .mount(&server)
+            .await;
+        let client =
+            wcore_egress::EgressClient::new().with_policy(Arc::new(wcore_egress::AllowAllPolicy));
+
+        let response = builder_send_with_retry(client.post(server.uri()))
+            .await
+            .expect("the final HTTP response is returned for provider parsing");
+
+        assert_eq!(response.status(), reqwest::StatusCode::SERVICE_UNAVAILABLE);
+        let requests = server.received_requests().await.expect("recorded requests");
+        assert_eq!(requests.len(), 3);
     }
 
     #[tokio::test]

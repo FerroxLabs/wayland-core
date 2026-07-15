@@ -11,6 +11,7 @@ use std::sync::Arc;
 use clap::Args;
 use wcore_agent::orchestration::anvil::forge::drive_climb_full;
 use wcore_agent::orchestration::anvil::seat::{materialize_driver_seat, materialize_valve_seat};
+use wcore_agent::spawner::SpawnerBudgetGovernance;
 use wcore_config::config::{CliArgs, Config, load_merged_config_file};
 use wcore_protocol::writer::{ProtocolEmitter, ProtocolWriter};
 
@@ -49,8 +50,32 @@ pub async fn run_forge(args: ForgeArgs) -> anyhow::Result<()> {
     let sandbox = Arc::new(wcore_sandbox::SandboxRegistry::required_for_session(
         session_cfg.tools.sandbox.as_deref(),
     )?);
-    let mut seat =
-        materialize_driver_seat(&cf.anvil, &session_cfg, Arc::clone(&egress_policy)).await?;
+    let budget_cfg = session_cfg.budget.with_smart_defaults();
+    let tracker_cfg = session_cfg
+        .session_cap
+        .as_ref()
+        .map(wcore_budget::BudgetConfig::with_smart_defaults)
+        .unwrap_or_else(|| budget_cfg.clone());
+    let provider_budget = Arc::new(parking_lot::Mutex::new(wcore_budget::BudgetTracker::new(
+        (&tracker_cfg).into(),
+    )));
+    let mut operational_budget = wcore_budget::ExecutionBudget::from(&budget_cfg);
+    operational_budget.max_tokens_in = None;
+    operational_budget.max_tokens_out = None;
+    operational_budget.max_cost_usd = None;
+    let governance = SpawnerBudgetGovernance::new(
+        provider_budget,
+        uuid::Uuid::new_v4().to_string(),
+        operational_budget.start_root(),
+        tokio_util::sync::CancellationToken::new(),
+    );
+    let mut seat = materialize_driver_seat(
+        &cf.anvil,
+        &session_cfg,
+        Arc::clone(&egress_policy),
+        Some(governance.clone()),
+    )
+    .await?;
     seat.spawner = seat
         .spawner
         .with_sandbox_runtime(std::sync::Arc::clone(&sandbox));
@@ -63,19 +88,20 @@ pub async fn run_forge(args: ForgeArgs) -> anyhow::Result<()> {
     // Valve seat (spec §6.4): the session/frontier model, read-only, one
     // diagnostic turn on a stall. Best-effort — a forge without a valve is
     // still a forge (it just stays cheap-dumb on a stall).
-    let valve_seat = match materialize_valve_seat(&session_cfg, egress_policy).await {
-        Ok(mut s) => {
-            s.spawner = s
-                .spawner
-                .with_sandbox_runtime(std::sync::Arc::clone(&sandbox));
-            eprintln!("forge: valve seat = {}", s.label);
-            Some(s)
-        }
-        Err(e) => {
-            eprintln!("forge: no valve seat ({e}); climbing without escalation");
-            None
-        }
-    };
+    let valve_seat =
+        match materialize_valve_seat(&session_cfg, egress_policy, Some(governance)).await {
+            Ok(mut s) => {
+                s.spawner = s
+                    .spawner
+                    .with_sandbox_runtime(std::sync::Arc::clone(&sandbox));
+                eprintln!("forge: valve seat = {}", s.label);
+                Some(s)
+            }
+            Err(e) => {
+                eprintln!("forge: no valve seat ({e}); climbing without escalation");
+                None
+            }
+        };
 
     // The top-level protocol writer — the AnvilReceipt is trusted ONLY from this
     // top-level emission (host trust boundary, spec §8).

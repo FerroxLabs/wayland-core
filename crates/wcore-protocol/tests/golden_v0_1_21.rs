@@ -499,12 +499,14 @@ fn golden_session_cost_v_w6() {
                 model: "claude-opus-4-7".into(),
                 provider: "anthropic".into(),
                 cost_usd: 0.05,
+                priced: true,
             },
             TurnCost {
                 turn: 1,
                 model: "claude-opus-4-7".into(),
                 provider: "anthropic".into(),
                 cost_usd: 0.073456,
+                priced: true,
             },
         ],
     };
@@ -518,13 +520,15 @@ fn golden_session_cost_v_w6() {
                 "turn": 0,
                 "model": "claude-opus-4-7",
                 "provider": "anthropic",
-                "cost_usd": 0.05
+                "cost_usd": 0.05,
+                "priced": true
             },
             {
                 "turn": 1,
                 "model": "claude-opus-4-7",
                 "provider": "anthropic",
-                "cost_usd": 0.073456
+                "cost_usd": 0.073456,
+                "priced": true
             }
         ]
     });

@@ -199,6 +199,56 @@ pub struct AgentSpawner {
     /// (session_id, user_id) the council charges against — same envelope as the
     /// parent turn. None ⇒ council spend is not charged. Propagated by clone_for_spawn.
     budget_identity: Option<(String, String)>,
+    /// Provider-call admission tracker shared by the parent engine and every
+    /// spawned child. This is distinct from the cap-less Crucible accumulator
+    /// above: it enforces the finite session token/cost envelope.
+    provider_budget_tracker: Option<Arc<parking_lot::Mutex<wcore_budget::BudgetTracker>>>,
+    /// Stable provider-budget identity shared with every child engine.
+    budget_session_id: Option<String>,
+    /// Parent execution envelope. Spawn/fork paths derive child views from it
+    /// so token, cost, process, runtime, and active-agent usage roll up.
+    execution_budget: Option<wcore_budget::ExecutionBudgetView>,
+    /// Keeps the standalone session's budget watcher alive for exactly as
+    /// long as the spawner and its clones can dispatch child work.
+    budget_guard: Option<Arc<crate::cancel::BudgetGuard>>,
+}
+
+/// Provider-spend, execution, and cancellation authority inherited by a
+/// transient spawner that is created after session bootstrap (for example a
+/// Council judge or an Anvil seat). Keeping these handles together prevents a
+/// convenience constructor from silently minting a fresh budget.
+#[derive(Clone)]
+pub struct SpawnerBudgetGovernance {
+    provider_budget_tracker: Arc<parking_lot::Mutex<wcore_budget::BudgetTracker>>,
+    budget_session_id: String,
+    execution_budget: wcore_budget::ExecutionBudgetView,
+    cancel: tokio_util::sync::CancellationToken,
+    budget_guard: Option<Arc<crate::cancel::BudgetGuard>>,
+}
+
+impl SpawnerBudgetGovernance {
+    pub fn new(
+        provider_budget_tracker: Arc<parking_lot::Mutex<wcore_budget::BudgetTracker>>,
+        budget_session_id: impl Into<String>,
+        execution_budget: wcore_budget::ExecutionBudgetView,
+        cancel: tokio_util::sync::CancellationToken,
+    ) -> Self {
+        Self {
+            provider_budget_tracker,
+            budget_session_id: budget_session_id.into(),
+            execution_budget,
+            cancel,
+            budget_guard: None,
+        }
+    }
+
+    pub(crate) fn with_budget_guard(
+        mut self,
+        budget_guard: Arc<crate::cancel::BudgetGuard>,
+    ) -> Self {
+        self.budget_guard = Some(budget_guard);
+        self
+    }
 }
 
 impl AgentSpawner {
@@ -216,6 +266,10 @@ impl AgentSpawner {
             resolver: None,
             budget_tracker: None,
             budget_identity: None,
+            provider_budget_tracker: None,
+            budget_session_id: None,
+            execution_budget: None,
+            budget_guard: None,
         }
     }
 
@@ -342,6 +396,91 @@ impl AgentSpawner {
         self.budget_identity.as_ref()
     }
 
+    /// Attach the finite provider-call envelope shared with the parent engine.
+    pub fn with_provider_budget(
+        mut self,
+        tracker: Arc<parking_lot::Mutex<wcore_budget::BudgetTracker>>,
+        session_id: impl Into<String>,
+    ) -> Self {
+        self.provider_budget_tracker = Some(tracker);
+        self.budget_session_id = Some(session_id.into());
+        self
+    }
+
+    /// Attach the parent execution envelope used to derive child budgets.
+    pub fn with_execution_budget(mut self, budget: wcore_budget::ExecutionBudgetView) -> Self {
+        self.execution_budget = Some(budget);
+        self
+    }
+
+    /// Install one previously captured session governance bundle.
+    pub fn with_budget_governance(mut self, governance: SpawnerBudgetGovernance) -> Self {
+        self.provider_budget_tracker = Some(governance.provider_budget_tracker);
+        self.budget_session_id = Some(governance.budget_session_id);
+        self.execution_budget = Some(governance.execution_budget);
+        self.cancel = governance.cancel;
+        self.budget_guard = governance.budget_guard;
+        self
+    }
+
+    /// Capture the complete finite envelope for a transient child spawner.
+    /// Production Smart sessions always return `Some`; legacy/test spawners
+    /// without an attached provider ledger return `None` rather than fabricating
+    /// an independent allowance.
+    pub fn budget_governance(&self) -> Option<SpawnerBudgetGovernance> {
+        let governance = SpawnerBudgetGovernance::new(
+            Arc::clone(self.provider_budget_tracker.as_ref()?),
+            self.budget_session_id.as_ref()?.clone(),
+            self.execution_budget.as_ref()?.clone(),
+            self.active_cancel_token(),
+        );
+        Some(match self.budget_guard.as_ref() {
+            Some(guard) => governance.with_budget_guard(Arc::clone(guard)),
+            None => governance,
+        })
+    }
+
+    fn enter_child_budget(
+        &self,
+    ) -> Result<
+        (
+            Option<wcore_budget::ExecutionBudgetView>,
+            Option<wcore_budget::AgentDepthGuard>,
+        ),
+        String,
+    > {
+        let Some(parent) = self.execution_budget.as_ref() else {
+            return Ok((None, None));
+        };
+        let child = parent.sub_budget(None);
+        let guard = child.enter_agent();
+        if let Some(reason) = child.first_exceeded_reason() {
+            let observed = child.observed_for(reason);
+            let limit = child.limit_for(reason);
+            drop(guard);
+            return Err(format!(
+                "child agent not started: budget cap '{reason}' exceeded (limit {limit}, observed {observed})"
+            ));
+        }
+        Ok((Some(child), Some(guard)))
+    }
+
+    fn bind_child_budget(
+        &self,
+        engine: &mut AgentEngine,
+        execution_budget: Option<wcore_budget::ExecutionBudgetView>,
+    ) {
+        if let Some(budget) = execution_budget {
+            engine.set_execution_budget(budget);
+        }
+        if let Some(tracker) = self.provider_budget_tracker.as_ref() {
+            engine.set_budget_tracker(Arc::clone(tracker));
+        }
+        if let Some(session_id) = self.budget_session_id.as_ref() {
+            engine.set_budget_session_id(session_id.clone());
+        }
+    }
+
     /// Resolve the provider a given sub-agent should run on.
     ///
     /// - **Unpinned** (`sub.provider == None`): inherit the parent provider —
@@ -379,10 +518,15 @@ impl AgentSpawner {
             Ok(p) => p,
             Err(result) => return result,
         };
+        let (child_budget, _agent_guard) = match self.enter_child_budget() {
+            Ok(budget) => budget,
+            Err(error) => return SubAgentResult::error(&sub_config.name, &error),
+        };
 
         let tools = self.child_tool_registry(&[]);
         let output: Arc<dyn OutputSink> = Arc::new(NullSink);
         let mut engine = AgentEngine::new_with_provider(provider, config, tools, output);
+        self.bind_child_budget(&mut engine, child_budget);
         engine.set_egress_policy(self.egress_policy.clone());
         // Bind the child to the parent cancel token so a host cancel stops it.
         engine.set_cancel_token(self.active_cancel_token().child_token());
@@ -622,6 +766,10 @@ impl AgentSpawner {
             Ok(p) => p,
             Err(result) => return result,
         };
+        let (child_budget, _agent_guard) = match self.enter_child_budget() {
+            Ok(budget) => budget,
+            Err(error) => return SubAgentResult::error(&sub_config.name, &error),
+        };
 
         let tools = self.child_tool_registry(&[]);
         // v0.9.4 W1.1b: keep a clone of the sink BEFORE moving it into the
@@ -633,6 +781,7 @@ impl AgentSpawner {
         };
         let terminal_output = Arc::clone(&output);
         let mut engine = AgentEngine::new_with_provider(provider, config, tools, output);
+        self.bind_child_budget(&mut engine, child_budget);
         engine.set_egress_policy(self.egress_policy.clone());
         // Bind the child to the parent cancel token so a host cancel stops it.
         engine.set_cancel_token(self.active_cancel_token().child_token());
@@ -757,6 +906,10 @@ impl AgentSpawner {
             // the per-session/day envelope.
             budget_tracker: self.budget_tracker.clone(),
             budget_identity: self.budget_identity.clone(),
+            provider_budget_tracker: self.provider_budget_tracker.clone(),
+            budget_session_id: self.budget_session_id.clone(),
+            execution_budget: self.execution_budget.clone(),
+            budget_guard: self.budget_guard.clone(),
         }
     }
 
@@ -830,10 +983,15 @@ impl Spawner for AgentSpawner {
             Ok(p) => p,
             Err(result) => return result,
         };
+        let (child_budget, _agent_guard) = match self.enter_child_budget() {
+            Ok(budget) => budget,
+            Err(error) => return SubAgentResult::error(&sub_config.name, &error),
+        };
 
         let tools = self.child_tool_registry(&overrides.allowed_tools);
         let output: Arc<dyn OutputSink> = Arc::new(NullSink);
         let mut engine = AgentEngine::new_with_provider(provider, config, tools, output);
+        self.bind_child_budget(&mut engine, child_budget);
         engine.set_egress_policy(self.egress_policy.clone());
         // Bind the child to the parent cancel token so a host cancel stops it.
         engine.set_cancel_token(self.active_cancel_token().child_token());
@@ -1049,6 +1207,134 @@ mod spawn_task_set_tests {
             let _drop_notify = DropNotify(self.dropped.lock().expect("dropped mutex").take());
             std::future::pending().await
         }
+    }
+
+    struct CountingErrorProvider {
+        calls: AtomicUsize,
+    }
+
+    #[async_trait]
+    impl LlmProvider for CountingErrorProvider {
+        async fn stream(
+            &self,
+            _request: &LlmRequest,
+        ) -> Result<tokio::sync::mpsc::Receiver<LlmEvent>, ProviderError> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            Err(ProviderError::Connection("test provider called".into()))
+        }
+    }
+
+    fn bounded_child(name: &str) -> SubAgentConfig {
+        SubAgentConfig {
+            name: name.into(),
+            prompt: "perform bounded work".into(),
+            max_turns: 1,
+            max_tokens: 16,
+            system_prompt: None,
+            provider: None,
+            model: None,
+            temperature: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn parallel_children_cannot_bypass_parent_agent_cap() {
+        let provider = Arc::new(CountingErrorProvider {
+            calls: AtomicUsize::new(0),
+        });
+        let budget = wcore_budget::ExecutionBudget {
+            max_agent_depth: Some(0),
+            ..Default::default()
+        }
+        .start_root();
+        let spawner =
+            AgentSpawner::new(provider.clone(), Config::default()).with_execution_budget(budget);
+
+        let results = spawner
+            .spawn_parallel(vec![bounded_child("one"), bounded_child("two")])
+            .await;
+
+        assert!(results.iter().all(|result| result.is_error));
+        assert!(
+            results
+                .iter()
+                .all(|result| result.text.contains("max_agent_depth"))
+        );
+        assert_eq!(provider.calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn child_provider_call_uses_parent_session_reservation() {
+        let provider = Arc::new(CountingErrorProvider {
+            calls: AtomicUsize::new(0),
+        });
+        let tracker = Arc::new(parking_lot::Mutex::new(wcore_budget::BudgetTracker::new(
+            wcore_budget::BudgetCap::builder()
+                .per_session_tokens(1)
+                .build(),
+        )));
+        let spawner = AgentSpawner::new(provider.clone(), Config::default())
+            .with_provider_budget(tracker, "shared-session");
+
+        let result = spawner.spawn_one(bounded_child("bounded")).await;
+
+        assert!(result.is_error, "budget refusal must fail the child loudly");
+        assert_eq!(provider.calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn transient_governance_reuses_parent_authority_handles() {
+        let provider: Arc<dyn LlmProvider> = Arc::new(CountingErrorProvider {
+            calls: AtomicUsize::new(0),
+        });
+        let provider_budget = Arc::new(parking_lot::Mutex::new(wcore_budget::BudgetTracker::new(
+            wcore_budget::BudgetCap::builder()
+                .per_session_tokens(32)
+                .build(),
+        )));
+        let execution_budget = wcore_budget::ExecutionBudget {
+            max_tokens_in: Some(1),
+            ..Default::default()
+        }
+        .start_root();
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let parent = AgentSpawner::new(Arc::clone(&provider), Config::default())
+            .with_provider_budget(Arc::clone(&provider_budget), "shared-session")
+            .with_execution_budget(execution_budget.clone())
+            .with_cancel(cancel.clone());
+        let governance = parent
+            .budget_governance()
+            .expect("a fully governed parent must export its existing handles");
+
+        let transient =
+            AgentSpawner::new(provider, Config::default()).with_budget_governance(governance);
+
+        assert!(Arc::ptr_eq(
+            transient
+                .provider_budget_tracker
+                .as_ref()
+                .expect("provider budget must transfer"),
+            &provider_budget,
+        ));
+        assert_eq!(
+            transient.budget_session_id.as_deref(),
+            Some("shared-session")
+        );
+        transient
+            .execution_budget
+            .as_ref()
+            .expect("execution budget must transfer")
+            .record_tokens(2, 0);
+        assert_eq!(
+            execution_budget.first_exceeded_reason(),
+            Some("max_tokens_in"),
+            "the transferred view must share the parent's execution ledger"
+        );
+        cancel.cancel();
+        assert!(
+            transient.active_cancel_token().is_cancelled(),
+            "the transient spawner must inherit parent cancellation"
+        );
     }
 
     #[tokio::test]

@@ -299,6 +299,18 @@ impl ToolOutputSink for NullToolOutputSink {
     fn emit_chunk(&self, _chunk: &str) {}
 }
 
+/// Host resource class for one concrete tool invocation.
+///
+/// This is deliberately separate from [`ToolCategory`]: `Exec` describes
+/// authority/UX, while this enum says whether dispatch must reserve one of the
+/// session's finite OS-process slots. Tools that can reach a subprocess through
+/// a nested dispatcher (for example `Script`) are process-spawning too.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ToolExecutionClass {
+    InProcess,
+    ProcessSpawning,
+}
+
 /// A tool that the agent can invoke
 #[async_trait]
 pub trait Tool: Send + Sync {
@@ -431,6 +443,13 @@ pub trait Tool: Send + Sync {
         self.category()
     }
 
+    /// Resource class for this concrete invocation. The orchestration layer
+    /// calls this before dispatch so a process slot can be reserved atomically.
+    /// Most tools stay in-process; subprocess-capable tools must opt in.
+    fn execution_class_for(&self, _input: &Value) -> ToolExecutionClass {
+        ToolExecutionClass::InProcess
+    }
+
     /// Whether this tool's schema should be deferred (sent as name-only stub).
     /// Override to `true` for tools with large schemas or infrequent use.
     fn is_deferred(&self) -> bool {
@@ -506,6 +525,9 @@ impl<T: Tool + ?Sized> Tool for std::sync::Arc<T> {
     }
     fn category_for(&self, input: &Value) -> ToolCategory {
         (**self).category_for(input)
+    }
+    fn execution_class_for(&self, input: &Value) -> ToolExecutionClass {
+        (**self).execution_class_for(input)
     }
     fn is_deferred(&self) -> bool {
         (**self).is_deferred()

@@ -203,6 +203,7 @@ impl PricingRefresher {
 fn prices_equal(a: &ModelPrice, b: &ModelPrice) -> bool {
     (a.input_per_mtok_usd - b.input_per_mtok_usd).abs() < 1e-9
         && (a.output_per_mtok_usd - b.output_per_mtok_usd).abs() < 1e-9
+        && a.billing == b.billing
 }
 
 fn openrouter_to_catalog(raw: OpenRouterResponse) -> PricingCatalog {
@@ -234,6 +235,7 @@ fn openrouter_to_catalog(raw: OpenRouterResponse) -> PricingCatalog {
             output_per_mtok_usd,
             cache_read_per_mtok_usd: None,
             cache_write_per_mtok_usd: None,
+            billing: crate::BillingClassification::Metered,
         };
         // OpenRouter model ids are like "anthropic/claude-opus-4-7" — split on /
         if let Some((prov, model_id)) = m.id.split_once('/') {

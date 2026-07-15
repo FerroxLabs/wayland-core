@@ -307,8 +307,10 @@ pub async fn run_council(
                         if proposal.is_usable() {
                             usable_count += 1;
                         }
-                        let charged_tokens =
-                            proposal.usage.input_tokens + proposal.usage.output_tokens;
+                        let charged_tokens = proposal
+                            .usage
+                            .total_input_tokens()
+                            .saturating_add(proposal.usage.output_tokens);
                         if charged_tokens > 0
                             && let (Some(tracker), Some((sess, user))) =
                                 (spawner.budget_tracker(), spawner.budget_identity())
@@ -383,7 +385,8 @@ pub async fn run_council(
                     base.clone(),
                     roster.aggregator_temperature,
                 )
-                .with_egress_policy(spawner.egress_policy());
+                .with_egress_policy(spawner.egress_policy())
+                .with_budget_governance(spawner.budget_governance());
                 Some(agg.aggregate(task, &proposals).await)
             }
             Err(_) => None,
@@ -405,7 +408,10 @@ pub async fn run_council(
         aggregator_provenance.as_ref(),
         aggregate.as_ref(),
     ) {
-        let total = agg.usage.input_tokens + agg.usage.output_tokens;
+        let total = agg
+            .usage
+            .total_input_tokens()
+            .saturating_add(agg.usage.output_tokens);
         if total > 0 {
             let usd =
                 CouncilSpend::usd_for_usage(prov, model.as_deref(), &agg.usage, roster.flux_markup);

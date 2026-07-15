@@ -1289,8 +1289,7 @@ struct StreamState {
     input_tokens: u64,
     output_tokens: u64,
     /// Cache-read (prompt cache hit) tokens reported by the chat path's usage
-    /// chunk. Informational only — `input_tokens` already includes these on the
-    /// OpenAI chat surface, so this is not added to/subtracted from input.
+    /// chunk. Disjoint from `input_tokens`, which contains cache misses only.
     cache_read_tokens: u64,
     /// Deferred Done event: populated when finish_reason arrives, emitted on
     /// [DONE] so the final usage-only chunk has a chance to update token counts.
@@ -1450,11 +1449,16 @@ impl LlmProvider for OpenAIProvider {
             // tools`. The request is otherwise valid, so rebuild the body
             // without the `tools` array and retry once on the same host so the
             // turn completes instead of surfacing a raw provider 400. Only fires
-            // when tools were actually attached.
+            // when tools were actually attached and the caller has not disabled
+            // provider-local retries (the engine does so for per-send budget
+            // admission).
             Err(ProviderError::Api {
                 status,
                 ref message,
-            }) if body_has_tools && is_tools_unsupported_error(status, message) => {
+            }) if body_has_tools
+                && !crate::retry::retries_disabled()
+                && is_tools_unsupported_error(status, message) =>
+            {
                 crate::retry::mark_last_attempt_retrying();
                 tracing::warn!(
                     model = %request.model,
@@ -1486,9 +1490,11 @@ impl LlmProvider for OpenAIProvider {
             // may belong to the provider's alternate platform (e.g. Moonshot's
             // `api.moonshot.cn` vs `.ai`). When a fallback host is configured
             // and we haven't already pinned it, retry the SAME key there; pin it
-            // for the session on success. See `compat.auth_fallback_base_url`.
+            // for the session on success. Suppressed when the caller governs
+            // retry admission. See `compat.auth_fallback_base_url`.
             Err(ProviderError::Api { status, .. })
                 if matches!(status, 401 | 403)
+                    && !crate::retry::retries_disabled()
                     && self
                         .compat
                         .auth_fallback_base_url
@@ -1887,33 +1893,32 @@ fn parse_sse_chunk(data: &str, state: &mut StreamState) -> Vec<LlmEvent> {
 
     // Extract usage if present
     if let Some(usage) = json.get("usage") {
-        let base_prompt = usage["prompt_tokens"]
-            .as_u64()
-            .unwrap_or(state.input_tokens);
-
-        // DeepSeek-style: prompt_cache_hit_tokens is reported separately and
-        // prompt_tokens only contains the cache-miss portion.
-        // Add it to get the true total prompt size.
-        let cache_hit = usage["prompt_cache_hit_tokens"].as_u64().unwrap_or(0);
-
-        state.input_tokens = base_prompt + cache_hit;
         state.output_tokens = usage["completion_tokens"]
             .as_u64()
             .unwrap_or(state.output_tokens);
 
-        // Cache-read accounting. DeepSeek reports the hit count in the separate
-        // `prompt_cache_hit_tokens` field (cache-miss-only prompt_tokens); the
-        // OpenAI-standard surface reports it under
-        // `prompt_tokens_details.cached_tokens` (prompt_tokens already total).
-        // Either way the cache-read count is informational and must be surfaced
-        // so chat-path sessions show cache savings, matching the Responses path.
+        // Normalize provider-specific usage into TokenUsage's disjoint input
+        // categories. Both DeepSeek and OpenAI report total input in
+        // `prompt_tokens`. DeepSeek additionally reports explicit hit/miss
+        // counters; OpenAI reports cached input as a subset under details.
+        let deepseek_cache_hit = usage.get("prompt_cache_hit_tokens").and_then(Value::as_u64);
+        let deepseek_cache_miss = usage
+            .get("prompt_cache_miss_tokens")
+            .and_then(Value::as_u64);
         let cached_details = usage
             .get("prompt_tokens_details")
             .and_then(|d| d.get("cached_tokens"))
             .and_then(Value::as_u64)
             .unwrap_or(0);
-        if cache_hit > 0 || cached_details > 0 {
-            state.cache_read_tokens = cache_hit.max(cached_details);
+        if let Some(prompt_tokens) = usage.get("prompt_tokens").and_then(Value::as_u64) {
+            if let Some(cache_hit) = deepseek_cache_hit {
+                state.input_tokens =
+                    deepseek_cache_miss.unwrap_or_else(|| prompt_tokens.saturating_sub(cache_hit));
+                state.cache_read_tokens = cache_hit;
+            } else {
+                state.input_tokens = prompt_tokens.saturating_sub(cached_details);
+                state.cache_read_tokens = cached_details;
+            }
         }
     }
 
@@ -5060,30 +5065,31 @@ mod tests {
     }
 
     #[test]
-    fn usage_includes_prompt_cache_hit_tokens() {
-        // DeepSeek reports prompt_cache_hit_tokens separately;
-        // input_tokens should be the sum of prompt_tokens + prompt_cache_hit_tokens
+    fn usage_keeps_deepseek_cache_categories_disjoint() {
+        // DeepSeek defines prompt_tokens as hit + miss. Canonical input keeps
+        // the explicit miss count disjoint from cache reads.
         let mut state = StreamState::new();
 
-        let chunk = r#"{"choices":[{"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":500,"completion_tokens":100,"prompt_cache_hit_tokens":999500}}"#;
+        let chunk = r#"{"choices":[{"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":1000000,"completion_tokens":100,"prompt_cache_hit_tokens":999500,"prompt_cache_miss_tokens":500}}"#;
         let _ = parse_sse_chunk(chunk, &mut state);
 
-        assert_eq!(state.input_tokens, 1_000_000);
+        assert_eq!(state.input_tokens, 500);
         assert_eq!(state.output_tokens, 100);
+        assert_eq!(state.cache_read_tokens, 999_500);
     }
 
     #[test]
     fn usage_with_prompt_tokens_details_cached() {
-        // OpenAI standard: prompt_tokens already includes cached_tokens (it's the total)
-        // prompt_tokens_details.cached_tokens is informational only
+        // OpenAI standard: prompt_tokens includes cached_tokens, so normalize
+        // input_tokens to the uncached portion.
         let mut state = StreamState::new();
 
         let chunk = r#"{"choices":[{"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":1000000,"completion_tokens":100,"prompt_tokens_details":{"cached_tokens":999000}}}"#;
         let _ = parse_sse_chunk(chunk, &mut state);
 
-        // prompt_tokens is already the full total for OpenAI
-        assert_eq!(state.input_tokens, 1_000_000);
+        assert_eq!(state.input_tokens, 1_000);
         assert_eq!(state.output_tokens, 100);
+        assert_eq!(state.cache_read_tokens, 999_000);
     }
 
     #[test]
@@ -5091,20 +5097,23 @@ mod tests {
         // Rank 39: the chat path must surface cache-read tokens in the Done
         // event (like the Responses path), not hardcode 0. OpenAI-standard
         // reports the hit count under prompt_tokens_details.cached_tokens while
-        // prompt_tokens stays the full total — so input_tokens is unchanged.
+        // prompt_tokens is the full total.
         let mut state = StreamState::new();
 
         let chunk = r#"{"choices":[{"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":1000,"completion_tokens":50,"prompt_tokens_details":{"cached_tokens":800}}}"#;
         let _ = parse_sse_chunk(chunk, &mut state);
 
-        assert_eq!(state.input_tokens, 1000, "prompt_tokens stays the total");
+        assert_eq!(
+            state.input_tokens, 200,
+            "input_tokens contains cache misses"
+        );
         assert_eq!(state.cache_read_tokens, 800);
 
         let done = state.flush_done().expect("pending_done should be Some");
         match done {
             LlmEvent::Done { usage, .. } => {
                 assert_eq!(usage.cache_read_tokens, 800);
-                assert_eq!(usage.input_tokens, 1000);
+                assert_eq!(usage.input_tokens, 200);
             }
             other => panic!("expected Done, got {other:?}"),
         }
@@ -5112,14 +5121,17 @@ mod tests {
 
     #[test]
     fn chat_path_cache_read_from_deepseek_hit_field() {
-        // DeepSeek reports the hit count separately and prompt_tokens carries
-        // only the cache-miss portion; cache_read_tokens must reflect the hit.
+        // Some OpenAI-compatible DeepSeek surfaces omit the explicit miss field.
+        // Derive misses from DeepSeek's documented prompt total minus cache hits.
         let mut state = StreamState::new();
 
-        let chunk = r#"{"choices":[{"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":200,"completion_tokens":10,"prompt_cache_hit_tokens":800}}"#;
+        let chunk = r#"{"choices":[{"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":1000,"completion_tokens":10,"prompt_cache_hit_tokens":800}}"#;
         let _ = parse_sse_chunk(chunk, &mut state);
 
-        assert_eq!(state.input_tokens, 1000, "miss + hit = total prompt");
+        assert_eq!(
+            state.input_tokens, 200,
+            "input_tokens contains cache misses"
+        );
         assert_eq!(state.cache_read_tokens, 800);
     }
 

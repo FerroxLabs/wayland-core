@@ -734,7 +734,11 @@ fn parse_gemini_models(body: &str) -> anyhow::Result<Vec<ModelInfo>> {
 /// Streaming-state accumulator for a single Gemini response.
 #[derive(Default)]
 pub(crate) struct GeminiStreamState {
-    /// Final usageMetadata, if any chunk emitted one.
+    /// Total effective prompt size reported by Gemini. This includes cached
+    /// content and is retained separately so usage fields can arrive in either
+    /// order across SSE chunks.
+    prompt_tokens_total: u64,
+    /// Canonical uncached input tokens (total prompt minus cached content).
     input_tokens: u64,
     output_tokens: u64,
     cache_read_tokens: u64,
@@ -902,10 +906,13 @@ pub(crate) fn parse_sse_chunk(data: &str, state: &mut GeminiStreamState) -> Vec<
         }
     };
 
-    // Usage metadata may appear on any chunk; latest wins.
+    // Usage metadata may appear on any chunk. Retain the raw total and cached
+    // counters independently, then normalize after every update so split SSE
+    // fields are order-independent. Gemini documents promptTokenCount as the
+    // total effective prompt size, including cachedContentTokenCount.
     if let Some(usage) = json.get("usageMetadata") {
         if let Some(v) = usage.get("promptTokenCount").and_then(Value::as_u64) {
-            state.input_tokens = v;
+            state.prompt_tokens_total = v;
         }
         if let Some(v) = usage.get("candidatesTokenCount").and_then(Value::as_u64) {
             state.output_tokens = v;
@@ -915,6 +922,9 @@ pub(crate) fn parse_sse_chunk(data: &str, state: &mut GeminiStreamState) -> Vec<
         if let Some(v) = usage.get("cachedContentTokenCount").and_then(Value::as_u64) {
             state.cache_read_tokens = v;
         }
+        state.input_tokens = state
+            .prompt_tokens_total
+            .saturating_sub(state.cache_read_tokens);
     }
 
     let Some(candidate) = json["candidates"].as_array().and_then(|c| c.first()) else {
@@ -1557,6 +1567,53 @@ mod tests {
         assert_eq!(state.final_finish_reason.as_deref(), Some("STOP"));
         assert_eq!(state.input_tokens, 12);
         assert_eq!(state.output_tokens, 3);
+    }
+
+    #[test]
+    fn parse_sse_chunk_normalizes_cached_usage_independent_of_field_order() {
+        let prompt = r#"{"usageMetadata":{"promptTokenCount":100}}"#;
+        let cached = r#"{"usageMetadata":{"cachedContentTokenCount":80}}"#;
+
+        for frames in [[prompt, cached], [cached, prompt]] {
+            let mut state = GeminiStreamState::default();
+            for frame in frames {
+                parse_sse_chunk(frame, &mut state);
+            }
+
+            assert_eq!(state.prompt_tokens_total, 100);
+            assert_eq!(
+                state.input_tokens, 20,
+                "only cache misses are canonical input"
+            );
+            assert_eq!(state.cache_read_tokens, 80);
+        }
+    }
+
+    #[test]
+    fn gemini_sse_done_keeps_cached_usage_disjoint_in_either_chunk_order() {
+        let prompt_first = "data: {\"usageMetadata\":{\"promptTokenCount\":100}}\r\n\r\ndata: {\"candidates\":[{\"finishReason\":\"STOP\"}],\"usageMetadata\":{\"cachedContentTokenCount\":80,\"candidatesTokenCount\":3}}\r\n\r\n";
+        let cache_first = "data: {\"usageMetadata\":{\"cachedContentTokenCount\":80}}\r\n\r\ndata: {\"candidates\":[{\"finishReason\":\"STOP\"}],\"usageMetadata\":{\"promptTokenCount\":100,\"candidatesTokenCount\":3}}\r\n\r\n";
+
+        for fixture in [prompt_first, cache_first] {
+            let (_, terminal) = drive_stream(fixture.as_bytes(), 7);
+            let usage = match terminal {
+                Ok(Some(LlmEvent::Done { usage, .. })) => usage,
+                other => panic!("expected a terminal Done event, got {other:?}"),
+            };
+            assert_eq!(usage.input_tokens, 20);
+            assert_eq!(usage.cache_read_tokens, 80);
+            assert_eq!(usage.output_tokens, 3);
+        }
+    }
+
+    #[test]
+    fn parse_sse_chunk_saturates_malformed_cached_count_above_prompt_total() {
+        let mut state = GeminiStreamState::default();
+        let data = r#"{"usageMetadata":{"promptTokenCount":10,"cachedContentTokenCount":12}}"#;
+        parse_sse_chunk(data, &mut state);
+
+        assert_eq!(state.input_tokens, 0);
+        assert_eq!(state.cache_read_tokens, 12);
     }
 
     // --- map_gemini_finish_reason ---

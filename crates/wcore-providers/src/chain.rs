@@ -59,7 +59,7 @@ fn is_chain_retryable(e: &ProviderError) -> bool {
         ProviderError::ContextOverflow { .. } => false,
         // Missing credential is a config error the user must fix; failing over
         // would only mask it. Terminal.
-        ProviderError::MissingApiKey => false,
+        ProviderError::MissingApiKey | ProviderError::NotAttempted { .. } => false,
         // Flux capability / entitlement gates (402): terminal — surface the
         // typed message. Another provider can't grant a Flux-only capability
         // or resolve this account's spend ceiling.
@@ -136,12 +136,25 @@ impl LlmProvider for ProviderChain {
             );
         }
 
+        let mut previous_provider = None::<(&str, bool)>;
         for slot in &self.providers {
+            if let Some((previous_provider, previous_attempted)) = previous_provider {
+                crate::retry::admit_configured_fallback(
+                    previous_provider,
+                    &slot.name,
+                    &slot.name,
+                    &request.model,
+                    previous_attempted,
+                )?;
+            }
             attempts += 1;
             match slot.provider.stream(request).await {
                 Ok(rx) => return Ok(rx),
                 Err(e) if is_chain_retryable(&e) => {
+                    let previous_attempted =
+                        crate::retry::configured_fallback_previous_attempted(&e);
                     last_err = Some(e);
+                    previous_provider = Some((&slot.name, previous_attempted));
                     // continue to next provider
                 }
                 Err(terminal) => return Err(terminal),
@@ -237,6 +250,82 @@ mod tests {
         chain.stream(&dummy_request()).await.unwrap();
         assert_eq!(c1.load(Ordering::SeqCst), 1, "p1 must be called once");
         assert_eq!(c2.load(Ordering::SeqCst), 1, "p2 must be called once");
+    }
+
+    #[tokio::test]
+    async fn scoped_zero_preserves_configured_provider_fallback() {
+        let c1 = Arc::new(AtomicUsize::new(0));
+        let c2 = Arc::new(AtomicUsize::new(0));
+        let admissions = Arc::new(AtomicUsize::new(0));
+        let chain = ProviderChain::new(vec![
+            (
+                "p1",
+                err_provider(
+                    || ProviderError::Api {
+                        status: 503,
+                        message: "overloaded".into(),
+                    },
+                    c1.clone(),
+                ),
+            ),
+            ("p2", ok_provider(c2.clone())),
+        ]);
+
+        let admission_count = Arc::clone(&admissions);
+        let admitter: crate::retry::ConfiguredFallbackAdmitter =
+            Arc::new(move |previous, next, _, _, previous_attempted| {
+                assert_eq!((previous, next), ("p1", "p2"));
+                assert!(previous_attempted);
+                admission_count.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            });
+        let result = crate::retry::scope_configured_fallback_admitter(
+            admitter,
+            crate::retry::scope_max_retries(0, chain.stream(&dummy_request())),
+        )
+        .await;
+
+        result.expect("configured fallback must remain available when nested retries are disabled");
+        assert_eq!(c1.load(Ordering::SeqCst), 1);
+        assert_eq!(admissions.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            c2.load(Ordering::SeqCst),
+            1,
+            "zero-retry scope limits each provider send, not configured fallback order"
+        );
+    }
+
+    #[tokio::test]
+    async fn configured_fallback_denial_prevents_next_provider_dispatch() {
+        let c1 = Arc::new(AtomicUsize::new(0));
+        let c2 = Arc::new(AtomicUsize::new(0));
+        let chain = ProviderChain::new(vec![
+            (
+                "p1",
+                err_provider(
+                    || ProviderError::Connection("primary down".into()),
+                    c1.clone(),
+                ),
+            ),
+            ("p2", ok_provider(c2.clone())),
+        ]);
+        let admitter: crate::retry::ConfiguredFallbackAdmitter = Arc::new(|_, _, _, _, _| {
+            Err(ProviderError::Api {
+                status: 400,
+                message: "fallback budget denied".into(),
+            })
+        });
+
+        let error = crate::retry::scope_configured_fallback_admitter(
+            admitter,
+            chain.stream(&dummy_request()),
+        )
+        .await
+        .unwrap_err();
+
+        assert!(matches!(error, ProviderError::Api { status: 400, .. }));
+        assert_eq!(c1.load(Ordering::SeqCst), 1);
+        assert_eq!(c2.load(Ordering::SeqCst), 0);
     }
 
     /// chain of 2: first returns 400 → second NOT tried → first error returned

@@ -16,7 +16,7 @@ use wcore_providers::LlmProvider;
 use wcore_types::message::TokenUsage;
 
 use super::proposal::{AggregateResult, Proposal, build_synthesis_prompt};
-use crate::spawner::{AgentSpawner, SubAgentConfig};
+use crate::spawner::{AgentSpawner, SpawnerBudgetGovernance, SubAgentConfig};
 
 /// Fuses council proposals into a single answer.
 #[async_trait]
@@ -46,6 +46,8 @@ pub struct LlmSynthesisAggregator {
     /// Immutable outbound authority inherited from the council's parent
     /// session. The synthesis child is created after bootstrap scope exits.
     egress_policy: wcore_egress::SharedPolicy,
+    /// Finite parent-session authority for the transient synthesis spawner.
+    budget_governance: Option<SpawnerBudgetGovernance>,
     /// Crucible #3: sampling temperature for the synthesis sub-agent
     /// (convergence — runs cooler than the proposers).
     temperature: f32,
@@ -63,12 +65,18 @@ impl LlmSynthesisAggregator {
             model,
             base,
             egress_policy: wcore_egress::default_policy(),
+            budget_governance: None,
             temperature,
         }
     }
 
     pub fn with_egress_policy(mut self, policy: wcore_egress::SharedPolicy) -> Self {
         self.egress_policy = policy;
+        self
+    }
+
+    pub fn with_budget_governance(mut self, governance: Option<SpawnerBudgetGovernance>) -> Self {
+        self.budget_governance = governance;
         self
     }
 
@@ -107,8 +115,11 @@ impl Aggregator for LlmSynthesisAggregator {
         // tool registry, so even a successful injection in a proposal cannot
         // reach a side-effecting tool. The provider is the (already-resolved)
         // aggregator provider; `model` is applied via child_config (T2).
-        let spawner = AgentSpawner::new(self.provider.clone(), self.base.clone())
+        let mut spawner = AgentSpawner::new(self.provider.clone(), self.base.clone())
             .with_egress_policy(Arc::clone(&self.egress_policy));
+        if let Some(governance) = self.budget_governance.clone() {
+            spawner = spawner.with_budget_governance(governance);
+        }
         let result = spawner
             .spawn_one(SubAgentConfig {
                 name: "__council_aggregator__".to_string(),

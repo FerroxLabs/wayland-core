@@ -426,6 +426,7 @@ pub async fn run_with_binary(
         &TempEnvOptions {
             budget_max_cost_usd: (scenario.max_total_cost_usd > 0.0)
                 .then_some(scenario.max_total_cost_usd),
+            ..TempEnvOptions::default()
         },
     )?;
     run_session_in(scenario, provider, bin, env.path(), Some(env.home())).await

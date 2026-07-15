@@ -1019,6 +1019,11 @@ fn default_max_tokens() -> u32 {
     // allow. Treated as a CAP, never sent raw.
     64000
 }
+/// Finite but deliberately generous Smart turn envelope. Ordinary long builds
+/// remain governed primarily by token/cost/wall-time caps; this catches a
+/// low-usage provider or novel-tool loop that otherwise makes no bounded
+/// progress for the full session lifetime.
+const SMART_MAX_TURNS: usize = 512;
 fn default_allow_list() -> Vec<String> {
     // Read-only info-gathering tools — no destructive action, safe to
     // auto-approve. Anything that writes, executes, or sends a message
@@ -2024,7 +2029,11 @@ impl Config {
         // unknown model on an omit-safe provider when this is `false`.
         let max_tokens_explicit =
             cli.max_tokens.is_some() || merged.default.max_tokens != default_max_tokens();
-        let max_turns = cli.max_turns.or(merged.default.max_turns);
+        let max_turns = Some(
+            cli.max_turns
+                .or(merged.default.max_turns)
+                .unwrap_or(SMART_MAX_TURNS),
+        );
         let approval_mode = merged.default.approval_mode;
 
         let system_prompt = cli
@@ -2152,6 +2161,16 @@ impl Config {
                 compat.supports_effort = Some(false);
                 compat.effort_levels = Some(vec![]);
             }
+        }
+
+        merged
+            .budget
+            .validate()
+            .map_err(|error| anyhow::anyhow!("invalid [budget]: {error}"))?;
+        if let Some(session_cap) = merged.session_cap.as_ref() {
+            session_cap
+                .validate()
+                .map_err(|error| anyhow::anyhow!("invalid [session_cap]: {error}"))?;
         }
 
         Ok(Config {

@@ -37,6 +37,29 @@ pub struct ModelPrice {
     pub cache_read_per_mtok_usd: Option<f64>,
     #[serde(default)]
     pub cache_write_per_mtok_usd: Option<f64>,
+    /// Whether this row carries a real metered price, a known-free local
+    /// price, or only a zero-valued placeholder for a dynamically priced
+    /// router. Defaults to `metered` for existing external catalogs.
+    #[serde(default)]
+    pub billing: BillingClassification,
+}
+
+#[derive(Debug, Clone, Copy, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum BillingClassification {
+    #[default]
+    Metered,
+    Free,
+    Unpriced,
+}
+
+/// A numeric estimate plus an explicit statement of whether it is a real
+/// price. `priced == true && microcents == 0` represents known-free usage;
+/// `priced == false` represents unknown dynamic pricing, never a free call.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PriceStatus {
+    pub microcents: u64,
+    pub priced: bool,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -46,6 +69,23 @@ pub struct PricingCatalog {
 }
 
 impl PricingCatalog {
+    fn classify_cost(price: &ModelPrice, microcents: u64) -> PriceStatus {
+        match price.billing {
+            BillingClassification::Metered => PriceStatus {
+                microcents,
+                priced: true,
+            },
+            BillingClassification::Free => PriceStatus {
+                microcents: 0,
+                priced: true,
+            },
+            BillingClassification::Unpriced => PriceStatus {
+                microcents: 0,
+                priced: false,
+            },
+        }
+    }
+
     pub fn load_default() -> Result<Self, PricingError> {
         let raw = if let Ok(path) = std::env::var("WAYLAND_PRICING_PATH") {
             std::fs::read_to_string(&path)?
@@ -105,6 +145,70 @@ impl PricingCatalog {
         Ok(total_microcents)
     }
 
+    /// Estimate cost while preserving the distinction between a known zero
+    /// price and an unpriceable dynamic-router placeholder.
+    pub fn estimate_cost_status(
+        &self,
+        provider: &str,
+        model: &str,
+        input_tokens: u64,
+        output_tokens: u64,
+    ) -> Result<PriceStatus, PricingError> {
+        let price = self.get(provider, model)?;
+        let microcents =
+            self.estimate_cost_microcents(provider, model, input_tokens, output_tokens)?;
+        Ok(Self::classify_cost(price, microcents))
+    }
+
+    /// Estimate a turn whose provider reports cached input separately from
+    /// uncached input. When a model has no special cache rate, cached tokens
+    /// conservatively use the ordinary input rate instead of becoming free.
+    pub fn estimate_cost_with_cache_microcents(
+        &self,
+        provider: &str,
+        model: &str,
+        input_tokens: u64,
+        output_tokens: u64,
+        cache_read_tokens: u64,
+        cache_write_tokens: u64,
+    ) -> Result<u64, PricingError> {
+        let p = self.get(provider, model)?;
+        let per_mtok = |tokens: u64, usd: f64| (tokens as f64 / 1_000_000.0) * usd;
+        let total_usd = per_mtok(input_tokens, p.input_per_mtok_usd)
+            + per_mtok(output_tokens, p.output_per_mtok_usd)
+            + per_mtok(
+                cache_read_tokens,
+                p.cache_read_per_mtok_usd.unwrap_or(p.input_per_mtok_usd),
+            )
+            + per_mtok(
+                cache_write_tokens,
+                p.cache_write_per_mtok_usd.unwrap_or(p.input_per_mtok_usd),
+            );
+        Ok((total_usd * 100.0 * 1_000_000.0).round() as u64)
+    }
+
+    /// Cache-aware counterpart to [`Self::estimate_cost_status`].
+    pub fn estimate_cost_with_cache_status(
+        &self,
+        provider: &str,
+        model: &str,
+        input_tokens: u64,
+        output_tokens: u64,
+        cache_read_tokens: u64,
+        cache_write_tokens: u64,
+    ) -> Result<PriceStatus, PricingError> {
+        let price = self.get(provider, model)?;
+        let microcents = self.estimate_cost_with_cache_microcents(
+            provider,
+            model,
+            input_tokens,
+            output_tokens,
+            cache_read_tokens,
+            cache_write_tokens,
+        )?;
+        Ok(Self::classify_cost(price, microcents))
+    }
+
     /// Cost in microcents, resolving a Flux pinned-tier model to its native SKU.
     ///
     /// Tries the literal `(provider, model)` first, so every non-Flux provider
@@ -147,6 +251,87 @@ impl PricingCatalog {
             .estimate_cost_microcents(&native_provider, &native_model, input_tokens, output_tokens)
             .ok()?;
         Some(((native as f64) * markup).round() as u64)
+    }
+
+    /// Status-preserving counterpart to
+    /// [`Self::estimate_cost_microcents_resolved`]. Router placeholder rows
+    /// remain explicitly unpriced, while pinned models with a known native
+    /// SKU carry that SKU's real billing status through the Flux markup.
+    pub fn estimate_cost_status_resolved(
+        &self,
+        provider: &str,
+        model: &str,
+        input_tokens: u64,
+        output_tokens: u64,
+        markup: f64,
+    ) -> Option<PriceStatus> {
+        if !markup.is_finite() || markup < 0.0 {
+            return None;
+        }
+        if let Ok(status) = self.estimate_cost_status(provider, model, input_tokens, output_tokens)
+        {
+            return Some(status);
+        }
+        let (native_provider, native_model) = flux_pinned_native(model)?;
+        let native = self
+            .estimate_cost_status(&native_provider, &native_model, input_tokens, output_tokens)
+            .ok()?;
+        if !native.priced {
+            return Some(native);
+        }
+        Some(PriceStatus {
+            microcents: ((native.microcents as f64) * markup).round() as u64,
+            priced: true,
+        })
+    }
+
+    /// Cache-aware counterpart to [`Self::estimate_cost_status_resolved`].
+    ///
+    /// The input counters are disjoint: `input_tokens` is uncached input,
+    /// while cache reads and writes are charged exactly once at their catalog
+    /// rates. Flux pinned models resolve to the exact native SKU before markup.
+    #[allow(clippy::too_many_arguments)] // Mirrors the cache-aware catalog API plus Flux markup.
+    pub fn estimate_cost_with_cache_status_resolved(
+        &self,
+        provider: &str,
+        model: &str,
+        input_tokens: u64,
+        output_tokens: u64,
+        cache_read_tokens: u64,
+        cache_write_tokens: u64,
+        markup: f64,
+    ) -> Option<PriceStatus> {
+        if !markup.is_finite() || markup < 0.0 {
+            return None;
+        }
+        if let Ok(status) = self.estimate_cost_with_cache_status(
+            provider,
+            model,
+            input_tokens,
+            output_tokens,
+            cache_read_tokens,
+            cache_write_tokens,
+        ) {
+            return Some(status);
+        }
+        let (native_provider, native_model) = flux_pinned_native(model)?;
+        let native = self
+            .estimate_cost_with_cache_status(
+                &native_provider,
+                &native_model,
+                input_tokens,
+                output_tokens,
+                cache_read_tokens,
+                cache_write_tokens,
+            )
+            .ok()?;
+        if !native.priced {
+            return Some(native);
+        }
+        Some(PriceStatus {
+            microcents: ((native.microcents as f64) * markup).round() as u64,
+            priced: true,
+        })
     }
 }
 
@@ -229,6 +414,97 @@ pub static DEFAULT_CATALOG: Lazy<PricingCatalog> = Lazy::new(|| {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cache_tokens_use_catalog_rates_without_becoming_free() {
+        let raw = "[p.m]\ninput_per_mtok_usd = 10.0\noutput_per_mtok_usd = 20.0\ncache_read_per_mtok_usd = 1.0\ncache_write_per_mtok_usd = 12.0\n\n[p.no-cache-rate]\ninput_per_mtok_usd = 10.0\noutput_per_mtok_usd = 20.0\n";
+        let cat = PricingCatalog::from_toml_str(raw).unwrap();
+        let priced = cat
+            .estimate_cost_with_cache_microcents(
+                "p", "m", 1_000_000, 1_000_000, 1_000_000, 1_000_000,
+            )
+            .unwrap();
+        assert_eq!(priced, 43 * 100 * 1_000_000);
+
+        let conservative = cat
+            .estimate_cost_with_cache_microcents("p", "no-cache-rate", 0, 0, 1_000_000, 1_000_000)
+            .unwrap();
+        assert_eq!(conservative, 20 * 100 * 1_000_000);
+    }
+
+    #[test]
+    fn status_distinguishes_known_free_from_unpriced_zero() {
+        let raw = r#"
+[local.model]
+input_per_mtok_usd = 0.0
+output_per_mtok_usd = 0.0
+billing = "free"
+
+[router.auto]
+input_per_mtok_usd = 0.0
+output_per_mtok_usd = 0.0
+billing = "unpriced"
+
+[paid.model]
+input_per_mtok_usd = 1.0
+output_per_mtok_usd = 2.0
+"#;
+        let cat = PricingCatalog::from_toml_str(raw).unwrap();
+
+        assert_eq!(
+            cat.estimate_cost_status("local", "model", 1_000_000, 1_000_000)
+                .unwrap(),
+            PriceStatus {
+                microcents: 0,
+                priced: true,
+            }
+        );
+        assert_eq!(
+            cat.estimate_cost_status("router", "auto", 1_000_000, 1_000_000)
+                .unwrap(),
+            PriceStatus {
+                microcents: 0,
+                priced: false,
+            }
+        );
+        assert_eq!(
+            cat.estimate_cost_status("paid", "model", 1_000_000, 1_000_000)
+                .unwrap(),
+            PriceStatus {
+                microcents: 300_000_000,
+                priced: true,
+            }
+        );
+        // The legacy numeric API remains source- and behavior-compatible.
+        assert_eq!(
+            cat.estimate_cost_microcents("router", "auto", 1_000_000, 1_000_000)
+                .unwrap(),
+            0
+        );
+    }
+
+    #[test]
+    fn bundled_router_and_local_rows_have_honest_billing_status() {
+        let cat = PricingCatalog::load_default().expect("bundled catalog parses");
+        for (provider, model) in [
+            ("openrouter", "auto"),
+            ("flux-router", "flux-auto"),
+            ("openai", "flux-auto"),
+            ("litellm", "proxy"),
+            ("openai-compatible", "default"),
+        ] {
+            let status = cat
+                .estimate_cost_with_cache_status(provider, model, 10, 10, 10, 10)
+                .unwrap();
+            assert_eq!(status.microcents, 0);
+            assert!(!status.priced, "{provider}/{model} must be unpriced");
+        }
+        for provider in ["ollama", "vllm", "lmstudio"] {
+            let status = cat.estimate_cost_status(provider, "local", 10, 10).unwrap();
+            assert_eq!(status.microcents, 0);
+            assert!(status.priced, "{provider}/local must be known-free");
+        }
+    }
 
     // Regression (#4): a custom catalog whose FIRST line is a bare
     // `[provider.model]` table (no leading comment) must parse. The old
@@ -394,12 +670,12 @@ output_per_mtok_usd = 15.0
 
     /// CORE-4: the four Flux tier aliases must be IN the bundled catalog under
     /// both provider keys Core reaches Flux through (`flux-router` and plain
-    /// `openai`), priced $0 = "router-priced" (the [openrouter.auto]
-    /// convention). This is what stops the W7 catalog-miss warning ("unknown
+    /// `openai`), explicitly marked unpriced. This is what stops the W7
+    /// catalog-miss warning ("unknown
     /// model flux-auto for provider openai" — 365 occurrences in customer
     /// logs) from firing on every Flux turn.
     #[test]
-    fn flux_tier_aliases_priced_in_bundled_catalog() {
+    fn flux_tier_aliases_are_explicitly_unpriced_in_bundled_catalog() {
         let cat = PricingCatalog::load_default().expect("bundled catalog parses");
         for provider in ["flux-router", "openai"] {
             for alias in ["flux-auto", "flux-fast", "flux-standard", "flux-reasoning"] {
@@ -411,8 +687,9 @@ output_per_mtok_usd = 15.0
                     "{provider}/{alias} is router-priced: local rate must be $0"
                 );
                 assert_eq!(p.output_per_mtok_usd, 0.0);
+                assert_eq!(p.billing, BillingClassification::Unpriced);
                 // And the cost path resolves (Ok(0)) instead of erroring into
-                // the heuristic fallback.
+                // the heuristic fallback, preserving the legacy numeric API.
                 assert_eq!(
                     cat.estimate_cost_microcents(provider, alias, 1_000_000, 1_000_000)
                         .expect("tier alias must price"),
@@ -514,6 +791,64 @@ output_per_mtok_usd = 15.0
                 1.0
             )
             .is_none()
+        );
+    }
+
+    #[test]
+    fn resolved_status_keeps_router_alias_unpriced_and_pinned_sku_priced() {
+        let cat = PricingCatalog::load_default().unwrap();
+        assert_eq!(
+            cat.estimate_cost_status_resolved("flux-router", "flux-auto", 1_000, 1_000, 1.0,),
+            Some(PriceStatus {
+                microcents: 0,
+                priced: false,
+            })
+        );
+        let pinned = cat
+            .estimate_cost_status_resolved("flux-router", "flux-pinned-gpt-5", 1_000, 1_000, 1.0)
+            .unwrap();
+        assert!(pinned.priced);
+        assert!(pinned.microcents > 0);
+        assert!(
+            cat.estimate_cost_status_resolved(
+                "flux-router",
+                "flux-pinned-glm-5-2",
+                1_000,
+                1_000,
+                1.0,
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn cache_aware_resolved_status_uses_native_cache_rates_once() {
+        let cat = PricingCatalog::load_default().unwrap();
+        let native = cat
+            .estimate_cost_with_cache_status(
+                "anthropic",
+                "claude-opus-4-7",
+                1_000,
+                2_000,
+                3_000,
+                4_000,
+            )
+            .unwrap();
+        let resolved = cat
+            .estimate_cost_with_cache_status_resolved(
+                "flux-router",
+                "flux-pinned-claude-opus-4-7",
+                1_000,
+                2_000,
+                3_000,
+                4_000,
+                1.5,
+            )
+            .unwrap();
+        assert!(resolved.priced);
+        assert_eq!(
+            resolved.microcents,
+            ((native.microcents as f64) * 1.5).round() as u64
         );
     }
 

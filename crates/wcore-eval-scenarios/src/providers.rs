@@ -97,6 +97,9 @@ pub struct ProviderConfig {
     /// Optional API root forwarded as `--base-url`. This lets deterministic
     /// scenarios exercise the production provider against a loopback fixture.
     pub base_url: Option<String>,
+    /// Explicit billing declaration for a provider fixture whose calls are
+    /// known to be free. This is never inferred from the URL or model name.
+    pub cost_is_known_free: bool,
 }
 
 impl fmt::Debug for ProviderConfig {
@@ -106,6 +109,7 @@ impl fmt::Debug for ProviderConfig {
             .field("model", &self.model)
             .field("api_key", &self.api_key.as_ref().map(|_| "[REDACTED]"))
             .field("base_url", &self.base_url.as_ref().map(|_| "[CONFIGURED]"))
+            .field("cost_is_known_free", &self.cost_is_known_free)
             .finish()
     }
 }
@@ -216,6 +220,7 @@ impl ProviderConfig {
             model: model.into(),
             api_key: None,
             base_url: None,
+            cost_is_known_free: false,
         }
     }
 
@@ -226,6 +231,14 @@ impl ProviderConfig {
 
     pub fn with_base_url(mut self, base_url: impl Into<String>) -> Self {
         self.base_url = Some(base_url.into());
+        self
+    }
+
+    /// Declare that this evaluator-controlled provider incurs no monetary
+    /// charge. Production providers remain unpriced unless their normal
+    /// catalog or compatibility configuration supplies authoritative pricing.
+    pub fn with_known_free_cost(mut self) -> Self {
+        self.cost_is_known_free = true;
         self
     }
 

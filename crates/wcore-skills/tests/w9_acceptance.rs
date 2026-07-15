@@ -21,6 +21,7 @@ fn turn(i: usize, tools: &[(&str, serde_json::Value)]) -> TurnTrace {
         cache_write: 0,
         cache_hit_rate: 0.0,
         cost_usd: 0.0,
+        cost_priced: false,
         tool_calls: tools
             .iter()
             .enumerate()

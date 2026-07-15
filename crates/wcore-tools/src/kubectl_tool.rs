@@ -319,6 +319,10 @@ impl Tool for KubectlTool {
         ToolCategory::Info
     }
 
+    fn execution_class_for(&self, _input: &Value) -> crate::ToolExecutionClass {
+        crate::ToolExecutionClass::ProcessSpawning
+    }
+
     fn describe(&self, input: &Value) -> String {
         let verb = input
             .get("verb")

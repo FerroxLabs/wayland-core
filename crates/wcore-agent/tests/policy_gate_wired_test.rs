@@ -162,6 +162,7 @@ fn cfg_with_gate(gate: Option<PolicyGate>) -> AgentExecutorConfig {
         compaction_level: CompactionLevel::Off,
         toon_enabled: false,
         streaming: None,
+        tool_budget: None,
         approval: None,
         allow_list: vec![],
         policy_gate: gate,

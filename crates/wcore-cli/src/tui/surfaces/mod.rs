@@ -2414,7 +2414,7 @@ fn format_cost_summary(cost: Option<&crate::tui::app::SessionCostView>) -> Strin
             .to_string();
     };
     let mut out = String::new();
-    out.push_str(&format!("Session cost: ${:.4}", cost.total_cost_usd));
+    out.push_str(&format!("Session cost: {}", cost.formatted_total_cost()));
 
     if cost.per_turn.is_empty() {
         out.push_str("\n\n(no per-turn breakdown available for this session)");
@@ -2429,8 +2429,11 @@ fn format_cost_summary(cost: Option<&crate::tui::app::SessionCostView>) -> Strin
     out.push_str(&format!("\n\nPer-turn breakdown (last {take}):"));
     for row in recent {
         out.push_str(&format!(
-            "\n- turn {:>3}  ${:.4}  ({} · {})",
-            row.turn, row.cost_usd, row.provider, row.model,
+            "\n- turn {:>3}  {}  ({} · {})",
+            row.turn,
+            row.formatted_cost(),
+            row.provider,
+            row.model,
         ));
     }
     out
@@ -5012,18 +5015,21 @@ mod tests {
                     model: "claude-opus-4-7".into(),
                     provider: "anthropic".into(),
                     cost_usd: 0.0234,
+                    priced: true,
                 },
                 TurnCostView {
                     turn: 2,
                     model: "claude-opus-4-7".into(),
                     provider: "anthropic".into(),
                     cost_usd: 0.0156,
+                    priced: true,
                 },
                 TurnCostView {
                     turn: 3,
                     model: "claude-sonnet-4-6".into(),
                     provider: "anthropic".into(),
                     cost_usd: 0.0512,
+                    priced: true,
                 },
             ],
         });
@@ -5048,6 +5054,46 @@ mod tests {
         assert!(
             text.contains("claude-sonnet-4-6"),
             "model annotation missing: {text:?}"
+        );
+    }
+
+    #[test]
+    fn slash_cost_distinguishes_unpriced_from_known_free_turns() {
+        use crate::tui::app::{SessionCostView, TurnCostView};
+
+        let cost = SessionCostView {
+            session_id: "pricing-status".into(),
+            total_cost_usd: 0.0,
+            per_turn: vec![
+                TurnCostView {
+                    turn: 1,
+                    model: "unknown-model".into(),
+                    provider: "custom".into(),
+                    cost_usd: 0.0,
+                    priced: false,
+                },
+                TurnCostView {
+                    turn: 2,
+                    model: "local-model".into(),
+                    provider: "ollama".into(),
+                    cost_usd: 0.0,
+                    priced: true,
+                },
+            ],
+        };
+
+        let text = format_cost_summary(Some(&cost));
+        assert!(
+            text.contains("Session cost: $0.0000 + unpriced"),
+            "aggregate must disclose its unpriced component: {text:?}"
+        );
+        assert!(
+            text.contains("turn   1  unpriced"),
+            "unknown price must not render as free: {text:?}"
+        );
+        assert!(
+            text.contains("turn   2  $0.0000"),
+            "known-free turn must remain a priced zero: {text:?}"
         );
     }
 

@@ -29,6 +29,7 @@ fn turn_with_calls(turn: usize, calls: Vec<(&str, serde_json::Value)>) -> TurnTr
         cache_write: 0,
         cache_hit_rate: 0.0,
         cost_usd: 0.0,
+        cost_priced: false,
         tool_calls: calls
             .into_iter()
             .enumerate()

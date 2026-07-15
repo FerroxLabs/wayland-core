@@ -25,7 +25,15 @@ use wcore_agent::orchestration::council::{
 use wcore_agent::spawner::{AgentSpawner, SubAgentConfig};
 use wcore_config::config::{CliArgs, Config, ConfigFile, load_merged_config_file};
 use wcore_config::crucible::{AssemblyMode, CouncilMode, CrucibleConfig};
+use wcore_providers::LlmProvider;
 use wcore_types::crucible::CrucibleDecision;
+
+fn governed_crucible_spawner(provider: Arc<dyn LlmProvider>, config: &Config) -> AgentSpawner {
+    wcore_agent::bootstrap::govern_standalone_spawner(
+        AgentSpawner::new(provider, config.clone()),
+        config,
+    )
+}
 
 /// A cap-less per-user/day spend accumulator for council charging, built when the
 /// council has a daily or per-run cap configured. The daily bound is enforced by
@@ -354,7 +362,7 @@ pub async fn run_crucible(args: CrucibleArgs) -> anyhow::Result<()> {
 
     let resolver = CouncilProviderResolver::new(base.clone(), cf.providers.clone());
     let mut spawner =
-        AgentSpawner::new(provider, base.clone()).with_provider_resolver(Arc::new(resolver));
+        governed_crucible_spawner(provider, &base).with_provider_resolver(Arc::new(resolver));
     if let Some(tracker) = council_budget_tracker(&cf) {
         let (sess, user) = cli_budget_identity();
         spawner = spawner
@@ -418,7 +426,7 @@ async fn run_crucible_auto(
         );
     }
     let mut spawner =
-        AgentSpawner::new(provider, base.clone()).with_provider_resolver(Arc::new(resolver));
+        governed_crucible_spawner(provider, &base).with_provider_resolver(Arc::new(resolver));
     if let Some(tracker) = council_budget_tracker(cf) {
         let (sess, user) = cli_budget_identity();
         spawner = spawner
@@ -618,10 +626,111 @@ fn direct_subagent_config(task: &str, roster: &Roster, first: &ProposerSpec) -> 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use async_trait::async_trait;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use wcore_agent::orchestration::council::{
         CouncilSpend, Proposal, ProviderSpend, SkippedProposer,
     };
+    use wcore_providers::ProviderError;
+    use wcore_types::llm::{LlmEvent, LlmRequest};
     use wcore_types::message::TokenUsage;
+
+    struct CountingProvider {
+        calls: AtomicUsize,
+    }
+
+    struct HungProvider;
+
+    #[async_trait]
+    impl LlmProvider for HungProvider {
+        async fn stream(
+            &self,
+            _request: &LlmRequest,
+        ) -> Result<tokio::sync::mpsc::Receiver<LlmEvent>, ProviderError> {
+            let (tx, rx) = tokio::sync::mpsc::channel(1);
+            tokio::spawn(async move {
+                let _held_sender = tx;
+                std::future::pending::<()>().await;
+            });
+            Ok(rx)
+        }
+    }
+
+    #[async_trait]
+    impl LlmProvider for CountingProvider {
+        async fn stream(
+            &self,
+            _request: &LlmRequest,
+        ) -> Result<tokio::sync::mpsc::Receiver<LlmEvent>, ProviderError> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            Err(ProviderError::Connection("test provider called".into()))
+        }
+    }
+
+    #[tokio::test]
+    async fn crucible_spawner_stops_before_provider_call_at_tiny_cap() {
+        let config = Config {
+            budget: wcore_budget::BudgetConfig {
+                max_tokens_in: Some(0),
+                max_tokens_out: Some(0),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let provider = Arc::new(CountingProvider {
+            calls: AtomicUsize::new(0),
+        });
+        let spawner = governed_crucible_spawner(provider.clone(), &config);
+
+        let result = spawner
+            .spawn_one(SubAgentConfig {
+                name: "tiny-cap-proposer".into(),
+                prompt: "propose an answer".into(),
+                max_turns: 1,
+                max_tokens: 16,
+                system_prompt: Some(COUNCIL_PROPOSER_SYSTEM_PROMPT.into()),
+                provider: None,
+                model: None,
+                temperature: None,
+            })
+            .await;
+
+        assert!(result.is_error, "zero-token envelope must stop proposer");
+        assert_eq!(provider.calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn crucible_spawner_cancels_a_hung_provider_at_the_wall_cap() {
+        let config = Config {
+            session_cap: Some(wcore_budget::BudgetConfig {
+                max_wall_time_secs: Some(1),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let spawner = governed_crucible_spawner(Arc::new(HungProvider), &config);
+
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(3),
+            spawner.spawn_one(SubAgentConfig {
+                name: "hung-proposer".into(),
+                prompt: "propose an answer".into(),
+                max_turns: 1,
+                max_tokens: 16,
+                system_prompt: Some(COUNCIL_PROPOSER_SYSTEM_PROMPT.into()),
+                provider: None,
+                model: None,
+                temperature: None,
+            }),
+        )
+        .await
+        .expect("standalone crucible must not outlive its wall-time envelope");
+
+        assert!(
+            result.is_error,
+            "budget cancellation must fail the proposer"
+        );
+    }
 
     fn proposal(provider: &str, model: Option<&str>) -> Proposal {
         Proposal {

@@ -464,6 +464,7 @@ mod tests {
             cache_write: 0,
             cache_hit_rate: 0.0,
             cost_usd: 0.0,
+            cost_priced: false,
             tool_calls,
             hook_actions: vec![],
             source_product: "test".into(),

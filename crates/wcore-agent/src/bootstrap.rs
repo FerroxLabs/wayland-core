@@ -140,6 +140,81 @@ pub struct BootstrapResult {
 pub type PluginProviderRouter =
     Box<dyn Fn(&str, &[Arc<dyn PluginProvider>]) -> Option<Arc<dyn LlmProvider>> + Send + Sync>;
 
+/// One F11 session envelope shared by the parent engine and every child
+/// spawner created for that session. Keeping config-to-budget translation in
+/// one constructor prevents early-return CLI modes from silently falling back
+/// to `AgentSpawner::new`'s legacy unbounded defaults.
+struct SessionBudgetEnvelope {
+    provider_tracker: Arc<parking_lot::Mutex<wcore_budget::BudgetTracker>>,
+    session_id: String,
+    execution_budget: ExecutionBudgetView,
+}
+
+impl SessionBudgetEnvelope {
+    fn from_config(config: &Config) -> Self {
+        let effective_budget = wcore_budget::BudgetConfig::effective_session_envelope(
+            &config.budget,
+            config.session_cap.as_ref(),
+        );
+        let cap: wcore_budget::BudgetCap = (&effective_budget).into();
+
+        // Provider tokens/cost have one authoritative, reservable ledger.
+        // ExecutionBudget owns only orthogonal operational axes; duplicating
+        // token/cost caps there would leave Continue widening one authority
+        // while another immutable watcher remained exhausted.
+        let mut operational_budget = ExecutionBudget::from(&effective_budget);
+        operational_budget.max_tokens_in = None;
+        operational_budget.max_tokens_out = None;
+        operational_budget.max_cost_usd = None;
+
+        Self {
+            provider_tracker: Arc::new(parking_lot::Mutex::new(wcore_budget::BudgetTracker::new(
+                cap,
+            ))),
+            session_id: uuid::Uuid::new_v4().to_string(),
+            execution_budget: operational_budget.start_root(),
+        }
+    }
+
+    fn govern_spawner(
+        &self,
+        spawner: crate::spawner::AgentSpawner,
+        cancel: CancellationToken,
+    ) -> crate::spawner::AgentSpawner {
+        spawner.with_budget_governance(crate::spawner::SpawnerBudgetGovernance::new(
+            Arc::clone(&self.provider_tracker),
+            self.session_id.clone(),
+            self.execution_budget.clone(),
+            cancel,
+        ))
+    }
+}
+
+/// Apply the canonical F11 session envelope to a one-shot CLI spawner.
+///
+/// Ordinary bootstrap and early-return modes use the same constructor, Smart
+/// defaults, provider ledger, execution root, stable session identity, and
+/// cancellation lineage. Every child created from the returned spawner shares
+/// these handles for the lifetime of the one-shot invocation.
+pub fn govern_standalone_spawner(
+    spawner: crate::spawner::AgentSpawner,
+    config: &Config,
+) -> crate::spawner::AgentSpawner {
+    let envelope = SessionBudgetEnvelope::from_config(config);
+    let guard = Arc::new(crate::cancel::budget_linked(
+        CancellationToken::new(),
+        envelope.execution_budget.clone(),
+    ));
+    let governance = crate::spawner::SpawnerBudgetGovernance::new(
+        envelope.provider_tracker,
+        envelope.session_id,
+        envelope.execution_budget,
+        guard.token_clone(),
+    )
+    .with_budget_guard(guard);
+    spawner.with_budget_governance(governance)
+}
+
 /// Builder for creating a fully-initialized `AgentEngine`.
 ///
 /// Encapsulates the complete initialization pipeline so all consumers
@@ -801,13 +876,14 @@ impl AgentBootstrap {
         // — they need their own credential/base-url resolution (follow-up).
         // No fallbacks configured → empty Vec, identical to prior behaviour.
         let fallbacks = build_fallback_providers(&self.config);
-        let provider: Arc<dyn LlmProvider> = Arc::new(ResilientProvider::new(
-            self.config.provider_label.clone(),
-            primary_provider,
-            fallbacks,
-            cfg,
-            reporter,
-        ));
+        let provider: Arc<dyn LlmProvider> =
+            Arc::new(ResilientProvider::new_with_fallback_identities(
+                self.config.provider_label.clone(),
+                primary_provider,
+                fallbacks,
+                cfg,
+                reporter,
+            ));
 
         // #182: honor `[tools] windows_shell` for the BashTool interpreter on
         // Windows (set once at boot; WAYLAND_BASH_SHELL env still overrides).
@@ -2018,6 +2094,26 @@ impl AgentBootstrap {
         // background-task vec so `Drop for AgentEngine` aborts it on
         // session shutdown.
         let agent_bus = Arc::new(crate::agents::bus::AgentBus::new(256));
+        // F11 — resolve one finite session envelope before constructing either
+        // the parent engine or its spawner. Explicit values win, while omitted
+        // fields retain Smart defaults. The shared tracker identity prevents
+        // children with session persistence disabled from receiving a fresh
+        // provider budget under `session-unknown`.
+        let session_budget = SessionBudgetEnvelope::from_config(&self.config);
+        let span_sink_for_budget = self.span_sink.clone();
+        if let Some(sink) = span_sink_for_budget.as_ref() {
+            let bridge = Arc::new(
+                wcore_observability::sink::ObservabilityBudgetEventBridge::new(sink.clone()),
+            );
+            session_budget
+                .provider_tracker
+                .lock()
+                .set_event_sink(bridge);
+        }
+        let provider_budget_tracker = Arc::clone(&session_budget.provider_tracker);
+        let budget_session_id = session_budget.session_id.clone();
+        let session_execution_budget = session_budget.execution_budget.clone();
+        let sink_for_budget = self.output.clone();
         // Crucible cost governance — a cap-less per-user/day spend ACCUMULATOR for
         // council members, built whenever the council has a daily or per-run cap
         // configured (independent of [session_cap], which governs the per-turn
@@ -2033,17 +2129,20 @@ impl AgentBootstrap {
                 wcore_budget::BudgetCap::default(),
             )))
         });
-        let mut spawner_builder =
-            crate::spawner::AgentSpawner::new(provider.clone(), self.config.clone())
-                .with_sandbox_runtime(registry.sandbox_runtime())
-                .with_egress_policy(Arc::new(
-                    self.session_egress_policy
-                        .as_ref()
-                        .expect("session egress policy is installed before scoped bootstrap")
-                        .clone(),
-                ))
-                .with_session_runtime(session_runtime.clone())
-                .with_bus(Arc::clone(&agent_bus));
+        let mut spawner_builder = session_budget
+            .govern_spawner(
+                crate::spawner::AgentSpawner::new(provider.clone(), self.config.clone()),
+                session_runtime.active_turn_token(),
+            )
+            .with_sandbox_runtime(registry.sandbox_runtime())
+            .with_egress_policy(Arc::new(
+                self.session_egress_policy
+                    .as_ref()
+                    .expect("session egress policy is installed before scoped bootstrap")
+                    .clone(),
+            ))
+            .with_session_runtime(session_runtime.clone())
+            .with_bus(Arc::clone(&agent_bus));
         if let Some(manager) = self.approval_manager.as_ref() {
             spawner_builder = spawner_builder.with_approval_manager(Arc::clone(manager));
         }
@@ -2137,7 +2236,9 @@ impl AgentBootstrap {
         // agents + OutputSink relay. Both share AgentSpawner via the
         // `wcore_types::spawner::Spawner` trait so wcore-tools stays
         // below wcore-agent in the dep graph.
-        registry.register(Box::new(wcore_tools::delegate::DelegateTool::new(spawner)));
+        registry.register(Box::new(wcore_tools::delegate::DelegateTool::new(
+            spawner.clone(),
+        )));
 
         // A1.9 — Forge: the session-level Anvil gated-forge tool (smart-loop
         // front door; the tool description carries the routing law so the
@@ -2158,6 +2259,9 @@ impl AgentBootstrap {
                         .expect("session egress policy is installed before tool registration")
                         .clone(),
                 ),
+                spawner
+                    .budget_governance()
+                    .expect("Smart session spawner carries finite budget governance"),
             )));
         }
 
@@ -2314,23 +2418,6 @@ impl AgentBootstrap {
         // function (before skill_refs) so the SkillPrioritizer can use them.
         // See the M3.6.2 block above. The engine setters below consume the
         // values from that earlier block.
-
-        // W8a A.6: capture the BudgetConfig before self.config is moved
-        // into AgentEngine. The BudgetConfig is Clone, so a one-time copy
-        // here is cheap; the ExecutionBudgetView is built after the engine
-        // is fully wired so plugin/MCP boot-time failures don't allocate
-        // a watcher task that would then need teardown. Clone the
-        // OutputSink Arc too so the budget watcher's emit callback can
-        // hold a handle after `self.output` is moved into the engine.
-        let budget_cfg = self.config.budget.clone();
-        let sink_for_budget = self.output.clone();
-
-        // M5.bootstrap-wiring — capture session_cap + span_sink BEFORE
-        // self.config is moved into AgentEngine so we can install a
-        // BudgetTracker after engine construction. None ⇒ skip install
-        // and leave engine.budget_tracker = None (pre-M5.3 behaviour).
-        let session_cap_cfg = self.config.session_cap.clone();
-        let span_sink_for_budget = self.span_sink.clone();
 
         // v0.8.1 U5 — open the credentials store BEFORE self.config is
         // moved into AgentEngine so the channel auto-registration block
@@ -2745,44 +2832,37 @@ impl AgentBootstrap {
         // and never unblock the awaiting script step.
         engine.set_approval_bridge(approval_bridge);
 
-        // M5.bootstrap-wiring — install a per-session engine `BudgetTracker`
-        // when `Config.session_cap` is set. This governs the PER-TURN engine
+        // F11 — install a per-session engine `BudgetTracker` for every runtime.
+        // An explicit `session_cap` keeps its legacy role; otherwise the same
+        // effective Smart envelope that drives ExecutionBudget supplies the
+        // token/cost admission cap. This governs the PER-TURN engine
         // charge in `engine.rs::run` — a SEPARATE concern from the council's
         // cap-less spend accumulator (built above and attached to the spawner),
         // which governs council spend via `crucible.daily_cap_usd`. The two do
         // NOT share one envelope. When the bootstrap also has a `SpanSink`
         // installed, wire `ObservabilityBudgetEventBridge` so
         // `BudgetEvent::{Charge, CapWarn, CapBlock}` reach the JSON span
-        // channel. Without `session_cap`, the engine's `budget_tracker` stays
-        // `None` and the per-turn charge is a no-op (matches pre-M5.3 behaviour).
-        if let Some(cap_cfg) = session_cap_cfg.as_ref() {
-            let cap: wcore_budget::BudgetCap = cap_cfg.into();
-            let mut tracker = wcore_budget::BudgetTracker::new(cap);
-            if let Some(sink) = span_sink_for_budget.as_ref() {
-                let bridge = Arc::new(
-                    wcore_observability::sink::ObservabilityBudgetEventBridge::new(sink.clone()),
-                );
-                tracker.set_event_sink(bridge);
-            }
-            engine.set_budget_tracker(Arc::new(parking_lot::Mutex::new(tracker)));
-        }
+        // channel.
+        engine.set_budget_tracker(Arc::clone(&provider_budget_tracker));
+        engine.set_budget_session_id(budget_session_id);
 
         // W8a A.6/A.7: build the session-root ExecutionBudgetView from
         // config and pair it with a cancellation token. The
         // `budget_linked_with_callback` form additionally emits
         // `BudgetExceeded` over the protocol sink the instant the first
         // cap trips — singular per session, host-tolerated per audit F5.
-        // Default-config sessions have every cap = None and the
-        // watcher's callback never fires.
-        let exec_budget: ExecutionBudget = (&budget_cfg).into();
-        let budget = exec_budget.start_root();
-        session_guard.attach_budget_with_callback(budget.clone(), move |payload| {
-            sink_for_budget.emit_budget_exceeded(
-                &payload.reason,
-                &payload.observed,
-                &payload.limit,
-            );
-        });
+        // Omitted fields inherit the finite Smart envelope above.
+        engine.set_execution_budget(session_execution_budget.clone());
+        session_guard.attach_budget_with_callback(
+            session_execution_budget.clone(),
+            move |payload| {
+                sink_for_budget.emit_budget_exceeded(
+                    &payload.reason,
+                    &payload.observed,
+                    &payload.limit,
+                );
+            },
+        );
         engine.install_session_cancel_guard(session_guard);
 
         // F-014 (CRIT, Aud-4/Aud-11): construct ChannelManager, auto-register
@@ -3200,7 +3280,7 @@ impl AgentBootstrap {
             has_plugins,
             plugin_capabilities,
             loaded_plugin_names,
-            budget,
+            budget: session_execution_budget,
             cancel_root,
             channel_manager,
             channels_auto_registered,
@@ -3553,7 +3633,9 @@ pub fn create_provider_with_oauth(config: &Config) -> anyhow::Result<Arc<dyn Llm
 ///
 /// No `fallback_models` configured → empty `Vec`, byte-for-byte the prior
 /// (circuit-breaker-only) behaviour.
-fn build_fallback_providers(config: &Config) -> Vec<(String, Arc<dyn LlmProvider>)> {
+fn build_fallback_providers(
+    config: &Config,
+) -> Vec<(String, String, String, Arc<dyn LlmProvider>)> {
     let primary_label = config.provider_label.as_str();
     let mut fallbacks = Vec::new();
     for entry in &config.provider_chain.fallback_models {
@@ -3581,11 +3663,35 @@ fn build_fallback_providers(config: &Config) -> Vec<(String, Arc<dyn LlmProvider
             .map(str::to_string)
             .unwrap_or_else(|| entry.to_string());
         let mut fb_config = config.clone();
-        fb_config.model = model;
+        fb_config.model = model.clone();
+        let pricing_provider = fb_config.compat.provider_type().to_string();
         let provider = wcore_providers::create_native_provider(&fb_config);
-        fallbacks.push((entry.to_string(), provider));
+        fallbacks.push((entry.to_string(), pricing_provider, model, provider));
     }
     fallbacks
+}
+
+#[cfg(test)]
+mod fallback_pricing_identity_tests {
+    use super::*;
+
+    #[test]
+    fn same_provider_fallback_keeps_provider_and_canonical_model_identity() {
+        let mut config = Config {
+            provider_label: "anthropic".into(),
+            compat: wcore_config::compat::ProviderCompat::anthropic_defaults(),
+            ..Default::default()
+        };
+        config.provider_chain.fallback_models = vec!["claude-haiku-4-5".into()];
+
+        let fallbacks = build_fallback_providers(&config);
+
+        assert_eq!(fallbacks.len(), 1);
+        let (label, pricing_provider, model, _) = &fallbacks[0];
+        assert_eq!(label, "claude-haiku-4-5");
+        assert_eq!(pricing_provider, "anthropic");
+        assert_eq!(model, "claude-haiku-4-5");
+    }
 }
 
 #[cfg(test)]

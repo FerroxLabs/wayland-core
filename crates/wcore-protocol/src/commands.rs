@@ -49,6 +49,14 @@ pub enum ProtocolCommand {
         #[serde(default)]
         compaction: Option<String>,
     },
+    /// Add explicit operator-authorized headroom to the active session's
+    /// provider envelope. This never changes global or per-user limits.
+    ContinueWithBudget {
+        #[serde(default)]
+        additional_tokens: u64,
+        #[serde(default)]
+        additional_cost_usd: f64,
+    },
     AddMcpServer {
         name: String,
         transport: String,
@@ -247,6 +255,20 @@ mod tests {
             }
             _ => panic!("expected SetConfig"),
         }
+    }
+
+    #[test]
+    fn continue_with_budget_is_typed_and_defaults_missing_axes_to_zero() {
+        let command: ProtocolCommand =
+            serde_json::from_str(r#"{"type":"continue_with_budget","additional_tokens":250000}"#)
+                .unwrap();
+        assert_eq!(
+            command,
+            ProtocolCommand::ContinueWithBudget {
+                additional_tokens: 250_000,
+                additional_cost_usd: 0.0,
+            }
+        );
     }
 
     #[test]

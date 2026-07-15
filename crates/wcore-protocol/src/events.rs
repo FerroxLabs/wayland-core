@@ -446,7 +446,7 @@ pub enum ProtocolEvent {
     /// W0 host decoder contract, so no dedicated capability flag is
     /// reserved. `reason` is one of the deterministic
     /// `ExecutionBudgetView::first_exceeded_reason()` strings
-    /// (`max_wall_time`, `max_tool_runtime`, `max_processes`,
+    /// (`max_wall_time`, `max_tool_runtime`, `max_concurrent_process_tools`,
     /// `max_agent_depth`, `max_tokens_in`, `max_tokens_out`,
     /// `max_cost_usd`); `observed` and `limit` are human-readable
     /// formatted strings (e.g. `"62.0s"` / `"60.0s"`, `"16384"` / `"4096"`).
@@ -730,6 +730,10 @@ pub struct TurnCost {
     pub model: String,
     pub provider: String,
     pub cost_usd: f64,
+    /// Whether `cost_usd` is a real metered or known-free price. Missing on
+    /// legacy rows defaults to false so zero is not silently called free.
+    #[serde(default)]
+    pub priced: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1616,5 +1620,17 @@ mod tests {
         assert_eq!(json["policy"]["trust"]["level"], "untrusted");
         assert_eq!(json["policy"]["trust"]["fingerprint"], "fingerprint");
         assert_eq!(json["policy"]["backend"], "bwrap");
+    }
+
+    #[test]
+    fn legacy_turn_cost_defaults_to_unpriced() {
+        let row: TurnCost = serde_json::from_value(serde_json::json!({
+            "turn": 1,
+            "model": "router-model",
+            "provider": "router",
+            "cost_usd": 0.0
+        }))
+        .unwrap();
+        assert!(!row.priced);
     }
 }
