@@ -22,7 +22,7 @@ pub fn check_contract() -> ContractResult<()> {
         .collect::<Vec<_>>();
     let mut drifted = Vec::new();
     for path in expected_paths.intersection(&actual_paths) {
-        if fs::read(root.join(path))? != expected[*path] {
+        if fs::read(root.join(path))? != expected[path] {
             drifted.push(path.clone());
         }
     }
