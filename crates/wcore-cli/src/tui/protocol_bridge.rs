@@ -620,13 +620,26 @@ fn apply_event_inner(app: &mut App, event: ProtocolEvent) {
             parent_call_id,
             agent_name,
             inner,
+        }
+        | ProtocolEvent::CorrelatedSubAgentEvent {
+            parent_call_id,
+            agent_name,
+            inner,
+            ..
         } => {
             apply_sub_agent_event(app, parent_call_id, agent_name, inner);
         }
 
         // ── Workflows (ForgeFlows-Live lifecycle) ────────────────────
         ProtocolEvent::WorkflowStarted {
-            workflow_id, name, ..
+            workflow_id: workflow_key,
+            name,
+            ..
+        }
+        | ProtocolEvent::CorrelatedWorkflowStarted {
+            run_id: workflow_key,
+            name,
+            ..
         } => {
             // One view per run, keyed by `workflow_id`. ADOPT the last view if
             // it is unfinished AND either still pending (a node arrived first,
@@ -634,16 +647,16 @@ fn apply_event_inner(app: &mut App, event: ProtocolEvent) {
             // view so each sequential run gets its own (fixes the merge bug
             // where a second run reused the first's view).
             let adopt = app.workflows.last().is_some_and(|w| {
-                w.finished.is_none() && (w.key == PENDING_WORKFLOW_KEY || w.key == workflow_id)
+                w.finished.is_none() && (w.key == PENDING_WORKFLOW_KEY || w.key == workflow_key)
             });
             if adopt {
                 let view = app.workflows.last_mut().expect("adopt implies non-empty");
-                view.key = workflow_id;
+                view.key = workflow_key;
                 view.name = name;
                 view.finished = None;
             } else {
                 app.workflows.push(WorkflowView {
-                    key: workflow_id,
+                    key: workflow_key,
                     name,
                     nodes: Vec::new(),
                     finished: None,
@@ -651,15 +664,20 @@ fn apply_event_inner(app: &mut App, event: ProtocolEvent) {
             }
         }
         ProtocolEvent::WorkflowFinished {
-            workflow_id,
+            workflow_id: workflow_key,
             succeeded,
+        }
+        | ProtocolEvent::CorrelatedWorkflowFinished {
+            run_id: workflow_key,
+            succeeded,
+            ..
         } => {
             // Resolve the run by its `workflow_id`; fall back to the last
             // unfinished view if the started event was never seen.
             let idx = app
                 .workflows
                 .iter()
-                .position(|w| w.key == workflow_id)
+                .position(|w| w.key == workflow_key)
                 .or_else(|| app.workflows.iter().rposition(|w| w.finished.is_none()));
             if let Some(idx) = idx {
                 app.workflows[idx].finished = Some(succeeded);
@@ -937,6 +955,9 @@ fn apply_event_inner(app: &mut App, event: ProtocolEvent) {
         | ProtocolEvent::ApprovalResume { .. }
         | ProtocolEvent::CompactOffload { .. }
         | ProtocolEvent::HostSendMessageRequest { .. }
+        // Node state is redundant with the correlated child relay for the TUI;
+        // Desktop consumes this authoritative lifecycle event directly.
+        | ProtocolEvent::WorkflowNodeEvent { .. }
         // A1.2: the receipt is not emitted yet (climb lands in A1.5/A1.6) and
         // chip rendering is an A2 concern — the TUI ignores it for now.
         | ProtocolEvent::AnvilReceipt { .. }

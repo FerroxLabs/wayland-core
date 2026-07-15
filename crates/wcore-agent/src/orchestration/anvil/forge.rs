@@ -1073,22 +1073,23 @@ mod tests {
         );
     }
 
-    #[test]
-    fn artifact_digest_is_stable_and_hex() {
-        let out = ClimbOutcome {
-            valve_fires: 0,
-            terminal: TerminalState::Verified,
-            stamp: "verified".into(),
-            checks_passed: 3,
-            checks_total: 3,
-            iterations: 2,
-            best_worktree: Some(PathBuf::from("/wt/cand-0")),
-        };
-        let a = artifact_digest(&out);
-        let b = artifact_digest(&out);
+    #[tokio::test]
+    async fn artifact_digest_is_stable_and_hex() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("artifact.txt"), b"verified artifact").unwrap();
+        let init = wcore_config::shell::shell_command_argv("git", &["init", "--quiet"])
+            .current_dir(dir.path())
+            .output()
+            .await
+            .unwrap();
+        assert!(init.status.success());
+
+        let a = artifact_content_digest(dir.path()).await.unwrap();
+        let b = artifact_content_digest(dir.path()).await.unwrap();
         assert_eq!(a, b);
-        assert_eq!(a.len(), 64);
-        assert!(a.chars().all(|c| c.is_ascii_hexdigit()));
+        let hex = a.strip_prefix("sha256:").unwrap();
+        assert_eq!(hex.len(), 64);
+        assert!(hex.chars().all(|c| c.is_ascii_hexdigit()));
     }
 
     #[test]

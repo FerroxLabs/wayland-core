@@ -742,6 +742,7 @@ pub fn event_fixture_values() -> BTreeMap<String, ProtocolEvent> {
                 version: "0.12.25".into(),
                 session_id: Some("session-desktop-001".into()),
                 capabilities: capabilities(),
+                execution_policy: None,
             },
         ),
         (
@@ -954,6 +955,7 @@ pub fn compatibility_event_values() -> BTreeMap<String, ProtocolEvent> {
                 version: "0.12.25".into(),
                 session_id: None,
                 capabilities: Capabilities::default(),
+                execution_policy: None,
             },
         ),
         (
