@@ -8,6 +8,7 @@ use std::collections::HashMap;
 use std::fmt;
 
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 pub const ANVIL_RECEIPT_CONTRACT_VERSION: &str = "1.0";
 pub const ANVIL_RECEIPT_ORIGIN: &str = "core/anvil";
@@ -33,6 +34,11 @@ pub struct AnvilReceipt {
     pub artifact_scope: String,
     pub artifact_digest: String,
     pub gate_closure_digest: String,
+    /// Domain-separated digest of every receipt field except this digest.
+    /// This detects journal/transport corruption of the verdict itself; it is
+    /// not a signature and does not authenticate against a local attacker who
+    /// can rewrite both the receipt and its digest.
+    pub receipt_body_digest: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub supersedes_receipt_id: Option<String>,
     pub terminal_state: String,
@@ -139,6 +145,7 @@ pub enum AnvilReceiptError {
     UnknownReceipt(String),
     CorrelationMismatch(String),
     UnknownCriticalExtension(String),
+    ReceiptBodyDigestMismatch,
 }
 
 impl fmt::Display for AnvilReceiptError {
@@ -172,6 +179,7 @@ impl fmt::Display for AnvilReceiptError {
             Self::UnknownCriticalExtension(extension) => {
                 write!(f, "unknown critical Anvil receipt extension: {extension}")
             }
+            Self::ReceiptBodyDigestMismatch => f.write_str("Anvil receipt body digest mismatch"),
         }
     }
 }
@@ -344,6 +352,14 @@ fn validate_event(event: &AnvilAuthorityEvent) -> Result<(), AnvilReceiptError> 
                     return Err(AnvilReceiptError::InvalidField("digest"));
                 }
             }
+            if !valid_sha256(&receipt.receipt_body_digest) {
+                return Err(AnvilReceiptError::InvalidField("receipt_body_digest"));
+            }
+            let expected = anvil_receipt_body_digest(receipt)
+                .map_err(|_| AnvilReceiptError::InvalidField("receipt_body_digest"))?;
+            if receipt.receipt_body_digest != expected {
+                return Err(AnvilReceiptError::ReceiptBodyDigestMismatch);
+            }
             (&receipt.origin, &receipt.contract_version)
         }
         AnvilAuthorityEvent::AnvilReceiptInvalidated { invalidation } => {
@@ -374,6 +390,19 @@ fn validate_event(event: &AnvilAuthorityEvent) -> Result<(), AnvilReceiptError> 
         return Err(AnvilReceiptError::VersionMismatch(version.to_string()));
     }
     Ok(())
+}
+
+/// Compute the canonical, domain-separated digest of an Anvil receipt body.
+/// The digest field is blanked before serialization so the value is not
+/// self-referential.
+pub fn anvil_receipt_body_digest(receipt: &AnvilReceipt) -> Result<String, serde_json::Error> {
+    let mut body = receipt.clone();
+    body.receipt_body_digest.clear();
+    let bytes = serde_json::to_vec(&body)?;
+    let mut hasher = Sha256::new();
+    hasher.update(b"wayland-core:anvil-receipt-body:v1\0");
+    hasher.update(bytes);
+    Ok(format!("sha256:{:x}", hasher.finalize()))
 }
 
 fn validate_nonempty(field: &'static str, value: &str) -> Result<(), AnvilReceiptError> {
@@ -422,6 +451,7 @@ mod tests {
             artifact_scope: "git:tracked+untracked-excluding-ignored@.".into(),
             artifact_digest: digest('a'),
             gate_closure_digest: digest('b'),
+            receipt_body_digest: String::new(),
             supersedes_receipt_id: None,
             terminal_state: "verified".into(),
             stamp: "verified".into(),
@@ -437,9 +467,9 @@ mod tests {
     }
 
     fn receipt_event(sequence: u64) -> AnvilAuthorityEvent {
-        AnvilAuthorityEvent::AnvilReceipt {
-            receipt: receipt(sequence),
-        }
+        let mut receipt = receipt(sequence);
+        receipt.receipt_body_digest = anvil_receipt_body_digest(&receipt).unwrap();
+        AnvilAuthorityEvent::AnvilReceipt { receipt }
     }
 
     #[test]
@@ -452,8 +482,12 @@ mod tests {
         );
         assert_eq!(reducer.apply(event).unwrap(), AnvilApplyOutcome::Duplicate);
 
-        let mut conflict = receipt(0);
+        let mut conflict = match receipt_event(0) {
+            AnvilAuthorityEvent::AnvilReceipt { receipt } => receipt,
+            AnvilAuthorityEvent::AnvilReceiptInvalidated { .. } => unreachable!(),
+        };
         conflict.artifact_digest = digest('c');
+        conflict.receipt_body_digest = anvil_receipt_body_digest(&conflict).unwrap();
         assert!(matches!(
             reducer.apply(AnvilAuthorityEvent::AnvilReceipt { receipt: conflict }),
             Err(AnvilReceiptError::EventConflict(_))
@@ -471,9 +505,13 @@ mod tests {
             })
         ));
         reducer.apply(receipt_event(0)).unwrap();
-        let mut older = receipt(0);
+        let mut older = match receipt_event(0) {
+            AnvilAuthorityEvent::AnvilReceipt { receipt } => receipt,
+            AnvilAuthorityEvent::AnvilReceiptInvalidated { .. } => unreachable!(),
+        };
         older.receipt_id = "receipt-2".into();
         older.event_id = "event-2".into();
+        older.receipt_body_digest = anvil_receipt_body_digest(&older).unwrap();
         assert!(matches!(
             reducer.apply(AnvilAuthorityEvent::AnvilReceipt { receipt: older }),
             Err(AnvilReceiptError::OutOfOrder {
@@ -536,8 +574,12 @@ mod tests {
                 .unwrap(),
             AnvilApplyOutcome::Inert
         );
-        let mut wrong_version = receipt(0);
+        let mut wrong_version = match receipt_event(0) {
+            AnvilAuthorityEvent::AnvilReceipt { receipt } => receipt,
+            AnvilAuthorityEvent::AnvilReceiptInvalidated { .. } => unreachable!(),
+        };
         wrong_version.contract_version = "2.0".into();
+        wrong_version.receipt_body_digest = anvil_receipt_body_digest(&wrong_version).unwrap();
         assert!(matches!(
             reducer.apply(AnvilAuthorityEvent::AnvilReceipt {
                 receipt: wrong_version
@@ -545,8 +587,13 @@ mod tests {
             Err(AnvilReceiptError::VersionMismatch(_))
         ));
 
-        let mut unknown_critical = receipt(0);
+        let mut unknown_critical = match receipt_event(0) {
+            AnvilAuthorityEvent::AnvilReceipt { receipt } => receipt,
+            AnvilAuthorityEvent::AnvilReceiptInvalidated { .. } => unreachable!(),
+        };
         unknown_critical.required_extensions = vec!["future-authority-rule".into()];
+        unknown_critical.receipt_body_digest =
+            anvil_receipt_body_digest(&unknown_critical).unwrap();
         assert!(matches!(
             reducer.apply(AnvilAuthorityEvent::AnvilReceipt {
                 receipt: unknown_critical
@@ -577,6 +624,19 @@ mod tests {
         assert!(matches!(
             reducer.apply_json_line(legacy),
             Err(AnvilReceiptError::Malformed(_))
+        ));
+    }
+
+    #[test]
+    fn altered_verdict_body_fails_closed() {
+        let mut event = receipt_event(0);
+        let AnvilAuthorityEvent::AnvilReceipt { receipt } = &mut event else {
+            unreachable!();
+        };
+        receipt.stamp = "tampered".into();
+        assert!(matches!(
+            AnvilReceiptReducer::default().apply(event),
+            Err(AnvilReceiptError::ReceiptBodyDigestMismatch)
         ));
     }
 }

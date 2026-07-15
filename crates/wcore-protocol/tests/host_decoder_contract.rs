@@ -680,35 +680,37 @@ fn host_decode_anvil(line: &str) -> DecodeOutcome {
 
 /// Build a sample top-level `anvil_receipt` event.
 fn sample_receipt() -> ProtocolEvent {
-    ProtocolEvent::AnvilReceipt {
-        receipt: wcore_protocol::anvil::AnvilReceipt {
-            receipt_id: "receipt-1".into(),
-            event_id: "event-1".into(),
-            origin: wcore_protocol::anvil::ANVIL_RECEIPT_ORIGIN.into(),
-            contract_version: wcore_protocol::anvil::ANVIL_RECEIPT_CONTRACT_VERSION.into(),
-            required_extensions: Vec::new(),
-            session_id: "sess-1".into(),
-            run_id: "run-1".into(),
-            task_id: "task-1".into(),
-            sequence: 1,
-            issued_at_unix_ms: 1,
-            digest_algorithm: wcore_protocol::anvil::ANVIL_DIGEST_ALGORITHM.into(),
-            artifact_scope: "git:tracked+untracked-excluding-ignored@candidate".into(),
-            artifact_digest: format!("sha256:{}", "a".repeat(64)),
-            gate_closure_digest: format!("sha256:{}", "b".repeat(64)),
-            supersedes_receipt_id: None,
-            terminal_state: "verified".into(),
-            stamp: "verified".into(),
-            checks_passed: 14,
-            checks_total: 14,
-            coverage: None,
-            iterations: 3,
-            valve_fires: 0,
-            cost_microcents: 7_000,
-            priced: true,
-            engine_version: "0.12.24".into(),
-        },
-    }
+    let mut receipt = wcore_protocol::anvil::AnvilReceipt {
+        receipt_id: "receipt-1".into(),
+        event_id: "event-1".into(),
+        origin: wcore_protocol::anvil::ANVIL_RECEIPT_ORIGIN.into(),
+        contract_version: wcore_protocol::anvil::ANVIL_RECEIPT_CONTRACT_VERSION.into(),
+        required_extensions: Vec::new(),
+        session_id: "sess-1".into(),
+        run_id: "run-1".into(),
+        task_id: "task-1".into(),
+        sequence: 1,
+        issued_at_unix_ms: 1,
+        digest_algorithm: wcore_protocol::anvil::ANVIL_DIGEST_ALGORITHM.into(),
+        artifact_scope: "git:tracked+untracked-excluding-ignored@candidate".into(),
+        artifact_digest: format!("sha256:{}", "a".repeat(64)),
+        gate_closure_digest: format!("sha256:{}", "b".repeat(64)),
+        receipt_body_digest: String::new(),
+        supersedes_receipt_id: None,
+        terminal_state: "verified".into(),
+        stamp: "verified".into(),
+        checks_passed: 14,
+        checks_total: 14,
+        coverage: None,
+        iterations: 3,
+        valve_fires: 0,
+        cost_microcents: 7_000,
+        priced: true,
+        engine_version: "0.12.24".into(),
+    };
+    receipt.receipt_body_digest =
+        wcore_protocol::anvil::anvil_receipt_body_digest(&receipt).unwrap();
+    ProtocolEvent::AnvilReceipt { receipt }
 }
 
 #[test]

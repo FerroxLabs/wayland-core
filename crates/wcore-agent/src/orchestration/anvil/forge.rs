@@ -26,7 +26,7 @@ use wcore_config::anvil::AnvilConfig;
 use wcore_protocol::anvil::{
     ANVIL_DIGEST_ALGORITHM, ANVIL_RECEIPT_CONTRACT_VERSION, ANVIL_RECEIPT_ORIGIN,
     AnvilAuthorityEvent, AnvilInvalidationReason, AnvilReceipt, AnvilReceiptInvalidation,
-    AnvilReceiptReducer,
+    AnvilReceiptReducer, anvil_receipt_body_digest,
 };
 use wcore_protocol::events::ProtocolEvent;
 use wcore_protocol::writer::{ProtocolEmitter, ProtocolWriter};
@@ -703,35 +703,37 @@ async fn emit_receipt(
     let mut journal = ReceiptAuthorityJournal::open(workspace, session_id)?;
     let sequence = journal.next_sequence(session_id);
     let receipt_id = uuid::Uuid::new_v4().to_string();
-    let event = AnvilAuthorityEvent::AnvilReceipt {
-        receipt: AnvilReceipt {
-            receipt_id,
-            event_id: uuid::Uuid::new_v4().to_string(),
-            origin: ANVIL_RECEIPT_ORIGIN.to_string(),
-            contract_version: ANVIL_RECEIPT_CONTRACT_VERSION.to_string(),
-            required_extensions: Vec::new(),
-            session_id: session_id.to_string(),
-            run_id: run_id.to_string(),
-            task_id: task_id.to_string(),
-            sequence,
-            issued_at_unix_ms: unix_time_ms(),
-            digest_algorithm: ANVIL_DIGEST_ALGORITHM.to_string(),
-            artifact_scope: "git:tracked+untracked-excluding-ignored@candidate".to_string(),
-            artifact_digest: artifact_digest.clone(),
-            gate_closure_digest: prefixed_sha256(gate_closure_digest),
-            supersedes_receipt_id: None,
-            terminal_state: terminal_state_str(&outcome.terminal).to_string(),
-            stamp: outcome.stamp.clone(),
-            checks_passed: outcome.checks_passed,
-            checks_total: outcome.checks_total,
-            coverage: None,
-            iterations: outcome.iterations,
-            valve_fires: outcome.valve_fires,
-            cost_microcents: spend.cost_microcents,
-            priced: spend.priced,
-            engine_version: env!("CARGO_PKG_VERSION").to_string(),
-        },
+    let mut receipt = AnvilReceipt {
+        receipt_id,
+        event_id: uuid::Uuid::new_v4().to_string(),
+        origin: ANVIL_RECEIPT_ORIGIN.to_string(),
+        contract_version: ANVIL_RECEIPT_CONTRACT_VERSION.to_string(),
+        required_extensions: Vec::new(),
+        session_id: session_id.to_string(),
+        run_id: run_id.to_string(),
+        task_id: task_id.to_string(),
+        sequence,
+        issued_at_unix_ms: unix_time_ms(),
+        digest_algorithm: ANVIL_DIGEST_ALGORITHM.to_string(),
+        artifact_scope: "git:tracked+untracked-excluding-ignored@candidate".to_string(),
+        artifact_digest: artifact_digest.clone(),
+        gate_closure_digest: prefixed_sha256(gate_closure_digest),
+        receipt_body_digest: String::new(),
+        supersedes_receipt_id: None,
+        terminal_state: terminal_state_str(&outcome.terminal).to_string(),
+        stamp: outcome.stamp.clone(),
+        checks_passed: outcome.checks_passed,
+        checks_total: outcome.checks_total,
+        coverage: None,
+        iterations: outcome.iterations,
+        valve_fires: outcome.valve_fires,
+        cost_microcents: spend.cost_microcents,
+        priced: spend.priced,
+        engine_version: env!("CARGO_PKG_VERSION").to_string(),
     };
+    receipt.receipt_body_digest = anvil_receipt_body_digest(&receipt)
+        .map_err(|error| ForgeError::Receipt(format!("digest receipt body: {error}")))?;
+    let event = AnvilAuthorityEvent::AnvilReceipt { receipt };
     journal.append(&event)?;
     emitter
         .emit_anvil_authority(&event)
@@ -906,6 +908,7 @@ async fn artifact_content_digest(root: &Path) -> Result<String, ForgeError> {
                 .map_err(|_| ForgeError::Receipt("artifact path is not UTF-8".to_string()))
         })
         .collect::<Result<Vec<_>, _>>()?;
+    paths.retain(|relative| !Path::new(relative).starts_with(Path::new(".wayland/anvil/receipts")));
     paths.sort_unstable();
     paths.dedup();
 
@@ -1085,11 +1088,18 @@ mod tests {
         assert!(init.status.success());
 
         let a = artifact_content_digest(dir.path()).await.unwrap();
+        let receipts = dir.path().join(".wayland/anvil/receipts");
+        std::fs::create_dir_all(&receipts).unwrap();
+        std::fs::write(receipts.join("session.jsonl"), b"receipt journal").unwrap();
         let b = artifact_content_digest(dir.path()).await.unwrap();
         assert_eq!(a, b);
         let hex = a.strip_prefix("sha256:").unwrap();
         assert_eq!(hex.len(), 64);
         assert!(hex.chars().all(|c| c.is_ascii_hexdigit()));
+
+        std::fs::write(dir.path().join("artifact.txt"), b"mutated artifact").unwrap();
+        let c = artifact_content_digest(dir.path()).await.unwrap();
+        assert_ne!(a, c);
     }
 
     #[test]
