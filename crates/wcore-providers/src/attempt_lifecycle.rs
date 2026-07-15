@@ -413,13 +413,15 @@ mod tests {
         assert!(result.accepted_attempt_id.is_none());
         assert_eq!(lifecycle.prepared.lock().unwrap().len(), 1);
         assert_eq!(lifecycle.started.lock().unwrap().len(), 1);
-        let finished = lifecycle.finished.lock().unwrap();
-        assert_eq!(finished.len(), 1);
-        assert!(matches!(
-            &finished[0].1,
-            ProviderAttemptHeaderOutcome::NotStarted { reason }
-                if matches!(reason, ProviderAttemptNotStartedReason::BeforeDispatchFailed { .. })
-        ));
+        {
+            let finished = lifecycle.finished.lock().unwrap();
+            assert_eq!(finished.len(), 1);
+            assert!(matches!(
+                &finished[0].1,
+                ProviderAttemptHeaderOutcome::NotStarted { reason }
+                    if matches!(reason, ProviderAttemptNotStartedReason::BeforeDispatchFailed { .. })
+            ));
+        }
         assert!(
             server
                 .received_requests()
