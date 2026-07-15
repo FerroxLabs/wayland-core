@@ -8,6 +8,7 @@ pub mod events;
 pub mod execution_policy;
 pub mod output_pump;
 pub mod reader;
+pub mod workflow;
 pub mod writer;
 
 use std::collections::HashMap;

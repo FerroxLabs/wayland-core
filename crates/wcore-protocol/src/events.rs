@@ -143,12 +143,8 @@ pub enum MonitorReason {
 pub enum WorkflowNodeState {
     Queued,
     Running,
-    Suspended,
-    Resumed,
     Succeeded,
     Failed,
-    Cancelled,
-    TimedOut,
     Blocked,
 }
 
@@ -158,9 +154,6 @@ pub enum WorkflowNodeState {
 pub enum WorkflowTerminalState {
     Succeeded,
     Failed,
-    Cancelled,
-    TimedOut,
-    Blocked,
 }
 
 /// Typed, provider-neutral failure evidence for workflow lifecycle events.

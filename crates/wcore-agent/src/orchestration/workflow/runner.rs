@@ -51,7 +51,6 @@
 //!   per-stage PassThrough path.
 
 use std::collections::{HashMap, HashSet};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use serde_json::Value;
@@ -89,6 +88,15 @@ struct ChildSequence {
     next_sequence: u64,
 }
 
+#[derive(Debug)]
+struct WorkflowLifecycleState {
+    started: bool,
+    finished: bool,
+    next_sequence: u64,
+    terminal_nodes: HashSet<String>,
+    children: HashMap<String, ChildSequence>,
+}
+
 /// Per-run producer authority for workflow, node, and child correlation.
 ///
 /// A single instance owns every sequence and event id for one execution. It
@@ -100,11 +108,10 @@ pub struct WorkflowLifecycleEmitter {
     node_count: usize,
     node_ids: Vec<String>,
     run_id: String,
-    started: AtomicBool,
-    finished: AtomicBool,
-    next_sequence: AtomicU64,
-    terminal_nodes: Mutex<HashSet<String>>,
-    children: Mutex<HashMap<String, ChildSequence>>,
+    /// Admission, identity allocation, and sink emission share one lock. This
+    /// makes physical wire order equal sequence order and closes the race where
+    /// a node event could pass a terminal check before `finish` won.
+    state: Mutex<WorkflowLifecycleState>,
 }
 
 impl WorkflowLifecycleEmitter {
@@ -122,18 +129,25 @@ impl WorkflowLifecycleEmitter {
             node_count,
             node_ids,
             run_id: uuid::Uuid::new_v4().to_string(),
-            started: AtomicBool::new(false),
-            finished: AtomicBool::new(false),
-            next_sequence: AtomicU64::new(1),
-            terminal_nodes: Mutex::new(HashSet::new()),
-            children: Mutex::new(HashMap::new()),
+            state: Mutex::new(WorkflowLifecycleState {
+                started: false,
+                finished: false,
+                next_sequence: 1,
+                terminal_nodes: HashSet::new(),
+                children: HashMap::new(),
+            }),
         }
     }
 
     pub fn start(&self) {
-        if self.started.swap(true, Ordering::AcqRel) {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if state.started || state.finished {
             return;
         }
+        state.started = true;
         self.output
             .emit_correlated_workflow_started(&WorkflowRunStarted {
                 workflow_id: self.workflow_id.clone(),
@@ -152,66 +166,61 @@ impl WorkflowLifecycleEmitter {
         state: WorkflowNodeState,
         failure: Option<WorkflowFailure>,
     ) {
-        if self.finished.load(Ordering::Acquire) {
+        let mut lifecycle = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if !lifecycle.started || lifecycle.finished {
             return;
         }
         let terminal = matches!(
             state,
-            WorkflowNodeState::Succeeded
-                | WorkflowNodeState::Failed
-                | WorkflowNodeState::Cancelled
-                | WorkflowNodeState::TimedOut
-                | WorkflowNodeState::Blocked
+            WorkflowNodeState::Succeeded | WorkflowNodeState::Failed | WorkflowNodeState::Blocked
         );
-        {
-            let mut terminals = self
-                .terminal_nodes
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
-            if terminals.contains(node_id) {
-                return;
-            }
-            if terminal {
-                terminals.insert(node_id.to_string());
-            }
+        if lifecycle.terminal_nodes.contains(node_id) {
+            return;
         }
+        if terminal {
+            lifecycle.terminal_nodes.insert(node_id.to_string());
+        }
+        let child_run_id = child_run_id(&lifecycle.children, node_id);
+        let sequence = lifecycle.next_sequence;
+        lifecycle.next_sequence = lifecycle.next_sequence.saturating_add(1);
         self.output
             .emit_workflow_node_event(&WorkflowNodeLifecycle {
                 run_id: self.run_id.clone(),
                 node_id: node_id.to_string(),
-                child_run_id: self.child_run_id(node_id),
+                child_run_id,
                 event_id: uuid::Uuid::new_v4().to_string(),
-                sequence: self.next_sequence.fetch_add(1, Ordering::Relaxed),
+                sequence,
                 state,
                 failure,
             });
     }
 
     pub fn child_event(&self, parent_call_id: &str, agent_name: &str, inner: &Value) {
-        if self.finished.load(Ordering::Acquire) {
+        let mut lifecycle = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if !lifecycle.started || lifecycle.finished {
             return;
         }
-        let correlation = {
-            let mut children = self
-                .children
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
-            let child = children
-                .entry(parent_call_id.to_string())
-                .or_insert_with(|| ChildSequence {
-                    run_id: uuid::Uuid::new_v4().to_string(),
-                    next_sequence: 0,
-                });
-            let sequence = child.next_sequence;
-            child.next_sequence = child.next_sequence.saturating_add(1);
-            WorkflowChildCorrelation {
-                run_id: self.run_id.clone(),
-                child_run_id: child.run_id.clone(),
-                parent_child_run_id: None,
-                child_sequence: sequence,
-                event_id: uuid::Uuid::new_v4().to_string(),
-            }
+        let child = lifecycle
+            .children
+            .entry(parent_call_id.to_string())
+            .or_insert_with(|| ChildSequence {
+                run_id: uuid::Uuid::new_v4().to_string(),
+                next_sequence: 0,
+            });
+        let correlation = WorkflowChildCorrelation {
+            run_id: self.run_id.clone(),
+            child_run_id: child.run_id.clone(),
+            parent_child_run_id: None,
+            child_sequence: child.next_sequence,
+            event_id: uuid::Uuid::new_v4().to_string(),
         };
+        child.next_sequence = child.next_sequence.saturating_add(1);
         self.output.emit_correlated_sub_agent_event(
             parent_call_id,
             agent_name,
@@ -229,28 +238,32 @@ impl WorkflowLifecycleEmitter {
     }
 
     pub fn finish(&self, terminal_state: WorkflowTerminalState, failure: Option<WorkflowFailure>) {
-        if self.finished.swap(true, Ordering::AcqRel) {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if !state.started || state.finished {
             return;
         }
+        state.finished = true;
+        let sequence = state.next_sequence;
+        state.next_sequence = state.next_sequence.saturating_add(1);
         self.output
             .emit_correlated_workflow_finished(&WorkflowRunFinished {
                 workflow_id: self.workflow_id.clone(),
                 run_id: self.run_id.clone(),
                 event_id: uuid::Uuid::new_v4().to_string(),
-                sequence: self.next_sequence.fetch_add(1, Ordering::Relaxed),
+                sequence,
                 terminal_state,
                 failure,
             });
     }
+}
 
-    fn child_run_id(&self, node_id: &str) -> Option<String> {
-        let key = format!("workflow:{node_id}");
-        self.children
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .get(&key)
-            .map(|child| child.run_id.clone())
-    }
+fn child_run_id(children: &HashMap<String, ChildSequence>, node_id: &str) -> Option<String> {
+    children
+        .get(&format!("workflow:{node_id}"))
+        .map(|child| child.run_id.clone())
 }
 
 /// Resolve a node's turn budget: the per-node `AgentSpec.max_turns` override
@@ -1998,6 +2011,67 @@ pub(crate) fn build_prompt(template: &str, input: &Value) -> String {
 mod tests {
     use super::*;
 
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum CapturedLifecycle {
+        Started(u64),
+        Node(u64),
+        Finished(u64),
+    }
+
+    #[derive(Default)]
+    struct LifecycleCapture {
+        events: Mutex<Vec<CapturedLifecycle>>,
+    }
+
+    impl OutputSink for LifecycleCapture {
+        fn emit_text_delta(&self, _text: &str, _msg_id: &str) {}
+
+        fn emit_thinking(&self, _text: &str, _msg_id: &str) {}
+
+        fn emit_tool_call(&self, _name: &str, _input: &str) {}
+
+        fn emit_tool_result(&self, _name: &str, _is_error: bool, _content: &str) {}
+
+        fn emit_stream_start(&self, _msg_id: &str) {}
+
+        fn emit_stream_end(
+            &self,
+            _msg_id: &str,
+            _turns: usize,
+            _input_tokens: u64,
+            _output_tokens: u64,
+            _cache_creation_tokens: u64,
+            _cache_read_tokens: u64,
+            _finish_reason: wcore_types::message::FinishReason,
+        ) {
+        }
+
+        fn emit_error(&self, _msg: &str, _retryable: bool) {}
+
+        fn emit_info(&self, _msg: &str) {}
+
+        fn emit_correlated_workflow_started(&self, event: &WorkflowRunStarted) {
+            self.events
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .push(CapturedLifecycle::Started(event.sequence));
+        }
+
+        fn emit_workflow_node_event(&self, event: &WorkflowNodeLifecycle) {
+            self.events
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .push(CapturedLifecycle::Node(event.sequence));
+        }
+
+        fn emit_correlated_workflow_finished(&self, event: &WorkflowRunFinished) {
+            self.events
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .push(CapturedLifecycle::Finished(event.sequence));
+        }
+    }
+
     #[test]
     fn build_prompt_appends_non_null_input() {
         let p = build_prompt("do it", &Value::String("ctx".into()));
@@ -2114,29 +2188,49 @@ Workflow(
         );
 
         lifecycle.start();
-        assert_eq!(lifecycle.next_sequence.load(Ordering::Relaxed), 1);
+        assert_eq!(
+            lifecycle
+                .state
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .next_sequence,
+            1
+        );
 
         lifecycle.node_event("scan", WorkflowNodeState::Queued, None);
         lifecycle.node_event("scan", WorkflowNodeState::Succeeded, None);
-        assert_eq!(lifecycle.next_sequence.load(Ordering::Relaxed), 3);
+        assert_eq!(
+            lifecycle
+                .state
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .next_sequence,
+            3
+        );
 
         // A terminal is absorbing: a late running event is not emitted and
         // does not consume sequence authority.
         lifecycle.node_event("scan", WorkflowNodeState::Running, None);
-        assert_eq!(lifecycle.next_sequence.load(Ordering::Relaxed), 3);
+        assert_eq!(
+            lifecycle
+                .state
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .next_sequence,
+            3
+        );
 
         // Finish accounts for every known node. The already-terminal scan is
         // unchanged and verify receives exactly one blocked terminal.
         lifecycle.finish_remaining();
-        assert_eq!(lifecycle.next_sequence.load(Ordering::Relaxed), 4);
-        assert_eq!(
-            lifecycle
-                .terminal_nodes
+        {
+            let state = lifecycle
+                .state
                 .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner())
-                .len(),
-            2
-        );
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            assert_eq!(state.next_sequence, 4);
+            assert_eq!(state.terminal_nodes.len(), 2);
+        }
 
         lifecycle.child_event(
             "workflow:scan",
@@ -2148,15 +2242,22 @@ Workflow(
             "scan",
             &serde_json::json!({"type": "stream_end"}),
         );
-        let children = lifecycle
-            .children
+        let state = lifecycle
+            .state
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        assert_eq!(children["workflow:scan"].next_sequence, 2);
-        drop(children);
+        assert_eq!(state.children["workflow:scan"].next_sequence, 2);
+        drop(state);
 
         lifecycle.finish(WorkflowTerminalState::Succeeded, None);
-        assert_eq!(lifecycle.next_sequence.load(Ordering::Relaxed), 5);
+        assert_eq!(
+            lifecycle
+                .state
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .next_sequence,
+            5
+        );
 
         // The run terminal is absorbing too: duplicate finish and late child
         // evidence cannot allocate new event or sequence identities.
@@ -2166,14 +2267,78 @@ Workflow(
             "scan",
             &serde_json::json!({"type": "error"}),
         );
-        assert_eq!(lifecycle.next_sequence.load(Ordering::Relaxed), 5);
-        assert_eq!(
-            lifecycle
-                .children
+        let state = lifecycle
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        assert_eq!(state.next_sequence, 5);
+        assert_eq!(state.children["workflow:scan"].next_sequence, 2);
+    }
+
+    #[test]
+    fn concurrent_finish_is_the_last_admitted_wire_event() {
+        for _ in 0..64 {
+            let capture = Arc::new(LifecycleCapture::default());
+            let output: Arc<dyn OutputSink> = capture.clone();
+            let lifecycle = Arc::new(WorkflowLifecycleEmitter::new(
+                output,
+                "audit".to_string(),
+                "Audit".to_string(),
+                1,
+                vec!["scan".to_string()],
+            ));
+            lifecycle.start();
+
+            let barrier = Arc::new(std::sync::Barrier::new(3));
+            let node_lifecycle = Arc::clone(&lifecycle);
+            let node_barrier = Arc::clone(&barrier);
+            let node = std::thread::spawn(move || {
+                node_barrier.wait();
+                node_lifecycle.node_event("scan", WorkflowNodeState::Queued, None);
+            });
+            let finish_lifecycle = Arc::clone(&lifecycle);
+            let finish_barrier = Arc::clone(&barrier);
+            let finish = std::thread::spawn(move || {
+                finish_barrier.wait();
+                finish_lifecycle.finish(WorkflowTerminalState::Succeeded, None);
+            });
+            barrier.wait();
+            node.join().unwrap();
+            finish.join().unwrap();
+
+            let before_late = capture
+                .events
                 .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner())["workflow:scan"]
-                .next_sequence,
-            2
-        );
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .len();
+            lifecycle.node_event("scan", WorkflowNodeState::Running, None);
+            lifecycle.child_event(
+                "workflow:scan",
+                "scan",
+                &serde_json::json!({"type": "text_delta"}),
+            );
+
+            let events = capture
+                .events
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            assert_eq!(events.len(), before_late);
+            assert!(matches!(
+                events.first(),
+                Some(CapturedLifecycle::Started(0))
+            ));
+            assert!(matches!(
+                events.last(),
+                Some(CapturedLifecycle::Finished(_))
+            ));
+            for (expected, event) in events.iter().enumerate() {
+                let actual = match event {
+                    CapturedLifecycle::Started(sequence)
+                    | CapturedLifecycle::Node(sequence)
+                    | CapturedLifecycle::Finished(sequence) => *sequence,
+                };
+                assert_eq!(actual, expected as u64);
+            }
+        }
     }
 }
