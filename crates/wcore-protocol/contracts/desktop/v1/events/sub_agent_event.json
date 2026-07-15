@@ -1,0 +1,1 @@
+{"agent_name":"researcher","inner":{"msg_id":"child-msg-001","text":"child output","type":"text_delta"},"parent_call_id":"call-spawn-001","type":"sub_agent_event"}
