@@ -1,7 +1,7 @@
 //! Anvil forge wiring — the REAL seams that make [`super::engine::run_climb`] a
 //! live gated-forge (spec §6), plus [`drive_climb_full`] which assembles the
 //! substrate (gate closure + probe, ledger, journal, lease) around them and
-//! emits the [`ProtocolEvent::AnvilReceipt`] at the single climb exit (spec §8).
+//! emits the authoritative Anvil receipt at the single climb exit (spec §8).
 //!
 //! - [`SandboxGate`] runs the pinned gate against a candidate's worktree through
 //!   the sandbox (network-denied, minimized env), reusing the tested
@@ -23,8 +23,13 @@ use parking_lot::Mutex;
 use sha2::{Digest, Sha256};
 
 use wcore_config::anvil::AnvilConfig;
+use wcore_protocol::anvil::{
+    ANVIL_DIGEST_ALGORITHM, ANVIL_RECEIPT_CONTRACT_VERSION, ANVIL_RECEIPT_ORIGIN,
+    AnvilAuthorityEvent, AnvilInvalidationReason, AnvilReceipt, AnvilReceiptInvalidation,
+    AnvilReceiptReducer,
+};
 use wcore_protocol::events::ProtocolEvent;
-use wcore_protocol::writer::ProtocolEmitter;
+use wcore_protocol::writer::{ProtocolEmitter, ProtocolWriter};
 use wcore_sandbox::SandboxRegistry;
 use wcore_sandbox::backends::SandboxBackend;
 use wcore_swarm::worktree::WorktreeManager;
@@ -41,6 +46,44 @@ use super::gates::{BaselineProbe, GateClosure, GateSpec, ProbeOpts, StabilityPol
 use super::journal::ClimbJournal;
 use super::lease::ClimbLease;
 use super::ledger::{ClimbLedger, LedgerCap, LedgerEntry};
+use crate::output::OutputSink;
+
+/// Authority-only event surface used by both the hosted engine sink and the
+/// standalone JSON protocol writer. Implementations must preserve the event as
+/// a top-level typed protocol variant; embedding serialized JSON in text is not
+/// an implementation of this trait.
+pub trait AnvilAuthorityEmitter: Send + Sync {
+    fn emit_anvil_authority(&self, event: &AnvilAuthorityEvent) -> std::io::Result<()>;
+}
+
+impl AnvilAuthorityEmitter for Arc<dyn OutputSink> {
+    fn emit_anvil_authority(&self, event: &AnvilAuthorityEvent) -> std::io::Result<()> {
+        match event {
+            AnvilAuthorityEvent::AnvilReceipt { receipt } => self.emit_anvil_receipt(receipt),
+            AnvilAuthorityEvent::AnvilReceiptInvalidated { invalidation } => {
+                self.emit_anvil_receipt_invalidation(invalidation);
+            }
+        }
+        Ok(())
+    }
+}
+
+impl AnvilAuthorityEmitter for Arc<ProtocolWriter> {
+    fn emit_anvil_authority(&self, event: &AnvilAuthorityEvent) -> std::io::Result<()> {
+        match event {
+            AnvilAuthorityEvent::AnvilReceipt { receipt } => {
+                self.emit(&ProtocolEvent::AnvilReceipt {
+                    receipt: receipt.clone(),
+                })
+            }
+            AnvilAuthorityEvent::AnvilReceiptInvalidated { invalidation } => {
+                self.emit(&ProtocolEvent::AnvilReceiptInvalidated {
+                    invalidation: invalidation.clone(),
+                })
+            }
+        }
+    }
+}
 
 /// The system read roots a gate needs beyond the worktree (toolchain, libs).
 /// Broad but read-only + network-denied; tightening per-gate is a follow-up.
@@ -92,6 +135,9 @@ pub enum ForgeError {
     /// The pre-climb probe found the gate cannot execute here (spec §5).
     #[error("gate cannot execute on the baseline: {0}")]
     GateUnrunnable(String),
+    /// The receipt could not be content-bound, persisted, or emitted.
+    #[error("receipt authority: {0}")]
+    Receipt(String),
 }
 
 /// A [`GateExecutor`] backed by the sandbox + a pinned [`GateClosure`].
@@ -455,7 +501,7 @@ fn build_prompt(task: &str, feedback: Option<&BuildFeedback>, worktree: &Path) -
 /// Assemble and run a live gated-forge climb, emitting the receipt at exit.
 ///
 /// The caller supplies the `spawner` (already built with a provider) and the
-/// `emitter` (the top-level protocol writer — the receipt is trusted ONLY from
+/// `emitter` (a top-level authority emitter — the receipt is trusted ONLY from
 /// this top-level emission, spec §8). `workspace` is the git repo root the forge
 /// runs against.
 // The forge entry point already carries the independently owned climb inputs;
@@ -467,8 +513,10 @@ pub async fn drive_climb_full(
     workspace: &Path,
     spawner: &dyn Spawner,
     valve_spawner: Option<&dyn Spawner>,
-    emitter: &Arc<dyn ProtocolEmitter>,
-    session_id: Option<String>,
+    emitter: &dyn AnvilAuthorityEmitter,
+    session_id: &str,
+    run_id: &str,
+    task_id: &str,
     sandbox: Arc<SandboxRegistry>,
 ) -> Result<ClimbOutcome, ForgeError> {
     if !cfg.enabled {
@@ -628,39 +676,99 @@ pub async fn drive_climb_full(
         .await;
     }
 
-    emit_receipt(emitter, &outcome, &ledger, &digest, task, session_id);
+    emit_receipt(
+        emitter, &outcome, &ledger, &digest, workspace, session_id, run_id, task_id,
+    )
+    .await?;
     Ok(outcome)
 }
 
-/// Emit the single top-level [`ProtocolEvent::AnvilReceipt`] (spec §8). Best
-/// effort — a writer error must not crash a completed climb.
-fn emit_receipt(
-    emitter: &Arc<dyn ProtocolEmitter>,
+/// Persist and emit the single authoritative top-level receipt. Persistence
+/// happens before publication so replay after a host or process restart uses
+/// the same event identity and sequence.
+#[allow(clippy::too_many_arguments)]
+async fn emit_receipt(
+    emitter: &dyn AnvilAuthorityEmitter,
     outcome: &ClimbOutcome,
     ledger: &ClimbLedger,
     gate_closure_digest: &str,
-    task: &str,
-    session_id: Option<String>,
-) {
+    workspace: &Path,
+    session_id: &str,
+    run_id: &str,
+    task_id: &str,
+) -> Result<(), ForgeError> {
     let spend = ledger.settled();
-    let event = ProtocolEvent::AnvilReceipt {
-        terminal_state: terminal_state_str(&outcome.terminal).to_string(),
-        stamp: outcome.stamp.clone(),
-        checks_passed: outcome.checks_passed,
-        checks_total: outcome.checks_total,
-        coverage: None,
-        iterations: outcome.iterations,
-        valve_fires: outcome.valve_fires,
-        cost_microcents: spend.cost_microcents,
-        priced: spend.priced,
-        gate_closure_digest: gate_closure_digest.to_string(),
-        artifact_digest: artifact_digest(outcome),
-        session_id,
-        task_id: task.to_string(),
-        engine_version: env!("CARGO_PKG_VERSION").to_string(),
-        sequence: 0,
+    let artifact_root = outcome.best_worktree.as_deref().unwrap_or(workspace);
+    let artifact_digest = artifact_content_digest(artifact_root).await?;
+    let mut journal = ReceiptAuthorityJournal::open(workspace, session_id)?;
+    let sequence = journal.next_sequence(session_id);
+    let receipt_id = uuid::Uuid::new_v4().to_string();
+    let event = AnvilAuthorityEvent::AnvilReceipt {
+        receipt: AnvilReceipt {
+            receipt_id,
+            event_id: uuid::Uuid::new_v4().to_string(),
+            origin: ANVIL_RECEIPT_ORIGIN.to_string(),
+            contract_version: ANVIL_RECEIPT_CONTRACT_VERSION.to_string(),
+            required_extensions: Vec::new(),
+            session_id: session_id.to_string(),
+            run_id: run_id.to_string(),
+            task_id: task_id.to_string(),
+            sequence,
+            issued_at_unix_ms: unix_time_ms(),
+            digest_algorithm: ANVIL_DIGEST_ALGORITHM.to_string(),
+            artifact_scope: "git:tracked+untracked-excluding-ignored@candidate".to_string(),
+            artifact_digest: artifact_digest.clone(),
+            gate_closure_digest: prefixed_sha256(gate_closure_digest),
+            supersedes_receipt_id: None,
+            terminal_state: terminal_state_str(&outcome.terminal).to_string(),
+            stamp: outcome.stamp.clone(),
+            checks_passed: outcome.checks_passed,
+            checks_total: outcome.checks_total,
+            coverage: None,
+            iterations: outcome.iterations,
+            valve_fires: outcome.valve_fires,
+            cost_microcents: spend.cost_microcents,
+            priced: spend.priced,
+            engine_version: env!("CARGO_PKG_VERSION").to_string(),
+        },
     };
-    let _ = emitter.emit(&event);
+    journal.append(&event)?;
+    emitter
+        .emit_anvil_authority(&event)
+        .map_err(|error| ForgeError::Receipt(format!("emit: {error}")))?;
+
+    // Close the publication race. This is not a long-lived filesystem
+    // watcher: it proves that the content persisted in the receipt still
+    // matched when publication completed. A later mutation requires the
+    // owning host/session watcher to publish an invalidation event.
+    let observed = artifact_content_digest(artifact_root).await?;
+    if observed != artifact_digest {
+        let invalidation = AnvilAuthorityEvent::AnvilReceiptInvalidated {
+            invalidation: AnvilReceiptInvalidation {
+                event_id: uuid::Uuid::new_v4().to_string(),
+                origin: ANVIL_RECEIPT_ORIGIN.to_string(),
+                contract_version: ANVIL_RECEIPT_CONTRACT_VERSION.to_string(),
+                required_extensions: Vec::new(),
+                receipt_id: match &event {
+                    AnvilAuthorityEvent::AnvilReceipt { receipt } => receipt.receipt_id.clone(),
+                    AnvilAuthorityEvent::AnvilReceiptInvalidated { .. } => unreachable!(),
+                },
+                session_id: session_id.to_string(),
+                run_id: run_id.to_string(),
+                task_id: task_id.to_string(),
+                sequence: sequence + 1,
+                issued_at_unix_ms: unix_time_ms(),
+                reason: AnvilInvalidationReason::ArtifactMutated,
+                prior_artifact_digest: artifact_digest,
+                observed_artifact_digest: Some(observed),
+            },
+        };
+        journal.append(&invalidation)?;
+        emitter
+            .emit_anvil_authority(&invalidation)
+            .map_err(|error| ForgeError::Receipt(format!("emit invalidation: {error}")))?;
+    }
+    Ok(())
 }
 
 /// Canonical snake_case terminal-state string for the receipt (spec §6.5/§8).
@@ -679,24 +787,189 @@ fn terminal_state_str(t: &TerminalState) -> &'static str {
     }
 }
 
-/// A1-minimal artifact digest binding the receipt to the promoted worktree (spec
-/// §8 staleness). Full content-tree hashing is a documented follow-up; this binds
-/// the winning worktree identity + check outcome.
-fn artifact_digest(outcome: &ClimbOutcome) -> String {
+struct ReceiptAuthorityJournal {
+    path: PathBuf,
+    reducer: AnvilReceiptReducer,
+}
+
+impl ReceiptAuthorityJournal {
+    fn open(workspace: &Path, session_id: &str) -> Result<Self, ForgeError> {
+        let directory = workspace.join(".wayland").join("anvil").join("receipts");
+        std::fs::create_dir_all(&directory)
+            .map_err(|error| ForgeError::Receipt(format!("create journal directory: {error}")))?;
+        let mut name_hash = Sha256::new();
+        name_hash.update(b"anvil-receipt-session:v1\0");
+        name_hash.update(session_id.as_bytes());
+        let name = format!("{:x}.jsonl", name_hash.finalize());
+        let path = directory.join(name);
+        let mut reducer = AnvilReceiptReducer::default();
+        if path.exists() {
+            let content = std::fs::read_to_string(&path)
+                .map_err(|error| ForgeError::Receipt(format!("read receipt journal: {error}")))?;
+            for (index, line) in content.lines().enumerate() {
+                if line.trim().is_empty() {
+                    continue;
+                }
+                match reducer.apply_json_line(line) {
+                    Ok(wcore_protocol::anvil::AnvilApplyOutcome::Applied)
+                    | Ok(wcore_protocol::anvil::AnvilApplyOutcome::Duplicate) => {}
+                    Ok(wcore_protocol::anvil::AnvilApplyOutcome::Inert) => {
+                        return Err(ForgeError::Receipt(format!(
+                            "non-authority event in receipt journal line {}",
+                            index + 1
+                        )));
+                    }
+                    Err(error) => {
+                        return Err(ForgeError::Receipt(format!(
+                            "invalid receipt journal line {}: {error}",
+                            index + 1
+                        )));
+                    }
+                }
+            }
+        }
+        Ok(Self { path, reducer })
+    }
+
+    fn next_sequence(&self, session_id: &str) -> u64 {
+        self.reducer.next_sequence(session_id)
+    }
+
+    fn append(&mut self, event: &AnvilAuthorityEvent) -> Result<(), ForgeError> {
+        self.reducer
+            .apply(event.clone())
+            .map_err(|error| ForgeError::Receipt(format!("reject event before append: {error}")))?;
+        let mut bytes = serde_json::to_vec(event)
+            .map_err(|error| ForgeError::Receipt(format!("serialize event: {error}")))?;
+        bytes.push(b'\n');
+        let mut file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&self.path)
+            .map_err(|error| ForgeError::Receipt(format!("open receipt journal: {error}")))?;
+        std::io::Write::write_all(&mut file, &bytes)
+            .map_err(|error| ForgeError::Receipt(format!("append receipt journal: {error}")))?;
+        file.sync_all()
+            .map_err(|error| ForgeError::Receipt(format!("sync receipt journal: {error}")))?;
+        Ok(())
+    }
+}
+
+fn prefixed_sha256(digest: &str) -> String {
+    if digest.starts_with("sha256:") {
+        digest.to_string()
+    } else {
+        format!("sha256:{digest}")
+    }
+}
+
+fn unix_time_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_millis().min(u128::from(u64::MAX)) as u64)
+        .unwrap_or(0)
+}
+
+/// Hash the canonical content corpus visible to git: tracked files plus
+/// untracked, non-ignored files. Paths and byte lengths are framed explicitly;
+/// worktree location, mtimes, permissions, check counts, and receipt journals
+/// do not affect the digest.
+async fn artifact_content_digest(root: &Path) -> Result<String, ForgeError> {
+    let output = wcore_config::shell::shell_command_argv(
+        "git",
+        &[
+            "ls-files",
+            "--cached",
+            "--others",
+            "--exclude-standard",
+            "-z",
+        ],
+    )
+    .current_dir(root)
+    .output()
+    .await
+    .map_err(|error| ForgeError::Receipt(format!("enumerate artifact content: {error}")))?;
+    if !output.status.success() {
+        return Err(ForgeError::Receipt(format!(
+            "enumerate artifact content exited {}: {}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr).trim()
+        )));
+    }
+
+    let mut paths = output
+        .stdout
+        .split(|byte| *byte == 0)
+        .filter(|path| !path.is_empty())
+        .map(|path| {
+            String::from_utf8(path.to_vec())
+                .map_err(|_| ForgeError::Receipt("artifact path is not UTF-8".to_string()))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    paths.sort_unstable();
+    paths.dedup();
+
     let mut h = Sha256::new();
-    h.update(b"anvil-artifact:v1:");
-    match &outcome.best_worktree {
-        Some(p) => h.update(p.to_string_lossy().as_bytes()),
-        None => h.update(b"none"),
+    h.update(b"anvil-artifact-content:v2\0");
+    for relative in paths {
+        let relative_path = Path::new(&relative);
+        if relative_path.is_absolute()
+            || relative_path
+                .components()
+                .any(|component| !matches!(component, std::path::Component::Normal(_)))
+        {
+            return Err(ForgeError::Receipt(format!(
+                "unsafe artifact path returned by git: {relative}"
+            )));
+        }
+        let absolute = root.join(relative_path);
+        h.update((relative.len() as u64).to_le_bytes());
+        h.update(relative.as_bytes());
+        match std::fs::symlink_metadata(&absolute) {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                let target = std::fs::read_link(&absolute).map_err(|error| {
+                    ForgeError::Receipt(format!("read symlink {relative}: {error}"))
+                })?;
+                let target = target.to_str().ok_or_else(|| {
+                    ForgeError::Receipt(format!("symlink target is not UTF-8: {relative}"))
+                })?;
+                h.update(b"L");
+                h.update((target.len() as u64).to_le_bytes());
+                h.update(target.as_bytes());
+            }
+            Ok(metadata) if metadata.is_file() => {
+                let bytes = std::fs::read(&absolute).map_err(|error| {
+                    ForgeError::Receipt(format!("read artifact {relative}: {error}"))
+                })?;
+                h.update(b"F");
+                h.update((bytes.len() as u64).to_le_bytes());
+                h.update(bytes);
+            }
+            Ok(_) => {
+                return Err(ForgeError::Receipt(format!(
+                    "artifact is neither file nor symlink: {relative}"
+                )));
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                // A missing tracked file is canonical content too: deletion is
+                // distinct from an empty file and therefore changes the digest.
+                h.update(b"M");
+            }
+            Err(error) => {
+                return Err(ForgeError::Receipt(format!(
+                    "inspect artifact {relative}: {error}"
+                )));
+            }
+        }
     }
-    h.update(outcome.checks_passed.to_le_bytes());
-    h.update(outcome.checks_total.to_le_bytes());
     let d = h.finalize();
-    let mut s = String::with_capacity(64);
+    let mut s = String::with_capacity(71);
+    s.push_str("sha256:");
     for b in d {
-        s.push_str(&format!("{b:02x}"));
+        use std::fmt::Write as _;
+        let _ = write!(s, "{b:02x}");
     }
-    s
+    Ok(s)
 }
 
 #[cfg(test)]

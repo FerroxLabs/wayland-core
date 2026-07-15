@@ -2986,6 +2986,7 @@ impl AgentEngine {
                     session.id, age_secs
                 ));
             }
+            self.output.bind_session_id(&session.id);
             self.current_session = Some(session);
             self.session_journal = Some(journal);
         }

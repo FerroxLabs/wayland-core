@@ -196,6 +196,9 @@ pub struct ProtocolSink {
     /// arrives; the value persists until the next update so in-turn info
     /// events (slash output, engine progress notes) carry a valid id.
     current_msg_id: Arc<RwLock<String>>,
+    /// Core session identity advertised to the host and reused by producer
+    /// contracts such as Anvil receipts.
+    session_id: Arc<RwLock<Option<String>>>,
 }
 
 impl ProtocolSink {
@@ -211,6 +214,7 @@ impl ProtocolSink {
             user_model_backend: std::sync::OnceLock::new(),
             token_redactor: ActiveTokenRedactor::new(),
             current_msg_id: Arc::new(RwLock::new(String::new())),
+            session_id: Arc::new(RwLock::new(None)),
         }
     }
 
@@ -521,6 +525,29 @@ impl ProtocolSink {
 }
 
 impl OutputSink for ProtocolSink {
+    fn bind_session_id(&self, session_id: &str) {
+        *self.session_id.write() = Some(session_id.to_string());
+    }
+
+    fn current_session_id(&self) -> Option<String> {
+        self.session_id.read().clone()
+    }
+
+    fn emit_anvil_receipt(&self, receipt: &wcore_protocol::anvil::AnvilReceipt) {
+        let _ = self.writer.emit(&ProtocolEvent::AnvilReceipt {
+            receipt: receipt.clone(),
+        });
+    }
+
+    fn emit_anvil_receipt_invalidation(
+        &self,
+        invalidation: &wcore_protocol::anvil::AnvilReceiptInvalidation,
+    ) {
+        let _ = self.writer.emit(&ProtocolEvent::AnvilReceiptInvalidated {
+            invalidation: invalidation.clone(),
+        });
+    }
+
     fn emit_text_delta(&self, text: &str, msg_id: &str) {
         let _ = self.writer.emit(&ProtocolEvent::TextDelta {
             text: text.to_string(),

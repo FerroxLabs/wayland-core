@@ -13,7 +13,7 @@ use wcore_agent::orchestration::anvil::forge::drive_climb_full;
 use wcore_agent::orchestration::anvil::seat::{materialize_driver_seat, materialize_valve_seat};
 use wcore_agent::spawner::SpawnerBudgetGovernance;
 use wcore_config::config::{CliArgs, Config, load_merged_config_file};
-use wcore_protocol::writer::{ProtocolEmitter, ProtocolWriter};
+use wcore_protocol::writer::ProtocolWriter;
 
 /// Arguments for `wayland-core forge`.
 #[derive(Args, Debug)]
@@ -69,6 +69,7 @@ pub async fn run_forge(args: ForgeArgs) -> anyhow::Result<()> {
         operational_budget.start_root(),
         tokio_util::sync::CancellationToken::new(),
     );
+    let session_id = governance.session_id().to_string();
     let mut seat = materialize_driver_seat(
         &cf.anvil,
         &session_cfg,
@@ -105,7 +106,7 @@ pub async fn run_forge(args: ForgeArgs) -> anyhow::Result<()> {
 
     // The top-level protocol writer — the AnvilReceipt is trusted ONLY from this
     // top-level emission (host trust boundary, spec §8).
-    let emitter: Arc<dyn ProtocolEmitter> = Arc::new(ProtocolWriter::new());
+    let emitter = Arc::new(ProtocolWriter::new());
 
     let workspace = std::env::current_dir()?;
 
@@ -119,7 +120,9 @@ pub async fn run_forge(args: ForgeArgs) -> anyhow::Result<()> {
         &spawner,
         valve_spawner,
         &emitter,
-        None,
+        &session_id,
+        &uuid::Uuid::new_v4().to_string(),
+        &uuid::Uuid::new_v4().to_string(),
         sandbox,
     )
     .await

@@ -11,6 +11,27 @@ use wcore_types::message::{FinishReason, TokenUsage};
 
 /// Abstraction over output channels (terminal vs JSON stream protocol)
 pub trait OutputSink: Send + Sync {
+    /// Bind the Core session identity after session creation. Default no-op
+    /// keeps non-session sinks unchanged; protocol-capable sinks retain it so
+    /// producer events can correlate to the same session advertised to hosts.
+    fn bind_session_id(&self, _session_id: &str) {}
+
+    /// Return the bound Core session identity, when this sink carries one.
+    fn current_session_id(&self) -> Option<String> {
+        None
+    }
+
+    /// Emit one authoritative top-level Anvil receipt. Default no-op prevents
+    /// terminal/test sinks from accidentally promoting receipt-shaped text.
+    fn emit_anvil_receipt(&self, _receipt: &wcore_protocol::anvil::AnvilReceipt) {}
+
+    /// Emit one authoritative top-level Anvil invalidation event.
+    fn emit_anvil_receipt_invalidation(
+        &self,
+        _invalidation: &wcore_protocol::anvil::AnvilReceiptInvalidation,
+    ) {
+    }
+
     /// Stream text delta from LLM
     fn emit_text_delta(&self, text: &str, msg_id: &str);
     /// Stream thinking content from LLM

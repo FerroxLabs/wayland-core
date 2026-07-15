@@ -940,6 +940,7 @@ fn apply_event_inner(app: &mut App, event: ProtocolEvent) {
         // A1.2: the receipt is not emitted yet (climb lands in A1.5/A1.6) and
         // chip rendering is an A2 concern — the TUI ignores it for now.
         | ProtocolEvent::AnvilReceipt { .. }
+        | ProtocolEvent::AnvilReceiptInvalidated { .. }
         | ProtocolEvent::Pong => {}
     }
 }

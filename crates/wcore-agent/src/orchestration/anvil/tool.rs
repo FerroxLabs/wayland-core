@@ -14,35 +14,19 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use parking_lot::Mutex;
 use serde_json::{Value, json};
 
 use wcore_config::anvil::AnvilConfig;
 use wcore_config::config::Config;
-use wcore_protocol::events::{ProtocolEvent, ToolCategory};
-use wcore_protocol::writer::ProtocolEmitter;
+use wcore_protocol::events::ToolCategory;
 use wcore_sandbox::SandboxRegistry;
 use wcore_tools::Tool;
 use wcore_tools::context::ToolContext;
 use wcore_types::tool::{JsonSchema, ToolResult};
 
 use super::forge::drive_climb_full;
+use crate::output::OutputSink;
 use crate::spawner::SpawnerBudgetGovernance;
-
-/// Captures the climb's protocol events (the `AnvilReceipt`) so the receipt
-/// can ride back inside the tool result instead of being written to stdout —
-/// a raw JSON line on stdout would corrupt the interactive TUI. Host-stream
-/// re-emission of captured receipts is a documented follow-up.
-struct CapturedEmitter(Mutex<Vec<String>>);
-
-impl ProtocolEmitter for CapturedEmitter {
-    fn emit(&self, event: &ProtocolEvent) -> std::io::Result<()> {
-        if let Ok(line) = serde_json::to_string(event) {
-            self.0.lock().push(line);
-        }
-        Ok(())
-    }
-}
 
 /// The session-level gated-forge tool.
 pub struct ForgeTool {
@@ -50,6 +34,8 @@ pub struct ForgeTool {
     session_cfg: Config,
     egress_policy: wcore_egress::SharedPolicy,
     budget_governance: SpawnerBudgetGovernance,
+    output: Arc<dyn OutputSink>,
+    fallback_session_id: String,
 }
 
 impl ForgeTool {
@@ -62,12 +48,16 @@ impl ForgeTool {
         session_cfg: Config,
         egress_policy: wcore_egress::SharedPolicy,
         budget_governance: SpawnerBudgetGovernance,
+        output: Arc<dyn OutputSink>,
     ) -> Self {
+        let fallback_session_id = budget_governance.session_id().to_string();
         Self {
             anvil,
             session_cfg,
             egress_policy,
             budget_governance,
+            output,
+            fallback_session_id,
         }
     }
 
@@ -75,6 +65,7 @@ impl ForgeTool {
         &self,
         input: Value,
         sandbox: Arc<SandboxRegistry>,
+        task_id: String,
     ) -> ToolResult {
         let Some(task) = input.get("task").and_then(Value::as_str) else {
             return ToolResult {
@@ -125,8 +116,11 @@ impl ForgeTool {
             .as_ref()
             .map(|s| &s.spawner as &dyn wcore_types::spawner::Spawner);
 
-        let captured = Arc::new(CapturedEmitter(Mutex::new(Vec::new())));
-        let emitter: Arc<dyn ProtocolEmitter> = captured.clone();
+        let session_id = self
+            .output
+            .current_session_id()
+            .unwrap_or_else(|| self.fallback_session_id.clone());
+        let run_id = uuid::Uuid::new_v4().to_string();
 
         match drive_climb_full(
             task,
@@ -134,14 +128,15 @@ impl ForgeTool {
             &workspace,
             &seat.spawner,
             valve_spawner,
-            &emitter,
-            None,
+            &self.output,
+            &session_id,
+            &run_id,
+            &task_id,
             sandbox,
         )
         .await
         {
             Ok(outcome) => {
-                let receipts = captured.0.lock().join("\n");
                 let worktree = outcome
                     .best_worktree
                     .as_ref()
@@ -156,8 +151,8 @@ impl ForgeTool {
                     content: format!(
                         "Forged: {stamp} · {passed}/{total} checks · {iters} iteration(s) · \
                          {fires} valve fire(s) · driver seat {seat_label}\nterminal: \
-                         {terminal:?}\ncandidate worktree: {worktree}\nreceipt: \
-                         {receipts}{notes}\n\nIf verified, review the candidate worktree and \
+                         {terminal:?}\ncandidate worktree: {worktree}\nreceipt: emitted as an \
+                         authoritative top-level Core event; this summary is inert{notes}\n\nIf verified, review the candidate worktree and \
                          merge/cherry-pick its branch; the user's tree was not modified.",
                         stamp = outcome.stamp,
                         passed = outcome.checks_passed,
@@ -249,11 +244,17 @@ impl Tool for ForgeTool {
                 };
             }
         };
-        self.execute_with_sandbox(input, sandbox).await
+        self.execute_with_sandbox(input, sandbox, uuid::Uuid::new_v4().to_string())
+            .await
     }
 
     async fn execute_with_ctx(&self, input: Value, ctx: &ToolContext) -> ToolResult {
-        self.execute_with_sandbox(input, Arc::clone(&ctx.sandbox))
+        let task_id = if ctx.call_id.is_empty() {
+            uuid::Uuid::new_v4().to_string()
+        } else {
+            ctx.call_id.clone()
+        };
+        self.execute_with_sandbox(input, Arc::clone(&ctx.sandbox), task_id)
             .await
     }
 }

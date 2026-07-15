@@ -2262,6 +2262,7 @@ impl AgentBootstrap {
                 spawner
                     .budget_governance()
                     .expect("Smart session spawner carries finite budget governance"),
+                Arc::clone(&self.output),
             )));
         }
 

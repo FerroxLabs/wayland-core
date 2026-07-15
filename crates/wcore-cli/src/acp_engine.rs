@@ -90,11 +90,15 @@ fn network_session_config(mut config: Config) -> Config {
 /// bridge's exact `ProtocolEvent` mapping — no re-implementation.
 struct RelaySink {
     handle: RelayHandle,
+    session_id: Arc<Mutex<Option<String>>>,
 }
 
 impl RelaySink {
     fn new(handle: RelayHandle) -> Self {
-        Self { handle }
+        Self {
+            handle,
+            session_id: Arc::new(Mutex::new(None)),
+        }
     }
 
     /// Run `f` against a `ChannelSink` bound to the current sender, if any.
@@ -109,6 +113,24 @@ impl RelaySink {
 }
 
 impl OutputSink for RelaySink {
+    fn bind_session_id(&self, session_id: &str) {
+        if let Ok(mut bound) = self.session_id.lock() {
+            *bound = Some(session_id.to_string());
+        }
+    }
+    fn current_session_id(&self) -> Option<String> {
+        self.session_id.lock().ok().and_then(|bound| bound.clone())
+    }
+    fn emit_anvil_receipt(&self, receipt: &wcore_protocol::anvil::AnvilReceipt) {
+        self.with_sink(|s| s.emit_anvil_receipt(receipt));
+    }
+    fn emit_anvil_receipt_invalidation(
+        &self,
+        invalidation: &wcore_protocol::anvil::AnvilReceiptInvalidation,
+    ) {
+        self.with_sink(|s| s.emit_anvil_receipt_invalidation(invalidation));
+    }
+
     fn emit_text_delta(&self, text: &str, msg_id: &str) {
         self.with_sink(|s| s.emit_text_delta(text, msg_id));
     }

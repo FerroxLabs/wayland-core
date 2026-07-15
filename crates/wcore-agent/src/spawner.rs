@@ -249,6 +249,14 @@ impl SpawnerBudgetGovernance {
         self.budget_guard = Some(budget_guard);
         self
     }
+
+    /// Stable Core session lineage shared by the parent and every transient
+    /// child. Producer contracts use it only when no persisted host session
+    /// identity has been bound to the output sink yet.
+    #[must_use]
+    pub fn session_id(&self) -> &str {
+        &self.budget_session_id
+    }
 }
 
 impl AgentSpawner {

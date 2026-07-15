@@ -235,12 +235,16 @@ impl ProtocolEmitter for ChannelEmitter {
 /// `ProtocolWriter` (stdout), not an arbitrary emitter.
 pub struct ChannelSink {
     tx: UnboundedSender<ProtocolEvent>,
+    session_id: Arc<Mutex<Option<String>>>,
 }
 
 impl ChannelSink {
     /// Build a sink that forwards onto `tx`.
     pub fn new(tx: UnboundedSender<ProtocolEvent>) -> Self {
-        Self { tx }
+        Self {
+            tx,
+            session_id: Arc::new(Mutex::new(None)),
+        }
     }
 
     /// Forward one event, dropping the result — a closed channel means
@@ -251,6 +255,31 @@ impl ChannelSink {
 }
 
 impl OutputSink for ChannelSink {
+    fn bind_session_id(&self, session_id: &str) {
+        if let Ok(mut bound) = self.session_id.lock() {
+            *bound = Some(session_id.to_string());
+        }
+    }
+
+    fn current_session_id(&self) -> Option<String> {
+        self.session_id.lock().ok().and_then(|bound| bound.clone())
+    }
+
+    fn emit_anvil_receipt(&self, receipt: &wcore_protocol::anvil::AnvilReceipt) {
+        self.send(ProtocolEvent::AnvilReceipt {
+            receipt: receipt.clone(),
+        });
+    }
+
+    fn emit_anvil_receipt_invalidation(
+        &self,
+        invalidation: &wcore_protocol::anvil::AnvilReceiptInvalidation,
+    ) {
+        self.send(ProtocolEvent::AnvilReceiptInvalidated {
+            invalidation: invalidation.clone(),
+        });
+    }
+
     fn emit_text_delta(&self, text: &str, msg_id: &str) {
         self.send(ProtocolEvent::TextDelta {
             text: text.to_string(),

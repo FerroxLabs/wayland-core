@@ -1,6 +1,8 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use crate::anvil::{AnvilReceipt, AnvilReceiptInvalidation};
+
 pub use wcore_types::message::FinishReason;
 
 /// Serde helper: skip serializing a `bool` field when it is `false`.
@@ -814,49 +816,19 @@ pub enum ProtocolEvent {
     /// Like [`ProtocolEvent::BudgetExceeded`], it is an additive variant a
     /// v0.1.21 host drops silently (W0 forward-compat).
     AnvilReceipt {
-        /// Canonical terminal state (anvil §6.5): `verified` | `criteria_checked`
-        /// | `self_checked` | `needs_escalation` | `blocked` | `cancelled` |
-        /// `timed_out` | `permission_denied` | `crashed_recovered` | `superseded`.
-        terminal_state: String,
-        /// The trust-tier stamp actually earned (spec §2 honesty vocabulary):
-        /// `verified` (real Tier-1 gate only) | `criteria_checked` |
-        /// `self_checked` | `format_validated` | `consensus_only`. Distinct from
-        /// `terminal_state`; never `verified` unless a real gate passed.
-        stamp: String,
-        /// Checks passed / total on the final candidate.
-        checks_passed: u32,
-        checks_total: u32,
-        /// Coverage-scope note, e.g. "suite-passed; 2 files outside exercised
-        /// tests". Absent when the whole change-set was covered.
-        #[serde(skip_serializing_if = "Option::is_none")]
-        coverage: Option<String>,
-        /// Climb iterations performed.
-        iterations: u32,
-        /// Escalation-valve fires during the climb (spec §6.4). `0` on the
-        /// happy path; defaulted for decoders of pre-valve receipts.
-        #[serde(default)]
-        valve_fires: u32,
-        /// Settled cost across the whole climb, in micro-cents. When `priced`
-        /// is false this is NOT a real price — the host renders "unpriced",
-        /// never $0 (spec §2).
-        cost_microcents: u64,
-        /// Whether `cost_microcents` is a real, metered price.
-        priced: bool,
-        /// Digest of the pinned gate closure (spec §5) — binds the receipt to
-        /// the exact gate invocation that produced it.
-        gate_closure_digest: String,
-        /// Digest of the verified artifact (spec §8 staleness) — any later
-        /// mutation of the verified files invalidates the chip.
-        artifact_digest: String,
-        /// Session this climb ran in.
-        #[serde(skip_serializing_if = "Option::is_none")]
-        session_id: Option<String>,
-        /// Task-lineage id the climb served.
-        task_id: String,
-        /// Engine version that produced the receipt.
-        engine_version: String,
-        /// Monotonic per-session sequence (receipt ordering / dedup).
-        sequence: u64,
+        /// Versioned, authoritative producer-owned receipt payload. Flattened
+        /// so existing top-level `type = "anvil_receipt"` dispatch remains
+        /// forward-additive while the contract gains stable identity,
+        /// correlation, content binding, and replay semantics.
+        #[serde(flatten)]
+        receipt: AnvilReceipt,
+    },
+    /// A previously authoritative receipt became stale, was revoked, or was
+    /// superseded. Only this top-level Core-origin event changes authority;
+    /// receipt-shaped tool text and opaque nested payloads remain inert.
+    AnvilReceiptInvalidated {
+        #[serde(flatten)]
+        invalidation: AnvilReceiptInvalidation,
     },
     Pong,
 }

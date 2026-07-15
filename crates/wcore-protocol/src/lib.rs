@@ -1,6 +1,7 @@
 // JSON stream protocol for host ↔ agent communication.
 // Contains: events (agent→host), commands (host→agent), approval manager.
 
+pub mod anvil;
 pub mod commands;
 pub mod contract;
 pub mod events;

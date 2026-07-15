@@ -664,7 +664,8 @@ fn structured_traces_and_gepa_enabled_are_independent_opt_ins() {
 // is INERT, because a sub-agent/plugin can never forge a verified verdict.
 // =====================================================================
 
-const ANVIL_RECEIPTS_OPTED_IN_KNOWN_TYPES: &[&str] = &["anvil_receipt"];
+const ANVIL_RECEIPTS_OPTED_IN_KNOWN_TYPES: &[&str] =
+    &["anvil_receipt", "anvil_receipt_invalidated"];
 
 fn host_decode_anvil(line: &str) -> DecodeOutcome {
     let outcome = host_decode(line);
@@ -680,21 +681,33 @@ fn host_decode_anvil(line: &str) -> DecodeOutcome {
 /// Build a sample top-level `anvil_receipt` event.
 fn sample_receipt() -> ProtocolEvent {
     ProtocolEvent::AnvilReceipt {
-        terminal_state: "verified".into(),
-        stamp: "verified".into(),
-        checks_passed: 14,
-        checks_total: 14,
-        coverage: None,
-        iterations: 3,
-        valve_fires: 0,
-        cost_microcents: 7_000,
-        priced: true,
-        gate_closure_digest: "sha256:gate".into(),
-        artifact_digest: "sha256:artifact".into(),
-        session_id: Some("sess-1".into()),
-        task_id: "task-1".into(),
-        engine_version: "0.12.24".into(),
-        sequence: 1,
+        receipt: wcore_protocol::anvil::AnvilReceipt {
+            receipt_id: "receipt-1".into(),
+            event_id: "event-1".into(),
+            origin: wcore_protocol::anvil::ANVIL_RECEIPT_ORIGIN.into(),
+            contract_version: wcore_protocol::anvil::ANVIL_RECEIPT_CONTRACT_VERSION.into(),
+            required_extensions: Vec::new(),
+            session_id: "sess-1".into(),
+            run_id: "run-1".into(),
+            task_id: "task-1".into(),
+            sequence: 1,
+            issued_at_unix_ms: 1,
+            digest_algorithm: wcore_protocol::anvil::ANVIL_DIGEST_ALGORITHM.into(),
+            artifact_scope: "git:tracked+untracked-excluding-ignored@candidate".into(),
+            artifact_digest: format!("sha256:{}", "a".repeat(64)),
+            gate_closure_digest: format!("sha256:{}", "b".repeat(64)),
+            supersedes_receipt_id: None,
+            terminal_state: "verified".into(),
+            stamp: "verified".into(),
+            checks_passed: 14,
+            checks_total: 14,
+            coverage: None,
+            iterations: 3,
+            valve_fires: 0,
+            cost_microcents: 7_000,
+            priced: true,
+            engine_version: "0.12.24".into(),
+        },
     }
 }
 
