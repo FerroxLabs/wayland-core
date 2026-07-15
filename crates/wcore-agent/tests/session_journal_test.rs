@@ -7,8 +7,8 @@ use sha2::{Digest, Sha256};
 use wcore_agent::session_journal::{
     ApprovalDecision, ApprovalOrigin, ApprovalResolution, BudgetAmount, BudgetOwner, BudgetPurpose,
     BudgetUnit, CheckpointOrigin, CheckpointPurpose, ChildNotStartedReason, CompletionOutcome,
-    DeliveryCompletion, DeliveryEvidence, DeliveryOrigin, DeliveryStage, DeliveryUnknownReason,
-    ExternalEffectState, GENESIS_CHECKSUM, JournalEnvelope, JournalError,
+    DeliveryCompletion, DeliveryEvidence, DeliveryNotStartedReason, DeliveryOrigin, DeliveryStage,
+    DeliveryUnknownReason, ExternalEffectState, GENESIS_CHECKSUM, JournalEnvelope, JournalError,
     ProviderAttemptNotStartedReason, ProviderAttemptPurpose, ProviderStreamEvent,
     ReducedSessionState, SESSION_JOURNAL_SCHEMA_VERSION, SessionEvent, SessionJournal,
     SessionSnapshot, ToolNotStartedReason, TurnState, load_snapshot, provider_request_digest,
