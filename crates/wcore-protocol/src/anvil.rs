@@ -80,6 +80,8 @@ pub struct AnvilReceiptInvalidation {
     pub prior_artifact_digest: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub observed_artifact_digest: Option<String>,
+    /// Domain-separated digest of every invalidation field except this one.
+    pub invalidation_body_digest: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -150,6 +152,7 @@ pub enum AnvilReceiptError {
     CorrelationMismatch(String),
     UnknownCriticalExtension(String),
     ReceiptBodyDigestMismatch,
+    InvalidationBodyDigestMismatch,
 }
 
 impl fmt::Display for AnvilReceiptError {
@@ -184,6 +187,9 @@ impl fmt::Display for AnvilReceiptError {
                 write!(f, "unknown critical Anvil receipt extension: {extension}")
             }
             Self::ReceiptBodyDigestMismatch => f.write_str("Anvil receipt body digest mismatch"),
+            Self::InvalidationBodyDigestMismatch => {
+                f.write_str("Anvil invalidation body digest mismatch")
+            }
         }
     }
 }
@@ -381,6 +387,14 @@ fn validate_event(event: &AnvilAuthorityEvent) -> Result<(), AnvilReceiptError> 
             {
                 return Err(AnvilReceiptError::InvalidField("digest"));
             }
+            if !valid_sha256(&invalidation.invalidation_body_digest) {
+                return Err(AnvilReceiptError::InvalidField("invalidation_body_digest"));
+            }
+            let expected = anvil_invalidation_body_digest(invalidation)
+                .map_err(|_| AnvilReceiptError::InvalidField("invalidation_body_digest"))?;
+            if invalidation.invalidation_body_digest != expected {
+                return Err(AnvilReceiptError::InvalidationBodyDigestMismatch);
+            }
             (&invalidation.origin, &invalidation.contract_version)
         }
     };
@@ -405,6 +419,19 @@ pub fn anvil_receipt_body_digest(receipt: &AnvilReceipt) -> Result<String, serde
     let bytes = serde_json::to_vec(&body)?;
     let mut hasher = Sha256::new();
     hasher.update(b"wayland-core:anvil-receipt-body:v1\0");
+    hasher.update(bytes);
+    Ok(format!("sha256:{:x}", hasher.finalize()))
+}
+
+/// Compute the canonical, domain-separated digest of an invalidation body.
+pub fn anvil_invalidation_body_digest(
+    invalidation: &AnvilReceiptInvalidation,
+) -> Result<String, serde_json::Error> {
+    let mut body = invalidation.clone();
+    body.invalidation_body_digest.clear();
+    let bytes = serde_json::to_vec(&body)?;
+    let mut hasher = Sha256::new();
+    hasher.update(b"wayland-core:anvil-invalidation-body:v1\0");
     hasher.update(bytes);
     Ok(format!("sha256:{:x}", hasher.finalize()))
 }
@@ -476,6 +503,28 @@ mod tests {
         AnvilAuthorityEvent::AnvilReceipt { receipt }
     }
 
+    fn invalidation_event() -> AnvilAuthorityEvent {
+        let mut invalidation = AnvilReceiptInvalidation {
+            event_id: "event-2".into(),
+            origin: ANVIL_RECEIPT_ORIGIN.into(),
+            contract_version: ANVIL_RECEIPT_CONTRACT_VERSION.into(),
+            required_extensions: Vec::new(),
+            receipt_id: "receipt-1".into(),
+            session_id: "session-1".into(),
+            run_id: "run-1".into(),
+            task_id: "task-1".into(),
+            sequence: 1,
+            issued_at_unix_ms: 2,
+            reason: AnvilInvalidationReason::ArtifactMutated,
+            prior_artifact_digest: digest('a'),
+            observed_artifact_digest: Some(digest('c')),
+            invalidation_body_digest: String::new(),
+        };
+        invalidation.invalidation_body_digest =
+            anvil_invalidation_body_digest(&invalidation).unwrap();
+        AnvilAuthorityEvent::AnvilReceiptInvalidated { invalidation }
+    }
+
     #[test]
     fn exact_replay_is_idempotent_and_conflicting_duplicate_fails_closed() {
         let mut reducer = AnvilReceiptReducer::default();
@@ -530,25 +579,7 @@ mod tests {
         let mut reducer = AnvilReceiptReducer::default();
         let original = receipt_event(0);
         reducer.apply(original.clone()).unwrap();
-        reducer
-            .apply(AnvilAuthorityEvent::AnvilReceiptInvalidated {
-                invalidation: AnvilReceiptInvalidation {
-                    event_id: "event-2".into(),
-                    origin: ANVIL_RECEIPT_ORIGIN.into(),
-                    contract_version: ANVIL_RECEIPT_CONTRACT_VERSION.into(),
-                    required_extensions: Vec::new(),
-                    receipt_id: "receipt-1".into(),
-                    session_id: "session-1".into(),
-                    run_id: "run-1".into(),
-                    task_id: "task-1".into(),
-                    sequence: 1,
-                    issued_at_unix_ms: 2,
-                    reason: AnvilInvalidationReason::ArtifactMutated,
-                    prior_artifact_digest: digest('a'),
-                    observed_artifact_digest: Some(digest('c')),
-                },
-            })
-            .unwrap();
+        reducer.apply(invalidation_event()).unwrap();
         assert_eq!(
             reducer.status("receipt-1"),
             Some(AnvilReceiptStatus::Invalidated)
@@ -641,6 +672,21 @@ mod tests {
         assert!(matches!(
             AnvilReceiptReducer::default().apply(event),
             Err(AnvilReceiptError::ReceiptBodyDigestMismatch)
+        ));
+    }
+
+    #[test]
+    fn altered_invalidation_body_fails_closed() {
+        let mut reducer = AnvilReceiptReducer::default();
+        reducer.apply(receipt_event(0)).unwrap();
+        let mut event = invalidation_event();
+        let AnvilAuthorityEvent::AnvilReceiptInvalidated { invalidation } = &mut event else {
+            unreachable!();
+        };
+        invalidation.reason = AnvilInvalidationReason::GateRevoked;
+        assert!(matches!(
+            reducer.apply(event),
+            Err(AnvilReceiptError::InvalidationBodyDigestMismatch)
         ));
     }
 }

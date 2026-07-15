@@ -26,7 +26,7 @@ use wcore_config::anvil::AnvilConfig;
 use wcore_protocol::anvil::{
     ANVIL_DIGEST_ALGORITHM, ANVIL_RECEIPT_CONTRACT_VERSION, ANVIL_RECEIPT_ORIGIN,
     AnvilAuthorityEvent, AnvilInvalidationReason, AnvilReceipt, AnvilReceiptInvalidation,
-    AnvilReceiptReducer, anvil_receipt_body_digest,
+    AnvilReceiptReducer, anvil_invalidation_body_digest, anvil_receipt_body_digest,
 };
 use wcore_protocol::events::ProtocolEvent;
 use wcore_protocol::writer::{ProtocolEmitter, ProtocolWriter};
@@ -745,26 +745,28 @@ async fn emit_receipt(
     // owning host/session watcher to publish an invalidation event.
     let observed = artifact_content_digest(artifact_root).await?;
     if observed != artifact_digest {
-        let invalidation = AnvilAuthorityEvent::AnvilReceiptInvalidated {
-            invalidation: AnvilReceiptInvalidation {
-                event_id: uuid::Uuid::new_v4().to_string(),
-                origin: ANVIL_RECEIPT_ORIGIN.to_string(),
-                contract_version: ANVIL_RECEIPT_CONTRACT_VERSION.to_string(),
-                required_extensions: Vec::new(),
-                receipt_id: match &event {
-                    AnvilAuthorityEvent::AnvilReceipt { receipt } => receipt.receipt_id.clone(),
-                    AnvilAuthorityEvent::AnvilReceiptInvalidated { .. } => unreachable!(),
-                },
-                session_id: session_id.to_string(),
-                run_id: run_id.to_string(),
-                task_id: task_id.to_string(),
-                sequence: sequence + 1,
-                issued_at_unix_ms: unix_time_ms(),
-                reason: AnvilInvalidationReason::ArtifactMutated,
-                prior_artifact_digest: artifact_digest,
-                observed_artifact_digest: Some(observed),
+        let mut invalidation = AnvilReceiptInvalidation {
+            event_id: uuid::Uuid::new_v4().to_string(),
+            origin: ANVIL_RECEIPT_ORIGIN.to_string(),
+            contract_version: ANVIL_RECEIPT_CONTRACT_VERSION.to_string(),
+            required_extensions: Vec::new(),
+            receipt_id: match &event {
+                AnvilAuthorityEvent::AnvilReceipt { receipt } => receipt.receipt_id.clone(),
+                AnvilAuthorityEvent::AnvilReceiptInvalidated { .. } => unreachable!(),
             },
+            session_id: session_id.to_string(),
+            run_id: run_id.to_string(),
+            task_id: task_id.to_string(),
+            sequence: sequence + 1,
+            issued_at_unix_ms: unix_time_ms(),
+            reason: AnvilInvalidationReason::ArtifactMutated,
+            prior_artifact_digest: artifact_digest,
+            observed_artifact_digest: Some(observed),
+            invalidation_body_digest: String::new(),
         };
+        invalidation.invalidation_body_digest = anvil_invalidation_body_digest(&invalidation)
+            .map_err(|error| ForgeError::Receipt(format!("digest invalidation body: {error}")))?;
+        let invalidation = AnvilAuthorityEvent::AnvilReceiptInvalidated { invalidation };
         journal.append(&invalidation)?;
         emitter
             .emit_anvil_authority(&invalidation)
