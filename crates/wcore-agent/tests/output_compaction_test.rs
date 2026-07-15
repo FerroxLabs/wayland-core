@@ -20,6 +20,8 @@ use wcore_providers::{LlmProvider, ProviderError};
 use wcore_tools::registry::ToolRegistry;
 use wcore_types::llm::{LlmEvent, LlmRequest};
 use wcore_types::message::{ContentBlock, StopReason, TokenUsage};
+use wiremock::matchers::method;
+use wiremock::{Mock, MockServer, ResponseTemplate};
 
 const TEST_OUTPUT: &str = "\x1b[32mSTATUS: OK\x1b[0m\n\n\n\n50%\r100%\nCompiling dep-0 v1.0.0\nCompiling dep-1 v1.0.0\nCompiling dep-2 v1.0.0\nCompiling dep-3 v1.0.0\nCompiling dep-4 v1.0.0\n{\n    \"id\": 1,\n    \"name\": \"Alice Wonderland\",\n    \"email\": \"alice@example.com\",\n    \"age\": 30,\n    \"address\": \"123 Main Street, Anytown, USA 12345\",\n    \"phone\": \"+1-555-0123\"\n}";
 
@@ -416,6 +418,11 @@ async fn case_6_compressed_content_reaches_llm() {
 
 #[tokio::test]
 async fn secret_tool_result_is_redacted_before_host_provider_and_persistence() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .respond_with(ResponseTemplate::new(200))
+        .mount(&server)
+        .await;
     let secret = test_openai_key();
     let encoded = base64::engine::general_purpose::STANDARD.encode(&secret);
     let raw_output = format!("literal={secret}\nencoded={encoded}\nMy_Password=hunter2");
@@ -447,7 +454,8 @@ async fn secret_tool_result_is_redacted_before_host_provider_and_persistence() {
                     usage: TokenUsage::default(),
                 },
             ],
-        ]),
+        ])
+        .with_physical_url(server.uri()),
         captured: Arc::clone(&captured),
     };
     let dir = tempdir().expect("session tempdir");

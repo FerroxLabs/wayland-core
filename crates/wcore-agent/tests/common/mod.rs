@@ -11,7 +11,9 @@ use tokio::sync::mpsc;
 
 use wcore_agent::confirm::ToolConfirmer;
 use wcore_config::config::{Config, ProviderType, SessionConfig, ToolsConfig};
+use wcore_egress::{AllowAllPolicy, EgressClient};
 use wcore_protocol::events::ToolCategory;
+use wcore_providers::retry::{builder_send_with_retry, scope_max_retries};
 use wcore_providers::{LlmProvider, ProviderError};
 use wcore_tools::Tool;
 use wcore_types::llm::{LlmEvent, LlmRequest};
@@ -27,6 +29,7 @@ use wcore_types::tool::ToolResult;
 /// When `responses` is empty it falls back to a single EndTurn with empty text.
 pub struct MockLlmProvider {
     responses: Mutex<Vec<Vec<LlmEvent>>>,
+    physical_url: Option<String>,
 }
 
 impl MockLlmProvider {
@@ -49,6 +52,7 @@ impl MockLlmProvider {
         ];
         Self {
             responses: Mutex::new(vec![events]),
+            physical_url: None,
         }
     }
 
@@ -76,6 +80,7 @@ impl MockLlmProvider {
         ];
         Self {
             responses: Mutex::new(vec![events]),
+            physical_url: None,
         }
     }
 
@@ -84,6 +89,7 @@ impl MockLlmProvider {
     pub fn with_turns(turns: Vec<Vec<LlmEvent>>) -> Self {
         Self {
             responses: Mutex::new(turns),
+            physical_url: None,
         }
     }
 
@@ -91,7 +97,16 @@ impl MockLlmProvider {
     pub fn with_events(events: Vec<LlmEvent>) -> Self {
         Self {
             responses: Mutex::new(vec![events]),
+            physical_url: None,
         }
+    }
+
+    /// Route each scripted response through a real provider send boundary.
+    /// Persisted-session tests opt in so the journal receives authoritative
+    /// physical-attempt identity before the scripted stream becomes visible.
+    pub fn with_physical_url(mut self, url: impl Into<String>) -> Self {
+        self.physical_url = Some(url.into());
+        self
     }
 }
 
@@ -101,6 +116,17 @@ impl LlmProvider for MockLlmProvider {
         &self,
         _request: &LlmRequest,
     ) -> Result<mpsc::Receiver<LlmEvent>, ProviderError> {
+        if let Some(url) = self.physical_url.as_deref() {
+            let client = EgressClient::new().with_policy(Arc::new(AllowAllPolicy));
+            let response = scope_max_retries(0, builder_send_with_retry(client.get(url))).await?;
+            if !response.status().is_success() {
+                return Err(ProviderError::Api {
+                    status: response.status().as_u16(),
+                    message: "fixture response".into(),
+                });
+            }
+        }
+
         let events = {
             let mut responses = self.responses.lock().unwrap();
             if responses.is_empty() {

@@ -11,6 +11,8 @@ use wcore_agent::session::SessionManager;
 use wcore_tools::registry::ToolRegistry;
 use wcore_types::llm::LlmEvent;
 use wcore_types::message::{StopReason, TokenUsage};
+use wiremock::matchers::method;
+use wiremock::{Mock, MockServer, ResponseTemplate};
 
 use common::{MockLlmProvider, MockTool, test_config};
 
@@ -158,41 +160,49 @@ async fn test_engine_max_tokens_handling() {
 // ---------------------------------------------------------------------------
 #[tokio::test]
 async fn test_engine_message_accumulation() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .respond_with(ResponseTemplate::new(200))
+        .mount(&server)
+        .await;
     let dir = tempdir().expect("tempdir should be created");
 
     // Provider needs two responses (one per run() call)
-    let provider = Arc::new(MockLlmProvider::with_turns(vec![
-        vec![
-            LlmEvent::TextDelta("Response 1".to_string()),
-            LlmEvent::Done {
-                stop_reason: StopReason::EndTurn,
-                finish_reason: wcore_types::message::FinishReason::from_stop_reason(
-                    StopReason::EndTurn,
-                ),
-                usage: TokenUsage {
-                    input_tokens: 10,
-                    output_tokens: 5,
-                    cache_creation_tokens: 0,
-                    cache_read_tokens: 0,
+    let provider = Arc::new(
+        MockLlmProvider::with_turns(vec![
+            vec![
+                LlmEvent::TextDelta("Response 1".to_string()),
+                LlmEvent::Done {
+                    stop_reason: StopReason::EndTurn,
+                    finish_reason: wcore_types::message::FinishReason::from_stop_reason(
+                        StopReason::EndTurn,
+                    ),
+                    usage: TokenUsage {
+                        input_tokens: 10,
+                        output_tokens: 5,
+                        cache_creation_tokens: 0,
+                        cache_read_tokens: 0,
+                    },
                 },
-            },
-        ],
-        vec![
-            LlmEvent::TextDelta("Response 2".to_string()),
-            LlmEvent::Done {
-                stop_reason: StopReason::EndTurn,
-                finish_reason: wcore_types::message::FinishReason::from_stop_reason(
-                    StopReason::EndTurn,
-                ),
-                usage: TokenUsage {
-                    input_tokens: 10,
-                    output_tokens: 5,
-                    cache_creation_tokens: 0,
-                    cache_read_tokens: 0,
+            ],
+            vec![
+                LlmEvent::TextDelta("Response 2".to_string()),
+                LlmEvent::Done {
+                    stop_reason: StopReason::EndTurn,
+                    finish_reason: wcore_types::message::FinishReason::from_stop_reason(
+                        StopReason::EndTurn,
+                    ),
+                    usage: TokenUsage {
+                        input_tokens: 10,
+                        output_tokens: 5,
+                        cache_creation_tokens: 0,
+                        cache_read_tokens: 0,
+                    },
                 },
-            },
-        ],
-    ]));
+            ],
+        ])
+        .with_physical_url(server.uri()),
+    );
 
     let mut config = test_config();
     config.session.enabled = true;
