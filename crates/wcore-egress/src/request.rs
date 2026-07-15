@@ -9,15 +9,21 @@
 //! 1:1 to reqwest so call sites read unchanged.
 
 use std::fmt::Display;
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
-use crate::error::EgressError;
+use crate::error::{BeforeDispatchError, EgressError};
 use crate::observer::{
     EgressAttemptGuard, EgressOutcome, SharedEgressObserver, classify_transport_error,
 };
 use crate::policy::{EgressDecision, SharedPolicy};
+
+type BeforeDispatchFuture =
+    Pin<Box<dyn Future<Output = Result<(), BeforeDispatchError>> + Send + 'static>>;
+type BeforeDispatchHook = Arc<dyn Fn() -> BeforeDispatchFuture + Send + Sync>;
 
 /// Builds and sends a single outbound request through the egress chokepoint.
 ///
@@ -30,6 +36,7 @@ pub struct EgressRequestBuilder {
     observer: SharedEgressObserver,
     next_attempt_id: Arc<AtomicU64>,
     inner: reqwest::RequestBuilder,
+    before_dispatch: Option<BeforeDispatchHook>,
 }
 
 impl EgressRequestBuilder {
@@ -46,6 +53,7 @@ impl EgressRequestBuilder {
             observer,
             next_attempt_id,
             inner,
+            before_dispatch: None,
         }
     }
 
@@ -120,6 +128,29 @@ impl EgressRequestBuilder {
         self
     }
 
+    /// Run an async callback after policy admission and immediately before the
+    /// physical network dispatch.
+    ///
+    /// The callback is not invoked when policy denies the request. Returning
+    /// an error stops the request before network I/O. Builder clones retain the
+    /// callback, so each retry gets its own pre-dispatch invocation.
+    pub fn before_dispatch<F, Fut, E>(mut self, hook: F) -> Self
+    where
+        F: Fn() -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = Result<(), E>> + Send + 'static,
+        E: Display + Send + 'static,
+    {
+        self.before_dispatch = Some(Arc::new(move || {
+            let future = hook();
+            Box::pin(async move {
+                future
+                    .await
+                    .map_err(|error| BeforeDispatchError::new(error.to_string()))
+            })
+        }));
+        self
+    }
+
     /// Try to clone this builder. Returns `None` when the body is a non-cloneable
     /// stream — same semantics as [`reqwest::RequestBuilder::try_clone`]. Used by
     /// the retry layer, which re-sends a request on transient failure.
@@ -130,6 +161,7 @@ impl EgressRequestBuilder {
             observer: self.observer.clone(),
             next_attempt_id: self.next_attempt_id.clone(),
             inner,
+            before_dispatch: self.before_dispatch.clone(),
         })
     }
 
@@ -145,6 +177,12 @@ impl EgressRequestBuilder {
         match self.policy.check(&request).await {
             EgressDecision::Allow => {
                 observation.mark_allowed();
+                if let Some(before_dispatch) = self.before_dispatch
+                    && let Err(error) = before_dispatch().await
+                {
+                    observation.finish(EgressOutcome::BeforeDispatchFailed);
+                    return Err(error.into());
+                }
                 match self.client.execute(request).await {
                     Ok(response) => {
                         observation.finish(EgressOutcome::HttpResponse {

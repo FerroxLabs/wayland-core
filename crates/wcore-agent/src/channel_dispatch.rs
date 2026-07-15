@@ -216,7 +216,7 @@ impl ChannelTurnDispatcher {
             PathBuf::from(&self.config.session.directory),
             self.config.session.max_sessions,
         );
-        let existing = session_mgr.load(hashed_id).ok();
+        let existing = session_mgr.load_for_run_if_exists(hashed_id)?;
         let is_new = existing.is_none();
 
         let execution_policy = config

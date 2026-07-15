@@ -1750,12 +1750,12 @@ async fn run() -> anyhow::Result<ExitCode> {
             cfg.session.directory.clone().into(),
             cfg.session.max_sessions,
         );
-        let session = session_mgr.load(resume_id)?;
+        let session = session_mgr.load_for_run(resume_id)?;
         terminal.formatter().session_info(&format!(
             "Resumed session {} ({} messages, {} model)",
-            session.id,
-            session.messages.len(),
-            session.model
+            session.session.id,
+            session.session.messages.len(),
+            session.session.model
         ));
         bootstrap = bootstrap.resume(session);
     }
@@ -2149,7 +2149,7 @@ async fn run_tui_mode(
             cfg.session.directory.clone().into(),
             cfg.session.max_sessions,
         );
-        let session = session_mgr.load(resume_id)?;
+        let session = session_mgr.load_for_run(resume_id)?;
         bootstrap = bootstrap.resume(session);
     }
 
@@ -3007,7 +3007,7 @@ async fn run_json_stream_mode(
             cfg.session.directory.clone().into(),
             cfg.session.max_sessions,
         );
-        let session = session_mgr.load(resume_id)?;
+        let session = session_mgr.load_for_run(resume_id)?;
         bootstrap = bootstrap.resume(session);
     }
 

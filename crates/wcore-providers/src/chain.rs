@@ -43,6 +43,7 @@ fn is_chain_retryable(e: &ProviderError) -> bool {
         ProviderError::Egress(e) => match e {
             wcore_egress::EgressError::Transport(inner) => inner.is_timeout() || inner.is_connect(),
             wcore_egress::EgressError::Denied(_) => false,
+            wcore_egress::EgressError::BeforeDispatch(_) => false,
             // Terminal: an over-cap body won't shrink on a retry/failover.
             wcore_egress::EgressError::BodyTooLarge { .. } => false,
         },
@@ -148,7 +149,13 @@ impl LlmProvider for ProviderChain {
                 )?;
             }
             attempts += 1;
-            match slot.provider.stream(request).await {
+            match crate::attempt_lifecycle::scope_provider_attempt_identity(
+                slot.name.clone(),
+                request.model.clone(),
+                slot.provider.stream(request),
+            )
+            .await
+            {
                 Ok(rx) => return Ok(rx),
                 Err(e) if is_chain_retryable(&e) => {
                     let previous_attempted =

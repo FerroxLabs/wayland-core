@@ -66,6 +66,8 @@ pub mod host_send_transport;
 // WhatsApp / Twilio SMS) to each channel's signature-verifying
 // `Channel::ingest_webhook` via the `ChannelManager`.
 pub mod inbound_webhook;
+pub mod journal_effects;
+pub mod journal_provider;
 pub mod mcp_curator;
 pub mod orchestration;
 pub mod output;
@@ -84,6 +86,7 @@ pub mod resilient_reporter;
 // W8b C.7: RollbackTool — consumes FileHistory to restore prior states.
 pub mod rollback_tool;
 pub mod session;
+pub mod session_journal;
 // v0.9.0 W1 B7 — in-process live state surfaces for wayland_status +
 // wayland_telemetry_query tools (introspection backend reads from this).
 pub mod session_state;

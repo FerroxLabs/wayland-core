@@ -18,7 +18,7 @@ use wcore_types::llm::{LlmEvent, LlmRequest, ThinkingConfig};
 use wcore_types::message::{FinishReason, StopReason, TokenUsage};
 
 use super::anthropic_shared;
-use crate::retry::{DEFAULT_MAX_RETRIES, with_retry};
+use crate::retry::{DEFAULT_MAX_RETRIES, send_physical_once, with_retry};
 use crate::{
     LlmProvider, ModelInfo, ProviderError, alias_models, dump_request_body, dump_response_chunk,
     reset_response_dump,
@@ -424,13 +424,7 @@ impl BedrockProvider {
             let signed_headers = signed_headers.clone();
             let body_bytes = body_bytes.clone();
             async move {
-                client
-                    .post(url)
-                    .headers(signed_headers)
-                    .body(body_bytes)
-                    .send()
-                    .await
-                    .map_err(crate::retry::provider_error_from_egress)
+                send_physical_once(client.post(url).headers(signed_headers).body(body_bytes)).await
             }
         })
         .await?;
@@ -646,13 +640,7 @@ impl LlmProvider for BedrockProvider {
             let signed_headers = signed_headers.clone();
             let body_bytes = body_bytes.clone();
             async move {
-                client
-                    .post(url)
-                    .headers(signed_headers)
-                    .body(body_bytes)
-                    .send()
-                    .await
-                    .map_err(crate::retry::provider_error_from_egress)
+                send_physical_once(client.post(url).headers(signed_headers).body(body_bytes)).await
             }
         })
         .await?;

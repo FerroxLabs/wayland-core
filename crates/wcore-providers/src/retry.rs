@@ -6,6 +6,10 @@ use std::time::Duration;
 use wcore_egress::{EgressError, EgressRequestBuilder};
 
 use super::ProviderError;
+use crate::attempt_lifecycle::{
+    ProviderAttemptHeaderOutcome, ProviderAttemptNotStartedReason, begin_physical_attempt,
+    finish_physical_attempt, start_physical_attempt,
+};
 
 /// Default retry policy for provider HTTP calls: 3 attempts, 250 ms → 1 s → 4 s.
 pub const DEFAULT_MAX_RETRIES: u32 = 2; // 1 initial + 2 retries = 3 total attempts
@@ -105,10 +109,7 @@ pub fn admit_configured_fallback(
 /// Keep this deliberately narrow: transport failures and HTTP responses are
 /// ambiguous and therefore remain conservatively chargeable.
 pub(crate) fn configured_fallback_previous_attempted(error: &ProviderError) -> bool {
-    !matches!(
-        error,
-        ProviderError::MissingApiKey | ProviderError::NotAttempted { .. }
-    )
+    !error.was_not_attempted()
 }
 
 fn effective_max_retries(configured: u32) -> u32 {
@@ -186,6 +187,19 @@ pub fn record_provider_failure(failure: impl Into<String>) {
     });
 }
 
+fn record_not_attempted(failure: impl Into<String>) {
+    let evidence = ProviderAttemptEvidence {
+        physical: false,
+        failure: Some(failure.into()),
+        retrying: false,
+    };
+    let _ = ATTEMPT_OBSERVER.try_with(|observer| {
+        if let Some(observer) = observer {
+            observer(evidence);
+        }
+    });
+}
+
 fn record_attempt(failure: Option<String>, retrying: bool) {
     let evidence = ProviderAttemptEvidence {
         physical: true,
@@ -228,7 +242,27 @@ fn egress_failure_code(error: &EgressError) -> &'static str {
         EgressError::Transport(error) if error.is_body() || error.is_decode() => "stream_body",
         EgressError::Transport(_) => "transport",
         EgressError::Denied(_) => "egress_denied",
+        EgressError::BeforeDispatch(_) => "provider_before_dispatch_failed",
         EgressError::BodyTooLarge { .. } => "response_body_too_large",
+    }
+}
+
+fn provider_not_started_reason(error: &EgressError) -> ProviderAttemptNotStartedReason {
+    match error {
+        EgressError::Denied(reason) => ProviderAttemptNotStartedReason::EgressDenied {
+            reason: reason.clone(),
+        },
+        EgressError::BeforeDispatch(error) => {
+            ProviderAttemptNotStartedReason::BeforeDispatchFailed {
+                error: error.to_string(),
+            }
+        }
+        other => ProviderAttemptNotStartedReason::BeforeDispatchFailed {
+            error: format!(
+                "unexpected pre-dispatch outcome: {}",
+                egress_failure_code(other)
+            ),
+        },
     }
 }
 
@@ -378,9 +412,65 @@ pub fn provider_error_from_egress(e: EgressError) -> ProviderError {
     match e {
         EgressError::Transport(inner) => provider_error_from_reqwest(inner),
         EgressError::Denied(reason) => ProviderError::Egress(EgressError::Denied(reason)),
+        EgressError::BeforeDispatch(error) => ProviderError::NotAttempted {
+            reason: error.to_string(),
+        },
         // Terminal — surfaced like Denied, never retried.
         EgressError::BodyTooLarge { limit } => {
             ProviderError::Egress(EgressError::BodyTooLarge { limit })
+        }
+    }
+}
+
+/// Send one provider request through the durable physical-attempt boundary.
+///
+/// Bedrock rebuilds a SigV4 request inside [`with_retry`] and therefore cannot
+/// use [`builder_send_with_retry`]. Keeping its physical send in this helper
+/// gives it the same fail-closed lifecycle ordering without adding another
+/// retry ring.
+pub(crate) async fn send_physical_once(
+    builder: EgressRequestBuilder,
+) -> Result<reqwest::Response, ProviderError> {
+    let lifecycle_attempt = begin_physical_attempt().await?;
+    let dispatch_attempt = lifecycle_attempt.clone();
+    let builder = builder.before_dispatch(move || {
+        let dispatch_attempt = dispatch_attempt.clone();
+        async move {
+            start_physical_attempt(dispatch_attempt.as_ref())
+                .await
+                .map_err(|error| error.to_string())
+        }
+    });
+    match builder.send().await {
+        Ok(response) => {
+            finish_physical_attempt(
+                lifecycle_attempt.as_ref(),
+                ProviderAttemptHeaderOutcome::HeadersReceived {
+                    status: response.status().as_u16(),
+                },
+            )
+            .await?;
+            Ok(response)
+        }
+        Err(error) if error.is_denied() || error.is_before_dispatch() => {
+            finish_physical_attempt(
+                lifecycle_attempt.as_ref(),
+                ProviderAttemptHeaderOutcome::NotStarted {
+                    reason: provider_not_started_reason(&error),
+                },
+            )
+            .await?;
+            Err(provider_error_from_egress(error))
+        }
+        Err(error) => {
+            finish_physical_attempt(
+                lifecycle_attempt.as_ref(),
+                ProviderAttemptHeaderOutcome::FailedBeforeHeaders {
+                    failure_code: egress_failure_code(&error).to_string(),
+                },
+            )
+            .await?;
+            Err(provider_error_from_egress(error))
         }
     }
 }
@@ -415,22 +505,76 @@ pub async fn builder_send_with_retry(
         let try_builder = match builder.try_clone() {
             Some(b) => b,
             None => {
+                let lifecycle_attempt = begin_physical_attempt().await?;
+                let dispatch_attempt = lifecycle_attempt.clone();
+                let builder = builder.before_dispatch(move || {
+                    let dispatch_attempt = dispatch_attempt.clone();
+                    async move {
+                        start_physical_attempt(dispatch_attempt.as_ref())
+                            .await
+                            .map_err(|error| error.to_string())
+                    }
+                });
                 return match builder.send().await {
                     Ok(response) => {
+                        finish_physical_attempt(
+                            lifecycle_attempt.as_ref(),
+                            ProviderAttemptHeaderOutcome::HeadersReceived {
+                                status: response.status().as_u16(),
+                            },
+                        )
+                        .await?;
                         let failure = (!response.status().is_success())
                             .then(|| format!("http_{}", response.status().as_u16()));
                         record_attempt(failure, false);
                         Ok(response)
                     }
+                    Err(error) if error.is_denied() || error.is_before_dispatch() => {
+                        let failure_code = egress_failure_code(&error).to_string();
+                        finish_physical_attempt(
+                            lifecycle_attempt.as_ref(),
+                            ProviderAttemptHeaderOutcome::NotStarted {
+                                reason: provider_not_started_reason(&error),
+                            },
+                        )
+                        .await?;
+                        record_not_attempted(failure_code);
+                        Err(provider_error_from_egress(error))
+                    }
                     Err(error) => {
-                        record_attempt(Some(egress_failure_code(&error).to_string()), false);
+                        let failure_code = egress_failure_code(&error).to_string();
+                        finish_physical_attempt(
+                            lifecycle_attempt.as_ref(),
+                            ProviderAttemptHeaderOutcome::FailedBeforeHeaders {
+                                failure_code: failure_code.clone(),
+                            },
+                        )
+                        .await?;
+                        record_attempt(Some(failure_code), false);
                         Err(provider_error_from_egress(error))
                     }
                 };
             }
         };
+        let lifecycle_attempt = begin_physical_attempt().await?;
+        let dispatch_attempt = lifecycle_attempt.clone();
+        let try_builder = try_builder.before_dispatch(move || {
+            let dispatch_attempt = dispatch_attempt.clone();
+            async move {
+                start_physical_attempt(dispatch_attempt.as_ref())
+                    .await
+                    .map_err(|error| error.to_string())
+            }
+        });
         match try_builder.send().await {
             Ok(resp) => {
+                finish_physical_attempt(
+                    lifecycle_attempt.as_ref(),
+                    ProviderAttemptHeaderOutcome::HeadersReceived {
+                        status: resp.status().as_u16(),
+                    },
+                )
+                .await?;
                 // E-H4: a 5xx / 408 is a completed HTTP round-trip with a
                 // transient *server-side* status. Retry it here instead of
                 // handing a doomed response back to the caller.
@@ -464,8 +608,27 @@ pub async fn builder_send_with_retry(
                 record_attempt(failure, false);
                 return Ok(resp);
             }
+            Err(e) if e.is_denied() || e.is_before_dispatch() => {
+                let failure_code = egress_failure_code(&e).to_string();
+                finish_physical_attempt(
+                    lifecycle_attempt.as_ref(),
+                    ProviderAttemptHeaderOutcome::NotStarted {
+                        reason: provider_not_started_reason(&e),
+                    },
+                )
+                .await?;
+                record_not_attempted(failure_code);
+                return Err(provider_error_from_egress(e));
+            }
             Err(e) => {
                 let failure_code = egress_failure_code(&e).to_string();
+                finish_physical_attempt(
+                    lifecycle_attempt.as_ref(),
+                    ProviderAttemptHeaderOutcome::FailedBeforeHeaders {
+                        failure_code: failure_code.clone(),
+                    },
+                )
+                .await?;
                 // H-2 / secrets-26: strip the URL before formatting so a
                 // credential-in-URL provider can't leak the key into the
                 // returned error or the `[retry]` tracing warning below.

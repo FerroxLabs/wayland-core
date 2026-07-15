@@ -10,6 +10,7 @@ use wcore_observability::cache::mark_cache_boundaries;
 use wcore_observability::cost::estimate_turn_cost;
 use wcore_observability::trace::{ToolCallTrace, TurnTrace, WorkflowDetectionRecord};
 use wcore_protocol::events::{MonitorDirective, MonitorReason, ToolCategory};
+use wcore_providers::attempt_lifecycle::ProviderAttemptPurpose as LifecyclePurpose;
 use wcore_providers::{LlmProvider, ProviderError, create_provider};
 use wcore_tools::registry::ToolRegistry;
 use wcore_types::llm::{LlmEvent, LlmRequest};
@@ -21,6 +22,7 @@ use crate::cache_diagnostics::{CacheBreakDetector, CacheDiagnostic, CacheStats};
 use crate::compact::state::CompactState;
 use crate::compact::{auto, emergency, estimate, micro};
 use crate::confirm::ToolConfirmer;
+use crate::journal_provider::JournaledLlmProvider;
 use crate::orchestration::ExecutionControl;
 use crate::orchestration::StreamingContext;
 use crate::orchestration::ToolCallOutcome;
@@ -38,7 +40,8 @@ use crate::orchestration::template_routing::{
 use crate::output::OutputSink;
 use crate::plan::prompt as plan_prompt;
 use crate::plan::state::PlanState;
-use crate::session::{Session, SessionManager};
+use crate::session::{ActiveSession, Session, SessionManager};
+use crate::session_journal::{SessionEvent, SessionJournal, state_payload_digest};
 
 /// Owns one paid-provider admission until authoritative usage is settled.
 ///
@@ -1921,6 +1924,11 @@ pub struct AgentEngine {
     hooks: Option<HookEngine>,
     session_manager: Option<SessionManager>,
     current_session: Option<Session>,
+    /// Exclusive journal writer authority for the active persisted session.
+    /// This handle must live for the same lifetime as the engine.
+    session_journal: Option<SessionJournal>,
+    /// Durable turn currently owned by `run`; set before turn work begins.
+    active_journal_turn_id: Option<String>,
     output: Arc<dyn OutputSink>,
     current_msg_id: String,
     /// #279(c): stable per-agent-run id, minted once per run() entry and
@@ -2518,6 +2526,8 @@ impl AgentEngine {
             }),
             session_manager,
             current_session: None,
+            session_journal: None,
+            active_journal_turn_id: None,
             output,
             current_msg_id: String::new(),
             current_agent_run_id: None,
@@ -2628,7 +2638,9 @@ impl AgentEngine {
         }
     }
 
-    /// Create from a resumed session
+    /// Compatibility constructor for an in-memory or persistence-disabled
+    /// resumed session. Persisted runs fail closed until journal authority is
+    /// supplied through [`Self::resume_active`].
     pub fn resume(
         config: Config,
         tools: ToolRegistry,
@@ -2639,13 +2651,49 @@ impl AgentEngine {
         Self::resume_with_provider(provider, config, tools, output, session)
     }
 
-    /// Create from a resumed session with an externally-provided provider
+    /// Create from a resumed session that already owns its journal lease.
+    pub fn resume_active(
+        config: Config,
+        tools: ToolRegistry,
+        output: Arc<dyn OutputSink>,
+        active_session: ActiveSession,
+    ) -> Self {
+        let provider = create_provider(&config);
+        Self::resume_active_with_provider(provider, config, tools, output, active_session)
+    }
+
+    /// Compatibility constructor for an in-memory or persistence-disabled
+    /// resumed session with an externally-provided provider.
     pub fn resume_with_provider(
         provider: Arc<dyn LlmProvider>,
         config: Config,
         tools: ToolRegistry,
         output: Arc<dyn OutputSink>,
         session: Session,
+    ) -> Self {
+        Self::resume_with_provider_parts(provider, config, tools, output, session, None)
+    }
+
+    /// Create from a resumed session with externally-provided provider and
+    /// full-lifetime journal authority.
+    pub fn resume_active_with_provider(
+        provider: Arc<dyn LlmProvider>,
+        config: Config,
+        tools: ToolRegistry,
+        output: Arc<dyn OutputSink>,
+        active_session: ActiveSession,
+    ) -> Self {
+        let ActiveSession { session, journal } = active_session;
+        Self::resume_with_provider_parts(provider, config, tools, output, session, Some(journal))
+    }
+
+    fn resume_with_provider_parts(
+        provider: Arc<dyn LlmProvider>,
+        config: Config,
+        tools: ToolRegistry,
+        output: Arc<dyn OutputSink>,
+        session: Session,
+        session_journal: Option<SessionJournal>,
     ) -> Self {
         // Dynamic Workflows B6 — capture the live confirm-gate flag and a full
         // clone of the resolved config BEFORE the partial moves below (see
@@ -2710,6 +2758,8 @@ impl AgentEngine {
             }),
             session_manager,
             current_session: Some(session),
+            session_journal,
+            active_journal_turn_id: None,
             output,
             current_msg_id: String::new(),
             current_agent_run_id: None,
@@ -2918,7 +2968,8 @@ impl AgentEngine {
         session_id: Option<&str>,
     ) -> anyhow::Result<()> {
         if let Some(mgr) = &self.session_manager {
-            let session = mgr.create(provider_name, &self.model, cwd, session_id)?;
+            let ActiveSession { session, journal } =
+                mgr.create_for_run(provider_name, &self.model, cwd, session_id)?;
             // W6 F16: if a previous plan was persisted for this session id,
             // advertise resume-availability via the existing Info channel.
             // No new protocol variant (audit rev-2). Errors from the probe
@@ -2935,6 +2986,7 @@ impl AgentEngine {
                 ));
             }
             self.current_session = Some(session);
+            self.session_journal = Some(journal);
         }
         Ok(())
     }
@@ -4687,9 +4739,10 @@ impl AgentEngine {
         finish_reason: FinishReason,
         persist_session: bool,
     ) -> Result<AgentResult, AgentError> {
+        self.prepare_durable_conversation().await?;
         self.fire_on_session_end(turn).await;
         if persist_session {
-            self.save_session();
+            self.save_session_mirror();
         }
         let auto_skill_picked = self.current_skill_router_pick.clone();
         self.observe_skill_router_outcome(StopReason::MaxTurns);
@@ -4950,8 +5003,186 @@ impl AgentEngine {
         }
     }
 
-    /// Run the agent loop with user input
+    /// Run one crash-recoverable user turn.
+    ///
+    /// A durable turn starts before any turn work and reaches exactly one
+    /// terminal journal transition after the exact structured conversation is
+    /// committed. In-memory/test engines without a journal retain the legacy
+    /// path unchanged.
     pub async fn run(&mut self, user_input: &str, msg_id: &str) -> Result<AgentResult, AgentError> {
+        if self.session_manager.is_some()
+            && self.current_session.is_some()
+            && self.session_journal.is_none()
+        {
+            return Err(AgentError::SessionAuthority(
+                "persisted session has no exclusive journal writer lease".to_string(),
+            ));
+        }
+
+        if self.session_journal.is_none() {
+            return self.run_inner(user_input, msg_id, None).await;
+        }
+        self.reconcile_interrupted_journal_turns().await?;
+        let turn_id = format!("turn-{}", uuid::Uuid::new_v4());
+        self.active_journal_turn_id = Some(turn_id.clone());
+        if let Err(error) = self
+            .append_journal_event(SessionEvent::TurnStarted {
+                turn_id: turn_id.clone(),
+                user_message: user_input.to_owned(),
+            })
+            .await
+        {
+            self.active_journal_turn_id = None;
+            return Err(error);
+        }
+
+        let result = self.run_inner(user_input, msg_id, Some(&turn_id)).await;
+        if let Err(sync_error) = self.sync_journal_conversation(&turn_id).await {
+            self.append_journal_event(SessionEvent::TurnFailed {
+                turn_id,
+                error: sync_error.to_string(),
+            })
+            .await?;
+            self.active_journal_turn_id = None;
+            return Err(sync_error);
+        }
+        self.save_session_mirror();
+        let terminal = match &result {
+            Ok(result) => SessionEvent::TurnCommitted {
+                turn_id,
+                assistant_message: result.text.clone(),
+            },
+            Err(AgentError::UserAborted) => SessionEvent::TurnCancelled { turn_id },
+            Err(error) => SessionEvent::TurnFailed {
+                turn_id,
+                error: error.to_string(),
+            },
+        };
+        self.append_journal_event(terminal).await?;
+        self.active_journal_turn_id = None;
+        result
+    }
+
+    async fn append_journal_event(&self, event: SessionEvent) -> Result<(), AgentError> {
+        let journal = self.session_journal.as_ref().cloned().ok_or_else(|| {
+            AgentError::SessionAuthority("session journal is not initialized".to_string())
+        })?;
+        tokio::task::spawn_blocking(move || journal.append(event))
+            .await
+            .map_err(|error| {
+                AgentError::SessionAuthority(format!("journal append task failed: {error}"))
+            })?
+            .map(|_| ())
+            .map_err(|error| AgentError::SessionAuthority(error.to_string()))
+    }
+
+    async fn reconcile_interrupted_journal_turns(&self) -> Result<(), AgentError> {
+        let journal = self.session_journal.as_ref().ok_or_else(|| {
+            AgentError::SessionAuthority("session journal is not initialized".to_string())
+        })?;
+        let state = journal
+            .state()
+            .map_err(|error| AgentError::SessionAuthority(error.to_string()))?;
+        let interrupted = state
+            .turns
+            .iter()
+            .filter(|(_, turn)| turn.completion.is_none())
+            .map(|(turn_id, _)| turn_id.clone())
+            .collect::<Vec<_>>();
+        if interrupted.len() > 1 {
+            return Err(AgentError::SessionAuthority(format!(
+                "session journal is corrupt: multiple active turns ({})",
+                interrupted.join(", ")
+            )));
+        }
+        if let Some(turn_id) = interrupted.into_iter().next() {
+            self.append_journal_event(SessionEvent::TurnFailed {
+                turn_id,
+                error: "interrupted before a terminal journal event".to_string(),
+            })
+            .await?;
+        }
+        Ok(())
+    }
+
+    async fn sync_journal_conversation(&self, turn_id: &str) -> Result<(), AgentError> {
+        let journal = self.session_journal.as_ref().ok_or_else(|| {
+            AgentError::SessionAuthority("session journal is not initialized".to_string())
+        })?;
+        let state = journal
+            .state()
+            .map_err(|error| AgentError::SessionAuthority(error.to_string()))?;
+        let messages = self
+            .messages
+            .iter()
+            .map(serde_json::to_value)
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| AgentError::SessionAuthority(error.to_string()))?;
+
+        if state.conversation.len() <= messages.len()
+            && state
+                .conversation
+                .iter()
+                .zip(&messages)
+                .all(|(persisted, current)| persisted == current)
+        {
+            for (index, message) in messages
+                .into_iter()
+                .enumerate()
+                .skip(state.conversation.len())
+            {
+                let message_digest = state_payload_digest(&message)
+                    .map_err(|error| AgentError::SessionAuthority(error.to_string()))?;
+                self.append_journal_event(SessionEvent::ConversationMessageCommitted {
+                    turn_id: turn_id.to_owned(),
+                    message_index: u64::try_from(index).map_err(|_| {
+                        AgentError::SessionAuthority(
+                            "conversation message index exceeds u64".to_string(),
+                        )
+                    })?,
+                    message,
+                    message_digest,
+                })
+                .await?;
+            }
+            return Ok(());
+        }
+
+        let messages_value = serde_json::Value::Array(messages.clone());
+        let messages_digest = state_payload_digest(&messages_value)
+            .map_err(|error| AgentError::SessionAuthority(error.to_string()))?;
+        self.append_journal_event(SessionEvent::ConversationStateCommitted {
+            turn_id: turn_id.to_owned(),
+            messages,
+            messages_digest,
+        })
+        .await
+    }
+
+    async fn sync_active_journal_conversation(&self) -> Result<(), AgentError> {
+        let Some(turn_id) = self.active_journal_turn_id.as_deref() else {
+            return Ok(());
+        };
+        self.sync_journal_conversation(turn_id).await
+    }
+
+    /// Legacy loop body. `journal_turn_id` is present only for an engine that
+    /// owns durable session authority.
+    async fn run_inner(
+        &mut self,
+        user_input: &str,
+        msg_id: &str,
+        journal_turn_id: Option<&str>,
+    ) -> Result<AgentResult, AgentError> {
+        if self.session_manager.is_some()
+            && self.current_session.is_some()
+            && self.session_journal.is_none()
+        {
+            return Err(AgentError::SessionAuthority(
+                "persisted session has no exclusive journal writer lease".to_string(),
+            ));
+        }
+
         // A host Stop cancels only the active turn. Renew that descendant on
         // the next message without reviving a terminal session root.
         if self.cancel_token.is_cancelled()
@@ -4969,10 +5200,6 @@ impl AgentEngine {
         if let Ok(mut det) = self.style_detector.lock() {
             det.observe(user_input);
         }
-        // v0.8.0 Task M — per-turn user-model write-back. See
-        // `observe_user_turn` for the full contract: no-op when no
-        // backend is installed; errors are logged + swallowed.
-        self.observe_user_turn(user_input).await;
         // v0.8.1 U1 — per-turn `SkillRouter` choose. Picks one skill
         // from the resolved catalog using a Thompson Beta scorer
         // seeded from GEPA winners + session-start prioritizer ranking
@@ -5034,7 +5261,6 @@ impl AgentEngine {
         if self.current_agent_run_id.is_none() {
             self.current_agent_run_id = Some(format!("agent-run-{}", uuid::Uuid::new_v4()));
         }
-        self.output.emit_stream_start(msg_id);
         // Cross-session recall (v2 memory gap fix): on a cold first turn,
         // pre-inject durable facts relevant to this message BEFORE the user
         // turn so a fresh process answers from prior-session memory without
@@ -5042,6 +5268,13 @@ impl AgentEngine {
         // sessions, with NullMemory, or when nothing relevant is stored.
         self.recall_relevant_facts(user_input).await;
         self.push_user_turn(user_input);
+        if let Some(turn_id) = journal_turn_id {
+            self.sync_journal_conversation(turn_id).await?;
+        }
+        // v0.8.0 Task M — write back only after the exact recalled/user
+        // conversation is durable. The backend is an external side effect.
+        self.observe_user_turn(user_input).await;
+        self.output.emit_stream_start(msg_id);
 
         // F-030 WAL: persist the user message BEFORE any LLM call so a
         // SIGKILL mid-turn does not silently erase it.  On resume the
@@ -5100,6 +5333,10 @@ impl AgentEngine {
             && crate::orchestration::intent::workflow_candidate(user_input).is_some()
             && let Some(result) = self.try_live_workflow(user_input, 0).await
         {
+            self.push_synthetic_assistant_result(&result);
+            self.sync_active_journal_conversation().await?;
+            self.output
+                .emit_text_delta(&result.text, &self.current_msg_id);
             return Ok(result);
         }
 
@@ -5118,13 +5355,21 @@ impl AgentEngine {
             if trimmed == "/crucible off" {
                 CRUCIBLE_SUGGEST_SUPPRESSED.store(true, Ordering::Relaxed);
                 let msg = "Crucible suggestions off for this session.".to_string();
-                self.output.emit_text_delta(&msg, &self.current_msg_id);
-                return Ok(self.crucible_result(msg));
+                let result = self.crucible_result(msg);
+                self.push_synthetic_assistant_result(&result);
+                self.sync_active_journal_conversation().await?;
+                self.output
+                    .emit_text_delta(&result.text, &self.current_msg_id);
+                return Ok(result);
             }
             if (trimmed == "/crucible" || trimmed.starts_with("/crucible "))
                 && self.protocol_writer.is_some()
                 && let Some(result) = self.try_crucible_council(trimmed).await
             {
+                self.push_synthetic_assistant_result(&result);
+                self.sync_active_journal_conversation().await?;
+                self.output
+                    .emit_text_delta(&result.text, &self.current_msg_id);
                 return Ok(result);
             }
         }
@@ -5153,9 +5398,10 @@ impl AgentEngine {
             // `tool_use` left by an in-turn cancel is repaired on the
             // next `push_user_turn` / `save_session` (AUDIT D-6).
             if self.cancel_token.is_cancelled() {
+                self.prepare_durable_conversation().await?;
                 self.output
                     .emit_info("Run cancelled by host before the next turn.");
-                self.save_session();
+                self.save_session_mirror();
                 return Err(AgentError::UserAborted);
             }
             // AUDIT A1 — `max_turns` is an OPTIONAL override, not the
@@ -5184,20 +5430,26 @@ impl AgentEngine {
             // AUDIT A9 — a turn-start hook that returns `block` halts
             // the loop cleanly: operators can write a "stop after
             // condition X" hook as a backstop.
-            if let Some(hook_engine) = self.hooks.as_ref() {
+            let hook_block_reason = if let Some(hook_engine) = self.hooks.as_ref() {
                 let ctx = TurnContext {
                     turn,
                     model: self.model.clone(),
                     message_count: self.messages.len(),
                 };
                 let outcome = hook_engine.on_turn_start(turn, &ctx).await;
-                if let Some(reason) = self.apply_pre_turn_outcome(outcome) {
-                    self.output
-                        .emit_info(&format!("Run stopped by on_turn_start hook: {reason}"));
-                    return self
-                        .finish_run_terminated(user_input, turn, FinishReason::Length)
-                        .await;
-                }
+                self.apply_pre_turn_outcome(outcome)
+            } else {
+                None
+            };
+            if let Some(turn_id) = journal_turn_id {
+                self.sync_journal_conversation(turn_id).await?;
+            }
+            if let Some(reason) = hook_block_reason {
+                self.output
+                    .emit_info(&format!("Run stopped by on_turn_start hook: {reason}"));
+                return self
+                    .finish_run_terminated(user_input, turn, FinishReason::Length)
+                    .await;
             }
 
             // Fire PreCompact plugin hooks once per turn, immediately before
@@ -5243,8 +5495,9 @@ impl AgentEngine {
             // session-end hooks before propagating, so the error exit
             // is consistent with every other loop-exit path.
             if let Err(e) = self.run_compaction().await {
+                self.prepare_durable_conversation().await?;
                 self.fire_on_session_end(turn).await;
-                self.save_session();
+                self.save_session_mirror();
                 return Err(e);
             }
 
@@ -5352,6 +5605,9 @@ impl AgentEngine {
             // matching tool_use) are untouched, and only true orphans are
             // demoted to text.
             self.repair_orphaned_tool_results();
+            if let Some(turn_id) = journal_turn_id {
+                self.sync_journal_conversation(turn_id).await?;
+            }
 
             // Output-side optimization (Part A): attach fluff stop sequences
             // only when the route optimizes client-side. On router-optimized
@@ -5659,6 +5915,7 @@ impl AgentEngine {
                             est,
                         );
                     }
+                    self.sync_active_journal_conversation().await?;
                     // Decide on the DISPATCHED set: the window/ceiling are
                     // unchanged, so only `used_tokens` moves. Re-stamp every
                     // downstream consumer of the request size so none sees the
@@ -6126,28 +6383,51 @@ impl AgentEngine {
                         attempt_output.emit_provider_retry(evidence.failure.as_deref());
                     }
                 });
+                let attempt_provider: Arc<dyn LlmProvider> = match (
+                    self.session_journal.as_ref(),
+                    self.active_journal_turn_id.as_ref(),
+                ) {
+                    (Some(journal), Some(turn_id)) => Arc::new(JournaledLlmProvider::new(
+                        Arc::clone(&self.provider),
+                        journal.clone(),
+                        turn_id.clone(),
+                        LifecyclePurpose::Conversation,
+                        reservation_provider,
+                        effective_model.clone(),
+                    )),
+                    (Some(_), None) => {
+                        return Err(AgentError::SessionAuthority(
+                            "provider call has journal authority but no active durable turn"
+                                .to_string(),
+                        ));
+                    }
+                    (None, _) => Arc::clone(&self.provider),
+                };
                 let provider_cancel = self.cancel_token.clone();
                 let provider_result = tokio::select! {
                     biased;
                     _ = provider_cancel.cancelled() => {
-                        let mut fallback_state = fallback_budget_state
-                            .lock()
-                            .unwrap_or_else(|poisoned| poisoned.into_inner());
-                        fallback_state.record_prior_charges(&run_budget);
-                        if let Some(reservation) = fallback_state.current.take() {
-                            // Cancellation may race a physical send. Once the
-                            // provider future has been polled, its outcome is
-                            // unknown; consume the conservative reservation so
-                            // the session neither understates possible spend
-                            // nor leaves an in-flight reservation stranded.
-                            let (input_tokens, output_tokens, cost_usd) =
-                                reservation.conservative_charge();
-                            run_budget.record_tokens(input_tokens, output_tokens);
-                            run_budget.record_cost(cost_usd);
-                            let _ = reservation.settle(input_tokens, output_tokens, cost_usd);
+                        {
+                            let mut fallback_state = fallback_budget_state
+                                .lock()
+                                .unwrap_or_else(|poisoned| poisoned.into_inner());
+                            fallback_state.record_prior_charges(&run_budget);
+                            if let Some(reservation) = fallback_state.current.take() {
+                                // Cancellation may race a physical send. Once the
+                                // provider future has been polled, its outcome is
+                                // unknown; consume the conservative reservation so
+                                // the session neither understates possible spend
+                                // nor leaves an in-flight reservation stranded.
+                                let (input_tokens, output_tokens, cost_usd) =
+                                    reservation.conservative_charge();
+                                run_budget.record_tokens(input_tokens, output_tokens);
+                                run_budget.record_cost(cost_usd);
+                                let _ = reservation.settle(input_tokens, output_tokens, cost_usd);
+                            }
                         }
+                        self.prepare_durable_conversation().await?;
                         self.output.emit_info("Run cancelled while waiting for the provider.");
-                        self.save_session();
+                        self.save_session_mirror();
                         return Err(AgentError::UserAborted);
                     }
                     result = wcore_providers::retry::scope_configured_fallback_admitter(
@@ -6156,7 +6436,7 @@ impl AgentEngine {
                             0,
                             wcore_providers::retry::observe_provider_attempts(
                                 attempt_observer,
-                                self.provider.stream(&request),
+                                attempt_provider.stream(&request),
                             ),
                         ),
                     ) => result,
@@ -6221,10 +6501,10 @@ impl AgentEngine {
                     None
                 };
                 if let Some(reservation) = failed_provider_reservation {
-                    if matches!(
-                        &provider_result,
-                        Err(ProviderError::MissingApiKey | ProviderError::NotAttempted { .. })
-                    ) {
+                    if provider_result
+                        .as_ref()
+                        .is_err_and(|error| error.was_not_attempted())
+                    {
                         reservation.release();
                     } else {
                         // The provider outcome is unknown: consume the conservative
@@ -6260,6 +6540,13 @@ impl AgentEngine {
                 }
                 let mut rx = match provider_result {
                     Ok(rx) => rx,
+                    Err(error)
+                        if crate::journal_provider::is_journal_authority_error(
+                            &error.to_string(),
+                        ) =>
+                    {
+                        return Err(AgentError::SessionAuthority(error.to_string()));
+                    }
                     Err(e) if e.is_retryable() => {
                         stream_failure_code = observed_provider_failure
                             .lock()
@@ -6292,8 +6579,9 @@ impl AgentEngine {
                              {model_window} window) — compacted and retrying"
                         ));
                         if let Err(e) = self.run_compaction().await {
+                            self.prepare_durable_conversation().await?;
                             self.fire_on_session_end(turn).await;
-                            self.save_session();
+                            self.save_session_mirror();
                             return Err(e);
                         }
                         // Rebuild the volatile request inputs from the compacted
@@ -6306,6 +6594,7 @@ impl AgentEngine {
                             &request.tools,
                         ) as u64;
                         request.client_context_tokens = Some(recount);
+                        self.sync_active_journal_conversation().await?;
                         continue 'stream;
                     }
                     Err(e) => {
@@ -6338,8 +6627,9 @@ impl AgentEngine {
                                 let _ =
                                     reservation.settle(input_tokens, output_tokens, cost_usd);
                             }
+                            self.prepare_durable_conversation().await?;
                             self.output.emit_info("Run cancelled while receiving provider output.");
-                            self.save_session();
+                            self.save_session_mirror();
                             return Err(AgentError::UserAborted);
                         }
                         event = rx.recv() => event,
@@ -6389,6 +6679,9 @@ impl AgentEngine {
                             done_seen = true;
                         }
                         LlmEvent::Error(e) => {
+                            if crate::journal_provider::is_journal_authority_error(&e) {
+                                return Err(AgentError::SessionAuthority(e));
+                            }
                             // AUDIT E-C2 — do NOT immediately abort the run.
                             // Record the error and stop consuming this
                             // attempt; the retry decision below re-issues
@@ -6620,8 +6913,9 @@ impl AgentEngine {
                                 // flag the #280 smart pre-gate uses.
                                 self.smart_compact_force = true;
                                 if let Err(e) = self.run_compaction().await {
+                                    self.prepare_durable_conversation().await?;
                                     self.fire_on_session_end(turn).await;
-                                    self.save_session();
+                                    self.save_session_mirror();
                                     return Err(e);
                                 }
                                 let history_after = request_wire_fingerprint(
@@ -6641,6 +6935,7 @@ impl AgentEngine {
                                 ) as u64;
                                 request.client_context_tokens = Some(recount);
                                 input_token_estimate = recount as usize;
+                                self.sync_active_journal_conversation().await?;
                                 if history_after != history_before && recount < ceiling {
                                     // Compaction freed real space AND changed
                                     // the context — retry the turn. (The
@@ -6822,8 +7117,9 @@ impl AgentEngine {
                     tokio::select! {
                         biased;
                         _ = backoff_cancel.cancelled() => {
+                            self.prepare_durable_conversation().await?;
                             self.output.emit_info("Run cancelled during provider retry backoff.");
-                            self.save_session();
+                            self.save_session_mirror();
                             return Err(AgentError::UserAborted);
                         }
                         _ = tokio::time::sleep(backoff) => {}
@@ -7049,6 +7345,9 @@ impl AgentEngine {
 
             self.messages
                 .push(Message::now(Role::Assistant, assistant_content));
+            if let Some(turn_id) = journal_turn_id {
+                self.sync_journal_conversation(turn_id).await?;
+            }
 
             // Fire on_turn_end after the assistant message is committed.
             // SwitchModel and InjectMessage apply to the NEXT turn (or are
@@ -7062,6 +7361,9 @@ impl AgentEngine {
                 };
                 let outcome = hook_engine.on_turn_end(turn, &result).await;
                 self.apply_turn_end_outcome(outcome);
+            }
+            if let Some(turn_id) = journal_turn_id {
+                self.sync_journal_conversation(turn_id).await?;
             }
 
             // AUDIT E-C1 — budget cap honored. The provider already
@@ -7160,8 +7462,9 @@ impl AgentEngine {
                 // user-visible Info event (and into the message tail in
                 // case the host resumes the session).
                 self.drain_and_inject_external_edits();
+                self.prepare_durable_conversation().await?;
                 self.fire_on_session_end(turn + 1).await;
-                self.save_session();
+                self.save_session_mirror();
                 // v0.8.1 U6 — snapshot the U1 pick BEFORE
                 // `observe_skill_router_outcome` clears it, so the
                 // autonomous-skill bucketer can record which catalog
@@ -7422,13 +7725,15 @@ impl AgentEngine {
             let outcome = match exit {
                 GraphExit::Continue(o) => o,
                 GraphExit::Aborted => {
+                    self.prepare_durable_conversation().await?;
                     self.fire_on_session_end(turn + 1).await;
-                    self.save_session();
+                    self.save_session_mirror();
                     return Err(AgentError::UserAborted);
                 }
                 GraphExit::Failed(msg) => {
+                    self.prepare_durable_conversation().await?;
                     self.fire_on_session_end(turn + 1).await;
-                    self.save_session();
+                    self.save_session_mirror();
                     return Err(AgentError::ApiError(msg));
                 }
             };
@@ -7441,6 +7746,9 @@ impl AgentEngine {
             // already drained at the orchestration layer.
             for hook_outcome in outcome.hook_outcomes {
                 self.apply_turn_end_outcome(hook_outcome);
+            }
+            if let Some(turn_id) = journal_turn_id {
+                self.sync_journal_conversation(turn_id).await?;
             }
 
             // W1 F9: pre-populate ToolCallTrace stubs from the LLM-requested
@@ -7913,6 +8221,9 @@ impl AgentEngine {
 
             self.messages
                 .push(Message::now(Role::User, tool_results_content));
+            if let Some(turn_id) = journal_turn_id {
+                self.sync_journal_conversation(turn_id).await?;
+            }
             if let Some(reason) = monitor_replan {
                 // The directive now exists in the committed transcript and
                 // will affect the next provider request, so the monitor owns
@@ -7923,7 +8234,8 @@ impl AgentEngine {
             }
 
             // Save session after each turn
-            self.save_session();
+            self.prepare_durable_conversation().await?;
+            self.save_session_mirror();
             turn += 1;
         }
     }
@@ -8245,7 +8557,6 @@ impl AgentEngine {
             let msg = "Usage: /crucible <task> — convene a cross-vendor council to \
                        cross-check an answer."
                 .to_string();
-            self.output.emit_text_delta(&msg, &self.current_msg_id);
             return Some(self.crucible_result(msg));
         }
 
@@ -8265,7 +8576,6 @@ impl AgentEngine {
                        Crucible can run (e.g. a Flux key) or set `proposers` / \
                        `candidate_pool` under `[crucible]` with keyed providers."
                 .to_string();
-            self.output.emit_text_delta(&msg, &self.current_msg_id);
             return Some(self.crucible_result(msg));
         }
 
@@ -8418,7 +8728,6 @@ impl AgentEngine {
                     reason: "Crucible declined — no spend.".to_string(),
                 });
                 let msg = "crucible: cancelled — no spend.".to_string();
-                self.output.emit_text_delta(&msg, &self.current_msg_id);
                 Some(self.crucible_result(msg))
             }
             Ok(CouncilRunResult::Direct { spec, text }) => {
@@ -8431,7 +8740,6 @@ impl AgentEngine {
                     output_type: OutputType::Text,
                     metadata: None,
                 });
-                self.output.emit_text_delta(&text, &self.current_msg_id);
                 Some(self.crucible_result(text))
             }
             Ok(CouncilRunResult::Council { plan: _, outcome }) => {
@@ -8444,8 +8752,6 @@ impl AgentEngine {
                     output_type: OutputType::Text,
                     metadata: None,
                 });
-                self.output
-                    .emit_text_delta(&outcome.final_text, &self.current_msg_id);
                 Some(self.crucible_result(outcome.final_text))
             }
             Err(e) => {
@@ -8459,7 +8765,6 @@ impl AgentEngine {
                     output_type: OutputType::Text,
                     metadata: None,
                 });
-                self.output.emit_text_delta(&msg, &self.current_msg_id);
                 Some(self.crucible_result(msg))
             }
         }
@@ -8481,9 +8786,20 @@ impl AgentEngine {
         }
     }
 
+    /// Persist the assistant side of a pre-loop workflow/Crucible result in
+    /// the same provider-neutral conversation used by ordinary model turns.
+    fn push_synthetic_assistant_result(&mut self, result: &AgentResult) {
+        self.messages.push(Message::now(
+            Role::Assistant,
+            vec![ContentBlock::Text {
+                text: result.text.clone(),
+            }],
+        ));
+    }
+
     /// Dynamic Workflows B6 — render a completed (or failed) workflow run into
-    /// the assistant turn output. Emits the rendered text as a delta on the
-    /// current msg so streaming hosts see it, then returns the `AgentResult`.
+    /// the assistant turn output. The caller journals the returned structured
+    /// assistant message before exposing its text to streaming hosts.
     fn surface_workflow_result(
         &self,
         plan: &crate::orchestration::workflow::runner::WorkflowPlan,
@@ -8534,7 +8850,6 @@ impl AgentEngine {
             }
             Err(e) => format!("Workflow `{}` failed: {}", plan.meta.name, e),
         };
-        self.output.emit_text_delta(&text, &self.current_msg_id);
         AgentResult {
             text,
             stop_reason: StopReason::EndTurn,
@@ -8716,7 +9031,25 @@ impl AgentEngine {
                 &self.compact_config,
             );
         if should_compact && !self.compact_state.is_circuit_broken(&self.compact_config) {
-            let provider = Arc::clone(&self.provider);
+            let provider: Arc<dyn LlmProvider> = match (
+                self.session_journal.as_ref(),
+                self.active_journal_turn_id.as_ref(),
+            ) {
+                (Some(journal), Some(turn_id)) => Arc::new(JournaledLlmProvider::new(
+                    Arc::clone(&self.provider),
+                    journal.clone(),
+                    turn_id.clone(),
+                    LifecyclePurpose::Compaction,
+                    self.compat.provider_type(),
+                    self.model.clone(),
+                )),
+                (Some(_), None) => {
+                    return Err(AgentError::SessionAuthority(
+                        "compaction has journal authority but no active durable turn".to_string(),
+                    ));
+                }
+                (None, _) => Arc::clone(&self.provider),
+            };
             // AUDIT A4 — `run_compaction` runs at the TOP of the turn
             // loop, AFTER `push_user_turn` appended the user's live
             // instruction. Summarizing ALL of `self.messages` therefore
@@ -8848,6 +9181,14 @@ impl AgentEngine {
                     if let Some(turn) = live_user_turn {
                         self.messages.push(turn);
                     }
+                }
+                Err(error)
+                    if crate::journal_provider::is_journal_authority_error(&error.to_string()) =>
+                {
+                    if let Some(turn) = live_user_turn {
+                        self.messages.push(turn);
+                    }
+                    return Err(AgentError::SessionAuthority(error.to_string()));
                 }
                 Err(e) => {
                     self.output
@@ -10369,28 +10710,21 @@ impl AgentEngine {
         self.audit_log = Some(log);
     }
 
-    fn save_session(&mut self) {
-        // AUDIT D-6 — never persist a trailing assistant message whose
-        // `tool_use` blocks have no following `tool_result`. The graph
-        // `Cancelled` / `Quit` exits call `save_session()` after the
-        // assistant message (with `tool_use`) is pushed but before the
-        // tool-results message — that orphaned shape is Anthropic-invalid
-        // and any consumer reading the session file without going
-        // through `push_user_turn` (inspector, export, re-send) would
-        // choke on it. Repair in-memory first so the on-disk copy is
-        // always a valid alternating message list. No-op when there is
-        // nothing dangling.
+    async fn prepare_durable_conversation(&mut self) -> Result<(), AgentError> {
         self.repair_orphaned_tool_use();
+        self.sync_active_journal_conversation().await
+    }
+
+    /// Write the compatibility snapshot without mutating conversation state.
+    /// Durable execution paths call `prepare_durable_conversation` first.
+    fn save_session_mirror(&mut self) {
         if let (Some(mgr), Some(session)) = (&self.session_manager, &mut self.current_session) {
             session.messages = self.messages.clone();
             session.total_usage = self.total_usage.clone();
             session.updated_at = chrono::Utc::now();
-            if let Err(e) = mgr.save(session) {
+            if let Err(e) = mgr.save_and_clear_wal(session) {
                 self.output
                     .emit_error(&format!("Failed to save session: {}", e), false);
-            } else {
-                // F-030: full save succeeded; the WAL is now redundant.
-                mgr.delete_wal(session);
             }
             if let Err(e) = mgr.update_index_for(session) {
                 self.output
@@ -11090,6 +11424,8 @@ mod set_config_tests {
             hooks: None,
             session_manager: None,
             current_session: None,
+            session_journal: None,
+            active_journal_turn_id: None,
             output: Arc::new(NullOutput),
             current_msg_id: String::new(),
             current_agent_run_id: None,
@@ -12759,6 +13095,8 @@ mod phase6_tests {
             hooks: None,
             session_manager: None,
             current_session: None,
+            session_journal: None,
+            active_journal_turn_id: None,
             output: Arc::new(NullOutput),
             current_msg_id: String::new(),
             current_agent_run_id: None,
@@ -13064,6 +13402,8 @@ mod compact_tests {
             hooks: None,
             session_manager: None,
             current_session: None,
+            session_journal: None,
+            active_journal_turn_id: None,
             output: Arc::new(NullOutput),
             current_msg_id: String::new(),
             current_agent_run_id: None,
@@ -14399,6 +14739,8 @@ mod plan_mode_tests {
             hooks: None,
             session_manager: None,
             current_session: None,
+            session_journal: None,
+            active_journal_turn_id: None,
             output: Arc::new(NullOutput),
             current_msg_id: String::new(),
             current_agent_run_id: None,
@@ -14837,6 +15179,8 @@ mod hook_integration_tests {
             hooks: None,
             session_manager: None,
             current_session: None,
+            session_journal: None,
+            active_journal_turn_id: None,
             output: Arc::new(NullOutput),
             current_msg_id: String::new(),
             current_agent_run_id: None,
@@ -15685,6 +16029,8 @@ mod approval_bridge_engine_tests {
             hooks: None,
             session_manager: None,
             current_session: None,
+            session_journal: None,
+            active_journal_turn_id: None,
             output: Arc::new(NullOutput),
             current_msg_id: String::new(),
             current_agent_run_id: None,
@@ -16633,6 +16979,8 @@ pub enum AgentError {
     Provider(#[from] ProviderError),
     #[error("User aborted the session")]
     UserAborted,
+    #[error("Session persistence authority unavailable: {0}")]
+    SessionAuthority(String),
     #[error("Context window nearly full ({input_tokens} tokens used, limit {limit})")]
     ContextTooLong { input_tokens: u64, limit: usize },
 }
@@ -16717,6 +17065,8 @@ mod user_model_writeback_tests {
             hooks: None,
             session_manager: None,
             current_session: None,
+            session_journal: None,
+            active_journal_turn_id: None,
             output: Arc::new(NullOutput),
             current_msg_id: String::new(),
             current_agent_run_id: None,
@@ -17415,6 +17765,50 @@ mod audit_2026_05_22_tests {
     struct NullOutput;
     impl OutputSink for NullOutput {
         fn emit_text_delta(&self, _: &str, _: &str) {}
+        fn emit_thinking(&self, _: &str, _: &str) {}
+        fn emit_tool_call(&self, _: &str, _: &str) {}
+        fn emit_tool_result(&self, _: &str, _: bool, _: &str) {}
+        fn emit_stream_start(&self, _: &str) {}
+        fn emit_stream_end(
+            &self,
+            _: &str,
+            _: usize,
+            _: u64,
+            _: u64,
+            _: u64,
+            _: u64,
+            _: FinishReason,
+        ) {
+        }
+        fn emit_error(&self, _: &str, _: bool) {}
+        fn emit_info(&self, _: &str) {}
+    }
+
+    struct JournalOrderSink {
+        journal: crate::session_journal::SessionJournal,
+        observed: Arc<std::sync::atomic::AtomicBool>,
+    }
+
+    impl OutputSink for JournalOrderSink {
+        fn emit_text_delta(&self, text: &str, _: &str) {
+            let state = self.journal.state().unwrap();
+            let message: wcore_types::message::Message = serde_json::from_value(
+                state
+                    .conversation
+                    .last()
+                    .cloned()
+                    .expect("assistant message must be durable before output"),
+            )
+            .unwrap();
+            assert_eq!(message.role, wcore_types::message::Role::Assistant);
+            assert!(matches!(
+                message.content.as_slice(),
+                [wcore_types::message::ContentBlock::Text { text: durable }] if durable == text
+            ));
+            self.observed
+                .store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+
         fn emit_thinking(&self, _: &str, _: &str) {}
         fn emit_tool_call(&self, _: &str, _: &str) {}
         fn emit_tool_result(&self, _: &str, _: bool, _: &str) {}
@@ -18693,6 +19087,217 @@ mod audit_2026_05_22_tests {
         assert_eq!(events[0]["usage"]["input_tokens"], 100);
     }
 
+    #[test]
+    fn resumed_engine_holds_journal_lease_until_drop() {
+        let dir = tempfile::tempdir().unwrap();
+        let manager = crate::session::SessionManager::new(dir.path().to_path_buf(), 10);
+        let session = manager.create("test", "test-model", "/tmp", None).unwrap();
+        manager.persist_first_message(&session).unwrap();
+        let active = manager.load_for_run(&session.id).unwrap();
+
+        let mut config = wcore_config::config::Config::default();
+        config.session.enabled = true;
+        config.session.directory = dir.path().to_string_lossy().into_owned();
+        let engine = super::AgentEngine::resume_active_with_provider(
+            Arc::new(ScriptedProvider::new(Vec::new())),
+            config,
+            ToolRegistry::new(),
+            Arc::new(NullOutput),
+            active,
+        );
+
+        let contested = manager.load_for_run(&session.id).unwrap_err();
+        assert!(
+            contested.to_string().contains("already held"),
+            "engine lifetime must retain the writer lease: {contested}"
+        );
+
+        drop(engine);
+        let reacquired = manager.load_for_run(&session.id).unwrap();
+        assert_eq!(reacquired.session.id, session.id);
+    }
+
+    #[tokio::test]
+    async fn persisted_resume_without_journal_authority_fails_closed() {
+        let dir = tempfile::tempdir().unwrap();
+        let manager = crate::session::SessionManager::new(dir.path().to_path_buf(), 10);
+        let session = manager.create("test", "test-model", "/tmp", None).unwrap();
+        manager.persist_first_message(&session).unwrap();
+
+        let provider = Arc::new(ScriptedProvider::new(Vec::new()));
+        let calls = provider.call_counter();
+        let mut config = wcore_config::config::Config::default();
+        config.session.enabled = true;
+        config.session.directory = dir.path().to_string_lossy().into_owned();
+        let mut engine = super::AgentEngine::resume_with_provider(
+            provider,
+            config,
+            ToolRegistry::new(),
+            Arc::new(NullOutput),
+            session,
+        );
+
+        let result = engine.run("must not start", "m-1").await;
+        assert!(
+            matches!(result, Err(super::AgentError::SessionAuthority(_))),
+            "persisted execution without a lease must fail closed: {result:?}"
+        );
+        assert_eq!(
+            calls.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "authority failure must happen before provider dispatch"
+        );
+    }
+
+    #[tokio::test]
+    async fn persisted_run_journals_exact_conversation_and_one_terminal_transition() {
+        let dir = tempfile::tempdir().unwrap();
+        let manager = crate::session::SessionManager::new(dir.path().to_path_buf(), 10);
+        let active = manager
+            .create_for_run("test", "test-model", "/tmp", Some("a11ce5acce55"))
+            .unwrap();
+        let mut config = wcore_config::config::Config::default();
+        config.session.enabled = true;
+        config.session.directory = dir.path().to_string_lossy().into_owned();
+        let provider = Arc::new(ScriptedProvider::new(vec![vec![
+            LlmEvent::TextDelta("durable answer".into()),
+            done_endturn(),
+        ]]));
+        let mut engine = super::AgentEngine::resume_active_with_provider(
+            provider,
+            config,
+            ToolRegistry::new(),
+            Arc::new(NullOutput),
+            active,
+        );
+
+        let result = engine.run("durable prompt", "m-1").await.unwrap();
+        assert_eq!(result.text, "durable answer");
+        let state = engine.session_journal.as_ref().unwrap().state().unwrap();
+        assert_eq!(
+            state.conversation,
+            serde_json::to_value(&engine.messages)
+                .unwrap()
+                .as_array()
+                .unwrap()
+                .clone()
+        );
+        assert_eq!(state.turns.len(), 1);
+        let turn = state.turns.values().next().unwrap();
+        assert!(matches!(
+            turn.completion.as_ref(),
+            Some(crate::session_journal::TurnCompletion::Committed { assistant_message })
+                if assistant_message == "durable answer"
+        ));
+    }
+
+    #[tokio::test]
+    async fn synthetic_result_is_durable_before_text_is_exposed() {
+        let dir = tempfile::tempdir().unwrap();
+        let manager = crate::session::SessionManager::new(dir.path().to_path_buf(), 10);
+        let active = manager
+            .create_for_run("test", "test-model", "/tmp", Some("d0ab1e0a7e57"))
+            .unwrap();
+        let journal = active.journal.clone();
+        let observed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let sink = Arc::new(JournalOrderSink {
+            journal,
+            observed: Arc::clone(&observed),
+        });
+        let provider = Arc::new(ScriptedProvider::new(Vec::new()));
+        let calls = provider.call_counter();
+        let mut config = wcore_config::config::Config::default();
+        config.session.enabled = true;
+        config.session.directory = dir.path().to_string_lossy().into_owned();
+        let mut engine = super::AgentEngine::resume_active_with_provider(
+            provider,
+            config,
+            ToolRegistry::new(),
+            sink,
+            active,
+        );
+
+        let result = engine.run("/crucible off", "m-1").await.unwrap();
+        assert_eq!(result.text, "Crucible suggestions off for this session.");
+        assert!(observed.load(std::sync::atomic::Ordering::SeqCst));
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn cancelled_persisted_run_records_cancelled_without_provider_dispatch() {
+        let dir = tempfile::tempdir().unwrap();
+        let manager = crate::session::SessionManager::new(dir.path().to_path_buf(), 10);
+        let active = manager
+            .create_for_run("test", "test-model", "/tmp", Some("ca11ce1ca11c"))
+            .unwrap();
+        let provider = Arc::new(ScriptedProvider::new(vec![vec![done_endturn()]]));
+        let calls = provider.call_counter();
+        let mut config = wcore_config::config::Config::default();
+        config.session.enabled = true;
+        config.session.directory = dir.path().to_string_lossy().into_owned();
+        let mut engine = super::AgentEngine::resume_active_with_provider(
+            provider,
+            config,
+            ToolRegistry::new(),
+            Arc::new(NullOutput),
+            active,
+        );
+        engine.session_runtime = None;
+        engine.cancel_token.cancel();
+
+        let result = engine.run("cancel me", "m-1").await;
+        assert!(matches!(result, Err(super::AgentError::UserAborted)));
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+        let state = engine.session_journal.as_ref().unwrap().state().unwrap();
+        assert_eq!(state.turns.len(), 1);
+        assert!(matches!(
+            state.turns.values().next().unwrap().completion.as_ref(),
+            Some(crate::session_journal::TurnCompletion::Cancelled)
+        ));
+    }
+
+    #[tokio::test]
+    async fn dropped_run_is_failed_before_a_new_turn_starts() {
+        let dir = tempfile::tempdir().unwrap();
+        let manager = crate::session::SessionManager::new(dir.path().to_path_buf(), 10);
+        let active = manager
+            .create_for_run("test", "test-model", "/tmp", Some("deadbeef1200"))
+            .unwrap();
+        let provider = Arc::new(BlockingThenScriptedProvider::new());
+        let mut config = wcore_config::config::Config::default();
+        config.session.enabled = true;
+        config.session.directory = dir.path().to_string_lossy().into_owned();
+        let mut engine = super::AgentEngine::resume_active_with_provider(
+            provider.clone(),
+            config,
+            ToolRegistry::new(),
+            Arc::new(NullOutput),
+            active,
+        );
+
+        let mut first = Box::pin(engine.run("first", "m-1"));
+        tokio::select! {
+            _ = provider.entered.notified() => {}
+            result = &mut first => panic!("first run unexpectedly completed: {result:?}"),
+        }
+        drop(first);
+
+        let second = engine.run("second", "m-2").await.unwrap();
+        assert_eq!(second.text, "session alive");
+        let state = engine.session_journal.as_ref().unwrap().state().unwrap();
+        assert_eq!(state.turns.len(), 2);
+        assert!(state.turns.values().any(|turn| matches!(
+            turn.completion.as_ref(),
+            Some(crate::session_journal::TurnCompletion::Failed { error })
+                if error == "interrupted before a terminal journal event"
+        )));
+        assert!(state.turns.values().any(|turn| matches!(
+            turn.completion.as_ref(),
+            Some(crate::session_journal::TurnCompletion::Committed { assistant_message })
+                if assistant_message == "session alive"
+        )));
+    }
+
     #[tokio::test]
     async fn resumed_session_carries_cumulative_usage_but_fresh_delta() {
         // CORE-2 (c) — an engine resumed from a persisted session inherits
@@ -18911,11 +19516,11 @@ mod audit_2026_05_22_tests {
         }
     }
 
-    // --- D6: orphaned tool_use repaired before save ----------------------
+    // --- D6: orphaned tool_use repaired before durable save --------------
 
     #[test]
-    fn save_session_repairs_orphaned_tool_use() {
-        // AUDIT D-6 — `save_session` must not persist a trailing
+    fn durable_conversation_repair_closes_orphaned_tool_use() {
+        // AUDIT D-6 — durable persistence must not retain a trailing
         // assistant message whose `tool_use` blocks have no following
         // `tool_result`. The repair appends a synthetic error-result
         // user message. Pre-fix: the orphaned shape was written verbatim.
@@ -18935,7 +19540,7 @@ mod audit_2026_05_22_tests {
                 }],
             ),
         ];
-        engine.save_session();
+        engine.repair_orphaned_tool_use();
         let last = engine.messages.last().expect("messages non-empty");
         assert_eq!(
             last.role,
@@ -19052,7 +19657,7 @@ mod audit_2026_05_22_tests {
     }
 
     #[test]
-    fn save_session_leaves_well_formed_history_untouched() {
+    fn durable_conversation_repair_leaves_well_formed_history_untouched() {
         // Control: a history that already ends with a tool-results
         // message must NOT gain a spurious repair message.
         use wcore_types::message::{ContentBlock, Message, Role};
@@ -19078,7 +19683,7 @@ mod audit_2026_05_22_tests {
             ),
         ];
         let before = engine.messages.len();
-        engine.save_session();
+        engine.repair_orphaned_tool_use();
         assert_eq!(
             engine.messages.len(),
             before,

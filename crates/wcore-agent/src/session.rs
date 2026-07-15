@@ -9,6 +9,10 @@ use serde_json::Value;
 
 use wcore_types::message::{Message, TokenUsage};
 
+use crate::session_journal::{
+    SessionEvent, SessionJournal, SessionSnapshot, state_payload_digest, write_snapshot,
+};
+
 /// Current on-disk schema version. Increment when adding required fields.
 /// Readers must accept any version ≤ CURRENT and refuse versions > CURRENT.
 pub const SESSION_SCHEMA_VERSION: u32 = 1;
@@ -86,6 +90,16 @@ impl Session {
     }
 }
 
+/// A session paired with its exclusive full-lifetime journal authority.
+///
+/// Production execution paths must keep this value intact until ownership is
+/// transferred into `AgentEngine`. Dropping it releases the writer lease.
+#[derive(Debug)]
+pub struct ActiveSession {
+    pub session: Session,
+    pub journal: SessionJournal,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SessionIndex {
     pub sessions: Vec<SessionMeta>,
@@ -157,6 +171,24 @@ impl SessionManager {
         })
     }
 
+    /// Create a fresh session together with its exclusive journal authority.
+    ///
+    /// The legacy snapshot remains deferred until the first user message, but
+    /// the journal lease is held from session initialization onward.
+    pub fn create_for_run(
+        &self,
+        provider: &str,
+        model: &str,
+        cwd: &str,
+        session_id: Option<&str>,
+    ) -> anyhow::Result<ActiveSession> {
+        let session = self.create(provider, model, cwd, session_id)?;
+        std::fs::create_dir_all(&self.directory)?;
+        let journal = SessionJournal::open(self.journal_path(&session.id), session.id.clone())?;
+        self.ensure_journal_imported(&session, &journal)?;
+        Ok(ActiveSession { session, journal })
+    }
+
     /// Called by the engine WAL hook (F-030) to record the first user message
     /// before any LLM call.  Also triggers the first disk write of the session
     /// file and index entry so the session is visible to `--list-sessions`
@@ -180,6 +212,21 @@ impl SessionManager {
         Ok(())
     }
 
+    /// Atomically with respect to WAL writers, save the canonical snapshot and
+    /// remove the now-redundant WAL. This prevents another process from
+    /// appending between the snapshot read and WAL deletion.
+    pub fn save_and_clear_wal(&self, session: &Session) -> anyhow::Result<()> {
+        let wal_path = self.wal_path(session);
+        with_wal_lock(&wal_path, || {
+            self.save(session)?;
+            match std::fs::remove_file(&wal_path) {
+                Ok(()) => Ok(()),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+                Err(error) => Err(error.into()),
+            }
+        })
+    }
+
     /// Append the user message text to the WAL file for this session (F-030).
     ///
     /// The WAL survives a SIGKILL.  On the next `load()` the engine merges
@@ -193,14 +240,20 @@ impl SessionManager {
             "role": "user",
             "content": user_text,
             "ts": Utc::now().to_rfc3339(),
+            // The canonical snapshot has this many messages immediately before
+            // this prompt. Recovery can therefore distinguish an unapplied WAL
+            // record from a save-completed/delete-interrupted stale record,
+            // even when the prompt text is intentionally repeated.
+            "base_message_count": session.messages.len(),
         });
-        let mut f = OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&wal_path)?;
-        writeln!(f, "{}", entry)?;
-        f.flush()?;
-        Ok(())
+        let mut encoded = serde_json::to_vec(&entry)?;
+        encoded.push(b'\n');
+        with_wal_lock(&wal_path, || {
+            let mut file = open_secure_append(&wal_path)?;
+            file.write_all(&encoded)?;
+            file.sync_all()?;
+            Ok(())
+        })
     }
 
     /// Merge a WAL file (if present) into `session.messages` and delete it.
@@ -210,44 +263,129 @@ impl SessionManager {
     /// appended as `Role::User` messages so a SIGKILL mid-turn is recoverable.
     pub fn merge_wal(&self, session: &mut Session) -> anyhow::Result<()> {
         let wal_path = self.wal_path(session);
-        if !wal_path.exists() {
-            return Ok(());
-        }
-        let content = std::fs::read_to_string(&wal_path)?;
-        for line in content.lines() {
-            let line = line.trim();
-            if line.is_empty() {
-                continue;
+        with_wal_lock(&wal_path, || {
+            if !wal_path.exists() {
+                return Ok(());
             }
-            if let Ok(obj) = serde_json::from_str::<serde_json::Map<String, Value>>(line) {
-                let Some(Value::String(text)) = obj.get("content") else {
+
+            let bytes = std::fs::read(&wal_path)?;
+            // A durable record always ends in '\n'. Bytes after the final
+            // newline are an incomplete crash-time append and are not part of
+            // the committed prefix. A malformed newline-terminated record is
+            // complete corruption and fails below.
+            let committed_len = if bytes.ends_with(b"\n") {
+                bytes.len()
+            } else {
+                bytes
+                    .iter()
+                    .rposition(|byte| *byte == b'\n')
+                    .map_or(0, |index| index + 1)
+            };
+            let committed = std::str::from_utf8(&bytes[..committed_len]).map_err(|error| {
+                anyhow::anyhow!(
+                    "Session WAL '{}' has invalid UTF-8 in its committed prefix: {}",
+                    wal_path.display(),
+                    error
+                )
+            })?;
+            let mut recovered_records = Vec::new();
+            for (line_index, line) in committed.lines().enumerate() {
+                let line = line.trim();
+                if line.is_empty() {
                     continue;
+                }
+                let obj = serde_json::from_str::<serde_json::Map<String, Value>>(line).map_err(
+                    |error| {
+                        anyhow::anyhow!(
+                            "Session WAL '{}' is corrupt at line {}: {}",
+                            wal_path.display(),
+                            line_index + 1,
+                            error
+                        )
+                    },
+                )?;
+                let Some(Value::String(role)) = obj.get("role") else {
+                    anyhow::bail!(
+                        "Session WAL '{}' is corrupt at line {}: missing string role",
+                        wal_path.display(),
+                        line_index + 1
+                    );
                 };
-                // Only append if not already the last user message (avoid
-                // duplicates if the WAL was partially merged on a previous run).
-                let already_present = session.messages.iter().rev().any(|m| {
-                    m.role == wcore_types::message::Role::User
-                        && m.content.iter().any(|b| {
-                            matches!(b, wcore_types::message::ContentBlock::Text { text: t } if t == text)
-                        })
-                });
-                if !already_present {
-                    use wcore_types::message::{ContentBlock, Message, Role};
-                    session.messages.push(Message::now(
-                        Role::User,
-                        vec![ContentBlock::Text { text: text.clone() }],
-                    ));
+                let Some(Value::String(text)) = obj.get("content") else {
+                    anyhow::bail!(
+                        "Session WAL '{}' is corrupt at line {}: missing string content",
+                        wal_path.display(),
+                        line_index + 1
+                    );
+                };
+                if role != "user" {
+                    anyhow::bail!(
+                        "Session WAL '{}' is corrupt at line {}: unsupported role '{}'",
+                        wal_path.display(),
+                        line_index + 1,
+                        role
+                    );
+                }
+                let base_message_count = match obj.get("base_message_count") {
+                    None => None,
+                    Some(Value::Number(value)) => value.as_u64().and_then(|value| {
+                        if value <= usize::MAX as u64 {
+                            Some(value as usize)
+                        } else {
+                            None
+                        }
+                    }),
+                    Some(_) => None,
+                };
+                if obj.contains_key("base_message_count") && base_message_count.is_none() {
+                    anyhow::bail!(
+                        "Session WAL '{}' is corrupt at line {}: invalid base_message_count",
+                        wal_path.display(),
+                        line_index + 1
+                    );
+                }
+                recovered_records.push((text.clone(), base_message_count));
+            }
+
+            use wcore_types::message::{ContentBlock, Role};
+            let original_message_count = session.messages.len();
+            for (text, base_message_count) in recovered_records {
+                let already_committed = if let Some(base_message_count) = base_message_count {
+                    original_message_count > base_message_count
+                } else {
+                    // Pre-F12 WAL records lack a cursor. Preserve their legacy
+                    // duplicate-suppression behavior because exact ordering is
+                    // unknowable; all new records use base_message_count.
+                    session.messages.iter().any(|message| {
+                        message.role == Role::User
+                            && message.content.iter().any(|block| {
+                                matches!(block, ContentBlock::Text { text: existing } if existing == &text)
+                            })
+                    })
+                };
+                if !already_committed {
+                    session
+                        .messages
+                        .push(Message::now(Role::User, vec![ContentBlock::Text { text }]));
                 }
             }
-        }
-        // Delete the WAL now that it has been merged.
-        let _ = std::fs::remove_file(&wal_path);
-        Ok(())
+
+            // Commit the merged state before removing its recovery evidence. If
+            // either operation fails, load fails loud and the WAL remains available.
+            self.save(session)?;
+            std::fs::remove_file(&wal_path)?;
+            Ok(())
+        })
     }
 
     /// Delete the WAL for a session (called after a clean save).
     pub fn delete_wal(&self, session: &Session) {
-        let _ = std::fs::remove_file(self.wal_path(session));
+        let wal_path = self.wal_path(session);
+        let _ = with_wal_lock(&wal_path, || match std::fs::remove_file(&wal_path) {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(error.into()),
+        });
     }
 
     /// Load a session by ID (or "latest").
@@ -293,6 +431,7 @@ impl SessionManager {
             match std::fs::read_to_string(&path) {
                 Ok(content) => {
                     let mut session: Session = serde_json::from_str(&content)?;
+                    reject_future_schema(session.schema_version)?;
                     let migrated = session.migrate();
                     self.merge_wal(&mut session)?;
                     if migrated {
@@ -316,13 +455,26 @@ impl SessionManager {
             }
         }
 
-        // Branch B: index has no entry. For an explicit id, look for an
-        // orphan `.wal` and recover from it. For "latest", there is no id
-        // to scan for, so this stays NotFound.
-        if id_or_latest != "latest"
-            && let Some(session) = self.recover_from_wal(id_or_latest, None)?
-        {
-            return Ok(session);
+        // Branch B: index has no entry. An atomic session snapshot can be
+        // durable before its separate index update, so explicit-id recovery
+        // must search for the JSON before falling back to an orphan WAL.
+        if id_or_latest != "latest" {
+            let unindexed_path = self.session_path_by_id(id_or_latest);
+            if unindexed_path.exists() {
+                let content = std::fs::read_to_string(&unindexed_path)?;
+                let mut session: Session = serde_json::from_str(&content)?;
+                reject_future_schema(session.schema_version)?;
+                let migrated = session.migrate();
+                self.merge_wal(&mut session)?;
+                if migrated {
+                    self.save(&session)?;
+                }
+                self.update_index_for(&session)?;
+                return Ok(session);
+            }
+            if let Some(session) = self.recover_from_wal(id_or_latest, None)? {
+                return Ok(session);
+            }
         }
 
         if id_or_latest == "latest" {
@@ -330,6 +482,119 @@ impl SessionManager {
         } else {
             anyhow::bail!("Session '{}' not found", id_or_latest)
         }
+    }
+
+    /// Load a session for execution while holding its exclusive journal lease.
+    ///
+    /// The concrete id is resolved using read-only metadata first. The journal
+    /// is then opened before `load` can migrate a snapshot, merge/delete a WAL,
+    /// or repair the index, so no execution path mutates legacy state without
+    /// full-lifetime writer authority.
+    pub fn load_for_run(&self, id_or_latest: &str) -> anyhow::Result<ActiveSession> {
+        let session_id = self.resolve_session_id_for_run(id_or_latest)?;
+        std::fs::create_dir_all(&self.directory)?;
+        let journal = SessionJournal::open(self.journal_path(&session_id), session_id.clone())?;
+        let mut session = self.load(&session_id)?;
+        self.ensure_journal_imported(&session, &journal)?;
+        self.restore_journal_conversation(&mut session, &journal)?;
+        Ok(ActiveSession { session, journal })
+    }
+
+    /// Restore the canonical provider-neutral transcript before execution.
+    ///
+    /// The JSON session file is a compatibility mirror and may lag when a
+    /// process dies after a durable journal append. Loading its messages into
+    /// the engine would let the next turn overwrite the recovered transcript
+    /// with stale state, so the verified reduced journal always wins here.
+    fn restore_journal_conversation(
+        &self,
+        session: &mut Session,
+        journal: &SessionJournal,
+    ) -> anyhow::Result<()> {
+        let state = journal.state()?;
+        if state.imported_baseline.is_none() {
+            anyhow::bail!(
+                "Session journal '{}' has no canonical imported baseline",
+                session.id
+            );
+        }
+        if state.session_id.as_deref() != Some(session.id.as_str()) {
+            anyhow::bail!(
+                "Session journal authority does not match session '{}'",
+                session.id
+            );
+        }
+        session.messages = state
+            .conversation
+            .into_iter()
+            .map(serde_json::from_value)
+            .collect::<Result<Vec<Message>, _>>()?;
+        Ok(())
+    }
+
+    /// Seed an empty journal from the exact provider-neutral legacy session.
+    ///
+    /// The append is fsynced by `SessionJournal::append`; the reduced-state
+    /// snapshot is then atomically persisted and directory-synced. Reopening
+    /// an already imported journal refreshes the snapshot without appending a
+    /// duplicate baseline.
+    fn ensure_journal_imported(
+        &self,
+        session: &Session,
+        journal: &SessionJournal,
+    ) -> anyhow::Result<()> {
+        let state = journal.state()?;
+        if state.imported_baseline.is_none() {
+            if state.last_seq.is_some() {
+                anyhow::bail!(
+                    "Session journal '{}' contains events without a canonical import",
+                    session.id
+                );
+            }
+            let value = serde_json::to_value(session)?;
+            let session_digest = state_payload_digest(&value)?;
+            journal.append(SessionEvent::SessionImported {
+                source_schema_version: session.schema_version,
+                session: value,
+                session_digest,
+            })?;
+        }
+
+        let snapshot = SessionSnapshot::new(session.id.clone(), journal.state()?)?;
+        write_snapshot(self.journal_snapshot_path(&session.id), &snapshot)?;
+        Ok(())
+    }
+
+    /// Read-only existence probe followed by an authoritative execution load.
+    ///
+    /// This supports load-or-create hosts without swallowing corruption or a
+    /// contested writer lease as if the session did not exist.
+    pub fn load_for_run_if_exists(&self, id: &str) -> anyhow::Result<Option<ActiveSession>> {
+        validate_session_id(id)?;
+        let indexed = self
+            .load_index()?
+            .sessions
+            .iter()
+            .any(|session| session.id == id);
+        let snapshot_exists = self.session_path_by_id(id).exists();
+        let wal_exists = self.find_wal_path(id).is_some();
+        if !indexed && !snapshot_exists && !wal_exists {
+            return Ok(None);
+        }
+        self.load_for_run(id).map(Some)
+    }
+
+    fn resolve_session_id_for_run(&self, id_or_latest: &str) -> anyhow::Result<String> {
+        if id_or_latest != "latest" {
+            validate_session_id(id_or_latest)?;
+            return Ok(id_or_latest.to_string());
+        }
+
+        self.load_index()?
+            .sessions
+            .last()
+            .map(|session| session.id.clone())
+            .ok_or_else(|| anyhow::anyhow!("No sessions found"))
     }
 
     /// F-030: reconstruct a session from its `.wal` file alone (the
@@ -384,10 +649,10 @@ impl SessionManager {
         // Fold the WAL entries into messages and delete the WAL.
         self.merge_wal(&mut session)?;
 
-        // Persist a `.json` + index row so the next load takes the normal
-        // path and `--list-sessions` shows the recovered session.
-        let _ = self.save(&session);
-        let _ = self.update_index_for(&session);
+        // `merge_wal` persisted the reconstructed `.json` before deleting the
+        // recovery evidence. Index repair must also succeed; otherwise callers
+        // get an explicit error instead of a false-green recovered session.
+        self.update_index_for(&session)?;
 
         Ok(Some(session))
     }
@@ -428,9 +693,10 @@ impl SessionManager {
         let index_path = self.directory.join("index.json");
         match std::fs::read_to_string(&index_path) {
             Ok(content) => Ok(serde_json::from_str(&content)?),
-            Err(_) => Ok(SessionIndex {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(SessionIndex {
                 sessions: Vec::new(),
             }),
+            Err(error) => Err(error.into()),
         }
     }
 
@@ -516,6 +782,15 @@ impl SessionManager {
             session.id
         ))
     }
+
+    fn journal_path(&self, session_id: &str) -> PathBuf {
+        self.directory.join(format!("{session_id}.journal"))
+    }
+
+    fn journal_snapshot_path(&self, session_id: &str) -> PathBuf {
+        self.directory
+            .join(format!("{session_id}.journal.snapshot"))
+    }
 }
 
 // ── Index locking (F-033) ────────────────────────────────────────────────────
@@ -542,9 +817,10 @@ where
         // Read current index (inside the lock).
         let mut index = match std::fs::read_to_string(&index_path) {
             Ok(content) => serde_json::from_str::<SessionIndex>(&content)?,
-            Err(_) => SessionIndex {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => SessionIndex {
                 sessions: Vec::new(),
             },
+            Err(error) => return Err(error.into()),
         };
 
         f(&mut index);
@@ -600,6 +876,46 @@ fn acquire_sentinel_lock(lock_path: &Path, stale_timeout: Duration) -> anyhow::R
 }
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
+
+fn reject_future_schema(schema_version: u32) -> anyhow::Result<()> {
+    if schema_version > SESSION_SCHEMA_VERSION {
+        anyhow::bail!(
+            "Session schema version {} is newer than supported version {}; refusing to rewrite it",
+            schema_version,
+            SESSION_SCHEMA_VERSION
+        );
+    }
+    Ok(())
+}
+
+fn with_wal_lock<T>(
+    wal_path: &Path,
+    operation: impl FnOnce() -> anyhow::Result<T>,
+) -> anyhow::Result<T> {
+    let lock_path = wal_path.with_extension("wal.lock");
+    acquire_sentinel_lock(&lock_path, Duration::from_secs(30))?;
+    let result = operation();
+    let _ = std::fs::remove_file(&lock_path);
+    result
+}
+
+#[cfg(unix)]
+fn open_secure_append(path: &Path) -> std::io::Result<std::fs::File> {
+    use std::os::unix::fs::{OpenOptionsExt as _, PermissionsExt as _};
+
+    let file = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .mode(0o600)
+        .open(path)?;
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
+    Ok(file)
+}
+
+#[cfg(not(unix))]
+fn open_secure_append(path: &Path) -> std::io::Result<std::fs::File> {
+    OpenOptions::new().create(true).append(true).open(path)
+}
 
 fn upsert_meta(index: &mut SessionIndex, session: &Session) {
     let summary = session
@@ -739,6 +1055,103 @@ mod tests {
 
         let result = manager.load("aabbccdd");
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn active_session_holds_exclusive_lease_until_drop() {
+        let dir = tempdir().unwrap();
+        let manager = SessionManager::new(dir.path().to_path_buf(), 10);
+        let session = manager.create("openai", "gpt-4", "/tmp", None).unwrap();
+        manager.persist_first_message(&session).unwrap();
+
+        let active = manager.load_for_run(&session.id).unwrap();
+        assert_eq!(active.session.id, session.id);
+
+        let contested = manager.load_for_run(&session.id).unwrap_err();
+        assert!(
+            contested.to_string().contains("already held"),
+            "second execution owner must fail deterministically: {contested}"
+        );
+
+        drop(active);
+        let reacquired = manager.load_for_run(&session.id).unwrap();
+        assert_eq!(reacquired.session.id, session.id);
+    }
+
+    #[test]
+    fn execution_session_imports_exactly_once_and_snapshots_the_journal() {
+        let dir = tempdir().unwrap();
+        let manager = SessionManager::new(dir.path().to_path_buf(), 10);
+        let mut session = manager.create("openai", "gpt-4", "/tmp", None).unwrap();
+        session.messages.push(make_user_msg("preserve me"));
+        manager.persist_first_message(&session).unwrap();
+
+        let active = manager.load_for_run(&session.id).unwrap();
+        let state = active.journal.state().unwrap();
+        let baseline = state.imported_baseline.as_ref().unwrap();
+        assert_eq!(
+            baseline.session,
+            serde_json::to_value(&active.session).unwrap()
+        );
+        assert_eq!(state.conversation.len(), 1);
+        let snapshot = crate::session_journal::load_snapshot(
+            manager.journal_snapshot_path(&active.session.id),
+        )
+        .unwrap();
+        assert_eq!(snapshot.state, state);
+        drop(active);
+
+        let reopened = manager.load_for_run(&session.id).unwrap();
+        assert_eq!(
+            SessionJournal::replay(manager.journal_path(&session.id))
+                .unwrap()
+                .len(),
+            1,
+            "reopening must not append a duplicate import"
+        );
+        assert_eq!(reopened.journal.state().unwrap().conversation.len(), 1);
+    }
+
+    #[test]
+    fn execution_load_restores_journal_conversation_over_stale_legacy_mirror() {
+        let dir = tempdir().unwrap();
+        let manager = SessionManager::new(dir.path().to_path_buf(), 10);
+        let mut session = manager.create("openai", "gpt-4", "/tmp", None).unwrap();
+        session.messages.push(make_user_msg("stale mirror"));
+        manager.persist_first_message(&session).unwrap();
+
+        let active = manager.load_for_run(&session.id).unwrap();
+        active
+            .journal
+            .append(SessionEvent::TurnStarted {
+                turn_id: "t1".into(),
+                user_message: "continue".into(),
+            })
+            .unwrap();
+        let assistant = Message::now(
+            Role::Assistant,
+            vec![ContentBlock::Text {
+                text: "journal is canonical".into(),
+            }],
+        );
+        let value = serde_json::to_value(&assistant).unwrap();
+        active
+            .journal
+            .append(SessionEvent::ConversationMessageCommitted {
+                turn_id: "t1".into(),
+                message_index: 1,
+                message_digest: state_payload_digest(&value).unwrap(),
+                message: value,
+            })
+            .unwrap();
+        drop(active);
+
+        let reopened = manager.load_for_run(&session.id).unwrap();
+        assert_eq!(reopened.session.messages.len(), 2);
+        assert_eq!(
+            serde_json::to_value(&reopened.session.messages[1]).unwrap(),
+            serde_json::to_value(assistant).unwrap()
+        );
     }
 
     #[test]
@@ -1172,5 +1585,190 @@ mod tests {
         let id1 = generate_session_id();
         let id2 = generate_session_id();
         assert_ne!(id1, id2);
+    }
+
+    #[test]
+    fn future_schema_is_rejected_without_rewriting_source_bytes() {
+        let dir = tempdir().unwrap();
+        let manager = SessionManager::new(dir.path().to_path_buf(), 10);
+        let id = generate_session_id();
+        let now = Utc::now();
+        let filename = format!("{}_{}.json", now.format("%Y-%m-%d"), id);
+        let path = dir.path().join(&filename);
+        let source = serde_json::json!({
+            "schema_version": SESSION_SCHEMA_VERSION + 1,
+            "id": id,
+            "created_at": now,
+            "updated_at": now,
+            "provider": "future-provider",
+            "model": "future-model",
+            "cwd": "/future",
+            "total_usage": {"input_tokens": 0, "output_tokens": 0},
+            "messages": [],
+            "future_required_state": {"must_not_be_lost": true}
+        })
+        .to_string();
+        std::fs::write(&path, &source).unwrap();
+        let index = SessionIndex {
+            sessions: vec![SessionMeta {
+                id: id.clone(),
+                created_at: now,
+                updated_at: now,
+                model: "future-model".to_string(),
+                summary: String::new(),
+                message_count: 0,
+            }],
+        };
+        std::fs::write(
+            dir.path().join("index.json"),
+            serde_json::to_vec(&index).unwrap(),
+        )
+        .unwrap();
+
+        let error = manager.load(&id).unwrap_err();
+        assert!(
+            error.to_string().contains("newer than supported"),
+            "unexpected error: {error}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(path).unwrap(),
+            source,
+            "a future session must never be rewritten by an older binary"
+        );
+    }
+
+    #[test]
+    fn corrupt_index_fails_loud_instead_of_appearing_empty() {
+        let dir = tempdir().unwrap();
+        let manager = SessionManager::new(dir.path().to_path_buf(), 10);
+        std::fs::write(dir.path().join("index.json"), b"{not valid json").unwrap();
+
+        let error = manager.list().unwrap_err();
+        assert!(
+            error.to_string().contains("expected") || error.to_string().contains("key"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn malformed_wal_is_preserved_and_fails_loud() {
+        let dir = tempdir().unwrap();
+        let manager = SessionManager::new(dir.path().to_path_buf(), 10);
+        let session = manager.create("openai", "gpt-4", "/tmp", None).unwrap();
+        manager.save(&session).unwrap();
+        let wal_path = manager.wal_path(&session);
+        std::fs::write(&wal_path, b"{not valid json}\n").unwrap();
+
+        let mut recovered = session.clone();
+        let error = manager.merge_wal(&mut recovered).unwrap_err();
+        assert!(
+            error.to_string().contains("WAL"),
+            "unexpected error: {error}"
+        );
+        assert!(wal_path.exists(), "corrupt evidence must not be deleted");
+        assert!(recovered.messages.is_empty());
+    }
+
+    #[test]
+    fn repeated_identical_wal_records_are_not_collapsed() {
+        let dir = tempdir().unwrap();
+        let manager = SessionManager::new(dir.path().to_path_buf(), 10);
+        let session = manager.create("openai", "gpt-4", "/tmp", None).unwrap();
+        manager.save(&session).unwrap();
+        manager.append_wal(&session, "repeat me").unwrap();
+        manager.append_wal(&session, "repeat me").unwrap();
+
+        let mut recovered = session.clone();
+        manager.merge_wal(&mut recovered).unwrap();
+        let repeated = recovered
+            .messages
+            .iter()
+            .filter(|message| {
+                message.role == Role::User
+                    && message.content.iter().any(
+                        |block| matches!(block, ContentBlock::Text { text } if text == "repeat me"),
+                    )
+            })
+            .count();
+        assert_eq!(repeated, 2);
+    }
+
+    #[test]
+    fn wal_record_already_in_a_completed_snapshot_is_not_replayed() {
+        let dir = tempdir().unwrap();
+        let manager = SessionManager::new(dir.path().to_path_buf(), 10);
+        let mut session = manager.create("openai", "gpt-4", "/tmp", None).unwrap();
+        session.messages.push(make_user_msg("already committed"));
+        session.messages.push(Message::now(
+            Role::Assistant,
+            vec![ContentBlock::Text {
+                text: "answer".to_string(),
+            }],
+        ));
+        manager.save(&session).unwrap();
+
+        // Simulate a crash after the full snapshot save but before WAL deletion.
+        let stale_view = Session {
+            messages: Vec::new(),
+            ..session.clone()
+        };
+        manager
+            .append_wal(&stale_view, "already committed")
+            .unwrap();
+
+        let loaded = manager.load(&session.id).unwrap();
+        assert_eq!(loaded.messages.len(), 2);
+        assert_eq!(
+            loaded
+                .messages
+                .iter()
+                .filter(|message| message.role == Role::User)
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn torn_final_wal_record_recovers_the_durable_prefix() {
+        let dir = tempdir().unwrap();
+        let manager = SessionManager::new(dir.path().to_path_buf(), 10);
+        let session = manager.create("openai", "gpt-4", "/tmp", None).unwrap();
+        manager.save(&session).unwrap();
+        manager.append_wal(&session, "durable prefix").unwrap();
+        let wal_path = manager.wal_path(&session);
+        let mut file = OpenOptions::new().append(true).open(&wal_path).unwrap();
+        file.write_all(b"{\"role\":\"user\",\"content\":\"")
+            .unwrap();
+        file.write_all(&[0xff]).unwrap();
+        file.sync_all().unwrap();
+
+        let mut recovered = session.clone();
+        manager.merge_wal(&mut recovered).unwrap();
+        assert_eq!(recovered.messages.len(), 1);
+        assert!(
+            recovered.messages[0].content.iter().any(
+                |block| matches!(block, ContentBlock::Text { text } if text == "durable prefix")
+            )
+        );
+    }
+
+    #[test]
+    fn unindexed_json_is_recovered_by_explicit_session_id() {
+        let dir = tempdir().unwrap();
+        let manager = SessionManager::new(dir.path().to_path_buf(), 10);
+        let mut session = manager.create("openai", "gpt-4", "/tmp", None).unwrap();
+        session.messages.push(make_user_msg("reachable"));
+        manager.save(&session).unwrap();
+        assert!(!dir.path().join("index.json").exists());
+
+        let recovered = manager.load(&session.id).unwrap();
+        assert_eq!(recovered.messages.len(), 1);
+        assert!(
+            manager
+                .list()
+                .unwrap()
+                .iter()
+                .any(|meta| meta.id == session.id)
+        );
     }
 }

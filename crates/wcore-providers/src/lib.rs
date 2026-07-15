@@ -1,5 +1,6 @@
 pub mod anthropic;
 pub mod anthropic_shared;
+pub mod attempt_lifecycle;
 pub mod azure_openai;
 pub mod bedrock;
 pub mod cache_observation;
@@ -219,6 +220,18 @@ pub enum ProviderError {
 }
 
 impl ProviderError {
+    /// True only when the error proves the request could not have reached a
+    /// provider or incurred provider-side usage.
+    pub fn was_not_attempted(&self) -> bool {
+        matches!(
+            self,
+            ProviderError::MissingApiKey
+                | ProviderError::NotAttempted { .. }
+                | ProviderError::Egress(wcore_egress::EgressError::Denied(_))
+                | ProviderError::Egress(wcore_egress::EgressError::BeforeDispatch(_))
+        )
+    }
+
     /// True for errors a retry (same request, possibly after backoff) may
     /// resolve.
     ///

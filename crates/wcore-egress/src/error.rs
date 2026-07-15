@@ -2,6 +2,23 @@
 
 use thiserror::Error;
 
+/// A caller-owned durable transition failed after policy admission but before
+/// the request was dispatched to the network.
+#[derive(Debug, Error)]
+#[error("{message}")]
+pub struct BeforeDispatchError {
+    message: String,
+}
+
+impl BeforeDispatchError {
+    /// Construct a pre-dispatch failure safe to surface to the caller.
+    pub fn new(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+        }
+    }
+}
+
 /// A failure on the egress path — either the policy refused to let the request
 /// leave the process, or the underlying transport (reqwest) errored.
 #[derive(Debug, Error)]
@@ -13,6 +30,11 @@ pub enum EgressError {
     /// the seam B2's allowlist/taint/`ask` logic fills in.
     #[error("egress denied: {0}")]
     Denied(String),
+
+    /// Policy admitted the request, but a caller-owned pre-dispatch hook
+    /// failed. No network dispatch occurred.
+    #[error("egress stopped before dispatch: {0}")]
+    BeforeDispatch(#[from] BeforeDispatchError),
 
     /// The underlying reqwest transport failed (DNS, TLS, timeout, connection
     /// reset, body decode, …). Forwarded verbatim so existing call-site error
@@ -47,6 +69,12 @@ impl EgressError {
         matches!(self, EgressError::Denied(_))
     }
 
+    /// True when policy admitted the request but its pre-dispatch durability
+    /// hook failed before any network I/O.
+    pub fn is_before_dispatch(&self) -> bool {
+        matches!(self, EgressError::BeforeDispatch(_))
+    }
+
     /// True for a transport-level connection failure (DNS/TCP/TLS). Mirrors
     /// [`reqwest::Error::is_connect`] so call sites that branched on it keep
     /// working through the wrapper.
@@ -66,6 +94,7 @@ impl EgressError {
     pub fn redacted(&self) -> String {
         match self {
             EgressError::Denied(reason) => reason.clone(),
+            EgressError::BeforeDispatch(error) => error.to_string(),
             // reqwest's Display appends " for url (<URL>)"; strip from the first
             // " for url (" so a query-string secret never reaches a log/UI.
             EgressError::Transport(e) => {

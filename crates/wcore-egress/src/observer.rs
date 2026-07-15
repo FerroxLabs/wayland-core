@@ -54,6 +54,9 @@ pub enum EgressOutcome {
     /// Policy allowed the request, but the send future was dropped before
     /// response headers or a transport error arrived.
     AbandonedAfterAllow,
+    /// Policy allowed the request, but its pre-dispatch hook failed. The
+    /// request did not reach the network.
+    BeforeDispatchFailed,
 }
 
 /// One normalized terminal event for an outbound HTTP attempt.

@@ -268,7 +268,13 @@ impl LlmProvider for ResilientProvider {
         let mut previous_attempted = false;
         if self.breaker.before_call().is_some() {
             previous_attempted = true;
-            match self.primary.stream(request).await {
+            match crate::attempt_lifecycle::scope_provider_attempt_identity(
+                self.primary_name.clone(),
+                request.model.clone(),
+                self.primary.stream(request),
+            )
+            .await
+            {
                 Ok(rx) => {
                     // F32: header acceptance is NOT yet a success. stream() returns
                     // Ok(rx) once headers arrive, but the request can still die
@@ -343,7 +349,13 @@ impl LlmProvider for ResilientProvider {
             )?;
             let mut fallback_request = request.clone();
             fallback_request.model.clone_from(&fallback.model);
-            match fallback.provider.stream(&fallback_request).await {
+            match crate::attempt_lifecycle::scope_provider_attempt_identity(
+                fallback.pricing_provider.clone(),
+                fallback.model.clone(),
+                fallback.provider.stream(&fallback_request),
+            )
+            .await
+            {
                 Ok(rx) => {
                     self.reporter.report(
                         &self.primary_name,

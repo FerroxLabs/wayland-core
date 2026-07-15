@@ -199,6 +199,7 @@ fn classify_by_provider_error(err: &ProviderError) -> FailoverReason {
         ProviderError::Egress(e) => match e {
             wcore_egress::EgressError::Transport(_) => FailoverReason::Timeout,
             wcore_egress::EgressError::Denied(_) => FailoverReason::Unknown,
+            wcore_egress::EgressError::BeforeDispatch(_) => FailoverReason::Unknown,
             // An over-cap response body is not a productive failover target.
             wcore_egress::EgressError::BodyTooLarge { .. } => FailoverReason::Unknown,
         },

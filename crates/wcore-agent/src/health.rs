@@ -205,6 +205,9 @@ async fn classify(
                 wcore_egress::EgressError::Denied(reason) => {
                     format!("unreachable: egress denied — {reason}")
                 }
+                wcore_egress::EgressError::BeforeDispatch(error) => {
+                    format!("unreachable: stopped before dispatch — {error}")
+                }
                 wcore_egress::EgressError::Transport(e) => {
                     let kind = if e.is_timeout() {
                         "timeout"

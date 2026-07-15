@@ -19,7 +19,7 @@ use crate::budget::{ExecutionBudget, ExecutionBudgetView};
 use crate::cancel::{CancellationToken, SessionControl, SessionRuntimeGuard};
 use crate::engine::AgentEngine;
 use crate::output::OutputSink;
-use crate::session::Session;
+use crate::session::ActiveSession;
 
 fn approval_policy_to_session_mode(
     policy: ApprovalPolicy,
@@ -229,7 +229,7 @@ pub struct AgentBootstrap {
     workspace: String,
     output: Arc<dyn OutputSink>,
     provider: Option<Arc<dyn LlmProvider>>,
-    resume_session: Option<Session>,
+    resume_session: Option<ActiveSession>,
     extra_skill_dirs: Vec<PathBuf>,
     /// Wave OL: optional resolver invoked after plugin init to route
     /// model strings like `ollama:llama3` through a plugin-supplied
@@ -483,7 +483,7 @@ impl AgentBootstrap {
     }
 
     /// Resume from a previously saved session.
-    pub fn resume(mut self, session: Session) -> Self {
+    pub fn resume(mut self, session: ActiveSession) -> Self {
         self.resume_session = Some(session);
         self
     }
@@ -2552,7 +2552,7 @@ impl AgentBootstrap {
         };
 
         let mut engine = if let Some(session) = self.resume_session {
-            AgentEngine::resume_with_provider(
+            AgentEngine::resume_active_with_provider(
                 provider.clone(),
                 self.config,
                 registry,
