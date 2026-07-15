@@ -28,7 +28,7 @@ pub enum ProviderAttemptPurpose {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "reason", rename_all = "snake_case")]
+#[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ProviderAttemptNotStartedReason {
     EgressDenied { policy: String },
     BeforeDispatchFailed { error: String },
@@ -37,7 +37,7 @@ pub enum ProviderAttemptNotStartedReason {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "reason", rename_all = "snake_case")]
+#[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ToolNotStartedReason {
     PolicyDenied { policy: String },
     ApprovalDenied { approval_id: String },
@@ -49,7 +49,7 @@ pub enum ToolNotStartedReason {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "reason", rename_all = "snake_case")]
+#[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ChildNotStartedReason {
     PolicyDenied { policy: String },
     ApprovalDenied { approval_id: String },
@@ -160,7 +160,7 @@ pub enum DeliveryUnknownReason {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "reason", rename_all = "snake_case")]
+#[serde(tag = "kind", rename_all = "snake_case")]
 pub enum DeliveryNotStartedReason {
     PolicyDenied { policy: String },
     ApprovalDenied { approval_id: String },
