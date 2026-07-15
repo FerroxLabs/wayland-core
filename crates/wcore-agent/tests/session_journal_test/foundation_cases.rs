@@ -89,6 +89,92 @@ fn append_is_contiguous_checksummed_and_exclusively_owned() {
     ));
     drop(second);
     assert!(SessionJournal::open(&path, "s1").is_ok());
+    assert!(
+        dir.path().join("session.journal.writer.lock").exists(),
+        "the advisory-lock sentinel must be retained to avoid an unlink/recreate race"
+    );
+    assert_eq!(
+        std::fs::metadata(dir.path().join("session.journal.writer.lock"))
+            .unwrap()
+            .len(),
+        0,
+        "released sentinels must not retain stale owner metadata"
+    );
+}
+
+#[test]
+fn hard_link_alias_cannot_acquire_a_second_writer_authority() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("session.journal");
+    let alias = dir.path().join("alias.journal");
+    let owner = SessionJournal::open(&path, "s1").unwrap();
+    std::fs::hard_link(&path, &alias).unwrap();
+
+    assert!(matches!(
+        SessionJournal::open(&alias, "s1"),
+        Err(JournalError::AlreadyOwned { .. })
+    ));
+
+    assert!(matches!(
+        owner.compact(),
+        Err(JournalError::MultipleLinks { .. })
+    ));
+    drop(owner);
+    assert!(matches!(
+        SessionJournal::open(&path, "s1"),
+        Err(JournalError::MultipleLinks { .. })
+    ));
+    assert!(matches!(
+        SessionJournal::open(&alias, "s1"),
+        Err(JournalError::MultipleLinks { .. })
+    ));
+    std::fs::remove_file(alias).unwrap();
+    assert!(SessionJournal::open(path, "s1").is_ok());
+}
+
+#[test]
+fn compacted_replacement_keeps_the_data_inode_lock() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("session.journal");
+    let alias = dir.path().join("alias.journal");
+    let owner = SessionJournal::open(&path, "s1").unwrap();
+    owner.append(turn_started("t0")).unwrap();
+    owner.compact().unwrap();
+    std::fs::hard_link(&path, &alias).unwrap();
+    std::fs::remove_file(&path).unwrap();
+
+    assert!(matches!(
+        SessionJournal::open(&alias, "s1"),
+        Err(JournalError::AlreadyOwned { .. })
+    ));
+
+    drop(owner);
+    assert!(SessionJournal::open(alias, "s1").is_ok());
+}
+
+#[cfg(unix)]
+#[test]
+fn symlink_alias_is_rejected_without_mutating_its_target() {
+    use std::os::unix::fs::symlink;
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("session.journal");
+    let alias = dir.path().join("alias.journal");
+    let owner = SessionJournal::open(&path, "s1").unwrap();
+    symlink(&path, &alias).unwrap();
+
+    assert!(matches!(
+        SessionJournal::open(&alias, "s1"),
+        Err(JournalError::SymbolicLink { .. })
+    ));
+
+    drop(owner);
+    let before = std::fs::read(&path).unwrap();
+    assert!(matches!(
+        SessionJournal::open(alias, "s1"),
+        Err(JournalError::SymbolicLink { .. })
+    ));
+    assert_eq!(std::fs::read(path).unwrap(), before);
 }
 
 #[test]
@@ -881,4 +967,3 @@ fn prepared_provider_tool_and_child_can_finish_without_a_fabricated_start() {
         Some(child_reason)
     );
 }
-

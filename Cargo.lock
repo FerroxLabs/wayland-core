@@ -9187,6 +9187,7 @@ dependencies = [
  "wcore-types",
  "wcore-user-model",
  "webpki-roots 0.26.11",
+ "windows-sys 0.59.0",
  "wiremock",
  "workspace-hack",
 ]

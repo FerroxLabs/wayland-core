@@ -10,7 +10,8 @@ use serde_json::Value;
 use wcore_types::message::{Message, TokenUsage};
 
 use crate::session_journal::{
-    SessionEvent, SessionJournal, SessionSnapshot, state_payload_digest, write_snapshot,
+    JournalError, SessionEvent, SessionJournal, SessionSnapshot, SessionStorageLease,
+    state_payload_digest, write_snapshot,
 };
 
 /// Current on-disk schema version. Increment when adding required fields.
@@ -198,6 +199,7 @@ impl SessionManager {
         self.save(session)?;
         with_index_lock(&self.directory, |index| {
             upsert_meta(index, session);
+            Ok(())
         })?;
         self.cleanup_old()?;
         Ok(())
@@ -686,6 +688,7 @@ impl SessionManager {
     pub fn update_index_for(&self, session: &Session) -> anyhow::Result<()> {
         with_index_lock(&self.directory, |index| {
             upsert_meta(index, session);
+            Ok(())
         })
     }
 
@@ -703,56 +706,76 @@ impl SessionManager {
     /// Remove oldest sessions beyond max_sessions (F-034: also sweeps empty
     /// sessions older than 5 minutes).
     fn cleanup_old(&self) -> anyhow::Result<()> {
-        with_index_lock(&self.directory, |index| {
+        let _leases = with_index_lock(&self.directory, |index| {
             let now = SystemTime::now();
             let five_min = Duration::from_secs(5 * 60);
+            let mut leases = Vec::new();
+            let mut retained = Vec::with_capacity(index.sessions.len());
 
             // F-034: remove empty sessions (message_count == 0) older than 5 min.
-            index.sessions.retain(|meta| {
-                if meta.message_count > 0 {
-                    return true; // keep non-empty sessions regardless
-                }
-                // For empty sessions, only keep if < 5 min old.
-                let age_ok = meta
+            for meta in std::mem::take(&mut index.sessions) {
+                let created = meta
                     .created_at
                     .signed_duration_since(DateTime::<Utc>::from(UNIX_EPOCH))
                     .to_std()
-                    .ok()
-                    .and_then(|created_secs| {
-                        now.duration_since(UNIX_EPOCH)
-                            .ok()
-                            .map(|now_secs| now_secs.saturating_sub(created_secs) < five_min)
-                    })
-                    .unwrap_or(false);
-                if !age_ok {
-                    // Delete the file too.
-                    let path = self.directory.join(format!(
-                        "{}_{}.json",
-                        meta.created_at.format("%Y-%m-%d"),
-                        meta.id
-                    ));
-                    let _ = std::fs::remove_file(&path);
-                    let _ = std::fs::remove_file(path.with_extension("wal"));
-                }
-                age_ok
-            });
-
-            // Count-based eviction: remove oldest beyond max_sessions.
-            if index.sessions.len() > self.max_sessions {
-                index.sessions.sort_by_key(|s| s.created_at);
-                let to_remove = index.sessions.len() - self.max_sessions;
-                let removed: Vec<_> = index.sessions.drain(..to_remove).collect();
-                for meta in &removed {
-                    let path = self.directory.join(format!(
-                        "{}_{}.json",
-                        meta.created_at.format("%Y-%m-%d"),
-                        meta.id
-                    ));
-                    let _ = std::fs::remove_file(&path);
-                    let _ = std::fs::remove_file(path.with_extension("wal"));
+                    .ok();
+                let expired_empty = meta.message_count == 0
+                    && created
+                        .and_then(|created_secs| {
+                            now.duration_since(UNIX_EPOCH)
+                                .ok()
+                                .map(|now_secs| now_secs.saturating_sub(created_secs) >= five_min)
+                        })
+                        .unwrap_or(true);
+                if expired_empty {
+                    match self.remove_session_storage(&meta)? {
+                        Some(lease) => leases.push(lease),
+                        None => retained.push(meta),
+                    }
+                } else {
+                    retained.push(meta);
                 }
             }
-        })
+
+            retained.sort_by_key(|meta| meta.created_at);
+            let mut candidate = 0;
+            while retained.len() > self.max_sessions && candidate < retained.len() {
+                match self.remove_session_storage(&retained[candidate])? {
+                    Some(lease) => {
+                        retained.remove(candidate);
+                        leases.push(lease);
+                    }
+                    None => candidate += 1,
+                }
+            }
+            index.sessions = retained;
+            Ok(leases)
+        })?;
+        Ok(())
+    }
+
+    fn remove_session_storage(
+        &self,
+        meta: &SessionMeta,
+    ) -> anyhow::Result<Option<SessionStorageLease>> {
+        let journal_path = self.journal_path(&meta.id);
+        let lease = match SessionJournal::acquire_storage_lease(&journal_path, &meta.id) {
+            Ok(lease) => lease,
+            Err(JournalError::AlreadyOwned { .. }) => return Ok(None),
+            Err(error) => return Err(error.into()),
+        };
+        let session_path = self.directory.join(format!(
+            "{}_{}.json",
+            meta.created_at.format("%Y-%m-%d"),
+            meta.id
+        ));
+        let wal_path = session_path.with_extension("wal");
+        with_wal_lock(&wal_path, || {
+            lease
+                .remove_files(&session_path, &wal_path)
+                .map_err(anyhow::Error::from)
+        })?;
+        Ok(Some(lease))
     }
 
     fn session_path(&self, session: &Session) -> PathBuf {
@@ -802,9 +825,9 @@ impl SessionManager {
 ///
 /// The closure receives a `&mut SessionIndex` and any mutations are
 /// atomically written back to `index.json` after `f` returns.
-fn with_index_lock<F>(directory: &Path, f: F) -> anyhow::Result<()>
+fn with_index_lock<F, T>(directory: &Path, f: F) -> anyhow::Result<T>
 where
-    F: FnOnce(&mut SessionIndex),
+    F: FnOnce(&mut SessionIndex) -> anyhow::Result<T>,
 {
     std::fs::create_dir_all(directory)?;
     let lock_path = directory.join("index.lock");
@@ -813,7 +836,7 @@ where
     // Acquire the sentinel lock with stale-lock timeout.
     acquire_sentinel_lock(&lock_path, Duration::from_secs(30))?;
 
-    let result = (|| -> anyhow::Result<()> {
+    let result = (|| -> anyhow::Result<T> {
         // Read current index (inside the lock).
         let mut index = match std::fs::read_to_string(&index_path) {
             Ok(content) => serde_json::from_str::<SessionIndex>(&content)?,
@@ -823,11 +846,11 @@ where
             Err(error) => return Err(error.into()),
         };
 
-        f(&mut index);
+        let value = f(&mut index)?;
 
         let json = serde_json::to_string_pretty(&index)?;
         wcore_config::atomic_write(&index_path, json.as_bytes())?;
-        Ok(())
+        Ok(value)
     })();
 
     // Always release the lock, even on error.
@@ -1383,6 +1406,18 @@ mod tests {
         });
         std::fs::create_dir_all(dir.path()).unwrap();
         std::fs::write(dir.path().join(&filename), json.to_string()).unwrap();
+        let session_path = dir.path().join(&filename);
+        let wal_path = session_path.with_extension("wal");
+        std::fs::write(&wal_path, b"durable wal evidence\n").unwrap();
+        let journal_path = manager.journal_path(&id);
+        let journal = SessionJournal::open(&journal_path, id.clone()).unwrap();
+        let snapshot = SessionSnapshot::new(
+            id.clone(),
+            crate::session_journal::ReducedSessionState::default(),
+        )
+        .unwrap();
+        write_snapshot(manager.journal_snapshot_path(&id), &snapshot).unwrap();
+        drop(journal);
 
         // Seed index with message_count=0 and old created_at.
         let index = SessionIndex {
@@ -1412,6 +1447,95 @@ mod tests {
         assert!(
             !list.iter().any(|m| m.id == id),
             "old empty session must be GC'd"
+        );
+        assert!(!session_path.exists());
+        assert!(!wal_path.exists());
+        assert!(!journal_path.exists());
+        assert!(!manager.journal_snapshot_path(&id).exists());
+        assert!(
+            dir.path()
+                .join(format!("{id}.journal.writer.lock"))
+                .exists(),
+            "cleanup must retain the race-safe lock sentinel"
+        );
+    }
+
+    #[test]
+    fn count_cleanup_retains_active_session_and_its_index_authority() {
+        let dir = tempdir().unwrap();
+        let manager = SessionManager::new(dir.path().to_path_buf(), 1);
+
+        let mut active_session = manager.create("openai", "gpt-4", "/tmp", None).unwrap();
+        active_session.created_at = Utc::now() - chrono::Duration::days(1);
+        active_session.updated_at = active_session.created_at;
+        active_session.messages.push(make_user_msg("active"));
+        manager.persist_first_message(&active_session).unwrap();
+        let active = manager.load_for_run(&active_session.id).unwrap();
+
+        let mut newer = manager.create("openai", "gpt-4", "/tmp", None).unwrap();
+        newer.messages.push(make_user_msg("newer"));
+        manager.persist_first_message(&newer).unwrap();
+
+        let list = manager.list().unwrap();
+        assert_eq!(list.len(), 1);
+        assert_eq!(list[0].id, active_session.id);
+        assert!(manager.session_path(&active_session).exists());
+        assert!(manager.journal_path(&active_session.id).exists());
+        assert!(manager.journal_snapshot_path(&active_session.id).exists());
+        assert!(
+            !manager.session_path(&newer).exists(),
+            "an inactive candidate may be evicted instead"
+        );
+
+        drop(active);
+    }
+
+    #[test]
+    fn cleanup_error_attempts_all_artifacts_but_retains_index_authority() {
+        let dir = tempdir().unwrap();
+        let manager = SessionManager::new(dir.path().to_path_buf(), 10);
+        let id = generate_session_id();
+        let old_time = Utc::now() - chrono::Duration::minutes(10);
+        let session_path = dir
+            .path()
+            .join(format!("{}_{}.json", old_time.format("%Y-%m-%d"), id));
+        std::fs::create_dir_all(&session_path).unwrap();
+        let wal_path = session_path.with_extension("wal");
+        std::fs::write(&wal_path, b"plaintext wal").unwrap();
+        let journal_path = manager.journal_path(&id);
+        let journal = SessionJournal::open(&journal_path, id.clone()).unwrap();
+        let snapshot_path = manager.journal_snapshot_path(&id);
+        std::fs::write(&snapshot_path, b"snapshot evidence").unwrap();
+        drop(journal);
+        let index = SessionIndex {
+            sessions: vec![SessionMeta {
+                id: id.clone(),
+                created_at: old_time,
+                updated_at: old_time,
+                model: "gpt-4".to_owned(),
+                summary: String::new(),
+                message_count: 0,
+            }],
+        };
+        std::fs::write(
+            dir.path().join("index.json"),
+            serde_json::to_vec(&index).unwrap(),
+        )
+        .unwrap();
+
+        assert!(manager.cleanup_old().is_err());
+        assert!(session_path.exists(), "failed artifact must remain visible");
+        assert!(
+            !wal_path.exists(),
+            "cleanup must still attempt later artifacts"
+        );
+        assert!(
+            !snapshot_path.exists(),
+            "cleanup must still attempt later artifacts"
+        );
+        assert!(
+            manager.list().unwrap().iter().any(|meta| meta.id == id),
+            "any deletion error must retain index authority"
         );
     }
 
@@ -1466,7 +1590,11 @@ mod tests {
         // Seed the index with a meta row for this session — mirroring the
         // state after one successful turn — but DO NOT call save(), so the
         // `.json` is absent (simulating dirty-death before the next flush).
-        with_index_lock(dir.path(), |index| upsert_meta(index, &session)).unwrap();
+        with_index_lock(dir.path(), |index| {
+            upsert_meta(index, &session);
+            Ok(())
+        })
+        .unwrap();
         assert!(
             !manager.session_path(&session).exists(),
             "json must be absent — that is the bug we are reproducing"

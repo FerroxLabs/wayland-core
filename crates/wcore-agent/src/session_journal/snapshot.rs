@@ -195,21 +195,33 @@ pub(super) fn replace_file_atomically(path: &Path, bytes: &[u8]) -> Result<File,
             path: path.to_path_buf(),
             source,
         })?;
+    // Lock the replacement inode before publication. This preserves the same
+    // writer authority across the atomic rename and makes hard-link aliases
+    // contend on the journal data itself, not only on its pathname sentinel.
+    super::lease::lock_data_file(temp.as_file(), path)?;
     let persisted = temp.persist(path).map_err(|error| JournalError::Io {
         path: path.to_path_buf(),
         source: error.error,
     })?;
     #[cfg(test)]
     if FAIL_REPLACE_AFTER_PERSIST.with(|fail| fail.replace(false)) {
+        // Publication is uncertain. Keep the new inode locked until process
+        // exit rather than let an alias acquire a second writer authority.
+        std::mem::forget(persisted);
         return Err(JournalError::Io {
             path: path.to_path_buf(),
             source: std::io::Error::other("injected replacement failure after persist"),
         });
     }
-    persisted.sync_all().map_err(|source| JournalError::Io {
-        path: path.to_path_buf(),
-        source,
-    })?;
+    if let Err(source) = persisted.sync_all() {
+        // See the injected-failure branch above: leaking one descriptor on an
+        // exceptional durability failure is the fail-closed choice.
+        std::mem::forget(persisted);
+        return Err(JournalError::Io {
+            path: path.to_path_buf(),
+            source,
+        });
+    }
     Ok(persisted)
 }
 

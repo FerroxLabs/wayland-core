@@ -126,6 +126,10 @@ pub enum JournalError {
     WriterFaulted,
     #[error("session journal writer lease is already held at {lease_path}")]
     AlreadyOwned { lease_path: PathBuf },
+    #[error("session journal path must not be a symbolic link: {path}")]
+    SymbolicLink { path: PathBuf },
+    #[error("session journal {path} must have exactly one filesystem link")]
+    MultipleLinks { path: PathBuf },
 }
 
 #[derive(Debug)]
@@ -146,6 +150,17 @@ type SharedWriter = Arc<Mutex<JournalWriter>>;
 #[derive(Debug, Clone)]
 pub struct SessionJournal {
     inner: SharedWriter,
+}
+
+/// Exclusive authority used while retiring every durable file for a session.
+///
+/// The writer-lock sentinel is deliberately retained after this guard drops:
+/// unlinking a lock inode permits two processes to lock different inodes under
+/// the same pathname. It contains ownership metadata only, never session data.
+pub(crate) struct SessionStorageLease {
+    journal_path: PathBuf,
+    _journal_file: Option<File>,
+    _lease: WriterLease,
 }
 
 impl SessionJournal {
@@ -232,6 +247,79 @@ impl SessionJournal {
     pub fn lease_owner(path: impl AsRef<Path>) -> Result<LeaseOwner, JournalError> {
         lease::inspect(&lease::normalized_path(path.as_ref())?)
     }
+
+    pub(crate) fn acquire_storage_lease(
+        path: impl AsRef<Path>,
+        session_id: &str,
+    ) -> Result<SessionStorageLease, JournalError> {
+        SessionStorageLease::acquire(path.as_ref(), session_id)
+    }
+}
+
+impl SessionStorageLease {
+    fn acquire(path: &Path, session_id: &str) -> Result<Self, JournalError> {
+        let journal_path = lease::normalized_path(path)?;
+        let lease = WriterLease::acquire(&journal_path, session_id)?;
+        let journal_file = match OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&journal_path)
+        {
+            Ok(file) => {
+                lease::lock_data_file(&file, &journal_path)?;
+                lease::reject_multiple_links(&file, &journal_path)?;
+                Some(file)
+            }
+            Err(source) if source.kind() == std::io::ErrorKind::NotFound => None,
+            Err(source) => {
+                return Err(JournalError::Io {
+                    path: journal_path,
+                    source,
+                });
+            }
+        };
+        Ok(Self {
+            journal_path,
+            _journal_file: journal_file,
+            _lease: lease,
+        })
+    }
+
+    pub(crate) fn remove_files(
+        &self,
+        session_path: &Path,
+        wal_path: &Path,
+    ) -> Result<(), JournalError> {
+        // Attempt every artifact so one undeletable file does not strand other
+        // plaintext. The caller retains index authority if any unlink or
+        // directory sync fails, making every residual file discoverable.
+        let mut first_error = None;
+        for path in [
+            session_path.to_path_buf(),
+            wal_path.to_path_buf(),
+            snapshot_path_for(&self.journal_path),
+            self.journal_path.clone(),
+        ] {
+            match std::fs::remove_file(&path) {
+                Ok(()) => {
+                    if let Err(error) = snapshot::sync_parent_directory(&path)
+                        && first_error.is_none()
+                    {
+                        first_error = Some(error);
+                    }
+                }
+                Err(source) if source.kind() == std::io::ErrorKind::NotFound => {}
+                Err(source) if first_error.is_none() => {
+                    first_error = Some(JournalError::Io { path, source });
+                }
+                Err(_) => {}
+            }
+        }
+        match first_error {
+            Some(error) => Err(error),
+            None => Ok(()),
+        }
+    }
 }
 
 impl JournalWriter {
@@ -254,6 +342,8 @@ impl JournalWriter {
             path: path.clone(),
             source,
         })?;
+        lease::lock_data_file(&file, &path)?;
+        lease::reject_multiple_links(&file, &path)?;
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
@@ -342,6 +432,7 @@ impl JournalWriter {
                 "cannot compact a snapshot-only authority without its anchor envelope".to_owned(),
             ));
         }
+        lease::reject_multiple_links(&self.file, &self.path)?;
         let snapshot = SessionSnapshot::new(self.session_id.clone(), self.state.clone())?;
         let replacement = match self.last_envelope.as_ref() {
             Some(anchor) => {

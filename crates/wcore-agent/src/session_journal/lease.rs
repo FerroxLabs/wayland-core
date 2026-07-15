@@ -18,6 +18,19 @@ pub(super) fn normalized_path(path: &Path) -> Result<PathBuf, JournalError> {
                 source,
             })?
     };
+    match std::fs::symlink_metadata(&absolute) {
+        Ok(metadata) if metadata.file_type().is_symlink() => {
+            return Err(JournalError::SymbolicLink { path: absolute });
+        }
+        Ok(_) => {}
+        Err(source) if source.kind() == std::io::ErrorKind::NotFound => {}
+        Err(source) => {
+            return Err(JournalError::Io {
+                path: absolute,
+                source,
+            });
+        }
+    }
     let Some(parent) = absolute.parent() else {
         return Ok(absolute);
     };
@@ -106,8 +119,83 @@ impl WriterLease {
     }
 }
 
+pub(super) fn lock_data_file(file: &File, path: &Path) -> Result<(), JournalError> {
+    match file.try_lock() {
+        Ok(()) => Ok(()),
+        Err(TryLockError::WouldBlock) => Err(JournalError::AlreadyOwned {
+            lease_path: path.to_path_buf(),
+        }),
+        Err(TryLockError::Error(source)) => Err(JournalError::Io {
+            path: path.to_path_buf(),
+            source,
+        }),
+    }
+}
+
+pub(super) fn reject_multiple_links(file: &File, path: &Path) -> Result<(), JournalError> {
+    if link_count(file, path)? == 1 {
+        Ok(())
+    } else {
+        Err(JournalError::MultipleLinks {
+            path: path.to_path_buf(),
+        })
+    }
+}
+
+#[cfg(unix)]
+fn link_count(file: &File, path: &Path) -> Result<u64, JournalError> {
+    use std::os::unix::fs::MetadataExt as _;
+
+    file.metadata()
+        .map(|metadata| metadata.nlink())
+        .map_err(|source| JournalError::Io {
+            path: path.to_path_buf(),
+            source,
+        })
+}
+
+#[cfg(windows)]
+fn link_count(file: &File, path: &Path) -> Result<u64, JournalError> {
+    use std::os::windows::io::AsRawHandle as _;
+    use windows_sys::Win32::Storage::FileSystem::{
+        BY_HANDLE_FILE_INFORMATION, GetFileInformationByHandle,
+    };
+
+    // SAFETY: this Windows POD has no invalid bit patterns.
+    let mut information = unsafe { std::mem::zeroed::<BY_HANDLE_FILE_INFORMATION>() };
+    // SAFETY: `file` keeps the OS handle valid for the call and `information`
+    // is a writable, correctly sized output buffer.
+    let succeeded = unsafe { GetFileInformationByHandle(file.as_raw_handle(), &mut information) };
+    if succeeded == 0 {
+        return Err(JournalError::Io {
+            path: path.to_path_buf(),
+            source: std::io::Error::last_os_error(),
+        });
+    }
+    Ok(u64::from(information.nNumberOfLinks))
+}
+
+#[cfg(not(any(unix, windows)))]
+fn link_count(_file: &File, path: &Path) -> Result<u64, JournalError> {
+    Err(JournalError::Io {
+        path: path.to_path_buf(),
+        source: std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "filesystem link-count verification is unavailable on this platform",
+        ),
+    })
+}
+
 impl Drop for WriterLease {
     fn drop(&mut self) {
+        // The sentinel inode must remain, but stale ownership metadata need
+        // not. Scrub it while still holding the advisory lock so a successor
+        // never observes a partially cleared owner record.
+        let _ = self
+            .file
+            .set_len(0)
+            .and_then(|()| self.file.seek(SeekFrom::Start(0)).map(|_| ()))
+            .and_then(|()| self.file.sync_all());
         let _ = self.file.unlock();
     }
 }
