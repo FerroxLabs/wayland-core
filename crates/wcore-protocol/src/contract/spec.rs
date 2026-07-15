@@ -1,16 +1,16 @@
 use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use crate::anvil::{
-    anvil_invalidation_body_digest, anvil_receipt_body_digest, AnvilInvalidationReason,
-    AnvilReceipt, AnvilReceiptInvalidation, ANVIL_DIGEST_ALGORITHM, ANVIL_RECEIPT_CONTRACT_VERSION,
-    ANVIL_RECEIPT_ORIGIN,
+    ANVIL_DIGEST_ALGORITHM, ANVIL_RECEIPT_CONTRACT_VERSION, ANVIL_RECEIPT_ORIGIN,
+    AnvilInvalidationReason, AnvilReceipt, AnvilReceiptInvalidation,
+    anvil_invalidation_body_digest, anvil_receipt_body_digest,
 };
 use crate::events::{
     Capabilities, ErrorInfo, OutputType, ProtocolEvent, ToolCategory, ToolInfo, ToolStatus,
-    TurnCost, Usage, WorkflowNodeState, WorkflowTerminalState,
+    TurnCost, Usage, WorkflowChildTerminalState, WorkflowNodeState, WorkflowTerminalState,
 };
 use crate::execution_policy::{ExecutionPolicyChangeReason, ExecutionPolicySequence};
 use wcore_types::execution_policy::{
@@ -314,7 +314,7 @@ pub const EVENT_SPECS: &[WireSpec] = &[
             "child_sequence",
             "event_id"
         ],
-        Observational,
+        Safety,
         "child_run_id_and_child_sequence",
         "workflow_lifecycle_v1"
     ),
@@ -822,6 +822,22 @@ pub(super) fn workflow_lifecycle_events() -> Vec<ProtocolEvent> {
             parent_child_run_id: None,
             child_sequence: 0,
             event_id: "child-event-000".into(),
+            terminal_state: None,
+        },
+        ProtocolEvent::CorrelatedSubAgentEvent {
+            parent_call_id: "workflow:scan".into(),
+            agent_name: "scan".into(),
+            inner: json!({
+                "type": "info",
+                "msg_id": "child-msg-terminal-001",
+                "message": "Sub-agent 'scan' completed successfully"
+            }),
+            run_id: "workflow-run-001".into(),
+            child_run_id: "child-run-001".into(),
+            parent_child_run_id: None,
+            child_sequence: 1,
+            event_id: "child-event-001".into(),
+            terminal_state: Some(WorkflowChildTerminalState::Succeeded),
         },
         ProtocolEvent::WorkflowNodeEvent {
             run_id: "workflow-run-001".into(),
@@ -1146,7 +1162,7 @@ pub fn event_fixture_values() -> BTreeMap<String, ProtocolEvent> {
                 trace: json!({"span":"provider","duration_ms":42}),
             },
         ),
-        ("events/workflow_finished.json".into(), workflow[5].clone()),
+        ("events/workflow_finished.json".into(), workflow[6].clone()),
         (
             "events/workflow_node_event.json".into(),
             workflow[2].clone(),

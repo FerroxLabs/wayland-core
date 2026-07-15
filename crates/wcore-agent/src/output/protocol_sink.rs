@@ -1004,6 +1004,7 @@ impl OutputSink for ProtocolSink {
             parent_child_run_id: correlation.parent_child_run_id.clone(),
             child_sequence: correlation.child_sequence,
             event_id: correlation.event_id.clone(),
+            terminal_state: correlation.terminal_state,
         });
     }
 

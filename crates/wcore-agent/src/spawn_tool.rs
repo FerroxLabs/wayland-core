@@ -3,7 +3,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use serde_json::{Value, json};
 
-use crate::agents::channel_sink::{ChannelSink, SubAgentRelay};
+use crate::agents::channel_sink::{ChannelSink, SubAgentRelay, SubAgentTerminalRelay};
 use crate::agents::registry::AgentRegistry;
 use crate::output::OutputSink;
 use crate::spawner::{AgentSpawner, SpawnExtras, SubAgentConfig};
@@ -298,11 +298,11 @@ impl SpawnTool {
     /// and its OWN `ChannelSink` so the bridge creates N distinct
     /// `SubAgentView`s instead of collapsing all tasks into one row.
     ///
-    /// W5.5 H-1: each ChannelSink now has a dedicated lifecycle channel
-    /// (capacity 2) for the terminal Done/Failed event. Stream events use
+    /// Each ChannelSink has a dedicated terminal channel (capacity 1) for the
+    /// authoritative Done/Failed result. Stream events use
     /// the shared bounded `tx` (best-effort); the terminal signal uses the
-    /// per-task `lifecycle_tx` (guaranteed). After the main stream drain
-    /// exits, we flush all lifecycle receivers so the bridge always sees the
+    /// per-task terminal sender. After the main stream drain exits, we flush
+    /// all terminal receivers so the bridge always sees the
     /// terminal event even when a chatty sub-agent filled the stream buffer.
     async fn spawn_with_relay(
         &self,
@@ -323,41 +323,42 @@ impl SpawnTool {
             crate::agents::channel_sink::CHANNEL_CAPACITY,
         );
 
-        // W5.5 H-1: one dedicated lifecycle channel per task. Collected as
+        // One dedicated terminal channel per task. Collected as
         // a Vec of receivers so we can flush them after the stream drain.
-        let mut lifecycle_rxs: Vec<tokio::sync::mpsc::Receiver<SubAgentRelay>> =
+        let mut terminal_rxs: Vec<tokio::sync::mpsc::Receiver<SubAgentTerminalRelay>> =
             Vec::with_capacity(tasks.len());
 
         // Build per-task SpawnExtras with distinct parent_call_id + ChannelSink.
-        let per_task_extras: Vec<SpawnExtras> = tasks
-            .iter()
-            .enumerate()
-            .map(|(idx, task)| {
-                let agent_label = agent_names
-                    .get(idx)
-                    .and_then(|a| a.as_deref())
-                    .filter(|s| !s.is_empty())
-                    .unwrap_or("anon");
-                // Unique id per task — the bridge keys SubAgentView on this.
-                let parent_call_id = format!("spawn:{}:{}", idx, agent_label);
-                // W5.5 H-1: dedicated lifecycle channel (capacity 2, never shared).
-                let (ltx, lrx) = tokio::sync::mpsc::channel::<SubAgentRelay>(
-                    crate::agents::channel_sink::LIFECYCLE_CAPACITY,
-                );
-                lifecycle_rxs.push(lrx);
-                let sink = Arc::new(ChannelSink::new_with_lifecycle(
-                    parent_call_id.clone(),
-                    task.name.clone(),
-                    tx.clone(),
-                    ltx,
-                ));
-                SpawnExtras {
-                    channel_sink: Some(sink),
-                    agent_name: Some(task.name.clone()),
-                    parent_call_id: Some(parent_call_id),
-                }
-            })
-            .collect();
+        let per_task_extras: Vec<SpawnExtras> =
+            tasks
+                .iter()
+                .enumerate()
+                .map(|(idx, task)| {
+                    let agent_label = agent_names
+                        .get(idx)
+                        .and_then(|a| a.as_deref())
+                        .filter(|s| !s.is_empty())
+                        .unwrap_or("anon");
+                    // Unique id per task — the bridge keys SubAgentView on this.
+                    let parent_call_id = format!("spawn:{}:{}", idx, agent_label);
+                    let (terminal_tx, terminal_rx) =
+                        tokio::sync::mpsc::channel::<SubAgentTerminalRelay>(
+                            crate::agents::channel_sink::TERMINAL_CAPACITY,
+                        );
+                    terminal_rxs.push(terminal_rx);
+                    let sink = Arc::new(ChannelSink::new_with_terminal(
+                        parent_call_id.clone(),
+                        task.name.clone(),
+                        tx.clone(),
+                        terminal_tx,
+                    ));
+                    SpawnExtras {
+                        channel_sink: Some(sink),
+                        agent_name: Some(task.name.clone()),
+                        parent_call_id: Some(parent_call_id),
+                    }
+                })
+                .collect();
 
         // Drop the original tx so the drain exits when all per-task senders drop.
         drop(tx);
@@ -387,12 +388,10 @@ impl SpawnTool {
         // so rx.recv() returns None and the drain task exits promptly.
         let _ = drain.await;
 
-        // W5.5 H-1: flush lifecycle events AFTER the stream drain. The terminal
-        // Done/Failed event for each task sits in its dedicated lifecycle channel.
-        // Because the ChannelSink (and its lifecycle_tx clone) has already dropped,
-        // recv() returns None after the one lifecycle event, so this loop is O(N).
-        for mut lrx in lifecycle_rxs {
-            while let Some(relay) = lrx.recv().await {
+        // Flush authoritative terminals after the best-effort stream drain.
+        for mut terminal_rx in terminal_rxs {
+            while let Some(terminal) = terminal_rx.recv().await {
+                let relay = terminal.relay;
                 parent_output.emit_sub_agent_event(
                     &relay.parent_call_id,
                     &relay.agent_name,

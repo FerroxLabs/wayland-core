@@ -16,6 +16,7 @@
 
 mod common;
 
+use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -25,12 +26,116 @@ use serde_json::Value;
 use tokio::sync::mpsc;
 use wcore_agent::agents::bus::{AgentBus, AgentMessage};
 use wcore_agent::orchestration::workflow::runner::{
-    WorkflowPlan, WorkflowRunError, WorkflowRunner,
+    WorkflowLifecycleEmitter, WorkflowPlan, WorkflowRunError, WorkflowRunner,
 };
+use wcore_agent::output::OutputSink;
 use wcore_agent::spawner::AgentSpawner;
+use wcore_protocol::events::{
+    WorkflowChildCorrelation, WorkflowChildTerminalState, WorkflowTerminalState,
+};
 use wcore_providers::{LlmProvider, ProviderError};
 use wcore_types::llm::{LlmEvent, LlmRequest};
 use wcore_types::message::{FinishReason, StopReason, TokenUsage};
+
+#[derive(Default)]
+struct ChildCapture {
+    children: Mutex<Vec<WorkflowChildCorrelation>>,
+    inners: Mutex<Vec<Value>>,
+}
+
+impl OutputSink for ChildCapture {
+    fn emit_text_delta(&self, _text: &str, _msg_id: &str) {}
+    fn emit_thinking(&self, _text: &str, _msg_id: &str) {}
+    fn emit_tool_call(&self, _name: &str, _input: &str) {}
+    fn emit_tool_result(&self, _name: &str, _is_error: bool, _content: &str) {}
+    fn emit_stream_start(&self, _msg_id: &str) {}
+    fn emit_stream_end(
+        &self,
+        _msg_id: &str,
+        _turns: usize,
+        _input_tokens: u64,
+        _output_tokens: u64,
+        _cache_creation_tokens: u64,
+        _cache_read_tokens: u64,
+        _finish_reason: FinishReason,
+    ) {
+    }
+    fn emit_error(&self, _msg: &str, _retryable: bool) {}
+    fn emit_info(&self, _msg: &str) {}
+    fn emit_correlated_sub_agent_event(
+        &self,
+        _parent_call_id: &str,
+        _agent_name: &str,
+        inner: &Value,
+        correlation: &WorkflowChildCorrelation,
+    ) {
+        self.inners.lock().unwrap().push(inner.clone());
+        self.children.lock().unwrap().push(correlation.clone());
+    }
+}
+
+fn lifecycle_runner<'a>(
+    spawner: &'a AgentSpawner,
+) -> (
+    WorkflowRunner<'a>,
+    Arc<WorkflowLifecycleEmitter>,
+    Arc<ChildCapture>,
+) {
+    let capture = Arc::new(ChildCapture::default());
+    let output: Arc<dyn OutputSink> = capture.clone();
+    let lifecycle = Arc::new(WorkflowLifecycleEmitter::new(
+        Arc::clone(&output),
+        "schema-flow".to_string(),
+        "schema-flow".to_string(),
+        1,
+        vec!["scan".to_string()],
+    ));
+    lifecycle.start();
+    let runner = WorkflowRunner::new(spawner)
+        .with_parent_output(output)
+        .with_lifecycle(Arc::clone(&lifecycle));
+    (runner, lifecycle, capture)
+}
+
+fn assert_one_logical_terminal(capture: &ChildCapture, expected: WorkflowChildTerminalState) {
+    let children = capture.children.lock().unwrap();
+    assert!(!children.is_empty(), "child evidence must not be empty");
+    let terminal_indices: Vec<_> = children
+        .iter()
+        .enumerate()
+        .filter_map(|(index, event)| event.terminal_state.map(|_| index))
+        .collect();
+    assert_eq!(
+        terminal_indices.len(),
+        1,
+        "one logical child terminal required"
+    );
+    let terminal_index = terminal_indices[0];
+    assert_eq!(children[terminal_index].terminal_state, Some(expected));
+    let inners = capture.inners.lock().unwrap();
+    let terminal_inner = &inners[terminal_index];
+    match expected {
+        WorkflowChildTerminalState::Succeeded => {
+            assert_eq!(terminal_inner["type"], "info");
+            assert!(
+                terminal_inner["msg_id"]
+                    .as_str()
+                    .is_some_and(|msg_id| !msg_id.is_empty())
+            );
+            assert!(terminal_inner["message"].is_string());
+        }
+        WorkflowChildTerminalState::Failed => {
+            assert_eq!(terminal_inner["type"], "error");
+            assert!(terminal_inner["error"]["message"].is_string());
+            assert!(terminal_inner["error"]["retryable"].is_boolean());
+        }
+    }
+    let child_run_id = &children[0].child_run_id;
+    for (sequence, event) in children.iter().enumerate() {
+        assert_eq!(&event.child_run_id, child_run_id);
+        assert_eq!(event.child_sequence, sequence as u64);
+    }
+}
 
 /// Records every request (Debug-formatted) and returns a distinct,
 /// turn-indexed response so each stage is individually observable — the same
@@ -204,11 +309,14 @@ async fn schema_conforming_output_passes_first_try_and_stores_structured_data() 
     let spawner = AgentSpawner::new(provider, test_config());
 
     let plan = WorkflowPlan::parse(schema_workflow_src()).expect("workflow should parse");
-    let runner = WorkflowRunner::new(&spawner);
+    let (runner, lifecycle, capture) = lifecycle_runner(&spawner);
     let result = runner
         .run(&plan, Value::Object(Default::default()))
         .await
         .expect("conforming output should run to completion");
+    lifecycle.finish_remaining();
+    lifecycle.finish(WorkflowTerminalState::Succeeded, None);
+    assert_one_logical_terminal(&capture, WorkflowChildTerminalState::Succeeded);
 
     // Exactly one LLM call: no retry happened.
     assert_eq!(
@@ -249,11 +357,14 @@ async fn schema_mismatch_retries_once_then_succeeds() {
     let spawner = AgentSpawner::new(provider, test_config());
 
     let plan = WorkflowPlan::parse(schema_workflow_src()).expect("workflow should parse");
-    let runner = WorkflowRunner::new(&spawner);
+    let (runner, lifecycle, capture) = lifecycle_runner(&spawner);
     let result = runner
         .run(&plan, Value::Object(Default::default()))
         .await
         .expect("a single retry should recover");
+    lifecycle.finish_remaining();
+    lifecycle.finish(WorkflowTerminalState::Succeeded, None);
+    assert_one_logical_terminal(&capture, WorkflowChildTerminalState::Succeeded);
 
     // Exactly two LLM calls: the original + one retry.
     let seen = seen.lock().unwrap();
@@ -287,11 +398,14 @@ async fn schema_persistent_mismatch_surfaces_typed_error_after_retries() {
     let spawner = AgentSpawner::new(provider, test_config());
 
     let plan = WorkflowPlan::parse(schema_workflow_src()).expect("workflow should parse");
-    let runner = WorkflowRunner::new(&spawner);
+    let (runner, lifecycle, capture) = lifecycle_runner(&spawner);
     let err = runner
         .run(&plan, Value::Object(Default::default()))
         .await
         .expect_err("persistent mismatch must fail");
+    lifecycle.finish_remaining();
+    lifecycle.finish(WorkflowTerminalState::Failed, None);
+    assert_one_logical_terminal(&capture, WorkflowChildTerminalState::Failed);
 
     match err {
         WorkflowRunError::SchemaValidationFailed {
@@ -636,11 +750,31 @@ async fn wide_fanout_routes_through_fleet_and_maps_results_to_nodes() {
     // the shard boundary (shard size 10).
     let src = parallel_workflow_with_branches(11);
     let plan = WorkflowPlan::parse(&src).expect("workflow should parse");
-    let runner = WorkflowRunner::new(&spawner);
+    let capture = Arc::new(ChildCapture::default());
+    let output: Arc<dyn OutputSink> = capture.clone();
+    let node_ids = plan
+        .graph
+        .nodes
+        .iter()
+        .map(|(node_id, _)| node_id.clone())
+        .collect();
+    let lifecycle = Arc::new(WorkflowLifecycleEmitter::new(
+        Arc::clone(&output),
+        "wide".to_string(),
+        "wide".to_string(),
+        plan.graph.nodes.len(),
+        node_ids,
+    ));
+    lifecycle.start();
+    let runner = WorkflowRunner::new(&spawner)
+        .with_parent_output(output)
+        .with_lifecycle(Arc::clone(&lifecycle));
     let result = runner
         .run(&plan, Value::Object(Default::default()))
         .await
         .expect("wide fan-out should run to completion");
+    lifecycle.finish_remaining();
+    lifecycle.finish(WorkflowTerminalState::Succeeded, None);
 
     // Every branch node has a non-error output in the final state — i.e. each
     // shard-ordered result was correlated back to the right node id.
@@ -670,6 +804,27 @@ async fn wide_fanout_routes_through_fleet_and_maps_results_to_nodes() {
         "wide fan-out must route through FleetDispatcher (>=11 `fleet:`-tagged \
          Spawned events); got {}. Events: {events:#?}",
         fleet_tagged_count(&events)
+    );
+
+    let children = capture.children.lock().unwrap();
+    let terminals: Vec<_> = children
+        .iter()
+        .filter(|event| event.terminal_state.is_some())
+        .collect();
+    assert_eq!(terminals.len(), 11, "every Fleet child must terminalize");
+    assert!(
+        terminals
+            .iter()
+            .all(|event| { event.terminal_state == Some(WorkflowChildTerminalState::Succeeded) })
+    );
+    assert_eq!(
+        terminals
+            .iter()
+            .map(|event| event.child_run_id.as_str())
+            .collect::<HashSet<_>>()
+            .len(),
+        11,
+        "every Fleet branch must keep a distinct child identity"
     );
 }
 

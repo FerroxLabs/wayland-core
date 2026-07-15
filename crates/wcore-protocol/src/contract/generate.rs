@@ -2,19 +2,19 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
-use crate::anvil::{anvil_receipt_body_digest, AnvilReceipt};
+use crate::anvil::{AnvilReceipt, anvil_receipt_body_digest};
 use crate::commands::ProtocolCommand;
 
+use super::ContractResult;
 use super::canonical::{canonical_json, digest_named_bytes};
 use super::observation::{ContractCapabilityStatus, ContractDescriptor};
 use super::spec::{
-    anvil_invalidation, anvil_receipt, command_fixture_values, compatibility_event_values,
-    event_fixture_values, workflow_lifecycle_events, WireSpec, COMMAND_SPECS, EVENT_SPECS,
-    PRODUCER_COMMAND_TYPES, PRODUCER_EVENT_TYPES, SOURCE_INPUTS,
+    COMMAND_SPECS, EVENT_SPECS, PRODUCER_COMMAND_TYPES, PRODUCER_EVENT_TYPES, SOURCE_INPUTS,
+    WireSpec, anvil_invalidation, anvil_receipt, command_fixture_values,
+    compatibility_event_values, event_fixture_values, workflow_lifecycle_events,
 };
-use super::ContractResult;
 
 pub const CONTRACT_NAME: &str = "wayland-desktop-core";
 pub const GENERATOR_VERSION: &str = "wcore-desktop-contract-gen/1";
@@ -71,20 +71,382 @@ fn refresh_anvil_receipt_body_digest(value: &mut Value) -> ContractResult<()> {
     Ok(())
 }
 
-fn schema_for(specs: &[WireSpec], title: &str) -> Value {
-    let one_of = specs
-        .iter()
-        .map(|spec| {
+fn inferred_schema(value: &Value) -> Value {
+    match value {
+        Value::Null => json!({"type": "null"}),
+        Value::Bool(_) => json!({"type": "boolean"}),
+        Value::Number(number) if number.is_i64() || number.is_u64() => {
+            json!({"type": "integer"})
+        }
+        Value::Number(_) => json!({"type": "number"}),
+        Value::String(_) => json!({"type": "string"}),
+        Value::Array(values) => {
+            let mut item_schemas = Vec::new();
+            for value in values {
+                let schema = inferred_schema(value);
+                if !item_schemas.contains(&schema) {
+                    item_schemas.push(schema);
+                }
+            }
+            let items = match item_schemas.as_slice() {
+                [] => json!({}),
+                [schema] => schema.clone(),
+                _ => json!({"oneOf": item_schemas}),
+            };
+            json!({"items": items, "type": "array"})
+        }
+        Value::Object(object) => {
+            let properties = object
+                .iter()
+                .map(|(field, value)| (field.clone(), inferred_schema(value)))
+                .collect::<serde_json::Map<_, _>>();
             json!({
                 "additionalProperties": true,
-                "properties": {
-                    "type": {"const": spec.wire_type}
-                },
-                "required": spec.required,
+                "properties": properties,
                 "type": "object"
             })
+        }
+    }
+}
+
+fn constrained_property_schema(wire_type: &str, field: &str, value: &Value) -> Value {
+    match (wire_type, field) {
+        (_, "type") => json!({"const": wire_type}),
+        ("set_mode", "mode") => json!({
+            "enum": [
+                "default",
+                "auto_edit",
+                "force",
+                "yolo",
+                "dangerously_skip_permissions",
+                "dangerously-skip-permissions"
+            ],
+            "type": "string"
+        }),
+        ("tool_approve", "scope") => json!({
+            "oneOf": [
+                {"enum": ["once", "always"], "type": "string"},
+                {
+                    "additionalProperties": false,
+                    "properties": {
+                        "always_prefix": {
+                            "additionalProperties": false,
+                            "properties": {"prefix": {"type": "string"}},
+                            "required": ["prefix"],
+                            "type": "object"
+                        }
+                    },
+                    "required": ["always_prefix"],
+                    "type": "object"
+                }
+            ]
+        }),
+        ("stream_end", "finish_reason") => {
+            json!({"enum": ["stop", "length", "error", "max_turns"], "type": "string"})
+        }
+        ("tool_result", "status") => {
+            json!({"enum": ["success", "error"], "type": "string"})
+        }
+        ("tool_result", "output_type") => {
+            json!({"enum": ["text", "diff", "image"], "type": "string"})
+        }
+        ("execution_policy", "reason") => json!({
+            "enum": ["launch", "mode_change", "resume", "expiry"],
+            "type": "string"
+        }),
+        ("execution_policy", "critical") => json!({"const": true, "type": "boolean"}),
+        ("workflow_node_event", "state") => json!({
+            "enum": ["queued", "running", "succeeded", "failed", "blocked"],
+            "type": "string"
+        }),
+        ("workflow_finished", "terminal_state") | ("sub_agent_event", "terminal_state") => {
+            json!({"enum": ["succeeded", "failed"], "type": "string"})
+        }
+        ("anvil_receipt_invalidated", "reason") => json!({
+            "enum": ["artifact_mutated", "gate_revoked", "superseded"],
+            "type": "string"
+        }),
+        ("anvil_receipt", "terminal_state") => {
+            json!({"const": "verified", "type": "string"})
+        }
+        ("anvil_receipt", "origin") | ("anvil_receipt_invalidated", "origin") => {
+            json!({"const": "core/anvil", "type": "string"})
+        }
+        ("anvil_receipt", "digest_algorithm") => {
+            json!({"const": "sha256", "type": "string"})
+        }
+        _ => inferred_schema(value),
+    }
+}
+
+fn workflow_failure_schema() -> Value {
+    json!({
+        "additionalProperties": true,
+        "properties": {
+            "code": {"type": "string"},
+            "message": {"type": "string"},
+            "retryable": {"type": "boolean"}
+        },
+        "required": ["code", "message", "retryable"],
+        "type": "object"
+    })
+}
+
+fn contract_descriptor_schema() -> Value {
+    json!({
+        "additionalProperties": true,
+        "properties": {
+            "capabilities": {
+                "additionalProperties": {
+                    "enum": ["available", "publication_bound", "shape_only", "unavailable"],
+                    "type": "string"
+                },
+                "type": "object"
+            },
+            "fixture_digest": {"type": "string"},
+            "generator": {"type": "string"},
+            "major": {"type": "integer"},
+            "minor": {"type": "integer"},
+            "name": {"type": "string"},
+            "schema_digest": {"type": "string"},
+            "source_inputs_digest": {"type": "string"}
+        },
+        "required": [
+            "name",
+            "major",
+            "minor",
+            "generator",
+            "fixture_digest",
+            "schema_digest",
+            "source_inputs_digest",
+            "capabilities"
+        ],
+        "type": "object"
+    })
+}
+
+fn effective_execution_policy_schema() -> Value {
+    json!({
+        "additionalProperties": true,
+        "properties": {
+            "approvals": {"enum": ["prompt", "auto_edit", "bypass"], "type": "string"},
+            "dangerous_activation_id": {"type": "string"},
+            "dangerous_expires_at_unix_ms": {"type": "integer"},
+            "managed_floor_active": {"type": "boolean"},
+            "posture": {"enum": ["smart", "managed", "dangerous"], "type": "string"},
+            "sandbox": {"enum": ["required", "bypass"], "type": "string"},
+            "source": {
+                "enum": [
+                    "default",
+                    "managed",
+                    "user_config",
+                    "project",
+                    "environment",
+                    "local_cli_launch",
+                    "desktop_local_launch",
+                    "protocol",
+                    "acp",
+                    "tui",
+                    "resume",
+                    "child"
+                ],
+                "type": "string"
+            }
+        },
+        "required": ["posture", "approvals", "sandbox", "source", "managed_floor_active"],
+        "type": "object"
+    })
+}
+
+fn execution_policy_snapshot_schema() -> Value {
+    json!({
+        "additionalProperties": true,
+        "properties": {
+            "contract_version": {"type": "string"},
+            "critical": {"const": true, "type": "boolean"},
+            "effective_at_unix_ms": {"type": "integer"},
+            "policy": effective_execution_policy_schema(),
+            "reason": {
+                "enum": ["launch", "mode_change", "resume", "expiry"],
+                "type": "string"
+            },
+            "revision": {"type": "integer"}
+        },
+        "required": [
+            "critical",
+            "contract_version",
+            "revision",
+            "reason",
+            "effective_at_unix_ms",
+            "policy"
+        ],
+        "type": "object"
+    })
+}
+
+fn child_terminal_conditions() -> Value {
+    json!([
+        {
+            "if": {
+                "properties": {"terminal_state": {"const": "succeeded"}},
+                "required": ["terminal_state"]
+            },
+            "then": {
+                "properties": {
+                    "inner": {
+                        "additionalProperties": true,
+                        "properties": {
+                            "message": {"type": "string"},
+                            "msg_id": {"type": "string"},
+                            "type": {"const": "info"}
+                        },
+                        "required": ["type", "msg_id", "message"],
+                        "type": "object"
+                    }
+                }
+            }
+        },
+        {
+            "if": {
+                "properties": {"terminal_state": {"const": "failed"}},
+                "required": ["terminal_state"]
+            },
+            "then": {
+                "properties": {
+                    "inner": {
+                        "additionalProperties": true,
+                        "properties": {
+                            "error": {
+                                "additionalProperties": true,
+                                "properties": {
+                                    "code": {"type": "string"},
+                                    "message": {"type": "string"},
+                                    "retryable": {"type": "boolean"}
+                                },
+                                "required": ["code", "message", "retryable"],
+                                "type": "object"
+                            },
+                            "type": {"const": "error"}
+                        },
+                        "required": ["type", "error"],
+                        "type": "object"
+                    }
+                }
+            }
+        }
+    ])
+}
+
+fn schema_branch(spec: &WireSpec, fixture: &Value) -> Value {
+    let object = fixture
+        .as_object()
+        .expect("canonical contract fixture must be an object");
+    let mut properties = object
+        .iter()
+        .map(|(field, value)| {
+            (
+                field.clone(),
+                constrained_property_schema(spec.wire_type, field, value),
+            )
         })
-        .collect::<Vec<_>>();
+        .collect::<serde_json::Map<_, _>>();
+    match spec.wire_type {
+        "ready" => {
+            properties
+                .entry("contract")
+                .or_insert_with(contract_descriptor_schema);
+            properties
+                .entry("execution_policy")
+                .and_modify(|schema| *schema = execution_policy_snapshot_schema());
+        }
+        "execution_policy" => {
+            properties
+                .entry("policy")
+                .and_modify(|schema| *schema = effective_execution_policy_schema());
+        }
+        "workflow_started" => {
+            properties
+                .entry("parent_run_id")
+                .or_insert_with(|| json!({"type": "string"}));
+        }
+        "workflow_node_event" | "workflow_finished" => {
+            properties
+                .entry("failure")
+                .or_insert_with(workflow_failure_schema);
+        }
+        "sub_agent_event" => {
+            properties
+                .entry("parent_child_run_id")
+                .or_insert_with(|| json!({"type": "string"}));
+            properties
+                .entry("terminal_state")
+                .or_insert_with(|| json!({"enum": ["succeeded", "failed"], "type": "string"}));
+        }
+        "anvil_receipt" => {
+            properties
+                .entry("supersedes_receipt_id")
+                .or_insert_with(|| json!({"type": "string"}));
+        }
+        "anvil_receipt_invalidated" => {
+            properties
+                .entry("observed_artifact_digest")
+                .or_insert_with(|| json!({"type": "string"}));
+        }
+        _ => {}
+    }
+    let mut branch = json!({
+        "additionalProperties": true,
+        "properties": properties,
+        "required": spec.required,
+        "type": "object"
+    });
+    if spec.wire_type == "sub_agent_event" {
+        branch["allOf"] = child_terminal_conditions();
+    }
+    branch
+}
+
+fn schema_for(
+    specs: &[WireSpec],
+    fixtures: &BTreeMap<String, Value>,
+    legacy_child: Option<&Value>,
+    title: &str,
+) -> Value {
+    let mut one_of = Vec::with_capacity(specs.len() + 1);
+    for spec in specs {
+        let fixture = fixtures
+            .get(spec.path)
+            .unwrap_or_else(|| panic!("missing canonical fixture {}", spec.path));
+        if spec.wire_type == "sub_agent_event" {
+            one_of.push(schema_branch(spec, fixture));
+            let legacy = legacy_child.expect("legacy sub-agent fixture must be present");
+            let mut legacy_branch = schema_branch(
+                &WireSpec {
+                    wire_type: "sub_agent_event",
+                    path: "compat/events/sub_agent_event.legacy.json",
+                    required: &["type", "parent_call_id", "agent_name", "inner"],
+                    criticality: spec.criticality,
+                    correlation: spec.correlation,
+                    capability: spec.capability,
+                },
+                legacy,
+            );
+            legacy_branch["not"] = json!({
+                "anyOf": [
+                    {"required": ["run_id"]},
+                    {"required": ["child_run_id"]},
+                    {"required": ["child_sequence"]},
+                    {"required": ["event_id"]},
+                    {"required": ["terminal_state"]}
+                ]
+            });
+            legacy_branch["title"] =
+                json!("Legacy non-authoritative sub-agent compatibility event");
+            one_of.push(legacy_branch);
+        } else {
+            one_of.push(schema_branch(spec, fixture));
+        }
+    }
     json!({
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "oneOf": one_of,
@@ -92,25 +454,41 @@ fn schema_for(specs: &[WireSpec], title: &str) -> Value {
     })
 }
 
-fn producer_complete_schema() -> Value {
+fn producer_complete_schema(command_schema: &Value, event_schema: &Value) -> Value {
+    let mut one_of = command_schema["oneOf"]
+        .as_array()
+        .expect("command schema must contain oneOf")
+        .clone();
+    one_of.extend(
+        event_schema["oneOf"]
+            .as_array()
+            .expect("event schema must contain oneOf")
+            .iter()
+            .cloned(),
+    );
+    let desktop_types = COMMAND_SPECS
+        .iter()
+        .chain(EVENT_SPECS)
+        .map(|spec| spec.wire_type)
+        .collect::<BTreeSet<_>>();
+    let inventory_only = PRODUCER_COMMAND_TYPES
+        .iter()
+        .chain(PRODUCER_EVENT_TYPES)
+        .copied()
+        .filter(|wire_type| !desktop_types.contains(wire_type))
+        .collect::<Vec<_>>();
+    if !inventory_only.is_empty() {
+        one_of.push(json!({
+            "additionalProperties": true,
+            "properties": {"type": {"enum": inventory_only}},
+            "required": ["type"],
+            "title": "Non-Desktop producer inventory discriminator",
+            "type": "object"
+        }));
+    }
     json!({
         "$schema": "https://json-schema.org/draft/2020-12/schema",
-        "oneOf": [
-            {
-                "additionalProperties": true,
-                "properties": {"type": {"enum": PRODUCER_COMMAND_TYPES}},
-                "required": ["type"],
-                "title": "Core ProtocolCommand",
-                "type": "object"
-            },
-            {
-                "additionalProperties": true,
-                "properties": {"type": {"enum": PRODUCER_EVENT_TYPES}},
-                "required": ["type"],
-                "title": "Core ProtocolEvent",
-                "type": "object"
-            }
-        ],
+        "anyOf": one_of,
         "title": "Complete current Core producer inventory"
     })
 }
@@ -359,14 +737,16 @@ pub fn generated_artifacts() -> ContractResult<BTreeMap<String, Vec<u8>>> {
         "adversarial/workflow/sequence-gap.jsonl".into(),
         json_lines([workflow[0].clone(), workflow[2].clone()])?,
     );
-    let mut early_finish = workflow[5].clone();
+    let mut early_finish = workflow[6].clone();
     early_finish["event_id"] = json!("workflow-event-terminal");
     early_finish["sequence"] = json!(1);
+    let mut empty_workflow_start = workflow[0].clone();
+    empty_workflow_start["node_count"] = json!(0);
     artifacts.insert(
         "adversarial/workflow/after-terminal.jsonl".into(),
-        json_lines([workflow[0].clone(), early_finish, workflow[2].clone()])?,
+        json_lines([empty_workflow_start, early_finish, workflow[2].clone()])?,
     );
-    let mut first_terminal = workflow[4].clone();
+    let mut first_terminal = workflow[5].clone();
     first_terminal["event_id"] = json!("workflow-event-terminal-node");
     first_terminal["sequence"] = json!(1);
     let mut conflicting_terminal = first_terminal.clone();
@@ -515,20 +895,40 @@ pub fn generated_artifacts() -> ContractResult<BTreeMap<String, Vec<u8>>> {
         b"{\"payload\":{},\"type\":\"future_unclassified\"}\n".to_vec(),
     );
 
+    let command_schema_fixtures = command_fixture_values();
+    let event_schema_fixtures = event_fixture_values()
+        .into_iter()
+        .map(|(path, event)| Ok((path, event_value(&event)?)))
+        .collect::<ContractResult<BTreeMap<_, _>>>()?;
+    let compatibility_schema_fixtures = compatibility_event_values()
+        .into_iter()
+        .map(|(path, event)| Ok((path, event_value(&event)?)))
+        .collect::<ContractResult<BTreeMap<_, _>>>()?;
+    let legacy_child =
+        compatibility_schema_fixtures.get("compat/events/sub_agent_event.legacy.json");
+    let command_schema = schema_for(
+        COMMAND_SPECS,
+        &command_schema_fixtures,
+        None,
+        "Desktop-consumed HostCommand v1",
+    );
+    let event_schema = schema_for(
+        EVENT_SPECS,
+        &event_schema_fixtures,
+        legacy_child,
+        "Desktop-consumed CoreEvent v1",
+    );
     artifacts.insert(
         "schema/host-command.schema.json".into(),
-        canonical_json(&schema_for(
-            COMMAND_SPECS,
-            "Desktop-consumed HostCommand v1",
-        ))?,
+        canonical_json(&command_schema)?,
     );
     artifacts.insert(
         "schema/core-event.schema.json".into(),
-        canonical_json(&schema_for(EVENT_SPECS, "Desktop-consumed CoreEvent v1"))?,
+        canonical_json(&event_schema)?,
     );
     artifacts.insert(
         "schema/producer-complete.schema.json".into(),
-        canonical_json(&producer_complete_schema())?,
+        canonical_json(&producer_complete_schema(&command_schema, &event_schema))?,
     );
     artifacts.insert("DEFERRED.md".into(), DEFERRED.as_bytes().to_vec());
 

@@ -3,6 +3,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 
 use wcore_config::config::Config;
+use wcore_protocol::events::WorkflowChildTerminalState;
 use wcore_providers::LlmProvider;
 use wcore_swarm::{
     AgentReport, BlackboardCtx, DEFAULT_SHARD_SIZE, FleetDispatcher, FleetReducer, MeshAgent,
@@ -65,6 +66,26 @@ fn subagent_ok_result(name: String, result: crate::engine::AgentResult) -> SubAg
         turns: result.turns,
         is_error,
     }
+}
+
+fn relay_subagent_terminal(sink: Option<&ChannelSink>, result: &SubAgentResult) {
+    let Some(sink) = sink else {
+        return;
+    };
+    let terminal_state = if result.is_error {
+        WorkflowChildTerminalState::Failed
+    } else {
+        WorkflowChildTerminalState::Succeeded
+    };
+    let terminal_message = if result.is_error {
+        result.text.clone()
+    } else {
+        format!(
+            "sub-agent '{}' completed ({} turns)",
+            result.name, result.turns
+        )
+    };
+    sink.relay_terminal(terminal_state, &terminal_message);
 }
 
 /// Human-readable cause for an abnormal sub-agent termination.
@@ -636,6 +657,22 @@ impl AgentSpawner {
         sub_configs: Vec<SubAgentConfig>,
         run_id: impl Into<String>,
     ) -> Vec<SubAgentResult> {
+        let tasks = sub_configs
+            .into_iter()
+            .map(|config| (config, SpawnExtras::default()))
+            .collect();
+        self.spawn_via_fleet_with_per_task_extras(tasks, run_id)
+            .await
+    }
+
+    /// Fleet-sharded spawn with one output/terminal sink per task. Fleet keeps
+    /// its shard-scoped bus correlation while the supplied `ChannelSink`
+    /// independently carries the workflow node correlation to the host.
+    pub async fn spawn_via_fleet_with_per_task_extras(
+        &self,
+        tasks_and_extras: Vec<(SubAgentConfig, SpawnExtras)>,
+        run_id: impl Into<String>,
+    ) -> Vec<SubAgentResult> {
         let run_id = run_id.into();
         let fleet = FleetDispatcher::new(run_id).with_shard_size(DEFAULT_SHARD_SIZE);
 
@@ -644,20 +681,17 @@ impl AgentSpawner {
         // spawn_parallel path uses) and reports back the SubAgentResult
         // serialized into the AgentReport payload so the reducer can
         // reconstruct it on the orchestrator side.
-        let agents: Vec<MeshAgent> = sub_configs
+        let agents: Vec<MeshAgent> = tasks_and_extras
             .into_iter()
-            .map(|sub_config| -> MeshAgent {
+            .map(|(sub_config, extras)| -> MeshAgent {
                 let spawner = self.clone_for_spawn();
                 Box::new(move |ctx: BlackboardCtx| {
                     Box::pin(async move {
                         // Wire-presence signal: tag the per-sub-agent
                         // Spawned event with the shard-scoped id so a
                         // bus subscriber can prove the Fleet path ran.
-                        let extras = SpawnExtras {
-                            channel_sink: None,
-                            agent_name: None,
-                            parent_call_id: Some(format!("fleet:{}", ctx.agent_id)),
-                        };
+                        let mut extras = extras;
+                        extras.parent_call_id = Some(format!("fleet:{}", ctx.agent_id));
                         let result = spawner.spawn_one_with_extras(sub_config, extras).await;
                         let succeeded = !result.is_error;
                         AgentReport {
@@ -727,27 +761,32 @@ impl AgentSpawner {
         &self,
         tasks_and_extras: Vec<(SubAgentConfig, SpawnExtras)>,
     ) -> Vec<SubAgentResult> {
-        let mut futures = SpawnTaskSet(
-            tasks_and_extras
-                .into_iter()
-                .map(|(config, extras)| {
-                    let spawner = self.clone_for_spawn();
-                    tokio::spawn(async move { spawner.spawn_one_with_extras(config, extras).await })
-                })
-                .collect(),
-        );
+        let mut join_terminals = Vec::with_capacity(tasks_and_extras.len());
+        let mut handles = Vec::with_capacity(tasks_and_extras.len());
+        for (config, extras) in tasks_and_extras {
+            let spawner = self.clone_for_spawn();
+            join_terminals.push((config.name.clone(), extras.channel_sink.clone()));
+            handles.push(tokio::spawn(async move {
+                spawner.spawn_one_with_extras(config, extras).await
+            }));
+        }
+        let mut futures = SpawnTaskSet(handles);
 
         let mut results = Vec::new();
-        for future in &mut futures.0 {
+        for (future, (name, terminal_sink)) in futures.0.iter_mut().zip(join_terminals) {
             match future.await {
                 Ok(result) => results.push(result),
-                Err(e) => results.push(SubAgentResult {
-                    name: "unknown".to_string(),
-                    text: format!("Task join error: {}", e),
-                    usage: TokenUsage::default(),
-                    turns: 0,
-                    is_error: true,
-                }),
+                Err(e) => {
+                    let result = SubAgentResult {
+                        name,
+                        text: format!("Task join error: {e}"),
+                        usage: TokenUsage::default(),
+                        turns: 0,
+                        is_error: true,
+                    };
+                    relay_subagent_terminal(terminal_sink.as_deref(), &result);
+                    results.push(result);
+                }
             }
         }
         results
@@ -766,28 +805,32 @@ impl AgentSpawner {
         // a single `Delegate`/`Spawn` approval auto-run every child
         // Bash/Write/Edit call with no operator prompt.
         let config = self.child_config(&sub_config);
+        let terminal_sink = extras.channel_sink.clone();
         // Crucible — resolve the per-spawn pinned provider (or inherit parent).
         // This is the path the fleet + parallel proposers funnel through, so a
         // resolver that fails to propagate via `clone_for_spawn` surfaces here
         // as a silent fall-back to the parent provider (guarded by tests).
         let provider = match self.provider_for(&sub_config) {
             Ok(p) => p,
-            Err(result) => return result,
+            Err(result) => {
+                relay_subagent_terminal(terminal_sink.as_deref(), &result);
+                return result;
+            }
         };
         let (child_budget, _agent_guard) = match self.enter_child_budget() {
             Ok(budget) => budget,
-            Err(error) => return SubAgentResult::error(&sub_config.name, &error),
+            Err(error) => {
+                let result = SubAgentResult::error(&sub_config.name, &error);
+                relay_subagent_terminal(terminal_sink.as_deref(), &result);
+                return result;
+            }
         };
 
         let tools = self.child_tool_registry(&[]);
-        // v0.9.4 W1.1b: keep a clone of the sink BEFORE moving it into the
-        // engine so we can call emit_info/emit_error AFTER engine.run() returns.
-        // The clone is cheap (Arc bump); the engine holds the primary ref.
         let output: Arc<dyn OutputSink> = match extras.channel_sink {
             Some(sink) => sink as Arc<dyn OutputSink>, // sub-agent events flow back through parent
             None => Arc::new(NullSink),                // legacy anonymous behaviour
         };
-        let terminal_output = Arc::clone(&output);
         let mut engine = AgentEngine::new_with_provider(provider, config, tools, output);
         self.bind_child_budget(&mut engine, child_budget);
         engine.set_egress_policy(self.egress_policy.clone());
@@ -808,20 +851,11 @@ impl AgentSpawner {
             Ok(result) => {
                 self.publish_completed(&sub_config.name, result.turns, result.usage.output_tokens);
                 guard.outcome = TerminalOutcome::Published;
-                // v0.9.4 W1.1b: emit terminal info event BEFORE the ChannelSink tx
-                // drops. The bridge sets SubAgentStatus::Done on `kind == "info"`.
-                terminal_output.emit_info(&format!(
-                    "sub-agent '{}' completed ({} turns)",
-                    sub_config.name, result.turns
-                ));
-                subagent_ok_result(sub_config.name, result)
+                subagent_ok_result(sub_config.name.clone(), result)
             }
             Err(e) => {
                 self.publish_errored(&sub_config.name, &e.to_string());
                 guard.outcome = TerminalOutcome::Published;
-                // v0.9.4 W1.1b: emit terminal error event before tx drops.
-                // The bridge sets SubAgentStatus::Failed on `kind == "error"`.
-                terminal_output.emit_error(&e.to_string(), false);
                 SubAgentResult {
                     name: sub_config.name,
                     text: format!("Sub-agent error: {}", e),
@@ -832,6 +866,7 @@ impl AgentSpawner {
             }
         };
         drop(guard);
+        relay_subagent_terminal(terminal_sink.as_deref(), &out);
         out
     }
 
@@ -1941,7 +1976,11 @@ mod posture_inheritance_tests {
 
 #[cfg(test)]
 mod fail_loud_tests {
-    use super::subagent_ok_result;
+    use super::{relay_subagent_terminal, subagent_ok_result};
+    use crate::agents::channel_sink::{
+        ChannelSink, SubAgentRelay, SubAgentTerminalRelay, TERMINAL_CAPACITY,
+    };
+    use wcore_protocol::events::WorkflowChildTerminalState;
     use wcore_types::message::{FinishReason, StopReason, TokenUsage};
 
     fn agent_result(text: &str, finish: FinishReason) -> crate::engine::AgentResult {
@@ -2008,5 +2047,30 @@ mod fail_loud_tests {
         let out = subagent_ok_result("child".into(), agent_result("done", FinishReason::Stop));
         assert!(!out.is_error);
         assert_eq!(out.text, "done");
+    }
+
+    #[tokio::test]
+    async fn final_result_drives_typed_terminal_disposition() {
+        let (stream_tx, _stream_rx) = tokio::sync::mpsc::channel::<SubAgentRelay>(1);
+        let (terminal_tx, mut terminal_rx) =
+            tokio::sync::mpsc::channel::<SubAgentTerminalRelay>(TERMINAL_CAPACITY);
+        let sink = ChannelSink::new_with_terminal(
+            "workflow:scan".into(),
+            "scan".into(),
+            stream_tx,
+            terminal_tx,
+        );
+        let result = subagent_ok_result("scan".into(), agent_result("", FinishReason::MaxTurns));
+
+        relay_subagent_terminal(Some(&sink), &result);
+
+        let terminal = terminal_rx.recv().await.expect("terminal result");
+        assert_eq!(terminal.terminal_state, WorkflowChildTerminalState::Failed);
+        assert_eq!(terminal.relay.inner["type"], "error");
+        assert!(
+            terminal.relay.inner["error"]["message"]
+                .as_str()
+                .is_some_and(|message| message.contains("turn limit"))
+        );
     }
 }

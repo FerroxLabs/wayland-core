@@ -5,12 +5,118 @@ use std::path::Path;
 use serde_json::Value;
 use wcore_protocol::commands::ProtocolCommand;
 use wcore_protocol::contract::{
-    canonical_json, check_contract, generated_artifacts, ContractCriticality, COMMAND_SPECS,
-    CONTRACT_ROOT, EVENT_SPECS, GENERATOR_VERSION,
+    COMMAND_SPECS, CONTRACT_ROOT, ContractCriticality, EVENT_SPECS, GENERATOR_VERSION,
+    canonical_json, check_contract, generated_artifacts,
 };
 
 fn root() -> std::path::PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join(CONTRACT_ROOT)
+}
+
+fn schema_accepts(schema: &Value, instance: &Value) -> bool {
+    if schema
+        .get("const")
+        .is_some_and(|expected| expected != instance)
+    {
+        return false;
+    }
+    if schema
+        .get("enum")
+        .and_then(Value::as_array)
+        .is_some_and(|values| !values.iter().any(|expected| expected == instance))
+    {
+        return false;
+    }
+    if let Some(expected) = schema.get("type").and_then(Value::as_str) {
+        let matches = match expected {
+            "null" => instance.is_null(),
+            "boolean" => instance.is_boolean(),
+            "integer" => instance.as_i64().is_some() || instance.as_u64().is_some(),
+            "number" => instance.is_number(),
+            "string" => instance.is_string(),
+            "array" => instance.is_array(),
+            "object" => instance.is_object(),
+            _ => false,
+        };
+        if !matches {
+            return false;
+        }
+    }
+    if let Some(required) = schema.get("required").and_then(Value::as_array) {
+        let Some(object) = instance.as_object() else {
+            return false;
+        };
+        if required
+            .iter()
+            .filter_map(Value::as_str)
+            .any(|field| !object.contains_key(field))
+        {
+            return false;
+        }
+    }
+    if let (Some(properties), Some(object)) = (
+        schema.get("properties").and_then(Value::as_object),
+        instance.as_object(),
+    ) {
+        for (field, field_schema) in properties {
+            if let Some(value) = object.get(field)
+                && !schema_accepts(field_schema, value)
+            {
+                return false;
+            }
+        }
+    }
+    if let (Some(items), Some(values)) = (schema.get("items"), instance.as_array())
+        && values.iter().any(|value| !schema_accepts(items, value))
+    {
+        return false;
+    }
+    if let Some(any_of) = schema.get("anyOf").and_then(Value::as_array)
+        && !any_of.iter().any(|branch| schema_accepts(branch, instance))
+    {
+        return false;
+    }
+    if let Some(all_of) = schema.get("allOf").and_then(Value::as_array)
+        && all_of
+            .iter()
+            .any(|branch| !schema_accepts(branch, instance))
+    {
+        return false;
+    }
+    if let Some(condition) = schema.get("if")
+        && schema_accepts(condition, instance)
+        && schema
+            .get("then")
+            .is_some_and(|consequence| !schema_accepts(consequence, instance))
+    {
+        return false;
+    }
+    if let Some(one_of) = schema.get("oneOf").and_then(Value::as_array)
+        && one_of
+            .iter()
+            .filter(|branch| schema_accepts(branch, instance))
+            .count()
+            != 1
+    {
+        return false;
+    }
+    if schema
+        .get("not")
+        .is_some_and(|forbidden| schema_accepts(forbidden, instance))
+    {
+        return false;
+    }
+    true
+}
+
+fn generated_json(relative: &str) -> Value {
+    let artifacts = generated_artifacts().unwrap();
+    serde_json::from_slice(
+        artifacts
+            .get(relative)
+            .unwrap_or_else(|| panic!("missing generated artifact {relative}")),
+    )
+    .unwrap()
 }
 
 #[test]
@@ -118,6 +224,13 @@ fn manifest_pins_generator_and_all_three_digests() {
         .expect("authoritative invalidation must be in EVENT_SPECS");
     assert_eq!(invalidation["criticality"], "safety");
     assert_eq!(invalidation["capability"], "anvil_receipts");
+    let child_event = manifest["events"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|event| event["type"] == "sub_agent_event")
+        .expect("child terminal evidence must be in EVENT_SPECS");
+    assert_eq!(child_event["criticality"], "safety");
 }
 
 #[test]
@@ -144,11 +257,102 @@ fn manifest_criticality_uses_only_the_normative_typed_vocabulary() {
 }
 
 #[test]
-fn producer_complete_schema_keeps_non_desktop_variants_visible() {
-    let schema: Value = serde_json::from_slice(
-        &fs::read(root().join("schema/producer-complete.schema.json")).unwrap(),
+fn event_schema_distinguishes_correlated_and_legacy_child_shapes() {
+    let schema: Value =
+        serde_json::from_slice(&fs::read(root().join("schema/core-event.schema.json")).unwrap())
+            .unwrap();
+    let child_variants: Vec<&Value> = schema["oneOf"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|branch| branch["properties"]["type"]["const"] == "sub_agent_event")
+        .collect();
+    assert_eq!(child_variants.len(), 2);
+
+    let correlated = child_variants
+        .iter()
+        .find(|branch| {
+            branch["required"]
+                .as_array()
+                .is_some_and(|required| required.iter().any(|field| field == "run_id"))
+        })
+        .expect("correlated child schema missing");
+    assert!(correlated["required"].as_array().unwrap().len() > 4);
+
+    let legacy = child_variants
+        .iter()
+        .find(|branch| branch.get("not").is_some())
+        .expect("legacy compatibility schema missing");
+    assert_eq!(
+        legacy["required"],
+        serde_json::json!(["type", "parent_call_id", "agent_name", "inner"])
+    );
+}
+
+#[test]
+fn generated_schemas_reject_malformed_authority_types_and_enums() {
+    let event_schema = generated_json("schema/core-event.schema.json");
+    let mut ready = generated_json("events/ready.json");
+    assert!(schema_accepts(&event_schema, &ready));
+    ready["contract"]["major"] = Value::String("one".into());
+    assert!(!schema_accepts(&event_schema, &ready));
+    ready["contract"]["major"] = Value::from(1_u64);
+    ready["execution_policy"]["policy"]["sandbox"] = Value::String("optional".into());
+    assert!(!schema_accepts(&event_schema, &ready));
+
+    let mut policy = generated_json("events/execution_policy.json");
+    assert!(schema_accepts(&event_schema, &policy));
+    policy["policy"]["source"] = Value::String("desktop_claim".into());
+    assert!(!schema_accepts(&event_schema, &policy));
+
+    let mut finished = generated_json("events/workflow_finished.json");
+    assert!(schema_accepts(&event_schema, &finished));
+
+    finished["sequence"] = Value::String("three".into());
+    assert!(!schema_accepts(&event_schema, &finished));
+    finished["sequence"] = Value::from(4_u64);
+    finished["terminal_state"] = Value::String("paused".into());
+    assert!(!schema_accepts(&event_schema, &finished));
+    finished["terminal_state"] = Value::String("failed".into());
+    finished["succeeded"] = Value::Bool(false);
+    finished["failure"] = serde_json::json!({
+        "code": "stage_failed",
+        "message": "failed",
+        "retryable": "no"
+    });
+    assert!(!schema_accepts(&event_schema, &finished));
+
+    let command_schema = generated_json("schema/host-command.schema.json");
+    let mut message = generated_json("commands/message.json");
+    assert!(schema_accepts(&command_schema, &message));
+    message["msg_id"] = Value::from(7_u64);
+    assert!(!schema_accepts(&command_schema, &message));
+
+    let artifacts = generated_artifacts().unwrap();
+    let lifecycle = std::str::from_utf8(
+        artifacts
+            .get("adversarial/workflow/valid-lifecycle.jsonl")
+            .unwrap(),
     )
-    .unwrap();
+    .unwrap()
+    .lines()
+    .map(|line| serde_json::from_str::<Value>(line).unwrap())
+    .collect::<Vec<_>>();
+    let mut child_terminal = lifecycle
+        .into_iter()
+        .find(|event| event["terminal_state"] == "succeeded")
+        .expect("canonical workflow must include a successful child terminal");
+    assert!(schema_accepts(&event_schema, &child_terminal));
+    child_terminal["inner"]
+        .as_object_mut()
+        .unwrap()
+        .remove("msg_id");
+    assert!(!schema_accepts(&event_schema, &child_terminal));
+}
+
+#[test]
+fn producer_complete_schema_keeps_non_desktop_variants_visible() {
+    let schema = generated_json("schema/producer-complete.schema.json");
     let wire = serde_json::to_string(&schema).unwrap();
     for required in [
         "continue_with_budget",
@@ -165,6 +369,11 @@ fn producer_complete_schema_keeps_non_desktop_variants_visible() {
             "producer schema omitted {required}"
         );
     }
+
+    let command = generated_json("commands/approval_resume.json");
+    let event = generated_json("events/approval_resume.json");
+    assert!(schema_accepts(&schema, &command));
+    assert!(schema_accepts(&schema, &event));
 }
 
 #[test]
@@ -180,9 +389,11 @@ fn authority_fixtures_pin_correlated_current_shapes() {
             .unwrap();
     assert_eq!(workflow["sequence"], 0);
     assert!(workflow["run_id"].as_str().is_some_and(|id| !id.is_empty()));
-    assert!(workflow["event_id"]
-        .as_str()
-        .is_some_and(|id| !id.is_empty()));
+    assert!(
+        workflow["event_id"]
+            .as_str()
+            .is_some_and(|id| !id.is_empty())
+    );
 
     let receipt: Value =
         serde_json::from_slice(&fs::read(root().join("events/anvil_receipt.json")).unwrap())
@@ -190,15 +401,19 @@ fn authority_fixtures_pin_correlated_current_shapes() {
     assert_eq!(receipt["origin"], "core/anvil");
     assert_eq!(receipt["sequence"], 0);
     assert_eq!(receipt["contract_version"], "1.0");
-    assert!(receipt["receipt_body_digest"]
-        .as_str()
-        .is_some_and(|digest| digest.starts_with("sha256:") && digest.len() == 71));
+    assert!(
+        receipt["receipt_body_digest"]
+            .as_str()
+            .is_some_and(|digest| digest.starts_with("sha256:") && digest.len() == 71)
+    );
 
     let invalidation: Value = serde_json::from_slice(
         &fs::read(root().join("events/anvil_receipt_invalidated.json")).unwrap(),
     )
     .unwrap();
-    assert!(invalidation["invalidation_body_digest"]
-        .as_str()
-        .is_some_and(|digest| digest.starts_with("sha256:") && digest.len() == 71));
+    assert!(
+        invalidation["invalidation_body_digest"]
+            .as_str()
+            .is_some_and(|digest| digest.starts_with("sha256:") && digest.len() == 71)
+    );
 }

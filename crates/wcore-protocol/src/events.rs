@@ -156,6 +156,14 @@ pub enum WorkflowTerminalState {
     Failed,
 }
 
+/// Stable terminal disposition for one child run within a workflow.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkflowChildTerminalState {
+    Succeeded,
+    Failed,
+}
+
 /// Typed, provider-neutral failure evidence for workflow lifecycle events.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WorkflowFailure {
@@ -172,6 +180,7 @@ pub struct WorkflowChildCorrelation {
     pub parent_child_run_id: Option<String>,
     pub child_sequence: u64,
     pub event_id: String,
+    pub terminal_state: Option<WorkflowChildTerminalState>,
 }
 
 /// Complete producer payload for a correlated workflow start.
@@ -403,6 +412,8 @@ pub enum ProtocolEvent {
         parent_child_run_id: Option<String>,
         child_sequence: u64,
         event_id: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        terminal_state: Option<WorkflowChildTerminalState>,
     },
     /// ForgeFlows-Live: a workflow (ForgeFlows / Dynamic Workflows) run
     /// started. Emitted once, before the first node dispatches, so hosts
@@ -410,7 +421,7 @@ pub enum ProtocolEvent {
     /// clean lifecycle signal instead of inferring the run from the first
     /// `workflow:<node_id>`-prefixed `SubAgentEvent`. `workflow_id` is a
     /// stable correlation handle for the run; `name` is the author's display
-    /// name; `node_count` is the number of agent nodes the run will dispatch.
+    /// name; `node_count` is the number of lifecycle nodes in the run graph.
     /// Rides the existing W0-reserved `capabilities.sub_agent_traces` flag
     /// (the same observability surface as `SubAgentEvent`) — no dedicated
     /// capability is added. Hosts that don't recognise the `workflow_started`

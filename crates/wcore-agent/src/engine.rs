@@ -8404,14 +8404,7 @@ impl AgentEngine {
                 // ownership of the plan + spawner and returns them with the
                 // run result so the caller can render the per-stage summary.
                 //
-                let node_count = plan
-                    .graph
-                    .nodes
-                    .iter()
-                    .filter(|(_, node)| {
-                        matches!(node, crate::orchestration::graph::Node::AgentCall { .. })
-                    })
-                    .count();
+                let node_count = plan.graph.nodes.len();
                 let node_ids = plan
                     .graph
                     .nodes
@@ -8485,6 +8478,7 @@ impl AgentEngine {
                         // WorkflowView stays `finished: None` (orange/running)
                         // forever. Emit it here with the SAME `workflow_id` so
                         // the card resolves to "failed".
+                        lifecycle.fail_active_children(&join_err.to_string());
                         lifecycle.finish_remaining();
                         lifecycle.finish(
                             wcore_protocol::events::WorkflowTerminalState::Failed,

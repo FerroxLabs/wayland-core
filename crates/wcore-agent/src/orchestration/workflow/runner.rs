@@ -64,12 +64,13 @@ use super::limits::{self, DispatchBudget};
 use super::meta::WorkflowMeta;
 use super::pipeline;
 use super::schema::{self, WorkflowSchema};
-use crate::agents::channel_sink::{ChannelSink, SubAgentRelay};
+use crate::agents::channel_sink::{ChannelSink, SubAgentRelay, SubAgentTerminalRelay};
 use crate::output::OutputSink;
 use crate::spawner::{AgentSpawner, SpawnExtras, SubAgentConfig, SubAgentResult};
 use wcore_protocol::events::{
-    WorkflowChildCorrelation, WorkflowFailure, WorkflowNodeLifecycle, WorkflowNodeState,
-    WorkflowRunFinished, WorkflowRunStarted, WorkflowTerminalState,
+    ProtocolEvent, WorkflowChildCorrelation, WorkflowChildTerminalState, WorkflowFailure,
+    WorkflowNodeLifecycle, WorkflowNodeState, WorkflowRunFinished, WorkflowRunStarted,
+    WorkflowTerminalState,
 };
 
 /// Default per-stage turn budget. Workflow stages are single-shot
@@ -85,7 +86,9 @@ const DEFAULT_MAX_TOKENS: u32 = 4096;
 #[derive(Debug)]
 struct ChildSequence {
     run_id: String,
+    agent_name: String,
     next_sequence: u64,
+    terminal: Option<WorkflowChildTerminalState>,
 }
 
 #[derive(Debug)]
@@ -199,6 +202,26 @@ impl WorkflowLifecycleEmitter {
     }
 
     pub fn child_event(&self, parent_call_id: &str, agent_name: &str, inner: &Value) {
+        self.emit_child(parent_call_id, agent_name, inner, None);
+    }
+
+    pub fn child_terminal(
+        &self,
+        parent_call_id: &str,
+        agent_name: &str,
+        inner: &Value,
+        terminal_state: WorkflowChildTerminalState,
+    ) {
+        self.emit_child(parent_call_id, agent_name, inner, Some(terminal_state));
+    }
+
+    fn emit_child(
+        &self,
+        parent_call_id: &str,
+        agent_name: &str,
+        inner: &Value,
+        terminal_state: Option<WorkflowChildTerminalState>,
+    ) {
         let mut lifecycle = self
             .state
             .lock()
@@ -206,27 +229,102 @@ impl WorkflowLifecycleEmitter {
         if !lifecycle.started || lifecycle.finished {
             return;
         }
+        if parent_call_id
+            .strip_prefix("workflow:")
+            .is_some_and(|node_id| lifecycle.terminal_nodes.contains(node_id))
+        {
+            return;
+        }
         let child = lifecycle
             .children
             .entry(parent_call_id.to_string())
             .or_insert_with(|| ChildSequence {
                 run_id: uuid::Uuid::new_v4().to_string(),
+                agent_name: agent_name.to_string(),
                 next_sequence: 0,
+                terminal: None,
             });
+        if child.agent_name != agent_name {
+            return;
+        }
+        if child.terminal.is_some() {
+            return;
+        }
         let correlation = WorkflowChildCorrelation {
             run_id: self.run_id.clone(),
             child_run_id: child.run_id.clone(),
             parent_child_run_id: None,
             child_sequence: child.next_sequence,
             event_id: uuid::Uuid::new_v4().to_string(),
+            terminal_state,
         };
         child.next_sequence = child.next_sequence.saturating_add(1);
+        if terminal_state.is_some() {
+            child.terminal = terminal_state;
+        }
         self.output.emit_correlated_sub_agent_event(
             parent_call_id,
             agent_name,
             inner,
             &correlation,
         );
+    }
+
+    /// Terminalize every child whose task disappeared before producing its
+    /// authoritative result. The workflow join-error path calls this before
+    /// closing nodes and the run, so the serialized reducer never observes a
+    /// finished workflow with active child executions.
+    pub fn fail_active_children(&self, message: &str) {
+        let mut lifecycle = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if !lifecycle.started || lifecycle.finished {
+            return;
+        }
+
+        let mut parent_call_ids: Vec<String> = lifecycle
+            .children
+            .iter()
+            .filter(|(_, child)| child.terminal.is_none())
+            .map(|(parent_call_id, _)| parent_call_id.clone())
+            .collect();
+        parent_call_ids.sort_unstable();
+
+        let mut terminals = Vec::with_capacity(parent_call_ids.len());
+        for parent_call_id in parent_call_ids {
+            let Some(child) = lifecycle.children.get_mut(&parent_call_id) else {
+                continue;
+            };
+            let correlation = WorkflowChildCorrelation {
+                run_id: self.run_id.clone(),
+                child_run_id: child.run_id.clone(),
+                parent_child_run_id: None,
+                child_sequence: child.next_sequence,
+                event_id: uuid::Uuid::new_v4().to_string(),
+                terminal_state: Some(WorkflowChildTerminalState::Failed),
+            };
+            child.next_sequence = child.next_sequence.saturating_add(1);
+            child.terminal = Some(WorkflowChildTerminalState::Failed);
+            terminals.push((parent_call_id, child.agent_name.clone(), correlation));
+        }
+
+        let inner = serde_json::json!({
+            "type": "error",
+            "error": {
+                "code": "workflow_task_interrupted",
+                "message": message,
+                "retryable": false
+            }
+        });
+        for (parent_call_id, agent_name, correlation) in terminals {
+            self.output.emit_correlated_sub_agent_event(
+                &parent_call_id,
+                &agent_name,
+                &inner,
+                &correlation,
+            );
+        }
     }
 
     pub fn finish_remaining(&self) {
@@ -1022,6 +1120,11 @@ impl<'a> WorkflowRunner<'a> {
                                 }),
                             });
                         }
+                        self.emit_logical_child_terminal(
+                            &id,
+                            WorkflowChildTerminalState::Failed,
+                            &result.text,
+                        );
                         self.emit_node_state(
                             &id,
                             WorkflowNodeState::Failed,
@@ -1067,14 +1170,20 @@ impl<'a> WorkflowRunner<'a> {
                                     }),
                                 });
                             }
+                            let message = format!(
+                                "workflow dispatch budget exceeded at dispatch {attempted}"
+                            );
+                            self.emit_logical_child_terminal(
+                                &id,
+                                WorkflowChildTerminalState::Failed,
+                                &message,
+                            );
                             self.emit_node_state(
                                 &id,
                                 WorkflowNodeState::Failed,
                                 Some(WorkflowFailure {
                                     code: "dispatch_budget_exceeded".to_string(),
-                                    message: format!(
-                                        "workflow dispatch budget exceeded at dispatch {attempted}"
-                                    ),
+                                    message,
                                     retryable: false,
                                 }),
                             );
@@ -1102,6 +1211,11 @@ impl<'a> WorkflowRunner<'a> {
                                     }),
                                 });
                             }
+                            self.emit_logical_child_terminal(
+                                &id,
+                                WorkflowChildTerminalState::Failed,
+                                &message,
+                            );
                             self.emit_node_state(
                                 &id,
                                 WorkflowNodeState::Failed,
@@ -1124,6 +1238,11 @@ impl<'a> WorkflowRunner<'a> {
                         is_error: false,
                         turns: result.turns,
                     });
+                    self.emit_logical_child_terminal(
+                        &id,
+                        WorkflowChildTerminalState::Succeeded,
+                        &format!("Sub-agent '{id}' completed successfully"),
+                    );
                     self.emit_node_state(&id, WorkflowNodeState::Succeeded, None);
                     // The id originates from a node the wave just dispatched, so
                     // it is always present in `node_map`. Use the same defensive
@@ -1322,18 +1441,26 @@ impl<'a> WorkflowRunner<'a> {
             Some(s) => format!("{base}\n\n{s}"),
             None => base,
         };
-        self.spawner
-            .spawn_one(SubAgentConfig {
-                name: id.to_string(),
-                prompt,
-                max_turns: node_turn_budget(&plan.graph, id),
-                max_tokens: node_token_budget(&plan.graph, id),
-                system_prompt: None,
-                provider: node_provider(&plan.graph, id),
-                model: node_pinned_model(&plan.graph, id),
-                temperature: None,
-            })
-            .await
+        let config = SubAgentConfig {
+            name: id.to_string(),
+            prompt,
+            max_turns: node_turn_budget(&plan.graph, id),
+            max_tokens: node_token_budget(&plan.graph, id),
+            system_prompt: None,
+            provider: node_provider(&plan.graph, id),
+            model: node_pinned_model(&plan.graph, id),
+            temperature: None,
+        };
+        if self.parent_output.is_some() {
+            return self
+                .dispatch_via_relay(vec![(id.to_string(), config)], None)
+                .await
+                .into_iter()
+                .next()
+                .map(|(_, result)| result)
+                .unwrap_or_else(|| SubAgentResult::error(id, "retry dispatch returned no result"));
+        }
+        self.spawner.spawn_one(config).await
     }
 
     /// Dispatch a sub-wave of `AgentCall` nodes. Returns `(node_id, result)`
@@ -1386,7 +1513,7 @@ impl<'a> WorkflowRunner<'a> {
             // reach the parent. `dispatch_via_relay` handles N==1 as a fan-out
             // of one. When `None`, keep the legacy `spawn_one` (NullSink) path.
             if self.parent_output.is_some() {
-                return self.dispatch_via_relay(configs).await;
+                return self.dispatch_via_relay(configs, None).await;
             }
             let (id, cfg) = configs.into_iter().next().expect("len checked == 1");
             let result = self.spawner.spawn_one(cfg).await;
@@ -1420,7 +1547,7 @@ impl<'a> WorkflowRunner<'a> {
         // a parent, fall through to `SpawnExtras::default()` (NullSink) so the
         // legacy unmonitored path is byte-for-byte unchanged.
         if self.parent_output.is_some() {
-            return self.dispatch_via_relay(configs).await;
+            return self.dispatch_via_relay(configs, None).await;
         }
         let ids: Vec<String> = configs.iter().map(|(id, _)| id.clone()).collect();
         let tasks: Vec<(SubAgentConfig, SpawnExtras)> = configs
@@ -1436,17 +1563,18 @@ impl<'a> WorkflowRunner<'a> {
 
     /// ForgeFlows-Live Phase 1 — relay fan-out that mirrors
     /// [`crate::spawn_tool::SpawnTool::spawn_with_relay`]: build one shared
-    /// stream-drain channel, a dedicated lifecycle channel per task, per-task
+    /// stream-drain channel, a dedicated terminal channel per task, per-task
     /// [`SpawnExtras`] carrying a `ChannelSink` keyed by `workflow:<node_id>`,
     /// dispatch via `spawn_parallel_with_per_task_extras`, then flush the
-    /// lifecycle receivers AFTER the stream drain (W5.5 H-1: terminal
-    /// Done/Failed events survive a full stream channel). Results return in
+    /// terminal receivers after the stream drain. Typed Done/Failed events
+    /// survive a full stream channel. Results return in
     /// input order, so a positional zip back to the node ids is correct.
     ///
     /// PRECONDITION: only called when `self.parent_output.is_some()`.
     async fn dispatch_via_relay(
         &self,
         configs: Vec<(String, SubAgentConfig)>,
+        fleet_run_id: Option<String>,
     ) -> Vec<(String, SubAgentResult)> {
         // SAFETY: guarded by every caller — only invoked when the parent sink
         // is wired (mirrors `SpawnTool::spawn_with_relay`'s precondition).
@@ -1464,36 +1592,36 @@ impl<'a> WorkflowRunner<'a> {
             crate::agents::channel_sink::CHANNEL_CAPACITY,
         );
 
-        // W5.5 H-1: one dedicated lifecycle channel per task. Collected as a Vec
-        // of receivers so we can flush them after the stream drain.
-        let mut lifecycle_rxs: Vec<tokio::sync::mpsc::Receiver<SubAgentRelay>> =
+        // One dedicated authoritative terminal channel per task.
+        let mut terminal_rxs: Vec<tokio::sync::mpsc::Receiver<SubAgentTerminalRelay>> =
             Vec::with_capacity(configs.len());
 
         // Build per-task SpawnExtras with a distinct parent_call_id + ChannelSink.
-        let tasks: Vec<(SubAgentConfig, SpawnExtras)> = configs
-            .into_iter()
-            .map(|(id, cfg)| {
-                // Unique id per node — the bridge keys SubAgentView on this.
-                let parent_call_id = format!("workflow:{id}");
-                // W5.5 H-1: dedicated lifecycle channel (capacity 2, never shared).
-                let (ltx, lrx) = tokio::sync::mpsc::channel::<SubAgentRelay>(
-                    crate::agents::channel_sink::LIFECYCLE_CAPACITY,
-                );
-                lifecycle_rxs.push(lrx);
-                let sink = Arc::new(ChannelSink::new_with_lifecycle(
-                    parent_call_id.clone(),
-                    cfg.name.clone(),
-                    tx.clone(),
-                    ltx,
-                ));
-                let extras = SpawnExtras {
-                    channel_sink: Some(sink),
-                    agent_name: Some(cfg.name.clone()),
-                    parent_call_id: Some(parent_call_id),
-                };
-                (cfg, extras)
-            })
-            .collect();
+        let tasks: Vec<(SubAgentConfig, SpawnExtras)> =
+            configs
+                .into_iter()
+                .map(|(id, cfg)| {
+                    // Unique id per node — the bridge keys SubAgentView on this.
+                    let parent_call_id = format!("workflow:{id}");
+                    let (terminal_tx, terminal_rx) =
+                        tokio::sync::mpsc::channel::<SubAgentTerminalRelay>(
+                            crate::agents::channel_sink::TERMINAL_CAPACITY,
+                        );
+                    terminal_rxs.push(terminal_rx);
+                    let sink = Arc::new(ChannelSink::new_with_terminal(
+                        parent_call_id.clone(),
+                        cfg.name.clone(),
+                        tx.clone(),
+                        terminal_tx,
+                    ));
+                    let extras = SpawnExtras {
+                        channel_sink: Some(sink),
+                        agent_name: Some(cfg.name.clone()),
+                        parent_call_id: Some(parent_call_id),
+                    };
+                    (cfg, extras)
+                })
+                .collect();
 
         // Drop the original tx so the drain exits when all per-task senders drop.
         drop(tx);
@@ -1515,23 +1643,29 @@ impl<'a> WorkflowRunner<'a> {
             }
         });
 
-        let results = self
-            .spawner
-            .spawn_parallel_with_per_task_extras(tasks)
-            .await;
+        let fleet_dispatched = fleet_run_id.is_some();
+        let results = if let Some(run_id) = fleet_run_id {
+            self.spawner
+                .spawn_via_fleet_with_per_task_extras(tasks, run_id)
+                .await
+        } else {
+            self.spawner
+                .spawn_parallel_with_per_task_extras(tasks)
+                .await
+        };
 
         // Wait for the stream drain to flush all pending stream relays. Every
         // per-task ChannelSink has been dropped by now (all tasks completed), so
         // rx.recv() returns None and the drain task exits promptly.
         let _ = drain.await;
 
-        // W5.5 H-1: flush lifecycle events AFTER the stream drain. The terminal
-        // Done/Failed event for each task sits in its dedicated lifecycle channel.
-        for mut lrx in lifecycle_rxs {
-            while let Some(relay) = lrx.recv().await {
-                if let Some(lifecycle) = &self.lifecycle {
-                    lifecycle.child_event(&relay.parent_call_id, &relay.agent_name, &relay.inner);
-                } else {
+        // Drain attempt-level terminals after the best-effort stream. Workflow
+        // mode deliberately suppresses them: the caller emits one authoritative
+        // logical-child terminal only after schema validation and retries finish.
+        for mut terminal_rx in terminal_rxs {
+            while let Some(terminal) = terminal_rx.recv().await {
+                let SubAgentTerminalRelay { relay, .. } = terminal;
+                if self.lifecycle.is_none() {
                     parent_output.emit_sub_agent_event(
                         &relay.parent_call_id,
                         &relay.agent_name,
@@ -1541,7 +1675,48 @@ impl<'a> WorkflowRunner<'a> {
             }
         }
 
-        ids.into_iter().zip(results).collect()
+        if fleet_dispatched {
+            Self::correlate_fleet_results(ids, results)
+        } else {
+            ids.into_iter().zip(results).collect()
+        }
+    }
+
+    /// Close the workflow-visible logical child only after all schema retries
+    /// and node-level validation have resolved. Per-attempt engine terminals
+    /// are drained by `dispatch_via_relay` but deliberately not published into
+    /// the workflow lifecycle; otherwise attempt zero could claim success while
+    /// a later correction attempt was still running or ultimately failed.
+    fn emit_logical_child_terminal(
+        &self,
+        node_id: &str,
+        terminal_state: WorkflowChildTerminalState,
+        message: &str,
+    ) {
+        let Some(lifecycle) = &self.lifecycle else {
+            return;
+        };
+        let inner = match terminal_state {
+            WorkflowChildTerminalState::Succeeded => serde_json::to_value(ProtocolEvent::Info {
+                msg_id: format!("workflow:{node_id}:terminal"),
+                message: message.to_owned(),
+            })
+            .expect("ProtocolEvent::Info must serialize"),
+            WorkflowChildTerminalState::Failed => serde_json::json!({
+                "type": "error",
+                "error": {
+                    "code": "sub_agent_error",
+                    "message": message,
+                    "retryable": false
+                }
+            }),
+        };
+        lifecycle.child_terminal(
+            &format!("workflow:{node_id}"),
+            node_id,
+            &inner,
+            terminal_state,
+        );
     }
 
     /// Fleet-sharded fan-out (> [`FLEET_FANOUT_THRESHOLD`] siblings): route the
@@ -1565,9 +1740,19 @@ impl<'a> WorkflowRunner<'a> {
         // The fleet run_id seeds the `fleet:<run_id>-shard-<i>-<j>` parent_call_id
         // tag; a workflow-scoped label keeps it distinguishable on the bus.
         let run_id = format!("workflow-fanout-{}", ids.len());
+        if self.parent_output.is_some() {
+            return self.dispatch_via_relay(configs, Some(run_id)).await;
+        }
         let sub_configs: Vec<SubAgentConfig> = configs.into_iter().map(|(_, cfg)| cfg).collect();
         let results = self.spawner.spawn_via_fleet(sub_configs, run_id).await;
 
+        Self::correlate_fleet_results(ids, results)
+    }
+
+    fn correlate_fleet_results(
+        ids: Vec<String>,
+        results: Vec<SubAgentResult>,
+    ) -> Vec<(String, SubAgentResult)> {
         // Index results by name so each node id picks up its own result
         // regardless of shard ordering. A name can in principle repeat across
         // results only if two nodes shared an id, which the graph forbids.
@@ -2021,6 +2206,7 @@ mod tests {
     #[derive(Default)]
     struct LifecycleCapture {
         events: Mutex<Vec<CapturedLifecycle>>,
+        children: Mutex<Vec<WorkflowChildCorrelation>>,
     }
 
     impl OutputSink for LifecycleCapture {
@@ -2049,6 +2235,19 @@ mod tests {
         fn emit_error(&self, _msg: &str, _retryable: bool) {}
 
         fn emit_info(&self, _msg: &str) {}
+
+        fn emit_correlated_sub_agent_event(
+            &self,
+            _parent_call_id: &str,
+            _agent_name: &str,
+            _inner: &Value,
+            correlation: &WorkflowChildCorrelation,
+        ) {
+            self.children
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .push(correlation.clone());
+        }
 
         fn emit_correlated_workflow_started(&self, event: &WorkflowRunStarted) {
             self.events
@@ -2198,6 +2397,22 @@ Workflow(
         );
 
         lifecycle.node_event("scan", WorkflowNodeState::Queued, None);
+        lifecycle.child_event(
+            "workflow:scan",
+            "scan",
+            &serde_json::json!({"type": "stream_start"}),
+        );
+        lifecycle.child_terminal(
+            "workflow:scan",
+            "scan",
+            &serde_json::json!({"type": "info"}),
+            WorkflowChildTerminalState::Succeeded,
+        );
+        lifecycle.child_event(
+            "workflow:scan",
+            "scan",
+            &serde_json::json!({"type": "text_delta"}),
+        );
         lifecycle.node_event("scan", WorkflowNodeState::Succeeded, None);
         assert_eq!(
             lifecycle
@@ -2232,21 +2447,15 @@ Workflow(
             assert_eq!(state.terminal_nodes.len(), 2);
         }
 
-        lifecycle.child_event(
-            "workflow:scan",
-            "scan",
-            &serde_json::json!({"type": "stream_start"}),
-        );
-        lifecycle.child_event(
-            "workflow:scan",
-            "scan",
-            &serde_json::json!({"type": "stream_end"}),
-        );
         let state = lifecycle
             .state
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         assert_eq!(state.children["workflow:scan"].next_sequence, 2);
+        assert_eq!(
+            state.children["workflow:scan"].terminal,
+            Some(WorkflowChildTerminalState::Succeeded)
+        );
         drop(state);
 
         lifecycle.finish(WorkflowTerminalState::Succeeded, None);
@@ -2273,6 +2482,54 @@ Workflow(
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         assert_eq!(state.next_sequence, 5);
         assert_eq!(state.children["workflow:scan"].next_sequence, 2);
+    }
+
+    #[test]
+    fn interrupted_workflow_terminalizes_active_children_before_finish() {
+        let capture = Arc::new(LifecycleCapture::default());
+        let output: Arc<dyn OutputSink> = capture.clone();
+        let lifecycle = WorkflowLifecycleEmitter::new(
+            output,
+            "audit".to_string(),
+            "Audit".to_string(),
+            1,
+            vec!["scan".to_string()],
+        );
+        lifecycle.start();
+        lifecycle.node_event("scan", WorkflowNodeState::Running, None);
+        lifecycle.child_event(
+            "workflow:scan",
+            "scan",
+            &serde_json::json!({"type": "text_delta"}),
+        );
+
+        lifecycle.fail_active_children("workflow task panicked");
+        lifecycle.finish_remaining();
+        lifecycle.finish(WorkflowTerminalState::Failed, None);
+
+        let state = lifecycle
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        assert_eq!(
+            state.children["workflow:scan"].terminal,
+            Some(WorkflowChildTerminalState::Failed)
+        );
+        assert_eq!(state.children["workflow:scan"].next_sequence, 2);
+        assert!(state.terminal_nodes.contains("scan"));
+        assert!(state.finished);
+        drop(state);
+
+        let children = capture
+            .children
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        assert_eq!(children.len(), 2);
+        assert_eq!(children[0].terminal_state, None);
+        assert_eq!(
+            children[1].terminal_state,
+            Some(WorkflowChildTerminalState::Failed)
+        );
     }
 
     #[test]

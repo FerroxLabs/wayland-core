@@ -13,17 +13,14 @@
 //! existing "receiver gone → drop silently" semantics already covered
 //! by the `channel_sink_drops_silently_when_receiver_gone` test.
 //!
-//! W5.5 H-1 RELIABILITY: lifecycle events (Done/Failed terminal signals
-//! emitted via `emit_info`/`emit_error`) bypass the bounded stream
-//! channel and travel through a dedicated `lifecycle_tx` channel
-//! (capacity [`LIFECYCLE_CAPACITY`]). This channel is never shared with
-//! stream events, so a chatty 256-event sub-agent cannot exhaust it.
-//! The drain in `spawn_with_relay` flushes lifecycle events AFTER the
-//! main stream drain — guaranteed delivery regardless of stream volume.
+//! Workflow child terminals never share the diagnostic stream. The spawner
+//! emits exactly one typed [`SubAgentTerminalRelay`] after the child result is
+//! known; ordinary `Info`/`Error` diagnostics remain ordered with stream data.
 
 use serde_json::Value;
+use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::sync::mpsc;
-use wcore_protocol::events::{ErrorInfo, ProtocolEvent};
+use wcore_protocol::events::{ErrorInfo, ProtocolEvent, WorkflowChildTerminalState};
 use wcore_tools::ToolOutputSink;
 use wcore_types::message::FinishReason;
 
@@ -32,15 +29,12 @@ use crate::output::OutputSink;
 /// Wave RA — bounded ChannelSink capacity. 256 is small enough to apply
 /// backpressure (and shed load when the parent consumer is slow) and
 /// large enough that normal sub-agent emission never trips the limit
-/// during a turn. Documented as drop-oldest-on-full semantics via
+/// during a turn. Documented as drop-new-on-full semantics via
 /// `try_send` (see file-level docs).
 pub const CHANNEL_CAPACITY: usize = 256;
 
-/// W5.5 H-1 — dedicated lifecycle lane capacity. One terminal event per
-/// sub-agent task (Done OR Failed), never more. Capacity 2 ensures
-/// try_send never fails even if a second lifecycle event is fired
-/// defensively (e.g. both emit_info AND emit_error from a buggy caller).
-pub const LIFECYCLE_CAPACITY: usize = 2;
+/// Exactly one terminal is emitted per child result.
+pub const TERMINAL_CAPACITY: usize = 1;
 
 /// One unit of relay-back to the parent. The parent engine wraps each
 /// of these in a `ProtocolEvent::SubAgentEvent` and emits via its
@@ -53,22 +47,27 @@ pub struct SubAgentRelay {
     pub inner: Value,
 }
 
+/// One authoritative child terminal, separate from best-effort diagnostics.
+#[derive(Debug, Clone)]
+pub struct SubAgentTerminalRelay {
+    pub relay: SubAgentRelay,
+    pub terminal_state: WorkflowChildTerminalState,
+}
+
 pub struct ChannelSink {
     parent_call_id: String,
     agent_name: String,
     /// Stream events (best-effort, drops on full).
     tx: mpsc::Sender<SubAgentRelay>,
-    /// W5.5 H-1: Lifecycle events (guaranteed delivery). When `Some`,
-    /// `emit_info` and `emit_error` route through this channel instead
-    /// of `tx`. Capacity [`LIFECYCLE_CAPACITY`] is never exhausted by
-    /// stream events, so the terminal Done/Failed signal always lands.
-    lifecycle_tx: Option<mpsc::Sender<SubAgentRelay>>,
+    /// Authoritative once-only terminal lane. Diagnostics never enter it.
+    terminal_tx: Option<mpsc::Sender<SubAgentTerminalRelay>>,
+    terminal_sent: AtomicBool,
 }
 
 impl ChannelSink {
     /// Standard constructor — no dedicated lifecycle lane. `emit_info` /
     /// `emit_error` fall through to the shared `tx` (best-effort). Use
-    /// [`ChannelSink::new_with_lifecycle`] for production relay paths
+    /// [`ChannelSink::new_with_terminal`] for production relay paths
     /// where the terminal event must survive channel backpressure.
     pub fn new(
         parent_call_id: String,
@@ -79,24 +78,24 @@ impl ChannelSink {
             parent_call_id,
             agent_name,
             tx,
-            lifecycle_tx: None,
+            terminal_tx: None,
+            terminal_sent: AtomicBool::new(false),
         }
     }
 
-    /// W5.5 H-1 constructor: attach a dedicated lifecycle channel.
-    /// `spawn_with_relay` uses this so terminal events are never dropped
-    /// under backpressure from chatty stream traffic.
-    pub fn new_with_lifecycle(
+    /// Attach the dedicated terminal channel used by production relay paths.
+    pub fn new_with_terminal(
         parent_call_id: String,
         agent_name: String,
         tx: mpsc::Sender<SubAgentRelay>,
-        lifecycle_tx: mpsc::Sender<SubAgentRelay>,
+        terminal_tx: mpsc::Sender<SubAgentTerminalRelay>,
     ) -> Self {
         Self {
             parent_call_id,
             agent_name,
             tx,
-            lifecycle_tx: Some(lifecycle_tx),
+            terminal_tx: Some(terminal_tx),
+            terminal_sent: AtomicBool::new(false),
         }
     }
 
@@ -116,32 +115,41 @@ impl ChannelSink {
         });
     }
 
-    /// W5.5 H-1: relay a lifecycle (terminal) event through the dedicated
-    /// lifecycle channel when available; fall back to the shared channel.
-    /// The dedicated channel has capacity [`LIFECYCLE_CAPACITY`] and is
-    /// never filled by stream events, so `try_send` here should never fail
-    /// in practice. We still fall back rather than panic on the remote chance
-    /// of a double-terminal call.
-    fn relay_lifecycle(&self, event: ProtocolEvent) {
+    /// Emit the single authoritative terminal after the child result is known.
+    /// There is deliberately no stream fallback: a terminal that can reorder
+    /// behind diagnostics is not authoritative evidence.
+    pub fn relay_terminal(&self, terminal_state: WorkflowChildTerminalState, message: &str) {
+        if self.terminal_sent.swap(true, Ordering::AcqRel) {
+            return;
+        }
+        let event = match terminal_state {
+            WorkflowChildTerminalState::Succeeded => ProtocolEvent::Info {
+                msg_id: String::new(),
+                message: message.to_owned(),
+            },
+            WorkflowChildTerminalState::Failed => ProtocolEvent::Error {
+                msg_id: None,
+                error: ErrorInfo {
+                    code: "sub_agent_error".to_owned(),
+                    message: message.to_owned(),
+                    retryable: false,
+                },
+            },
+        };
         let inner = match serde_json::to_value(&event) {
             Ok(v) => v,
             Err(_) => return,
         };
-        let relay = SubAgentRelay {
-            parent_call_id: self.parent_call_id.clone(),
-            agent_name: self.agent_name.clone(),
-            inner,
-        };
-        if let Some(ref ltx) = self.lifecycle_tx {
-            // Dedicated lane: always has room (capacity 2, 1 event per task).
-            // If try_send somehow fails (e.g. receiver gone), fall through to
-            // the stream channel rather than silently dropping the event.
-            if ltx.try_send(relay.clone()).is_ok() {
-                return;
-            }
+        if let Some(tx) = &self.terminal_tx {
+            let _ = tx.try_send(SubAgentTerminalRelay {
+                relay: SubAgentRelay {
+                    parent_call_id: self.parent_call_id.clone(),
+                    agent_name: self.agent_name.clone(),
+                    inner,
+                },
+                terminal_state,
+            });
         }
-        // Fallback: shared stream channel (best-effort, same as before W5.5).
-        let _ = self.tx.try_send(relay);
     }
 }
 
@@ -200,11 +208,9 @@ impl OutputSink for ChannelSink {
         // SubAgentStatus::Failed (not Done). Previously relayed Info, causing a
         // crashed sub-agent to appear green/Done in the UI strip.
         //
-        // W5.5 H-1: routes through relay_lifecycle (guaranteed delivery lane).
-        // Carry the caller's retryable flag through so a transient sub-agent
-        // failure (e.g. a provider 5xx) reaches the parent/host as retryable,
-        // not a hardcoded false (matches the ProtocolSink contract).
-        self.relay_lifecycle(ProtocolEvent::Error {
+        // Engine errors can be retry diagnostics. The spawner publishes the
+        // only authoritative child terminal after the final result is known.
+        self.relay(ProtocolEvent::Error {
             msg_id: None,
             error: ErrorInfo {
                 code: "sub_agent_error".to_string(),
@@ -214,10 +220,7 @@ impl OutputSink for ChannelSink {
         });
     }
     fn emit_info(&self, msg: &str) {
-        // W5.5 H-1: terminal Done signal routes through the guaranteed
-        // lifecycle lane so it survives channel backpressure from a chatty
-        // sub-agent that filled the 256-event stream buffer.
-        self.relay_lifecycle(ProtocolEvent::Info {
+        self.relay(ProtocolEvent::Info {
             msg_id: String::new(),
             message: msg.to_string(),
         });
@@ -319,22 +322,20 @@ mod tests {
         sink.emit_text_delta("c", "m"); // must not block / panic
     }
 
-    /// W5.5 H-1 regression: when the stream channel is full, the lifecycle
-    /// event (emit_info) must still be received via the dedicated lifecycle
-    /// channel. This is the specific scenario where a chatty sub-agent fills
-    /// the 256-event buffer before the terminal Done signal arrives.
+    /// A chatty child cannot crowd its authoritative terminal out of the
+    /// dedicated terminal lane.
     #[tokio::test]
-    async fn lifecycle_event_survives_full_stream_channel_w55_h1() {
+    async fn terminal_success_survives_full_stream_channel() {
         // Stream channel capacity 2 so we can fill it without 256 events.
         let (stream_tx, _stream_rx) = mpsc::channel::<SubAgentRelay>(2);
-        // Lifecycle channel capacity 2 (LIFECYCLE_CAPACITY).
-        let (lifecycle_tx, mut lifecycle_rx) = mpsc::channel::<SubAgentRelay>(LIFECYCLE_CAPACITY);
+        let (terminal_tx, mut terminal_rx) =
+            mpsc::channel::<SubAgentTerminalRelay>(TERMINAL_CAPACITY);
 
-        let sink = ChannelSink::new_with_lifecycle(
+        let sink = ChannelSink::new_with_terminal(
             "spawn:0:chatty".into(),
             "chatty".into(),
             stream_tx,
-            lifecycle_tx,
+            terminal_tx,
         );
 
         // Fill the stream channel to capacity (simulate chatty sub-agent).
@@ -343,67 +344,55 @@ mod tests {
         // Stream channel is now full. A third stream event drops silently.
         sink.emit_text_delta("delta-3-dropped", "m");
 
-        // The terminal lifecycle event MUST still arrive despite the full
-        // stream channel, because it uses the dedicated lifecycle lane.
-        sink.emit_info("sub-agent 'chatty' completed (3 turns)");
+        // Diagnostics remain on the full best-effort stream.
+        sink.emit_info("retrying provider");
+        sink.emit_error("transient provider failure", true);
+        sink.relay_terminal(
+            WorkflowChildTerminalState::Succeeded,
+            "sub-agent 'chatty' completed (3 turns)",
+        );
 
-        // Drain from the lifecycle channel — must receive exactly one event.
-        let event = lifecycle_rx
+        let event = terminal_rx
             .recv()
             .await
-            .expect("W5.5 H-1: terminal info event must arrive on lifecycle channel even when stream channel is full");
-        assert_eq!(
-            event.inner["type"], "info",
-            "lifecycle event must be type 'info' (the Done signal)"
-        );
-        assert_eq!(event.parent_call_id, "spawn:0:chatty");
+            .expect("terminal must arrive even when the stream is full");
+        assert_eq!(event.terminal_state, WorkflowChildTerminalState::Succeeded);
+        assert_eq!(event.relay.inner["type"], "info");
+        assert_eq!(event.relay.parent_call_id, "spawn:0:chatty");
 
-        // No second event (only one terminal event per task).
-        let second = lifecycle_rx.try_recv();
-        assert!(
-            second.is_err(),
-            "lifecycle channel must have exactly one event, not more"
-        );
+        sink.relay_terminal(WorkflowChildTerminalState::Failed, "late contradiction");
+        assert!(terminal_rx.try_recv().is_err());
     }
 
-    /// W5.5 H-1 regression: failed sub-agent terminal event (emit_error)
-    /// also survives full stream channel via the lifecycle lane.
+    /// Failed child results use the same isolated, typed terminal lane.
     #[tokio::test]
-    async fn lifecycle_error_survives_full_stream_channel_w55_h1() {
+    async fn terminal_failure_survives_full_stream_channel() {
         let (stream_tx, _stream_rx) = mpsc::channel::<SubAgentRelay>(2);
-        let (lifecycle_tx, mut lifecycle_rx) = mpsc::channel::<SubAgentRelay>(LIFECYCLE_CAPACITY);
+        let (terminal_tx, mut terminal_rx) =
+            mpsc::channel::<SubAgentTerminalRelay>(TERMINAL_CAPACITY);
 
-        let sink = ChannelSink::new_with_lifecycle(
+        let sink = ChannelSink::new_with_terminal(
             "spawn:0:failed".into(),
             "failed".into(),
             stream_tx,
-            lifecycle_tx,
+            terminal_tx,
         );
 
         // Fill the stream channel.
         sink.emit_text_delta("a", "m");
         sink.emit_text_delta("b", "m");
-        // Stream now full. Terminal error must still arrive. Pass retryable=true
-        // so the assertion below proves the flag is THREADED, not hardcoded.
+        // A retry diagnostic remains best-effort and is not a terminal.
         sink.emit_error("engine crashed", true);
+        sink.relay_terminal(WorkflowChildTerminalState::Failed, "engine crashed");
 
-        let event = lifecycle_rx
+        let event = terminal_rx
             .recv()
             .await
-            .expect("W5.5 H-1: terminal error event must arrive via lifecycle lane");
-        assert_eq!(
-            event.inner["type"], "error",
-            "emit_error must relay an 'error' type event so bridge sets Failed"
-        );
-        // Confirm error message is carried.
-        let msg = event.inner["error"]["message"].as_str().unwrap_or("");
+            .expect("failed terminal must arrive via terminal lane");
+        assert_eq!(event.terminal_state, WorkflowChildTerminalState::Failed);
+        assert_eq!(event.relay.inner["type"], "error");
+        let msg = event.relay.inner["error"]["message"].as_str().unwrap_or("");
         assert_eq!(msg, "engine crashed");
-        // Regression (audit finding): the relayed error must carry the caller's
-        // `retryable` flag, not a hardcoded false — so a transient sub-agent
-        // failure reaches the parent/host as retryable.
-        assert_eq!(
-            event.inner["error"]["retryable"], true,
-            "ChannelSink must relay the caller's retryable flag, not hardcode false"
-        );
+        assert_eq!(event.relay.inner["error"]["retryable"], false);
     }
 }

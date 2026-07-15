@@ -123,6 +123,7 @@ fn golden_correlated_sub_agent_event() {
         parent_child_run_id: None,
         child_sequence: 0,
         event_id: "child-event-0".into(),
+        terminal_state: None,
     };
     let got = serde_json::to_value(event).unwrap();
     assert_eq!(got["type"], "sub_agent_event");
