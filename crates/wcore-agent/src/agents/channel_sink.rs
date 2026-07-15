@@ -124,11 +124,11 @@ impl ChannelSink {
         }
         let event = match terminal_state {
             WorkflowChildTerminalState::Succeeded => ProtocolEvent::Info {
-                msg_id: String::new(),
+                msg_id: format!("{}:terminal", self.parent_call_id),
                 message: message.to_owned(),
             },
             WorkflowChildTerminalState::Failed => ProtocolEvent::Error {
-                msg_id: None,
+                msg_id: Some(format!("{}:terminal", self.parent_call_id)),
                 error: ErrorInfo {
                     code: "sub_agent_error".to_owned(),
                     message: message.to_owned(),
@@ -136,11 +136,11 @@ impl ChannelSink {
                 },
             },
         };
-        let inner = match serde_json::to_value(&event) {
-            Ok(v) => v,
-            Err(_) => return,
-        };
         if let Some(tx) = &self.terminal_tx {
+            let inner = match serde_json::to_value(&event) {
+                Ok(v) => v,
+                Err(_) => return,
+            };
             let _ = tx.try_send(SubAgentTerminalRelay {
                 relay: SubAgentRelay {
                     parent_call_id: self.parent_call_id.clone(),
@@ -149,6 +149,11 @@ impl ChannelSink {
                 },
                 terminal_state,
             });
+        } else {
+            // Compatibility constructors predate the dedicated lifecycle lane.
+            // Keep their terminal observable on the best-effort stream without
+            // weakening production paths, which always use `new_with_terminal`.
+            self.relay(event);
         }
     }
 }
@@ -358,10 +363,25 @@ mod tests {
             .expect("terminal must arrive even when the stream is full");
         assert_eq!(event.terminal_state, WorkflowChildTerminalState::Succeeded);
         assert_eq!(event.relay.inner["type"], "info");
+        assert_eq!(event.relay.inner["msg_id"], "spawn:0:chatty:terminal");
         assert_eq!(event.relay.parent_call_id, "spawn:0:chatty");
 
         sink.relay_terminal(WorkflowChildTerminalState::Failed, "late contradiction");
         assert!(terminal_rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn legacy_constructor_relays_terminal_on_stream() {
+        let (tx, mut rx) = mpsc::channel(CHANNEL_CAPACITY);
+        let sink = ChannelSink::new("spawn:0:legacy".into(), "legacy".into(), tx);
+        sink.relay_terminal(WorkflowChildTerminalState::Succeeded, "completed");
+
+        let relay = rx
+            .recv()
+            .await
+            .expect("legacy terminal must remain visible");
+        assert_eq!(relay.inner["type"], "info");
+        assert_eq!(relay.inner["msg_id"], "spawn:0:legacy:terminal");
     }
 
     /// Failed child results use the same isolated, typed terminal lane.

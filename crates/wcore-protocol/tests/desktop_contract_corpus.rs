@@ -42,6 +42,13 @@ fn schema_accepts(schema: &Value, instance: &Value) -> bool {
             return false;
         }
     }
+    if let Some(minimum) = schema.get("minLength").and_then(Value::as_u64)
+        && instance
+            .as_str()
+            .is_some_and(|value| value.chars().count() < minimum as usize)
+    {
+        return false;
+    }
     if let Some(required) = schema.get("required").and_then(Value::as_array) {
         let Some(object) = instance.as_object() else {
             return false;
@@ -347,6 +354,8 @@ fn generated_schemas_reject_malformed_authority_types_and_enums() {
         .as_object_mut()
         .unwrap()
         .remove("msg_id");
+    assert!(!schema_accepts(&event_schema, &child_terminal));
+    child_terminal["inner"]["msg_id"] = Value::String(String::new());
     assert!(!schema_accepts(&event_schema, &child_terminal));
 }
 

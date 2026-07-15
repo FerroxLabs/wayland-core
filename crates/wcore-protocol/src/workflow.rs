@@ -116,6 +116,10 @@ pub enum WorkflowReplayError {
         run_id: String,
         node_ids: Vec<String>,
     },
+    SuccessfulRunHasFailedChildren {
+        run_id: String,
+        child_run_ids: Vec<String>,
+    },
     ChildrenStillActive {
         run_id: String,
         child_run_ids: Vec<String>,
@@ -234,6 +238,14 @@ impl fmt::Display for WorkflowReplayError {
                 formatter,
                 "workflow run {run_id} succeeded with failed nodes: {}",
                 node_ids.join(", ")
+            ),
+            Self::SuccessfulRunHasFailedChildren {
+                run_id,
+                child_run_ids,
+            } => write!(
+                formatter,
+                "workflow run {run_id} succeeded with failed children: {}",
+                child_run_ids.join(", ")
             ),
             Self::ChildrenStillActive {
                 run_id,
@@ -609,6 +621,21 @@ impl WorkflowReplayReducer {
             });
         }
         validate_completed_child_links(run_id, run)?;
+        if terminal_state == WorkflowTerminalState::Succeeded {
+            let mut failed_children: Vec<String> = run
+                .children
+                .iter()
+                .filter(|(_, child)| child.terminal == Some(WorkflowChildTerminalState::Failed))
+                .map(|(child_run_id, _)| child_run_id.clone())
+                .collect();
+            if !failed_children.is_empty() {
+                failed_children.sort_unstable();
+                return Err(WorkflowReplayError::SuccessfulRunHasFailedChildren {
+                    run_id: run_id.to_owned(),
+                    child_run_ids: failed_children,
+                });
+            }
+        }
         run.next_sequence = run.next_sequence.saturating_add(1);
         run.terminal = Some(terminal_state);
         Ok(WorkflowReplayAcceptance::Advanced)
@@ -726,15 +753,33 @@ fn validate_child_terminal_inner(
     let Some(terminal) = terminal else {
         return Ok(());
     };
-    let actual = inner
-        .as_object()
-        .and_then(|object| object.get("type"))
-        .and_then(Value::as_str);
-    let expected = match terminal {
-        WorkflowChildTerminalState::Succeeded => "info",
-        WorkflowChildTerminalState::Failed => "error",
+    let Some(object) = inner.as_object() else {
+        return Err(WorkflowReplayError::ChildTerminalTypeMismatch {
+            child_run_id: child_run_id.to_owned(),
+        });
     };
-    if actual == Some(expected) {
+    let valid = match terminal {
+        WorkflowChildTerminalState::Succeeded => {
+            object.get("type").and_then(Value::as_str) == Some("info")
+                && object
+                    .get("msg_id")
+                    .and_then(Value::as_str)
+                    .is_some_and(|msg_id| !msg_id.is_empty())
+                && object.get("message").is_some_and(Value::is_string)
+        }
+        WorkflowChildTerminalState::Failed => {
+            object.get("type").and_then(Value::as_str) == Some("error")
+                && object
+                    .get("error")
+                    .and_then(Value::as_object)
+                    .is_some_and(|error| {
+                        error.get("code").is_some_and(Value::is_string)
+                            && error.get("message").is_some_and(Value::is_string)
+                            && error.get("retryable").is_some_and(Value::is_boolean)
+                    })
+        }
+    };
+    if valid {
         Ok(())
     } else {
         Err(WorkflowReplayError::ChildTerminalTypeMismatch {

@@ -297,7 +297,7 @@ fn child_terminal_conditions() -> Value {
                         "additionalProperties": true,
                         "properties": {
                             "message": {"type": "string"},
-                            "msg_id": {"type": "string"},
+                            "msg_id": {"minLength": 1, "type": "string"},
                             "type": {"const": "info"}
                         },
                         "required": ["type", "msg_id", "message"],

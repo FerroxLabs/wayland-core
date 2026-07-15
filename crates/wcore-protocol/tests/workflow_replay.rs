@@ -66,8 +66,19 @@ fn child_with_parent(
     let parent_child_run_id = parent_child_run_id
         .map(|id| format!(",\"parent_child_run_id\":\"{id}\""))
         .unwrap_or_default();
+    let inner = match inner_type {
+        "info" => r#"{"type":"info","msg_id":"child-terminal","message":"completed"}"#,
+        "error" => {
+            r#"{"type":"error","error":{"code":"sub_agent_error","message":"failed","retryable":false}}"#
+        }
+        _ => {
+            return format!(
+                r#"{{"type":"sub_agent_event","parent_call_id":"{parent_call_id}","agent_name":"{agent_name}","inner":{{"type":"{inner_type}"}},"run_id":"run-1","child_run_id":"child-1","child_sequence":{child_sequence},"event_id":"{event_id}"{terminal_state}{parent_child_run_id}}}"#
+            );
+        }
+    };
     format!(
-        r#"{{"type":"sub_agent_event","parent_call_id":"{parent_call_id}","agent_name":"{agent_name}","inner":{{"type":"{inner_type}"}},"run_id":"run-1","child_run_id":"child-1","child_sequence":{child_sequence},"event_id":"{event_id}"{terminal_state}{parent_child_run_id}}}"#
+        r#"{{"type":"sub_agent_event","parent_call_id":"{parent_call_id}","agent_name":"{agent_name}","inner":{inner},"run_id":"run-1","child_run_id":"child-1","child_sequence":{child_sequence},"event_id":"{event_id}"{terminal_state}{parent_child_run_id}}}"#
     )
 }
 
@@ -423,6 +434,47 @@ fn child_terminal_is_typed_conflict_checked_and_absorbing() {
 }
 
 #[test]
+fn child_terminal_requires_complete_typed_inner_payload() {
+    let mut success = serde_json::from_str::<serde_json::Value>(&child(
+        "success-1",
+        0,
+        "workflow:scan",
+        "scan",
+        "info",
+        Some("succeeded"),
+    ))
+    .unwrap();
+    success["inner"].as_object_mut().unwrap().remove("msg_id");
+    let mut reducer = WorkflowReplayReducer::new("1.0").unwrap();
+    reducer.accept_json(&start("success-0")).unwrap();
+    assert_eq!(
+        reducer.accept_json(&serde_json::to_string(&success).unwrap()),
+        Err(WorkflowReplayError::ChildTerminalTypeMismatch {
+            child_run_id: "child-1".to_string(),
+        })
+    );
+
+    let mut failure = serde_json::from_str::<serde_json::Value>(&child(
+        "failure-1",
+        0,
+        "workflow:scan",
+        "scan",
+        "error",
+        Some("failed"),
+    ))
+    .unwrap();
+    failure["inner"]["error"]["retryable"] = serde_json::json!("no");
+    let mut reducer = WorkflowReplayReducer::new("1.0").unwrap();
+    reducer.accept_json(&start("failure-0")).unwrap();
+    assert_eq!(
+        reducer.accept_json(&serde_json::to_string(&failure).unwrap()),
+        Err(WorkflowReplayError::ChildTerminalTypeMismatch {
+            child_run_id: "child-1".to_string(),
+        })
+    );
+}
+
+#[test]
 fn child_parent_and_node_binding_are_strict() {
     let mut invalid_parent = WorkflowReplayReducer::new("1.0").unwrap();
     invalid_parent.accept_json(&start("event-0")).unwrap();
@@ -605,6 +657,32 @@ fn fully_correlated_child_run_replays_to_completion() {
             .accept_json(&finish("event-3", 3, "succeeded", true))
             .unwrap(),
         WorkflowReplayAcceptance::Advanced
+    );
+}
+
+#[test]
+fn successful_finish_rejects_failed_child_on_blocked_node() {
+    let mut reducer = WorkflowReplayReducer::new("1.0").unwrap();
+    reducer.accept_json(&start("event-0")).unwrap();
+    reducer
+        .accept_json(&child(
+            "child-0",
+            0,
+            "workflow:scan",
+            "scan",
+            "error",
+            Some("failed"),
+        ))
+        .unwrap();
+    reducer
+        .accept_json(&node_with_child("event-1", 1, "blocked", Some("child-1")))
+        .unwrap();
+    assert_eq!(
+        reducer.accept_json(&finish("event-2", 2, "succeeded", true)),
+        Err(WorkflowReplayError::SuccessfulRunHasFailedChildren {
+            run_id: "run-1".to_string(),
+            child_run_ids: vec!["child-1".to_string()],
+        })
     );
 }
 
