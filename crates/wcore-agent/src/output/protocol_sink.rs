@@ -401,6 +401,7 @@ impl ProtocolSink {
                 plugin_caps,
                 advertised,
             ),
+            contract: Some(wcore_protocol::contract::producer_contract_descriptor()),
             execution_policy,
         });
     }

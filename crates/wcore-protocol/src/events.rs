@@ -230,6 +230,11 @@ pub enum ProtocolEvent {
         #[serde(skip_serializing_if = "Option::is_none")]
         session_id: Option<String>,
         capabilities: Capabilities,
+        /// Pinned producer contract for contract-aware hosts. This remains
+        /// optional on the Rust type so legacy fixtures can prove their old
+        /// shape, while production Ready emission always supplies it.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        contract: Option<crate::contract::ContractDescriptor>,
         /// Initial complete policy snapshot for contract-aware hosts. Legacy
         /// producers/tests may omit it; the JSON-stream producer always sets
         /// it before accepting a turn.
@@ -1116,6 +1121,7 @@ mod tests {
                 modes: vec!["default".into(), "auto_edit".into(), "force".into()],
                 ..Default::default()
             },
+            contract: None,
             execution_policy: None,
         };
         let json = serde_json::to_value(&event).unwrap();
@@ -1134,6 +1140,7 @@ mod tests {
                 modes: vec!["default".into(), "auto_edit".into(), "force".into()],
                 ..Default::default()
             },
+            contract: None,
             execution_policy: None,
         };
         let json2 = serde_json::to_value(&event_no_sid).unwrap();
@@ -1160,6 +1167,7 @@ mod tests {
             version: "0.12.25".to_owned(),
             session_id: Some("session-1".to_owned()),
             capabilities: Capabilities::default(),
+            contract: None,
             execution_policy: Some(snapshot),
         })
         .unwrap();
@@ -1505,6 +1513,7 @@ mod tests {
                 modes: vec!["default".into(), "auto_edit".into(), "force".into()],
                 ..Default::default()
             },
+            contract: None,
             execution_policy: None,
         };
         let json = serde_json::to_value(&event).unwrap();
@@ -1612,6 +1621,7 @@ mod tests {
             version: "0.1.21".into(),
             session_id: None,
             capabilities: Capabilities::default(),
+            contract: None,
             execution_policy: None,
         };
         let json = serde_json::to_value(&event).unwrap();
@@ -1746,6 +1756,7 @@ mod tests {
             version: "0.2.0".into(),
             session_id: None,
             capabilities: caps,
+            contract: None,
             execution_policy: None,
         };
         let json = serde_json::to_value(&event).unwrap();

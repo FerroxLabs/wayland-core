@@ -910,24 +910,31 @@ decoder MUST honour this contract:
    type-specific interpretation. Do not derive directly into a closed
    enum.
 
-2. **Distinguish three outcomes per line:**
+2. **Negotiate before interpreting contract-aware events.** A current Core
+   `ready` includes a `contract` descriptor with the supported major/minor,
+   generator, fixture/schema/source digests, and capability statuses. A host
+   pinned to this contract fails closed on an unsupported major or a pinned
+   schema/fixture digest mismatch. The reference observer is
+   `wcore_protocol::contract::HostContractObserver`.
+
+3. **Distinguish three outcomes per line:**
    - **Known event type**: the `type` string is in the host's known set;
      render normally.
    - **Unknown event type**: the `type` string is NOT in the host's known
-     set. **Drop silently** — no error log, no exception, no surfaced
-     warning. This is the forward-compatibility path; new wcore versions
-     emit variants the host hasn't learned about.
+     set. Drop it only when the event explicitly carries `"critical": false`.
+     Reject `"critical": true`, a missing classification, or a non-boolean
+     classification. Unknown criticality is critical; hosts must not guess.
    - **Malformed**: input wasn't decodable JSON, OR had no `type` field,
      OR the `type` value wasn't a string. **Log or count with rate
      limiting** — this indicates protocol corruption (framing bugs,
      truncation, injection) and is observable evidence of a problem,
      distinct from normal version skew.
 
-3. **Tolerate unknown fields on known variants.** Read only the fields
+4. **Tolerate unknown fields on known variants.** Read only the fields
    the host expects. Unknown fields on a known event must be ignored;
    they appear when wcore adds new optional fields in future versions.
 
-4. **Use `capabilities` advisory, not permissive.** The `Ready` event's
+5. **Use `capabilities` advisory, not permissive.** The `Ready` event's
    `capabilities` block advertises which event families this wcore
    session will emit. The host CAN read the flags to decide whether to
    add relevant `type` strings to its known set. The host MUST NOT
@@ -936,11 +943,11 @@ decoder MUST honour this contract:
 
 ### Authoritative test
 
-The behaviour above is enforced in
-`crates/wcore-protocol/tests/host_decoder_contract.rs`. That file
-contains a reference `host_decode` implementation that satisfies this
-contract; use it as the spec when porting the Electron host's decoder
-to match. The production host code lives at
+Legacy additive decoding is characterized in
+`crates/wcore-protocol/tests/host_decoder_contract.rs`. Negotiated,
+fail-closed behavior is enforced by `HostContractObserver` and serialized
+corpus replay in `desktop_contract_adversarial.rs`; use that observer as the
+current reference when porting the Electron host's decoder. The production host code lives at
 `app/src/process/agent/wcore/index.ts` — conformance there is a
 follow-up audit owned by the Wayland Desktop side, not by W0.
 

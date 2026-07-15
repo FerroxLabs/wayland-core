@@ -30,6 +30,7 @@ fn golden_ready_v0_1_21() {
             mcp: true,
             ..Default::default()
         },
+        contract: None,
         execution_policy: None,
     };
     let got = serialize(&event);
@@ -450,6 +451,7 @@ fn golden_each_w0_capability_flag_locks_its_documented_name() {
             version: "0.1.21".into(),
             session_id: None,
             capabilities: caps,
+            contract: None,
             execution_policy: None,
         };
         let got = serialize(&event);
@@ -566,6 +568,7 @@ fn golden_ready_with_cost_attribution_advertised() {
             cost_attribution: true,
             ..Default::default()
         },
+        contract: None,
         execution_policy: None,
     };
     let got = serialize(&event);

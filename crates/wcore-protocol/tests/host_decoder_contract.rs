@@ -86,6 +86,7 @@ fn host_decodes_ready_with_default_capabilities() {
         version: "0.1.21".into(),
         session_id: None,
         capabilities: Capabilities::default(),
+        contract: None,
         execution_policy: None,
     };
     let serialized = serde_json::to_string(&event).unwrap();

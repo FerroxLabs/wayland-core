@@ -13,6 +13,7 @@ fn capabilities_serialize_with_all_fields() {
         version: "0.2.0".into(),
         session_id: None,
         capabilities: caps,
+        contract: None,
         execution_policy: None,
     };
     let json = serde_json::to_string(&event).unwrap();
@@ -62,6 +63,7 @@ fn capabilities_with_effort_levels_roundtrip() {
         version: "0.2.0".into(),
         session_id: Some("test-session".into()),
         capabilities: caps,
+        contract: None,
         execution_policy: None,
     };
     let json = serde_json::to_string(&event).unwrap();

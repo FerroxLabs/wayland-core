@@ -182,6 +182,7 @@ async fn ready_event_advertises_plugins_true_when_plugin_registered() {
         version: "0.0.1".into(),
         session_id: None,
         capabilities: caps,
+        contract: None,
         execution_policy: None,
     };
     let v: serde_json::Value = serde_json::to_value(&event).unwrap();
