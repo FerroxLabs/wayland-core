@@ -1,0 +1,884 @@
+#[test]
+fn provider_request_digest_is_stable_for_the_exact_request() {
+    let request = LlmRequest {
+        model: "model-a".into(),
+        system: "system".into(),
+        messages: vec![Message::new(
+            Role::User,
+            vec![ContentBlock::Text {
+                text: "question".into(),
+            }],
+        )],
+        max_tokens: 1_024,
+        conversation_id: Some("conversation-1".into()),
+        client_context_tokens: Some(42),
+        ..LlmRequest::default()
+    };
+
+    let first = provider_request_digest(&request).unwrap();
+    let second = provider_request_digest(&request.clone()).unwrap();
+    assert_eq!(first, second);
+    assert_eq!(first.len(), 64);
+}
+
+#[test]
+fn provider_request_digest_changes_when_wire_relevant_input_changes() {
+    let request = LlmRequest {
+        model: "model-a".into(),
+        system: "system".into(),
+        messages: vec![Message::new(
+            Role::User,
+            vec![ContentBlock::Text {
+                text: "question".into(),
+            }],
+        )],
+        max_tokens: 1_024,
+        ..LlmRequest::default()
+    };
+    let original = provider_request_digest(&request).unwrap();
+
+    let mut changed_message = request.clone();
+    changed_message.messages[0].content = vec![ContentBlock::Text {
+        text: "different question".into(),
+    }];
+    assert_ne!(original, provider_request_digest(&changed_message).unwrap());
+
+    let mut changed_model = request.clone();
+    changed_model.model = "model-b".into();
+    assert_ne!(original, provider_request_digest(&changed_model).unwrap());
+
+    let mut changed_limit = request;
+    changed_limit.max_tokens += 1;
+    assert_ne!(original, provider_request_digest(&changed_limit).unwrap());
+}
+
+#[test]
+fn append_is_contiguous_checksummed_and_exclusively_owned() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("session.journal");
+    std::fs::write(&path, []).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+    }
+    let first = SessionJournal::open(&path, "s1").unwrap();
+    assert!(matches!(
+        SessionJournal::open(&path, "s1"),
+        Err(JournalError::AlreadyOwned { .. })
+    ));
+    let second = first.clone();
+    let zero = first.append(turn_started("t0")).unwrap();
+    let one = second.append(turn_committed("t0")).unwrap();
+    assert_eq!((zero.seq, one.seq), (0, 1));
+    assert_eq!(zero.previous_checksum, GENESIS_CHECKSUM);
+    assert_eq!(one.previous_checksum, zero.checksum);
+    assert_eq!(SessionJournal::replay(&path).unwrap(), vec![zero, one]);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+    }
+    drop(first);
+    assert!(matches!(
+        SessionJournal::open(&path, "s1"),
+        Err(JournalError::AlreadyOwned { .. })
+    ));
+    drop(second);
+    assert!(SessionJournal::open(&path, "s1").is_ok());
+}
+
+#[test]
+fn lease_holder_process_exits_without_drop() {
+    let Ok(path) = std::env::var("WCORE_TEST_JOURNAL_LEASE_PATH") else {
+        return;
+    };
+    let _journal = SessionJournal::open(path, "crash-owner").unwrap();
+    std::process::exit(0);
+}
+
+#[test]
+fn operating_system_releases_writer_lease_after_process_exit() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("session.journal");
+    let status = std::process::Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", "lease_holder_process_exits_without_drop"])
+        .env("WCORE_TEST_JOURNAL_LEASE_PATH", &path)
+        .status()
+        .unwrap();
+    assert!(status.success());
+    assert!(SessionJournal::open(path, "crash-owner").is_ok());
+}
+
+#[test]
+fn torn_tail_is_ignored_healed_and_replaced() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("session.journal");
+    append_events(&path, vec![turn_started("t0")]);
+    let torn = frame(br#"{"incomplete":true}"#);
+    OpenOptions::new()
+        .append(true)
+        .open(&path)
+        .unwrap()
+        .write_all(&torn[..torn.len() - 7])
+        .unwrap();
+    assert_eq!(SessionJournal::replay(&path).unwrap().len(), 1);
+    let journal = SessionJournal::open(&path, "s1").unwrap();
+    assert_eq!(journal.append(turn_committed("t0")).unwrap().seq, 1);
+    assert_eq!(SessionJournal::replay(&path).unwrap().len(), 2);
+}
+
+#[test]
+fn complete_corrupt_final_frame_is_a_hard_error() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("session.journal");
+    std::fs::write(&path, frame(b"{not json}")).unwrap();
+    assert!(matches!(
+        SessionJournal::replay(path),
+        Err(JournalError::CorruptFrame { frame: 1, .. })
+    ));
+}
+
+#[test]
+fn complete_frame_digest_corruption_is_a_hard_error() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("session.journal");
+    let mut bytes = frame(br#"{"valid":"json"}"#);
+    let last = bytes.len() - 1;
+    bytes[last] ^= 0xff;
+    std::fs::write(&path, bytes).unwrap();
+    assert!(matches!(
+        SessionJournal::replay(path),
+        Err(JournalError::FrameDigestMismatch { frame: 1, .. })
+    ));
+}
+
+#[test]
+fn checksum_sequence_previous_and_schema_tampering_fail_closed() {
+    let dir = tempfile::tempdir().unwrap();
+    let entries = append_events(
+        &dir.path().join("session.journal"),
+        vec![turn_started("t0"), turn_committed("t0")],
+    );
+    let zero = entries[0].clone();
+    let one = entries[1].clone();
+
+    let mut bad_checksum = zero.clone();
+    bad_checksum.checksum = "bad".into();
+    assert!(matches!(
+        verify_chain(&[bad_checksum]),
+        Err(JournalError::ChecksumMismatch { .. })
+    ));
+
+    let mut gap = one.clone();
+    gap.seq = 2;
+    assert!(matches!(
+        verify_chain(&[zero.clone(), gap]),
+        Err(JournalError::SequenceMismatch { .. })
+    ));
+
+    let mut wrong_previous = one.clone();
+    wrong_previous.previous_checksum = GENESIS_CHECKSUM.into();
+    assert!(matches!(
+        verify_chain(&[zero.clone(), wrong_previous]),
+        Err(JournalError::PreviousChecksumMismatch { .. })
+    ));
+    assert!(matches!(
+        verify_chain(&[one]),
+        Err(JournalError::SequenceMismatch { .. })
+    ));
+
+    let mut future = zero;
+    future.schema_version = SESSION_JOURNAL_SCHEMA_VERSION + 1;
+    assert!(matches!(
+        verify_chain(&[future]),
+        Err(JournalError::UnsupportedSchema { .. })
+    ));
+
+    let mut obsolete = entries[0].clone();
+    obsolete.schema_version = SESSION_JOURNAL_SCHEMA_VERSION - 1;
+    assert!(matches!(
+        verify_chain(&[obsolete]),
+        Err(JournalError::UnsupportedSchema { .. })
+    ));
+}
+
+#[test]
+fn obsolete_journal_schema_is_rejected_before_decoding_incompatible_events() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("v2.journal");
+    let obsolete = serde_json::to_vec(&json!({
+        "schema_version": SESSION_JOURNAL_SCHEMA_VERSION - 1,
+        "session_id": "s1",
+        "seq": 0,
+        "previous_checksum": GENESIS_CHECKSUM,
+        "event": {
+            "type": "stream_delta_committed",
+            "stream_id": "stream",
+            "ordinal": 0,
+            "content": "lossy-v1"
+        },
+        "checksum": "irrelevant-for-unsupported-schema"
+    }))
+    .unwrap();
+    std::fs::write(&path, frame(&obsolete)).unwrap();
+    assert!(matches!(
+        SessionJournal::replay(path),
+        Err(JournalError::UnsupportedSchema { found: 2, .. })
+    ));
+}
+
+#[test]
+fn unresolved_started_external_effects_reduce_to_unknown() {
+    let dir = tempfile::tempdir().unwrap();
+    let entries = append_events(
+        &dir.path().join("session.journal"),
+        vec![
+            turn_started("turn"),
+            provider_prepared("p", "turn"),
+            SessionEvent::ProviderAttemptStarted {
+                attempt_id: "p".into(),
+            },
+            tool_intent(
+                "tool-exec",
+                "provider-call",
+                "turn",
+                0,
+                "bash",
+                json!({"cmd":"true"}),
+                json!({"cmd":"true"}),
+            ),
+            SessionEvent::ToolExecutionStarted {
+                tool_execution_id: "tool-exec".into(),
+            },
+            SessionEvent::ChildPrepared {
+                child_id: "c".into(),
+                turn_id: "turn".into(),
+                request: json!({"task":"x"}),
+            },
+            SessionEvent::ChildStarted {
+                child_id: "c".into(),
+            },
+            SessionEvent::DeliveryPrepared {
+                delivery_id: "d".into(),
+                origin: DeliveryOrigin::Turn {
+                    turn_id: "turn".into(),
+                },
+                destination: "host".into(),
+                payload: json!({"text":"x"}),
+            },
+            SessionEvent::DeliveryStarted {
+                delivery_id: "d".into(),
+            },
+        ],
+    );
+    let state = replay_state(&entries).unwrap();
+    for effect in [
+        &state.provider_attempts["p"].effect,
+        &state.tools["tool-exec"].effect,
+        &state.children["c"].effect,
+        &state.deliveries["d"].effect,
+    ] {
+        assert_eq!(effect, &ExternalEffectState::Unknown);
+        assert!(effect.requires_reconciliation());
+    }
+}
+
+#[test]
+fn full_replay_equals_snapshot_plus_suffix() {
+    let dir = tempfile::tempdir().unwrap();
+    let entries = append_events(
+        &dir.path().join("session.journal"),
+        vec![
+            SessionEvent::TurnStarted {
+                turn_id: "t".into(),
+                user_message: "hello".into(),
+            },
+            provider_prepared("p", "t"),
+            SessionEvent::ProviderAttemptStarted {
+                attempt_id: "p".into(),
+            },
+            SessionEvent::StreamStarted {
+                stream_id: "s".into(),
+                attempt_id: "p".into(),
+            },
+            text_batch("s", 0, "done"),
+            SessionEvent::StreamFinished {
+                stream_id: "s".into(),
+            },
+            SessionEvent::ProviderAttemptFinished {
+                attempt_id: "p".into(),
+                outcome: CompletionOutcome::Succeeded,
+                response_digest: Some("response".into()),
+            },
+            SessionEvent::TurnCommitted {
+                turn_id: "t".into(),
+                assistant_message: "done".into(),
+            },
+        ],
+    );
+    let full = replay_state(&entries).unwrap();
+    let snapshot = SessionSnapshot::new("s1", replay_state(&entries[..5]).unwrap()).unwrap();
+    assert_eq!(
+        full,
+        replay_from_snapshot(&snapshot, &entries[5..]).unwrap()
+    );
+}
+
+#[test]
+fn provider_stream_requires_started_attempt_and_preserves_ordered_structured_batches() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("session.journal");
+    let journal = SessionJournal::open(&path, "s1").unwrap();
+    journal.append(turn_started("turn")).unwrap();
+
+    assert!(matches!(
+        journal.append(provider_prepared("orphan", "missing-turn")),
+        Err(JournalError::InvalidTransition(_))
+    ));
+
+    let stream_started = SessionEvent::StreamStarted {
+        stream_id: "stream".into(),
+        attempt_id: "attempt".into(),
+    };
+    assert!(matches!(
+        journal.append(stream_started.clone()),
+        Err(JournalError::InvalidTransition(_))
+    ));
+
+    journal
+        .append(provider_prepared("attempt", "turn"))
+        .unwrap();
+    assert!(matches!(
+        journal.append(stream_started.clone()),
+        Err(JournalError::InvalidTransition(_))
+    ));
+    journal
+        .append(SessionEvent::ProviderAttemptStarted {
+            attempt_id: "attempt".into(),
+        })
+        .unwrap();
+    journal.append(stream_started).unwrap();
+    assert!(matches!(
+        journal.append(SessionEvent::StreamStarted {
+            stream_id: "other".into(),
+            attempt_id: "attempt".into(),
+        }),
+        Err(JournalError::InvalidTransition(_))
+    ));
+    assert!(matches!(
+        journal.append(SessionEvent::StreamBatchCommitted {
+            stream_id: "stream".into(),
+            ordinal: 0,
+            events: vec![],
+        }),
+        Err(JournalError::InvalidTransition(_))
+    ));
+    assert!(matches!(
+        journal.append(text_batch("stream", 1, "gap")),
+        Err(JournalError::InvalidTransition(_))
+    ));
+
+    let batch = vec![
+        ProviderStreamEvent::ThinkingDelta {
+            text: "reason".into(),
+        },
+        ProviderStreamEvent::ToolUse {
+            id: "call".into(),
+            name: "read".into(),
+            input: json!({"path":"README.md"}),
+            extra: Some(json!({"signature":"opaque"})),
+        },
+        ProviderStreamEvent::Done {
+            stop_reason: json!("tool_use"),
+            finish_reason: json!("tool_calls"),
+            usage: json!({"input_tokens":10,"output_tokens":2}),
+        },
+    ];
+    journal
+        .append(SessionEvent::StreamBatchCommitted {
+            stream_id: "stream".into(),
+            ordinal: 0,
+            events: batch.clone(),
+        })
+        .unwrap();
+    assert!(matches!(
+        journal.append(SessionEvent::ProviderAttemptFinished {
+            attempt_id: "attempt".into(),
+            outcome: CompletionOutcome::Succeeded,
+            response_digest: Some("response".into()),
+        }),
+        Err(JournalError::InvalidTransition(_))
+    ));
+    journal
+        .append(SessionEvent::StreamFinished {
+            stream_id: "stream".into(),
+        })
+        .unwrap();
+    assert!(matches!(
+        journal.append(text_batch("stream", 1, "late")),
+        Err(JournalError::InvalidTransition(_))
+    ));
+    journal
+        .append(SessionEvent::ProviderAttemptFinished {
+            attempt_id: "attempt".into(),
+            outcome: CompletionOutcome::Succeeded,
+            response_digest: Some("response".into()),
+        })
+        .unwrap();
+
+    journal
+        .append(SessionEvent::ProviderAttemptPrepared {
+            attempt_id: "compaction".into(),
+            turn_id: "turn".into(),
+            purpose: ProviderAttemptPurpose::Compaction,
+            provider: "x".into(),
+            model: "m".into(),
+            request_digest: "compact-request".into(),
+        })
+        .unwrap();
+    let state = journal.state().unwrap();
+    assert_eq!(state.streams["stream"].batches, vec![batch.clone()]);
+    assert_eq!(state.provider_attempts["attempt"].turn_id, "turn");
+    assert_eq!(
+        state.provider_attempts["compaction"].purpose,
+        ProviderAttemptPurpose::Compaction
+    );
+    let replayed = replay_state(&SessionJournal::replay(&path).unwrap()).unwrap();
+    assert_eq!(replayed.streams["stream"].batches, vec![batch]);
+}
+
+#[test]
+fn approval_linkage_and_terminal_resolution_are_enforced() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("session.journal");
+    let journal = SessionJournal::open(&path, "s1").unwrap();
+    journal.append(turn_started("turn")).unwrap();
+    journal
+        .append(tool_intent(
+            "exec",
+            "call",
+            "turn",
+            0,
+            "bash",
+            json!({"cmd":"true"}),
+            json!({"cmd":"true"}),
+        ))
+        .unwrap();
+
+    assert!(matches!(
+        journal.append(SessionEvent::ApprovalRequested {
+            approval_id: "missing".into(),
+            origin: ApprovalOrigin::ToolExecution {
+                tool_execution_id: "unknown".into(),
+            },
+            intent_digest: "intent".into(),
+        }),
+        Err(JournalError::InvalidTransition(_))
+    ));
+    journal
+        .append(SessionEvent::ApprovalRequested {
+            approval_id: "approval".into(),
+            origin: ApprovalOrigin::ToolExecution {
+                tool_execution_id: "exec".into(),
+            },
+            intent_digest: "intent".into(),
+        })
+        .unwrap();
+    assert!(matches!(
+        journal.append(SessionEvent::ApprovalRequested {
+            approval_id: "duplicate-origin".into(),
+            origin: ApprovalOrigin::ToolExecution {
+                tool_execution_id: "exec".into(),
+            },
+            intent_digest: "intent".into(),
+        }),
+        Err(JournalError::InvalidTransition(_))
+    ));
+    let resolved = SessionEvent::ApprovalResolved {
+        approval_id: "approval".into(),
+        resolution: ApprovalResolution::TimedOut,
+    };
+    journal.append(resolved.clone()).unwrap();
+    assert!(matches!(
+        journal.append(resolved),
+        Err(JournalError::InvalidTransition(_))
+    ));
+    let state = journal.state().unwrap();
+    assert_eq!(
+        state.approvals["approval"].origin,
+        ApprovalOrigin::ToolExecution {
+            tool_execution_id: "exec".into(),
+        }
+    );
+    assert_eq!(
+        state.approvals["approval"].resolution,
+        Some(ApprovalResolution::TimedOut)
+    );
+
+    journal
+        .append(tool_intent(
+            "exec-cancel",
+            "call-cancel",
+            "turn",
+            1,
+            "bash",
+            json!({}),
+            json!({}),
+        ))
+        .unwrap();
+    journal
+        .append(SessionEvent::ApprovalRequested {
+            approval_id: "cancelled".into(),
+            origin: ApprovalOrigin::ToolExecution {
+                tool_execution_id: "exec-cancel".into(),
+            },
+            intent_digest: "cancel-intent".into(),
+        })
+        .unwrap();
+    journal
+        .append(SessionEvent::ApprovalResolved {
+            approval_id: "cancelled".into(),
+            resolution: ApprovalResolution::Cancelled,
+        })
+        .unwrap();
+
+    journal
+        .append(tool_intent(
+            "exec-allow",
+            "call-allow",
+            "turn",
+            2,
+            "bash",
+            json!({}),
+            json!({}),
+        ))
+        .unwrap();
+    journal
+        .append(SessionEvent::ApprovalRequested {
+            approval_id: "allowed".into(),
+            origin: ApprovalOrigin::ToolExecution {
+                tool_execution_id: "exec-allow".into(),
+            },
+            intent_digest: "allow-intent".into(),
+        })
+        .unwrap();
+    journal
+        .append(SessionEvent::ApprovalResolved {
+            approval_id: "allowed".into(),
+            resolution: ApprovalResolution::Decided {
+                decision: ApprovalDecision::AllowOnce,
+            },
+        })
+        .unwrap();
+
+    journal
+        .append(provider_prepared("attempt", "turn"))
+        .unwrap();
+    journal
+        .append(SessionEvent::ApprovalRequested {
+            approval_id: "provider-approval".into(),
+            origin: ApprovalOrigin::ProviderAttempt {
+                attempt_id: "attempt".into(),
+            },
+            intent_digest: "provider-intent".into(),
+        })
+        .unwrap();
+}
+
+#[test]
+fn children_and_deliveries_distinguish_prepared_from_started_unknown() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("session.journal");
+    let journal = SessionJournal::open(&path, "s1").unwrap();
+    journal.append(turn_started("turn")).unwrap();
+    assert!(matches!(
+        journal.append(SessionEvent::ChildStarted {
+            child_id: "child".into(),
+        }),
+        Err(JournalError::InvalidTransition(_))
+    ));
+    journal
+        .append(SessionEvent::ChildPrepared {
+            child_id: "child".into(),
+            turn_id: "turn".into(),
+            request: json!({"task":"inspect"}),
+        })
+        .unwrap();
+    assert_eq!(
+        journal.state().unwrap().children["child"].effect,
+        ExternalEffectState::Prepared
+    );
+    journal
+        .append(SessionEvent::ChildStarted {
+            child_id: "child".into(),
+        })
+        .unwrap();
+    assert_eq!(
+        journal.state().unwrap().children["child"].effect,
+        ExternalEffectState::Unknown
+    );
+    journal
+        .append(SessionEvent::ChildFinished {
+            child_id: "child".into(),
+            outcome: CompletionOutcome::Succeeded,
+            result: json!({"answer":"done"}),
+        })
+        .unwrap();
+    assert!(matches!(
+        journal.append(SessionEvent::ChildStarted {
+            child_id: "child".into(),
+        }),
+        Err(JournalError::InvalidTransition(_))
+    ));
+
+    assert!(matches!(
+        journal.append(SessionEvent::DeliveryStarted {
+            delivery_id: "delivery".into(),
+        }),
+        Err(JournalError::InvalidTransition(_))
+    ));
+    journal
+        .append(SessionEvent::DeliveryPrepared {
+            delivery_id: "delivery".into(),
+            origin: DeliveryOrigin::Turn {
+                turn_id: "turn".into(),
+            },
+            destination: "host".into(),
+            payload: json!({"text":"hello"}),
+        })
+        .unwrap();
+    assert_eq!(
+        journal.state().unwrap().deliveries["delivery"].effect,
+        ExternalEffectState::Prepared
+    );
+    journal
+        .append(SessionEvent::DeliveryStarted {
+            delivery_id: "delivery".into(),
+        })
+        .unwrap();
+    assert_eq!(
+        journal.state().unwrap().deliveries["delivery"].effect,
+        ExternalEffectState::Unknown
+    );
+    journal
+        .append(SessionEvent::DeliveryFinished {
+            delivery_id: "delivery".into(),
+            completion: DeliveryCompletion::Confirmed {
+                outcome: CompletionOutcome::Succeeded,
+                receipt: json!({"accepted":true}),
+            },
+        })
+        .unwrap();
+    assert!(matches!(
+        journal.append(SessionEvent::DeliveryStarted {
+            delivery_id: "delivery".into(),
+        }),
+        Err(JournalError::InvalidTransition(_))
+    ));
+
+    journal
+        .append(SessionEvent::DeliveryPrepared {
+            delivery_id: "delivery-denied".into(),
+            origin: DeliveryOrigin::Turn {
+                turn_id: "turn".into(),
+            },
+            destination: "host".into(),
+            payload: json!({"text":"blocked"}),
+        })
+        .unwrap();
+    let denied = DeliveryNotStartedReason::PolicyDenied {
+        policy: "managed".into(),
+    };
+    journal
+        .append(SessionEvent::DeliveryNotStarted {
+            delivery_id: "delivery-denied".into(),
+            reason: denied.clone(),
+        })
+        .unwrap();
+    let denied_state = &journal.state().unwrap().deliveries["delivery-denied"];
+    assert_eq!(denied_state.effect, ExternalEffectState::NotStarted);
+    assert_eq!(denied_state.not_started_reason, Some(denied));
+    assert!(matches!(
+        journal.append(SessionEvent::DeliveryStarted {
+            delivery_id: "delivery-denied".into(),
+        }),
+        Err(JournalError::InvalidTransition(_))
+    ));
+}
+
+#[test]
+fn prepared_provider_tool_and_child_can_finish_without_a_fabricated_start() {
+    let dir = tempfile::tempdir().unwrap();
+    let journal = SessionJournal::open(dir.path().join("session.journal"), "s1").unwrap();
+    journal.append(turn_started("turn")).unwrap();
+
+    journal
+        .append(provider_prepared("attempt", "turn"))
+        .unwrap();
+    let provider_reason = ProviderAttemptNotStartedReason::EgressDenied {
+        policy: "network-boundary".into(),
+    };
+    journal
+        .append(SessionEvent::ProviderAttemptNotStarted {
+            attempt_id: "attempt".into(),
+            reason: provider_reason.clone(),
+        })
+        .unwrap();
+    assert!(matches!(
+        journal.append(SessionEvent::ProviderAttemptStarted {
+            attempt_id: "attempt".into(),
+        }),
+        Err(JournalError::InvalidTransition(_))
+    ));
+    journal
+        .append(provider_prepared("started-attempt", "turn"))
+        .unwrap();
+    journal
+        .append(SessionEvent::ProviderAttemptStarted {
+            attempt_id: "started-attempt".into(),
+        })
+        .unwrap();
+    assert!(matches!(
+        journal.append(SessionEvent::ProviderAttemptNotStarted {
+            attempt_id: "started-attempt".into(),
+            reason: ProviderAttemptNotStartedReason::Cancelled {
+                reason: "too late".into(),
+            },
+        }),
+        Err(JournalError::InvalidTransition(_))
+    ));
+
+    let requested = json!({"path":"requested"});
+    let effective = json!({"path":"effective"});
+    journal
+        .append(tool_intent(
+            "execution",
+            "provider-call",
+            "turn",
+            0,
+            "read",
+            requested.clone(),
+            effective.clone(),
+        ))
+        .unwrap();
+    let tool_reason = ToolNotStartedReason::ApprovalDenied {
+        approval_id: "approval".into(),
+    };
+    journal
+        .append(SessionEvent::ToolExecutionNotStarted {
+            tool_execution_id: "execution".into(),
+            reason: tool_reason.clone(),
+        })
+        .unwrap();
+    assert!(matches!(
+        journal.append(SessionEvent::ToolExecutionStarted {
+            tool_execution_id: "execution".into(),
+        }),
+        Err(JournalError::InvalidTransition(_))
+    ));
+    journal
+        .append(tool_intent(
+            "started-execution",
+            "started-provider-call",
+            "turn",
+            1,
+            "read",
+            json!({}),
+            json!({}),
+        ))
+        .unwrap();
+    journal
+        .append(SessionEvent::ToolExecutionStarted {
+            tool_execution_id: "started-execution".into(),
+        })
+        .unwrap();
+    assert!(matches!(
+        journal.append(SessionEvent::ToolExecutionNotStarted {
+            tool_execution_id: "started-execution".into(),
+            reason: ToolNotStartedReason::Cancelled {
+                reason: "too late".into(),
+            },
+        }),
+        Err(JournalError::InvalidTransition(_))
+    ));
+
+    journal
+        .append(SessionEvent::ChildPrepared {
+            child_id: "child".into(),
+            turn_id: "turn".into(),
+            request: json!({"task":"inspect"}),
+        })
+        .unwrap();
+    let child_reason = ChildNotStartedReason::PolicyDenied {
+        policy: "spawn-disabled".into(),
+    };
+    journal
+        .append(SessionEvent::ChildNotStarted {
+            child_id: "child".into(),
+            reason: child_reason.clone(),
+        })
+        .unwrap();
+    assert!(matches!(
+        journal.append(SessionEvent::ChildStarted {
+            child_id: "child".into(),
+        }),
+        Err(JournalError::InvalidTransition(_))
+    ));
+    journal
+        .append(SessionEvent::ChildPrepared {
+            child_id: "started-child".into(),
+            turn_id: "turn".into(),
+            request: json!({"task":"started"}),
+        })
+        .unwrap();
+    journal
+        .append(SessionEvent::ChildStarted {
+            child_id: "started-child".into(),
+        })
+        .unwrap();
+    assert!(matches!(
+        journal.append(SessionEvent::ChildNotStarted {
+            child_id: "started-child".into(),
+            reason: ChildNotStartedReason::Cancelled {
+                reason: "too late".into(),
+            },
+        }),
+        Err(JournalError::InvalidTransition(_))
+    ));
+
+    let state = journal.state().unwrap();
+    assert_eq!(
+        state.provider_attempts["attempt"].effect,
+        ExternalEffectState::NotStarted
+    );
+    assert_eq!(
+        state.provider_attempts["attempt"].not_started_reason,
+        Some(provider_reason)
+    );
+    assert_eq!(state.tools["execution"].provider_call_id, "provider-call");
+    assert_eq!(state.tools["execution"].turn_id, "turn");
+    assert_eq!(state.tools["execution"].ordinal, 0);
+    assert_eq!(state.tools["execution"].requested_input, requested);
+    assert_eq!(state.tools["execution"].effective_input, effective);
+    assert_eq!(
+        state.tools["execution"].effect,
+        ExternalEffectState::NotStarted
+    );
+    assert_eq!(
+        state.tools["execution"].not_started_reason,
+        Some(tool_reason)
+    );
+    assert_eq!(
+        state.children["child"].effect,
+        ExternalEffectState::NotStarted
+    );
+    assert_eq!(
+        state.children["child"].not_started_reason,
+        Some(child_reason)
+    );
+}
+
