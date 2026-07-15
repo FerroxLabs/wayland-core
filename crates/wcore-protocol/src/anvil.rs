@@ -84,6 +84,10 @@ pub struct AnvilReceiptInvalidation {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
+// Keep payloads inline: this is a short-lived serialized wire envelope, and
+// boxing the flattened receipt would spread allocation/pointer semantics
+// through every authority reducer and emitter for no meaningful hot-path win.
+#[allow(clippy::large_enum_variant)]
 pub enum AnvilAuthorityEvent {
     AnvilReceipt {
         #[serde(flatten)]
