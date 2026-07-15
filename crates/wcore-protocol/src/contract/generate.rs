@@ -634,23 +634,29 @@ fn insert_negotiation_fixtures(
 
     let mut unsupported_major = descriptor.clone();
     unsupported_major.major += 1;
+    let mut unsupported_major_ready = ready.clone();
+    unsupported_major_ready["contract"] = serde_json::to_value(unsupported_major)?;
     artifacts.insert(
         "adversarial/events/version-mismatch.jsonl".into(),
-        canonical_json(&json!({"contract": unsupported_major, "type": "ready"}))?,
+        canonical_json(&unsupported_major_ready)?,
     );
 
     let mut schema_mismatch = descriptor.clone();
     schema_mismatch.schema_digest = format!("sha256:{}", "f".repeat(64));
+    let mut schema_mismatch_ready = ready.clone();
+    schema_mismatch_ready["contract"] = serde_json::to_value(schema_mismatch)?;
     artifacts.insert(
         "adversarial/events/schema-mismatch.jsonl".into(),
-        canonical_json(&json!({"contract": schema_mismatch, "type": "ready"}))?,
+        canonical_json(&schema_mismatch_ready)?,
     );
 
     let mut fixture_mismatch = descriptor.clone();
     fixture_mismatch.fixture_digest = format!("sha256:{}", "f".repeat(64));
+    let mut fixture_mismatch_ready = ready;
+    fixture_mismatch_ready["contract"] = serde_json::to_value(fixture_mismatch)?;
     artifacts.insert(
         "adversarial/events/fixture-mismatch.jsonl".into(),
-        canonical_json(&json!({"contract": fixture_mismatch, "type": "ready"}))?,
+        canonical_json(&fixture_mismatch_ready)?,
     );
     Ok(())
 }

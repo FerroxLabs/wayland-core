@@ -8,8 +8,8 @@ use wcore_protocol::anvil::{
 };
 use wcore_protocol::commands::ProtocolCommand;
 use wcore_protocol::contract::{
-    producer_contract_descriptor, ContractCapabilityStatus, HostContractObserver, HostObservation,
-    HostObservationError, CONTRACT_ROOT,
+    CONTRACT_ROOT, ContractCapabilityStatus, HostContractObserver, HostObservation,
+    HostObservationError, producer_contract_descriptor,
 };
 use wcore_protocol::execution_policy::validate_execution_policy_contract_version;
 use wcore_protocol::workflow::{

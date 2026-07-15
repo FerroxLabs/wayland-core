@@ -14,16 +14,16 @@ mod spec;
 pub use canonical::{canonical_json, digest_named_bytes};
 pub use check::check_contract;
 pub use generate::{
-    generated_artifacts, manifest_digests, write_contract, CONTRACT_NAME, CONTRACT_ROOT,
-    GENERATOR_VERSION,
+    CONTRACT_NAME, CONTRACT_ROOT, GENERATOR_VERSION, generated_artifacts, manifest_digests,
+    write_contract,
 };
 pub use observation::{
-    producer_contract_descriptor, ContractCapabilityStatus, ContractDescriptor,
-    HostContractObserver, HostObservation, HostObservationError,
+    ContractCapabilityStatus, ContractDescriptor, HostContractObserver, HostObservation,
+    HostObservationError, producer_contract_descriptor,
 };
 pub use spec::{
-    command_fixture_values, event_fixture_values, ContractCriticality, WireSpec, COMMAND_SPECS,
-    EVENT_SPECS, SOURCE_INPUTS,
+    COMMAND_SPECS, ContractCriticality, EVENT_SPECS, SOURCE_INPUTS, WireSpec,
+    command_fixture_values, event_fixture_values,
 };
 
 pub type ContractResult<T> = Result<T, Box<dyn std::error::Error + Send + Sync>>;
