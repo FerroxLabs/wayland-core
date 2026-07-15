@@ -343,9 +343,6 @@ impl JournalWriter {
             ));
         }
         let snapshot = SessionSnapshot::new(self.session_id.clone(), self.state.clone())?;
-        let snapshot_path = snapshot_path_for(&self.path);
-        write_snapshot(&snapshot_path, &snapshot)?;
-
         let replacement = match self.last_envelope.as_ref() {
             Some(anchor) => {
                 let body = serde_json::to_vec(anchor).map_err(|source| JournalError::Json {
@@ -356,17 +353,31 @@ impl JournalWriter {
             }
             None => Vec::new(),
         };
-        // `persist` is an atomic replacement on supported tempfile platforms.
-        // There is deliberately no remove-then-rename fallback: that would
-        // create an authority gap on Windows and violate the journal contract.
-        self.file = snapshot::replace_file_atomically(&self.path, &replacement)?;
-        snapshot::sync_parent_directory(&self.path)?;
-        self.file
-            .seek(SeekFrom::End(0))
-            .map_err(|source| JournalError::Io {
-                path: self.path.clone(),
-                source,
-            })?;
+        let snapshot_path = snapshot_path_for(&self.path);
+        let publication = (|| {
+            write_snapshot(&snapshot_path, &snapshot)?;
+            // `persist` is an atomic replacement on supported tempfile platforms.
+            // There is deliberately no remove-then-rename fallback: that would
+            // create an authority gap on Windows and violate the journal contract.
+            let mut file = snapshot::replace_file_atomically(&self.path, &replacement)?;
+            snapshot::sync_parent_directory(&self.path)?;
+            file.seek(SeekFrom::End(0))
+                .map_err(|source| JournalError::Io {
+                    path: self.path.clone(),
+                    source,
+                })?;
+            Ok(file)
+        })();
+        self.file = match publication {
+            Ok(file) => file,
+            Err(error) => {
+                // Once snapshot publication starts, an error can leave the
+                // pathname and this open handle referring to different files.
+                // Reopening is the only safe way to recover authority.
+                self.faulted = true;
+                return Err(error);
+            }
+        };
         Ok(snapshot)
     }
 }
@@ -406,7 +417,13 @@ fn recover_storage(
                 first_seq: first.seq,
             });
         }
-        (Some(snapshot), None) => snapshot.state.clone(),
+        (Some(snapshot), None) if snapshot.cursor.is_none() => snapshot.state.clone(),
+        (Some(_), None) => {
+            return Err(JournalError::SnapshotJournalMismatch(
+                "snapshot has a committed cursor but its journal anchor or suffix is missing"
+                    .to_owned(),
+            ));
+        }
         (Some(snapshot), Some(first)) if first.seq == 0 => {
             verify_chain_for_session(entries, Some(&snapshot.session_id))?;
             let prefix_len = match snapshot.cursor {
@@ -703,6 +720,26 @@ mod fault_tests {
             writer.append(event.clone()),
             Err(JournalError::Io { .. })
         ));
+        assert!(matches!(
+            writer.append(event),
+            Err(JournalError::WriterFaulted)
+        ));
+        assert!(matches!(writer.compact(), Err(JournalError::WriterFaulted)));
+    }
+
+    #[test]
+    fn uncertain_compaction_publication_permanently_faults_writer() {
+        let dir = tempfile::tempdir().unwrap();
+        let journal_path = dir.path().join("session.journal");
+        let mut writer = JournalWriter::open(journal_path, "session".to_owned()).unwrap();
+        let event = SessionEvent::TurnStarted {
+            turn_id: "turn".into(),
+            user_message: "hello".into(),
+        };
+        writer.append(event.clone()).unwrap();
+
+        snapshot::fail_next_replace_after_persist();
+        assert!(matches!(writer.compact(), Err(JournalError::Io { .. })));
         assert!(matches!(
             writer.append(event),
             Err(JournalError::WriterFaulted)

@@ -8,6 +8,16 @@ use super::{
     JournalEnvelope, JournalError, ReducedSessionState, SESSION_JOURNAL_SCHEMA_VERSION, reduce,
 };
 
+#[cfg(test)]
+thread_local! {
+    static FAIL_REPLACE_AFTER_PERSIST: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+#[cfg(test)]
+pub(super) fn fail_next_replace_after_persist() {
+    FAIL_REPLACE_AFTER_PERSIST.with(|fail| fail.set(true));
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[rustfmt::skip]
 pub struct SessionSnapshot {
@@ -189,6 +199,13 @@ pub(super) fn replace_file_atomically(path: &Path, bytes: &[u8]) -> Result<File,
         path: path.to_path_buf(),
         source: error.error,
     })?;
+    #[cfg(test)]
+    if FAIL_REPLACE_AFTER_PERSIST.with(|fail| fail.replace(false)) {
+        return Err(JournalError::Io {
+            path: path.to_path_buf(),
+            source: std::io::Error::other("injected replacement failure after persist"),
+        });
+    }
     persisted.sync_all().map_err(|source| JournalError::Io {
         path: path.to_path_buf(),
         source,

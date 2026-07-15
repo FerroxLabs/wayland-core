@@ -43,6 +43,17 @@ fn canonical_events() -> Vec<SessionEvent> {
     ]
 }
 
+fn create_stale_snapshot_fixture(path: &std::path::Path) {
+    let journal = SessionJournal::open(path, "s1").unwrap();
+    journal.append(turn_started("t0", "first")).unwrap();
+    let stale_snapshot = SessionSnapshot::new("s1", journal.state().unwrap()).unwrap();
+    write_snapshot(snapshot_path_for(path), &stale_snapshot).unwrap();
+    journal
+        .append(message_committed("t0", 0, "answer"))
+        .unwrap();
+    drop(journal);
+}
+
 #[test]
 fn validated_snapshot_at_every_cursor_replays_the_same_committed_state() {
     let dir = tempfile::tempdir().unwrap();
@@ -216,5 +227,44 @@ fn compacted_non_genesis_log_without_snapshot_fails_closed() {
     assert!(matches!(
         SessionJournal::open(&path, "s1"),
         Err(JournalError::CompactedJournalMissingSnapshot { first_seq: 1 })
+    ));
+}
+
+#[test]
+fn committed_snapshot_with_missing_journal_fails_closed() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("s1.journal");
+    create_stale_snapshot_fixture(&path);
+    std::fs::remove_file(&path).unwrap();
+
+    assert!(matches!(
+        SessionJournal::open(&path, "s1"),
+        Err(JournalError::SnapshotJournalMismatch(_))
+    ));
+}
+
+#[test]
+fn committed_snapshot_with_empty_journal_fails_closed() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("s1.journal");
+    create_stale_snapshot_fixture(&path);
+    std::fs::write(&path, []).unwrap();
+
+    assert!(matches!(
+        SessionJournal::open(&path, "s1"),
+        Err(JournalError::SnapshotJournalMismatch(_))
+    ));
+}
+
+#[test]
+fn committed_snapshot_with_torn_journal_fails_closed() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("s1.journal");
+    create_stale_snapshot_fixture(&path);
+    std::fs::write(&path, b"WJ01").unwrap();
+
+    assert!(matches!(
+        SessionJournal::open(&path, "s1"),
+        Err(JournalError::SnapshotJournalMismatch(_))
     ));
 }
