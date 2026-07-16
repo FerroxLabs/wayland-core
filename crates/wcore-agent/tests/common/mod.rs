@@ -10,6 +10,10 @@ use serde_json::{Value, json};
 use tokio::sync::mpsc;
 
 use wcore_agent::confirm::ToolConfirmer;
+use wcore_agent::engine::AgentEngine;
+use wcore_agent::session::SessionManager;
+use wcore_agent::session_journal::SessionJournal;
+use wcore_agent::spawner::AgentSpawner;
 use wcore_config::config::{Config, ProviderType, SessionConfig, ToolsConfig};
 use wcore_egress::{AllowAllPolicy, EgressClient};
 use wcore_protocol::events::ToolCategory;
@@ -29,6 +33,49 @@ pub const RECOVERY_TEST_KEY: [u8; 32] = [0x5a; 32];
 pub fn configure_persisted_test_session(config: &mut Config, session_root: &std::path::Path) {
     config.session.enabled = true;
     config.session.directory = session_root.join("sessions").to_string_lossy().into_owned();
+}
+
+/// Bind an integration-test spawner to the same canonical journal authority
+/// production child launches require. The returned tempdir must remain alive
+/// until every child task and journal assertion has completed.
+pub fn bind_test_spawner(
+    spawner: AgentSpawner,
+) -> (AgentSpawner, SessionJournal, tempfile::TempDir) {
+    let root = tempfile::tempdir().expect("create durable spawner test root");
+    let manager = SessionManager::new(root.path().join("sessions"), 10);
+    let active = manager
+        .create_for_run("test-provider", "test-model", "/tmp", None)
+        .expect("create canonical durable spawner test session");
+    let journal = active.journal.clone();
+    spawner
+        .bind_durable_session(active.journal, &active.session.id)
+        .expect("bind canonical durable spawner test session");
+    (spawner, journal, root)
+}
+
+/// Bind a test spawner when the caller does not inspect the journal directly.
+pub fn bound_test_spawner(spawner: AgentSpawner) -> (AgentSpawner, tempfile::TempDir) {
+    let (spawner, _journal, root) = bind_test_spawner(spawner);
+    (spawner, root)
+}
+
+/// Bind and share a test spawner for tools that own it behind an `Arc`.
+pub fn bound_test_spawner_arc(spawner: AgentSpawner) -> (Arc<AgentSpawner>, tempfile::TempDir) {
+    let (spawner, root) = bound_test_spawner(spawner);
+    (Arc::new(spawner), root)
+}
+
+/// Bind a directly-constructed engine to a canonical child-session authority.
+pub fn bind_test_engine(engine: &mut AgentEngine) -> tempfile::TempDir {
+    let root = tempfile::tempdir().expect("create durable engine test root");
+    let manager = SessionManager::new(root.path().join("sessions"), 10);
+    let active = manager
+        .create_for_run("test-provider", "test-model", "/tmp", None)
+        .expect("create canonical durable engine test session");
+    engine
+        .bind_test_durable_session(active.journal, &active.session.id)
+        .expect("bind canonical durable engine test session");
+    root
 }
 
 /// Local HTTP boundary used by persisted-session mock providers. Durable

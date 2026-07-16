@@ -45,6 +45,9 @@ pub struct PluginMcpDeclaration {
 
 pub struct BootstrapResult {
     pub engine: AgentEngine,
+    /// Host-facing durable child control plane backed by the exact canonical
+    /// spawner installed into the bootstrapped engine's child-capable tools.
+    pub host_children: crate::spawner::HostChildController,
     pub provider: Arc<dyn LlmProvider>,
     /// F07: immutable launch authority snapshot for host/TUI/ACP reporting.
     pub effective_execution_policy: EffectiveExecutionPolicy,
@@ -165,6 +168,10 @@ struct SessionBudgetEnvelope {
 
 impl SessionBudgetEnvelope {
     fn from_config(config: &Config) -> Self {
+        Self::from_config_for_session(config, uuid::Uuid::new_v4().to_string())
+    }
+
+    fn from_config_for_session(config: &Config, session_id: String) -> Self {
         let effective_budget = wcore_budget::BudgetConfig::effective_session_envelope(
             &config.budget,
             config.session_cap.as_ref(),
@@ -187,7 +194,6 @@ impl SessionBudgetEnvelope {
             wall_clock: crate::session_journal::BudgetWallClockAuthority::ActiveRuntime,
             process_cleanup_proof: None,
         };
-        let session_id = uuid::Uuid::new_v4().to_string();
         let authority = authority_seed
             .detached(session_id.clone())
             .expect("resolved budget policy produces a valid detached authority");
@@ -218,8 +224,21 @@ impl SessionBudgetEnvelope {
 pub fn govern_standalone_spawner(
     spawner: crate::spawner::AgentSpawner,
     config: &Config,
-) -> crate::spawner::AgentSpawner {
-    let envelope = SessionBudgetEnvelope::from_config(config);
+) -> anyhow::Result<crate::spawner::AgentSpawner> {
+    let spawner = spawner.with_session_authority_config(config);
+    let cwd = std::env::current_dir()?;
+    let manager = crate::session::SessionManager::new(
+        config.session.directory.clone().into(),
+        config.session.max_sessions,
+    );
+    let active = manager.create_for_run(
+        &config.provider_label,
+        &config.model,
+        &cwd.to_string_lossy(),
+        None,
+    )?;
+    let session_id = active.session.id.clone();
+    let envelope = SessionBudgetEnvelope::from_config_for_session(config, session_id.clone());
     let execution_budget = envelope
         .authority
         .lock()
@@ -234,7 +253,15 @@ pub fn govern_standalone_spawner(
         guard.token_clone(),
     )
     .with_budget_guard(guard);
-    spawner.with_budget_governance(governance)
+    let durable_authority = crate::durable_spawner::DurableSessionAuthority::new();
+    let spawner = spawner
+        .with_budget_governance(governance)
+        .with_durable_session_authority(
+            durable_authority.clone(),
+            EffectiveExecutionPolicy::baseline(&config.execution_policy),
+        )?;
+    durable_authority.bind_fresh(active.journal, &session_id)?;
+    Ok(spawner)
 }
 
 /// Builder for creating a fully-initialized `AgentEngine`.
@@ -2167,7 +2194,7 @@ impl AgentBootstrap {
             .with_durable_session_authority(
                 durable_session_authority.clone(),
                 effective_execution_policy.clone(),
-            )
+            )?
             .with_sandbox_runtime(registry.sandbox_runtime())
             .with_egress_policy(Arc::new(
                 self.session_egress_policy
@@ -2187,6 +2214,7 @@ impl AgentBootstrap {
                 .with_budget_identity("session", crate::engine::resolve_user_model_user_id());
         }
         let spawner = Arc::new(spawner_builder);
+        let host_children = crate::spawner::HostChildController::new(Arc::clone(&spawner));
         // Lane D3 (G2/G4): register agents copied into installed marketplace
         // plugins (`<plugins-root>/<plugin>@<marketplace>/agents/*.yaml`),
         // namespaced `<marketplace>/<plugin>:<agent>` so agents from different
@@ -2293,9 +2321,7 @@ impl AgentBootstrap {
                         .expect("session egress policy is installed before tool registration")
                         .clone(),
                 ),
-                spawner
-                    .budget_governance()
-                    .expect("Smart session spawner carries finite budget governance"),
+                Arc::clone(&spawner),
                 Arc::clone(&self.output),
             )));
         }
@@ -2588,7 +2614,10 @@ impl AgentBootstrap {
         } else {
             AgentEngine::new_with_provider(provider.clone(), self.config, registry, self.output)
         };
-        engine.install_durable_session_authority(durable_session_authority)?;
+        engine.install_durable_session_authority(
+            durable_session_authority,
+            effective_execution_policy.clone(),
+        )?;
         if let Some(policy) = self.session_egress_policy.as_ref() {
             let policy: wcore_egress::SharedPolicy = Arc::new(policy.clone());
             engine.set_egress_policy(policy);
@@ -3302,6 +3331,7 @@ impl AgentBootstrap {
 
         Ok(BootstrapResult {
             engine,
+            host_children,
             provider,
             effective_execution_policy,
             workspace_policy_receipt,

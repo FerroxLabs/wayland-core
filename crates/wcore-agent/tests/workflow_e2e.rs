@@ -39,7 +39,7 @@ mod common;
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
-use common::test_config;
+use common::{bound_test_spawner, test_config};
 use serde_json::{Value, json};
 use tokio::sync::mpsc;
 use wcore_agent::orchestration::workflow::runner::{WorkflowPlan, WorkflowRunner};
@@ -200,7 +200,7 @@ async fn review_changes_workflow_runs_full_stack_end_to_end() {
         Arc::clone(&seen),
         Arc::clone(&lint_calls),
     ));
-    let spawner = AgentSpawner::new(provider, test_config());
+    let (spawner, _session_root) = bound_test_spawner(AgentSpawner::new(provider, test_config()));
 
     let plan = WorkflowPlan::parse(REVIEW_CHANGES).expect("review-changes workflow should parse");
     let runner = WorkflowRunner::new(&spawner);

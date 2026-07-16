@@ -22,7 +22,7 @@ mod common;
 use std::sync::Arc;
 use std::time::Duration;
 
-use common::{MockLlmProvider, test_config};
+use common::{MockLlmProvider, bound_test_spawner_arc, test_config};
 use serde_json::json;
 use wcore_agent::agents::bus::{AgentBus, AgentMessage};
 use wcore_agent::spawn_tool::SpawnTool;
@@ -80,7 +80,9 @@ async fn spawn_tool_routes_via_fleet_dispatcher_when_topology_is_fleet() {
     // 11 OK-turn responses, one per child sub-agent.
     let turns: Vec<Vec<LlmEvent>> = (0..11).map(|i| ok_turn(&format!("out-{i}"))).collect();
     let provider = Arc::new(MockLlmProvider::with_turns(turns));
-    let spawner = Arc::new(AgentSpawner::new(provider, test_config()).with_bus(Arc::clone(&bus)));
+    let (spawner, _session_root) = bound_test_spawner_arc(
+        AgentSpawner::new(provider, test_config()).with_bus(Arc::clone(&bus)),
+    );
 
     // The production wiring point: bootstrap.rs flips topology to Fleet
     // when the loaded agent registry has > DEFAULT_SHARD_SIZE entries.
@@ -166,7 +168,9 @@ async fn spawn_tool_does_not_route_via_fleet_when_topology_is_spawn() {
 
     let turns: Vec<Vec<LlmEvent>> = (0..3).map(|i| ok_turn(&format!("out-{i}"))).collect();
     let provider = Arc::new(MockLlmProvider::with_turns(turns));
-    let spawner = Arc::new(AgentSpawner::new(provider, test_config()).with_bus(Arc::clone(&bus)));
+    let (spawner, _session_root) = bound_test_spawner_arc(
+        AgentSpawner::new(provider, test_config()).with_bus(Arc::clone(&bus)),
+    );
 
     // No with_topology — defaults to Topology::Spawn.
     let tool = SpawnTool::new(spawner);

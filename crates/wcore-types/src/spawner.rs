@@ -534,6 +534,21 @@ impl SubAgentResult {
 pub trait Spawner: Send + Sync {
     /// Spawn a fork-mode sub-agent with optional overrides and wait for its result.
     async fn spawn_fork(&self, config: SubAgentConfig, overrides: ForkOverrides) -> SubAgentResult;
+
+    /// Spawn with an explicit durable lifecycle origin.
+    ///
+    /// Legacy implementations inherit the original behavior. The production
+    /// agent spawner overrides this so Delegate, forked skills, and specialized
+    /// orchestration cannot collapse into one anonymous child kind.
+    async fn spawn_fork_with_origin(
+        &self,
+        config: SubAgentConfig,
+        overrides: ForkOverrides,
+        origin: ChildOrigin,
+    ) -> SubAgentResult {
+        let _ = origin;
+        self.spawn_fork(config, overrides).await
+    }
 }
 
 #[cfg(test)]

@@ -64,20 +64,73 @@ fn delivery_origin_belongs_to_turn(origin: &DeliveryOrigin, turn_id: &str) -> bo
 #[cfg(test)]
 mod durable_session_authority_tests {
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
+    use async_trait::async_trait;
+    use tokio::sync::mpsc;
     use wcore_config::config::Config;
+    use wcore_providers::{LlmProvider, ProviderError};
     use wcore_tools::registry::ToolRegistry;
+    use wcore_types::llm::{LlmEvent, LlmRequest};
+    use wcore_types::message::{FinishReason, StopReason, TokenUsage};
+    use wcore_types::spawner::{ChildOrigin, DurableChildStatus, SubAgentConfig};
 
     use super::AgentEngine;
     use crate::durable_spawner::{DurableSessionAuthority, DurableSpawnerError};
     use crate::output::null_sink::NullSink;
+    use crate::spawner::AgentSpawner;
     use crate::test_utils::ScriptedProvider;
 
+    struct CountingProvider {
+        calls: AtomicUsize,
+    }
+
+    #[async_trait]
+    impl LlmProvider for CountingProvider {
+        async fn stream(
+            &self,
+            _request: &LlmRequest,
+        ) -> Result<mpsc::Receiver<LlmEvent>, ProviderError> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            let (tx, rx) = mpsc::channel(2);
+            tx.send(LlmEvent::TextDelta("hosted child completed".into()))
+                .await
+                .unwrap();
+            tx.send(LlmEvent::Done {
+                stop_reason: StopReason::EndTurn,
+                finish_reason: FinishReason::Stop,
+                usage: TokenUsage::default(),
+            })
+            .await
+            .unwrap();
+            Ok(rx)
+        }
+    }
+
+    fn child(name: &str) -> SubAgentConfig {
+        SubAgentConfig {
+            name: name.into(),
+            prompt: "perform hosted orchestration work".into(),
+            max_turns: 1,
+            max_tokens: 16,
+            system_prompt: None,
+            provider: None,
+            model: None,
+            temperature: None,
+        }
+    }
+
     fn session_config(directory: &std::path::Path) -> Config {
-        let mut config = Config::default();
-        config.session.enabled = true;
-        config.session.directory = directory.to_string_lossy().into_owned();
-        config
+        Config {
+            model: "test-model".into(),
+            provider_label: "test-provider".into(),
+            session: wcore_config::config::SessionConfig {
+                enabled: true,
+                directory: directory.to_string_lossy().into_owned(),
+                ..Default::default()
+            },
+            ..Config::default()
+        }
     }
 
     #[test]
@@ -92,7 +145,14 @@ mod durable_session_authority_tests {
             Arc::new(NullSink),
         );
 
-        engine.install_durable_session_authority(authority).unwrap();
+        engine
+            .install_durable_session_authority(
+                authority,
+                wcore_types::execution_policy::EffectiveExecutionPolicy::baseline(
+                    &engine.config.execution_policy,
+                ),
+            )
+            .unwrap();
         assert!(matches!(
             observer.token(),
             Err(DurableSpawnerError::AuthorityUnbound)
@@ -137,7 +197,14 @@ mod durable_session_authority_tests {
         let authority = DurableSessionAuthority::new();
         let observer = authority.clone();
 
-        engine.install_durable_session_authority(authority).unwrap();
+        engine
+            .install_durable_session_authority(
+                authority,
+                wcore_types::execution_policy::EffectiveExecutionPolicy::baseline(
+                    &engine.config.execution_policy,
+                ),
+            )
+            .unwrap();
         let token_a = observer.token().unwrap();
         assert_eq!(token_a.session_id(), "f190010");
 
@@ -149,6 +216,74 @@ mod durable_session_authority_tests {
             observer.with_store(&token_a, |_| Ok(())),
             Err(DurableSpawnerError::StaleAuthority { .. })
         ));
+    }
+
+    #[tokio::test]
+    async fn hosted_workflow_and_crucible_spawners_share_canonical_session_authority() {
+        let dir = tempfile::tempdir().unwrap();
+        let authority = DurableSessionAuthority::new();
+        let observer = authority.clone();
+        let provider = Arc::new(CountingProvider {
+            calls: AtomicUsize::new(0),
+        });
+        let provider_dyn: Arc<dyn LlmProvider> = provider.clone();
+        let mut engine = AgentEngine::new_with_provider(
+            Arc::clone(&provider_dyn),
+            session_config(dir.path()),
+            ToolRegistry::new(),
+            Arc::new(NullSink),
+        );
+        engine
+            .install_durable_session_authority(
+                authority,
+                wcore_types::execution_policy::EffectiveExecutionPolicy::baseline(
+                    &engine.config.execution_policy,
+                ),
+            )
+            .unwrap();
+        engine
+            .init_session("test", &dir.path().to_string_lossy(), Some("f190012"))
+            .unwrap();
+
+        // These are the exact transient spawners used by hosted live Workflow
+        // and hosted /crucible after provider/resolver construction.
+        let workflow_spawner = engine.govern_transient_spawner(AgentSpawner::new(
+            Arc::clone(&provider_dyn),
+            engine.config.clone(),
+        ));
+        let crucible_spawner = engine.govern_transient_spawner(AgentSpawner::new(
+            Arc::clone(&provider_dyn),
+            engine.config.clone(),
+        ));
+        assert_eq!(workflow_spawner.durable_session_id().unwrap(), "f190012");
+        assert_eq!(crucible_spawner.durable_session_id().unwrap(), "f190012");
+
+        let workflow = workflow_spawner
+            .spawn_one_with_origin(child("hosted-workflow"), ChildOrigin::Workflow)
+            .await;
+        let council = crucible_spawner
+            .spawn_one_with_origin(child("hosted-crucible"), ChildOrigin::Council)
+            .await;
+        assert!(!workflow.is_error, "{}", workflow.text);
+        assert!(!council.is_error, "{}", council.text);
+        assert_eq!(provider.calls.load(Ordering::SeqCst), 2);
+
+        let token = observer.token().unwrap();
+        observer
+            .with_store(&token, |store| {
+                let records = store.list()?;
+                assert_eq!(records.len(), 2);
+                for origin in [ChildOrigin::Workflow, ChildOrigin::Council] {
+                    let record = records
+                        .iter()
+                        .find(|record| record.origin == origin)
+                        .expect("hosted origin must be durable");
+                    assert_eq!(record.parent.session_id, "f190012");
+                    assert_eq!(record.status, DurableChildStatus::Succeeded);
+                }
+                Ok(())
+            })
+            .unwrap();
     }
 }
 
@@ -3411,7 +3546,7 @@ impl AgentEngine {
             let ActiveSession { session, journal } =
                 mgr.create_for_run(provider_name, &self.model, cwd, session_id)?;
             self.bind_budget_authority(journal.clone(), &session.id)?;
-            self.bind_durable_session_authority(journal.clone(), &session.id)?;
+            self.bind_fresh_durable_session_authority(journal.clone(), &session.id)?;
             // W6 F16: if a previous plan was persisted for this session id,
             // advertise resume-availability via the existing Info channel.
             // No new protocol variant (audit rev-2). Errors from the probe
@@ -3637,13 +3772,35 @@ impl AgentEngine {
     pub(crate) fn install_durable_session_authority(
         &mut self,
         authority: crate::durable_spawner::DurableSessionAuthority,
+        effective_policy: wcore_types::execution_policy::EffectiveExecutionPolicy,
     ) -> anyhow::Result<()> {
+        authority.install_effective_policy(effective_policy)?;
         if let (Some(session), Some(journal)) =
             (self.current_session.as_ref(), self.session_journal.as_ref())
         {
             authority.bind(journal.clone(), &session.id)?;
         }
         self.durable_session_authority = Some(authority);
+        Ok(())
+    }
+
+    /// Bind the canonical child-session authority for integration fixtures
+    /// that construct an engine directly instead of through `AgentBootstrap`.
+    #[cfg(any(test, feature = "test-utils"))]
+    #[doc(hidden)]
+    pub fn bind_test_durable_session(
+        &mut self,
+        journal: SessionJournal,
+        session_id: &str,
+    ) -> anyhow::Result<()> {
+        let authority = crate::durable_spawner::DurableSessionAuthority::new();
+        self.install_durable_session_authority(
+            authority.clone(),
+            wcore_types::execution_policy::EffectiveExecutionPolicy::baseline(
+                &self.config.execution_policy,
+            ),
+        )?;
+        authority.bind(journal, session_id)?;
         Ok(())
     }
 
@@ -3654,6 +3811,17 @@ impl AgentEngine {
     ) -> anyhow::Result<()> {
         if let Some(authority) = &self.durable_session_authority {
             authority.bind(journal, session_id)?;
+        }
+        Ok(())
+    }
+
+    fn bind_fresh_durable_session_authority(
+        &self,
+        journal: SessionJournal,
+        session_id: &str,
+    ) -> anyhow::Result<()> {
+        if let Some(authority) = &self.durable_session_authority {
+            authority.bind_fresh(journal, session_id)?;
         }
         Ok(())
     }
@@ -3818,6 +3986,12 @@ impl AgentEngine {
         &self,
         spawner: crate::spawner::AgentSpawner,
     ) -> crate::spawner::AgentSpawner {
+        let spawner = match self.durable_session_authority.as_ref() {
+            Some(authority) => spawner
+                .with_shared_durable_session_authority(authority.clone())
+                .expect("installed durable session authority carries its effective policy"),
+            None => spawner,
+        };
         if let Some(authority) = self.budget_authority.as_ref() {
             let governance = crate::spawner::SpawnerBudgetGovernance::from_authority(
                 Arc::clone(authority),

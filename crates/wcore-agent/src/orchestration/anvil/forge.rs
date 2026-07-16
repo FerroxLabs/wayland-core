@@ -33,7 +33,7 @@ use wcore_protocol::writer::{ProtocolEmitter, ProtocolWriter};
 use wcore_sandbox::SandboxRegistry;
 use wcore_sandbox::backends::SandboxBackend;
 use wcore_swarm::worktree::WorktreeManager;
-use wcore_types::spawner::{ForkOverrides, Spawner, SubAgentConfig};
+use wcore_types::spawner::{ChildOrigin, ForkOverrides, Spawner, SubAgentConfig};
 
 use super::TerminalState;
 use super::climb::{CandidateId, CheckOutcome, GateReport, Severity};
@@ -322,16 +322,20 @@ impl Builder for SpawnBuilder<'_> {
             std::env::current_dir().map_err(|e| EngineError::Builder(format!("cwd read: {e}")))?;
         std::env::set_current_dir(&worktree)
             .map_err(|e| EngineError::Builder(format!("cwd set: {e}")))?;
-        let result = tokio::time::timeout(BUILDER_TIMEOUT, self.spawner.spawn_fork(sub, overrides))
-            .await
-            .map_err(|_| {
-                // Always restore cwd on the timeout path too.
-                let _ = std::env::set_current_dir(&prev);
-                EngineError::Builder(format!(
-                    "builder fork exceeded {}s wall budget",
-                    BUILDER_TIMEOUT.as_secs()
-                ))
-            })?;
+        let result = tokio::time::timeout(
+            BUILDER_TIMEOUT,
+            self.spawner
+                .spawn_fork_with_origin(sub, overrides, ChildOrigin::Anvil),
+        )
+        .await
+        .map_err(|_| {
+            // Always restore cwd on the timeout path too.
+            let _ = std::env::set_current_dir(&prev);
+            EngineError::Builder(format!(
+                "builder fork exceeded {}s wall budget",
+                BUILDER_TIMEOUT.as_secs()
+            ))
+        })?;
         // Always restore, even on a builder error.
         let _ = std::env::set_current_dir(&prev);
 
@@ -445,14 +449,18 @@ impl Valve for SpawnValve<'_> {
             effort: None,
             allowed_tools: Vec::new(), // read-only (Read/Grep/Glob)
         };
-        let result = tokio::time::timeout(VALVE_TIMEOUT, self.spawner.spawn_fork(sub, overrides))
-            .await
-            .map_err(|_| {
-                EngineError::Builder(format!(
-                    "valve fork exceeded {}s wall budget",
-                    VALVE_TIMEOUT.as_secs()
-                ))
-            })?;
+        let result = tokio::time::timeout(
+            VALVE_TIMEOUT,
+            self.spawner
+                .spawn_fork_with_origin(sub, overrides, ChildOrigin::Anvil),
+        )
+        .await
+        .map_err(|_| {
+            EngineError::Builder(format!(
+                "valve fork exceeded {}s wall budget",
+                VALVE_TIMEOUT.as_secs()
+            ))
+        })?;
         eprintln!(
             "[anvil-forge] valve fired: error={} turns={} tokens={}+{}",
             result.is_error, result.turns, result.usage.input_tokens, result.usage.output_tokens,

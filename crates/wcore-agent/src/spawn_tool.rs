@@ -9,6 +9,7 @@ use crate::output::OutputSink;
 use crate::spawner::{AgentSpawner, SpawnExtras, SubAgentConfig};
 use wcore_protocol::events::ToolCategory;
 use wcore_swarm::Topology;
+use wcore_types::spawner::ChildOrigin;
 use wcore_types::tool::{JsonSchema, ToolEffectContract, ToolResult};
 
 use wcore_tools::Tool;
@@ -187,6 +188,7 @@ impl Tool for SpawnTool {
         // per-task relay path (cap still enforced above via Mesh cap). Fleet only
         // fires when the caller explicitly set topology=Fleet AND parent_output is
         // None (unmonitored path).
+        let origin = child_origin(self.topology);
         let results = if self.topology == Topology::Fleet && self.parent_output.is_none() {
             // Pure fleet path: no relay, sharded dispatch.
             let run_id = format!("spawn-tool-{}", uuid::Uuid::new_v4().simple());
@@ -194,10 +196,12 @@ impl Tool for SpawnTool {
         } else if self.parent_output.is_some() {
             // Relay path: each task gets its own ChannelSink + parent_call_id.
             // Works for both named and anonymous tasks (Decision A).
-            self.spawn_with_relay(tasks, &agent_names).await
+            self.spawn_with_relay(tasks, &agent_names, origin).await
         } else {
             // Legacy anonymous path: no parent output wired.
-            self.spawner.spawn_parallel(tasks).await
+            self.spawner
+                .spawn_parallel_with_extras_origin(tasks, SpawnExtras::default(), origin)
+                .await
         };
 
         let output: Vec<String> = results
@@ -294,6 +298,15 @@ fn parse_tasks(input: &Value) -> Result<(Vec<SubAgentConfig>, Vec<Option<String>
     Ok((configs, agent_names))
 }
 
+fn child_origin(topology: Topology) -> ChildOrigin {
+    match topology {
+        Topology::Spawn => ChildOrigin::Spawn,
+        Topology::Swarm => ChildOrigin::Swarm,
+        Topology::Mesh => ChildOrigin::Mesh,
+        Topology::Fleet => ChildOrigin::Fleet,
+    }
+}
+
 impl SpawnTool {
     /// v0.9.4 W1 relay fix: spawn with per-task channel-sink relay.
     ///
@@ -313,6 +326,7 @@ impl SpawnTool {
         &self,
         tasks: Vec<SubAgentConfig>,
         agent_names: &[Option<String>],
+        origin: ChildOrigin,
     ) -> Vec<crate::spawner::SubAgentResult> {
         // SAFETY: guarded by caller — `spawn_with_relay` is only called
         // when `self.parent_output.is_some()`.
@@ -385,7 +399,7 @@ impl SpawnTool {
         let tasks_and_extras: Vec<_> = tasks.into_iter().zip(per_task_extras).collect();
         let results = self
             .spawner
-            .spawn_parallel_with_per_task_extras(tasks_and_extras)
+            .spawn_parallel_with_per_task_extras_origin(tasks_and_extras, origin)
             .await;
 
         // Wait for the stream drain to flush all pending stream relays. By this
@@ -538,6 +552,107 @@ mod topology_cap_tests {
 }
 
 #[cfg(test)]
+mod durable_topology_origin_tests {
+    use std::sync::Arc;
+
+    use async_trait::async_trait;
+    use serde_json::json;
+    use tokio::sync::mpsc;
+    use wcore_config::config::{Config, SessionConfig};
+    use wcore_providers::{LlmProvider, ProviderError};
+    use wcore_swarm::Topology;
+    use wcore_tools::Tool;
+    use wcore_types::llm::{LlmEvent, LlmRequest};
+    use wcore_types::message::{FinishReason, StopReason, TokenUsage};
+    use wcore_types::spawner::ChildOrigin;
+
+    use super::SpawnTool;
+    use crate::spawner::AgentSpawner;
+
+    struct ImmediateProvider;
+
+    #[async_trait]
+    impl LlmProvider for ImmediateProvider {
+        async fn stream(
+            &self,
+            _request: &LlmRequest,
+        ) -> Result<mpsc::Receiver<LlmEvent>, ProviderError> {
+            let (tx, rx) = mpsc::channel(2);
+            tx.send(LlmEvent::TextDelta("done".into())).await.unwrap();
+            tx.send(LlmEvent::Done {
+                stop_reason: StopReason::EndTurn,
+                finish_reason: FinishReason::from_stop_reason(StopReason::EndTurn),
+                usage: TokenUsage::default(),
+            })
+            .await
+            .unwrap();
+            Ok(rx)
+        }
+    }
+
+    #[tokio::test]
+    async fn requested_topology_is_preserved_in_the_durable_supervisor() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = Config {
+            model: "test-model".into(),
+            provider_label: "test-provider".into(),
+            session: SessionConfig {
+                enabled: false,
+                ..Default::default()
+            },
+            ..Config::default()
+        };
+        let spawner = Arc::new(AgentSpawner::new(Arc::new(ImmediateProvider), config));
+        let manager = crate::session::SessionManager::new(dir.path().to_path_buf(), 10);
+        let active = manager
+            .create_for_run(
+                "test-provider",
+                "test-model",
+                &dir.path().to_string_lossy(),
+                Some("f1920008"),
+            )
+            .unwrap();
+        spawner
+            .bind_durable_session(active.journal, &active.session.id)
+            .unwrap();
+        let supervisor = spawner.durable_child_supervisor().unwrap();
+
+        for (topology, name) in [
+            (Topology::Spawn, "spawn-child"),
+            (Topology::Swarm, "swarm-child"),
+            (Topology::Mesh, "mesh-child"),
+            (Topology::Fleet, "fleet-child"),
+        ] {
+            let result = SpawnTool::new(Arc::clone(&spawner))
+                .with_topology(topology)
+                .execute(json!({
+                    "tasks": [{"name": name, "prompt": "return done"}]
+                }))
+                .await;
+            assert!(!result.is_error, "{topology}: {}", result.content);
+        }
+
+        let records = supervisor.list().unwrap();
+        assert_eq!(records.len(), 4);
+        for origin in [
+            ChildOrigin::Spawn,
+            ChildOrigin::Swarm,
+            ChildOrigin::Mesh,
+            ChildOrigin::Fleet,
+        ] {
+            let record = records
+                .iter()
+                .find(|record| record.origin == origin)
+                .unwrap_or_else(|| panic!("missing durable {origin:?} record"));
+            assert_eq!(
+                supervisor.inspect(&record.child_id).unwrap(),
+                Some(record.clone())
+            );
+        }
+    }
+}
+
+#[cfg(test)]
 mod partial_failure_rollup_tests {
     //! #661 — a batch is an ERROR when ANY child fails, not only when EVERY
     //! child fails. Mirrors wcore-tools' `delegate_batch_partial_failure_is_error`
@@ -557,7 +672,7 @@ mod partial_failure_rollup_tests {
     use wcore_types::message::{FinishReason, StopReason, TokenUsage};
 
     use super::SpawnTool;
-    use crate::spawner::AgentSpawner;
+    use crate::spawner::{AgentSpawner, bind_test_durable_session};
     use wcore_tools::Tool;
 
     /// Marker embedded in exactly one task's prompt. `parse_tasks` folds the
@@ -604,9 +719,12 @@ mod partial_failure_rollup_tests {
 
     #[tokio::test]
     async fn spawn_batch_partial_failure_is_error() {
+        let dir = tempfile::tempdir().unwrap();
         // Session off so the child engines never touch disk; every other
         // default is fine (matches the end-to-end spawn integration tests).
         let config = Config {
+            model: "test-model".into(),
+            provider_label: "test-provider".into(),
             session: SessionConfig {
                 enabled: false,
                 ..Default::default()
@@ -614,6 +732,7 @@ mod partial_failure_rollup_tests {
             ..Config::default()
         };
         let spawner = Arc::new(AgentSpawner::new(Arc::new(PartialFailProvider), config));
+        bind_test_durable_session(&spawner, dir.path(), "f190022");
         let tool = SpawnTool::new(spawner);
 
         let out = tool

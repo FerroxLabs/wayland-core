@@ -16,7 +16,7 @@ mod common;
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
-use common::test_config;
+use common::{bound_test_spawner_arc, test_config};
 use serde_json::json;
 use tokio::sync::mpsc;
 use wcore_agent::bootstrap::AgentBootstrap;
@@ -122,7 +122,8 @@ async fn workflow_tool_is_registered_in_bootstrap() {
 #[tokio::test]
 async fn inline_two_stage_workflow_runs_end_to_end() {
     let provider = Arc::new(CapturingProvider::new());
-    let spawner = Arc::new(AgentSpawner::new(provider, test_config()));
+    let (spawner, _session_root) =
+        bound_test_spawner_arc(AgentSpawner::new(provider, test_config()));
     let tool = WorkflowTool::new(spawner);
 
     let src = r#"
@@ -167,7 +168,8 @@ Workflow(
 #[tokio::test]
 async fn malformed_ron_returns_parse_error_not_panic() {
     let provider = Arc::new(CapturingProvider::new());
-    let spawner = Arc::new(AgentSpawner::new(provider, test_config()));
+    let (spawner, _session_root) =
+        bound_test_spawner_arc(AgentSpawner::new(provider, test_config()));
     let tool = WorkflowTool::new(spawner);
 
     // Not valid RON for a `Workflow` (truncated / garbage).
@@ -191,7 +193,8 @@ async fn malformed_ron_returns_parse_error_not_panic() {
 #[tokio::test]
 async fn missing_workflow_param_returns_error() {
     let provider = Arc::new(CapturingProvider::new());
-    let spawner = Arc::new(AgentSpawner::new(provider, test_config()));
+    let (spawner, _session_root) =
+        bound_test_spawner_arc(AgentSpawner::new(provider, test_config()));
     let tool = WorkflowTool::new(spawner);
 
     let out = tool.execute(json!({})).await;
@@ -246,7 +249,8 @@ async fn inputs_object_feeds_over_pipeline() {
     let provider = Arc::new(CountingProvider {
         calls: Arc::clone(&calls),
     });
-    let spawner = Arc::new(AgentSpawner::new(provider, test_config()));
+    let (spawner, _session_root) =
+        bound_test_spawner_arc(AgentSpawner::new(provider, test_config()));
     let tool = WorkflowTool::new(spawner);
 
     let out = tool
@@ -278,7 +282,8 @@ async fn over_pipeline_without_inputs_dispatches_nothing() {
     let provider = Arc::new(CountingProvider {
         calls: Arc::clone(&calls),
     });
-    let spawner = Arc::new(AgentSpawner::new(provider, test_config()));
+    let (spawner, _session_root) =
+        bound_test_spawner_arc(AgentSpawner::new(provider, test_config()));
     let tool = WorkflowTool::new(spawner);
 
     let out = tool.execute(json!({ "workflow": OVER_PIPELINE })).await;

@@ -20,7 +20,7 @@ mod common;
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
-use common::test_config;
+use common::{bound_test_spawner, test_config};
 use tokio::sync::mpsc;
 use wcore_agent::spawner::{AgentSpawner, SubAgentConfig, SubAgentResult};
 use wcore_providers::{LlmProvider, ProviderError};
@@ -105,7 +105,7 @@ async fn workflow_runner_kernel_executes_all_stages_and_threads_data() {
         seen: Arc::clone(&seen),
         turn: Mutex::new(0),
     });
-    let spawner = AgentSpawner::new(provider, test_config());
+    let (spawner, _session_root) = bound_test_spawner(AgentSpawner::new(provider, test_config()));
 
     let results = run_sequential(
         &spawner,

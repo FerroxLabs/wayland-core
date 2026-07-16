@@ -28,7 +28,10 @@ use wcore_config::crucible::{AssemblyMode, CouncilMode, CrucibleConfig};
 use wcore_providers::LlmProvider;
 use wcore_types::crucible::CrucibleDecision;
 
-fn governed_crucible_spawner(provider: Arc<dyn LlmProvider>, config: &Config) -> AgentSpawner {
+fn governed_crucible_spawner(
+    provider: Arc<dyn LlmProvider>,
+    config: &Config,
+) -> anyhow::Result<AgentSpawner> {
     wcore_agent::bootstrap::govern_standalone_spawner(
         AgentSpawner::new(provider, config.clone()),
         config,
@@ -362,7 +365,7 @@ pub async fn run_crucible(args: CrucibleArgs) -> anyhow::Result<()> {
 
     let resolver = CouncilProviderResolver::new(base.clone(), cf.providers.clone());
     let mut spawner =
-        governed_crucible_spawner(provider, &base).with_provider_resolver(Arc::new(resolver));
+        governed_crucible_spawner(provider, &base)?.with_provider_resolver(Arc::new(resolver));
     if let Some(tracker) = council_budget_tracker(&cf) {
         let (sess, user) = cli_budget_identity();
         spawner = spawner
@@ -426,7 +429,7 @@ async fn run_crucible_auto(
         );
     }
     let mut spawner =
-        governed_crucible_spawner(provider, &base).with_provider_resolver(Arc::new(resolver));
+        governed_crucible_spawner(provider, &base)?.with_provider_resolver(Arc::new(resolver));
     if let Some(tracker) = council_budget_tracker(cf) {
         let (sess, user) = cli_budget_identity();
         spawner = spawner
@@ -669,7 +672,8 @@ mod tests {
 
     #[tokio::test]
     async fn crucible_spawner_stops_before_provider_call_at_tiny_cap() {
-        let config = Config {
+        let session_root = tempfile::tempdir().unwrap();
+        let mut config = Config {
             budget: wcore_budget::BudgetConfig {
                 max_tokens_in: Some(0),
                 max_tokens_out: Some(0),
@@ -677,10 +681,12 @@ mod tests {
             },
             ..Default::default()
         };
+        config.session.directory = session_root.path().join("sessions").display().to_string();
         let provider = Arc::new(CountingProvider {
             calls: AtomicUsize::new(0),
         });
-        let spawner = governed_crucible_spawner(provider.clone(), &config);
+        let spawner = governed_crucible_spawner(provider.clone(), &config)
+            .expect("bind standalone crucible session authority");
 
         let result = spawner
             .spawn_one(SubAgentConfig {
@@ -701,14 +707,17 @@ mod tests {
 
     #[tokio::test]
     async fn crucible_spawner_cancels_a_hung_provider_at_the_wall_cap() {
-        let config = Config {
+        let session_root = tempfile::tempdir().unwrap();
+        let mut config = Config {
             session_cap: Some(wcore_budget::BudgetConfig {
                 max_wall_time_secs: Some(1),
                 ..Default::default()
             }),
             ..Default::default()
         };
-        let spawner = governed_crucible_spawner(Arc::new(HungProvider), &config);
+        config.session.directory = session_root.path().join("sessions").display().to_string();
+        let spawner = governed_crucible_spawner(Arc::new(HungProvider), &config)
+            .expect("bind standalone crucible session authority");
 
         let result = tokio::time::timeout(
             std::time::Duration::from_secs(3),

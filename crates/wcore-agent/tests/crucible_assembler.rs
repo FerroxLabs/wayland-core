@@ -18,7 +18,7 @@ use wcore_pricing::PricingCatalog;
 use wcore_providers::{LlmProvider, ProviderError};
 use wcore_types::llm::{LlmEvent, LlmRequest};
 
-use common::{MockLlmProvider, test_config};
+use common::{MockLlmProvider, bind_test_spawner, test_config};
 
 /// Provider that is never called (the spawner's unused default).
 struct NeverProvider;
@@ -59,9 +59,13 @@ fn ok_text(text: &str) -> Result<Arc<dyn LlmProvider>, ResolveError> {
     Ok(Arc::new(MockLlmProvider::with_text_response(text)))
 }
 
-fn spawner_with(map: HashMap<String, Result<Arc<dyn LlmProvider>, ResolveError>>) -> AgentSpawner {
-    AgentSpawner::new(Arc::new(NeverProvider), test_config())
-        .with_provider_resolver(Arc::new(MapResolver { map }))
+fn spawner_with(
+    map: HashMap<String, Result<Arc<dyn LlmProvider>, ResolveError>>,
+) -> (AgentSpawner, tempfile::TempDir) {
+    let spawner = AgentSpawner::new(Arc::new(NeverProvider), test_config())
+        .with_provider_resolver(Arc::new(MapResolver { map }));
+    let (spawner, _journal, root) = bind_test_spawner(spawner);
+    (spawner, root)
 }
 
 /// Five catalog-priced specs across five distinct families.
@@ -139,7 +143,7 @@ async fn auto_med_assembles_diverse_council_and_fuses() {
     for s in pool() {
         map.insert(s.clone(), ok_text(&format!("ans-{s}")));
     }
-    let spawner = spawner_with(map);
+    let (spawner, _session_root) = spawner_with(map);
     let roster = roster_from_plan(&plan.members, plan.aggregator.clone());
     let outcome = run_council("design a system", &roster, &spawner, &test_config())
         .await

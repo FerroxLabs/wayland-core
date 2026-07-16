@@ -37,6 +37,11 @@ use wcore_providers::{LlmProvider, ProviderError};
 use wcore_types::llm::{LlmEvent, LlmRequest};
 use wcore_types::message::{FinishReason, StopReason, TokenUsage};
 
+fn bind_spawner(spawner: AgentSpawner) -> (AgentSpawner, tempfile::TempDir) {
+    let (spawner, _journal, session_root) = common::bind_test_spawner(spawner);
+    (spawner, session_root)
+}
+
 #[derive(Default)]
 struct ChildCapture {
     children: Mutex<Vec<WorkflowChildCorrelation>>,
@@ -306,7 +311,7 @@ async fn schema_conforming_output_passes_first_try_and_stores_structured_data() 
         vec![r#"{ "findings": ["a", "b"] }"#],
         Arc::clone(&seen),
     ));
-    let spawner = AgentSpawner::new(provider, test_config());
+    let (spawner, _session_root) = bind_spawner(AgentSpawner::new(provider, test_config()));
 
     let plan = WorkflowPlan::parse(schema_workflow_src()).expect("workflow should parse");
     let (runner, lifecycle, capture) = lifecycle_runner(&spawner);
@@ -354,7 +359,7 @@ async fn schema_mismatch_retries_once_then_succeeds() {
         vec![r#"["not", "an", "object"]"#, r#"{ "findings": ["ok"] }"#],
         Arc::clone(&seen),
     ));
-    let spawner = AgentSpawner::new(provider, test_config());
+    let (spawner, _session_root) = bind_spawner(AgentSpawner::new(provider, test_config()));
 
     let plan = WorkflowPlan::parse(schema_workflow_src()).expect("workflow should parse");
     let (runner, lifecycle, capture) = lifecycle_runner(&spawner);
@@ -395,7 +400,7 @@ async fn schema_persistent_mismatch_surfaces_typed_error_after_retries() {
         vec![r#""still not an object""#],
         Arc::clone(&seen),
     ));
-    let spawner = AgentSpawner::new(provider, test_config());
+    let (spawner, _session_root) = bind_spawner(AgentSpawner::new(provider, test_config()));
 
     let plan = WorkflowPlan::parse(schema_workflow_src()).expect("workflow should parse");
     let (runner, lifecycle, capture) = lifecycle_runner(&spawner);
@@ -438,7 +443,7 @@ async fn schema_persistent_mismatch_surfaces_typed_error_after_retries() {
 async fn linear_workflow_executes_all_stages_and_threads_data() {
     let seen = Arc::new(Mutex::new(Vec::new()));
     let provider = Arc::new(CapturingProvider::new(Arc::clone(&seen)));
-    let spawner = AgentSpawner::new(provider, test_config());
+    let (spawner, _session_root) = bind_spawner(AgentSpawner::new(provider, test_config()));
 
     // A pipeline of 3 stages; each later stage reads its predecessor's output
     // via a flat-key Select input ref (lowered by A1).
@@ -507,7 +512,7 @@ Workflow(
 async fn parallel_fanout_collects_sibling_outputs() {
     let seen = Arc::new(Mutex::new(Vec::new()));
     let provider = Arc::new(CapturingProvider::new(Arc::clone(&seen)));
-    let spawner = AgentSpawner::new(provider, test_config());
+    let (spawner, _session_root) = bind_spawner(AgentSpawner::new(provider, test_config()));
 
     let src = r#"
 Workflow(
@@ -573,7 +578,7 @@ Workflow(
 async fn collect_aggregator_output_is_reachable_downstream_via_aggregator_id() {
     let seen = Arc::new(Mutex::new(Vec::new()));
     let provider = Arc::new(CapturingProvider::new(Arc::clone(&seen)));
-    let spawner = AgentSpawner::new(provider, test_config());
+    let (spawner, _session_root) = bind_spawner(AgentSpawner::new(provider, test_config()));
 
     // Two branches collected into aggregator `tally`, then a `summarize` stage
     // reads `tally` as its input — proving the collected array threads through.
@@ -628,7 +633,7 @@ async fn stage_failure_surfaces_typed_error_with_partial_results() {
         fail_at: 1,
         turn: Mutex::new(0),
     });
-    let spawner = AgentSpawner::new(provider, test_config());
+    let (spawner, _session_root) = bind_spawner(AgentSpawner::new(provider, test_config()));
 
     let src = r#"
 Workflow(
@@ -744,7 +749,8 @@ async fn wide_fanout_routes_through_fleet_and_maps_results_to_nodes() {
 
     let seen = Arc::new(Mutex::new(Vec::new()));
     let provider = Arc::new(CapturingProvider::new(Arc::clone(&seen)));
-    let spawner = AgentSpawner::new(provider, test_config()).with_bus(Arc::clone(&bus));
+    let (spawner, _session_root) =
+        bind_spawner(AgentSpawner::new(provider, test_config()).with_bus(Arc::clone(&bus)));
 
     // 11 siblings — the smallest fan-out that exceeds the threshold and crosses
     // the shard boundary (shard size 10).
@@ -838,7 +844,8 @@ async fn narrow_fanout_stays_on_relay_path_no_fleet() {
 
     let seen = Arc::new(Mutex::new(Vec::new()));
     let provider = Arc::new(CapturingProvider::new(Arc::clone(&seen)));
-    let spawner = AgentSpawner::new(provider, test_config()).with_bus(Arc::clone(&bus));
+    let (spawner, _session_root) =
+        bind_spawner(AgentSpawner::new(provider, test_config()).with_bus(Arc::clone(&bus)));
 
     // Exactly 10 siblings — the threshold itself, which must NOT shard.
     let src = parallel_workflow_with_branches(10);
@@ -915,7 +922,7 @@ async fn parallel_wave_failing_sibling_preserves_successful_siblings() {
         needle: "LOSE_THIS_BRANCH".to_string(),
         turn: Mutex::new(0),
     });
-    let spawner = AgentSpawner::new(provider, test_config());
+    let (spawner, _session_root) = bind_spawner(AgentSpawner::new(provider, test_config()));
 
     let src = r#"
 Workflow(
@@ -989,7 +996,7 @@ async fn merge_and_concat_joins_fold_to_array_in_v1() {
     for join in ["Merge", "Concat"] {
         let seen = Arc::new(Mutex::new(Vec::new()));
         let provider = Arc::new(CapturingProvider::new(Arc::clone(&seen)));
-        let spawner = AgentSpawner::new(provider, test_config());
+        let (spawner, _session_root) = bind_spawner(AgentSpawner::new(provider, test_config()));
 
         let src = format!(
             r#"

@@ -72,6 +72,7 @@ use wcore_protocol::events::{
     WorkflowNodeLifecycle, WorkflowNodeState, WorkflowRunFinished, WorkflowRunStarted,
     WorkflowTerminalState,
 };
+use wcore_types::spawner::ChildOrigin;
 
 /// Default per-stage turn budget. Workflow stages are single-shot
 /// instructions, so a small budget keeps a stuck stage from burning the
@@ -636,18 +637,21 @@ pub(crate) async fn resolve_stage_schema(
                     });
                 };
                 result = spawner
-                    .spawn_one(SubAgentConfig {
-                        name: format!("{pipeline_id}[{item_index}]:{}", stage.id),
-                        prompt,
-                        max_turns: dispatch.max_turns,
-                        max_tokens: dispatch.max_tokens,
-                        system_prompt: None,
-                        // The pipeline stage IS an AgentSpec, so its provider /
-                        // model pin is read directly (no node_providers lookup).
-                        provider: stage.provider.clone(),
-                        model: stage.model.clone(),
-                        temperature: None,
-                    })
+                    .spawn_one_with_origin(
+                        SubAgentConfig {
+                            name: format!("{pipeline_id}[{item_index}]:{}", stage.id),
+                            prompt,
+                            max_turns: dispatch.max_turns,
+                            max_tokens: dispatch.max_tokens,
+                            system_prompt: None,
+                            // The pipeline stage IS an AgentSpec, so its provider /
+                            // model pin is read directly (no node_providers lookup).
+                            provider: stage.provider.clone(),
+                            model: stage.model.clone(),
+                            temperature: None,
+                        },
+                        ChildOrigin::Pipeline,
+                    )
                     .await;
                 drop(permit);
                 if result.is_error {
@@ -1460,7 +1464,9 @@ impl<'a> WorkflowRunner<'a> {
                 .map(|(_, result)| result)
                 .unwrap_or_else(|| SubAgentResult::error(id, "retry dispatch returned no result"));
         }
-        self.spawner.spawn_one(config).await
+        self.spawner
+            .spawn_one_with_origin(config, ChildOrigin::Workflow)
+            .await
     }
 
     /// Dispatch a sub-wave of `AgentCall` nodes. Returns `(node_id, result)`
@@ -1516,7 +1522,10 @@ impl<'a> WorkflowRunner<'a> {
                 return self.dispatch_via_relay(configs, None).await;
             }
             let (id, cfg) = configs.into_iter().next().expect("len checked == 1");
-            let result = self.spawner.spawn_one(cfg).await;
+            let result = self
+                .spawner
+                .spawn_one_with_origin(cfg, ChildOrigin::Workflow)
+                .await;
             return vec![(id, result)];
         }
 
@@ -1556,7 +1565,7 @@ impl<'a> WorkflowRunner<'a> {
             .collect();
         let results = self
             .spawner
-            .spawn_parallel_with_per_task_extras(tasks)
+            .spawn_parallel_with_per_task_extras_origin(tasks, ChildOrigin::Workflow)
             .await;
         ids.into_iter().zip(results).collect()
     }
@@ -1650,7 +1659,7 @@ impl<'a> WorkflowRunner<'a> {
                 .await
         } else {
             self.spawner
-                .spawn_parallel_with_per_task_extras(tasks)
+                .spawn_parallel_with_per_task_extras_origin(tasks, ChildOrigin::Workflow)
                 .await
         };
 
@@ -2004,7 +2013,10 @@ impl<'a> WorkflowRunner<'a> {
                     model: node_pinned_model(&plan.graph, agent_name),
                     temperature: None,
                 };
-                let result = self.spawner.spawn_one(cfg).await;
+                let result = self
+                    .spawner
+                    .spawn_one_with_origin(cfg, ChildOrigin::Workflow)
+                    .await;
                 if result.is_error {
                     return Err(self.fail(
                         &format!("{loop_id}:{agent_name}"),

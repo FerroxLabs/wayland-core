@@ -18,7 +18,7 @@ use wcore_agent::spawner::AgentSpawner;
 use wcore_providers::LlmProvider;
 use wcore_types::spawner::{SubAgentConfig, SubAgentResult};
 
-use common::{MockLlmProvider, test_config};
+use common::{MockLlmProvider, bind_test_spawner, test_config};
 
 /// Resolver mapping a spec string to a specific mock provider `Arc`.
 struct MapResolver {
@@ -90,6 +90,7 @@ async fn relay_path_honors_pinned_providers() {
     let parent = Arc::new(MockLlmProvider::with_text_response("PARENT"));
     let (configs, resolver) = pinned_roster(4);
     let spawner = AgentSpawner::new(parent, test_config()).with_provider_resolver(resolver);
+    let (spawner, _journal, _session_root) = bind_test_spawner(spawner);
 
     let results = spawner.spawn_parallel(configs).await;
     assert_diverse(&results, 4);
@@ -102,6 +103,7 @@ async fn fleet_path_honors_pinned_providers() {
     let parent = Arc::new(MockLlmProvider::with_text_response("PARENT"));
     let (configs, resolver) = pinned_roster(12);
     let spawner = AgentSpawner::new(parent, test_config()).with_provider_resolver(resolver);
+    let (spawner, _journal, _session_root) = bind_test_spawner(spawner);
 
     let results = spawner.spawn_via_fleet(configs, "diversity-test").await;
     assert_diverse(&results, 12);
@@ -113,6 +115,7 @@ async fn unpinned_member_uses_parent_provider() {
     let parent = Arc::new(MockLlmProvider::with_text_response("PARENT"));
     let (_configs, resolver) = pinned_roster(1);
     let spawner = AgentSpawner::new(parent, test_config()).with_provider_resolver(resolver);
+    let (spawner, _journal, _session_root) = bind_test_spawner(spawner);
 
     let result = spawner
         .spawn_one(SubAgentConfig {

@@ -168,12 +168,12 @@ fn governed_workflow_spawner(
     provider: Arc<dyn LlmProvider>,
     config: &Config,
     agent_bus: Arc<AgentBus>,
-) -> AgentSpawner {
-    wcore_agent::bootstrap::govern_standalone_spawner(
+) -> anyhow::Result<AgentSpawner> {
+    Ok(wcore_agent::bootstrap::govern_standalone_spawner(
         AgentSpawner::new(provider, config.clone()),
         config,
-    )
-    .with_bus(agent_bus)
+    )?
+    .with_bus(agent_bus))
 }
 
 /// `run <NAME>` — resolve, parse, and execute through `WorkflowRunner`.
@@ -219,7 +219,7 @@ async fn run_workflow(name: &str) -> anyhow::Result<()> {
     // workflow that pins a node's provider (`Agent((provider: Some(..)))`)
     // resolves it from the on-disk `[providers]` map instead of hard-erroring.
     // Harmless for unpinned workflows (no pin → inherit the parent provider).
-    let mut spawner = governed_workflow_spawner(provider, &config, agent_bus);
+    let mut spawner = governed_workflow_spawner(provider, &config, agent_bus)?;
     if let Ok(cf) = wcore_config::config::load_merged_config_file(None)
         && !cf.providers.is_empty()
     {
@@ -438,7 +438,8 @@ Workflow(
 
     #[tokio::test]
     async fn workflow_spawner_stops_before_provider_call_at_tiny_cap() {
-        let config = Config {
+        let session_root = tempfile::tempdir().unwrap();
+        let mut config = Config {
             budget: wcore_budget::BudgetConfig {
                 max_tokens_in: Some(0),
                 max_tokens_out: Some(0),
@@ -446,11 +447,13 @@ Workflow(
             },
             ..Default::default()
         };
+        config.session.directory = session_root.path().join("sessions").display().to_string();
         let provider = Arc::new(CountingProvider {
             calls: AtomicUsize::new(0),
         });
         let spawner =
-            governed_workflow_spawner(provider.clone(), &config, Arc::new(AgentBus::new(8)));
+            governed_workflow_spawner(provider.clone(), &config, Arc::new(AgentBus::new(8)))
+                .expect("bind standalone workflow session authority");
         let plan = WorkflowPlan::parse(GOOD).expect("fixture workflow parses");
 
         let error = WorkflowRunner::new(&spawner)
@@ -464,15 +467,18 @@ Workflow(
 
     #[tokio::test]
     async fn workflow_spawner_cancels_a_hung_provider_at_the_wall_cap() {
-        let config = Config {
+        let session_root = tempfile::tempdir().unwrap();
+        let mut config = Config {
             session_cap: Some(wcore_budget::BudgetConfig {
                 max_wall_time_secs: Some(1),
                 ..Default::default()
             }),
             ..Default::default()
         };
+        config.session.directory = session_root.path().join("sessions").display().to_string();
         let spawner =
-            governed_workflow_spawner(Arc::new(HungProvider), &config, Arc::new(AgentBus::new(8)));
+            governed_workflow_spawner(Arc::new(HungProvider), &config, Arc::new(AgentBus::new(8)))
+                .expect("bind standalone workflow session authority");
         let plan = WorkflowPlan::parse(GOOD).expect("fixture workflow parses");
 
         let outcome = tokio::time::timeout(

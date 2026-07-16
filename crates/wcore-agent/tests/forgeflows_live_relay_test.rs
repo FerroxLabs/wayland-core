@@ -19,7 +19,7 @@ use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
-use common::test_config;
+use common::{bound_test_spawner, test_config};
 use serde_json::Value;
 use tokio::sync::mpsc;
 use wcore_agent::orchestration::workflow::runner::{WorkflowPlan, WorkflowRunner};
@@ -110,7 +110,7 @@ Workflow(
 async fn fanout_relays_both_children_with_distinct_parent_call_ids() {
     let parent = Arc::new(Rec::default());
     let provider = Arc::new(ChattyProvider);
-    let spawner = AgentSpawner::new(provider, test_config());
+    let (spawner, _session_root) = bound_test_spawner(AgentSpawner::new(provider, test_config()));
 
     let plan = WorkflowPlan::parse(FANOUT_SRC).expect("workflow should parse");
     let runner = WorkflowRunner::new(&spawner)
@@ -160,7 +160,7 @@ async fn fanout_relays_both_children_with_distinct_parent_call_ids() {
 async fn fanout_without_parent_emits_no_sub_agent_events() {
     let parent = Arc::new(Rec::default());
     let provider = Arc::new(ChattyProvider);
-    let spawner = AgentSpawner::new(provider, test_config());
+    let (spawner, _session_root) = bound_test_spawner(AgentSpawner::new(provider, test_config()));
 
     let plan = WorkflowPlan::parse(FANOUT_SRC).expect("workflow should parse");
     // No `with_parent_output` — legacy path.

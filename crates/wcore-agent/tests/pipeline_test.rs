@@ -23,7 +23,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use async_trait::async_trait;
-use common::test_config;
+use common::{bound_test_spawner, test_config};
 use serde_json::{Value, json};
 use tokio::sync::mpsc;
 use wcore_agent::orchestration::workflow::runner::{WorkflowPlan, WorkflowRunner};
@@ -181,7 +181,7 @@ async fn no_barrier_fast_item_finishes_all_stages_before_slow_finishes_stage_one
         Arc::clone(&in_flight),
         Arc::clone(&max_in_flight),
     ));
-    let spawner = AgentSpawner::new(provider, test_config());
+    let (spawner, _session_root) = bound_test_spawner(AgentSpawner::new(provider, test_config()));
 
     let plan = WorkflowPlan::parse(three_stage_pipeline_src()).expect("workflow should parse");
     let runner = WorkflowRunner::new(&spawner);
@@ -212,7 +212,7 @@ async fn one_stage_failure_drops_exactly_one_item_to_null_preserving_order() {
     let provider = Arc::new(FailTagProvider {
         fail_tag: "mid".to_string(),
     });
-    let spawner = AgentSpawner::new(provider, test_config());
+    let (spawner, _session_root) = bound_test_spawner(AgentSpawner::new(provider, test_config()));
 
     let plan = WorkflowPlan::parse(three_stage_pipeline_src()).expect("workflow should parse");
     let runner = WorkflowRunner::new(&spawner);
@@ -255,7 +255,7 @@ async fn concurrency_cap_bounds_in_flight_stage_agents() {
         Arc::clone(&in_flight),
         Arc::clone(&max_in_flight),
     ));
-    let spawner = AgentSpawner::new(provider, test_config());
+    let (spawner, _session_root) = bound_test_spawner(AgentSpawner::new(provider, test_config()));
 
     // Single-stage pipeline keeps the test about the cap, not stage chaining.
     let src = r#"
@@ -336,7 +336,7 @@ async fn schema_retries_respect_pipeline_concurrency_cap() {
         in_flight: Arc::clone(&in_flight),
         max_in_flight: Arc::clone(&max_in_flight),
     });
-    let spawner = AgentSpawner::new(provider, test_config());
+    let (spawner, _session_root) = bound_test_spawner(AgentSpawner::new(provider, test_config()));
 
     // Single schema-bearing stage; every item fails validation and retries.
     let src = r#"
@@ -378,7 +378,7 @@ async fn non_array_over_runs_zero_items() {
     let provider = Arc::new(FailTagProvider {
         fail_tag: "never".to_string(),
     });
-    let spawner = AgentSpawner::new(provider, test_config());
+    let (spawner, _session_root) = bound_test_spawner(AgentSpawner::new(provider, test_config()));
     let plan = WorkflowPlan::parse(three_stage_pipeline_src()).expect("workflow should parse");
     let runner = WorkflowRunner::new(&spawner);
     // `changed_files` is absent → Select yields Null → zero items.
@@ -418,7 +418,7 @@ async fn empty_over_array_records_a_visible_non_error_stage_gap1() {
     let provider = Arc::new(FailTagProvider {
         fail_tag: "never".to_string(),
     });
-    let spawner = AgentSpawner::new(provider, test_config());
+    let (spawner, _session_root) = bound_test_spawner(AgentSpawner::new(provider, test_config()));
     let plan = WorkflowPlan::parse(three_stage_pipeline_src()).expect("workflow should parse");
     let runner = WorkflowRunner::new(&spawner);
     // changed_files present but empty (clean tree) → zero items.

@@ -1,6 +1,7 @@
 //! Journal-backed authority for child execution and supervision.
 
 use std::collections::BTreeMap;
+use std::future::Future;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -9,6 +10,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 use tokio_util::sync::CancellationToken;
+use wcore_types::execution_policy::EffectiveExecutionPolicy;
 use wcore_types::message::TokenUsage;
 use wcore_types::spawner::{
     ChildDeliveryReconciliation, ChildDeliveryState, ChildDesiredState, ChildId,
@@ -90,12 +92,37 @@ pub enum DurableSpawnerError {
     SessionMismatch { expected: String, found: String },
     #[error("durable child journal {0} has no matching canonical baseline")]
     NonCanonicalSession(String),
+    #[error("fresh durable child session {0} already contains child history")]
+    FreshSessionHasChildHistory(String),
+    #[error("durable child executor is unavailable for this session authority")]
+    ExecutorUnavailable,
+    #[error("durable child session policy authority is not installed")]
+    PolicyAuthorityUnbound,
+    #[error("durable child session policy authority conflicts with the installed policy")]
+    PolicyAuthorityConflict,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DurableAuthorityToken {
     session_id: String,
     generation: u64,
+}
+
+/// Session-pinned supervision authority for every durable child origin.
+///
+/// A handle never follows a later session bind. Operations against a stale
+/// generation fail closed rather than observing or mutating the new session.
+#[derive(Clone)]
+pub struct DurableChildSupervisor {
+    authority: DurableSessionAuthority,
+    token: DurableAuthorityToken,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct ResolvedExecutionEvidence<'a> {
+    pub provider: &'a str,
+    pub model: &'a str,
+    pub effective_policy_digest: &'a str,
 }
 
 impl DurableAuthorityToken {
@@ -119,17 +146,42 @@ pub struct DurableSessionAuthority {
 struct DurableSessionAuthorityState {
     generation: u64,
     binding: Option<DurableSessionBinding>,
+    effective_policy: Option<EffectiveExecutionPolicy>,
 }
 
 struct DurableSessionBinding {
     session_id: String,
-    store: DurableChildStore,
+    spawner: DurableSpawner,
 }
 
 impl DurableSessionAuthority {
     #[must_use]
     pub fn new() -> Self {
         Self::default()
+    }
+
+    pub(crate) fn install_effective_policy(
+        &self,
+        policy: EffectiveExecutionPolicy,
+    ) -> Result<(), DurableSpawnerError> {
+        let mut state = self.state.lock();
+        if state
+            .effective_policy
+            .as_ref()
+            .is_some_and(|installed| installed != &policy)
+        {
+            return Err(DurableSpawnerError::PolicyAuthorityConflict);
+        }
+        state.effective_policy = Some(policy);
+        Ok(())
+    }
+
+    pub(crate) fn effective_policy(&self) -> Result<EffectiveExecutionPolicy, DurableSpawnerError> {
+        self.state
+            .lock()
+            .effective_policy
+            .clone()
+            .ok_or(DurableSpawnerError::PolicyAuthorityUnbound)
     }
 
     /// Replace the active journal authority atomically.
@@ -141,6 +193,27 @@ impl DurableSessionAuthority {
         &self,
         journal: SessionJournal,
         expected_session_id: &str,
+    ) -> Result<DurableAuthorityToken, DurableSpawnerError> {
+        self.bind_with_recovery(journal, expected_session_id, true)
+    }
+
+    /// Bind a session created for this run without paying recovery replay.
+    ///
+    /// The journal itself proves freshness. A caller cannot misclassify an
+    /// existing child-bearing journal as fresh to bypass reconciliation.
+    pub(crate) fn bind_fresh(
+        &self,
+        journal: SessionJournal,
+        expected_session_id: &str,
+    ) -> Result<DurableAuthorityToken, DurableSpawnerError> {
+        self.bind_with_recovery(journal, expected_session_id, false)
+    }
+
+    fn bind_with_recovery(
+        &self,
+        journal: SessionJournal,
+        expected_session_id: &str,
+        reconcile_existing: bool,
     ) -> Result<DurableAuthorityToken, DurableSpawnerError> {
         let mut state = self.state.lock();
         state.binding = None;
@@ -161,13 +234,24 @@ impl DurableSessionAuthority {
         {
             return Err(DurableSpawnerError::NonCanonicalSession(found));
         }
+        if !reconcile_existing
+            && (!journal_state.children.is_empty() || !journal_state.deliveries.is_empty())
+        {
+            return Err(DurableSpawnerError::FreshSessionHasChildHistory(found));
+        }
         let token = DurableAuthorityToken {
             session_id: found.clone(),
             generation: state.generation,
         };
+        let store = DurableChildStore::new(journal);
+        let spawner = if reconcile_existing {
+            DurableSpawner::for_session(store)?
+        } else {
+            DurableSpawner::for_fresh_session(store)
+        };
         state.binding = Some(DurableSessionBinding {
             session_id: found,
-            store: DurableChildStore::new(journal),
+            spawner,
         });
         Ok(token)
     }
@@ -182,6 +266,41 @@ impl DurableSessionAuthority {
             session_id: binding.session_id.clone(),
             generation: state.generation,
         })
+    }
+
+    pub(crate) fn supervisor(&self) -> Result<DurableChildSupervisor, DurableSpawnerError> {
+        Ok(DurableChildSupervisor {
+            authority: self.clone(),
+            token: self.token()?,
+        })
+    }
+
+    fn with_runtime<T>(
+        &self,
+        token: &DurableAuthorityToken,
+        use_runtime: impl FnOnce(&DurableSpawner) -> Result<T, DurableSpawnerError>,
+    ) -> Result<T, DurableSpawnerError> {
+        let state = self.state.lock();
+        let binding =
+            state
+                .binding
+                .as_ref()
+                .ok_or_else(|| DurableSpawnerError::StaleAuthority {
+                    launch_session: token.session_id.clone(),
+                    launch_generation: token.generation,
+                    current: format!("unbound generation {}", state.generation),
+                })?;
+        if state.generation != token.generation || binding.session_id != token.session_id {
+            return Err(DurableSpawnerError::StaleAuthority {
+                launch_session: token.session_id.clone(),
+                launch_generation: token.generation,
+                current: format!(
+                    "session {} generation {}",
+                    binding.session_id, state.generation
+                ),
+            });
+        }
+        use_runtime(&binding.spawner)
     }
 
     pub(crate) fn with_store<T>(
@@ -209,7 +328,68 @@ impl DurableSessionAuthority {
                 ),
             });
         }
-        use_store(&binding.store)
+        use_store(&binding.spawner.store)
+    }
+
+    pub(crate) fn admit_resolved(
+        &self,
+        token: &DurableAuthorityToken,
+        record: DurableChildRecord,
+        config: &SubAgentConfig,
+        overrides: &ForkOverrides,
+        evidence: ResolvedExecutionEvidence<'_>,
+    ) -> Result<AdmittedDurableSpawn, DurableSpawnerError> {
+        let state = self.state.lock();
+        let binding =
+            state
+                .binding
+                .as_ref()
+                .ok_or_else(|| DurableSpawnerError::StaleAuthority {
+                    launch_session: token.session_id.clone(),
+                    launch_generation: token.generation,
+                    current: format!("unbound generation {}", state.generation),
+                })?;
+        if state.generation != token.generation || binding.session_id != token.session_id {
+            return Err(DurableSpawnerError::StaleAuthority {
+                launch_session: token.session_id.clone(),
+                launch_generation: token.generation,
+                current: format!(
+                    "session {} generation {}",
+                    binding.session_id, state.generation
+                ),
+            });
+        }
+        binding
+            .spawner
+            .admit_resolved(record, config, overrides, evidence)
+    }
+}
+
+impl DurableChildSupervisor {
+    #[must_use]
+    pub fn session_id(&self) -> &str {
+        self.token.session_id()
+    }
+
+    pub fn list(&self) -> Result<Vec<DurableChildRecord>, DurableSpawnerError> {
+        self.authority
+            .with_runtime(&self.token, |runtime| Ok(runtime.list()?))
+    }
+
+    pub fn inspect(
+        &self,
+        child_id: &ChildId,
+    ) -> Result<Option<DurableChildRecord>, DurableSpawnerError> {
+        self.authority
+            .with_runtime(&self.token, |runtime| Ok(runtime.inspect(child_id)?))
+    }
+
+    pub fn request_cancel(
+        &self,
+        child_id: &ChildId,
+    ) -> Result<DurableCancelDisposition, DurableSpawnerError> {
+        self.authority
+            .with_runtime(&self.token, |runtime| runtime.request_cancel(child_id))
     }
 }
 
@@ -222,11 +402,20 @@ impl DurableSessionAuthority {
 #[derive(Clone)]
 pub struct DurableSpawner {
     store: DurableChildStore,
-    executor: Arc<dyn Spawner>,
+    executor: Option<Arc<dyn Spawner>>,
     running: Arc<Mutex<BTreeMap<ChildId, CancellationToken>>>,
     mutations: Arc<Mutex<()>>,
     poison: Arc<Mutex<Option<DurableSpawnerPoison>>>,
     drop_recovery: Arc<dyn DropRecoveryAuthority>,
+}
+
+pub(crate) struct AdmittedDurableSpawn {
+    runtime: DurableSpawner,
+    child_id: ChildId,
+    name: String,
+    declaration_id: String,
+    cancel: CancellationToken,
+    running: RunningChildGuard,
 }
 
 impl DurableSpawner {
@@ -237,7 +426,7 @@ impl DurableSpawner {
         let drop_recovery: Arc<dyn DropRecoveryAuthority> = Arc::new(store.clone());
         let spawner = Self {
             store,
-            executor,
+            executor: Some(executor),
             running: Arc::new(Mutex::new(BTreeMap::new())),
             mutations: Arc::new(Mutex::new(())),
             poison: Arc::new(Mutex::new(None)),
@@ -245,6 +434,24 @@ impl DurableSpawner {
         };
         spawner.reconcile_startup()?;
         Ok(spawner)
+    }
+
+    fn for_session(store: DurableChildStore) -> Result<Self, DurableSpawnerError> {
+        let spawner = Self::for_fresh_session(store);
+        spawner.reconcile_startup()?;
+        Ok(spawner)
+    }
+
+    fn for_fresh_session(store: DurableChildStore) -> Self {
+        let drop_recovery: Arc<dyn DropRecoveryAuthority> = Arc::new(store.clone());
+        Self {
+            store,
+            executor: None,
+            running: Arc::new(Mutex::new(BTreeMap::new())),
+            mutations: Arc::new(Mutex::new(())),
+            poison: Arc::new(Mutex::new(None)),
+            drop_recovery,
+        }
     }
 
     /// Digest the exact executor inputs without persisting their plaintext.
@@ -300,27 +507,26 @@ impl DurableSpawner {
         record: &DurableChildRecord,
         config: &SubAgentConfig,
         overrides: &ForkOverrides,
+        provider: &str,
+        model: &str,
         effective_policy_digest: &str,
     ) -> Result<(), DurableSpawnerError> {
         if record.request.exact_digest() != Self::request_digest(config, overrides)? {
             return Err(DurableSpawnerError::EvidenceMismatch("request digest"));
         }
-        let provider = config
-            .provider
-            .as_deref()
-            .ok_or(DurableSpawnerError::EvidenceMismatch(
+        if provider.trim().is_empty() {
+            return Err(DurableSpawnerError::EvidenceMismatch(
                 "provider must be resolved before durable execution",
-            ))?;
+            ));
+        }
         if record.provider.as_deref() != Some(provider) {
             return Err(DurableSpawnerError::EvidenceMismatch("provider"));
         }
-        let model = overrides
-            .model
-            .as_deref()
-            .or(config.model.as_deref())
-            .ok_or(DurableSpawnerError::EvidenceMismatch(
+        if model.trim().is_empty() {
+            return Err(DurableSpawnerError::EvidenceMismatch(
                 "model must be resolved before durable execution",
-            ))?;
+            ));
+        }
         if record.model.as_deref() != Some(model) {
             return Err(DurableSpawnerError::EvidenceMismatch("model"));
         }
@@ -371,6 +577,64 @@ impl DurableSpawner {
         overrides: ForkOverrides,
         effective_policy_digest: &str,
     ) -> Result<SubAgentResult, DurableSpawnerError> {
+        let executor = self
+            .executor
+            .as_ref()
+            .cloned()
+            .ok_or(DurableSpawnerError::ExecutorUnavailable)?;
+        let provider = config
+            .provider
+            .clone()
+            .ok_or(DurableSpawnerError::EvidenceMismatch(
+                "provider must be resolved before durable execution",
+            ))?;
+        let model = overrides
+            .model
+            .clone()
+            .or_else(|| config.model.clone())
+            .ok_or(DurableSpawnerError::EvidenceMismatch(
+                "model must be resolved before durable execution",
+            ))?;
+        let execution = executor.spawn_fork(config.clone(), overrides.clone());
+        self.spawn_resolved(
+            record,
+            &config,
+            &overrides,
+            ResolvedExecutionEvidence {
+                provider: &provider,
+                model: &model,
+                effective_policy_digest,
+            },
+            execution,
+        )
+        .await
+    }
+
+    /// Declare and execute an already-resolved child through this session's
+    /// single durable runtime.
+    pub(crate) async fn spawn_resolved<F>(
+        &self,
+        record: DurableChildRecord,
+        config: &SubAgentConfig,
+        overrides: &ForkOverrides,
+        evidence: ResolvedExecutionEvidence<'_>,
+        execution: F,
+    ) -> Result<SubAgentResult, DurableSpawnerError>
+    where
+        F: Future<Output = SubAgentResult> + Send,
+    {
+        self.admit_resolved(record, config, overrides, evidence)?
+            .execute(execution)
+            .await
+    }
+
+    fn admit_resolved(
+        &self,
+        record: DurableChildRecord,
+        config: &SubAgentConfig,
+        overrides: &ForkOverrides,
+        evidence: ResolvedExecutionEvidence<'_>,
+    ) -> Result<AdmittedDurableSpawn, DurableSpawnerError> {
         let child_id = record.child_id.clone();
         let declaration_id = record.declaration_id.clone();
         let cancel = CancellationToken::new();
@@ -380,9 +644,11 @@ impl DurableSpawner {
             self.ensure_healthy()?;
             self.validate_execution_evidence(
                 &record,
-                &config,
-                &overrides,
-                effective_policy_digest,
+                config,
+                overrides,
+                evidence.provider,
+                evidence.model,
+                evidence.effective_policy_digest,
             )?;
             self.store.declare(record)?;
             let current = self.required_child(&child_id)?;
@@ -417,53 +683,22 @@ impl DurableSpawner {
             }
         }
 
-        let mut running = RunningChildGuard {
+        Ok(AdmittedDurableSpawn {
+            runtime: self.clone(),
             child_id: child_id.clone(),
+            name: config.name.clone(),
             declaration_id: declaration_id.clone(),
-            recovery: Arc::clone(&self.drop_recovery),
-            running: Arc::clone(&self.running),
-            mutations: Arc::clone(&self.mutations),
-            poison: Arc::clone(&self.poison),
-            armed: true,
-        };
-        let execution = self.executor.spawn_fork(config, overrides);
-        tokio::pin!(execution);
-
-        tokio::select! {
-            biased;
-            () = cancel.cancelled() => {
-                let _mutation = self.mutations.lock();
-                self.ensure_healthy()?;
-                let current = self.required_child(&child_id)?;
-                self.transition_current(
-                    &current,
-                    &declaration_id,
-                    "cancelled",
-                    DurableChildTransition::Cancel,
-                )?;
-                running.disarm();
-                Ok(SubAgentResult::error(
-                    child_id.as_str(),
-                    "durable child cancelled before completion",
-                ))
-            }
-            result = &mut execution => {
-                let (payload, durable_result) = encode_result_payload(&result)?;
-                let _mutation = self.mutations.lock();
-                self.ensure_healthy()?;
-                self.store
-                    .store_result_payload(&durable_result.exact_digest, &payload)?;
-                let transition = if result.is_error {
-                    DurableChildTransition::Fail { result: durable_result }
-                } else {
-                    DurableChildTransition::Succeed { result: durable_result }
-                };
-                let current = self.required_child(&child_id)?;
-                self.transition_current(&current, &declaration_id, "terminal", transition)?;
-                running.disarm();
-                Ok(result)
-            }
-        }
+            cancel,
+            running: RunningChildGuard {
+                child_id,
+                declaration_id,
+                recovery: Arc::clone(&self.drop_recovery),
+                running: Arc::clone(&self.running),
+                mutations: Arc::clone(&self.mutations),
+                poison: Arc::clone(&self.poison),
+                armed: true,
+            },
+        })
     }
 
     /// Persist a cancellation request and signal the live execution when owned.
@@ -508,7 +743,88 @@ impl DurableSpawner {
         }
         Ok(DurableCancelDisposition::AwaitingRecovery)
     }
+}
 
+impl AdmittedDurableSpawn {
+    pub(crate) async fn execute<F>(
+        self,
+        execution: F,
+    ) -> Result<SubAgentResult, DurableSpawnerError>
+    where
+        F: Future<Output = SubAgentResult> + Send,
+    {
+        self.execute_with_parent_cancel(execution, CancellationToken::new())
+            .await
+    }
+
+    pub(crate) async fn execute_with_parent_cancel<F>(
+        mut self,
+        execution: F,
+        parent_cancel: CancellationToken,
+    ) -> Result<SubAgentResult, DurableSpawnerError>
+    where
+        F: Future<Output = SubAgentResult> + Send,
+    {
+        tokio::pin!(execution);
+
+        tokio::select! {
+            biased;
+            () = parent_cancel.cancelled() => self.commit_cancelled(),
+            () = self.cancel.cancelled() => {
+                self.commit_cancelled()
+            }
+            result = &mut execution => {
+                let (payload, durable_result) = encode_result_payload(&result)?;
+                let _mutation = self.runtime.mutations.lock();
+                self.runtime.ensure_healthy()?;
+                self.runtime.store
+                    .store_result_payload(&durable_result.exact_digest, &payload)?;
+                let transition = if result.is_error {
+                    DurableChildTransition::Fail { result: durable_result }
+                } else {
+                    DurableChildTransition::Succeed { result: durable_result }
+                };
+                let current = self.runtime.required_child(&self.child_id)?;
+                self.runtime.transition_current(
+                    &current,
+                    &self.declaration_id,
+                    "terminal",
+                    transition,
+                )?;
+                self.running.disarm();
+                Ok(result)
+            }
+        }
+    }
+
+    fn commit_cancelled(&mut self) -> Result<SubAgentResult, DurableSpawnerError> {
+        let _mutation = self.runtime.mutations.lock();
+        self.runtime.ensure_healthy()?;
+        let mut current = self.runtime.required_child(&self.child_id)?;
+        if current.desired_state != ChildDesiredState::Cancel {
+            self.runtime.transition_current(
+                &current,
+                &self.declaration_id,
+                "cancel-request",
+                DurableChildTransition::RequestCancel,
+            )?;
+            current = self.runtime.required_child(&self.child_id)?;
+        }
+        self.runtime.transition_current(
+            &current,
+            &self.declaration_id,
+            "cancelled",
+            DurableChildTransition::Cancel,
+        )?;
+        self.running.disarm();
+        Ok(SubAgentResult::error(
+            &self.name,
+            "durable child cancelled before completion",
+        ))
+    }
+}
+
+impl DurableSpawner {
     /// Claim a terminal result once. A crash after this claim cannot redeliver;
     /// the committed in-flight state must be explicitly reconciled.
     pub fn claim_result(
@@ -867,7 +1183,7 @@ fn delivery_interrupted_digest(child_id: &ChildId, revision: u64) -> String {
     )
 }
 
-fn now_unix_ms() -> Result<u64, DurableSpawnerError> {
+pub(crate) fn now_unix_ms() -> Result<u64, DurableSpawnerError> {
     let millis = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_err(DurableSpawnerError::Clock)?
@@ -878,6 +1194,10 @@ fn now_unix_ms() -> Result<u64, DurableSpawnerError> {
 #[cfg(test)]
 mod tests {
     use async_trait::async_trait;
+    use wcore_types::spawner::{
+        ChildDeliveryTarget, ChildOrigin, ChildParent, ChildPolicySnapshot, ChildRequestEvidence,
+        ChildTimestamps, ChildWorkspace, ChildWorkspaceMode, DURABLE_CHILD_SCHEMA_VERSION,
+    };
 
     use super::*;
     use crate::session_journal::SessionJournal;
@@ -1015,6 +1335,200 @@ mod tests {
         manager.persist_first_message(&session).unwrap();
         let active = manager.load_for_run(&session.id).unwrap();
         (manager, active.journal)
+    }
+
+    fn child_record(session_id: &str, child_id: &str) -> DurableChildRecord {
+        DurableChildRecord {
+            schema_version: DURABLE_CHILD_SCHEMA_VERSION,
+            declaration_id: format!("declare-{child_id}"),
+            child_id: ChildId::new(child_id).unwrap(),
+            parent: ChildParent {
+                session_id: session_id.into(),
+                turn_id: None,
+                parent_child_id: None,
+                workflow_run_id: None,
+                graph_node_id: None,
+                parent_call_id: None,
+            },
+            origin: ChildOrigin::Spawn,
+            request: ChildRequestEvidence::redacted("a".repeat(64)),
+            policy_snapshot: ChildPolicySnapshot {
+                contract_version: "effective-execution-policy/v1".into(),
+                exact_digest: "b".repeat(64),
+                posture: "standard".into(),
+                approvals: "ask".into(),
+                sandbox: "workspace-write".into(),
+                source: "session-effective-policy".into(),
+                managed_floor_active: true,
+                dangerous_activation_id_digest: None,
+            },
+            provider: Some("test".into()),
+            model: Some("test-model".into()),
+            workspace: ChildWorkspace {
+                mode: ChildWorkspaceMode::Isolated,
+                workspace_id: "workspace-1".into(),
+            },
+            status: DurableChildStatus::Prepared,
+            desired_state: ChildDesiredState::Run,
+            recovery: ChildRecoveryState::Clean,
+            revision: 0,
+            timestamps: ChildTimestamps {
+                created_at_unix_ms: 100,
+                updated_at_unix_ms: 100,
+                queued_at_unix_ms: None,
+                started_at_unix_ms: None,
+                terminal_at_unix_ms: None,
+            },
+            result: None,
+            delivery_target: Some(ChildDeliveryTarget::SessionOutbox),
+            delivery_state: ChildDeliveryState::Pending,
+            attempt: 1,
+            retry_of: None,
+            applied_events: BTreeMap::new(),
+        }
+    }
+
+    #[test]
+    fn fresh_binding_accepts_only_a_canonical_childless_journal() {
+        let dir = tempfile::tempdir().unwrap();
+        let authority = DurableSessionAuthority::new();
+        let (_manager, journal) = canonical_journal(dir.path(), "f190020");
+
+        let token = authority.bind_fresh(journal, "f190020").unwrap();
+
+        assert_eq!(token.session_id(), "f190020");
+        assert!(
+            authority
+                .with_store(&token, |store| Ok(store.list()?.is_empty()))
+                .unwrap()
+        );
+    }
+
+    #[test]
+    fn fresh_binding_rejects_a_journal_with_durable_child_history() {
+        let dir = tempfile::tempdir().unwrap();
+        let authority = DurableSessionAuthority::new();
+        let clone = authority.clone();
+        let (_manager_a, journal_a) = canonical_journal(&dir.path().join("a"), "f190021a");
+        let token_a = authority.bind_fresh(journal_a, "f190021a").unwrap();
+        let (_manager_b, journal_b) = canonical_journal(&dir.path().join("b"), "f190021b");
+        DurableChildStore::new(journal_b.clone())
+            .declare(child_record("f190021b", "existing-child"))
+            .unwrap();
+
+        assert!(matches!(
+            clone.bind_fresh(journal_b, "f190021b"),
+            Err(DurableSpawnerError::FreshSessionHasChildHistory(session_id))
+                if session_id == "f190021b"
+        ));
+        assert!(matches!(
+            authority.token(),
+            Err(DurableSpawnerError::AuthorityUnbound)
+        ));
+        assert!(matches!(
+            clone.with_store(&token_a, |_| Ok(())),
+            Err(DurableSpawnerError::StaleAuthority { .. })
+        ));
+    }
+
+    #[test]
+    fn resumed_binding_reconciles_running_and_inflight_terminal_children() {
+        let dir = tempfile::tempdir().unwrap();
+        let authority = DurableSessionAuthority::new();
+        let (_manager, journal) = canonical_journal(dir.path(), "f190022");
+        let store = DurableChildStore::new(journal.clone());
+        let running_id = ChildId::new("running-child").unwrap();
+        store
+            .declare(child_record("f190022", running_id.as_str()))
+            .unwrap();
+        store
+            .transition(
+                running_id.clone(),
+                "enqueue-running",
+                0,
+                101,
+                DurableChildTransition::Enqueue,
+            )
+            .unwrap();
+        store
+            .transition(
+                running_id.clone(),
+                "start-running",
+                1,
+                102,
+                DurableChildTransition::Start,
+            )
+            .unwrap();
+
+        let delivery_id = ChildId::new("delivery-child").unwrap();
+        store
+            .declare(child_record("f190022", delivery_id.as_str()))
+            .unwrap();
+        store
+            .transition(
+                delivery_id.clone(),
+                "enqueue-delivery",
+                0,
+                101,
+                DurableChildTransition::Enqueue,
+            )
+            .unwrap();
+        store
+            .transition(
+                delivery_id.clone(),
+                "start-delivery",
+                1,
+                102,
+                DurableChildTransition::Start,
+            )
+            .unwrap();
+        store
+            .transition(
+                delivery_id.clone(),
+                "succeed-delivery",
+                2,
+                103,
+                DurableChildTransition::Succeed {
+                    result: DurableChildResult {
+                        exact_digest: "c".repeat(64),
+                        turns: 1,
+                        input_tokens: 1,
+                        output_tokens: 1,
+                        artifact_digests: Vec::new(),
+                    },
+                },
+            )
+            .unwrap();
+        store
+            .transition(
+                delivery_id.clone(),
+                "start-result-delivery",
+                3,
+                104,
+                DurableChildTransition::DeliveryStarted,
+            )
+            .unwrap();
+        drop(store);
+
+        let token = authority.bind(journal, "f190022").unwrap();
+        let running = authority
+            .with_store(&token, |store| Ok(store.inspect(&running_id)?))
+            .unwrap()
+            .unwrap();
+        let delivery = authority
+            .with_store(&token, |store| Ok(store.inspect(&delivery_id)?))
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(running.status, DurableChildStatus::RecoveryRequired);
+        assert!(matches!(
+            running.recovery,
+            ChildRecoveryState::Required { .. }
+        ));
+        assert!(matches!(
+            delivery.delivery_state,
+            ChildDeliveryState::Unknown { .. }
+        ));
     }
 
     #[test]

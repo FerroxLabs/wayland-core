@@ -220,7 +220,12 @@ fn silent_output() -> Arc<dyn OutputSink> {
 /// and emitter handles.
 fn live_engine(
     provider: Arc<dyn LlmProvider>,
-) -> (AgentEngine, Arc<ToolApprovalManager>, Arc<CapturingEmitter>) {
+) -> (
+    AgentEngine,
+    Arc<ToolApprovalManager>,
+    Arc<CapturingEmitter>,
+    tempfile::TempDir,
+) {
     // `auto_approve = true` so a fall-through turn-0 tool call (deny / off /
     // synthesis-fail paths) dispatches without parking on its own approval —
     // the gate's OWN approval round-trip is independent of this flag.
@@ -234,9 +239,10 @@ fn live_engine(
     let emitter = Arc::new(CapturingEmitter::default());
 
     let mut engine = AgentEngine::new_with_provider(provider, config, registry, silent_output());
+    let session_root = common::bind_test_engine(&mut engine);
     engine.set_approval_manager(approval_manager.clone());
     engine.set_protocol_writer(emitter.clone());
-    (engine, approval_manager, emitter)
+    (engine, approval_manager, emitter, session_root)
 }
 
 /// Spawn a task that approves whatever call_id the gate registered, by polling
@@ -285,7 +291,7 @@ async fn live_gate_approved_runs_workflow_and_yields_result() {
     // turn would have to pull from the empty-EndTurn fallback and the run output
     // would NOT be the workflow completion summary.
     let provider = Arc::new(SequencedProvider::new(vec![text_turn(VALID_RON)]));
-    let (mut engine, manager, emitter) = live_engine(provider);
+    let (mut engine, manager, emitter, _session_root) = live_engine(provider);
 
     approve_when_pending(manager, emitter.clone());
 
@@ -369,7 +375,7 @@ async fn live_gate_denied_falls_through_to_normal_turn() {
         text_turn(VALID_RON),
         text_turn("normal answer after deny"),
     ]));
-    let (mut engine, manager, emitter) = live_engine(provider);
+    let (mut engine, manager, emitter, _session_root) = live_engine(provider);
 
     deny_when_pending(manager, emitter.clone());
 
@@ -412,7 +418,7 @@ async fn live_gate_cancel_race_drops_pending_and_falls_through() {
         text_turn(VALID_RON),
         text_turn("normal answer after cancel"),
     ]));
-    let (mut engine, manager, emitter) = live_engine(provider);
+    let (mut engine, manager, emitter, _session_root) = live_engine(provider);
     let cancel = engine.cancel_token();
 
     // Cancel as soon as the gate parks on the approval await (i.e. once the
@@ -514,7 +520,7 @@ async fn live_gate_synthesis_failure_falls_through() {
         text_turn("nope, no Workflow( document here either"),
         text_turn("normal answer after synth-fail"),
     ]));
-    let (mut engine, manager, emitter) = live_engine(provider);
+    let (mut engine, manager, emitter, _session_root) = live_engine(provider);
 
     // Approve eagerly IF an approval is ever requested — it must NOT be, because
     // synthesis fails before the confirm round-trip is emitted.

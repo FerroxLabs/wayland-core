@@ -34,7 +34,7 @@ use async_trait::async_trait;
 use serde_json::{Value, json};
 
 use wcore_protocol::events::ToolCategory;
-use wcore_types::spawner::{ForkOverrides, Spawner, SubAgentConfig, SubAgentResult};
+use wcore_types::spawner::{ChildOrigin, ForkOverrides, Spawner, SubAgentConfig, SubAgentResult};
 use wcore_types::tool::{JsonSchema, ToolEffectContract, ToolResult};
 
 use crate::Tool;
@@ -349,7 +349,10 @@ impl Tool for DelegateTool {
             .map(|t| {
                 let (cfg, overrides) = task_to_config(t, max_turns);
                 let s = spawner.clone();
-                async move { s.spawn_fork(cfg, overrides).await }
+                async move {
+                    s.spawn_fork_with_origin(cfg, overrides, ChildOrigin::Delegate)
+                        .await
+                }
             })
             .collect();
 

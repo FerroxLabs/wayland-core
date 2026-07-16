@@ -26,7 +26,7 @@ use wcore_providers::{LlmProvider, ProviderError};
 use wcore_types::llm::{LlmEvent, LlmRequest};
 use wcore_types::message::{FinishReason, StopReason, TokenUsage};
 
-use common::test_config;
+use common::{bind_test_spawner, test_config};
 
 /// The priceable provider/model used across these tests (a native catalog row,
 /// as the spend.rs pricing tests rely on). Members differ only by spec string so
@@ -130,13 +130,14 @@ impl ProviderResolver for MapResolver {
 /// shared tracker so the test can read `user_daily_usd("u")`.
 fn spawner_with(
     map: HashMap<String, Arc<dyn LlmProvider>>,
-) -> (AgentSpawner, Arc<PlMutex<BudgetTracker>>) {
+) -> (AgentSpawner, Arc<PlMutex<BudgetTracker>>, tempfile::TempDir) {
     let tracker = Arc::new(PlMutex::new(BudgetTracker::new(BudgetCap::default())));
     let spawner = AgentSpawner::new(Arc::new(NeverProvider), test_config())
         .with_provider_resolver(Arc::new(MapResolver { map }))
         .with_budget_tracker(Arc::clone(&tracker))
         .with_budget_identity("s", "u");
-    (spawner, tracker)
+    let (spawner, _journal, session_root) = bind_test_spawner(spawner);
+    (spawner, tracker, session_root)
 }
 
 /// A `ProposerSpec` whose `spec` keys the resolver map (the resolver fixes the
@@ -214,7 +215,7 @@ fn build_roster_3(daily_cap_usd: Option<f64>) -> Roster {
 
 #[tokio::test]
 async fn council_charges_each_member_against_the_envelope() {
-    let (spawner, tracker) = spawner_with(three_member_map());
+    let (spawner, tracker, _session_root) = spawner_with(three_member_map());
 
     let outcome = run_council("task", &build_roster_3(None), &spawner, &test_config())
         .await
@@ -264,7 +265,7 @@ async fn second_council_blocked_after_first_real_council_charges() {
     // inputs, so `c == ceiling` exactly and the `> cap` comparison is exact.
     let cap = ceiling;
 
-    let (spawner, tracker) = spawner_with(three_member_map());
+    let (spawner, tracker, _session_root) = spawner_with(three_member_map());
 
     // Council A: prior_spent == 0 → passes, then charges real spend.
     let a = run_council(
@@ -318,7 +319,7 @@ async fn errored_proposer_with_usage_is_still_charged() {
         format!("{PROVIDER}:ok"),
         UsageProvider::new("usable answer"),
     ); // keeps quorum
-    let (spawner, tracker) = spawner_with(map);
+    let (spawner, tracker, _session_root) = spawner_with(map);
 
     let outcome = run_council(
         "task",

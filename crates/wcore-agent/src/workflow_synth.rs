@@ -41,6 +41,7 @@ use crate::orchestration::intent::workflow_candidate;
 use crate::orchestration::workflow::error::WorkflowParseError;
 use crate::orchestration::workflow::runner::WorkflowPlan;
 use crate::spawner::{AgentSpawner, SubAgentConfig};
+use wcore_types::spawner::ChildOrigin;
 
 /// Turn budget for the synthesis sub-agent. Synthesis is a *compiler*: one
 /// turn that emits the RON document. A budget of 1 denies the model the extra
@@ -187,18 +188,21 @@ async fn dispatch(
     prompt: String,
 ) -> Result<String, SynthError> {
     let result = spawner
-        .spawn_one(SubAgentConfig {
-            name: name.to_string(),
-            prompt,
-            max_turns: SYNTH_MAX_TURNS,
-            max_tokens: SYNTH_MAX_TOKENS,
-            // Pin the compiler framing so the model emits RON in its single
-            // turn instead of exploring the codebase with its read-only tools.
-            system_prompt: Some(SYNTH_SYSTEM_PROMPT.to_string()),
-            provider: None,
-            model: None,
-            temperature: None,
-        })
+        .spawn_one_with_origin(
+            SubAgentConfig {
+                name: name.to_string(),
+                prompt,
+                max_turns: SYNTH_MAX_TURNS,
+                max_tokens: SYNTH_MAX_TOKENS,
+                // Pin the compiler framing so the model emits RON in its single
+                // turn instead of exploring the codebase with its read-only tools.
+                system_prompt: Some(SYNTH_SYSTEM_PROMPT.to_string()),
+                provider: None,
+                model: None,
+                temperature: None,
+            },
+            ChildOrigin::Synthesis,
+        )
         .await;
     if result.is_error {
         return Err(SynthError::AgentError(result.text));

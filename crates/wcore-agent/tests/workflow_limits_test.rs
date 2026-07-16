@@ -11,7 +11,7 @@ mod common;
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
-use common::test_config;
+use common::{bound_test_spawner, test_config};
 use serde_json::{Value, json};
 use tokio::sync::mpsc;
 use wcore_agent::orchestration::workflow::error::WorkflowParseError;
@@ -188,7 +188,7 @@ fn fix4_small_workflow_under_node_cap_parses() {
 async fn fix1_dispatch_budget_aborts_with_partial_result() {
     let calls = Arc::new(Mutex::new(0usize));
     let provider = Arc::new(CountingProvider::new(Arc::clone(&calls), "ok"));
-    let spawner = AgentSpawner::new(provider, test_config());
+    let (spawner, _session_root) = bound_test_spawner(AgentSpawner::new(provider, test_config()));
 
     // 400 items (< MAX_OVER_CARDINALITY = 500) × 3 stages = 1200 dispatches,
     // which exceeds MAX_TOTAL_DISPATCHES = 1000.
@@ -248,7 +248,7 @@ const DEFAULT_PIPELINE_HEADROOM: usize = 64;
 async fn fix1_normal_small_workflow_unaffected() {
     let calls = Arc::new(Mutex::new(0usize));
     let provider = Arc::new(CountingProvider::new(Arc::clone(&calls), "ok"));
-    let spawner = AgentSpawner::new(provider, test_config());
+    let (spawner, _session_root) = bound_test_spawner(AgentSpawner::new(provider, test_config()));
 
     let src = r#"
 Workflow(
@@ -279,7 +279,7 @@ Workflow(
 async fn fix3_over_cardinality_above_cap_is_rejected() {
     let calls = Arc::new(Mutex::new(0usize));
     let provider = Arc::new(CountingProvider::new(Arc::clone(&calls), "ok"));
-    let spawner = AgentSpawner::new(provider, test_config());
+    let (spawner, _session_root) = bound_test_spawner(AgentSpawner::new(provider, test_config()));
 
     let src = r#"
 Workflow(
@@ -346,7 +346,8 @@ async fn fix3_moderate_pipeline_runs_and_preserves_order_with_null_holes() {
         }
     }
 
-    let spawner = AgentSpawner::new(Arc::new(OrderProvider), test_config());
+    let (spawner, _session_root) =
+        bound_test_spawner(AgentSpawner::new(Arc::new(OrderProvider), test_config()));
     let src = r#"
 Workflow(
     meta: (name: "order"),

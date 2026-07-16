@@ -34,7 +34,7 @@ use wcore_providers::{LlmProvider, ProviderError};
 use wcore_types::llm::{LlmEvent, LlmRequest};
 use wcore_types::message::{FinishReason, StopReason, TokenUsage};
 
-use common::{MockLlmProvider, test_config};
+use common::{MockLlmProvider, bind_test_spawner, test_config};
 
 // ---- shared mock providers + resolver ------------------------------------
 
@@ -126,9 +126,13 @@ impl ProviderResolver for MapResolver {
     }
 }
 
-fn spawner_with(map: HashMap<String, Result<Arc<dyn LlmProvider>, ResolveError>>) -> AgentSpawner {
-    AgentSpawner::new(Arc::new(NeverProvider), test_config())
-        .with_provider_resolver(Arc::new(MapResolver { map }))
+fn spawner_with(
+    map: HashMap<String, Result<Arc<dyn LlmProvider>, ResolveError>>,
+) -> (AgentSpawner, tempfile::TempDir) {
+    let spawner = AgentSpawner::new(Arc::new(NeverProvider), test_config())
+        .with_provider_resolver(Arc::new(MapResolver { map }));
+    let (spawner, _journal, session_root) = bind_test_spawner(spawner);
+    (spawner, session_root)
 }
 
 /// A `ProposerSpec` from a `"provider"` / `"provider:model"` spec, with an
@@ -194,7 +198,7 @@ async fn scenario_diverse_answers_are_all_fed_to_the_aggregator() {
     map.insert("anthropic".into(), ok_text(test));
     map.insert("google".into(), ok_text(rollback));
     map.insert("synth".into(), Ok(agg.clone()));
-    let spawner = spawner_with(map);
+    let (spawner, _session_root) = spawner_with(map);
 
     let outcome = run_council(
         "Write a deployment runbook.",
@@ -263,7 +267,7 @@ async fn scenario_conflicting_proposals_all_reach_the_resolver() {
         ok_text("Use SQLite — zero-ops embedded."),
     );
     map.insert("synth".into(), Ok(agg.clone()));
-    let spawner = spawner_with(map);
+    let (spawner, _session_root) = spawner_with(map);
 
     let outcome = run_council(
         "Which database should we pick?",
@@ -313,7 +317,7 @@ async fn scenario_council_degrades_gracefully_under_failures() {
     map.insert("xai".into(), Ok(Arc::new(ErrorProvider)));
     map.insert("vertex".into(), Err(ResolveError::Keyless("vertex".into())));
     map.insert("synth".into(), Ok(agg.clone()));
-    let spawner = spawner_with(map);
+    let (spawner, _session_root) = spawner_with(map);
 
     let outcome = run_council(
         "Hard task under failure.",
@@ -381,7 +385,7 @@ async fn scenario_partial_roster_skips_each_member_with_its_reason() {
         "made-up".into(),
         Err(ResolveError::Unknown("made-up".into())),
     );
-    let spawner = spawner_with(map);
+    let (spawner, _session_root) = spawner_with(map);
 
     let outcome = run_council(
         "task",
@@ -427,7 +431,7 @@ async fn scenario_priced_models_yield_a_concrete_spend_rollup() {
     let mut map: HashMap<String, Result<Arc<dyn LlmProvider>, ResolveError>> = HashMap::new();
     map.insert("anthropic".into(), ok_text("opus answer"));
     map.insert("openai".into(), ok_text("gpt answer"));
-    let spawner = spawner_with(map);
+    let (spawner, _session_root) = spawner_with(map);
 
     let outcome = run_council(
         "priced task",
@@ -482,7 +486,7 @@ async fn scenario_over_budget_roster_is_refused_before_spawn() {
     // If this mock were ever spawned the test would still pass, but the worst-
     // case estimate is designed to trip the cap before any spawn occurs.
     map.insert("anthropic".into(), ok_text("never reached"));
-    let spawner = spawner_with(map);
+    let (spawner, _session_root) = spawner_with(map);
 
     let err = run_council(
         "expensive task",
@@ -522,7 +526,7 @@ async fn scenario_injection_payload_is_contained_in_full_council() {
     map.insert("openai".into(), ok_text("a normal, useful answer"));
     map.insert("evilcorp".into(), ok_text(evil));
     map.insert("synth".into(), Ok(agg.clone()));
-    let spawner = spawner_with(map);
+    let (spawner, _session_root) = spawner_with(map);
 
     let outcome = run_council(
         "Summarize the design.",
@@ -575,7 +579,7 @@ async fn scenario_provenance_carries_per_model_attribution() {
     let mut map: HashMap<String, Result<Arc<dyn LlmProvider>, ResolveError>> = HashMap::new();
     map.insert("anthropic:claude-opus-4-7".into(), ok_text("opus says X"));
     map.insert("openai:gpt-5".into(), ok_text("gpt says Y"));
-    let spawner = spawner_with(map);
+    let (spawner, _session_root) = spawner_with(map);
 
     let outcome = run_council(
         "audit me",
@@ -668,7 +672,7 @@ async fn scenario_multi_turn_proposer_uses_read_only_tools_and_fuses() {
     );
     map.insert("anthropic".into(), ok_text("single-turn answer"));
     map.insert("synth".into(), Ok(agg.clone()));
-    let spawner = spawner_with(map);
+    let (spawner, _session_root) = spawner_with(map);
 
     let outcome = run_council(
         "What port does the service use?",

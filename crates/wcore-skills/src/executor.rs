@@ -2,7 +2,7 @@ use crate::context_modifier::effort_to_string;
 use crate::shell::{ShellExecutionError, execute_shell_commands};
 use crate::substitution::substitute_arguments;
 use crate::types::{ExecutionContext, SkillMetadata};
-use wcore_types::spawner::{ForkOverrides, Spawner, SubAgentConfig};
+use wcore_types::spawner::{ChildOrigin, ForkOverrides, Spawner, SubAgentConfig};
 
 /// Render the exact text that will be handed to the shell executor for an
 /// inline skill — base-directory header (when `skill_root` is set) followed by
@@ -128,7 +128,9 @@ pub async fn execute_fork(
         allowed_tools: skill.allowed_tools.clone(),
     };
 
-    let result = spawner.spawn_fork(sub_config, overrides).await;
+    let result = spawner
+        .spawn_fork_with_origin(sub_config, overrides, ChildOrigin::ForkSkill)
+        .await;
     if result.is_error {
         Err(result.text)
     } else {

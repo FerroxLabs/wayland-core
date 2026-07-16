@@ -51,6 +51,7 @@ use std::sync::Arc;
 use futures::StreamExt;
 use serde_json::Value;
 use tokio::sync::Semaphore;
+use wcore_types::spawner::ChildOrigin;
 
 use super::dsl::AgentSpec;
 use super::runner::{
@@ -219,16 +220,19 @@ async fn run_item(
             };
         };
         let result = spawner
-            .spawn_one(SubAgentConfig {
-                name: format!("{pipeline_id}[{index}]:{}", stage.id),
-                prompt,
-                max_turns: dispatch.max_turns,
-                max_tokens: dispatch.max_tokens,
-                system_prompt: None,
-                provider: None,
-                model: None,
-                temperature: None,
-            })
+            .spawn_one_with_origin(
+                SubAgentConfig {
+                    name: format!("{pipeline_id}[{index}]:{}", stage.id),
+                    prompt,
+                    max_turns: dispatch.max_turns,
+                    max_tokens: dispatch.max_tokens,
+                    system_prompt: None,
+                    provider: None,
+                    model: None,
+                    temperature: None,
+                },
+                ChildOrigin::Pipeline,
+            )
             .await;
         drop(permit);
 

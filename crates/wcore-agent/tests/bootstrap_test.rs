@@ -1,11 +1,17 @@
 use std::sync::Arc;
 
+use async_trait::async_trait;
 use serial_test::serial;
+use tokio::sync::{Notify, mpsc};
 use wcore_agent::bootstrap::AgentBootstrap;
 use wcore_agent::cancel::SessionTerminationReason;
 use wcore_agent::output::null_sink::NullSink;
+use wcore_agent::spawner::{DurableCancelDisposition, SubAgentConfig};
 use wcore_config::compat::ProviderCompat;
 use wcore_config::config::{Config, ProviderType};
+use wcore_providers::{LlmProvider, ProviderError};
+use wcore_types::llm::{LlmEvent, LlmRequest};
+use wcore_types::spawner::{ChildOrigin, DurableChildStatus};
 
 /// Save/restore guard for process-global env vars used by backend-gating
 /// tests. Restores prior values (or removes if previously unset) on drop —
@@ -57,6 +63,19 @@ fn null_output() -> Arc<dyn wcore_agent::output::OutputSink> {
     Arc::new(NullSink)
 }
 
+#[derive(Default)]
+struct BlockingProvider {
+    entered: Arc<Notify>,
+}
+
+#[async_trait]
+impl LlmProvider for BlockingProvider {
+    async fn stream(&self, _: &LlmRequest) -> Result<mpsc::Receiver<LlmEvent>, ProviderError> {
+        self.entered.notify_one();
+        std::future::pending().await
+    }
+}
+
 /// Pin `WAYLAND_PLUGINS_DIR` to a fresh empty directory so on-disk plugin
 /// discovery cannot pick up plugins installed on the host or CI runner (e.g. an
 /// `ijfw` plugin that registers an `ijfw-memory` MCP server). Without this, the
@@ -87,6 +106,76 @@ async fn bootstrap_builds_engine_with_model_in_prompt() {
     assert!(!result.engine.tool_names().is_empty());
     assert!(!result.has_mcp);
     assert!(result.mcp_managers.is_empty());
+}
+
+#[tokio::test]
+#[serial]
+async fn bootstrap_exposes_its_canonical_host_child_runtime() {
+    let (_plugins, _env) = isolated_plugins();
+    let workdir = tempfile::TempDir::new().expect("workdir");
+    let sessions = tempfile::TempDir::new().expect("sessions");
+    let mut config = minimal_config();
+    config.session.directory = sessions.path().to_string_lossy().into_owned();
+    config.memory.enabled = false;
+    let provider = Arc::new(BlockingProvider::default());
+    let entered = Arc::clone(&provider.entered);
+    let mut result = AgentBootstrap::new(config, workdir.path().to_string_lossy(), null_output())
+        .provider(provider)
+        .without_channels(true)
+        .defer_config_mcp(true)
+        .build()
+        .await
+        .expect("production bootstrap");
+    result
+        .engine
+        .init_session(
+            "test-provider",
+            &workdir.path().to_string_lossy(),
+            Some("f19000a"),
+        )
+        .expect("bind session A");
+
+    let host = result.host_children.clone();
+    let supervisor = host.supervisor().expect("session A supervisor");
+    let child = |name: &str| SubAgentConfig {
+        name: name.into(),
+        prompt: "finish the task".into(),
+        max_turns: 2,
+        max_tokens: 128,
+        system_prompt: None,
+        provider: None,
+        model: None,
+        temperature: None,
+    };
+    let task = tokio::spawn(async move { host.spawn_child(child("host-a")).await });
+    tokio::time::timeout(std::time::Duration::from_secs(2), entered.notified())
+        .await
+        .expect("host child reaches provider");
+    let records = supervisor.list().expect("list session A");
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0].origin, ChildOrigin::Host);
+    assert_eq!(records[0].status, DurableChildStatus::Running);
+    assert_eq!(
+        supervisor
+            .request_cancel(&records[0].child_id)
+            .expect("live cancel disposition"),
+        DurableCancelDisposition::Signalled
+    );
+    let child_result = task.await.expect("host task join");
+    assert!(child_result.is_error);
+    assert_eq!(child_result.name, "host-a");
+    let terminal = supervisor
+        .inspect(&records[0].child_id)
+        .expect("inspect session A")
+        .expect("durable child record");
+    assert_eq!(terminal.origin, ChildOrigin::Host);
+    assert_eq!(terminal.status, DurableChildStatus::Cancelled);
+    assert_eq!(
+        supervisor
+            .request_cancel(&records[0].child_id)
+            .expect("terminal cancel disposition"),
+        DurableCancelDisposition::AlreadyTerminal
+    );
 }
 
 #[tokio::test]

@@ -18,7 +18,11 @@ use wcore_tools::registry::ToolRegistry;
 use wcore_tools::write::WriteTool;
 use wcore_types::execution_policy::EffectiveExecutionPolicy;
 use wcore_types::message::{FinishReason, TokenUsage};
-use wcore_types::spawner::{ChildPolicySnapshot, DurableChildRecord};
+use wcore_types::spawner::{
+    ChildDeliveryState, ChildDesiredState, ChildId, ChildOrigin, ChildParent, ChildPolicySnapshot,
+    ChildRecoveryState, ChildRequestEvidence, ChildTimestamps, ChildWorkspace, ChildWorkspaceMode,
+    DURABLE_CHILD_SCHEMA_VERSION, DurableChildRecord, DurableChildStatus,
+};
 
 use crate::agents::bus::{AgentBus, AgentMessage, now_ms, preview};
 use crate::agents::channel_sink::ChannelSink;
@@ -26,16 +30,46 @@ use crate::engine::AgentEngine;
 use crate::orchestration::council::ProviderResolver;
 use crate::output::OutputSink;
 use crate::output::null_sink::NullSink;
+use crate::session_journal::SessionJournal;
 
 // Re-export from wcore-types — single source of truth
 pub use wcore_types::spawner::{ForkOverrides, Spawner, SubAgentConfig, SubAgentResult};
 
 pub use crate::durable_spawner::{
     DurableAuthorityFailure, DurableAuthorityToken, DurableCancelDisposition,
-    DurableSessionAuthority, DurableSpawner, DurableSpawnerError, DurableSpawnerPoison,
+    DurableChildSupervisor, DurableSessionAuthority, DurableSpawner, DurableSpawnerError,
+    DurableSpawnerPoison,
 };
 
 const CHILD_POLICY_CONTRACT_VERSION: &str = "effective-execution-policy/v1";
+
+/// Narrow host-facing control plane over the canonical bootstrapped child
+/// runtime.
+///
+/// Bootstrap constructs this from the same [`Arc<AgentSpawner>`] installed in
+/// Spawn, workflow, Crucible, and Anvil paths. Keeping that identity is
+/// required because live cancellation tokens are owned by the durable spawner,
+/// not by the journal-backed child store alone.
+#[derive(Clone)]
+pub struct HostChildController {
+    spawner: Arc<AgentSpawner>,
+}
+
+impl HostChildController {
+    pub(crate) fn new(spawner: Arc<AgentSpawner>) -> Self {
+        Self { spawner }
+    }
+
+    /// Create host-originated child work through the canonical durable path.
+    pub async fn spawn_child(&self, config: SubAgentConfig) -> SubAgentResult {
+        self.spawner.spawn_host_child(config).await
+    }
+
+    /// Pin supervision to the currently bound session generation.
+    pub fn supervisor(&self) -> Result<DurableChildSupervisor, DurableSpawnerError> {
+        self.spawner.durable_child_supervisor()
+    }
+}
 
 struct ResolvedProvider {
     provider: Arc<dyn LlmProvider>,
@@ -56,6 +90,7 @@ pub struct ResolvedChildLaunch {
     config: Config,
     policy: ChildPolicySnapshot,
     authority: DurableAuthorityToken,
+    parent_cancel: tokio_util::sync::CancellationToken,
 }
 
 impl ResolvedChildLaunch {
@@ -108,6 +143,58 @@ impl ResolvedChildLaunch {
             return Err(DurableSpawnerError::EvidenceMismatch("policy snapshot"));
         }
         Ok(())
+    }
+
+    fn durable_record(
+        &self,
+        origin: ChildOrigin,
+        parent_call_id: Option<String>,
+    ) -> Result<DurableChildRecord, DurableSpawnerError> {
+        let child_id = ChildId::new(format!("child-{}", uuid::Uuid::new_v4().simple()))
+            .map_err(|_| DurableSpawnerError::EvidenceMismatch("child identity"))?;
+        let now = crate::durable_spawner::now_unix_ms()?;
+        Ok(DurableChildRecord {
+            schema_version: DURABLE_CHILD_SCHEMA_VERSION,
+            declaration_id: format!("declare-{}", uuid::Uuid::new_v4().simple()),
+            parent: ChildParent {
+                session_id: self.authority.session_id().to_owned(),
+                turn_id: None,
+                parent_child_id: None,
+                workflow_run_id: None,
+                graph_node_id: None,
+                parent_call_id,
+            },
+            origin,
+            request: ChildRequestEvidence::redacted(DurableSpawner::request_digest(
+                &self.request,
+                &self.overrides,
+            )?),
+            policy_snapshot: self.policy.clone(),
+            provider: Some(self.provider_id.clone()),
+            model: Some(self.model.clone()),
+            workspace: ChildWorkspace {
+                mode: ChildWorkspaceMode::External,
+                workspace_id: format!("runtime-{}", child_id.as_str()),
+            },
+            child_id,
+            status: DurableChildStatus::Prepared,
+            desired_state: ChildDesiredState::Run,
+            recovery: ChildRecoveryState::Clean,
+            revision: 0,
+            timestamps: ChildTimestamps {
+                created_at_unix_ms: now,
+                updated_at_unix_ms: now,
+                queued_at_unix_ms: None,
+                started_at_unix_ms: None,
+                terminal_at_unix_ms: None,
+            },
+            result: None,
+            delivery_target: None,
+            delivery_state: ChildDeliveryState::NotRequired,
+            attempt: 1,
+            retry_of: None,
+            applied_events: Default::default(),
+        })
     }
 }
 
@@ -476,10 +563,53 @@ impl AgentSpawner {
         mut self,
         authority: DurableSessionAuthority,
         effective_policy: EffectiveExecutionPolicy,
-    ) -> Self {
+    ) -> Result<Self, DurableSpawnerError> {
+        authority.install_effective_policy(effective_policy.clone())?;
         self.durable_authority = authority;
         self.effective_policy = effective_policy;
-        self
+        Ok(self)
+    }
+
+    pub(crate) fn with_shared_durable_session_authority(
+        self,
+        authority: DurableSessionAuthority,
+    ) -> Result<Self, DurableSpawnerError> {
+        let effective_policy = authority.effective_policy()?;
+        self.with_durable_session_authority(authority, effective_policy)
+    }
+
+    /// Bind this spawner and every clone it creates to one canonical session.
+    ///
+    /// Host adapters that construct an [`AgentSpawner`] outside
+    /// [`AgentEngine`](crate::engine::AgentEngine) must call this before any
+    /// child launch. A missing, mismatched, or non-canonical journal fails
+    /// closed; no ephemeral execution fallback exists.
+    pub fn bind_durable_session(
+        &self,
+        journal: SessionJournal,
+        expected_session_id: &str,
+    ) -> Result<(), DurableSpawnerError> {
+        self.durable_authority
+            .bind(journal, expected_session_id)
+            .map(|_| ())
+    }
+
+    /// Return the canonical session currently owning durable child launches.
+    pub fn durable_session_id(&self) -> Result<String, DurableSpawnerError> {
+        self.durable_authority
+            .token()
+            .map(|token| token.session_id().to_owned())
+    }
+
+    /// Return a session-pinned supervisor over every durable child origin.
+    pub fn durable_child_supervisor(&self) -> Result<DurableChildSupervisor, DurableSpawnerError> {
+        self.durable_authority.supervisor()
+    }
+
+    /// Canonical host adapter for creating durable child work.
+    pub async fn spawn_host_child(&self, sub_config: SubAgentConfig) -> SubAgentResult {
+        self.spawn_one_with_origin(sub_config, ChildOrigin::Host)
+            .await
     }
 
     /// Bind spawned children to the parent session's immutable sandbox.
@@ -493,11 +623,6 @@ impl AgentSpawner {
     pub fn with_egress_policy(mut self, policy: wcore_egress::SharedPolicy) -> Self {
         self.egress_policy = policy;
         self
-    }
-
-    /// Clone the immutable outbound authority inherited by child agents.
-    pub(crate) fn egress_policy(&self) -> wcore_egress::SharedPolicy {
-        Arc::clone(&self.egress_policy)
     }
 
     /// Bind child posture derivation to the host session's live manager.
@@ -748,6 +873,7 @@ impl AgentSpawner {
     /// - **Pinned without a resolver**: a configuration error — a provider was
     ///   pinned but nothing can resolve it. Fail that sub-agent loudly rather
     ///   than silently running it on the parent provider.
+    #[cfg(test)]
     fn provider_for(&self, sub: &SubAgentConfig) -> Result<Arc<dyn LlmProvider>, SubAgentResult> {
         self.resolve_provider_for(sub)
             .map(|resolved| resolved.provider)
@@ -795,6 +921,7 @@ impl AgentSpawner {
         request: SubAgentConfig,
         overrides: ForkOverrides,
     ) -> Result<ResolvedChildLaunch, DurableSpawnerError> {
+        let parent_cancel = self.active_cancel_token();
         let authority = self.durable_authority.token()?;
         let ResolvedProvider {
             provider,
@@ -830,6 +957,7 @@ impl AgentSpawner {
             config,
             policy,
             authority,
+            parent_cancel,
         })
     }
 
@@ -850,59 +978,23 @@ impl AgentSpawner {
 
     /// Spawn a single sub-agent and wait for result.
     pub async fn spawn_one(&self, sub_config: SubAgentConfig) -> SubAgentResult {
-        // Security audit H-7 / M-9: `child_config` inherits the parent's
-        // approval posture (no forced `auto_approve = true`), and
-        // `build_tool_registry(&[])` defaults to a read-only toolset.
-        let config = self.child_config(&sub_config);
-        // Crucible — resolve the per-spawn pinned provider (or inherit parent).
-        let provider = match self.provider_for(&sub_config) {
-            Ok(p) => p,
-            Err(result) => return result,
-        };
-        let (child_budget, _agent_guard) = match self.enter_child_budget() {
-            Ok(budget) => budget,
-            Err(error) => return SubAgentResult::error(&sub_config.name, &error),
-        };
+        self.spawn_one_with_origin(sub_config, ChildOrigin::Spawn)
+            .await
+    }
 
-        let tools = self.child_tool_registry(&[]);
-        let output: Arc<dyn OutputSink> = Arc::new(NullSink);
-        let mut engine = AgentEngine::new_with_provider(provider, config, tools, output);
-        if let Err(error) = self.bind_child_budget(&mut engine, child_budget) {
-            return SubAgentResult::error(&sub_config.name, &error);
-        }
-        engine.set_egress_policy(self.egress_policy.clone());
-        // Bind the child to the parent cancel token so a host cancel stops it.
-        engine.set_cancel_token(self.active_cancel_token().child_token());
-
-        // v0.8.0 Task J — publish Spawned + FirstMessage before
-        // entering the engine, then Completed/Errored on the way out.
-        // Spawner has no parent_call_id here (legacy direct callers do
-        // not pass one in); set None.
-        self.publish_spawned(&sub_config.name, None);
-        self.publish_first_message(&sub_config.name, &sub_config.prompt);
-        let mut guard = self.lifecycle_guard(&sub_config.name);
-
-        let result = engine.run(&sub_config.prompt, "").await;
-        let out = match result {
-            Ok(result) => {
-                self.publish_completed(&sub_config.name, result.turns, result.usage.output_tokens);
-                guard.outcome = TerminalOutcome::Published;
-                subagent_ok_result(sub_config.name, result)
-            }
-            Err(e) => {
-                self.publish_errored(&sub_config.name, &e.to_string());
-                guard.outcome = TerminalOutcome::Published;
-                SubAgentResult {
-                    name: sub_config.name,
-                    text: format!("Sub-agent error: {}", e),
-                    usage: TokenUsage::default(),
-                    turns: 0,
-                    is_error: true,
-                }
-            }
-        };
-        drop(guard);
-        out
+    /// Spawn one child with its durable lifecycle origin preserved.
+    pub async fn spawn_one_with_origin(
+        &self,
+        sub_config: SubAgentConfig,
+        origin: ChildOrigin,
+    ) -> SubAgentResult {
+        self.spawn_durable(
+            sub_config,
+            ForkOverrides::default(),
+            SpawnExtras::default(),
+            origin,
+        )
+        .await
     }
 
     /// Spawn multiple sub-agents in parallel.
@@ -927,13 +1019,25 @@ impl AgentSpawner {
         sub_configs: Vec<SubAgentConfig>,
         extras: SpawnExtras,
     ) -> Vec<SubAgentResult> {
+        self.spawn_parallel_with_extras_origin(sub_configs, extras, ChildOrigin::Spawn)
+            .await
+    }
+
+    pub async fn spawn_parallel_with_extras_origin(
+        &self,
+        sub_configs: Vec<SubAgentConfig>,
+        extras: SpawnExtras,
+        origin: ChildOrigin,
+    ) -> Vec<SubAgentResult> {
         let mut futures = SpawnTaskSet(
             sub_configs
                 .into_iter()
                 .map(|config| {
                     let spawner = self.clone_for_spawn();
                     let extras = extras.clone();
-                    tokio::spawn(async move { spawner.spawn_one_with_extras(config, extras).await })
+                    tokio::spawn(async move {
+                        spawner.spawn_one_with_extras(config, extras, origin).await
+                    })
                 })
                 .collect(),
         );
@@ -1006,7 +1110,9 @@ impl AgentSpawner {
                         // bus subscriber can prove the Fleet path ran.
                         let mut extras = extras;
                         extras.parent_call_id = Some(format!("fleet:{}", ctx.agent_id));
-                        let result = spawner.spawn_one_with_extras(sub_config, extras).await;
+                        let result = spawner
+                            .spawn_one_with_extras(sub_config, extras, ChildOrigin::Fleet)
+                            .await;
                         let succeeded = !result.is_error;
                         AgentReport {
                             agent_id: ctx.agent_id,
@@ -1075,13 +1181,22 @@ impl AgentSpawner {
         &self,
         tasks_and_extras: Vec<(SubAgentConfig, SpawnExtras)>,
     ) -> Vec<SubAgentResult> {
+        self.spawn_parallel_with_per_task_extras_origin(tasks_and_extras, ChildOrigin::Spawn)
+            .await
+    }
+
+    pub async fn spawn_parallel_with_per_task_extras_origin(
+        &self,
+        tasks_and_extras: Vec<(SubAgentConfig, SpawnExtras)>,
+        origin: ChildOrigin,
+    ) -> Vec<SubAgentResult> {
         let mut join_terminals = Vec::with_capacity(tasks_and_extras.len());
         let mut handles = Vec::with_capacity(tasks_and_extras.len());
         for (config, extras) in tasks_and_extras {
             let spawner = self.clone_for_spawn();
             join_terminals.push((config.name.clone(), extras.channel_sink.clone()));
             handles.push(tokio::spawn(async move {
-                spawner.spawn_one_with_extras(config, extras).await
+                spawner.spawn_one_with_extras(config, extras, origin).await
             }));
         }
         let mut futures = SpawnTaskSet(handles);
@@ -1113,70 +1228,138 @@ impl AgentSpawner {
         &self,
         sub_config: SubAgentConfig,
         extras: SpawnExtras,
+        origin: ChildOrigin,
     ) -> SubAgentResult {
-        // Security audit H-7 / M-9: inherit the parent's approval posture via
-        // `child_config` (no forced `auto_approve`). Forcing it here would let
-        // a single `Delegate`/`Spawn` approval auto-run every child
-        // Bash/Write/Edit call with no operator prompt.
-        let config = self.child_config(&sub_config);
+        self.spawn_durable(sub_config, ForkOverrides::default(), extras, origin)
+            .await
+    }
+
+    async fn spawn_durable(
+        &self,
+        sub_config: SubAgentConfig,
+        overrides: ForkOverrides,
+        extras: SpawnExtras,
+        origin: ChildOrigin,
+    ) -> SubAgentResult {
+        let name = sub_config.name.clone();
         let terminal_sink = extras.channel_sink.clone();
-        // Crucible — resolve the per-spawn pinned provider (or inherit parent).
-        // This is the path the fleet + parallel proposers funnel through, so a
-        // resolver that fails to propagate via `clone_for_spawn` surfaces here
-        // as a silent fall-back to the parent provider (guarded by tests).
-        let provider = match self.provider_for(&sub_config) {
-            Ok(p) => p,
-            Err(result) => {
+        let launch = match self.resolve_durable_launch(sub_config, overrides) {
+            Ok(launch) => launch,
+            Err(error) => {
+                let result = SubAgentResult::error(&name, &error.to_string());
                 relay_subagent_terminal(terminal_sink.as_deref(), &result);
                 return result;
             }
         };
+        self.execute_durable_launch(launch, extras, origin).await
+    }
+
+    async fn execute_durable_launch(
+        &self,
+        launch: ResolvedChildLaunch,
+        extras: SpawnExtras,
+        origin: ChildOrigin,
+    ) -> SubAgentResult {
+        let name = launch.request.name.clone();
+        let terminal_sink = extras.channel_sink.clone();
+        let record = match launch.durable_record(origin, extras.parent_call_id.clone()) {
+            Ok(record) => record,
+            Err(error) => {
+                let result = SubAgentResult::error(&name, &error.to_string());
+                relay_subagent_terminal(terminal_sink.as_deref(), &result);
+                return result;
+            }
+        };
+        let admitted = match self.durable_authority.admit_resolved(
+            launch.authority(),
+            record,
+            &launch.request,
+            &launch.overrides,
+            crate::durable_spawner::ResolvedExecutionEvidence {
+                provider: &launch.provider_id,
+                model: &launch.model,
+                effective_policy_digest: &launch.policy.exact_digest,
+            },
+        ) {
+            Ok(admitted) => admitted,
+            Err(error) => {
+                let result = SubAgentResult::error(&name, &error.to_string());
+                relay_subagent_terminal(terminal_sink.as_deref(), &result);
+                return result;
+            }
+        };
+        let parent_cancel = launch.parent_cancel.clone();
+        let child_cancel = parent_cancel.child_token();
+        // `execute_resolved_launch` carries the full child-engine state machine.
+        // Keep that large future off Tokio's worker stack before the durable
+        // cancellation/terminal-evidence wrapper adds its own select state.
+        let execution = Box::pin(self.execute_resolved_launch(launch, extras, child_cancel));
+        match admitted
+            .execute_with_parent_cancel(execution, parent_cancel)
+            .await
+        {
+            Ok(result) => {
+                relay_subagent_terminal(terminal_sink.as_deref(), &result);
+                result
+            }
+            Err(error) => {
+                let result = SubAgentResult::error(&name, &error.to_string());
+                relay_subagent_terminal(terminal_sink.as_deref(), &result);
+                result
+            }
+        }
+    }
+
+    async fn execute_resolved_launch(
+        &self,
+        launch: ResolvedChildLaunch,
+        extras: SpawnExtras,
+        child_cancel: tokio_util::sync::CancellationToken,
+    ) -> SubAgentResult {
         let (child_budget, _agent_guard) = match self.enter_child_budget() {
             Ok(budget) => budget,
             Err(error) => {
-                let result = SubAgentResult::error(&sub_config.name, &error);
-                relay_subagent_terminal(terminal_sink.as_deref(), &result);
-                return result;
+                return SubAgentResult::error(&launch.request.name, &error);
             }
         };
-
-        let tools = self.child_tool_registry(&[]);
+        let tools = self.child_tool_registry(&launch.overrides.allowed_tools);
         let output: Arc<dyn OutputSink> = match extras.channel_sink {
-            Some(sink) => sink as Arc<dyn OutputSink>, // sub-agent events flow back through parent
-            None => Arc::new(NullSink),                // legacy anonymous behaviour
+            Some(sink) => sink as Arc<dyn OutputSink>,
+            None => Arc::new(NullSink),
         };
-        let mut engine = AgentEngine::new_with_provider(provider, config, tools, output);
+        let mut engine = AgentEngine::new_with_provider(
+            Arc::clone(&launch.provider),
+            launch.config.clone(),
+            tools,
+            output,
+        );
         if let Err(error) = self.bind_child_budget(&mut engine, child_budget) {
-            let result = SubAgentResult::error(&sub_config.name, &error);
-            relay_subagent_terminal(terminal_sink.as_deref(), &result);
-            return result;
+            return SubAgentResult::error(&launch.request.name, &error);
         }
         engine.set_egress_policy(self.egress_policy.clone());
-        // Bind the child to the parent cancel token so a host cancel stops it.
-        engine.set_cancel_token(self.active_cancel_token().child_token());
+        engine.set_cancel_token(child_cancel);
+        engine.set_initial_reasoning_effort(launch.overrides.effort.clone());
 
-        // v0.8.0 Task J — Spawned + FirstMessage before the turn,
-        // Completed/Errored after. `extras.parent_call_id` (set by
-        // SpawnTool's relay path) is carried into the Spawned event so
-        // a subscriber can correlate sub-agent lifecycle with the
-        // parent's `SpawnTool` invocation.
-        self.publish_spawned(&sub_config.name, extras.parent_call_id.clone());
-        self.publish_first_message(&sub_config.name, &sub_config.prompt);
-        let mut guard = self.lifecycle_guard(&sub_config.name);
-
-        let result = engine.run(&sub_config.prompt, "").await;
+        self.publish_spawned(&launch.request.name, extras.parent_call_id);
+        self.publish_first_message(&launch.request.name, &launch.request.prompt);
+        let mut guard = self.lifecycle_guard(&launch.request.name);
+        let result = engine.run(&launch.request.prompt, "").await;
         let out = match result {
             Ok(result) => {
-                self.publish_completed(&sub_config.name, result.turns, result.usage.output_tokens);
+                self.publish_completed(
+                    &launch.request.name,
+                    result.turns,
+                    result.usage.output_tokens,
+                );
                 guard.outcome = TerminalOutcome::Published;
-                subagent_ok_result(sub_config.name.clone(), result)
+                subagent_ok_result(launch.request.name, result)
             }
-            Err(e) => {
-                self.publish_errored(&sub_config.name, &e.to_string());
+            Err(error) => {
+                self.publish_errored(&launch.request.name, &error.to_string());
                 guard.outcome = TerminalOutcome::Published;
                 SubAgentResult {
-                    name: sub_config.name,
-                    text: format!("Sub-agent error: {}", e),
+                    name: launch.request.name,
+                    text: format!("Sub-agent error: {error}"),
                     usage: TokenUsage::default(),
                     turns: 0,
                     is_error: true,
@@ -1184,7 +1367,6 @@ impl AgentSpawner {
             }
         };
         drop(guard);
-        relay_subagent_terminal(terminal_sink.as_deref(), &out);
         out
     }
 
@@ -1245,7 +1427,7 @@ impl AgentSpawner {
         config
     }
 
-    fn clone_for_spawn(&self) -> Self {
+    pub(crate) fn clone_for_spawn(&self) -> Self {
         Self {
             provider: self.provider.clone(),
             base_config: self.base_config.clone(),
@@ -1275,6 +1457,74 @@ impl AgentSpawner {
             durable_authority: self.durable_authority.clone(),
             effective_policy: self.effective_policy.clone(),
         }
+    }
+
+    /// Clone every inherited child authority while pinning an already-resolved
+    /// provider. The returned spawner accepts an unpinned child request, so the
+    /// provider cannot be resolved a second time between council admission and
+    /// durable launch.
+    pub(crate) fn clone_for_resolved_provider(
+        &self,
+        provider: Arc<dyn LlmProvider>,
+        provider_id: String,
+        model: Option<String>,
+    ) -> Self {
+        let mut cloned = self.clone_for_spawn();
+        cloned.provider = provider;
+        cloned.base_config.provider_label = provider_id;
+        if let Some(model) = model {
+            cloned.base_config.model = model;
+        }
+        cloned
+    }
+
+    #[doc(hidden)]
+    pub fn clone_for_resolved_config(
+        &self,
+        provider: Arc<dyn LlmProvider>,
+        config: Config,
+    ) -> Self {
+        let mut cloned = self.clone_for_spawn();
+        cloned.provider = provider;
+        cloned.base_config =
+            Self::overlay_resolved_provider_config(self.base_config.clone(), config);
+        cloned
+    }
+
+    /// Rebind a pre-resolved provider seat to the canonical session authority.
+    ///
+    /// Provider resolution is allowed to select provider credentials and wire
+    /// behavior. It must not replace the session-owned approval posture,
+    /// execution policy, workspace trust, security policy, or budget caps that
+    /// enforcement and durable receipts describe.
+    pub(crate) fn with_session_authority_config(mut self, authority: &Config) -> Self {
+        self.base_config =
+            Self::overlay_resolved_provider_config(authority.clone(), self.base_config);
+        self
+    }
+
+    fn overlay_resolved_provider_config(mut authority: Config, resolved: Config) -> Config {
+        authority.provider_label = resolved.provider_label;
+        authority.provider = resolved.provider;
+        authority.api_key = resolved.api_key;
+        authority.base_url = resolved.base_url;
+        authority.provider_organization = resolved.provider_organization;
+        authority.provider_region = resolved.provider_region;
+        authority.model = resolved.model;
+        authority.temperature = resolved.temperature;
+        authority.thinking = resolved.thinking;
+        authority.prompt_caching = resolved.prompt_caching;
+        authority.prompt_caching_min_prefix_tokens = resolved.prompt_caching_min_prefix_tokens;
+        authority.compat = resolved.compat;
+        authority.bedrock = resolved.bedrock;
+        authority.vertex = resolved.vertex;
+
+        // Approval remains session authority. A resolved machinery seat may
+        // request auto-approval, but it cannot mint a child-only Bypass while
+        // the canonical durable receipt still says Prompt/Managed. Until a
+        // bounded delegated approval exists, non-interactive seats fail closed
+        // when the canonical policy requires consent.
+        authority
     }
 
     // ---- v0.8.0 Task J: lifecycle publish helpers ----
@@ -1333,64 +1583,23 @@ impl Spawner for AgentSpawner {
         sub_config: SubAgentConfig,
         overrides: ForkOverrides,
     ) -> SubAgentResult {
-        // Security audit H-7 / M-9: inherit the parent's approval posture via
-        // `child_config` (no forced `auto_approve`). Combined with the
-        // read-only default in `build_tool_registry`, an empty
-        // `overrides.allowed_tools` now yields a child with no Bash/Write/Edit
-        // and the parent's confirm posture.
-        let mut config = self.child_config(&sub_config);
-        if let Some(model) = overrides.model.clone() {
-            config.model = model;
-        }
-        // Crucible — resolve the per-fork pinned provider (or inherit parent).
-        let provider = match self.provider_for(&sub_config) {
-            Ok(p) => p,
-            Err(result) => return result,
-        };
-        let (child_budget, _agent_guard) = match self.enter_child_budget() {
-            Ok(budget) => budget,
-            Err(error) => return SubAgentResult::error(&sub_config.name, &error),
-        };
+        self.spawn_durable(
+            sub_config,
+            overrides,
+            SpawnExtras::default(),
+            ChildOrigin::Delegate,
+        )
+        .await
+    }
 
-        let tools = self.child_tool_registry(&overrides.allowed_tools);
-        let output: Arc<dyn OutputSink> = Arc::new(NullSink);
-        let mut engine = AgentEngine::new_with_provider(provider, config, tools, output);
-        if let Err(error) = self.bind_child_budget(&mut engine, child_budget) {
-            return SubAgentResult::error(&sub_config.name, &error);
-        }
-        engine.set_egress_policy(self.egress_policy.clone());
-        // Bind the child to the parent cancel token so a host cancel stops it.
-        engine.set_cancel_token(self.active_cancel_token().child_token());
-        engine.set_initial_reasoning_effort(overrides.effort.clone());
-
-        // v0.8.0 Task J — fork path publishes lifecycle too. Forks
-        // don't carry a parent SpawnTool call_id (the `Spawner` trait
-        // surface doesn't accept one), so we pass None.
-        self.publish_spawned(&sub_config.name, None);
-        self.publish_first_message(&sub_config.name, &sub_config.prompt);
-        let mut guard = self.lifecycle_guard(&sub_config.name);
-
-        let result = engine.run(&sub_config.prompt, "").await;
-        let out = match result {
-            Ok(result) => {
-                self.publish_completed(&sub_config.name, result.turns, result.usage.output_tokens);
-                guard.outcome = TerminalOutcome::Published;
-                subagent_ok_result(sub_config.name, result)
-            }
-            Err(e) => {
-                self.publish_errored(&sub_config.name, &e.to_string());
-                guard.outcome = TerminalOutcome::Published;
-                SubAgentResult {
-                    name: sub_config.name,
-                    text: format!("Sub-agent error: {}", e),
-                    usage: TokenUsage::default(),
-                    turns: 0,
-                    is_error: true,
-                }
-            }
-        };
-        drop(guard);
-        out
+    async fn spawn_fork_with_origin(
+        &self,
+        sub_config: SubAgentConfig,
+        overrides: ForkOverrides,
+        origin: ChildOrigin,
+    ) -> SubAgentResult {
+        self.spawn_durable(sub_config, overrides, SpawnExtras::default(), origin)
+            .await
     }
 }
 
@@ -1510,6 +1719,26 @@ fn build_tool_registry(
 }
 
 #[cfg(test)]
+pub(crate) fn bind_test_durable_session(
+    spawner: &AgentSpawner,
+    root: &std::path::Path,
+    session_id: &str,
+) {
+    let manager = crate::session::SessionManager::new(root.to_path_buf(), 10);
+    let active = manager
+        .create_for_run(
+            "test-provider",
+            "test-model",
+            &root.to_string_lossy(),
+            Some(session_id),
+        )
+        .unwrap();
+    spawner
+        .bind_durable_session(active.journal, &active.session.id)
+        .unwrap();
+}
+
+#[cfg(test)]
 mod spawn_task_set_tests {
     use serde_json::json;
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -1524,6 +1753,7 @@ mod spawn_task_set_tests {
 
     use super::{
         AgentSpawner, SpawnTaskSet, SpawnerBudgetGovernance, SubAgentConfig, SubAgentResult,
+        bind_test_durable_session,
     };
 
     struct DropNotify(Option<oneshot::Sender<()>>);
@@ -1608,6 +1838,7 @@ mod spawn_task_set_tests {
 
     #[tokio::test]
     async fn parallel_children_cannot_bypass_parent_agent_cap() {
+        let dir = tempfile::tempdir().unwrap();
         let provider = Arc::new(CountingErrorProvider {
             calls: AtomicUsize::new(0),
         });
@@ -1616,8 +1847,13 @@ mod spawn_task_set_tests {
             ..Default::default()
         }
         .start_root();
-        let spawner =
-            AgentSpawner::new(provider.clone(), Config::default()).with_execution_budget(budget);
+        let config = Config {
+            model: "test-model".into(),
+            provider_label: "test-provider".into(),
+            ..Config::default()
+        };
+        let spawner = AgentSpawner::new(provider.clone(), config).with_execution_budget(budget);
+        bind_test_durable_session(&spawner, dir.path(), "f190020");
 
         let results = spawner
             .spawn_parallel(vec![bounded_child("one"), bounded_child("two")])
@@ -1773,6 +2009,7 @@ mod spawn_task_set_tests {
 
     #[tokio::test]
     async fn cancelling_legacy_parallel_spawn_aborts_running_children() {
+        let dir = tempfile::tempdir().unwrap();
         let (started_tx, started_rx) = oneshot::channel();
         let (dropped_tx, dropped_rx) = oneshot::channel();
         let provider = Arc::new(HangingProvider {
@@ -1780,7 +2017,13 @@ mod spawn_task_set_tests {
             dropped: Mutex::new(Some(dropped_tx)),
             calls: AtomicUsize::new(0),
         });
-        let spawner = AgentSpawner::new(provider.clone(), Config::default());
+        let config = Config {
+            model: "test-model".into(),
+            provider_label: "test-provider".into(),
+            ..Config::default()
+        };
+        let spawner = AgentSpawner::new(provider.clone(), config);
+        bind_test_durable_session(&spawner, dir.path(), "f190021");
         let child = SubAgentConfig {
             name: "hanging-child".into(),
             prompt: "wait".into(),
@@ -2038,7 +2281,8 @@ mod crucible_provider_resolution_tests {
                 wcore_types::execution_policy::EffectiveExecutionPolicy::baseline(
                     &Config::default().execution_policy,
                 ),
-            );
+            )
+            .unwrap();
         let mut request = sub("child", Some("openai"));
         request.model = Some("request-model".into());
         let overrides = ForkOverrides {
@@ -2142,12 +2386,14 @@ mod crucible_provider_resolution_tests {
         authority.bind(active_a.journal, &session_a.id).unwrap();
 
         let parent: Arc<dyn LlmProvider> = Arc::new(StubProvider);
-        let spawner = AgentSpawner::new(parent, Config::default()).with_durable_session_authority(
-            authority.clone(),
-            wcore_types::execution_policy::EffectiveExecutionPolicy::baseline(
-                &Config::default().execution_policy,
-            ),
-        );
+        let spawner = AgentSpawner::new(parent, Config::default())
+            .with_durable_session_authority(
+                authority.clone(),
+                wcore_types::execution_policy::EffectiveExecutionPolicy::baseline(
+                    &Config::default().execution_policy,
+                ),
+            )
+            .unwrap();
         let request = sub("stale-child", None);
         let overrides = ForkOverrides {
             model: Some("model-a".into()),
@@ -2176,6 +2422,382 @@ mod crucible_provider_resolution_tests {
                 Ok(())
             })
             .unwrap();
+    }
+}
+
+#[cfg(test)]
+mod production_durable_spawn_tests {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use async_trait::async_trait;
+    use tokio::sync::{Notify, mpsc, oneshot};
+    use wcore_config::config::Config;
+    use wcore_providers::{LlmProvider, ProviderError};
+    use wcore_types::llm::{LlmEvent, LlmRequest};
+    use wcore_types::message::{FinishReason, StopReason, TokenUsage};
+    use wcore_types::spawner::{
+        ChildDesiredState, ChildOrigin, ChildRecoveryState, DurableChildStatus,
+    };
+
+    use super::{
+        AgentSpawner, DurableCancelDisposition, DurableSessionAuthority, ForkOverrides,
+        SpawnExtras, SubAgentConfig,
+    };
+    use crate::durable_child::DurableChildStore;
+
+    struct ControlledProvider {
+        calls: AtomicUsize,
+        started: parking_lot::Mutex<Option<oneshot::Sender<()>>>,
+        release: Arc<Notify>,
+        wait_for_release: bool,
+    }
+
+    impl ControlledProvider {
+        fn immediate() -> Arc<Self> {
+            Arc::new(Self {
+                calls: AtomicUsize::new(0),
+                started: parking_lot::Mutex::new(None),
+                release: Arc::new(Notify::new()),
+                wait_for_release: false,
+            })
+        }
+
+        fn blocked(started: oneshot::Sender<()>) -> Arc<Self> {
+            Arc::new(Self {
+                calls: AtomicUsize::new(0),
+                started: parking_lot::Mutex::new(Some(started)),
+                release: Arc::new(Notify::new()),
+                wait_for_release: true,
+            })
+        }
+    }
+
+    #[async_trait]
+    impl LlmProvider for ControlledProvider {
+        async fn stream(
+            &self,
+            _request: &LlmRequest,
+        ) -> Result<mpsc::Receiver<LlmEvent>, ProviderError> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            if let Some(started) = self.started.lock().take() {
+                let _ = started.send(());
+            }
+            if self.wait_for_release {
+                self.release.notified().await;
+            }
+            let (tx, rx) = mpsc::channel(2);
+            tx.send(LlmEvent::TextDelta("durable child completed".into()))
+                .await
+                .unwrap();
+            tx.send(LlmEvent::Done {
+                stop_reason: StopReason::EndTurn,
+                finish_reason: FinishReason::from_stop_reason(StopReason::EndTurn),
+                usage: TokenUsage {
+                    input_tokens: 3,
+                    output_tokens: 4,
+                    cache_creation_tokens: 0,
+                    cache_read_tokens: 0,
+                },
+            })
+            .await
+            .unwrap();
+            Ok(rx)
+        }
+    }
+
+    fn child(name: &str) -> SubAgentConfig {
+        SubAgentConfig {
+            name: name.into(),
+            prompt: "perform durable work".into(),
+            max_turns: 1,
+            max_tokens: 16,
+            system_prompt: None,
+            provider: None,
+            model: None,
+            temperature: None,
+        }
+    }
+
+    fn canonical_binding(
+        root: &std::path::Path,
+        seed: &str,
+        authority: &DurableSessionAuthority,
+    ) -> (
+        crate::session::SessionManager,
+        crate::session_journal::SessionJournal,
+        super::DurableAuthorityToken,
+    ) {
+        let manager = crate::session::SessionManager::new(root.to_path_buf(), 10);
+        let session = manager
+            .create("test", "test-model", "/tmp", Some(seed))
+            .unwrap();
+        manager.persist_first_message(&session).unwrap();
+        let active = manager.load_for_run(&session.id).unwrap();
+        let journal = active.journal.clone();
+        let token = authority.bind(active.journal, &session.id).unwrap();
+        (manager, journal, token)
+    }
+
+    fn bound_spawner(
+        provider: Arc<dyn LlmProvider>,
+        authority: DurableSessionAuthority,
+    ) -> AgentSpawner {
+        let config = Config {
+            model: "test-model".into(),
+            provider_label: "test-provider".into(),
+            ..Config::default()
+        };
+        let policy = wcore_types::execution_policy::EffectiveExecutionPolicy::baseline(
+            &config.execution_policy,
+        );
+        AgentSpawner::new(provider, config)
+            .with_durable_session_authority(authority, policy)
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn unbound_production_spawn_fails_before_provider_execution() {
+        let provider = ControlledProvider::immediate();
+        let provider_dyn: Arc<dyn LlmProvider> = provider.clone();
+        let spawner = AgentSpawner::new(provider_dyn, Config::default());
+
+        let result = spawner
+            .spawn_one_with_origin(child("unbound"), ChildOrigin::Workflow)
+            .await;
+
+        assert!(result.is_error);
+        assert!(result.text.contains("session authority is not bound"));
+        assert_eq!(provider.calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn production_spawn_commits_exact_origin_and_terminal_result_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let authority = DurableSessionAuthority::new();
+        let (_manager, _journal, token) = canonical_binding(dir.path(), "f1920001", &authority);
+        let provider = ControlledProvider::immediate();
+        let provider_dyn: Arc<dyn LlmProvider> = provider.clone();
+        let spawner = bound_spawner(provider_dyn, authority.clone());
+
+        let result = spawner
+            .spawn_one_with_origin(child("workflow-child"), ChildOrigin::Workflow)
+            .await;
+
+        assert!(!result.is_error, "{}", result.text);
+        assert_eq!(provider.calls.load(Ordering::SeqCst), 1);
+        authority
+            .with_store(&token, |store| {
+                let records = store.list()?;
+                assert_eq!(records.len(), 1);
+                let record = &records[0];
+                assert_eq!(record.origin, ChildOrigin::Workflow);
+                assert_eq!(record.provider.as_deref(), Some("test-provider"));
+                assert_eq!(record.model.as_deref(), Some("test-model"));
+                assert_eq!(record.status, DurableChildStatus::Succeeded);
+                assert!(record.result.is_some());
+                Ok(())
+            })
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn anvil_seat_clone_preserves_session_authority_and_terminalizes_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let authority = DurableSessionAuthority::new();
+        let (_manager, _journal, token) = canonical_binding(dir.path(), "f1920006", &authority);
+        let template_provider: Arc<dyn LlmProvider> = ControlledProvider::immediate();
+        let template = bound_spawner(template_provider, authority.clone());
+        let seat_provider = ControlledProvider::immediate();
+        let seat_provider_dyn: Arc<dyn LlmProvider> = seat_provider.clone();
+        let seat_config = Config {
+            model: "anvil-model".into(),
+            provider_label: "anvil-provider".into(),
+            ..Config::default()
+        };
+        let seat = template.clone_for_resolved_config(seat_provider_dyn, seat_config);
+
+        let result = seat
+            .spawn_one_with_origin(child("anvil-builder"), ChildOrigin::Anvil)
+            .await;
+
+        assert!(!result.is_error, "{}", result.text);
+        assert_eq!(seat_provider.calls.load(Ordering::SeqCst), 1);
+        authority
+            .with_store(&token, |store| {
+                let records = store.list()?;
+                assert_eq!(records.len(), 1);
+                let record = &records[0];
+                assert_eq!(record.parent.session_id, "f1920006");
+                assert_eq!(record.origin, ChildOrigin::Anvil);
+                assert_eq!(record.provider.as_deref(), Some("anvil-provider"));
+                assert_eq!(record.model.as_deref(), Some("anvil-model"));
+                assert_eq!(record.status, DurableChildStatus::Succeeded);
+                Ok(())
+            })
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn authority_switch_before_atomic_admission_never_calls_provider_or_declares_child() {
+        let dir = tempfile::tempdir().unwrap();
+        let authority = DurableSessionAuthority::new();
+        let (_manager_a, journal_a, _token_a) =
+            canonical_binding(&dir.path().join("a"), "f1920004", &authority);
+        let provider = ControlledProvider::immediate();
+        let provider_dyn: Arc<dyn LlmProvider> = provider.clone();
+        let spawner = bound_spawner(provider_dyn, authority.clone());
+
+        // Resolve under A, pause before the exact production admission helper,
+        // then switch the shared authority to B. Admission must reject the
+        // stale token before it creates or polls the provider future.
+        let launch = spawner
+            .resolve_durable_launch(child("stale-before-admission"), ForkOverrides::default())
+            .unwrap();
+        let (_manager_b, journal_b, _token_b) =
+            canonical_binding(&dir.path().join("b"), "f1920005", &authority);
+        let result = spawner
+            .execute_durable_launch(launch, SpawnExtras::default(), ChildOrigin::Workflow)
+            .await;
+
+        assert!(result.is_error);
+        assert!(
+            result
+                .text
+                .contains("durable child launch authority is stale")
+        );
+        assert_eq!(provider.calls.load(Ordering::SeqCst), 0);
+        assert!(DurableChildStore::new(journal_a).list().unwrap().is_empty());
+        assert!(DurableChildStore::new(journal_b).list().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn in_flight_child_finishes_in_captured_session_after_authority_switch() {
+        let dir = tempfile::tempdir().unwrap();
+        let authority = DurableSessionAuthority::new();
+        let (_manager_a, journal_a, _token_a) =
+            canonical_binding(&dir.path().join("a"), "f1920002", &authority);
+        let (started_tx, started_rx) = oneshot::channel();
+        let provider = ControlledProvider::blocked(started_tx);
+        let provider_dyn: Arc<dyn LlmProvider> = provider.clone();
+        let spawner = bound_spawner(provider_dyn, authority.clone());
+
+        let task = tokio::spawn(async move {
+            spawner
+                .spawn_one_with_origin(child("session-a-child"), ChildOrigin::Pipeline)
+                .await
+        });
+        started_rx.await.unwrap();
+
+        let (_manager_b, _journal_b, token_b) =
+            canonical_binding(&dir.path().join("b"), "f1920003", &authority);
+        provider.release.notify_waiters();
+        let result = task.await.unwrap();
+        assert!(!result.is_error, "{}", result.text);
+
+        let records_a = DurableChildStore::new(journal_a).list().unwrap();
+        assert_eq!(records_a.len(), 1);
+        assert_eq!(records_a[0].origin, ChildOrigin::Pipeline);
+        assert_eq!(records_a[0].status, DurableChildStatus::Succeeded);
+        authority
+            .with_store(&token_b, |store| {
+                assert!(store.list()?.is_empty());
+                Ok(())
+            })
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn host_child_uses_the_session_supervisor_for_admission_and_cancel() {
+        let dir = tempfile::tempdir().unwrap();
+        let authority = DurableSessionAuthority::new();
+        let (_manager, _journal, _token) = canonical_binding(dir.path(), "f1920009", &authority);
+        let (started_tx, started_rx) = oneshot::channel();
+        let provider = ControlledProvider::blocked(started_tx);
+        let provider_dyn: Arc<dyn LlmProvider> = provider.clone();
+        let spawner = Arc::new(bound_spawner(provider_dyn, authority));
+        let supervisor = spawner.durable_child_supervisor().unwrap();
+        let task_spawner = Arc::clone(&spawner);
+        let task =
+            tokio::spawn(async move { task_spawner.spawn_host_child(child("host-created")).await });
+        started_rx.await.unwrap();
+
+        let records = supervisor.list().unwrap();
+        assert_eq!(records.len(), 1);
+        let child_id = records[0].child_id.clone();
+        assert_eq!(records[0].origin, ChildOrigin::Host);
+        assert_eq!(records[0].status, DurableChildStatus::Running);
+        assert_eq!(
+            supervisor.inspect(&child_id).unwrap(),
+            Some(records[0].clone())
+        );
+        assert_eq!(
+            supervisor.request_cancel(&child_id).unwrap(),
+            DurableCancelDisposition::Signalled
+        );
+
+        let result = task.await.unwrap();
+        assert!(result.is_error);
+        assert_eq!(result.name, "host-created");
+        assert_eq!(provider.calls.load(Ordering::SeqCst), 1);
+        let record = supervisor.inspect(&child_id).unwrap().unwrap();
+        assert_eq!(record.status, DurableChildStatus::Cancelled);
+        assert_eq!(record.desired_state, ChildDesiredState::Cancel);
+        assert_eq!(record.recovery, ChildRecoveryState::Clean);
+        assert!(record.result.is_none());
+    }
+
+    #[tokio::test]
+    async fn stale_supervisor_never_follows_a_session_rebind() {
+        let dir = tempfile::tempdir().unwrap();
+        let authority = DurableSessionAuthority::new();
+        let (_manager_a, _journal_a, _token_a) =
+            canonical_binding(&dir.path().join("a"), "f192000a", &authority);
+        let provider = ControlledProvider::immediate();
+        let provider_dyn: Arc<dyn LlmProvider> = provider.clone();
+        let spawner = bound_spawner(provider_dyn, authority.clone());
+        let stale = spawner.durable_child_supervisor().unwrap();
+
+        let (_manager_b, _journal_b, _token_b) =
+            canonical_binding(&dir.path().join("b"), "f192000b", &authority);
+        let result = spawner.spawn_host_child(child("session-b-host")).await;
+        assert!(!result.is_error, "{}", result.text);
+        let current = spawner.durable_child_supervisor().unwrap();
+        let record = current.list().unwrap().pop().unwrap();
+
+        assert!(stale.list().is_err());
+        assert!(stale.inspect(&record.child_id).is_err());
+        assert!(stale.request_cancel(&record.child_id).is_err());
+        assert_eq!(current.inspect(&record.child_id).unwrap(), Some(record));
+    }
+
+    #[tokio::test]
+    async fn resolved_child_keeps_the_turn_token_that_created_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let authority = DurableSessionAuthority::new();
+        let (_manager, _journal, _token) = canonical_binding(dir.path(), "f192000c", &authority);
+        let provider = ControlledProvider::immediate();
+        let provider_dyn: Arc<dyn LlmProvider> = provider.clone();
+        let root = tokio_util::sync::CancellationToken::new();
+        let mut guard = crate::cancel::SessionRuntimeGuard::new(root);
+        let first_turn = tokio_util::sync::CancellationToken::new();
+        guard.set_active_turn(first_turn);
+        let spawner = bound_spawner(provider_dyn, authority).with_session_runtime(guard.observer());
+        let launch = spawner
+            .resolve_durable_launch(child("old-turn-child"), ForkOverrides::default())
+            .unwrap();
+
+        guard.set_active_turn(tokio_util::sync::CancellationToken::new());
+        let result = spawner
+            .execute_durable_launch(launch, SpawnExtras::default(), ChildOrigin::Workflow)
+            .await;
+
+        assert!(result.is_error);
+        assert_eq!(result.name, "old-turn-child");
+        assert_eq!(provider.calls.load(Ordering::SeqCst), 0);
+        let record = spawner.durable_child_supervisor().unwrap().list().unwrap();
+        assert_eq!(record.len(), 1);
+        assert_eq!(record[0].status, DurableChildStatus::Cancelled);
     }
 }
 
@@ -2307,17 +2929,26 @@ mod posture_inheritance_tests {
     //! typed approval policy, legacy `auto_approve`, and `allow_list` unchanged.
 
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     use async_trait::async_trait;
     use tokio::sync::mpsc;
-    use wcore_config::config::{Config, ToolsConfig};
+    use wcore_config::compat::ProviderCompat;
+    use wcore_config::config::{Config, ProviderType, ToolsConfig};
     use wcore_protocol::ToolApprovalManager;
     use wcore_protocol::commands::SessionMode;
     use wcore_providers::{LlmProvider, ProviderError};
-    use wcore_types::execution_policy::ApprovalPolicy;
+    use wcore_types::execution_policy::{
+        ApprovalPolicy, BaselineExecutionPolicy, EffectiveExecutionPolicy, ManagedDangerousPolicy,
+    };
     use wcore_types::llm::{LlmEvent, LlmRequest};
+    use wcore_types::spawner::{
+        ChildDeliveryState, ChildDesiredState, ChildRecoveryState, DurableChildStatus,
+    };
 
     use super::{AgentSpawner, SubAgentConfig};
+    use crate::confirm::ToolConfirmer;
+    use crate::durable_child::DurableChildStore;
 
     /// Minimal `LlmProvider` stub — `child_config` never calls `stream`, so an
     /// immediate error return is sufficient to satisfy the trait bound.
@@ -2329,6 +2960,21 @@ mod posture_inheritance_tests {
             &self,
             _request: &LlmRequest,
         ) -> Result<mpsc::Receiver<LlmEvent>, ProviderError> {
+            Err(ProviderError::Connection("never called".into()))
+        }
+    }
+
+    struct CountingNeverProvider {
+        calls: AtomicUsize,
+    }
+
+    #[async_trait]
+    impl LlmProvider for CountingNeverProvider {
+        async fn stream(
+            &self,
+            _request: &LlmRequest,
+        ) -> Result<mpsc::Receiver<LlmEvent>, ProviderError> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
             Err(ProviderError::Connection("never called".into()))
         }
     }
@@ -2417,6 +3063,85 @@ mod posture_inheritance_tests {
         assert!(
             !cloned_child.tools.auto_approve,
             "runtime de-escalation must revoke bypass for fleet/parallel children"
+        );
+    }
+
+    #[test]
+    fn routed_seat_preserves_canonical_policy_and_budget_authority() {
+        let mut authority = config_with_posture(false, vec!["Read".into()]);
+        authority.execution_policy =
+            BaselineExecutionPolicy::managed(ApprovalPolicy::Prompt, ManagedDangerousPolicy::Deny);
+        authority.budget.max_cost_usd = Some(3.0);
+        authority.session_cap = Some(wcore_budget::BudgetConfig {
+            max_tokens_out: Some(2_048),
+            max_cost_usd: Some(1.0),
+            ..Default::default()
+        });
+
+        let mut routed = Config {
+            provider_label: "flux-router".into(),
+            provider: ProviderType::FluxRouter,
+            api_key: "route-secret".into(),
+            base_url: "https://router.invalid/v1".into(),
+            model: "flux-auto".into(),
+            compat: ProviderCompat::flux_router_defaults(),
+            ..Config::default()
+        };
+        routed.tools.auto_approve = true;
+        routed.execution_policy = BaselineExecutionPolicy::smart(
+            ApprovalPolicy::Bypass,
+            wcore_types::execution_policy::PolicySource::UserConfig,
+        );
+        routed.budget = wcore_budget::BudgetConfig::default();
+        routed.session_cap = None;
+
+        let canonical_receipt_policy =
+            EffectiveExecutionPolicy::baseline(&authority.execution_policy);
+        let template = AgentSpawner::new(Arc::new(NeverProvider), authority.clone());
+        let seat = template.clone_for_resolved_config(Arc::new(NeverProvider), routed.clone());
+        let child = seat.child_config(&sub_config());
+
+        assert_eq!(child.provider, ProviderType::FluxRouter);
+        assert_eq!(child.provider_label, "flux-router");
+        assert_eq!(child.model, "flux-auto");
+        assert_eq!(child.compat.provider_type(), "flux-router");
+        assert!(!child.tools.auto_approve);
+        assert_eq!(child.execution_policy, authority.execution_policy);
+        assert_eq!(child.budget, authority.budget);
+        assert_eq!(child.session_cap, authority.session_cap);
+        assert_eq!(
+            EffectiveExecutionPolicy::baseline(&child.execution_policy),
+            canonical_receipt_policy,
+            "durable receipt policy must match child-engine enforcement",
+        );
+        assert_eq!(
+            child.smart_approval_policy(),
+            canonical_receipt_policy.approvals(),
+            "legacy confirmer posture must agree with the durable receipt",
+        );
+        let confirmer = ToolConfirmer::with_policy(
+            child.smart_approval_policy(),
+            child.tools.allow_list.clone(),
+        );
+        assert!(
+            confirmer.requires_confirmation("Bash"),
+            "the real child confirmer must not bypass a Managed/Prompt floor",
+        );
+
+        let standalone = AgentSpawner::new(Arc::new(NeverProvider), routed)
+            .with_session_authority_config(&authority);
+        let standalone_child = standalone.child_config(&sub_config());
+        assert_eq!(
+            standalone_child.execution_policy,
+            authority.execution_policy
+        );
+        assert_eq!(standalone_child.budget, authority.budget);
+        assert_eq!(standalone_child.session_cap, authority.session_cap);
+        assert_eq!(standalone_child.provider, ProviderType::FluxRouter);
+        assert_eq!(standalone_child.model, "flux-auto");
+        assert_eq!(
+            standalone_child.smart_approval_policy(),
+            canonical_receipt_policy.approvals(),
         );
     }
 
@@ -2516,18 +3241,46 @@ mod posture_inheritance_tests {
     /// of that error proves the child inherited the parent's cancel token.
     #[tokio::test]
     async fn cancelled_parent_short_circuits_spawned_child() {
+        let dir = tempfile::tempdir().unwrap();
         let cancel = tokio_util::sync::CancellationToken::new();
         cancel.cancel();
-        let spawner =
-            AgentSpawner::new(Arc::new(NeverProvider), Config::default()).with_cancel(cancel);
+        let provider = Arc::new(CountingNeverProvider {
+            calls: AtomicUsize::new(0),
+        });
+        let config = Config {
+            model: "test-model".into(),
+            provider_label: "test-provider".into(),
+            ..Config::default()
+        };
+        let spawner = AgentSpawner::new(provider.clone(), config).with_cancel(cancel);
+        let manager = crate::session::SessionManager::new(dir.path().to_path_buf(), 10);
+        let active = manager
+            .create_for_run(
+                "test-provider",
+                "test-model",
+                &dir.path().to_string_lossy(),
+                Some("f1920007"),
+            )
+            .unwrap();
+        let journal = active.journal.clone();
+        spawner
+            .bind_durable_session(active.journal, &active.session.id)
+            .unwrap();
 
         let result = spawner.spawn_one(sub_config()).await;
 
-        assert!(
-            !result.text.contains("never called"),
-            "a cancelled parent must short-circuit the child before the provider; got: {}",
-            result.text
-        );
+        assert!(result.is_error);
+        assert_eq!(result.name, "child");
+        assert_eq!(provider.calls.load(Ordering::SeqCst), 0);
+        let records = DurableChildStore::new(journal).list().unwrap();
+        assert_eq!(records.len(), 1);
+        let record = &records[0];
+        assert_eq!(record.status, DurableChildStatus::Cancelled);
+        assert_eq!(record.desired_state, ChildDesiredState::Cancel);
+        assert_eq!(record.recovery, ChildRecoveryState::Clean);
+        assert!(record.result.is_none());
+        assert_eq!(record.delivery_state, ChildDeliveryState::NotRequired);
+        assert!(record.timestamps.terminal_at_unix_ms.is_some());
     }
 }
 

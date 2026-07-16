@@ -26,16 +26,15 @@ use wcore_types::tool::{JsonSchema, ToolEffectContract, ToolResult};
 
 use super::forge::drive_climb_full;
 use crate::output::OutputSink;
-use crate::spawner::SpawnerBudgetGovernance;
+use crate::spawner::AgentSpawner;
 
 /// The session-level gated-forge tool.
 pub struct ForgeTool {
     anvil: AnvilConfig,
     session_cfg: Config,
     egress_policy: wcore_egress::SharedPolicy,
-    budget_governance: SpawnerBudgetGovernance,
+    session_spawner: Arc<AgentSpawner>,
     output: Arc<dyn OutputSink>,
-    fallback_session_id: String,
 }
 
 impl ForgeTool {
@@ -47,17 +46,15 @@ impl ForgeTool {
         anvil: AnvilConfig,
         session_cfg: Config,
         egress_policy: wcore_egress::SharedPolicy,
-        budget_governance: SpawnerBudgetGovernance,
+        session_spawner: Arc<AgentSpawner>,
         output: Arc<dyn OutputSink>,
     ) -> Self {
-        let fallback_session_id = budget_governance.session_id().to_string();
         Self {
             anvil,
             session_cfg,
             egress_policy,
-            budget_governance,
+            session_spawner,
             output,
-            fallback_session_id,
         }
     }
 
@@ -79,7 +76,7 @@ impl ForgeTool {
             &self.anvil,
             &self.session_cfg,
             Arc::clone(&self.egress_policy),
-            Some(self.budget_governance.clone()),
+            &self.session_spawner,
         )
         .await
         {
@@ -108,7 +105,7 @@ impl ForgeTool {
         let valve_seat = super::seat::materialize_valve_seat(
             &self.session_cfg,
             Arc::clone(&self.egress_policy),
-            Some(self.budget_governance.clone()),
+            &self.session_spawner,
         )
         .await
         .ok();
@@ -116,10 +113,18 @@ impl ForgeTool {
             .as_ref()
             .map(|s| &s.spawner as &dyn wcore_types::spawner::Spawner);
 
-        let session_id = self
-            .output
-            .current_session_id()
-            .unwrap_or_else(|| self.fallback_session_id.clone());
+        let session_id = match self.output.current_session_id() {
+            Some(session_id) => session_id,
+            None => match self.session_spawner.durable_session_id() {
+                Ok(session_id) => session_id,
+                Err(error) => {
+                    return ToolResult {
+                        content: format!("Forge has no canonical session authority: {error}"),
+                        is_error: true,
+                    };
+                }
+            },
+        };
         let run_id = uuid::Uuid::new_v4().to_string();
 
         match drive_climb_full(
