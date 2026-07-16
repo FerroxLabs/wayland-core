@@ -20,7 +20,7 @@ use super::transport::{McpError, McpTransport};
 /// Per-server connect budget (audit C2).
 ///
 /// `connect_server` runs the full MCP handshake: spawn transport →
-/// `initialize` → `notifications/initialized` → `tools/list`. Each request
+/// `initialize` → `notifications/initialized` → capability discovery. Each request
 /// over a stdio transport is itself bounded (audit C1), but the boot path
 /// must not wait the full per-request budget on a server that is wedged
 /// before it ever speaks MCP. 30s covers a legitimately slow server (npm
@@ -254,6 +254,14 @@ impl McpManager {
         name: String,
         config: &McpServerConfig,
     ) -> Result<Vec<String>, McpError> {
+        if let Some(server) = self
+            .servers
+            .get(&name)
+            .filter(|server| server.transport.is_alive())
+        {
+            return Ok(server.tools.iter().map(|tool| tool.name.clone()).collect());
+        }
+
         match Self::connect_server_outcome(
             &name,
             config,
@@ -383,26 +391,36 @@ impl McpManager {
             .get("resources")
             .map(|v| !v.is_null())
             .unwrap_or(false);
+        let supports_tools = init_result
+            .capabilities
+            .get("tools")
+            .map(|v| !v.is_null())
+            .unwrap_or(false);
 
         // 3. Send initialized notification
         let initialized_notification =
             JsonRpcRequest::notification("notifications/initialized", None);
         transport.notify(&initialized_notification).await?;
 
-        // 4. List tools
-        let list_req = JsonRpcRequest::new(2, "tools/list", None);
-        let list_response = transport.request(&list_req).await?;
-        let tools_result: ToolsListResult = serde_json::from_value(
-            list_response
-                .result
-                .ok_or_else(|| McpError::InitFailed("No result in tools/list response".into()))?,
-        )
-        .map_err(|e| McpError::InitFailed(format!("Failed to parse tools list: {}", e)))?;
+        // 4. Discover tools only when the server advertises that capability.
+        // Resource-only MCP servers are valid and may reject `tools/list`.
+        let tools = if supports_tools {
+            let list_req = JsonRpcRequest::new(2, "tools/list", None);
+            let list_response = transport.request(&list_req).await?;
+            let tools_result: ToolsListResult =
+                serde_json::from_value(list_response.result.ok_or_else(|| {
+                    McpError::InitFailed("No result in tools/list response".into())
+                })?)
+                .map_err(|e| McpError::InitFailed(format!("Failed to parse tools list: {}", e)))?;
+            tools_result.tools
+        } else {
+            Vec::new()
+        };
 
         Ok(McpServer {
             name: name.to_string(),
             transport,
-            tools: tools_result.tools,
+            tools,
             supports_resources,
         })
     }
@@ -862,16 +880,6 @@ mod tests {
             .respond_with(ResponseTemplate::new(202))
             .mount(&server)
             .await;
-        Mock::given(method("POST"))
-            .and(body_string_contains("\"method\":\"tools/list\""))
-            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-                "jsonrpc": "2.0",
-                "id": 2,
-                "result": {"tools": []}
-            })))
-            .mount(&server)
-            .await;
-
         let config = McpServerConfig {
             transport: TransportType::StreamableHttp,
             command: None,
@@ -904,7 +912,7 @@ mod tests {
         ));
         assert_eq!(
             server.received_requests().await.expect("request log").len(),
-            3,
+            2,
             "the denied session must not emit any network request"
         );
     }
@@ -1218,12 +1226,11 @@ mod tests {
             allow_local: false,
             only_for_assistant: None,
         };
-        // A real MCP handshake fixture: answer initialize + tools/list.
+        // A real MCP handshake fixture with no listable capabilities.
         let healthy_script = r#"
             while IFS= read -r line; do
               case "$line" in
                 *initialize*) printf '{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2025-03-26","capabilities":{}}}\n' ;;
-                *tools/list*) printf '{"jsonrpc":"2.0","id":2,"result":{"tools":[]}}\n' ;;
               esac
             done
         "#;
@@ -1334,7 +1341,7 @@ mod tests {
         let healthy_script = r#"
             while IFS= read -r line; do
               case "$line" in
-                *initialize*) printf '{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2025-03-26","capabilities":{}}}\n' ;;
+                *initialize*) printf '{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2025-03-26","capabilities":{"tools":{}}}}\n' ;;
                 *tools/list*) printf '{"jsonrpc":"2.0","id":2,"result":{"tools":[{"name":"echo","description":"e","inputSchema":{"type":"object"}}]}}\n' ;;
               esac
             done

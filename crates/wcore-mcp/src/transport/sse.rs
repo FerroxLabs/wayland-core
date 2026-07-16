@@ -446,6 +446,10 @@ impl McpTransport for SseTransport {
         self.pending.lock().await.clear();
         Ok(())
     }
+
+    fn is_alive(&self) -> bool {
+        !self.closed.load(Ordering::SeqCst) && !self._listener.is_finished()
+    }
 }
 
 /// Parse a single SSE event block into (event_type, data)
@@ -554,6 +558,33 @@ fn resolve_endpoint(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn transport_with_listener(listener: tokio::task::JoinHandle<()>) -> SseTransport {
+        SseTransport {
+            client: wcore_egress::EgressClient::new(),
+            post_url: "http://127.0.0.1/unused".to_string(),
+            headers: reqwest::header::HeaderMap::new(),
+            pending: Arc::new(Mutex::new(HashMap::new())),
+            next_id: AtomicU64::new(1),
+            _listener: listener,
+            request_timeout: std::time::Duration::from_secs(1),
+            closed: AtomicBool::new(false),
+        }
+    }
+
+    #[tokio::test]
+    async fn is_alive_tracks_explicit_close_and_listener_exit() {
+        let transport = transport_with_listener(tokio::spawn(std::future::pending()));
+        assert!(transport.is_alive());
+        transport.close().await.expect("close transport");
+        assert!(!transport.is_alive());
+
+        let listener = tokio::spawn(async {});
+        tokio::task::yield_now().await;
+        assert!(listener.is_finished(), "listener fixture must have exited");
+        let transport = transport_with_listener(listener);
+        assert!(!transport.is_alive());
+    }
 
     /// Audit C6 — `SseTransport::request` must bound its wait on the response
     /// `oneshot`. The failure mode without the fix: the listener is alive, the
