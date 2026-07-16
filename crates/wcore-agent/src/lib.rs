@@ -48,6 +48,7 @@ pub mod context;
 // spawns a `CronRunner` with the `EngineJobHandler` defined here.
 pub mod cron;
 pub mod durable_child;
+mod durable_spawner;
 // B2: the real egress policy (allowlist + ask-with-memory + exfil-class)
 // installed into the B1 wcore-egress chokepoint at bootstrap.
 pub mod egress;

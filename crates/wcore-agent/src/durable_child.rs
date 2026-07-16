@@ -154,6 +154,22 @@ impl DurableChildStore {
             .filter_map(|child| child.durable)
             .collect())
     }
+
+    /// Persist a content-addressed terminal child payload before the terminal
+    /// transition makes its digest visible in the durable record.
+    pub(crate) fn store_result_payload(
+        &self,
+        digest: &str,
+        payload: &[u8],
+    ) -> Result<(), JournalError> {
+        self.journal.store_effect_checkpoint(digest, payload)
+    }
+
+    /// Load and integrity-check the terminal child payload addressed by the
+    /// digest committed in [`DurableChildResult::exact_digest`].
+    pub(crate) fn load_result_payload(&self, digest: &str) -> Result<Vec<u8>, JournalError> {
+        self.journal.load_effect_checkpoint(digest)
+    }
 }
 
 fn write_result(envelope: Option<JournalEnvelope>) -> DurableChildWrite {
