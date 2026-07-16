@@ -27,6 +27,11 @@ pub enum ProviderAttemptPurpose {
 /// Caller-supplied linkage shared by every physical retry/fallback attempt.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ProviderAttemptContext {
+    /// Stable caller-owned identity for the logical dispatch that authorized
+    /// this physical attempt. Legacy callers leave this absent; recovery must
+    /// never infer continuation authority for those attempts.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dispatch_id: Option<String>,
     pub turn_id: String,
     pub purpose: ProviderAttemptPurpose,
     pub request_digest: String,
@@ -38,6 +43,8 @@ pub struct ProviderAttemptContext {
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct PhysicalProviderAttempt {
     pub attempt_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dispatch_id: Option<String>,
     pub turn_id: String,
     pub purpose: ProviderAttemptPurpose,
     pub request_digest: String,
@@ -49,6 +56,7 @@ impl PhysicalProviderAttempt {
     fn new(context: &ProviderAttemptContext) -> Self {
         Self {
             attempt_id: Uuid::now_v7().to_string(),
+            dispatch_id: context.dispatch_id.clone(),
             turn_id: context.turn_id.clone(),
             purpose: context.purpose,
             request_digest: context.request_digest.clone(),
@@ -320,6 +328,7 @@ mod tests {
 
     fn context() -> ProviderAttemptContext {
         ProviderAttemptContext {
+            dispatch_id: None,
             turn_id: "turn-1".into(),
             purpose: ProviderAttemptPurpose::Conversation,
             request_digest: "sha256:test".into(),
@@ -507,6 +516,35 @@ mod tests {
                 .map(|(attempt, _)| &attempt.attempt_id)
                 .collect::<Vec<_>>()
         );
+    }
+
+    #[tokio::test]
+    async fn logical_dispatch_correlation_survives_every_physical_retry() {
+        let server = status_server(503).await;
+        let lifecycle = Arc::new(RecordingLifecycle::default());
+        let lifecycle_object: Arc<dyn ProviderAttemptLifecycle> = lifecycle.clone();
+        let client =
+            wcore_egress::EgressClient::new().with_policy(Arc::new(wcore_egress::AllowAllPolicy));
+        let mut correlated = context();
+        correlated.dispatch_id = Some("dispatch-7".into());
+
+        let result = scope_provider_attempt_lifecycle(
+            correlated,
+            lifecycle_object,
+            scope_max_retries(1, builder_send_with_retry(client.post(server.uri()))),
+        )
+        .await;
+
+        assert_eq!(result.output.unwrap().status().as_u16(), 503);
+        for attempt in lifecycle.prepared.lock().unwrap().iter() {
+            assert_eq!(attempt.dispatch_id.as_deref(), Some("dispatch-7"));
+        }
+        for attempt in lifecycle.started.lock().unwrap().iter() {
+            assert_eq!(attempt.dispatch_id.as_deref(), Some("dispatch-7"));
+        }
+        for (attempt, _) in lifecycle.finished.lock().unwrap().iter() {
+            assert_eq!(attempt.dispatch_id.as_deref(), Some("dispatch-7"));
+        }
     }
 
     #[tokio::test]

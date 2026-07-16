@@ -4,6 +4,7 @@
 
 pub mod mock_llm;
 pub mod pty;
+pub mod vault;
 
 #[cfg(unix)]
 pub mod proving_ground;

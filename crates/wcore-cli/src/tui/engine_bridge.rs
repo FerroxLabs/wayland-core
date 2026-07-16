@@ -29,18 +29,28 @@
 use std::collections::HashSet;
 use std::io;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
+use serde::Serialize;
 use tokio::sync::mpsc::UnboundedSender;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use wcore_agent::output::OutputSink;
+use wcore_protocol::commands::OPERATOR_RESOLUTION_RECOVERY_VERSION;
 use wcore_protocol::events::{
-    ErrorInfo, FinishReason, MonitorDirective, MonitorReason, ProtocolEvent, ToolStatus, Usage,
+    ErrorInfo, FinishReason, MonitorDirective, MonitorReason, OperatorResolutionEvidence,
+    OperatorToolEffectOutcome, OperatorToolEffectResolution, ProtocolEvent, RecoveryCursor,
+    RecoveryLifecycle, RecoveryTurnSnapshot, ToolStatus, Usage,
 };
 use wcore_protocol::writer::ProtocolEmitter;
 use wcore_protocol::{ToolApprovalManager, ToolApprovalResult};
+
+/// Grace period for Core to durably close a cancelled turn before the TUI
+/// falls back to aborting the task. The cooperative path must get first
+/// authority so pending approvals and other provably-not-started effects can
+/// be terminalized before the engine lock is released.
+const TUI_CANCEL_GRACE: std::time::Duration = std::time::Duration::from_secs(2);
 
 // ─────────────────────────────────────────────────────────────────────────
 // ChannelEmitter — a ProtocolEmitter that forwards into an mpsc channel
@@ -643,6 +653,23 @@ impl Drop for TerminalGuard {
     }
 }
 
+/// Keep the turn future alive for Core's durable cancellation finalizer, then
+/// enforce the TUI's bounded-liveness contract. Awaiting the aborted handle is
+/// load-bearing: it guarantees [`TerminalGuard`] has emitted its fallback and
+/// the engine mutex has been released before recovery authority is inspected.
+async fn await_cooperative_cancellation(
+    mut handle: JoinHandle<()>,
+    grace: std::time::Duration,
+) -> bool {
+    if tokio::time::timeout(grace, &mut handle).await.is_err() {
+        handle.abort();
+        let _ = handle.await;
+        true
+    } else {
+        false
+    }
+}
+
 // ─────────────────────────────────────────────────────────────────────────
 // TuiEngine — the render loop's handle on the live engine
 // ─────────────────────────────────────────────────────────────────────────
@@ -859,24 +886,28 @@ pub struct TuiEngine {
     /// the bridge (the engine emits `StreamStart` itself but never
     /// `StreamEnd` — that is the caller's job, as in `run_json_stream`).
     tx: UnboundedSender<ProtocolEvent>,
-    /// The join handle of the turn currently running, if any. `Esc`
-    /// cancellation aborts this task; dropping the task drops the
-    /// `engine.run` future, which is how `run_json_stream` cancels too.
+    /// The join handle of the turn currently running, if any. `Esc` first
+    /// cancels cooperatively so Core can durably finalize the turn; a bounded
+    /// watchdog aborts this task only if that finalizer does not return.
     active_turn: Option<JoinHandle<()>>,
+    /// The tracked `/recover` task. Unlike a detached task, this gives Esc a
+    /// concrete future to cancel cooperatively and a bounded abort fallback.
+    active_recovery: Option<JoinHandle<()>>,
     /// The cooperative-cancellation token for the in-flight turn.
     ///
-    /// `cancel()` fires this BEFORE the hard `JoinHandle::abort()` so a
-    /// running tool gets a chance to observe cancellation and clean up,
-    /// rather than being torn down at an arbitrary `.await` point. Each
-    /// `submit` installs a FRESH token (a fired token stays fired — a
-    /// turn must not start pre-cancelled). The `abort()` remains the
-    /// backstop for code that does not poll the token.
+    /// `cancel()` fires this before a bounded watchdog may call
+    /// `JoinHandle::abort()`, so Core's cancellation finalizer and a running
+    /// tool both get a chance to observe cancellation and clean up rather
+    /// than being torn down at an arbitrary `.await` point. Each `submit`
+    /// installs a FRESH token (a fired token stays fired — a turn must not
+    /// start pre-cancelled).
     ///
     /// `submit` installs this token as the engine's session root via
     /// `AgentEngine::set_cancel_token` before each `run()`, so firing it
     /// is observed cooperatively inside the engine loop and in every
     /// in-flight tool — not just by the `abort()` backstop.
     turn_cancel: CancellationToken,
+    recovery_cancel: CancellationToken,
     /// Immutable post-bootstrap snapshot of loaded skills / MCP servers /
     /// hooks, read by the synchronous `/skills` `/mcp` `/hooks` dispatch.
     /// Default-empty until [`Self::set_inventory`] runs in `run_tui_mode`.
@@ -903,6 +934,206 @@ pub struct TuiEngine {
     /// and skips its swap if a newer rebind has superseded it, so only the
     /// most recently requested config is ever applied.
     rebind_generation: Arc<AtomicU64>,
+    /// The persisted session whose journal/lease the live engine currently
+    /// owns. Kept outside the async engine mutex so `/resume` can reject a
+    /// same-session selection before trying to acquire a second lease.
+    active_session_id: Arc<std::sync::Mutex<Option<String>>>,
+    /// Only one authority transfer may be in flight. The router is
+    /// synchronous, so completion is delivered through `session_switch_rx`
+    /// and applied to the view on a later render-loop tick.
+    session_switch_pending: Arc<AtomicBool>,
+    session_switch_tx: UnboundedSender<SessionSwitchResult>,
+    session_switch_rx: tokio::sync::mpsc::UnboundedReceiver<SessionSwitchResult>,
+    recovery_action_pending: Arc<AtomicBool>,
+    recovery_action_tx: UnboundedSender<TuiRecoveryResult>,
+    recovery_action_rx: tokio::sync::mpsc::UnboundedReceiver<TuiRecoveryResult>,
+    /// Recovery authority derived before the engine moves behind its async
+    /// mutex. The router consumes this once at startup so `--resume` and
+    /// `--continue` expose the same interrupted-turn state as an in-TUI
+    /// `/resume` transfer.
+    boot_recovery: Option<TuiRecoveryView>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TuiRecoveryAction {
+    Continue,
+    Approve,
+    Deny,
+    Reconcile,
+    Resolve,
+    Cancel,
+}
+
+impl TuiRecoveryAction {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::Continue => "continue",
+            Self::Approve => "approve",
+            Self::Deny => "deny",
+            Self::Reconcile => "reconcile",
+            Self::Resolve => "resolve",
+            Self::Cancel => "cancel",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct TuiOperatorResolutionInput {
+    pub(crate) tool_execution_id: String,
+    pub(crate) outcome: OperatorToolEffectOutcome,
+    pub(crate) operator_id: String,
+    pub(crate) evidence: OperatorResolutionEvidence,
+}
+
+fn emit_recovery_result(
+    tx: &UnboundedSender<ProtocolEvent>,
+    msg_id: String,
+    result: wcore_agent::engine::AgentResult,
+) {
+    let _ = tx.send(ProtocolEvent::StreamEnd {
+        msg_id,
+        finish_reason: result.finish_reason,
+        usage: Some(Usage {
+            input_tokens: result.usage.input_tokens,
+            output_tokens: result.usage.output_tokens,
+            cache_read_tokens: (result.usage.cache_read_tokens > 0)
+                .then_some(result.usage.cache_read_tokens),
+            cache_write_tokens: (result.usage.cache_creation_tokens > 0)
+                .then_some(result.usage.cache_creation_tokens),
+            active_window_percent: result.active_window_percent,
+        }),
+        usage_delta: Some(Usage {
+            input_tokens: result.usage_delta.input_tokens,
+            output_tokens: result.usage_delta.output_tokens,
+            cache_read_tokens: (result.usage_delta.cache_read_tokens > 0)
+                .then_some(result.usage_delta.cache_read_tokens),
+            cache_write_tokens: (result.usage_delta.cache_creation_tokens > 0)
+                .then_some(result.usage_delta.cache_creation_tokens),
+            active_window_percent: None,
+        }),
+        agent_run_id: result.agent_run_id,
+    });
+}
+
+fn emit_recovery_error(
+    tx: &UnboundedSender<ProtocolEvent>,
+    msg_id: String,
+    error: &wcore_agent::engine::AgentError,
+) {
+    let _ = tx.send(ProtocolEvent::Error {
+        msg_id: Some(msg_id.clone()),
+        error: ErrorInfo {
+            code: "recovery_refused".to_string(),
+            message: error.to_string(),
+            retryable: false,
+        },
+    });
+    let _ = tx.send(ProtocolEvent::StreamEnd {
+        msg_id,
+        finish_reason: FinishReason::Error,
+        usage: None,
+        usage_delta: None,
+        agent_run_id: None,
+    });
+}
+
+/// Stable machine-readable subset shared with the JSON-stream recovery
+/// snapshot. It contains no prompt, tool input/output, path, provider payload,
+/// approval secret, state payload, or budget authority.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub(crate) struct TuiRecoveryProjection {
+    pub(crate) session_id: String,
+    pub(crate) cursor: RecoveryCursor,
+    pub(crate) lifecycle: RecoveryLifecycle,
+    pub(crate) pending_turn: RecoveryTurnSnapshot,
+}
+
+/// Sanitized recovery authority shown by the TUI. The action list is local UX
+/// derived from the internal disposition; the serialized projection remains
+/// byte-comparable with the corresponding JSON-stream snapshot fields.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct TuiRecoveryView {
+    pub(crate) projection: TuiRecoveryProjection,
+    pub(crate) actions: Vec<TuiRecoveryAction>,
+}
+
+impl TuiRecoveryView {
+    fn from_plan(plan: &wcore_agent::recovery::RecoveryPlan) -> Option<Self> {
+        use wcore_agent::recovery::RecoveryDisposition;
+
+        let (lifecycle, pending_turn) = plan.protocol_projection();
+        let pending_turn = pending_turn?;
+        let actions = match &plan.disposition {
+            RecoveryDisposition::ContinueTurnStart { .. }
+            | RecoveryDisposition::ContinueCheckpoint { .. } => {
+                vec![TuiRecoveryAction::Continue, TuiRecoveryAction::Cancel]
+            }
+            RecoveryDisposition::AwaitApproval { .. } => vec![
+                TuiRecoveryAction::Approve,
+                TuiRecoveryAction::Deny,
+                TuiRecoveryAction::Cancel,
+            ],
+            RecoveryDisposition::ReconciliationRequired { .. } => {
+                vec![TuiRecoveryAction::Reconcile, TuiRecoveryAction::Resolve]
+            }
+            RecoveryDisposition::Blocked {
+                reason: wcore_agent::recovery::RecoveryBlocker::ContextCheckpointMissing,
+                ..
+            } => vec![TuiRecoveryAction::Cancel],
+            RecoveryDisposition::Ready | RecoveryDisposition::Blocked { .. } => Vec::new(),
+        };
+        Some(Self {
+            projection: TuiRecoveryProjection {
+                session_id: plan.session_id.clone(),
+                cursor: plan.cursor(),
+                lifecycle,
+                pending_turn,
+            },
+            actions,
+        })
+    }
+
+    pub(crate) fn projection_json(&self) -> Result<String, serde_json::Error> {
+        serde_json::to_string(&self.projection)
+    }
+}
+
+/// Immediate disposition of a `/resume <id>` request.
+pub(crate) enum SessionSwitchStart {
+    Started { short_id: String },
+    AlreadyActive { short_id: String },
+    NotFound,
+    StoreUnavailable,
+    Pending,
+}
+
+/// Completed session-authority transfer delivered back to the synchronous
+/// router. Messages are exposed only after `switch_active_session` succeeds,
+/// so the UI can never repaint a target the engine did not actually adopt.
+pub(crate) enum SessionSwitchResult {
+    Applied {
+        session_id: String,
+        messages: Vec<wcore_types::message::Message>,
+        recovery: Option<TuiRecoveryView>,
+    },
+    Failed {
+        session_id: String,
+        error: String,
+    },
+}
+
+pub(crate) enum TuiRecoveryResult {
+    Interrupted {
+        recovery: Option<TuiRecoveryView>,
+    },
+    Completed {
+        action: TuiRecoveryAction,
+        recovery: Option<TuiRecoveryView>,
+    },
+    Failed {
+        action: TuiRecoveryAction,
+        error: String,
+    },
 }
 
 impl TuiEngine {
@@ -923,21 +1154,46 @@ impl TuiEngine {
         // Capture the egress consent bridge before the engine is moved behind
         // the async mutex, so the sync `approve`/`deny` path can resolve it.
         let approval_bridge = engine.approval_bridge().clone();
+        let active_session_id = engine.current_session_id();
+        let boot_recovery = engine
+            .recovery_plan()
+            .ok()
+            .as_ref()
+            .and_then(TuiRecoveryView::from_plan);
+        let (session_switch_tx, session_switch_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (recovery_action_tx, recovery_action_rx) = tokio::sync::mpsc::unbounded_channel();
         Self {
             engine: Arc::new(tokio::sync::Mutex::new(engine)),
             approval,
             approval_bridge,
             tx,
             active_turn: None,
+            active_recovery: None,
             // A starting token; `submit` replaces it with a fresh one
             // per turn so a prior cancel never leaks into a new turn.
             turn_cancel: CancellationToken::new(),
+            recovery_cancel: CancellationToken::new(),
             inventory: EngineInventory::default(),
             repo_root: PathBuf::from("."),
             session_store: None,
             pending_at_ref_output: None,
             rebind_generation: Arc::new(AtomicU64::new(0)),
+            active_session_id: Arc::new(std::sync::Mutex::new(active_session_id)),
+            session_switch_pending: Arc::new(AtomicBool::new(false)),
+            session_switch_tx,
+            session_switch_rx,
+            recovery_action_pending: Arc::new(AtomicBool::new(false)),
+            recovery_action_tx,
+            recovery_action_rx,
+            boot_recovery,
         }
+    }
+
+    /// Consume the recovery view captured at engine handoff. It is one-shot:
+    /// all later changes flow through the session-switch/recovery result
+    /// channels and are re-derived from the durable journal.
+    pub(crate) fn take_boot_recovery(&mut self) -> Option<TuiRecoveryView> {
+        self.boot_recovery.take()
     }
 
     /// Install the post-bootstrap extension inventory snapshot. Called once
@@ -1023,6 +1279,7 @@ impl TuiEngine {
             .as_ref()
             .map(|h| !h.is_finished())
             .unwrap_or(false)
+            || self.recovery_action_pending.load(Ordering::Acquire)
     }
 
     /// Submit a prompt: spawn `engine.run(prompt, msg_id)` on a
@@ -1138,38 +1395,69 @@ impl TuiEngine {
     /// Cancel the in-flight turn (`Esc`).
     ///
     /// Cancellation is two-stage (AUDIT-D + cooperative-cancel wiring):
-    ///  1. Fire the per-turn [`CancellationToken`] FIRST, so a running
-    ///     tool that polls it gets a *cooperative* cancel and can clean
-    ///     up (close a subprocess, flush a file) rather than being torn
-    ///     down at an arbitrary `.await`.
-    ///  2. Then `JoinHandle::abort()` as the backstop — it stops the task
-    ///     even if nothing on the turn path observes the token. Aborting
-    ///     drops the `engine.run` future, the same mechanism the
-    ///     json-stream loop uses.
+    ///  1. Fire the per-turn [`CancellationToken`] and let `AgentEngine`
+    ///     durably close the turn, pending approvals, and effects whose
+    ///     physical boundary provably was not crossed.
+    ///  2. If Core has not returned within [`TUI_CANCEL_GRACE`], abort the
+    ///     task as the bounded liveness backstop.
     ///
-    /// A synthetic `Info` + `StreamEnd` keeps the TUI's streaming state
-    /// from getting stuck. (The turn task's own [`TerminalGuard`] would
-    /// also fire a fallback terminal event on the abort-drop; the
-    /// explicit pair here gives the user the friendlier "cancelled"
-    /// wording immediately rather than the guard's generic message.)
+    /// The normal task owns the terminal `Error` + `StreamEnd`. On watchdog
+    /// abort, [`TerminalGuard`] emits its fallback pair. This avoids an early
+    /// synthetic terminal event claiming cancellation before durable closure.
     pub fn cancel(&mut self) {
         if let Some(handle) = self.active_turn.take() {
-            // Stage 1: cooperative cancel — fire the token before the
-            // hard abort so a tool that polls it can unwind cleanly.
+            // Keep submit/session-switch paths gated until the cooperative
+            // finalizer or watchdog has released the engine lock and the
+            // resulting recovery authority has been projected.
+            self.recovery_action_pending.store(true, Ordering::Release);
+
+            // Stage 1: cooperative cancel. AgentEngine's finalizer needs this
+            // future to remain alive so it can append ApprovalResolved /
+            // TurnCancelled or preserve an unknown physical effect.
             self.turn_cancel.cancel();
-            // Stage 2: hard abort — the backstop for code that does not
-            // observe the token.
-            handle.abort();
+            let engine = Arc::clone(&self.engine);
+            let recovery_tx = self.recovery_action_tx.clone();
+            tokio::spawn(async move {
+                // Stage 2: bounded liveness fallback.
+                await_cooperative_cancellation(handle, TUI_CANCEL_GRACE).await;
+
+                // Cancellation after a physical provider boundary is not a
+                // terminal provider receipt. Derive the durable recovery
+                // authority only after the turn task has returned or abort has
+                // released the engine lock.
+                let recovery = engine
+                    .lock()
+                    .await
+                    .recovery_plan()
+                    .ok()
+                    .as_ref()
+                    .and_then(TuiRecoveryView::from_plan);
+                let _ = recovery_tx.send(TuiRecoveryResult::Interrupted { recovery });
+            });
             let _ = self.tx.send(ProtocolEvent::Info {
                 msg_id: String::new(),
-                message: "Turn cancelled.".to_string(),
+                message: "Cancellation requested.".to_string(),
             });
-            let _ = self.tx.send(ProtocolEvent::StreamEnd {
+            return;
+        }
+        if let Some(handle) = self.active_recovery.take() {
+            self.recovery_cancel.cancel();
+            let engine = Arc::clone(&self.engine);
+            let recovery_tx = self.recovery_action_tx.clone();
+            tokio::spawn(async move {
+                let _aborted = await_cooperative_cancellation(handle, TUI_CANCEL_GRACE).await;
+                let recovery = engine
+                    .lock()
+                    .await
+                    .recovery_plan()
+                    .ok()
+                    .as_ref()
+                    .and_then(TuiRecoveryView::from_plan);
+                let _ = recovery_tx.send(TuiRecoveryResult::Interrupted { recovery });
+            });
+            let _ = self.tx.send(ProtocolEvent::Info {
                 msg_id: String::new(),
-                finish_reason: FinishReason::Error,
-                usage: None,
-                usage_delta: None,
-                agent_run_id: None,
+                message: "Recovery cancellation requested.".to_string(),
             });
         }
     }
@@ -2245,37 +2533,345 @@ impl TuiEngine {
         });
     }
 
-    /// D018: list saved sessions for `/resume`, loading the full `Session`
-    /// (messages included) for a matched id. `id_or_prefix` matches a full
-    /// session id or a `--resume`-style short prefix against the on-disk
-    /// index. Returns the deserialized [`Session`](wcore_agent::session::Session)
-    /// so the caller can repaint its transcript and rehydrate the engine
-    /// conversation buffer. `None` when no store is configured or no session
-    /// matches. A fast synchronous index+file read (no engine lock).
-    pub fn load_session(&self, id_or_prefix: &str) -> Option<wcore_agent::session::Session> {
-        let (dir, max) = self.session_store.clone()?;
+    /// Start an atomic live-session authority transfer.
+    ///
+    /// Prefix resolution is read-only. A same-session selection returns
+    /// before `load_for_run`, avoiding a guaranteed self-contended journal
+    /// lease. For another session, the task first obtains the target's full
+    /// `ActiveSession`, then swaps it into the engine under the engine mutex.
+    /// The old session remains authoritative until the swap succeeds.
+    pub(crate) fn request_session_switch(&self, id_or_prefix: &str) -> SessionSwitchStart {
+        let Some((dir, max)) = self.session_store.clone() else {
+            return SessionSwitchStart::StoreUnavailable;
+        };
         let manager = wcore_agent::session::SessionManager::new(dir, max);
-        // Resolve a short prefix to a full id via the index, then load.
-        let meta = manager
+        let Some(meta) = manager
             .list()
-            .ok()?
+            .unwrap_or_default()
             .into_iter()
-            .find(|m| m.id == id_or_prefix || m.id.starts_with(id_or_prefix))?;
-        manager.load(&meta.id).ok()
+            .find(|m| m.id == id_or_prefix || m.id.starts_with(id_or_prefix))
+        else {
+            return SessionSwitchStart::NotFound;
+        };
+
+        let short_id = meta.id.chars().take(8).collect::<String>();
+        let current_id = self
+            .active_session_id
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone();
+        if current_id.as_deref() == Some(meta.id.as_str()) {
+            return SessionSwitchStart::AlreadyActive { short_id };
+        }
+        if self
+            .session_switch_pending
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
+            return SessionSwitchStart::Pending;
+        }
+
+        let engine = self.engine.clone();
+        let active_session_id = self.active_session_id.clone();
+        let pending = self.session_switch_pending.clone();
+        let result_tx = self.session_switch_tx.clone();
+        let target_id = meta.id;
+        tokio::spawn(async move {
+            let result = match manager.load_for_run(&target_id) {
+                Ok(active) => {
+                    let messages = active.session.messages.clone();
+                    let mut guard = engine.lock().await;
+                    match guard.switch_active_session(active) {
+                        Ok(()) => {
+                            let recovery = guard
+                                .recovery_plan()
+                                .ok()
+                                .as_ref()
+                                .and_then(TuiRecoveryView::from_plan);
+                            *active_session_id
+                                .lock()
+                                .unwrap_or_else(|poisoned| poisoned.into_inner()) =
+                                Some(target_id.clone());
+                            SessionSwitchResult::Applied {
+                                session_id: target_id,
+                                messages,
+                                recovery,
+                            }
+                        }
+                        Err(error) => SessionSwitchResult::Failed {
+                            session_id: target_id,
+                            error: error.to_string(),
+                        },
+                    }
+                }
+                Err(error) => SessionSwitchResult::Failed {
+                    session_id: target_id,
+                    error: error.to_string(),
+                },
+            };
+            let _ = result_tx.send(result);
+            pending.store(false, Ordering::Release);
+        });
+
+        SessionSwitchStart::Started { short_id }
     }
 
-    /// D018: swap the live engine's conversation buffer to a resumed session's
-    /// messages, so the next turn continues that session's context rather than
-    /// the in-memory one. Mirrors [`clear_conversation`](Self::clear_conversation)'s
-    /// spawn-then-lock shape (the engine mutex is async; this call site is sync).
-    ///
-    /// Runs in a spawned task; no user-facing event — the caller already
-    /// repainted the resumed transcript and pushed the confirmation line.
-    pub fn load_conversation(&self, messages: Vec<wcore_types::message::Message>) {
+    /// Poll the deterministic completion channel for a finished authority
+    /// transfer. The render loop owns the sole mutable `TuiEngine`, so one
+    /// non-blocking receive per tick preserves result ordering.
+    pub(crate) fn take_session_switch_result(&mut self) -> Option<SessionSwitchResult> {
+        self.session_switch_rx.try_recv().ok()
+    }
+
+    /// Start a recovery action bound to the exact sanitized cursor and turn
+    /// currently inspected by the user. Core revalidates both under its engine
+    /// lock immediately before any durable mutation.
+    pub(crate) fn request_recovery_action(
+        &mut self,
+        recovery: &TuiRecoveryView,
+        action: TuiRecoveryAction,
+    ) -> Result<(), String> {
+        let active_session_id = self
+            .active_session_id
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone();
+        if active_session_id.as_deref() != Some(recovery.projection.session_id.as_str()) {
+            return Err("the inspected recovery view is not for the active session".to_string());
+        }
+        if !recovery.actions.contains(&action) {
+            return Err(format!(
+                "recovery action `{}` is not allowed at this durable state",
+                action.as_str()
+            ));
+        }
+        if self
+            .recovery_action_pending
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
+            return Err("a recovery action is already in progress".to_string());
+        }
+
+        self.recovery_cancel = CancellationToken::new();
+        let recovery_cancel = self.recovery_cancel.clone();
         let engine = self.engine.clone();
-        tokio::spawn(async move {
-            engine.lock().await.load_conversation(messages);
+        let result_tx = self.recovery_action_tx.clone();
+        let tx = self.tx.clone();
+        let recovery = recovery.clone();
+        let handle = tokio::spawn(async move {
+            let mut guard = engine.lock().await;
+            guard.set_cancel_token(recovery_cancel);
+            let action_result = match action {
+                TuiRecoveryAction::Continue => {
+                    let msg_id =
+                        format!("tui-recover-{}", recovery.projection.pending_turn.turn_id);
+                    match guard
+                        .resume_interrupted_turn(
+                            &recovery.projection.pending_turn.turn_id,
+                            &recovery.projection.cursor,
+                            &msg_id,
+                        )
+                        .await
+                    {
+                        Ok(result) => {
+                            emit_recovery_result(&tx, msg_id, result);
+                            Ok(())
+                        }
+                        Err(error) => {
+                            if !matches!(error, wcore_agent::engine::AgentError::UserAborted) {
+                                emit_recovery_error(&tx, msg_id, &error);
+                            }
+                            Err(error)
+                        }
+                    }
+                }
+                TuiRecoveryAction::Approve | TuiRecoveryAction::Deny => {
+                    let msg_id =
+                        format!("tui-recover-{}", recovery.projection.pending_turn.turn_id);
+                    let approval_id = recovery
+                        .projection
+                        .pending_turn
+                        .pending_call_id
+                        .as_deref()
+                        .ok_or_else(|| {
+                            wcore_agent::engine::AgentError::SessionAuthority(
+                                "recovered approval has no pending call identity".to_string(),
+                            )
+                        });
+                    match approval_id {
+                        Ok(approval_id) => {
+                            let decision = if matches!(action, TuiRecoveryAction::Approve) {
+                                wcore_protocol::commands::RecoveredApprovalDecision::Approve
+                            } else {
+                                wcore_protocol::commands::RecoveredApprovalDecision::Deny
+                            };
+                            match guard
+                                .resolve_interrupted_approval(
+                                    &recovery.projection.pending_turn.turn_id,
+                                    &recovery.projection.cursor,
+                                    approval_id,
+                                    decision,
+                                    None,
+                                    &msg_id,
+                                )
+                                .await
+                            {
+                                Ok(result) => {
+                                    emit_recovery_result(&tx, msg_id, result);
+                                    Ok(())
+                                }
+                                Err(error) => {
+                                    emit_recovery_error(&tx, msg_id, &error);
+                                    Err(error)
+                                }
+                            }
+                        }
+                        Err(error) => {
+                            emit_recovery_error(&tx, msg_id, &error);
+                            Err(error)
+                        }
+                    }
+                }
+                TuiRecoveryAction::Reconcile => {
+                    guard
+                        .reconcile_interrupted_turn(
+                            &recovery.projection.pending_turn.turn_id,
+                            &recovery.projection.cursor,
+                        )
+                        .await
+                }
+                TuiRecoveryAction::Resolve => {
+                    Err(wcore_agent::engine::AgentError::SessionAuthority(
+                        "operator resolution requires typed evidence".to_string(),
+                    ))
+                }
+                TuiRecoveryAction::Cancel => {
+                    guard
+                        .cancel_interrupted_turn(
+                            &recovery.projection.pending_turn.turn_id,
+                            &recovery.projection.cursor,
+                        )
+                        .await
+                }
+            };
+            let result = match action_result {
+                Ok(()) => {
+                    let next = guard
+                        .recovery_plan()
+                        .ok()
+                        .as_ref()
+                        .and_then(TuiRecoveryView::from_plan);
+                    TuiRecoveryResult::Completed {
+                        action,
+                        recovery: next,
+                    }
+                }
+                Err(wcore_agent::engine::AgentError::UserAborted) => return,
+                Err(error) => TuiRecoveryResult::Failed {
+                    action,
+                    error: error.to_string(),
+                },
+            };
+            let _ = result_tx.send(result);
         });
+        self.active_recovery = Some(handle);
+        Ok(())
+    }
+
+    /// Resolve one unknown tool effect from the standalone TUI using the same
+    /// cursor-bound, closed evidence contract as the hosted protocol. The tool
+    /// identity is taken from the inspected recovery view rather than from
+    /// free-form user input, then revalidated under the engine lock.
+    pub(crate) fn request_operator_resolution(
+        &self,
+        recovery: &TuiRecoveryView,
+        input: TuiOperatorResolutionInput,
+    ) -> Result<(), String> {
+        let active_session_id = self
+            .active_session_id
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone();
+        if active_session_id.as_deref() != Some(recovery.projection.session_id.as_str()) {
+            return Err("the inspected recovery view is not for the active session".to_string());
+        }
+        if !recovery.actions.contains(&TuiRecoveryAction::Resolve) {
+            return Err("operator resolution is not allowed at this durable state".to_string());
+        }
+        let tool_execution_id = recovery
+            .projection
+            .pending_turn
+            .pending_call_id
+            .clone()
+            .ok_or_else(|| "recovery has no unresolved tool identity".to_string())?;
+        if input.tool_execution_id != tool_execution_id {
+            return Err("operator evidence names a different tool execution".to_string());
+        }
+        if self
+            .recovery_action_pending
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
+            return Err("a recovery action is already in progress".to_string());
+        }
+
+        let engine = self.engine.clone();
+        let result_tx = self.recovery_action_tx.clone();
+        let tx = self.tx.clone();
+        let recovery = recovery.clone();
+        tokio::spawn(async move {
+            let guard = engine.lock().await;
+            let resolution = OperatorToolEffectResolution {
+                recovery_version: OPERATOR_RESOLUTION_RECOVERY_VERSION,
+                session_id: recovery.projection.session_id,
+                turn_id: recovery.projection.pending_turn.turn_id,
+                cursor: recovery.projection.cursor,
+                tool_execution_id: input.tool_execution_id,
+                outcome: input.outcome,
+                operator_id: input.operator_id,
+                evidence: input.evidence,
+            };
+            let result = match guard.resolve_operator_tool_effect(&resolution) {
+                Ok(()) => {
+                    let _ = tx.send(ProtocolEvent::UnknownToolEffectResolved { resolution });
+                    let next = guard
+                        .recovery_plan()
+                        .ok()
+                        .as_ref()
+                        .and_then(TuiRecoveryView::from_plan);
+                    TuiRecoveryResult::Completed {
+                        action: TuiRecoveryAction::Resolve,
+                        recovery: next,
+                    }
+                }
+                Err(error) => TuiRecoveryResult::Failed {
+                    action: TuiRecoveryAction::Resolve,
+                    error: error.to_string(),
+                },
+            };
+            let _ = result_tx.send(result);
+        });
+        Ok(())
+    }
+
+    pub(crate) fn take_recovery_action_result(&mut self) -> Option<TuiRecoveryResult> {
+        let result = self.recovery_action_rx.try_recv().ok();
+        if result.is_some() {
+            self.active_recovery = None;
+            self.recovery_action_pending.store(false, Ordering::Release);
+        }
+        result
+    }
+
+    #[cfg(test)]
+    pub(crate) fn session_switch_in_progress(&self) -> bool {
+        self.session_switch_pending.load(Ordering::Acquire)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn recovery_action_in_progress(&self) -> bool {
+        self.recovery_action_pending.load(Ordering::Acquire)
     }
 }
 
@@ -2628,6 +3224,80 @@ mod tests {
     use super::*;
     use tokio::sync::mpsc;
     use wcore_protocol::events::FinishReason;
+
+    #[test]
+    fn context_checkpoint_blocker_offers_safe_cancel() {
+        let plan = wcore_agent::recovery::RecoveryPlan {
+            session_id: "session-1".into(),
+            journal_sequence: Some(1),
+            journal_digest: "a".repeat(64),
+            state_digest: "b".repeat(64),
+            budget: wcore_protocol::events::RecoveryBudgetSnapshot {
+                tokens_used: 0,
+                token_limit: None,
+                cost_used_usd: 0.0,
+                cost_limit_usd: None,
+            },
+            disposition: wcore_agent::recovery::RecoveryDisposition::Blocked {
+                turn_id: "turn-1".into(),
+                reason: wcore_agent::recovery::RecoveryBlocker::ContextCheckpointMissing,
+            },
+        };
+
+        let view = TuiRecoveryView::from_plan(&plan).expect("blocked turn remains visible");
+        assert_eq!(view.actions, vec![TuiRecoveryAction::Cancel]);
+    }
+
+    #[test]
+    fn recovery_projection_preserves_complete_pending_turn_f14() {
+        let plan = wcore_agent::recovery::RecoveryPlan {
+            session_id: "session-projection".into(),
+            journal_sequence: Some(7),
+            journal_digest: "c".repeat(64),
+            state_digest: "d".repeat(64),
+            budget: wcore_protocol::events::RecoveryBudgetSnapshot {
+                tokens_used: 21,
+                token_limit: Some(100),
+                cost_used_usd: 0.25,
+                cost_limit_usd: Some(1.0),
+            },
+            disposition: wcore_agent::recovery::RecoveryDisposition::AwaitApproval {
+                turn_id: "turn-projection".into(),
+                approval_ids: vec!["opaque-approval-id".into()],
+            },
+        };
+
+        let view = TuiRecoveryView::from_plan(&plan).expect("pending turn projects");
+        let json = view.projection_json().expect("projection serializes");
+        let expected = serde_json::json!({
+            "session_id": "session-projection",
+            "cursor": {
+                "journal_sequence": 7,
+                "journal_digest": "c".repeat(64),
+            },
+            "lifecycle": "awaiting_approval",
+            "pending_turn": {
+                "turn_id": "turn-projection",
+                "lifecycle": "awaiting_approval",
+                "pending_call_id": "opaque-approval-id",
+                "reconcile_reason": "approval_expired",
+            },
+        });
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&json).expect("valid projection JSON"),
+            expected
+        );
+        assert_eq!(
+            view.actions,
+            vec![
+                TuiRecoveryAction::Approve,
+                TuiRecoveryAction::Deny,
+                TuiRecoveryAction::Cancel,
+            ]
+        );
+        assert!(!json.contains("state_digest"));
+        assert!(!json.contains("cost_used_usd"));
+    }
 
     #[test]
     fn channel_emitter_forwards_events() {
@@ -3259,6 +3929,65 @@ mod tests {
         assert!(matches!(first, ProtocolEvent::Error { .. }));
         let second = rx.try_recv().expect("an aborted turn must emit StreamEnd");
         assert!(matches!(second, ProtocolEvent::StreamEnd { .. }));
+    }
+
+    #[tokio::test]
+    async fn cancel_watchdog_grace_expiry_aborts_with_one_terminal_pair() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let handle = tokio::spawn(async move {
+            let _term = TerminalGuard::new(tx, "m-watchdog".to_string());
+            let _ = started_tx.send(());
+            std::future::pending::<()>().await;
+        });
+        started_rx
+            .await
+            .expect("watchdog fixture installed terminal guard");
+
+        let aborted =
+            await_cooperative_cancellation(handle, std::time::Duration::from_millis(10)).await;
+        assert!(aborted, "the watchdog must report that it used hard abort");
+
+        let events = std::iter::from_fn(|| rx.try_recv().ok()).collect::<Vec<_>>();
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(event, ProtocolEvent::Error { .. }))
+                .count(),
+            1,
+            "watchdog abort must emit exactly one Error"
+        );
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(event, ProtocolEvent::StreamEnd { .. }))
+                .count(),
+            1,
+            "watchdog abort must emit exactly one StreamEnd"
+        );
+        assert_eq!(
+            events.len(),
+            2,
+            "watchdog emitted duplicate terminal events"
+        );
+    }
+
+    #[tokio::test]
+    async fn cooperative_recovery_cancellation_finishes_without_watchdog_abort() {
+        let cancellation = CancellationToken::new();
+        let observed = cancellation.clone();
+        let handle = tokio::spawn(async move {
+            observed.cancelled().await;
+        });
+        cancellation.cancel();
+
+        let aborted =
+            await_cooperative_cancellation(handle, std::time::Duration::from_secs(1)).await;
+
+        assert!(
+            !aborted,
+            "cooperative cancellation must not hard-abort the task"
+        );
     }
 
     // ── Approval round-trip ──────────────────────────────────────────

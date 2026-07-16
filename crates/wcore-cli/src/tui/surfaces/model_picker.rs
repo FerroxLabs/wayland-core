@@ -136,13 +136,13 @@ impl ModelPickerSurface {
     /// freshness label ([`heading_status`]).
     fn build_rows(active_provider: &str) -> Vec<ModelRow> {
         let mut rows = Vec::new();
-        for &provider in known_providers() {
+        let statuses = super::provider_connection_statuses(known_providers());
+        for (&provider, status) in known_providers().iter().zip(statuses) {
             // Connection-aware: list only providers the user can actually use
             // (resolved key / ambient cloud creds / OAuth login), PLUS the
             // active provider itself — you can always re-pick a model on the
             // one you're already on, even mid-setup.
-            let connected =
-                super::provider_connection_status(provider) == super::ProviderConnection::Connected;
+            let connected = status == super::ProviderConnection::Connected;
             if !connected && provider != active_provider {
                 continue;
             }
@@ -321,14 +321,12 @@ impl Surface for ModelPickerSurface {
                         let active = *provider == app.config.provider.as_str()
                             && (*resolved == app.config.model.as_str()
                                 || *role == app.config.model.as_str());
-                        // Dim models whose provider isn't configured: selecting
-                        // one routes through `apply_provider_swap`, which
-                        // surfaces the graceful "missing API key, run /setup"
-                        // hint rather than switching — the dimming signals that
-                        // up front. The active provider is never dimmed.
-                        let dim = *provider != app.config.provider.as_str()
-                            && super::provider_connection_status(provider)
-                                == super::ProviderConnection::NeedsKey;
+                        // `build_rows` includes only connected providers plus
+                        // the active provider, and the active provider is never
+                        // dimmed. Connection checks therefore belong solely in
+                        // construction; render must not reopen an encrypted
+                        // credential vault once per visible model row.
+                        let dim = false;
                         RowView::Item {
                             selected,
                             active,
@@ -408,8 +406,9 @@ impl ProviderPickerSurface {
     fn build_rows() -> Vec<ProviderRow> {
         let mut connected = Vec::new();
         let mut needs_key = Vec::new();
-        for name in known_providers() {
-            match super::provider_connection_status(name) {
+        let statuses = super::provider_connection_statuses(known_providers());
+        for (name, status) in known_providers().iter().zip(statuses) {
+            match status {
                 super::ProviderConnection::Connected => connected.push(*name),
                 super::ProviderConnection::NeedsKey => needs_key.push(*name),
             }

@@ -145,9 +145,8 @@ pub type PluginProviderRouter =
 /// one constructor prevents early-return CLI modes from silently falling back
 /// to `AgentSpawner::new`'s legacy unbounded defaults.
 struct SessionBudgetEnvelope {
-    provider_tracker: Arc<parking_lot::Mutex<wcore_budget::BudgetTracker>>,
-    session_id: String,
-    execution_budget: ExecutionBudgetView,
+    authority: crate::budget_authority::SharedBudgetAuthorityCoordinator,
+    authority_seed: crate::budget_authority::BudgetAuthoritySeed,
 }
 
 impl SessionBudgetEnvelope {
@@ -167,12 +166,19 @@ impl SessionBudgetEnvelope {
         operational_budget.max_tokens_out = None;
         operational_budget.max_cost_usd = None;
 
+        let authority_seed = crate::budget_authority::BudgetAuthoritySeed {
+            provider_caps: cap.clone(),
+            execution_policy: operational_budget.clone(),
+            wall_clock: crate::session_journal::BudgetWallClockAuthority::ActiveRuntime,
+            process_cleanup_proof: None,
+        };
+        let session_id = uuid::Uuid::new_v4().to_string();
+        let authority = authority_seed
+            .detached(session_id.clone())
+            .expect("resolved budget policy produces a valid detached authority");
         Self {
-            provider_tracker: Arc::new(parking_lot::Mutex::new(wcore_budget::BudgetTracker::new(
-                cap,
-            ))),
-            session_id: uuid::Uuid::new_v4().to_string(),
-            execution_budget: operational_budget.start_root(),
+            authority,
+            authority_seed,
         }
     }
 
@@ -181,10 +187,8 @@ impl SessionBudgetEnvelope {
         spawner: crate::spawner::AgentSpawner,
         cancel: CancellationToken,
     ) -> crate::spawner::AgentSpawner {
-        spawner.with_budget_governance(crate::spawner::SpawnerBudgetGovernance::new(
-            Arc::clone(&self.provider_tracker),
-            self.session_id.clone(),
-            self.execution_budget.clone(),
+        spawner.with_budget_governance(crate::spawner::SpawnerBudgetGovernance::from_authority(
+            Arc::clone(&self.authority),
             cancel,
         ))
     }
@@ -201,14 +205,17 @@ pub fn govern_standalone_spawner(
     config: &Config,
 ) -> crate::spawner::AgentSpawner {
     let envelope = SessionBudgetEnvelope::from_config(config);
+    let execution_budget = envelope
+        .authority
+        .lock()
+        .current_execution_view()
+        .expect("resolved standalone budget authority is healthy");
     let guard = Arc::new(crate::cancel::budget_linked(
         CancellationToken::new(),
-        envelope.execution_budget.clone(),
+        execution_budget,
     ));
-    let governance = crate::spawner::SpawnerBudgetGovernance::new(
-        envelope.provider_tracker,
-        envelope.session_id,
-        envelope.execution_budget,
+    let governance = crate::spawner::SpawnerBudgetGovernance::from_authority(
+        envelope.authority,
         guard.token_clone(),
     )
     .with_budget_guard(guard);
@@ -2105,14 +2112,10 @@ impl AgentBootstrap {
             let bridge = Arc::new(
                 wcore_observability::sink::ObservabilityBudgetEventBridge::new(sink.clone()),
             );
-            session_budget
-                .provider_tracker
-                .lock()
-                .set_event_sink(bridge);
+            session_budget.authority.lock().install_event_sink(bridge)?;
         }
-        let provider_budget_tracker = Arc::clone(&session_budget.provider_tracker);
-        let budget_session_id = session_budget.session_id.clone();
-        let session_execution_budget = session_budget.execution_budget.clone();
+        let budget_authority = Arc::clone(&session_budget.authority);
+        let budget_authority_seed = session_budget.authority_seed.clone();
         let sink_for_budget = self.output.clone();
         // Crucible cost governance — a cap-less per-user/day spend ACCUMULATOR for
         // council members, built whenever the council has a daily or per-run cap
@@ -2833,27 +2836,30 @@ impl AgentBootstrap {
         // and never unblock the awaiting script step.
         engine.set_approval_bridge(approval_bridge);
 
-        // F11 — install a per-session engine `BudgetTracker` for every runtime.
+        // F11/F14 — install the session's sole durable budget authority.
         // An explicit `session_cap` keeps its legacy role; otherwise the same
-        // effective Smart envelope that drives ExecutionBudget supplies the
-        // token/cost admission cap. This governs the PER-TURN engine
-        // charge in `engine.rs::run` — a SEPARATE concern from the council's
-        // cap-less spend accumulator (built above and attached to the spawner),
-        // which governs council spend via `crucible.daily_cap_usd`. The two do
-        // NOT share one envelope. When the bootstrap also has a `SpanSink`
-        // installed, wire `ObservabilityBudgetEventBridge` so
-        // `BudgetEvent::{Charge, CapWarn, CapBlock}` reach the JSON span
-        // channel.
-        engine.set_budget_tracker(Arc::clone(&provider_budget_tracker));
-        engine.set_budget_session_id(budget_session_id);
+        // effective Smart envelope supplies the provider token/cost admission
+        // cap. This governs per-dispatch reservations and settlement in
+        // `engine.rs::run` and remains separate from the council's cap-less
+        // spend accumulator governed by `crucible.daily_cap_usd`. When the
+        // bootstrap also has a `SpanSink`, the authority owns the
+        // `ObservabilityBudgetEventBridge` so Charge, CapWarn, and CapBlock
+        // events reach the JSON span channel.
+        let budget_authority_for_view = Arc::clone(&budget_authority);
+        engine.install_budget_authority(budget_authority, budget_authority_seed)?;
+        let session_execution_budget = budget_authority_for_view
+            .lock()
+            .current_execution_view()
+            .map_err(anyhow::Error::msg)?;
 
-        // W8a A.6/A.7: build the session-root ExecutionBudgetView from
-        // config and pair it with a cancellation token. The
+        // W8a A.6/A.7: pair the restored session-root execution view with a
+        // cancellation token. The
         // `budget_linked_with_callback` form additionally emits
         // `BudgetExceeded` over the protocol sink the instant the first
         // cap trips — singular per session, host-tolerated per audit F5.
-        // Omitted fields inherit the finite Smart envelope above.
-        engine.set_execution_budget(session_execution_budget.clone());
+        // Omitted fields inherit the finite Smart envelope above. The watcher,
+        // parent engine, and embedded spawner now observe the same restored
+        // coordinator-backed root.
         session_guard.attach_budget_with_callback(
             session_execution_budget.clone(),
             move |payload| {

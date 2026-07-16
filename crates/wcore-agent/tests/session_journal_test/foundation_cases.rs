@@ -53,6 +53,162 @@ fn provider_request_digest_changes_when_wire_relevant_input_changes() {
 }
 
 #[test]
+fn prepared_provider_request_snapshot_round_trips_every_request_field() {
+    let timestamp = "2026-07-16T01:02:03Z".parse().unwrap();
+    let request = LlmRequest {
+        model: "model-a".into(),
+        system: "system prompt".into(),
+        messages: vec![Message {
+            role: Role::Assistant,
+            content: vec![
+                ContentBlock::Text {
+                    text: "text".into(),
+                },
+                ContentBlock::ToolUse {
+                    id: "tool-1".into(),
+                    name: "read".into(),
+                    input: json!({"path":"README.md"}),
+                    extra: Some(json!({"thought_signature":"opaque"})),
+                },
+                ContentBlock::ToolResult {
+                    tool_use_id: "tool-1".into(),
+                    content: "result".into(),
+                    is_error: true,
+                },
+                ContentBlock::Thinking {
+                    thinking: "reasoning".into(),
+                },
+                ContentBlock::Image {
+                    mime: "image/png".into(),
+                    data: "aGVsbG8=".into(),
+                },
+            ],
+            timestamp: Some(timestamp),
+            cache_breakpoint: Some(MessageCacheHint::Breakpoint),
+        }],
+        tools: vec![ToolDef {
+            name: "read".into(),
+            description: "Read a file".into(),
+            input_schema: json!({
+                "type":"object",
+                "properties":{"path":{"type":"string"}},
+                "required":["path"]
+            }),
+            deferred: true,
+            server: Some("filesystem".into()),
+        }],
+        max_tokens: 4_096,
+        thinking: Some(ThinkingConfig::Enabled {
+            budget_tokens: 1_024,
+        }),
+        reasoning_effort: Some("high".into()),
+        cache_tier: Some(CacheTier::Ephemeral1h),
+        routing_hint: Some(RoutingHint::new("frontier")),
+        stop_sequences: vec!["STOP".into()],
+        web_search: true,
+        conversation_id: Some("conversation-1".into()),
+        client_context_tokens: Some(12_345),
+        temperature: Some(0.25),
+        omit_max_tokens: true,
+    };
+
+    let snapshot = prepared_provider_request_snapshot(&request).unwrap();
+    let restored = decode_prepared_provider_request_snapshot(&snapshot).unwrap();
+    let restored_snapshot = prepared_provider_request_snapshot(&restored).unwrap();
+
+    assert_eq!(snapshot, restored_snapshot);
+    assert_eq!(
+        provider_request_digest(&request).unwrap(),
+        provider_request_digest(&restored).unwrap()
+    );
+}
+
+#[test]
+fn prepared_provider_request_snapshot_rejects_unknown_structural_fields() {
+    let request = LlmRequest {
+        messages: vec![Message::new(
+            Role::User,
+            vec![ContentBlock::Text { text: "hello".into() }],
+        )],
+        tools: vec![ToolDef {
+            name: "read".into(),
+            ..ToolDef::default()
+        }],
+        thinking: Some(ThinkingConfig::Disabled),
+        ..LlmRequest::default()
+    };
+    let snapshot = prepared_provider_request_snapshot(&request).unwrap();
+
+    for path in ["root", "request", "message", "content", "tool", "thinking"] {
+        let mut changed = snapshot.clone();
+        match path {
+            "root" => changed["unknown"] = json!(true),
+            "request" => changed["request"]["unknown"] = json!(true),
+            "message" => changed["request"]["messages"][0]["unknown"] = json!(true),
+            "content" => {
+                changed["request"]["messages"][0]["content"][0]["unknown"] = json!(true);
+            }
+            "tool" => changed["request"]["tools"][0]["unknown"] = json!(true),
+            "thinking" => changed["request"]["thinking"]["unknown"] = json!(true),
+            _ => unreachable!(),
+        }
+        assert!(
+            decode_prepared_provider_request_snapshot(&changed).is_err(),
+            "unknown {path} field was accepted"
+        );
+    }
+}
+
+#[test]
+fn prepared_provider_request_snapshot_rejects_version_and_malformed_fields() {
+    let snapshot = prepared_provider_request_snapshot(&LlmRequest::default()).unwrap();
+
+    let mut unsupported = snapshot.clone();
+    unsupported["version"] = json!(2);
+    assert!(matches!(
+        decode_prepared_provider_request_snapshot(&unsupported),
+        Err(JournalError::InvalidTransition(message))
+            if message.contains("unsupported prepared provider request snapshot version 2")
+    ));
+
+    let mut missing = snapshot.clone();
+    missing["request"].as_object_mut().unwrap().remove("model");
+    assert!(matches!(
+        decode_prepared_provider_request_snapshot(&missing),
+        Err(JournalError::Json {
+            context: "decoding prepared provider request snapshot",
+            ..
+        })
+    ));
+
+    let mut malformed = snapshot;
+    malformed["request"]["max_tokens"] = json!("unbounded");
+    assert!(decode_prepared_provider_request_snapshot(&malformed).is_err());
+
+    let noncanonical = prepared_provider_request_snapshot(&LlmRequest {
+        temperature: Some(1.0),
+        ..LlmRequest::default()
+    })
+    .unwrap();
+    let mut noncanonical = noncanonical;
+    noncanonical["request"]["temperature"] = json!(1);
+    assert!(matches!(
+        decode_prepared_provider_request_snapshot(&noncanonical),
+        Err(JournalError::InvalidTransition(message))
+            if message == "prepared provider request snapshot is not canonical"
+    ));
+
+    assert!(matches!(
+        prepared_provider_request_snapshot(&LlmRequest {
+            temperature: Some(f32::NAN),
+            ..LlmRequest::default()
+        }),
+        Err(JournalError::InvalidTransition(message))
+            if message == "prepared provider request temperature must be finite"
+    ));
+}
+
+#[test]
 fn append_is_contiguous_checksummed_and_exclusively_owned() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("session.journal");

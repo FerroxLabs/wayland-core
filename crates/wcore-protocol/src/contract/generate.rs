@@ -17,12 +17,12 @@ use super::spec::{
 };
 
 pub const CONTRACT_NAME: &str = "wayland-desktop-core";
-pub const GENERATOR_VERSION: &str = "wcore-desktop-contract-gen/1";
+pub const GENERATOR_VERSION: &str = "wcore-desktop-contract-gen/3";
 pub const CONTRACT_ROOT: &str = "contracts/desktop/v1";
 
 const DEFERRED: &str = r#"# Deferred Desktop contract adversarial cases
 
-This v1.0 corpus records the current producer wire. Contract negotiation,
+This v1.2 corpus records the current producer wire. Contract negotiation,
 unknown-critical rejection, and unknown-noncritical dropping are live and
 proved by serialized replay through the reference host observer.
 
@@ -33,9 +33,11 @@ Anvil receipts are publication-bound: the producer binds the serialized
 verdict body and immediate post-publication artifact state. Durable Desktop
 replay and a persistent later-mutation watcher remain deferred.
 
-- `ordinary_turn_tool_replay_reducer`: deferred because ordinary turn and tool
-  events still have no producer event ID or monotonic sequence. Workflow,
-  execution-policy, and Anvil streams have their own proved sequencing rules.
+- `ordinary_turn_tool_replay_reducer`: legacy ordinary turn and tool events
+  still have no producer event ID or monotonic sequence. Recovery v1 instead
+  exposes a sanitized, content-free journal cursor and replay stream for
+  interrupted-turn restoration; it does not retroactively make legacy event
+  payloads authoritative.
 - `anvil_desktop_replay_reducer`: deferred until Desktop consumes the Core
   reducer and proves restart/replay against this corpus.
 - `anvil_persistent_mutation_watcher`: deferred because Core currently checks
@@ -112,6 +114,48 @@ fn inferred_schema(value: &Value) -> Value {
 fn constrained_property_schema(wire_type: &str, field: &str, value: &Value) -> Value {
     match (wire_type, field) {
         (_, "type") => json!({"const": wire_type}),
+        (
+            "session_resync"
+            | "resume_turn"
+            | "resolve_interrupted_approval"
+            | "resolve_unknown_tool_effect"
+            | "session_recovery_snapshot"
+            | "session_recovery_replay"
+            | "session_recovery_unavailable"
+            | "turn_recovery_lifecycle"
+            | "unknown_tool_effect_resolved",
+            "recovery_version",
+        ) => json!({"const": 1, "type": "integer"}),
+        ("resume_turn", "action") => {
+            json!({"enum": ["continue", "reconcile", "cancel"], "type": "string"})
+        }
+        ("resolve_interrupted_approval", "decision") => {
+            json!({"enum": ["approve", "deny"], "type": "string"})
+        }
+        ("session_recovery_snapshot" | "turn_recovery_lifecycle", "lifecycle") => {
+            recovery_lifecycle_schema()
+        }
+        ("session_recovery_unavailable", "reason") => json!({
+            "enum": [
+                "session_not_found",
+                "unsupported_version",
+                "cursor_invalid",
+                "cursor_ahead",
+                "cursor_digest_mismatch",
+                "history_gap",
+                "journal_corrupt",
+                "snapshot_unavailable",
+                "unknown_critical_state"
+            ],
+            "type": "string"
+        }),
+        ("session_recovery_snapshot" | "turn_recovery_lifecycle", "reconcile_reason") => {
+            recovery_reconcile_reason_schema()
+        }
+        ("session_recovery_snapshot", "state_digest") => raw_recovery_digest_schema(),
+        ("resolve_unknown_tool_effect" | "unknown_tool_effect_resolved", "outcome") => {
+            operator_resolution_outcome_schema()
+        }
         ("set_mode", "mode") => json!({
             "enum": [
                 "default",
@@ -177,6 +221,159 @@ fn constrained_property_schema(wire_type: &str, field: &str, value: &Value) -> V
         }
         _ => inferred_schema(value),
     }
+}
+
+fn prefixed_sha256_digest_schema() -> Value {
+    json!({"pattern": "^sha256:[0-9a-f]{64}$", "type": "string"})
+}
+
+fn raw_recovery_digest_schema() -> Value {
+    json!({"pattern": "^[0-9a-f]{64}$", "type": "string"})
+}
+
+fn recovery_cursor_schema() -> Value {
+    json!({
+        "additionalProperties": false,
+        "properties": {
+            "journal_digest": raw_recovery_digest_schema(),
+            "journal_sequence": {"type": "integer"}
+        },
+        "required": ["journal_digest"],
+        "type": "object"
+    })
+}
+
+fn operator_resolution_cursor_schema() -> Value {
+    json!({
+        "additionalProperties": false,
+        "properties": {
+            "journal_digest": raw_recovery_digest_schema(),
+            "journal_sequence": {"type": "integer"}
+        },
+        "required": ["journal_digest"],
+        "type": "object"
+    })
+}
+
+fn recovery_lifecycle_schema() -> Value {
+    json!({
+        "enum": [
+            "ready",
+            "streaming",
+            "awaiting_approval",
+            "tool_in_flight",
+            "reconciliation_required",
+            "suspended",
+            "completed",
+            "cancelled",
+            "failed"
+        ],
+        "type": "string"
+    })
+}
+
+fn recovery_reconcile_reason_schema() -> Value {
+    json!({
+        "enum": [
+            "approval_expired",
+            "provider_outcome_unknown",
+            "tool_outcome_unknown",
+            "effect_requires_operator",
+            "budget_exhausted",
+            "context_unrestorable",
+            "cancellation_ambiguous",
+            "unknown_critical_state"
+        ],
+        "type": "string"
+    })
+}
+
+fn recovery_turn_snapshot_schema() -> Value {
+    json!({
+        "additionalProperties": true,
+        "properties": {
+            "lifecycle": recovery_lifecycle_schema(),
+            "msg_id": {"type": "string"},
+            "pending_call_id": {"type": "string"},
+            "reconcile_reason": recovery_reconcile_reason_schema(),
+            "turn_id": {"type": "string"}
+        },
+        "required": ["turn_id", "lifecycle"],
+        "type": "object"
+    })
+}
+
+fn recovery_budget_schema() -> Value {
+    json!({
+        "additionalProperties": true,
+        "properties": {
+            "cost_limit_usd": {"type": "number"},
+            "cost_used_usd": {"type": "number"},
+            "token_limit": {"type": "integer"},
+            "tokens_used": {"type": "integer"}
+        },
+        "required": ["tokens_used", "cost_used_usd"],
+        "type": "object"
+    })
+}
+
+fn recovery_replay_item_schema() -> Value {
+    json!({
+        "additionalProperties": true,
+        "properties": {
+            "cursor": recovery_cursor_schema(),
+            "kind": {
+                "enum": [
+                    "state_advanced",
+                    "turn_started",
+                    "stream_started",
+                    "stream_committed",
+                    "approval_requested",
+                    "approval_resolved",
+                    "tool_started",
+                    "tool_committed",
+                    "effect_uncertain",
+                    "cancellation_requested",
+                    "turn_completed",
+                    "turn_cancelled",
+                    "turn_failed"
+                ],
+                "type": "string"
+            },
+            "turn_id": {"type": "string"}
+        },
+        "required": ["cursor", "kind"],
+        "type": "object"
+    })
+}
+
+fn operator_resolution_outcome_schema() -> Value {
+    json!({
+        "enum": ["succeeded", "failed", "not_started"],
+        "type": "string"
+    })
+}
+
+fn operator_resolution_evidence_schema() -> Value {
+    json!({
+        "additionalProperties": false,
+        "properties": {
+            "digest": prefixed_sha256_digest_schema(),
+            "observed_at_unix_ms": {"minimum": 1, "type": "integer"},
+            "reference_id": {"maxLength": 256, "minLength": 1, "type": "string"},
+            "source": {
+                "enum": [
+                    "tool_receipt",
+                    "provider_receipt",
+                    "process_observation",
+                    "external_system_record"
+                ],
+                "type": "string"
+            }
+        },
+        "required": ["source", "reference_id", "observed_at_unix_ms", "digest"],
+        "type": "object"
+    })
 }
 
 fn workflow_failure_schema() -> Value {
@@ -364,6 +561,56 @@ fn schema_branch(spec: &WireSpec, fixture: &Value) -> Value {
                 .entry("policy")
                 .and_modify(|schema| *schema = effective_execution_policy_schema());
         }
+        "session_resync" => {
+            properties
+                .entry("after")
+                .and_modify(|schema| *schema = recovery_cursor_schema());
+        }
+        "resume_turn" => {
+            properties
+                .entry("cursor")
+                .and_modify(|schema| *schema = recovery_cursor_schema());
+        }
+        "resolve_interrupted_approval" => {
+            properties
+                .entry("cursor")
+                .and_modify(|schema| *schema = recovery_cursor_schema());
+        }
+        "resolve_unknown_tool_effect" | "unknown_tool_effect_resolved" => {
+            properties
+                .entry("cursor")
+                .and_modify(|schema| *schema = operator_resolution_cursor_schema());
+            properties
+                .entry("evidence")
+                .and_modify(|schema| *schema = operator_resolution_evidence_schema());
+        }
+        "session_recovery_snapshot" => {
+            properties
+                .entry("cursor")
+                .and_modify(|schema| *schema = recovery_cursor_schema());
+            properties
+                .entry("pending_turn")
+                .and_modify(|schema| *schema = recovery_turn_snapshot_schema());
+            properties
+                .entry("budget")
+                .and_modify(|schema| *schema = recovery_budget_schema());
+        }
+        "session_recovery_replay" => {
+            properties
+                .entry("from")
+                .and_modify(|schema| *schema = recovery_cursor_schema());
+            properties
+                .entry("through")
+                .and_modify(|schema| *schema = recovery_cursor_schema());
+            properties.entry("items").and_modify(|schema| {
+                *schema = json!({"items": recovery_replay_item_schema(), "type": "array"});
+            });
+        }
+        "turn_recovery_lifecycle" => {
+            properties
+                .entry("cursor")
+                .and_modify(|schema| *schema = recovery_cursor_schema());
+        }
         "workflow_started" => {
             properties
                 .entry("parent_run_id")
@@ -402,6 +649,16 @@ fn schema_branch(spec: &WireSpec, fixture: &Value) -> Value {
     });
     if spec.wire_type == "sub_agent_event" {
         branch["allOf"] = child_terminal_conditions();
+    }
+    if matches!(
+        spec.wire_type,
+        "session_resync"
+            | "resume_turn"
+            | "resolve_interrupted_approval"
+            | "resolve_unknown_tool_effect"
+            | "unknown_tool_effect_resolved"
+    ) {
+        branch["additionalProperties"] = json!(false);
     }
     branch
 }
@@ -597,6 +854,14 @@ fn contract_capabilities() -> BTreeMap<String, ContractCapabilityStatus> {
         ),
         ("plugin_events".into(), ContractCapabilityStatus::ShapeOnly),
         (
+            "turn_recovery_v1".into(),
+            ContractCapabilityStatus::Available,
+        ),
+        (
+            "operator_tool_effect_resolution_v1".into(),
+            ContractCapabilityStatus::Available,
+        ),
+        (
             "workflow_lifecycle_v1".into(),
             ContractCapabilityStatus::Available,
         ),
@@ -612,7 +877,7 @@ fn descriptor(
     ContractDescriptor {
         name: CONTRACT_NAME.into(),
         major: 1,
-        minor: 0,
+        minor: 2,
         generator: GENERATOR_VERSION.into(),
         fixture_digest,
         schema_digest,
@@ -687,6 +952,47 @@ pub fn generated_artifacts() -> ContractResult<BTreeMap<String, Vec<u8>>> {
             .get("events/execution_policy.json")
             .expect("execution policy fixture must exist"),
     )?;
+    let recovery_snapshot = event_value(
+        canonical_events
+            .get("events/session_recovery_snapshot.json")
+            .expect("recovery snapshot fixture must exist"),
+    )?;
+    let recovery_replay = event_value(
+        canonical_events
+            .get("events/session_recovery_replay.json")
+            .expect("recovery replay fixture must exist"),
+    )?;
+
+    artifacts.insert(
+        "adversarial/recovery/valid-replay.jsonl".into(),
+        json_lines([recovery_snapshot.clone(), recovery_replay.clone()])?,
+    );
+    let mut recovery_version = recovery_snapshot.clone();
+    recovery_version["recovery_version"] = json!(2);
+    artifacts.insert(
+        "adversarial/recovery/version-mismatch.jsonl".into(),
+        json_lines([recovery_version])?,
+    );
+    let mut cursor_digest_mismatch = recovery_replay.clone();
+    cursor_digest_mismatch["from"]["journal_digest"] = json!("f".repeat(64));
+    artifacts.insert(
+        "adversarial/recovery/cursor-digest-mismatch.jsonl".into(),
+        json_lines([recovery_snapshot.clone(), cursor_digest_mismatch])?,
+    );
+    let mut cursor_gap = recovery_replay.clone();
+    let gap_digest = cursor_gap["items"][1]["cursor"]["journal_digest"].clone();
+    cursor_gap["items"][0]["cursor"]["journal_sequence"] = json!(42);
+    cursor_gap["items"][0]["cursor"]["journal_digest"] = gap_digest;
+    artifacts.insert(
+        "adversarial/recovery/cursor-gap.jsonl".into(),
+        json_lines([recovery_snapshot.clone(), cursor_gap])?,
+    );
+    let mut state_digest_conflict = recovery_snapshot.clone();
+    state_digest_conflict["state_digest"] = json!("f".repeat(64));
+    artifacts.insert(
+        "adversarial/recovery/state-digest-conflict.jsonl".into(),
+        json_lines([recovery_snapshot.clone(), state_digest_conflict])?,
+    );
 
     artifacts.insert(
         "adversarial/policy/valid-revisions.jsonl".into(),
@@ -916,13 +1222,13 @@ pub fn generated_artifacts() -> ContractResult<BTreeMap<String, Vec<u8>>> {
         COMMAND_SPECS,
         &command_schema_fixtures,
         None,
-        "Desktop-consumed HostCommand v1",
+        "Desktop-consumed HostCommand v1.2",
     );
     let event_schema = schema_for(
         EVENT_SPECS,
         &event_schema_fixtures,
         legacy_child,
-        "Desktop-consumed CoreEvent v1",
+        "Desktop-consumed CoreEvent v1.2",
     );
     artifacts.insert(
         "schema/host-command.schema.json".into(),
@@ -974,7 +1280,7 @@ pub fn generated_artifacts() -> ContractResult<BTreeMap<String, Vec<u8>>> {
             "events": EVENT_SPECS.len(),
             "fixtures": fixture_inventory.len()
         },
-        "contract": {"major": 1, "minor": 0, "name": CONTRACT_NAME},
+        "contract": {"major": 1, "minor": 2, "name": CONTRACT_NAME},
         "deferred_adversarial": [
             "ordinary_turn_tool_replay_reducer",
             "anvil_desktop_replay_reducer",
@@ -987,6 +1293,8 @@ pub fn generated_artifacts() -> ContractResult<BTreeMap<String, Vec<u8>>> {
         "subcontracts": {
             "anvil_receipts": "1.0",
             "execution_policy": "1.0",
+            "operator_tool_effect_resolution": "1.0",
+            "turn_recovery": "1.0",
             "workflow_lifecycle": "1.0"
         },
         "schema_digest": schema_digest,

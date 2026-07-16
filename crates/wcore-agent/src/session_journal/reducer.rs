@@ -1,8 +1,11 @@
 //! Deterministic session-journal state reduction and payload digests.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 
 use super::*;
+use crate::provider_recovery::{
+    provider_response_digest, validate_appended_provider_events, validate_finished_provider_events,
+};
 
 impl ReducedSessionState {
     pub fn digest(&self) -> Result<String, JournalError> {
@@ -65,6 +68,32 @@ fn duplicate(kind: &str, id: &str) -> JournalError {
 
 fn missing(kind: &str, id: &str) -> JournalError {
     JournalError::InvalidTransition(format!("unknown {kind} id {id}"))
+}
+
+fn valid_sha256_digest(value: &str) -> bool {
+    value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
+fn valid_hook_manifest(slots: &[HookManifestSlot]) -> bool {
+    slots.iter().enumerate().all(|(index, slot)| {
+        slot.ordinal == index as u64
+            && !slot.slot_id.is_empty()
+            && valid_sha256_digest(&slot.descriptor_digest)
+    }) && slots
+        .iter()
+        .map(|slot| slot.slot_id.as_str())
+        .collect::<BTreeSet<_>>()
+        .len()
+        == slots.len()
+}
+
+fn valid_hook_receipts(manifest: &[HookManifestSlot], receipts: &[HookSlotReceipt]) -> bool {
+    manifest.len() == receipts.len()
+        && manifest.iter().zip(receipts).all(|(slot, receipt)| {
+            slot.ordinal == receipt.ordinal
+                && slot.slot_id == receipt.slot_id
+                && slot.descriptor_digest == receipt.descriptor_digest
+        })
 }
 
 fn required_mut<'a, T>(
@@ -259,6 +288,80 @@ fn require_tool_unknown(effect: &ToolEffectState, id: &str) -> Result<(), Journa
     }
 }
 
+fn provider_stream_events(stream: &StreamState) -> Vec<ProviderStreamEvent> {
+    stream.batches.iter().flatten().cloned().collect()
+}
+
+fn require_correlated_dispatch(
+    attempt: &ProviderAttemptState,
+    attempt_id: &str,
+    dispatch_id: &str,
+) -> Result<(), JournalError> {
+    match attempt.dispatch_id.as_deref() {
+        Some(actual) if actual == dispatch_id => Ok(()),
+        Some(actual) => Err(JournalError::InvalidTransition(format!(
+            "provider attempt {attempt_id} belongs to dispatch {actual}, not {dispatch_id}"
+        ))),
+        None => Err(JournalError::InvalidTransition(format!(
+            "legacy provider attempt {attempt_id} has no dispatch correlation"
+        ))),
+    }
+}
+
+fn validate_correlated_terminal(
+    state: &ReducedSessionState,
+    attempt_id: &str,
+    outcome: &CompletionOutcome,
+    response_digest: Option<&str>,
+) -> Result<(), JournalError> {
+    let streams = state
+        .streams
+        .values()
+        .filter(|stream| stream.attempt_id == attempt_id)
+        .collect::<Vec<_>>();
+    if matches!(outcome, CompletionOutcome::Succeeded) && streams.len() != 1 {
+        return Err(JournalError::InvalidTransition(format!(
+            "successful recovery-correlated provider attempt {attempt_id} must have exactly one stream"
+        )));
+    }
+    if streams.len() > 1 {
+        return Err(JournalError::InvalidTransition(format!(
+            "recovery-correlated provider attempt {attempt_id} has multiple streams"
+        )));
+    }
+    let events = streams
+        .first()
+        .map_or_else(Vec::new, |stream| provider_stream_events(stream));
+    if matches!(outcome, CompletionOutcome::Succeeded) {
+        let stream = streams[0];
+        if !stream.finished {
+            return Err(JournalError::InvalidTransition(format!(
+                "successful recovery-correlated provider attempt {attempt_id} has an unfinished stream"
+            )));
+        }
+        validate_finished_provider_events(&events)?;
+    }
+    match (events.is_empty(), response_digest) {
+        (true, None) => Ok(()),
+        (false, Some(recorded)) => {
+            let computed = provider_response_digest(&events)?;
+            if computed == recorded {
+                Ok(())
+            } else {
+                Err(JournalError::InvalidTransition(format!(
+                    "provider attempt {attempt_id} response digest does not match its durable stream"
+                )))
+            }
+        }
+        (true, Some(_)) => Err(JournalError::InvalidTransition(format!(
+            "provider attempt {attempt_id} has a response digest without durable events"
+        ))),
+        (false, None) => Err(JournalError::InvalidTransition(format!(
+            "provider attempt {attempt_id} has durable events without a response digest"
+        ))),
+    }
+}
+
 fn require_active_turn(state: &ReducedSessionState, turn_id: &str) -> Result<(), JournalError> {
     let turn = state
         .turns
@@ -338,6 +441,234 @@ fn require_budget_owner_exists(
     }
 }
 
+fn execution_snapshot_state_count(
+    snapshot: &wcore_budget::ExecutionBudgetSnapshot,
+    field: &'static str,
+) -> Result<usize, JournalError> {
+    let value = serde_json::to_value(snapshot).map_err(|source| JournalError::Json {
+        context: "encoding budget authority execution snapshot",
+        source,
+    })?;
+    value
+        .get("states")
+        .and_then(serde_json::Value::as_array)
+        .map(Vec::len)
+        .ok_or_else(|| {
+            JournalError::InvalidTransition(format!(
+                "budget authority {field} has no execution state array"
+            ))
+        })
+}
+
+fn validate_budget_authority(
+    state: &ReducedSessionState,
+    authority: &BudgetAuthorityState,
+) -> Result<(), JournalError> {
+    if state.imported_baseline.is_none() {
+        return Err(JournalError::InvalidTransition(
+            "budget authority requires a canonical imported session baseline".to_owned(),
+        ));
+    }
+    if authority.schema_version != LEGACY_BUDGET_AUTHORITY_SCHEMA_VERSION
+        && authority.schema_version != BUDGET_AUTHORITY_SCHEMA_VERSION
+    {
+        return Err(JournalError::InvalidTransition(format!(
+            "unsupported budget authority schema {}; expected {} or {}",
+            authority.schema_version,
+            LEGACY_BUDGET_AUTHORITY_SCHEMA_VERSION,
+            BUDGET_AUTHORITY_SCHEMA_VERSION
+        )));
+    }
+    if authority.schema_version == LEGACY_BUDGET_AUTHORITY_SCHEMA_VERSION
+        && !authority.provider_reservations.is_empty()
+    {
+        return Err(JournalError::InvalidTransition(
+            "legacy budget authority cannot contain provider reservation bindings".to_owned(),
+        ));
+    }
+    if authority.authority_epoch == 0 {
+        return Err(JournalError::InvalidTransition(
+            "budget authority epoch must be non-zero".to_owned(),
+        ));
+    }
+    if authority.budget_session_id.trim().is_empty() {
+        return Err(JournalError::InvalidTransition(
+            "budget authority session id must not be empty".to_owned(),
+        ));
+    }
+    if authority.captured_at_unix_millis == 0 {
+        return Err(JournalError::InvalidTransition(
+            "budget authority capture time must be non-zero".to_owned(),
+        ));
+    }
+    if authority.prior_cursor.journal_sequence != state.last_seq
+        || authority.prior_cursor.journal_checksum != state.last_checksum
+    {
+        return Err(JournalError::InvalidTransition(
+            "budget authority prior cursor does not match the current journal head".to_owned(),
+        ));
+    }
+
+    let conversation = serde_json::Value::Array(state.conversation.clone());
+    if state_payload_digest(&conversation)? != authority.conversation_digest {
+        return Err(JournalError::InvalidTransition(
+            "budget authority conversation digest does not match canonical context".to_owned(),
+        ));
+    }
+
+    let provider_tracker = wcore_budget::BudgetTracker::from_snapshot(
+        authority.provider_tracker.clone(),
+    )
+    .map_err(|error| {
+        JournalError::InvalidTransition(format!(
+            "budget authority provider snapshot is invalid: {error}"
+        ))
+    })?;
+    let mut bound_reservations = HashSet::new();
+    for (dispatch_id, binding) in &authority.provider_reservations {
+        if dispatch_id.trim().is_empty() {
+            return Err(JournalError::InvalidTransition(
+                "budget authority provider dispatch id must not be empty".to_owned(),
+            ));
+        }
+        if !bound_reservations.insert(binding.reservation) {
+            return Err(JournalError::InvalidTransition(
+                "budget authority binds one provider reservation to multiple dispatches".to_owned(),
+            ));
+        }
+        if !provider_tracker.has_reservation(binding.reservation) {
+            return Err(JournalError::InvalidTransition(format!(
+                "budget authority dispatch {dispatch_id} references a missing provider reservation"
+            )));
+        }
+        let mut prior_attempt_ids = HashSet::new();
+        for attempt_id in &binding.prior_attempt_ids {
+            if !prior_attempt_ids.insert(attempt_id) {
+                return Err(JournalError::InvalidTransition(format!(
+                    "budget authority dispatch {dispatch_id} repeats prior attempt {attempt_id}"
+                )));
+            }
+            let attempt = state.provider_attempts.get(attempt_id).ok_or_else(|| {
+                JournalError::InvalidTransition(format!(
+                    "budget authority dispatch {dispatch_id} references missing prior attempt {attempt_id}"
+                ))
+            })?;
+            if attempt.dispatch_id.as_deref() != Some(dispatch_id.as_str()) {
+                return Err(JournalError::InvalidTransition(format!(
+                    "budget authority prior attempt {attempt_id} belongs to another dispatch"
+                )));
+            }
+        }
+    }
+    wcore_budget::ExecutionBudgetView::from_snapshot(authority.execution_root.clone()).map_err(
+        |error| {
+            JournalError::InvalidTransition(format!(
+                "budget authority execution root snapshot is invalid: {error}"
+            ))
+        },
+    )?;
+    if execution_snapshot_state_count(&authority.execution_root, "execution root")? != 1 {
+        return Err(JournalError::InvalidTransition(
+            "budget authority execution root must contain exactly one root state".to_owned(),
+        ));
+    }
+
+    if let Some(active_turn) = &authority.active_turn {
+        require_active_turn(state, &active_turn.turn_id)?;
+        wcore_budget::ExecutionBudgetView::from_snapshot(active_turn.execution.clone()).map_err(
+            |error| {
+                JournalError::InvalidTransition(format!(
+                    "budget authority active-turn snapshot is invalid: {error}"
+                ))
+            },
+        )?;
+        if execution_snapshot_state_count(&active_turn.execution, "active turn")? < 2 {
+            return Err(JournalError::InvalidTransition(
+                "budget authority active-turn snapshot must retain its session-root ancestor"
+                    .to_owned(),
+            ));
+        }
+    }
+
+    match state.budget_authority.as_ref() {
+        None => {
+            if authority.authority_epoch != 1 {
+                return Err(JournalError::InvalidTransition(format!(
+                    "first budget authority epoch must be 1, found {}",
+                    authority.authority_epoch
+                )));
+            }
+        }
+        Some(previous) => {
+            if authority.schema_version < previous.schema_version {
+                return Err(JournalError::InvalidTransition(format!(
+                    "budget authority schema regressed from {} to {}",
+                    previous.schema_version, authority.schema_version
+                )));
+            }
+            let expected_epoch = previous.authority_epoch.checked_add(1).ok_or_else(|| {
+                JournalError::InvalidTransition("budget authority epoch is exhausted".to_owned())
+            })?;
+            if authority.authority_epoch != expected_epoch {
+                return Err(JournalError::InvalidTransition(format!(
+                    "budget authority epoch regression or gap: expected {expected_epoch}, found {}",
+                    authority.authority_epoch
+                )));
+            }
+            if authority.budget_session_id != previous.budget_session_id {
+                return Err(JournalError::InvalidTransition(
+                    "budget authority session identity changed".to_owned(),
+                ));
+            }
+            if authority.captured_at_unix_millis < previous.captured_at_unix_millis {
+                return Err(JournalError::InvalidTransition(
+                    "budget authority capture time regressed".to_owned(),
+                ));
+            }
+            match (&previous.wall_clock, &authority.wall_clock) {
+                (
+                    BudgetWallClockAuthority::ActiveRuntime,
+                    BudgetWallClockAuthority::ActiveRuntime,
+                ) => {}
+                (
+                    BudgetWallClockAuthority::AbsoluteDeadline {
+                        deadline_unix_millis: previous_deadline,
+                    },
+                    BudgetWallClockAuthority::AbsoluteDeadline {
+                        deadline_unix_millis: next_deadline,
+                    },
+                ) if next_deadline <= previous_deadline => {}
+                (
+                    BudgetWallClockAuthority::AbsoluteDeadline { .. },
+                    BudgetWallClockAuthority::AbsoluteDeadline { .. },
+                ) => {
+                    return Err(JournalError::InvalidTransition(
+                        "budget authority absolute deadline was widened".to_owned(),
+                    ));
+                }
+                _ => {
+                    return Err(JournalError::InvalidTransition(
+                        "budget authority wall-clock semantics changed".to_owned(),
+                    ));
+                }
+            }
+            if let Some(previous_turn) = &previous.active_turn
+                && state
+                    .turns
+                    .get(&previous_turn.turn_id)
+                    .is_some_and(|turn| turn.completion.is_none())
+                && authority.active_turn.is_none()
+            {
+                return Err(JournalError::InvalidTransition(format!(
+                    "budget authority dropped active-turn state for {}",
+                    previous_turn.turn_id
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
 fn require_delivery_origin_active(
     state: &ReducedSessionState,
     origin: &DeliveryOrigin,
@@ -346,6 +677,154 @@ fn require_delivery_origin_active(
         DeliveryOrigin::Turn { turn_id } => require_active_turn(state, turn_id),
         DeliveryOrigin::InboundReply { .. } | DeliveryOrigin::Cron { .. } => Ok(()),
     }
+}
+
+fn approval_origin_belongs_to_turn(
+    state: &ReducedSessionState,
+    origin: &ApprovalOrigin,
+    turn_id: &str,
+) -> bool {
+    match origin {
+        ApprovalOrigin::Turn {
+            turn_id: origin_turn,
+        } => origin_turn == turn_id,
+        ApprovalOrigin::ProviderAttempt { attempt_id } => state
+            .provider_attempts
+            .get(attempt_id)
+            .is_some_and(|attempt| attempt.turn_id == turn_id),
+        ApprovalOrigin::ToolExecution { tool_execution_id } => state
+            .tools
+            .get(tool_execution_id)
+            .is_some_and(|tool| tool.turn_id == turn_id),
+        ApprovalOrigin::Child { child_id } => state
+            .children
+            .get(child_id)
+            .is_some_and(|child| child.turn_id == turn_id),
+        ApprovalOrigin::Delivery { delivery_id } => {
+            state.deliveries.get(delivery_id).is_some_and(|delivery| {
+                matches!(
+                    &delivery.origin,
+                    DeliveryOrigin::Turn {
+                        turn_id: origin_turn
+                    } if origin_turn == turn_id
+                )
+            })
+        }
+    }
+}
+
+fn budget_owner_belongs_to_turn(
+    state: &ReducedSessionState,
+    owner: &BudgetOwner,
+    turn_id: &str,
+) -> bool {
+    match owner {
+        BudgetOwner::Session => false,
+        BudgetOwner::Turn {
+            turn_id: owner_turn,
+        } => owner_turn == turn_id,
+        BudgetOwner::ProviderAttempt { attempt_id } => state
+            .provider_attempts
+            .get(attempt_id)
+            .is_some_and(|attempt| attempt.turn_id == turn_id),
+        BudgetOwner::ToolExecution { tool_execution_id } => state
+            .tools
+            .get(tool_execution_id)
+            .is_some_and(|tool| tool.turn_id == turn_id),
+        BudgetOwner::Child { child_id } => state
+            .children
+            .get(child_id)
+            .is_some_and(|child| child.turn_id == turn_id),
+    }
+}
+
+pub(crate) fn require_turn_descendants_terminal(
+    state: &ReducedSessionState,
+    turn_id: &str,
+) -> Result<(), JournalError> {
+    let pending_approval = state.approvals.iter().find(|(_, approval)| {
+        approval.resolution.is_none()
+            && approval_origin_belongs_to_turn(state, &approval.origin, turn_id)
+    });
+    if let Some((approval_id, _)) = pending_approval {
+        return Err(JournalError::InvalidTransition(format!(
+            "turn {turn_id} has pending approval {approval_id}"
+        )));
+    }
+    if let Some((attempt_id, _)) = state.provider_attempts.iter().find(|(_, attempt)| {
+        attempt.turn_id == turn_id
+            && matches!(
+                attempt.effect,
+                ExternalEffectState::Prepared | ExternalEffectState::Unknown
+            )
+    }) {
+        return Err(JournalError::InvalidTransition(format!(
+            "turn {turn_id} has nonterminal provider attempt {attempt_id}"
+        )));
+    }
+    if let Some((tool_execution_id, _)) = state.tools.iter().find(|(_, tool)| {
+        tool.turn_id == turn_id
+            && matches!(
+                tool.effect,
+                ToolEffectState::Prepared
+                    | ToolEffectState::Running
+                    | ToolEffectState::Unknown { .. }
+            )
+    }) {
+        return Err(JournalError::InvalidTransition(format!(
+            "turn {turn_id} has nonterminal tool execution {tool_execution_id}"
+        )));
+    }
+    if let Some((hook_phase_id, _)) = state.hook_phases.iter().find(|(_, phase)| {
+        phase.turn_id == turn_id
+            && !matches!(
+                phase.state,
+                HookPhaseState::Consumed { .. }
+                    | HookPhaseState::NotStarted { .. }
+                    | HookPhaseState::NotApplicable
+                    | HookPhaseState::AbandonedUnknown
+            )
+    }) {
+        return Err(JournalError::InvalidTransition(format!(
+            "turn {turn_id} has nonterminal hook phase {hook_phase_id}"
+        )));
+    }
+    if let Some((child_id, _)) = state.children.iter().find(|(_, child)| {
+        child.turn_id == turn_id
+            && matches!(
+                child.effect,
+                ExternalEffectState::Prepared | ExternalEffectState::Unknown
+            )
+    }) {
+        return Err(JournalError::InvalidTransition(format!(
+            "turn {turn_id} has nonterminal child {child_id}"
+        )));
+    }
+    if let Some((delivery_id, _)) = state.deliveries.iter().find(|(_, delivery)| {
+        matches!(
+            &delivery.origin,
+            DeliveryOrigin::Turn {
+                turn_id: origin_turn
+            } if origin_turn == turn_id
+        ) && matches!(
+            delivery.effect,
+            ExternalEffectState::Prepared | ExternalEffectState::Unknown
+        )
+    }) {
+        return Err(JournalError::InvalidTransition(format!(
+            "turn {turn_id} has nonterminal delivery {delivery_id}"
+        )));
+    }
+    if let Some((reservation_id, _)) = state.budgets.iter().find(|(_, budget)| {
+        budget.used.is_none()
+            && !budget.released
+            && budget_owner_belongs_to_turn(state, &budget.owner, turn_id)
+    }) {
+        return Err(JournalError::InvalidTransition(format!(
+            "turn {turn_id} has open budget reservation {reservation_id}"
+        )));
+    }
+    Ok(())
 }
 
 pub fn state_payload_digest(value: &serde_json::Value) -> Result<String, JournalError> {
@@ -372,49 +851,441 @@ pub fn state_payload_digest(value: &serde_json::Value) -> Result<String, Journal
     Ok(sha256_hex(&bytes))
 }
 
+/// Schema version for the protected, replayable provider-request snapshot.
+pub const PREPARED_PROVIDER_REQUEST_SNAPSHOT_VERSION: u32 = 1;
+
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PreparedProviderRequestSnapshot {
+    version: u32,
+    request: PreparedProviderRequestV1,
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PreparedProviderRequestV1 {
+    model: String,
+    system: String,
+    messages: Vec<PreparedMessageV1>,
+    tools: Vec<PreparedToolV1>,
+    max_tokens: u32,
+    thinking: Option<PreparedThinkingV1>,
+    reasoning_effort: Option<String>,
+    cache_tier: Option<PreparedCacheTierV1>,
+    routing_hint: Option<String>,
+    stop_sequences: Vec<String>,
+    web_search: bool,
+    conversation_id: Option<String>,
+    client_context_tokens: Option<u64>,
+    temperature: Option<f32>,
+    omit_max_tokens: bool,
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PreparedMessageV1 {
+    role: wcore_types::message::Role,
+    content: Vec<PreparedContentBlockV1>,
+    timestamp: Option<chrono::DateTime<chrono::Utc>>,
+    cache_breakpoint: Option<wcore_types::message::MessageCacheHint>,
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(tag = "type", deny_unknown_fields)]
+enum PreparedContentBlockV1 {
+    #[serde(rename = "text")]
+    Text { text: String },
+    #[serde(rename = "tool_use")]
+    ToolUse {
+        id: wcore_types::message::ToolUseId,
+        name: String,
+        input: serde_json::Value,
+        extra: Option<serde_json::Value>,
+    },
+    #[serde(rename = "tool_result")]
+    ToolResult {
+        tool_use_id: wcore_types::message::ToolUseId,
+        content: String,
+        is_error: bool,
+    },
+    #[serde(rename = "thinking")]
+    Thinking { thinking: String },
+    #[serde(rename = "image")]
+    Image { mime: String, data: String },
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PreparedToolV1 {
+    name: String,
+    description: String,
+    input_schema: serde_json::Value,
+    deferred: bool,
+    server: Option<String>,
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(tag = "mode", rename_all = "snake_case", deny_unknown_fields)]
+enum PreparedThinkingV1 {
+    Enabled { budget_tokens: u32 },
+    Disabled,
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+enum PreparedCacheTierV1 {
+    #[serde(rename = "5m")]
+    Ephemeral5m,
+    #[serde(rename = "1h")]
+    Ephemeral1h,
+    #[serde(rename = "none")]
+    None,
+}
+
+impl From<&wcore_types::message::ContentBlock> for PreparedContentBlockV1 {
+    fn from(value: &wcore_types::message::ContentBlock) -> Self {
+        use wcore_types::message::ContentBlock;
+
+        match value {
+            ContentBlock::Text { text } => Self::Text { text: text.clone() },
+            ContentBlock::ToolUse {
+                id,
+                name,
+                input,
+                extra,
+            } => Self::ToolUse {
+                id: id.clone(),
+                name: name.clone(),
+                input: input.clone(),
+                extra: extra.clone(),
+            },
+            ContentBlock::ToolResult {
+                tool_use_id,
+                content,
+                is_error,
+            } => Self::ToolResult {
+                tool_use_id: tool_use_id.clone(),
+                content: content.clone(),
+                is_error: *is_error,
+            },
+            ContentBlock::Thinking { thinking } => Self::Thinking {
+                thinking: thinking.clone(),
+            },
+            ContentBlock::Image { mime, data } => Self::Image {
+                mime: mime.clone(),
+                data: data.clone(),
+            },
+        }
+    }
+}
+
+impl From<PreparedContentBlockV1> for wcore_types::message::ContentBlock {
+    fn from(value: PreparedContentBlockV1) -> Self {
+        match value {
+            PreparedContentBlockV1::Text { text } => Self::Text { text },
+            PreparedContentBlockV1::ToolUse {
+                id,
+                name,
+                input,
+                extra,
+            } => Self::ToolUse {
+                id,
+                name,
+                input,
+                extra,
+            },
+            PreparedContentBlockV1::ToolResult {
+                tool_use_id,
+                content,
+                is_error,
+            } => Self::ToolResult {
+                tool_use_id,
+                content,
+                is_error,
+            },
+            PreparedContentBlockV1::Thinking { thinking } => Self::Thinking { thinking },
+            PreparedContentBlockV1::Image { mime, data } => Self::Image { mime, data },
+        }
+    }
+}
+
+impl From<&wcore_types::llm::LlmRequest> for PreparedProviderRequestV1 {
+    fn from(request: &wcore_types::llm::LlmRequest) -> Self {
+        Self {
+            model: request.model.clone(),
+            system: request.system.clone(),
+            messages: request
+                .messages
+                .iter()
+                .map(|message| PreparedMessageV1 {
+                    role: message.role,
+                    content: message.content.iter().map(Into::into).collect(),
+                    timestamp: message.timestamp,
+                    cache_breakpoint: message.cache_breakpoint,
+                })
+                .collect(),
+            tools: request
+                .tools
+                .iter()
+                .map(|tool| PreparedToolV1 {
+                    name: tool.name.clone(),
+                    description: tool.description.clone(),
+                    input_schema: tool.input_schema.clone(),
+                    deferred: tool.deferred,
+                    server: tool.server.clone(),
+                })
+                .collect(),
+            max_tokens: request.max_tokens,
+            thinking: request.thinking.as_ref().map(|thinking| match thinking {
+                wcore_types::llm::ThinkingConfig::Enabled { budget_tokens } => {
+                    PreparedThinkingV1::Enabled {
+                        budget_tokens: *budget_tokens,
+                    }
+                }
+                wcore_types::llm::ThinkingConfig::Disabled => PreparedThinkingV1::Disabled,
+            }),
+            reasoning_effort: request.reasoning_effort.clone(),
+            cache_tier: request.cache_tier.map(|tier| match tier {
+                wcore_types::cache_tier::CacheTier::Ephemeral5m => PreparedCacheTierV1::Ephemeral5m,
+                wcore_types::cache_tier::CacheTier::Ephemeral1h => PreparedCacheTierV1::Ephemeral1h,
+                wcore_types::cache_tier::CacheTier::None => PreparedCacheTierV1::None,
+            }),
+            routing_hint: request.routing_hint.as_ref().map(|hint| hint.0.clone()),
+            stop_sequences: request.stop_sequences.clone(),
+            web_search: request.web_search,
+            conversation_id: request.conversation_id.clone(),
+            client_context_tokens: request.client_context_tokens,
+            temperature: request.temperature,
+            omit_max_tokens: request.omit_max_tokens,
+        }
+    }
+}
+
+impl From<PreparedProviderRequestV1> for wcore_types::llm::LlmRequest {
+    fn from(request: PreparedProviderRequestV1) -> Self {
+        Self {
+            model: request.model,
+            system: request.system,
+            messages: request
+                .messages
+                .into_iter()
+                .map(|message| wcore_types::message::Message {
+                    role: message.role,
+                    content: message.content.into_iter().map(Into::into).collect(),
+                    timestamp: message.timestamp,
+                    cache_breakpoint: message.cache_breakpoint,
+                })
+                .collect(),
+            tools: request
+                .tools
+                .into_iter()
+                .map(|tool| wcore_types::tool::ToolDef {
+                    name: tool.name,
+                    description: tool.description,
+                    input_schema: tool.input_schema,
+                    deferred: tool.deferred,
+                    server: tool.server,
+                })
+                .collect(),
+            max_tokens: request.max_tokens,
+            thinking: request.thinking.map(|thinking| match thinking {
+                PreparedThinkingV1::Enabled { budget_tokens } => {
+                    wcore_types::llm::ThinkingConfig::Enabled { budget_tokens }
+                }
+                PreparedThinkingV1::Disabled => wcore_types::llm::ThinkingConfig::Disabled,
+            }),
+            reasoning_effort: request.reasoning_effort,
+            cache_tier: request.cache_tier.map(|tier| match tier {
+                PreparedCacheTierV1::Ephemeral5m => wcore_types::cache_tier::CacheTier::Ephemeral5m,
+                PreparedCacheTierV1::Ephemeral1h => wcore_types::cache_tier::CacheTier::Ephemeral1h,
+                PreparedCacheTierV1::None => wcore_types::cache_tier::CacheTier::None,
+            }),
+            routing_hint: request.routing_hint.map(wcore_types::llm::RoutingHint::new),
+            stop_sequences: request.stop_sequences,
+            web_search: request.web_search,
+            conversation_id: request.conversation_id,
+            client_context_tokens: request.client_context_tokens,
+            temperature: request.temperature,
+            omit_max_tokens: request.omit_max_tokens,
+        }
+    }
+}
+
+/// Encode the exact prepared provider request into its canonical protected form.
+pub fn prepared_provider_request_snapshot(
+    request: &wcore_types::llm::LlmRequest,
+) -> Result<serde_json::Value, JournalError> {
+    if request.temperature.is_some_and(|value| !value.is_finite()) {
+        return Err(JournalError::InvalidTransition(
+            "prepared provider request temperature must be finite".to_owned(),
+        ));
+    }
+    serde_json::to_value(PreparedProviderRequestSnapshot {
+        version: PREPARED_PROVIDER_REQUEST_SNAPSHOT_VERSION,
+        request: request.into(),
+    })
+    .map_err(|source| JournalError::Json {
+        context: "encoding prepared provider request snapshot",
+        source,
+    })
+}
+
+/// Decode a protected provider request, rejecting drift and malformed fields.
+pub fn decode_prepared_provider_request_snapshot(
+    snapshot_value: &serde_json::Value,
+) -> Result<wcore_types::llm::LlmRequest, JournalError> {
+    let snapshot = serde_json::from_value::<PreparedProviderRequestSnapshot>(
+        snapshot_value.clone(),
+    )
+    .map_err(|source| JournalError::Json {
+        context: "decoding prepared provider request snapshot",
+        source,
+    })?;
+    if snapshot.version != PREPARED_PROVIDER_REQUEST_SNAPSHOT_VERSION {
+        return Err(JournalError::InvalidTransition(format!(
+            "unsupported prepared provider request snapshot version {}; supported version is {}",
+            snapshot.version, PREPARED_PROVIDER_REQUEST_SNAPSHOT_VERSION
+        )));
+    }
+    let request = snapshot.request.into();
+    if prepared_provider_request_snapshot(&request)? != *snapshot_value {
+        return Err(JournalError::InvalidTransition(
+            "prepared provider request snapshot is not canonical".to_owned(),
+        ));
+    }
+    Ok(request)
+}
+
 pub fn provider_request_digest(
     request: &wcore_types::llm::LlmRequest,
 ) -> Result<String, JournalError> {
-    let thinking = request.thinking.as_ref().map(|thinking| match thinking {
-        wcore_types::llm::ThinkingConfig::Enabled { budget_tokens } => serde_json::json!({
-            "mode": "enabled",
-            "budget_tokens": budget_tokens,
-        }),
-        wcore_types::llm::ThinkingConfig::Disabled => {
-            serde_json::json!({ "mode": "disabled" })
+    state_payload_digest(&prepared_provider_request_snapshot(request)?)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn commit_recovery_checkpoint(
+    state: &mut ReducedSessionState,
+    turn_id: &str,
+    messages: &[serde_json::Value],
+    messages_digest: &str,
+    checkpoint_id: &str,
+    checkpoint_state_digest: &str,
+    checkpoint: &serde_json::Value,
+    consumed_hook_phases: &[HookPhaseConsumption],
+) -> Result<(), JournalError> {
+    let turn = state
+        .turns
+        .get(turn_id)
+        .ok_or_else(|| missing("turn", turn_id))?;
+    if turn.completion.is_some() {
+        return Err(JournalError::InvalidTransition(format!(
+            "turn {turn_id} is terminal"
+        )));
+    }
+    if messages.iter().any(|message| !message.is_object()) {
+        return Err(JournalError::InvalidTransition(
+            "every conversation recovery message must be an object".to_owned(),
+        ));
+    }
+    let payload = serde_json::Value::Array(messages.to_vec());
+    if state_payload_digest(&payload)? != messages_digest {
+        return Err(JournalError::InvalidTransition(
+            "conversation recovery message digest mismatch".to_owned(),
+        ));
+    }
+    if state_payload_digest(checkpoint)? != checkpoint_state_digest {
+        return Err(JournalError::InvalidTransition(format!(
+            "checkpoint {checkpoint_id} state digest mismatch"
+        )));
+    }
+    if state.checkpoints.contains_key(checkpoint_id) {
+        return Err(duplicate("checkpoint", checkpoint_id));
+    }
+
+    let mut seen = BTreeSet::new();
+    for consumption in consumed_hook_phases {
+        if !seen.insert(consumption.hook_phase_id.as_str()) {
+            return Err(JournalError::InvalidTransition(format!(
+                "checkpoint {checkpoint_id} repeats hook phase {}",
+                consumption.hook_phase_id
+            )));
         }
-    });
-    let tools = request
-        .tools
+        let phase = state
+            .hook_phases
+            .get(&consumption.hook_phase_id)
+            .ok_or_else(|| missing("hook phase", &consumption.hook_phase_id))?;
+        if phase.turn_id != turn_id {
+            return Err(JournalError::InvalidTransition(format!(
+                "hook phase {} belongs to turn {}, not {turn_id}",
+                consumption.hook_phase_id, phase.turn_id
+            )));
+        }
+        match &phase.state {
+            HookPhaseState::Finished { outcome_digest, .. }
+                if outcome_digest == &consumption.outcome_digest => {}
+            HookPhaseState::Finished { .. } => {
+                return Err(JournalError::InvalidTransition(format!(
+                    "hook phase {} outcome digest mismatch",
+                    consumption.hook_phase_id
+                )));
+            }
+            _ => {
+                return Err(JournalError::InvalidTransition(format!(
+                    "hook phase {} is not finished and consumable",
+                    consumption.hook_phase_id
+                )));
+            }
+        }
+    }
+    let eligible = state
+        .hook_phases
         .iter()
-        .map(|tool| {
-            serde_json::json!({
-                "name": &tool.name,
-                "description": &tool.description,
-                "input_schema": &tool.input_schema,
-                "deferred": tool.deferred,
-                "server": &tool.server,
-            })
+        .filter_map(|(phase_id, phase)| {
+            (phase.turn_id == turn_id && matches!(phase.state, HookPhaseState::Finished { .. }))
+                .then_some(phase_id.as_str())
         })
-        .collect::<Vec<_>>();
-    let request_value = serde_json::json!({
-        "model": &request.model,
-        "system": &request.system,
-        "messages": &request.messages,
-        "tools": tools,
-        "max_tokens": request.max_tokens,
-        "thinking": thinking,
-        "reasoning_effort": &request.reasoning_effort,
-        "cache_tier": request.cache_tier.map(|tier| tier.as_str()),
-        "routing_hint": request.routing_hint.as_ref().map(|hint| &hint.0),
-        "stop_sequences": &request.stop_sequences,
-        "web_search": request.web_search,
-        "conversation_id": &request.conversation_id,
-        "client_context_tokens": request.client_context_tokens,
-        "temperature": request.temperature,
-        "omit_max_tokens": request.omit_max_tokens,
-    });
-    state_payload_digest(&request_value)
+        .collect::<BTreeSet<_>>();
+    if seen != eligible {
+        return Err(JournalError::InvalidTransition(format!(
+            "checkpoint {checkpoint_id} must consume every finished hook phase for turn {turn_id}"
+        )));
+    }
+    if state.hook_phases.values().any(|phase| {
+        phase.turn_id == turn_id
+            && matches!(
+                phase.state,
+                HookPhaseState::Prepared
+                    | HookPhaseState::Started { .. }
+                    | HookPhaseState::AbandonedUnknown
+            )
+    }) {
+        return Err(JournalError::InvalidTransition(format!(
+            "checkpoint {checkpoint_id} cannot cross an unresolved hook phase for turn {turn_id}"
+        )));
+    }
+
+    state.conversation = messages.to_vec();
+    state.checkpoints.insert(
+        checkpoint_id.to_owned(),
+        CheckpointState {
+            purpose: CheckpointPurpose::Recovery,
+            origin: CheckpointOrigin::Turn {
+                turn_id: turn_id.to_owned(),
+            },
+            state_digest: checkpoint_state_digest.to_owned(),
+            state: checkpoint.clone(),
+        },
+    );
+    for consumption in consumed_hook_phases {
+        let phase = state
+            .hook_phases
+            .get_mut(&consumption.hook_phase_id)
+            .ok_or_else(|| missing("hook phase", &consumption.hook_phase_id))?;
+        phase.state = HookPhaseState::Consumed {
+            outcome_digest: consumption.outcome_digest.clone(),
+            checkpoint_id: checkpoint_id.to_owned(),
+        };
+    }
+    Ok(())
 }
 
 fn apply_event(state: &mut ReducedSessionState, event: &SessionEvent) -> Result<(), JournalError> {
@@ -431,9 +1302,11 @@ fn apply_event(state: &mut ReducedSessionState, event: &SessionEvent) -> Result<
                 && state.streams.is_empty()
                 && state.provider_attempts.is_empty()
                 && state.tools.is_empty()
+                && state.hook_phases.is_empty()
                 && state.approvals.is_empty()
                 && state.budgets.is_empty()
                 && state.budget_event_ids.is_empty()
+                && state.budget_authority.is_none()
                 && state.checkpoints.is_empty()
                 && state.children.is_empty()
                 && state.deliveries.is_empty();
@@ -561,6 +1434,45 @@ fn apply_event(state: &mut ReducedSessionState, event: &SessionEvent) -> Result<
             }
             state.conversation.clone_from(messages);
         }
+        SessionEvent::ConversationRecoveryCheckpointCommitted {
+            turn_id,
+            messages,
+            messages_digest,
+            checkpoint_id,
+            checkpoint_state_digest,
+            checkpoint,
+        } => {
+            commit_recovery_checkpoint(
+                state,
+                turn_id,
+                messages,
+                messages_digest,
+                checkpoint_id,
+                checkpoint_state_digest,
+                checkpoint,
+                &[],
+            )?;
+        }
+        SessionEvent::ConversationRecoveryCheckpointCommittedV2 {
+            turn_id,
+            messages,
+            messages_digest,
+            checkpoint_id,
+            checkpoint_state_digest,
+            checkpoint,
+            consumed_hook_phases,
+        } => {
+            commit_recovery_checkpoint(
+                state,
+                turn_id,
+                messages,
+                messages_digest,
+                checkpoint_id,
+                checkpoint_state_digest,
+                checkpoint,
+                consumed_hook_phases,
+            )?;
+        }
         SessionEvent::TurnStarted {
             turn_id,
             user_message,
@@ -589,6 +1501,7 @@ fn apply_event(state: &mut ReducedSessionState, event: &SessionEvent) -> Result<
             turn_id,
             assistant_message,
         } => {
+            require_turn_descendants_terminal(state, turn_id)?;
             let turn = required_mut(&mut state.turns, "turn", turn_id)?;
             if turn.completion.is_some() {
                 return Err(duplicate("turn completion", turn_id));
@@ -598,6 +1511,7 @@ fn apply_event(state: &mut ReducedSessionState, event: &SessionEvent) -> Result<
             });
         }
         SessionEvent::TurnFailed { turn_id, error } => {
+            require_turn_descendants_terminal(state, turn_id)?;
             let turn = required_mut(&mut state.turns, "turn", turn_id)?;
             if turn.completion.is_some() {
                 return Err(duplicate("turn completion", turn_id));
@@ -607,6 +1521,7 @@ fn apply_event(state: &mut ReducedSessionState, event: &SessionEvent) -> Result<
             });
         }
         SessionEvent::TurnCancelled { turn_id } => {
+            require_turn_descendants_terminal(state, turn_id)?;
             let turn = required_mut(&mut state.turns, "turn", turn_id)?;
             if turn.completion.is_some() {
                 return Err(duplicate("turn completion", turn_id));
@@ -660,6 +1575,7 @@ fn apply_event(state: &mut ReducedSessionState, event: &SessionEvent) -> Result<
                 .get(&attempt_id)
                 .ok_or_else(|| missing("provider attempt", &attempt_id))?;
             require_unknown(&attempt.effect, "provider attempt", &attempt_id)?;
+            let correlated = attempt.dispatch_id.is_some();
             let stream = required_mut(&mut state.streams, "stream", stream_id)?;
             if stream.finished || *ordinal != stream.next_ordinal {
                 return Err(JournalError::InvalidTransition(format!(
@@ -671,6 +1587,10 @@ fn apply_event(state: &mut ReducedSessionState, event: &SessionEvent) -> Result<
                 return Err(JournalError::InvalidTransition(format!(
                     "stream {stream_id} batch {ordinal} is empty"
                 )));
+            }
+            if correlated {
+                let existing = provider_stream_events(stream);
+                validate_appended_provider_events(&existing, events)?;
             }
             stream.batches.push(events.clone());
             stream.next_ordinal += 1;
@@ -687,9 +1607,13 @@ fn apply_event(state: &mut ReducedSessionState, event: &SessionEvent) -> Result<
                 .get(&attempt_id)
                 .ok_or_else(|| missing("provider attempt", &attempt_id))?;
             require_unknown(&attempt.effect, "provider attempt", &attempt_id)?;
+            let correlated = attempt.dispatch_id.is_some();
             let stream = required_mut(&mut state.streams, "stream", stream_id)?;
             if stream.finished {
                 return Err(duplicate("stream completion", stream_id));
+            }
+            if correlated {
+                validate_finished_provider_events(&provider_stream_events(stream))?;
             }
             stream.finished = true;
         }
@@ -708,6 +1632,40 @@ fn apply_event(state: &mut ReducedSessionState, event: &SessionEvent) -> Result<
             state.provider_attempts.insert(
                 attempt_id.clone(),
                 ProviderAttemptState {
+                    dispatch_id: None,
+                    turn_id: turn_id.clone(),
+                    purpose: *purpose,
+                    provider: provider.clone(),
+                    model: model.clone(),
+                    request_digest: request_digest.clone(),
+                    response_digest: None,
+                    not_started_reason: None,
+                    effect: ExternalEffectState::Prepared,
+                },
+            );
+        }
+        SessionEvent::ProviderAttemptPreparedV2 {
+            attempt_id,
+            dispatch_id,
+            turn_id,
+            purpose,
+            provider,
+            model,
+            request_digest,
+        } => {
+            require_active_turn(state, turn_id)?;
+            if dispatch_id.trim().is_empty() {
+                return Err(JournalError::InvalidTransition(
+                    "provider dispatch id must not be empty".to_owned(),
+                ));
+            }
+            if state.provider_attempts.contains_key(attempt_id) {
+                return Err(duplicate("provider attempt", attempt_id));
+            }
+            state.provider_attempts.insert(
+                attempt_id.clone(),
+                ProviderAttemptState {
+                    dispatch_id: Some(dispatch_id.clone()),
                     turn_id: turn_id.clone(),
                     purpose: *purpose,
                     provider: provider.clone(),
@@ -737,6 +1695,15 @@ fn apply_event(state: &mut ReducedSessionState, event: &SessionEvent) -> Result<
             outcome,
             response_digest,
         } => {
+            let attempt = state
+                .provider_attempts
+                .get(attempt_id)
+                .ok_or_else(|| missing("provider attempt", attempt_id))?;
+            if attempt.dispatch_id.is_some() {
+                return Err(JournalError::InvalidTransition(format!(
+                    "recovery-correlated provider attempt {attempt_id} requires a V2 terminal receipt"
+                )));
+            }
             if matches!(outcome, CompletionOutcome::Succeeded) {
                 let stream = state
                     .streams
@@ -761,13 +1728,55 @@ fn apply_event(state: &mut ReducedSessionState, event: &SessionEvent) -> Result<
                 outcome: outcome.clone(),
             };
         }
-        SessionEvent::ProviderAttemptNotStarted { attempt_id, reason } => {
-            let turn_id = state
+        SessionEvent::ProviderAttemptFinishedV2 {
+            attempt_id,
+            dispatch_id,
+            outcome,
+            response_digest,
+        } => {
+            let attempt = state
                 .provider_attempts
                 .get(attempt_id)
-                .ok_or_else(|| missing("provider attempt", attempt_id))?
-                .turn_id
-                .clone();
+                .ok_or_else(|| missing("provider attempt", attempt_id))?;
+            require_correlated_dispatch(attempt, attempt_id, dispatch_id)?;
+            require_unknown(&attempt.effect, "provider attempt", attempt_id)?;
+            validate_correlated_terminal(state, attempt_id, outcome, response_digest.as_deref())?;
+            let attempt =
+                required_mut(&mut state.provider_attempts, "provider attempt", attempt_id)?;
+            attempt.response_digest.clone_from(response_digest);
+            attempt.effect = ExternalEffectState::Completed {
+                outcome: outcome.clone(),
+            };
+        }
+        SessionEvent::ProviderAttemptNotStarted { attempt_id, reason } => {
+            let attempt = state
+                .provider_attempts
+                .get(attempt_id)
+                .ok_or_else(|| missing("provider attempt", attempt_id))?;
+            if attempt.dispatch_id.is_some() {
+                return Err(JournalError::InvalidTransition(format!(
+                    "recovery-correlated provider attempt {attempt_id} requires a V2 not-started receipt"
+                )));
+            }
+            let turn_id = attempt.turn_id.clone();
+            require_active_turn(state, &turn_id)?;
+            let attempt =
+                required_mut(&mut state.provider_attempts, "provider attempt", attempt_id)?;
+            require_prepared(&attempt.effect, "provider attempt", attempt_id)?;
+            attempt.not_started_reason = Some(reason.clone());
+            attempt.effect = ExternalEffectState::NotStarted;
+        }
+        SessionEvent::ProviderAttemptNotStartedV2 {
+            attempt_id,
+            dispatch_id,
+            reason,
+        } => {
+            let attempt = state
+                .provider_attempts
+                .get(attempt_id)
+                .ok_or_else(|| missing("provider attempt", attempt_id))?;
+            require_correlated_dispatch(attempt, attempt_id, dispatch_id)?;
+            let turn_id = attempt.turn_id.clone();
             require_active_turn(state, &turn_id)?;
             let attempt =
                 required_mut(&mut state.provider_attempts, "provider attempt", attempt_id)?;
@@ -811,6 +1820,7 @@ fn apply_event(state: &mut ReducedSessionState, event: &SessionEvent) -> Result<
                     effective_input_digest: effective_input_digest.clone(),
                     effect_contract: wcore_types::tool::ToolEffectContract::default(),
                     effect_receipt: None,
+                    pre_hook_phase_id: None,
                     result: None,
                     not_started_reason: None,
                     resolution_source: None,
@@ -833,6 +1843,7 @@ fn apply_event(state: &mut ReducedSessionState, event: &SessionEvent) -> Result<
             effective_input_digest,
             effect_contract,
             effect_receipt,
+            pre_hook_phase_id,
         } => {
             require_active_turn(state, turn_id)?;
             if state.tools.contains_key(tool_execution_id) {
@@ -856,6 +1867,50 @@ fn apply_event(state: &mut ReducedSessionState, event: &SessionEvent) -> Result<
             if effect_receipt.is_some() && effect_contract.reconciler.is_none() {
                 return Err(JournalError::InvalidTransition(format!(
                     "tool execution {tool_execution_id} has an effect receipt without a reconciler"
+                )));
+            }
+            if let Some(phase_id) = pre_hook_phase_id {
+                let phase = state
+                    .hook_phases
+                    .get(phase_id)
+                    .ok_or_else(|| missing("hook phase", phase_id))?;
+                let consumed_retry_binding = matches!(phase.state, HookPhaseState::Consumed { .. })
+                    && retry_of.as_ref().is_some_and(|prior_id| {
+                        state.tools.get(prior_id).is_some_and(|prior| {
+                            prior.pre_hook_phase_id.as_deref() == Some(phase_id.as_str())
+                                && prior.effective_input_digest == *effective_input_digest
+                        })
+                    });
+                let effective_digest = match &phase.state {
+                    HookPhaseState::Finished {
+                        effective_input_digest: Some(digest),
+                        ..
+                    } => Some(digest),
+                    HookPhaseState::Consumed { .. } if consumed_retry_binding => None,
+                    _ => {
+                        return Err(JournalError::InvalidTransition(format!(
+                            "tool execution {tool_execution_id} pre-hook phase is not finished"
+                        )));
+                    }
+                };
+                if phase.phase != ToolHookPhase::PreToolUse
+                    || phase.turn_id != *turn_id
+                    || phase.provider_call_id != *provider_call_id
+                    || phase.ordinal != *ordinal
+                    || effective_digest.is_some_and(|digest| digest != effective_input_digest)
+                {
+                    return Err(JournalError::InvalidTransition(format!(
+                        "tool execution {tool_execution_id} pre-hook binding mismatch"
+                    )));
+                }
+            } else if state.hook_phases.values().any(|phase| {
+                phase.turn_id == *turn_id
+                    && phase.provider_call_id == *provider_call_id
+                    && phase.ordinal == *ordinal
+                    && phase.phase == ToolHookPhase::PreToolUse
+            }) {
+                return Err(JournalError::InvalidTransition(format!(
+                    "tool execution {tool_execution_id} omitted its pre-hook binding"
                 )));
             }
             validate_tool_retry(
@@ -888,6 +1943,7 @@ fn apply_event(state: &mut ReducedSessionState, event: &SessionEvent) -> Result<
                     effective_input_digest: effective_input_digest.clone(),
                     effect_contract: effect_contract.clone(),
                     effect_receipt: effect_receipt.clone(),
+                    pre_hook_phase_id: pre_hook_phase_id.clone(),
                     result: None,
                     not_started_reason: None,
                     resolution_source: None,
@@ -897,13 +1953,37 @@ fn apply_event(state: &mut ReducedSessionState, event: &SessionEvent) -> Result<
             );
         }
         SessionEvent::ToolExecutionStarted { tool_execution_id } => {
-            let turn_id = state
+            let tool_snapshot = state
                 .tools
                 .get(tool_execution_id)
-                .ok_or_else(|| missing("tool execution", tool_execution_id))?
-                .turn_id
-                .clone();
+                .ok_or_else(|| missing("tool execution", tool_execution_id))?;
+            let turn_id = tool_snapshot.turn_id.clone();
             require_active_turn(state, &turn_id)?;
+            if state.hook_phases.values().any(|phase| {
+                phase.turn_id == tool_snapshot.turn_id
+                    && phase.provider_call_id == tool_snapshot.provider_call_id
+                    && phase.ordinal == tool_snapshot.ordinal
+                    && phase.phase == ToolHookPhase::PreToolUse
+                    && matches!(
+                        phase.state,
+                        HookPhaseState::Prepared | HookPhaseState::Started { .. }
+                    )
+            }) {
+                return Err(JournalError::InvalidTransition(format!(
+                    "tool execution {tool_execution_id} cannot start while its pre-hook phase is active"
+                )));
+            }
+            if tool_snapshot.pre_hook_phase_id.is_some()
+                && !state.hook_phases.values().any(|phase| {
+                    phase.tool_execution_id.as_deref() == Some(tool_execution_id)
+                        && phase.phase == ToolHookPhase::PostToolUse
+                        && matches!(phase.state, HookPhaseState::Prepared)
+                })
+            {
+                return Err(JournalError::InvalidTransition(format!(
+                    "tool execution {tool_execution_id} lacks a prepared post-hook phase"
+                )));
+            }
             let tool = required_mut(&mut state.tools, "tool execution", tool_execution_id)?;
             require_tool_prepared(&tool.effect, tool_execution_id)?;
             validate_filesystem_start_receipt(tool, tool_execution_id)?;
@@ -984,6 +2064,245 @@ fn apply_event(state: &mut ReducedSessionState, event: &SessionEvent) -> Result<
                 }
             }
         }
+        SessionEvent::HookPhasePrepared {
+            hook_phase_id,
+            lifecycle_version,
+            turn_id,
+            provider_call_id,
+            ordinal,
+            phase,
+            tool_execution_id,
+            input_digest,
+            hook_authority_digest,
+            hook_manifest_digest,
+            hook_slots,
+        } => {
+            require_active_turn(state, turn_id)?;
+            if state.hook_phases.contains_key(hook_phase_id) {
+                return Err(duplicate("hook phase", hook_phase_id));
+            }
+            if *lifecycle_version != HOOK_PHASE_LIFECYCLE_VERSION
+                || provider_call_id.is_empty()
+                || hook_slots.is_empty()
+                || !valid_sha256_digest(input_digest)
+                || !valid_sha256_digest(hook_authority_digest)
+                || !valid_sha256_digest(hook_manifest_digest)
+                || !valid_hook_manifest(hook_slots)
+                || state_payload_digest(&serde_json::to_value(hook_slots).map_err(|source| {
+                    JournalError::Json {
+                        context: "encoding hook manifest",
+                        source,
+                    }
+                })?)?
+                    != *hook_manifest_digest
+            {
+                return Err(JournalError::InvalidTransition(format!(
+                    "hook phase {hook_phase_id} has invalid version or authority binding"
+                )));
+            }
+            if state.hook_phases.values().any(|existing| {
+                existing.turn_id == *turn_id
+                    && existing.provider_call_id == *provider_call_id
+                    && existing.ordinal == *ordinal
+                    && existing.phase == *phase
+                    && (*phase == ToolHookPhase::PreToolUse
+                        || existing.tool_execution_id == *tool_execution_id)
+            }) {
+                return Err(JournalError::InvalidTransition(format!(
+                    "duplicate hook phase authority for {turn_id}/{provider_call_id}/{ordinal}/{phase:?}"
+                )));
+            }
+            match (phase, tool_execution_id.as_deref()) {
+                (ToolHookPhase::PreToolUse, None) => {}
+                (ToolHookPhase::PostToolUse, Some(tool_execution_id)) => {
+                    let tool = state
+                        .tools
+                        .get(tool_execution_id)
+                        .ok_or_else(|| missing("tool execution", tool_execution_id))?;
+                    if tool.turn_id != *turn_id
+                        || tool.provider_call_id != *provider_call_id
+                        || tool.ordinal != *ordinal
+                        || tool.effective_input_digest != *input_digest
+                        || !matches!(tool.effect, ToolEffectState::Prepared)
+                    {
+                        return Err(JournalError::InvalidTransition(format!(
+                            "post hook phase {hook_phase_id} is not bound to the prepared tool"
+                        )));
+                    }
+                }
+                _ => {
+                    return Err(JournalError::InvalidTransition(format!(
+                        "hook phase {hook_phase_id} has an invalid tool binding"
+                    )));
+                }
+            }
+            state.hook_phases.insert(
+                hook_phase_id.clone(),
+                HookPhaseExecutionState {
+                    lifecycle_version: *lifecycle_version,
+                    turn_id: turn_id.clone(),
+                    provider_call_id: provider_call_id.clone(),
+                    ordinal: *ordinal,
+                    phase: *phase,
+                    tool_execution_id: tool_execution_id.clone(),
+                    input_digest: input_digest.clone(),
+                    hook_authority_digest: hook_authority_digest.clone(),
+                    hook_manifest_digest: hook_manifest_digest.clone(),
+                    hook_slots: hook_slots.clone(),
+                    state: HookPhaseState::Prepared,
+                },
+            );
+        }
+        SessionEvent::HookPhaseStarted {
+            hook_phase_id,
+            result_digest,
+        } => {
+            let phase = state
+                .hook_phases
+                .get(hook_phase_id)
+                .ok_or_else(|| missing("hook phase", hook_phase_id))?;
+            if !matches!(phase.state, HookPhaseState::Prepared) {
+                return Err(JournalError::InvalidTransition(format!(
+                    "hook phase {hook_phase_id} is not prepared"
+                )));
+            }
+            match phase.phase {
+                ToolHookPhase::PreToolUse if result_digest.is_none() => {}
+                ToolHookPhase::PostToolUse => {
+                    let digest = result_digest
+                        .as_deref()
+                        .filter(|digest| valid_sha256_digest(digest))
+                        .ok_or_else(|| {
+                            JournalError::InvalidTransition(format!(
+                                "post hook phase {hook_phase_id} lacks a valid result digest"
+                            ))
+                        })?;
+                    let tool_id = phase.tool_execution_id.as_deref().ok_or_else(|| {
+                        JournalError::InvalidTransition(format!(
+                            "post hook phase {hook_phase_id} lacks a tool binding"
+                        ))
+                    })?;
+                    let tool = state
+                        .tools
+                        .get(tool_id)
+                        .ok_or_else(|| missing("tool execution", tool_id))?;
+                    let result = tool.result.as_ref().ok_or_else(|| {
+                        JournalError::InvalidTransition(format!(
+                            "post hook phase {hook_phase_id} tool result is not durable"
+                        ))
+                    })?;
+                    if !matches!(
+                        tool.effect,
+                        ToolEffectState::Succeeded | ToolEffectState::Failed { .. }
+                    ) || state_payload_digest(result)? != digest
+                    {
+                        return Err(JournalError::InvalidTransition(format!(
+                            "post hook phase {hook_phase_id} result binding mismatch"
+                        )));
+                    }
+                }
+                _ => {
+                    return Err(JournalError::InvalidTransition(format!(
+                        "pre hook phase {hook_phase_id} must not bind a result"
+                    )));
+                }
+            }
+            state.hook_phases.get_mut(hook_phase_id).unwrap().state = HookPhaseState::Started {
+                result_digest: result_digest.clone(),
+            };
+        }
+        SessionEvent::HookPhaseFinished {
+            hook_phase_id,
+            result_digest,
+            effective_input_digest,
+            outcome_digest,
+            slot_receipts_digest,
+            slot_receipts,
+        } => {
+            let phase = state
+                .hook_phases
+                .get(hook_phase_id)
+                .ok_or_else(|| missing("hook phase", hook_phase_id))?;
+            let HookPhaseState::Started {
+                result_digest: started_result_digest,
+            } = &phase.state
+            else {
+                return Err(JournalError::InvalidTransition(format!(
+                    "hook phase {hook_phase_id} is not started"
+                )));
+            };
+            let input_binding_valid = match phase.phase {
+                ToolHookPhase::PreToolUse => effective_input_digest
+                    .as_deref()
+                    .is_some_and(valid_sha256_digest),
+                ToolHookPhase::PostToolUse => effective_input_digest.is_none(),
+            };
+            if started_result_digest != result_digest
+                || !input_binding_valid
+                || !valid_sha256_digest(outcome_digest)
+                || !valid_sha256_digest(slot_receipts_digest)
+                || !valid_hook_receipts(&phase.hook_slots, slot_receipts)
+                || state_payload_digest(&serde_json::to_value(slot_receipts).map_err(
+                    |source| JournalError::Json {
+                        context: "encoding hook slot receipts",
+                        source,
+                    },
+                )?)? != *slot_receipts_digest
+            {
+                return Err(JournalError::InvalidTransition(format!(
+                    "hook phase {hook_phase_id} has an invalid finished receipt"
+                )));
+            }
+            state.hook_phases.get_mut(hook_phase_id).unwrap().state = HookPhaseState::Finished {
+                result_digest: result_digest.clone(),
+                effective_input_digest: effective_input_digest.clone(),
+                outcome_digest: outcome_digest.clone(),
+                slot_receipts_digest: slot_receipts_digest.clone(),
+                slot_receipts: slot_receipts.clone(),
+            };
+        }
+        SessionEvent::HookPhaseNotStarted {
+            hook_phase_id,
+            reason,
+        } => {
+            let phase = required_mut(&mut state.hook_phases, "hook phase", hook_phase_id)?;
+            if !matches!(phase.state, HookPhaseState::Prepared) {
+                return Err(JournalError::InvalidTransition(format!(
+                    "hook phase {hook_phase_id} is not prepared"
+                )));
+            }
+            phase.state = HookPhaseState::NotStarted {
+                reason: reason.clone(),
+            };
+        }
+        SessionEvent::HookPhaseNotApplicable { hook_phase_id } => {
+            let phase = state
+                .hook_phases
+                .get(hook_phase_id)
+                .ok_or_else(|| missing("hook phase", hook_phase_id))?;
+            if phase.phase != ToolHookPhase::PostToolUse
+                || !matches!(phase.state, HookPhaseState::Prepared)
+                || phase
+                    .tool_execution_id
+                    .as_ref()
+                    .and_then(|tool_id| state.tools.get(tool_id))
+                    .is_none_or(|tool| !matches!(tool.effect, ToolEffectState::NotStarted))
+            {
+                return Err(JournalError::InvalidTransition(format!(
+                    "hook phase {hook_phase_id} is not a non-started post phase"
+                )));
+            }
+            state.hook_phases.get_mut(hook_phase_id).unwrap().state = HookPhaseState::NotApplicable;
+        }
+        SessionEvent::HookPhaseAbandonedUnknown { hook_phase_id } => {
+            let phase = required_mut(&mut state.hook_phases, "hook phase", hook_phase_id)?;
+            if !matches!(phase.state, HookPhaseState::Started { .. }) {
+                return Err(JournalError::InvalidTransition(format!(
+                    "hook phase {hook_phase_id} is not started and unknown"
+                )));
+            }
+            phase.state = HookPhaseState::AbandonedUnknown;
+        }
         SessionEvent::ApprovalRequested {
             approval_id,
             origin,
@@ -996,10 +2315,10 @@ fn apply_event(state: &mut ReducedSessionState, event: &SessionEvent) -> Result<
             if state
                 .approvals
                 .values()
-                .any(|approval| approval.origin == *origin)
+                .any(|approval| approval.origin == *origin && approval.resolution.is_none())
             {
                 return Err(JournalError::InvalidTransition(format!(
-                    "approval origin {origin:?} already has an approval"
+                    "approval origin {origin:?} already has a pending approval"
                 )));
             }
             state.approvals.insert(
@@ -1099,6 +2418,10 @@ fn apply_event(state: &mut ReducedSessionState, event: &SessionEvent) -> Result<
             state
                 .budget_event_ids
                 .insert(event_id.clone(), reservation_id.clone());
+        }
+        SessionEvent::BudgetAuthorityCommitted { authority } => {
+            validate_budget_authority(state, authority)?;
+            state.budget_authority = Some(authority.clone());
         }
         SessionEvent::CheckpointCommitted {
             checkpoint_id,
@@ -1327,6 +2650,7 @@ mod tool_effect_transition_properties {
                 effective_input_digest: "effective".into(),
                 effect_contract: wcore_types::tool::ToolEffectContract::default(),
                 effect_receipt: None,
+                pre_hook_phase_id: None,
                 result: None,
                 not_started_reason: None,
                 resolution_source: None,
@@ -1457,5 +2781,763 @@ mod tool_effect_transition_properties {
                 );
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod hook_phase_transition_tests {
+    use super::*;
+
+    const DIGEST: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+
+    fn active_turn_state() -> ReducedSessionState {
+        let mut state = ReducedSessionState::default();
+        state.turns.insert(
+            "turn".into(),
+            TurnState {
+                user_message: "test".into(),
+                completion: None,
+            },
+        );
+        state
+    }
+
+    fn prepare_pre() -> SessionEvent {
+        let slots = manifest();
+        SessionEvent::HookPhasePrepared {
+            hook_phase_id: "hook-pre".into(),
+            lifecycle_version: HOOK_PHASE_LIFECYCLE_VERSION,
+            turn_id: "turn".into(),
+            provider_call_id: "call".into(),
+            ordinal: 0,
+            phase: ToolHookPhase::PreToolUse,
+            tool_execution_id: None,
+            input_digest: DIGEST.into(),
+            hook_authority_digest: DIGEST.into(),
+            hook_manifest_digest: state_payload_digest(&serde_json::to_value(&slots).unwrap())
+                .unwrap(),
+            hook_slots: slots,
+        }
+    }
+
+    fn manifest() -> Vec<HookManifestSlot> {
+        (0..2)
+            .map(|ordinal| HookManifestSlot {
+                ordinal,
+                slot_id: format!("slot-{ordinal}"),
+                source: HookSlotSource::Rust,
+                descriptor_digest: DIGEST.into(),
+            })
+            .collect()
+    }
+
+    fn receipts() -> Vec<HookSlotReceipt> {
+        manifest()
+            .into_iter()
+            .map(|slot| HookSlotReceipt {
+                ordinal: slot.ordinal,
+                slot_id: slot.slot_id,
+                descriptor_digest: slot.descriptor_digest,
+                status: HookSlotTerminalStatus::Completed,
+            })
+            .collect()
+    }
+
+    fn finish_pre(state: &mut ReducedSessionState) {
+        apply_event(state, &prepare_pre()).unwrap();
+        apply_event(
+            state,
+            &SessionEvent::HookPhaseStarted {
+                hook_phase_id: "hook-pre".into(),
+                result_digest: None,
+            },
+        )
+        .unwrap();
+        let receipts = receipts();
+        apply_event(
+            state,
+            &SessionEvent::HookPhaseFinished {
+                hook_phase_id: "hook-pre".into(),
+                result_digest: None,
+                effective_input_digest: Some(DIGEST.into()),
+                outcome_digest: DIGEST.into(),
+                slot_receipts_digest: state_payload_digest(
+                    &serde_json::to_value(&receipts).unwrap(),
+                )
+                .unwrap(),
+                slot_receipts: receipts,
+            },
+        )
+        .unwrap();
+    }
+
+    fn consume_pre(state: &mut ReducedSessionState) {
+        let messages = vec![serde_json::json!({"role": "user", "content": "test"})];
+        let messages_digest =
+            state_payload_digest(&serde_json::Value::Array(messages.clone())).unwrap();
+        let checkpoint = serde_json::json!({"version": 1});
+        let checkpoint_state_digest = state_payload_digest(&checkpoint).unwrap();
+        apply_event(
+            state,
+            &SessionEvent::ConversationRecoveryCheckpointCommittedV2 {
+                turn_id: "turn".into(),
+                messages,
+                messages_digest,
+                checkpoint_id: "checkpoint".into(),
+                checkpoint_state_digest,
+                checkpoint,
+                consumed_hook_phases: vec![HookPhaseConsumption {
+                    hook_phase_id: "hook-pre".into(),
+                    outcome_digest: DIGEST.into(),
+                }],
+            },
+        )
+        .unwrap();
+    }
+
+    fn tool_intent(
+        tool_execution_id: &str,
+        retry_of: Option<&str>,
+        pre_hook_phase_id: Option<&str>,
+    ) -> SessionEvent {
+        SessionEvent::ToolIntentRecordedV2 {
+            tool_execution_id: tool_execution_id.into(),
+            idempotency_key: "stable-tool-key".into(),
+            retry_of: retry_of.map(str::to_owned),
+            provider_call_id: "call".into(),
+            turn_id: "turn".into(),
+            ordinal: 0,
+            tool: "Opaque".into(),
+            requested_input: StoredToolInput::redacted(DIGEST),
+            requested_input_digest: DIGEST.into(),
+            effective_input: StoredToolInput::redacted(DIGEST),
+            effective_input_digest: DIGEST.into(),
+            effect_contract: wcore_types::tool::ToolEffectContract::default(),
+            effect_receipt: None,
+            pre_hook_phase_id: pre_hook_phase_id.map(str::to_owned),
+        }
+    }
+
+    fn prepare_post(hook_phase_id: &str, tool_execution_id: &str) -> SessionEvent {
+        let slots = manifest();
+        SessionEvent::HookPhasePrepared {
+            hook_phase_id: hook_phase_id.into(),
+            lifecycle_version: HOOK_PHASE_LIFECYCLE_VERSION,
+            turn_id: "turn".into(),
+            provider_call_id: "call".into(),
+            ordinal: 0,
+            phase: ToolHookPhase::PostToolUse,
+            tool_execution_id: Some(tool_execution_id.into()),
+            input_digest: DIGEST.into(),
+            hook_authority_digest: DIGEST.into(),
+            hook_manifest_digest: state_payload_digest(&serde_json::to_value(&slots).unwrap())
+                .unwrap(),
+            hook_slots: slots,
+        }
+    }
+
+    #[test]
+    fn finished_hook_outcome_is_consumed_atomically_with_checkpoint() {
+        let mut state = active_turn_state();
+        apply_event(&mut state, &prepare_pre()).unwrap();
+        let receipts = receipts();
+        apply_event(
+            &mut state,
+            &SessionEvent::HookPhaseStarted {
+                hook_phase_id: "hook-pre".into(),
+                result_digest: None,
+            },
+        )
+        .unwrap();
+        apply_event(
+            &mut state,
+            &SessionEvent::HookPhaseFinished {
+                hook_phase_id: "hook-pre".into(),
+                result_digest: None,
+                effective_input_digest: Some(DIGEST.into()),
+                outcome_digest: DIGEST.into(),
+                slot_receipts_digest: state_payload_digest(
+                    &serde_json::to_value(&receipts).unwrap(),
+                )
+                .unwrap(),
+                slot_receipts: receipts,
+            },
+        )
+        .unwrap();
+
+        let messages = vec![serde_json::json!({"role": "user", "content": "test"})];
+        let messages_digest =
+            state_payload_digest(&serde_json::Value::Array(messages.clone())).unwrap();
+        let checkpoint = serde_json::json!({"version": 1});
+        let checkpoint_state_digest = state_payload_digest(&checkpoint).unwrap();
+        apply_event(
+            &mut state,
+            &SessionEvent::ConversationRecoveryCheckpointCommittedV2 {
+                turn_id: "turn".into(),
+                messages: messages.clone(),
+                messages_digest,
+                checkpoint_id: "checkpoint".into(),
+                checkpoint_state_digest,
+                checkpoint,
+                consumed_hook_phases: vec![HookPhaseConsumption {
+                    hook_phase_id: "hook-pre".into(),
+                    outcome_digest: DIGEST.into(),
+                }],
+            },
+        )
+        .unwrap();
+
+        assert_eq!(state.conversation, messages);
+        assert!(matches!(
+            state.hook_phases["hook-pre"].state,
+            HookPhaseState::Consumed {
+                ref outcome_digest,
+                ref checkpoint_id,
+            } if outcome_digest == DIGEST && checkpoint_id == "checkpoint"
+        ));
+    }
+
+    #[test]
+    fn hook_finished_receipt_must_cover_the_prepared_manifest() {
+        let mut state = active_turn_state();
+        apply_event(&mut state, &prepare_pre()).unwrap();
+        apply_event(
+            &mut state,
+            &SessionEvent::HookPhaseStarted {
+                hook_phase_id: "hook-pre".into(),
+                result_digest: None,
+            },
+        )
+        .unwrap();
+
+        assert!(matches!(
+            apply_event(
+                &mut state,
+                &SessionEvent::HookPhaseFinished {
+                    hook_phase_id: "hook-pre".into(),
+                    result_digest: None,
+                    effective_input_digest: Some(DIGEST.into()),
+                    outcome_digest: DIGEST.into(),
+                    slot_receipts_digest: DIGEST.into(),
+                    slot_receipts: receipts()[..1].to_vec(),
+                },
+            ),
+            Err(JournalError::InvalidTransition(_))
+        ));
+        assert!(matches!(
+            state.hook_phases["hook-pre"].state,
+            HookPhaseState::Started { .. }
+        ));
+    }
+
+    #[test]
+    fn started_hook_can_only_be_abandoned_as_unknown() {
+        let mut state = active_turn_state();
+        apply_event(&mut state, &prepare_pre()).unwrap();
+        apply_event(
+            &mut state,
+            &SessionEvent::HookPhaseStarted {
+                hook_phase_id: "hook-pre".into(),
+                result_digest: None,
+            },
+        )
+        .unwrap();
+        apply_event(
+            &mut state,
+            &SessionEvent::HookPhaseAbandonedUnknown {
+                hook_phase_id: "hook-pre".into(),
+            },
+        )
+        .unwrap();
+        assert!(matches!(
+            state.hook_phases["hook-pre"].state,
+            HookPhaseState::AbandonedUnknown
+        ));
+    }
+
+    #[test]
+    fn consumed_pre_hook_can_bind_only_its_exact_retry_lineage() {
+        let mut state = active_turn_state();
+        finish_pre(&mut state);
+        apply_event(
+            &mut state,
+            &tool_intent("tool-original", None, Some("hook-pre")),
+        )
+        .unwrap();
+        apply_event(
+            &mut state,
+            &SessionEvent::ToolExecutionNotStarted {
+                tool_execution_id: "tool-original".into(),
+                reason: ToolNotStartedReason::Cancelled {
+                    reason: "crash before physical dispatch".into(),
+                },
+            },
+        )
+        .unwrap();
+        consume_pre(&mut state);
+
+        let mut wrong_digest =
+            tool_intent("tool-wrong-digest", Some("tool-original"), Some("hook-pre"));
+        let SessionEvent::ToolIntentRecordedV2 {
+            effective_input,
+            effective_input_digest,
+            ..
+        } = &mut wrong_digest
+        else {
+            unreachable!();
+        };
+        *effective_input_digest =
+            "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into();
+        *effective_input = StoredToolInput::redacted(effective_input_digest.clone());
+        assert!(matches!(
+            apply_event(&mut state.clone(), &wrong_digest),
+            Err(JournalError::InvalidTransition(_))
+        ));
+
+        apply_event(
+            &mut state,
+            &tool_intent("tool-retry", Some("tool-original"), Some("hook-pre")),
+        )
+        .unwrap();
+        assert_eq!(
+            state.tools["tool-retry"].pre_hook_phase_id.as_deref(),
+            Some("hook-pre")
+        );
+    }
+
+    #[test]
+    fn post_hook_authority_is_unique_per_retry_attempt() {
+        let mut state = active_turn_state();
+        apply_event(&mut state, &tool_intent("tool-original", None, None)).unwrap();
+        apply_event(&mut state, &prepare_post("post-original", "tool-original")).unwrap();
+        apply_event(
+            &mut state,
+            &SessionEvent::ToolExecutionNotStarted {
+                tool_execution_id: "tool-original".into(),
+                reason: ToolNotStartedReason::Cancelled {
+                    reason: "crash before physical dispatch".into(),
+                },
+            },
+        )
+        .unwrap();
+        apply_event(
+            &mut state,
+            &SessionEvent::HookPhaseNotApplicable {
+                hook_phase_id: "post-original".into(),
+            },
+        )
+        .unwrap();
+
+        apply_event(
+            &mut state,
+            &tool_intent("tool-retry", Some("tool-original"), None),
+        )
+        .unwrap();
+        apply_event(&mut state, &prepare_post("post-retry", "tool-retry")).unwrap();
+
+        assert!(matches!(
+            apply_event(
+                &mut state,
+                &prepare_post("post-retry-duplicate", "tool-retry")
+            ),
+            Err(JournalError::InvalidTransition(_))
+        ));
+        assert!(state.hook_phases.contains_key("post-original"));
+        assert!(state.hook_phases.contains_key("post-retry"));
+    }
+}
+
+#[cfg(test)]
+mod approval_transition_tests {
+    use super::*;
+
+    fn active_turn_state() -> ReducedSessionState {
+        let mut state = ReducedSessionState::default();
+        state.turns.insert(
+            "turn".into(),
+            TurnState {
+                user_message: "test".into(),
+                completion: None,
+            },
+        );
+        state
+    }
+
+    fn request(id: &str) -> SessionEvent {
+        SessionEvent::ApprovalRequested {
+            approval_id: id.into(),
+            origin: ApprovalOrigin::Turn {
+                turn_id: "turn".into(),
+            },
+            intent_digest: format!("digest:{id}"),
+        }
+    }
+
+    #[test]
+    fn approval_origin_is_reusable_only_after_prior_request_is_terminal() {
+        let mut state = active_turn_state();
+        apply_event(&mut state, &request("approval-1")).unwrap();
+
+        let concurrent = apply_event(&mut state, &request("approval-2"));
+        assert!(matches!(
+            concurrent,
+            Err(JournalError::InvalidTransition(_))
+        ));
+
+        apply_event(
+            &mut state,
+            &SessionEvent::ApprovalResolved {
+                approval_id: "approval-1".into(),
+                resolution: ApprovalResolution::Decided {
+                    decision: ApprovalDecision::AllowOnce,
+                },
+            },
+        )
+        .unwrap();
+        apply_event(&mut state, &request("approval-2")).unwrap();
+
+        assert!(state.approvals["approval-1"].resolution.is_some());
+        assert!(state.approvals["approval-2"].resolution.is_none());
+    }
+
+    #[test]
+    fn resolved_approval_id_cannot_be_reused() {
+        let mut state = active_turn_state();
+        apply_event(&mut state, &request("approval-1")).unwrap();
+        apply_event(
+            &mut state,
+            &SessionEvent::ApprovalResolved {
+                approval_id: "approval-1".into(),
+                resolution: ApprovalResolution::Cancelled,
+            },
+        )
+        .unwrap();
+
+        assert!(matches!(
+            apply_event(&mut state, &request("approval-1")),
+            Err(JournalError::InvalidTransition(_))
+        ));
+    }
+}
+
+#[cfg(test)]
+mod terminal_turn_transition_tests {
+    use super::*;
+
+    fn active_turn_state() -> ReducedSessionState {
+        let mut state = ReducedSessionState::default();
+        state.turns.insert(
+            "turn".into(),
+            TurnState {
+                user_message: "test".into(),
+                completion: None,
+            },
+        );
+        state
+    }
+
+    fn assert_terminal_rejected(event: SessionEvent, expected: &str) {
+        let mut state = active_turn_state();
+        apply_event(&mut state, &event).unwrap();
+        let error = apply_event(
+            &mut state,
+            &SessionEvent::TurnCancelled {
+                turn_id: "turn".into(),
+            },
+        )
+        .unwrap_err();
+        assert!(
+            error.to_string().contains(expected),
+            "unexpected terminal rejection: {error}"
+        );
+    }
+
+    #[test]
+    fn terminal_turn_rejects_every_nonterminal_descendant_class() {
+        assert_terminal_rejected(
+            SessionEvent::ApprovalRequested {
+                approval_id: "approval".into(),
+                origin: ApprovalOrigin::Turn {
+                    turn_id: "turn".into(),
+                },
+                intent_digest: "intent".into(),
+            },
+            "pending approval",
+        );
+        assert_terminal_rejected(
+            SessionEvent::ProviderAttemptPrepared {
+                attempt_id: "provider".into(),
+                turn_id: "turn".into(),
+                purpose: ProviderAttemptPurpose::Conversation,
+                provider: "fixture".into(),
+                model: "fixture-model".into(),
+                request_digest: "request".into(),
+            },
+            "nonterminal provider attempt",
+        );
+        assert_terminal_rejected(
+            SessionEvent::ToolIntentRecorded {
+                tool_execution_id: "tool".into(),
+                provider_call_id: "provider-call".into(),
+                turn_id: "turn".into(),
+                ordinal: 0,
+                tool: "Write".into(),
+                requested_input: serde_json::json!({}),
+                requested_input_digest: "requested".into(),
+                effective_input: serde_json::json!({}),
+                effective_input_digest: "effective".into(),
+            },
+            "nonterminal tool execution",
+        );
+        assert_terminal_rejected(
+            SessionEvent::ChildPrepared {
+                child_id: "child".into(),
+                turn_id: "turn".into(),
+                request: serde_json::json!({}),
+            },
+            "nonterminal child",
+        );
+        assert_terminal_rejected(
+            SessionEvent::DeliveryPrepared {
+                delivery_id: "delivery".into(),
+                origin: DeliveryOrigin::Turn {
+                    turn_id: "turn".into(),
+                },
+                destination: "fixture".into(),
+                payload: serde_json::json!({}),
+            },
+            "nonterminal delivery",
+        );
+        assert_terminal_rejected(
+            SessionEvent::BudgetReserved {
+                event_id: "budget-event".into(),
+                reservation_id: "budget".into(),
+                owner: BudgetOwner::Turn {
+                    turn_id: "turn".into(),
+                },
+                purpose: BudgetPurpose::Conversation,
+                amount: BudgetAmount {
+                    value: 1,
+                    unit: BudgetUnit::Tokens,
+                },
+            },
+            "open budget reservation",
+        );
+    }
+}
+
+#[cfg(test)]
+mod provider_recovery_invariant_tests {
+    use super::*;
+
+    fn active_state() -> ReducedSessionState {
+        let mut state = ReducedSessionState::default();
+        state.turns.insert(
+            "turn".into(),
+            TurnState {
+                user_message: "test".into(),
+                completion: None,
+            },
+        );
+        state
+    }
+
+    fn done_event() -> ProviderStreamEvent {
+        ProviderStreamEvent::Done {
+            stop_reason: serde_json::json!("end_turn"),
+            finish_reason: serde_json::json!("stop"),
+            usage: serde_json::json!({
+                "input_tokens": 1,
+                "output_tokens": 2,
+                "cache_creation_tokens": 0,
+                "cache_read_tokens": 0
+            }),
+        }
+    }
+
+    fn start_correlated(state: &mut ReducedSessionState) {
+        apply_event(
+            state,
+            &SessionEvent::ProviderAttemptPreparedV2 {
+                attempt_id: "attempt".into(),
+                dispatch_id: "dispatch".into(),
+                turn_id: "turn".into(),
+                purpose: ProviderAttemptPurpose::Conversation,
+                provider: "fixture".into(),
+                model: "fixture-model".into(),
+                request_digest: "request".into(),
+            },
+        )
+        .unwrap();
+        apply_event(
+            state,
+            &SessionEvent::ProviderAttemptStarted {
+                attempt_id: "attempt".into(),
+            },
+        )
+        .unwrap();
+        apply_event(
+            state,
+            &SessionEvent::StreamStarted {
+                stream_id: "stream".into(),
+                attempt_id: "attempt".into(),
+            },
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn correlated_success_requires_one_final_done_and_exact_digest() {
+        let mut state = active_state();
+        start_correlated(&mut state);
+        let events = vec![
+            ProviderStreamEvent::TextDelta { text: "ok".into() },
+            done_event(),
+        ];
+        apply_event(
+            &mut state,
+            &SessionEvent::StreamBatchCommitted {
+                stream_id: "stream".into(),
+                ordinal: 0,
+                events: events.clone(),
+            },
+        )
+        .unwrap();
+        apply_event(
+            &mut state,
+            &SessionEvent::StreamFinished {
+                stream_id: "stream".into(),
+            },
+        )
+        .unwrap();
+        let wrong = apply_event(
+            &mut state.clone(),
+            &SessionEvent::ProviderAttemptFinishedV2 {
+                attempt_id: "attempt".into(),
+                dispatch_id: "dispatch".into(),
+                outcome: CompletionOutcome::Succeeded,
+                response_digest: Some("wrong".into()),
+            },
+        )
+        .unwrap_err();
+        assert!(wrong.to_string().contains("digest does not match"));
+
+        apply_event(
+            &mut state,
+            &SessionEvent::ProviderAttemptFinishedV2 {
+                attempt_id: "attempt".into(),
+                dispatch_id: "dispatch".into(),
+                outcome: CompletionOutcome::Succeeded,
+                response_digest: Some(provider_response_digest(&events).unwrap()),
+            },
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn correlated_stream_rejects_nonfinal_or_missing_done() {
+        let mut nonfinal = active_state();
+        start_correlated(&mut nonfinal);
+        let error = apply_event(
+            &mut nonfinal,
+            &SessionEvent::StreamBatchCommitted {
+                stream_id: "stream".into(),
+                ordinal: 0,
+                events: vec![
+                    done_event(),
+                    ProviderStreamEvent::TextDelta {
+                        text: "after terminal".into(),
+                    },
+                ],
+            },
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("non-final terminal"));
+
+        let mut missing = active_state();
+        start_correlated(&mut missing);
+        apply_event(
+            &mut missing,
+            &SessionEvent::StreamBatchCommitted {
+                stream_id: "stream".into(),
+                ordinal: 0,
+                events: vec![ProviderStreamEvent::TextDelta {
+                    text: "partial".into(),
+                }],
+            },
+        )
+        .unwrap();
+        let error = apply_event(
+            &mut missing,
+            &SessionEvent::StreamFinished {
+                stream_id: "stream".into(),
+            },
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("exactly one final Done"));
+    }
+
+    #[test]
+    fn legacy_attempt_replays_but_cannot_be_recovered() {
+        let mut state = active_state();
+        apply_event(
+            &mut state,
+            &SessionEvent::ProviderAttemptPrepared {
+                attempt_id: "attempt".into(),
+                turn_id: "turn".into(),
+                purpose: ProviderAttemptPurpose::Conversation,
+                provider: "fixture".into(),
+                model: "fixture-model".into(),
+                request_digest: "request".into(),
+            },
+        )
+        .unwrap();
+        apply_event(
+            &mut state,
+            &SessionEvent::ProviderAttemptStarted {
+                attempt_id: "attempt".into(),
+            },
+        )
+        .unwrap();
+        apply_event(
+            &mut state,
+            &SessionEvent::StreamStarted {
+                stream_id: "stream".into(),
+                attempt_id: "attempt".into(),
+            },
+        )
+        .unwrap();
+        apply_event(
+            &mut state,
+            &SessionEvent::StreamBatchCommitted {
+                stream_id: "stream".into(),
+                ordinal: 0,
+                events: vec![ProviderStreamEvent::Error {
+                    message: "legacy malformed stream".into(),
+                }],
+            },
+        )
+        .unwrap();
+        apply_event(
+            &mut state,
+            &SessionEvent::StreamFinished {
+                stream_id: "stream".into(),
+            },
+        )
+        .unwrap();
+        apply_event(
+            &mut state,
+            &SessionEvent::ProviderAttemptFinished {
+                attempt_id: "attempt".into(),
+                outcome: CompletionOutcome::Succeeded,
+                response_digest: Some("legacy".into()),
+            },
+        )
+        .unwrap();
+
+        assert!(matches!(
+            crate::provider_recovery::recover_provider_round(&state, "dispatch", "attempt"),
+            Err(crate::provider_recovery::ProviderRecoveryError::LegacyAttempt(_))
+        ));
     }
 }

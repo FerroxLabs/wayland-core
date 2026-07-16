@@ -130,6 +130,66 @@ The default for a repository without a current external fingerprint decision is
 stored local decision. Hosts must display the receipt as effective state, not
 as a selectable trust claim.
 
+### 1.1c Durable turn recovery events (contract v1.1)
+
+Recovery v1 is a fail-closed, content-free view of the durable session
+journal. It lets Desktop reconnect without treating transcript text, provider
+payloads, tool arguments, tool output, paths, or approval secrets as recovery
+authority. Every recovery frame carries `recovery_version: 1` and opaque
+correlation IDs. A recovery cursor binds a journal sequence to a lowercase,
+raw 64-hex SHA-256 content digest; neither component is authoritative on its
+own. Recovery cursor and state digests deliberately omit the `sha256:` prefix
+used by evidence, artifact, and contract digests.
+
+`session_recovery_snapshot` reports one sanitized committed state:
+
+```json
+{
+  "type": "session_recovery_snapshot",
+  "recovery_version": 1,
+  "request_id": "recovery-request-001",
+  "session_id": "session-desktop-001",
+  "cursor": {
+    "journal_sequence": 40,
+    "journal_digest": "4444444444444444444444444444444444444444444444444444444444444444"
+  },
+  "state_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "lifecycle": "reconciliation_required",
+  "pending_turn": {
+    "turn_id": "turn-002",
+    "msg_id": "msg-002",
+    "lifecycle": "reconciliation_required",
+    "pending_call_id": "call-tool-002",
+    "reconcile_reason": "tool_outcome_unknown"
+  },
+  "budget": {
+    "tokens_used": 12000,
+    "token_limit": 20000,
+    "cost_used_usd": 1.25,
+    "cost_limit_usd": 5.0
+  }
+}
+```
+
+`session_recovery_replay` contains ordered, content-free milestones after the
+requested cursor. `from` must exactly match the host's accepted cursor, item
+sequences must be contiguous, and `through` must equal the final item cursor.
+An identical sequence with a different digest is a conflict, not a duplicate.
+Transitions without a more specific public milestone use `state_advanced` so
+the cursor sequence remains contiguous without exposing private payloads.
+
+`session_recovery_unavailable` refuses recovery with one typed reason:
+`session_not_found`, `unsupported_version`, `cursor_invalid`, `cursor_ahead`,
+`cursor_digest_mismatch`, `history_gap`, `journal_corrupt`,
+`snapshot_unavailable`, or `unknown_critical_state`. Hosts must not silently
+restart a turn after this event.
+
+`turn_recovery_lifecycle` reports a durable transition for one turn. Lifecycle
+values are `ready`, `streaming`, `awaiting_approval`, `tool_in_flight`,
+`reconciliation_required`, `suspended`, `completed`, `cancelled`, and
+`failed`. A reconciliation reason is required whenever Core cannot prove that
+direct continuation is safe.
+
 ### 1.2 `stream_start`
 
 A new response turn has started.
@@ -610,6 +670,82 @@ a per-user daily limit. Managed sessions reject interactive increases so a host
 cannot override an organization-controlled ceiling. Core reports acceptance or
 refusal with an `info` event. A host should expose this only as an explicit
 local action after showing the exhausted limit and requested headroom.
+
+### 2.7c `session_resync`
+
+Request a versioned recovery snapshot. Omitting `after` requests the current
+committed snapshot. Supplying `after` also requests sanitized replay strictly
+after that cursor.
+
+```json
+{
+  "type": "session_resync",
+  "recovery_version": 1,
+  "request_id": "recovery-request-001",
+  "session_id": "session-desktop-001",
+  "after": {
+    "journal_sequence": 40,
+    "journal_digest": "4444444444444444444444444444444444444444444444444444444444444444"
+  }
+}
+```
+
+`request_id` makes retries idempotently correlatable. A genesis request omits
+`after`; the genesis cursor returned by Core omits `journal_sequence` but still
+carries its digest. Core responds with a recovery snapshot, optional replay,
+or a typed unavailable event. Unsupported recovery versions fail closed.
+
+### 2.7d `resume_turn`
+
+Apply an explicit action to the interrupted turn state the operator inspected:
+
+```json
+{
+  "type": "resume_turn",
+  "recovery_version": 1,
+  "request_id": "recovery-request-002",
+  "session_id": "session-desktop-001",
+  "turn_id": "turn-002",
+  "cursor": {
+    "journal_sequence": 42,
+    "journal_digest": "6666666666666666666666666666666666666666666666666666666666666666"
+  },
+  "action": "reconcile"
+}
+```
+
+`action` is `continue`, `reconcile`, or `cancel`. The cursor is mandatory and
+must still identify the current committed state. `reconcile` invokes only
+Core-registered authoritative reconcilers; the command cannot carry a
+free-form claim that an external effect succeeded or failed.
+
+### 2.7e `resolve_interrupted_approval`
+
+Resolve the exact approval gate restored for an interrupted durable turn:
+
+```json
+{
+  "type": "resolve_interrupted_approval",
+  "recovery_version": 1,
+  "request_id": "recovery-request-003",
+  "session_id": "session-desktop-001",
+  "turn_id": "turn-002",
+  "cursor": {
+    "journal_sequence": 42,
+    "journal_digest": "6666666666666666666666666666666666666666666666666666666666666666"
+  },
+  "approval_id": "approval-002",
+  "decision": "approve",
+  "answer": "Proceed"
+}
+```
+
+`decision` is `approve` or `deny`; `answer` is optional. Core binds the
+decision to the request, inspected cursor, interrupted turn, and exact durable
+approval ID. A stale cursor or approval ID fails closed. The
+`session_resync`, `resume_turn`, and `resolve_interrupted_approval` command
+objects are closed: unknown top-level fields are rejected instead of silently
+ignored.
 
 ### 2.8 `add_mcp_server`
 

@@ -36,11 +36,12 @@
 #![cfg(unix)]
 
 use std::io::{Read, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use portable_pty::{CommandBuilder, MasterPty, PtySize, native_pty_system};
 use tempfile::TempDir;
+use wcore_agent::session_journal::{ApprovalResolution, SessionEvent, SessionJournal};
 
 // Shared mock-LLM harness support (the scriptable Anthropic-shaped server the
 // real provider talks to). Included by path so this binary and
@@ -51,6 +52,22 @@ mod support;
 /// Path to the debug binary under test.
 fn binary() -> &'static str {
     env!("CARGO_BIN_EXE_wayland-core")
+}
+
+fn only_session_journal(home: &Path) -> PathBuf {
+    let sessions = home.join("sessions");
+    let journals = std::fs::read_dir(&sessions)
+        .unwrap_or_else(|error| panic!("read session directory {sessions:?}: {error}"))
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .filter(|path| path.extension().and_then(|ext| ext.to_str()) == Some("journal"))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        journals.len(),
+        1,
+        "expected one session journal under {sessions:?}, found {journals:?}"
+    );
+    journals.into_iter().next().unwrap()
 }
 
 /// Seed `<home>/config.toml` with a minimal valid config so the TUI's
@@ -169,7 +186,10 @@ impl PtyHarness {
         cmd.env_remove("ANTHROPIC_API_KEY");
         cmd.env_remove("OPENAI_API_KEY");
         cmd.cwd(home);
-        let child = pty.slave.spawn_command(cmd).expect("spawn wayland-core");
+        let vault = support::vault::configure_pty(&mut cmd);
+        let child = pty.slave.spawn_command(cmd);
+        drop(vault);
+        let child = child.expect("spawn wayland-core");
 
         // The reader thread pumps the PTY's byte stream into a shared
         // vt100 parser; tests query the screen grid by locking the
@@ -516,16 +536,35 @@ fn agent_turn_streams_mock_assistant_text_into_the_transcript() {
         Duration::from_secs(30),
         "mock-scripted assistant text to render in the transcript after a real agent turn",
     );
+    h.wait_for(
+        |s| !s.contains("Esc interrupt"),
+        Duration::from_secs(30),
+        "mock-scripted agent turn to reach its idle terminal state",
+    );
 
     // `/provider` (bare) opens the arrow-key picker OVERLAY — reaching its real
     // handler, not the LLM. Drive it through the palette, assert the picker
     // paints a provider row, then `esc` to close before the shutdown path.
     h.send(b"/");
-    std::thread::sleep(Duration::from_millis(400));
-    h.send(b"provider");
+    h.wait_for(
+        |s| s.contains("/  command") || s.contains("command "),
+        Duration::from_secs(3),
+        "palette overlay to open before selecting /provider",
+    );
+    // Pace the query bytes. The initial unfiltered palette already contains
+    // the `/provider` row, so a screen-only wait can otherwise return before
+    // a bulk `provider\r` burst has crossed the PTY input boundary.
+    h.type_text("provider");
+    h.wait_for(
+        |s| s.contains("/ provider") && s.contains("/provider") && s.contains("switch provider"),
+        Duration::from_secs(3),
+        "provider query to render with the exact /provider palette row selected",
+    );
+    // Keep the query and the control key on separate PTY input boundaries.
+    // This is the same stabilization interval used by the other palette
+    // journeys in this harness.
     std::thread::sleep(Duration::from_millis(300));
     h.send(b"\r");
-    std::thread::sleep(Duration::from_millis(500));
     h.wait_for(
         |s| s.to_lowercase().contains("anthropic"),
         Duration::from_secs(6),
@@ -624,6 +663,94 @@ fn tool_call_renders_approval_then_executes_and_continues_on_approve() {
     );
 
     // Clean shutdown via the proven palette quit path.
+    h.send(b"/");
+    std::thread::sleep(Duration::from_millis(300));
+    h.send(b"exit\r");
+    let _ = h.wait_for_exit(Duration::from_secs(8));
+}
+
+/// F14 cancellation authority: Esc while a tool approval is pending cancels
+/// the whole turn cooperatively. Core must resolve the durable approval as
+/// cancelled before terminalizing the turn, and the proposed tool must never
+/// cross its execution boundary.
+#[test]
+fn esc_on_pending_approval_durably_cancels_turn_without_tool_execution() {
+    let home = TempDir::new().expect("tempdir");
+    let output_path = home.path().join("must_not_be_written.txt");
+    let output_arg = output_path
+        .to_str()
+        .expect("tempdir path utf-8")
+        .to_string();
+
+    let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
+    let server = rt.block_on(
+        support::mock_llm::MockLlm::new()
+            .tool_use(
+                "Write",
+                serde_json::json!({
+                    "file_path": output_arg,
+                    "content": "F14_TOOL_MUST_NOT_EXECUTE"
+                }),
+            )
+            .start(),
+    );
+    seed_config_with_base_url(home.path(), &server.uri());
+
+    let mut h = boot_to_workspace(home.path());
+    h.send(b"propose the guarded write\r");
+    h.wait_for(
+        |s| s.contains("approve") && s.contains("deny"),
+        Duration::from_secs(30),
+        "the Write approval card to become pending",
+    );
+
+    h.send(b"\x1b");
+    h.wait_for(
+        |s| s.contains("Cancellation requested"),
+        Duration::from_secs(5),
+        "Esc to request cooperative turn cancellation",
+    );
+    h.wait_for(
+        |s| s.contains("User aborted the session"),
+        Duration::from_secs(15),
+        "Core to durably finalize the cancelled approval turn",
+    );
+
+    assert!(
+        !output_path.exists(),
+        "the pending Write crossed its execution boundary during cancellation"
+    );
+
+    let entries = SessionJournal::replay(only_session_journal(home.path()))
+        .expect("replay cancelled TUI turn journal");
+    let approval_cancelled = entries
+        .iter()
+        .position(|entry| {
+            matches!(
+                &entry.event,
+                SessionEvent::ApprovalResolved {
+                    resolution: ApprovalResolution::Cancelled,
+                    ..
+                }
+            )
+        })
+        .expect("pending approval must resolve as Cancelled");
+    let turn_cancelled = entries
+        .iter()
+        .position(|entry| matches!(&entry.event, SessionEvent::TurnCancelled { .. }))
+        .expect("turn must terminalize as TurnCancelled");
+    assert!(
+        approval_cancelled < turn_cancelled,
+        "approval cancellation must be durable before TurnCancelled"
+    );
+    assert!(
+        entries.iter().all(|entry| !matches!(
+            &entry.event,
+            SessionEvent::ToolExecutionStarted { .. } | SessionEvent::ToolExecutionFinished { .. }
+        )),
+        "cancelled approval produced a physical tool execution receipt"
+    );
+
     h.send(b"/");
     std::thread::sleep(Duration::from_millis(300));
     h.send(b"exit\r");
@@ -963,11 +1090,12 @@ fn resume_repaints_prior_conversation_into_the_transcript() {
 /// covers the real-provider Ctrl-C path; this is the deterministic mock twin and
 /// adds the recover-and-continue assertion.)
 #[test]
-fn esc_cancels_an_in_flight_turn_and_the_session_keeps_working() {
+fn esc_on_an_accepted_provider_stream_surfaces_recovery_and_blocks_redispatch() {
     let home = TempDir::new().expect("tempdir");
 
-    // Turn 0 is SLOW (reply held ~4s) so we can interrupt it; turn 1 is a fast
-    // text turn proving the loop still works after the cancel.
+    // Turn 0 is SLOW (reply held ~4s) so we can interrupt it after the
+    // physical provider boundary. A second scripted response exists only to
+    // prove the blocked follow-up cannot consume it before reconciliation.
     let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
     let server = rt.block_on(
         support::mock_llm::MockLlm::new()
@@ -1005,13 +1133,14 @@ fn esc_cancels_an_in_flight_turn_and_the_session_keeps_working() {
     }
 
     // Interrupt: ESC is the in-flight cancel affordance (workspace.rs maps
-    // `Esc while streaming` → /cancel). The cancel emits a "Turn cancelled."
-    // Info message (engine_bridge.rs::cancel).
+    // `Esc while streaming` → /cancel). The TUI acknowledges the request
+    // immediately while Core retains the run future long enough to durably
+    // finalize cancellation or preserve unknown provider authority.
     h.send(b"\x1b");
     h.wait_for(
-        |s| s.contains("Turn cancelled"),
+        |s| s.contains("Cancellation requested"),
         Duration::from_secs(15),
-        "the in-flight turn to cancel cleanly with a 'Turn cancelled.' notice",
+        "the in-flight turn to acknowledge the cancellation request",
     );
 
     // The slow body must NOT have rendered — we interrupted before it arrived.
@@ -1021,15 +1150,48 @@ fn esc_cancels_an_in_flight_turn_and_the_session_keeps_working() {
         "the cancelled turn's body must not render; screen:\n{after_cancel}"
     );
 
-    // SURVIVAL: a fresh turn after the cancel must complete normally. This is
-    // the real point — a cancel that bricks the loop is the failure mode.
-    std::thread::sleep(Duration::from_millis(600));
+    // F14: local Esc is not proof that an already-accepted provider request
+    // stopped. Provider attempts do not have the tool-effect reconciliation
+    // authority behind `/recover reconcile`, so the TUI must surface the
+    // durable unknown outcome and expose no unsafe recovery action.
+    h.wait_for(
+        |s| {
+            let screen = s.to_ascii_lowercase();
+            screen.contains("suspended")
+                && screen.contains("provideroutcomeunknown")
+                && screen.contains("allowed: none (fail-closed)")
+        },
+        Duration::from_secs(15),
+        "Esc to surface the fail-closed provider-outcome-unknown state",
+    );
+
+    // A normal message while the provider outcome is unresolved must fail
+    // closed and must not trigger the fixture's second provider response.
     h.type_text("now a normal turn");
     h.send(b"\r");
     h.wait_for(
-        |s| s.contains("WAYLAND_RECOVERED_OK"),
-        Duration::from_secs(30),
-        "a fresh turn to complete normally after the cancel (session not bricked)",
+        |s| {
+            let screen = s.to_ascii_lowercase();
+            screen.contains("session persistence authority unavailable")
+                && screen.contains("journal cursor")
+        },
+        Duration::from_secs(15),
+        "a pre-reconciliation follow-up to fail closed",
+    );
+    let requests = rt
+        .block_on(server.received_requests())
+        .expect("read provider fixture requests");
+    assert_eq!(
+        requests
+            .iter()
+            .filter(|request| request.url.path() == "/v1/messages")
+            .count(),
+        1,
+        "pre-reconciliation follow-up dispatched the provider"
+    );
+    assert!(
+        !h.screen_text().contains("WAYLAND_RECOVERED_OK"),
+        "the blocked second provider response became visible"
     );
 
     // Clean shutdown via the proven palette quit path.

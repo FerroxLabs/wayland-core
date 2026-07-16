@@ -16,7 +16,7 @@
 //!    `(user_id, calendar_day_utc)`. Crossing the daily cap blocks further
 //!    charges from that user until the next UTC day.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::sync::Arc;
 
 use chrono::{DateTime, Datelike, Utc};
@@ -25,7 +25,7 @@ use thiserror::Error;
 /// Caps for the session-keyed / user-keyed tracker. None on every field
 /// means "no cap" — the tracker accumulates totals for observability but
 /// every charge succeeds.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct BudgetCap {
     pub per_session_tokens: Option<u64>,
     pub per_session_input_tokens: Option<u64>,
@@ -187,13 +187,127 @@ struct ReservationEntry {
 }
 
 /// Opaque admission reservation returned before a provider call starts.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct BudgetReservation(u64);
 
 #[derive(Debug, Clone, Copy)]
 struct DailyTotals {
     /// Year-month-day in UTC (chrono `NaiveDate::num_days_from_ce` is
     /// stable across timezone boundary changes).
+    day_ordinal: i32,
+    usd: f64,
+}
+
+const BUDGET_TRACKER_SNAPSHOT_VERSION: u32 = 1;
+
+/// Serializable, immutable copy of tracker enforcement authority.
+///
+/// Derived reservation totals are intentionally omitted and rebuilt from the
+/// reservation ledger during restore so serialized input cannot make the two
+/// sources disagree.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BudgetTrackerSnapshot {
+    schema_version: u32,
+    caps: BudgetCap,
+    per_session: BTreeMap<String, SessionTotalsSnapshot>,
+    #[serde(with = "reservation_snapshot_ledger")]
+    reservations: BTreeMap<u64, ReservationSnapshot>,
+    next_reservation_id: u64,
+    session_extensions: BTreeMap<String, SessionExtensionSnapshot>,
+    blocked_sessions: BTreeSet<String>,
+    per_user_daily: BTreeMap<String, DailyTotalsSnapshot>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SessionTotalsSnapshot {
+    tokens: u64,
+    input_tokens: u64,
+    output_tokens: u64,
+    usd: f64,
+}
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ReservationSnapshot {
+    session_id: String,
+    input_tokens: u64,
+    output_tokens: u64,
+    usd: f64,
+}
+
+mod reservation_snapshot_ledger {
+    use std::collections::BTreeMap;
+
+    use serde::{Deserialize, Deserializer, Serialize, Serializer, de::Error as _};
+
+    use super::ReservationSnapshot;
+
+    #[derive(Serialize)]
+    #[serde(deny_unknown_fields)]
+    struct ReservationEntryRef<'a> {
+        reservation_id: u64,
+        reservation: &'a ReservationSnapshot,
+    }
+
+    #[derive(Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct ReservationEntry {
+        reservation_id: u64,
+        reservation: ReservationSnapshot,
+    }
+
+    pub(super) fn serialize<S>(
+        reservations: &BTreeMap<u64, ReservationSnapshot>,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        reservations
+            .iter()
+            .map(|(reservation_id, reservation)| ReservationEntryRef {
+                reservation_id: *reservation_id,
+                reservation,
+            })
+            .collect::<Vec<_>>()
+            .serialize(serializer)
+    }
+
+    pub(super) fn deserialize<'de, D>(
+        deserializer: D,
+    ) -> Result<BTreeMap<u64, ReservationSnapshot>, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let entries = Vec::<ReservationEntry>::deserialize(deserializer)?;
+        let mut reservations = BTreeMap::new();
+        for entry in entries {
+            let reservation_id = entry.reservation_id;
+            if reservations
+                .insert(reservation_id, entry.reservation)
+                .is_some()
+            {
+                return Err(D::Error::custom(format!(
+                    "duplicate reservation id {reservation_id}"
+                )));
+            }
+        }
+        Ok(reservations)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SessionExtensionSnapshot {
+    tokens: u64,
+    usd: f64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DailyTotalsSnapshot {
     day_ordinal: i32,
     usd: f64,
 }
@@ -211,16 +325,32 @@ pub struct BudgetTracker {
     blocked_sessions: HashSet<String>,
     per_user_daily: HashMap<String, DailyTotals>,
     sink: Option<Arc<dyn BudgetEventSink>>,
+    restore_applied: bool,
+    /// Reservation ids recovered from durable state and therefore requiring
+    /// explicit restart reconciliation before fresh provider admission.
+    restored_reservations: HashSet<u64>,
+}
+
+/// Outcome of conservatively charging every provider reservation recovered
+/// from durable state.
+#[derive(Debug, Clone)]
+pub struct RestoredReservationReconciliation {
+    /// Number of recovered reservations consumed by this reconciliation.
+    pub reservations_settled: usize,
+    /// Conservative input-token authority consumed while reconciling.
+    pub input_tokens_charged: u64,
+    /// Conservative output-token authority consumed while reconciling.
+    pub output_tokens_charged: u64,
+    /// Conservative cost authority consumed while reconciling.
+    pub cost_usd_charged: f64,
+    /// Cap receipts raised after the conservative charges were committed.
+    /// All reservations are settled even when one or more caps are exceeded.
+    pub cap_errors: Vec<BudgetError>,
 }
 
 impl BudgetTracker {
     pub fn new(caps: BudgetCap) -> Self {
-        let mut caps = caps;
-        for cap in [&mut caps.per_session_usd, &mut caps.per_user_daily_usd] {
-            if cap.is_some_and(|usd| !usd.is_finite() || usd < 0.0) {
-                *cap = Some(0.0);
-            }
-        }
+        let caps = normalize_caps(caps);
         Self {
             caps,
             per_session: HashMap::new(),
@@ -231,7 +361,244 @@ impl BudgetTracker {
             blocked_sessions: HashSet::new(),
             per_user_daily: HashMap::new(),
             sink: None,
+            restore_applied: false,
+            restored_reservations: HashSet::new(),
         }
+    }
+
+    /// Capture caps, extensions, committed usage, user-daily usage, blocked
+    /// sessions, and every in-flight provider reservation.
+    pub fn snapshot(&self) -> Result<BudgetTrackerSnapshot, crate::BudgetSnapshotError> {
+        let snapshot = BudgetTrackerSnapshot {
+            schema_version: BUDGET_TRACKER_SNAPSHOT_VERSION,
+            caps: self.caps.clone(),
+            per_session: self
+                .per_session
+                .iter()
+                .map(|(session_id, totals)| {
+                    (
+                        session_id.clone(),
+                        SessionTotalsSnapshot {
+                            tokens: totals.tokens,
+                            input_tokens: totals.input_tokens,
+                            output_tokens: totals.output_tokens,
+                            usd: totals.usd,
+                        },
+                    )
+                })
+                .collect(),
+            reservations: self
+                .reservations
+                .iter()
+                .map(|(id, entry)| {
+                    (
+                        *id,
+                        ReservationSnapshot {
+                            session_id: entry.session_id.clone(),
+                            input_tokens: entry.input_tokens,
+                            output_tokens: entry.output_tokens,
+                            usd: entry.usd,
+                        },
+                    )
+                })
+                .collect(),
+            next_reservation_id: self.next_reservation_id,
+            session_extensions: self
+                .session_extensions
+                .iter()
+                .map(|(session_id, extension)| {
+                    (
+                        session_id.clone(),
+                        SessionExtensionSnapshot {
+                            tokens: extension.tokens,
+                            usd: extension.usd,
+                        },
+                    )
+                })
+                .collect(),
+            blocked_sessions: self.blocked_sessions.iter().cloned().collect(),
+            per_user_daily: self
+                .per_user_daily
+                .iter()
+                .map(|(user_id, totals)| {
+                    (
+                        user_id.clone(),
+                        DailyTotalsSnapshot {
+                            day_ordinal: totals.day_ordinal,
+                            usd: totals.usd,
+                        },
+                    )
+                })
+                .collect(),
+        };
+        validate_tracker_snapshot(&snapshot)?;
+        Ok(snapshot)
+    }
+
+    /// Whether this tracker still contains only its configured caps and
+    /// process-local wiring, with no durable enforcement state applied.
+    pub fn is_pristine(&self) -> bool {
+        !self.restore_applied && self.durable_state_is_empty()
+    }
+
+    /// Build a tracker directly from serialized enforcement authority.
+    pub fn from_snapshot(
+        snapshot: BudgetTrackerSnapshot,
+    ) -> Result<Self, crate::BudgetSnapshotError> {
+        build_tracker_from_snapshot(snapshot)
+    }
+
+    /// Restore durable usage under the intersection of the captured caps and
+    /// the caps configured for the new process.
+    ///
+    /// `None` is treated as unbounded, so adding a current cap tightens a
+    /// previously unbounded snapshot. Durable per-session extensions are
+    /// clamped as necessary so their effective caps cannot exceed either the
+    /// captured authority or the current policy.
+    pub fn from_snapshot_with_current_caps(
+        snapshot: BudgetTrackerSnapshot,
+        current_caps: BudgetCap,
+    ) -> Result<Self, crate::BudgetSnapshotError> {
+        build_tracker_from_snapshot(constrain_tracker_snapshot(snapshot, current_caps)?)
+    }
+
+    /// Atomically apply serialized authority to a pristine tracker.
+    ///
+    /// The event sink is runtime wiring rather than durable state, so an
+    /// already-installed sink is retained. Reapplying a snapshot, including
+    /// an empty one, is rejected to prevent replay from double-restoring.
+    pub fn restore_snapshot(
+        &mut self,
+        snapshot: BudgetTrackerSnapshot,
+    ) -> Result<(), crate::BudgetSnapshotError> {
+        if self.restore_applied || !self.durable_state_is_empty() {
+            return Err(crate::BudgetSnapshotError::RestoreTargetNotPristine);
+        }
+        let mut restored = build_tracker_from_snapshot(snapshot)?;
+        restored.sink = self.sink.take();
+        *self = restored;
+        Ok(())
+    }
+
+    /// Apply durable usage to a pristine tracker while intersecting captured
+    /// authority with this tracker's current caps.
+    pub fn restore_snapshot_with_current_caps(
+        &mut self,
+        snapshot: BudgetTrackerSnapshot,
+    ) -> Result<(), crate::BudgetSnapshotError> {
+        if self.restore_applied || !self.durable_state_is_empty() {
+            return Err(crate::BudgetSnapshotError::RestoreTargetNotPristine);
+        }
+        let current_caps = self.caps.clone();
+        let mut restored = Self::from_snapshot_with_current_caps(snapshot, current_caps)?;
+        restored.sink = self.sink.take();
+        *self = restored;
+        Ok(())
+    }
+
+    /// Conservatively settle every provider reservation recovered after a
+    /// restart at its admitted maximum.
+    ///
+    /// The operation is exhaustive: a cap error blocks the affected session
+    /// but does not leave later restored reservations unsettled. Repeating the
+    /// call is safe and reports zero additional settlements.
+    pub fn reconcile_restored_reservations_conservatively(
+        &mut self,
+    ) -> RestoredReservationReconciliation {
+        let mut ids: Vec<_> = std::mem::take(&mut self.restored_reservations)
+            .into_iter()
+            .collect();
+        ids.sort_unstable();
+        let mut cap_errors = Vec::new();
+        let mut reservations_settled = 0;
+        let mut input_tokens_charged = 0u64;
+        let mut output_tokens_charged = 0u64;
+        let mut cost_usd_charged = 0.0;
+
+        for id in ids {
+            let Some(entry) = self.reservations.get(&id).cloned() else {
+                continue;
+            };
+            reservations_settled += 1;
+            input_tokens_charged = input_tokens_charged.saturating_add(entry.input_tokens);
+            output_tokens_charged = output_tokens_charged.saturating_add(entry.output_tokens);
+            let next_cost = cost_usd_charged + entry.usd;
+            cost_usd_charged = if next_cost.is_finite() {
+                next_cost
+            } else {
+                f64::INFINITY
+            };
+            if let Err(error) = self.settle_turn(
+                BudgetReservation(id),
+                entry.input_tokens,
+                entry.output_tokens,
+                entry.usd,
+            ) {
+                cap_errors.push(error);
+            }
+        }
+
+        RestoredReservationReconciliation {
+            reservations_settled,
+            input_tokens_charged,
+            output_tokens_charged,
+            cost_usd_charged,
+            cap_errors,
+        }
+    }
+
+    /// Whether this tracker still owns an in-flight provider reservation.
+    ///
+    /// Durable coordinators use this to validate that their external-effect
+    /// correlation ledger names authority that actually exists in the
+    /// tracker snapshot.
+    pub fn has_reservation(&self, reservation: BudgetReservation) -> bool {
+        self.reservations.contains_key(&reservation.0)
+    }
+
+    /// Return the admitted maximum owned by one in-flight provider
+    /// reservation. Restart coordinators use this before consuming the
+    /// reservation so provider and execution ledgers receive the same charge.
+    pub fn reservation_admitted_maximum(
+        &self,
+        reservation: BudgetReservation,
+    ) -> Option<(u64, u64, f64)> {
+        self.reservations
+            .get(&reservation.0)
+            .map(|entry| (entry.input_tokens, entry.output_tokens, entry.usd))
+    }
+
+    /// Consume one in-flight provider reservation at its admitted maximum.
+    ///
+    /// This is the targeted counterpart to restart-wide reconciliation. It
+    /// lets a durable coordinator settle only the reservation whose physical
+    /// dispatch is known to have started, while releasing proved no-send
+    /// reservations independently.
+    pub fn settle_reservation_conservatively(
+        &mut self,
+        reservation: BudgetReservation,
+    ) -> Result<bool, BudgetError> {
+        let Some(entry) = self.reservations.get(&reservation.0).cloned() else {
+            return Ok(false);
+        };
+        self.settle_turn(
+            reservation,
+            entry.input_tokens,
+            entry.output_tokens,
+            entry.usd,
+        )?;
+        Ok(true)
+    }
+
+    fn durable_state_is_empty(&self) -> bool {
+        self.per_session.is_empty()
+            && self.reserved_per_session.is_empty()
+            && self.reservations.is_empty()
+            && self.next_reservation_id == 1
+            && self.session_extensions.is_empty()
+            && self.blocked_sessions.is_empty()
+            && self.per_user_daily.is_empty()
+            && self.restored_reservations.is_empty()
     }
 
     /// Install an observability sink. Calls emit synchronously on the
@@ -325,6 +692,15 @@ impl BudgetTracker {
                 .map(|extension| extension.usd)
                 .unwrap_or(0.0)
         })
+    }
+
+    /// Effective aggregate session limits, including durable operator grants.
+    #[must_use]
+    pub fn effective_session_limits(&self, session_id: &str) -> (Option<u64>, Option<f64>) {
+        (
+            self.session_token_cap(session_id),
+            self.session_usd_cap(session_id),
+        )
     }
 
     fn session_input_token_cap(&self, session_id: &str) -> Option<u64> {
@@ -624,6 +1000,7 @@ impl BudgetTracker {
     }
 
     fn take_reservation(&mut self, reservation: BudgetReservation) -> Option<ReservationEntry> {
+        self.restored_reservations.remove(&reservation.0);
         let entry = self.reservations.remove(&reservation.0)?;
         if let Some(totals) = self.reserved_per_session.get_mut(&entry.session_id) {
             totals.tokens = totals.tokens.saturating_sub(entry.tokens);
@@ -862,6 +1239,304 @@ impl BudgetTracker {
             .into_iter()
             .flatten()
             .reduce(f32::max)
+    }
+}
+
+fn validate_tracker_snapshot(
+    snapshot: &BudgetTrackerSnapshot,
+) -> Result<(), crate::BudgetSnapshotError> {
+    if snapshot.schema_version != BUDGET_TRACKER_SNAPSHOT_VERSION {
+        return Err(crate::BudgetSnapshotError::UnsupportedVersion {
+            found: snapshot.schema_version,
+            expected: BUDGET_TRACKER_SNAPSHOT_VERSION,
+        });
+    }
+    validate_optional_usd("caps.per_session_usd", snapshot.caps.per_session_usd)?;
+    validate_optional_usd("caps.per_user_daily_usd", snapshot.caps.per_user_daily_usd)?;
+
+    for (session_id, totals) in &snapshot.per_session {
+        validate_usd(&format!("per_session[{session_id:?}].usd"), totals.usd)?;
+    }
+    for (session_id, extension) in &snapshot.session_extensions {
+        validate_usd(
+            &format!("session_extensions[{session_id:?}].usd"),
+            extension.usd,
+        )?;
+        if let Some(base) = snapshot.caps.per_session_usd
+            && checked_usd_add(base, extension.usd).is_none()
+        {
+            return Err(invalid_snapshot(format!(
+                "session_extensions[{session_id:?}].usd makes the effective cap unrepresentable"
+            )));
+        }
+    }
+    for (user_id, totals) in &snapshot.per_user_daily {
+        validate_usd(&format!("per_user_daily[{user_id:?}].usd"), totals.usd)?;
+    }
+
+    let mut max_reservation_id = 0;
+    let mut reserved_usd = BTreeMap::<&str, f64>::new();
+    for (id, reservation) in &snapshot.reservations {
+        if *id == 0 {
+            return Err(invalid_snapshot("reservation id must be non-zero"));
+        }
+        max_reservation_id = max_reservation_id.max(*id);
+        validate_usd(&format!("reservations[{id}].usd"), reservation.usd)?;
+        let total = reserved_usd
+            .entry(reservation.session_id.as_str())
+            .or_default();
+        *total = checked_usd_add(*total, reservation.usd).ok_or_else(|| {
+            invalid_snapshot(format!(
+                "reservations for session {:?} overflow USD authority",
+                reservation.session_id
+            ))
+        })?;
+    }
+    if snapshot.next_reservation_id == 0 || max_reservation_id >= snapshot.next_reservation_id {
+        return Err(invalid_snapshot(
+            "next_reservation_id must be non-zero and greater than every reservation id",
+        ));
+    }
+    Ok(())
+}
+
+fn build_tracker_from_snapshot(
+    snapshot: BudgetTrackerSnapshot,
+) -> Result<BudgetTracker, crate::BudgetSnapshotError> {
+    validate_tracker_snapshot(&snapshot)?;
+
+    let per_session = snapshot
+        .per_session
+        .into_iter()
+        .map(|(session_id, totals)| {
+            (
+                session_id,
+                SessionTotals {
+                    tokens: totals.tokens,
+                    input_tokens: totals.input_tokens,
+                    output_tokens: totals.output_tokens,
+                    usd: totals.usd,
+                },
+            )
+        })
+        .collect();
+    let mut reserved_per_session = HashMap::<String, ReservedTotals>::new();
+    let mut reservations = HashMap::new();
+    for (id, reservation) in snapshot.reservations {
+        let tokens = reservation
+            .input_tokens
+            .saturating_add(reservation.output_tokens);
+        let totals = reserved_per_session
+            .entry(reservation.session_id.clone())
+            .or_default();
+        totals.tokens = totals.tokens.saturating_add(tokens);
+        totals.input_tokens = totals.input_tokens.saturating_add(reservation.input_tokens);
+        totals.output_tokens = totals
+            .output_tokens
+            .saturating_add(reservation.output_tokens);
+        totals.usd = checked_usd_add(totals.usd, reservation.usd).ok_or_else(|| {
+            invalid_snapshot(format!(
+                "reservations for session {:?} overflow USD authority",
+                reservation.session_id
+            ))
+        })?;
+        reservations.insert(
+            id,
+            ReservationEntry {
+                session_id: reservation.session_id,
+                tokens,
+                input_tokens: reservation.input_tokens,
+                output_tokens: reservation.output_tokens,
+                usd: reservation.usd,
+            },
+        );
+    }
+
+    let restored_reservations = reservations.keys().copied().collect();
+    Ok(BudgetTracker {
+        caps: snapshot.caps,
+        per_session,
+        reserved_per_session,
+        reservations,
+        next_reservation_id: snapshot.next_reservation_id,
+        session_extensions: snapshot
+            .session_extensions
+            .into_iter()
+            .map(|(session_id, extension)| {
+                (
+                    session_id,
+                    SessionExtension {
+                        tokens: extension.tokens,
+                        usd: extension.usd,
+                    },
+                )
+            })
+            .collect(),
+        blocked_sessions: snapshot.blocked_sessions.into_iter().collect(),
+        per_user_daily: snapshot
+            .per_user_daily
+            .into_iter()
+            .map(|(user_id, totals)| {
+                (
+                    user_id,
+                    DailyTotals {
+                        day_ordinal: totals.day_ordinal,
+                        usd: totals.usd,
+                    },
+                )
+            })
+            .collect(),
+        sink: None,
+        restore_applied: true,
+        restored_reservations,
+    })
+}
+
+fn constrain_tracker_snapshot(
+    mut snapshot: BudgetTrackerSnapshot,
+    current_caps: BudgetCap,
+) -> Result<BudgetTrackerSnapshot, crate::BudgetSnapshotError> {
+    validate_tracker_snapshot(&snapshot)?;
+    let current_caps = normalize_caps(current_caps);
+    let captured_caps = snapshot.caps.clone();
+
+    for extension in snapshot.session_extensions.values_mut() {
+        extension.tokens = clamp_token_extension(&captured_caps, &current_caps, extension.tokens);
+        extension.usd = clamp_usd_extension(
+            captured_caps.per_session_usd,
+            current_caps.per_session_usd,
+            extension.usd,
+        );
+    }
+    snapshot
+        .session_extensions
+        .retain(|_, extension| extension.tokens != 0 || extension.usd != 0.0);
+    snapshot.caps = intersect_caps(&captured_caps, &current_caps);
+    validate_tracker_snapshot(&snapshot)?;
+    Ok(snapshot)
+}
+
+fn normalize_caps(mut caps: BudgetCap) -> BudgetCap {
+    for cap in [&mut caps.per_session_usd, &mut caps.per_user_daily_usd] {
+        if cap.is_some_and(|usd| !usd.is_finite() || usd < 0.0) {
+            *cap = Some(0.0);
+        }
+    }
+    caps
+}
+
+fn intersect_caps(captured: &BudgetCap, current: &BudgetCap) -> BudgetCap {
+    BudgetCap {
+        per_session_tokens: intersect_optional(
+            captured.per_session_tokens,
+            current.per_session_tokens,
+        ),
+        per_session_input_tokens: intersect_optional(
+            captured.per_session_input_tokens,
+            current.per_session_input_tokens,
+        ),
+        per_session_output_tokens: intersect_optional(
+            captured.per_session_output_tokens,
+            current.per_session_output_tokens,
+        ),
+        per_session_usd: intersect_optional_f64(captured.per_session_usd, current.per_session_usd),
+        per_user_daily_usd: intersect_optional_f64(
+            captured.per_user_daily_usd,
+            current.per_user_daily_usd,
+        ),
+    }
+}
+
+fn intersect_optional<T: Ord + Copy>(captured: Option<T>, current: Option<T>) -> Option<T> {
+    match (captured, current) {
+        (Some(captured), Some(current)) => Some(captured.min(current)),
+        (Some(value), None) | (None, Some(value)) => Some(value),
+        (None, None) => None,
+    }
+}
+
+fn intersect_optional_f64(captured: Option<f64>, current: Option<f64>) -> Option<f64> {
+    match (captured, current) {
+        (Some(captured), Some(current)) => Some(captured.min(current)),
+        (Some(value), None) | (None, Some(value)) => Some(value),
+        (None, None) => None,
+    }
+}
+
+fn clamp_token_extension(captured: &BudgetCap, current: &BudgetCap, extension: u64) -> u64 {
+    [
+        extension_headroom_u64(
+            captured.per_session_tokens,
+            current.per_session_tokens,
+            extension,
+        ),
+        extension_headroom_u64(
+            captured.per_session_input_tokens,
+            current.per_session_input_tokens,
+            extension,
+        ),
+        extension_headroom_u64(
+            captured.per_session_output_tokens,
+            current.per_session_output_tokens,
+            extension,
+        ),
+    ]
+    .into_iter()
+    .flatten()
+    .fold(extension, u64::min)
+}
+
+fn extension_headroom_u64(
+    captured_base: Option<u64>,
+    current_cap: Option<u64>,
+    extension: u64,
+) -> Option<u64> {
+    let captured_effective = captured_base.map(|base| base.saturating_add(extension));
+    let target = intersect_optional(captured_effective, current_cap);
+    let base = intersect_optional(captured_base, current_cap);
+    match (target, base) {
+        (Some(target), Some(base)) => Some(target.saturating_sub(base)),
+        _ => None,
+    }
+}
+
+fn clamp_usd_extension(
+    captured_base: Option<f64>,
+    current_cap: Option<f64>,
+    extension: f64,
+) -> f64 {
+    let captured_effective = captured_base.and_then(|base| checked_usd_add(base, extension));
+    let target = intersect_optional_f64(captured_effective, current_cap);
+    let base = intersect_optional_f64(captured_base, current_cap);
+    match (target, base) {
+        (Some(target), Some(base)) => (target - base).max(0.0).min(extension),
+        _ => extension,
+    }
+}
+
+fn validate_optional_usd(
+    field: &str,
+    value: Option<f64>,
+) -> Result<(), crate::BudgetSnapshotError> {
+    if let Some(value) = value {
+        validate_usd(field, value)?;
+    }
+    Ok(())
+}
+
+fn validate_usd(field: &str, value: f64) -> Result<(), crate::BudgetSnapshotError> {
+    if value.is_finite() && value >= 0.0 {
+        Ok(())
+    } else {
+        Err(invalid_snapshot(format!(
+            "{field} must be finite and non-negative"
+        )))
+    }
+}
+
+fn invalid_snapshot(reason: impl Into<String>) -> crate::BudgetSnapshotError {
+    crate::BudgetSnapshotError::Invalid {
+        reason: reason.into(),
     }
 }
 
@@ -1120,6 +1795,11 @@ mod tests {
 
         tracker.extend_session("s1", 50, 0.50).unwrap();
 
+        assert_eq!(
+            tracker.effective_session_limits("s1"),
+            (Some(150), Some(1.5))
+        );
+
         assert!(tracker.reserve("s1", 50, 0.50).is_ok());
         assert!(tracker.reserve("s2", 101, 0.0).is_err());
     }
@@ -1192,5 +1872,207 @@ mod tests {
         let _ = t.charge_for_user_at("s1", "alice", 0, 0.10, now);
         // Per-user cap rejected the charge → session bucket must be 0.
         assert_eq!(t.session_totals("s1").1, 0.0);
+    }
+
+    #[test]
+    fn tracker_snapshot_json_roundtrip_preserves_enforcement_authority() {
+        let caps = BudgetCap::builder()
+            .per_session_tokens(100)
+            .per_session_usd(1.0)
+            .build();
+        let mut tracker = BudgetTracker::new(caps);
+        tracker.charge("committed", 60, 0.60).unwrap();
+        tracker.reserve("committed", 20, 0.20).unwrap();
+        assert!(tracker.reserve("blocked", 101, 0.0).is_err());
+        tracker.charge("extended", 100, 1.0).unwrap();
+        assert!(tracker.reserve("extended", 1, 0.01).is_err());
+        tracker.extend_session("extended", 50, 0.50).unwrap();
+
+        let snapshot = tracker.snapshot().unwrap();
+        let json = serde_json::to_vec(&snapshot).unwrap();
+        let wire: serde_json::Value = serde_json::from_slice(&json).unwrap();
+        assert!(wire["reservations"].is_array());
+        let decoded: BudgetTrackerSnapshot = serde_json::from_slice(&json).unwrap();
+        let mut restored = BudgetTracker::from_snapshot(decoded.clone()).unwrap();
+
+        assert_eq!(restored.snapshot().unwrap(), decoded);
+        assert_eq!(restored.session_totals("committed"), (60, 0.60));
+        assert_eq!(restored.reserved_totals("committed"), (20, 0.20));
+        assert!(restored.reserve("blocked", 1, 0.0).is_err());
+        assert!(restored.reserve("committed", 21, 0.21).is_err());
+        assert!(restored.reserve("extended", 50, 0.50).is_ok());
+    }
+
+    #[test]
+    fn tracker_snapshot_rejects_duplicate_reservation_ids_on_the_wire() {
+        let mut tracker = BudgetTracker::new(BudgetCap::default());
+        tracker.reserve("session", 1, 0.25).unwrap();
+        let mut wire = serde_json::to_value(tracker.snapshot().unwrap()).unwrap();
+        let duplicate = wire["reservations"][0].clone();
+        wire["reservations"].as_array_mut().unwrap().push(duplicate);
+
+        assert!(serde_json::from_value::<BudgetTrackerSnapshot>(wire).is_err());
+    }
+
+    #[test]
+    fn tracker_pristine_state_is_typed_and_independent_of_snapshot_wire_shape() {
+        let mut tracker = BudgetTracker::new(BudgetCap::default());
+        assert!(tracker.is_pristine());
+
+        tracker.reserve("session", 1, 0.25).unwrap();
+        assert!(!tracker.is_pristine());
+    }
+
+    #[test]
+    fn tracker_refuses_duplicate_snapshot_restore() {
+        let snapshot = BudgetTracker::new(BudgetCap::default()).snapshot().unwrap();
+        let mut target = BudgetTracker::new(BudgetCap::default());
+
+        target.restore_snapshot(snapshot.clone()).unwrap();
+        assert_eq!(
+            target.restore_snapshot(snapshot).unwrap_err(),
+            crate::BudgetSnapshotError::RestoreTargetNotPristine
+        );
+    }
+
+    #[test]
+    fn tracker_snapshot_rejects_nonfinite_and_negative_usd() {
+        let mut cap_snapshot = BudgetTracker::new(BudgetCap::default()).snapshot().unwrap();
+        cap_snapshot.caps.per_session_usd = Some(f64::NAN);
+        assert!(matches!(
+            BudgetTracker::from_snapshot(cap_snapshot),
+            Err(crate::BudgetSnapshotError::Invalid { .. })
+        ));
+
+        let mut tracker = BudgetTracker::new(BudgetCap::default());
+        tracker.charge("session", 1, 0.25).unwrap();
+        let mut committed_snapshot = tracker.snapshot().unwrap();
+        committed_snapshot
+            .per_session
+            .get_mut("session")
+            .unwrap()
+            .usd = f64::INFINITY;
+        assert!(matches!(
+            BudgetTracker::from_snapshot(committed_snapshot),
+            Err(crate::BudgetSnapshotError::Invalid { .. })
+        ));
+
+        let mut tracker = BudgetTracker::new(BudgetCap::default());
+        tracker.reserve("session", 1, 0.25).unwrap();
+        let mut reservation_snapshot = tracker.snapshot().unwrap();
+        reservation_snapshot
+            .reservations
+            .values_mut()
+            .next()
+            .unwrap()
+            .usd = -0.01;
+        assert!(matches!(
+            BudgetTracker::from_snapshot(reservation_snapshot),
+            Err(crate::BudgetSnapshotError::Invalid { .. })
+        ));
+    }
+
+    #[test]
+    fn restored_inflight_reservation_remains_conservative_until_reconciled() {
+        let mut tracker = BudgetTracker::new(
+            BudgetCap::builder()
+                .per_session_tokens(100)
+                .per_session_usd(1.0)
+                .build(),
+        );
+        let reservation = tracker.reserve("session", 80, 0.80).unwrap();
+        let encoded_reservation = serde_json::to_vec(&reservation).unwrap();
+        let snapshot = tracker.snapshot().unwrap();
+
+        let mut restored = BudgetTracker::from_snapshot(snapshot).unwrap();
+        assert!(restored.reserve("session", 21, 0.21).is_err());
+        let reservation: BudgetReservation = serde_json::from_slice(&encoded_reservation).unwrap();
+        restored.settle(reservation, 20, 0.20).unwrap();
+        assert_eq!(restored.reserved_totals("session"), (0, 0.0));
+        assert_eq!(restored.session_totals("session"), (20, 0.20));
+    }
+
+    #[test]
+    fn current_caps_intersect_every_axis_and_clamp_durable_extensions() {
+        let captured_caps = BudgetCap {
+            per_session_tokens: Some(100),
+            per_session_input_tokens: Some(80),
+            per_session_output_tokens: None,
+            per_session_usd: Some(1.0),
+            per_user_daily_usd: None,
+        };
+        let mut tracker = BudgetTracker::new(captured_caps);
+        tracker.charge("used", 60, 0.60).unwrap();
+        assert!(tracker.reserve("blocked", 101, 0.0).is_err());
+        tracker.charge("extended", 100, 1.0).unwrap();
+        assert!(tracker.reserve("extended", 1, 0.01).is_err());
+        tracker.extend_session("extended", 50, 0.50).unwrap();
+
+        let current_caps = BudgetCap {
+            per_session_tokens: Some(120),
+            per_session_input_tokens: Some(70),
+            per_session_output_tokens: Some(30),
+            per_session_usd: Some(1.20),
+            per_user_daily_usd: Some(0.40),
+        };
+        let mut restored = BudgetTracker::from_snapshot_with_current_caps(
+            tracker.snapshot().unwrap(),
+            current_caps,
+        )
+        .unwrap();
+        let restored_snapshot = restored.snapshot().unwrap();
+
+        assert_eq!(restored_snapshot.caps.per_session_tokens, Some(100));
+        assert_eq!(restored_snapshot.caps.per_session_input_tokens, Some(70));
+        assert_eq!(restored_snapshot.caps.per_session_output_tokens, Some(30));
+        assert_eq!(restored_snapshot.caps.per_session_usd, Some(1.0));
+        assert_eq!(restored_snapshot.caps.per_user_daily_usd, Some(0.40));
+        let extension = restored_snapshot
+            .session_extensions
+            .get("extended")
+            .unwrap();
+        assert_eq!(extension.tokens, 0);
+        assert!((extension.usd - 0.20).abs() < f64::EPSILON * 4.0);
+        assert_eq!(restored.session_totals("used"), (60, 0.60));
+        assert!(restored.reserve("blocked", 1, 0.0).is_err());
+    }
+
+    #[test]
+    fn restart_reconciliation_settles_every_restored_reservation_at_maximum() {
+        let mut tracker = BudgetTracker::new(
+            BudgetCap::builder()
+                .per_session_tokens(100)
+                .per_session_usd(1.0)
+                .build(),
+        );
+        tracker.reserve("over-current", 80, 0.80).unwrap();
+        tracker.reserve("within-current", 20, 0.20).unwrap();
+        let mut restored = BudgetTracker::from_snapshot_with_current_caps(
+            tracker.snapshot().unwrap(),
+            BudgetCap::builder()
+                .per_session_tokens(50)
+                .per_session_usd(0.50)
+                .build(),
+        )
+        .unwrap();
+
+        let report = restored.reconcile_restored_reservations_conservatively();
+
+        assert_eq!(report.reservations_settled, 2);
+        assert_eq!(report.input_tokens_charged, 100);
+        assert_eq!(report.output_tokens_charged, 0);
+        assert!((report.cost_usd_charged - 1.0).abs() < f64::EPSILON);
+        assert_eq!(report.cap_errors.len(), 1);
+        assert_eq!(restored.reserved_totals("over-current"), (0, 0.0));
+        assert_eq!(restored.reserved_totals("within-current"), (0, 0.0));
+        assert_eq!(restored.session_totals("over-current"), (80, 0.80));
+        assert_eq!(restored.session_totals("within-current"), (20, 0.20));
+        assert!(restored.reserve("over-current", 1, 0.0).is_err());
+        let repeated = restored.reconcile_restored_reservations_conservatively();
+        assert_eq!(repeated.reservations_settled, 0);
+        assert_eq!(repeated.input_tokens_charged, 0);
+        assert_eq!(repeated.output_tokens_charged, 0);
+        assert_eq!(repeated.cost_usd_charged, 0.0);
+        assert!(repeated.cap_errors.is_empty());
     }
 }

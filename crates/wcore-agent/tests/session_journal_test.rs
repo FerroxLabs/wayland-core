@@ -5,19 +5,24 @@ use std::path::Path;
 use serde_json::json;
 use sha2::{Digest, Sha256};
 use wcore_agent::session_journal::{
-    ApprovalDecision, ApprovalOrigin, ApprovalResolution, BudgetAmount, BudgetOwner, BudgetPurpose,
-    BudgetUnit, CheckpointOrigin, CheckpointPurpose, ChildNotStartedReason, CompletionOutcome,
-    DeliveryCompletion, DeliveryEvidence, DeliveryNotStartedReason, DeliveryOrigin, DeliveryStage,
+    ActiveTurnBudgetAuthority, ApprovalDecision, ApprovalOrigin, ApprovalResolution,
+    BUDGET_AUTHORITY_SCHEMA_VERSION, BudgetAmount, BudgetAuthorityCursor, BudgetAuthorityState,
+    BudgetOwner, BudgetPurpose, BudgetUnit, BudgetWallClockAuthority, CheckpointOrigin,
+    CheckpointPurpose, ChildNotStartedReason, CompletionOutcome, DeliveryCompletion,
+    DeliveryEvidence, DeliveryNotStartedReason, DeliveryOrigin, DeliveryStage,
     DeliveryUnknownReason, ExternalEffectState, GENESIS_CHECKSUM, JournalEnvelope, JournalError,
-    ProviderAttemptNotStartedReason, ProviderAttemptPurpose, ProviderStreamEvent,
-    ReducedSessionState, SESSION_JOURNAL_SCHEMA_VERSION, SessionEvent, SessionJournal,
-    SessionSnapshot, StoredToolInput, ToolEffectState, ToolNotStartedReason, TurnState,
-    load_snapshot, provider_request_digest, replay_from_snapshot, replay_state,
-    state_payload_digest, verify_chain, write_snapshot,
+    LEGACY_BUDGET_AUTHORITY_SCHEMA_VERSION, ProviderAttemptNotStartedReason,
+    ProviderAttemptPurpose, ProviderStreamEvent, ReducedSessionState,
+    SESSION_JOURNAL_SCHEMA_VERSION, SessionEvent, SessionJournal, SessionSnapshot, StoredToolInput,
+    ToolEffectState, ToolNotStartedReason, TurnState, decode_prepared_provider_request_snapshot,
+    load_snapshot, prepared_provider_request_snapshot, provider_request_digest,
+    replay_from_snapshot, replay_state, state_payload_digest, verify_chain, write_snapshot,
 };
-use wcore_types::llm::LlmRequest;
-use wcore_types::message::{ContentBlock, Message, Role};
-use wcore_types::tool::ToolEffectContract;
+use wcore_budget::{BudgetCap, BudgetTracker, ExecutionBudget};
+use wcore_types::cache_tier::CacheTier;
+use wcore_types::llm::{LlmRequest, RoutingHint, ThinkingConfig};
+use wcore_types::message::{ContentBlock, Message, MessageCacheHint, Role};
+use wcore_types::tool::{ToolDef, ToolEffectContract};
 
 fn turn_started(turn_id: &str) -> SessionEvent {
     SessionEvent::TurnStarted {
@@ -69,6 +74,7 @@ fn tool_intent(
         effective_input_digest,
         effect_contract: ToolEffectContract::default(),
         effect_receipt: None,
+        pre_hook_phase_id: None,
     }
 }
 
@@ -133,3 +139,4 @@ fn frame(body: &[u8]) -> Vec<u8> {
 
 include!("session_journal_test/foundation_cases.rs");
 include!("session_journal_test/effect_and_conversation_cases.rs");
+include!("session_journal_test/budget_authority_cases.rs");

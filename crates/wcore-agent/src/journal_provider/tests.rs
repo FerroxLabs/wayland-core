@@ -267,8 +267,49 @@ async fn physical_attempt_and_stream_are_durable_before_visibility() {
     let response = stream.batches.iter().flatten().cloned().collect::<Vec<_>>();
     assert_eq!(
         attempt.response_digest,
-        Some(response_digest(&response).unwrap())
+        Some(provider_response_digest(&response).unwrap())
     );
+}
+
+#[tokio::test]
+async fn correlated_provider_round_uses_only_v2_attempt_receipts() {
+    let server = success_server().await;
+    let fixture = JournalFixture::new();
+    let provider = journaled(
+        &server,
+        &fixture,
+        LifecyclePurpose::Conversation,
+        ProviderScript::Events(vec![LlmEvent::TextDelta("hello".into()), done()]),
+    )
+    .with_dispatch_id("dispatch-1");
+
+    let mut rx = provider.stream(&request("model-a")).await.unwrap();
+    while rx.recv().await.is_some() {}
+    wait_until_completed(&fixture).await;
+
+    let entries = SessionJournal::replay(&fixture.path).unwrap();
+    assert!(entries.iter().any(|entry| matches!(
+        &entry.event,
+        SessionEvent::ProviderAttemptPreparedV2 { dispatch_id, .. }
+            if dispatch_id == "dispatch-1"
+    )));
+    assert!(entries.iter().any(|entry| matches!(
+        &entry.event,
+        SessionEvent::ProviderAttemptFinishedV2 {
+            dispatch_id,
+            outcome: CompletionOutcome::Succeeded,
+            ..
+        } if dispatch_id == "dispatch-1"
+    )));
+    assert!(!entries.iter().any(|entry| matches!(
+        &entry.event,
+        SessionEvent::ProviderAttemptPrepared { .. }
+            | SessionEvent::ProviderAttemptFinished { .. }
+            | SessionEvent::ProviderAttemptNotStarted { .. }
+    )));
+    let state = fixture.journal.state().unwrap();
+    let attempt = state.provider_attempts.values().next().unwrap();
+    assert_eq!(attempt.dispatch_id.as_deref(), Some("dispatch-1"));
 }
 
 #[tokio::test]
@@ -478,7 +519,7 @@ async fn provider_error_and_truncation_terminalize_as_failed() {
 }
 
 #[tokio::test]
-async fn receiver_drop_cancels_attempt_and_hung_inner_stream() {
+async fn receiver_drop_preserves_unknown_attempt_and_stops_local_forwarder() {
     let server = success_server().await;
     let fixture = JournalFixture::new();
     let inner_closed = Arc::new(AtomicBool::new(false));
@@ -498,15 +539,31 @@ async fn receiver_drop_cancels_attempt_and_hung_inner_stream() {
     tokio::time::timeout(Duration::from_secs(2), closed.notified())
         .await
         .expect("hung inner provider was not cancelled");
-    wait_until_completed(&fixture).await;
     assert!(inner_closed.load(Ordering::SeqCst));
+
+    // Give any detached/background forwarder ample opportunity to append a
+    // late terminal receipt. Local receiver closure is not evidence that the
+    // already-accepted provider attempt stopped, so its authority must remain
+    // StartedUnknown and recovery must not drift to a continuable state.
+    tokio::time::sleep(Duration::from_millis(100)).await;
     let (_, attempt) = only_attempt(&fixture);
     assert!(matches!(
         attempt.effect,
-        crate::session_journal::ExternalEffectState::Completed {
-            outcome: CompletionOutcome::Cancelled
-        }
+        crate::session_journal::ExternalEffectState::Unknown
     ));
+    assert!(attempt.response_digest.is_none());
+    assert!(
+        !SessionJournal::replay(&fixture.path)
+            .unwrap()
+            .iter()
+            .any(|entry| matches!(
+                &entry.event,
+                SessionEvent::ProviderAttemptFinished { .. }
+                    | SessionEvent::ProviderAttemptFinishedV2 { .. }
+                    | SessionEvent::ProviderAttemptNotStarted { .. }
+                    | SessionEvent::ProviderAttemptNotStartedV2 { .. }
+            ))
+    );
 }
 
 #[tokio::test]

@@ -364,7 +364,11 @@ async fn packaged_core_cancels_an_active_stream() {
     .expect("packaged cancellation run");
     let observation = fixture.shutdown().await.expect("fixture shutdown");
 
-    assert!(started.elapsed() < Duration::from_secs(3));
+    let elapsed = started.elapsed();
+    assert!(
+        elapsed < Duration::from_secs(5),
+        "packaged cancellation exceeded the scenario's five-second total bound: {elapsed:?}"
+    );
     assert!(matches!(result.failures.as_slice(), [Failure::CostMissing]));
     assert_eq!(result.final_text, "before cancellation");
     assert!(result.execution.cancellation_requested);

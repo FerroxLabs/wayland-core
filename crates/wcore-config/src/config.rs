@@ -1690,23 +1690,52 @@ fn xai_oauth_credentials_present() -> bool {
 ///   chain. A `MissingApiKey` error (or an empty resolved key) is "not
 ///   connected".
 pub fn provider_connected(provider: ProviderType) -> bool {
-    match provider {
-        // Ambient cloud credentials — connected only when AWS/GCP credentials
-        // are actually present (env, shared config/credentials files, container
-        // or OIDC role, or ADC), decided with no network call.
-        ProviderType::Bedrock => aws_ambient_credentials_present(),
-        ProviderType::Vertex => gcp_ambient_credentials_present(),
-        // OAuth-backed — the stored login token is the credential.
-        ProviderType::OpenAIChatGpt => chatgpt_oauth_token_path().exists(),
-        // API-key providers: resolved key must be present and non-empty.
-        _ => {
-            let storage = crate::credentials::CredentialsStorageConfig::default();
-            matches!(
-                resolve_api_key(None, None, provider, &storage),
-                Ok(key) if !key.trim().is_empty()
-            )
-        }
-    }
+    providers_connected(&[provider])
+        .into_iter()
+        .next()
+        .unwrap_or(false)
+}
+
+/// Resolve connection state for several providers from one credential-store
+/// snapshot. This is the batch form UI catalogs must use: opening an encrypted
+/// vault once per row would synchronously repeat its Argon2 KDF and freeze the
+/// terminal while a provider/model picker is being constructed.
+///
+/// Results are positionally aligned with `providers`.
+pub fn providers_connected(providers: &[ProviderType]) -> Vec<bool> {
+    let store_keys = providers
+        .iter()
+        .filter_map(|provider| credentials_store_key(*provider))
+        .collect::<Vec<_>>();
+    let store_key_refs = store_keys.iter().map(String::as_str).collect::<Vec<_>>();
+    let storage = crate::credentials::CredentialsStorageConfig::default();
+    let stored_values = if store_keys.is_empty() {
+        Vec::new()
+    } else {
+        crate::credentials::open_store(&storage, &credentials_storage_path())
+            .and_then(|store| store.get_many(&store_key_refs))
+            .unwrap_or_else(|_| vec![None; store_keys.len()])
+    };
+    let mut stored_values = stored_values.into_iter();
+
+    providers
+        .iter()
+        .map(|provider| match provider {
+            // Ambient cloud credentials — connected only when AWS/GCP
+            // credentials are actually present, decided with no network call.
+            ProviderType::Bedrock => aws_ambient_credentials_present(),
+            ProviderType::Vertex => gcp_ambient_credentials_present(),
+            // OAuth-backed — the stored login token is the credential.
+            ProviderType::OpenAIChatGpt => chatgpt_oauth_token_path().exists(),
+            // API-key providers: one value is consumed from the aligned store
+            // snapshot, then the normal environment fallback chain applies.
+            _ => {
+                let stored = stored_values.next().flatten();
+                stored.as_deref().is_some_and(|key| !key.trim().is_empty())
+                    || matches!(resolve_api_key_from_env(*provider), Ok(key) if !key.trim().is_empty())
+            }
+        })
+        .collect()
 }
 
 /// Whether AWS credentials the Bedrock provider's default SDK chain would use
@@ -1761,7 +1790,8 @@ pub fn connected_providers() -> Vec<ProviderType> {
     KNOWN_PROVIDER_TYPES
         .iter()
         .copied()
-        .filter(|p| provider_connected(*p))
+        .zip(providers_connected(KNOWN_PROVIDER_TYPES))
+        .filter_map(|(provider, connected)| connected.then_some(provider))
         .collect()
 }
 
@@ -2231,6 +2261,20 @@ impl Config {
     {
         crate::credentials::open_store(&self.storage.credentials, &credentials_storage_path())
     }
+
+    /// Open the configured fail-closed store for encryption keys and other
+    /// material that must never use the plaintext credentials backend.
+    pub fn open_confidential_credentials_store(
+        &self,
+    ) -> Result<
+        crate::credentials::ConfidentialCredentialsStore,
+        crate::credentials::CredentialsError,
+    > {
+        crate::credentials::open_confidential_store(
+            &self.storage.credentials,
+            &credentials_storage_path(),
+        )
+    }
 }
 
 /// Wave SD — path used by the plaintext credentials backend. Lives next
@@ -2600,6 +2644,13 @@ fn resolve_api_key(
         return Ok(key);
     }
 
+    resolve_api_key_from_env(provider)
+}
+
+/// Resolve only the environment/out-of-band portion of the API-key chain.
+/// Kept separate so batch connection checks can reuse one credentials-store
+/// snapshot without reopening it once per provider.
+fn resolve_api_key_from_env(provider: ProviderType) -> anyhow::Result<String> {
     // Env var fallback chain
     if let Ok(key) = std::env::var("API_KEY") {
         return Ok(key);

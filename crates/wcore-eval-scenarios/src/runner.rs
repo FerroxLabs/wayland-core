@@ -318,7 +318,7 @@ fn spawn_for_run_with_secret(
         .as_ref()
         .map_or(bin, crate::process_tree::PreparedExecutable::path);
     let mut cmd = Command::new(executable);
-    child_environment.apply_tokio(&mut cmd);
+    let vault_guard = child_environment.apply_tokio(&mut cmd)?;
     if prepared_executable.is_some() {
         #[cfg(target_os = "linux")]
         cmd.env("WCORE_EVAL_PINNED_EXECUTABLE", "/proc/self/exe");
@@ -366,7 +366,9 @@ fn spawn_for_run_with_secret(
     // stripping the var (`None`) instead falls back to the developer's real home
     // and dials their actual MCP servers. `None` remains for callers that
     // genuinely want the host default.
-    let child = cmd.spawn()?;
+    let child = cmd.spawn();
+    drop(vault_guard);
+    let child = child?;
     drop(prepared_executable);
     Ok(child)
 }
@@ -379,14 +381,17 @@ pub fn spawn_with_args(
     cwd: &std::path::Path,
 ) -> Result<Child, SpawnError> {
     let mut cmd = Command::new(bin);
-    ChildEnvironment::build(cwd, cwd, None)?.apply_tokio(&mut cmd);
+    let child_environment = ChildEnvironment::build(cwd, cwd, None)?;
+    let vault_guard = child_environment.apply_tokio(&mut cmd)?;
     cmd.args(args)
         .current_dir(cwd)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
-    Ok(cmd.spawn()?)
+    let child = cmd.spawn();
+    drop(vault_guard);
+    Ok(child?)
 }
 
 /// Drive one scenario × provider to completion and return the result.

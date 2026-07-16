@@ -189,7 +189,15 @@ impl PaletteSurface {
     fn group_and_flatten(&self, commands: &[Command]) -> Vec<Row> {
         let querying = !self.query.is_empty();
         let mut rows = Vec::new();
-        for group in IntentGroup::ORDER {
+        let mut groups = IntentGroup::ORDER.to_vec();
+        if querying
+            && let Some(top_group) = commands.first().map(|command| command.group)
+            && let Some(index) = groups.iter().position(|group| *group == top_group)
+        {
+            groups.remove(index);
+            groups.insert(0, top_group);
+        }
+        for group in groups {
             let mut members: Vec<&Command> = commands.iter().filter(|c| c.group == group).collect();
             if members.is_empty() {
                 continue;
@@ -568,6 +576,7 @@ mod tests {
             ("mcp", "/mcp"),
             ("hooks", "/hooks"),
             ("resume", "/resume"),
+            ("recover", "/recover"),
             ("profile", "/profile"),
             ("provider", "/provider"),
             ("replay", "/replay"),

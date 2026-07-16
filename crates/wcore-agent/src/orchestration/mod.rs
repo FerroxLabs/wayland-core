@@ -80,8 +80,15 @@ mod f13_durability_tests;
 use crate::confirm::{ConfirmResult, ToolConfirmer};
 use crate::engine::is_hook_lifecycle_line;
 use crate::hooks::HookEngine;
-use crate::journal_effects::{PreparedToolLease, TurnEffectScope};
-use crate::session_journal::{ToolNotStartedReason, ToolUnknownReason};
+use crate::journal_effects::{
+    PreparedHookPhaseLease, PreparedToolLease, StartedHookPhaseLease, TurnEffectScope,
+};
+use crate::session_journal::{
+    ApprovalDecision, ApprovalResolution, HookManifestSlot, HookPhaseConsumption,
+    HookPhaseNotStartedReason, HookSlotReceipt, HookSlotSource, HookSlotTerminalStatus,
+    ToolHookPhase, ToolNotStartedReason, ToolUnknownReason, state_payload_digest,
+};
+use wcore_plugin_api::registry::hooks::HookPhase;
 use wcore_protocol::events::{OutputType, ProtocolEvent, ToolCategory, ToolInfo, ToolStatus};
 use wcore_protocol::writer::ProtocolEmitter;
 use wcore_protocol::{ToolApprovalManager, ToolApprovalResult};
@@ -106,8 +113,21 @@ pub(crate) enum DispatcherCrashCut {
 }
 
 #[cfg(test)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ApprovalCrashCut {
+    AfterRequested,
+    BeforeResolved,
+    AfterResolved,
+}
+
+#[cfg(test)]
 tokio::task_local! {
     static DISPATCHER_CRASH_CUT: std::cell::Cell<Option<DispatcherCrashCut>>;
+}
+
+#[cfg(test)]
+tokio::task_local! {
+    static APPROVAL_CRASH_CUT: std::cell::Cell<Option<ApprovalCrashCut>>;
 }
 
 #[cfg(test)]
@@ -116,6 +136,16 @@ fn inject_dispatcher_crash(cut: DispatcherCrashCut) {
         if armed.get() == Some(cut) {
             armed.set(None);
             panic!("injected dispatcher crash at {cut:?}");
+        }
+    });
+}
+
+#[cfg(test)]
+fn inject_approval_crash(cut: ApprovalCrashCut) {
+    let _ = APPROVAL_CRASH_CUT.try_with(|armed| {
+        if armed.get() == Some(cut) {
+            armed.set(None);
+            panic!("injected approval crash at {cut:?}");
         }
     });
 }
@@ -369,6 +399,7 @@ impl PolicyFilteredCalls {
                 input,
                 contract,
                 ToolNotStartedReason::PolicyDenied { policy },
+                None,
             ) {
                 *denied = journal_authority_failure(id, error);
             }
@@ -630,6 +661,7 @@ pub(crate) async fn execute_tool_calls_with_budget_and_effects(
                                     file_write_notifier,
                                     effect_scope,
                                     durable_tool_call_ordinal(effect_ordinals, tool_calls, call),
+                                    None,
                                 )
                                 .await;
                         }
@@ -738,6 +770,145 @@ struct ProtocolToolSink {
     redactor: Mutex<crate::output_redaction::StreamingRedactor>,
 }
 
+struct PreparedHookAuthority {
+    lease: PreparedHookPhaseLease,
+    slots: Vec<HookManifestSlot>,
+}
+
+struct HookAuthorityRequest<'a> {
+    provider_call_id: &'a str,
+    ordinal: u64,
+    phase: ToolHookPhase,
+    tool_execution_id: Option<String>,
+    tool_name: &'a str,
+    tool_input: &'a serde_json::Value,
+}
+
+fn prepare_hook_authority(
+    effect_scope: Option<&TurnEffectScope>,
+    hook_engine: &HookEngine,
+    request: HookAuthorityRequest<'_>,
+) -> Result<Option<PreparedHookAuthority>, String> {
+    let Some(scope) = effect_scope else {
+        return Ok(None);
+    };
+    let runtime_phase = match request.phase {
+        ToolHookPhase::PreToolUse => HookPhase::PreToolUse,
+        ToolHookPhase::PostToolUse => HookPhase::PostToolUse,
+    };
+    let descriptors =
+        hook_engine.tool_hook_manifest(runtime_phase, request.tool_name, request.tool_input);
+    if descriptors.is_empty() {
+        return Ok(None);
+    }
+    let slots = descriptors
+        .iter()
+        .enumerate()
+        .map(|(ordinal, descriptor)| {
+            let descriptor_digest = state_payload_digest(descriptor)?;
+            let source = match descriptor.get("kind").and_then(serde_json::Value::as_str) {
+                Some("rust") => HookSlotSource::Rust,
+                Some("plugin") => HookSlotSource::Plugin,
+                Some("shell") => HookSlotSource::Shell,
+                _ => {
+                    return Err(crate::session_journal::JournalError::InvalidTransition(
+                        "tool hook manifest contains an unknown source".to_string(),
+                    ));
+                }
+            };
+            Ok(HookManifestSlot {
+                ordinal: ordinal as u64,
+                slot_id: format!(
+                    "{}-{ordinal}-{descriptor_digest}",
+                    match source {
+                        HookSlotSource::Rust => "rust",
+                        HookSlotSource::Plugin => "plugin",
+                        HookSlotSource::Shell => "shell",
+                    }
+                ),
+                source,
+                descriptor_digest,
+            })
+        })
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| format!("hook manifest could not be bound: {error}"))?;
+    let input_digest = state_payload_digest(request.tool_input)
+        .map_err(|error| format!("hook input could not be digested: {error}"))?;
+    let hook_authority_digest = state_payload_digest(&hook_engine.tool_hook_authority())
+        .map_err(|error| format!("hook authority could not be digested: {error}"))?;
+    let hook_manifest_digest = state_payload_digest(
+        &serde_json::to_value(&slots)
+            .map_err(|error| format!("hook manifest could not be encoded: {error}"))?,
+    )
+    .map_err(|error| format!("hook manifest could not be digested: {error}"))?;
+    let lease = scope
+        .prepare_hook_phase(
+            request.provider_call_id,
+            request.ordinal,
+            request.phase,
+            request.tool_execution_id,
+            input_digest,
+            hook_authority_digest,
+            hook_manifest_digest,
+            slots.clone(),
+        )
+        .map_err(|error| format!("durable hook authority could not be prepared: {error}"))?;
+    Ok(Some(PreparedHookAuthority { lease, slots }))
+}
+
+fn finish_hook_authority(
+    started: StartedHookPhaseLease,
+    slots: Vec<HookManifestSlot>,
+    outcome: &crate::hooks::HookOutcome,
+    effective_input: Option<&serde_json::Value>,
+) -> Result<HookPhaseConsumption, String> {
+    if outcome.completed_slots > slots.len()
+        || (outcome.completed_slots < slots.len() && outcome.block.is_none())
+    {
+        return Err(
+            "hook runner did not authoritatively terminate every manifest slot".to_string(),
+        );
+    }
+    let receipts = slots
+        .into_iter()
+        .enumerate()
+        .map(|(ordinal, slot)| HookSlotReceipt {
+            ordinal: slot.ordinal,
+            slot_id: slot.slot_id,
+            descriptor_digest: slot.descriptor_digest,
+            status: if ordinal < outcome.completed_slots {
+                HookSlotTerminalStatus::Completed
+            } else {
+                HookSlotTerminalStatus::SkippedAfterBlock
+            },
+        })
+        .collect::<Vec<_>>();
+    let outcome_digest = state_payload_digest(&serde_json::json!({
+        "block": outcome.block,
+        "modified_input": outcome.modified_input,
+        "injected_messages": outcome.injected_messages,
+        "switch_model": outcome.switch_model,
+    }))
+    .map_err(|error| format!("hook outcome could not be digested: {error}"))?;
+    let receipts_digest = state_payload_digest(
+        &serde_json::to_value(&receipts)
+            .map_err(|error| format!("hook receipts could not be encoded: {error}"))?,
+    )
+    .map_err(|error| format!("hook receipts could not be digested: {error}"))?;
+    let effective_input_digest = effective_input
+        .map(state_payload_digest)
+        .transpose()
+        .map_err(|error| format!("effective hook input could not be digested: {error}"))?;
+    started
+        .finish(
+            effective_input_digest,
+            outcome_digest,
+            receipts_digest,
+            receipts,
+        )
+        .map_err(|error| format!("durable hook outcome could not be finished: {error}"))
+}
+
 impl wcore_tools::ToolOutputSink for ProtocolToolSink {
     fn emit_chunk(&self, chunk: &str) {
         let mut redactor = self.redactor.lock().unwrap_or_else(|p| p.into_inner());
@@ -768,11 +939,23 @@ fn prepare_tool_effect(
     effective_input: &serde_json::Value,
     contract: wcore_types::tool::ToolEffectContract,
     effect_receipt: Option<serde_json::Value>,
+    pre_hook_phase_id: Option<&str>,
 ) -> Result<Option<PreparedToolLease>, String> {
     effect_scope
         .map(|scope| {
-            let prepared = match effect_receipt {
-                Some(receipt) => scope.prepare_tool_with_effect_receipt(
+            let prepared = match (effect_receipt, pre_hook_phase_id) {
+                (Some(receipt), Some(phase_id)) => scope
+                    .prepare_tool_with_effect_receipt_after_hook(
+                        provider_call_id,
+                        ordinal,
+                        tool,
+                        requested_input.clone(),
+                        effective_input.clone(),
+                        contract,
+                        receipt,
+                        phase_id,
+                    ),
+                (Some(receipt), None) => scope.prepare_tool_with_effect_receipt(
                     provider_call_id,
                     ordinal,
                     tool,
@@ -781,7 +964,16 @@ fn prepare_tool_effect(
                     contract,
                     receipt,
                 ),
-                None => scope.prepare_tool_with_contract(
+                (None, Some(phase_id)) => scope.prepare_tool_after_hook(
+                    provider_call_id,
+                    ordinal,
+                    tool,
+                    requested_input.clone(),
+                    effective_input.clone(),
+                    contract,
+                    phase_id,
+                ),
+                (None, None) => scope.prepare_tool_with_contract(
                     provider_call_id,
                     ordinal,
                     tool,
@@ -842,6 +1034,7 @@ fn record_tool_not_started(
     effective_input: &serde_json::Value,
     contract: wcore_types::tool::ToolEffectContract,
     reason: ToolNotStartedReason,
+    pre_hook_phase_id: Option<&str>,
 ) -> Result<(), String> {
     prepare_tool_effect(
         effect_scope,
@@ -852,11 +1045,48 @@ fn record_tool_not_started(
         effective_input,
         contract,
         None,
+        pre_hook_phase_id,
     )?
     .map(|lease| lease.not_started(reason))
     .transpose()
     .map_err(|error| format!("durable not-started outcome could not be recorded: {error}"))?;
     Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn record_tool_attempt_not_started(
+    effect_scope: Option<&TurnEffectScope>,
+    provider_call_id: &str,
+    ordinal: u64,
+    tool: &str,
+    requested_input: &serde_json::Value,
+    effective_input: &serde_json::Value,
+    contract: wcore_types::tool::ToolEffectContract,
+    reason: ToolNotStartedReason,
+    pre_hook_phase_id: Option<&str>,
+    recovered_retry: Option<&RecoveredToolRetry<'_>>,
+) -> Result<(), String> {
+    if let Some(retry) = recovered_retry {
+        let scope = effect_scope
+            .ok_or_else(|| "recovered tool retry has no durable effect scope".to_string())?;
+        return scope
+            .retry_not_started_tool(retry.prior_tool_execution_id)
+            .and_then(|lease| lease.not_started(reason))
+            .map_err(|error| {
+                format!("durable recovered tool retry could not be terminalized: {error}")
+            });
+    }
+    record_tool_not_started(
+        effect_scope,
+        provider_call_id,
+        ordinal,
+        tool,
+        requested_input,
+        effective_input,
+        contract,
+        reason,
+        pre_hook_phase_id,
+    )
 }
 
 fn record_terminal_denial(
@@ -887,8 +1117,54 @@ fn record_terminal_denial(
         ToolNotStartedReason::ApprovalDenied {
             approval_id: format!("terminal:{id}"),
         },
+        None,
     )
     .map_or_else(|error| journal_authority_failure(id, error), |()| denied)
+}
+
+/// Materialize a recovered no-start outcome only after the exact F13 tool
+/// intent and terminal not-started receipt are durable. Recovery uses this
+/// for approval decisions that were journaled before the original process
+/// could create a tool execution record.
+pub(crate) fn record_recovered_tool_not_started(
+    registry: &ToolRegistry,
+    effect_scope: &TurnEffectScope,
+    ordinal: u64,
+    call: &ContentBlock,
+    reason: ToolNotStartedReason,
+    content: String,
+) -> ContentBlock {
+    let ContentBlock::ToolUse {
+        id, name, input, ..
+    } = call
+    else {
+        return ContentBlock::ToolResult {
+            tool_use_id: String::new(),
+            content: "Recovered non-tool block was not executed".to_string(),
+            is_error: true,
+        };
+    };
+    let result = ContentBlock::ToolResult {
+        tool_use_id: id.clone(),
+        content,
+        is_error: true,
+    };
+    let contract = registry
+        .get(name)
+        .map(|tool| tool.effect_contract(input))
+        .unwrap_or_default();
+    record_tool_not_started(
+        Some(effect_scope),
+        id,
+        ordinal,
+        name,
+        input,
+        input,
+        contract,
+        reason,
+        None,
+    )
+    .map_or_else(|error| journal_authority_failure(id, error), |()| result)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -964,6 +1240,7 @@ async fn execute_single_with_budget(
         file_write_notifier,
         effect_scope,
         ordinal,
+        None,
     )
     .await
 }
@@ -990,6 +1267,7 @@ async fn execute_single_with_streaming(
     >,
     effect_scope: Option<&TurnEffectScope>,
     ordinal: u64,
+    recovered_retry: Option<&RecoveredToolRetry<'_>>,
 ) -> (
     ContentBlock,
     Option<ContextModifier>,
@@ -1005,12 +1283,138 @@ async fn execute_single_with_streaming(
         unreachable!("execute_single called with non-ToolUse block")
     };
 
-    // Run pre-tool-use hooks
+    if let Some(retry) = recovered_retry
+        && (retry.tool != name || retry.ordinal != ordinal)
+    {
+        return (
+            journal_authority_failure(
+                id,
+                "recovered tool retry identity does not match the durable attempt",
+            ),
+            None,
+            crate::hooks::HookOutcome::default(),
+            false,
+        );
+    }
+
+    // Run pre-tool-use hooks. A crash-proven retry reuses the pre-hook
+    // authority from its original attempt: rerunning hooks could mutate the
+    // input differently or repeat an external hook effect.
     let mut effective_input = input.clone();
-    if let Some(hook_engine) = hooks {
-        match hook_engine.run_pre_tool_use(name, input).await {
+    let mut pre_outcome = crate::hooks::HookOutcome::default();
+    let mut pre_hook_phase_id = None;
+    if let Some(retry) = recovered_retry {
+        let requested_input_digest = match state_payload_digest(input) {
+            Ok(digest) => digest,
+            Err(error) => {
+                return (
+                    journal_authority_failure(id, error),
+                    None,
+                    pre_outcome,
+                    false,
+                );
+            }
+        };
+        if requested_input_digest != retry.requested_input_digest {
+            return (
+                journal_authority_failure(
+                    id,
+                    "recovered tool retry input does not match the durable request",
+                ),
+                None,
+                pre_outcome,
+                false,
+            );
+        }
+        if retry.requested_input_digest != retry.effective_input_digest {
+            return (
+                journal_authority_failure(
+                    id,
+                    "recovered tool retry cannot reconstruct hook-modified input from redacted durable state",
+                ),
+                None,
+                pre_outcome,
+                false,
+            );
+        }
+        if retry.pre_hook_phase_id.is_none() && retry.pre_hook_consumption.is_some() {
+            return (
+                journal_authority_failure(
+                    id,
+                    "recovered tool retry consumption has no durable pre-hook authority",
+                ),
+                None,
+                pre_outcome,
+                false,
+            );
+        }
+        pre_hook_phase_id = retry.pre_hook_phase_id.map(str::to_owned);
+        if let Some(consumption) = retry.pre_hook_consumption.clone() {
+            pre_outcome.durable_hook_phases.push(consumption);
+        }
+    } else if let Some(hook_engine) = hooks {
+        let prepared_hook = match prepare_hook_authority(
+            effect_scope,
+            hook_engine,
+            HookAuthorityRequest {
+                provider_call_id: id,
+                ordinal,
+                phase: ToolHookPhase::PreToolUse,
+                tool_execution_id: None,
+                tool_name: name,
+                tool_input: input,
+            },
+        ) {
+            Ok(prepared) => prepared,
+            Err(error) => {
+                return (
+                    journal_authority_failure(id, error),
+                    None,
+                    pre_outcome,
+                    false,
+                );
+            }
+        };
+        let started_hook = match prepared_hook
+            .map(|prepared| {
+                prepared
+                    .lease
+                    .start(None)
+                    .map(|started| (started, prepared.slots))
+            })
+            .transpose()
+        {
+            Ok(started) => started,
+            Err(error) => {
+                return (
+                    journal_authority_failure(id, error),
+                    None,
+                    pre_outcome,
+                    false,
+                );
+            }
+        };
+        match hook_engine.run_pre_tool_use_strict(name, input).await {
             Ok(mut outcome) => {
-                if let Some(reason) = outcome.block.take() {
+                let candidate_input = outcome.modified_input.as_ref().unwrap_or(input);
+                if let Some((started, slots)) = started_hook {
+                    let phase_id = started.id().to_string();
+                    match finish_hook_authority(started, slots, &outcome, Some(candidate_input)) {
+                        Ok(consumption) => {
+                            pre_hook_phase_id = Some(phase_id);
+                            outcome.durable_hook_phases.push(consumption);
+                        }
+                        Err(error) => {
+                            return (
+                                journal_authority_failure(id, error),
+                                None,
+                                pre_outcome,
+                                false,
+                            );
+                        }
+                    }
+                }
+                if let Some(reason) = outcome.block.clone() {
                     let durable = record_tool_not_started(
                         effect_scope,
                         id,
@@ -1025,6 +1429,7 @@ async fn execute_single_with_streaming(
                         ToolNotStartedReason::HookDenied {
                             reason: reason.clone(),
                         },
+                        pre_hook_phase_id.as_deref(),
                     );
                     let block = durable.map_or_else(
                         |error| journal_authority_failure(id, error),
@@ -1036,9 +1441,9 @@ async fn execute_single_with_streaming(
                             is_error: true,
                         },
                     );
-                    return (block, None, crate::hooks::HookOutcome::default(), false);
+                    return (block, None, outcome, false);
                 }
-                if let Some(v) = outcome.modified_input {
+                if let Some(v) = outcome.modified_input.clone() {
                     if approval_bound && v != *input {
                         let reason = "modified tool input requires fresh approval".to_string();
                         let durable = record_tool_not_started(
@@ -1055,6 +1460,7 @@ async fn execute_single_with_streaming(
                             ToolNotStartedReason::HookDenied {
                                 reason: reason.clone(),
                             },
+                            pre_hook_phase_id.as_deref(),
                         );
                         let block = durable.map_or_else(
                             |error| journal_authority_failure(id, error),
@@ -1064,7 +1470,7 @@ async fn execute_single_with_streaming(
                                 is_error: true,
                             },
                         );
-                        return (block, None, crate::hooks::HookOutcome::default(), false);
+                        return (block, None, outcome, false);
                     }
                     effective_input = v;
                 }
@@ -1088,9 +1494,22 @@ async fn execute_single_with_streaming(
                         eprintln!("{line}");
                     }
                 }
+                pre_outcome = outcome;
             }
             Err(e) => {
                 let reason = e.to_string();
+                if let Some((started, _)) = started_hook {
+                    let unknown = started.abandon_unknown().map_or_else(
+                        |journal_error| journal_authority_failure(id, journal_error),
+                        |()| {
+                            journal_authority_failure(
+                                id,
+                                format!("pre-tool hook outcome is unknown: {reason}"),
+                            )
+                        },
+                    );
+                    return (unknown, None, pre_outcome, false);
+                }
                 let durable = record_tool_not_started(
                     effect_scope,
                     id,
@@ -1105,6 +1524,7 @@ async fn execute_single_with_streaming(
                     ToolNotStartedReason::HookDenied {
                         reason: reason.clone(),
                     },
+                    None,
                 );
                 let block = durable.map_or_else(
                     |error| journal_authority_failure(id, error),
@@ -1116,7 +1536,7 @@ async fn execute_single_with_streaming(
                         is_error: true,
                     },
                 );
-                return (block, None, crate::hooks::HookOutcome::default(), false);
+                return (block, None, pre_outcome, false);
             }
         }
     }
@@ -1124,10 +1544,25 @@ async fn execute_single_with_streaming(
     // Set true only when the dispatch timeout-cancel path below wins, so the
     // engine can flag the synthesized result's trace as cancelled.
     let mut was_cancelled = false;
-    let (result, modifier) = match registry.get(name) {
+    let (result, modifier, prepared_post_hook, durable_tool_result_digest) = match registry
+        .get(name)
+    {
         Some(tool) => {
             let max_size = tool.max_result_size();
             let effect_contract = tool.effect_contract(&effective_input);
+            if let Some(retry) = recovered_retry
+                && retry.effect_contract != &effect_contract
+            {
+                return (
+                    journal_authority_failure(
+                        id,
+                        "recovered tool retry effect contract does not match the durable attempt",
+                    ),
+                    None,
+                    pre_outcome,
+                    false,
+                );
+            }
             // AUDIT B-1 follow-up — pick the timeout category based on
             // THIS call's input, not just the tool's bare `category()`.
             // SkillTool is `Info` (30s) for inline skills (returns
@@ -1146,7 +1581,7 @@ async fn execute_single_with_streaming(
             // server is both bounded per-call AND backed off across
             // calls.
             if registry.breaker_is_open(name) {
-                if let Err(error) = record_tool_not_started(
+                if let Err(error) = record_tool_attempt_not_started(
                     effect_scope,
                     id,
                     ordinal,
@@ -1155,11 +1590,13 @@ async fn execute_single_with_streaming(
                     &effective_input,
                     effect_contract.clone(),
                     ToolNotStartedReason::CircuitOpen,
+                    pre_hook_phase_id.as_deref(),
+                    recovered_retry,
                 ) {
                     return (
                         journal_authority_failure(id, error),
                         None,
-                        crate::hooks::HookOutcome::default(),
+                        pre_outcome,
                         false,
                     );
                 }
@@ -1173,13 +1610,13 @@ async fn execute_single_with_streaming(
                         is_error: true,
                     },
                     None,
-                    crate::hooks::HookOutcome::default(),
+                    pre_outcome,
                     false,
                 );
             }
             if cancel.is_cancelled() {
                 let reason = "session cancellation was requested before tool dispatch".to_string();
-                if let Err(error) = record_tool_not_started(
+                if let Err(error) = record_tool_attempt_not_started(
                     effect_scope,
                     id,
                     ordinal,
@@ -1190,11 +1627,13 @@ async fn execute_single_with_streaming(
                     ToolNotStartedReason::Cancelled {
                         reason: reason.clone(),
                     },
+                    pre_hook_phase_id.as_deref(),
+                    recovered_retry,
                 ) {
                     return (
                         journal_authority_failure(id, error),
                         None,
-                        crate::hooks::HookOutcome::default(),
+                        pre_outcome,
                         false,
                     );
                 }
@@ -1205,7 +1644,7 @@ async fn execute_single_with_streaming(
                         is_error: true,
                     },
                     None,
-                    crate::hooks::HookOutcome::default(),
+                    pre_outcome,
                     false,
                 );
             }
@@ -1255,7 +1694,7 @@ async fn execute_single_with_streaming(
                 Some(tracker) => match tracker.try_start(name, execution_class, category_timeout) {
                     Ok(guard) => Some(guard),
                     Err(error) => {
-                        if let Err(journal_error) = record_tool_not_started(
+                        if let Err(journal_error) = record_tool_attempt_not_started(
                             effect_scope,
                             id,
                             ordinal,
@@ -1266,11 +1705,13 @@ async fn execute_single_with_streaming(
                             ToolNotStartedReason::BudgetDenied {
                                 reason: error.reason.to_string(),
                             },
+                            pre_hook_phase_id.as_deref(),
+                            recovered_retry,
                         ) {
                             return (
                                 journal_authority_failure(id, journal_error),
                                 None,
-                                crate::hooks::HookOutcome::default(),
+                                pre_outcome,
                                 false,
                             );
                         }
@@ -1285,7 +1726,7 @@ async fn execute_single_with_streaming(
                                 is_error: true,
                             },
                             None,
-                            crate::hooks::HookOutcome::default(),
+                            pre_outcome,
                             false,
                         );
                     }
@@ -1300,7 +1741,7 @@ async fn execute_single_with_streaming(
                     Ok(Ok(prepared)) => prepared,
                     Ok(Err(result)) => {
                         let error = crate::output_redaction::redact_tool_output(&result.content);
-                        if let Err(journal_error) = record_tool_not_started(
+                        if let Err(journal_error) = record_tool_attempt_not_started(
                             effect_scope,
                             id,
                             ordinal,
@@ -1311,11 +1752,13 @@ async fn execute_single_with_streaming(
                             ToolNotStartedReason::InvalidInput {
                                 error: error.clone(),
                             },
+                            pre_hook_phase_id.as_deref(),
+                            recovered_retry,
                         ) {
                             return (
                                 journal_authority_failure(id, journal_error),
                                 None,
-                                crate::hooks::HookOutcome::default(),
+                                pre_outcome,
                                 false,
                             );
                         }
@@ -1326,7 +1769,7 @@ async fn execute_single_with_streaming(
                                 is_error: result.is_error,
                             },
                             None,
-                            crate::hooks::HookOutcome::default(),
+                            pre_outcome,
                             false,
                         );
                     }
@@ -1334,7 +1777,7 @@ async fn execute_single_with_streaming(
                         let error = crate::output_redaction::redact_tool_output(
                             &extract_panic_message(&payload),
                         );
-                        if let Err(journal_error) = record_tool_not_started(
+                        if let Err(journal_error) = record_tool_attempt_not_started(
                             effect_scope,
                             id,
                             ordinal,
@@ -1345,11 +1788,13 @@ async fn execute_single_with_streaming(
                             ToolNotStartedReason::DispatchFailed {
                                 error: error.clone(),
                             },
+                            pre_hook_phase_id.as_deref(),
+                            recovered_retry,
                         ) {
                             return (
                                 journal_authority_failure(id, journal_error),
                                 None,
-                                crate::hooks::HookOutcome::default(),
+                                pre_outcome,
                                 false,
                             );
                         }
@@ -1360,7 +1805,7 @@ async fn execute_single_with_streaming(
                                 is_error: true,
                             },
                             None,
-                            crate::hooks::HookOutcome::default(),
+                            pre_outcome,
                             false,
                         );
                     }
@@ -1371,7 +1816,7 @@ async fn execute_single_with_streaming(
                     Err(error) => {
                         let reason =
                             format!("prepared effect receipt could not be encoded: {error}");
-                        if let Err(journal_error) = record_tool_not_started(
+                        if let Err(journal_error) = record_tool_attempt_not_started(
                             effect_scope,
                             id,
                             ordinal,
@@ -1382,11 +1827,13 @@ async fn execute_single_with_streaming(
                             ToolNotStartedReason::DispatchFailed {
                                 error: reason.clone(),
                             },
+                            pre_hook_phase_id.as_deref(),
+                            recovered_retry,
                         ) {
                             return (
                                 journal_authority_failure(id, journal_error),
                                 None,
-                                crate::hooks::HookOutcome::default(),
+                                pre_outcome,
                                 false,
                             );
                         }
@@ -1397,7 +1844,7 @@ async fn execute_single_with_streaming(
                                 is_error: true,
                             },
                             None,
-                            crate::hooks::HookOutcome::default(),
+                            pre_outcome,
                             false,
                         );
                     }
@@ -1408,7 +1855,7 @@ async fn execute_single_with_streaming(
                 store_prepared_effect_checkpoint(effect_scope, prepared_runtime.as_ref()).await
             {
                 let reason = crate::output_redaction::redact_tool_output(&error);
-                if let Err(journal_error) = record_tool_not_started(
+                if let Err(journal_error) = record_tool_attempt_not_started(
                     effect_scope,
                     id,
                     ordinal,
@@ -1419,11 +1866,13 @@ async fn execute_single_with_streaming(
                     ToolNotStartedReason::DispatchFailed {
                         error: reason.clone(),
                     },
+                    pre_hook_phase_id.as_deref(),
+                    recovered_retry,
                 ) {
                     return (
                         journal_authority_failure(id, journal_error),
                         None,
-                        crate::hooks::HookOutcome::default(),
+                        pre_outcome,
                         false,
                     );
                 }
@@ -1434,28 +1883,81 @@ async fn execute_single_with_streaming(
                         is_error: true,
                     },
                     None,
-                    crate::hooks::HookOutcome::default(),
+                    pre_outcome,
                     false,
                 );
             }
             #[cfg(test)]
             inject_dispatcher_crash(DispatcherCrashCut::BeforePrepared);
-            let prepared_effect = match prepare_tool_effect(
-                effect_scope,
-                id,
-                ordinal,
-                name,
-                input,
-                &effective_input,
-                effect_contract.clone(),
-                durable_receipt,
-            ) {
+            let prepared_effect = match recovered_retry {
+                Some(retry) if durable_receipt.as_ref() != retry.effect_receipt => Err(
+                    "recovered tool retry effect receipt does not match the durable attempt"
+                        .to_string(),
+                ),
+                Some(retry) => effect_scope
+                    .ok_or_else(|| "recovered tool retry has no durable effect scope".to_string())
+                    .and_then(|scope| {
+                        scope
+                            .retry_not_started_tool(retry.prior_tool_execution_id)
+                            .map(Some)
+                            .map_err(|error| {
+                                format!(
+                                    "durable recovered tool retry could not be recorded: {error}"
+                                )
+                            })
+                    }),
+                None => prepare_tool_effect(
+                    effect_scope,
+                    id,
+                    ordinal,
+                    name,
+                    input,
+                    &effective_input,
+                    effect_contract.clone(),
+                    durable_receipt,
+                    pre_hook_phase_id.as_deref(),
+                ),
+            };
+            let prepared_effect = match prepared_effect {
                 Ok(lease) => lease,
                 Err(error) => {
                     return (
                         journal_authority_failure(id, error),
                         None,
-                        crate::hooks::HookOutcome::default(),
+                        pre_outcome,
+                        false,
+                    );
+                }
+            };
+            let prepared_post_hook = match hooks {
+                Some(hook_engine) => prepare_hook_authority(
+                    effect_scope,
+                    hook_engine,
+                    HookAuthorityRequest {
+                        provider_call_id: id,
+                        ordinal,
+                        phase: ToolHookPhase::PostToolUse,
+                        tool_execution_id: prepared_effect
+                            .as_ref()
+                            .map(|lease| lease.id().to_string()),
+                        tool_name: name,
+                        tool_input: &effective_input,
+                    },
+                ),
+                None => Ok(None),
+            };
+            let mut prepared_post_hook = match prepared_post_hook {
+                Ok(prepared) => prepared,
+                Err(error) => {
+                    if let Some(prepared) = prepared_effect {
+                        let _ = prepared.not_started(ToolNotStartedReason::DispatchFailed {
+                            error: error.clone(),
+                        });
+                    }
+                    return (
+                        journal_authority_failure(id, error),
+                        None,
+                        pre_outcome,
                         false,
                     );
                 }
@@ -1465,6 +1967,16 @@ async fn execute_single_with_streaming(
             if cancel.is_cancelled() {
                 let reason =
                     "session cancellation was requested before physical tool start".to_string();
+                if let Some(prepared) = prepared_post_hook.take()
+                    && let Err(error) = prepared.lease.not_applicable()
+                {
+                    return (
+                        journal_authority_failure(id, error),
+                        None,
+                        pre_outcome,
+                        false,
+                    );
+                }
                 if let Some(prepared) = prepared_effect
                     && let Err(error) = prepared.not_started(ToolNotStartedReason::Cancelled {
                         reason: reason.clone(),
@@ -1473,7 +1985,7 @@ async fn execute_single_with_streaming(
                     return (
                         journal_authority_failure(id, error),
                         None,
-                        crate::hooks::HookOutcome::default(),
+                        pre_outcome,
                         false,
                     );
                 }
@@ -1484,7 +1996,7 @@ async fn execute_single_with_streaming(
                         is_error: true,
                     },
                     None,
-                    crate::hooks::HookOutcome::default(),
+                    pre_outcome,
                     false,
                 );
             }
@@ -1503,7 +2015,7 @@ async fn execute_single_with_streaming(
                     return (
                         journal_authority_failure(id, error),
                         None,
-                        crate::hooks::HookOutcome::default(),
+                        pre_outcome,
                         false,
                     );
                 }
@@ -1747,6 +2259,7 @@ async fn execute_single_with_streaming(
                 content
             };
             let content = crate::output_redaction::redact_tool_output(&content);
+            let mut durable_tool_result_digest = None;
             if let Some(lease) = started_effect {
                 let durable_result = serde_json::json!({
                     "content": content.clone(),
@@ -1755,20 +2268,35 @@ async fn execute_single_with_streaming(
                         .as_ref()
                         .map(|(_, receipt)| receipt.clone()),
                 });
+                let result_digest = state_payload_digest(&durable_result)
+                    .map_err(|error| format!("tool result could not be digested: {error}"));
+                let result_digest = match result_digest {
+                    Ok(digest) => digest,
+                    Err(error) => {
+                        return (
+                            journal_authority_failure(id, error),
+                            None,
+                            pre_outcome,
+                            false,
+                        );
+                    }
+                };
                 #[cfg(test)]
                 inject_dispatcher_crash(DispatcherCrashCut::BeforeTerminalAppend);
                 let journal_result = if let Some((reason, evidence)) = unknown_effect {
                     lease.unknown(reason, evidence).map(|_| ())
                 } else if r.is_error {
+                    durable_tool_result_digest = Some(result_digest);
                     lease.fail(content.clone(), durable_result)
                 } else {
+                    durable_tool_result_digest = Some(result_digest);
                     lease.succeed(durable_result)
                 };
                 if let Err(error) = journal_result {
                     return (
                         journal_authority_failure(id, error),
                         None,
-                        crate::hooks::HookOutcome::default(),
+                        pre_outcome,
                         false,
                     );
                 }
@@ -1781,6 +2309,8 @@ async fn execute_single_with_streaming(
                     is_error: r.is_error,
                 },
                 modifier,
+                prepared_post_hook,
+                durable_tool_result_digest,
             )
         }
         None => {
@@ -1793,6 +2323,7 @@ async fn execute_single_with_streaming(
                 &effective_input,
                 wcore_types::tool::ToolEffectContract::default(),
                 None,
+                pre_hook_phase_id.as_deref(),
             )
             .and_then(|lease| {
                 lease
@@ -1805,7 +2336,19 @@ async fn execute_single_with_streaming(
                 return (
                     journal_authority_failure(id, error),
                     None,
-                    crate::hooks::HookOutcome::default(),
+                    pre_outcome,
+                    false,
+                );
+            }
+            if effect_scope.is_some() {
+                return (
+                    ContentBlock::ToolResult {
+                        tool_use_id: id.clone(),
+                        content: format!("Unknown tool: {}", name),
+                        is_error: true,
+                    },
+                    None,
+                    pre_outcome,
                     false,
                 );
             }
@@ -1815,6 +2358,8 @@ async fn execute_single_with_streaming(
                     is_error: true,
                 },
                 None,
+                None,
+                None,
             )
         }
     };
@@ -1822,9 +2367,84 @@ async fn execute_single_with_streaming(
     // Run post-tool-use hooks
     let mut post_outcome = crate::hooks::HookOutcome::default();
     if let Some(hook_engine) = hooks {
-        let mut outcome = hook_engine
-            .run_post_tool_use(name, id, &effective_input, &result.content, result.is_error)
-            .await;
+        let mut outcome = if let Some(prepared) = prepared_post_hook {
+            let Some(result_digest) = durable_tool_result_digest else {
+                if let Err(error) = prepared
+                    .lease
+                    .not_started(HookPhaseNotStartedReason::ToolOutcomeUnknown)
+                {
+                    return (
+                        journal_authority_failure(id, error),
+                        None,
+                        pre_outcome,
+                        false,
+                    );
+                }
+                return (
+                    ContentBlock::ToolResult {
+                        tool_use_id: id.clone(),
+                        content: result.content,
+                        is_error: result.is_error,
+                    },
+                    modifier,
+                    pre_outcome,
+                    was_cancelled,
+                );
+            };
+            let started = match prepared.lease.start(Some(result_digest)) {
+                Ok(started) => started,
+                Err(error) => {
+                    return (
+                        journal_authority_failure(id, error),
+                        None,
+                        pre_outcome,
+                        false,
+                    );
+                }
+            };
+            match hook_engine
+                .run_post_tool_use_strict(
+                    name,
+                    id,
+                    &effective_input,
+                    &result.content,
+                    result.is_error,
+                )
+                .await
+            {
+                Ok(mut outcome) => {
+                    match finish_hook_authority(started, prepared.slots, &outcome, None) {
+                        Ok(consumption) => outcome.durable_hook_phases.push(consumption),
+                        Err(error) => {
+                            return (
+                                journal_authority_failure(id, error),
+                                None,
+                                pre_outcome,
+                                false,
+                            );
+                        }
+                    }
+                    outcome
+                }
+                Err(error) => {
+                    let failure = error.to_string();
+                    let unknown = started.abandon_unknown().map_or_else(
+                        |journal_error| journal_authority_failure(id, journal_error),
+                        |()| {
+                            journal_authority_failure(
+                                id,
+                                format!("post-tool hook outcome is unknown: {failure}"),
+                            )
+                        },
+                    );
+                    return (unknown, None, pre_outcome, false);
+                }
+            }
+        } else {
+            hook_engine
+                .run_post_tool_use(name, id, &effective_input, &result.content, result.is_error)
+                .await
+        };
         // v0.9.1.2 F10: hook lifecycle telemetry goes to `tracing::debug!`
         // ONLY — never eprintln! (which leaks into the TUI alt-screen and
         // overlaps the composer/transcript). `hook_trace` is the
@@ -1851,6 +2471,19 @@ async fn execute_single_with_streaming(
         post_outcome = outcome;
     }
 
+    pre_outcome
+        .injected_messages
+        .append(&mut post_outcome.injected_messages);
+    if post_outcome.switch_model.is_some() {
+        pre_outcome.switch_model = post_outcome.switch_model.take();
+    }
+    pre_outcome
+        .fired_actions
+        .append(&mut post_outcome.fired_actions);
+    pre_outcome
+        .durable_hook_phases
+        .append(&mut post_outcome.durable_hook_phases);
+
     (
         ContentBlock::ToolResult {
             tool_use_id: id.clone(),
@@ -1858,7 +2491,7 @@ async fn execute_single_with_streaming(
             is_error: result.is_error,
         },
         modifier,
-        post_outcome,
+        pre_outcome,
         was_cancelled,
     )
 }
@@ -1944,6 +2577,169 @@ pub(crate) async fn execute_tool_calls_with_approval_budget_and_effects(
     writer: &Arc<dyn ProtocolEmitter>,
     msg_id: &str,
     allow_list: &[String],
+    hooks: Option<&mut HookEngine>,
+    compaction_level: wcore_compact::CompactionLevel,
+    toon_enabled: bool,
+    budget: Option<&ToolBudgetTracker>,
+    cancel: &CancellationToken,
+    file_write_notifier: Option<
+        &std::sync::Arc<dyn wcore_tools::file_write_notifier::FileWriteNotifier>,
+    >,
+    effect_scope: Option<&TurnEffectScope>,
+    effect_ordinals: Option<&[u64]>,
+) -> Result<ToolCallOutcome, ExecutionControl> {
+    execute_tool_calls_with_approval_budget_effects_inner(
+        registry,
+        tool_calls,
+        approval_manager,
+        writer,
+        msg_id,
+        allow_list,
+        hooks,
+        compaction_level,
+        toon_enabled,
+        budget,
+        cancel,
+        file_write_notifier,
+        effect_scope,
+        effect_ordinals,
+        None,
+        None,
+    )
+    .await
+}
+
+/// Execute exactly one recovered tool call whose original approval has already
+/// been resolved in the durable journal. The call id remains input-bound and
+/// no broader live approval mode is inferred from the recovered decision.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn execute_recovered_approved_tool_call_with_effects(
+    registry: &ToolRegistry,
+    tool_call: &ContentBlock,
+    approval_manager: &Arc<ToolApprovalManager>,
+    writer: &Arc<dyn ProtocolEmitter>,
+    msg_id: &str,
+    allow_list: &[String],
+    hooks: Option<&mut HookEngine>,
+    compaction_level: wcore_compact::CompactionLevel,
+    toon_enabled: bool,
+    budget: Option<&ToolBudgetTracker>,
+    cancel: &CancellationToken,
+    file_write_notifier: Option<
+        &std::sync::Arc<dyn wcore_tools::file_write_notifier::FileWriteNotifier>,
+    >,
+    effect_scope: &TurnEffectScope,
+    effect_ordinal: u64,
+    recovered_approval_call_id: &str,
+) -> Result<ToolCallOutcome, ExecutionControl> {
+    execute_tool_calls_with_approval_budget_effects_inner(
+        registry,
+        std::slice::from_ref(tool_call),
+        approval_manager,
+        writer,
+        msg_id,
+        allow_list,
+        hooks,
+        compaction_level,
+        toon_enabled,
+        budget,
+        cancel,
+        file_write_notifier,
+        Some(effect_scope),
+        Some(std::slice::from_ref(&effect_ordinal)),
+        Some(recovered_approval_call_id),
+        None,
+    )
+    .await
+}
+
+#[derive(Clone)]
+struct RecoveredToolRetry<'a> {
+    call_id: &'a str,
+    prior_tool_execution_id: &'a str,
+    tool: &'a str,
+    ordinal: u64,
+    effect_contract: &'a wcore_types::tool::ToolEffectContract,
+    effect_receipt: Option<&'a serde_json::Value>,
+    requested_input_digest: &'a str,
+    effective_input_digest: &'a str,
+    pre_hook_phase_id: Option<&'a str>,
+    pre_hook_consumption: Option<HookPhaseConsumption>,
+}
+
+/// Execute a crash-proven no-start retry as a linked F13 attempt. The prior
+/// receipt must match the freshly prepared runtime receipt before the retry
+/// lease is recorded, preserving the original physical-effect contract.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn execute_recovered_retry_tool_call_with_effects(
+    registry: &ToolRegistry,
+    tool_call: &ContentBlock,
+    approval_manager: &Arc<ToolApprovalManager>,
+    writer: &Arc<dyn ProtocolEmitter>,
+    msg_id: &str,
+    allow_list: &[String],
+    hooks: Option<&mut HookEngine>,
+    compaction_level: wcore_compact::CompactionLevel,
+    toon_enabled: bool,
+    budget: Option<&ToolBudgetTracker>,
+    cancel: &CancellationToken,
+    file_write_notifier: Option<
+        &std::sync::Arc<dyn wcore_tools::file_write_notifier::FileWriteNotifier>,
+    >,
+    effect_scope: &TurnEffectScope,
+    effect_ordinal: u64,
+    recovered_approval_call_id: Option<&str>,
+    call_id: &str,
+    prior_tool_execution_id: &str,
+    tool: &str,
+    prior_ordinal: u64,
+    effect_contract: &wcore_types::tool::ToolEffectContract,
+    effect_receipt: Option<&serde_json::Value>,
+    requested_input_digest: &str,
+    effective_input_digest: &str,
+    pre_hook_phase_id: Option<&str>,
+    pre_hook_consumption: Option<HookPhaseConsumption>,
+) -> Result<ToolCallOutcome, ExecutionControl> {
+    execute_tool_calls_with_approval_budget_effects_inner(
+        registry,
+        std::slice::from_ref(tool_call),
+        approval_manager,
+        writer,
+        msg_id,
+        allow_list,
+        hooks,
+        compaction_level,
+        toon_enabled,
+        budget,
+        cancel,
+        file_write_notifier,
+        Some(effect_scope),
+        Some(std::slice::from_ref(&effect_ordinal)),
+        recovered_approval_call_id,
+        Some(RecoveredToolRetry {
+            call_id,
+            prior_tool_execution_id,
+            tool,
+            ordinal: prior_ordinal,
+            effect_contract,
+            effect_receipt,
+            requested_input_digest,
+            effective_input_digest,
+            pre_hook_phase_id,
+            pre_hook_consumption,
+        }),
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn execute_tool_calls_with_approval_budget_effects_inner(
+    registry: &ToolRegistry,
+    tool_calls: &[ContentBlock],
+    approval_manager: &Arc<ToolApprovalManager>,
+    writer: &Arc<dyn ProtocolEmitter>,
+    msg_id: &str,
+    allow_list: &[String],
     mut hooks: Option<&mut HookEngine>,
     compaction_level: wcore_compact::CompactionLevel,
     toon_enabled: bool,
@@ -1954,6 +2750,8 @@ pub(crate) async fn execute_tool_calls_with_approval_budget_and_effects(
     >,
     effect_scope: Option<&TurnEffectScope>,
     effect_ordinals: Option<&[u64]>,
+    recovered_approval_call_id: Option<&str>,
+    recovered_retry: Option<RecoveredToolRetry<'_>>,
 ) -> Result<ToolCallOutcome, ExecutionControl> {
     let mut results = Vec::new();
     let mut modifiers = Vec::new();
@@ -2003,14 +2801,58 @@ pub(crate) async fn execute_tool_calls_with_approval_budget_and_effects(
                 Some(name),
                 command,
             );
-        let needs_approval = name == "AskUserQuestion"
-            || (!globally_approved && !tool_name_approved && !scoped_auto_approval);
+        let recovered_approval = recovered_approval_call_id == Some(id.as_str());
+        if recovered_approval_call_id.is_some() && !recovered_approval {
+            tracing::error!(
+                target: "wcore_agent::orchestration",
+                expected_call_id = recovered_approval_call_id,
+                actual_call_id = %id,
+                "recovered approval authority did not match the dispatched tool call"
+            );
+            return Err(ExecutionControl::Quit);
+        }
+        let recovered_retry_for_call = match recovered_retry.as_ref() {
+            Some(retry) if retry.call_id != id => {
+                tracing::error!(
+                    target: "wcore_agent::orchestration",
+                    expected_call_id = retry.call_id,
+                    actual_call_id = %id,
+                    "recovered retry authority did not match the dispatched tool call"
+                );
+                return Err(ExecutionControl::Quit);
+            }
+            retry => retry,
+        };
+        let needs_approval = !recovered_approval
+            && (name == "AskUserQuestion"
+                || (!globally_approved && !tool_name_approved && !scoped_auto_approval));
         // Category-, mode- and prefix-scoped rules authorize the arguments
         // that matched them. A hook may still mutate input after a global or
         // tool-name-wide grant, but may not widen an input-scoped grant.
-        let approval_bound = needs_approval || scoped_auto_approval;
+        let approval_bound = recovered_approval || needs_approval || scoped_auto_approval;
 
         if needs_approval {
+            let approval_intent = serde_json::json!({
+                "provider_call_id": id,
+                "tool": name,
+                "category": category.to_string(),
+                "input": input,
+            });
+            let mut durable_approval = match effect_scope
+                .map(|scope| scope.request_approval_with_id(id.clone(), &approval_intent))
+                .transpose()
+            {
+                Ok(lease) => lease,
+                Err(error) => {
+                    results.push(journal_authority_failure(id, error));
+                    modifiers.push(None);
+                    hook_outcomes.push(crate::hooks::HookOutcome::default());
+                    continue;
+                }
+            };
+            #[cfg(test)]
+            inject_approval_crash(ApprovalCrashCut::AfterRequested);
+
             // Register the pending request before emission. A local desktop
             // host can answer synchronously from `emit`; emitting first would
             // race that response against pending-map installation and lose it.
@@ -2029,6 +2871,9 @@ pub(crate) async fn execute_tool_calls_with_approval_budget_and_effects(
                 .is_err()
             {
                 approval_manager.drop_pending(id);
+                if let Some(lease) = durable_approval.take() {
+                    let _ = lease.resolve(ApprovalResolution::Cancelled);
+                }
                 return Err(ExecutionControl::Quit);
             }
 
@@ -2043,10 +2888,39 @@ pub(crate) async fn execute_tool_calls_with_approval_budget_and_effects(
                 biased;
                 _ = cancel.cancelled() => {
                     approval_manager.drop_pending(id);
+                    if let Some(lease) = durable_approval.take() {
+                        let _ = lease.resolve(ApprovalResolution::Cancelled);
+                    }
                     return Err(ExecutionControl::Quit);
                 }
                 res = rx => res,
             };
+            let durable_resolution = match &approval {
+                Ok(ToolApprovalResult::Approved { .. }) => ApprovalResolution::Decided {
+                    decision: ApprovalDecision::AllowOnce,
+                },
+                Ok(ToolApprovalResult::Denied { reason })
+                    if reason == "approval timed out (no host response)" =>
+                {
+                    ApprovalResolution::TimedOut
+                }
+                Ok(ToolApprovalResult::Denied { .. }) => ApprovalResolution::Decided {
+                    decision: ApprovalDecision::Deny,
+                },
+                Err(_) => ApprovalResolution::Cancelled,
+            };
+            #[cfg(test)]
+            inject_approval_crash(ApprovalCrashCut::BeforeResolved);
+            if let Some(lease) = durable_approval.take()
+                && let Err(error) = lease.resolve(durable_resolution)
+            {
+                results.push(journal_authority_failure(id, error));
+                modifiers.push(None);
+                hook_outcomes.push(crate::hooks::HookOutcome::default());
+                continue;
+            }
+            #[cfg(test)]
+            inject_approval_crash(ApprovalCrashCut::AfterResolved);
             match approval {
                 Ok(ToolApprovalResult::Approved { answer: Some(s) })
                     if name == "AskUserQuestion" =>
@@ -2132,6 +3006,7 @@ pub(crate) async fn execute_tool_calls_with_approval_budget_and_effects(
                         ToolNotStartedReason::ApprovalDenied {
                             approval_id: id.clone(),
                         },
+                        None,
                     )
                     .map_or_else(|error| journal_authority_failure(id, error), |()| denied);
                     results.push(denied);
@@ -2177,6 +3052,7 @@ pub(crate) async fn execute_tool_calls_with_approval_budget_and_effects(
                     .and_then(|ordinals| ordinals.get(ordinal))
                     .copied()
                     .unwrap_or(ordinal as u64),
+                recovered_retry_for_call,
             )
             .await;
         }

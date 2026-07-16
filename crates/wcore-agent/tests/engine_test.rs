@@ -14,7 +14,9 @@ use wcore_types::message::{StopReason, TokenUsage};
 use wiremock::matchers::method;
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
-use common::{MockLlmProvider, MockTool, test_config};
+use common::{
+    MockLlmProvider, MockTool, RECOVERY_TEST_KEY, configure_persisted_test_session, test_config,
+};
 
 // ---------------------------------------------------------------------------
 // Helper: build a no-color OutputFormatter for silent test output
@@ -205,8 +207,8 @@ async fn test_engine_message_accumulation() {
     );
 
     let mut config = test_config();
-    config.session.enabled = true;
-    config.session.directory = dir.path().to_string_lossy().into_owned();
+    configure_persisted_test_session(&mut config, dir.path());
+    let session_dir = std::path::PathBuf::from(&config.session.directory);
 
     let registry = ToolRegistry::new();
     let output = silent_output();
@@ -215,8 +217,9 @@ async fn test_engine_message_accumulation() {
 
     // Initialize session so save_session() has a session to persist
     engine
-        .init_session("test-provider", "/tmp", None)
+        .init_session("test-provider", &dir.path().to_string_lossy(), None)
         .expect("init_session should succeed");
+    engine.use_recovery_test_key(&RECOVERY_TEST_KEY);
 
     engine
         .run("First message", "")
@@ -228,7 +231,7 @@ async fn test_engine_message_accumulation() {
         .expect("second run should succeed");
 
     // Load the persisted session and count accumulated messages
-    let session_manager = SessionManager::new(dir.path().to_path_buf(), 10);
+    let session_manager = SessionManager::new(session_dir, 10);
     let session = session_manager
         .load("latest")
         .expect("session should be loadable");

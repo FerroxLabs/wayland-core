@@ -9,7 +9,11 @@ use wcore_observability::SOURCE_PRODUCT;
 use wcore_observability::cache::mark_cache_boundaries;
 use wcore_observability::cost::estimate_turn_cost;
 use wcore_observability::trace::{ToolCallTrace, TurnTrace, WorkflowDetectionRecord};
-use wcore_protocol::events::{MonitorDirective, MonitorReason, ToolCategory};
+use wcore_protocol::commands::{OperatorResolutionAuthority, ProtocolCommand};
+use wcore_protocol::events::{
+    MonitorDirective, MonitorReason, OperatorToolEffectOutcome, OperatorToolEffectResolution,
+    ToolCategory,
+};
 use wcore_providers::attempt_lifecycle::ProviderAttemptPurpose as LifecyclePurpose;
 use wcore_providers::{LlmProvider, ProviderError, create_provider};
 use wcore_tools::registry::ToolRegistry;
@@ -18,6 +22,10 @@ use wcore_types::message::{ContentBlock, FinishReason, Message, Role, StopReason
 use wcore_types::skill_types::{ContextModifier, PlanModeTransition, effort_to_string};
 
 use crate::approval::ApprovalBridge;
+use crate::budget_authority::{
+    BudgetAuthorityCoordinator, BudgetAuthorityError, BudgetAuthoritySeed,
+    SharedBudgetAuthorityCoordinator,
+};
 use crate::cache_diagnostics::{CacheBreakDetector, CacheDiagnostic, CacheStats};
 use crate::compact::state::CompactState;
 use crate::compact::{auto, emergency, estimate, micro};
@@ -42,9 +50,172 @@ use crate::plan::prompt as plan_prompt;
 use crate::plan::state::PlanState;
 use crate::session::{ActiveSession, Session, SessionManager};
 use crate::session_journal::{
-    SessionEvent, SessionJournal, ToolEffectState, ToolNotStartedReason, ToolResolution,
-    ToolResolutionSource, ToolUnknownReason, state_payload_digest,
+    ApprovalDecision, ApprovalOrigin, ApprovalResolution, BudgetOwner, CheckpointOrigin,
+    CheckpointPurpose, ChildNotStartedReason, DeliveryNotStartedReason, DeliveryOrigin,
+    ExternalEffectState, ProviderAttemptNotStartedReason, SessionEvent, SessionJournal,
+    ToolEffectState, ToolNotStartedReason, ToolResolution, ToolResolutionSource, ToolUnknownReason,
+    state_payload_digest,
 };
+
+fn delivery_origin_belongs_to_turn(origin: &DeliveryOrigin, turn_id: &str) -> bool {
+    matches!(origin, DeliveryOrigin::Turn { turn_id: origin_turn } if origin_turn == turn_id)
+}
+
+fn approval_origin_belongs_to_turn(
+    state: &crate::session_journal::ReducedSessionState,
+    origin: &ApprovalOrigin,
+    turn_id: &str,
+) -> bool {
+    match origin {
+        ApprovalOrigin::Turn {
+            turn_id: origin_turn,
+        } => origin_turn == turn_id,
+        ApprovalOrigin::ProviderAttempt { attempt_id } => state
+            .provider_attempts
+            .get(attempt_id)
+            .is_some_and(|attempt| attempt.turn_id == turn_id),
+        ApprovalOrigin::ToolExecution { tool_execution_id } => state
+            .tools
+            .get(tool_execution_id)
+            .is_some_and(|tool| tool.turn_id == turn_id),
+        ApprovalOrigin::Child { child_id } => state
+            .children
+            .get(child_id)
+            .is_some_and(|child| child.turn_id == turn_id),
+        ApprovalOrigin::Delivery { delivery_id } => state
+            .deliveries
+            .get(delivery_id)
+            .is_some_and(|delivery| delivery_origin_belongs_to_turn(&delivery.origin, turn_id)),
+    }
+}
+
+fn recovered_pre_hook_consumption(
+    state: &crate::session_journal::ReducedSessionState,
+    tool: &crate::session_journal::ToolState,
+) -> Result<Option<crate::session_journal::HookPhaseConsumption>, AgentError> {
+    let Some(hook_phase_id) = tool.pre_hook_phase_id.as_ref() else {
+        return Ok(None);
+    };
+    let phase = state.hook_phases.get(hook_phase_id).ok_or_else(|| {
+        AgentError::SessionAuthority(format!(
+            "recovered tool references missing pre-hook phase {hook_phase_id}"
+        ))
+    })?;
+    let outcome_digest = match &phase.state {
+        crate::session_journal::HookPhaseState::Finished { outcome_digest, .. } => {
+            Some(outcome_digest)
+        }
+        crate::session_journal::HookPhaseState::Consumed { .. } => None,
+        _ => {
+            return Err(AgentError::SessionAuthority(format!(
+                "recovered tool pre-hook phase {hook_phase_id} is not durably finished"
+            )));
+        }
+    };
+    Ok(outcome_digest.map(
+        |outcome_digest| crate::session_journal::HookPhaseConsumption {
+            hook_phase_id: hook_phase_id.clone(),
+            outcome_digest: outcome_digest.clone(),
+        },
+    ))
+}
+
+fn terminalize_recoverable_prepared_post_hook(
+    journal: &SessionJournal,
+    tool_execution_id: &str,
+) -> Result<(), AgentError> {
+    let state = journal
+        .state()
+        .map_err(|error| AgentError::SessionAuthority(error.to_string()))?;
+    let tool = state.tools.get(tool_execution_id).ok_or_else(|| {
+        AgentError::SessionAuthority(format!(
+            "recovered post-hook references missing tool {tool_execution_id}"
+        ))
+    })?;
+    let prepared = state
+        .hook_phases
+        .iter()
+        .filter(|(_, phase)| {
+            phase.phase == crate::session_journal::ToolHookPhase::PostToolUse
+                && phase.tool_execution_id.as_deref() == Some(tool_execution_id)
+                && matches!(
+                    phase.state,
+                    crate::session_journal::HookPhaseState::Prepared
+                )
+        })
+        .map(|(phase_id, _)| phase_id.clone())
+        .collect::<Vec<_>>();
+    if prepared.len() > 1 {
+        return Err(AgentError::SessionAuthority(format!(
+            "tool {tool_execution_id} has duplicate prepared post-hook authority"
+        )));
+    }
+    let Some(hook_phase_id) = prepared.into_iter().next() else {
+        return Ok(());
+    };
+    let event = if tool.resolution_source.is_some() {
+        SessionEvent::HookPhaseNotStarted {
+            hook_phase_id,
+            reason: crate::session_journal::HookPhaseNotStartedReason::ToolOutcomeUnknown,
+        }
+    } else if matches!(tool.effect, ToolEffectState::NotStarted) {
+        SessionEvent::HookPhaseNotApplicable { hook_phase_id }
+    } else {
+        return Ok(());
+    };
+    journal
+        .append(event)
+        .map(|_| ())
+        .map_err(|error| AgentError::SessionAuthority(error.to_string()))
+}
+
+fn budget_owner_belongs_to_turn(
+    state: &crate::session_journal::ReducedSessionState,
+    owner: &BudgetOwner,
+    turn_id: &str,
+) -> bool {
+    match owner {
+        BudgetOwner::Session => false,
+        BudgetOwner::Turn {
+            turn_id: owner_turn,
+        } => owner_turn == turn_id,
+        BudgetOwner::ProviderAttempt { attempt_id } => state
+            .provider_attempts
+            .get(attempt_id)
+            .is_some_and(|attempt| attempt.turn_id == turn_id),
+        BudgetOwner::ToolExecution { tool_execution_id } => state
+            .tools
+            .get(tool_execution_id)
+            .is_some_and(|tool| tool.turn_id == turn_id),
+        BudgetOwner::Child { child_id } => state
+            .children
+            .get(child_id)
+            .is_some_and(|child| child.turn_id == turn_id),
+    }
+}
+
+fn intersect_recovery_allow_list(checkpoint: &[String], live: &[String]) -> Vec<String> {
+    let live = live.iter().collect::<HashSet<_>>();
+    checkpoint
+        .iter()
+        .filter(|tool| live.contains(tool))
+        .cloned()
+        .collect()
+}
+
+#[cfg(test)]
+mod recovery_allow_list_tests {
+    #[test]
+    fn restart_never_restores_permission_absent_from_live_policy() {
+        let checkpoint = vec!["Read".to_string(), "Bash".to_string()];
+        let live = vec!["Read".to_string(), "Grep".to_string()];
+
+        assert_eq!(
+            super::intersect_recovery_allow_list(&checkpoint, &live),
+            vec!["Read"]
+        );
+    }
+}
 
 /// Owns one paid-provider admission until authoritative usage is settled.
 ///
@@ -53,23 +224,39 @@ use crate::session_journal::{
 /// panics, consume the conservative reservation instead of leaking admission
 /// capacity or pretending the unknown outcome was free.
 struct ProviderBudgetReservation {
-    tracker: Arc<parking_lot::Mutex<wcore_budget::BudgetTracker>>,
+    owner: ProviderBudgetOwner,
+    execution_budget: crate::budget::ExecutionBudgetView,
     reservation: Option<wcore_budget::BudgetReservation>,
     conservative_input_tokens: u64,
     conservative_output_tokens: u64,
     conservative_cost_usd: f64,
 }
 
+enum ProviderBudgetOwner {
+    Durable {
+        authority: SharedBudgetAuthorityCoordinator,
+        dispatch_id: String,
+    },
+    Legacy(Arc<parking_lot::Mutex<wcore_budget::BudgetTracker>>),
+}
+
+enum ProviderBudgetMutationError {
+    Budget(wcore_budget::BudgetError),
+    Authority(BudgetAuthorityError),
+}
+
 impl ProviderBudgetReservation {
     fn new(
-        tracker: Arc<parking_lot::Mutex<wcore_budget::BudgetTracker>>,
+        owner: ProviderBudgetOwner,
+        execution_budget: crate::budget::ExecutionBudgetView,
         reservation: wcore_budget::BudgetReservation,
         conservative_input_tokens: u64,
         conservative_output_tokens: u64,
         conservative_cost_usd: f64,
     ) -> Self {
         Self {
-            tracker,
+            owner,
+            execution_budget,
             reservation: Some(reservation),
             conservative_input_tokens,
             conservative_output_tokens,
@@ -82,17 +269,46 @@ impl ProviderBudgetReservation {
         actual_input_tokens: u64,
         actual_output_tokens: u64,
         actual_cost_usd: f64,
-    ) -> Result<(), wcore_budget::BudgetError> {
+    ) -> Result<(), ProviderBudgetMutationError> {
         let reservation = self
             .reservation
             .take()
             .expect("provider budget reservation settles exactly once");
-        self.tracker.lock().settle_turn(
-            reservation,
-            actual_input_tokens,
-            actual_output_tokens,
-            actual_cost_usd,
-        )
+        match &self.owner {
+            ProviderBudgetOwner::Durable {
+                authority,
+                dispatch_id,
+            } => {
+                self.execution_budget
+                    .record_tokens(actual_input_tokens, actual_output_tokens);
+                self.execution_budget.record_cost(actual_cost_usd);
+                authority
+                    .lock()
+                    .settle_provider_dispatch(
+                        dispatch_id,
+                        reservation,
+                        actual_input_tokens,
+                        actual_output_tokens,
+                        actual_cost_usd,
+                    )
+                    .map_err(ProviderBudgetMutationError::Authority)?
+                    .map_err(ProviderBudgetMutationError::Budget)
+            }
+            ProviderBudgetOwner::Legacy(tracker) => {
+                self.execution_budget
+                    .record_tokens(actual_input_tokens, actual_output_tokens);
+                self.execution_budget.record_cost(actual_cost_usd);
+                tracker
+                    .lock()
+                    .settle_turn(
+                        reservation,
+                        actual_input_tokens,
+                        actual_output_tokens,
+                        actual_cost_usd,
+                    )
+                    .map_err(ProviderBudgetMutationError::Budget)
+            }
+        }
     }
 
     fn conservative_charge(&self) -> (u64, u64, f64) {
@@ -103,30 +319,69 @@ impl ProviderBudgetReservation {
         )
     }
 
-    fn release(mut self) {
+    fn release(mut self) -> Result<(), BudgetAuthorityError> {
         let reservation = self
             .reservation
             .take()
             .expect("provider budget reservation releases exactly once");
-        self.tracker.lock().release(reservation);
+        match &self.owner {
+            ProviderBudgetOwner::Durable {
+                authority,
+                dispatch_id,
+            } => authority
+                .lock()
+                .release_provider_dispatch(dispatch_id, reservation),
+            ProviderBudgetOwner::Legacy(tracker) => {
+                tracker.lock().release(reservation);
+                Ok(())
+            }
+        }
     }
 }
 
 impl Drop for ProviderBudgetReservation {
     fn drop(&mut self) {
         if let Some(reservation) = self.reservation.take() {
-            let _ = self.tracker.lock().settle_turn(
-                reservation,
-                self.conservative_input_tokens,
-                self.conservative_output_tokens,
-                self.conservative_cost_usd,
-            );
+            match &self.owner {
+                ProviderBudgetOwner::Durable {
+                    authority,
+                    dispatch_id,
+                } => {
+                    self.execution_budget.record_tokens(
+                        self.conservative_input_tokens,
+                        self.conservative_output_tokens,
+                    );
+                    self.execution_budget
+                        .record_cost(self.conservative_cost_usd);
+                    let _ = authority.lock().settle_provider_dispatch(
+                        dispatch_id,
+                        reservation,
+                        self.conservative_input_tokens,
+                        self.conservative_output_tokens,
+                        self.conservative_cost_usd,
+                    );
+                }
+                ProviderBudgetOwner::Legacy(tracker) => {
+                    self.execution_budget.record_tokens(
+                        self.conservative_input_tokens,
+                        self.conservative_output_tokens,
+                    );
+                    self.execution_budget
+                        .record_cost(self.conservative_cost_usd);
+                    let _ = tracker.lock().settle_turn(
+                        reservation,
+                        self.conservative_input_tokens,
+                        self.conservative_output_tokens,
+                        self.conservative_cost_usd,
+                    );
+                }
+            }
         }
     }
 }
 
 enum ConfiguredFallbackAdmissionFailure {
-    Budget(wcore_budget::BudgetError),
+    Budget(ProviderBudgetMutationError),
     Unpriced { provider: String, model: String },
 }
 
@@ -134,9 +389,6 @@ struct ConfiguredFallbackBudgetState {
     current: Option<ProviderBudgetReservation>,
     current_provider: String,
     current_model: String,
-    prior_input_tokens: u64,
-    prior_output_tokens: u64,
-    prior_cost_usd: f64,
     failure: Option<ConfiguredFallbackAdmissionFailure>,
 }
 
@@ -150,25 +402,8 @@ impl ConfiguredFallbackBudgetState {
             current,
             current_provider,
             current_model,
-            prior_input_tokens: 0,
-            prior_output_tokens: 0,
-            prior_cost_usd: 0.0,
             failure: None,
         }
-    }
-
-    fn record_prior_charges(&mut self, budget: &wcore_budget::ExecutionBudgetView) {
-        budget.record_tokens(self.prior_input_tokens, self.prior_output_tokens);
-        budget.record_cost(self.prior_cost_usd);
-        self.prior_input_tokens = 0;
-        self.prior_output_tokens = 0;
-        self.prior_cost_usd = 0.0;
-    }
-
-    fn add_prior_charge(&mut self, input_tokens: u64, output_tokens: u64, cost_usd: f64) {
-        self.prior_input_tokens = self.prior_input_tokens.saturating_add(input_tokens);
-        self.prior_output_tokens = self.prior_output_tokens.saturating_add(output_tokens);
-        self.prior_cost_usd += cost_usd;
     }
 }
 
@@ -1599,6 +1834,30 @@ impl LoopGuard {
         }
         (self.count >= self.threshold).then_some(self.count)
     }
+
+    fn recovery_state(&self) -> crate::recovery::RecoveryLoopGuardState {
+        crate::recovery::RecoveryLoopGuardState {
+            last_signature: self.last_sig,
+            count: self.count,
+            threshold: self.threshold,
+        }
+    }
+
+    fn restore(state: &crate::recovery::RecoveryLoopGuardState) -> Result<Self, AgentError> {
+        let configured = Self::from_env();
+        if configured.threshold != state.threshold
+            || (state.threshold != 0 && state.count >= state.threshold)
+        {
+            return Err(AgentError::SessionAuthority(
+                "recovery loop-guard authority does not match the current runtime".to_string(),
+            ));
+        }
+        Ok(Self {
+            last_sig: state.last_signature,
+            count: state.count,
+            threshold: state.threshold,
+        })
+    }
 }
 
 /// Signature of a tool call + its outcome for [`LoopGuard`]:
@@ -1691,6 +1950,28 @@ impl FailureGuard {
         }
         self.count = self.count.saturating_add(1);
         (self.count >= self.threshold).then_some(self.count)
+    }
+
+    fn recovery_state(&self) -> crate::recovery::RecoveryFailureGuardState {
+        crate::recovery::RecoveryFailureGuardState {
+            count: self.count,
+            threshold: self.threshold,
+        }
+    }
+
+    fn restore(state: &crate::recovery::RecoveryFailureGuardState) -> Result<Self, AgentError> {
+        let configured = Self::from_env();
+        if configured.threshold != state.threshold
+            || (state.threshold != 0 && state.count >= state.threshold)
+        {
+            return Err(AgentError::SessionAuthority(
+                "recovery failure-guard authority does not match the current runtime".to_string(),
+            ));
+        }
+        Ok(Self {
+            count: state.count,
+            threshold: state.threshold,
+        })
     }
 }
 
@@ -1855,6 +2136,12 @@ mod loop_guard_tests {
         let changed_args = loop_call_signature("Read", &json!({"file_path": "/y"}), true, "err");
         assert_ne!(a, changed_args);
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CancellationDescendantClosure {
+    Closed,
+    ReconciliationRequired,
 }
 
 pub struct AgentEngine {
@@ -2126,6 +2413,10 @@ pub struct AgentEngine {
     /// observability sink. `None` is the default — no caps configured,
     /// no telemetry; matches pre-M5.3 behaviour.
     budget_tracker: Option<Arc<parking_lot::Mutex<wcore_budget::BudgetTracker>>>,
+    /// Production owner for crash-durable provider and execution authority.
+    /// Legacy raw fields below remain only for direct unit-test construction.
+    budget_authority: Option<SharedBudgetAuthorityCoordinator>,
+    budget_authority_seed: Option<BudgetAuthoritySeed>,
     /// Stable tracker identity shared by the parent engine and every child it
     /// spawns. Session persistence may be disabled for children, so deriving
     /// admission identity from `current_session_id()` would give each child a
@@ -2278,6 +2569,10 @@ pub struct AgentEngine {
     /// from disk. Only the live gate reads this; the rest of the engine uses
     /// the derived fields above.
     config: Config,
+    /// Session-scoped authority for sealing and reopening the exact prepared
+    /// provider request carried by recovery checkpoints. Successful key
+    /// resolution is cached; unavailable keys remain retryable.
+    recovery_request_protection: Arc<dyn crate::recovery_confidential::RecoveryRequestProtection>,
     /// Token-opt "compaction floor": the number of leading conversation
     /// messages that autocompact has summarized/collapsed away. Any absolute
     /// message index `< compaction_floor` no longer maps to its original
@@ -2307,6 +2602,10 @@ pub struct AgentEngine {
     /// post-tool-use, and turn-end hook phases. Drained into the next
     /// `TurnTrace.hook_actions` via `std::mem::take` at each emission site.
     pending_hook_actions: Vec<wcore_observability::trace::HookActionRecord>,
+    /// Aggregate pre/post tool-hook outcomes that have finished physically but
+    /// are not safe to replay until the same conversation checkpoint consumes
+    /// them atomically.
+    pending_hook_phase_consumptions: Vec<crate::session_journal::HookPhaseConsumption>,
     /// #282 contract V1: stable per-session conversation id for Flux sticky
     /// routing. Minted ONCE at construction with a v4 UUID and threaded onto
     /// every `LlmRequest` as `conversation_id`; the Flux provider emits it as
@@ -2353,6 +2652,18 @@ pub struct AgentEngine {
     /// changed (compaction, new user turn, different system prompt or tool
     /// surface) passes.
     length_wedge_fingerprint: Option<[u8; 32]>,
+}
+
+fn default_recovery_request_protection()
+-> Arc<dyn crate::recovery_confidential::RecoveryRequestProtection> {
+    #[cfg(test)]
+    {
+        Arc::new(crate::recovery_confidential::RecoveryRequestProtector::with_test_key(&[0x52; 32]))
+    }
+    #[cfg(not(test))]
+    {
+        Arc::new(crate::recovery_confidential::RecoveryRequestProtector::default())
+    }
 }
 
 impl Drop for AgentEngine {
@@ -2582,6 +2893,8 @@ impl AgentEngine {
             decay_handles: Vec::new(),
             plugin_runtime_handles: Arc::new(Vec::new()),
             budget_tracker: None,
+            budget_authority: None,
+            budget_authority_seed: None,
             budget_session_id: None,
             execution_budget: crate::budget::ExecutionBudget::default().start_root(),
             midflight_monitor: crate::orchestration::monitor::MidFlightMonitor::new(
@@ -2621,6 +2934,7 @@ impl AgentEngine {
             // captured before the partial moves above.
             workflow_live_mode,
             config: retained_config,
+            recovery_request_protection: default_recovery_request_protection(),
             // Token-opt: no history has been collapsed yet at construction.
             compaction_floor: 0,
             // C1 / A2 — no SessionStart prelude applied at construction.
@@ -2628,6 +2942,7 @@ impl AgentEngine {
             // No hook actions have fired before the first turn.
             web_search: false,
             pending_hook_actions: Vec::new(),
+            pending_hook_phase_consumptions: Vec::new(),
             // #282: mint the stable Flux conversation id once per engine.
             conversation_id: uuid::Uuid::new_v4().to_string(),
             // #282: no Flux signal-back seen yet at construction.
@@ -2811,6 +3126,8 @@ impl AgentEngine {
             decay_handles: Vec::new(),
             plugin_runtime_handles: Arc::new(Vec::new()),
             budget_tracker: None,
+            budget_authority: None,
+            budget_authority_seed: None,
             budget_session_id: None,
             execution_budget: crate::budget::ExecutionBudget::default().start_root(),
             midflight_monitor: crate::orchestration::monitor::MidFlightMonitor::new(
@@ -2850,6 +3167,7 @@ impl AgentEngine {
             // captured before the partial moves above.
             workflow_live_mode,
             config: retained_config,
+            recovery_request_protection: default_recovery_request_protection(),
             // Token-opt: no history has been collapsed yet at construction.
             compaction_floor: 0,
             // C1 / A2 — resume populates `messages` here at construction, so
@@ -2858,6 +3176,7 @@ impl AgentEngine {
             // No hook actions have fired before the first turn.
             web_search: false,
             pending_hook_actions: Vec::new(),
+            pending_hook_phase_consumptions: Vec::new(),
             // #282: mint the stable Flux conversation id once per engine. A
             // resumed session gets a fresh id (sticky routing is best-effort).
             conversation_id: uuid::Uuid::new_v4().to_string(),
@@ -2974,6 +3293,7 @@ impl AgentEngine {
         if let Some(mgr) = &self.session_manager {
             let ActiveSession { session, journal } =
                 mgr.create_for_run(provider_name, &self.model, cwd, session_id)?;
+            self.bind_budget_authority(journal.clone(), &session.id)?;
             // W6 F16: if a previous plan was persisted for this session id,
             // advertise resume-availability via the existing Info channel.
             // No new protocol variant (audit rev-2). Errors from the probe
@@ -2999,6 +3319,110 @@ impl AgentEngine {
     /// Get the current session ID (if sessions are enabled and initialized)
     pub fn current_session_id(&self) -> Option<String> {
         self.current_session.as_ref().map(|s| s.id.clone())
+    }
+
+    /// Transfer this long-running engine to another persisted session.
+    ///
+    /// Validation is completed before any live state changes. On success the
+    /// new journal becomes the sole durable authority and dropping the old
+    /// handle releases its writer lease. Session-local runtime state is reset
+    /// so the next turn cannot inherit correlations, caches, usage deltas, or
+    /// plan/compaction state from the session being left.
+    pub fn switch_active_session(&mut self, active_session: ActiveSession) -> anyhow::Result<()> {
+        if self.active_journal_turn_id.is_some() {
+            anyhow::bail!("cannot switch sessions while a durable turn is active");
+        }
+        if self.budget_authority.is_some() {
+            anyhow::bail!(
+                "session switch is unavailable until the budget authority watcher/spawner rebind is sealed"
+            );
+        }
+
+        let ActiveSession {
+            mut session,
+            journal,
+        } = active_session;
+        let journal_session_id = journal.session_id()?;
+        if journal_session_id != session.id {
+            anyhow::bail!(
+                "journal session mismatch: expected {}, found {}",
+                session.id,
+                journal_session_id
+            );
+        }
+        let journal_state = journal.state()?;
+        if journal_state.session_id.as_deref() != Some(session.id.as_str())
+            || journal_state.imported_baseline.is_none()
+        {
+            anyhow::bail!(
+                "session journal '{}' has no matching canonical baseline",
+                session.id
+            );
+        }
+        let canonical_messages = journal_state
+            .conversation
+            .into_iter()
+            .map(serde_json::from_value)
+            .collect::<Result<Vec<Message>, _>>()?;
+
+        // Everything below is infallible. Keep the validated replacement
+        // journal alive before assigning it; replacing `session_journal`
+        // releases the old session's lease only after B is fully available.
+        session.messages = canonical_messages.clone();
+        let session_id = session.id.clone();
+        let session_usage = session.total_usage.clone();
+        self.messages = canonical_messages;
+        self.total_usage = session_usage.clone();
+        self.run_usage = TokenUsage::default();
+        self.current_session = Some(session);
+        self.session_journal = Some(journal);
+        self.active_journal_turn_id = None;
+        self.current_msg_id.clear();
+        self.current_agent_run_id = None;
+        self.user_model_pin = None;
+        self.current_reasoning_effort = None;
+        self.compact_state = CompactState::new();
+        if self.plan_state.is_active {
+            self.exit_plan_mode();
+        }
+        self.plan_state = PlanState::default();
+        if let Some(flag) = &self.plan_active_flag {
+            flag.store(false, Ordering::Release);
+        }
+        self.cache_detector = CacheBreakDetector::new();
+        self.per_turn_costs.clear();
+        self.mcp_curation_cache = None;
+        self.mcp_cap_cache = None;
+        self.hydrated_tool_names.clear();
+        self.recent_turn_traces.clear();
+        self.drafted_skill_signatures.clear();
+        self.mode_override = None;
+        self.current_skill_router_pick = None;
+        self.auto_skill_bucketer = Mutex::new(crate::auto_skill::Bucketer::new(3));
+        self.compaction_floor = 0;
+        self.session_start_injected_len = 0;
+        self.pending_hook_actions.clear();
+        self.pending_hook_phase_consumptions.clear();
+        self.conversation_id = uuid::Uuid::new_v4().to_string();
+        self.flux_served_window = None;
+        self.flux_context_pressure = None;
+        self.smart_compact_armed = true;
+        self.smart_compact_last_turn = None;
+        self.smart_compact_exhausted = false;
+        self.smart_compact_force = false;
+        self.length_wedge_fingerprint = None;
+        self.budget_session_id = Some(session_id.clone());
+        self.style_detector = Mutex::new(crate::style_detector::StyleDetector::new());
+        if let Some(state) = &self.session_state {
+            state.reset_for_session(
+                self.model.clone(),
+                session_usage.input_tokens,
+                session_usage.output_tokens,
+            );
+        }
+        self.clear_file_cache();
+        self.output.bind_session_id(&session_id);
+        Ok(())
     }
 
     /// CORE-2 — snapshot of the engine's usage counters:
@@ -3060,6 +3484,78 @@ impl AgentEngine {
         self.budget_tracker = Some(tracker);
     }
 
+    /// Install the sole production budget owner. A resumed engine binds
+    /// immediately; a fresh persisted engine binds after `init_session`
+    /// creates the canonical journal baseline.
+    pub(crate) fn install_budget_authority(
+        &mut self,
+        authority: SharedBudgetAuthorityCoordinator,
+        seed: BudgetAuthoritySeed,
+    ) -> anyhow::Result<()> {
+        if let (Some(session), Some(journal)) =
+            (self.current_session.as_ref(), self.session_journal.as_ref())
+        {
+            BudgetAuthorityCoordinator::bind_shared_pristine(
+                &authority,
+                seed.config(Some(journal.clone()), session.id.clone()),
+            )?;
+        }
+        self.execution_budget = authority.lock().current_execution_view()?;
+        self.budget_authority = Some(authority);
+        self.budget_authority_seed = Some(seed);
+        self.budget_tracker = None;
+        self.budget_session_id = None;
+        Ok(())
+    }
+
+    fn bind_budget_authority(
+        &mut self,
+        journal: SessionJournal,
+        session_id: &str,
+    ) -> anyhow::Result<()> {
+        let Some(authority) = self.budget_authority.as_ref() else {
+            return Ok(());
+        };
+        let seed = self.budget_authority_seed.as_ref().ok_or_else(|| {
+            anyhow::anyhow!("budget authority is installed without its policy seed")
+        })?;
+        BudgetAuthorityCoordinator::bind_shared_session(
+            authority,
+            seed.config(Some(journal), session_id),
+        )?;
+        self.execution_budget = authority.lock().current_execution_view()?;
+        Ok(())
+    }
+
+    /// Attach a child engine to the parent's sole budget authority. Child
+    /// engines never bind or replace the durable session; every provider and
+    /// tool mutation commits through the inherited coordinator.
+    pub(crate) fn inherit_budget_authority(
+        &mut self,
+        authority: SharedBudgetAuthorityCoordinator,
+    ) -> anyhow::Result<()> {
+        self.execution_budget = authority.lock().current_execution_view()?;
+        self.budget_authority = Some(authority);
+        self.budget_authority_seed = None;
+        self.budget_tracker = None;
+        self.budget_session_id = None;
+        Ok(())
+    }
+
+    fn durable_budget_authority(
+        &self,
+    ) -> Result<Option<&SharedBudgetAuthorityCoordinator>, AgentError> {
+        let Some(authority) = self.budget_authority.as_ref() else {
+            return Ok(None);
+        };
+        if self.session_manager.is_some() && !authority.lock().is_durably_bound() {
+            return Err(AgentError::SessionAuthority(
+                "persisted session budget authority is not durably bound".to_owned(),
+            ));
+        }
+        Ok(Some(authority))
+    }
+
     /// Bind provider reservations and interactive extensions to a stable
     /// runtime identity shared with spawned children.
     pub fn set_budget_session_id(&mut self, session_id: impl Into<String>) {
@@ -3067,16 +3563,18 @@ impl AgentEngine {
     }
 
     fn budget_session_id(&self) -> String {
+        if let Some(authority) = self.budget_authority.as_ref() {
+            return authority.lock().budget_session_id().to_owned();
+        }
         self.budget_session_id
             .clone()
             .or_else(|| self.current_session_id())
             .unwrap_or_else(|| "session-unknown".to_string())
     }
 
-    /// M5.bootstrap-wiring — read access to the optional `BudgetTracker`.
-    /// Returns `None` when bootstrap did not install one (the default
-    /// when `Config.session_cap` is `None`). Tests use this to assert
-    /// install-from-config wiring works end-to-end.
+    /// Read access to the legacy in-memory `BudgetTracker` used by direct
+    /// engine construction and compatibility tests. Production bootstrap
+    /// installs the durable budget authority instead and clears this tracker.
     pub fn budget_tracker(&self) -> Option<&Arc<parking_lot::Mutex<wcore_budget::BudgetTracker>>> {
         self.budget_tracker.as_ref()
     }
@@ -3094,6 +3592,26 @@ impl AgentEngine {
                 "managed policy forbids interactive budget increases; update the managed policy"
                     .to_string(),
             );
+        }
+        if let Some(authority) = self
+            .durable_budget_authority()
+            .map_err(|error| error.to_string())?
+        {
+            let session_id = authority.lock().budget_session_id().to_owned();
+            authority
+                .lock()
+                .transaction(|mutation| {
+                    mutation.provider_tracker().extend_session(
+                        &session_id,
+                        additional_tokens,
+                        additional_cost_usd,
+                    )
+                })
+                .map_err(|error| error.to_string())?
+                .map_err(|error| error.to_string())?;
+            return Ok(format!(
+                "budget extended for this session: +{additional_tokens} tokens, +${additional_cost_usd:.4}"
+            ));
         }
         let tracker = self
             .budget_tracker
@@ -3127,6 +3645,13 @@ impl AgentEngine {
         &self,
         spawner: crate::spawner::AgentSpawner,
     ) -> crate::spawner::AgentSpawner {
+        if let Some(authority) = self.budget_authority.as_ref() {
+            let governance = crate::spawner::SpawnerBudgetGovernance::from_authority(
+                Arc::clone(authority),
+                self.cancel_token.clone(),
+            );
+            return spawner.with_budget_governance(governance);
+        }
         match self.budget_tracker.as_ref() {
             Some(tracker) => {
                 spawner.with_budget_governance(crate::spawner::SpawnerBudgetGovernance::new(
@@ -4052,6 +4577,48 @@ impl AgentEngine {
         })
     }
 
+    /// Persist an interrupted turn at a real, sealed provider-dispatch
+    /// checkpoint for downstream recovery integration tests.
+    #[cfg(any(test, feature = "test-utils"))]
+    pub async fn prepare_recoverable_turn_for_test(
+        &mut self,
+        turn_id: &str,
+        input: &str,
+    ) -> Result<(), AgentError> {
+        self.active_journal_turn_id = Some(turn_id.to_owned());
+        self.append_journal_event(SessionEvent::TurnStarted {
+            turn_id: turn_id.to_owned(),
+            user_message: input.to_owned(),
+        })
+        .await?;
+        self.messages.push(Message::now(
+            Role::User,
+            vec![ContentBlock::Text {
+                text: input.to_owned(),
+            }],
+        ));
+        self.sync_journal_conversation(turn_id).await?;
+
+        let request = LlmRequest {
+            model: self.config.model.clone(),
+            messages: self.messages.clone(),
+            conversation_id: Some(self.conversation_id.clone()),
+            ..Default::default()
+        };
+        self.commit_provider_recovery_checkpoint(
+            turn_id,
+            &request,
+            0,
+            0,
+            false,
+            false,
+            &LoopGuard::from_env(),
+            &FailureGuard::from_env(),
+        )
+        .await?;
+        Ok(())
+    }
+
     /// W9.1 T3 (T10b): per-turn skill-draft entry point. Pushes the
     /// just-completed `TurnTrace` into the rolling window, runs the F10
     /// `PatternDetector`, stages any newly-detected drafts as P4
@@ -4744,7 +5311,19 @@ impl AgentEngine {
         finish_reason: FinishReason,
         persist_session: bool,
     ) -> Result<AgentResult, AgentError> {
-        self.prepare_durable_conversation().await?;
+        if persist_session {
+            self.prepare_durable_conversation().await?;
+        } else if let Some(journal) = self.session_journal.as_ref() {
+            let state = journal
+                .state()
+                .map_err(|error| AgentError::SessionAuthority(error.to_string()))?;
+            self.messages = state
+                .conversation
+                .into_iter()
+                .map(serde_json::from_value)
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|error| AgentError::SessionAuthority(error.to_string()))?;
+        }
         self.fire_on_session_end(turn).await;
         if persist_session {
             self.save_session_mirror();
@@ -4752,7 +5331,7 @@ impl AgentEngine {
         let auto_skill_picked = self.current_skill_router_pick.clone();
         self.observe_skill_router_outcome(StopReason::MaxTurns);
         self.observe_auto_skill(user_input, auto_skill_picked, StopReason::MaxTurns, turn);
-        Ok(AgentResult {
+        let result = AgentResult {
             text: String::new(),
             stop_reason: StopReason::MaxTurns,
             finish_reason,
@@ -4761,7 +5340,19 @@ impl AgentEngine {
             turns: turn,
             active_window_percent: self.active_window_percent_now(&self.model, 0),
             agent_run_id: self.current_agent_run_id.clone(),
-        })
+        };
+        if let Some(turn_id) = self.active_journal_turn_id.clone() {
+            self.commit_terminal_recovery_checkpoint(
+                &turn_id,
+                &result,
+                turn,
+                &LoopGuard::from_env(),
+                &FailureGuard::from_env(),
+                crate::recovery::RecoveryTerminalCompletion::Committed,
+            )
+            .await?;
+        }
+        Ok(result)
     }
 
     /// #279(a): the sole place the engine sources the active-window gauge.
@@ -5024,10 +5615,42 @@ impl AgentEngine {
             ));
         }
 
+        // Renew cancellation only for a genuinely new user turn. A recovered
+        // future may already have been cancelled before its first poll and
+        // must never erase that host Stop.
+        if self.cancel_token.is_cancelled()
+            && let Some(runtime) = self.session_runtime.as_mut()
+        {
+            self.cancel_token = runtime.install_descendant_turn();
+        }
+
         if self.session_journal.is_none() {
-            return self.run_inner(user_input, msg_id, None).await;
+            let result = self
+                .run_inner(user_input, msg_id, None, None, None, None)
+                .await;
+            if result.is_ok() {
+                self.observe_user_turn(user_input).await;
+            }
+            return result;
+        }
+        let recovery = self.recovery_plan()?;
+        if !matches!(
+            recovery.disposition,
+            crate::recovery::RecoveryDisposition::Ready
+        ) {
+            return Err(AgentError::SessionAuthority(format!(
+                "session has an interrupted turn at journal cursor {:?}; resume, reconcile, or cancel it before starting a new message",
+                recovery.journal_sequence
+            )));
         }
         self.reconcile_interrupted_journal_turns().await?;
+        // Do not accept or journal a new user turn unless its exact provider
+        // request can be protected for crash recovery. Failing here keeps an
+        // unconfigured headless/profile launch at a clean Ready boundary
+        // instead of stranding a TurnStarted that can never dispatch.
+        self.recovery_request_protection
+            .preflight(&self.config)
+            .map_err(|error| AgentError::SessionAuthority(error.to_string()))?;
         let turn_id = format!("turn-{}", uuid::Uuid::new_v4());
         self.active_journal_turn_id = Some(turn_id.clone());
         if let Err(error) = self
@@ -5040,32 +5663,1546 @@ impl AgentEngine {
             self.active_journal_turn_id = None;
             return Err(error);
         }
+        if let Err(error) = self.begin_budget_turn(&turn_id) {
+            self.active_journal_turn_id = None;
+            return Err(error);
+        }
 
-        let result = self.run_inner(user_input, msg_id, Some(&turn_id)).await;
-        if let Err(sync_error) = self.sync_journal_conversation(&turn_id).await {
+        let result = self
+            .run_inner(user_input, msg_id, Some(&turn_id), None, None, None)
+            .await;
+        // Cancellation may drop the graph future before its pending approval
+        // or other not-started descendants get a chance to close themselves.
+        // Close only effects whose physical boundary provably was not crossed.
+        // Unknown/running descendants retain durable reconciliation authority
+        // and the original UserAborted result.
+        if matches!(result, Err(AgentError::UserAborted))
+            && matches!(
+                self.close_not_started_descendants_for_cancellation(&turn_id)
+                    .await?,
+                CancellationDescendantClosure::ReconciliationRequired
+            )
+        {
+            self.active_journal_turn_id = None;
+            return result;
+        }
+        let sync_result = if matches!(result, Err(AgentError::UserAborted)) {
+            self.prepare_durable_conversation().await
+        } else {
+            self.sync_journal_conversation(&turn_id).await
+        };
+        if let Err(sync_error) = sync_result {
             self.append_journal_event(SessionEvent::TurnFailed {
-                turn_id,
+                turn_id: turn_id.clone(),
                 error: sync_error.to_string(),
             })
             .await?;
+            self.finish_budget_turn(&turn_id)?;
             self.active_journal_turn_id = None;
             return Err(sync_error);
         }
         self.save_session_mirror();
         let terminal = match &result {
             Ok(result) => SessionEvent::TurnCommitted {
-                turn_id,
+                turn_id: turn_id.clone(),
                 assistant_message: result.text.clone(),
             },
-            Err(AgentError::UserAborted) => SessionEvent::TurnCancelled { turn_id },
+            Err(AgentError::UserAborted) => SessionEvent::TurnCancelled {
+                turn_id: turn_id.clone(),
+            },
             Err(error) => SessionEvent::TurnFailed {
-                turn_id,
+                turn_id: turn_id.clone(),
                 error: error.to_string(),
             },
         };
         self.append_journal_event(terminal).await?;
+        self.finish_budget_turn(&turn_id)?;
         self.active_journal_turn_id = None;
+        if result.is_ok() {
+            // Adaptive user-model state is bootstrap input. Persisting it
+            // before this durable terminal boundary makes an equivalent
+            // crash restart rebuild a different system prompt and correctly
+            // fail strict recovery authority. Learn only after the turn is
+            // committed so an interrupted turn can reconstruct its original
+            // prompt byte-for-byte; a crash after this point is already a
+            // completed turn and needs no continuation authority.
+            self.observe_user_turn(user_input).await;
+        }
         result
+    }
+
+    fn begin_budget_turn(&self, turn_id: &str) -> Result<(), AgentError> {
+        let Some(authority) = self.durable_budget_authority()? else {
+            return Ok(());
+        };
+        authority
+            .lock()
+            .begin_active_turn(turn_id, None)
+            .map_err(|error| AgentError::SessionAuthority(error.to_string()))
+    }
+
+    fn finish_budget_turn(&self, turn_id: &str) -> Result<(), AgentError> {
+        let Some(authority) = self.durable_budget_authority()? else {
+            return Ok(());
+        };
+        authority
+            .lock()
+            .finish_active_turn(turn_id)
+            .map_err(|error| AgentError::SessionAuthority(error.to_string()))
+    }
+
+    fn current_run_budget(&self) -> Result<crate::budget::ExecutionBudgetView, AgentError> {
+        let Some(authority) = self.durable_budget_authority()? else {
+            return Ok(self.execution_budget.sub_budget(None));
+        };
+        let budget = authority
+            .lock()
+            .current_execution_view()
+            .map_err(|error| AgentError::SessionAuthority(error.to_string()))?;
+        if self.session_journal.is_some() {
+            Ok(budget)
+        } else {
+            Ok(budget.sub_budget(None))
+        }
+    }
+
+    /// Return the fail-closed recovery decision for the active durable
+    /// session. Hosts use the same projection before offering TUI or JSON
+    /// recovery actions.
+    pub fn recovery_plan(&self) -> Result<crate::recovery::RecoveryPlan, AgentError> {
+        let journal = self.session_journal.as_ref().ok_or_else(|| {
+            AgentError::SessionAuthority("session journal is not initialized".to_string())
+        })?;
+        crate::recovery::RecoveryPlan::from_journal(journal)
+            .map_err(|error| AgentError::SessionAuthority(error.to_string()))
+    }
+
+    /// Return the recovery projection at an already-observed durable cursor.
+    ///
+    /// Unlike [`Self::recovery_plan`], this never labels current-head state
+    /// with an older host cursor. The recovery layer validates the cursor and
+    /// reduces exactly the journal prefix it identifies.
+    pub fn recovery_plan_at(
+        &self,
+        cursor: &wcore_protocol::events::RecoveryCursor,
+    ) -> Result<crate::recovery::RecoveryPlan, wcore_protocol::events::RecoveryUnavailableReason>
+    {
+        let journal = self
+            .session_journal
+            .as_ref()
+            .ok_or(wcore_protocol::events::RecoveryUnavailableReason::SnapshotUnavailable)?;
+        crate::recovery::RecoveryPlan::from_journal_at(journal, cursor)
+    }
+
+    /// Validate a host cursor against the durable journal and return only
+    /// content-free lifecycle milestones after it.
+    pub fn recovery_replay_after(
+        &self,
+        after: &wcore_protocol::events::RecoveryCursor,
+    ) -> Result<
+        Vec<wcore_protocol::events::RecoveryReplayItem>,
+        wcore_protocol::events::RecoveryUnavailableReason,
+    > {
+        let journal = self
+            .session_journal
+            .as_ref()
+            .ok_or(wcore_protocol::events::RecoveryUnavailableReason::SnapshotUnavailable)?;
+        crate::recovery::RecoveryPlan::replay_after(journal, after)
+    }
+
+    /// Sanitized cumulative budget evidence for recovery UIs. Limits remain
+    /// absent until the durable budget ledger is the single restored source of
+    /// truth; publishing a fresh runtime cap here would falsely imply it had
+    /// survived the crash.
+    #[must_use]
+    pub fn recovery_budget_snapshot(&self) -> wcore_protocol::events::RecoveryBudgetSnapshot {
+        let tokens_used = self
+            .total_usage
+            .total_input_tokens()
+            .saturating_add(self.total_usage.output_tokens);
+        let cost_used_usd = self.per_turn_costs.iter().map(|turn| turn.cost_usd).sum();
+        wcore_protocol::events::RecoveryBudgetSnapshot {
+            tokens_used,
+            token_limit: None,
+            cost_used_usd,
+            cost_limit_usd: None,
+        }
+    }
+
+    /// Continue the original interrupted turn from a proven durable boundary:
+    /// either `TurnStarted` is the journal head with no later execution state,
+    /// or the exact head is a validated recovery checkpoint whose conversation
+    /// matches the reduced journal and whose descendants are terminal. The
+    /// original turn id and user message are reused; no second `TurnStarted` or
+    /// duplicate user message is appended.
+    pub async fn resume_interrupted_turn(
+        &mut self,
+        turn_id: &str,
+        expected_cursor: &wcore_protocol::events::RecoveryCursor,
+        msg_id: &str,
+    ) -> Result<AgentResult, AgentError> {
+        let recovery = self.recovery_plan()?;
+        if recovery.cursor() != *expected_cursor {
+            return Err(AgentError::SessionAuthority(
+                "recovery cursor no longer matches the durable session head".to_string(),
+            ));
+        }
+        let (user_message, resume_checkpoint) = match recovery.disposition {
+            crate::recovery::RecoveryDisposition::ContinueTurnStart {
+                turn_id: recoverable_turn_id,
+                user_message,
+            } if recoverable_turn_id == turn_id => (user_message, None),
+            crate::recovery::RecoveryDisposition::ContinueCheckpoint {
+                turn_id: recoverable_turn_id,
+                user_message,
+                checkpoint_id,
+                checkpoint,
+            } if recoverable_turn_id == turn_id => {
+                (user_message, Some((checkpoint_id, *checkpoint)))
+            }
+            crate::recovery::RecoveryDisposition::ContinueTurnStart {
+                turn_id: recoverable_turn_id,
+                ..
+            }
+            | crate::recovery::RecoveryDisposition::ContinueCheckpoint {
+                turn_id: recoverable_turn_id,
+                ..
+            } => {
+                return Err(AgentError::SessionAuthority(format!(
+                    "recovery turn mismatch: expected {recoverable_turn_id}, found {turn_id}"
+                )));
+            }
+            disposition => {
+                return Err(AgentError::SessionAuthority(format!(
+                    "interrupted turn is not directly continuable: {disposition:?}"
+                )));
+            }
+        };
+
+        let mut prepared_recovery_request = None;
+        let mut recovered_provider_round = None;
+        let mut durable_provider_terminal = None;
+        if let Some((checkpoint_id, checkpoint)) = resume_checkpoint.as_ref()
+            && matches!(
+                checkpoint.next_action,
+                crate::recovery::RecoveryNextAction::ProviderDispatch
+            )
+        {
+            let (request, disposition) =
+                self.prepare_provider_recovery(turn_id, checkpoint_id, checkpoint)?;
+            use crate::provider_recovery::ProviderDispatchRecoveryDisposition as Disposition;
+            match disposition {
+                Disposition::SafeNoSend { .. } => {
+                    prepared_recovery_request = Some(request);
+                }
+                Disposition::StartedUnknown { .. } => {
+                    return Err(AgentError::SessionAuthority(
+                        "provider outcome remains unknown; recovery is suspended".to_string(),
+                    ));
+                }
+                Disposition::ApplyDurableSuccess { round, .. } => {
+                    prepared_recovery_request = Some(request);
+                    recovered_provider_round = Some(*round);
+                }
+                Disposition::DurableFailure { failures, .. } => {
+                    durable_provider_terminal = Some(Err(AgentError::ApiError(format!(
+                        "recovered provider dispatch failed: {}",
+                        failures
+                            .iter()
+                            .map(|failure| failure.error.as_str())
+                            .collect::<Vec<_>>()
+                            .join("; ")
+                    ))));
+                }
+                Disposition::DurableCancelled { .. } => {
+                    durable_provider_terminal = Some(Err(AgentError::UserAborted));
+                }
+            }
+        }
+
+        if let Some((_, checkpoint)) = resume_checkpoint.as_ref() {
+            self.conversation_id.clone_from(&checkpoint.conversation_id);
+            self.restore_recovery_posture(&checkpoint.posture)?;
+            if matches!(
+                checkpoint.next_action,
+                crate::recovery::RecoveryNextAction::ContinueToolRound
+            ) {
+                return self
+                    .resume_recovered_tool_round(turn_id, checkpoint.clone(), msg_id)
+                    .await;
+            }
+            if matches!(
+                checkpoint.next_action,
+                crate::recovery::RecoveryNextAction::CommitTurn
+            ) {
+                let terminal = checkpoint.terminal_result.as_ref().ok_or_else(|| {
+                    AgentError::SessionAuthority(
+                        "terminal recovery checkpoint has no result".to_string(),
+                    )
+                })?;
+                let stop_reason = match terminal.stop_reason.as_str() {
+                    "end_turn" => StopReason::EndTurn,
+                    "max_tokens" => StopReason::MaxTokens,
+                    "max_turns" => StopReason::MaxTurns,
+                    _ => {
+                        return Err(AgentError::SessionAuthority(
+                            "terminal recovery checkpoint has an invalid stop reason".to_string(),
+                        ));
+                    }
+                };
+                let result = AgentResult {
+                    text: terminal.text.clone(),
+                    stop_reason,
+                    finish_reason: terminal.finish_reason,
+                    usage: terminal.usage.clone(),
+                    usage_delta: terminal.usage_delta.clone(),
+                    turns: usize::try_from(terminal.turns).map_err(|_| {
+                        AgentError::SessionAuthority(
+                            "terminal recovery turn count exceeds usize".to_string(),
+                        )
+                    })?,
+                    active_window_percent: terminal.active_window_percent,
+                    agent_run_id: terminal.agent_run_id.clone(),
+                };
+                self.total_usage = result.usage.clone();
+                self.run_usage = result.usage_delta.clone();
+                self.current_agent_run_id.clone_from(&result.agent_run_id);
+                self.active_journal_turn_id = Some(turn_id.to_owned());
+                let cancelled = matches!(
+                    terminal.completion,
+                    crate::recovery::RecoveryTerminalCompletion::Cancelled
+                );
+                if !cancelled {
+                    self.output.emit_text_delta(&result.text, msg_id);
+                }
+                let terminal_event = if cancelled {
+                    SessionEvent::TurnCancelled {
+                        turn_id: turn_id.to_owned(),
+                    }
+                } else {
+                    SessionEvent::TurnCommitted {
+                        turn_id: turn_id.to_owned(),
+                        assistant_message: result.text.clone(),
+                    }
+                };
+                self.append_journal_event(terminal_event).await?;
+                self.finish_budget_turn(turn_id)?;
+                self.active_journal_turn_id = None;
+                self.save_session_mirror();
+                return Ok(result);
+            }
+        }
+
+        self.active_journal_turn_id = Some(turn_id.to_owned());
+        let checkpoint = resume_checkpoint.map(|(_, checkpoint)| checkpoint);
+        let result = match durable_provider_terminal {
+            Some(result) => result,
+            None => {
+                self.run_inner(
+                    &user_message,
+                    msg_id,
+                    Some(turn_id),
+                    checkpoint,
+                    prepared_recovery_request,
+                    recovered_provider_round,
+                )
+                .await
+            }
+        };
+        // Apply the same safe closure rule as a fresh run: pending/prepared
+        // descendants are cancelled, but started unknown effects keep the
+        // interrupted turn open for reconciliation.
+        if matches!(result, Err(AgentError::UserAborted))
+            && matches!(
+                self.close_not_started_descendants_for_cancellation(turn_id)
+                    .await?,
+                CancellationDescendantClosure::ReconciliationRequired
+            )
+        {
+            self.active_journal_turn_id = None;
+            return result;
+        }
+        let sync_result = if matches!(result, Err(AgentError::UserAborted)) {
+            self.prepare_durable_conversation().await
+        } else {
+            self.sync_journal_conversation(turn_id).await
+        };
+        if let Err(sync_error) = sync_result {
+            self.append_journal_event(SessionEvent::TurnFailed {
+                turn_id: turn_id.to_owned(),
+                error: sync_error.to_string(),
+            })
+            .await?;
+            self.finish_budget_turn(turn_id)?;
+            self.active_journal_turn_id = None;
+            return Err(sync_error);
+        }
+        self.save_session_mirror();
+        let terminal = match &result {
+            Ok(result) => SessionEvent::TurnCommitted {
+                turn_id: turn_id.to_owned(),
+                assistant_message: result.text.clone(),
+            },
+            Err(AgentError::UserAborted) => SessionEvent::TurnCancelled {
+                turn_id: turn_id.to_owned(),
+            },
+            Err(error) => SessionEvent::TurnFailed {
+                turn_id: turn_id.to_owned(),
+                error: error.to_string(),
+            },
+        };
+        self.append_journal_event(terminal).await?;
+        self.finish_budget_turn(turn_id)?;
+        self.active_journal_turn_id = None;
+        if result.is_ok() {
+            // The original process deliberately did not persist this
+            // adaptive bootstrap input before its terminal journal event.
+            // Commit the observation exactly once after recovered completion.
+            self.observe_user_turn(&user_message).await;
+        }
+        result
+    }
+
+    /// Resolve the approval gate shown by a recovery snapshot and continue the
+    /// exact committed tool round. The durable cursor and approval id are both
+    /// checked before recording the decision.
+    pub async fn resolve_interrupted_approval(
+        &mut self,
+        turn_id: &str,
+        expected_cursor: &wcore_protocol::events::RecoveryCursor,
+        approval_id: &str,
+        decision: wcore_protocol::commands::RecoveredApprovalDecision,
+        answer: Option<&str>,
+        msg_id: &str,
+    ) -> Result<AgentResult, AgentError> {
+        let recovery = self.recovery_plan()?;
+        if recovery.cursor() != *expected_cursor {
+            return Err(AgentError::SessionAuthority(
+                "recovery cursor no longer matches the durable session head".to_string(),
+            ));
+        }
+        match &recovery.disposition {
+            crate::recovery::RecoveryDisposition::AwaitApproval {
+                turn_id: recoverable_turn_id,
+                approval_ids,
+            } if recoverable_turn_id == turn_id
+                && approval_ids.len() == 1
+                && approval_ids.first().is_some_and(|id| id == approval_id) => {}
+            crate::recovery::RecoveryDisposition::AwaitApproval { .. } => {
+                return Err(AgentError::SessionAuthority(
+                    "recovered approval authority does not match the exact pending gate"
+                        .to_string(),
+                ));
+            }
+            disposition => {
+                return Err(AgentError::SessionAuthority(format!(
+                    "interrupted turn is not awaiting approval: {disposition:?}"
+                )));
+            }
+        }
+
+        let journal = self.session_journal.as_ref().cloned().ok_or_else(|| {
+            AgentError::SessionAuthority("session journal is not initialized".to_string())
+        })?;
+        let authority =
+            crate::recovery::RecoveryPlan::recovered_tool_round_authority(&journal, turn_id)
+                .map_err(|error| AgentError::SessionAuthority(error.to_string()))?;
+        let messages = authority
+            .conversation
+            .iter()
+            .cloned()
+            .map(serde_json::from_value::<Message>)
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| AgentError::SessionAuthority(error.to_string()))?;
+        let tool_calls = messages
+            .iter()
+            .rev()
+            .find(|message| matches!(message.role, Role::Assistant))
+            .map(|message| {
+                message
+                    .content
+                    .iter()
+                    .filter(|block| matches!(block, ContentBlock::ToolUse { .. }))
+                    .cloned()
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        let Some(ContentBlock::ToolUse {
+            id, name, input, ..
+        }) = tool_calls
+            .iter()
+            .find(|call| matches!(call, ContentBlock::ToolUse { id, .. } if id == approval_id))
+        else {
+            return Err(AgentError::SessionAuthority(
+                "recovered approval id does not match any committed tool call".to_string(),
+            ));
+        };
+        if name == "AskUserQuestion" {
+            return Err(AgentError::SessionAuthority(
+                "AskUserQuestion recovery is unavailable because its answer is not durably journaled; cancel and retry the turn"
+                    .to_string(),
+            ));
+        }
+        if answer.is_some() {
+            return Err(AgentError::SessionAuthority(
+                "recovered answers are valid only for AskUserQuestion, which is not recovery-safe"
+                    .to_string(),
+            ));
+        }
+
+        let category = self
+            .tools
+            .get(name)
+            .map(|tool| tool.category_for(input))
+            .unwrap_or(ToolCategory::Exec);
+        let intent = serde_json::json!({
+            "provider_call_id": id,
+            "tool": name,
+            "category": category.to_string(),
+            "input": input,
+        });
+        let intent_digest = state_payload_digest(&intent)
+            .map_err(|error| AgentError::SessionAuthority(error.to_string()))?;
+        let state = journal
+            .state()
+            .map_err(|error| AgentError::SessionAuthority(error.to_string()))?;
+        let approval = state.approvals.get(approval_id).ok_or_else(|| {
+            AgentError::SessionAuthority(
+                "recovered approval is absent from the journal".to_string(),
+            )
+        })?;
+        if approval.resolution.is_some()
+            || approval.intent_digest != intent_digest
+            || !matches!(
+                &approval.origin,
+                ApprovalOrigin::Turn { turn_id: origin_turn } if origin_turn == turn_id
+            )
+        {
+            return Err(AgentError::SessionAuthority(
+                "recovered approval does not match the committed tool intent".to_string(),
+            ));
+        }
+        // Validate the complete prompt/policy/tool posture before recording a
+        // recovered decision. In particular, an adaptive prompt drift must
+        // not partially consume approval authority and then fail continuation.
+        self.restore_recovery_posture(&authority.checkpoint.posture)?;
+        let resolution = match decision {
+            wcore_protocol::commands::RecoveredApprovalDecision::Approve => {
+                ApprovalResolution::Decided {
+                    decision: ApprovalDecision::AllowOnce,
+                }
+            }
+            wcore_protocol::commands::RecoveredApprovalDecision::Deny => {
+                ApprovalResolution::Decided {
+                    decision: ApprovalDecision::Deny,
+                }
+            }
+        };
+        self.append_journal_event(SessionEvent::ApprovalResolved {
+            approval_id: approval_id.to_owned(),
+            resolution,
+        })
+        .await?;
+
+        if matches!(
+            decision,
+            wcore_protocol::commands::RecoveredApprovalDecision::Deny
+        ) {
+            return self
+                .terminalize_recovered_denied_tool_round(
+                    turn_id,
+                    authority.checkpoint,
+                    messages,
+                    tool_calls,
+                )
+                .await;
+        }
+
+        let next = self.recovery_plan()?;
+        Box::pin(self.resume_interrupted_turn(turn_id, &next.cursor(), msg_id)).await
+    }
+
+    async fn terminalize_recovered_denied_tool_round(
+        &mut self,
+        turn_id: &str,
+        checkpoint: crate::recovery::RecoveryCheckpoint,
+        messages: Vec<Message>,
+        tool_calls: Vec<ContentBlock>,
+    ) -> Result<AgentResult, AgentError> {
+        let journal = self.session_journal.as_ref().cloned().ok_or_else(|| {
+            AgentError::SessionAuthority("session journal is not initialized".to_string())
+        })?;
+        let state = journal
+            .state()
+            .map_err(|error| AgentError::SessionAuthority(error.to_string()))?;
+        let denied_ids = tool_calls
+            .iter()
+            .filter_map(|call| match call {
+                ContentBlock::ToolUse { id, .. }
+                    if matches!(
+                        state
+                            .approvals
+                            .get(id)
+                            .and_then(|approval| approval.resolution.as_ref()),
+                        Some(ApprovalResolution::Decided {
+                            decision: ApprovalDecision::Deny,
+                        })
+                    ) =>
+                {
+                    Some(id.clone())
+                }
+                _ => None,
+            })
+            .collect::<HashSet<_>>();
+        if denied_ids.is_empty() {
+            return Err(AgentError::SessionAuthority(
+                "recovered cancellation has no durable denial authority".to_string(),
+            ));
+        }
+
+        // The denial applies to the committed tool round, not only the first
+        // gate encountered. Close every descendant and pair every ToolUse
+        // with one result so the durable transcript remains provider-valid.
+        // Already-completed tools retain their exact durable result; only
+        // not-started calls receive synthetic cancellation evidence. This
+        // routine is idempotent across crashes before the cancellation
+        // checkpoint: the reducer exposes only still-open work.
+        self.terminalize_interrupted_turn_for_cancellation(turn_id)
+            .await?;
+        self.messages = messages;
+        let terminal_state = journal
+            .state()
+            .map_err(|error| AgentError::SessionAuthority(error.to_string()))?;
+        let results = tool_calls
+            .iter()
+            .enumerate()
+            .map(|(ordinal, call)| {
+                let ContentBlock::ToolUse {
+                    id, name, input, ..
+                } = call
+                else {
+                    return Err(AgentError::SessionAuthority(
+                        "recovered denial authority contains a non-tool call".to_string(),
+                    ));
+                };
+                let ordinal = u64::try_from(ordinal).map_err(|_| {
+                    AgentError::SessionAuthority("recovered tool ordinal exceeds u64".to_string())
+                })?;
+                let input_digest = state_payload_digest(input)
+                    .map_err(|error| AgentError::SessionAuthority(error.to_string()))?;
+                let attempts = terminal_state
+                    .tools
+                    .iter()
+                    .filter(|(_, tool)| tool.turn_id == turn_id && tool.provider_call_id == *id)
+                    .collect::<Vec<_>>();
+                if attempts.iter().any(|(_, tool)| {
+                    tool.ordinal != ordinal
+                        || tool.tool != *name
+                        || tool.requested_input_digest != input_digest
+                }) {
+                    return Err(AgentError::SessionAuthority(format!(
+                        "recovered denied tool call {id} does not match its durable intent"
+                    )));
+                }
+                let retry_parents = attempts
+                    .iter()
+                    .filter_map(|(_, tool)| tool.retry_of.as_deref())
+                    .collect::<HashSet<_>>();
+                let leaves = attempts
+                    .iter()
+                    .filter(|(execution_id, _)| !retry_parents.contains(execution_id.as_str()))
+                    .copied()
+                    .collect::<Vec<_>>();
+                if leaves.len() > 1 {
+                    return Err(AgentError::SessionAuthority(format!(
+                        "recovered denied tool call {id} has ambiguous durable retry history"
+                    )));
+                }
+                if let Some((_, tool)) = leaves.first().copied()
+                    && matches!(
+                        &tool.effect,
+                        ToolEffectState::Succeeded | ToolEffectState::Failed { .. }
+                    )
+                {
+                    let durable = tool.result.as_ref().ok_or_else(|| {
+                        AgentError::SessionAuthority(format!(
+                            "completed recovered tool call {id} has no durable result"
+                        ))
+                    })?;
+                    return Ok(ContentBlock::ToolResult {
+                        tool_use_id: id.clone(),
+                        content: durable
+                            .get("content")
+                            .and_then(serde_json::Value::as_str)
+                            .ok_or_else(|| {
+                                AgentError::SessionAuthority(format!(
+                                    "durable recovered tool result {id} has no content"
+                                ))
+                            })?
+                            .to_string(),
+                        is_error: durable
+                            .get("is_error")
+                            .and_then(serde_json::Value::as_bool)
+                            .ok_or_else(|| {
+                                AgentError::SessionAuthority(format!(
+                                    "durable recovered tool result {id} has no error status"
+                                ))
+                            })?,
+                    });
+                }
+                Ok(ContentBlock::ToolResult {
+                    tool_use_id: id.clone(),
+                    content: crate::output_redaction::redact_tool_output(
+                        if denied_ids.contains(id) {
+                            "Tool denied during recovery"
+                        } else {
+                            "Tool not run because the recovered tool round was denied"
+                        },
+                    ),
+                    is_error: true,
+                })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        self.messages.push(Message::now(Role::User, results));
+        self.conversation_id.clone_from(&checkpoint.conversation_id);
+        self.run_usage.clone_from(&checkpoint.run_usage);
+        self.active_journal_turn_id = Some(turn_id.to_owned());
+        let turns = usize::try_from(checkpoint.turn_index)
+            .map_err(|_| {
+                AgentError::SessionAuthority(
+                    "recovery checkpoint turn index exceeds usize".to_string(),
+                )
+            })?
+            .saturating_add(1);
+        let result = AgentResult {
+            text: String::new(),
+            stop_reason: StopReason::EndTurn,
+            finish_reason: FinishReason::Stop,
+            usage: self.total_usage.clone(),
+            usage_delta: checkpoint.run_usage.clone(),
+            turns,
+            active_window_percent: self.active_window_percent_now(&self.model, 0),
+            agent_run_id: self.current_agent_run_id.clone(),
+        };
+        let loop_guard = LoopGuard::restore(&checkpoint.loop_guard)?;
+        let failure_guard = FailureGuard::restore(&checkpoint.failure_guard)?;
+        self.commit_terminal_recovery_checkpoint(
+            turn_id,
+            &result,
+            turns.saturating_sub(1),
+            &loop_guard,
+            &failure_guard,
+            crate::recovery::RecoveryTerminalCompletion::Cancelled,
+        )
+        .await?;
+        self.append_journal_event(SessionEvent::TurnCancelled {
+            turn_id: turn_id.to_owned(),
+        })
+        .await?;
+        self.finish_budget_turn(turn_id)?;
+        self.active_journal_turn_id = None;
+        self.save_session_mirror();
+        Ok(result)
+    }
+
+    async fn resume_recovered_tool_round(
+        &mut self,
+        turn_id: &str,
+        checkpoint: crate::recovery::RecoveryCheckpoint,
+        msg_id: &str,
+    ) -> Result<AgentResult, AgentError> {
+        let journal = self.session_journal.as_ref().cloned().ok_or_else(|| {
+            AgentError::SessionAuthority("session journal is not initialized".to_string())
+        })?;
+        let authority =
+            crate::recovery::RecoveryPlan::recovered_tool_round_authority(&journal, turn_id)
+                .map_err(|error| AgentError::SessionAuthority(error.to_string()))?;
+        let messages = authority
+            .conversation
+            .into_iter()
+            .map(serde_json::from_value::<Message>)
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| AgentError::SessionAuthority(error.to_string()))?;
+        let tool_calls = messages
+            .iter()
+            .rev()
+            .find(|message| matches!(message.role, Role::Assistant))
+            .map(|message| {
+                message
+                    .content
+                    .iter()
+                    .filter(|block| matches!(block, ContentBlock::ToolUse { .. }))
+                    .cloned()
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        if tool_calls.is_empty() {
+            return Err(AgentError::SessionAuthority(
+                "recovered tool round has no committed tool calls".to_string(),
+            ));
+        }
+        if tool_calls.iter().any(
+            |call| matches!(call, ContentBlock::ToolUse { name, .. } if name == "AskUserQuestion"),
+        ) {
+            return Err(AgentError::SessionAuthority(
+                "AskUserQuestion recovery is unavailable because its answer is not durably journaled"
+                    .to_string(),
+            ));
+        }
+
+        let state = journal
+            .state()
+            .map_err(|error| AgentError::SessionAuthority(error.to_string()))?;
+        let has_durable_denial = tool_calls.iter().any(|call| {
+            let ContentBlock::ToolUse { id, .. } = call else {
+                return false;
+            };
+            matches!(
+                state
+                    .approvals
+                    .get(id)
+                    .and_then(|approval| approval.resolution.as_ref()),
+                Some(ApprovalResolution::Decided {
+                    decision: ApprovalDecision::Deny,
+                })
+            )
+        });
+        if has_durable_denial {
+            return self
+                .terminalize_recovered_denied_tool_round(turn_id, checkpoint, messages, tool_calls)
+                .await;
+        }
+        self.messages = messages;
+        self.conversation_id.clone_from(&checkpoint.conversation_id);
+        self.restore_recovery_posture(&checkpoint.posture)?;
+        self.run_usage.clone_from(&checkpoint.run_usage);
+        self.current_msg_id = msg_id.to_owned();
+        self.active_journal_turn_id = Some(turn_id.to_owned());
+        let loop_guard = LoopGuard::restore(&checkpoint.loop_guard)?;
+        let failure_guard = FailureGuard::restore(&checkpoint.failure_guard)?;
+        let approval_manager = self.approval_manager.as_ref().cloned().ok_or_else(|| {
+            AgentError::SessionAuthority(
+                "recovered tool execution requires an approval manager".to_string(),
+            )
+        })?;
+        let writer = self.protocol_writer.as_ref().cloned().ok_or_else(|| {
+            AgentError::SessionAuthority(
+                "recovered tool execution requires a protocol writer".to_string(),
+            )
+        })?;
+        let run_budget = self.current_run_budget()?;
+        let tool_budget = match self.budget_authority.as_ref() {
+            Some(authority) => {
+                crate::tool_budget::ToolBudgetTracker::with_budget_authority(Arc::clone(authority))
+            }
+            None => crate::tool_budget::ToolBudgetTracker::with_execution_budget(run_budget),
+        };
+        let file_write_notifier = self.tool_write_notifier().cloned();
+        let effect_scope = crate::journal_effects::JournalEffectCoordinator::new(journal.clone())
+            .for_turn(turn_id);
+        let recovered_pre_consumptions = state
+            .tools
+            .values()
+            .filter(|tool| tool.turn_id == turn_id)
+            .map(|tool| recovered_pre_hook_consumption(&state, tool))
+            .collect::<Result<Vec<_>, _>>()?
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>();
+        self.queue_durable_hook_consumptions(recovered_pre_consumptions);
+        for tool_execution_id in state
+            .tools
+            .iter()
+            .filter(|(_, tool)| tool.turn_id == turn_id)
+            .map(|(tool_execution_id, _)| tool_execution_id)
+        {
+            terminalize_recoverable_prepared_post_hook(&journal, tool_execution_id)?;
+        }
+        let mut results = Vec::with_capacity(tool_calls.len());
+
+        for (ordinal, tool_call) in tool_calls.iter().enumerate() {
+            let ContentBlock::ToolUse {
+                id, name, input, ..
+            } = tool_call
+            else {
+                continue;
+            };
+            let ordinal = u64::try_from(ordinal).map_err(|_| {
+                AgentError::SessionAuthority("recovered tool ordinal exceeds u64".to_string())
+            })?;
+            let requested_input_digest = state_payload_digest(input)
+                .map_err(|error| AgentError::SessionAuthority(error.to_string()))?;
+            let attempts = state
+                .tools
+                .iter()
+                .filter(|(_, tool)| tool.turn_id == turn_id && tool.provider_call_id == *id)
+                .collect::<Vec<_>>();
+            if attempts.iter().any(|(_, tool)| {
+                tool.ordinal != ordinal
+                    || tool.tool != *name
+                    || tool.requested_input_digest != requested_input_digest
+            }) {
+                return Err(AgentError::SessionAuthority(format!(
+                    "recovered tool call {id} does not match its durable ordinal or intent"
+                )));
+            }
+            let retry_parents = attempts
+                .iter()
+                .filter_map(|(_, tool)| tool.retry_of.as_deref())
+                .collect::<HashSet<_>>();
+            let leaves = attempts
+                .iter()
+                .filter(|(tool_execution_id, _)| {
+                    !retry_parents.contains(tool_execution_id.as_str())
+                })
+                .copied()
+                .collect::<Vec<_>>();
+            if leaves.len() > 1 {
+                return Err(AgentError::SessionAuthority(format!(
+                    "recovered tool call {id} has ambiguous durable retry history"
+                )));
+            }
+
+            let category = self
+                .tools
+                .get(name)
+                .map(|tool| tool.category_for(input))
+                .unwrap_or(ToolCategory::Exec);
+            let approval_intent = serde_json::json!({
+                "provider_call_id": id,
+                "tool": name,
+                "category": category.to_string(),
+                "input": input,
+            });
+            let approval_intent_digest = state_payload_digest(&approval_intent)
+                .map_err(|error| AgentError::SessionAuthority(error.to_string()))?;
+            let approval_resolution = state
+                .approvals
+                .get(id)
+                .map(|approval| {
+                    if approval.intent_digest != approval_intent_digest
+                        || !matches!(
+                            &approval.origin,
+                            ApprovalOrigin::Turn { turn_id: origin_turn } if origin_turn == turn_id
+                        )
+                    {
+                        return Err(AgentError::SessionAuthority(format!(
+                            "recovered approval for tool call {id} is not bound to its committed intent"
+                        )));
+                    }
+                    approval.resolution.clone().ok_or_else(|| {
+                        AgentError::SessionAuthority(format!(
+                            "recovered approval for tool call {id} is still pending"
+                        ))
+                    })
+                })
+                .transpose()?;
+
+            if let Some((tool_execution_id, tool)) = leaves.first().copied() {
+                let result = match (&tool.effect, tool.result.as_ref()) {
+                    (ToolEffectState::Succeeded | ToolEffectState::Failed { .. }, Some(result)) => {
+                        if matches!(
+                            approval_resolution,
+                            Some(
+                                ApprovalResolution::Decided {
+                                    decision: ApprovalDecision::Deny,
+                                } | ApprovalResolution::Cancelled
+                                    | ApprovalResolution::TimedOut
+                            )
+                        ) {
+                            return Err(AgentError::SessionAuthority(format!(
+                                "recovered tool call {id} executed after a durable non-approval"
+                            )));
+                        }
+                        ContentBlock::ToolResult {
+                            tool_use_id: id.clone(),
+                            content: result
+                                .get("content")
+                                .and_then(serde_json::Value::as_str)
+                                .ok_or_else(|| {
+                                    AgentError::SessionAuthority(format!(
+                                        "durable recovered tool result {id} has no content"
+                                    ))
+                                })?
+                                .to_string(),
+                            is_error: result
+                                .get("is_error")
+                                .and_then(serde_json::Value::as_bool)
+                                .ok_or_else(|| {
+                                    AgentError::SessionAuthority(format!(
+                                        "durable recovered tool result {id} has no error status"
+                                    ))
+                                })?,
+                        }
+                    }
+                    (ToolEffectState::Prepared, None) => {
+                        let terminal_no_start = match approval_resolution.as_ref() {
+                            Some(ApprovalResolution::Decided {
+                                decision: ApprovalDecision::Deny,
+                            }) => Some((
+                                ToolNotStartedReason::ApprovalDenied {
+                                    approval_id: id.clone(),
+                                },
+                                "Tool denied during recovery".to_string(),
+                            )),
+                            Some(ApprovalResolution::Cancelled) => Some((
+                                ToolNotStartedReason::ApprovalCancelled {
+                                    approval_id: id.clone(),
+                                },
+                                "Tool approval was cancelled before recovery".to_string(),
+                            )),
+                            Some(ApprovalResolution::TimedOut) => Some((
+                                ToolNotStartedReason::ApprovalTimedOut {
+                                    approval_id: id.clone(),
+                                },
+                                "Tool approval timed out before recovery".to_string(),
+                            )),
+                            _ => None,
+                        };
+                        if let Some((reason, content)) = terminal_no_start {
+                            journal
+                                .append(SessionEvent::ToolExecutionNotStarted {
+                                    tool_execution_id: tool_execution_id.clone(),
+                                    reason,
+                                })
+                                .map_err(|error| AgentError::SessionAuthority(error.to_string()))?;
+                            terminalize_recoverable_prepared_post_hook(
+                                &journal,
+                                tool_execution_id,
+                            )?;
+                            results.push(ContentBlock::ToolResult {
+                                tool_use_id: id.clone(),
+                                content: crate::output_redaction::redact_tool_output(&content),
+                                is_error: true,
+                            });
+                            continue;
+                        }
+                        let interrupted_reason =
+                            "process stopped before durable tool execution began".to_string();
+                        journal
+                            .append(SessionEvent::ToolExecutionNotStarted {
+                                tool_execution_id: tool_execution_id.clone(),
+                                reason: ToolNotStartedReason::Cancelled {
+                                    reason: interrupted_reason,
+                                },
+                            })
+                            .map_err(|error| AgentError::SessionAuthority(error.to_string()))?;
+                        terminalize_recoverable_prepared_post_hook(&journal, tool_execution_id)?;
+                        let recovered_approval_call_id = matches!(
+                            approval_resolution,
+                            Some(ApprovalResolution::Decided {
+                                decision: ApprovalDecision::AllowOnce
+                                    | ApprovalDecision::AllowSession,
+                            })
+                        )
+                        .then_some(id.as_str());
+                        let pre_hook_consumption = recovered_pre_hook_consumption(&state, tool)?;
+                        let outcome =
+                            crate::orchestration::execute_recovered_retry_tool_call_with_effects(
+                                &self.tools,
+                                tool_call,
+                                &approval_manager,
+                                &writer,
+                                msg_id,
+                                &self.allow_list,
+                                self.hooks.as_mut(),
+                                self.compaction_level,
+                                self.toon_enabled,
+                                Some(&tool_budget),
+                                &self.cancel_token,
+                                file_write_notifier.as_ref(),
+                                &effect_scope,
+                                ordinal,
+                                recovered_approval_call_id,
+                                id,
+                                tool_execution_id,
+                                &tool.tool,
+                                tool.ordinal,
+                                &tool.effect_contract,
+                                tool.effect_receipt.as_ref(),
+                                &tool.requested_input_digest,
+                                &tool.effective_input_digest,
+                                tool.pre_hook_phase_id.as_deref(),
+                                pre_hook_consumption,
+                            )
+                            .await
+                            .map_err(|ExecutionControl::Quit| AgentError::UserAborted)?;
+                        self.apply_context_modifiers(&outcome.modifiers);
+                        for hook_outcome in outcome.hook_outcomes {
+                            self.apply_turn_end_outcome(hook_outcome);
+                        }
+                        results.extend(outcome.results);
+                        continue;
+                    }
+                    (ToolEffectState::NotStarted, None)
+                        if matches!(
+                            tool.not_started_reason.as_ref(),
+                            Some(ToolNotStartedReason::Cancelled { reason })
+                                if reason == "process stopped before durable tool execution began"
+                        ) =>
+                    {
+                        terminalize_recoverable_prepared_post_hook(&journal, tool_execution_id)?;
+                        if matches!(
+                            approval_resolution,
+                            Some(
+                                ApprovalResolution::Decided {
+                                    decision: ApprovalDecision::Deny,
+                                } | ApprovalResolution::Cancelled
+                                    | ApprovalResolution::TimedOut
+                            )
+                        ) {
+                            return Err(AgentError::SessionAuthority(format!(
+                                "recovered tool call {id} was retryable after a durable non-approval"
+                            )));
+                        }
+                        let recovered_approval_call_id = matches!(
+                            approval_resolution,
+                            Some(ApprovalResolution::Decided {
+                                decision: ApprovalDecision::AllowOnce
+                                    | ApprovalDecision::AllowSession,
+                            })
+                        )
+                        .then_some(id.as_str());
+                        let pre_hook_consumption = recovered_pre_hook_consumption(&state, tool)?;
+                        let outcome =
+                            crate::orchestration::execute_recovered_retry_tool_call_with_effects(
+                                &self.tools,
+                                tool_call,
+                                &approval_manager,
+                                &writer,
+                                msg_id,
+                                &self.allow_list,
+                                self.hooks.as_mut(),
+                                self.compaction_level,
+                                self.toon_enabled,
+                                Some(&tool_budget),
+                                &self.cancel_token,
+                                file_write_notifier.as_ref(),
+                                &effect_scope,
+                                ordinal,
+                                recovered_approval_call_id,
+                                id,
+                                tool_execution_id,
+                                &tool.tool,
+                                tool.ordinal,
+                                &tool.effect_contract,
+                                tool.effect_receipt.as_ref(),
+                                &tool.requested_input_digest,
+                                &tool.effective_input_digest,
+                                tool.pre_hook_phase_id.as_deref(),
+                                pre_hook_consumption,
+                            )
+                            .await
+                            .map_err(|ExecutionControl::Quit| AgentError::UserAborted)?;
+                        self.apply_context_modifiers(&outcome.modifiers);
+                        for hook_outcome in outcome.hook_outcomes {
+                            self.apply_turn_end_outcome(hook_outcome);
+                        }
+                        results.extend(outcome.results);
+                        continue;
+                    }
+                    (ToolEffectState::NotStarted, None) => ContentBlock::ToolResult {
+                        tool_use_id: id.clone(),
+                        content: crate::output_redaction::redact_tool_output(&format!(
+                            "Tool was not started before recovery: {}",
+                            tool.not_started_reason.as_ref().map_or_else(
+                                || "unspecified reason".to_string(),
+                                |reason| format!("{reason:?}")
+                            )
+                        )),
+                        is_error: true,
+                    },
+                    (ToolEffectState::Running | ToolEffectState::Unknown { .. }, _) => {
+                        return Err(AgentError::SessionAuthority(format!(
+                            "recovered tool effect {tool_execution_id} requires reconciliation"
+                        )));
+                    }
+                    _ => {
+                        return Err(AgentError::SessionAuthority(format!(
+                            "recovered tool effect {tool_execution_id} has an incomplete terminal receipt"
+                        )));
+                    }
+                };
+                results.push(result);
+                continue;
+            }
+
+            let terminal_no_start = match approval_resolution.as_ref() {
+                Some(ApprovalResolution::Decided {
+                    decision: ApprovalDecision::Deny,
+                }) => Some((
+                    ToolNotStartedReason::ApprovalDenied {
+                        approval_id: id.clone(),
+                    },
+                    "Tool denied during recovery".to_string(),
+                )),
+                Some(ApprovalResolution::Cancelled) => Some((
+                    ToolNotStartedReason::ApprovalCancelled {
+                        approval_id: id.clone(),
+                    },
+                    "Tool approval was cancelled before recovery".to_string(),
+                )),
+                Some(ApprovalResolution::TimedOut) => Some((
+                    ToolNotStartedReason::ApprovalTimedOut {
+                        approval_id: id.clone(),
+                    },
+                    "Tool approval timed out before recovery".to_string(),
+                )),
+                _ => None,
+            };
+            if let Some((reason, content)) = terminal_no_start {
+                results.push(crate::orchestration::record_recovered_tool_not_started(
+                    &self.tools,
+                    &effect_scope,
+                    ordinal,
+                    tool_call,
+                    reason,
+                    content,
+                ));
+                continue;
+            }
+
+            let outcome = if matches!(
+                approval_resolution,
+                Some(ApprovalResolution::Decided {
+                    decision: ApprovalDecision::AllowOnce | ApprovalDecision::AllowSession,
+                })
+            ) {
+                crate::orchestration::execute_recovered_approved_tool_call_with_effects(
+                    &self.tools,
+                    tool_call,
+                    &approval_manager,
+                    &writer,
+                    msg_id,
+                    &self.allow_list,
+                    self.hooks.as_mut(),
+                    self.compaction_level,
+                    self.toon_enabled,
+                    Some(&tool_budget),
+                    &self.cancel_token,
+                    file_write_notifier.as_ref(),
+                    &effect_scope,
+                    ordinal,
+                    id,
+                )
+                .await
+            } else {
+                crate::orchestration::execute_tool_calls_with_approval_budget_and_effects(
+                    &self.tools,
+                    std::slice::from_ref(tool_call),
+                    &approval_manager,
+                    &writer,
+                    msg_id,
+                    &self.allow_list,
+                    self.hooks.as_mut(),
+                    self.compaction_level,
+                    self.toon_enabled,
+                    Some(&tool_budget),
+                    &self.cancel_token,
+                    file_write_notifier.as_ref(),
+                    Some(&effect_scope),
+                    Some(std::slice::from_ref(&ordinal)),
+                )
+                .await
+            }
+            .map_err(|ExecutionControl::Quit| AgentError::UserAborted)?;
+            self.apply_context_modifiers(&outcome.modifiers);
+            for hook_outcome in outcome.hook_outcomes {
+                self.apply_turn_end_outcome(hook_outcome);
+            }
+            results.extend(outcome.results);
+        }
+
+        let unresolved = self.tool_effects_requiring_reconciliation()?;
+        if !unresolved.is_empty() {
+            return Err(AgentError::SessionAuthority(format!(
+                "recovered tool effects require reconciliation before continuation: {}",
+                unresolved.join(", ")
+            )));
+        }
+        self.dedup_repeated_tool_outputs(&mut results, &tool_calls);
+        self.messages.push(Message::now(Role::User, results));
+        self.commit_continue_loop_recovery_checkpoint(
+            turn_id,
+            usize::try_from(checkpoint.turn_index)
+                .map_err(|_| {
+                    AgentError::SessionAuthority(
+                        "recovery checkpoint turn index exceeds usize".to_string(),
+                    )
+                })?
+                .saturating_add(1),
+            &loop_guard,
+            &failure_guard,
+        )
+        .await?;
+        let next = self.recovery_plan()?;
+        Box::pin(self.resume_interrupted_turn(turn_id, &next.cursor(), msg_id)).await
+    }
+
+    /// Cancel an interrupted turn only when no external effect has an unknown
+    /// outcome. Pending approvals are durably cancelled before the terminal
+    /// turn event, so cancellation cannot strand reusable authority.
+    pub async fn cancel_interrupted_turn(
+        &mut self,
+        turn_id: &str,
+        expected_cursor: &wcore_protocol::events::RecoveryCursor,
+    ) -> Result<(), AgentError> {
+        let recovery = self.recovery_plan()?;
+        if recovery.cursor() != *expected_cursor {
+            return Err(AgentError::SessionAuthority(
+                "recovery cursor no longer matches the durable session head".to_string(),
+            ));
+        }
+        let recoverable_turn_id = match recovery.disposition {
+            crate::recovery::RecoveryDisposition::ContinueTurnStart { turn_id, .. }
+            | crate::recovery::RecoveryDisposition::ContinueCheckpoint { turn_id, .. }
+            | crate::recovery::RecoveryDisposition::AwaitApproval { turn_id, .. }
+            | crate::recovery::RecoveryDisposition::ReconciliationRequired { turn_id, .. }
+            | crate::recovery::RecoveryDisposition::Blocked { turn_id, .. } => turn_id,
+            crate::recovery::RecoveryDisposition::Ready => {
+                return Err(AgentError::SessionAuthority(
+                    "session has no interrupted turn to cancel".to_string(),
+                ));
+            }
+        };
+        if recoverable_turn_id != turn_id {
+            return Err(AgentError::SessionAuthority(format!(
+                "recovery turn mismatch: expected {recoverable_turn_id}, found {turn_id}"
+            )));
+        }
+
+        self.terminalize_interrupted_turn_for_cancellation(turn_id)
+            .await?;
+        self.append_journal_event(SessionEvent::TurnCancelled {
+            turn_id: turn_id.to_owned(),
+        })
+        .await?;
+        self.finish_budget_turn(turn_id)
+    }
+
+    /// Close every not-yet-started descendant before terminalizing a recovered
+    /// turn. Any started effect whose outcome is not authoritative blocks the
+    /// operation: cancellation is not evidence that a remote provider, tool,
+    /// child, or delivery did not run.
+    ///
+    /// Events are derived from a fresh reduced state and appended one at a
+    /// time. If the process dies between appends, the next cursor observes the
+    /// partial progress and this routine safely derives only the remaining
+    /// closures.
+    async fn terminalize_interrupted_turn_for_cancellation(
+        &self,
+        turn_id: &str,
+    ) -> Result<(), AgentError> {
+        match self
+            .close_not_started_descendants_for_cancellation(turn_id)
+            .await?
+        {
+            CancellationDescendantClosure::Closed => Ok(()),
+            CancellationDescendantClosure::ReconciliationRequired => {
+                Err(AgentError::SessionAuthority(
+                    "interrupted turn cannot be cancelled until started external outcomes are reconciled"
+                        .to_string(),
+                ))
+            }
+        }
+    }
+
+    async fn close_not_started_descendants_for_cancellation(
+        &self,
+        turn_id: &str,
+    ) -> Result<CancellationDescendantClosure, AgentError> {
+        let journal = self.session_journal.as_ref().ok_or_else(|| {
+            AgentError::SessionAuthority("session journal is not initialized".to_string())
+        })?;
+        let state = journal
+            .state()
+            .map_err(|error| AgentError::SessionAuthority(error.to_string()))?;
+        let turn = state.turns.get(turn_id).ok_or_else(|| {
+            AgentError::SessionAuthority(format!("unknown interrupted turn {turn_id}"))
+        })?;
+        if turn.completion.is_some() {
+            return Err(AgentError::SessionAuthority(format!(
+                "interrupted turn {turn_id} is already terminal"
+            )));
+        }
+
+        let has_unknown_provider = state.provider_attempts.values().any(|attempt| {
+            attempt.turn_id == turn_id && matches!(attempt.effect, ExternalEffectState::Unknown)
+        });
+        let has_unknown_tool = state.tools.values().any(|tool| {
+            tool.turn_id == turn_id
+                && matches!(
+                    tool.effect,
+                    ToolEffectState::Running | ToolEffectState::Unknown { .. }
+                )
+        });
+        let has_unknown_child = state.children.values().any(|child| {
+            child.turn_id == turn_id && matches!(child.effect, ExternalEffectState::Unknown)
+        });
+        let has_unknown_delivery = state.deliveries.values().any(|delivery| {
+            delivery_origin_belongs_to_turn(&delivery.origin, turn_id)
+                && matches!(delivery.effect, ExternalEffectState::Unknown)
+        });
+        if has_unknown_provider || has_unknown_tool || has_unknown_child || has_unknown_delivery {
+            return Ok(CancellationDescendantClosure::ReconciliationRequired);
+        }
+
+        let mut events = Vec::new();
+        events.extend(
+            state
+                .approvals
+                .iter()
+                .filter(|(_, approval)| {
+                    approval.resolution.is_none()
+                        && approval_origin_belongs_to_turn(&state, &approval.origin, turn_id)
+                })
+                .map(|(approval_id, _)| SessionEvent::ApprovalResolved {
+                    approval_id: approval_id.clone(),
+                    resolution: ApprovalResolution::Cancelled,
+                }),
+        );
+        events.extend(
+            state
+                .provider_attempts
+                .iter()
+                .filter(|(_, attempt)| {
+                    attempt.turn_id == turn_id
+                        && matches!(attempt.effect, ExternalEffectState::Prepared)
+                })
+                .map(|(attempt_id, attempt)| {
+                    let reason = ProviderAttemptNotStartedReason::Cancelled {
+                        reason: "interrupted turn cancelled during recovery".to_string(),
+                    };
+                    match attempt.dispatch_id.as_ref() {
+                        None => SessionEvent::ProviderAttemptNotStarted {
+                            attempt_id: attempt_id.clone(),
+                            reason,
+                        },
+                        Some(dispatch_id) => SessionEvent::ProviderAttemptNotStartedV2 {
+                            attempt_id: attempt_id.clone(),
+                            dispatch_id: dispatch_id.clone(),
+                            reason,
+                        },
+                    }
+                }),
+        );
+        events.extend(
+            state
+                .tools
+                .iter()
+                .filter(|(_, tool)| {
+                    tool.turn_id == turn_id && matches!(tool.effect, ToolEffectState::Prepared)
+                })
+                .map(|(tool_execution_id, tool)| {
+                    let reason = state
+                        .approvals
+                        .get(&tool.provider_call_id)
+                        .and_then(|approval| approval.resolution.as_ref())
+                        .and_then(|resolution| match resolution {
+                            ApprovalResolution::Decided {
+                                decision: ApprovalDecision::Deny,
+                            } => Some(ToolNotStartedReason::ApprovalDenied {
+                                approval_id: tool.provider_call_id.clone(),
+                            }),
+                            ApprovalResolution::Cancelled => {
+                                Some(ToolNotStartedReason::ApprovalCancelled {
+                                    approval_id: tool.provider_call_id.clone(),
+                                })
+                            }
+                            ApprovalResolution::TimedOut => {
+                                Some(ToolNotStartedReason::ApprovalTimedOut {
+                                    approval_id: tool.provider_call_id.clone(),
+                                })
+                            }
+                            ApprovalResolution::Decided { .. } => None,
+                        })
+                        .unwrap_or_else(|| ToolNotStartedReason::Cancelled {
+                            reason: "interrupted turn cancelled during recovery".to_string(),
+                        });
+                    SessionEvent::ToolExecutionNotStarted {
+                        tool_execution_id: tool_execution_id.clone(),
+                        reason,
+                    }
+                }),
+        );
+        events.extend(
+            state
+                .children
+                .iter()
+                .filter(|(_, child)| {
+                    child.turn_id == turn_id
+                        && matches!(child.effect, ExternalEffectState::Prepared)
+                })
+                .map(|(child_id, _)| SessionEvent::ChildNotStarted {
+                    child_id: child_id.clone(),
+                    reason: ChildNotStartedReason::Cancelled {
+                        reason: "interrupted turn cancelled during recovery".to_string(),
+                    },
+                }),
+        );
+        events.extend(
+            state
+                .deliveries
+                .iter()
+                .filter(|(_, delivery)| {
+                    delivery_origin_belongs_to_turn(&delivery.origin, turn_id)
+                        && matches!(delivery.effect, ExternalEffectState::Prepared)
+                })
+                .map(|(delivery_id, _)| SessionEvent::DeliveryNotStarted {
+                    delivery_id: delivery_id.clone(),
+                    reason: DeliveryNotStartedReason::Cancelled {
+                        reason: "interrupted turn cancelled during recovery".to_string(),
+                    },
+                }),
+        );
+        events.extend(
+            state
+                .budgets
+                .iter()
+                .filter(|(_, budget)| {
+                    budget.used.is_none()
+                        && !budget.released
+                        && budget_owner_belongs_to_turn(&state, &budget.owner, turn_id)
+                })
+                .map(|(reservation_id, _)| SessionEvent::BudgetReleased {
+                    event_id: format!("budget-event-{}", uuid::Uuid::new_v4()),
+                    reservation_id: reservation_id.clone(),
+                }),
+        );
+
+        for event in events {
+            self.append_journal_event(event).await?;
+        }
+        Ok(CancellationDescendantClosure::Closed)
+    }
+
+    /// Run only Core-registered authoritative reconcilers for an interrupted
+    /// tool effect. The cursor and turn id bind the action to the recovery view
+    /// the host inspected; free-form outcome claims are never accepted.
+    pub async fn reconcile_interrupted_turn(
+        &mut self,
+        turn_id: &str,
+        expected_cursor: &wcore_protocol::events::RecoveryCursor,
+    ) -> Result<(), AgentError> {
+        let recovery = self.recovery_plan()?;
+        if recovery.cursor() != *expected_cursor {
+            return Err(AgentError::SessionAuthority(
+                "recovery cursor no longer matches the durable session head".to_string(),
+            ));
+        }
+        match recovery.disposition {
+            crate::recovery::RecoveryDisposition::ReconciliationRequired {
+                turn_id: recoverable_turn_id,
+                ..
+            } if recoverable_turn_id == turn_id => {}
+            _ => {
+                return Err(AgentError::SessionAuthority(
+                    "interrupted turn has no registered authoritative reconciliation path"
+                        .to_string(),
+                ));
+            }
+        }
+        self.reconcile_interrupted_journal_turns().await
     }
 
     async fn append_journal_event(&self, event: SessionEvent) -> Result<(), AgentError> {
@@ -5238,10 +7375,11 @@ impl AgentEngine {
 
         if let Some(turn_id) = interrupted.into_iter().next() {
             self.append_journal_event(SessionEvent::TurnFailed {
-                turn_id,
+                turn_id: turn_id.clone(),
                 error: "interrupted before a terminal journal event".to_string(),
             })
             .await?;
+            self.finish_budget_turn(&turn_id)?;
         }
         Ok(())
     }
@@ -5277,9 +7415,85 @@ impl AgentEngine {
         let journal = self.session_journal.as_ref().cloned().ok_or_else(|| {
             AgentError::SessionAuthority("session journal is not initialized".to_string())
         })?;
-        crate::journal_effects::JournalEffectCoordinator::new(journal)
-            .resolve_tool(tool_execution_id, resolution, source, evidence)
-            .map_err(|error| AgentError::SessionAuthority(error.to_string()))
+        let tool_execution_id = tool_execution_id.into();
+        crate::journal_effects::JournalEffectCoordinator::new(journal.clone())
+            .resolve_tool(tool_execution_id.clone(), resolution, source, evidence)
+            .map_err(|error| AgentError::SessionAuthority(error.to_string()))?;
+        terminalize_recoverable_prepared_post_hook(&journal, &tool_execution_id)
+    }
+
+    /// Validate and persist one cursor-bound operator resolution against the
+    /// engine's live recovery authority. Both hosted and standalone clients
+    /// use this boundary so neither can bypass stale-cursor or evidence checks.
+    pub fn resolve_operator_tool_effect(
+        &self,
+        resolution: &OperatorToolEffectResolution,
+    ) -> Result<(), AgentError> {
+        let plan = self.recovery_plan()?;
+        let expected_cursor = plan.cursor();
+        let (expected_turn_id, expected_tool_execution_id) = match &plan.disposition {
+            crate::recovery::RecoveryDisposition::ReconciliationRequired {
+                turn_id,
+                tool_execution_ids,
+            } => {
+                let tool_execution_id = tool_execution_ids
+                    .iter()
+                    .find(|tool_execution_id| *tool_execution_id == &resolution.tool_execution_id)
+                    .ok_or_else(|| {
+                        AgentError::SessionAuthority(
+                            "tool execution is not an unresolved effect".to_string(),
+                        )
+                    })?;
+                (turn_id.as_str(), tool_execution_id.as_str())
+            }
+            _ => {
+                return Err(AgentError::SessionAuthority(
+                    "session has no unresolved tool effect".to_string(),
+                ));
+            }
+        };
+        let authority = OperatorResolutionAuthority {
+            session_id: &plan.session_id,
+            turn_id: expected_turn_id,
+            cursor: &expected_cursor,
+            tool_execution_id: expected_tool_execution_id,
+        };
+        ProtocolCommand::ResolveUnknownToolEffect(resolution.clone())
+            .validate_operator_resolution(&authority)
+            .map_err(|error| AgentError::SessionAuthority(error.to_string()))?;
+
+        let evidence = serde_json::to_value(&resolution.evidence)
+            .map_err(|error| AgentError::SessionAuthority(error.to_string()))?;
+        let durable_resolution = match resolution.outcome {
+            OperatorToolEffectOutcome::Succeeded => ToolResolution::Succeeded {
+                result: serde_json::json!({
+                    "content": "Operator evidence confirms the interrupted tool effect succeeded",
+                    "is_error": false,
+                    "operator_resolution_evidence": evidence.clone()
+                }),
+            },
+            OperatorToolEffectOutcome::Failed => ToolResolution::Failed {
+                error: "operator evidence confirms the tool effect failed".into(),
+                result: Some(serde_json::json!({
+                    "content": "Operator evidence confirms the interrupted tool effect failed",
+                    "is_error": true,
+                    "operator_resolution_evidence": evidence.clone()
+                })),
+            },
+            OperatorToolEffectOutcome::NotStarted => ToolResolution::NotStarted {
+                reason: ToolNotStartedReason::Cancelled {
+                    reason: "operator evidence confirms the tool execution did not start".into(),
+                },
+            },
+        };
+        self.resolve_unknown_tool_effect(
+            resolution.tool_execution_id.clone(),
+            durable_resolution,
+            ToolResolutionSource::Operator {
+                operator_id: resolution.operator_id.clone(),
+            },
+            evidence,
+        )
     }
 
     async fn sync_journal_conversation(&self, turn_id: &str) -> Result<(), AgentError> {
@@ -5295,6 +7509,9 @@ impl AgentEngine {
             .map(serde_json::to_value)
             .collect::<Result<Vec<_>, _>>()
             .map_err(|error| AgentError::SessionAuthority(error.to_string()))?;
+        let messages_value = serde_json::Value::Array(messages.clone());
+        let messages_digest = state_payload_digest(&messages_value)
+            .map_err(|error| AgentError::SessionAuthority(error.to_string()))?;
 
         if state.conversation.len() <= messages.len()
             && state
@@ -5303,8 +7520,12 @@ impl AgentEngine {
                 .zip(&messages)
                 .all(|(persisted, current)| persisted == current)
         {
+            if state.conversation.len() == messages.len() {
+                return Ok(());
+            }
             for (index, message) in messages
-                .into_iter()
+                .iter()
+                .cloned()
                 .enumerate()
                 .skip(state.conversation.len())
             {
@@ -5325,15 +7546,589 @@ impl AgentEngine {
             return Ok(());
         }
 
-        let messages_value = serde_json::Value::Array(messages.clone());
-        let messages_digest = state_payload_digest(&messages_value)
-            .map_err(|error| AgentError::SessionAuthority(error.to_string()))?;
         self.append_journal_event(SessionEvent::ConversationStateCommitted {
             turn_id: turn_id.to_owned(),
             messages,
-            messages_digest,
+            messages_digest: messages_digest.clone(),
+        })
+        .await?;
+        Ok(())
+    }
+
+    fn recovery_posture(&self) -> Result<crate::recovery::RecoveryPosture, AgentError> {
+        let cwd = std::env::current_dir()
+            .and_then(std::fs::canonicalize)
+            .map_err(|error| AgentError::SessionAuthority(error.to_string()))?;
+        let approval_policy = self
+            .confirmer
+            .lock()
+            .map_err(|_| {
+                AgentError::SessionAuthority(
+                    "tool confirmer lock is poisoned during checkpoint".to_string(),
+                )
+            })?
+            .approval_policy();
+        let mut tool_defs = self.tools.to_tool_defs();
+        tool_defs.sort_by(|left, right| left.name.cmp(&right.name));
+        let tool_inventory = tool_defs
+            .into_iter()
+            .map(|tool| {
+                serde_json::json!({
+                    "name": tool.name,
+                    "description": tool.description,
+                    "input_schema": tool.input_schema,
+                    "deferred": tool.deferred,
+                    "server": tool.server,
+                })
+            })
+            .collect::<Vec<_>>();
+        let thinking = self.thinking.as_ref().map(|thinking| match thinking {
+            wcore_types::llm::ThinkingConfig::Enabled { budget_tokens } => serde_json::json!({
+                "mode": "enabled",
+                "budget_tokens": budget_tokens,
+            }),
+            wcore_types::llm::ThinkingConfig::Disabled => {
+                serde_json::json!({ "mode": "disabled" })
+            }
+        });
+        let tool_hook_authority = self.hooks.as_ref().map_or_else(
+            || serde_json::json!({}),
+            |hooks| hooks.tool_hook_authority(),
+        );
+        let authority = serde_json::json!({
+            "execution_policy": serde_json::to_value(&self.config.execution_policy)
+                .map_err(|error| AgentError::SessionAuthority(error.to_string()))?,
+            "workspace_trust": serde_json::to_value(&self.config.workspace_trust)
+                .map_err(|error| AgentError::SessionAuthority(error.to_string()))?,
+            "approval_policy": serde_json::to_value(approval_policy)
+                .map_err(|error| AgentError::SessionAuthority(error.to_string()))?,
+            "cwd": cwd.to_string_lossy(),
+            "tool_inventory": tool_inventory,
+            "provider": wcore_config::config::provider_type_slug(self.config.provider),
+            "provider_label": &self.config.provider_label,
+            "provider_base_url": &self.config.base_url,
+            "provider_compat": serde_json::to_value(&self.compat)
+                .map_err(|error| AgentError::SessionAuthority(error.to_string()))?,
+            "egress_security": serde_json::to_value(&self.config.security)
+                .map_err(|error| AgentError::SessionAuthority(error.to_string()))?,
+            "model": &self.model,
+            "system_prompt": &self.system_prompt,
+            "max_tokens": self.max_tokens,
+            "max_tokens_explicit": self.max_tokens_explicit,
+            "temperature": self.temperature,
+            "thinking": thinking,
+            "reasoning_effort": &self.current_reasoning_effort,
+            "web_search": self.web_search,
+            "tool_hooks": tool_hook_authority,
+        });
+        let authority_digest = state_payload_digest(&authority)
+            .map_err(|error| AgentError::SessionAuthority(error.to_string()))?;
+        let authority_component_digests = authority
+            .as_object()
+            .ok_or_else(|| {
+                AgentError::SessionAuthority(
+                    "recovery checkpoint authority is not an object".to_string(),
+                )
+            })?
+            .iter()
+            .map(|(name, value)| {
+                state_payload_digest(value)
+                    .map(|digest| (name.clone(), digest))
+                    .map_err(|error| AgentError::SessionAuthority(error.to_string()))
+            })
+            .collect::<Result<std::collections::BTreeMap<_, _>, _>>()?;
+        Ok(crate::recovery::RecoveryPosture {
+            plan_active: self.plan_state.is_active,
+            pre_plan_allow_list: self.plan_state.pre_plan_allow_list.clone(),
+            effective_allow_list: self.allow_list.clone(),
+            conservatively_open_breakers: self.tools.breakers_requiring_conservative_restore(),
+            authority_digest,
+            authority_component_digests,
+            tool_hook_authority_version: crate::recovery::TOOL_HOOK_RECOVERY_AUTHORITY_VERSION,
+        })
+    }
+
+    fn restore_recovery_posture(
+        &mut self,
+        posture: &crate::recovery::RecoveryPosture,
+    ) -> Result<(), AgentError> {
+        let live = self.recovery_posture()?;
+        if live.authority_digest != posture.authority_digest {
+            let changed_components = if posture.authority_component_digests.is_empty() {
+                Vec::new()
+            } else {
+                live.authority_component_digests
+                    .keys()
+                    .chain(posture.authority_component_digests.keys())
+                    .collect::<std::collections::BTreeSet<_>>()
+                    .into_iter()
+                    .filter(|name| {
+                        live.authority_component_digests.get(*name)
+                            != posture.authority_component_digests.get(*name)
+                    })
+                    .map(|name| name.as_str())
+                    .collect::<Vec<_>>()
+            };
+            let detail = if changed_components.is_empty() {
+                String::new()
+            } else {
+                format!(": {}", changed_components.join(", "))
+            };
+            return Err(AgentError::SessionAuthority(format!(
+                "recovery checkpoint policy, workspace, cwd, or tool authority changed{detail}"
+            )));
+        }
+        self.tools
+            .restore_breakers_conservatively(&posture.conservatively_open_breakers)
+            .map_err(|error| AgentError::SessionAuthority(error.to_string()))?;
+        let recovered_pre_plan_allow_list =
+            intersect_recovery_allow_list(&posture.pre_plan_allow_list, &self.allow_list);
+        let recovered_effective_allow_list =
+            intersect_recovery_allow_list(&posture.effective_allow_list, &self.allow_list);
+        self.plan_state = PlanState {
+            is_active: posture.plan_active,
+            pre_plan_allow_list: recovered_pre_plan_allow_list,
+        };
+        self.allow_list = recovered_effective_allow_list;
+        let mut confirmer = self.confirmer.lock().map_err(|_| {
+            AgentError::SessionAuthority(
+                "tool confirmer lock is poisoned during recovery".to_string(),
+            )
+        })?;
+        let policy = confirmer.approval_policy();
+        *confirmer = ToolConfirmer::with_policy(policy, self.allow_list.clone());
+        if let Some(flag) = &self.plan_active_flag {
+            flag.store(posture.plan_active, Ordering::Release);
+        }
+        Ok(())
+    }
+
+    async fn append_recovery_checkpoint(
+        &self,
+        turn_id: &str,
+        checkpoint_id: String,
+        checkpoint: crate::recovery::RecoveryCheckpoint,
+    ) -> Result<(), AgentError> {
+        let checkpoint = checkpoint
+            .to_value()
+            .map_err(|error| AgentError::SessionAuthority(error.to_string()))?;
+        let state_digest = state_payload_digest(&checkpoint)
+            .map_err(|error| AgentError::SessionAuthority(error.to_string()))?;
+        self.append_journal_event(SessionEvent::CheckpointCommitted {
+            checkpoint_id,
+            purpose: CheckpointPurpose::Recovery,
+            origin: CheckpointOrigin::Turn {
+                turn_id: turn_id.to_owned(),
+            },
+            state_digest,
+            state: checkpoint,
         })
         .await
+    }
+
+    fn recovery_conversation_authority(&self) -> Result<(String, u64), AgentError> {
+        let journal = self.session_journal.as_ref().ok_or_else(|| {
+            AgentError::SessionAuthority("session journal is not initialized".to_string())
+        })?;
+        let state = journal
+            .state()
+            .map_err(|error| AgentError::SessionAuthority(error.to_string()))?;
+        let conversation_digest =
+            state_payload_digest(&serde_json::Value::Array(state.conversation.clone()))
+                .map_err(|error| AgentError::SessionAuthority(error.to_string()))?;
+        let message_count = u64::try_from(state.conversation.len()).map_err(|_| {
+            AgentError::SessionAuthority(
+                "recovery checkpoint message count exceeds u64".to_string(),
+            )
+        })?;
+        Ok((conversation_digest, message_count))
+    }
+
+    fn prepare_provider_recovery(
+        &self,
+        turn_id: &str,
+        checkpoint_id: &str,
+        checkpoint: &crate::recovery::RecoveryCheckpoint,
+    ) -> Result<
+        (
+            LlmRequest,
+            crate::provider_recovery::ProviderDispatchRecoveryDisposition,
+        ),
+        AgentError,
+    > {
+        let journal = self.session_journal.as_ref().ok_or_else(|| {
+            AgentError::SessionAuthority(
+                "session journal is not initialized for recovery".to_string(),
+            )
+        })?;
+        let state = journal
+            .state()
+            .map_err(|error| AgentError::SessionAuthority(error.to_string()))?;
+        let session_id = journal
+            .session_id()
+            .map_err(|error| AgentError::SessionAuthority(error.to_string()))?;
+        let dispatch_id = checkpoint.dispatch_id.as_deref().ok_or_else(|| {
+            AgentError::SessionAuthority(
+                "provider recovery checkpoint has no dispatch identity".to_string(),
+            )
+        })?;
+        let request_digest = checkpoint.request_digest.as_deref().ok_or_else(|| {
+            AgentError::SessionAuthority(
+                "provider recovery checkpoint has no request digest".to_string(),
+            )
+        })?;
+        let sealed = checkpoint.sealed_prepared_request.as_ref().ok_or_else(|| {
+            AgentError::SessionAuthority(
+                "provider recovery checkpoint has no sealed request".to_string(),
+            )
+        })?;
+        let binding = crate::recovery_confidential::PreparedRequestBinding {
+            session_id: &session_id,
+            turn_id,
+            checkpoint_id,
+            checkpoint_version: checkpoint.version,
+            dispatch_id,
+            conversation_id: &checkpoint.conversation_id,
+            conversation_digest: &checkpoint.conversation_digest,
+            message_count: checkpoint.message_count,
+            request_digest,
+            turn_index: checkpoint.turn_index,
+            stream_attempt: checkpoint.stream_attempt,
+            overflow_retried: checkpoint.overflow_retried,
+            length_wedge_retried: checkpoint.length_wedge_retried,
+            posture_authority_digest: &checkpoint.posture.authority_digest,
+        };
+        let prepared = self
+            .recovery_request_protection
+            .open(&self.config, &binding, sealed)
+            .map_err(|error| AgentError::SessionAuthority(error.to_string()))?;
+        let request = checkpoint
+            .validate_opened_prepared_request_conversation(&prepared, &state.conversation)
+            .map_err(|error| AgentError::SessionAuthority(error.to_string()))?;
+        if (self.budget_authority.is_some() || self.budget_tracker.is_some())
+            && request.omit_max_tokens
+        {
+            return Err(AgentError::SessionAuthority(
+                "recovery request omits its provider output cap under active budget governance"
+                    .to_string(),
+            ));
+        }
+        let disposition = crate::provider_recovery::plan_provider_dispatch_recovery(
+            &state,
+            dispatch_id,
+            turn_id,
+            crate::session_journal::ProviderAttemptPurpose::Conversation,
+            request_digest,
+        )
+        .map_err(|error| AgentError::SessionAuthority(error.to_string()))?;
+        Ok((request, disposition))
+    }
+
+    #[cfg(any(test, feature = "test-utils"))]
+    pub fn use_recovery_test_key(&mut self, bytes: &[u8; 32]) {
+        self.recovery_request_protection =
+            Arc::new(crate::recovery_confidential::RecoveryRequestProtector::with_test_key(bytes));
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn commit_provider_recovery_checkpoint(
+        &self,
+        turn_id: &str,
+        request: &LlmRequest,
+        turn: usize,
+        stream_attempt: u32,
+        overflow_retried: bool,
+        length_wedge_retried: bool,
+        loop_guard: &LoopGuard,
+        failure_guard: &FailureGuard,
+    ) -> Result<crate::recovery::RecoveryCheckpoint, AgentError> {
+        let (conversation_digest, message_count) = self.recovery_conversation_authority()?;
+        let request_digest = crate::session_journal::provider_request_digest(request)
+            .map_err(|error| AgentError::SessionAuthority(error.to_string()))?;
+        let prepared_request = crate::session_journal::prepared_provider_request_snapshot(request)
+            .map_err(|error| AgentError::SessionAuthority(error.to_string()))?;
+        let checkpoint_id = format!("recovery-checkpoint-{}", uuid::Uuid::new_v4());
+        let dispatch_id = format!("provider-dispatch-{}", uuid::Uuid::new_v4());
+        let posture = self.recovery_posture()?;
+        let turn_index = u64::try_from(turn).map_err(|_| {
+            AgentError::SessionAuthority("recovery turn index exceeds u64".to_string())
+        })?;
+        let journal = self.session_journal.as_ref().ok_or_else(|| {
+            AgentError::SessionAuthority("session journal is not initialized".to_string())
+        })?;
+        let session_id = journal
+            .session_id()
+            .map_err(|error| AgentError::SessionAuthority(error.to_string()))?;
+        let binding = crate::recovery_confidential::PreparedRequestBinding {
+            session_id: &session_id,
+            turn_id,
+            checkpoint_id: &checkpoint_id,
+            checkpoint_version: crate::recovery::RECOVERY_CHECKPOINT_VERSION,
+            dispatch_id: &dispatch_id,
+            conversation_id: &self.conversation_id,
+            conversation_digest: &conversation_digest,
+            message_count,
+            request_digest: &request_digest,
+            turn_index,
+            stream_attempt,
+            overflow_retried,
+            length_wedge_retried,
+            posture_authority_digest: &posture.authority_digest,
+        };
+        let sealed_prepared_request = self
+            .recovery_request_protection
+            .seal(&self.config, &binding, &prepared_request)
+            .map_err(|error| AgentError::SessionAuthority(error.to_string()))?;
+        let checkpoint = crate::recovery::RecoveryCheckpoint {
+            version: crate::recovery::RECOVERY_CHECKPOINT_VERSION,
+            conversation_id: self.conversation_id.clone(),
+            next_action: crate::recovery::RecoveryNextAction::ProviderDispatch,
+            conversation_digest: conversation_digest.clone(),
+            message_count,
+            turn_index,
+            stream_attempt,
+            overflow_retried,
+            length_wedge_retried,
+            request_digest: Some(request_digest),
+            dispatch_id: Some(dispatch_id),
+            sealed_prepared_request: Some(sealed_prepared_request),
+            posture,
+            loop_guard: loop_guard.recovery_state(),
+            failure_guard: failure_guard.recovery_state(),
+            run_usage: self.run_usage.clone(),
+            terminal_result: None,
+        };
+        let state = journal
+            .state()
+            .map_err(|error| AgentError::SessionAuthority(error.to_string()))?;
+        checkpoint
+            .validate_opened_prepared_request_conversation(&prepared_request, &state.conversation)
+            .map_err(|error| AgentError::SessionAuthority(error.to_string()))?;
+        self.append_recovery_checkpoint(turn_id, checkpoint_id, checkpoint.clone())
+            .await?;
+        Ok(checkpoint)
+    }
+
+    async fn commit_terminal_recovery_checkpoint(
+        &mut self,
+        turn_id: &str,
+        result: &AgentResult,
+        turn: usize,
+        loop_guard: &LoopGuard,
+        failure_guard: &FailureGuard,
+        completion: crate::recovery::RecoveryTerminalCompletion,
+    ) -> Result<(), AgentError> {
+        let messages = self
+            .messages
+            .iter()
+            .map(serde_json::to_value)
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| AgentError::SessionAuthority(error.to_string()))?;
+        let conversation_digest = state_payload_digest(&serde_json::Value::Array(messages.clone()))
+            .map_err(|error| AgentError::SessionAuthority(error.to_string()))?;
+        let message_count = u64::try_from(messages.len()).map_err(|_| {
+            AgentError::SessionAuthority(
+                "terminal recovery checkpoint message count exceeds u64".to_string(),
+            )
+        })?;
+        let stop_reason = match result.stop_reason {
+            StopReason::EndTurn => "end_turn",
+            StopReason::ToolUse => {
+                return Err(AgentError::SessionAuthority(
+                    "tool-use result cannot become a terminal recovery checkpoint".to_string(),
+                ));
+            }
+            StopReason::MaxTokens => "max_tokens",
+            StopReason::MaxTurns => "max_turns",
+        };
+        let checkpoint = crate::recovery::RecoveryCheckpoint {
+            version: crate::recovery::RECOVERY_CHECKPOINT_VERSION,
+            conversation_id: self.conversation_id.clone(),
+            next_action: crate::recovery::RecoveryNextAction::CommitTurn,
+            conversation_digest: conversation_digest.clone(),
+            message_count,
+            turn_index: u64::try_from(turn).map_err(|_| {
+                AgentError::SessionAuthority("recovery turn index exceeds u64".to_string())
+            })?,
+            stream_attempt: 0,
+            overflow_retried: false,
+            length_wedge_retried: false,
+            request_digest: None,
+            dispatch_id: None,
+            sealed_prepared_request: None,
+            posture: self.recovery_posture()?,
+            loop_guard: loop_guard.recovery_state(),
+            failure_guard: failure_guard.recovery_state(),
+            run_usage: result.usage_delta.clone(),
+            terminal_result: Some(crate::recovery::RecoveryTerminalResult {
+                completion,
+                text: result.text.clone(),
+                stop_reason: stop_reason.to_string(),
+                finish_reason: result.finish_reason,
+                usage: result.usage.clone(),
+                usage_delta: result.usage_delta.clone(),
+                turns: u64::try_from(result.turns).map_err(|_| {
+                    AgentError::SessionAuthority("terminal turn count exceeds u64".to_string())
+                })?,
+                active_window_percent: result.active_window_percent,
+                agent_run_id: result.agent_run_id.clone(),
+            }),
+        };
+        let checkpoint = checkpoint
+            .to_value()
+            .map_err(|error| AgentError::SessionAuthority(error.to_string()))?;
+        let checkpoint_state_digest = state_payload_digest(&checkpoint)
+            .map_err(|error| AgentError::SessionAuthority(error.to_string()))?;
+        let checkpoint_id = format!("recovery-checkpoint-{}", uuid::Uuid::new_v4());
+        let consumed_hook_phases = self.pending_hook_phase_consumptions.clone();
+        let result = self
+            .append_journal_event(SessionEvent::ConversationRecoveryCheckpointCommittedV2 {
+                turn_id: turn_id.to_owned(),
+                messages,
+                messages_digest: conversation_digest,
+                checkpoint_id,
+                checkpoint_state_digest,
+                checkpoint,
+                consumed_hook_phases,
+            })
+            .await;
+        if result.is_ok() {
+            self.pending_hook_phase_consumptions.clear();
+        }
+        result
+    }
+
+    async fn commit_continue_loop_recovery_checkpoint(
+        &mut self,
+        turn_id: &str,
+        next_turn: usize,
+        loop_guard: &LoopGuard,
+        failure_guard: &FailureGuard,
+    ) -> Result<(), AgentError> {
+        let messages = self
+            .messages
+            .iter()
+            .map(serde_json::to_value)
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| AgentError::SessionAuthority(error.to_string()))?;
+        let conversation_digest = state_payload_digest(&serde_json::Value::Array(messages))
+            .map_err(|error| AgentError::SessionAuthority(error.to_string()))?;
+        let checkpoint = crate::recovery::RecoveryCheckpoint {
+            version: crate::recovery::RECOVERY_CHECKPOINT_VERSION,
+            conversation_id: self.conversation_id.clone(),
+            next_action: crate::recovery::RecoveryNextAction::ContinueLoop,
+            conversation_digest: conversation_digest.clone(),
+            message_count: u64::try_from(self.messages.len()).map_err(|_| {
+                AgentError::SessionAuthority(
+                    "recovery checkpoint message count exceeds u64".to_string(),
+                )
+            })?,
+            turn_index: u64::try_from(next_turn).map_err(|_| {
+                AgentError::SessionAuthority("recovery turn index exceeds u64".to_string())
+            })?,
+            stream_attempt: 0,
+            overflow_retried: false,
+            length_wedge_retried: false,
+            request_digest: None,
+            dispatch_id: None,
+            sealed_prepared_request: None,
+            posture: self.recovery_posture()?,
+            loop_guard: loop_guard.recovery_state(),
+            failure_guard: failure_guard.recovery_state(),
+            run_usage: self.run_usage.clone(),
+            terminal_result: None,
+        };
+        let checkpoint = checkpoint
+            .to_value()
+            .map_err(|error| AgentError::SessionAuthority(error.to_string()))?;
+        let checkpoint_state_digest = state_payload_digest(&checkpoint)
+            .map_err(|error| AgentError::SessionAuthority(error.to_string()))?;
+        let checkpoint_id = format!("recovery-checkpoint-{}", uuid::Uuid::new_v4());
+        let consumed_hook_phases = self.pending_hook_phase_consumptions.clone();
+        let result = self
+            .append_journal_event(SessionEvent::ConversationRecoveryCheckpointCommittedV2 {
+                turn_id: turn_id.to_owned(),
+                messages: self
+                    .messages
+                    .iter()
+                    .map(serde_json::to_value)
+                    .collect::<Result<Vec<_>, _>>()
+                    .map_err(|error| AgentError::SessionAuthority(error.to_string()))?,
+                messages_digest: conversation_digest,
+                checkpoint_id,
+                checkpoint_state_digest,
+                checkpoint,
+                consumed_hook_phases,
+            })
+            .await;
+        if result.is_ok() {
+            self.pending_hook_phase_consumptions.clear();
+        }
+        result
+    }
+
+    async fn commit_tool_round_recovery_checkpoint(
+        &mut self,
+        turn_id: &str,
+        turn: usize,
+        loop_guard: &LoopGuard,
+        failure_guard: &FailureGuard,
+    ) -> Result<(), AgentError> {
+        let messages = self
+            .messages
+            .iter()
+            .map(serde_json::to_value)
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| AgentError::SessionAuthority(error.to_string()))?;
+        let conversation_digest = state_payload_digest(&serde_json::Value::Array(messages.clone()))
+            .map_err(|error| AgentError::SessionAuthority(error.to_string()))?;
+        let checkpoint = crate::recovery::RecoveryCheckpoint {
+            version: crate::recovery::RECOVERY_CHECKPOINT_VERSION,
+            conversation_id: self.conversation_id.clone(),
+            next_action: crate::recovery::RecoveryNextAction::ContinueToolRound,
+            conversation_digest: conversation_digest.clone(),
+            message_count: u64::try_from(messages.len()).map_err(|_| {
+                AgentError::SessionAuthority(
+                    "recovery checkpoint message count exceeds u64".to_string(),
+                )
+            })?,
+            turn_index: u64::try_from(turn).map_err(|_| {
+                AgentError::SessionAuthority("recovery turn index exceeds u64".to_string())
+            })?,
+            stream_attempt: 0,
+            overflow_retried: false,
+            length_wedge_retried: false,
+            request_digest: None,
+            dispatch_id: None,
+            sealed_prepared_request: None,
+            posture: self.recovery_posture()?,
+            loop_guard: loop_guard.recovery_state(),
+            failure_guard: failure_guard.recovery_state(),
+            run_usage: self.run_usage.clone(),
+            terminal_result: None,
+        };
+        let checkpoint = checkpoint
+            .to_value()
+            .map_err(|error| AgentError::SessionAuthority(error.to_string()))?;
+        let checkpoint_state_digest = state_payload_digest(&checkpoint)
+            .map_err(|error| AgentError::SessionAuthority(error.to_string()))?;
+        let checkpoint_id = format!("recovery-checkpoint-{}", uuid::Uuid::new_v4());
+        let consumed_hook_phases = self.pending_hook_phase_consumptions.clone();
+        let result = self
+            .append_journal_event(SessionEvent::ConversationRecoveryCheckpointCommittedV2 {
+                turn_id: turn_id.to_owned(),
+                messages,
+                messages_digest: conversation_digest,
+                checkpoint_id,
+                checkpoint_state_digest,
+                checkpoint,
+                consumed_hook_phases,
+            })
+            .await;
+        if result.is_ok() {
+            self.pending_hook_phase_consumptions.clear();
+        }
+        result
     }
 
     async fn sync_active_journal_conversation(&self) -> Result<(), AgentError> {
@@ -5350,7 +8145,11 @@ impl AgentEngine {
         user_input: &str,
         msg_id: &str,
         journal_turn_id: Option<&str>,
+        resume_checkpoint: Option<crate::recovery::RecoveryCheckpoint>,
+        mut prepared_recovery_request: Option<LlmRequest>,
+        mut recovered_provider_round: Option<crate::provider_recovery::RecoveredProviderRound>,
     ) -> Result<AgentResult, AgentError> {
+        let resume_from_checkpoint = resume_checkpoint.is_some();
         if self.session_manager.is_some()
             && self.current_session.is_some()
             && self.session_journal.is_none()
@@ -5359,23 +8158,25 @@ impl AgentEngine {
                 "persisted session has no exclusive journal writer lease".to_string(),
             ));
         }
-
-        // A host Stop cancels only the active turn. Renew that descendant on
-        // the next message without reviving a terminal session root.
-        if self.cancel_token.is_cancelled()
-            && let Some(runtime) = self.session_runtime.as_mut()
-        {
-            self.cancel_token = runtime.install_descendant_turn();
-        }
         // F11: derive the turn envelope from the live session root. Every
         // counter recorded on this child rolls up to the bootstrap-owned root.
-        let run_budget = self.execution_budget.sub_budget(None);
-        let tool_budget =
-            crate::tool_budget::ToolBudgetTracker::with_execution_budget(run_budget.clone());
+        let run_budget = self.current_run_budget()?;
+        let tool_budget = match self.budget_authority.as_ref() {
+            Some(authority) => {
+                crate::tool_budget::ToolBudgetTracker::with_budget_authority(Arc::clone(authority))
+            }
+            None => {
+                crate::tool_budget::ToolBudgetTracker::with_execution_budget(run_budget.clone())
+            }
+        };
         self.midflight_monitor = MidFlightMonitor::new(run_budget.clone());
-        // methodology #27: production caller for StyleDetector::observe (Task 1.B.3)
-        if let Ok(mut det) = self.style_detector.lock() {
-            det.observe(user_input);
+        // Resuming from a recovery checkpoint re-enters the already-started
+        // turn. Do not replay turn-front-door observations or selections.
+        if !resume_from_checkpoint {
+            // methodology #27: production caller for StyleDetector::observe (Task 1.B.3)
+            if let Ok(mut det) = self.style_detector.lock() {
+                det.observe(user_input);
+            }
         }
         // v0.8.1 U1 — per-turn `SkillRouter` choose. Picks one skill
         // from the resolved catalog using a Thompson Beta scorer
@@ -5386,7 +8187,8 @@ impl AgentEngine {
         // OR no catalog was wired OR the catalog has zero entries —
         // matches the Stub/`None` defaults for engines built outside
         // bootstrap.
-        if let Some(router) = self.skill_router.as_ref()
+        if !resume_from_checkpoint
+            && let Some(router) = self.skill_router.as_ref()
             && let Some(catalog) = self.skill_catalog.as_ref()
         {
             let candidates: Vec<String> = catalog.visible().map(|r| r.name.clone()).collect();
@@ -5424,13 +8226,19 @@ impl AgentEngine {
         // CORE-2: reset the run-scoped usage delta at the start of each
         // user turn; the tool loop below re-accumulates it per provider
         // round-trip alongside the session-cumulative `total_usage`.
-        self.run_usage = TokenUsage::default();
+        self.run_usage = resume_checkpoint
+            .as_ref()
+            .map_or_else(TokenUsage::default, |checkpoint| {
+                checkpoint.run_usage.clone()
+            });
         // #403: clear tool circuit breakers at the start of each user turn.
         // A transient burst of `web`/`WebFetch` failures in one turn opened the
         // breaker and, with no per-turn reset, left every web tool short-circuited
         // for the rest of the session — the chat appeared dead. Persistent
         // failures simply re-open the breaker again within this turn.
-        self.tools.reset_all_breakers();
+        if !resume_from_checkpoint {
+            self.tools.reset_all_breakers();
+        }
         // #279(c): mint a stable per-run correlation id on the first run()
         // of the session and reuse it for every subsequent turn/message.
         // Re-minted only when None (fresh engine / cleared session); persists
@@ -5443,14 +8251,13 @@ impl AgentEngine {
         // turn so a fresh process answers from prior-session memory without
         // relying on the model invoking `session_search`. No-op on resumed
         // sessions, with NullMemory, or when nothing relevant is stored.
-        self.recall_relevant_facts(user_input).await;
-        self.push_user_turn(user_input);
-        if let Some(turn_id) = journal_turn_id {
-            self.sync_journal_conversation(turn_id).await?;
+        if !resume_from_checkpoint {
+            self.recall_relevant_facts(user_input).await;
+            self.push_user_turn(user_input);
+            // TurnStarted is already durable. Canonical conversation sync is
+            // intentionally delayed until context and budget admission, so an
+            // over-ceiling prompt cannot replace the last resumable history.
         }
-        // v0.8.0 Task M — write back only after the exact recalled/user
-        // conversation is durable. The backend is an external side effect.
-        self.observe_user_turn(user_input).await;
         self.output.emit_stream_start(msg_id);
 
         // F-030 WAL: persist the user message BEFORE any LLM call so a
@@ -5464,7 +8271,9 @@ impl AgentEngine {
         //      yet (F-034 deferred write).  Call persist_first_message which
         //      does the initial session + index write AND the WAL append.
         //   b) Subsequent messages: session file exists; just append WAL.
-        if let (Some(mgr), Some(session)) = (&self.session_manager, &mut self.current_session) {
+        if !resume_from_checkpoint
+            && let (Some(mgr), Some(session)) = (&self.session_manager, &mut self.current_session)
+        {
             let is_first_message = session.messages.len() == 1; // we just pushed
             if is_first_message {
                 session.messages = self.messages.clone();
@@ -5504,7 +8313,8 @@ impl AgentEngine {
         // `workflow_live_mode = false` (set in `AgentSpawner::child_config`) AND
         // lack an approval manager / protocol writer, so they can never
         // recursively re-enter this gate.
-        if self.workflow_live_mode
+        if !resume_from_checkpoint
+            && self.workflow_live_mode
             && self.approval_manager.is_some()
             && self.protocol_writer.is_some()
             && crate::orchestration::intent::workflow_candidate(user_input).is_some()
@@ -5524,7 +8334,7 @@ impl AgentEngine {
         // `/crucible` typed with no approver falls through to a normal turn ($0).
         // Child engines (council members) carry no protocol_writer, so they can
         // never re-enter this gate.
-        {
+        if !resume_from_checkpoint {
             let trimmed = user_input.trim_start();
             // Stage 4c — `/crucible off` silences the discovery suggestion for the
             // rest of the process. Checked BEFORE the council dispatch because
@@ -5553,7 +8363,7 @@ impl AgentEngine {
 
         // Stage 4c — discovery nudge: if the input is HIGH-stakes and the user
         // hasn't used (or silenced) `/crucible`, surface the council once.
-        if let Some(hint) = self.maybe_suggest_council(user_input) {
+        if !resume_from_checkpoint && let Some(hint) = self.maybe_suggest_council(user_input) {
             self.output.emit_text_delta(&hint, &self.current_msg_id);
             CRUCIBLE_SUGGEST_SUPPRESSED.store(true, Ordering::Relaxed);
         }
@@ -5561,12 +8371,26 @@ impl AgentEngine {
         // Runaway-loop breaker (per-run): the engine-side backstop for the
         // no-progress loops that `max_turns = None` leaves unguarded. Terminates
         // the run if the same tool call keeps producing the same result.
-        let mut loop_guard = LoopGuard::from_env();
+        let mut loop_guard = match resume_checkpoint.as_ref() {
+            Some(checkpoint) => LoopGuard::restore(&checkpoint.loop_guard)?,
+            None => LoopGuard::from_env(),
+        };
         // #475: complementary failure-loop breaker — trips when the SAME tool
         // keeps failing with DIFFERENT (still-wrong) args, which LoopGuard's
         // signature keying misses (a validation-error retry loop).
-        let mut failure_guard = FailureGuard::from_env();
-        let mut turn: usize = 0;
+        let mut failure_guard = match resume_checkpoint.as_ref() {
+            Some(checkpoint) => FailureGuard::restore(&checkpoint.failure_guard)?,
+            None => FailureGuard::from_env(),
+        };
+        let mut turn = match resume_checkpoint.as_ref() {
+            Some(checkpoint) => usize::try_from(checkpoint.turn_index).map_err(|_| {
+                AgentError::SessionAuthority(
+                    "recovery checkpoint turn index exceeds usize".to_string(),
+                )
+            })?,
+            None => 0,
+        };
+        let mut first_recovery_checkpoint = resume_checkpoint;
         loop {
             // AUDIT A2 — cooperative cancellation check between turns.
             // A host (TUI, ACP server) that fired `cancel_token()`
@@ -5575,10 +8399,12 @@ impl AgentEngine {
             // `tool_use` left by an in-turn cancel is repaired on the
             // next `push_user_turn` / `save_session` (AUDIT D-6).
             if self.cancel_token.is_cancelled() {
-                self.prepare_durable_conversation().await?;
+                if journal_turn_id.is_none() {
+                    self.prepare_durable_conversation().await?;
+                    self.save_session_mirror();
+                }
                 self.output
                     .emit_info("Run cancelled by host before the next turn.");
-                self.save_session_mirror();
                 return Err(AgentError::UserAborted);
             }
             // AUDIT A1 — `max_turns` is an OPTIONAL override, not the
@@ -5599,658 +8425,753 @@ impl AgentEngine {
                     .finish_run_terminated(user_input, turn, FinishReason::MaxTurns)
                     .await;
             }
-            // Fire on_turn_start hooks at the top of each iteration so Rust
-            // hooks can override the model or inject prompt messages before
-            // run_compaction + provider.stream(). Outcome is applied via
-            // apply_pre_turn_outcome (switch_model + injected_messages).
-            //
-            // AUDIT A9 — a turn-start hook that returns `block` halts
-            // the loop cleanly: operators can write a "stop after
-            // condition X" hook as a backstop.
-            let hook_block_reason = if let Some(hook_engine) = self.hooks.as_ref() {
-                let ctx = TurnContext {
-                    turn,
-                    model: self.model.clone(),
-                    message_count: self.messages.len(),
-                };
-                let outcome = hook_engine.on_turn_start(turn, &ctx).await;
-                self.apply_pre_turn_outcome(outcome)
-            } else {
-                None
-            };
-            if let Some(turn_id) = journal_turn_id {
-                self.sync_journal_conversation(turn_id).await?;
-            }
-            if let Some(reason) = hook_block_reason {
-                self.output
-                    .emit_info(&format!("Run stopped by on_turn_start hook: {reason}"));
-                return self
-                    .finish_run_terminated(user_input, turn, FinishReason::Length)
-                    .await;
-            }
-
-            // Fire PreCompact plugin hooks once per turn, immediately before
-            // the compaction pass. Gated like every other phase: a no-op when
-            // no hook engine / no PreCompact hooks are registered.
-            if let Some(hook_engine) = self.hooks.as_ref() {
-                let outcome = hook_engine.run_pre_compact(turn, self.messages.len()).await;
-                for line in outcome.hook_trace {
-                    tracing::debug!(target: "wcore_agent::hooks", "{line}");
-                }
-            }
-
-            // #280 — smart auto-compaction pre-gate. Boundary-fire ONLY: this is
-            // the turn-loop top (the tool loop lives below provider.stream in the
-            // same iteration), and the model swap was already applied above, so
-            // the Flux-aware fraction is computed against the CURRENTLY-active
-            // model. Default-OFF: `smart_compact_fraction` returns `None` on its
-            // first line when disabled, so neither memory nor the force flag is
-            // touched and `run_compaction` below behaves exactly as before. On a
-            // fire we (1) persist a non-destructive handoff Episode, then (2) set
-            // the one-shot force flag and fall straight through into the existing
-            // `run_compaction` — no new summarization / fold / emit code.
-            let smart_fired = match self.smart_compact_fraction() {
-                Some(frac) => self.smart_compact_should_fire(turn as u32, frac),
-                None => false,
-            };
-            if smart_fired {
-                self.smart_compact_force = true;
-                if self.compact_config.smart_handoff_to_memory {
-                    // Persist BEFORE run_compaction mutates the buffer so the
-                    // verbatim pre-compaction transcript is durable; errors are
-                    // swallowed and never abort the turn.
-                    self.write_smart_handoff().await;
-                }
-            }
-
-            // Run multi-level compaction before each API call.
-            // On the first turn last_input_tokens is 0 so neither
-            // autocompact nor emergency will fire.
-            //
-            // AUDIT A6 — a compaction failure (e.g. the emergency
-            // `ContextTooLong` bail) ends the session; persist + fire
-            // session-end hooks before propagating, so the error exit
-            // is consistent with every other loop-exit path.
-            if let Err(e) = self.run_compaction().await {
-                self.prepare_durable_conversation().await?;
-                self.fire_on_session_end(turn).await;
-                self.save_session_mirror();
-                return Err(e);
-            }
-
-            // Build tool list: filter based on plan mode state
-            let tools = if self.plan_state.is_active {
-                // Plan mode: only Info-category tools (excluding EnterPlanMode)
-                self.tools.to_tool_defs_filtered(|t| {
-                    t.category() == ToolCategory::Info && t.name() != "EnterPlanMode"
+            if first_recovery_checkpoint
+                .as_ref()
+                .is_some_and(|checkpoint| {
+                    matches!(
+                        checkpoint.next_action,
+                        crate::recovery::RecoveryNextAction::ContinueLoop
+                    )
                 })
-            } else {
-                // Normal mode: all tools except ExitPlanMode
-                self.tools
-                    .to_tool_defs_filtered(|t| t.name() != "ExitPlanMode")
-            };
-
-            // W6 F17: trim MCP tools to a curated top-K. MCP tools are
-            // identified by real provenance (`ToolDef::server.is_some()`), not
-            // the `mcp__` name prefix — a non-colliding MCP tool keeps its bare
-            // name (wcore-mcp/src/tool_proxy.rs). Non-MCP tools (builtins,
-            // skills, spawn, plan tools) are always kept. Off-policy is a no-op.
-            // Audit-log recency degrades to empty/keyword-only when
-            // self.audit_log is None.
-            let tools = self.apply_mcp_curation(tools);
-
-            // #344/#359: enforce the provider's HARD tool-array cap (OpenAI =
-            // 128). MCP servers can push the total past the limit even after
-            // curation; this is the correctness guarantee, separate from the
-            // relevance trim above.
-            let tools = self.apply_provider_tool_cap(tools);
-
-            // Layer D1 (token-opt): defer cold tools to name-only stubs —
-            // only the configured hot allowlist (plus ToolSearch-hydrated
-            // tools) ships full schemas; the model hydrates a stub on demand
-            // via ToolSearch (the system prompt states that rule once,
-            // `tool_usage_guidance`). The hot/stub split is a pure function
-            // of static config + the monotonic hydrated set, so the
-            // serialized tools[] array stays byte-identical across turns
-            // (cache guard: `tools_array_byte_stable_across_roundtrips`);
-            // a hydration changes it once.
-            let tools = self.apply_tool_deferral(tools);
-
-            // Build system prompt: append plan mode instructions when active
-            let system = if self.plan_state.is_active {
-                format!(
-                    "{}\n\n{}",
-                    self.system_prompt,
-                    plan_prompt::plan_mode_instructions()
-                )
-            } else {
-                self.system_prompt.clone()
-            };
-
-            // v0.8.1 U1 — the per-turn skill-router hint (when the router is
-            // installed and picked a visible catalog skill). Cache-stability
-            // (token-opt): the hint is dynamic per turn, so appending it to the
-            // `system` string here would rewrite the cached system prefix
-            // (zone 1) every turn. Compute it now and inject it into the
-            // request's volatile message tail below instead. `None` (no router
-            // / no pick / hidden skill) leaves both system and tail untouched.
-            let skill_hint = self.skill_router_hint();
-
-            // Record prompt state for cache diagnostics
-            self.cache_detector.record_request(&system, &tools);
-
-            // W8 v0.6.3 — pick the Anthropic prompt-cache tier for this
-            // request. The agent turn loop reuses the same system prompt +
-            // tools across every turn, so the prefix is stable far longer
-            // than the 5-minute ephemeral window; `pick_cache_tier` promotes
-            // to the 1h tier once the prompt clears the 1024-token minimum.
-            // `None` stays valid (the Anthropic adapter falls back to 5m for
-            // a `None` request) but the production path now produces a real
-            // tier instead of always-`None`. Non-Anthropic providers ignore
-            // the field.
-            //
-            // AUDIT A5 — estimate the FULL request (messages + system +
-            // tool defs), not just message content. The message-only
-            // estimate undercounts the turn-1 watermark by the system
-            // prompt + tool-schema size (tens of k tokens for MCP-heavy
-            // configs).
-            let mut input_token_estimate =
-                estimate::estimate_request_tokens(&self.messages, &system, &tools) as usize;
-            // AUDIT A1 / #255 — context-token overflow guard MOVED below, to
-            // immediately AFTER the smart-routing tier swap (so it measures the
-            // POST-swap effective model's REAL window via the wcore-config
-            // context_window kernel, not the stale CompactConfig 200k default).
-            // See the `ContextWindow::resolve(..)` block just before
-            // `size_output_cap`.
-            let cache_tier = Some(wcore_providers::cache_tier::pick_cache_tier(
-                input_token_estimate,
-                AGENT_TURN_CACHE_REUSE_WINDOW_SECS,
-            ));
-
-            // Belt-and-suspenders: ensure no `tool_use` in history is
-            // orphaned before sending to the provider. Anthropic 400s
-            // on any orphan and bricks the session; the per-path fixes
-            // in the dispatch loop close the known escape paths, but
-            // this guard catches every remaining one — denial-by-
-            // reaper, partial-batch loss on cancel, system-message
-            // injection between an assistant tool_use and its result.
-            self.repair_all_orphaned_tool_uses();
-            // #285 — the reverse direction: a `tool_result` whose `tool_use`
-            // was summarized away by autocompact is orphaned and makes
-            // DeepSeek 400 the whole array. Run AFTER the forward repair so
-            // the synthetic results it just backfilled (which always have a
-            // matching tool_use) are untouched, and only true orphans are
-            // demoted to text.
-            self.repair_orphaned_tool_results();
-            if let Some(turn_id) = journal_turn_id {
-                self.sync_journal_conversation(turn_id).await?;
-            }
-
-            // Output-side optimization (Part A): attach fluff stop sequences
-            // only when the route optimizes client-side. On router-optimized
-            // routes the server already trims output, so we leave the Vec
-            // empty and providers emit no stop field.
-            let stop_sequences = if self.compat.input_optimization() == "client"
-                && self.compat.supports_stop_param()
             {
-                FLUFF_STOP_SEQUENCES.iter().map(|s| s.to_string()).collect()
-            } else {
-                // Either the route is router-optimized (server trims output) or
-                // the provider rejects `stop` (e.g. xAI grok-4.3 400s on it) —
-                // leave empty so providers emit no `stop` field.
-                Vec::new()
-            };
-
-            // Finding #174: the model actually dispatched this turn. Starts as
-            // the user's configured model and is rewritten below if a routing
-            // hint selects a configured tier model. Cost/usage accounting reads
-            // THIS (not `self.model`) so attribution follows any swap.
-            let mut effective_model = self.model.clone();
-
-            // Layer E1 — the model Flux ACTUALLY routed this turn to
-            // (ProviderMeta signal-back). `None` on non-Flux paths / before
-            // the signal arrives; the cache_health_warn emission below falls
-            // back to `effective_model`.
-            let mut last_routed_model: Option<String> = None;
-
-            let mut request = LlmRequest {
-                model: self.model.clone(),
-                system,
-                messages: self.messages.clone(),
-                tools,
-                max_tokens: self.max_tokens,
-                thinking: self.thinking.clone(),
-                reasoning_effort: self.current_reasoning_effort.clone(),
-                cache_tier,
-                routing_hint: None,
-                stop_sequences,
-                web_search: self.web_search,
-                // #282: thread the stable conversation id + assembled-prompt
-                // token estimate so the Flux provider can emit the x-wl-*
-                // context-routing headers on tier-alias turns.
-                conversation_id: Some(self.conversation_id.clone()),
-                client_context_tokens: Some(input_token_estimate as u64),
-                // Crucible #3: per-session sampling temperature (council child
-                // engines set it; top-level session leaves it `None`).
-                temperature: self.temperature,
-                // #112: decided below at the sizing site, AFTER the smart-
-                // routing tier swap, so the omit decision sees the final model.
-                omit_max_tokens: false,
-            };
-
-            // Cache-stability (token-opt): inject the per-turn skill-router
-            // hint as a transient text block on the request's last user-role
-            // message. `request.messages` is a clone, so this never persists
-            // into history and never shifts the cached system/tool prefix.
-            // Done before `mark_cache_boundaries` so the tail breakpoint
-            // accounts for the final content. Skipped unless the tail is
-            // user-role (never orphans a tool_use or creates adjacent user
-            // messages).
-            if let Some(hint) = skill_hint
-                && let Some(last) = request.messages.last_mut()
-                && matches!(last.role, Role::User)
-            {
-                last.content.push(ContentBlock::Text { text: hint });
+                first_recovery_checkpoint = None;
             }
-
-            // Cache-stability (token-opt, finding #174): inject the current date
-            // as a transient text block on the request's last user-role message
-            // instead of the cached system prefix. The date value changes daily /
-            // across cross-midnight restarts; keeping it out of the prefix lets
-            // the cached system+tools prefix stay byte-stable, so Anthropic prompt
-            // caching survives cold starts. `request.messages` is a clone, so this
-            // never persists into history. Skipped unless the tail is user-role
-            // (never orphans a tool_use or creates adjacent user messages).
-            if let Some(last) = request.messages.last_mut()
-                && matches!(last.role, Role::User)
-            {
-                last.content.push(ContentBlock::Text {
-                    text: crate::context::current_date_block(&crate::context::today_string()),
-                });
-            }
-
-            // C1 / Task A3: fire PrePrompt plugin hooks once per turn and apply
-            // their contributions to the request's last user-role message. Done
-            // here — after the skill hint and BEFORE `mark_cache_boundaries`, but
-            // OUTSIDE the `'stream` retry loop below (so it fires once per turn,
-            // not once per stream retry). `request.messages` is a clone, so this
-            // never persists into history and never shifts the cached system/tool
-            // prefix; placing it before the breakpoint marking lets the tail
-            // breakpoint account for the final content. The contribution is
-            // budget-capped and deduped against the last injection. No-op when no
-            // hook engine / PrePrompt hooks / dispatcher are present.
-            let pre_prompt_outcome = match self.hooks.as_ref() {
-                Some(hook_engine) => Some(hook_engine.run_pre_prompt().await),
-                None => None,
-            };
-            if let Some(outcome) = pre_prompt_outcome {
-                for line in &outcome.hook_trace {
-                    tracing::debug!(target: "wcore_agent::hooks", "{line}");
-                }
-                Self::apply_pre_prompt_contribution(&mut request.messages, &outcome);
-            }
-
-            // W1 S3: place per-message cache breakpoints when the provider
-            // honours them. Idempotent across turns: previous turns' markers
-            // are cleared and the new tail is marked. Gap-1+gap-2 coupling:
-            // a PERMANENT anchor breakpoint is additionally pinned to an
-            // immutable already-stubbed message (pure function of the
-            // compaction markers; `request.messages` is an index-aligned
-            // clone of `self.messages`, so the index maps 1:1). The anchor
-            // keeps the long prefix cache-valid while continuous
-            // args-compaction transitions the message at the
-            // keep_recent_turns boundary inside it.
-            mark_cache_boundaries(
-                &mut request,
-                &self.compat,
-                micro::cache_anchor_index(&self.messages),
-            );
-
-            // W1 v0.6.3: stamp a smart-routing hint onto the request so
-            // `ProviderChain` can surface the router's decision in dispatch
-            // observability. Finding #174: ALSO act on the hint — swap the
-            // model to a configured tier model (cheap/balanced) before
-            // dispatch. `input_tokens`, `max_output_tokens`, and
-            // `tool_call_count` are real; `code_ratio` is conservatively zero
-            // (no code-ratio scanner) and `requires_vision` comes from
-            // `message_requires_vision` (false until an image ContentBlock
-            // exists), so this producer emits only large-context / tool-heavy /
-            // simple decisions — never a wrong hint.
-            {
-                let tool_call_count = self
-                    .messages
-                    .iter()
-                    .flat_map(|m| &m.content)
-                    .filter(|b| matches!(b, ContentBlock::ToolUse { .. }))
-                    .count() as u32;
-                // Vision guard input: a turn that carries image/vision content
-                // must never be downgraded (the cheap tier may not be
-                // vision-capable). The `wcore-types` message model has no image
-                // block today, so this is conservatively `false` from real
-                // content; the routing classifier promotes any vision turn to
-                // Premium anyway, which `select_tier_model` also refuses to
-                // swap. Routed through one flag so a future image ContentBlock
-                // only needs to flip this.
-                let requires_vision = message_requires_vision(&self.messages);
-                let shape = wcore_providers::RequestShape {
-                    input_tokens: input_token_estimate,
-                    max_output_tokens: request.max_tokens as usize,
-                    code_ratio: 0.0,
-                    tool_call_count,
-                    requires_vision,
-                };
-                let decision =
-                    wcore_providers::route(&shape, &wcore_providers::RoutingHeuristics::default());
-                request.routing_hint = Some(decision.to_hint());
-
-                // Finding #174: act on the hint. Opt-in + guarded — see
-                // `select_tier_model`. Only Cheap/Balanced hints with a
-                // configured tier model and no vision content swap the model;
-                // everything else leaves `request.model` (and `effective_model`)
-                // as the user's configured model.
-                if let Some(tier_model) =
-                    select_tier_model(&decision, requires_vision, &self.compat)
-                {
-                    tracing::debug!(
-                        target: "wcore_agent::routing",
-                        from = %self.model,
-                        to = %tier_model,
-                        hint = %decision.to_hint().0,
-                        "smart-routing tier swap"
-                    );
-                    request.model = tier_model.clone();
-                    effective_model = tier_model;
-                }
-            }
-
-            // #255 — pre-flight context-window overflow guard, RECOMPUTED on the
-            // POST-swap effective model. `run_compaction` above already had its
-            // chance to shrink history; if the assembled request still exceeds a
-            // safe fraction of the model that will ACTUALLY serve this request,
-            // the provider call would 400. Terminate the run cleanly instead.
-            //
-            // The denominator comes from the kernel (`ContextWindow::resolve`),
-            // which reads the post-swap model's REAL window from
-            // `wcore_config::limits` — NOT the stale `CompactConfig` 200k
-            // default that the old guard used. After a Flux/tier swap to e.g.
-            // gpt-4o (128k) the ceiling is now computed against 128k, so the
-            // guard fires at the correct count (the #255 false-negative fix).
-            //
-            // `&request.model` is the same model arg fed to `size_output_cap`
-            // below, so guard and cap agree. When the window is unknown
-            // (`input_ceiling() == None`) the guard SKIPS — fail open, identical
-            // to the old `window > 0` skip; `size_output_cap`'s UNKNOWN_CAP and
-            // the provider 400 are the backstops.
-            {
-                let mut ctx = wcore_config::context_window::ContextWindow::resolve(
-                    input_token_estimate as u64,
-                    self.compat.provider_type(),
-                    &request.model,
-                    self.compact_config.context_window as u64,
-                );
-                // #282 contract V1: once Flux has SIGNALLED-BACK the real served
-                // window (`x-flux-model-window`) on a prior turn of THIS Flux
-                // route, prefer it over the alias's pre-route guess so the guard
-                // measures against the model that will actually serve the turn.
-                if wcore_providers::is_flux_tier_alias(&request.model)
-                    && let Some(window) = self.flux_served_window
-                {
-                    ctx.window = Some(window);
-                }
-                if let Some(ceiling) = ctx.input_ceiling(
-                    self.compact_config.output_reserve as u64,
-                    self.compact_config.emergency_buffer as u64,
-                ) && ctx.used_tokens >= ceiling
-                {
-                    // #636 — graceful degradation (rung 1). Before aborting, shed
-                    // the largest tool-result outputs (spilling full content to
-                    // disk, leaving a bounded `<persisted-output>` preview) so the
-                    // request drops back under the ceiling and the run CONTINUES.
-                    // Shedding rewrites `ToolResult` content in place — it never
-                    // adds or removes blocks — so tool_use/tool_result pairing is
-                    // untouched (no orphaned-tool_use 400; the reason drop-oldest
-                    // sliding-window is deferred to a later phase).
-                    //
-                    // Two message sets are shed:
-                    //   * `request.messages` — the copy actually DISPATCHED (a
-                    //     clone of history plus this turn's transient injections);
-                    //     shedding it is what makes the sent call fit. The
-                    //     continue/abort decision is taken on THIS set.
-                    //   * `self.messages` — the PERSISTED history; shedding it too
-                    //     means a saved/resumed session heals (starts already
-                    //     shrunk) instead of re-entering this guard every turn.
-                    // Both target the same oversized blocks and the spills are
-                    // idempotent (`maybe_persist_tool_result` skips already-spilled
-                    // blocks), so re-runs never re-spill or hot-loop.
-                    let storage = wcore_tools::tool_result_storage::StorageDir::os_default();
-                    let budget = wcore_tools::tool_result_storage::BudgetConfig::default();
-                    // Shed any result whose spill is a NET reduction: the
-                    // `<persisted-output>` replacement is the preview (≤
-                    // `preview_size`) plus a small fixed header, so a block over
-                    // `preview_size` + a header margin always shrinks. Keeping the
-                    // floor this low (not a large multiple) means a context that
-                    // is only marginally over the ceiling still gets reduced
-                    // instead of aborting — only genuinely tiny blocks are skipped.
-                    let min_shed = budget.preview_size + 512;
-                    // Fold the fixed system+tools token overhead into a scalar so
-                    // the shedding closure borrows nothing from `request` (the
-                    // `system`/`tools` locals were moved into `request` above).
-                    // `estimate_request_tokens(m, sys, tools)
-                    //   == estimate_tokens_from_messages(m) + overhead` exactly.
-                    let overhead =
-                        estimate::estimate_request_tokens(&[], &request.system, &request.tools);
-                    // `est` captures only `overhead` (a `u64`), so it is `Copy` —
-                    // pass it by value to both sheds and still call it below.
-                    let est = |m: &[Message]| estimate::estimate_tokens_from_messages(m) + overhead;
-                    let shed = crate::compact::degrade::shed_tool_outputs_until_under(
-                        &mut request.messages,
-                        &storage,
-                        &budget,
-                        min_shed,
-                        ceiling,
-                        est,
-                    );
-                    crate::compact::degrade::shed_tool_outputs_until_under(
-                        &mut self.messages,
-                        &storage,
-                        &budget,
-                        min_shed,
-                        ceiling,
-                        est,
-                    );
-                    // #646 — graceful degradation (rung 2). If tool-output
-                    // shedding did not bring the DISPATCHED request under the
-                    // ceiling, the overflow is conversation-heavy: a big pasted
-                    // `Text`/`Thinking` block or many non-tool messages, which
-                    // rung 1 cannot touch. Degrade the non-tool content too —
-                    // truncate an oversized non-tool block head+tail, then drop
-                    // the oldest non-essential (pairing-safe: never a
-                    // tool_use/tool_result, the system prompt, or the latest
-                    // turn) message until under the ceiling. Applied to both the
-                    // dispatched request and persisted history so a resume heals.
-                    let mut rung2_fired = false;
-                    if est(&request.messages) >= ceiling {
-                        // Cap any single non-tool block at ~`ceiling` chars
-                        // (≈ a quarter of the ceiling in tokens), so one huge
-                        // paste truncates well under the window and the
-                        // drop-oldest pass mops up any residual.
-                        let per_block_budget = ceiling as usize;
-                        // The dispatched-set result drives the user notification:
-                        // rung 2 is LOSSY (truncates pasted content, drops oldest
-                        // turns) and irreversible, unlike rung 1's disk-spill — so
-                        // it must never fire silently.
-                        rung2_fired = crate::compact::degrade::degrade_conversation_overflow(
-                            &mut request.messages,
-                            ceiling,
-                            per_block_budget,
-                            est,
-                        );
-                        crate::compact::degrade::degrade_conversation_overflow(
-                            &mut self.messages,
-                            ceiling,
-                            per_block_budget,
-                            est,
-                        );
-                    }
-                    self.sync_active_journal_conversation().await?;
-                    // Decide on the DISPATCHED set: the window/ceiling are
-                    // unchanged, so only `used_tokens` moves. Re-stamp every
-                    // downstream consumer of the request size so none sees the
-                    // stale pre-shed estimate — `client_context_tokens` feeds the
-                    // Flux/OpenAI context-routing header (mirrors the compaction-
-                    // retry recount below).
-                    let sent = est(&request.messages);
-                    ctx.used_tokens = sent;
-                    input_token_estimate = sent as usize;
-                    request.client_context_tokens = Some(sent);
-                    if sent >= ceiling {
-                        // #636: is the PERSISTED history (which, unlike the
-                        // dispatched request, carries none of this turn's transient
-                        // injections) resumable? If degradation left it under the
-                        // ceiling, a resume heals — persist it. If not, saving it
-                        // would trap the resume in the same over-ceiling context, so
-                        // DON'T persist: keep the last recoverable on-disk state.
-                        let resumable = est(&self.messages) < ceiling;
-                        let tail = if resumable {
-                            "Start a new chat or raise the model's context budget; \
-                             your saved session was trimmed to stay resumable."
-                        } else {
-                            "This over-limit turn was not saved — your previous \
-                             (smaller) session is still resumable; reopen it or \
-                             start a new chat."
-                        };
-                        self.output.emit_error(
-                            &format!(
-                                "Run stopped: estimated request size ({sent} tokens) \
-                                 reached the context-window ceiling ({ceiling}) for model \
-                                 '{}' and compaction could not reduce it further. {tail}",
-                                request.model,
-                            ),
-                            false,
-                        );
-                        // Context ceiling: a bigger budget is needed, not more turns.
-                        return self
-                            .finish_run_terminated_inner(
-                                user_input,
-                                turn,
-                                FinishReason::Length,
-                                resumable,
+            let mut stream_attempt = first_recovery_checkpoint
+                .as_ref()
+                .map_or(0, |checkpoint| checkpoint.stream_attempt);
+            let mut overflow_retried = first_recovery_checkpoint
+                .as_ref()
+                .is_some_and(|checkpoint| checkpoint.overflow_retried);
+            let mut length_wedge_retried = first_recovery_checkpoint
+                .as_ref()
+                .is_some_and(|checkpoint| checkpoint.length_wedge_retried);
+            let mut resumed_provider_dispatch = false;
+            let mut resumed_dispatch_id = None;
+            let (mut request, effective_model, mut input_token_estimate, mut last_routed_model) =
+                if let Some(checkpoint) = first_recovery_checkpoint.take() {
+                    if !matches!(
+                        checkpoint.next_action,
+                        crate::recovery::RecoveryNextAction::ProviderDispatch
+                    ) || checkpoint.turn_index
+                        != u64::try_from(turn).map_err(|_| {
+                            AgentError::SessionAuthority(
+                                "recovery turn index exceeds u64".to_string(),
                             )
-                            .await;
-                    }
-                    if shed > 0 || rung2_fired {
-                        tracing::info!(
-                            target: "wcore_agent::compact",
-                            shed,
-                            rung2_fired,
-                            ceiling,
-                            used = input_token_estimate,
-                            model = %request.model,
-                            "context overflow: degraded history to continue"
-                        );
-                        // Two distinct degradations may have fired: rung 1 spills
-                        // large tool outputs to disk (recoverable); rung 2 truncates
-                        // pasted content and/or drops the oldest turns (lossy). Name
-                        // whichever ran so the user knows what changed.
-                        let mut parts: Vec<String> = Vec::new();
-                        if shed > 0 {
-                            parts.push(format!("shed {shed} large tool output(s) to disk"));
-                        }
-                        if rung2_fired {
-                            parts.push(
-                                "truncated oversized message content and/or dropped the \
-                                 oldest turns"
-                                    .to_string(),
-                            );
-                        }
-                        self.output.emit_info(&format!(
-                            "Context exceeded the model limit; {} to continue.",
-                            parts.join(" and "),
+                        })?
+                        || checkpoint.stream_attempt != stream_attempt
+                        || checkpoint.overflow_retried != overflow_retried
+                        || checkpoint.length_wedge_retried != length_wedge_retried
+                    {
+                        return Err(AgentError::SessionAuthority(
+                            "recovery checkpoint does not match the provider loop state"
+                                .to_string(),
                         ));
                     }
-                }
-            }
-
-            // Up-front output sizing (Layer 1). Clamp `max_tokens` to the FINAL
-            // model's real output ceiling. Placed AFTER the smart-routing tier
-            // swap above so it sees `request.model` post-swap: a tier-swapped
-            // cheaper model is clamped to ITS ceiling, never over-asked at the
-            // premium model's. A known model is clamped to what it actually
-            // allows (so the generous default never 400s); an unknown/router
-            // model is clamped to a conservative floor. `self.max_tokens` is the
-            // user's CAP and always binds.
-            let requested_thinking_budget = match &request.thinking {
-                Some(wcore_types::llm::ThinkingConfig::Enabled { budget_tokens }) => {
-                    Some(*budget_tokens)
-                }
-                _ => None,
-            };
-            // #426 — a turn is "reasoning" if it carries either a numeric
-            // thinking budget (Anthropic/DeepSeek) or an OpenAI reasoning_effort
-            // (o-series / gpt-5). Both spend output tokens on hidden reasoning,
-            // so both must lift an unknown model off the 8192 floor.
-            let is_reasoning_turn =
-                requested_thinking_budget.is_some() || request.reasoning_effort.is_some();
-            request.max_tokens = size_output_cap(
-                self.max_tokens,
-                self.compat.provider_type(),
-                &request.model,
-                input_token_estimate,
-                is_reasoning_turn,
-            );
-            // #112 — when the user omitted `--max-tokens`, the model is
-            // unknown to the registry, and the provider is omit-safe, OMIT the
-            // wire max-tokens field so the served model's natural ceiling
-            // applies instead of the conservative floor. `request.max_tokens`
-            // keeps the sized value above — it still feeds
-            // `fit_thinking_budget` below, the `x-wl-expected-output` header,
-            // and the #255 gauge math; only serialization is skipped.
-            request.omit_max_tokens = should_omit_max_tokens(
-                self.compat.provider_type(),
-                &request.model,
-                self.max_tokens_explicit,
-                self.compat.omit_max_tokens_when_unsized(),
-            );
-            // A finite provider ledger can reserve only a wire-bounded output.
-            // Keep omit-safe behavior for legacy/unmetered sessions, but force
-            // the sized cap onto every governed provider call.
-            if self.budget_tracker.is_some() {
-                request.omit_max_tokens = false;
-            }
-
-            // #426 / wayland#422 — separate the reasoning budget from the output
-            // budget so extended thinking can never starve the visible answer.
-            // For reasoning models `max_tokens` is the TOTAL of reasoning +
-            // visible output; without this a heavy thinking turn (especially on
-            // a router alias clamped low) spends the whole budget thinking and
-            // returns an empty, `finish_reason: length` reply. Shrink the budget
-            // to reserve `MIN_VISIBLE_OUTPUT`; if no usable budget remains, drop
-            // thinking for the turn rather than emit an empty answer.
-            if let Some(budget) = requested_thinking_budget {
-                let fitted = fit_thinking_budget(request.max_tokens, budget);
-                request.thinking = Some(if fitted >= MIN_THINKING_BUDGET {
-                    if fitted < budget {
-                        tracing::debug!(
-                            target: "wcore_agent::engine",
-                            requested = budget,
-                            fitted,
-                            max_tokens = request.max_tokens,
-                            "thinking budget shrunk to reserve visible-output room (#426)"
-                        );
-                    }
-                    wcore_types::llm::ThinkingConfig::Enabled {
-                        budget_tokens: fitted,
-                    }
-                } else {
-                    tracing::debug!(
-                        target: "wcore_agent::engine",
-                        requested = budget,
-                        max_tokens = request.max_tokens,
-                        "output budget too small for thinking + visible answer; thinking dropped for this turn (#426)"
+                    let request = prepared_recovery_request.take().ok_or_else(|| {
+                        AgentError::SessionAuthority(
+                            "recovery checkpoint is missing its validated exact provider request"
+                                .to_string(),
+                        )
+                    })?;
+                    resumed_dispatch_id = checkpoint.dispatch_id.clone();
+                    let effective_model = request.model.clone();
+                    let input_token_estimate = request.client_context_tokens.map_or_else(
+                        || {
+                            estimate::estimate_request_tokens(
+                                &request.messages,
+                                &request.system,
+                                &request.tools,
+                            ) as usize
+                        },
+                        |tokens| tokens as usize,
                     );
-                    wcore_types::llm::ThinkingConfig::Disabled
-                });
-            }
+                    resumed_provider_dispatch = true;
+                    (request, effective_model, input_token_estimate, None)
+                } else {
+                    // Fire on_turn_start hooks at the top of each iteration so Rust
+                    // hooks can override the model or inject prompt messages before
+                    // run_compaction + provider.stream(). Outcome is applied via
+                    // apply_pre_turn_outcome (switch_model + injected_messages).
+                    //
+                    // AUDIT A9 — a turn-start hook that returns `block` halts
+                    // the loop cleanly: operators can write a "stop after
+                    // condition X" hook as a backstop.
+                    let hook_block_reason = if first_recovery_checkpoint.is_none()
+                        && let Some(hook_engine) = self.hooks.as_ref()
+                    {
+                        let ctx = TurnContext {
+                            turn,
+                            model: self.model.clone(),
+                            message_count: self.messages.len(),
+                        };
+                        let outcome = hook_engine.on_turn_start(turn, &ctx).await;
+                        self.apply_pre_turn_outcome(outcome)
+                    } else {
+                        None
+                    };
+                    if let Some(reason) = hook_block_reason {
+                        self.output
+                            .emit_info(&format!("Run stopped by on_turn_start hook: {reason}"));
+                        return self
+                            .finish_run_terminated(user_input, turn, FinishReason::Length)
+                            .await;
+                    }
+
+                    // Fire PreCompact plugin hooks once per turn, immediately before
+                    // the compaction pass. Gated like every other phase: a no-op when
+                    // no hook engine / no PreCompact hooks are registered.
+                    if first_recovery_checkpoint.is_none()
+                        && let Some(hook_engine) = self.hooks.as_ref()
+                    {
+                        let outcome = hook_engine.run_pre_compact(turn, self.messages.len()).await;
+                        for line in outcome.hook_trace {
+                            tracing::debug!(target: "wcore_agent::hooks", "{line}");
+                        }
+                    }
+
+                    // #280 — smart auto-compaction pre-gate. Boundary-fire ONLY: this is
+                    // the turn-loop top (the tool loop lives below provider.stream in the
+                    // same iteration), and the model swap was already applied above, so
+                    // the Flux-aware fraction is computed against the CURRENTLY-active
+                    // model. Default-OFF: `smart_compact_fraction` returns `None` on its
+                    // first line when disabled, so neither memory nor the force flag is
+                    // touched and `run_compaction` below behaves exactly as before. On a
+                    // fire we (1) persist a non-destructive handoff Episode, then (2) set
+                    // the one-shot force flag and fall straight through into the existing
+                    // `run_compaction` — no new summarization / fold / emit code.
+                    let smart_fired = if first_recovery_checkpoint.is_none() {
+                        match self.smart_compact_fraction() {
+                            Some(frac) => self.smart_compact_should_fire(turn as u32, frac),
+                            None => false,
+                        }
+                    } else {
+                        false
+                    };
+                    if smart_fired {
+                        self.smart_compact_force = true;
+                        if self.compact_config.smart_handoff_to_memory {
+                            // Persist BEFORE run_compaction mutates the buffer so the
+                            // verbatim pre-compaction transcript is durable; errors are
+                            // swallowed and never abort the turn.
+                            self.write_smart_handoff().await;
+                        }
+                    }
+
+                    // Run multi-level compaction before each API call.
+                    // On the first turn last_input_tokens is 0 so neither
+                    // autocompact nor emergency will fire.
+                    //
+                    // AUDIT A6 — a compaction failure (e.g. the emergency
+                    // `ContextTooLong` bail) ends the session; persist + fire
+                    // session-end hooks before propagating, so the error exit
+                    // is consistent with every other loop-exit path.
+                    if first_recovery_checkpoint.is_none()
+                        && let Err(e) = self.run_compaction().await
+                    {
+                        self.prepare_durable_conversation().await?;
+                        self.fire_on_session_end(turn).await;
+                        self.save_session_mirror();
+                        return Err(e);
+                    }
+
+                    // Build tool list: filter based on plan mode state
+                    let tools = if self.plan_state.is_active {
+                        // Plan mode: only Info-category tools (excluding EnterPlanMode)
+                        self.tools.to_tool_defs_filtered(|t| {
+                            t.category() == ToolCategory::Info && t.name() != "EnterPlanMode"
+                        })
+                    } else {
+                        // Normal mode: all tools except ExitPlanMode
+                        self.tools
+                            .to_tool_defs_filtered(|t| t.name() != "ExitPlanMode")
+                    };
+
+                    // W6 F17: trim MCP tools to a curated top-K. MCP tools are
+                    // identified by real provenance (`ToolDef::server.is_some()`), not
+                    // the `mcp__` name prefix — a non-colliding MCP tool keeps its bare
+                    // name (wcore-mcp/src/tool_proxy.rs). Non-MCP tools (builtins,
+                    // skills, spawn, plan tools) are always kept. Off-policy is a no-op.
+                    // Audit-log recency degrades to empty/keyword-only when
+                    // self.audit_log is None.
+                    let tools = self.apply_mcp_curation(tools);
+
+                    // #344/#359: enforce the provider's HARD tool-array cap (OpenAI =
+                    // 128). MCP servers can push the total past the limit even after
+                    // curation; this is the correctness guarantee, separate from the
+                    // relevance trim above.
+                    let tools = self.apply_provider_tool_cap(tools);
+
+                    // Layer D1 (token-opt): defer cold tools to name-only stubs —
+                    // only the configured hot allowlist (plus ToolSearch-hydrated
+                    // tools) ships full schemas; the model hydrates a stub on demand
+                    // via ToolSearch (the system prompt states that rule once,
+                    // `tool_usage_guidance`). The hot/stub split is a pure function
+                    // of static config + the monotonic hydrated set, so the
+                    // serialized tools[] array stays byte-identical across turns
+                    // (cache guard: `tools_array_byte_stable_across_roundtrips`);
+                    // a hydration changes it once.
+                    let tools = self.apply_tool_deferral(tools);
+
+                    // Build system prompt: append plan mode instructions when active
+                    let system = if self.plan_state.is_active {
+                        format!(
+                            "{}\n\n{}",
+                            self.system_prompt,
+                            plan_prompt::plan_mode_instructions()
+                        )
+                    } else {
+                        self.system_prompt.clone()
+                    };
+
+                    // v0.8.1 U1 — the per-turn skill-router hint (when the router is
+                    // installed and picked a visible catalog skill). Cache-stability
+                    // (token-opt): the hint is dynamic per turn, so appending it to the
+                    // `system` string here would rewrite the cached system prefix
+                    // (zone 1) every turn. Compute it now and inject it into the
+                    // request's volatile message tail below instead. `None` (no router
+                    // / no pick / hidden skill) leaves both system and tail untouched.
+                    let skill_hint = self.skill_router_hint();
+
+                    // Record prompt state for cache diagnostics
+                    self.cache_detector.record_request(&system, &tools);
+
+                    // W8 v0.6.3 — pick the Anthropic prompt-cache tier for this
+                    // request. The agent turn loop reuses the same system prompt +
+                    // tools across every turn, so the prefix is stable far longer
+                    // than the 5-minute ephemeral window; `pick_cache_tier` promotes
+                    // to the 1h tier once the prompt clears the 1024-token minimum.
+                    // `None` stays valid (the Anthropic adapter falls back to 5m for
+                    // a `None` request) but the production path now produces a real
+                    // tier instead of always-`None`. Non-Anthropic providers ignore
+                    // the field.
+                    //
+                    // AUDIT A5 — estimate the FULL request (messages + system +
+                    // tool defs), not just message content. The message-only
+                    // estimate undercounts the turn-1 watermark by the system
+                    // prompt + tool-schema size (tens of k tokens for MCP-heavy
+                    // configs).
+                    let mut input_token_estimate =
+                        estimate::estimate_request_tokens(&self.messages, &system, &tools) as usize;
+                    // AUDIT A1 / #255 — context-token overflow guard MOVED below, to
+                    // immediately AFTER the smart-routing tier swap (so it measures the
+                    // POST-swap effective model's REAL window via the wcore-config
+                    // context_window kernel, not the stale CompactConfig 200k default).
+                    // See the `ContextWindow::resolve(..)` block just before
+                    // `size_output_cap`.
+                    let cache_tier = Some(wcore_providers::cache_tier::pick_cache_tier(
+                        input_token_estimate,
+                        AGENT_TURN_CACHE_REUSE_WINDOW_SECS,
+                    ));
+
+                    // Belt-and-suspenders: ensure no `tool_use` in history is
+                    // orphaned before sending to the provider. Anthropic 400s
+                    // on any orphan and bricks the session; the per-path fixes
+                    // in the dispatch loop close the known escape paths, but
+                    // this guard catches every remaining one — denial-by-
+                    // reaper, partial-batch loss on cancel, system-message
+                    // injection between an assistant tool_use and its result.
+                    self.repair_all_orphaned_tool_uses();
+                    // #285 — the reverse direction: a `tool_result` whose `tool_use`
+                    // was summarized away by autocompact is orphaned and makes
+                    // DeepSeek 400 the whole array. Run AFTER the forward repair so
+                    // the synthetic results it just backfilled (which always have a
+                    // matching tool_use) are untouched, and only true orphans are
+                    // demoted to text.
+                    self.repair_orphaned_tool_results();
+                    // Output-side optimization (Part A): attach fluff stop sequences
+                    // only when the route optimizes client-side. On router-optimized
+                    // routes the server already trims output, so we leave the Vec
+                    // empty and providers emit no stop field.
+                    let stop_sequences = if self.compat.input_optimization() == "client"
+                        && self.compat.supports_stop_param()
+                    {
+                        FLUFF_STOP_SEQUENCES.iter().map(|s| s.to_string()).collect()
+                    } else {
+                        // Either the route is router-optimized (server trims output) or
+                        // the provider rejects `stop` (e.g. xAI grok-4.3 400s on it) —
+                        // leave empty so providers emit no `stop` field.
+                        Vec::new()
+                    };
+
+                    // Finding #174: the model actually dispatched this turn. Starts as
+                    // the user's configured model and is rewritten below if a routing
+                    // hint selects a configured tier model. Cost/usage accounting reads
+                    // THIS (not `self.model`) so attribution follows any swap.
+                    let mut effective_model = self.model.clone();
+
+                    // Layer E1 — the model Flux ACTUALLY routed this turn to
+                    // (ProviderMeta signal-back). `None` on non-Flux paths / before
+                    // the signal arrives; the cache_health_warn emission below falls
+                    // back to `effective_model`.
+                    let last_routed_model: Option<String> = None;
+
+                    let mut request = LlmRequest {
+                        model: self.model.clone(),
+                        system,
+                        messages: self.messages.clone(),
+                        tools,
+                        max_tokens: self.max_tokens,
+                        thinking: self.thinking.clone(),
+                        reasoning_effort: self.current_reasoning_effort.clone(),
+                        cache_tier,
+                        routing_hint: None,
+                        stop_sequences,
+                        web_search: self.web_search,
+                        // #282: thread the stable conversation id + assembled-prompt
+                        // token estimate so the Flux provider can emit the x-wl-*
+                        // context-routing headers on tier-alias turns.
+                        conversation_id: Some(self.conversation_id.clone()),
+                        client_context_tokens: Some(input_token_estimate as u64),
+                        // Crucible #3: per-session sampling temperature (council child
+                        // engines set it; top-level session leaves it `None`).
+                        temperature: self.temperature,
+                        // #112: decided below at the sizing site, AFTER the smart-
+                        // routing tier swap, so the omit decision sees the final model.
+                        omit_max_tokens: false,
+                    };
+
+                    // Cache-stability (token-opt): inject the per-turn skill-router
+                    // hint as a transient text block on the request's last user-role
+                    // message. `request.messages` is a clone, so this never persists
+                    // into history and never shifts the cached system/tool prefix.
+                    // Done before `mark_cache_boundaries` so the tail breakpoint
+                    // accounts for the final content. Skipped unless the tail is
+                    // user-role (never orphans a tool_use or creates adjacent user
+                    // messages).
+                    if let Some(hint) = skill_hint
+                        && let Some(last) = request.messages.last_mut()
+                        && matches!(last.role, Role::User)
+                    {
+                        last.content.push(ContentBlock::Text { text: hint });
+                    }
+
+                    // Cache-stability (token-opt, finding #174): inject the current date
+                    // as a transient text block on the request's last user-role message
+                    // instead of the cached system prefix. The date value changes daily /
+                    // across cross-midnight restarts; keeping it out of the prefix lets
+                    // the cached system+tools prefix stay byte-stable, so Anthropic prompt
+                    // caching survives cold starts. `request.messages` is a clone, so this
+                    // never persists into history. Skipped unless the tail is user-role
+                    // (never orphans a tool_use or creates adjacent user messages).
+                    if let Some(last) = request.messages.last_mut()
+                        && matches!(last.role, Role::User)
+                    {
+                        last.content.push(ContentBlock::Text {
+                            text: crate::context::current_date_block(
+                                &crate::context::today_string(),
+                            ),
+                        });
+                    }
+
+                    // C1 / Task A3: fire PrePrompt plugin hooks once per turn and apply
+                    // their contributions to the request's last user-role message. Done
+                    // here — after the skill hint and BEFORE `mark_cache_boundaries`, but
+                    // OUTSIDE the `'stream` retry loop below (so it fires once per turn,
+                    // not once per stream retry). `request.messages` is a clone, so this
+                    // never persists into history and never shifts the cached system/tool
+                    // prefix; placing it before the breakpoint marking lets the tail
+                    // breakpoint account for the final content. The contribution is
+                    // budget-capped and deduped against the last injection. No-op when no
+                    // hook engine / PrePrompt hooks / dispatcher are present.
+                    // A provider-dispatch checkpoint was committed after PrePrompt had
+                    // already run. Replaying the hook could repeat an external side
+                    // effect. Rebuild without it and let the request-digest check fail
+                    // closed when the original hook contributed transient content.
+                    let pre_prompt_outcome = if first_recovery_checkpoint.is_some() {
+                        None
+                    } else {
+                        match self.hooks.as_ref() {
+                            Some(hook_engine) => Some(hook_engine.run_pre_prompt().await),
+                            None => None,
+                        }
+                    };
+                    if let Some(outcome) = pre_prompt_outcome {
+                        for line in &outcome.hook_trace {
+                            tracing::debug!(target: "wcore_agent::hooks", "{line}");
+                        }
+                        Self::apply_pre_prompt_contribution(&mut request.messages, &outcome);
+                    }
+
+                    // W1 S3: place per-message cache breakpoints when the provider
+                    // honours them. Idempotent across turns: previous turns' markers
+                    // are cleared and the new tail is marked. Gap-1+gap-2 coupling:
+                    // a PERMANENT anchor breakpoint is additionally pinned to an
+                    // immutable already-stubbed message (pure function of the
+                    // compaction markers; `request.messages` is an index-aligned
+                    // clone of `self.messages`, so the index maps 1:1). The anchor
+                    // keeps the long prefix cache-valid while continuous
+                    // args-compaction transitions the message at the
+                    // keep_recent_turns boundary inside it.
+                    mark_cache_boundaries(
+                        &mut request,
+                        &self.compat,
+                        micro::cache_anchor_index(&self.messages),
+                    );
+
+                    // W1 v0.6.3: stamp a smart-routing hint onto the request so
+                    // `ProviderChain` can surface the router's decision in dispatch
+                    // observability. Finding #174: ALSO act on the hint — swap the
+                    // model to a configured tier model (cheap/balanced) before
+                    // dispatch. `input_tokens`, `max_output_tokens`, and
+                    // `tool_call_count` are real; `code_ratio` is conservatively zero
+                    // (no code-ratio scanner) and `requires_vision` comes from
+                    // `message_requires_vision` (false until an image ContentBlock
+                    // exists), so this producer emits only large-context / tool-heavy /
+                    // simple decisions — never a wrong hint.
+                    {
+                        let tool_call_count = self
+                            .messages
+                            .iter()
+                            .flat_map(|m| &m.content)
+                            .filter(|b| matches!(b, ContentBlock::ToolUse { .. }))
+                            .count() as u32;
+                        // Vision guard input: a turn that carries image/vision content
+                        // must never be downgraded (the cheap tier may not be
+                        // vision-capable). The `wcore-types` message model has no image
+                        // block today, so this is conservatively `false` from real
+                        // content; the routing classifier promotes any vision turn to
+                        // Premium anyway, which `select_tier_model` also refuses to
+                        // swap. Routed through one flag so a future image ContentBlock
+                        // only needs to flip this.
+                        let requires_vision = message_requires_vision(&self.messages);
+                        let shape = wcore_providers::RequestShape {
+                            input_tokens: input_token_estimate,
+                            max_output_tokens: request.max_tokens as usize,
+                            code_ratio: 0.0,
+                            tool_call_count,
+                            requires_vision,
+                        };
+                        let decision = wcore_providers::route(
+                            &shape,
+                            &wcore_providers::RoutingHeuristics::default(),
+                        );
+                        request.routing_hint = Some(decision.to_hint());
+
+                        // Finding #174: act on the hint. Opt-in + guarded — see
+                        // `select_tier_model`. Only Cheap/Balanced hints with a
+                        // configured tier model and no vision content swap the model;
+                        // everything else leaves `request.model` (and `effective_model`)
+                        // as the user's configured model.
+                        if let Some(tier_model) =
+                            select_tier_model(&decision, requires_vision, &self.compat)
+                        {
+                            tracing::debug!(
+                                target: "wcore_agent::routing",
+                                from = %self.model,
+                                to = %tier_model,
+                                hint = %decision.to_hint().0,
+                                "smart-routing tier swap"
+                            );
+                            request.model = tier_model.clone();
+                            effective_model = tier_model;
+                        }
+                    }
+
+                    // #255 — pre-flight context-window overflow guard, RECOMPUTED on the
+                    // POST-swap effective model. `run_compaction` above already had its
+                    // chance to shrink history; if the assembled request still exceeds a
+                    // safe fraction of the model that will ACTUALLY serve this request,
+                    // the provider call would 400. Terminate the run cleanly instead.
+                    //
+                    // The denominator comes from the kernel (`ContextWindow::resolve`),
+                    // which reads the post-swap model's REAL window from
+                    // `wcore_config::limits` — NOT the stale `CompactConfig` 200k
+                    // default that the old guard used. After a Flux/tier swap to e.g.
+                    // gpt-4o (128k) the ceiling is now computed against 128k, so the
+                    // guard fires at the correct count (the #255 false-negative fix).
+                    //
+                    // `&request.model` is the same model arg fed to `size_output_cap`
+                    // below, so guard and cap agree. When the window is unknown
+                    // (`input_ceiling() == None`) the guard SKIPS — fail open, identical
+                    // to the old `window > 0` skip; `size_output_cap`'s UNKNOWN_CAP and
+                    // the provider 400 are the backstops.
+                    {
+                        let mut ctx = wcore_config::context_window::ContextWindow::resolve(
+                            input_token_estimate as u64,
+                            self.compat.provider_type(),
+                            &request.model,
+                            self.compact_config.context_window as u64,
+                        );
+                        // #282 contract V1: once Flux has SIGNALLED-BACK the real served
+                        // window (`x-flux-model-window`) on a prior turn of THIS Flux
+                        // route, prefer it over the alias's pre-route guess so the guard
+                        // measures against the model that will actually serve the turn.
+                        if wcore_providers::is_flux_tier_alias(&request.model)
+                            && let Some(window) = self.flux_served_window
+                        {
+                            ctx.window = Some(window);
+                        }
+                        if let Some(ceiling) = ctx.input_ceiling(
+                            self.compact_config.output_reserve as u64,
+                            self.compact_config.emergency_buffer as u64,
+                        ) && ctx.used_tokens >= ceiling
+                        {
+                            // #636 — graceful degradation (rung 1). Before aborting, shed
+                            // the largest tool-result outputs (spilling full content to
+                            // disk, leaving a bounded `<persisted-output>` preview) so the
+                            // request drops back under the ceiling and the run CONTINUES.
+                            // Shedding rewrites `ToolResult` content in place — it never
+                            // adds or removes blocks — so tool_use/tool_result pairing is
+                            // untouched (no orphaned-tool_use 400; the reason drop-oldest
+                            // sliding-window is deferred to a later phase).
+                            //
+                            // Two message sets are shed:
+                            //   * `request.messages` — the copy actually DISPATCHED (a
+                            //     clone of history plus this turn's transient injections);
+                            //     shedding it is what makes the sent call fit. The
+                            //     continue/abort decision is taken on THIS set.
+                            //   * `self.messages` — the PERSISTED history; shedding it too
+                            //     means a saved/resumed session heals (starts already
+                            //     shrunk) instead of re-entering this guard every turn.
+                            // Both target the same oversized blocks and the spills are
+                            // idempotent (`maybe_persist_tool_result` skips already-spilled
+                            // blocks), so re-runs never re-spill or hot-loop.
+                            let storage =
+                                wcore_tools::tool_result_storage::StorageDir::os_default();
+                            let budget = wcore_tools::tool_result_storage::BudgetConfig::default();
+                            // Shed any result whose spill is a NET reduction: the
+                            // `<persisted-output>` replacement is the preview (≤
+                            // `preview_size`) plus a small fixed header, so a block over
+                            // `preview_size` + a header margin always shrinks. Keeping the
+                            // floor this low (not a large multiple) means a context that
+                            // is only marginally over the ceiling still gets reduced
+                            // instead of aborting — only genuinely tiny blocks are skipped.
+                            let min_shed = budget.preview_size + 512;
+                            // Fold the fixed system+tools token overhead into a scalar so
+                            // the shedding closure borrows nothing from `request` (the
+                            // `system`/`tools` locals were moved into `request` above).
+                            // `estimate_request_tokens(m, sys, tools)
+                            //   == estimate_tokens_from_messages(m) + overhead` exactly.
+                            let overhead = estimate::estimate_request_tokens(
+                                &[],
+                                &request.system,
+                                &request.tools,
+                            );
+                            // `est` captures only `overhead` (a `u64`), so it is `Copy` —
+                            // pass it by value to both sheds and still call it below.
+                            let est = |m: &[Message]| {
+                                estimate::estimate_tokens_from_messages(m) + overhead
+                            };
+                            let shed = crate::compact::degrade::shed_tool_outputs_until_under(
+                                &mut request.messages,
+                                &storage,
+                                &budget,
+                                min_shed,
+                                ceiling,
+                                est,
+                            );
+                            crate::compact::degrade::shed_tool_outputs_until_under(
+                                &mut self.messages,
+                                &storage,
+                                &budget,
+                                min_shed,
+                                ceiling,
+                                est,
+                            );
+                            // #646 — graceful degradation (rung 2). If tool-output
+                            // shedding did not bring the DISPATCHED request under the
+                            // ceiling, the overflow is conversation-heavy: a big pasted
+                            // `Text`/`Thinking` block or many non-tool messages, which
+                            // rung 1 cannot touch. Degrade the non-tool content too —
+                            // truncate an oversized non-tool block head+tail, then drop
+                            // the oldest non-essential (pairing-safe: never a
+                            // tool_use/tool_result, the system prompt, or the latest
+                            // turn) message until under the ceiling. Applied to both the
+                            // dispatched request and persisted history so a resume heals.
+                            let mut rung2_fired = false;
+                            if est(&request.messages) >= ceiling {
+                                // Cap any single non-tool block at ~`ceiling` chars
+                                // (≈ a quarter of the ceiling in tokens), so one huge
+                                // paste truncates well under the window and the
+                                // drop-oldest pass mops up any residual.
+                                let per_block_budget = ceiling as usize;
+                                // The dispatched-set result drives the user notification:
+                                // rung 2 is LOSSY (truncates pasted content, drops oldest
+                                // turns) and irreversible, unlike rung 1's disk-spill — so
+                                // it must never fire silently.
+                                rung2_fired =
+                                    crate::compact::degrade::degrade_conversation_overflow(
+                                        &mut request.messages,
+                                        ceiling,
+                                        per_block_budget,
+                                        est,
+                                    );
+                                crate::compact::degrade::degrade_conversation_overflow(
+                                    &mut self.messages,
+                                    ceiling,
+                                    per_block_budget,
+                                    est,
+                                );
+                            }
+                            // Decide on the DISPATCHED set: the window/ceiling are
+                            // unchanged, so only `used_tokens` moves. Re-stamp every
+                            // downstream consumer of the request size so none sees the
+                            // stale pre-shed estimate — `client_context_tokens` feeds the
+                            // Flux/OpenAI context-routing header (mirrors the compaction-
+                            // retry recount below).
+                            let sent = est(&request.messages);
+                            let resumable_history = est(&self.messages) < ceiling;
+                            if sent < ceiling || resumable_history {
+                                self.sync_active_journal_conversation().await?;
+                            }
+                            ctx.used_tokens = sent;
+                            input_token_estimate = sent as usize;
+                            request.client_context_tokens = Some(sent);
+                            if sent >= ceiling {
+                                // #636: is the PERSISTED history (which, unlike the
+                                // dispatched request, carries none of this turn's transient
+                                // injections) resumable? If degradation left it under the
+                                // ceiling, a resume heals — persist it. If not, saving it
+                                // would trap the resume in the same over-ceiling context, so
+                                // DON'T persist: keep the last recoverable on-disk state.
+                                let resumable = resumable_history;
+                                let tail = if resumable {
+                                    "Start a new chat or raise the model's context budget; \
+                             your saved session was trimmed to stay resumable."
+                                } else {
+                                    "This over-limit turn was not saved — your previous \
+                             (smaller) session is still resumable; reopen it or \
+                             start a new chat."
+                                };
+                                self.output.emit_error(
+                                    &format!(
+                                        "Run stopped: estimated request size ({sent} tokens) \
+                                 reached the context-window ceiling ({ceiling}) for model \
+                                 '{}' and compaction could not reduce it further. {tail}",
+                                        request.model,
+                                    ),
+                                    false,
+                                );
+                                // Context ceiling: a bigger budget is needed, not more turns.
+                                return self
+                                    .finish_run_terminated_inner(
+                                        user_input,
+                                        turn,
+                                        FinishReason::Length,
+                                        resumable,
+                                    )
+                                    .await;
+                            }
+                            if shed > 0 || rung2_fired {
+                                tracing::info!(
+                                    target: "wcore_agent::compact",
+                                    shed,
+                                    rung2_fired,
+                                    ceiling,
+                                    used = input_token_estimate,
+                                    model = %request.model,
+                                    "context overflow: degraded history to continue"
+                                );
+                                // Two distinct degradations may have fired: rung 1 spills
+                                // large tool outputs to disk (recoverable); rung 2 truncates
+                                // pasted content and/or drops the oldest turns (lossy). Name
+                                // whichever ran so the user knows what changed.
+                                let mut parts: Vec<String> = Vec::new();
+                                if shed > 0 {
+                                    parts.push(format!("shed {shed} large tool output(s) to disk"));
+                                }
+                                if rung2_fired {
+                                    parts.push(
+                                        "truncated oversized message content and/or dropped the \
+                                 oldest turns"
+                                            .to_string(),
+                                    );
+                                }
+                                self.output.emit_info(&format!(
+                                    "Context exceeded the model limit; {} to continue.",
+                                    parts.join(" and "),
+                                ));
+                            }
+                        }
+                    }
+
+                    // Up-front output sizing (Layer 1). Clamp `max_tokens` to the FINAL
+                    // model's real output ceiling. Placed AFTER the smart-routing tier
+                    // swap above so it sees `request.model` post-swap: a tier-swapped
+                    // cheaper model is clamped to ITS ceiling, never over-asked at the
+                    // premium model's. A known model is clamped to what it actually
+                    // allows (so the generous default never 400s); an unknown/router
+                    // model is clamped to a conservative floor. `self.max_tokens` is the
+                    // user's CAP and always binds.
+                    let requested_thinking_budget = match &request.thinking {
+                        Some(wcore_types::llm::ThinkingConfig::Enabled { budget_tokens }) => {
+                            Some(*budget_tokens)
+                        }
+                        _ => None,
+                    };
+                    // #426 — a turn is "reasoning" if it carries either a numeric
+                    // thinking budget (Anthropic/DeepSeek) or an OpenAI reasoning_effort
+                    // (o-series / gpt-5). Both spend output tokens on hidden reasoning,
+                    // so both must lift an unknown model off the 8192 floor.
+                    let is_reasoning_turn =
+                        requested_thinking_budget.is_some() || request.reasoning_effort.is_some();
+                    request.max_tokens = size_output_cap(
+                        self.max_tokens,
+                        self.compat.provider_type(),
+                        &request.model,
+                        input_token_estimate,
+                        is_reasoning_turn,
+                    );
+                    // #112 — when the user omitted `--max-tokens`, the model is
+                    // unknown to the registry, and the provider is omit-safe, OMIT the
+                    // wire max-tokens field so the served model's natural ceiling
+                    // applies instead of the conservative floor. `request.max_tokens`
+                    // keeps the sized value above — it still feeds
+                    // `fit_thinking_budget` below, the `x-wl-expected-output` header,
+                    // and the #255 gauge math; only serialization is skipped.
+                    request.omit_max_tokens = should_omit_max_tokens(
+                        self.compat.provider_type(),
+                        &request.model,
+                        self.max_tokens_explicit,
+                        self.compat.omit_max_tokens_when_unsized(),
+                    );
+                    // A finite provider ledger can reserve only a wire-bounded output.
+                    // Keep omit-safe behavior for legacy/unmetered sessions, but force
+                    // the sized cap onto every governed provider call.
+                    if self.budget_authority.is_some() || self.budget_tracker.is_some() {
+                        request.omit_max_tokens = false;
+                    }
+
+                    // #426 / wayland#422 — separate the reasoning budget from the output
+                    // budget so extended thinking can never starve the visible answer.
+                    // For reasoning models `max_tokens` is the TOTAL of reasoning +
+                    // visible output; without this a heavy thinking turn (especially on
+                    // a router alias clamped low) spends the whole budget thinking and
+                    // returns an empty, `finish_reason: length` reply. Shrink the budget
+                    // to reserve `MIN_VISIBLE_OUTPUT`; if no usable budget remains, drop
+                    // thinking for the turn rather than emit an empty answer.
+                    if let Some(budget) = requested_thinking_budget {
+                        let fitted = fit_thinking_budget(request.max_tokens, budget);
+                        request.thinking = Some(if fitted >= MIN_THINKING_BUDGET {
+                            if fitted < budget {
+                                tracing::debug!(
+                                    target: "wcore_agent::engine",
+                                    requested = budget,
+                                    fitted,
+                                    max_tokens = request.max_tokens,
+                                    "thinking budget shrunk to reserve visible-output room (#426)"
+                                );
+                            }
+                            wcore_types::llm::ThinkingConfig::Enabled {
+                                budget_tokens: fitted,
+                            }
+                        } else {
+                            tracing::debug!(
+                                target: "wcore_agent::engine",
+                                requested = budget,
+                                max_tokens = request.max_tokens,
+                                "output budget too small for thinking + visible answer; thinking dropped for this turn (#426)"
+                            );
+                            wcore_types::llm::ThinkingConfig::Disabled
+                        });
+                    }
+                    (
+                        request,
+                        effective_model,
+                        input_token_estimate,
+                        last_routed_model,
+                    )
+                };
 
             // AUDIT A3 / E-C2 — bounded stream-level retry loop.
             //
@@ -6281,22 +9202,17 @@ impl AgentEngine {
             let stop_reason: StopReason;
             let finish_reason: FinishReason;
             let turn_usage: TokenUsage;
-            let turn_provider: String;
-            let turn_model: String;
-            let mut stream_attempt: u32 = 0;
-            let mut provider_budget_cap_hit: Option<wcore_budget::BudgetError> = None;
+            let mut provider_budget_cap_hit: Option<ProviderBudgetMutationError> = None;
             // #282 contract V1: a managed Flux client that overflows the routed
             // model's window gets a typed 409 `ProviderError::ContextOverflow`.
             // We compact the conversation and retry the SAME turn EXACTLY ONCE;
             // this guard bounds it so a persistently-overflowing turn cannot
             // infinite-loop. After the single retry, a recurring overflow is
             // surfaced as a clean terminal error below.
-            let mut overflow_retried = false;
             // LENGTH-WEDGE GATE: a turn that ends `finish_reason=length` while
             // at/over the resolved input ceiling gets ONE forced compaction +
             // retry; this guard bounds it so the turn can never loop. After
             // the single retry a recurring wedge is a clean terminal error.
-            let mut length_wedge_retried = false;
             'stream: loop {
                 // Reset per-attempt accumulators so a retry never
                 // double-commits text/tool-calls from a failed attempt.
@@ -6318,6 +9234,78 @@ impl AgentEngine {
                 let mut grounding_citations: Vec<String> = Vec::new();
                 let mut grounding_search_results: Vec<wcore_types::llm::FluxSearchResult> =
                     Vec::new();
+
+                let provider_dispatch_id = if resumed_provider_dispatch {
+                    resumed_provider_dispatch = false;
+                    Some(resumed_dispatch_id.take().ok_or_else(|| {
+                        AgentError::SessionAuthority(
+                            "recovery checkpoint is missing its provider dispatch identity"
+                                .to_string(),
+                        )
+                    })?)
+                } else if let Some(turn_id) = journal_turn_id {
+                    self.sync_journal_conversation(turn_id).await?;
+                    let checkpoint = self
+                        .commit_provider_recovery_checkpoint(
+                            turn_id,
+                            &request,
+                            turn,
+                            stream_attempt,
+                            overflow_retried,
+                            length_wedge_retried,
+                            &loop_guard,
+                            &failure_guard,
+                        )
+                        .await?;
+                    checkpoint.dispatch_id
+                } else {
+                    None
+                };
+
+                if let Some(round) = recovered_provider_round.take() {
+                    if provider_dispatch_id.as_deref() != Some(round.dispatch_id.as_str()) {
+                        return Err(AgentError::SessionAuthority(
+                            "recovered provider response does not match checkpoint dispatch"
+                                .to_string(),
+                        ));
+                    }
+                    if !round.thinking_text.is_empty() {
+                        self.output
+                            .emit_thinking(&round.thinking_text, &self.current_msg_id);
+                    }
+                    if !round.assistant_text.is_empty() {
+                        self.output
+                            .emit_text_delta(&round.assistant_text, &self.current_msg_id);
+                    }
+                    for tool_call in &round.tool_calls {
+                        if let ContentBlock::ToolUse { name, input, .. } = tool_call {
+                            self.output.emit_tool_call(
+                                name,
+                                &serde_json::to_string(input).unwrap_or_default(),
+                            );
+                        }
+                    }
+                    assistant_text = round.assistant_text;
+                    thinking_text = round.thinking_text;
+                    tool_calls = round.tool_calls;
+                    if !round.citations.is_empty() || !round.search_results.is_empty() {
+                        let block =
+                            render_grounding_sources(&round.citations, &round.search_results);
+                        self.output.emit_text_delta(&block, &self.current_msg_id);
+                        assistant_text.push_str(&block);
+                    }
+                    self.flux_context_pressure = round.provider_metadata.context_pressure;
+                    self.flux_served_window = round.provider_metadata.model_window;
+                    if round.provider_metadata.routed_model.is_some() {
+                        last_routed_model = round.provider_metadata.routed_model;
+                    }
+                    self.length_wedge_fingerprint = None;
+                    stop_reason = round.stop_reason;
+                    finish_reason = round.finish_reason;
+                    turn_usage = round.usage;
+                    self.midflight_monitor.record_stream_attempt(false, false);
+                    break 'stream;
+                }
 
                 // LENGTH-WEDGE GATE (dispatch guard) — never re-send a context
                 // that is byte-identical (on the wire) to one that already
@@ -6371,9 +9359,16 @@ impl AgentEngine {
                     reserved_output,
                     &self.compat,
                 );
-                let monetary_cap_active = self.budget_tracker.as_ref().is_some_and(|tracker| {
-                    tracker.lock().has_session_usd_cap(&reservation_session_id)
-                });
+                let monetary_cap_active = if let Some(authority) = self.budget_authority.as_ref() {
+                    authority
+                        .lock()
+                        .inspect(|tracker, _| tracker.has_session_usd_cap(&reservation_session_id))
+                        .map_err(|error| AgentError::SessionAuthority(error.to_string()))?
+                } else {
+                    self.budget_tracker.as_ref().is_some_and(|tracker| {
+                        tracker.lock().has_session_usd_cap(&reservation_session_id)
+                    })
+                };
                 let strict_monetary_cap = self.config.execution_policy.is_managed()
                     || self.config.budget.max_cost_usd.is_some()
                     || self
@@ -6407,7 +9402,53 @@ impl AgentEngine {
                     ));
                 }
                 let reserved_cost = reserved_cost.usd;
-                let budget_reservation = if let Some(tracker) = self.budget_tracker.clone() {
+                let budget_dispatch_id = provider_dispatch_id.clone().unwrap_or_else(|| {
+                    format!("provider-budget-dispatch-{}", uuid::Uuid::new_v4())
+                });
+                let durable_authority = self.budget_authority.clone();
+                let budget_reservation = if let Some(authority) = durable_authority.as_ref() {
+                    let reservation_result = authority
+                        .lock()
+                        .reserve_provider_dispatch(
+                            &budget_dispatch_id,
+                            &reservation_session_id,
+                            reserved_input,
+                            reserved_output,
+                            reserved_cost,
+                        )
+                        .map_err(|error| AgentError::SessionAuthority(error.to_string()))?;
+                    match reservation_result {
+                        Ok(reservation) => Some(ProviderBudgetReservation::new(
+                            ProviderBudgetOwner::Durable {
+                                authority: Arc::clone(authority),
+                                dispatch_id: budget_dispatch_id.clone(),
+                            },
+                            run_budget.clone(),
+                            reservation,
+                            reserved_input,
+                            reserved_output,
+                            reserved_cost,
+                        )),
+                        Err(wcore_budget::BudgetError::CapExceeded {
+                            kind,
+                            limit,
+                            observed,
+                        }) => {
+                            self.output.emit_budget_exceeded(&kind, &observed, &limit);
+                            self.output.emit_error(
+                                &format!(
+                                    "Provider call not started: budget cap '{kind}' would be exceeded \
+                                     (limit {limit}, reserved total {observed}). Continue with \
+                                     additional budget to authorize more work."
+                                ),
+                                false,
+                            );
+                            return self
+                                .finish_run_terminated(user_input, turn, FinishReason::Length)
+                                .await;
+                        }
+                    }
+                } else if let Some(tracker) = self.budget_tracker.clone() {
                     let reservation_result = tracker.lock().reserve_turn(
                         &reservation_session_id,
                         reserved_input,
@@ -6416,7 +9457,8 @@ impl AgentEngine {
                     );
                     match reservation_result {
                         Ok(reservation) => Some(ProviderBudgetReservation::new(
-                            tracker,
+                            ProviderBudgetOwner::Legacy(tracker),
+                            run_budget.clone(),
                             reservation,
                             reserved_input,
                             reserved_output,
@@ -6452,7 +9494,10 @@ impl AgentEngine {
                     )));
                 let fallback_state_for_admission = Arc::clone(&fallback_budget_state);
                 let tracker_for_fallback = self.budget_tracker.clone();
+                let authority_for_fallback = durable_authority.clone();
+                let execution_for_fallback = run_budget.clone();
                 let fallback_session_id = reservation_session_id.clone();
+                let fallback_dispatch_id = budget_dispatch_id.clone();
                 let fallback_compat = self.compat.clone();
                 let fallback_admitter: wcore_providers::retry::ConfiguredFallbackAdmitter =
                     Arc::new(move |_, _, next_provider, next_model, previous_attempted| {
@@ -6465,7 +9510,6 @@ impl AgentEngine {
                                     reservation.conservative_charge();
                                 let settle_result =
                                     reservation.settle(input_tokens, output_tokens, cost_usd);
-                                state.add_prior_charge(input_tokens, output_tokens, cost_usd);
                                 if let Err(error) = settle_result {
                                     state.failure =
                                         Some(ConfiguredFallbackAdmissionFailure::Budget(error));
@@ -6475,7 +9519,17 @@ impl AgentEngine {
                                     });
                                 }
                             } else {
-                                reservation.release();
+                                if let Err(error) = reservation.release() {
+                                    state.failure =
+                                        Some(ConfiguredFallbackAdmissionFailure::Budget(
+                                            ProviderBudgetMutationError::Authority(error),
+                                        ));
+                                    return Err(ProviderError::Api {
+                                        status: 400,
+                                        message: "configured fallback budget authority failed"
+                                            .into(),
+                                    });
+                                }
                             }
                         }
 
@@ -6497,32 +9551,77 @@ impl AgentEngine {
                             });
                         }
                         let next_cost_usd = next_cost.usd;
-                        let next_reservation = if let Some(tracker) = tracker_for_fallback.clone() {
-                            match tracker.lock().reserve_turn(
-                                &fallback_session_id,
-                                reserved_input,
-                                reserved_output,
-                                next_cost_usd,
-                            ) {
-                                Ok(reservation) => Some(ProviderBudgetReservation::new(
-                                    Arc::clone(&tracker),
-                                    reservation,
+                        let next_reservation =
+                            if let Some(authority) = authority_for_fallback.as_ref() {
+                                match authority.lock().reserve_provider_dispatch(
+                                    &fallback_dispatch_id,
+                                    &fallback_session_id,
                                     reserved_input,
                                     reserved_output,
                                     next_cost_usd,
-                                )),
-                                Err(error) => {
-                                    state.failure =
-                                        Some(ConfiguredFallbackAdmissionFailure::Budget(error));
-                                    return Err(ProviderError::Api {
-                                        status: 400,
-                                        message: "configured fallback denied by budget".into(),
-                                    });
+                                ) {
+                                    Ok(Ok(reservation)) => Some(ProviderBudgetReservation::new(
+                                        ProviderBudgetOwner::Durable {
+                                            authority: Arc::clone(authority),
+                                            dispatch_id: fallback_dispatch_id.clone(),
+                                        },
+                                        execution_for_fallback.clone(),
+                                        reservation,
+                                        reserved_input,
+                                        reserved_output,
+                                        next_cost_usd,
+                                    )),
+                                    Ok(Err(error)) => {
+                                        state.failure =
+                                            Some(ConfiguredFallbackAdmissionFailure::Budget(
+                                                ProviderBudgetMutationError::Budget(error),
+                                            ));
+                                        return Err(ProviderError::Api {
+                                            status: 400,
+                                            message: "configured fallback denied by budget".into(),
+                                        });
+                                    }
+                                    Err(error) => {
+                                        state.failure =
+                                            Some(ConfiguredFallbackAdmissionFailure::Budget(
+                                                ProviderBudgetMutationError::Authority(error),
+                                            ));
+                                        return Err(ProviderError::Api {
+                                            status: 400,
+                                            message: "configured fallback budget authority failed"
+                                                .into(),
+                                        });
+                                    }
                                 }
-                            }
-                        } else {
-                            None
-                        };
+                            } else if let Some(tracker) = tracker_for_fallback.clone() {
+                                match tracker.lock().reserve_turn(
+                                    &fallback_session_id,
+                                    reserved_input,
+                                    reserved_output,
+                                    next_cost_usd,
+                                ) {
+                                    Ok(reservation) => Some(ProviderBudgetReservation::new(
+                                        ProviderBudgetOwner::Legacy(Arc::clone(&tracker)),
+                                        execution_for_fallback.clone(),
+                                        reservation,
+                                        reserved_input,
+                                        reserved_output,
+                                        next_cost_usd,
+                                    )),
+                                    Err(error) => {
+                                        state.failure =
+                                            Some(ConfiguredFallbackAdmissionFailure::Budget(
+                                                ProviderBudgetMutationError::Budget(error),
+                                            ));
+                                        return Err(ProviderError::Api {
+                                            status: 400,
+                                            message: "configured fallback denied by budget".into(),
+                                        });
+                                    }
+                                }
+                            } else {
+                                None
+                            };
                         state.current = next_reservation;
                         state.current_provider = next_provider.to_string();
                         state.current_model = next_model.to_string();
@@ -6564,14 +9663,25 @@ impl AgentEngine {
                     self.session_journal.as_ref(),
                     self.active_journal_turn_id.as_ref(),
                 ) {
-                    (Some(journal), Some(turn_id)) => Arc::new(JournaledLlmProvider::new(
-                        Arc::clone(&self.provider),
-                        journal.clone(),
-                        turn_id.clone(),
-                        LifecyclePurpose::Conversation,
-                        reservation_provider,
-                        effective_model.clone(),
-                    )),
+                    (Some(journal), Some(turn_id)) => {
+                        let dispatch_id = provider_dispatch_id.as_ref().ok_or_else(|| {
+                            AgentError::SessionAuthority(
+                                "journaled provider call has no recovery dispatch identity"
+                                    .to_string(),
+                            )
+                        })?;
+                        Arc::new(
+                            JournaledLlmProvider::new(
+                                Arc::clone(&self.provider),
+                                journal.clone(),
+                                turn_id.clone(),
+                                LifecyclePurpose::Conversation,
+                                reservation_provider,
+                                effective_model.clone(),
+                            )
+                            .with_dispatch_id(dispatch_id.clone()),
+                        )
+                    }
                     (Some(_), None) => {
                         return Err(AgentError::SessionAuthority(
                             "provider call has journal authority but no active durable turn"
@@ -6588,7 +9698,6 @@ impl AgentEngine {
                             let mut fallback_state = fallback_budget_state
                                 .lock()
                                 .unwrap_or_else(|poisoned| poisoned.into_inner());
-                            fallback_state.record_prior_charges(&run_budget);
                             if let Some(reservation) = fallback_state.current.take() {
                                 // Cancellation may race a physical send. Once the
                                 // provider future has been polled, its outcome is
@@ -6597,14 +9706,14 @@ impl AgentEngine {
                                 // nor leaves an in-flight reservation stranded.
                                 let (input_tokens, output_tokens, cost_usd) =
                                     reservation.conservative_charge();
-                                run_budget.record_tokens(input_tokens, output_tokens);
-                                run_budget.record_cost(cost_usd);
                                 let _ = reservation.settle(input_tokens, output_tokens, cost_usd);
                             }
                         }
-                        self.prepare_durable_conversation().await?;
+                        if journal_turn_id.is_none() {
+                            self.prepare_durable_conversation().await?;
+                            self.save_session_mirror();
+                        }
                         self.output.emit_info("Run cancelled while waiting for the provider.");
-                        self.save_session_mirror();
                         return Err(AgentError::UserAborted);
                     }
                     result = wcore_providers::retry::scope_configured_fallback_admitter(
@@ -6622,7 +9731,6 @@ impl AgentEngine {
                     let mut fallback_state = fallback_budget_state
                         .lock()
                         .unwrap_or_else(|poisoned| poisoned.into_inner());
-                    fallback_state.record_prior_charges(&run_budget);
                     (
                         fallback_state.current_provider.clone(),
                         fallback_state.current_model.clone(),
@@ -6632,11 +9740,13 @@ impl AgentEngine {
                 if let Some(failure) = fallback_admission_failure {
                     match failure {
                         ConfiguredFallbackAdmissionFailure::Budget(
-                            wcore_budget::BudgetError::CapExceeded {
-                                kind,
-                                limit,
-                                observed,
-                            },
+                            ProviderBudgetMutationError::Budget(
+                                wcore_budget::BudgetError::CapExceeded {
+                                    kind,
+                                    limit,
+                                    observed,
+                                },
+                            ),
                         ) => {
                             self.output.emit_budget_exceeded(&kind, &observed, &limit);
                             self.output.emit_error(
@@ -6647,6 +9757,11 @@ impl AgentEngine {
                                 ),
                                 false,
                             );
+                        }
+                        ConfiguredFallbackAdmissionFailure::Budget(
+                            ProviderBudgetMutationError::Authority(error),
+                        ) => {
+                            return Err(AgentError::SessionAuthority(error.to_string()));
                         }
                         ConfiguredFallbackAdmissionFailure::Unpriced { provider, model } => {
                             self.output.emit_budget_exceeded(
@@ -6682,36 +9797,48 @@ impl AgentEngine {
                         .as_ref()
                         .is_err_and(|error| error.was_not_attempted())
                     {
-                        reservation.release();
+                        reservation
+                            .release()
+                            .map_err(|error| AgentError::SessionAuthority(error.to_string()))?;
                     } else {
                         // The provider outcome is unknown: consume the conservative
                         // reservation rather than pretending a failed transport was
                         // free. This bounds retry rings even when usage is absent.
                         let (input_tokens, output_tokens, cost_usd) =
                             reservation.conservative_charge();
-                        run_budget.record_tokens(input_tokens, output_tokens);
-                        run_budget.record_cost(cost_usd);
                         if let Err(err) = reservation.settle(input_tokens, output_tokens, cost_usd)
                         {
                             provider_budget_cap_hit = Some(err);
                         }
-                        if let Some(wcore_budget::BudgetError::CapExceeded {
-                            kind,
-                            limit,
-                            observed,
-                        }) = provider_budget_cap_hit.take()
-                        {
-                            self.output.emit_budget_exceeded(&kind, &observed, &limit);
-                            self.output.emit_error(
-                                &format!(
-                                    "Run stopped after an unknown provider outcome exhausted \
-                                     budget cap '{kind}' (limit {limit}, observed {observed})."
-                                ),
-                                false,
-                            );
-                            return self
-                                .finish_run_terminated(user_input, turn, FinishReason::Length)
-                                .await;
+                        if let Some(error) = provider_budget_cap_hit.take() {
+                            match error {
+                                ProviderBudgetMutationError::Budget(
+                                    wcore_budget::BudgetError::CapExceeded {
+                                        kind,
+                                        limit,
+                                        observed,
+                                    },
+                                ) => {
+                                    self.output.emit_budget_exceeded(&kind, &observed, &limit);
+                                    self.output.emit_error(
+                                        &format!(
+                                            "Run stopped after an unknown provider outcome exhausted \
+                                             budget cap '{kind}' (limit {limit}, observed {observed})."
+                                        ),
+                                        false,
+                                    );
+                                    return self
+                                        .finish_run_terminated(
+                                            user_input,
+                                            turn,
+                                            FinishReason::Length,
+                                        )
+                                        .await;
+                                }
+                                ProviderBudgetMutationError::Authority(error) => {
+                                    return Err(AgentError::SessionAuthority(error.to_string()));
+                                }
+                            }
                         }
                     }
                 }
@@ -6769,7 +9896,7 @@ impl AgentEngine {
                             &self.messages,
                             &request.system,
                             &request.tools,
-                        ) as u64;
+                        );
                         request.client_context_tokens = Some(recount);
                         self.sync_active_journal_conversation().await?;
                         continue 'stream;
@@ -6799,14 +9926,14 @@ impl AgentEngine {
                                 // in-flight admission slot for a later turn.
                                 let (input_tokens, output_tokens, cost_usd) =
                                     reservation.conservative_charge();
-                                run_budget.record_tokens(input_tokens, output_tokens);
-                                run_budget.record_cost(cost_usd);
                                 let _ =
                                     reservation.settle(input_tokens, output_tokens, cost_usd);
                             }
-                            self.prepare_durable_conversation().await?;
+                            if journal_turn_id.is_none() {
+                                self.prepare_durable_conversation().await?;
+                                self.save_session_mirror();
+                            }
                             self.output.emit_info("Run cancelled while receiving provider output.");
-                            self.save_session_mirror();
                             return Err(AgentError::UserAborted);
                         }
                         event = rx.recv() => event,
@@ -6963,8 +10090,6 @@ impl AgentEngine {
                             // paid call to zero and loop through the envelope.
                             let (input_tokens, output_tokens, cost_usd) =
                                 reservation.conservative_charge();
-                            run_budget.record_tokens(input_tokens, output_tokens);
-                            run_budget.record_cost(cost_usd);
                             if completed {
                                 self.output.emit_info(
                                     "Provider completed without authoritative usage; the \
@@ -6978,32 +10103,37 @@ impl AgentEngine {
                     {
                         provider_budget_cap_hit = Some(err);
                     }
-                    if !completed
-                        && let Some(wcore_budget::BudgetError::CapExceeded {
-                            kind,
-                            limit,
-                            observed,
-                        }) = provider_budget_cap_hit.take()
-                    {
-                        self.output.emit_budget_exceeded(&kind, &observed, &limit);
-                        self.output.emit_error(
-                            &format!(
-                                "Run stopped after a failed provider attempt exhausted budget \
-                                 cap '{kind}' (limit {limit}, observed {observed})."
-                            ),
-                            false,
-                        );
-                        return self
-                            .finish_run_terminated(user_input, turn, FinishReason::Length)
-                            .await;
+                    if !completed && let Some(error) = provider_budget_cap_hit.take() {
+                        match error {
+                            ProviderBudgetMutationError::Budget(
+                                wcore_budget::BudgetError::CapExceeded {
+                                    kind,
+                                    limit,
+                                    observed,
+                                },
+                            ) => {
+                                self.output.emit_budget_exceeded(&kind, &observed, &limit);
+                                self.output.emit_error(
+                                    &format!(
+                                        "Run stopped after a failed provider attempt exhausted budget \
+                                         cap '{kind}' (limit {limit}, observed {observed})."
+                                    ),
+                                    false,
+                                );
+                                return self
+                                    .finish_run_terminated(user_input, turn, FinishReason::Length)
+                                    .await;
+                            }
+                            ProviderBudgetMutationError::Authority(error) => {
+                                return Err(AgentError::SessionAuthority(error.to_string()));
+                            }
+                        }
                     }
                 }
                 if done_seen && stream_error.is_none() && provider_budget_cap_hit.is_some() {
                     stop_reason = attempt_stop_reason;
                     finish_reason = attempt_finish_reason;
                     turn_usage = attempt_usage;
-                    turn_provider = current_attempt_provider;
-                    turn_model = current_attempt_model;
                     self.midflight_monitor.record_stream_attempt(false, false);
                     break 'stream;
                 }
@@ -7109,11 +10239,12 @@ impl AgentEngine {
                                     &self.messages,
                                     &request.system,
                                     &request.tools,
-                                ) as u64;
+                                );
                                 request.client_context_tokens = Some(recount);
                                 input_token_estimate = recount as usize;
-                                self.sync_active_journal_conversation().await?;
-                                if history_after != history_before && recount < ceiling {
+                                let resumable_after_compaction = recount < ceiling;
+                                if history_after != history_before && resumable_after_compaction {
+                                    self.sync_active_journal_conversation().await?;
                                     // Compaction freed real space AND changed
                                     // the context — retry the turn. (The
                                     // dispatch guard passes because the
@@ -7138,6 +10269,9 @@ impl AgentEngine {
                                 &request.system,
                                 &request.tools,
                             ) < ceiling;
+                            if resumable {
+                                self.sync_active_journal_conversation().await?;
+                            }
                             let tail = if resumable {
                                 "Compact the conversation or start a new session."
                             } else {
@@ -7190,8 +10324,6 @@ impl AgentEngine {
                     stop_reason = attempt_stop_reason;
                     finish_reason = attempt_finish_reason;
                     turn_usage = attempt_usage;
-                    turn_provider = current_attempt_provider;
-                    turn_model = current_attempt_model;
                     // A completed provider stream is progress even when it
                     // ends without text. Do not carry a failed-attempt stall
                     // into a later tool turn or user run.
@@ -7294,9 +10426,11 @@ impl AgentEngine {
                     tokio::select! {
                         biased;
                         _ = backoff_cancel.cancelled() => {
-                            self.prepare_durable_conversation().await?;
+                            if journal_turn_id.is_none() {
+                                self.prepare_durable_conversation().await?;
+                                self.save_session_mirror();
+                            }
                             self.output.emit_info("Run cancelled during provider retry backoff.");
-                            self.save_session_mirror();
                             return Err(AgentError::UserAborted);
                         }
                         _ = tokio::time::sleep(backoff) => {}
@@ -7332,30 +10466,9 @@ impl AgentEngine {
                 state.add_token_usage(turn_usage.total_input_tokens(), turn_usage.output_tokens);
             }
 
-            // The tracker reservation was settled inside the provider-attempt
-            // loop. Mirror authoritative usage into the execution-budget tree
-            // here so the mid-flight monitor and host share the same totals.
+            // The tracker reservation and execution-budget usage were settled
+            // transactionally inside the provider-attempt loop.
             let budget_cap_hit = provider_budget_cap_hit;
-            // Finding #174: charge the model actually dispatched. Cached input
-            // is accounted at its catalog rate and remains token-visible.
-            let turn_cost = resolve_turn_cost(
-                &turn_provider,
-                &turn_model,
-                turn_usage.input_tokens,
-                turn_usage.output_tokens,
-                turn_usage.cache_read_tokens,
-                turn_usage.cache_creation_tokens,
-                &self.compat,
-            )
-            .usd;
-            run_budget.record_tokens(
-                turn_usage
-                    .input_tokens
-                    .saturating_add(turn_usage.cache_read_tokens)
-                    .saturating_add(turn_usage.cache_creation_tokens),
-                turn_usage.output_tokens,
-            );
-            run_budget.record_cost(turn_cost);
 
             // Track per-turn input tokens for compaction watermarks.
             //
@@ -7522,9 +10635,6 @@ impl AgentEngine {
 
             self.messages
                 .push(Message::now(Role::Assistant, assistant_content));
-            if let Some(turn_id) = journal_turn_id {
-                self.sync_journal_conversation(turn_id).await?;
-            }
 
             // Fire on_turn_end after the assistant message is committed.
             // SwitchModel and InjectMessage apply to the NEXT turn (or are
@@ -7539,10 +10649,6 @@ impl AgentEngine {
                 let outcome = hook_engine.on_turn_end(turn, &result).await;
                 self.apply_turn_end_outcome(outcome);
             }
-            if let Some(turn_id) = journal_turn_id {
-                self.sync_journal_conversation(turn_id).await?;
-            }
-
             // AUDIT E-C1 — budget cap honored. The provider already
             // billed this turn; running its tool calls (and another
             // turn after) would burn more cost past the cap. Terminate
@@ -7550,11 +10656,18 @@ impl AgentEngine {
             // blocks (those tools never run), emit a `BudgetExceeded`
             // event + a user-visible error, and finish cleanly.
             if let Some(err) = budget_cap_hit {
-                let wcore_budget::BudgetError::CapExceeded {
-                    kind,
-                    limit,
-                    observed,
-                } = err;
+                let (kind, limit, observed) = match err {
+                    ProviderBudgetMutationError::Budget(
+                        wcore_budget::BudgetError::CapExceeded {
+                            kind,
+                            limit,
+                            observed,
+                        },
+                    ) => (kind, limit, observed),
+                    ProviderBudgetMutationError::Authority(error) => {
+                        return Err(AgentError::SessionAuthority(error.to_string()));
+                    }
+                };
                 self.repair_orphaned_tool_use();
                 self.output.emit_budget_exceeded(&kind, &observed, &limit);
                 self.output.emit_error(
@@ -7568,6 +10681,18 @@ impl AgentEngine {
                 return self
                     .finish_run_terminated(user_input, turn + 1, FinishReason::Length)
                     .await;
+            }
+
+            if !tool_calls.is_empty()
+                && let Some(turn_id) = journal_turn_id
+            {
+                self.commit_tool_round_recovery_checkpoint(
+                    turn_id,
+                    turn,
+                    &loop_guard,
+                    &failure_guard,
+                )
+                .await?;
             }
 
             if tool_calls.is_empty() {
@@ -7639,9 +10764,10 @@ impl AgentEngine {
                 // user-visible Info event (and into the message tail in
                 // case the host resumes the session).
                 self.drain_and_inject_external_edits();
-                self.prepare_durable_conversation().await?;
+                if journal_turn_id.is_none() {
+                    self.prepare_durable_conversation().await?;
+                }
                 self.fire_on_session_end(turn + 1).await;
-                self.save_session_mirror();
                 // v0.8.1 U6 — snapshot the U1 pick BEFORE
                 // `observe_skill_router_outcome` clears it, so the
                 // autonomous-skill bucketer can record which catalog
@@ -7657,7 +10783,7 @@ impl AgentEngine {
                 // triggers a draft + PromptStore record. Failure logged
                 // and swallowed — the user's turn must complete.
                 self.observe_auto_skill(user_input, auto_skill_picked, stop_reason, turn + 1);
-                return Ok(AgentResult {
+                let result = AgentResult {
                     text: assistant_text,
                     stop_reason,
                     finish_reason,
@@ -7667,7 +10793,20 @@ impl AgentEngine {
                     active_window_percent: self
                         .active_window_percent_now(&effective_model, input_token_estimate as u64),
                     agent_run_id: self.current_agent_run_id.clone(),
-                });
+                };
+                if let Some(turn_id) = journal_turn_id {
+                    self.commit_terminal_recovery_checkpoint(
+                        turn_id,
+                        &result,
+                        turn,
+                        &loop_guard,
+                        &failure_guard,
+                        crate::recovery::RecoveryTerminalCompletion::Committed,
+                    )
+                    .await?;
+                }
+                self.save_session_mirror();
+                return Ok(result);
             }
 
             // Wave OR (W8b.2.B.1): per-turn dispatch flows through
@@ -7918,9 +11057,11 @@ impl AgentEngine {
             let outcome = match exit {
                 GraphExit::Continue(o) => o,
                 GraphExit::Aborted => {
-                    self.prepare_durable_conversation().await?;
+                    if journal_turn_id.is_none() {
+                        self.prepare_durable_conversation().await?;
+                        self.save_session_mirror();
+                    }
                     self.fire_on_session_end(turn + 1).await;
-                    self.save_session_mirror();
                     return Err(AgentError::UserAborted);
                 }
                 GraphExit::Failed(msg) => {
@@ -8415,7 +11556,13 @@ impl AgentEngine {
             self.messages
                 .push(Message::now(Role::User, tool_results_content));
             if let Some(turn_id) = journal_turn_id {
-                self.sync_journal_conversation(turn_id).await?;
+                self.commit_continue_loop_recovery_checkpoint(
+                    turn_id,
+                    turn.saturating_add(1),
+                    &loop_guard,
+                    &failure_guard,
+                )
+                .await?;
                 let unresolved = self.tool_effects_requiring_reconciliation()?;
                 if !unresolved.is_empty() {
                     return Err(AgentError::SessionAuthority(format!(
@@ -9839,9 +12986,24 @@ impl AgentEngine {
     /// Returns the block reason when set so the caller can terminate;
     /// `None` means proceed. `modified_input` remains a pre-tool-use
     /// concern and is still ignored here.
+    fn queue_durable_hook_consumptions(
+        &mut self,
+        consumptions: impl IntoIterator<Item = crate::session_journal::HookPhaseConsumption>,
+    ) {
+        for consumption in consumptions {
+            if !self.pending_hook_phase_consumptions.iter().any(|pending| {
+                pending.hook_phase_id == consumption.hook_phase_id
+                    && pending.outcome_digest == consumption.outcome_digest
+            }) {
+                self.pending_hook_phase_consumptions.push(consumption);
+            }
+        }
+    }
+
     fn apply_pre_turn_outcome(&mut self, mut outcome: crate::hooks::HookOutcome) -> Option<String> {
         // Accumulate fired hook actions for the next TurnTrace.
         self.pending_hook_actions.append(&mut outcome.fired_actions);
+        self.queue_durable_hook_consumptions(outcome.durable_hook_phases.drain(..));
         if let Some(new_model) = outcome.switch_model {
             // D014: an explicit user `/model` pin outranks a hook switch_model.
             self.apply_switch_model(new_model);
@@ -9873,6 +13035,7 @@ impl AgentEngine {
         // outcomes also flow through here (engine.rs turn-end loop), so this
         // covers the post-tool-use phase too.
         self.pending_hook_actions.append(&mut outcome.fired_actions);
+        self.queue_durable_hook_consumptions(outcome.durable_hook_phases.drain(..));
         if let Some(new_model) = outcome.switch_model {
             // D014: an explicit user `/model` pin outranks a hook switch_model.
             self.apply_switch_model(new_model);
@@ -11692,6 +14855,8 @@ mod set_config_tests {
             decay_handles: Vec::new(),
             plugin_runtime_handles: Arc::new(Vec::new()),
             budget_tracker: None,
+            budget_authority: None,
+            budget_authority_seed: None,
             budget_session_id: None,
             execution_budget: crate::budget::ExecutionBudget::default().start_root(),
             midflight_monitor: crate::orchestration::monitor::MidFlightMonitor::new(
@@ -11729,10 +14894,14 @@ mod set_config_tests {
             // default config for the (unused-in-these-fixtures) live gate.
             workflow_live_mode: false,
             config: wcore_config::config::Config::default(),
+            recovery_request_protection: Arc::new(
+                crate::recovery_confidential::RecoveryRequestProtector::default(),
+            ),
             compaction_floor: 0,
             session_start_injected_len: 0,
             web_search: false,
             pending_hook_actions: Vec::new(),
+            pending_hook_phase_consumptions: Vec::new(),
             conversation_id: String::new(),
             flux_served_window: None,
             flux_context_pressure: None,
@@ -13364,6 +16533,8 @@ mod phase6_tests {
             decay_handles: Vec::new(),
             plugin_runtime_handles: Arc::new(Vec::new()),
             budget_tracker: None,
+            budget_authority: None,
+            budget_authority_seed: None,
             budget_session_id: None,
             execution_budget: crate::budget::ExecutionBudget::default().start_root(),
             midflight_monitor: crate::orchestration::monitor::MidFlightMonitor::new(
@@ -13401,10 +16572,14 @@ mod phase6_tests {
             // default config for the (unused-in-these-fixtures) live gate.
             workflow_live_mode: false,
             config: wcore_config::config::Config::default(),
+            recovery_request_protection: Arc::new(
+                crate::recovery_confidential::RecoveryRequestProtector::default(),
+            ),
             compaction_floor: 0,
             session_start_injected_len: 0,
             web_search: false,
             pending_hook_actions: Vec::new(),
+            pending_hook_phase_consumptions: Vec::new(),
             conversation_id: String::new(),
             flux_served_window: None,
             flux_context_pressure: None,
@@ -13671,6 +16846,8 @@ mod compact_tests {
             decay_handles: Vec::new(),
             plugin_runtime_handles: Arc::new(Vec::new()),
             budget_tracker: None,
+            budget_authority: None,
+            budget_authority_seed: None,
             budget_session_id: None,
             execution_budget: crate::budget::ExecutionBudget::default().start_root(),
             midflight_monitor: crate::orchestration::monitor::MidFlightMonitor::new(
@@ -13708,10 +16885,14 @@ mod compact_tests {
             // default config for the (unused-in-these-fixtures) live gate.
             workflow_live_mode: false,
             config: wcore_config::config::Config::default(),
+            recovery_request_protection: Arc::new(
+                crate::recovery_confidential::RecoveryRequestProtector::default(),
+            ),
             compaction_floor: 0,
             session_start_injected_len: 0,
             web_search: false,
             pending_hook_actions: Vec::new(),
+            pending_hook_phase_consumptions: Vec::new(),
             conversation_id: String::new(),
             flux_served_window: None,
             flux_context_pressure: None,
@@ -15008,6 +18189,8 @@ mod plan_mode_tests {
             decay_handles: Vec::new(),
             plugin_runtime_handles: Arc::new(Vec::new()),
             budget_tracker: None,
+            budget_authority: None,
+            budget_authority_seed: None,
             budget_session_id: None,
             execution_budget: crate::budget::ExecutionBudget::default().start_root(),
             midflight_monitor: crate::orchestration::monitor::MidFlightMonitor::new(
@@ -15045,10 +18228,14 @@ mod plan_mode_tests {
             // default config for the (unused-in-these-fixtures) live gate.
             workflow_live_mode: false,
             config: wcore_config::config::Config::default(),
+            recovery_request_protection: Arc::new(
+                crate::recovery_confidential::RecoveryRequestProtector::default(),
+            ),
             compaction_floor: 0,
             session_start_injected_len: 0,
             web_search: false,
             pending_hook_actions: Vec::new(),
+            pending_hook_phase_consumptions: Vec::new(),
             conversation_id: String::new(),
             flux_served_window: None,
             flux_context_pressure: None,
@@ -15448,6 +18635,8 @@ mod hook_integration_tests {
             decay_handles: Vec::new(),
             plugin_runtime_handles: Arc::new(Vec::new()),
             budget_tracker: None,
+            budget_authority: None,
+            budget_authority_seed: None,
             budget_session_id: None,
             execution_budget: crate::budget::ExecutionBudget::default().start_root(),
             midflight_monitor: crate::orchestration::monitor::MidFlightMonitor::new(
@@ -15485,10 +18674,14 @@ mod hook_integration_tests {
             // default config for the (unused-in-these-fixtures) live gate.
             workflow_live_mode: false,
             config: wcore_config::config::Config::default(),
+            recovery_request_protection: Arc::new(
+                crate::recovery_confidential::RecoveryRequestProtector::default(),
+            ),
             compaction_floor: 0,
             session_start_injected_len: 0,
             web_search: false,
             pending_hook_actions: Vec::new(),
+            pending_hook_phase_consumptions: Vec::new(),
             conversation_id: String::new(),
             flux_served_window: None,
             flux_context_pressure: None,
@@ -16298,6 +19491,8 @@ mod approval_bridge_engine_tests {
             decay_handles: Vec::new(),
             plugin_runtime_handles: Arc::new(Vec::new()),
             budget_tracker: None,
+            budget_authority: None,
+            budget_authority_seed: None,
             budget_session_id: None,
             execution_budget: crate::budget::ExecutionBudget::default().start_root(),
             midflight_monitor: crate::orchestration::monitor::MidFlightMonitor::new(
@@ -16335,10 +19530,14 @@ mod approval_bridge_engine_tests {
             // default config for the (unused-in-these-fixtures) live gate.
             workflow_live_mode: false,
             config: wcore_config::config::Config::default(),
+            recovery_request_protection: Arc::new(
+                crate::recovery_confidential::RecoveryRequestProtector::default(),
+            ),
             compaction_floor: 0,
             session_start_injected_len: 0,
             web_search: false,
             pending_hook_actions: Vec::new(),
+            pending_hook_phase_consumptions: Vec::new(),
             conversation_id: String::new(),
             flux_served_window: None,
             flux_context_pressure: None,
@@ -17210,8 +20409,9 @@ pub enum AgentError {
 mod user_model_writeback_tests {
     //! v0.8.0 Task M — per-turn observation write-back into
     //! `UserModelBackend`. Closes the v0.7.0 deferment where the
-    //! user-model layer was bootstrap-only-read: `engine.run()` now
-    //! observes on every user turn so the backend keeps learning.
+    //! user-model layer was bootstrap-only-read: `engine.run()` observes
+    //! every successfully completed user turn so the backend keeps learning
+    //! without changing crash-recovery bootstrap input mid-turn.
 
     use std::sync::Arc;
     use std::sync::Mutex;
@@ -17261,6 +20461,17 @@ mod user_model_writeback_tests {
         ) -> Result<tokio::sync::mpsc::Receiver<LlmEvent>, ProviderError> {
             let (_tx, rx) = tokio::sync::mpsc::channel(1);
             Ok(rx)
+        }
+    }
+
+    struct StallingProvider;
+    #[async_trait]
+    impl LlmProvider for StallingProvider {
+        async fn stream(
+            &self,
+            _: &LlmRequest,
+        ) -> Result<tokio::sync::mpsc::Receiver<LlmEvent>, ProviderError> {
+            std::future::pending().await
         }
     }
 
@@ -17329,6 +20540,8 @@ mod user_model_writeback_tests {
             decay_handles: Vec::new(),
             plugin_runtime_handles: Arc::new(Vec::new()),
             budget_tracker: None,
+            budget_authority: None,
+            budget_authority_seed: None,
             budget_session_id: None,
             execution_budget: crate::budget::ExecutionBudget::default().start_root(),
             midflight_monitor: crate::orchestration::monitor::MidFlightMonitor::new(
@@ -17364,10 +20577,14 @@ mod user_model_writeback_tests {
             // default config for the (unused-in-these-fixtures) live gate.
             workflow_live_mode: false,
             config: wcore_config::config::Config::default(),
+            recovery_request_protection: Arc::new(
+                crate::recovery_confidential::RecoveryRequestProtector::default(),
+            ),
             compaction_floor: 0,
             session_start_injected_len: 0,
             web_search: false,
             pending_hook_actions: Vec::new(),
+            pending_hook_phase_consumptions: Vec::new(),
             conversation_id: String::new(),
             flux_served_window: None,
             flux_context_pressure: None,
@@ -17416,6 +20633,34 @@ mod user_model_writeback_tests {
             brief.style.terseness > 0.0,
             "terse-message stream must produce a positive terseness axis; got {}",
             brief.style.terseness
+        );
+    }
+
+    /// An interrupted turn must not mutate adaptive bootstrap input. The
+    /// restart has to reconstruct the exact system prompt protected by its
+    /// recovery checkpoint; persisting a style observation before the turn's
+    /// terminal journal event made that prompt differ after SIGKILL.
+    #[tokio::test]
+    async fn interrupted_turn_does_not_persist_user_model_observation() {
+        let backend = Arc::new(LocalBackend::in_memory());
+        let mut engine = make_engine();
+        engine.provider = Arc::new(StallingProvider);
+        engine.set_user_model_backend(backend.clone());
+
+        let interrupted = tokio::time::timeout(
+            std::time::Duration::from_millis(25),
+            engine.run("remember my terse style", "interrupted-style-turn"),
+        )
+        .await;
+        assert!(
+            interrupted.is_err(),
+            "provider fixture must remain in flight"
+        );
+
+        let brief = backend.brief("test-user").await.unwrap();
+        assert_eq!(
+            brief.last_observed_ts, 0,
+            "an unterminated turn must not change restart-time user context"
         );
     }
 
@@ -17981,7 +21226,7 @@ mod audit_2026_05_22_tests {
     use wcore_tools::registry::ToolRegistry;
     use wcore_tools::vfs::{FileContentIdentity, RealFs, VirtualFs};
     use wcore_types::llm::{LlmEvent, LlmRequest};
-    use wcore_types::message::{FinishReason, StopReason, TokenUsage};
+    use wcore_types::message::{ContentBlock, FinishReason, Message, Role, StopReason, TokenUsage};
     use wiremock::matchers::method;
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
@@ -18009,6 +21254,60 @@ mod audit_2026_05_22_tests {
         }
         fn emit_error(&self, _: &str, _: bool) {}
         fn emit_info(&self, _: &str) {}
+    }
+
+    #[derive(Default)]
+    struct RecoveryTextSink {
+        deltas: Mutex<Vec<(String, String)>>,
+    }
+
+    impl OutputSink for RecoveryTextSink {
+        fn emit_text_delta(&self, text: &str, msg_id: &str) {
+            self.deltas
+                .lock()
+                .unwrap()
+                .push((text.to_string(), msg_id.to_string()));
+        }
+        fn emit_thinking(&self, _: &str, _: &str) {}
+        fn emit_tool_call(&self, _: &str, _: &str) {}
+        fn emit_tool_result(&self, _: &str, _: bool, _: &str) {}
+        fn emit_stream_start(&self, _: &str) {}
+        fn emit_stream_end(
+            &self,
+            _: &str,
+            _: usize,
+            _: u64,
+            _: u64,
+            _: u64,
+            _: u64,
+            _: FinishReason,
+        ) {
+        }
+        fn emit_error(&self, _: &str, _: bool) {}
+        fn emit_info(&self, _: &str) {}
+    }
+
+    struct NullEmitter;
+    impl wcore_protocol::writer::ProtocolEmitter for NullEmitter {
+        fn emit(&self, _event: &wcore_protocol::events::ProtocolEvent) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    struct ApprovalRequestEmitter {
+        seen: Arc<tokio::sync::Notify>,
+    }
+
+    impl wcore_protocol::writer::ProtocolEmitter for ApprovalRequestEmitter {
+        fn emit(&self, event: &wcore_protocol::events::ProtocolEvent) -> std::io::Result<()> {
+            if matches!(
+                event,
+                wcore_protocol::events::ProtocolEvent::ToolRequest { .. }
+            ) {
+                self.seen.notify_one();
+            }
+            Ok(())
+        }
     }
 
     struct JournalOrderSink {
@@ -18994,6 +22293,266 @@ mod audit_2026_05_22_tests {
     }
 
     #[tokio::test]
+    async fn restart_reconciles_durable_provider_success_without_redispatch() {
+        let dir = tempfile::tempdir().unwrap();
+        let recovery_key = [0x71; 32];
+        let manager = crate::session::SessionManager::new(dir.path().to_path_buf(), 10);
+        let mut active = manager
+            .create_for_run("test", "test-model", "/tmp", Some("f14b0001"))
+            .unwrap();
+        let user_message = Message::now(
+            Role::User,
+            vec![ContentBlock::Text {
+                text: "recover paid provider result".into(),
+            }],
+        );
+        active.session.messages.push(user_message.clone());
+        manager.persist_first_message(&active.session).unwrap();
+
+        let provider = Arc::new(ScriptedProvider::new(Vec::new()));
+        let calls = provider.call_counter();
+        let mut config = wcore_config::config::Config::default();
+        config.session.enabled = true;
+        config.session.directory = dir.path().to_string_lossy().into_owned();
+        let budget_seed = crate::budget_authority::BudgetAuthoritySeed {
+            provider_caps: wcore_budget::BudgetCap::builder()
+                .per_session_tokens(100)
+                .per_session_usd(10.0)
+                .build(),
+            execution_policy: wcore_budget::ExecutionBudget {
+                max_tokens_in: Some(100),
+                max_tokens_out: Some(100),
+                max_cost_usd: Some(10.0),
+                ..Default::default()
+            },
+            wall_clock: crate::session_journal::BudgetWallClockAuthority::ActiveRuntime,
+            process_cleanup_proof: None,
+        };
+        let mut engine = super::AgentEngine::resume_active_with_provider(
+            provider.clone(),
+            config.clone(),
+            ToolRegistry::new(),
+            Arc::new(NullOutput),
+            active,
+        );
+        engine
+            .install_budget_authority(
+                budget_seed.detached("bootstrap-budget").unwrap(),
+                budget_seed.clone(),
+            )
+            .unwrap();
+        engine.use_recovery_test_key(&recovery_key);
+        let turn_id = "turn-budget-restart";
+        engine.active_journal_turn_id = Some(turn_id.into());
+        engine
+            .append_journal_event(crate::session_journal::SessionEvent::TurnStarted {
+                turn_id: turn_id.into(),
+                user_message: "recover paid provider result".into(),
+            })
+            .await
+            .unwrap();
+        engine.begin_budget_turn(turn_id).unwrap();
+        engine.sync_journal_conversation(turn_id).await.unwrap();
+
+        let request = LlmRequest {
+            model: "test-model".into(),
+            messages: vec![user_message],
+            conversation_id: Some(engine.conversation_id.clone()),
+            ..Default::default()
+        };
+        let checkpoint = engine
+            .commit_provider_recovery_checkpoint(
+                turn_id,
+                &request,
+                0,
+                0,
+                false,
+                false,
+                &super::LoopGuard::from_env(),
+                &super::FailureGuard::from_env(),
+            )
+            .await
+            .unwrap();
+        let dispatch_id = checkpoint.dispatch_id.unwrap();
+        let request_digest = checkpoint.request_digest.unwrap();
+        let budget_authority = engine.budget_authority.as_ref().unwrap();
+        let budget_session_id = budget_authority.lock().budget_session_id().to_owned();
+        budget_authority
+            .lock()
+            .reserve_provider_dispatch(&dispatch_id, &budget_session_id, 6, 2, 0.01)
+            .unwrap()
+            .unwrap();
+
+        let attempt_id = "attempt-budget-restart";
+        let stream_id = format!("provider-stream:{attempt_id}");
+        let stream_events = vec![
+            crate::session_journal::ProviderStreamEvent::TextDelta {
+                text: "durable paid answer".into(),
+            },
+            crate::session_journal::ProviderStreamEvent::Done {
+                stop_reason: serde_json::json!("end_turn"),
+                finish_reason: serde_json::to_value(FinishReason::Stop).unwrap(),
+                usage: serde_json::to_value(TokenUsage::default()).unwrap(),
+            },
+        ];
+        let response_digest =
+            crate::provider_recovery::provider_response_digest(&stream_events).unwrap();
+        let journal = engine.session_journal.as_ref().unwrap();
+        journal
+            .append(
+                crate::session_journal::SessionEvent::ProviderAttemptPreparedV2 {
+                    attempt_id: attempt_id.into(),
+                    dispatch_id: dispatch_id.clone(),
+                    turn_id: turn_id.into(),
+                    purpose: crate::session_journal::ProviderAttemptPurpose::Conversation,
+                    provider: "test".into(),
+                    model: "test-model".into(),
+                    request_digest,
+                },
+            )
+            .unwrap();
+        journal
+            .append(
+                crate::session_journal::SessionEvent::ProviderAttemptStarted {
+                    attempt_id: attempt_id.into(),
+                },
+            )
+            .unwrap();
+        journal
+            .append(crate::session_journal::SessionEvent::StreamStarted {
+                stream_id: stream_id.clone(),
+                attempt_id: attempt_id.into(),
+            })
+            .unwrap();
+        journal
+            .append(crate::session_journal::SessionEvent::StreamBatchCommitted {
+                stream_id: stream_id.clone(),
+                ordinal: 0,
+                events: stream_events,
+            })
+            .unwrap();
+        journal
+            .append(crate::session_journal::SessionEvent::StreamFinished { stream_id })
+            .unwrap();
+        journal
+            .append(
+                crate::session_journal::SessionEvent::ProviderAttemptFinishedV2 {
+                    attempt_id: attempt_id.into(),
+                    dispatch_id,
+                    outcome: crate::session_journal::CompletionOutcome::Succeeded,
+                    response_digest: Some(response_digest),
+                },
+            )
+            .unwrap();
+        drop(engine);
+
+        let reopened = manager.load_for_run("f14b0001").unwrap();
+        let mut resumed = super::AgentEngine::resume_active_with_provider(
+            provider.clone(),
+            config.clone(),
+            ToolRegistry::new(),
+            Arc::new(NullOutput),
+            reopened,
+        );
+        resumed
+            .install_budget_authority(
+                budget_seed.detached("bootstrap-budget").unwrap(),
+                budget_seed.clone(),
+            )
+            .unwrap();
+        resumed.use_recovery_test_key(&recovery_key);
+        let cursor = resumed.recovery_plan().unwrap().cursor();
+        let authority = resumed.budget_authority.as_ref().unwrap();
+        assert_eq!(
+            authority
+                .lock()
+                .inspect(|tracker, _| tracker.reserved_totals(&budget_session_id))
+                .unwrap(),
+            (0, 0.0)
+        );
+        assert_eq!(
+            authority
+                .lock()
+                .inspect(|tracker, _| tracker.session_totals(&budget_session_id))
+                .unwrap(),
+            (8, 0.01)
+        );
+        assert_eq!(
+            authority
+                .lock()
+                .current_execution_view()
+                .unwrap()
+                .observed_for("max_tokens_in"),
+            "6"
+        );
+        assert_eq!(
+            authority
+                .lock()
+                .current_execution_view()
+                .unwrap()
+                .observed_for("max_tokens_out"),
+            "2"
+        );
+
+        let recovered = resumed
+            .resume_interrupted_turn(turn_id, &cursor, "resume-budget-restart")
+            .await
+            .unwrap();
+        assert_eq!(recovered.text, "durable paid answer");
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+        drop(resumed);
+
+        let reopened = manager.load_for_run("f14b0001").unwrap();
+        let mut second = super::AgentEngine::resume_active_with_provider(
+            provider,
+            config,
+            ToolRegistry::new(),
+            Arc::new(NullOutput),
+            reopened,
+        );
+        second
+            .install_budget_authority(
+                budget_seed.detached("bootstrap-budget").unwrap(),
+                budget_seed,
+            )
+            .unwrap();
+        let authority = second.budget_authority.as_ref().unwrap().lock();
+        assert_eq!(
+            authority
+                .inspect(|tracker, _| tracker.reserved_totals(&budget_session_id))
+                .unwrap(),
+            (0, 0.0)
+        );
+        assert_eq!(
+            authority
+                .inspect(|tracker, _| tracker.session_totals(&budget_session_id))
+                .unwrap(),
+            (8, 0.01)
+        );
+        assert_eq!(
+            authority
+                .current_execution_view()
+                .unwrap()
+                .observed_for("max_tokens_in"),
+            "6"
+        );
+        assert_eq!(
+            authority
+                .current_execution_view()
+                .unwrap()
+                .observed_for("max_tokens_out"),
+            "2"
+        );
+        assert_eq!(
+            authority
+                .restored_reservation_reconciliation()
+                .reservations_settled,
+            0
+        );
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
     async fn unpriced_provider_is_rejected_while_a_usd_cap_is_active() {
         let provider = Arc::new(ScriptedProvider::new(vec![vec![done_endturn_with(
             TokenUsage {
@@ -19387,6 +22946,1134 @@ mod audit_2026_05_22_tests {
     }
 
     #[tokio::test]
+    async fn live_session_switch_transfers_journal_authority_and_runtime_state() {
+        let server = physical_attempt_server().await;
+        let dir = tempfile::tempdir().unwrap();
+        let manager = crate::session::SessionManager::new(dir.path().to_path_buf(), 10);
+
+        let mut session_a = manager
+            .create("test", "test-model", "/tmp", Some("f14000a"))
+            .unwrap();
+        session_a.messages.push(wcore_types::message::Message::now(
+            wcore_types::message::Role::User,
+            vec![wcore_types::message::ContentBlock::Text {
+                text: "session A".into(),
+            }],
+        ));
+        session_a.total_usage = usage(900, 90);
+        manager.persist_first_message(&session_a).unwrap();
+
+        let mut session_b = manager
+            .create("test", "test-model", "/tmp", Some("f14000b"))
+            .unwrap();
+        session_b.messages.push(wcore_types::message::Message::now(
+            wcore_types::message::Role::User,
+            vec![wcore_types::message::ContentBlock::Text {
+                text: "session B".into(),
+            }],
+        ));
+        session_b.total_usage = usage(40, 4);
+        manager.persist_first_message(&session_b).unwrap();
+
+        let active_a = manager.load_for_run(&session_a.id).unwrap();
+        let active_b = manager.load_for_run(&session_b.id).unwrap();
+        let b_before = active_b.journal.state().unwrap().last_seq;
+        let provider = Arc::new(
+            ScriptedProvider::new(vec![vec![
+                LlmEvent::TextDelta("continued B".into()),
+                done_endturn_with(usage(5, 2)),
+            ]])
+            .with_physical_url(server.uri()),
+        );
+        let mut config = wcore_config::config::Config::default();
+        config.session.enabled = true;
+        config.session.directory = dir.path().to_string_lossy().into_owned();
+        let mut engine = super::AgentEngine::resume_active_with_provider(
+            provider,
+            config,
+            ToolRegistry::new(),
+            Arc::new(NullOutput),
+            active_a,
+        );
+
+        engine.run_usage = usage(100, 10);
+        engine.current_msg_id = "session-a-message".into();
+        engine.current_agent_run_id = Some("session-a-run".into());
+        engine.compact_state.consecutive_failures = 2;
+        engine.plan_state.is_active = true;
+        engine
+            .per_turn_costs
+            .push(wcore_protocol::events::TurnCost {
+                turn: 1,
+                model: "session-a-model".into(),
+                provider: "test".into(),
+                cost_usd: 0.0,
+                priced: true,
+            });
+
+        engine.switch_active_session(active_b).unwrap();
+
+        assert_eq!(engine.current_session_id().as_deref(), Some("f14000b"));
+        assert_eq!(
+            serde_json::to_value(engine.conversation_messages()).unwrap(),
+            serde_json::to_value(&session_b.messages).unwrap()
+        );
+        let (total, delta) = engine.usage_snapshot();
+        assert_eq!(total.input_tokens, 40);
+        assert_eq!(total.output_tokens, 4);
+        assert_eq!(delta.input_tokens, 0);
+        assert_eq!(delta.output_tokens, 0);
+        assert!(engine.current_msg_id.is_empty());
+        assert!(engine.current_agent_run_id.is_none());
+        assert_eq!(engine.compact_state.consecutive_failures, 0);
+        assert!(!engine.plan_state.is_active);
+        assert!(engine.per_turn_costs.is_empty());
+
+        // Reacquiring A proves the engine released A's exclusive writer lease.
+        // Keeping that handle open while B runs lets us prove no later durable
+        // event is accidentally appended through the retired authority.
+        let active_a = manager.load_for_run(&session_a.id).unwrap();
+        let a_before = active_a.journal.state().unwrap().last_seq;
+        let contested_b = manager.load_for_run(&session_b.id).unwrap_err();
+        assert!(
+            contested_b.to_string().contains("already held"),
+            "the engine must own B's writer lease: {contested_b}"
+        );
+
+        let result = engine.run("continue B", "b-message").await.unwrap();
+        assert_eq!(result.text, "continued B");
+        assert_eq!(active_a.journal.state().unwrap().last_seq, a_before);
+        assert!(
+            engine
+                .session_journal
+                .as_ref()
+                .unwrap()
+                .state()
+                .unwrap()
+                .last_seq
+                > b_before,
+            "the next durable turn must advance B's journal"
+        );
+        let (total, _) = engine.usage_snapshot();
+        assert_eq!(total.input_tokens, 45);
+        assert_eq!(total.output_tokens, 6);
+    }
+
+    #[test]
+    fn invalid_live_session_switch_leaves_existing_authority_untouched() {
+        let dir = tempfile::tempdir().unwrap();
+        let manager = crate::session::SessionManager::new(dir.path().to_path_buf(), 10);
+        let session_a = manager
+            .create("test", "test-model", "/tmp", Some("f14001a"))
+            .unwrap();
+        let session_b = manager
+            .create("test", "test-model", "/tmp", Some("f14001b"))
+            .unwrap();
+        manager.persist_first_message(&session_a).unwrap();
+        manager.persist_first_message(&session_b).unwrap();
+
+        let active_a = manager.load_for_run(&session_a.id).unwrap();
+        let mut invalid_b = manager.load_for_run(&session_b.id).unwrap();
+        invalid_b.session.id = "f140bad".into();
+        let mut config = wcore_config::config::Config::default();
+        config.session.enabled = true;
+        config.session.directory = dir.path().to_string_lossy().into_owned();
+        let mut engine = super::AgentEngine::resume_active_with_provider(
+            Arc::new(ScriptedProvider::new(Vec::new())),
+            config,
+            ToolRegistry::new(),
+            Arc::new(NullOutput),
+            active_a,
+        );
+
+        let error = engine.switch_active_session(invalid_b).unwrap_err();
+        assert!(error.to_string().contains("journal session mismatch"));
+        assert_eq!(engine.current_session_id().as_deref(), Some("f14001a"));
+        assert!(
+            manager.load_for_run(&session_a.id).is_err(),
+            "a rejected switch must retain A's writer lease"
+        );
+        assert!(
+            manager.load_for_run(&session_b.id).is_ok(),
+            "a rejected switch must release the unused B authority"
+        );
+    }
+
+    #[tokio::test]
+    async fn recovery_blocks_bare_turn_started_before_provider_dispatch() {
+        let dir = tempfile::tempdir().unwrap();
+        let manager = crate::session::SessionManager::new(dir.path().to_path_buf(), 10);
+        let active = manager
+            .create_for_run("test", "test-model", "/tmp", Some("f14c001"))
+            .unwrap();
+        active
+            .journal
+            .append(crate::session_journal::SessionEvent::TurnStarted {
+                turn_id: "turn-original".into(),
+                user_message: "continue exactly once".into(),
+            })
+            .unwrap();
+        let cursor = crate::recovery::RecoveryPlan::from_journal(&active.journal)
+            .unwrap()
+            .cursor();
+        let provider = Arc::new(ScriptedProvider::new(vec![vec![
+            LlmEvent::TextDelta("continued".into()),
+            done_endturn(),
+        ]]));
+        let calls = provider.call_counter();
+        let mut config = wcore_config::config::Config::default();
+        config.session.enabled = true;
+        config.session.directory = dir.path().to_string_lossy().into_owned();
+        let mut engine = super::AgentEngine::resume_active_with_provider(
+            provider,
+            config,
+            ToolRegistry::new(),
+            Arc::new(NullOutput),
+            active,
+        );
+
+        let new_turn = engine.run("must not start", "new-message").await;
+        assert!(matches!(
+            new_turn,
+            Err(super::AgentError::SessionAuthority(_))
+        ));
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+
+        let result = engine
+            .resume_interrupted_turn("turn-original", &cursor, "recovered-message")
+            .await;
+        assert!(matches!(
+            result,
+            Err(super::AgentError::SessionAuthority(message))
+                if message.contains("not directly continuable")
+        ));
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+
+        let state = engine.session_journal.as_ref().unwrap().state().unwrap();
+        assert_eq!(state.turns.len(), 1);
+        assert!(state.turns["turn-original"].completion.is_none());
+    }
+
+    #[tokio::test]
+    async fn recovery_checkpoint_continues_without_duplicate_prompt_or_provider_call() {
+        let server = physical_attempt_server().await;
+        let dir = tempfile::tempdir().unwrap();
+        let manager = crate::session::SessionManager::new(dir.path().to_path_buf(), 10);
+        let mut active = manager
+            .create_for_run("test", "test-model", "/tmp", Some("f14c005"))
+            .unwrap();
+        let user_message = Message::now(
+            Role::User,
+            vec![ContentBlock::Text {
+                text: "continue from checkpoint".into(),
+            }],
+        );
+        let orphaned_tool_use = Message::now(
+            Role::Assistant,
+            vec![ContentBlock::ToolUse {
+                id: "must-not-be-repaired".into(),
+                name: "fixture".into(),
+                input: serde_json::json!({}),
+                extra: None,
+            }],
+        );
+        active.session.messages.push(orphaned_tool_use.clone());
+        active.session.messages.push(user_message.clone());
+        manager
+            .persist_first_message(&active.session)
+            .expect("test session must be discoverable after restart");
+        active
+            .journal
+            .append(crate::session_journal::SessionEvent::TurnStarted {
+                turn_id: "turn-original".into(),
+                user_message: "continue from checkpoint".into(),
+            })
+            .unwrap();
+        let encoded_tool_use = serde_json::to_value(&orphaned_tool_use).unwrap();
+        active
+            .journal
+            .append(
+                crate::session_journal::SessionEvent::ConversationMessageCommitted {
+                    turn_id: "turn-original".into(),
+                    message_index: 0,
+                    message: encoded_tool_use.clone(),
+                    message_digest: crate::session_journal::state_payload_digest(&encoded_tool_use)
+                        .unwrap(),
+                },
+            )
+            .unwrap();
+        let encoded_message = serde_json::to_value(&user_message).unwrap();
+        active
+            .journal
+            .append(
+                crate::session_journal::SessionEvent::ConversationMessageCommitted {
+                    turn_id: "turn-original".into(),
+                    message_index: 1,
+                    message: encoded_message.clone(),
+                    message_digest: crate::session_journal::state_payload_digest(&encoded_message)
+                        .unwrap(),
+                },
+            )
+            .unwrap();
+        let provider = Arc::new(
+            ScriptedProvider::new(vec![vec![
+                LlmEvent::TextDelta("continued".into()),
+                done_endturn(),
+            ]])
+            .with_physical_url(server.uri()),
+        );
+        let calls = provider.call_counter();
+        let mut config = wcore_config::config::Config::default();
+        config.session.enabled = true;
+        config.session.directory = dir.path().to_string_lossy().into_owned();
+        let checkpoint_provider = Arc::new(ScriptedProvider::new(Vec::new()));
+        let mut checkpoint_engine = super::AgentEngine::resume_active_with_provider(
+            checkpoint_provider,
+            config.clone(),
+            ToolRegistry::new(),
+            Arc::new(NullOutput),
+            active,
+        );
+        let recovery_key = [0x5a; 32];
+        checkpoint_engine.use_recovery_test_key(&recovery_key);
+        let mut prepared_message = user_message.clone();
+        prepared_message.content.push(ContentBlock::Text {
+            text: "transient request-only tail".into(),
+        });
+        let prepared_request = LlmRequest {
+            model: "test-model".into(),
+            messages: vec![orphaned_tool_use, prepared_message],
+            conversation_id: Some(checkpoint_engine.conversation_id.clone()),
+            ..Default::default()
+        };
+        checkpoint_engine
+            .commit_provider_recovery_checkpoint(
+                "turn-original",
+                &prepared_request,
+                0,
+                0,
+                false,
+                false,
+                &super::LoopGuard::from_env(),
+                &super::FailureGuard::from_env(),
+            )
+            .await
+            .unwrap();
+        let cursor = checkpoint_engine.recovery_plan().unwrap().cursor();
+        drop(checkpoint_engine);
+
+        let reopened = manager.load_for_run("f14c005").unwrap();
+        let state_before_wrong_key = reopened.journal.state().unwrap();
+        let mut wrong_key_engine = super::AgentEngine::resume_active_with_provider(
+            provider.clone(),
+            config.clone(),
+            ToolRegistry::new(),
+            Arc::new(NullOutput),
+            reopened,
+        );
+        wrong_key_engine.use_recovery_test_key(&[0x6b; 32]);
+        let rejected = wrong_key_engine
+            .resume_interrupted_turn("turn-original", &cursor, "wrong-key-message")
+            .await;
+        assert!(matches!(
+            rejected,
+            Err(super::AgentError::SessionAuthority(ref message))
+                if message == "recovery confidential request is invalid"
+        ));
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+        assert_eq!(
+            wrong_key_engine
+                .session_journal
+                .as_ref()
+                .unwrap()
+                .state()
+                .unwrap(),
+            state_before_wrong_key,
+            "a wrong recovery key must not advance or mutate durable authority"
+        );
+        assert_eq!(
+            wrong_key_engine.recovery_plan().unwrap().cursor(),
+            cursor,
+            "a wrong recovery key must leave the committed cursor byte-identical"
+        );
+        drop(wrong_key_engine);
+
+        let reopened = manager.load_for_run("f14c005").unwrap();
+        let mut engine = super::AgentEngine::resume_active_with_provider(
+            provider,
+            config,
+            ToolRegistry::new(),
+            Arc::new(NullOutput),
+            reopened,
+        );
+        engine.use_recovery_test_key(&recovery_key);
+
+        let result = engine
+            .resume_interrupted_turn("turn-original", &cursor, "recovered-message")
+            .await
+            .unwrap();
+        assert_eq!(result.text, "continued");
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+
+        let state = engine.session_journal.as_ref().unwrap().state().unwrap();
+        assert_eq!(state.turns.len(), 1);
+        let prompts = state
+            .conversation
+            .iter()
+            .filter(|message| message["role"] == "user")
+            .filter(|message| message.to_string().contains("continue from checkpoint"))
+            .count();
+        assert_eq!(
+            prompts, 1,
+            "checkpoint resume must not duplicate the prompt"
+        );
+        assert!(
+            state
+                .conversation
+                .iter()
+                .all(|message| !message.to_string().contains("backfilled before sending")),
+            "exact checkpoint replay must bypass orphan repair and other request preparation"
+        );
+    }
+
+    #[tokio::test]
+    async fn durable_provider_success_before_terminal_composite_never_redispatches() {
+        let dir = tempfile::tempdir().unwrap();
+        let recovery_key = [0x3e; 32];
+        let manager = crate::session::SessionManager::new(dir.path().to_path_buf(), 10);
+        let mut active = manager
+            .create_for_run("test", "test-model", "/tmp", Some("f14c007"))
+            .unwrap();
+        let user_message = Message::now(
+            Role::User,
+            vec![ContentBlock::Text {
+                text: "finish from durable provider output".into(),
+            }],
+        );
+        active.session.messages.push(user_message.clone());
+        manager.persist_first_message(&active.session).unwrap();
+
+        let provider = Arc::new(ScriptedProvider::new(Vec::new()));
+        let calls = provider.call_counter();
+        let mut config = wcore_config::config::Config::default();
+        config.session.enabled = true;
+        config.session.directory = dir.path().to_string_lossy().into_owned();
+        let mut engine = super::AgentEngine::resume_active_with_provider(
+            provider.clone(),
+            config.clone(),
+            ToolRegistry::new(),
+            Arc::new(NullOutput),
+            active,
+        );
+        engine.use_recovery_test_key(&recovery_key);
+        let turn_id = "turn-before-terminal-composite";
+        engine.active_journal_turn_id = Some(turn_id.into());
+        engine
+            .append_journal_event(crate::session_journal::SessionEvent::TurnStarted {
+                turn_id: turn_id.into(),
+                user_message: "finish from durable provider output".into(),
+            })
+            .await
+            .unwrap();
+        engine.begin_budget_turn(turn_id).unwrap();
+        engine.sync_journal_conversation(turn_id).await.unwrap();
+
+        let request = LlmRequest {
+            model: "test-model".into(),
+            messages: vec![user_message],
+            conversation_id: Some(engine.conversation_id.clone()),
+            ..Default::default()
+        };
+        let checkpoint = engine
+            .commit_provider_recovery_checkpoint(
+                turn_id,
+                &request,
+                0,
+                0,
+                false,
+                false,
+                &super::LoopGuard::from_env(),
+                &super::FailureGuard::from_env(),
+            )
+            .await
+            .unwrap();
+        let dispatch_id = checkpoint.dispatch_id.unwrap();
+        let request_digest = checkpoint.request_digest.unwrap();
+        let attempt_id = "attempt-before-terminal-composite";
+        let stream_id = format!("provider-stream:{attempt_id}");
+        let stream_events = vec![
+            crate::session_journal::ProviderStreamEvent::TextDelta {
+                text: "durable before composite".into(),
+            },
+            crate::session_journal::ProviderStreamEvent::Done {
+                stop_reason: serde_json::json!("end_turn"),
+                finish_reason: serde_json::to_value(FinishReason::Stop).unwrap(),
+                usage: serde_json::to_value(TokenUsage::default()).unwrap(),
+            },
+        ];
+        let response_digest =
+            crate::provider_recovery::provider_response_digest(&stream_events).unwrap();
+        let journal = engine.session_journal.as_ref().unwrap();
+        journal
+            .append(
+                crate::session_journal::SessionEvent::ProviderAttemptPreparedV2 {
+                    attempt_id: attempt_id.into(),
+                    dispatch_id: dispatch_id.clone(),
+                    turn_id: turn_id.into(),
+                    purpose: crate::session_journal::ProviderAttemptPurpose::Conversation,
+                    provider: "test".into(),
+                    model: "test-model".into(),
+                    request_digest,
+                },
+            )
+            .unwrap();
+        journal
+            .append(
+                crate::session_journal::SessionEvent::ProviderAttemptStarted {
+                    attempt_id: attempt_id.into(),
+                },
+            )
+            .unwrap();
+        journal
+            .append(crate::session_journal::SessionEvent::StreamStarted {
+                stream_id: stream_id.clone(),
+                attempt_id: attempt_id.into(),
+            })
+            .unwrap();
+        journal
+            .append(crate::session_journal::SessionEvent::StreamBatchCommitted {
+                stream_id: stream_id.clone(),
+                ordinal: 0,
+                events: stream_events,
+            })
+            .unwrap();
+        journal
+            .append(crate::session_journal::SessionEvent::StreamFinished { stream_id })
+            .unwrap();
+        journal
+            .append(
+                crate::session_journal::SessionEvent::ProviderAttemptFinishedV2 {
+                    attempt_id: attempt_id.into(),
+                    dispatch_id,
+                    outcome: crate::session_journal::CompletionOutcome::Succeeded,
+                    response_digest: Some(response_digest),
+                },
+            )
+            .unwrap();
+        let cursor = engine.recovery_plan().unwrap().cursor();
+        drop(engine);
+
+        let reopened = manager.load_for_run("f14c007").unwrap();
+        let mut resumed = super::AgentEngine::resume_active_with_provider(
+            provider,
+            config,
+            ToolRegistry::new(),
+            Arc::new(NullOutput),
+            reopened,
+        );
+        resumed.use_recovery_test_key(&recovery_key);
+        let recovered = resumed
+            .resume_interrupted_turn(turn_id, &cursor, "resume-before-composite")
+            .await
+            .unwrap();
+        assert_eq!(recovered.text, "durable before composite");
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+        let entries = resumed
+            .session_journal
+            .as_ref()
+            .unwrap()
+            .committed_entries()
+            .unwrap();
+        assert_eq!(
+            entries
+                .iter()
+                .filter(|entry| {
+                    matches!(
+                        &entry.event,
+                        crate::session_journal::SessionEvent::TurnCommitted { .. }
+                    )
+                })
+                .count(),
+            1,
+            "recovery must terminalize the durable answer exactly once"
+        );
+    }
+
+    #[tokio::test]
+    async fn terminal_checkpoint_commits_after_restart_without_provider_redispatch() {
+        let server = physical_attempt_server().await;
+        let dir = tempfile::tempdir().unwrap();
+        let recovery_key = [0x4f; 32];
+        let manager = crate::session::SessionManager::new(dir.path().to_path_buf(), 10);
+        let active = manager
+            .create_for_run("test", "test-model", "/tmp", Some("f14c006"))
+            .unwrap();
+        manager.persist_first_message(&active.session).unwrap();
+        let provider = Arc::new(
+            ScriptedProvider::new(vec![vec![
+                LlmEvent::TextDelta("durable terminal".into()),
+                done_endturn(),
+            ]])
+            .with_physical_url(server.uri()),
+        );
+        let calls = provider.call_counter();
+        let mut config = wcore_config::config::Config::default();
+        config.session.enabled = true;
+        config.session.directory = dir.path().to_string_lossy().into_owned();
+        let mut engine = super::AgentEngine::resume_active_with_provider(
+            provider.clone(),
+            config.clone(),
+            ToolRegistry::new(),
+            Arc::new(NullOutput),
+            active,
+        );
+        engine.use_recovery_test_key(&recovery_key);
+        let turn_id = "turn-terminal";
+        engine.active_journal_turn_id = Some(turn_id.into());
+        engine
+            .append_journal_event(crate::session_journal::SessionEvent::TurnStarted {
+                turn_id: turn_id.into(),
+                user_message: "finish once".into(),
+            })
+            .await
+            .unwrap();
+        engine.begin_budget_turn(turn_id).unwrap();
+
+        let result = engine
+            .run_inner(
+                "finish once",
+                "terminal-message",
+                Some(turn_id),
+                None,
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+        assert_eq!(result.text, "durable terminal");
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+        let entries = engine
+            .session_journal
+            .as_ref()
+            .unwrap()
+            .committed_entries()
+            .unwrap();
+        assert!(matches!(
+            entries.last().map(|entry| &entry.event),
+            Some(
+                crate::session_journal::SessionEvent::ConversationRecoveryCheckpointCommittedV2 { .. }
+            )
+        ));
+        let plan = engine.recovery_plan().unwrap();
+        assert!(matches!(
+            plan.disposition,
+            crate::recovery::RecoveryDisposition::ContinueCheckpoint {
+                ref checkpoint,
+                ..
+            } if matches!(
+                checkpoint.next_action,
+                crate::recovery::RecoveryNextAction::CommitTurn
+            )
+        ));
+        let cursor = plan.cursor();
+        drop(engine);
+
+        let reopened = manager.load_for_run("f14c006").unwrap();
+        let recovered_output = Arc::new(RecoveryTextSink::default());
+        let mut resumed = super::AgentEngine::resume_active_with_provider(
+            provider,
+            config,
+            ToolRegistry::new(),
+            recovered_output.clone(),
+            reopened,
+        );
+        resumed.use_recovery_test_key(&recovery_key);
+        let recovered = resumed
+            .resume_interrupted_turn(turn_id, &cursor, "resume-terminal")
+            .await
+            .unwrap();
+        assert_eq!(recovered.text, "durable terminal");
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert_eq!(
+            *recovered_output.deltas.lock().unwrap(),
+            vec![(
+                "durable terminal".to_string(),
+                "resume-terminal".to_string()
+            )],
+            "terminal recovery must replay the durable text exactly once"
+        );
+        let state = resumed.session_journal.as_ref().unwrap().state().unwrap();
+        assert!(matches!(
+            state.turns[turn_id].completion,
+            Some(crate::session_journal::TurnCompletion::Committed { .. })
+        ));
+        assert!(matches!(
+            resumed.recovery_plan().unwrap().disposition,
+            crate::recovery::RecoveryDisposition::Ready
+        ));
+        let entries = resumed
+            .session_journal
+            .as_ref()
+            .unwrap()
+            .committed_entries()
+            .unwrap();
+        assert_eq!(
+            entries
+                .iter()
+                .filter(|entry| {
+                    matches!(
+                        &entry.event,
+                        crate::session_journal::SessionEvent::TurnCommitted { .. }
+                    )
+                })
+                .count(),
+            1,
+            "terminal checkpoint recovery must append exactly one turn commit"
+        );
+    }
+
+    #[tokio::test]
+    async fn post_charge_budget_cap_recovers_terminal_without_running_tools() {
+        let server = physical_attempt_server().await;
+        let dir = tempfile::tempdir().unwrap();
+        let recovery_key = [0x5a; 32];
+        let manager = crate::session::SessionManager::new(dir.path().to_path_buf(), 10);
+        let active = manager
+            .create_for_run("test", "test-model", "/tmp", Some("f14b00d6e7001"))
+            .unwrap();
+        manager.persist_first_message(&active.session).unwrap();
+        let provider = Arc::new(
+            ScriptedProvider::new(vec![vec![
+                LlmEvent::ToolUse {
+                    id: "budget-blocked-tool".into(),
+                    name: "RestartProofOpaque".into(),
+                    input: json!({}),
+                    extra: None,
+                },
+                LlmEvent::Done {
+                    stop_reason: StopReason::ToolUse,
+                    finish_reason: FinishReason::Stop,
+                    usage: TokenUsage {
+                        input_tokens: 10_000,
+                        output_tokens: 10_000,
+                        ..Default::default()
+                    },
+                },
+            ]])
+            .with_physical_url(server.uri()),
+        );
+        let provider_calls = provider.call_counter();
+        let physical_tool_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let mut config = wcore_config::config::Config::default();
+        config.session.enabled = true;
+        config.session.directory = dir.path().to_string_lossy().into_owned();
+        config.tools.allow_list = vec!["RestartProofOpaque".into()];
+        let mut engine = super::AgentEngine::resume_active_with_provider(
+            provider.clone(),
+            config.clone(),
+            restart_proof_registry(&physical_tool_calls),
+            Arc::new(NullOutput),
+            active,
+        );
+        engine.use_recovery_test_key(&recovery_key);
+        engine.set_budget_tracker(Arc::new(parking_lot::Mutex::new(
+            wcore_budget::BudgetTracker::new(
+                wcore_budget::BudgetCap::builder()
+                    .per_session_tokens(12_000)
+                    .build(),
+            ),
+        )));
+        let turn_id = "turn-budget-tool";
+        engine.active_journal_turn_id = Some(turn_id.into());
+        engine
+            .append_journal_event(crate::session_journal::SessionEvent::TurnStarted {
+                turn_id: turn_id.into(),
+                user_message: "run only within budget".into(),
+            })
+            .await
+            .unwrap();
+        engine.begin_budget_turn(turn_id).unwrap();
+
+        let result = engine
+            .run_inner(
+                "run only within budget",
+                "budget-message",
+                Some(turn_id),
+                None,
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+        assert_eq!(result.stop_reason, StopReason::MaxTurns);
+        assert_eq!(provider_calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert_eq!(
+            physical_tool_calls.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "the post-charge cap must suppress provider-requested tools"
+        );
+        let plan = engine.recovery_plan().unwrap();
+        assert!(matches!(
+            plan.disposition,
+            crate::recovery::RecoveryDisposition::ContinueCheckpoint {
+                ref checkpoint,
+                ..
+            } if matches!(
+                checkpoint.next_action,
+                crate::recovery::RecoveryNextAction::CommitTurn
+            )
+        ));
+        let cursor = plan.cursor();
+        drop(engine);
+
+        let reopened = manager.load_for_run("f14b00d6e7001").unwrap();
+        let mut resumed = super::AgentEngine::resume_active_with_provider(
+            provider,
+            config,
+            restart_proof_registry(&physical_tool_calls),
+            Arc::new(NullOutput),
+            reopened,
+        );
+        resumed.use_recovery_test_key(&recovery_key);
+        let recovered = resumed
+            .resume_interrupted_turn(turn_id, &cursor, "resume-budget-tool")
+            .await
+            .unwrap();
+        assert_eq!(recovered.stop_reason, StopReason::MaxTurns);
+        assert_eq!(provider_calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert_eq!(
+            physical_tool_calls.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "restart must not turn a budget-suppressed tool into executable work"
+        );
+    }
+
+    #[tokio::test]
+    async fn recovery_rejects_stale_cursor_before_provider_dispatch() {
+        let dir = tempfile::tempdir().unwrap();
+        let manager = crate::session::SessionManager::new(dir.path().to_path_buf(), 10);
+        let active = manager
+            .create_for_run("test", "test-model", "/tmp", Some("f14c002"))
+            .unwrap();
+        active
+            .journal
+            .append(crate::session_journal::SessionEvent::TurnStarted {
+                turn_id: "turn-original".into(),
+                user_message: "do not duplicate".into(),
+            })
+            .unwrap();
+        let mut cursor = crate::recovery::RecoveryPlan::from_journal(&active.journal)
+            .unwrap()
+            .cursor();
+        cursor.journal_digest = "stale-digest".into();
+        let provider = Arc::new(ScriptedProvider::new(Vec::new()));
+        let calls = provider.call_counter();
+        let mut config = wcore_config::config::Config::default();
+        config.session.enabled = true;
+        config.session.directory = dir.path().to_string_lossy().into_owned();
+        let mut engine = super::AgentEngine::resume_active_with_provider(
+            provider,
+            config,
+            ToolRegistry::new(),
+            Arc::new(NullOutput),
+            active,
+        );
+
+        let result = engine
+            .resume_interrupted_turn("turn-original", &cursor, "recovered-message")
+            .await;
+        assert!(matches!(
+            result,
+            Err(super::AgentError::SessionAuthority(message))
+                if message.contains("cursor no longer matches")
+        ));
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn recovery_cancel_is_cursor_bound_and_durably_terminal() {
+        let dir = tempfile::tempdir().unwrap();
+        let manager = crate::session::SessionManager::new(dir.path().to_path_buf(), 10);
+        let active = manager
+            .create_for_run("test", "test-model", "/tmp", Some("f14c003"))
+            .unwrap();
+        active
+            .journal
+            .append(crate::session_journal::SessionEvent::TurnStarted {
+                turn_id: "turn-original".into(),
+                user_message: "cancel safely".into(),
+            })
+            .unwrap();
+        let effects = crate::journal_effects::JournalEffectCoordinator::new(active.journal.clone())
+            .for_turn("turn-original");
+        let approval_id = effects
+            .request_approval_with_id("approval-cancel", &serde_json::json!({"tool": "Write"}))
+            .unwrap()
+            .id()
+            .to_owned();
+        active
+            .journal
+            .append(
+                crate::session_journal::SessionEvent::ProviderAttemptPrepared {
+                    attempt_id: "provider-cancel".into(),
+                    turn_id: "turn-original".into(),
+                    purpose: crate::session_journal::ProviderAttemptPurpose::Conversation,
+                    provider: "fixture".into(),
+                    model: "fixture-model".into(),
+                    request_digest: "request-digest".into(),
+                },
+            )
+            .unwrap();
+        let tool_id = effects
+            .prepare_tool(
+                "provider-call-cancel",
+                0,
+                "Write",
+                serde_json::json!({"path": "a"}),
+                serde_json::json!({"path": "a"}),
+            )
+            .unwrap()
+            .id()
+            .to_owned();
+        let child_id = effects
+            .prepare_child("child-cancel", serde_json::json!({"task": "inspect"}))
+            .unwrap()
+            .id()
+            .to_owned();
+        let delivery_id = effects
+            .prepare_delivery("fixture", serde_json::json!({"message": "pending"}))
+            .unwrap()
+            .id()
+            .to_owned();
+        let budget_id = effects
+            .reserve_budget(
+                crate::session_journal::BudgetPurpose::Conversation,
+                crate::session_journal::BudgetAmount {
+                    value: 100,
+                    unit: crate::session_journal::BudgetUnit::Tokens,
+                },
+            )
+            .unwrap()
+            .id()
+            .to_owned();
+        let cursor = crate::recovery::RecoveryPlan::from_journal(&active.journal)
+            .unwrap()
+            .cursor();
+        let mut config = wcore_config::config::Config::default();
+        config.session.enabled = true;
+        config.session.directory = dir.path().to_string_lossy().into_owned();
+        let mut engine = super::AgentEngine::resume_active_with_provider(
+            Arc::new(ScriptedProvider::new(Vec::new())),
+            config,
+            ToolRegistry::new(),
+            Arc::new(NullOutput),
+            active,
+        );
+
+        engine
+            .cancel_interrupted_turn("turn-original", &cursor)
+            .await
+            .unwrap();
+        let state = engine.session_journal.as_ref().unwrap().state().unwrap();
+        assert!(matches!(
+            state.turns["turn-original"].completion,
+            Some(crate::session_journal::TurnCompletion::Cancelled)
+        ));
+        assert!(state.approvals[&approval_id].resolution.is_some());
+        assert!(matches!(
+            state.provider_attempts["provider-cancel"].effect,
+            crate::session_journal::ExternalEffectState::NotStarted
+        ));
+        assert!(matches!(
+            state.tools[&tool_id].effect,
+            crate::session_journal::ToolEffectState::NotStarted
+        ));
+        assert!(matches!(
+            state.children[&child_id].effect,
+            crate::session_journal::ExternalEffectState::NotStarted
+        ));
+        assert!(matches!(
+            state.deliveries[&delivery_id].effect,
+            crate::session_journal::ExternalEffectState::NotStarted
+        ));
+        assert!(state.budgets[&budget_id].released);
+        assert!(matches!(
+            engine.recovery_plan().unwrap().disposition,
+            crate::recovery::RecoveryDisposition::Ready
+        ));
+
+        let stale = engine
+            .cancel_interrupted_turn("turn-original", &cursor)
+            .await
+            .unwrap_err();
+        assert!(stale.to_string().contains("cursor no longer matches"));
+    }
+
+    #[tokio::test]
+    async fn recovery_cancel_preserves_correlated_provider_dispatch_identity() {
+        let dir = tempfile::tempdir().unwrap();
+        let manager = crate::session::SessionManager::new(dir.path().to_path_buf(), 10);
+        let active = manager
+            .create_for_run("test", "test-model", "/tmp", Some("f14c003c0de1"))
+            .unwrap();
+        let mut config = wcore_config::config::Config::default();
+        config.session.enabled = true;
+        config.session.directory = dir.path().to_string_lossy().into_owned();
+        let mut engine = super::AgentEngine::resume_active_with_provider(
+            Arc::new(ScriptedProvider::new(Vec::new())),
+            config,
+            ToolRegistry::new(),
+            Arc::new(NullOutput),
+            active,
+        );
+        engine.use_recovery_test_key(&[0x44; 32]);
+        let turn_id = "turn-correlated-provider-cancel";
+        engine.active_journal_turn_id = Some(turn_id.into());
+        engine
+            .append_journal_event(crate::session_journal::SessionEvent::TurnStarted {
+                turn_id: turn_id.into(),
+                user_message: "cancel before correlated provider dispatch".into(),
+            })
+            .await
+            .unwrap();
+        let user_message = Message::now(
+            Role::User,
+            vec![ContentBlock::Text {
+                text: "cancel before correlated provider dispatch".into(),
+            }],
+        );
+        engine.messages.push(user_message.clone());
+        engine.sync_journal_conversation(turn_id).await.unwrap();
+        let request = LlmRequest {
+            model: "test-model".into(),
+            messages: vec![user_message],
+            conversation_id: Some(engine.conversation_id.clone()),
+            ..Default::default()
+        };
+        let checkpoint = engine
+            .commit_provider_recovery_checkpoint(
+                turn_id,
+                &request,
+                0,
+                0,
+                false,
+                false,
+                &super::LoopGuard::from_env(),
+                &super::FailureGuard::from_env(),
+            )
+            .await
+            .unwrap();
+        let dispatch_id = checkpoint.dispatch_id.unwrap();
+        let attempt_id = "provider-correlated-cancel";
+        engine
+            .append_journal_event(
+                crate::session_journal::SessionEvent::ProviderAttemptPreparedV2 {
+                    attempt_id: attempt_id.into(),
+                    dispatch_id: dispatch_id.clone(),
+                    turn_id: turn_id.into(),
+                    purpose: crate::session_journal::ProviderAttemptPurpose::Conversation,
+                    provider: "fixture".into(),
+                    model: "fixture-model".into(),
+                    request_digest: checkpoint.request_digest.unwrap(),
+                },
+            )
+            .await
+            .unwrap();
+        let cursor = engine.recovery_plan().unwrap().cursor();
+
+        engine
+            .cancel_interrupted_turn(turn_id, &cursor)
+            .await
+            .unwrap();
+
+        let entries = engine
+            .session_journal
+            .as_ref()
+            .unwrap()
+            .committed_entries()
+            .unwrap();
+        assert!(entries.iter().any(|entry| matches!(
+            &entry.event,
+            crate::session_journal::SessionEvent::ProviderAttemptNotStartedV2 {
+                attempt_id: event_attempt_id,
+                dispatch_id: event_dispatch_id,
+                ..
+            } if event_attempt_id == attempt_id && event_dispatch_id == &dispatch_id
+        )));
+        let state = engine.session_journal.as_ref().unwrap().state().unwrap();
+        assert!(matches!(
+            state.provider_attempts[attempt_id].effect,
+            crate::session_journal::ExternalEffectState::NotStarted
+        ));
+        assert!(matches!(
+            state.turns[turn_id].completion,
+            Some(crate::session_journal::TurnCompletion::Cancelled)
+        ));
+    }
+
+    #[tokio::test]
+    async fn recovery_cancel_refuses_unknown_provider_without_mutation() {
+        let dir = tempfile::tempdir().unwrap();
+        let manager = crate::session::SessionManager::new(dir.path().to_path_buf(), 10);
+        let active = manager
+            .create_for_run("test", "test-model", "/tmp", Some("f14c004"))
+            .unwrap();
+        active
+            .journal
+            .append(crate::session_journal::SessionEvent::TurnStarted {
+                turn_id: "turn-original".into(),
+                user_message: "do not fabricate cancellation".into(),
+            })
+            .unwrap();
+        active
+            .journal
+            .append(
+                crate::session_journal::SessionEvent::ProviderAttemptPrepared {
+                    attempt_id: "provider-unknown".into(),
+                    turn_id: "turn-original".into(),
+                    purpose: crate::session_journal::ProviderAttemptPurpose::Conversation,
+                    provider: "fixture".into(),
+                    model: "fixture-model".into(),
+                    request_digest: "request-digest".into(),
+                },
+            )
+            .unwrap();
+        active
+            .journal
+            .append(
+                crate::session_journal::SessionEvent::ProviderAttemptStarted {
+                    attempt_id: "provider-unknown".into(),
+                },
+            )
+            .unwrap();
+        let cursor = crate::recovery::RecoveryPlan::from_journal(&active.journal)
+            .unwrap()
+            .cursor();
+        let before = active.journal.state().unwrap();
+        let mut config = wcore_config::config::Config::default();
+        config.session.enabled = true;
+        config.session.directory = dir.path().to_string_lossy().into_owned();
+        let mut engine = super::AgentEngine::resume_active_with_provider(
+            Arc::new(ScriptedProvider::new(Vec::new())),
+            config,
+            ToolRegistry::new(),
+            Arc::new(NullOutput),
+            active,
+        );
+
+        let error = engine
+            .cancel_interrupted_turn("turn-original", &cursor)
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("outcomes are reconciled"));
+        assert_eq!(
+            engine.session_journal.as_ref().unwrap().state().unwrap(),
+            before,
+            "refused cancellation must not append partial terminal state"
+        );
+    }
+
+    #[tokio::test]
     async fn persisted_resume_without_journal_authority_fails_closed() {
         let dir = tempfile::tempdir().unwrap();
         let manager = crate::session::SessionManager::new(dir.path().to_path_buf(), 10);
@@ -19530,6 +24217,117 @@ mod audit_2026_05_22_tests {
     }
 
     #[tokio::test]
+    async fn cancelled_persisted_approval_repairs_tool_pair_before_turn_cancelled() {
+        let server = physical_attempt_server().await;
+        let dir = tempfile::tempdir().unwrap();
+        let manager = crate::session::SessionManager::new(dir.path().to_path_buf(), 10);
+        let active = manager
+            .create_for_run("test", "test-model", "/tmp", Some("ca11ce1a9900"))
+            .unwrap();
+        let provider = Arc::new(
+            ScriptedProvider::new(vec![vec![
+                LlmEvent::ToolUse {
+                    id: "approval-cancelled-tool".into(),
+                    name: "RestartProofOpaque".into(),
+                    input: json!({}),
+                    extra: None,
+                },
+                LlmEvent::Done {
+                    stop_reason: StopReason::ToolUse,
+                    finish_reason: FinishReason::Stop,
+                    usage: TokenUsage::default(),
+                },
+            ]])
+            .with_physical_url(server.uri()),
+        );
+        let physical_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let mut config = wcore_config::config::Config::default();
+        config.session.enabled = true;
+        config.session.directory = dir.path().to_string_lossy().into_owned();
+        let mut engine = super::AgentEngine::resume_active_with_provider(
+            provider,
+            config,
+            restart_proof_registry(&physical_calls),
+            Arc::new(NullOutput),
+            active,
+        );
+        engine.use_recovery_test_key(&[0x43; 32]);
+        engine.set_approval_manager(Arc::new(wcore_protocol::ToolApprovalManager::new()));
+        let approval_seen = Arc::new(tokio::sync::Notify::new());
+        engine.set_protocol_writer(Arc::new(ApprovalRequestEmitter {
+            seen: Arc::clone(&approval_seen),
+        }));
+        let cancel = engine.cancel_token();
+
+        let run = tokio::spawn(async move {
+            let outcome = engine
+                .run("ask before the opaque tool", "approval-cancel")
+                .await;
+            (engine, outcome)
+        });
+        tokio::time::timeout(std::time::Duration::from_secs(2), approval_seen.notified())
+            .await
+            .expect("the durable tool approval must become pending");
+        cancel.cancel();
+        let (engine, outcome) = tokio::time::timeout(std::time::Duration::from_secs(2), run)
+            .await
+            .expect("approval cancellation must stop the durable turn")
+            .expect("engine task must join");
+
+        assert!(matches!(outcome, Err(super::AgentError::UserAborted)));
+        assert_eq!(
+            physical_calls.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "cancelling approval must not execute the tool"
+        );
+        let state = engine.session_journal.as_ref().unwrap().state().unwrap();
+        assert!(matches!(
+            state
+                .approvals
+                .get("approval-cancelled-tool")
+                .and_then(|approval| approval.resolution.as_ref()),
+            Some(crate::session_journal::ApprovalResolution::Cancelled)
+        ));
+        assert!(
+            state.tools.is_empty(),
+            "cancellation before approval cannot prepare a tool execution"
+        );
+        assert!(matches!(
+            state.turns.values().next().unwrap().completion.as_ref(),
+            Some(crate::session_journal::TurnCompletion::Cancelled)
+        ));
+        let conversation = state
+            .conversation
+            .into_iter()
+            .map(serde_json::from_value)
+            .collect::<Result<Vec<Message>, _>>()
+            .unwrap();
+        assert!(matches!(
+            conversation.as_slice(),
+            [
+                ..,
+                Message {
+                    role: Role::Assistant,
+                    content: assistant,
+                    ..
+                },
+                Message {
+                    role: Role::User,
+                    content: repair,
+                    ..
+                }
+            ] if matches!(
+                assistant.as_slice(),
+                [ContentBlock::ToolUse { id, .. }] if id == "approval-cancelled-tool"
+            ) && matches!(
+                repair.as_slice(),
+                [ContentBlock::ToolResult { tool_use_id, is_error: true, .. }]
+                    if tool_use_id == "approval-cancelled-tool"
+            )
+        ));
+    }
+
+    #[tokio::test]
     async fn dropped_run_is_failed_before_a_new_turn_starts() {
         let server = physical_attempt_server().await;
         let dir = tempfile::tempdir().unwrap();
@@ -19557,20 +24355,21 @@ mod audit_2026_05_22_tests {
         }
         drop(first);
 
-        let second = engine.run("second", "m-2").await.unwrap();
-        assert_eq!(second.text, "session alive");
+        let recovery = engine.recovery_plan().unwrap();
+        assert!(matches!(
+            recovery.disposition,
+            crate::recovery::RecoveryDisposition::ContinueCheckpoint { .. }
+        ));
+        let second = engine.run("second", "m-2").await.unwrap_err();
+        assert!(matches!(second, super::AgentError::SessionAuthority(_)));
+        assert_eq!(
+            provider.calls.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "a dropped run must not dispatch again without an explicit recovery action"
+        );
         let state = engine.session_journal.as_ref().unwrap().state().unwrap();
-        assert_eq!(state.turns.len(), 2);
-        assert!(state.turns.values().any(|turn| matches!(
-            turn.completion.as_ref(),
-            Some(crate::session_journal::TurnCompletion::Failed { error })
-                if error == "interrupted before a terminal journal event"
-        )));
-        assert!(state.turns.values().any(|turn| matches!(
-            turn.completion.as_ref(),
-            Some(crate::session_journal::TurnCompletion::Committed { assistant_message })
-                if assistant_message == "session alive"
-        )));
+        assert_eq!(state.turns.len(), 1);
+        assert!(state.turns.values().all(|turn| turn.completion.is_none()));
     }
 
     #[tokio::test]
@@ -19616,12 +24415,23 @@ mod audit_2026_05_22_tests {
             active,
         );
 
-        let error = engine.run("must remain blocked", "m-1").await.unwrap_err();
+        let recovery = engine.recovery_plan().unwrap();
         assert!(matches!(
-            &error,
-            super::AgentError::SessionAuthority(message)
-                if message.contains(&tool_execution_id)
-                    && message.contains("require reconciliation")
+            &recovery.disposition,
+            crate::recovery::RecoveryDisposition::ReconciliationRequired {
+                turn_id,
+                tool_execution_ids,
+            } if turn_id == "interrupted-turn"
+                && tool_execution_ids == std::slice::from_ref(&tool_execution_id)
+        ));
+        let cursor = recovery.cursor();
+        let reconciliation = engine
+            .reconcile_interrupted_turn("interrupted-turn", &cursor)
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            reconciliation,
+            super::AgentError::SessionAuthority(_)
         ));
         assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 0);
         assert_eq!(
@@ -19641,6 +24451,38 @@ mod audit_2026_05_22_tests {
 
     struct RestartProofOpaqueTool {
         physical_calls: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    struct RecoveryPostureTool(&'static str);
+
+    #[async_trait]
+    impl Tool for RecoveryPostureTool {
+        fn name(&self) -> &str {
+            self.0
+        }
+
+        fn description(&self) -> &str {
+            "Recovery posture ordering fixture"
+        }
+
+        fn input_schema(&self) -> serde_json::Value {
+            json!({"type": "object", "additionalProperties": false})
+        }
+
+        fn is_concurrency_safe(&self, _: &serde_json::Value) -> bool {
+            true
+        }
+
+        async fn execute(&self, _: serde_json::Value) -> wcore_types::tool::ToolResult {
+            wcore_types::tool::ToolResult {
+                content: "ok".into(),
+                is_error: false,
+            }
+        }
+
+        fn category(&self) -> wcore_protocol::events::ToolCategory {
+            wcore_protocol::events::ToolCategory::Info
+        }
     }
 
     #[async_trait]
@@ -19683,6 +24525,683 @@ mod audit_2026_05_22_tests {
             physical_calls: Arc::clone(physical_calls),
         }));
         registry
+    }
+
+    #[test]
+    fn recovery_posture_digest_is_independent_of_tool_registration_order() {
+        let mut first_registry = ToolRegistry::new();
+        first_registry.register(Box::new(RecoveryPostureTool("Zulu")));
+        first_registry.register(Box::new(RecoveryPostureTool("Alpha")));
+        let mut second_registry = ToolRegistry::new();
+        second_registry.register(Box::new(RecoveryPostureTool("Alpha")));
+        second_registry.register(Box::new(RecoveryPostureTool("Zulu")));
+        let config = wcore_config::config::Config::default();
+        let first = super::AgentEngine::new_with_provider(
+            Arc::new(ScriptedProvider::new(Vec::new())),
+            config.clone(),
+            first_registry,
+            Arc::new(NullOutput),
+        );
+        let second = super::AgentEngine::new_with_provider(
+            Arc::new(ScriptedProvider::new(Vec::new())),
+            config,
+            second_registry,
+            Arc::new(NullOutput),
+        );
+
+        assert_eq!(
+            first.recovery_posture().unwrap().authority_digest,
+            second.recovery_posture().unwrap().authority_digest
+        );
+    }
+
+    #[tokio::test]
+    async fn recovered_multi_tool_round_replays_first_and_retries_second_once() {
+        let server = physical_attempt_server().await;
+        let dir = tempfile::tempdir().unwrap();
+        let recovery_key = [0x41; 32];
+        let manager = crate::session::SessionManager::new(dir.path().to_path_buf(), 10);
+        let active = manager
+            .create_for_run("test", "test-model", "/tmp", Some("f14a00170001"))
+            .unwrap();
+        manager.persist_first_message(&active.session).unwrap();
+        let provider = Arc::new(
+            ScriptedProvider::new(vec![vec![
+                LlmEvent::TextDelta("continued after recovered tool round".into()),
+                done_endturn(),
+            ]])
+            .with_physical_url(server.uri()),
+        );
+        let physical_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let mut config = wcore_config::config::Config::default();
+        config.session.enabled = true;
+        config.session.directory = dir.path().to_string_lossy().into_owned();
+        config.tools.allow_list = vec!["RestartProofOpaque".into()];
+        // This fixture seeds tool attempts directly through the journal scope;
+        // hook recovery is covered by the dedicated F14 durability tests.
+        config.tools.verify_edits = false;
+        let mut engine = super::AgentEngine::resume_active_with_provider(
+            provider.clone(),
+            config.clone(),
+            restart_proof_registry(&physical_calls),
+            Arc::new(NullOutput),
+            active,
+        );
+        engine.set_approval_manager(Arc::new(wcore_protocol::ToolApprovalManager::new()));
+        engine.set_protocol_writer(Arc::new(NullEmitter));
+        engine.use_recovery_test_key(&recovery_key);
+        let turn_id = "turn-multi-tool";
+        engine.active_journal_turn_id = Some(turn_id.into());
+        engine
+            .append_journal_event(crate::session_journal::SessionEvent::TurnStarted {
+                turn_id: turn_id.into(),
+                user_message: "run both tools".into(),
+            })
+            .await
+            .unwrap();
+        engine.begin_budget_turn(turn_id).unwrap();
+        engine.messages.push(Message::now(
+            Role::User,
+            vec![ContentBlock::Text {
+                text: "run both tools".into(),
+            }],
+        ));
+        engine.messages.push(Message::now(
+            Role::Assistant,
+            vec![
+                ContentBlock::ToolUse {
+                    id: "call-first".into(),
+                    name: "RestartProofOpaque".into(),
+                    input: json!({}),
+                    extra: None,
+                },
+                ContentBlock::ToolUse {
+                    id: "call-second".into(),
+                    name: "RestartProofOpaque".into(),
+                    input: json!({}),
+                    extra: None,
+                },
+            ],
+        ));
+        engine
+            .commit_tool_round_recovery_checkpoint(
+                turn_id,
+                0,
+                &super::LoopGuard::from_env(),
+                &super::FailureGuard::from_env(),
+            )
+            .await
+            .unwrap();
+        let scope = crate::journal_effects::JournalEffectCoordinator::new(
+            engine.session_journal.as_ref().unwrap().clone(),
+        )
+        .for_turn(turn_id);
+        scope
+            .prepare_tool("call-first", 0, "RestartProofOpaque", json!({}), json!({}))
+            .unwrap()
+            .start()
+            .unwrap()
+            .succeed(json!({
+                "content": "first durable result",
+                "is_error": false,
+                "effect_receipt": null,
+            }))
+            .unwrap();
+        let second = scope
+            .prepare_tool("call-second", 1, "RestartProofOpaque", json!({}), json!({}))
+            .unwrap();
+        let second_execution_id = second.id().to_string();
+        second
+            .not_started(crate::session_journal::ToolNotStartedReason::Cancelled {
+                reason: "process stopped before durable tool execution began".into(),
+            })
+            .unwrap();
+        let cursor = engine.recovery_plan().unwrap().cursor();
+        drop(scope);
+        drop(engine);
+
+        let reopened = manager.load_for_run("f14a00170001").unwrap();
+        let mut resumed = super::AgentEngine::resume_active_with_provider(
+            provider,
+            config,
+            restart_proof_registry(&physical_calls),
+            Arc::new(NullOutput),
+            reopened,
+        );
+        resumed.set_approval_manager(Arc::new(wcore_protocol::ToolApprovalManager::new()));
+        resumed.set_protocol_writer(Arc::new(NullEmitter));
+        resumed.use_recovery_test_key(&recovery_key);
+        let result = resumed
+            .resume_interrupted_turn(turn_id, &cursor, "resume-multi-tool")
+            .await
+            .unwrap();
+        assert_eq!(result.text, "continued after recovered tool round");
+        let state = resumed.session_journal.as_ref().unwrap().state().unwrap();
+        assert_eq!(
+            physical_calls.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "the completed first call must replay and the second call must execute once; state={state:#?}"
+        );
+        assert!(matches!(
+            state.tools[&second_execution_id].effect,
+            crate::session_journal::ToolEffectState::NotStarted
+        ));
+        let retry = state
+            .tools
+            .values()
+            .find(|tool| tool.retry_of.as_deref() == Some(&second_execution_id))
+            .expect("the interrupted prepared attempt must have one linked retry");
+        assert_eq!(retry.ordinal, 1);
+        assert!(matches!(
+            retry.effect,
+            crate::session_journal::ToolEffectState::Succeeded
+        ));
+        assert_eq!(
+            state
+                .tools
+                .values()
+                .filter(|tool| tool.provider_call_id == "call-first")
+                .count(),
+            1,
+            "the completed first call must not be dispatched again"
+        );
+    }
+
+    #[tokio::test]
+    async fn recovered_denial_terminalizes_without_provider_or_tool_replay() {
+        let server = physical_attempt_server().await;
+        let dir = tempfile::tempdir().unwrap();
+        let recovery_key = [0x42; 32];
+        let manager = crate::session::SessionManager::new(dir.path().to_path_buf(), 10);
+        let active = manager
+            .create_for_run("test", "test-model", "/tmp", Some("f14de111a100"))
+            .unwrap();
+        manager.persist_first_message(&active.session).unwrap();
+        let provider = Arc::new(
+            ScriptedProvider::new(vec![vec![
+                LlmEvent::TextDelta("continued after denial".into()),
+                done_endturn(),
+            ]])
+            .with_physical_url(server.uri()),
+        );
+        let provider_calls = provider.call_counter();
+        let physical_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let mut config = wcore_config::config::Config::default();
+        config.session.enabled = true;
+        config.session.directory = dir.path().to_string_lossy().into_owned();
+        let mut engine = super::AgentEngine::resume_active_with_provider(
+            provider.clone(),
+            config.clone(),
+            restart_proof_registry(&physical_calls),
+            Arc::new(NullOutput),
+            active,
+        );
+        engine.set_approval_manager(Arc::new(wcore_protocol::ToolApprovalManager::new()));
+        engine.set_protocol_writer(Arc::new(NullEmitter));
+        engine.use_recovery_test_key(&recovery_key);
+        let turn_id = "turn-denial";
+        let completed_call_id = "call-completed";
+        let call_id = "call-denied";
+        engine.active_journal_turn_id = Some(turn_id.into());
+        engine
+            .append_journal_event(crate::session_journal::SessionEvent::TurnStarted {
+                turn_id: turn_id.into(),
+                user_message: "ask before running".into(),
+            })
+            .await
+            .unwrap();
+        engine.begin_budget_turn(turn_id).unwrap();
+        engine.messages.push(Message::now(
+            Role::User,
+            vec![ContentBlock::Text {
+                text: "ask before running".into(),
+            }],
+        ));
+        engine.messages.push(Message::now(
+            Role::Assistant,
+            vec![
+                ContentBlock::ToolUse {
+                    id: completed_call_id.into(),
+                    name: "RestartProofOpaque".into(),
+                    input: json!({}),
+                    extra: None,
+                },
+                ContentBlock::ToolUse {
+                    id: call_id.into(),
+                    name: "RestartProofOpaque".into(),
+                    input: json!({}),
+                    extra: None,
+                },
+            ],
+        ));
+        engine
+            .commit_tool_round_recovery_checkpoint(
+                turn_id,
+                0,
+                &super::LoopGuard::from_env(),
+                &super::FailureGuard::from_env(),
+            )
+            .await
+            .unwrap();
+        let intent = json!({
+            "provider_call_id": call_id,
+            "tool": "RestartProofOpaque",
+            "category": wcore_protocol::events::ToolCategory::Info.to_string(),
+            "input": {},
+        });
+        engine
+            .session_journal
+            .as_ref()
+            .unwrap()
+            .append(crate::session_journal::SessionEvent::ApprovalRequested {
+                approval_id: call_id.into(),
+                origin: crate::session_journal::ApprovalOrigin::Turn {
+                    turn_id: turn_id.into(),
+                },
+                intent_digest: crate::session_journal::state_payload_digest(&intent).unwrap(),
+            })
+            .unwrap();
+        let scope = crate::journal_effects::JournalEffectCoordinator::new(
+            engine.session_journal.as_ref().unwrap().clone(),
+        )
+        .for_turn(turn_id);
+        scope
+            .prepare_tool(
+                completed_call_id,
+                0,
+                "RestartProofOpaque",
+                json!({}),
+                json!({}),
+            )
+            .unwrap()
+            .start()
+            .unwrap()
+            .succeed(json!({
+                "content": "first durable result",
+                "is_error": false,
+                "effect_receipt": null,
+            }))
+            .unwrap();
+        let prepared = scope
+            .prepare_tool(call_id, 1, "RestartProofOpaque", json!({}), json!({}))
+            .unwrap();
+        let prepared_execution_id = prepared.id().to_string();
+        drop(prepared);
+        assert!(matches!(
+            engine.recovery_plan().unwrap().disposition,
+            crate::recovery::RecoveryDisposition::AwaitApproval { .. }
+        ));
+        drop(scope);
+        drop(engine);
+
+        let reopened = manager.load_for_run("f14de111a100").unwrap();
+        reopened
+            .journal
+            .append(crate::session_journal::SessionEvent::ApprovalResolved {
+                approval_id: call_id.into(),
+                resolution: crate::session_journal::ApprovalResolution::Decided {
+                    decision: crate::session_journal::ApprovalDecision::Deny,
+                },
+            })
+            .unwrap();
+        let denial_cursor = crate::recovery::RecoveryPlan::from_journal(&reopened.journal)
+            .unwrap()
+            .cursor();
+        let mut resumed = super::AgentEngine::resume_active_with_provider(
+            provider,
+            config,
+            restart_proof_registry(&physical_calls),
+            Arc::new(NullOutput),
+            reopened,
+        );
+        resumed.set_approval_manager(Arc::new(wcore_protocol::ToolApprovalManager::new()));
+        resumed.set_protocol_writer(Arc::new(NullEmitter));
+        resumed.use_recovery_test_key(&recovery_key);
+        let result = resumed
+            .resume_interrupted_turn(turn_id, &denial_cursor, "resume-denial")
+            .await
+            .unwrap();
+        assert!(result.text.is_empty());
+        assert_eq!(result.stop_reason, StopReason::EndTurn);
+        assert_eq!(
+            provider_calls.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "a recovered denial must terminalize without another provider request"
+        );
+        assert_eq!(
+            physical_calls.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "a durable denial must never cross the physical execution boundary"
+        );
+        let entries = resumed
+            .session_journal
+            .as_ref()
+            .unwrap()
+            .committed_entries()
+            .unwrap();
+        let intent_index = entries
+            .iter()
+            .position(|entry| {
+                matches!(
+                    &entry.event,
+                    crate::session_journal::SessionEvent::ToolIntentRecordedV2 {
+                        provider_call_id,
+                        ..
+                    } if provider_call_id == call_id
+                )
+            })
+            .expect("denial must persist a tool intent");
+        let no_start_index = entries
+            .iter()
+            .position(|entry| {
+                matches!(
+                    &entry.event,
+                    crate::session_journal::SessionEvent::ToolExecutionNotStarted {
+                        reason: crate::session_journal::ToolNotStartedReason::ApprovalDenied {
+                            approval_id,
+                        },
+                        ..
+                    } if approval_id == call_id
+                )
+            })
+            .expect("denial must persist a no-start receipt");
+        assert!(matches!(
+            resumed.session_journal.as_ref().unwrap().state().unwrap().tools
+                [&prepared_execution_id]
+                .not_started_reason,
+            Some(crate::session_journal::ToolNotStartedReason::ApprovalDenied {
+                ref approval_id,
+            }) if approval_id == call_id
+        ));
+        let terminal_index = entries
+            .iter()
+            .position(|entry| {
+                matches!(
+                    &entry.event,
+                    crate::session_journal::SessionEvent::TurnCancelled { turn_id: terminal_turn }
+                        if terminal_turn == turn_id
+                )
+            })
+            .expect("denied recovery must terminalize the original turn");
+        assert!(intent_index < no_start_index);
+        assert!(no_start_index < terminal_index);
+        assert!(matches!(
+            resumed.recovery_plan().unwrap().disposition,
+            crate::recovery::RecoveryDisposition::Ready
+        ));
+        assert!(matches!(
+            resumed.messages.last().map(|message| message.content.as_slice()),
+            Some([
+                ContentBlock::ToolResult {
+                    tool_use_id: first_id,
+                    content,
+                    is_error: false,
+                },
+                ContentBlock::ToolResult {
+                    tool_use_id: denied_id,
+                    is_error: true,
+                    ..
+                }
+            ]) if first_id == completed_call_id
+                && content == "first durable result"
+                && denied_id == call_id
+        ));
+        let next = resumed
+            .run("ordinary next turn", "after-denial")
+            .await
+            .unwrap();
+        assert_eq!(next.text, "continued after denial");
+        assert_eq!(
+            provider_calls.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "only the ordinary post-cancellation turn may dispatch the provider"
+        );
+    }
+
+    #[tokio::test]
+    async fn recovered_denial_resumes_after_partial_no_start_without_dispatch() {
+        let dir = tempfile::tempdir().unwrap();
+        let manager = crate::session::SessionManager::new(dir.path().to_path_buf(), 10);
+        let active = manager
+            .create_for_run("test", "test-model", "/tmp", Some("f14de111a101"))
+            .unwrap();
+        manager.persist_first_message(&active.session).unwrap();
+        let provider = Arc::new(ScriptedProvider::new(vec![vec![done_endturn()]]));
+        let provider_calls = provider.call_counter();
+        let mut config = wcore_config::config::Config::default();
+        config.session.enabled = true;
+        config.session.directory = dir.path().to_string_lossy().into_owned();
+        let mut engine = super::AgentEngine::resume_active_with_provider(
+            provider.clone(),
+            config.clone(),
+            ToolRegistry::new(),
+            Arc::new(NullOutput),
+            active,
+        );
+        let turn_id = "turn-partial-denial";
+        let call_id = "call-partial-denial";
+        engine.active_journal_turn_id = Some(turn_id.into());
+        engine
+            .append_journal_event(crate::session_journal::SessionEvent::TurnStarted {
+                turn_id: turn_id.into(),
+                user_message: "deny after partial closure".into(),
+            })
+            .await
+            .unwrap();
+        engine.messages = vec![
+            Message::now(
+                Role::User,
+                vec![ContentBlock::Text {
+                    text: "deny after partial closure".into(),
+                }],
+            ),
+            Message::now(
+                Role::Assistant,
+                vec![ContentBlock::ToolUse {
+                    id: call_id.into(),
+                    name: "Opaque".into(),
+                    input: json!({}),
+                    extra: None,
+                }],
+            ),
+        ];
+        engine
+            .commit_tool_round_recovery_checkpoint(
+                turn_id,
+                0,
+                &super::LoopGuard::from_env(),
+                &super::FailureGuard::from_env(),
+            )
+            .await
+            .unwrap();
+        let intent = json!({
+            "provider_call_id": call_id,
+            "tool": "Opaque",
+            "category": wcore_protocol::events::ToolCategory::Exec.to_string(),
+            "input": {},
+        });
+        let journal = engine.session_journal.as_ref().unwrap().clone();
+        journal
+            .append(crate::session_journal::SessionEvent::ApprovalRequested {
+                approval_id: call_id.into(),
+                origin: crate::session_journal::ApprovalOrigin::Turn {
+                    turn_id: turn_id.into(),
+                },
+                intent_digest: crate::session_journal::state_payload_digest(&intent).unwrap(),
+            })
+            .unwrap();
+        let prepared = crate::journal_effects::JournalEffectCoordinator::new(journal.clone())
+            .for_turn(turn_id)
+            .prepare_tool(call_id, 0, "Opaque", json!({}), json!({}))
+            .unwrap();
+        let execution_id = prepared.id().to_owned();
+        drop(prepared);
+        journal
+            .append(crate::session_journal::SessionEvent::ApprovalResolved {
+                approval_id: call_id.into(),
+                resolution: crate::session_journal::ApprovalResolution::Decided {
+                    decision: crate::session_journal::ApprovalDecision::Deny,
+                },
+            })
+            .unwrap();
+        journal
+            .append(
+                crate::session_journal::SessionEvent::ToolExecutionNotStarted {
+                    tool_execution_id: execution_id,
+                    reason: crate::session_journal::ToolNotStartedReason::ApprovalDenied {
+                        approval_id: call_id.into(),
+                    },
+                },
+            )
+            .unwrap();
+        let partial_cursor = engine.recovery_plan().unwrap().cursor();
+        drop(journal);
+        drop(engine);
+
+        let reopened = manager.load_for_run("f14de111a101").unwrap();
+        let mut resumed = super::AgentEngine::resume_active_with_provider(
+            provider,
+            config,
+            ToolRegistry::new(),
+            Arc::new(NullOutput),
+            reopened,
+        );
+        let result = resumed
+            .resume_interrupted_turn(turn_id, &partial_cursor, "resume-partial-denial")
+            .await
+            .unwrap();
+        assert!(result.text.is_empty());
+        assert_eq!(
+            provider_calls.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "partial descendant closure must not reopen provider authority"
+        );
+        assert!(matches!(
+            resumed.recovery_plan().unwrap().disposition,
+            crate::recovery::RecoveryDisposition::Ready
+        ));
+        assert!(matches!(
+            resumed.messages.last().map(|message| message.content.as_slice()),
+            Some([ContentBlock::ToolResult {
+                tool_use_id,
+                is_error: true,
+                ..
+            }]) if tool_use_id == call_id
+        ));
+    }
+
+    #[tokio::test]
+    async fn cancelled_terminal_checkpoint_finishes_after_restart_without_provider_dispatch() {
+        let dir = tempfile::tempdir().unwrap();
+        let manager = crate::session::SessionManager::new(dir.path().to_path_buf(), 10);
+        let active = manager
+            .create_for_run("test", "test-model", "/tmp", Some("f14ca11ce100"))
+            .unwrap();
+        manager.persist_first_message(&active.session).unwrap();
+        let provider = Arc::new(ScriptedProvider::new(vec![vec![done_endturn()]]));
+        let provider_calls = provider.call_counter();
+        let mut config = wcore_config::config::Config::default();
+        config.session.enabled = true;
+        config.session.directory = dir.path().to_string_lossy().into_owned();
+        let mut engine = super::AgentEngine::resume_active_with_provider(
+            provider.clone(),
+            config.clone(),
+            ToolRegistry::new(),
+            Arc::new(NullOutput),
+            active,
+        );
+        let turn_id = "turn-cancel-checkpoint";
+        engine.active_journal_turn_id = Some(turn_id.into());
+        engine
+            .append_journal_event(crate::session_journal::SessionEvent::TurnStarted {
+                turn_id: turn_id.into(),
+                user_message: "cancel durably".into(),
+            })
+            .await
+            .unwrap();
+        engine.messages = vec![
+            Message::now(
+                Role::User,
+                vec![ContentBlock::Text {
+                    text: "cancel durably".into(),
+                }],
+            ),
+            Message::now(
+                Role::Assistant,
+                vec![ContentBlock::ToolUse {
+                    id: "cancelled-call".into(),
+                    name: "Opaque".into(),
+                    input: json!({}),
+                    extra: None,
+                }],
+            ),
+            Message::now(
+                Role::User,
+                vec![ContentBlock::ToolResult {
+                    tool_use_id: "cancelled-call".into(),
+                    content: "Tool denied during recovery".into(),
+                    is_error: true,
+                }],
+            ),
+        ];
+        let result = super::AgentResult {
+            text: String::new(),
+            stop_reason: StopReason::EndTurn,
+            finish_reason: FinishReason::Stop,
+            usage: TokenUsage::default(),
+            usage_delta: TokenUsage::default(),
+            turns: 1,
+            active_window_percent: None,
+            agent_run_id: None,
+        };
+        engine
+            .commit_terminal_recovery_checkpoint(
+                turn_id,
+                &result,
+                0,
+                &super::LoopGuard::from_env(),
+                &super::FailureGuard::from_env(),
+                crate::recovery::RecoveryTerminalCompletion::Cancelled,
+            )
+            .await
+            .unwrap();
+        let checkpoint_cursor = engine.recovery_plan().unwrap().cursor();
+        drop(engine);
+
+        let reopened = manager.load_for_run("f14ca11ce100").unwrap();
+        let mut resumed = super::AgentEngine::resume_active_with_provider(
+            provider,
+            config,
+            ToolRegistry::new(),
+            Arc::new(NullOutput),
+            reopened,
+        );
+        let recovered = resumed
+            .resume_interrupted_turn(turn_id, &checkpoint_cursor, "finish-cancel")
+            .await
+            .unwrap();
+        assert!(recovered.text.is_empty());
+        assert_eq!(recovered.stop_reason, StopReason::EndTurn);
+        assert_eq!(
+            provider_calls.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "a durable cancellation checkpoint must finish without provider dispatch"
+        );
+        assert!(matches!(
+            resumed.recovery_plan().unwrap().disposition,
+            crate::recovery::RecoveryDisposition::Ready
+        ));
+        assert!(matches!(
+            resumed
+                .session_journal
+                .as_ref()
+                .unwrap()
+                .state()
+                .unwrap()
+                .turns[turn_id]
+                .completion,
+            Some(crate::session_journal::TurnCompletion::Cancelled)
+        ));
     }
 
     #[tokio::test]
@@ -19763,11 +25282,27 @@ mod audit_2026_05_22_tests {
             reopened,
         );
 
-        let blocked = restarted.run("must not replay", "m-2").await.unwrap_err();
+        let recovery = restarted.recovery_plan().unwrap();
         assert!(matches!(
-            &blocked,
-            super::AgentError::SessionAuthority(message)
-                if message.contains("require reconciliation")
+            &recovery.disposition,
+            crate::recovery::RecoveryDisposition::ReconciliationRequired {
+                turn_id: _,
+                tool_execution_ids,
+            } if tool_execution_ids.len() == 1
+        ));
+        let interrupted_turn_id = match &recovery.disposition {
+            crate::recovery::RecoveryDisposition::ReconciliationRequired { turn_id, .. } => {
+                turn_id.clone()
+            }
+            _ => unreachable!("asserted reconciliation-required disposition"),
+        };
+        let reconciliation = restarted
+            .reconcile_interrupted_turn(&interrupted_turn_id, &recovery.cursor())
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            reconciliation,
+            super::AgentError::SessionAuthority(_)
         ));
         assert_eq!(
             provider_calls.load(std::sync::atomic::Ordering::SeqCst),
@@ -19875,15 +25410,30 @@ mod audit_2026_05_22_tests {
             active,
         );
 
-        let error = engine.run("must remain blocked", "m-1").await.unwrap_err();
+        let recovery = engine.recovery_plan().unwrap();
         assert!(matches!(
-            &error,
-            super::AgentError::SessionAuthority(message)
-                if message.contains(&tool_execution_id)
-                    && message.contains("require reconciliation")
+            &recovery.disposition,
+            crate::recovery::RecoveryDisposition::ReconciliationRequired {
+                turn_id,
+                tool_execution_ids,
+            } if turn_id == "interrupted-turn"
+                && tool_execution_ids == std::slice::from_ref(&tool_execution_id)
+        ));
+        let cursor = recovery.cursor();
+        let reconciliation = engine
+            .reconcile_interrupted_turn("interrupted-turn", &cursor)
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            reconciliation,
+            super::AgentError::SessionAuthority(_)
         ));
         assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 0);
         assert_eq!(std::fs::read(&target).unwrap(), b"original bytes");
+        assert!(matches!(
+            engine.recovery_plan().unwrap().disposition,
+            crate::recovery::RecoveryDisposition::ReconciliationRequired { .. }
+        ));
         let state = engine.session_journal.as_ref().unwrap().state().unwrap();
         assert!(matches!(
             &state.tools[&tool_execution_id].effect,
@@ -19960,8 +25510,15 @@ mod audit_2026_05_22_tests {
             active,
         );
 
-        let blocked = engine.run("blocked", "m-1").await.unwrap_err();
-        assert!(blocked.to_string().contains(&tool_execution_id));
+        let recovery = engine.recovery_plan().unwrap();
+        assert!(matches!(
+            &recovery.disposition,
+            crate::recovery::RecoveryDisposition::ReconciliationRequired {
+                turn_id,
+                tool_execution_ids,
+            } if turn_id == "interrupted-turn"
+                && tool_execution_ids == std::slice::from_ref(&tool_execution_id)
+        ));
         assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 0);
 
         engine
@@ -19983,6 +25540,12 @@ mod audit_2026_05_22_tests {
                 .is_empty()
         );
 
+        let cancellation = engine.recovery_plan().unwrap();
+        engine
+            .cancel_interrupted_turn("interrupted-turn", &cancellation.cursor())
+            .await
+            .unwrap();
+
         let result = engine.run("continue", "m-2").await.unwrap();
         assert_eq!(result.text, "continued after resolution");
         assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
@@ -19993,8 +25556,7 @@ mod audit_2026_05_22_tests {
         ));
         assert!(matches!(
             state.turns["interrupted-turn"].completion.as_ref(),
-            Some(crate::session_journal::TurnCompletion::Failed { error })
-                if error == "interrupted before a terminal journal event"
+            Some(crate::session_journal::TurnCompletion::Cancelled)
         ));
     }
 
@@ -20048,14 +25610,7 @@ mod audit_2026_05_22_tests {
                 panic!("unknown effect did not stop the turn: result={result:?}; state={state:?}")
             }
         };
-        assert!(
-            matches!(
-                error,
-                super::AgentError::SessionAuthority(ref message)
-                    if message.contains("require reconciliation")
-            ),
-            "unexpected fail-closed error: {error:?}"
-        );
+        assert!(matches!(error, super::AgentError::SessionAuthority(_)));
         assert_eq!(
             calls.load(std::sync::atomic::Ordering::SeqCst),
             1,
@@ -20111,6 +25666,19 @@ mod audit_2026_05_22_tests {
             active,
         );
 
+        let recovery = engine.recovery_plan().unwrap();
+        assert!(matches!(
+            &recovery.disposition,
+            crate::recovery::RecoveryDisposition::Blocked {
+                turn_id,
+                reason: crate::recovery::RecoveryBlocker::ContextCheckpointMissing,
+            } if turn_id == "interrupted-turn"
+        ));
+        engine
+            .cancel_interrupted_turn("interrupted-turn", &recovery.cursor())
+            .await
+            .unwrap();
+
         let result = engine.run("continue", "m-1").await.unwrap();
         assert_eq!(result.text, "safe continuation");
         assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
@@ -20124,7 +25692,7 @@ mod audit_2026_05_22_tests {
                 .not_started_reason
                 .as_ref(),
             Some(crate::session_journal::ToolNotStartedReason::Cancelled { reason })
-                if reason == "interrupted before durable tool start"
+                if reason == "interrupted turn cancelled during recovery"
         ));
     }
 
@@ -21598,6 +27166,7 @@ mod retry_wedge_protection_tests {
     use std::sync::Mutex;
 
     use async_trait::async_trait;
+    use serde_json::json;
     use wcore_providers::{LlmProvider, ProviderError};
     use wcore_tools::registry::ToolRegistry;
     use wcore_types::llm::{LlmEvent, LlmRequest};
@@ -21739,17 +27308,25 @@ mod retry_wedge_protection_tests {
     async fn ceiling_abort_does_not_persist_unrecoverable_session() {
         let dir = tempfile::tempdir().unwrap();
         let manager = crate::session::SessionManager::new(dir.path().to_path_buf(), 10);
-        let session = manager.create("test", "m", "/tmp", None).unwrap();
-        let sid = session.id.clone();
-
+        let active = manager
+            .create_for_run("test", "m", "/tmp", Some("ce1111a60001"))
+            .unwrap();
         let provider = Arc::new(RecordingProvider::new(vec![]));
+        let requests = provider.recorded();
         let mut engine = wedge_engine(provider);
         engine.session_manager = Some(manager);
-        engine.current_session = Some(session);
+        engine.current_session = Some(active.session);
+        engine.session_journal = Some(active.journal);
 
-        // Establish the last GOOD on-disk state via the engine's OWN save path
-        // (persist = true also runs update_index_for, so `load` can find it —
-        // a bare `SessionManager::save` does not index the session).
+        let baseline_turn = "baseline-turn";
+        engine.active_journal_turn_id = Some(baseline_turn.into());
+        engine
+            .append_journal_event(crate::session_journal::SessionEvent::TurnStarted {
+                turn_id: baseline_turn.into(),
+                user_message: "recoverable".into(),
+            })
+            .await
+            .unwrap();
         engine.messages = vec![Message::new(
             Role::User,
             vec![ContentBlock::Text {
@@ -21757,38 +27334,62 @@ mod retry_wedge_protection_tests {
             }],
         )];
         engine
-            .finish_run_terminated_inner("ok", 1, FinishReason::Length, true)
+            .sync_journal_conversation(baseline_turn)
             .await
             .unwrap();
+        engine
+            .append_journal_event(crate::session_journal::SessionEvent::TurnCommitted {
+                turn_id: baseline_turn.into(),
+                assistant_message: String::new(),
+            })
+            .await
+            .unwrap();
+        engine.active_journal_turn_id = None;
+        engine.save_session_mirror();
 
-        // Now the in-memory history is UNRECOVERABLE; persist = false must leave
-        // the recoverable on-disk state untouched.
+        // This irreducible in-memory history fails context admission. The new
+        // TurnStarted retains the rejected prompt, while canonical conversation
+        // authority must remain at the last resumable baseline.
         engine.messages = vec![Message::new(
-            Role::User,
-            vec![ContentBlock::Text {
-                text: "OVER-CEILING-must-not-persist".into(),
+            Role::Assistant,
+            vec![ContentBlock::ToolUse {
+                id: "irreducible".into(),
+                name: "Read".into(),
+                input: json!({"blob": "x".repeat(1_000_000)}),
+                extra: None,
             }],
         )];
-        engine
-            .finish_run_terminated_inner("x", 2, FinishReason::Length, false)
+        let result = engine
+            .run("rejected over-ceiling prompt", "ceiling-message")
             .await
             .unwrap();
+        assert_eq!(result.stop_reason, StopReason::MaxTurns);
+        assert!(
+            requests.lock().unwrap().is_empty(),
+            "context admission must fail before provider dispatch"
+        );
+        drop(engine);
 
-        // The on-disk session is STILL the small recoverable state.
         let verify = crate::session::SessionManager::new(dir.path().to_path_buf(), 10);
-        let loaded = verify.load(&sid).unwrap();
+        let loaded = verify.load_for_run("ce1111a60001").unwrap();
         assert_eq!(
-            loaded.messages.len(),
+            loaded.session.messages.len(),
             1,
             "unrecoverable history must not overwrite the saved session"
         );
-        let ContentBlock::Text { text } = &loaded.messages[0].content[0] else {
+        let ContentBlock::Text { text } = &loaded.session.messages[0].content[0] else {
             panic!("expected text");
         };
         assert_eq!(
             text, "recoverable",
             "the last recoverable state must survive"
         );
+        let state = loaded.journal.state().unwrap();
+        let canonical: Message = serde_json::from_value(state.conversation[0].clone()).unwrap();
+        assert!(matches!(
+            canonical.content.as_slice(),
+            [ContentBlock::Text { text }] if text == "recoverable"
+        ));
     }
 
     /// The complement: a RESUMABLE terminal abort (`persist_session = true`)

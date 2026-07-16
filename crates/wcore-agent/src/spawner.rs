@@ -168,6 +168,27 @@ impl Drop for LifecycleGuard {
     }
 }
 
+/// Keeps aggregate child depth durable for the whole child lifetime. The
+/// in-process guard updates shared counters; this wrapper commits its release
+/// before the child scope disappears.
+struct ChildBudgetGuard {
+    guard: Option<wcore_budget::AgentDepthGuard>,
+    authority: Option<crate::budget_authority::SharedBudgetAuthorityCoordinator>,
+}
+
+impl Drop for ChildBudgetGuard {
+    fn drop(&mut self) {
+        let Some(authority) = self.authority.as_ref() else {
+            self.guard.take();
+            return;
+        };
+        let guard = self.guard.take();
+        if let Err(error) = authority.lock().transaction(|_| drop(guard)) {
+            tracing::error!(error = %error, "durable child budget release failed");
+        }
+    }
+}
+
 /// Spawns independent child agents that share the parent's LLM provider.
 ///
 /// Sub-agents use a [`NullSink`] so their streaming output is silently
@@ -224,6 +245,9 @@ pub struct AgentSpawner {
     /// spawned child. This is distinct from the cap-less Crucible accumulator
     /// above: it enforces the finite session token/cost envelope.
     provider_budget_tracker: Option<Arc<parking_lot::Mutex<wcore_budget::BudgetTracker>>>,
+    /// Sole production provider/execution authority. Raw tracker/view fields
+    /// remain only for legacy and isolated tests.
+    budget_authority: Option<crate::budget_authority::SharedBudgetAuthorityCoordinator>,
     /// Stable provider-budget identity shared with every child engine.
     budget_session_id: Option<String>,
     /// Parent execution envelope. Spawn/fork paths derive child views from it
@@ -240,9 +264,10 @@ pub struct AgentSpawner {
 /// convenience constructor from silently minting a fresh budget.
 #[derive(Clone)]
 pub struct SpawnerBudgetGovernance {
-    provider_budget_tracker: Arc<parking_lot::Mutex<wcore_budget::BudgetTracker>>,
+    provider_budget_tracker: Option<Arc<parking_lot::Mutex<wcore_budget::BudgetTracker>>>,
+    budget_authority: Option<crate::budget_authority::SharedBudgetAuthorityCoordinator>,
     budget_session_id: String,
-    execution_budget: wcore_budget::ExecutionBudgetView,
+    execution_budget: Option<wcore_budget::ExecutionBudgetView>,
     cancel: tokio_util::sync::CancellationToken,
     budget_guard: Option<Arc<crate::cancel::BudgetGuard>>,
 }
@@ -255,9 +280,25 @@ impl SpawnerBudgetGovernance {
         cancel: tokio_util::sync::CancellationToken,
     ) -> Self {
         Self {
-            provider_budget_tracker,
+            provider_budget_tracker: Some(provider_budget_tracker),
+            budget_authority: None,
             budget_session_id: budget_session_id.into(),
-            execution_budget,
+            execution_budget: Some(execution_budget),
+            cancel,
+            budget_guard: None,
+        }
+    }
+
+    pub(crate) fn from_authority(
+        authority: crate::budget_authority::SharedBudgetAuthorityCoordinator,
+        cancel: tokio_util::sync::CancellationToken,
+    ) -> Self {
+        let budget_session_id = authority.lock().budget_session_id().to_owned();
+        Self {
+            provider_budget_tracker: None,
+            budget_authority: Some(authority),
+            budget_session_id,
+            execution_budget: None,
             cancel,
             budget_guard: None,
         }
@@ -296,6 +337,7 @@ impl AgentSpawner {
             budget_tracker: None,
             budget_identity: None,
             provider_budget_tracker: None,
+            budget_authority: None,
             budget_session_id: None,
             execution_budget: None,
             budget_guard: None,
@@ -444,9 +486,10 @@ impl AgentSpawner {
 
     /// Install one previously captured session governance bundle.
     pub fn with_budget_governance(mut self, governance: SpawnerBudgetGovernance) -> Self {
-        self.provider_budget_tracker = Some(governance.provider_budget_tracker);
+        self.provider_budget_tracker = governance.provider_budget_tracker;
+        self.budget_authority = governance.budget_authority;
         self.budget_session_id = Some(governance.budget_session_id);
-        self.execution_budget = Some(governance.execution_budget);
+        self.execution_budget = governance.execution_budget;
         self.cancel = governance.cancel;
         self.budget_guard = governance.budget_guard;
         self
@@ -457,12 +500,19 @@ impl AgentSpawner {
     /// without an attached provider ledger return `None` rather than fabricating
     /// an independent allowance.
     pub fn budget_governance(&self) -> Option<SpawnerBudgetGovernance> {
-        let governance = SpawnerBudgetGovernance::new(
-            Arc::clone(self.provider_budget_tracker.as_ref()?),
-            self.budget_session_id.as_ref()?.clone(),
-            self.execution_budget.as_ref()?.clone(),
-            self.active_cancel_token(),
-        );
+        let governance = if let Some(authority) = self.budget_authority.as_ref() {
+            SpawnerBudgetGovernance::from_authority(
+                Arc::clone(authority),
+                self.active_cancel_token(),
+            )
+        } else {
+            SpawnerBudgetGovernance::new(
+                Arc::clone(self.provider_budget_tracker.as_ref()?),
+                self.budget_session_id.as_ref()?.clone(),
+                self.execution_budget.as_ref()?.clone(),
+                self.active_cancel_token(),
+            )
+        };
         Some(match self.budget_guard.as_ref() {
             Some(guard) => governance.with_budget_guard(Arc::clone(guard)),
             None => governance,
@@ -474,10 +524,35 @@ impl AgentSpawner {
     ) -> Result<
         (
             Option<wcore_budget::ExecutionBudgetView>,
-            Option<wcore_budget::AgentDepthGuard>,
+            Option<ChildBudgetGuard>,
         ),
         String,
     > {
+        if let Some(authority) = self.budget_authority.as_ref() {
+            let (child, guard) = authority
+                .lock()
+                .transaction(|mutation| {
+                    let child = mutation.execution().sub_budget(None);
+                    let guard = child.enter_agent();
+                    if let Some(reason) = child.first_exceeded_reason() {
+                        let observed = child.observed_for(reason);
+                        let limit = child.limit_for(reason);
+                        drop(guard);
+                        return Err(format!(
+                            "child agent not started: budget cap '{reason}' exceeded (limit {limit}, observed {observed})"
+                        ));
+                    }
+                    Ok((child, guard))
+                })
+                .map_err(|error| error.to_string())??;
+            return Ok((
+                Some(child),
+                Some(ChildBudgetGuard {
+                    guard: Some(guard),
+                    authority: Some(Arc::clone(authority)),
+                }),
+            ));
+        }
         let Some(parent) = self.execution_budget.as_ref() else {
             return Ok((None, None));
         };
@@ -491,14 +566,26 @@ impl AgentSpawner {
                 "child agent not started: budget cap '{reason}' exceeded (limit {limit}, observed {observed})"
             ));
         }
-        Ok((Some(child), Some(guard)))
+        Ok((
+            Some(child),
+            Some(ChildBudgetGuard {
+                guard: Some(guard),
+                authority: None,
+            }),
+        ))
     }
 
     fn bind_child_budget(
         &self,
         engine: &mut AgentEngine,
         execution_budget: Option<wcore_budget::ExecutionBudgetView>,
-    ) {
+    ) -> Result<(), String> {
+        if let Some(authority) = self.budget_authority.as_ref() {
+            engine
+                .inherit_budget_authority(Arc::clone(authority))
+                .map_err(|error| error.to_string())?;
+            return Ok(());
+        }
         if let Some(budget) = execution_budget {
             engine.set_execution_budget(budget);
         }
@@ -508,6 +595,7 @@ impl AgentSpawner {
         if let Some(session_id) = self.budget_session_id.as_ref() {
             engine.set_budget_session_id(session_id.clone());
         }
+        Ok(())
     }
 
     /// Resolve the provider a given sub-agent should run on.
@@ -555,7 +643,9 @@ impl AgentSpawner {
         let tools = self.child_tool_registry(&[]);
         let output: Arc<dyn OutputSink> = Arc::new(NullSink);
         let mut engine = AgentEngine::new_with_provider(provider, config, tools, output);
-        self.bind_child_budget(&mut engine, child_budget);
+        if let Err(error) = self.bind_child_budget(&mut engine, child_budget) {
+            return SubAgentResult::error(&sub_config.name, &error);
+        }
         engine.set_egress_policy(self.egress_policy.clone());
         // Bind the child to the parent cancel token so a host cancel stops it.
         engine.set_cancel_token(self.active_cancel_token().child_token());
@@ -832,7 +922,11 @@ impl AgentSpawner {
             None => Arc::new(NullSink),                // legacy anonymous behaviour
         };
         let mut engine = AgentEngine::new_with_provider(provider, config, tools, output);
-        self.bind_child_budget(&mut engine, child_budget);
+        if let Err(error) = self.bind_child_budget(&mut engine, child_budget) {
+            let result = SubAgentResult::error(&sub_config.name, &error);
+            relay_subagent_terminal(terminal_sink.as_deref(), &result);
+            return result;
+        }
         engine.set_egress_policy(self.egress_policy.clone());
         // Bind the child to the parent cancel token so a host cancel stops it.
         engine.set_cancel_token(self.active_cancel_token().child_token());
@@ -950,6 +1044,7 @@ impl AgentSpawner {
             budget_tracker: self.budget_tracker.clone(),
             budget_identity: self.budget_identity.clone(),
             provider_budget_tracker: self.provider_budget_tracker.clone(),
+            budget_authority: self.budget_authority.clone(),
             budget_session_id: self.budget_session_id.clone(),
             execution_budget: self.execution_budget.clone(),
             budget_guard: self.budget_guard.clone(),
@@ -1034,7 +1129,9 @@ impl Spawner for AgentSpawner {
         let tools = self.child_tool_registry(&overrides.allowed_tools);
         let output: Arc<dyn OutputSink> = Arc::new(NullSink);
         let mut engine = AgentEngine::new_with_provider(provider, config, tools, output);
-        self.bind_child_budget(&mut engine, child_budget);
+        if let Err(error) = self.bind_child_budget(&mut engine, child_budget) {
+            return SubAgentResult::error(&sub_config.name, &error);
+        }
         engine.set_egress_policy(self.egress_policy.clone());
         // Bind the child to the parent cancel token so a host cancel stops it.
         engine.set_cancel_token(self.active_cancel_token().child_token());
@@ -1188,6 +1285,7 @@ fn build_tool_registry(
 
 #[cfg(test)]
 mod spawn_task_set_tests {
+    use serde_json::json;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
     use std::time::Duration;
@@ -1198,7 +1296,9 @@ mod spawn_task_set_tests {
     use wcore_providers::{LlmProvider, ProviderError};
     use wcore_types::llm::{LlmEvent, LlmRequest};
 
-    use super::{AgentSpawner, SpawnTaskSet, SubAgentConfig, SubAgentResult};
+    use super::{
+        AgentSpawner, SpawnTaskSet, SpawnerBudgetGovernance, SubAgentConfig, SubAgentResult,
+    };
 
     struct DropNotify(Option<oneshot::Sender<()>>);
 
@@ -1378,6 +1478,70 @@ mod spawn_task_set_tests {
             transient.active_cancel_token().is_cancelled(),
             "the transient spawner must inherit parent cancellation"
         );
+    }
+
+    #[test]
+    fn durable_child_depth_commits_admission_and_release() {
+        let dir = tempfile::tempdir().unwrap();
+        let journal = crate::session_journal::SessionJournal::open(
+            dir.path().join("session.journal"),
+            "session",
+        )
+        .unwrap();
+        let session = json!({
+            "id": "session",
+            "schema_version": 1,
+            "messages": [],
+        });
+        journal
+            .append(crate::session_journal::SessionEvent::SessionImported {
+                source_schema_version: 1,
+                session_digest: crate::session_journal::state_payload_digest(&session).unwrap(),
+                session,
+            })
+            .unwrap();
+        let authority = crate::budget_authority::BudgetAuthorityCoordinator::bind(
+            crate::budget_authority::BudgetAuthorityConfig {
+                journal: Some(journal.clone()),
+                budget_session_id: "session-budget".to_owned(),
+                provider_caps: wcore_budget::BudgetCap::default(),
+                execution_policy: wcore_budget::ExecutionBudget {
+                    max_agent_depth: Some(2),
+                    ..Default::default()
+                },
+                wall_clock: crate::session_journal::BudgetWallClockAuthority::ActiveRuntime,
+                process_cleanup_proof: None,
+            },
+        )
+        .unwrap()
+        .into_shared();
+        let provider: Arc<dyn LlmProvider> = Arc::new(CountingErrorProvider {
+            calls: AtomicUsize::new(0),
+        });
+        let spawner = AgentSpawner::new(provider, Config::default()).with_budget_governance(
+            SpawnerBudgetGovernance::from_authority(
+                Arc::clone(&authority),
+                tokio_util::sync::CancellationToken::new(),
+            ),
+        );
+        let initial_epoch = authority.lock().authority_epoch();
+
+        let (_child, guard) = spawner
+            .enter_child_budget()
+            .expect("durable authority admits the child");
+        let admitted = journal.state().unwrap().budget_authority.unwrap();
+        assert_eq!(admitted.authority_epoch, initial_epoch + 1);
+        let admitted_view =
+            wcore_budget::ExecutionBudgetView::from_snapshot(admitted.execution_root).unwrap();
+        assert_eq!(admitted_view.observed_for("max_agent_depth"), "1");
+
+        drop(guard);
+        let released = journal.state().unwrap().budget_authority.unwrap();
+        assert_eq!(released.authority_epoch, initial_epoch + 2);
+        let released_view =
+            wcore_budget::ExecutionBudgetView::from_snapshot(released.execution_root).unwrap();
+        assert_eq!(released_view.observed_for("max_agent_depth"), "0");
+        assert_eq!(authority.lock().authority_epoch(), released.authority_epoch);
     }
 
     #[tokio::test]

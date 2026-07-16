@@ -160,7 +160,7 @@ const STRIPPED_PROVIDER_ENV: &[&str] = &[
 /// throwaway tempdir, set a deterministic `TERM`, and strip every credential in
 /// [`STRIPPED_PROVIDER_ENV`]. The single place that defines "hermetic child
 /// env" so the headless / PTY / json-stream spawns can never drift apart (M6).
-fn harden_child_env(cmd: &mut std::process::Command, home: &Path) {
+fn harden_child_env(cmd: &mut std::process::Command, home: &Path) -> support::vault::VaultGuard {
     cmd.env("WAYLAND_HOME", home)
         .env("HOME", home)
         // Headless / json-stream children get a deterministic non-TTY term. The
@@ -170,6 +170,7 @@ fn harden_child_env(cmd: &mut std::process::Command, home: &Path) {
     for key in STRIPPED_PROVIDER_ENV {
         cmd.env_remove(key);
     }
+    support::vault::configure_process(cmd)
 }
 
 /// Spawn the binary headless (no TUI) against a hermetic home. The prompt is a
@@ -182,11 +183,16 @@ fn harden_child_env(cmd: &mut std::process::Command, home: &Path) {
 fn run_headless(home: &Path, args: &[&str]) -> (std::process::ExitStatus, String, String) {
     let mut cmd = std::process::Command::new(binary());
     cmd.args(args).current_dir(home);
-    harden_child_env(&mut cmd, home);
+    let vault = harden_child_env(&mut cmd, home);
     cmd.stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
-    let out = cmd.output().expect("spawn wayland-core headless");
+    let child = cmd.spawn();
+    drop(vault);
+    let out = child
+        .expect("spawn wayland-core headless")
+        .wait_with_output()
+        .expect("wait for wayland-core headless");
     (
         out.status,
         String::from_utf8_lossy(&out.stdout).into_owned(),
@@ -333,13 +339,14 @@ fn smoke_17_force_posture_auto_approves_mutating_tool_in_engine() {
     let mut cmd = std::process::Command::new(binary());
     cmd.args(["--json-stream", "--force", "--provider", "anthropic"])
         .current_dir(home.path());
-    harden_child_env(&mut cmd, home.path());
-    let mut child = cmd
+    let vault = harden_child_env(&mut cmd, home.path());
+    let child = cmd
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
-        .spawn()
-        .expect("spawn --json-stream --force");
+        .spawn();
+    drop(vault);
+    let mut child = child.expect("spawn --json-stream --force");
 
     let mut stdin = child.stdin.take().expect("stdin");
     let stdout = child.stdout.take().expect("stdout");
@@ -426,13 +433,14 @@ fn stop_mid_turn_does_not_strand_json_stream_session() {
     let mut cmd = std::process::Command::new(binary());
     cmd.args(["--json-stream", "--provider", "anthropic"])
         .current_dir(home.path());
-    harden_child_env(&mut cmd, home.path());
-    let mut child = cmd
+    let vault = harden_child_env(&mut cmd, home.path());
+    let child = cmd
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
-        .spawn()
-        .expect("spawn --json-stream");
+        .spawn();
+    drop(vault);
+    let mut child = child.expect("spawn --json-stream");
 
     let mut stdin = child.stdin.take().expect("stdin");
     let stdout = child.stdout.take().expect("stdout");
@@ -559,13 +567,14 @@ fn approval_mode_auto_edit_from_config_reaches_json_stream_session() {
     // NOTE: no --force. The auto-edit posture must come from config alone.
     cmd.args(["--json-stream", "--provider", "anthropic"])
         .current_dir(home.path());
-    harden_child_env(&mut cmd, home.path());
-    let mut child = cmd
+    let vault = harden_child_env(&mut cmd, home.path());
+    let child = cmd
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
-        .spawn()
-        .expect("spawn --json-stream");
+        .spawn();
+    drop(vault);
+    let mut child = child.expect("spawn --json-stream");
 
     let mut stdin = child.stdin.take().expect("stdin");
     let stdout = child.stdout.take().expect("stdout");
@@ -659,8 +668,11 @@ mod pty {
             for key in STRIPPED_PROVIDER_ENV {
                 cmd.env_remove(key);
             }
+            let vault = support::vault::configure_pty(&mut cmd);
             cmd.cwd(home);
-            let child = pty.slave.spawn_command(cmd).expect("spawn wayland-core");
+            let child = pty.slave.spawn_command(cmd);
+            drop(vault);
+            let child = child.expect("spawn wayland-core");
 
             let mut reader = pty.master.try_clone_reader().expect("clone PTY reader");
             let parser = std::sync::Arc::new(std::sync::Mutex::new(vt100::Parser::new(40, 120, 0)));
@@ -1224,13 +1236,14 @@ fn gap_d012_acp_protocol_gates_mutating_tools() {
     let mut cmd = std::process::Command::new(binary());
     cmd.args(["--json-stream", "--provider", "anthropic"])
         .current_dir(home.path());
-    harden_child_env(&mut cmd, home.path());
-    let mut child = cmd
+    let vault = harden_child_env(&mut cmd, home.path());
+    let child = cmd
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
-        .spawn()
-        .expect("spawn --json-stream");
+        .spawn();
+    drop(vault);
+    let mut child = child.expect("spawn --json-stream");
 
     let mut stdin = child.stdin.take().expect("stdin");
     let stdout = child.stdout.take().expect("stdout");
@@ -1338,7 +1351,13 @@ fn live_real_key_first_prompt_round_trip() {
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
-    let out = cmd.output().expect("spawn live wayland-core");
+    let vault = support::vault::configure_process(&mut cmd);
+    let child = cmd.spawn();
+    drop(vault);
+    let out = child
+        .expect("spawn live wayland-core")
+        .wait_with_output()
+        .expect("wait for live wayland-core");
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(
         out.status.success(),

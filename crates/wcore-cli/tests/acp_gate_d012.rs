@@ -58,13 +58,14 @@ const STRIPPED_PROVIDER_ENV: &[&str] = &[
 
 /// Apply the hermetic child env uniformly: point `WAYLAND_HOME` + `HOME` at the
 /// throwaway tempdir, set a deterministic `TERM`, and strip every credential.
-fn harden_child_env(cmd: &mut std::process::Command, home: &Path) {
+fn harden_child_env(cmd: &mut std::process::Command, home: &Path) -> support::vault::VaultGuard {
     cmd.env("WAYLAND_HOME", home)
         .env("HOME", home)
         .env("TERM", "dumb");
     for key in STRIPPED_PROVIDER_ENV {
         cmd.env_remove(key);
     }
+    support::vault::configure_process(cmd)
 }
 
 /// Seed `<home>/config.toml` for a provider/model routed at the mock.
@@ -109,13 +110,14 @@ fn drive_write_turn(extra_args: &[&str]) -> GateProbe {
     args.extend_from_slice(extra_args);
     let mut cmd = std::process::Command::new(binary());
     cmd.args(&args).current_dir(home.path());
-    harden_child_env(&mut cmd, home.path());
-    let mut child = cmd
+    let vault = harden_child_env(&mut cmd, home.path());
+    let child = cmd
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
-        .spawn()
-        .expect("spawn --json-stream");
+        .spawn();
+    drop(vault);
+    let mut child = child.expect("spawn --json-stream");
 
     let mut stdin = child.stdin.take().expect("stdin");
     let stdout = child.stdout.take().expect("stdout");

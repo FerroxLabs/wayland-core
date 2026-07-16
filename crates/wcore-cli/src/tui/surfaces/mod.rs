@@ -15,7 +15,10 @@ use ratatui::widgets::{Block, Paragraph};
 
 use crate::tui::app::App;
 use crate::tui::commands::{CommandRegistry, Dispatch, parse_theme_mode};
-use crate::tui::engine_bridge::{EngineInventory, TuiEngine};
+use crate::tui::engine_bridge::{
+    EngineInventory, SessionSwitchResult, SessionSwitchStart, TuiEngine,
+    TuiOperatorResolutionInput, TuiRecoveryAction, TuiRecoveryResult, TuiRecoveryView,
+};
 use crate::tui::frecency::FrecencyStore;
 use crate::tui::theme::{Theme, ThemeMode};
 use crate::tui::widgets::{SystemSampler, status_bar, top_chrome};
@@ -462,6 +465,9 @@ pub struct Router {
     ///
     /// [`check_model_divergence`]: Self::check_model_divergence
     model_pinned: Option<String>,
+    /// Sanitized interrupted-turn authority for the active session. Actions
+    /// are always rebound to this exact turn + cursor before Core mutates.
+    recovery: Option<TuiRecoveryView>,
 }
 
 /// v0.9.1.1 H6: cache of cold-started surfaces keyed by their
@@ -523,6 +529,7 @@ impl Router {
             // collapse the chord into a one-Esc drain at boot.
             last_esc_at: std::time::Instant::now() - std::time::Duration::from_secs(10),
             model_pinned: None,
+            recovery: None,
         }
     }
 
@@ -535,8 +542,9 @@ impl Router {
     /// `/name` slash command. Registering them into the `CommandRegistry`
     /// makes `/lint` (for an installed `lint` skill) route to the skill
     /// runner instead of returning "Unknown command".
-    pub fn with_engine(mut self, engine: TuiEngine) -> Self {
+    pub fn with_engine(mut self, mut engine: TuiEngine) -> Self {
         self.register_engine_skills(&engine);
+        self.recovery = engine.take_boot_recovery();
         self.engine = Some(engine);
         self
     }
@@ -674,45 +682,107 @@ impl Router {
         )
     }
 
-    /// D018: reopen session `id_or_prefix` in-TUI. Loads the saved session,
-    /// swaps the live engine conversation buffer to its messages, and repaints
-    /// the transcript with its history (mirroring a `--resume` boot). Returns
-    /// the user-facing confirmation, or a "no match" line.
-    fn apply_resume(&mut self, app: &mut App, id_or_prefix: &str) -> String {
-        // All engine work happens first (load the session, repaint source,
-        // rehydrate the engine buffer) so the `&self` engine borrow ends
-        // before the `self`/`app` mutations below.
-        let repaint = match self.engine.as_ref() {
-            Some(engine) => match engine.load_session(id_or_prefix) {
-                Some(session) => {
-                    let short = short_id(&session.id).to_string();
-                    let msg_count = session.messages.len();
-                    // Same builder the `--resume` boot path uses.
-                    let (turns, tool_cards) =
-                        crate::tui::protocol_bridge::hydrate_history(&session.messages);
-                    // Rehydrate the live engine buffer so the next turn
-                    // continues THIS session's context, not the current one.
-                    engine.load_conversation(session.messages);
-                    Some((short, msg_count, turns, tool_cards))
-                }
-                None => None,
-            },
+    /// D018/F14: begin an atomic in-TUI session authority transfer. This only
+    /// reports that the transfer started; repaint happens later, when the
+    /// engine bridge delivers a successful `SessionSwitchResult`.
+    fn apply_resume(&mut self, _app: &mut App, id_or_prefix: &str) -> String {
+        let disposition = match self.engine.as_ref() {
+            Some(engine) => engine.request_session_switch(id_or_prefix),
             None => return "Reopening a session needs a live session.".to_string(),
         };
-        let Some((short, msg_count, turns, tool_cards)) = repaint else {
-            return format!(
+        match disposition {
+            SessionSwitchStart::Started { short_id } => {
+                format!("Reopening session {short_id}…")
+            }
+            SessionSwitchStart::AlreadyActive { short_id } => {
+                format!("Session {short_id} is already active.")
+            }
+            SessionSwitchStart::NotFound => format!(
                 "No saved session matches `{id_or_prefix}`. Type /resume to list recent sessions."
-            );
-        };
-        // Swap the transcript to the resumed history.
-        app.session.clear();
-        app.reset_agents();
-        app.session.turns = turns;
-        app.session.tool_cards = tool_cards;
-        self.model_pinned = None;
-        format!(
-            "Reopened session {short} ({msg_count} messages). You can continue where it left off."
-        )
+            ),
+            SessionSwitchStart::StoreUnavailable => {
+                "No session store is configured for this live session.".to_string()
+            }
+            SessionSwitchStart::Pending => "A session reopen is already in progress.".to_string(),
+        }
+    }
+
+    /// Apply completed session switches to the UI. A target transcript is
+    /// installed only for `Applied`, which means `AgentEngine` has already
+    /// transferred journal, lease, identity, usage, and conversation state.
+    /// Failures append one diagnostic to the current transcript and leave all
+    /// existing view state intact.
+    pub(crate) fn poll_session_switch(&mut self, app: &mut App) {
+        let result = self
+            .engine
+            .as_mut()
+            .and_then(TuiEngine::take_session_switch_result);
+        match result {
+            Some(SessionSwitchResult::Applied {
+                session_id,
+                messages,
+                recovery,
+            }) => {
+                let short = short_id(&session_id).to_string();
+                let msg_count = messages.len();
+                let (turns, tool_cards) = crate::tui::protocol_bridge::hydrate_history(&messages);
+                app.session.clear();
+                app.reset_agents();
+                app.session.turns = turns;
+                app.session.tool_cards = tool_cards;
+                self.model_pinned = None;
+                self.recovery = recovery;
+                append_system_turn(
+                    app,
+                    format!(
+                        "Reopened session {short} ({msg_count} messages). You can continue where it left off."
+                    ),
+                );
+                if let Some(recovery) = &self.recovery {
+                    append_system_turn(app, render_recovery(recovery));
+                }
+            }
+            Some(SessionSwitchResult::Failed { session_id, error }) => {
+                append_system_turn(
+                    app,
+                    format!("Couldn't reopen session {}: {error}", short_id(&session_id)),
+                );
+            }
+            None => {}
+        }
+    }
+
+    /// Apply a completed durable recovery action. The inspected view is kept
+    /// unchanged on refusal; a successful action replaces it only with Core's
+    /// newly derived durable state.
+    pub(crate) fn poll_recovery_action(&mut self, app: &mut App) {
+        let result = self
+            .engine
+            .as_mut()
+            .and_then(TuiEngine::take_recovery_action_result);
+        match result {
+            Some(TuiRecoveryResult::Interrupted { recovery }) => {
+                self.recovery = recovery;
+                if let Some(recovery) = &self.recovery {
+                    append_system_turn(app, render_recovery(recovery));
+                }
+            }
+            Some(TuiRecoveryResult::Completed { action, recovery }) => {
+                self.recovery = recovery;
+                append_system_turn(
+                    app,
+                    format!("Recovery {} completed durably.", action.as_str()),
+                );
+                if let Some(recovery) = &self.recovery {
+                    append_system_turn(app, render_recovery(recovery));
+                }
+            }
+            Some(TuiRecoveryResult::Failed { action, error }) => append_system_turn(
+                app,
+                format!("Recovery {} refused: {error}", action.as_str()),
+            ),
+            None => {}
+        }
     }
 
     /// Test-only seam: replace the active surface so a test can drive a
@@ -947,20 +1017,14 @@ impl Router {
                 self.last_esc_at =
                     std::time::Instant::now() - std::time::Duration::from_millis(500);
                 // Fall through to the standard overlay dispatch below.
-            } else if app.session.streaming_active
-                && !app
-                    .session
-                    .tool_cards
-                    .iter()
-                    .any(|c| c.status == crate::tui::app::ToolCardStatus::AwaitingApproval)
-            {
-                // Step 2 — streaming cancel (global), only when no overlay
-                // is open AND no tool card is awaiting approval. A turn that
-                // is blocked on an approval card keeps `streaming_active`
-                // true; without this guard the global cancel would eat the
-                // card's own advertised `[esc] cancel`/`[esc] dismiss` and
-                // abort the whole turn instead of denying the one call
-                // (the v0.9.6 "Esc cancels the turn, not the card" fix).
+            } else if app.session.streaming_active {
+                // Step 2 — streaming cancel (global), when no overlay is
+                // open. This includes a turn blocked on approval: Esc means
+                // cancel the turn, while `n` remains the explicit deny-one-
+                // call affordance. Keeping the engine run future alive lets
+                // Core durably append ApprovalResolved(Cancelled) before
+                // TurnCancelled; routing Esc as a deny would continue the
+                // same turn and defeat that cancellation authority.
                 return self.apply(SurfaceAction::Command("/cancel".to_string()), app);
             } else {
                 // Step 3 — AgentTranscript Pop. `apply(Pop)` returns false
@@ -1921,6 +1985,98 @@ impl Router {
                             }
                         }
                     }
+                    "/recover" => {
+                        let arg = line.split_whitespace().nth(1);
+                        let action = match arg {
+                            None => {
+                                let body = self
+                                    .recovery
+                                    .as_ref()
+                                    .map(render_recovery)
+                                    .unwrap_or_else(|| {
+                                        "No interrupted turn is currently recoverable.".to_string()
+                                    });
+                                push_system(app, body);
+                                return true;
+                            }
+                            Some("json") => {
+                                let body = match self.recovery.as_ref() {
+                                    Some(recovery) => match recovery.projection_json() {
+                                        Ok(json) => format!("RECOVERY_V1 {json}"),
+                                        Err(error) => {
+                                            format!("Recovery projection unavailable: {error}")
+                                        }
+                                    },
+                                    None => {
+                                        "No interrupted turn is currently recoverable.".to_string()
+                                    }
+                                };
+                                push_system(app, body);
+                                return true;
+                            }
+                            Some("continue") => TuiRecoveryAction::Continue,
+                            Some("approve") => TuiRecoveryAction::Approve,
+                            Some("deny") => TuiRecoveryAction::Deny,
+                            Some("reconcile") => TuiRecoveryAction::Reconcile,
+                            Some("resolve") => {
+                                let input = match parse_operator_resolution(line) {
+                                    Ok(input) => input,
+                                    Err(error) => {
+                                        push_system(app, error);
+                                        return true;
+                                    }
+                                };
+                                let Some(recovery) = self.recovery.clone() else {
+                                    push_system(
+                                        app,
+                                        "No interrupted turn is currently recoverable.".to_string(),
+                                    );
+                                    return true;
+                                };
+                                let result = match self.engine.as_ref() {
+                                    Some(engine) => {
+                                        engine.request_operator_resolution(&recovery, input)
+                                    }
+                                    None => Err("recovery needs a live session".to_string()),
+                                };
+                                match result {
+                                    Ok(()) => {
+                                        push_system(app, "Recovery resolve started…".to_string())
+                                    }
+                                    Err(error) => push_system(
+                                        app,
+                                        format!("Recovery resolve refused: {error}"),
+                                    ),
+                                }
+                                return true;
+                            }
+                            Some("cancel") => TuiRecoveryAction::Cancel,
+                            Some(_) => {
+                                push_system(app, recovery_usage());
+                                return true;
+                            }
+                        };
+                        let Some(recovery) = self.recovery.clone() else {
+                            push_system(
+                                app,
+                                "No interrupted turn is currently recoverable.".to_string(),
+                            );
+                            return true;
+                        };
+                        let result = match self.engine.as_mut() {
+                            Some(engine) => engine.request_recovery_action(&recovery, action),
+                            None => Err("recovery needs a live session".to_string()),
+                        };
+                        match result {
+                            Ok(()) => {
+                                push_system(app, format!("Recovery {} started…", action.as_str()))
+                            }
+                            Err(error) => push_system(
+                                app,
+                                format!("Recovery {} refused: {error}", action.as_str()),
+                            ),
+                        }
+                    }
                     "/provider" => {
                         // D022: bare `/provider` opens the arrow-key picker
                         // overlay (the current provider marked ●); `/provider
@@ -2551,6 +2707,126 @@ fn short_id(id: &str) -> &str {
     id.get(..8).unwrap_or(id)
 }
 
+fn render_recovery(recovery: &TuiRecoveryView) -> String {
+    use wcore_protocol::events::RecoveryLifecycle;
+
+    let lifecycle = match recovery.projection.lifecycle {
+        RecoveryLifecycle::Ready => "ready",
+        RecoveryLifecycle::Streaming => "streaming",
+        RecoveryLifecycle::AwaitingApproval => "awaiting approval",
+        RecoveryLifecycle::ToolInFlight => "tool in flight",
+        RecoveryLifecycle::ReconciliationRequired => "reconciliation required",
+        RecoveryLifecycle::Suspended => "suspended",
+        RecoveryLifecycle::Completed => "completed",
+        RecoveryLifecycle::Cancelled => "cancelled",
+        RecoveryLifecycle::Failed => "failed",
+    };
+    let sequence = recovery
+        .projection
+        .cursor
+        .journal_sequence
+        .map(|value| value.to_string())
+        .unwrap_or_else(|| "genesis".to_string());
+    let digest = recovery
+        .projection
+        .cursor
+        .journal_digest
+        .chars()
+        .take(12)
+        .collect::<String>();
+    let actions = if recovery.actions.is_empty() {
+        "none (fail-closed)".to_string()
+    } else {
+        recovery
+            .actions
+            .iter()
+            .map(|action| match action {
+                TuiRecoveryAction::Resolve => "/recover resolve <outcome> <operator> <source> \
+                    <tool_execution_id> <reference> <sha256:digest>"
+                    .to_string(),
+                _ => format!("/recover {}", action.as_str()),
+            })
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    let reason = recovery
+        .projection
+        .pending_turn
+        .reconcile_reason
+        .map(|reason| format!("\nReason: {reason:?}"))
+        .unwrap_or_default();
+    let pending_effect = recovery
+        .projection
+        .pending_turn
+        .pending_call_id
+        .as_ref()
+        .filter(|_| recovery.actions.contains(&TuiRecoveryAction::Resolve))
+        .map(|id| format!("\nPending tool execution: {id}"))
+        .unwrap_or_default();
+    format!(
+        "Interrupted turn {} — {lifecycle}.\nCursor: {sequence}:{digest}{reason}{pending_effect}\nAllowed: {actions}",
+        short_id(&recovery.projection.pending_turn.turn_id)
+    )
+}
+
+fn recovery_usage() -> String {
+    "Usage: /recover json|continue|approve|deny|reconcile|cancel\n\
+     Operator evidence: /recover resolve <succeeded|failed|not_started> \
+     <operator_id> <tool_receipt|provider_receipt|process_observation|external_system_record> \
+     <tool_execution_id> <reference_id> <sha256:digest>"
+        .to_string()
+}
+
+fn parse_operator_resolution(line: &str) -> Result<TuiOperatorResolutionInput, String> {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    use wcore_protocol::events::{
+        OperatorResolutionEvidence, OperatorResolutionEvidenceSource, OperatorToolEffectOutcome,
+    };
+
+    let args = line.split_whitespace().skip(2).collect::<Vec<_>>();
+    if args.len() != 6 {
+        return Err(recovery_usage());
+    }
+    let outcome = match args[0] {
+        "succeeded" => OperatorToolEffectOutcome::Succeeded,
+        "failed" => OperatorToolEffectOutcome::Failed,
+        "not_started" => OperatorToolEffectOutcome::NotStarted,
+        _ => return Err(recovery_usage()),
+    };
+    let source = match args[2] {
+        "tool_receipt" => OperatorResolutionEvidenceSource::ToolReceipt,
+        "provider_receipt" => OperatorResolutionEvidenceSource::ProviderReceipt,
+        "process_observation" => OperatorResolutionEvidenceSource::ProcessObservation,
+        "external_system_record" => OperatorResolutionEvidenceSource::ExternalSystemRecord,
+        _ => return Err(recovery_usage()),
+    };
+    if !args[5].strip_prefix("sha256:").is_some_and(|digest| {
+        digest.len() == 64
+            && digest
+                .bytes()
+                .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+    }) {
+        return Err(recovery_usage());
+    }
+    let observed_at_unix_ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|_| "system clock is before the Unix epoch".to_string())?
+        .as_millis()
+        .try_into()
+        .map_err(|_| "system clock cannot be represented in the recovery record".to_string())?;
+    Ok(TuiOperatorResolutionInput {
+        tool_execution_id: args[3].to_string(),
+        outcome,
+        operator_id: args[1].to_string(),
+        evidence: OperatorResolutionEvidence {
+            source,
+            reference_id: args[4].to_string(),
+            observed_at_unix_ms,
+            digest: args[5].to_string(),
+        },
+    })
+}
+
 /// Render the `/resume` output. Bare (`arg = None`) lists saved sessions
 /// newest-first; `/resume <id>` resolves the id and returns the exact restart
 /// command. Pure over `&[SessionMeta]` so it unit-tests without a session dir.
@@ -2654,14 +2930,29 @@ fn oauth_provider_signed_in(name: &str) -> Option<bool> {
 /// duplicates the per-provider env-var arms; it parses the slug to a
 /// `ProviderType` and asks the config layer.
 fn provider_connection_status(name: &str) -> ProviderConnection {
-    let connected = wcore_config::config::provider_type_from_slug(name)
-        .map(wcore_config::config::provider_connected)
-        .unwrap_or(false);
-    if connected {
-        ProviderConnection::Connected
-    } else {
-        ProviderConnection::NeedsKey
-    }
+    provider_connection_statuses(&[name])
+        .into_iter()
+        .next()
+        .unwrap_or(ProviderConnection::NeedsKey)
+}
+
+/// Batch form used while building provider/model catalogs. The config layer
+/// opens and decrypts the credential store once for the whole list, avoiding a
+/// synchronous vault KDF per row on the TUI input thread.
+fn provider_connection_statuses(names: &[&str]) -> Vec<ProviderConnection> {
+    let parsed = names
+        .iter()
+        .map(|name| wcore_config::config::provider_type_from_slug(name))
+        .collect::<Vec<_>>();
+    let provider_types = parsed.iter().flatten().copied().collect::<Vec<_>>();
+    let mut connected = wcore_config::config::providers_connected(&provider_types).into_iter();
+    parsed
+        .into_iter()
+        .map(|provider| match provider {
+            Some(_) if connected.next().unwrap_or(false) => ProviderConnection::Connected,
+            _ => ProviderConnection::NeedsKey,
+        })
+        .collect()
 }
 
 /// Sync connection verdict for a built-in provider — see
@@ -2985,6 +3276,16 @@ fn make_surface(id: SurfaceId) -> Box<dyn Surface> {
     }
 }
 
+fn append_system_turn(app: &mut App, text: String) {
+    use crate::tui::app::{TurnRole, TurnView};
+    use crate::tui::turn_element::TurnElement;
+
+    app.session.turns.push(TurnView {
+        role: TurnRole::System,
+        elements: vec![TurnElement::Markdown(text)],
+    });
+}
+
 /// D015 (mutex-poison containment): record that a surface input handler
 /// panicked and was caught (in `Router::handle_key` / `handle_paste`). Appends
 /// a calm system turn so the user sees the input was dropped rather than the
@@ -3063,6 +3364,39 @@ mod tests {
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
     use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+    #[test]
+    fn recovery_resolution_parser_requires_closed_typed_evidence_f14() {
+        use wcore_protocol::events::{OperatorResolutionEvidenceSource, OperatorToolEffectOutcome};
+
+        let digest = format!("sha256:{}", "a".repeat(64));
+        let input = parse_operator_resolution(&format!(
+            "/recover resolve not_started operator-7 process_observation tool-9 process-42 {digest}"
+        ))
+        .expect("valid typed operator evidence");
+        assert_eq!(input.tool_execution_id, "tool-9");
+        assert_eq!(input.outcome, OperatorToolEffectOutcome::NotStarted);
+        assert_eq!(input.operator_id, "operator-7");
+        assert_eq!(
+            input.evidence.source,
+            OperatorResolutionEvidenceSource::ProcessObservation
+        );
+        assert_eq!(input.evidence.reference_id, "process-42");
+        assert_eq!(input.evidence.digest, digest);
+        assert!(input.evidence.observed_at_unix_ms > 0);
+
+        for malformed in [
+            "/recover resolve guessed operator-7 process_observation tool-9 process-42 sha256:00",
+            "/recover resolve failed operator-7 hearsay tool-9 process-42 sha256:00",
+            "/recover resolve failed operator-7 process_observation tool-9 process-42",
+            "/recover resolve failed operator-7 process_observation tool-9 process-42 sha256:00 extra",
+        ] {
+            assert!(
+                parse_operator_resolution(malformed).is_err(),
+                "accepted malformed operator evidence: {malformed}"
+            );
+        }
+    }
 
     fn key(code: KeyCode) -> KeyEvent {
         KeyEvent::new(code, KeyModifiers::NONE)
@@ -3498,6 +3832,26 @@ mod tests {
         assert_eq!(
             app.overlay, None,
             "running a command must dismiss the palette overlay"
+        );
+    }
+
+    #[test]
+    fn exact_provider_palette_enter_routes_to_provider_picker() {
+        let mut app = App::new();
+        let mut router = Router::new(&app);
+        router.apply(SurfaceAction::Switch(SurfaceId::Workspace), &mut app);
+
+        router.handle_key(key(KeyCode::Char('/')), &mut app);
+        assert_eq!(app.overlay, Some(SurfaceId::Palette));
+        for character in "provider".chars() {
+            router.handle_key(key(KeyCode::Char(character)), &mut app);
+        }
+        router.handle_key(key(KeyCode::Enter), &mut app);
+
+        assert_eq!(
+            app.overlay,
+            Some(SurfaceId::ProviderPicker),
+            "Enter on the exact `/provider` match must close the palette and route the command"
         );
     }
 
@@ -4394,6 +4748,203 @@ mod tests {
         Router::new(app).with_engine(tui_engine)
     }
 
+    fn save_resume_fixture(
+        manager: &wcore_agent::session::SessionManager,
+        id: &str,
+        marker: &str,
+    ) -> wcore_agent::session::Session {
+        let session: wcore_agent::session::Session = serde_json::from_value(serde_json::json!({
+            "schema_version": 1,
+            "id": id,
+            "created_at": "2026-06-01T05:00:00Z",
+            "updated_at": "2026-06-01T05:10:00Z",
+            "provider": "anthropic",
+            "model": "claude-opus",
+            "cwd": "",
+            "messages": [
+                { "role": "user", "content": [ { "type": "text", "text": marker } ] }
+            ],
+        }))
+        .expect("deserialize session fixture");
+        manager.save(&session).expect("save session");
+        manager
+            .update_index_for(&session)
+            .expect("index session fixture");
+        session
+    }
+
+    fn router_with_active_session(app: &App, directory: &std::path::Path, id: &str) -> Router {
+        router_with_active_session_provider(
+            app,
+            directory,
+            id,
+            std::sync::Arc::new(wcore_agent::test_utils::ScriptedProvider::single_text_turn(
+                "test response",
+            )),
+        )
+    }
+
+    fn router_with_active_session_provider(
+        app: &App,
+        directory: &std::path::Path,
+        id: &str,
+        provider: std::sync::Arc<dyn wcore_providers::LlmProvider>,
+    ) -> Router {
+        use std::sync::Arc;
+        use wcore_agent::session::SessionManager;
+        use wcore_protocol::ToolApprovalManager;
+
+        let manager = SessionManager::new(directory.to_path_buf(), 50);
+        let active = manager.load_for_run(id).expect("load active session");
+        let mut config = wcore_config::config::Config::default();
+        config.session.enabled = true;
+        config.session.directory = directory.to_string_lossy().into_owned();
+        config.session.max_sessions = 50;
+        let mut engine = wcore_agent::engine::AgentEngine::resume_active_with_provider(
+            provider,
+            config,
+            wcore_tools::registry::ToolRegistry::new(),
+            Arc::new(crate::tui::engine_bridge::ChannelSink::new(
+                tokio::sync::mpsc::unbounded_channel().0,
+            )),
+            active,
+        );
+        engine.use_recovery_test_key(&[0x52; 32]);
+        let approval = Arc::new(ToolApprovalManager::new());
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut tui_engine = TuiEngine::new(engine, approval, tx);
+        tui_engine.set_session_store(directory.to_path_buf(), 50);
+        Router::new(app).with_engine(tui_engine)
+    }
+
+    struct PhysicalScriptedProvider {
+        url: String,
+        text: String,
+    }
+
+    #[async_trait::async_trait]
+    impl wcore_providers::LlmProvider for PhysicalScriptedProvider {
+        async fn stream(
+            &self,
+            _: &wcore_types::llm::LlmRequest,
+        ) -> Result<
+            tokio::sync::mpsc::Receiver<wcore_types::llm::LlmEvent>,
+            wcore_providers::ProviderError,
+        > {
+            let client = wcore_egress::EgressClient::new()
+                .with_policy(std::sync::Arc::new(wcore_egress::AllowAllPolicy));
+            let response = wcore_providers::retry::scope_max_retries(
+                0,
+                wcore_providers::retry::builder_send_with_retry(client.get(&self.url)),
+            )
+            .await?;
+            if !response.status().is_success() {
+                return Err(wcore_providers::ProviderError::Api {
+                    status: response.status().as_u16(),
+                    message: "fixture response".to_string(),
+                });
+            }
+            let (tx, rx) = tokio::sync::mpsc::channel(2);
+            tx.send(wcore_types::llm::LlmEvent::TextDelta(self.text.clone()))
+                .await
+                .expect("fixture receiver remains live");
+            tx.send(wcore_types::llm::LlmEvent::Done {
+                stop_reason: wcore_types::message::StopReason::EndTurn,
+                finish_reason: wcore_types::message::FinishReason::Stop,
+                usage: wcore_types::message::TokenUsage::default(),
+            })
+            .await
+            .expect("fixture receiver remains live");
+            Ok(rx)
+        }
+    }
+
+    fn append_interrupted_turn(
+        manager: &wcore_agent::session::SessionManager,
+        session_id: &str,
+        turn_id: &str,
+        user_message: &str,
+    ) {
+        use wcore_agent::session_journal::SessionEvent;
+
+        let active = manager
+            .load_for_run(session_id)
+            .expect("acquire fixture journal");
+        active
+            .journal
+            .append(SessionEvent::TurnStarted {
+                turn_id: turn_id.to_string(),
+                user_message: user_message.to_string(),
+            })
+            .expect("append interrupted turn");
+    }
+
+    async fn append_recoverable_turn(
+        manager: &wcore_agent::session::SessionManager,
+        session_directory: &std::path::Path,
+        session_id: &str,
+        turn_id: &str,
+        user_message: &str,
+    ) {
+        let active = manager
+            .load_for_run(session_id)
+            .expect("acquire recoverable fixture journal");
+        let mut config = wcore_config::config::Config::default();
+        config.session.enabled = true;
+        config.session.directory = session_directory.to_string_lossy().into_owned();
+        config.session.max_sessions = 50;
+        let mut engine = wcore_agent::engine::AgentEngine::resume_active_with_provider(
+            std::sync::Arc::new(wcore_agent::test_utils::ScriptedProvider::single_text_turn(
+                "unused checkpoint fixture response",
+            )),
+            config,
+            wcore_tools::registry::ToolRegistry::new(),
+            std::sync::Arc::new(crate::tui::engine_bridge::ChannelSink::new(
+                tokio::sync::mpsc::unbounded_channel().0,
+            )),
+            active,
+        );
+        engine.use_recovery_test_key(&[0x52; 32]);
+        engine
+            .prepare_recoverable_turn_for_test(turn_id, user_message)
+            .await
+            .expect("persist sealed recovery checkpoint");
+    }
+
+    async fn await_session_switch(router: &mut Router, app: &mut App) {
+        for _ in 0..100 {
+            router.poll_session_switch(app);
+            if !router
+                .engine
+                .as_ref()
+                .expect("test engine")
+                .session_switch_in_progress()
+            {
+                router.poll_session_switch(app);
+                return;
+            }
+            tokio::task::yield_now().await;
+        }
+        panic!("session switch did not complete");
+    }
+
+    async fn await_recovery_action(router: &mut Router, app: &mut App) {
+        for _ in 0..400 {
+            router.poll_recovery_action(app);
+            if !router
+                .engine
+                .as_ref()
+                .expect("test engine")
+                .recovery_action_in_progress()
+            {
+                router.poll_recovery_action(app);
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+        panic!("recovery action did not complete");
+    }
+
     fn skill(name: &str, invocable: bool) -> crate::tui::engine_bridge::SkillInfo {
         crate::tui::engine_bridge::SkillInfo {
             name: name.to_string(),
@@ -4466,45 +5017,34 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn resume_reopens_a_session_in_tui_d018() {
-        use wcore_agent::session::{Session, SessionManager};
+    async fn resume_transfers_engine_authority_before_repainting_f14() {
+        use wcore_agent::session::SessionManager;
 
-        // A real on-disk session store with one saved session carrying a
-        // distinctive user message. Built via serde (like the g6 test) to
-        // avoid a direct chrono dep just for the timestamp literals.
         let dir = tempfile::tempdir().expect("tempdir");
         let manager = SessionManager::new(dir.path().to_path_buf(), 50);
-        let session: Session = serde_json::from_value(serde_json::json!({
-            "schema_version": 1,
-            "id": "deadbeefcafef00d",
-            "created_at": "2026-06-01T05:00:00Z",
-            "updated_at": "2026-06-01T05:10:00Z",
-            "provider": "anthropic",
-            "model": "claude-opus",
-            "cwd": "",
-            "messages": [
-                { "role": "user", "content": [ { "type": "text", "text": "RESUME_MARKER question from the past" } ] }
-            ],
-        }))
-        .expect("deserialize session fixture");
-        manager.save(&session).expect("save session");
-        manager
-            .update_index_for(&session)
-            .expect("index the session");
+        let session_a = save_resume_fixture(&manager, "f14aaaaa", "SESSION_A_MARKER");
+        let session_b = save_resume_fixture(&manager, "f14bbbbb", "SESSION_B_MARKER");
 
         let mut app = App::new();
-        let mut router = router_with_inventory(&app, vec![], Some((dir.path().to_path_buf(), 50)));
+        append_system_turn(&mut app, "OLD_UI_MARKER".to_string());
+        let mut router = router_with_active_session(&app, dir.path(), &session_a.id);
 
-        // `/resume <id>` REOPENS in-TUI: the transcript repaints the saved
-        // session's history (rendered) and a confirmation names the session.
         router.apply(SurfaceAction::Switch(SurfaceId::Workspace), &mut app);
         router.apply(
-            SurfaceAction::Command(format!("/resume {}", session.id)),
+            SurfaceAction::Command(format!("/resume {}", session_b.id)),
             &mut app,
         );
-        // The resumed history is now the transcript's render source — the
-        // first turn carries the saved user message, the last is the reopen
-        // confirmation (proves the buffer was swapped, not a CLI string shown).
+        let before_completion = app
+            .session
+            .turns
+            .iter()
+            .map(|turn| turn.text())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(before_completion.contains("OLD_UI_MARKER"));
+        assert!(!before_completion.contains("SESSION_B_MARKER"));
+
+        await_session_switch(&mut router, &mut app).await;
         let transcript = app
             .session
             .turns
@@ -4513,7 +5053,7 @@ mod tests {
             .collect::<Vec<_>>()
             .join("\n");
         assert!(
-            transcript.contains("RESUME_MARKER"),
+            transcript.contains("SESSION_B_MARKER"),
             "the resumed session's history must repaint into the transcript: {transcript}"
         );
         assert!(
@@ -4524,12 +5064,364 @@ mod tests {
             !transcript.contains("wayland-core --resume"),
             "the wired /resume must reopen, not print a relaunch command: {transcript}"
         );
-        // And it actually paints — drive the real render so the assertion is a
-        // RENDERED one, not just a view-model check.
+        assert!(!transcript.contains("OLD_UI_MARKER"));
+
+        // The target lease is now held by the engine and the source lease was
+        // released. This proves the repaint followed a full authority transfer,
+        // not another message-only buffer swap.
+        let released_a = manager
+            .load_for_run(&session_a.id)
+            .expect("source lease released after successful switch");
+        drop(released_a);
+        assert!(
+            manager.load_for_run(&session_b.id).is_err(),
+            "target journal lease must be held by the switched engine"
+        );
+
         let out = render_to_string(&mut router, &app, 120, 16);
         assert!(
-            out.contains("RESUME_MARKER") || out.contains("Reopened session"),
+            out.contains("SESSION_B_MARKER") || out.contains("Reopened session"),
             "the reopened session must paint to the terminal buffer: {out}"
+        );
+    }
+
+    #[tokio::test]
+    async fn resume_failure_keeps_current_engine_and_ui_unchanged_f14() {
+        use wcore_agent::session::SessionManager;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let manager = SessionManager::new(dir.path().to_path_buf(), 50);
+        let session_a = save_resume_fixture(&manager, "f14fa11a", "SESSION_A_MARKER");
+        let session_b = save_resume_fixture(&manager, "f14fa11b", "SESSION_B_MARKER");
+        let target_lease = manager
+            .load_for_run(&session_b.id)
+            .expect("hold target lease to force switch failure");
+
+        let mut app = App::new();
+        append_system_turn(&mut app, "CURRENT_UI_MARKER".to_string());
+        let mut router = router_with_active_session(&app, dir.path(), &session_a.id);
+        router.apply(
+            SurfaceAction::Command(format!("/resume {}", session_b.id)),
+            &mut app,
+        );
+        await_session_switch(&mut router, &mut app).await;
+
+        let transcript = app
+            .session
+            .turns
+            .iter()
+            .map(|turn| turn.text())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(transcript.contains("CURRENT_UI_MARKER"));
+        assert!(!transcript.contains("SESSION_B_MARKER"));
+        assert!(transcript.contains("Couldn't reopen session"));
+        assert!(
+            manager.load_for_run(&session_a.id).is_err(),
+            "source lease must remain held after target acquisition fails"
+        );
+        drop(target_lease);
+    }
+
+    #[tokio::test]
+    async fn resume_same_session_is_noop_before_second_lease_f14() {
+        use wcore_agent::session::SessionManager;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let manager = SessionManager::new(dir.path().to_path_buf(), 50);
+        let session_a = save_resume_fixture(&manager, "f145a0ea", "SESSION_A_MARKER");
+        let mut app = App::new();
+        append_system_turn(&mut app, "CURRENT_UI_MARKER".to_string());
+        let mut router = router_with_active_session(&app, dir.path(), &session_a.id);
+
+        router.apply(
+            SurfaceAction::Command(format!("/resume {}", session_a.id)),
+            &mut app,
+        );
+        let transcript = app
+            .session
+            .turns
+            .iter()
+            .map(|turn| turn.text())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(transcript.contains("CURRENT_UI_MARKER"));
+        assert!(transcript.contains("already active"));
+        assert!(
+            manager.load_for_run(&session_a.id).is_err(),
+            "same-session no-op must retain the existing lease"
+        );
+        assert!(
+            !router
+                .engine
+                .as_ref()
+                .expect("test engine")
+                .session_switch_in_progress(),
+            "same-session selection must not spawn an authority transfer"
+        );
+    }
+
+    #[tokio::test]
+    async fn resumed_tui_seeds_content_free_machine_projection_f14() {
+        use wcore_agent::session::SessionManager;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let manager = SessionManager::new(dir.path().to_path_buf(), 50);
+        let session = save_resume_fixture(&manager, "f14b001e", "BOOT_SESSION_MARKER");
+        append_interrupted_turn(
+            &manager,
+            &session.id,
+            "turn-boot-recovery",
+            "SECRET_BOOT_RECOVERY_PROMPT",
+        );
+
+        let mut app = App::new();
+        let mut router = router_with_active_session(&app, dir.path(), &session.id);
+        let recovery = router
+            .recovery
+            .as_ref()
+            .expect("resumed TUI seeds recovery before an in-TUI session switch");
+        assert_eq!(
+            recovery.projection.pending_turn.turn_id,
+            "turn-boot-recovery"
+        );
+
+        router.apply(
+            SurfaceAction::Command("/recover json".to_string()),
+            &mut app,
+        );
+        let transcript = app
+            .session
+            .turns
+            .iter()
+            .map(|turn| turn.text())
+            .collect::<Vec<_>>()
+            .join("\n");
+        let projection = transcript
+            .lines()
+            .find_map(|line| line.strip_prefix("RECOVERY_V1 "))
+            .expect("machine-readable recovery marker");
+        let parsed: serde_json::Value =
+            serde_json::from_str(projection).expect("valid recovery projection JSON");
+        assert_eq!(parsed["session_id"], session.id);
+        assert_eq!(parsed["lifecycle"], "suspended");
+        assert_eq!(parsed["pending_turn"]["turn_id"], "turn-boot-recovery");
+        assert_eq!(
+            parsed["pending_turn"]["reconcile_reason"],
+            "context_unrestorable"
+        );
+        assert!(parsed["cursor"]["journal_digest"].is_string());
+        assert!(
+            !projection.contains("SECRET_BOOT_RECOVERY_PROMPT"),
+            "machine projection leaked stored prompt: {projection}"
+        );
+    }
+
+    #[tokio::test]
+    async fn recover_continue_is_cursor_bound_and_completes_original_turn_f14() {
+        use wcore_agent::session::SessionManager;
+        use wiremock::matchers::method;
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(200))
+            .mount(&server)
+            .await;
+        let manager = SessionManager::new(dir.path().to_path_buf(), 50);
+        let session_a = save_resume_fixture(&manager, "f14c0a01", "SESSION_A_MARKER");
+        let session_b = save_resume_fixture(&manager, "f14c0b01", "SESSION_B_MARKER");
+        append_recoverable_turn(
+            &manager,
+            dir.path(),
+            &session_b.id,
+            "turn-c0ffee",
+            "SECRET_RECOVERY_PROMPT",
+        )
+        .await;
+
+        let mut app = App::new();
+        let mut router = router_with_active_session_provider(
+            &app,
+            dir.path(),
+            &session_a.id,
+            std::sync::Arc::new(PhysicalScriptedProvider {
+                url: server.uri(),
+                text: "RECOVERED_RESPONSE".to_string(),
+            }),
+        );
+        router.apply(
+            SurfaceAction::Command(format!("/resume {}", session_b.id)),
+            &mut app,
+        );
+        await_session_switch(&mut router, &mut app).await;
+
+        let recovery = router.recovery.as_ref().expect("recovery view");
+        assert_eq!(recovery.projection.pending_turn.turn_id, "turn-c0ffee");
+        assert!(recovery.actions.contains(&TuiRecoveryAction::Continue));
+        let transcript = app
+            .session
+            .turns
+            .iter()
+            .map(|turn| turn.text())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            transcript.contains("SECRET_RECOVERY_PROMPT"),
+            "the resumed user-owned transcript must retain the original prompt"
+        );
+        let rendered_recovery = render_recovery(recovery);
+        assert!(rendered_recovery.contains("/recover continue"));
+        assert!(rendered_recovery.contains("Cursor:"));
+        assert!(
+            !rendered_recovery.contains("SECRET_RECOVERY_PROMPT"),
+            "recovery projection leaked stored prompt: {rendered_recovery}"
+        );
+
+        router.apply(
+            SurfaceAction::Command("/recover continue".to_string()),
+            &mut app,
+        );
+        await_recovery_action(&mut router, &mut app).await;
+        assert!(
+            router.recovery.is_none(),
+            "continue left recovery view {:?}; transcript: {}",
+            router.recovery,
+            app.session
+                .turns
+                .iter()
+                .map(|turn| turn.text())
+                .collect::<Vec<_>>()
+                .join(" | ")
+        );
+        assert!(
+            app.session
+                .turns
+                .iter()
+                .any(|turn| turn.text().contains("Recovery continue completed durably"))
+        );
+
+        drop(router);
+        let active = manager
+            .load_for_run(&session_b.id)
+            .expect("reacquire completed target");
+        let state = active.journal.state().expect("journal state");
+        assert!(
+            state
+                .turns
+                .get("turn-c0ffee")
+                .expect("original turn")
+                .completion
+                .is_some(),
+            "continue must terminalize the original durable turn"
+        );
+    }
+
+    #[tokio::test]
+    async fn recover_cancel_terminalizes_safe_interrupted_turn_f14() {
+        use wcore_agent::session::SessionManager;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let manager = SessionManager::new(dir.path().to_path_buf(), 50);
+        let session_a = save_resume_fixture(&manager, "f14ca001", "SESSION_A_MARKER");
+        let session_b = save_resume_fixture(&manager, "f14ca002", "SESSION_B_MARKER");
+        append_interrupted_turn(&manager, &session_b.id, "turn-cancel", "cancel me");
+        let mut app = App::new();
+        let mut router = router_with_active_session(&app, dir.path(), &session_a.id);
+        router.apply(
+            SurfaceAction::Command(format!("/resume {}", session_b.id)),
+            &mut app,
+        );
+        await_session_switch(&mut router, &mut app).await;
+        assert!(
+            router
+                .recovery
+                .as_ref()
+                .expect("recovery view")
+                .actions
+                .contains(&TuiRecoveryAction::Cancel)
+        );
+
+        router.apply(
+            SurfaceAction::Command("/recover cancel".to_string()),
+            &mut app,
+        );
+        await_recovery_action(&mut router, &mut app).await;
+        assert!(router.recovery.is_none());
+
+        drop(router);
+        let active = manager
+            .load_for_run(&session_b.id)
+            .expect("reacquire cancelled target");
+        let state = active.journal.state().expect("journal state");
+        assert!(
+            state
+                .turns
+                .get("turn-cancel")
+                .expect("cancelled turn")
+                .completion
+                .is_some()
+        );
+    }
+
+    #[tokio::test]
+    async fn recover_stale_cursor_is_refused_and_view_is_preserved_f14() {
+        use wcore_agent::session::SessionManager;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let manager = SessionManager::new(dir.path().to_path_buf(), 50);
+        let session_a = save_resume_fixture(&manager, "f1457a1e", "SESSION_A_MARKER");
+        let session_b = save_resume_fixture(&manager, "f1457b1e", "SESSION_B_MARKER");
+        append_interrupted_turn(&manager, &session_b.id, "turn-stale", "do not leak");
+        let mut app = App::new();
+        let mut router = router_with_active_session(&app, dir.path(), &session_a.id);
+        router.apply(
+            SurfaceAction::Command(format!("/resume {}", session_b.id)),
+            &mut app,
+        );
+        await_session_switch(&mut router, &mut app).await;
+        router
+            .recovery
+            .as_mut()
+            .expect("recovery view")
+            .projection
+            .cursor
+            .journal_digest
+            .push_str("stale");
+
+        router.apply(
+            SurfaceAction::Command("/recover cancel".to_string()),
+            &mut app,
+        );
+        await_recovery_action(&mut router, &mut app).await;
+        assert!(
+            router.recovery.is_some(),
+            "refusal must preserve the inspected recovery view"
+        );
+        let transcript = app
+            .session
+            .turns
+            .iter()
+            .map(|turn| turn.text())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(transcript.contains("Recovery cancel refused"));
+        assert!(transcript.contains("cursor no longer matches"));
+
+        drop(router);
+        let active = manager
+            .load_for_run(&session_b.id)
+            .expect("reacquire refused target");
+        let state = active.journal.state().expect("journal state");
+        assert!(
+            state
+                .turns
+                .get("turn-stale")
+                .expect("stale turn")
+                .completion
+                .is_none(),
+            "stale cursor must not mutate durable state"
         );
     }
 

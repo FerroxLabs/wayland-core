@@ -9,8 +9,12 @@ use crate::anvil::{
     anvil_invalidation_body_digest, anvil_receipt_body_digest,
 };
 use crate::events::{
-    Capabilities, ErrorInfo, OutputType, ProtocolEvent, ToolCategory, ToolInfo, ToolStatus,
-    TurnCost, Usage, WorkflowChildTerminalState, WorkflowNodeState, WorkflowTerminalState,
+    Capabilities, ErrorInfo, OperatorResolutionEvidence, OperatorResolutionEvidenceSource,
+    OperatorToolEffectOutcome, OperatorToolEffectResolution, OutputType, ProtocolEvent,
+    RecoveryBudgetSnapshot, RecoveryCursor, RecoveryLifecycle, RecoveryReconcileReason,
+    RecoveryReplayItem, RecoveryReplayKind, RecoveryTurnSnapshot, RecoveryUnavailableReason,
+    ToolCategory, ToolInfo, ToolStatus, TurnCost, Usage, WorkflowChildTerminalState,
+    WorkflowNodeState, WorkflowTerminalState,
 };
 use crate::execution_policy::{ExecutionPolicyChangeReason, ExecutionPolicySequence};
 use wcore_types::execution_policy::{
@@ -118,6 +122,62 @@ pub const COMMAND_SPECS: &[WireSpec] = &[
         "available"
     ),
     wire!(
+        "session_resync",
+        "commands/session_resync.json",
+        ["recovery_version", "request_id", "session_id"],
+        Safety,
+        "request_id_and_session_id",
+        "turn_recovery_v1"
+    ),
+    wire!(
+        "resume_turn",
+        "commands/resume_turn.json",
+        [
+            "recovery_version",
+            "request_id",
+            "session_id",
+            "turn_id",
+            "cursor",
+            "action"
+        ],
+        Safety,
+        "request_id_and_cursor",
+        "turn_recovery_v1"
+    ),
+    wire!(
+        "resolve_interrupted_approval",
+        "commands/resolve_interrupted_approval.json",
+        [
+            "recovery_version",
+            "request_id",
+            "session_id",
+            "turn_id",
+            "cursor",
+            "approval_id",
+            "decision"
+        ],
+        Safety,
+        "request_id_cursor_and_approval_id",
+        "turn_recovery_v1"
+    ),
+    wire!(
+        "resolve_unknown_tool_effect",
+        "commands/resolve_unknown_tool_effect.json",
+        [
+            "recovery_version",
+            "session_id",
+            "turn_id",
+            "cursor",
+            "tool_execution_id",
+            "outcome",
+            "operator_id",
+            "evidence"
+        ],
+        Safety,
+        "session_turn_tool_and_cursor",
+        "operator_tool_effect_resolution_v1"
+    ),
+    wire!(
         "add_mcp_server",
         "commands/add_mcp_server.json",
         ["name", "transport"],
@@ -166,6 +226,75 @@ pub const EVENT_SPECS: &[WireSpec] = &[
         Safety,
         "revision",
         "effective_execution_policy_revisions"
+    ),
+    wire!(
+        "session_recovery_snapshot",
+        "events/session_recovery_snapshot.json",
+        [
+            "recovery_version",
+            "request_id",
+            "session_id",
+            "cursor",
+            "state_digest",
+            "lifecycle",
+            "budget"
+        ],
+        Safety,
+        "request_id_and_cursor",
+        "turn_recovery_v1"
+    ),
+    wire!(
+        "session_recovery_replay",
+        "events/session_recovery_replay.json",
+        [
+            "recovery_version",
+            "request_id",
+            "session_id",
+            "through",
+            "items"
+        ],
+        Safety,
+        "request_id_and_cursor",
+        "turn_recovery_v1"
+    ),
+    wire!(
+        "session_recovery_unavailable",
+        "events/session_recovery_unavailable.json",
+        ["recovery_version", "request_id", "session_id", "reason"],
+        Safety,
+        "request_id_and_session_id",
+        "turn_recovery_v1"
+    ),
+    wire!(
+        "turn_recovery_lifecycle",
+        "events/turn_recovery_lifecycle.json",
+        [
+            "recovery_version",
+            "session_id",
+            "turn_id",
+            "cursor",
+            "lifecycle"
+        ],
+        Safety,
+        "turn_id_and_cursor",
+        "turn_recovery_v1"
+    ),
+    wire!(
+        "unknown_tool_effect_resolved",
+        "events/unknown_tool_effect_resolved.json",
+        [
+            "recovery_version",
+            "session_id",
+            "turn_id",
+            "cursor",
+            "tool_execution_id",
+            "outcome",
+            "operator_id",
+            "evidence"
+        ],
+        Safety,
+        "session_turn_tool_and_cursor",
+        "operator_tool_effect_resolution_v1"
     ),
     wire!(
         "stream_start",
@@ -535,6 +664,10 @@ pub const PRODUCER_COMMAND_TYPES: &[&str] = &[
     "set_mode",
     "set_config",
     "continue_with_budget",
+    "session_resync",
+    "resume_turn",
+    "resolve_interrupted_approval",
+    "resolve_unknown_tool_effect",
     "add_mcp_server",
     "grant_workspace_capability",
     "approval_resume",
@@ -546,6 +679,11 @@ pub const PRODUCER_EVENT_TYPES: &[&str] = &[
     "ready",
     "execution_policy",
     "workspace_policy",
+    "session_recovery_snapshot",
+    "session_recovery_replay",
+    "session_recovery_unavailable",
+    "turn_recovery_lifecycle",
+    "unknown_tool_effect_resolved",
     "capability_activation",
     "stream_start",
     "text_delta",
@@ -612,6 +750,7 @@ pub const SOURCE_INPUTS: &[&str] = &[
     "crates/wcore-agent/src/orchestration/workflow/runner.rs",
     "crates/wcore-agent/src/orchestration/anvil/forge.rs",
     "crates/wcore-cli/src/main.rs",
+    "crates/wcore-cli/src/packaged_runtime.rs",
 ];
 
 /// Canonical command inputs. Every value is accepted by `ProtocolCommand`.
@@ -646,6 +785,33 @@ pub fn command_fixture_values() -> BTreeMap<String, Value> {
             "commands/set_mode.json".into(),
             json!({"type":"set_mode","mode":"force"}),
         ),
+        (
+            "commands/session_resync.json".into(),
+            json!({"type":"session_resync","recovery_version":1,"request_id":"recovery-request-001","session_id":"session-desktop-001","after":{"journal_sequence":40,"journal_digest":journal_digest('4')}}),
+        ),
+        (
+            "commands/resume_turn.json".into(),
+            json!({"type":"resume_turn","recovery_version":1,"request_id":"recovery-request-002","session_id":"session-desktop-001","turn_id":"turn-002","cursor":{"journal_sequence":42,"journal_digest":journal_digest('6')},"action":"reconcile"}),
+        ),
+        (
+            "commands/resolve_interrupted_approval.json".into(),
+            json!({"type":"resolve_interrupted_approval","recovery_version":1,"request_id":"recovery-request-003","session_id":"session-desktop-001","turn_id":"turn-002","cursor":{"journal_sequence":42,"journal_digest":journal_digest('6')},"approval_id":"approval-002","decision":"approve","answer":"Proceed"}),
+        ),
+        (
+            "commands/resolve_unknown_tool_effect.json".into(),
+            serde_json::to_value(operator_tool_effect_resolution())
+                .expect("operator-resolution command fixture must serialize")
+                .as_object()
+                .map(|fields| {
+                    let mut command = fields.clone();
+                    command.insert(
+                        "type".into(),
+                        Value::String("resolve_unknown_tool_effect".into()),
+                    );
+                    Value::Object(command)
+                })
+                .expect("operator-resolution command fixture must be an object"),
+        ),
         ("commands/stop.json".into(), json!({"type":"stop"})),
         (
             "commands/tool_approve.json".into(),
@@ -678,6 +844,10 @@ pub fn command_fixture_values() -> BTreeMap<String, Value> {
         (
             "compat/commands/set_mode.yolo.json".into(),
             json!({"type":"set_mode","mode":"yolo"}),
+        ),
+        (
+            "compat/commands/session_resync.genesis.json".into(),
+            json!({"type":"session_resync","recovery_version":1,"request_id":"recovery-request-genesis","session_id":"session-desktop-001"}),
         ),
         (
             "compat/commands/tool_approve.always.json".into(),
@@ -726,6 +896,38 @@ fn execution_policy_sequence() -> (
 
 fn digest(byte: char) -> String {
     format!("sha256:{}", byte.to_string().repeat(64))
+}
+
+fn journal_digest(byte: char) -> String {
+    byte.to_string().repeat(64)
+}
+
+fn recovery_cursor(sequence: Option<u64>, byte: char) -> RecoveryCursor {
+    RecoveryCursor {
+        journal_sequence: sequence,
+        journal_digest: journal_digest(byte),
+    }
+}
+
+fn operator_tool_effect_resolution() -> OperatorToolEffectResolution {
+    OperatorToolEffectResolution {
+        recovery_version: 1,
+        session_id: "session-desktop-001".into(),
+        turn_id: "turn-002".into(),
+        cursor: RecoveryCursor {
+            journal_sequence: Some(42),
+            journal_digest: journal_digest('6'),
+        },
+        tool_execution_id: "tool-execution-002".into(),
+        outcome: OperatorToolEffectOutcome::Succeeded,
+        operator_id: "operator-desktop-001".into(),
+        evidence: OperatorResolutionEvidence {
+            source: OperatorResolutionEvidenceSource::ExternalSystemRecord,
+            reference_id: "external-record-002".into(),
+            observed_at_unix_ms: 1_721_000_003_000,
+            digest: digest('7'),
+        },
+    }
 }
 
 pub(super) fn anvil_receipt() -> AnvilReceipt {
@@ -971,6 +1173,78 @@ pub fn event_fixture_values() -> BTreeMap<String, ProtocolEvent> {
             "events/execution_policy.json".into(),
             ProtocolEvent::ExecutionPolicy {
                 snapshot: changed_policy,
+            },
+        ),
+        (
+            "events/session_recovery_snapshot.json".into(),
+            ProtocolEvent::SessionRecoverySnapshot {
+                recovery_version: 1,
+                request_id: "recovery-request-001".into(),
+                session_id: "session-desktop-001".into(),
+                cursor: recovery_cursor(Some(40), '4'),
+                state_digest: journal_digest('a'),
+                lifecycle: RecoveryLifecycle::ReconciliationRequired,
+                pending_turn: Some(RecoveryTurnSnapshot {
+                    turn_id: "turn-002".into(),
+                    msg_id: Some("msg-002".into()),
+                    lifecycle: RecoveryLifecycle::ReconciliationRequired,
+                    pending_call_id: Some("call-tool-002".into()),
+                    reconcile_reason: Some(RecoveryReconcileReason::ToolOutcomeUnknown),
+                }),
+                budget: RecoveryBudgetSnapshot {
+                    tokens_used: 12_000,
+                    token_limit: Some(20_000),
+                    cost_used_usd: 1.25,
+                    cost_limit_usd: Some(5.0),
+                },
+            },
+        ),
+        (
+            "events/session_recovery_replay.json".into(),
+            ProtocolEvent::SessionRecoveryReplay {
+                recovery_version: 1,
+                request_id: "recovery-request-001".into(),
+                session_id: "session-desktop-001".into(),
+                from: Some(recovery_cursor(Some(40), '4')),
+                through: recovery_cursor(Some(42), '6'),
+                items: vec![
+                    RecoveryReplayItem {
+                        cursor: recovery_cursor(Some(41), '5'),
+                        turn_id: Some("turn-002".into()),
+                        kind: RecoveryReplayKind::ToolStarted,
+                    },
+                    RecoveryReplayItem {
+                        cursor: recovery_cursor(Some(42), '6'),
+                        turn_id: Some("turn-002".into()),
+                        kind: RecoveryReplayKind::EffectUncertain,
+                    },
+                ],
+            },
+        ),
+        (
+            "events/session_recovery_unavailable.json".into(),
+            ProtocolEvent::SessionRecoveryUnavailable {
+                recovery_version: 1,
+                request_id: "recovery-request-003".into(),
+                session_id: "session-desktop-001".into(),
+                reason: RecoveryUnavailableReason::CursorDigestMismatch,
+            },
+        ),
+        (
+            "events/turn_recovery_lifecycle.json".into(),
+            ProtocolEvent::TurnRecoveryLifecycle {
+                recovery_version: 1,
+                session_id: "session-desktop-001".into(),
+                turn_id: "turn-002".into(),
+                cursor: recovery_cursor(Some(42), '6'),
+                lifecycle: RecoveryLifecycle::ReconciliationRequired,
+                reconcile_reason: Some(RecoveryReconcileReason::ToolOutcomeUnknown),
+            },
+        ),
+        (
+            "events/unknown_tool_effect_resolved.json".into(),
+            ProtocolEvent::UnknownToolEffectResolved {
+                resolution: operator_tool_effect_resolution(),
             },
         ),
         (

@@ -247,7 +247,8 @@ impl PtyCapture {
             cmd.arg(arg);
         }
         let secret = provider.resolved_key();
-        ChildEnvironment::build(env.path(), env.path(), secret.as_deref())?.apply_pty(&mut cmd);
+        let child_environment = ChildEnvironment::build(env.path(), env.path(), secret.as_deref())?;
+        let vault_guard = child_environment.apply_pty(&mut cmd)?;
         for (name, value) in extra_env {
             cmd.env(*name, *value);
         }
@@ -259,7 +260,9 @@ impl PtyCapture {
         let child = pty
             .slave
             .spawn_command(cmd)
-            .context("spawn wayland-core under PTY")?;
+            .context("spawn wayland-core under PTY");
+        drop(vault_guard);
+        let child = child?;
         let mut pending_child = PendingPtyChild::new(child);
         let child_pid = pending_child
             .child()

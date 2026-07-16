@@ -65,6 +65,7 @@ fn tool_intent(execution_id: &str, provider_call_id: &str, ordinal: u64) -> Sess
         effective_input: StoredToolInput::redacted(digest(&effective_input)),
         effect_contract: ToolEffectContract::default(),
         effect_receipt: None,
+        pre_hook_phase_id: None,
     }
 }
 

@@ -243,6 +243,9 @@ anyhow    = "1"
 # File globbing
 glob = "0.3"
 
+# Cross-platform advisory file locks for serializing confidential-key creation.
+fd-lock = "4.0.4"
+
 # RON (Rusty Object Notation) — declarative workflow DSL front-end
 # (orchestration/workflow). Lowers to the existing `GraphConfig` IR.
 ron = "0.8"

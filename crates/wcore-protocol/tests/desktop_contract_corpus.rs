@@ -49,6 +49,28 @@ fn schema_accepts(schema: &Value, instance: &Value) -> bool {
     {
         return false;
     }
+    if schema.get("pattern").and_then(Value::as_str) == Some("^sha256:[0-9a-f]{64}$")
+        && !instance.as_str().is_some_and(|value| {
+            value.strip_prefix("sha256:").is_some_and(|hex| {
+                hex.len() == 64
+                    && hex
+                        .bytes()
+                        .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+            })
+        })
+    {
+        return false;
+    }
+    if schema.get("pattern").and_then(Value::as_str) == Some("^[0-9a-f]{64}$")
+        && !instance.as_str().is_some_and(|value| {
+            value.len() == 64
+                && value
+                    .bytes()
+                    .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+        })
+    {
+        return false;
+    }
     if let Some(required) = schema.get("required").and_then(Value::as_array) {
         let Some(object) = instance.as_object() else {
             return false;
@@ -65,6 +87,11 @@ fn schema_accepts(schema: &Value, instance: &Value) -> bool {
         schema.get("properties").and_then(Value::as_object),
         instance.as_object(),
     ) {
+        if schema.get("additionalProperties") == Some(&Value::Bool(false))
+            && object.keys().any(|field| !properties.contains_key(field))
+        {
+            return false;
+        }
         for (field, field_schema) in properties {
             if let Some(value) = object.get(field)
                 && !schema_accepts(field_schema, value)
@@ -141,16 +168,16 @@ fn checked_corpus_matches_real_serializers_byte_for_byte() {
 }
 
 #[test]
-fn inventory_is_exactly_eleven_commands_and_thirty_nine_events() {
-    assert_eq!(COMMAND_SPECS.len(), 11);
-    assert_eq!(EVENT_SPECS.len(), 39);
+fn inventory_is_exactly_fifteen_commands_and_forty_four_events() {
+    assert_eq!(COMMAND_SPECS.len(), 15);
+    assert_eq!(EVENT_SPECS.len(), 44);
     assert_eq!(
         COMMAND_SPECS
             .iter()
             .map(|spec| spec.wire_type)
             .collect::<BTreeSet<_>>()
             .len(),
-        11
+        15
     );
     assert_eq!(
         EVENT_SPECS
@@ -158,7 +185,7 @@ fn inventory_is_exactly_eleven_commands_and_thirty_nine_events() {
             .map(|spec| spec.wire_type)
             .collect::<BTreeSet<_>>()
             .len(),
-        39
+        44
     );
 }
 
@@ -203,10 +230,12 @@ fn manifest_pins_generator_and_all_three_digests() {
             "manifest {key} must be a prefixed SHA-256 digest"
         );
     }
-    assert_eq!(manifest["commands"].as_array().unwrap().len(), 11);
-    assert_eq!(manifest["events"].as_array().unwrap().len(), 39);
-    assert_eq!(manifest["counts"]["commands"], 11);
-    assert_eq!(manifest["counts"]["events"], 39);
+    assert_eq!(manifest["contract"]["major"], 1);
+    assert_eq!(manifest["contract"]["minor"], 2);
+    assert_eq!(manifest["commands"].as_array().unwrap().len(), 15);
+    assert_eq!(manifest["events"].as_array().unwrap().len(), 44);
+    assert_eq!(manifest["counts"]["commands"], 15);
+    assert_eq!(manifest["counts"]["events"], 44);
     assert_eq!(
         manifest["capabilities"]["contract_negotiation"],
         "available"
@@ -223,6 +252,8 @@ fn manifest_pins_generator_and_all_three_digests() {
         manifest["capabilities"]["effective_execution_policy_revisions"],
         "available"
     );
+    assert_eq!(manifest["capabilities"]["turn_recovery_v1"], "available");
+    assert_eq!(manifest["subcontracts"]["turn_recovery"], "1.0");
     let invalidation = manifest["events"]
         .as_array()
         .unwrap()
@@ -335,6 +366,39 @@ fn generated_schemas_reject_malformed_authority_types_and_enums() {
     message["msg_id"] = Value::from(7_u64);
     assert!(!schema_accepts(&command_schema, &message));
 
+    let mut resume = generated_json("commands/resume_turn.json");
+    assert!(schema_accepts(&command_schema, &resume));
+    resume["recovery_version"] = Value::from(2_u64);
+    assert!(!schema_accepts(&command_schema, &resume));
+    resume["recovery_version"] = Value::from(1_u64);
+    resume["action"] = Value::String("claim_effect_succeeded".into());
+    assert!(!schema_accepts(&command_schema, &resume));
+    resume["action"] = Value::String("reconcile".into());
+    resume["cursor"]["journal_digest"] = Value::String("sha256:not-a-digest".into());
+    assert!(!schema_accepts(&command_schema, &resume));
+    resume["cursor"]["journal_digest"] = Value::String("6".repeat(64));
+    resume["future_authority"] = Value::Bool(true);
+    assert!(
+        !schema_accepts(&command_schema, &resume),
+        "closed recovery command schemas must reject unknown properties"
+    );
+
+    let mut snapshot = generated_json("events/session_recovery_snapshot.json");
+    assert!(schema_accepts(&event_schema, &snapshot));
+    snapshot["lifecycle"] = Value::String("silently_restarted".into());
+    assert!(!schema_accepts(&event_schema, &snapshot));
+    snapshot["lifecycle"] = Value::String("reconciliation_required".into());
+    snapshot["state_digest"] = Value::String(format!("sha256:{}", "a".repeat(64)));
+    assert!(
+        !schema_accepts(&event_schema, &snapshot),
+        "recovery state digests are raw lowercase hex, not evidence digests"
+    );
+
+    let mut replay = generated_json("events/session_recovery_replay.json");
+    assert!(schema_accepts(&event_schema, &replay));
+    replay["items"][0]["kind"] = Value::String("provider_payload".into());
+    assert!(!schema_accepts(&event_schema, &replay));
+
     let artifacts = generated_artifacts().unwrap();
     let lifecycle = std::str::from_utf8(
         artifacts
@@ -366,12 +430,18 @@ fn producer_complete_schema_keeps_non_desktop_variants_visible() {
     for required in [
         "continue_with_budget",
         "grant_workspace_capability",
+        "session_resync",
+        "resume_turn",
         "execution_policy",
         "workflow_started",
         "workflow_node_event",
         "workflow_finished",
         "anvil_receipt",
         "anvil_receipt_invalidated",
+        "session_recovery_snapshot",
+        "session_recovery_replay",
+        "session_recovery_unavailable",
+        "turn_recovery_lifecycle",
     ] {
         assert!(
             wire.contains(required),

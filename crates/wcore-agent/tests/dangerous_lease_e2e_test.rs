@@ -9,7 +9,9 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
-use common::MockLlmProvider;
+use common::{
+    MockLlmProvider, RECOVERY_TEST_KEY, configure_persisted_test_session, physical_attempt_server,
+};
 use serde_json::json;
 use tokio::sync::{Notify, mpsc};
 use wcore_agent::bootstrap::{AgentBootstrap, BootstrapResult};
@@ -17,6 +19,8 @@ use wcore_agent::engine::AgentError;
 use wcore_agent::output::OutputSink;
 use wcore_config::compat::ProviderCompat;
 use wcore_config::config::{Config, ProviderType};
+use wcore_egress::{AllowAllPolicy, EgressClient};
+use wcore_providers::retry::{builder_send_with_retry, scope_max_retries};
 use wcore_providers::{LlmProvider, ProviderError};
 use wcore_types::execution_policy::{
     ApprovalPolicy, BaselineExecutionPolicy, DangerousLaunchRequest, PolicySource,
@@ -113,6 +117,7 @@ async fn wait_gone(pid: u32) {
 #[tokio::test]
 async fn dangerous_expiry_cancels_production_streaming_bash_process_tree() {
     let workspace = tempfile::tempdir().unwrap();
+    let physical = physical_attempt_server().await;
     let shell_pid_file = workspace.path().join("shell.pid");
     let child_pid_file = workspace.path().join("child.pid");
     let script = format!(
@@ -120,20 +125,26 @@ async fn dangerous_expiry_cancels_production_streaming_bash_process_tree() {
         shell_pid_file.display(),
         child_pid_file.display()
     );
-    let provider = Arc::new(MockLlmProvider::with_tool_use(
-        "bash-lease",
-        "Bash",
-        json!({ "command": script }),
-    ));
+    let provider = Arc::new(
+        MockLlmProvider::with_tool_use("bash-lease", "Bash", json!({ "command": script }))
+            .with_physical_url(physical.uri()),
+    );
     let streaming_sink = Arc::new(StreamingSink::default());
     let sink: Arc<dyn OutputSink> = streaming_sink.clone();
-    let result = AgentBootstrap::new(bootstrap_config(), workspace.path().to_string_lossy(), sink)
+    let mut config = bootstrap_config();
+    configure_persisted_test_session(&mut config, workspace.path());
+    let mut result = AgentBootstrap::new(config, workspace.path().to_string_lossy(), sink)
         .provider(provider)
         .without_channels(true)
         .with_dangerous_grant(dangerous_grant("lease-bash-e2e"))
         .build()
         .await
         .expect("Dangerous bootstrap must finish inside its one-shot lease");
+    result
+        .engine
+        .init_session("openai", &workspace.path().to_string_lossy(), None)
+        .expect("persisted session must bind the production budget authority");
+    result.engine.use_recovery_test_key(&RECOVERY_TEST_KEY);
     let BootstrapResult {
         mut engine,
         cancel_root,
@@ -153,7 +164,14 @@ async fn dangerous_expiry_cancels_production_streaming_bash_process_tree() {
         .await
         .expect("lease expiry must stop the production Bash dispatch promptly")
         .expect("engine task must join");
-    assert!(matches!(outcome, Err(AgentError::UserAborted)));
+    assert!(
+        matches!(outcome, Err(AgentError::UserAborted)),
+        "Dangerous expiry must surface UserAborted, got {outcome:?}"
+    );
+    assert!(matches!(
+        engine.recovery_plan().unwrap().disposition,
+        wcore_agent::recovery::RecoveryDisposition::ReconciliationRequired { .. }
+    ));
     assert!(started.elapsed() < Duration::from_secs(4));
     assert!(cancel_root.is_cancelled());
     assert!(
@@ -175,14 +193,16 @@ struct SpawnThenBlockProvider {
     calls: AtomicUsize,
     child_entered: Notify,
     held_senders: Mutex<Vec<mpsc::Sender<LlmEvent>>>,
+    physical_url: String,
 }
 
 impl SpawnThenBlockProvider {
-    fn new() -> Self {
+    fn new(physical_url: String) -> Self {
         Self {
             calls: AtomicUsize::new(0),
             child_entered: Notify::new(),
             held_senders: Mutex::new(Vec::new()),
+            physical_url,
         }
     }
 }
@@ -193,6 +213,15 @@ impl LlmProvider for SpawnThenBlockProvider {
         &self,
         _request: &LlmRequest,
     ) -> Result<mpsc::Receiver<LlmEvent>, ProviderError> {
+        let client = EgressClient::new().with_policy(Arc::new(AllowAllPolicy));
+        let response =
+            scope_max_retries(0, builder_send_with_retry(client.get(&self.physical_url))).await?;
+        if !response.status().is_success() {
+            return Err(ProviderError::Api {
+                status: response.status().as_u16(),
+                message: "fixture response".into(),
+            });
+        }
         let call = self.calls.fetch_add(1, Ordering::SeqCst);
         let (tx, rx) = mpsc::channel(4);
         if call == 0 {
@@ -226,15 +255,23 @@ impl LlmProvider for SpawnThenBlockProvider {
 #[tokio::test]
 async fn dangerous_expiry_reaches_bootstrapped_spawn_child() {
     let workspace = tempfile::tempdir().unwrap();
-    let provider = Arc::new(SpawnThenBlockProvider::new());
+    let physical = physical_attempt_server().await;
+    let provider = Arc::new(SpawnThenBlockProvider::new(physical.uri()));
     let sink: Arc<dyn OutputSink> = Arc::new(StreamingSink::default());
-    let result = AgentBootstrap::new(bootstrap_config(), workspace.path().to_string_lossy(), sink)
+    let mut config = bootstrap_config();
+    configure_persisted_test_session(&mut config, workspace.path());
+    let mut result = AgentBootstrap::new(config, workspace.path().to_string_lossy(), sink)
         .provider(provider.clone())
         .without_channels(true)
         .with_dangerous_grant(dangerous_grant("lease-spawn-e2e"))
         .build()
         .await
         .expect("Dangerous bootstrap must finish inside its one-shot lease");
+    result
+        .engine
+        .init_session("openai", &workspace.path().to_string_lossy(), None)
+        .expect("persisted session must bind the production budget authority");
+    result.engine.use_recovery_test_key(&RECOVERY_TEST_KEY);
     let BootstrapResult {
         mut engine,
         cancel_root,
@@ -253,7 +290,14 @@ async fn dangerous_expiry_reaches_bootstrapped_spawn_child() {
         .await
         .expect("lease expiry must stop the production child promptly")
         .expect("engine task must join");
-    assert!(matches!(outcome, Err(AgentError::UserAborted)));
+    assert!(
+        matches!(outcome, Err(AgentError::UserAborted)),
+        "Dangerous expiry must surface UserAborted, got {outcome:?}"
+    );
+    assert!(matches!(
+        engine.recovery_plan().unwrap().disposition,
+        wcore_agent::recovery::RecoveryDisposition::ReconciliationRequired { .. }
+    ));
     assert!(cancel_root.is_cancelled());
     assert_eq!(
         provider.calls.load(Ordering::SeqCst),

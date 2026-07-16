@@ -27,7 +27,7 @@ use wcore_types::message::{ContentBlock, Message, Role, StopReason, TokenUsage};
 use wiremock::matchers::method;
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
-use common::test_config;
+use common::{RECOVERY_TEST_KEY, configure_persisted_test_session, test_config};
 
 // ── Helpers ────────────────────────────────────────────────────────────────
 
@@ -318,8 +318,8 @@ async fn tc_2_6_05_session_save_after_compact() {
 
     let mut config = test_config();
     config.compact = CompactConfig::default();
-    config.session.enabled = true;
-    config.session.directory = dir.path().to_string_lossy().into_owned();
+    configure_persisted_test_session(&mut config, dir.path());
+    let session_dir = std::path::PathBuf::from(&config.session.directory);
 
     let mut registry = ToolRegistry::new();
     registry.register(Box::new(common::MockTool::new(
@@ -331,13 +331,14 @@ async fn tc_2_6_05_session_save_after_compact() {
 
     let mut engine = AgentEngine::new_with_provider(provider, config, registry, output);
     engine
-        .init_session("test", "/tmp", None)
+        .init_session("test", &dir.path().to_string_lossy(), None)
         .expect("init session");
+    engine.use_recovery_test_key(&RECOVERY_TEST_KEY);
 
     engine.run("Start", "msg-1").await.expect("should succeed");
 
     // Load the saved session
-    let mgr = SessionManager::new(dir.path().to_path_buf(), 10);
+    let mgr = SessionManager::new(session_dir, 10);
     let session = mgr.load("latest").expect("load session");
 
     // After compaction + turn2, messages should include the compact boundary,

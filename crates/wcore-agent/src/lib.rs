@@ -12,6 +12,7 @@ pub mod auto_skill;
 pub mod bootstrap;
 // W8a A.2: ExecutionBudget + ExecutionBudgetView (S2 foundation).
 pub mod budget;
+pub mod budget_authority;
 pub mod cache_diagnostics;
 // W8a A.2: cooperative cancellation primitives (re-export of tokio-util).
 pub mod cancel;
@@ -74,9 +75,12 @@ pub mod output;
 mod output_redaction;
 pub mod plan;
 pub mod plugins;
+pub mod provider_recovery;
 // v0.7.0 Task 1.C.1 — WAYLAND.md / AGENTS.md / .wayland/context.md /
 // CLAUDE.md auto-detection.
 pub mod project_context;
+pub mod recovery;
+pub(crate) mod recovery_confidential;
 pub mod user_context;
 // v0.6.1 hardening (CRIT-1) — opt-in wcore-permissions gate at tool
 // dispatch boundary; without this, the M5.8 ACL shipped in v0.6.0 was

@@ -5,13 +5,31 @@ use std::fs::OpenOptions;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{LazyLock, Mutex};
+
+use rand::RngCore;
 
 static CREDENTIAL_FILE_COUNTER: AtomicU64 = AtomicU64::new(0);
+static VAULT_PASSPHRASES: LazyLock<Mutex<std::collections::HashMap<PathBuf, String>>> =
+    LazyLock::new(|| Mutex::new(std::collections::HashMap::new()));
 
-#[derive(Debug, Clone)]
 pub(crate) struct ChildEnvironment {
     variables: Vec<(OsString, OsString)>,
     credential_file: Option<PathBuf>,
+    vault_passphrase: String,
+}
+
+pub(crate) struct VaultGuard {
+    #[cfg(unix)]
+    fd: std::os::unix::io::RawFd,
+}
+
+#[cfg(unix)]
+impl Drop for VaultGuard {
+    fn drop(&mut self) {
+        // SAFETY: the guard uniquely owns the parent's copy of this descriptor.
+        let _ = unsafe { libc::close(self.fd) };
+    }
 }
 
 impl ChildEnvironment {
@@ -73,19 +91,27 @@ impl ChildEnvironment {
         Ok(Self {
             variables,
             credential_file,
+            vault_passphrase: vault_passphrase_for(wayland_home),
         })
     }
 
-    pub(crate) fn apply_tokio(&self, command: &mut tokio::process::Command) {
+    pub(crate) fn apply_tokio(
+        &self,
+        command: &mut tokio::process::Command,
+    ) -> std::io::Result<VaultGuard> {
         command.env_clear();
         command.envs(self.variables.iter().cloned());
         if let Some(path) = &self.credential_file {
             command.arg("--api-key-file").arg(path);
         }
+        self.configure_tokio_vault(command)
     }
 
     #[cfg(unix)]
-    pub(crate) fn apply_pty(&self, command: &mut portable_pty::CommandBuilder) {
+    pub(crate) fn apply_pty(
+        &self,
+        command: &mut portable_pty::CommandBuilder,
+    ) -> std::io::Result<VaultGuard> {
         command.env_clear();
         for (key, value) in &self.variables {
             command.env(key, value);
@@ -94,7 +120,72 @@ impl ChildEnvironment {
             command.arg("--api-key-file");
             command.arg(path);
         }
+        let guard = self.inheritable_vault_pipe()?;
+        command.env("WAYLAND_VAULT_PASSPHRASE_FD", guard.fd.to_string());
+        Ok(guard)
     }
+
+    #[cfg(unix)]
+    fn configure_tokio_vault(
+        &self,
+        command: &mut tokio::process::Command,
+    ) -> std::io::Result<VaultGuard> {
+        let guard = self.inheritable_vault_pipe()?;
+        command.env("WAYLAND_VAULT_PASSPHRASE_FD", guard.fd.to_string());
+        Ok(guard)
+    }
+
+    #[cfg(not(unix))]
+    fn configure_tokio_vault(
+        &self,
+        command: &mut tokio::process::Command,
+    ) -> std::io::Result<VaultGuard> {
+        // Windows has no Unix-style inherited file descriptor. This is a
+        // hermetic evaluator child; production still warns on this legacy
+        // compatibility path.
+        command.env("WAYLAND_VAULT_PASSPHRASE", &self.vault_passphrase);
+        Ok(VaultGuard {})
+    }
+
+    #[cfg(unix)]
+    fn inheritable_vault_pipe(&self) -> std::io::Result<VaultGuard> {
+        use std::os::unix::io::FromRawFd;
+
+        let mut pipe = [0; 2];
+        // SAFETY: `pipe` points to two valid integers. Plain `pipe(2)` is
+        // intentional: the read end must survive exec into packaged Core.
+        if unsafe { libc::pipe(pipe.as_mut_ptr()) } != 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        let guard = VaultGuard { fd: pipe[0] };
+        // SAFETY: this function uniquely owns the write descriptor and the
+        // `File` closes it on every return path.
+        let mut writer = unsafe { std::fs::File::from_raw_fd(pipe[1]) };
+        writer.write_all(self.vault_passphrase.as_bytes())?;
+        writer.flush()?;
+        Ok(guard)
+    }
+}
+
+fn random_vault_passphrase() -> String {
+    let mut bytes = [0_u8; 32];
+    rand::rngs::OsRng.fill_bytes(&mut bytes);
+    let mut encoded = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        use std::fmt::Write as _;
+        write!(&mut encoded, "{byte:02x}").expect("writing to String cannot fail");
+    }
+    encoded
+}
+
+fn vault_passphrase_for(wayland_home: &Path) -> String {
+    let mut passphrases = VAULT_PASSPHRASES
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    passphrases
+        .entry(wayland_home.to_path_buf())
+        .or_insert_with(random_vault_passphrase)
+        .clone()
 }
 
 fn pair(name: &str, value: &Path) -> (OsString, OsString) {

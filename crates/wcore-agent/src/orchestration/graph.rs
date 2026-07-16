@@ -499,24 +499,25 @@ impl ExecutionGraph {
             //    (since each iteration depends on the previous one's
             //    state mutations).
             let mut agent_futures = Vec::new();
-            for (id, node) in &runnable_now {
+            let mut pending_graph_error = None;
+            'runnable: for (id, node) in &runnable_now {
                 match node {
                     Node::AgentCall {
                         agent,
                         input_mapper,
                     } => {
                         let input = input_mapper.apply(&state);
-                        let cancel = ctx.cancel.clone();
                         let executor = ctx.executor.clone();
                         let agent_name = agent.clone();
                         let id_clone = id.clone();
                         // Spawn each AgentCall on its own task so blocking
                         // work inside `run_agent` doesn't serialise siblings.
+                        // Once dispatched, the executor owns cooperative
+                        // cancellation. Racing this future against the graph
+                        // token would drop it while spawned tool work can still
+                        // advance durable effect state.
                         agent_futures.push(tokio::spawn(async move {
-                            let res = tokio::select! {
-                                _ = cancel.cancelled() => Err("cancelled".to_string()),
-                                r = executor.run_agent(&agent_name, &input) => r,
-                            };
+                            let res = executor.run_agent(&agent_name, &input).await;
                             (id_clone, agent_name, res)
                         }));
                     }
@@ -536,20 +537,38 @@ impl ExecutionGraph {
                         let mut iter = 0usize;
                         while iter < *max_iters {
                             if ctx.cancel.is_cancelled() {
-                                return Err(GraphError::Cancelled);
+                                pending_graph_error = Some(GraphError::Cancelled);
+                                break 'runnable;
                             }
                             for (agent_name, mapper) in agents {
+                                // The prior loop dispatch has been drained, so
+                                // this remains a true pre-dispatch check.
+                                if ctx.cancel.is_cancelled() {
+                                    pending_graph_error = Some(GraphError::Cancelled);
+                                    break 'runnable;
+                                }
                                 let input = mapper.apply(&state);
-                                let res = tokio::select! {
-                                    _ = ctx.cancel.cancelled() => {
-                                        return Err(GraphError::Cancelled);
+                                // After dispatch, let the executor observe
+                                // cancellation and persist its own boundary.
+                                let res = ctx.executor.run_agent(agent_name, &input).await;
+                                let v = match res {
+                                    Ok(value) => value,
+                                    Err(error) if error == "cancelled" => {
+                                        pending_graph_error = Some(GraphError::Cancelled);
+                                        break 'runnable;
                                     }
-                                    r = ctx.executor.run_agent(agent_name, &input) => r,
+                                    Err(message) => {
+                                        pending_graph_error = Some(GraphError::AgentFailed {
+                                            agent: agent_name.clone(),
+                                            message,
+                                        });
+                                        break 'runnable;
+                                    }
                                 };
-                                let v = res.map_err(|e| GraphError::AgentFailed {
-                                    agent: agent_name.clone(),
-                                    message: e,
-                                })?;
+                                if ctx.cancel.is_cancelled() {
+                                    pending_graph_error = Some(GraphError::Cancelled);
+                                    break 'runnable;
+                                }
                                 merge_into_state(&mut state, &v, &state_reducers);
                             }
                             iter += 1;
@@ -565,6 +584,12 @@ impl ExecutionGraph {
                 }
             }
             let agent_results = futures::future::join_all(agent_futures).await;
+            if ctx.cancel.is_cancelled() {
+                return Err(GraphError::Cancelled);
+            }
+            if let Some(error) = pending_graph_error {
+                return Err(error);
+            }
             for join_res in agent_results {
                 let (id, agent, res) = join_res.map_err(|e| GraphError::AgentFailed {
                     agent: "<join>".to_string(),
@@ -760,6 +785,8 @@ fn apply_aggregation(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use tokio::sync::Notify;
 
     #[test]
     fn input_mapper_passthrough_clones_state() {
@@ -914,5 +941,219 @@ mod tests {
         async fn run_agent(&self, _agent: &str, _input: &Value) -> Result<Value, String> {
             Ok(Value::Null)
         }
+    }
+
+    struct CancellationDrainingExec {
+        started: Arc<Notify>,
+        release: Arc<Notify>,
+        drained: Arc<AtomicBool>,
+    }
+
+    #[async_trait]
+    impl NodeExecutor for CancellationDrainingExec {
+        async fn run_agent(&self, _agent: &str, _input: &Value) -> Result<Value, String> {
+            self.started.notify_one();
+            self.release.notified().await;
+            self.drained.store(true, Ordering::SeqCst);
+            Ok(Value::Null)
+        }
+    }
+
+    struct CancelledExec;
+
+    #[async_trait]
+    impl NodeExecutor for CancelledExec {
+        async fn run_agent(&self, _agent: &str, _input: &Value) -> Result<Value, String> {
+            Err("cancelled".to_string())
+        }
+    }
+
+    #[tokio::test]
+    async fn cancellation_does_not_drop_dispatched_agent_executor() {
+        let cancel = CancellationToken::new();
+        let started = Arc::new(Notify::new());
+        let release = Arc::new(Notify::new());
+        let drained = Arc::new(AtomicBool::new(false));
+        let executor = Arc::new(CancellationDrainingExec {
+            started: Arc::clone(&started),
+            release: Arc::clone(&release),
+            drained: Arc::clone(&drained),
+        });
+        let mut run = tokio::spawn(ExecutionGraph::execute(
+            GraphConfig::single_node("main", InputMapper::PassThrough),
+            Value::Null,
+            GraphContext {
+                cancel: cancel.clone(),
+                executor,
+            },
+        ));
+
+        started.notified().await;
+        cancel.cancel();
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(50), &mut run)
+                .await
+                .is_err(),
+            "graph returned before the dispatched executor drained"
+        );
+        release.notify_one();
+
+        let result = run.await.expect("graph task must join");
+        assert!(matches!(result, Err(GraphError::Cancelled)));
+        assert!(
+            drained.load(Ordering::SeqCst),
+            "graph cancellation dropped an already-dispatched executor future"
+        );
+    }
+
+    #[tokio::test]
+    async fn cancellation_does_not_drop_dispatched_loop_executor() {
+        let cancel = CancellationToken::new();
+        let started = Arc::new(Notify::new());
+        let release = Arc::new(Notify::new());
+        let drained = Arc::new(AtomicBool::new(false));
+        let executor = Arc::new(CancellationDrainingExec {
+            started: Arc::clone(&started),
+            release: Arc::clone(&release),
+            drained: Arc::clone(&drained),
+        });
+        let mut config = GraphConfig::empty("loop");
+        config.add_loop(
+            "loop",
+            vec![("main".to_string(), InputMapper::PassThrough)],
+            Predicate::Always,
+            1,
+        );
+        let mut run = tokio::spawn(ExecutionGraph::execute(
+            config,
+            Value::Null,
+            GraphContext {
+                cancel: cancel.clone(),
+                executor,
+            },
+        ));
+
+        started.notified().await;
+        cancel.cancel();
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(50), &mut run)
+                .await
+                .is_err(),
+            "graph returned before the dispatched loop executor drained"
+        );
+        release.notify_one();
+
+        let result = run.await.expect("graph task must join");
+        assert!(matches!(result, Err(GraphError::Cancelled)));
+        assert!(
+            drained.load(Ordering::SeqCst),
+            "loop cancellation dropped an already-dispatched executor future"
+        );
+    }
+
+    struct MixedFrontierExec {
+        agent_started_for_test: Arc<Notify>,
+        agent_started_for_loop: Arc<Notify>,
+        release_agent: Arc<Notify>,
+        loop_cancelled: Arc<Notify>,
+        agent_drained: Arc<AtomicBool>,
+        cancel: CancellationToken,
+    }
+
+    #[async_trait]
+    impl NodeExecutor for MixedFrontierExec {
+        async fn run_agent(&self, agent: &str, _input: &Value) -> Result<Value, String> {
+            match agent {
+                "a-agent" => {
+                    self.agent_started_for_test.notify_one();
+                    self.agent_started_for_loop.notify_one();
+                    self.release_agent.notified().await;
+                    self.agent_drained.store(true, Ordering::SeqCst);
+                    Ok(Value::Null)
+                }
+                "loop-agent" => {
+                    self.agent_started_for_loop.notified().await;
+                    self.cancel.cancel();
+                    self.loop_cancelled.notify_one();
+                    Err("cancelled".to_string())
+                }
+                other => panic!("unexpected agent {other}"),
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn mixed_frontier_cancellation_drains_earlier_agent_before_returning() {
+        let cancel = CancellationToken::new();
+        let agent_started_for_test = Arc::new(Notify::new());
+        let agent_started_for_loop = Arc::new(Notify::new());
+        let release_agent = Arc::new(Notify::new());
+        let loop_cancelled = Arc::new(Notify::new());
+        let agent_drained = Arc::new(AtomicBool::new(false));
+        let executor = Arc::new(MixedFrontierExec {
+            agent_started_for_test: Arc::clone(&agent_started_for_test),
+            agent_started_for_loop: Arc::clone(&agent_started_for_loop),
+            release_agent: Arc::clone(&release_agent),
+            loop_cancelled: Arc::clone(&loop_cancelled),
+            agent_drained: Arc::clone(&agent_drained),
+            cancel: cancel.clone(),
+        });
+        let mut config = GraphConfig::empty("entry");
+        config.add_passthrough("entry");
+        config.add_agent("a-agent", InputMapper::PassThrough);
+        config.add_loop(
+            "z-loop",
+            vec![("loop-agent".to_string(), InputMapper::PassThrough)],
+            Predicate::Never,
+            1,
+        );
+        config.add_edge("entry", "a-agent", None);
+        config.add_edge("entry", "z-loop", None);
+
+        let mut run = tokio::spawn(ExecutionGraph::execute(
+            config,
+            Value::Null,
+            GraphContext { cancel, executor },
+        ));
+
+        agent_started_for_test.notified().await;
+        loop_cancelled.notified().await;
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(50), &mut run)
+                .await
+                .is_err(),
+            "mixed-frontier cancellation returned before the earlier agent drained"
+        );
+        release_agent.notify_one();
+
+        let result = run.await.expect("graph task must join");
+        assert!(matches!(result, Err(GraphError::Cancelled)));
+        assert!(
+            agent_drained.load(Ordering::SeqCst),
+            "mixed-frontier cancellation detached the earlier agent"
+        );
+    }
+
+    #[tokio::test]
+    async fn loop_preserves_executor_cancelled_error() {
+        let mut config = GraphConfig::empty("loop");
+        config.add_loop(
+            "loop",
+            vec![("main".to_string(), InputMapper::PassThrough)],
+            Predicate::Never,
+            1,
+        );
+
+        let result = ExecutionGraph::execute(
+            config,
+            Value::Null,
+            GraphContext {
+                cancel: CancellationToken::new(),
+                executor: Arc::new(CancelledExec),
+            },
+        )
+        .await;
+
+        assert!(matches!(result, Err(GraphError::Cancelled)));
     }
 }

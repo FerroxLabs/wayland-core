@@ -22,6 +22,7 @@
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use thiserror::Error;
 
 /// Configurable backend for credential storage. Selected via the
@@ -92,8 +93,54 @@ pub enum CredentialsError {
 /// (e.g. `providers.anthropic.api_key`, `bedrock.secret_access_key`).
 pub trait CredentialsStore: Send + Sync {
     fn get(&self, key: &str) -> Result<Option<String>, CredentialsError>;
+    /// Resolve several keys from one logical snapshot when the backend can do
+    /// so efficiently. The default preserves existing backend semantics;
+    /// table-backed stores override it to avoid reloading or re-deriving their
+    /// backing material once per key.
+    fn get_many(&self, keys: &[&str]) -> Result<Vec<Option<String>>, CredentialsError> {
+        keys.iter().map(|key| self.get(key)).collect()
+    }
     fn put(&self, key: &str, value: &str) -> Result<(), CredentialsError>;
     fn delete(&self, key: &str) -> Result<(), CredentialsError>;
+}
+
+/// A credential store selected through the fail-closed confidential backend
+/// policy. The private inner store prevents callers from constructing this
+/// capability around a plaintext backend.
+pub struct ConfidentialCredentialsStore {
+    inner: Box<dyn CredentialsStore>,
+    key_creation_lock_path: PathBuf,
+}
+
+impl ConfidentialCredentialsStore {
+    fn new(inner: Box<dyn CredentialsStore>, key_creation_lock_path: PathBuf) -> Self {
+        Self {
+            inner,
+            key_creation_lock_path,
+        }
+    }
+
+    pub(crate) fn key_creation_lock_path(&self) -> &Path {
+        &self.key_creation_lock_path
+    }
+}
+
+impl CredentialsStore for ConfidentialCredentialsStore {
+    fn get(&self, key: &str) -> Result<Option<String>, CredentialsError> {
+        self.inner.get(key)
+    }
+
+    fn get_many(&self, keys: &[&str]) -> Result<Vec<Option<String>>, CredentialsError> {
+        self.inner.get_many(keys)
+    }
+
+    fn put(&self, key: &str, value: &str) -> Result<(), CredentialsError> {
+        self.inner.put(key, value)
+    }
+
+    fn delete(&self, key: &str) -> Result<(), CredentialsError> {
+        self.inner.delete(key)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -176,6 +223,23 @@ impl CredentialsStore for PlaintextCredentialsStore {
             _ => return Ok(None),
         };
         Ok(secrets.get(key).and_then(|v| v.as_str()).map(str::to_owned))
+    }
+
+    fn get_many(&self, keys: &[&str]) -> Result<Vec<Option<String>>, CredentialsError> {
+        let table = self.load_table()?;
+        let secrets = match table.get("secrets") {
+            Some(toml::Value::Table(table)) => Some(table),
+            _ => None,
+        };
+        Ok(keys
+            .iter()
+            .map(|key| {
+                secrets
+                    .and_then(|table| table.get(*key))
+                    .and_then(toml::Value::as_str)
+                    .map(str::to_owned)
+            })
+            .collect())
     }
 
     fn put(&self, key: &str, value: &str) -> Result<(), CredentialsError> {
@@ -274,6 +338,266 @@ fn keyring_available(service: &str) -> bool {
     }
 }
 
+/// Build a stable, profile-isolated keyring service identity.
+///
+/// The credentials file may not exist yet, so canonicalize the longest
+/// existing ancestor and append the missing suffix. This makes symlinked
+/// profile paths converge while keeping new profiles deterministic. The path
+/// itself is not exposed to the OS keyring UI; only its SHA-256 digest is.
+fn profile_keyring_service(
+    base_service: &str,
+    credentials_path: &Path,
+) -> Result<String, CredentialsError> {
+    let canonical = absolute_confidential_path(credentials_path)?;
+    let digest = Sha256::digest(canonical.as_os_str().as_encoded_bytes());
+    let digest_hex = digest
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    Ok(format!("{base_service}.profile.{digest_hex}"))
+}
+
+fn absolute_confidential_path(path: &Path) -> Result<PathBuf, CredentialsError> {
+    let absolute = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir()?.join(path)
+    };
+    Ok(canonicalize_with_missing_suffix(&absolute))
+}
+
+fn confidential_keyring_service(
+    cfg: &CredentialsStorageConfig,
+    credentials_path: &Path,
+    isolated_home: bool,
+) -> Result<String, CredentialsError> {
+    let base_service = cfg
+        .service_name
+        .clone()
+        .unwrap_or_else(|| "wayland-core".to_string());
+    if isolated_home {
+        profile_keyring_service(&base_service, credentials_path)
+    } else {
+        Ok(base_service)
+    }
+}
+
+fn canonicalize_with_missing_suffix(path: &Path) -> PathBuf {
+    let mut cursor = path;
+    let mut missing = Vec::new();
+
+    loop {
+        if let Ok(mut canonical) = std::fs::canonicalize(cursor) {
+            for component in missing.iter().rev() {
+                canonical.push(component);
+            }
+            return canonical;
+        }
+
+        let Some(file_name) = cursor.file_name() else {
+            return path.to_path_buf();
+        };
+        missing.push(file_name.to_os_string());
+        let Some(parent) = cursor.parent() else {
+            return path.to_path_buf();
+        };
+        cursor = parent;
+    }
+}
+
+const CONFIDENTIAL_BACKEND_MARKER_VERSION: u8 = 1;
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "backend", rename_all = "snake_case", deny_unknown_fields)]
+enum ConfidentialBackendSelection {
+    Keyring {
+        service: String,
+    },
+    EncryptedFile {
+        cipher_path: PathBuf,
+        key_params_path: PathBuf,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ConfidentialBackendMarker {
+    version: u8,
+    selection: ConfidentialBackendSelection,
+}
+
+#[derive(Debug, Clone)]
+enum ConfidentialBackendMode {
+    Auto {
+        keyring: ConfidentialBackendSelection,
+        vault: ConfidentialBackendSelection,
+    },
+    Explicit(ConfidentialBackendSelection),
+}
+
+fn confidential_backend_unavailable(message: &str) -> CredentialsError {
+    CredentialsError::BackendUnavailable(message.to_string())
+}
+
+fn selection_is_available(
+    selection: &ConfidentialBackendSelection,
+    keyring_is_available: &impl Fn(&str) -> bool,
+    vault_is_available: bool,
+) -> bool {
+    match selection {
+        ConfidentialBackendSelection::Keyring { service } => keyring_is_available(service),
+        ConfidentialBackendSelection::EncryptedFile { .. } => vault_is_available,
+    }
+}
+
+/// Resolve one confidential backend without ever replacing an existing pin.
+/// Availability is injected so oscillation behavior can be proven without
+/// touching an operator's real keyring.
+fn select_confidential_backend(
+    pinned: Option<&ConfidentialBackendSelection>,
+    mode: &ConfidentialBackendMode,
+    keyring_is_available: &impl Fn(&str) -> bool,
+    vault_is_available: bool,
+) -> Result<ConfidentialBackendSelection, CredentialsError> {
+    if let Some(pinned) = pinned {
+        match mode {
+            ConfidentialBackendMode::Auto { keyring, vault }
+                if pinned != keyring && pinned != vault =>
+            {
+                return Err(confidential_backend_unavailable(
+                    "pinned confidential backend conflicts with the current profile",
+                ));
+            }
+            ConfidentialBackendMode::Explicit(required) if required != pinned => {
+                return Err(confidential_backend_unavailable(
+                    "configured confidential backend conflicts with the profile's pinned backend",
+                ));
+            }
+            _ => {}
+        }
+        let available = match mode {
+            ConfidentialBackendMode::Auto { .. } => {
+                selection_is_available(pinned, keyring_is_available, vault_is_available)
+            }
+            // An explicitly configured encrypted file retains its existing
+            // interactive unlock behavior; keyring availability is still
+            // probed before the store is opened.
+            ConfidentialBackendMode::Explicit(ConfidentialBackendSelection::EncryptedFile {
+                ..
+            }) => true,
+            ConfidentialBackendMode::Explicit(_) => {
+                selection_is_available(pinned, keyring_is_available, vault_is_available)
+            }
+        };
+        if !available {
+            return Err(confidential_backend_unavailable(
+                "the profile's pinned confidential credential backend is unavailable",
+            ));
+        }
+        return Ok(pinned.clone());
+    }
+
+    match mode {
+        ConfidentialBackendMode::Auto { keyring, vault } => {
+            if selection_is_available(keyring, keyring_is_available, vault_is_available) {
+                Ok(keyring.clone())
+            } else if selection_is_available(vault, keyring_is_available, vault_is_available) {
+                Ok(vault.clone())
+            } else {
+                Err(confidential_backend_unavailable(
+                    "no confidential credential backend is available",
+                ))
+            }
+        }
+        ConfidentialBackendMode::Explicit(selection) => {
+            let available = match selection {
+                ConfidentialBackendSelection::Keyring { .. } => {
+                    selection_is_available(selection, keyring_is_available, vault_is_available)
+                }
+                ConfidentialBackendSelection::EncryptedFile { .. } => true,
+            };
+            if available {
+                Ok(selection.clone())
+            } else {
+                Err(confidential_backend_unavailable(
+                    "the configured confidential credential backend is unavailable",
+                ))
+            }
+        }
+    }
+}
+
+fn load_confidential_backend_marker(
+    marker_path: &Path,
+) -> Result<Option<ConfidentialBackendSelection>, CredentialsError> {
+    let bytes = match std::fs::read(marker_path) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(CredentialsError::Io(error)),
+    };
+    let marker: ConfidentialBackendMarker = serde_json::from_slice(&bytes).map_err(|_| {
+        confidential_backend_unavailable("confidential backend marker is malformed")
+    })?;
+    if marker.version != CONFIDENTIAL_BACKEND_MARKER_VERSION {
+        return Err(confidential_backend_unavailable(
+            "confidential backend marker version is unsupported",
+        ));
+    }
+    Ok(Some(marker.selection))
+}
+
+fn resolve_confidential_backend_with_availability(
+    mode: &ConfidentialBackendMode,
+    plaintext_path: &Path,
+    keyring_is_available: &impl Fn(&str) -> bool,
+    vault_is_available: bool,
+) -> Result<ConfidentialBackendSelection, CredentialsError> {
+    let marker_path = plaintext_path.with_file_name(".credentials.confidential-backend.json");
+    let lock_path = marker_path.with_extension("lock");
+    if let Some(parent) = marker_path.parent()
+        && !parent.as_os_str().is_empty()
+    {
+        std::fs::create_dir_all(parent)?;
+    }
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(lock_path)?;
+    let mut lock = fd_lock::RwLock::new(file);
+    let _guard = loop {
+        match lock.write() {
+            Ok(guard) => break guard,
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(_) => {
+                return Err(confidential_backend_unavailable(
+                    "confidential backend selection lock failed",
+                ));
+            }
+        }
+    };
+
+    let pinned = load_confidential_backend_marker(&marker_path)?;
+    let selected = select_confidential_backend(
+        pinned.as_ref(),
+        mode,
+        keyring_is_available,
+        vault_is_available,
+    )?;
+    if pinned.is_none() {
+        let marker = ConfidentialBackendMarker {
+            version: CONFIDENTIAL_BACKEND_MARKER_VERSION,
+            selection: selected.clone(),
+        };
+        let bytes = serde_json::to_vec(&marker).map_err(|_| {
+            confidential_backend_unavailable("confidential backend marker serialization failed")
+        })?;
+        crate::atomic_write(&marker_path, &bytes)?;
+    }
+    Ok(selected)
+}
+
 /// The [`CredentialsBackend::Auto`] store: keyring primary, plaintext fallback.
 ///
 /// Reads check the keyring first, then plaintext, so pre-existing plaintext
@@ -359,10 +683,110 @@ pub struct EncryptedFileCredentialsStore {
 
 /// In-memory vault unlock state.
 struct UnlockedVault {
-    /// User-supplied passphrase. Held only in memory; zeroized on drop.
-    passphrase: zeroize::Zeroizing<String>,
+    /// Process-scoped passphrase authority. Held only in memory, redacted from
+    /// debug output, shared across fresh store instances, and zeroized when the
+    /// process authority is dropped.
+    passphrase: std::sync::Arc<VaultPassphraseAuthority>,
     /// KDF params (salt + tuning knobs). Persisted to `key_params_path`.
     params: encrypted_file::KdfParams,
+}
+
+/// Process-scoped vault passphrase authority.
+///
+/// The secret is deliberately private and has a redacted `Debug`
+/// implementation. `Arc` lets every encrypted-store instance in one process
+/// share the same zeroizing allocation rather than cloning plaintext.
+struct VaultPassphraseAuthority {
+    secret: zeroize::Zeroizing<String>,
+}
+
+impl VaultPassphraseAuthority {
+    fn new(secret: String) -> Self {
+        Self {
+            secret: zeroize::Zeroizing::new(secret),
+        }
+    }
+
+    fn expose(&self) -> &str {
+        self.secret.as_str()
+    }
+}
+
+impl std::fmt::Debug for VaultPassphraseAuthority {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("VaultPassphraseAuthority")
+            .field("secret", &"[REDACTED]")
+            .finish()
+    }
+}
+
+#[cfg(unix)]
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+struct PassphraseFdIdentity {
+    raw_fd: std::os::unix::io::RawFd,
+    device: u64,
+    inode: u64,
+}
+
+#[cfg(unix)]
+type ProcessPassphraseAuthority = Option<(
+    PassphraseFdIdentity,
+    std::sync::Arc<VaultPassphraseAuthority>,
+)>;
+
+#[cfg(unix)]
+fn passphrase_from_fd(
+    fd: std::os::unix::io::RawFd,
+) -> Result<std::sync::Arc<VaultPassphraseAuthority>, CredentialsError> {
+    use std::io::Read;
+    use std::os::unix::fs::MetadataExt;
+    use std::os::unix::io::FromRawFd;
+
+    validate_readable_fd(fd)?;
+
+    // SAFETY: `validate_readable_fd` confirmed that this inherited descriptor
+    // is open and readable. `ManuallyDrop` keeps this borrowed wrapper from
+    // closing the descriptor, including on error paths.
+    let mut file = std::mem::ManuallyDrop::new(unsafe { std::fs::File::from_raw_fd(fd) });
+    let metadata = file.metadata().map_err(|error| {
+        CredentialsError::BackendUnavailable(format!("passphrase fd {fd} metadata: {error}"))
+    })?;
+    let identity = PassphraseFdIdentity {
+        raw_fd: fd,
+        device: metadata.dev(),
+        inode: metadata.ino(),
+    };
+
+    // A passphrase pipe is intentionally one-shot. Fresh recovery-store
+    // instances in the same process must therefore share the authority created
+    // by the first read. Holding the mutex across the initial read also prevents
+    // concurrent openers from racing to consume the same descriptor.
+    static AUTHORITY: std::sync::OnceLock<parking_lot::Mutex<ProcessPassphraseAuthority>> =
+        std::sync::OnceLock::new();
+    let mut authority = AUTHORITY
+        .get_or_init(|| parking_lot::Mutex::new(None))
+        .lock();
+    if let Some((cached_identity, cached_authority)) = authority.as_ref() {
+        if cached_identity == &identity {
+            return Ok(std::sync::Arc::clone(cached_authority));
+        }
+        return Err(CredentialsError::BackendUnavailable(
+            "WAYLAND_VAULT_PASSPHRASE_FD changed after the process vault authority was initialized"
+                .to_string(),
+        ));
+    }
+
+    let mut secret = zeroize::Zeroizing::new(String::new());
+    file.read_to_string(&mut secret).map_err(|error| {
+        CredentialsError::BackendUnavailable(format!("passphrase fd {fd}: {error}"))
+    })?;
+    while secret.ends_with('\n') {
+        secret.pop();
+    }
+    let initialized = std::sync::Arc::new(VaultPassphraseAuthority { secret });
+    *authority = Some((identity, std::sync::Arc::clone(&initialized)));
+    Ok(initialized)
 }
 
 /// supply-unsafe-63: validate that an env-supplied raw file descriptor is
@@ -436,7 +860,7 @@ impl EncryptedFileCredentialsStore {
     ///   2. `WAYLAND_VAULT_PASSPHRASE` env var (legacy, kept for backwards
     ///      compatibility). Emits a warning about the `/proc` visibility risk.
     ///   3. Interactive `rpassword` prompt.
-    fn read_passphrase() -> Result<zeroize::Zeroizing<String>, CredentialsError> {
+    fn read_passphrase() -> Result<std::sync::Arc<VaultPassphraseAuthority>, CredentialsError> {
         // F-055 path 1: read from a file descriptor. Unix-only — file
         // descriptors are not a portable concept; Windows uses HANDLEs
         // which the keyring backend doesn't expose. On Windows + targets
@@ -448,28 +872,7 @@ impl EncryptedFileCredentialsStore {
                     "WAYLAND_VAULT_PASSPHRASE_FD is not a valid integer: {fd_str}"
                 ))
             })?;
-            // supply-unsafe-63: the fd number is fully attacker-influenced
-            // (it comes from the environment). Validate it BEFORE handing it
-            // to `from_raw_fd`: confirm it is actually open and that it was
-            // opened for reading. Without this, a hostile or buggy parent
-            // could point us at fd 1/2 (a write-only pipe → silent EBADF
-            // read), or a closed/recycled descriptor → reading whatever data
-            // happens to be on a fd opened later in the process. Reject
-            // anything that is not a readable, currently-open descriptor.
-            validate_readable_fd(fd)?;
-            use std::io::Read;
-            // SAFETY: We are re-borrowing an fd that the process inherited and
-            // that `validate_readable_fd` just confirmed is open and readable;
-            // ownership is not transferred and we do not close it.
-            let mut f = unsafe { <std::fs::File as std::os::unix::io::FromRawFd>::from_raw_fd(fd) };
-            let mut pp = String::new();
-            f.read_to_string(&mut pp).map_err(|e| {
-                CredentialsError::BackendUnavailable(format!("passphrase fd {fd}: {e}"))
-            })?;
-            // Do not close the fd — `std::mem::forget` prevents Drop from closing.
-            std::mem::forget(f);
-            let pp = pp.trim_end_matches('\n').to_string();
-            return Ok(zeroize::Zeroizing::new(pp));
+            return passphrase_from_fd(fd);
         }
 
         // F-055 path 2: env var (legacy, warned).
@@ -480,13 +883,13 @@ impl EncryptedFileCredentialsStore {
                  /proc/<pid>/environ on Linux. Set WAYLAND_VAULT_PASSPHRASE_FD \
                  to a file descriptor number to avoid this leak."
             );
-            return Ok(zeroize::Zeroizing::new(pp));
+            return Ok(std::sync::Arc::new(VaultPassphraseAuthority::new(pp)));
         }
 
         // F-055 path 3: interactive prompt.
         let pp = rpassword::prompt_password("vault passphrase: ")
             .map_err(|e| CredentialsError::BackendUnavailable(format!("rpassword: {e}")))?;
-        Ok(zeroize::Zeroizing::new(pp))
+        Ok(std::sync::Arc::new(VaultPassphraseAuthority::new(pp)))
     }
 
     /// Acquire (or reuse) the unlocked-state cache.
@@ -513,11 +916,12 @@ impl EncryptedFileCredentialsStore {
             // the vault key on next write.
             if self.cipher_path.exists() {
                 let blob = std::fs::read(&self.cipher_path)?;
-                let _pt = encrypted_file::decrypt(&blob, &passphrase, &params).map_err(|e| {
-                    CredentialsError::BackendUnavailable(format!(
-                        "vault unlock failed (wrong passphrase or corrupt file): {e}"
-                    ))
-                })?;
+                let _pt =
+                    encrypted_file::decrypt(&blob, passphrase.expose(), &params).map_err(|e| {
+                        CredentialsError::BackendUnavailable(format!(
+                            "vault unlock failed (wrong passphrase or corrupt file): {e}"
+                        ))
+                    })?;
             }
 
             *guard = Some(UnlockedVault { passphrase, params });
@@ -536,9 +940,9 @@ impl EncryptedFileCredentialsStore {
             return Ok(toml::Table::new());
         }
         let blob = std::fs::read(&self.cipher_path)?;
-        let pt = encrypted_file::decrypt(&blob, &vault.passphrase, &vault.params).map_err(|e| {
-            CredentialsError::BackendUnavailable(format!("vault decrypt failed: {e}"))
-        })?;
+        let pt = encrypted_file::decrypt(&blob, vault.passphrase.expose(), &vault.params).map_err(
+            |e| CredentialsError::BackendUnavailable(format!("vault decrypt failed: {e}")),
+        )?;
         let parsed: toml::Table = std::str::from_utf8(&pt)
             .map_err(|e| {
                 CredentialsError::BackendUnavailable(format!("vault plaintext utf8: {e}"))
@@ -558,7 +962,7 @@ impl EncryptedFileCredentialsStore {
         // so the existing passphrase keeps deriving the same key. Only
         // the AEAD nonce is rotated on each encrypt (handled inside
         // `encrypted_file::encrypt`).
-        let key = encrypted_file::derive_key(&vault.passphrase, &vault.params)
+        let key = encrypted_file::derive_key(vault.passphrase.expose(), &vault.params)
             .map_err(|e| CredentialsError::BackendUnavailable(format!("derive_key: {e}")))?;
         let blob = encrypted_file::encrypt_with_key(serialized.as_bytes(), &key).map_err(|e| {
             CredentialsError::BackendUnavailable(format!("vault encrypt failed: {e}"))
@@ -620,6 +1024,24 @@ impl CredentialsStore for EncryptedFileCredentialsStore {
             _ => return Ok(None),
         };
         Ok(secrets.get(key).and_then(|v| v.as_str()).map(str::to_owned))
+    }
+
+    fn get_many(&self, keys: &[&str]) -> Result<Vec<Option<String>>, CredentialsError> {
+        let vault = self.unlock()?;
+        let table = self.load_secrets(&vault)?;
+        let secrets = match table.get("secrets") {
+            Some(toml::Value::Table(table)) => Some(table),
+            _ => None,
+        };
+        Ok(keys
+            .iter()
+            .map(|key| {
+                secrets
+                    .and_then(|table| table.get(*key))
+                    .and_then(toml::Value::as_str)
+                    .map(str::to_owned)
+            })
+            .collect())
     }
 
     fn put(&self, key: &str, value: &str) -> Result<(), CredentialsError> {
@@ -994,6 +1416,77 @@ pub fn open_store(
             // rather than silently downgrading to plaintext.
             migrate_plaintext_into_vault(plaintext_path, &store)?;
             Ok(Box::new(store))
+        }
+    }
+}
+
+/// Open a credentials store for material that must never be written in
+/// plaintext.
+///
+/// Unlike [`open_store`], `Auto` is fail-closed: it selects the OS keyring when
+/// it is usable, using a stable profile-namespaced service for isolated
+/// `WAYLAND_HOME` profiles. Otherwise it selects the encrypted-file vault only
+/// when unlock material is available.
+/// It never constructs [`PlaintextCredentialsStore`] or
+/// [`FallbackCredentialsStore`].
+pub fn open_confidential_store(
+    cfg: &CredentialsStorageConfig,
+    plaintext_path: &Path,
+) -> Result<ConfidentialCredentialsStore, CredentialsError> {
+    if matches!(&cfg.backend, CredentialsBackend::Plaintext) {
+        return Err(CredentialsError::BackendUnavailable(
+            "plaintext credentials are not permitted for confidential material".to_string(),
+        ));
+    }
+
+    let credentials_path = absolute_confidential_path(plaintext_path)?;
+    let isolated_home = std::env::var_os("WAYLAND_HOME").is_some();
+    let service = confidential_keyring_service(cfg, &credentials_path, isolated_home)?;
+    let keyring = ConfidentialBackendSelection::Keyring { service };
+    let (default_cipher_path, default_key_params_path) = default_vault_paths(&credentials_path);
+    let vault = ConfidentialBackendSelection::EncryptedFile {
+        cipher_path: absolute_confidential_path(&default_cipher_path)?,
+        key_params_path: absolute_confidential_path(&default_key_params_path)?,
+    };
+    let mode = match &cfg.backend {
+        CredentialsBackend::Auto => ConfidentialBackendMode::Auto { keyring, vault },
+        CredentialsBackend::Keyring => ConfidentialBackendMode::Explicit(keyring),
+        CredentialsBackend::EncryptedFile {
+            cipher_path,
+            key_params_path,
+        } => ConfidentialBackendMode::Explicit(ConfidentialBackendSelection::EncryptedFile {
+            cipher_path: absolute_confidential_path(cipher_path)?,
+            key_params_path: absolute_confidential_path(key_params_path)?,
+        }),
+        CredentialsBackend::Plaintext => unreachable!("handled above"),
+    };
+    let selected = resolve_confidential_backend_with_availability(
+        &mode,
+        &credentials_path,
+        &keyring_available,
+        vault_unlock_material_present(),
+    )?;
+
+    match selected {
+        ConfidentialBackendSelection::Keyring { service } => {
+            let key_creation_lock_path =
+                credentials_path.with_file_name(".credentials.confidential-key.lock");
+            Ok(ConfidentialCredentialsStore::new(
+                Box::new(KeyringCredentialsStore::new(service)),
+                key_creation_lock_path,
+            ))
+        }
+        ConfidentialBackendSelection::EncryptedFile {
+            cipher_path,
+            key_params_path,
+        } => {
+            let key_creation_lock_path = cipher_path.with_extension("confidential-key.lock");
+            let store = EncryptedFileCredentialsStore::new(cipher_path, key_params_path);
+            migrate_plaintext_into_vault(&credentials_path, &store)?;
+            Ok(ConfidentialCredentialsStore::new(
+                Box::new(store),
+                key_creation_lock_path,
+            ))
         }
     }
 }
@@ -1406,6 +1899,16 @@ mod tests {
             store.get("openai_api_key").unwrap().as_deref(),
             Some("sk-test")
         );
+        assert_eq!(
+            store
+                .get_many(&["anthropic_api_key", "missing", "openai_api_key"])
+                .unwrap(),
+            vec![
+                Some("sk-ant-secret".to_string()),
+                None,
+                Some("sk-test".to_string())
+            ]
+        );
 
         store.delete("anthropic_api_key").unwrap();
         assert!(store.get("anthropic_api_key").unwrap().is_none());
@@ -1491,6 +1994,16 @@ mod tests {
             store.get("openai_api_key").unwrap().as_deref(),
             Some("sk-openai")
         );
+        assert_eq!(
+            store
+                .get_many(&["anthropic_api_key", "missing", "openai_api_key"])
+                .unwrap(),
+            vec![
+                Some("sk-ant-secret".to_string()),
+                None,
+                Some("sk-openai".to_string())
+            ]
+        );
 
         // Delete one
         store.delete("anthropic_api_key").unwrap();
@@ -1521,6 +2034,91 @@ mod tests {
         let reader = EncryptedFileCredentialsStore::new(cipher.clone(), params.clone());
         assert_eq!(reader.get("k1").unwrap().as_deref(), Some("v1"));
         assert_eq!(reader.get("k2").unwrap().as_deref(), Some("v2"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    #[serial_test::serial(vault_passphrase_env)]
+    fn passphrase_fd_authority_survives_provider_then_confidential_store_open() {
+        use std::io::Write;
+        use std::os::unix::io::AsRawFd;
+        use std::os::unix::net::UnixStream;
+
+        let _passphrase = EnvVarGuard::remove("WAYLAND_VAULT_PASSPHRASE");
+        let dir = tempdir().unwrap();
+        let plaintext_path = dir.path().join("credentials.toml");
+        let cipher_path = dir.path().join("credentials.enc");
+        let key_params_path = dir.path().join("credentials.kdf.json");
+        let cfg = CredentialsStorageConfig {
+            backend: CredentialsBackend::EncryptedFile {
+                cipher_path,
+                key_params_path,
+            },
+            service_name: None,
+        };
+
+        let (reader, mut writer) = UnixStream::pair().unwrap();
+        writer.write_all(b"one-shot-recovery-passphrase\n").unwrap();
+        writer.shutdown(std::net::Shutdown::Write).unwrap();
+        let _passphrase_fd = EnvVarGuard::set(
+            "WAYLAND_VAULT_PASSPHRASE_FD",
+            &reader.as_raw_fd().to_string(),
+        );
+
+        // Config/provider resolution opens the ordinary store first and
+        // consumes the one-shot passphrase descriptor even when no provider
+        // credential exists.
+        let provider_store = open_store(&cfg, &plaintext_path).unwrap();
+        assert!(
+            provider_store
+                .get("providers.openai.api_key")
+                .unwrap()
+                .is_none()
+        );
+
+        // Recovery protection opens a fresh fail-closed store later in the
+        // same process. It must reuse the in-memory authority rather than read
+        // the now-at-EOF descriptor again.
+        let recovery_store = open_confidential_store(&cfg, &plaintext_path).unwrap();
+        recovery_store
+            .put("recovery.sealing_key", "sealed-key-material")
+            .unwrap();
+        assert_eq!(
+            recovery_store
+                .get("recovery.sealing_key")
+                .unwrap()
+                .as_deref(),
+            Some("sealed-key-material")
+        );
+
+        // A launch authority is immutable. Repointing the environment at a
+        // different live descriptor cannot silently switch vault keys.
+        let (replacement_reader, mut replacement_writer) = UnixStream::pair().unwrap();
+        replacement_writer
+            .write_all(b"attacker-selected-replacement\n")
+            .unwrap();
+        replacement_writer
+            .shutdown(std::net::Shutdown::Write)
+            .unwrap();
+        let _replacement_fd = EnvVarGuard::set(
+            "WAYLAND_VAULT_PASSPHRASE_FD",
+            &replacement_reader.as_raw_fd().to_string(),
+        );
+        let reopened = open_store(&cfg, &plaintext_path).unwrap();
+        let error = reopened
+            .get("providers.openai.api_key")
+            .expect_err("mid-process passphrase authority replacement must fail closed");
+        assert!(
+            matches!(error, CredentialsError::BackendUnavailable(ref message) if message.contains("changed after the process vault authority was initialized"))
+        );
+    }
+
+    #[test]
+    fn vault_passphrase_authority_debug_is_redacted() {
+        let authority = VaultPassphraseAuthority::new("must-not-appear".to_string());
+        let rendered = format!("{authority:?}");
+        assert!(rendered.contains("[REDACTED]"));
+        assert!(!rendered.contains("must-not-appear"));
     }
 
     #[test]
@@ -1613,6 +2211,342 @@ mod tests {
             }
             Self { key, prior }
         }
+
+        fn remove(key: &'static str) -> Self {
+            let prior = std::env::var(key).ok();
+            unsafe {
+                std::env::remove_var(key);
+            }
+            Self { key, prior }
+        }
+    }
+
+    #[test]
+    #[serial_test::serial(vault_passphrase_env)]
+    fn confidential_auto_never_downgrades_to_plaintext() {
+        let dir = tempdir().unwrap();
+        let _home = EnvVarGuard::set("WAYLAND_HOME", dir.path().to_str().unwrap());
+        let _passphrase = EnvVarGuard::remove("WAYLAND_VAULT_PASSPHRASE");
+        let _passphrase_fd = EnvVarGuard::remove("WAYLAND_VAULT_PASSPHRASE_FD");
+        let plaintext_path = dir.path().join("credentials.toml");
+
+        match open_confidential_store(&CredentialsStorageConfig::default(), &plaintext_path) {
+            // A usable OS keyring is a valid confidential backend, including
+            // for an isolated profile. Do not write a probe value into the
+            // operator's keyring from this test.
+            Ok(_) => {}
+            Err(err) => assert!(matches!(err, CredentialsError::BackendUnavailable(_))),
+        }
+        assert!(
+            !plaintext_path.exists(),
+            "confidential Auto must never materialize a plaintext store"
+        );
+
+        let plaintext_cfg = CredentialsStorageConfig {
+            backend: CredentialsBackend::Plaintext,
+            service_name: None,
+        };
+        assert!(matches!(
+            open_confidential_store(&plaintext_cfg, &plaintext_path),
+            Err(CredentialsError::BackendUnavailable(_))
+        ));
+    }
+
+    #[test]
+    fn profile_keyring_service_is_stable_and_profile_isolated() {
+        let dir = tempdir().unwrap();
+        let first = dir.path().join("profile-a").join("credentials.toml");
+        let second = dir.path().join("profile-b").join("credentials.toml");
+
+        let first_service = profile_keyring_service("wayland-core", &first).unwrap();
+        assert_eq!(
+            first_service,
+            profile_keyring_service("wayland-core", &first).unwrap()
+        );
+        assert_ne!(
+            first_service,
+            profile_keyring_service("wayland-core", &second).unwrap()
+        );
+        assert!(first_service.starts_with("wayland-core.profile."));
+        assert_eq!(first_service.len(), "wayland-core.profile.".len() + 64);
+    }
+
+    #[test]
+    fn profile_keyring_service_preserves_configured_namespace() {
+        let dir = tempdir().unwrap();
+        let credentials_path = dir.path().join("credentials.toml");
+
+        let default = profile_keyring_service("wayland-core", &credentials_path).unwrap();
+        let configured = profile_keyring_service("wayland-core-dev", &credentials_path).unwrap();
+
+        assert_ne!(default, configured);
+        assert!(configured.starts_with("wayland-core-dev.profile."));
+    }
+
+    #[test]
+    fn explicit_keyring_uses_the_same_isolated_profile_namespace() {
+        let dir = tempdir().unwrap();
+        let credentials_path = dir.path().join("credentials.toml");
+        let cfg = CredentialsStorageConfig {
+            backend: CredentialsBackend::Keyring,
+            service_name: Some("wayland-core-explicit".to_string()),
+        };
+
+        let isolated = confidential_keyring_service(&cfg, &credentials_path, true).unwrap();
+        let non_isolated = confidential_keyring_service(&cfg, &credentials_path, false).unwrap();
+
+        assert!(isolated.starts_with("wayland-core-explicit.profile."));
+        assert_eq!(non_isolated, "wayland-core-explicit");
+    }
+
+    fn test_keyring_selection(service: &str) -> ConfidentialBackendSelection {
+        ConfidentialBackendSelection::Keyring {
+            service: service.to_string(),
+        }
+    }
+
+    fn test_vault_selection(root: &Path, name: &str) -> ConfidentialBackendSelection {
+        ConfidentialBackendSelection::EncryptedFile {
+            cipher_path: root.join(format!("{name}.enc")),
+            key_params_path: root.join(format!("{name}.kdf.json")),
+        }
+    }
+
+    #[test]
+    fn confidential_auto_vault_pin_refuses_keyring_appearance() {
+        let dir = tempdir().unwrap();
+        let original_keyring = test_keyring_selection("keyring-original");
+        let original_vault = test_vault_selection(dir.path(), "vault-original");
+        let initial_mode = ConfidentialBackendMode::Auto {
+            keyring: original_keyring,
+            vault: original_vault.clone(),
+        };
+        let pinned = select_confidential_backend(None, &initial_mode, &|_| false, true).unwrap();
+        assert_eq!(pinned, original_vault);
+
+        let restart_mode = ConfidentialBackendMode::Auto {
+            keyring: test_keyring_selection("keyring-original"),
+            vault: test_vault_selection(dir.path(), "vault-original"),
+        };
+        assert!(matches!(
+            select_confidential_backend(Some(&pinned), &restart_mode, &|_| true, false),
+            Err(CredentialsError::BackendUnavailable(_))
+        ));
+        assert_eq!(
+            select_confidential_backend(Some(&pinned), &restart_mode, &|_| true, true).unwrap(),
+            pinned,
+            "the original vault paths remain authoritative"
+        );
+    }
+
+    #[test]
+    fn confidential_auto_keyring_pin_refuses_vault_fallback() {
+        let dir = tempdir().unwrap();
+        let original_keyring = test_keyring_selection("keyring-original");
+        let initial_mode = ConfidentialBackendMode::Auto {
+            keyring: original_keyring.clone(),
+            vault: test_vault_selection(dir.path(), "vault-original"),
+        };
+        let pinned = select_confidential_backend(None, &initial_mode, &|_| true, true).unwrap();
+        assert_eq!(pinned, original_keyring);
+
+        let restart_mode = ConfidentialBackendMode::Auto {
+            keyring: test_keyring_selection("keyring-original"),
+            vault: test_vault_selection(dir.path(), "vault-original"),
+        };
+        assert!(matches!(
+            select_confidential_backend(Some(&pinned), &restart_mode, &|_| false, true),
+            Err(CredentialsError::BackendUnavailable(_))
+        ));
+        assert_eq!(
+            select_confidential_backend(
+                Some(&pinned),
+                &restart_mode,
+                &|service| service == "keyring-original",
+                true,
+            )
+            .unwrap(),
+            pinned,
+            "the original keyring service remains authoritative"
+        );
+    }
+
+    #[test]
+    fn confidential_auto_rejects_foreign_or_relative_backend_markers() {
+        let dir = tempdir().unwrap();
+        let credentials_path = dir.path().join("credentials.toml");
+        let marker_path = dir.path().join(".credentials.confidential-backend.json");
+        let mode = ConfidentialBackendMode::Auto {
+            keyring: test_keyring_selection("current-profile-keyring"),
+            vault: test_vault_selection(dir.path(), "current-profile-vault"),
+        };
+        let foreign = [
+            test_keyring_selection("copied-foreign-profile-keyring"),
+            ConfidentialBackendSelection::EncryptedFile {
+                cipher_path: PathBuf::from("relative-vault.enc"),
+                key_params_path: PathBuf::from("relative-vault.kdf.json"),
+            },
+            test_vault_selection(&dir.path().join("foreign-profile"), "foreign-vault"),
+        ];
+
+        for selection in foreign {
+            let marker = ConfidentialBackendMarker {
+                version: CONFIDENTIAL_BACKEND_MARKER_VERSION,
+                selection,
+            };
+            crate::atomic_write(&marker_path, &serde_json::to_vec(&marker).unwrap()).unwrap();
+            assert!(matches!(
+                resolve_confidential_backend_with_availability(
+                    &mode,
+                    &credentials_path,
+                    &|_| true,
+                    true,
+                ),
+                Err(CredentialsError::BackendUnavailable(_))
+            ));
+        }
+    }
+
+    #[test]
+    fn confidential_backend_marker_is_strict_and_fail_closed() {
+        let dir = tempdir().unwrap();
+        let credentials_path = dir.path().join("credentials.toml");
+        let marker_path = dir.path().join(".credentials.confidential-backend.json");
+        let mode = ConfidentialBackendMode::Explicit(test_keyring_selection("strict-marker"));
+
+        std::fs::write(
+            &marker_path,
+            br#"{"version":1,"selection":{"backend":"keyring"}}"#,
+        )
+        .unwrap();
+        assert!(matches!(
+            resolve_confidential_backend_with_availability(
+                &mode,
+                &credentials_path,
+                &|_| true,
+                false,
+            ),
+            Err(CredentialsError::BackendUnavailable(_))
+        ));
+
+        let unsupported = ConfidentialBackendMarker {
+            version: CONFIDENTIAL_BACKEND_MARKER_VERSION + 1,
+            selection: test_keyring_selection("strict-marker"),
+        };
+        crate::atomic_write(&marker_path, &serde_json::to_vec(&unsupported).unwrap()).unwrap();
+        assert!(matches!(
+            resolve_confidential_backend_with_availability(
+                &mode,
+                &credentials_path,
+                &|_| true,
+                false,
+            ),
+            Err(CredentialsError::BackendUnavailable(_))
+        ));
+    }
+
+    #[test]
+    fn concurrent_confidential_backend_selection_creates_one_authority() {
+        use std::sync::{Arc, Barrier};
+
+        let dir = tempdir().unwrap();
+        let credentials_path = Arc::new(dir.path().join("credentials.toml"));
+        let mode = Arc::new(ConfidentialBackendMode::Auto {
+            keyring: test_keyring_selection("concurrent-keyring"),
+            vault: test_vault_selection(dir.path(), "concurrent-vault"),
+        });
+        let barrier = Arc::new(Barrier::new(2));
+
+        let keyring_thread = {
+            let credentials_path = Arc::clone(&credentials_path);
+            let mode = Arc::clone(&mode);
+            let barrier = Arc::clone(&barrier);
+            std::thread::spawn(move || {
+                barrier.wait();
+                resolve_confidential_backend_with_availability(
+                    &mode,
+                    &credentials_path,
+                    &|_| true,
+                    false,
+                )
+            })
+        };
+        let vault_thread = {
+            let credentials_path = Arc::clone(&credentials_path);
+            let mode = Arc::clone(&mode);
+            let barrier = Arc::clone(&barrier);
+            std::thread::spawn(move || {
+                barrier.wait();
+                resolve_confidential_backend_with_availability(
+                    &mode,
+                    &credentials_path,
+                    &|_| false,
+                    true,
+                )
+            })
+        };
+
+        let results = [keyring_thread.join().unwrap(), vault_thread.join().unwrap()];
+        let successful = results
+            .iter()
+            .filter_map(|result| result.as_ref().ok())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            successful.len(),
+            1,
+            "exactly one concurrent selector owns the pin"
+        );
+        let marker_path = dir.path().join(".credentials.confidential-backend.json");
+        assert_eq!(
+            load_confidential_backend_marker(&marker_path)
+                .unwrap()
+                .as_ref(),
+            Some(*successful.first().unwrap())
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn profile_keyring_service_canonicalizes_symlinked_profile_path() {
+        use std::os::unix::fs::symlink;
+
+        let dir = tempdir().unwrap();
+        let profile = dir.path().join("profile");
+        std::fs::create_dir(&profile).unwrap();
+        let alias = dir.path().join("profile-alias");
+        symlink(&profile, &alias).unwrap();
+
+        let canonical = profile.join("credentials.toml");
+        let aliased = alias.join("credentials.toml");
+        assert_eq!(
+            profile_keyring_service("wayland-core", &canonical).unwrap(),
+            profile_keyring_service("wayland-core", &aliased).unwrap()
+        );
+    }
+
+    #[test]
+    #[serial_test::serial(vault_passphrase_env)]
+    fn confidential_auto_uses_encrypted_vault_without_plaintext_fallback() {
+        let _passphrase = EnvPassphraseGuard::set("confidential-auto-passphrase");
+        let dir = tempdir().unwrap();
+        let _home = EnvVarGuard::set("WAYLAND_HOME", dir.path().to_str().unwrap());
+        let _passphrase_fd = EnvVarGuard::remove("WAYLAND_VAULT_PASSPHRASE_FD");
+        let plaintext_path = dir.path().join("credentials.toml");
+        let (cipher_path, params_path) = default_vault_paths(&plaintext_path);
+
+        let store =
+            open_confidential_store(&CredentialsStorageConfig::default(), &plaintext_path).unwrap();
+        store
+            .put("recovery.sealing_key", "base64-key-material")
+            .unwrap();
+
+        assert!(cipher_path.exists());
+        assert!(params_path.exists());
+        assert!(!plaintext_path.exists());
+        assert_eq!(
+            store.get("recovery.sealing_key").unwrap().as_deref(),
+            Some("base64-key-material")
+        );
     }
 
     impl Drop for EnvVarGuard {

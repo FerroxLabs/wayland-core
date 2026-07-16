@@ -1,6 +1,54 @@
 use std::collections::HashMap;
 
 use serde::Deserialize;
+use thiserror::Error;
+
+use crate::events::{OperatorToolEffectResolution, RecoveryCursor};
+
+pub const OPERATOR_RESOLUTION_RECOVERY_VERSION: u16 = 1;
+pub const RECOVERED_APPROVAL_VERSION: u16 = 1;
+
+/// Closed payload for a versioned durable-session resynchronization request.
+///
+/// This command was introduced with recovery v1, so rejecting unknown fields
+/// does not tighten any legacy wire shape. It prevents a host from believing
+/// an authority-bearing extension was honored when Core actually ignored it.
+#[derive(Debug, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct SessionResyncCommand {
+    pub recovery_version: u16,
+    pub request_id: String,
+    pub session_id: String,
+    #[serde(default)]
+    pub after: Option<RecoveryCursor>,
+}
+
+/// Closed payload for an operator action on an interrupted durable turn.
+#[derive(Debug, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct ResumeTurnCommand {
+    pub recovery_version: u16,
+    pub request_id: String,
+    pub session_id: String,
+    pub turn_id: String,
+    pub cursor: RecoveryCursor,
+    pub action: ResumeTurnAction,
+}
+
+/// Closed payload for resolving the exact approval restored after a crash.
+#[derive(Debug, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct ResolveInterruptedApprovalCommand {
+    pub recovery_version: u16,
+    pub request_id: String,
+    pub session_id: String,
+    pub turn_id: String,
+    pub cursor: RecoveryCursor,
+    pub approval_id: String,
+    pub decision: RecoveredApprovalDecision,
+    #[serde(default)]
+    pub answer: Option<String>,
+}
 
 /// Commands sent from the client to the agent (Client -> Agent)
 #[derive(Debug, Deserialize, PartialEq)]
@@ -57,6 +105,22 @@ pub enum ProtocolCommand {
         #[serde(default)]
         additional_cost_usd: f64,
     },
+    /// Request a versioned, idempotently-correlated recovery view of a
+    /// durable session. `after = None` asks for the current snapshot;
+    /// supplying a cursor additionally asks for typed replay after it.
+    SessionResync(SessionResyncCommand),
+    /// Apply an explicit recovery action to an interrupted turn. The cursor
+    /// binds the decision to the state the operator actually inspected.
+    ResumeTurn(ResumeTurnCommand),
+    /// Resolve the exact approval gate restored for an interrupted durable
+    /// turn. The cursor prevents a stale host card from authorizing a newer
+    /// tool call after the session head advances.
+    ResolveInterruptedApproval(ResolveInterruptedApprovalCommand),
+    /// Resolve an unknown tool effect only after binding the operator's typed
+    /// claim to the exact durable state they inspected. Dispatchers must call
+    /// [`ProtocolCommand::validate_operator_resolution`] against live
+    /// authority before applying this command.
+    ResolveUnknownToolEffect(OperatorToolEffectResolution),
     AddMcpServer {
         name: String,
         transport: String,
@@ -114,6 +178,117 @@ pub enum ProtocolCommand {
     Ping,
 }
 
+/// Live authority against which an operator-resolution command is validated.
+#[derive(Debug, Clone, Copy)]
+pub struct OperatorResolutionAuthority<'a> {
+    pub session_id: &'a str,
+    pub turn_id: &'a str,
+    pub cursor: &'a RecoveryCursor,
+    pub tool_execution_id: &'a str,
+}
+
+/// Fail-closed protocol-boundary errors for operator tool-effect resolution.
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+pub enum OperatorResolutionValidationError {
+    #[error("command is not an operator tool-effect resolution")]
+    WrongCommand,
+    #[error("unsupported operator-resolution recovery version: {actual}")]
+    UnsupportedVersion { actual: u16 },
+    #[error("malformed operator-resolution field: {field}")]
+    Malformed { field: &'static str },
+    #[error("stale operator-resolution authority: {field}")]
+    Stale { field: &'static str },
+}
+
+impl ProtocolCommand {
+    /// Validate syntax and exact live authority before an operator resolution
+    /// reaches a dispatcher. Unknown fields/enums are already rejected by the
+    /// closed serde types; this boundary additionally rejects malformed and
+    /// stale claims.
+    pub fn validate_operator_resolution(
+        &self,
+        authority: &OperatorResolutionAuthority<'_>,
+    ) -> Result<(), OperatorResolutionValidationError> {
+        let Self::ResolveUnknownToolEffect(resolution) = self else {
+            return Err(OperatorResolutionValidationError::WrongCommand);
+        };
+
+        if resolution.recovery_version != OPERATOR_RESOLUTION_RECOVERY_VERSION {
+            return Err(OperatorResolutionValidationError::UnsupportedVersion {
+                actual: resolution.recovery_version,
+            });
+        }
+        for (field, value) in [
+            ("session_id", resolution.session_id.as_str()),
+            ("turn_id", resolution.turn_id.as_str()),
+            ("tool_execution_id", resolution.tool_execution_id.as_str()),
+            ("operator_id", resolution.operator_id.as_str()),
+        ] {
+            if !valid_identifier(value) {
+                return Err(OperatorResolutionValidationError::Malformed { field });
+            }
+        }
+        if !valid_identifier(&resolution.evidence.reference_id) {
+            return Err(OperatorResolutionValidationError::Malformed {
+                field: "evidence.reference_id",
+            });
+        }
+        if resolution.evidence.observed_at_unix_ms == 0 {
+            return Err(OperatorResolutionValidationError::Malformed {
+                field: "evidence.observed_at_unix_ms",
+            });
+        }
+        if !valid_recovery_cursor_digest(&resolution.cursor.journal_digest) {
+            return Err(OperatorResolutionValidationError::Malformed {
+                field: "cursor.journal_digest",
+            });
+        }
+        if !valid_evidence_digest(&resolution.evidence.digest) {
+            return Err(OperatorResolutionValidationError::Malformed {
+                field: "evidence.digest",
+            });
+        }
+
+        for (field, matches) in [
+            ("session_id", resolution.session_id == authority.session_id),
+            ("turn_id", resolution.turn_id == authority.turn_id),
+            (
+                "tool_execution_id",
+                resolution.tool_execution_id == authority.tool_execution_id,
+            ),
+            ("cursor", &resolution.cursor == authority.cursor),
+        ] {
+            if !matches {
+                return Err(OperatorResolutionValidationError::Stale { field });
+            }
+        }
+        Ok(())
+    }
+}
+
+fn valid_identifier(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 256
+        && value.trim() == value
+        && !value.chars().any(char::is_control)
+}
+
+fn valid_recovery_cursor_digest(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+}
+
+fn valid_evidence_digest(value: &str) -> bool {
+    value.strip_prefix("sha256:").is_some_and(|digest| {
+        digest.len() == 64
+            && digest
+                .bytes()
+                .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+    })
+}
+
 #[derive(Debug, Deserialize, Default, PartialEq, Eq, Clone)]
 #[serde(rename_all = "snake_case")]
 pub enum ApprovalScope {
@@ -128,6 +303,26 @@ pub enum ApprovalScope {
     AlwaysPrefix {
         prefix: String,
     },
+}
+
+/// Host-selected action for an interrupted turn.
+///
+/// `Reconcile` invokes only Core-registered authoritative reconcilers. It does
+/// not carry, and must never be interpreted as, a free-form operator claim
+/// that an external effect succeeded or failed.
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ResumeTurnAction {
+    Continue,
+    Reconcile,
+    Cancel,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum RecoveredApprovalDecision {
+    Approve,
+    Deny,
 }
 
 /// Per DECISIONS.md §D1: `Force` is the canonical variant name.

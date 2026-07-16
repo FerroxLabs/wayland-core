@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::Arc;
@@ -10,18 +11,9 @@ use clap::{Parser, Subcommand};
 // `doctor` lives in the `wcore_cli` lib so the TUI diagnostics surface can
 // share it; the binary re-imports it here for the `--doctor` CLI flag.
 use wcore_cli::doctor;
-
-// Force-link the plugin crates so their `inventory::submit!` factories
-// fire at static-init time and `PluginLoader::discover` can find them.
-// Without these `use ... as _;` references Rust's linker dead-code-strips
-// the entire crate — including the `link_section` static items inventory
-// relies on — because nothing in this binary names a symbol from them.
-// Each crate registers itself via inventory; we never need a typed import.
-// Removing any line silently disables the corresponding plugin in the
-// shipped binary. Covered by `tests/plugin_discovery_e2e.rs`.
-use wayland_browser as _;
-use wayland_cua as _;
-use wayland_honcho as _;
+use wcore_cli::packaged_runtime::{
+    LocalExecutionSelection, audit_unix_time_millis, resolve_local_execution,
+};
 // Wave OL: typed import — `OllamaProvider` is downcast from
 // `Arc<dyn PluginProvider>` in `make_plugin_provider_router` below to
 // route `--model ollama:*` through the wayland-ollama plugin. The
@@ -38,8 +30,11 @@ use wcore_agent::slash::{Dispatcher as SlashDispatcher, SlashError, SlashOutcome
 use wcore_config::config::{self, CliArgs, Config, McpServerConfig, TransportType};
 use wcore_mcp::manager::McpManager;
 use wcore_mcp::tool_proxy::register_single_server_tools;
-use wcore_protocol::commands::ProtocolCommand;
-use wcore_protocol::events::{FinishReason, ProtocolEvent};
+use wcore_protocol::commands::{ProtocolCommand, ResumeTurnAction};
+use wcore_protocol::events::{
+    FinishReason, ProtocolEvent, RecoveryLifecycle, RecoveryReconcileReason,
+    RecoveryUnavailableReason,
+};
 use wcore_protocol::execution_policy::{
     ExecutionPolicyChangeReason, ExecutionPolicySequence, ExecutionPolicySequenceError,
     ExecutionPolicySnapshot,
@@ -48,10 +43,7 @@ use wcore_protocol::reader::spawn_stdin_reader;
 use wcore_protocol::writer::{ProtocolEmitter, ProtocolWriter};
 use wcore_protocol::{ToolApprovalManager, ToolApprovalResult};
 use wcore_providers::LlmProvider;
-use wcore_types::execution_policy::{
-    ApprovalPolicy, BaselineExecutionPolicy, DEFAULT_DANGEROUS_SESSION_TTL_SECS,
-    DangerousLaunchRequest, DangerousSessionGrant, PolicySource, resolve_dangerous_launch,
-};
+use wcore_types::execution_policy::{ApprovalPolicy, DEFAULT_DANGEROUS_SESSION_TTL_SECS};
 
 // v0.8.0 N.1+N.2+N.3 — slash-runtime dispatch helpers.
 //
@@ -1968,20 +1960,6 @@ fn approval_policy_to_session(policy: ApprovalPolicy) -> wcore_protocol::command
     }
 }
 
-struct LocalExecutionSelection {
-    baseline: BaselineExecutionPolicy,
-    dangerous_grant: Option<DangerousSessionGrant>,
-}
-
-fn audit_unix_time_millis() -> anyhow::Result<u64> {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_err(|_| anyhow::anyhow!("system clock is before the Unix epoch"))?
-        .as_millis()
-        .try_into()
-        .map_err(|_| anyhow::anyhow!("system clock does not fit execution-policy metadata"))
-}
-
 enum WireModeChange {
     Rejected,
     Unchanged,
@@ -2012,63 +1990,6 @@ fn apply_wire_mode_change(
         Some(snapshot) => Ok(WireModeChange::Changed(snapshot.clone())),
         None => Ok(WireModeChange::Unchanged),
     }
-}
-
-impl LocalExecutionSelection {
-    fn approvals(&self) -> ApprovalPolicy {
-        if self.dangerous_grant.is_some() {
-            ApprovalPolicy::Bypass
-        } else {
-            self.baseline.approvals()
-        }
-    }
-
-    fn apply(self, bootstrap: AgentBootstrap) -> AgentBootstrap {
-        let mut bootstrap = bootstrap.with_execution_policy(self.baseline);
-        if let Some(grant) = self.dangerous_grant {
-            bootstrap = bootstrap.with_dangerous_grant(grant);
-        }
-        bootstrap
-    }
-}
-
-fn resolve_local_execution(
-    config: &Config,
-    approval_bypass: bool,
-    dangerous: bool,
-    dangerous_ttl_secs: u64,
-    desktop_launch: bool,
-) -> anyhow::Result<LocalExecutionSelection> {
-    let requested = if approval_bypass {
-        ApprovalPolicy::Bypass
-    } else {
-        config.smart_approval_policy()
-    };
-    let source = if desktop_launch {
-        PolicySource::DesktopLocalLaunch
-    } else {
-        PolicySource::LocalCliLaunch
-    };
-    let baseline = config
-        .execution_policy
-        .with_requested_approvals(requested, source);
-    let dangerous_grant = if dangerous {
-        let activation_id = format!("{}-{}", std::process::id(), uuid::Uuid::now_v7());
-        let request = if desktop_launch {
-            DangerousLaunchRequest::desktop(dangerous_ttl_secs, activation_id)
-        } else {
-            DangerousLaunchRequest::cli(dangerous_ttl_secs, activation_id)
-        };
-        let now = audit_unix_time_millis()?;
-        Some(resolve_dangerous_launch(&baseline, request, now)?)
-    } else {
-        None
-    };
-
-    Ok(LocalExecutionSelection {
-        baseline,
-        dangerous_grant,
-    })
 }
 
 /// GHSA-8r7g: the `WAYLAND_ALLOW_WIRE_FORCE` env opt-in that lets a protocol
@@ -2944,6 +2865,638 @@ fn emit_workspace_capability_grant(
     }
 }
 
+const RECOVERY_PROTOCOL_VERSION: u16 = 1;
+
+fn emit_recovery_unavailable(
+    writer: &dyn ProtocolEmitter,
+    request_id: String,
+    session_id: String,
+    reason: RecoveryUnavailableReason,
+) {
+    let _ = writer.emit(&ProtocolEvent::SessionRecoveryUnavailable {
+        recovery_version: RECOVERY_PROTOCOL_VERSION,
+        request_id,
+        session_id,
+        reason,
+    });
+}
+
+fn handle_session_resync(
+    engine: &wcore_agent::engine::AgentEngine,
+    writer: &dyn ProtocolEmitter,
+    recovery_version: u16,
+    request_id: String,
+    session_id: String,
+    after: Option<wcore_protocol::events::RecoveryCursor>,
+) {
+    if recovery_version != RECOVERY_PROTOCOL_VERSION {
+        emit_recovery_unavailable(
+            writer,
+            request_id,
+            session_id,
+            RecoveryUnavailableReason::UnsupportedVersion,
+        );
+        return;
+    }
+    if engine.current_session_id().as_deref() != Some(session_id.as_str()) {
+        emit_recovery_unavailable(
+            writer,
+            request_id,
+            session_id,
+            RecoveryUnavailableReason::SessionNotFound,
+        );
+        return;
+    }
+    let (plan, replay) = match after.as_ref() {
+        Some(cursor) => {
+            let plan = match engine.recovery_plan_at(cursor) {
+                Ok(plan) => plan,
+                Err(reason) => {
+                    emit_recovery_unavailable(writer, request_id, session_id, reason);
+                    return;
+                }
+            };
+            let items = match engine.recovery_replay_after(cursor) {
+                Ok(items) => items,
+                Err(reason) => {
+                    emit_recovery_unavailable(writer, request_id, session_id, reason);
+                    return;
+                }
+            };
+            (plan, Some(items))
+        }
+        None => match engine.recovery_plan() {
+            Ok(plan) => (plan, None),
+            Err(_) => {
+                emit_recovery_unavailable(
+                    writer,
+                    request_id,
+                    session_id,
+                    RecoveryUnavailableReason::JournalCorrupt,
+                );
+                return;
+            }
+        },
+    };
+    let (lifecycle, pending_turn) = plan.protocol_projection();
+    let cursor = plan.cursor();
+    let _ = writer.emit(&ProtocolEvent::SessionRecoverySnapshot {
+        recovery_version: RECOVERY_PROTOCOL_VERSION,
+        request_id: request_id.clone(),
+        session_id: session_id.clone(),
+        cursor: cursor.clone(),
+        state_digest: plan.state_digest,
+        lifecycle,
+        pending_turn,
+        budget: plan.budget,
+    });
+    if let Some(items) = replay {
+        let through = items
+            .last()
+            .map(|item| item.cursor.clone())
+            .or_else(|| after.clone())
+            .unwrap_or_else(|| cursor.clone());
+        let _ = writer.emit(&ProtocolEvent::SessionRecoveryReplay {
+            recovery_version: RECOVERY_PROTOCOL_VERSION,
+            request_id,
+            session_id,
+            from: after,
+            through,
+            items,
+        });
+    }
+}
+
+enum ActiveRecoveryOutcome<T> {
+    Finished(T),
+    Stopped(T),
+}
+
+/// Drive a recovered turn while preserving the same host approval boundary as
+/// an ordinary active turn. Recovery can encounter more than one gated tool;
+/// parking only on the engine future would strand later approval commands in
+/// `cmd_rx` and deadlock the turn.
+async fn drive_active_recovery<F, T, C>(
+    future: F,
+    cmd_rx: &mut tokio::sync::mpsc::Receiver<ProtocolCommand>,
+    approval_manager: &ToolApprovalManager,
+    writer: &dyn ProtocolEmitter,
+    cancel_active_turn: &C,
+) -> ActiveRecoveryOutcome<T>
+where
+    F: Future<Output = T>,
+    C: Fn(),
+{
+    tokio::pin!(future);
+    let mut commands_open = true;
+    let mut stop_requested = false;
+    loop {
+        tokio::select! {
+            biased;
+            command = cmd_rx.recv(), if commands_open => match command {
+                Some(ProtocolCommand::ToolApprove { call_id, scope, answer }) if !stop_requested => {
+                    approval_manager.approve(&call_id, scope, answer);
+                }
+                Some(ProtocolCommand::ToolDeny { call_id, reason }) if !stop_requested => {
+                    approval_manager.resolve(
+                        &call_id,
+                        ToolApprovalResult::Denied { reason },
+                    );
+                }
+                Some(ProtocolCommand::Stop) if !stop_requested => {
+                    cancel_active_turn();
+                    stop_requested = true;
+                }
+                Some(ProtocolCommand::Ping) => {
+                    let _ = writer.emit(&ProtocolEvent::Pong);
+                }
+                Some(ProtocolCommand::SessionResync(command)) => {
+                    emit_recovery_unavailable(
+                        writer,
+                        command.request_id,
+                        command.session_id,
+                        RecoveryUnavailableReason::SnapshotUnavailable,
+                    );
+                }
+                Some(ProtocolCommand::ResumeTurn(command)) => {
+                    emit_recovery_unavailable(
+                        writer,
+                        command.request_id,
+                        command.session_id,
+                        RecoveryUnavailableReason::UnknownCriticalState,
+                    );
+                }
+                Some(ProtocolCommand::ResolveInterruptedApproval(command)) => {
+                    emit_recovery_unavailable(
+                        writer,
+                        command.request_id,
+                        command.session_id,
+                        RecoveryUnavailableReason::UnknownCriticalState,
+                    );
+                }
+                Some(ProtocolCommand::ResolveUnknownToolEffect(resolution)) => {
+                    let _ = writer.emit(&ProtocolEvent::Error {
+                        msg_id: Some(resolution.tool_execution_id),
+                        error: wcore_protocol::events::ErrorInfo {
+                            code: "recovery_busy".to_string(),
+                            message: "resolve_unknown_tool_effect refused while another recovery action is active; resync and retry".to_string(),
+                            retryable: true,
+                        },
+                    });
+                }
+                Some(_) => {
+                    eprintln!("[protocol] Ignoring uncorrelated command during active recovery");
+                }
+                None => commands_open = false,
+            },
+            result = &mut future => {
+                return if stop_requested {
+                    ActiveRecoveryOutcome::Stopped(result)
+                } else {
+                    ActiveRecoveryOutcome::Finished(result)
+                };
+            }
+        }
+    }
+}
+
+fn emit_recovered_terminal(output: &dyn OutputSink, request_id: &str, finish_reason: FinishReason) {
+    output.emit_stream_end(request_id, 0, 0, 0, 0, 0, finish_reason);
+}
+
+#[allow(clippy::too_many_arguments)] // Explicit wire fields remain visible at the authority gate.
+async fn handle_resume_turn<C>(
+    engine: &mut wcore_agent::engine::AgentEngine,
+    writer: &dyn ProtocolEmitter,
+    output: &dyn OutputSink,
+    cmd_rx: &mut tokio::sync::mpsc::Receiver<ProtocolCommand>,
+    approval_manager: &ToolApprovalManager,
+    cancel_active_turn: &C,
+    recovery_version: u16,
+    request_id: String,
+    session_id: String,
+    turn_id: String,
+    cursor: wcore_protocol::events::RecoveryCursor,
+    action: ResumeTurnAction,
+) where
+    C: Fn(),
+{
+    if recovery_version != RECOVERY_PROTOCOL_VERSION {
+        emit_recovery_unavailable(
+            writer,
+            request_id.clone(),
+            session_id,
+            RecoveryUnavailableReason::UnsupportedVersion,
+        );
+        emit_recovered_terminal(output, &request_id, FinishReason::Error);
+        return;
+    }
+    if engine.current_session_id().as_deref() != Some(session_id.as_str()) {
+        emit_recovery_unavailable(
+            writer,
+            request_id.clone(),
+            session_id,
+            RecoveryUnavailableReason::SessionNotFound,
+        );
+        emit_recovered_terminal(output, &request_id, FinishReason::Error);
+        return;
+    }
+    let plan = match engine.recovery_plan() {
+        Ok(plan) => plan,
+        Err(_) => {
+            emit_recovery_unavailable(
+                writer,
+                request_id.clone(),
+                session_id,
+                RecoveryUnavailableReason::JournalCorrupt,
+            );
+            emit_recovered_terminal(output, &request_id, FinishReason::Error);
+            return;
+        }
+    };
+    if plan.cursor() != cursor {
+        emit_recovery_unavailable(
+            writer,
+            request_id.clone(),
+            session_id,
+            RecoveryUnavailableReason::CursorDigestMismatch,
+        );
+        emit_recovered_terminal(output, &request_id, FinishReason::Error);
+        return;
+    }
+
+    let result =
+        match action {
+            ResumeTurnAction::Continue => {
+                let future = engine.resume_interrupted_turn(&turn_id, &cursor, &request_id);
+                match drive_active_recovery(
+                    future,
+                    cmd_rx,
+                    approval_manager,
+                    writer,
+                    cancel_active_turn,
+                )
+                .await
+                {
+                    ActiveRecoveryOutcome::Finished(result) => result.map(|result| {
+                        emit_recovered_stream_end(output, &request_id, &result);
+                        RecoveryLifecycle::Completed
+                    }),
+                    ActiveRecoveryOutcome::Stopped(result) => {
+                        let terminal_if_ready = match result {
+                            Ok(_) => RecoveryLifecycle::Completed,
+                            Err(wcore_agent::engine::AgentError::UserAborted) => {
+                                RecoveryLifecycle::Cancelled
+                            }
+                            Err(error) => {
+                                output.emit_error(&format!("resume_turn refused: {error}"), false);
+                                emit_recovered_terminal(output, &request_id, FinishReason::Error);
+                                emit_recovery_unavailable(
+                                    writer,
+                                    request_id,
+                                    session_id,
+                                    RecoveryUnavailableReason::UnknownCriticalState,
+                                );
+                                return;
+                            }
+                        };
+                        emit_recovered_terminal(output, &request_id, FinishReason::Stop);
+                        let next = match engine.recovery_plan() {
+                            Ok(plan) => plan,
+                            Err(_) => {
+                                emit_recovery_unavailable(
+                                    writer,
+                                    request_id,
+                                    session_id,
+                                    RecoveryUnavailableReason::JournalCorrupt,
+                                );
+                                return;
+                            }
+                        };
+                        let (lifecycle, reconcile_reason) =
+                            interrupted_action_lifecycle(&next, terminal_if_ready);
+                        let _ = writer.emit(&ProtocolEvent::TurnRecoveryLifecycle {
+                            recovery_version: RECOVERY_PROTOCOL_VERSION,
+                            session_id,
+                            turn_id,
+                            cursor: next.cursor(),
+                            lifecycle,
+                            reconcile_reason,
+                        });
+                        return;
+                    }
+                }
+            }
+            ResumeTurnAction::Reconcile => engine
+                .reconcile_interrupted_turn(&turn_id, &cursor)
+                .await
+                .map(|_| {
+                    emit_recovered_terminal(output, &request_id, FinishReason::Error);
+                    RecoveryLifecycle::Failed
+                }),
+            ResumeTurnAction::Cancel => engine
+                .cancel_interrupted_turn(&turn_id, &cursor)
+                .await
+                .map(|_| {
+                    emit_recovered_terminal(output, &request_id, FinishReason::Stop);
+                    RecoveryLifecycle::Cancelled
+                }),
+        };
+    match result {
+        Ok(lifecycle) => {
+            let next = match engine.recovery_plan() {
+                Ok(plan) => plan,
+                Err(_) => {
+                    emit_recovery_unavailable(
+                        writer,
+                        request_id,
+                        session_id,
+                        RecoveryUnavailableReason::JournalCorrupt,
+                    );
+                    return;
+                }
+            };
+            let _ = writer.emit(&ProtocolEvent::TurnRecoveryLifecycle {
+                recovery_version: RECOVERY_PROTOCOL_VERSION,
+                session_id,
+                turn_id,
+                cursor: next.cursor(),
+                lifecycle,
+                reconcile_reason: None,
+            });
+        }
+        Err(error) => {
+            output.emit_error(&format!("resume_turn refused: {error}"), false);
+            let finish_reason = if matches!(error, wcore_agent::engine::AgentError::UserAborted) {
+                FinishReason::Stop
+            } else {
+                FinishReason::Error
+            };
+            emit_recovered_terminal(output, &request_id, finish_reason);
+            if matches!(action, ResumeTurnAction::Continue)
+                && let Ok(next) = engine.recovery_plan()
+                && next.cursor() != cursor
+                && matches!(
+                    next.disposition,
+                    wcore_agent::recovery::RecoveryDisposition::Ready
+                )
+            {
+                let lifecycle = if matches!(error, wcore_agent::engine::AgentError::UserAborted) {
+                    RecoveryLifecycle::Cancelled
+                } else {
+                    RecoveryLifecycle::Failed
+                };
+                let _ = writer.emit(&ProtocolEvent::TurnRecoveryLifecycle {
+                    recovery_version: RECOVERY_PROTOCOL_VERSION,
+                    session_id,
+                    turn_id,
+                    cursor: next.cursor(),
+                    lifecycle,
+                    reconcile_reason: None,
+                });
+                return;
+            }
+            emit_recovery_unavailable(
+                writer,
+                request_id,
+                session_id,
+                RecoveryUnavailableReason::UnknownCriticalState,
+            );
+        }
+    }
+}
+
+fn emit_recovered_stream_end(
+    output: &dyn OutputSink,
+    request_id: &str,
+    result: &wcore_agent::engine::AgentResult,
+) {
+    output.emit_stream_end_full(
+        request_id,
+        result.turns,
+        result.usage.input_tokens,
+        result.usage.output_tokens,
+        result.usage.cache_creation_tokens,
+        result.usage.cache_read_tokens,
+        result.finish_reason,
+        result.active_window_percent,
+        result.agent_run_id.as_deref(),
+        Some(&result.usage_delta),
+    );
+}
+
+fn interrupted_action_lifecycle(
+    plan: &wcore_agent::recovery::RecoveryPlan,
+    terminal_if_ready: RecoveryLifecycle,
+) -> (RecoveryLifecycle, Option<RecoveryReconcileReason>) {
+    let (durable_lifecycle, pending_turn) = plan.protocol_projection();
+    if matches!(
+        plan.disposition,
+        wcore_agent::recovery::RecoveryDisposition::Ready
+    ) {
+        (terminal_if_ready, None)
+    } else {
+        (
+            durable_lifecycle,
+            pending_turn.and_then(|turn| turn.reconcile_reason),
+        )
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn handle_recovered_approval<C>(
+    engine: &mut wcore_agent::engine::AgentEngine,
+    writer: &dyn ProtocolEmitter,
+    output: &dyn OutputSink,
+    cmd_rx: &mut tokio::sync::mpsc::Receiver<ProtocolCommand>,
+    approval_manager: &ToolApprovalManager,
+    cancel_active_turn: &C,
+    recovery_version: u16,
+    request_id: String,
+    session_id: String,
+    turn_id: String,
+    cursor: wcore_protocol::events::RecoveryCursor,
+    approval_id: String,
+    decision: wcore_protocol::commands::RecoveredApprovalDecision,
+    answer: Option<String>,
+) where
+    C: Fn(),
+{
+    if recovery_version != wcore_protocol::commands::RECOVERED_APPROVAL_VERSION {
+        emit_recovery_unavailable(
+            writer,
+            request_id.clone(),
+            session_id,
+            RecoveryUnavailableReason::UnsupportedVersion,
+        );
+        emit_recovered_terminal(output, &request_id, FinishReason::Error);
+        return;
+    }
+    if engine.current_session_id().as_deref() != Some(session_id.as_str()) {
+        emit_recovery_unavailable(
+            writer,
+            request_id.clone(),
+            session_id,
+            RecoveryUnavailableReason::SessionNotFound,
+        );
+        emit_recovered_terminal(output, &request_id, FinishReason::Error);
+        return;
+    }
+    let future = engine.resolve_interrupted_approval(
+        &turn_id,
+        &cursor,
+        &approval_id,
+        decision,
+        answer.as_deref(),
+        &request_id,
+    );
+    let result =
+        match drive_active_recovery(future, cmd_rx, approval_manager, writer, cancel_active_turn)
+            .await
+        {
+            ActiveRecoveryOutcome::Finished(result) => result,
+            ActiveRecoveryOutcome::Stopped(result) => {
+                let terminal_if_ready = match result {
+                    Ok(_) => RecoveryLifecycle::Completed,
+                    Err(wcore_agent::engine::AgentError::UserAborted) => {
+                        RecoveryLifecycle::Cancelled
+                    }
+                    Err(error) => {
+                        output.emit_error(
+                            &format!("resolve_interrupted_approval refused: {error}"),
+                            false,
+                        );
+                        emit_recovered_terminal(output, &request_id, FinishReason::Error);
+                        emit_recovery_unavailable(
+                            writer,
+                            request_id,
+                            session_id,
+                            RecoveryUnavailableReason::UnknownCriticalState,
+                        );
+                        return;
+                    }
+                };
+                emit_recovered_terminal(output, &request_id, FinishReason::Stop);
+                let next = match engine.recovery_plan() {
+                    Ok(plan) => plan,
+                    Err(_) => {
+                        emit_recovery_unavailable(
+                            writer,
+                            request_id,
+                            session_id,
+                            RecoveryUnavailableReason::JournalCorrupt,
+                        );
+                        return;
+                    }
+                };
+                let (lifecycle, reconcile_reason) =
+                    interrupted_action_lifecycle(&next, terminal_if_ready);
+                let _ = writer.emit(&ProtocolEvent::TurnRecoveryLifecycle {
+                    recovery_version: RECOVERY_PROTOCOL_VERSION,
+                    session_id,
+                    turn_id,
+                    cursor: next.cursor(),
+                    lifecycle,
+                    reconcile_reason,
+                });
+                return;
+            }
+        };
+    match result {
+        Ok(result) => {
+            emit_recovered_stream_end(output, &request_id, &result);
+            let next = match engine.recovery_plan() {
+                Ok(plan) => plan,
+                Err(_) => {
+                    emit_recovery_unavailable(
+                        writer,
+                        request_id,
+                        session_id,
+                        RecoveryUnavailableReason::JournalCorrupt,
+                    );
+                    return;
+                }
+            };
+            let _ = writer.emit(&ProtocolEvent::TurnRecoveryLifecycle {
+                recovery_version: RECOVERY_PROTOCOL_VERSION,
+                session_id,
+                turn_id,
+                cursor: next.cursor(),
+                lifecycle: RecoveryLifecycle::Completed,
+                reconcile_reason: None,
+            });
+        }
+        Err(error) => {
+            if matches!(
+                decision,
+                wcore_protocol::commands::RecoveredApprovalDecision::Deny
+            ) && matches!(error, wcore_agent::engine::AgentError::UserAborted)
+                && let Ok(next) = engine.recovery_plan()
+                && next.cursor() != cursor
+                && matches!(
+                    next.disposition,
+                    wcore_agent::recovery::RecoveryDisposition::Ready
+                )
+            {
+                emit_recovered_terminal(output, &request_id, FinishReason::Stop);
+                let _ = writer.emit(&ProtocolEvent::TurnRecoveryLifecycle {
+                    recovery_version: RECOVERY_PROTOCOL_VERSION,
+                    session_id,
+                    turn_id,
+                    cursor: next.cursor(),
+                    lifecycle: RecoveryLifecycle::Cancelled,
+                    reconcile_reason: None,
+                });
+                return;
+            }
+            output.emit_error(
+                &format!("resolve_interrupted_approval refused: {error}"),
+                false,
+            );
+            let finish_reason = if matches!(error, wcore_agent::engine::AgentError::UserAborted) {
+                FinishReason::Stop
+            } else {
+                FinishReason::Error
+            };
+            emit_recovered_terminal(output, &request_id, finish_reason);
+            emit_recovery_unavailable(
+                writer,
+                request_id,
+                session_id,
+                RecoveryUnavailableReason::UnknownCriticalState,
+            );
+        }
+    }
+}
+
+fn handle_operator_tool_effect_resolution(
+    engine: &wcore_agent::engine::AgentEngine,
+    writer: &dyn ProtocolEmitter,
+    output: &dyn OutputSink,
+    command: ProtocolCommand,
+) {
+    let ProtocolCommand::ResolveUnknownToolEffect(_) = &command else {
+        output.emit_error(
+            "resolve_unknown_tool_effect refused: wrong command at dispatcher boundary",
+            false,
+        );
+        return;
+    };
+
+    let ProtocolCommand::ResolveUnknownToolEffect(resolution) = command else {
+        unreachable!("operator-resolution command was checked above");
+    };
+    if let Err(error) = engine.resolve_operator_tool_effect(&resolution) {
+        output.emit_error(
+            &format!("resolve_unknown_tool_effect refused: {error}"),
+            false,
+        );
+        return;
+    }
+
+    let _ = writer.emit(&ProtocolEvent::UnknownToolEffectResolved { resolution });
+}
+
 #[allow(clippy::too_many_arguments)] // One explicit boundary argument per host-controlled posture.
 async fn run_json_stream_mode(
     config: Config,
@@ -3658,6 +4211,61 @@ async fn run_json_stream_mode(
                                             &writer,
                                         );
                                     }
+                                    ProtocolCommand::SessionResync(command) => {
+                                        let reason = if command.recovery_version
+                                            != RECOVERY_PROTOCOL_VERSION
+                                        {
+                                            RecoveryUnavailableReason::UnsupportedVersion
+                                        } else {
+                                            RecoveryUnavailableReason::SnapshotUnavailable
+                                        };
+                                        emit_recovery_unavailable(
+                                            writer.as_ref(),
+                                            command.request_id,
+                                            command.session_id,
+                                            reason,
+                                        );
+                                    }
+                                    ProtocolCommand::ResumeTurn(command) => {
+                                        let reason = if command.recovery_version
+                                            != RECOVERY_PROTOCOL_VERSION
+                                        {
+                                            RecoveryUnavailableReason::UnsupportedVersion
+                                        } else {
+                                            RecoveryUnavailableReason::UnknownCriticalState
+                                        };
+                                        emit_recovery_unavailable(
+                                            writer.as_ref(),
+                                            command.request_id,
+                                            command.session_id,
+                                            reason,
+                                        );
+                                    }
+                                    ProtocolCommand::ResolveInterruptedApproval(command) => {
+                                        let reason = if command.recovery_version
+                                            != wcore_protocol::commands::RECOVERED_APPROVAL_VERSION
+                                        {
+                                            RecoveryUnavailableReason::UnsupportedVersion
+                                        } else {
+                                            RecoveryUnavailableReason::UnknownCriticalState
+                                        };
+                                        emit_recovery_unavailable(
+                                            writer.as_ref(),
+                                            command.request_id,
+                                            command.session_id,
+                                            reason,
+                                        );
+                                    }
+                                    ProtocolCommand::ResolveUnknownToolEffect(_) => {
+                                        // The live engine is mutably borrowed by `engine_fut` and
+                                        // its durable cursor may still advance. Never queue or
+                                        // apply an operator claim against that moving authority;
+                                        // the host must resync and reissue it between turns.
+                                        output.emit_error(
+                                            "resolve_unknown_tool_effect refused during active turn; resync and retry after the turn stops",
+                                            false,
+                                        );
+                                    }
                                     ProtocolCommand::Ping => {
                                         let _ = writer.emit(&wcore_protocol::events::ProtocolEvent::Pong);
                                     }
@@ -3813,6 +4421,62 @@ async fn run_json_stream_mode(
                     // ended the whole session.
                     continue;
                 }
+            }
+            ProtocolCommand::SessionResync(command) => {
+                handle_session_resync(
+                    &engine,
+                    writer.as_ref(),
+                    command.recovery_version,
+                    command.request_id,
+                    command.session_id,
+                    command.after,
+                );
+            }
+            ProtocolCommand::ResumeTurn(command) => {
+                protocol_sink.set_current_msg_id(&command.request_id);
+                handle_resume_turn(
+                    &mut engine,
+                    writer.as_ref(),
+                    output.as_ref(),
+                    &mut cmd_rx,
+                    approval_manager.as_ref(),
+                    &|| session_control.cancel_active_turn(),
+                    command.recovery_version,
+                    command.request_id,
+                    command.session_id,
+                    command.turn_id,
+                    command.cursor,
+                    command.action,
+                )
+                .await;
+            }
+            ProtocolCommand::ResolveInterruptedApproval(command) => {
+                protocol_sink.set_current_msg_id(&command.request_id);
+                handle_recovered_approval(
+                    &mut engine,
+                    writer.as_ref(),
+                    output.as_ref(),
+                    &mut cmd_rx,
+                    approval_manager.as_ref(),
+                    &|| session_control.cancel_active_turn(),
+                    command.recovery_version,
+                    command.request_id,
+                    command.session_id,
+                    command.turn_id,
+                    command.cursor,
+                    command.approval_id,
+                    command.decision,
+                    command.answer,
+                )
+                .await;
+            }
+            command @ ProtocolCommand::ResolveUnknownToolEffect(_) => {
+                handle_operator_tool_effect_resolution(
+                    &engine,
+                    writer.as_ref(),
+                    output.as_ref(),
+                    command,
+                );
             }
             ProtocolCommand::Stop => {
                 // wayland#403 fix-3: a Stop that arrives with no active turn (or
@@ -4041,6 +4705,64 @@ mod tests {
     use async_trait::async_trait;
     use serde_json::{Value, json};
     use wcore_mcp::manager::McpManager;
+    use wcore_types::execution_policy::{BaselineExecutionPolicy, PolicySource};
+
+    fn lifecycle_test_plan(
+        disposition: wcore_agent::recovery::RecoveryDisposition,
+    ) -> wcore_agent::recovery::RecoveryPlan {
+        wcore_agent::recovery::RecoveryPlan {
+            session_id: "f14-lifecycle".into(),
+            journal_sequence: Some(7),
+            journal_digest: "a".repeat(64),
+            state_digest: "b".repeat(64),
+            budget: wcore_protocol::events::RecoveryBudgetSnapshot {
+                tokens_used: 0,
+                token_limit: None,
+                cost_used_usd: 0.0,
+                cost_limit_usd: None,
+            },
+            disposition,
+        }
+    }
+
+    #[test]
+    fn interrupted_action_lifecycle_reports_durable_post_stop_state_f14() {
+        use wcore_agent::recovery::{RecoveryBlocker, RecoveryDisposition};
+
+        assert_eq!(
+            interrupted_action_lifecycle(
+                &lifecycle_test_plan(RecoveryDisposition::Ready),
+                RecoveryLifecycle::Cancelled,
+            ),
+            (RecoveryLifecycle::Cancelled, None)
+        );
+        assert_eq!(
+            interrupted_action_lifecycle(
+                &lifecycle_test_plan(RecoveryDisposition::Blocked {
+                    turn_id: "turn-provider".into(),
+                    reason: RecoveryBlocker::ProviderOutcomeUnknown,
+                }),
+                RecoveryLifecycle::Cancelled,
+            ),
+            (
+                RecoveryLifecycle::Suspended,
+                Some(RecoveryReconcileReason::ProviderOutcomeUnknown),
+            )
+        );
+        assert_eq!(
+            interrupted_action_lifecycle(
+                &lifecycle_test_plan(RecoveryDisposition::ReconciliationRequired {
+                    turn_id: "turn-tool".into(),
+                    tool_execution_ids: vec!["tool-1".into()],
+                }),
+                RecoveryLifecycle::Cancelled,
+            ),
+            (
+                RecoveryLifecycle::ReconciliationRequired,
+                Some(RecoveryReconcileReason::ToolOutcomeUnknown),
+            )
+        );
+    }
 
     #[derive(Default)]
     struct CapturingProtocolEmitter {
@@ -4052,6 +4774,588 @@ mod tests {
             self.events.lock().unwrap().push(event.clone());
             Ok(())
         }
+    }
+
+    #[derive(Default)]
+    struct CapturingOutputSink {
+        errors: std::sync::Mutex<Vec<String>>,
+        stream_ends: std::sync::Mutex<Vec<(String, FinishReason)>>,
+    }
+
+    impl OutputSink for CapturingOutputSink {
+        fn emit_text_delta(&self, _text: &str, _msg_id: &str) {}
+        fn emit_thinking(&self, _text: &str, _msg_id: &str) {}
+        fn emit_tool_call(&self, _name: &str, _input: &str) {}
+        fn emit_tool_result(&self, _name: &str, _is_error: bool, _content: &str) {}
+        fn emit_stream_start(&self, _msg_id: &str) {}
+        fn emit_stream_end(
+            &self,
+            msg_id: &str,
+            _turns: usize,
+            _input_tokens: u64,
+            _output_tokens: u64,
+            _cache_creation_tokens: u64,
+            _cache_read_tokens: u64,
+            finish_reason: wcore_types::message::FinishReason,
+        ) {
+            self.stream_ends
+                .lock()
+                .unwrap()
+                .push((msg_id.to_owned(), finish_reason));
+        }
+        fn emit_error(&self, msg: &str, _retryable: bool) {
+            self.errors.lock().unwrap().push(msg.to_owned());
+        }
+        fn emit_info(&self, _msg: &str) {}
+    }
+
+    fn recovery_engine(
+        session_id: &str,
+    ) -> (
+        tempfile::TempDir,
+        wcore_agent::engine::AgentEngine,
+        wcore_agent::session_journal::SessionJournal,
+        wcore_protocol::events::RecoveryCursor,
+    ) {
+        let directory = tempfile::tempdir().expect("recovery tempdir");
+        let manager = wcore_agent::session::SessionManager::new(directory.path().into(), 10);
+        let active = manager
+            .create_for_run("test", "test-model", "/tmp", Some(session_id))
+            .expect("create recovery session");
+        active
+            .journal
+            .append(wcore_agent::session_journal::SessionEvent::TurnStarted {
+                turn_id: "turn-recovery".into(),
+                user_message: "content must stay out of recovery frames".into(),
+            })
+            .expect("append interrupted turn");
+        let cursor = wcore_agent::recovery::RecoveryPlan::from_journal(&active.journal)
+            .expect("plan recovery")
+            .cursor();
+        let journal = active.journal.clone();
+        let mut config = wcore_config::config::Config::default();
+        config.session.enabled = true;
+        config.session.directory = directory.path().to_string_lossy().into_owned();
+        let engine = wcore_agent::engine::AgentEngine::resume_active(
+            config,
+            wcore_tools::registry::ToolRegistry::new(),
+            Arc::new(wcore_agent::output::null_sink::NullSink),
+            active,
+        );
+        (directory, engine, journal, cursor)
+    }
+
+    fn unknown_tool_recovery_engine(
+        session_id: &str,
+    ) -> (
+        tempfile::TempDir,
+        wcore_agent::engine::AgentEngine,
+        wcore_agent::session_journal::SessionJournal,
+        wcore_protocol::events::RecoveryCursor,
+        String,
+    ) {
+        let directory = tempfile::tempdir().expect("operator recovery tempdir");
+        let manager = wcore_agent::session::SessionManager::new(directory.path().into(), 10);
+        let active = manager
+            .create_for_run("test", "test-model", "/tmp", Some(session_id))
+            .expect("create operator recovery session");
+        active
+            .journal
+            .append(wcore_agent::session_journal::SessionEvent::TurnStarted {
+                turn_id: "turn-operator-recovery".into(),
+                user_message: "interrupted".into(),
+            })
+            .expect("append interrupted turn");
+        let unknown =
+            wcore_agent::journal_effects::JournalEffectCoordinator::new(active.journal.clone())
+                .for_turn("turn-operator-recovery")
+                .prepare_tool(
+                    "provider-tool-call",
+                    0,
+                    "OpaqueRemote",
+                    json!({}),
+                    json!({}),
+                )
+                .expect("prepare unknown tool")
+                .start()
+                .expect("start unknown tool")
+                .unknown(
+                    wcore_agent::session_journal::ToolUnknownReason::AmbiguousFailure {
+                        error: "remote outcome unavailable".into(),
+                    },
+                    json!({"adapter": "opaque"}),
+                )
+                .expect("record unknown tool effect");
+        let tool_execution_id = unknown.id().to_owned();
+        drop(unknown);
+        let cursor = wcore_agent::recovery::RecoveryPlan::from_journal(&active.journal)
+            .expect("plan operator recovery")
+            .cursor();
+        let journal = active.journal.clone();
+        let mut config = wcore_config::config::Config::default();
+        config.session.enabled = true;
+        config.session.directory = directory.path().to_string_lossy().into_owned();
+        let engine = wcore_agent::engine::AgentEngine::resume_active(
+            config,
+            wcore_tools::registry::ToolRegistry::new(),
+            Arc::new(wcore_agent::output::null_sink::NullSink),
+            active,
+        );
+        (directory, engine, journal, cursor, tool_execution_id)
+    }
+
+    fn operator_resolution_command(
+        session_id: &str,
+        cursor: wcore_protocol::events::RecoveryCursor,
+        tool_execution_id: &str,
+    ) -> ProtocolCommand {
+        ProtocolCommand::ResolveUnknownToolEffect(
+            wcore_protocol::events::OperatorToolEffectResolution {
+                recovery_version: RECOVERY_PROTOCOL_VERSION,
+                session_id: session_id.into(),
+                turn_id: "turn-operator-recovery".into(),
+                cursor,
+                tool_execution_id: tool_execution_id.into(),
+                outcome: wcore_protocol::events::OperatorToolEffectOutcome::Succeeded,
+                operator_id: "operator-7".into(),
+                evidence: wcore_protocol::events::OperatorResolutionEvidence {
+                    source:
+                        wcore_protocol::events::OperatorResolutionEvidenceSource::ExternalSystemRecord,
+                    reference_id: "record-11".into(),
+                    observed_at_unix_ms: 1_721_000_003_000,
+                    digest: format!("sha256:{}", "b".repeat(64)),
+                },
+            },
+        )
+    }
+
+    #[test]
+    fn json_recovery_resync_emits_contract_reducible_non_empty_replay() {
+        let (_directory, engine, journal, cursor) = recovery_engine("f14a0001");
+        journal
+            .append(wcore_agent::session_journal::SessionEvent::TurnCancelled {
+                turn_id: "turn-recovery".into(),
+            })
+            .expect("advance recovery journal beyond host cursor");
+        let writer = CapturingProtocolEmitter::default();
+
+        handle_session_resync(
+            &engine,
+            &writer,
+            RECOVERY_PROTOCOL_VERSION,
+            "request-snapshot".into(),
+            "f14a0001".into(),
+            Some(cursor),
+        );
+
+        let events = writer.events.lock().unwrap();
+        let [
+            ProtocolEvent::SessionRecoverySnapshot {
+                cursor: snapshot_cursor,
+                state_digest,
+                lifecycle: RecoveryLifecycle::Suspended,
+                pending_turn: Some(_),
+                ..
+            },
+            ProtocolEvent::SessionRecoveryReplay {
+                from: Some(replay_from),
+                through,
+                items,
+                ..
+            },
+        ] = events.as_slice()
+        else {
+            panic!("expected one snapshot followed by one non-empty replay");
+        };
+        assert_eq!(snapshot_cursor, replay_from);
+        let is_raw_digest = |digest: &str| {
+            digest.len() == 64
+                && digest
+                    .bytes()
+                    .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+        };
+        assert!(is_raw_digest(&snapshot_cursor.journal_digest));
+        assert!(is_raw_digest(state_digest));
+        assert_eq!(items.len(), 1);
+        assert_eq!(&items[0].cursor, through);
+        assert!(items[0].cursor.journal_sequence > replay_from.journal_sequence);
+
+        let wire = serde_json::to_value(&*events).unwrap();
+        assert_eq!(wire[0]["cursor"], wire[1]["from"]);
+        let round_trip: wcore_protocol::events::RecoveryCursor =
+            serde_json::from_value(wire[0]["cursor"].clone()).unwrap();
+        assert_eq!(&round_trip, snapshot_cursor);
+        assert_eq!(wire[1]["through"], wire[1]["items"][0]["cursor"]);
+        assert_eq!(wire[1]["items"][0]["kind"], "turn_cancelled");
+        let encoded = serde_json::to_string(&wire).unwrap();
+        assert!(!encoded.contains("content must stay out of recovery frames"));
+    }
+
+    #[test]
+    fn json_recovery_resync_rejects_stale_digest_without_snapshot() {
+        let (_directory, engine, _journal, mut cursor) = recovery_engine("f14a0002");
+        cursor.journal_digest = "stale".into();
+        let writer = CapturingProtocolEmitter::default();
+
+        handle_session_resync(
+            &engine,
+            &writer,
+            RECOVERY_PROTOCOL_VERSION,
+            "request-stale".into(),
+            "f14a0002".into(),
+            Some(cursor),
+        );
+
+        assert!(matches!(
+            writer.events.lock().unwrap().as_slice(),
+            [ProtocolEvent::SessionRecoveryUnavailable {
+                reason: RecoveryUnavailableReason::CursorDigestMismatch,
+                ..
+            }]
+        ));
+    }
+
+    #[tokio::test]
+    async fn json_recovery_cancel_is_durable_and_cursor_bound() {
+        let (_directory, mut engine, _journal, cursor) = recovery_engine("f14a0003");
+        let writer = CapturingProtocolEmitter::default();
+        let output = CapturingOutputSink::default();
+        let approval_manager = ToolApprovalManager::new();
+        let (_cmd_tx, mut cmd_rx) = tokio::sync::mpsc::channel(1);
+
+        handle_resume_turn(
+            &mut engine,
+            &writer,
+            &output,
+            &mut cmd_rx,
+            &approval_manager,
+            &|| {},
+            RECOVERY_PROTOCOL_VERSION,
+            "request-cancel".into(),
+            "f14a0003".into(),
+            "turn-recovery".into(),
+            cursor,
+            ResumeTurnAction::Cancel,
+        )
+        .await;
+
+        assert!(matches!(
+            writer.events.lock().unwrap().as_slice(),
+            [ProtocolEvent::TurnRecoveryLifecycle {
+                lifecycle: RecoveryLifecycle::Cancelled,
+                ..
+            }]
+        ));
+        assert!(matches!(
+            engine.recovery_plan().unwrap().disposition,
+            wcore_agent::recovery::RecoveryDisposition::Ready
+        ));
+        assert_eq!(
+            *output.stream_ends.lock().unwrap(),
+            vec![("request-cancel".into(), FinishReason::Stop)]
+        );
+    }
+
+    #[tokio::test]
+    async fn recovered_turn_driver_resolves_multiple_approval_commands() {
+        use wcore_protocol::commands::ApprovalScope;
+        use wcore_protocol::events::ToolCategory;
+
+        let approval_manager = Arc::new(ToolApprovalManager::new());
+        let future_manager = approval_manager.clone();
+        let (ready_tx, mut ready_rx) = tokio::sync::mpsc::unbounded_channel();
+        let future = async move {
+            let first =
+                future_manager.request_approval("recovery-call-1", &ToolCategory::Exec, "Bash");
+            ready_tx.send("recovery-call-1").unwrap();
+            let first = first.await.unwrap();
+            let second =
+                future_manager.request_approval("recovery-call-2", &ToolCategory::Exec, "Write");
+            ready_tx.send("recovery-call-2").unwrap();
+            let second = second.await.unwrap();
+            (first, second)
+        };
+        let (cmd_tx, mut cmd_rx) = tokio::sync::mpsc::channel(2);
+        let host = tokio::spawn(async move {
+            assert_eq!(ready_rx.recv().await, Some("recovery-call-1"));
+            cmd_tx
+                .send(ProtocolCommand::ToolApprove {
+                    call_id: "recovery-call-1".into(),
+                    scope: ApprovalScope::Once,
+                    answer: None,
+                })
+                .await
+                .unwrap();
+            assert_eq!(ready_rx.recv().await, Some("recovery-call-2"));
+            cmd_tx
+                .send(ProtocolCommand::ToolDeny {
+                    call_id: "recovery-call-2".into(),
+                    reason: "operator denied second recovered tool".into(),
+                })
+                .await
+                .unwrap();
+        });
+        let writer = CapturingProtocolEmitter::default();
+
+        let outcome = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            drive_active_recovery(
+                future,
+                &mut cmd_rx,
+                approval_manager.as_ref(),
+                &writer,
+                &|| {},
+            ),
+        )
+        .await
+        .expect("multiple recovered approvals must not deadlock");
+        host.await.unwrap();
+
+        let ActiveRecoveryOutcome::Finished((first, second)) = outcome else {
+            panic!("recovery driver stopped unexpectedly");
+        };
+        assert!(matches!(
+            first,
+            ToolApprovalResult::Approved { answer: None }
+        ));
+        assert!(matches!(
+            second,
+            ToolApprovalResult::Denied { reason }
+                if reason == "operator denied second recovered tool"
+        ));
+    }
+
+    #[tokio::test]
+    async fn recovered_turn_stop_waits_until_engine_future_observes_cancellation() {
+        let cancellation = wcore_agent::cancel::CancellationToken::new();
+        let observed = cancellation.clone();
+        let provider_dispatches = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let future_dispatches = provider_dispatches.clone();
+        let future = async move {
+            if !observed.is_cancelled() {
+                future_dispatches.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            }
+            observed.cancelled().await;
+            "engine-observed-cancellation"
+        };
+        let (cmd_tx, mut cmd_rx) = tokio::sync::mpsc::channel(1);
+        cmd_tx.send(ProtocolCommand::Stop).await.unwrap();
+        let writer = CapturingProtocolEmitter::default();
+        let approval_manager = ToolApprovalManager::new();
+
+        let outcome = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            drive_active_recovery(future, &mut cmd_rx, &approval_manager, &writer, &|| {
+                cancellation.cancel()
+            }),
+        )
+        .await
+        .expect("Stop must be observed by the recovery future before it is dropped");
+
+        assert!(matches!(
+            outcome,
+            ActiveRecoveryOutcome::Stopped("engine-observed-cancellation")
+        ));
+        assert_eq!(
+            provider_dispatches.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "a queued Stop must be applied before the recovered future's first poll"
+        );
+    }
+
+    #[tokio::test]
+    async fn active_recovery_answers_every_correlated_command_once() {
+        let cancellation = wcore_agent::cancel::CancellationToken::new();
+        let observed = cancellation.clone();
+        let future = async move {
+            observed.cancelled().await;
+        };
+        let (cmd_tx, mut cmd_rx) = tokio::sync::mpsc::channel(5);
+        for command in [
+            r#"{"type":"session_resync","recovery_version":1,"request_id":"r1","session_id":"s1"}"#,
+            r#"{"type":"resume_turn","recovery_version":1,"request_id":"r2","session_id":"s1","turn_id":"t1","cursor":{"journal_sequence":1,"journal_digest":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},"action":"continue"}"#,
+            r#"{"type":"resolve_interrupted_approval","recovery_version":1,"request_id":"r3","session_id":"s1","turn_id":"t1","cursor":{"journal_sequence":1,"journal_digest":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},"approval_id":"a1","decision":"deny"}"#,
+            r#"{"type":"resolve_unknown_tool_effect","recovery_version":1,"session_id":"s1","turn_id":"t1","cursor":{"journal_sequence":1,"journal_digest":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},"tool_execution_id":"tool-1","outcome":"not_started","operator_id":"operator-1","evidence":{"source":"external_system_record","reference_id":"ref-1","observed_at_unix_ms":1,"digest":"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}}"#,
+        ] {
+            cmd_tx
+                .send(serde_json::from_str(command).unwrap())
+                .await
+                .unwrap();
+        }
+        cmd_tx.send(ProtocolCommand::Stop).await.unwrap();
+        let writer = CapturingProtocolEmitter::default();
+        let approval_manager = ToolApprovalManager::new();
+
+        let outcome =
+            drive_active_recovery(future, &mut cmd_rx, &approval_manager, &writer, &|| {
+                cancellation.cancel()
+            })
+            .await;
+
+        assert!(matches!(outcome, ActiveRecoveryOutcome::Stopped(())));
+        let events = writer.events.lock().unwrap();
+        assert_eq!(events.len(), 4);
+        assert!(matches!(
+            &events[0],
+            ProtocolEvent::SessionRecoveryUnavailable { request_id, .. } if request_id == "r1"
+        ));
+        assert!(matches!(
+            &events[1],
+            ProtocolEvent::SessionRecoveryUnavailable { request_id, .. } if request_id == "r2"
+        ));
+        assert!(matches!(
+            &events[2],
+            ProtocolEvent::SessionRecoveryUnavailable { request_id, .. } if request_id == "r3"
+        ));
+        assert!(matches!(
+            &events[3],
+            ProtocolEvent::Error { msg_id: Some(msg_id), error }
+                if msg_id == "tool-1" && error.code == "recovery_busy"
+        ));
+    }
+
+    #[tokio::test]
+    async fn recovered_approval_error_emits_exactly_one_terminal_stream_end() {
+        let (_directory, mut engine, _journal, cursor) = recovery_engine("f14a0005");
+        let writer = CapturingProtocolEmitter::default();
+        let output = CapturingOutputSink::default();
+        let approval_manager = ToolApprovalManager::new();
+        let (_cmd_tx, mut cmd_rx) = tokio::sync::mpsc::channel(1);
+
+        handle_recovered_approval(
+            &mut engine,
+            &writer,
+            &output,
+            &mut cmd_rx,
+            &approval_manager,
+            &|| {},
+            wcore_protocol::commands::RECOVERED_APPROVAL_VERSION,
+            "request-approval-error".into(),
+            "f14a0005".into(),
+            "turn-recovery".into(),
+            cursor,
+            "absent-approval".into(),
+            wcore_protocol::commands::RecoveredApprovalDecision::Approve,
+            None,
+        )
+        .await;
+
+        assert_eq!(output.errors.lock().unwrap().len(), 1);
+        assert_eq!(
+            *output.stream_ends.lock().unwrap(),
+            vec![("request-approval-error".into(), FinishReason::Error)]
+        );
+        assert!(matches!(
+            writer.events.lock().unwrap().as_slice(),
+            [ProtocolEvent::SessionRecoveryUnavailable { .. }]
+        ));
+    }
+
+    #[test]
+    fn json_operator_resolution_persists_exact_authority_and_emits_receipt() {
+        let (_directory, engine, journal, cursor, tool_execution_id) =
+            unknown_tool_recovery_engine("f14a0004");
+        let writer = CapturingProtocolEmitter::default();
+        let output = CapturingOutputSink::default();
+        let command = operator_resolution_command("f14a0004", cursor.clone(), &tool_execution_id);
+
+        handle_operator_tool_effect_resolution(&engine, &writer, &output, command);
+
+        assert_eq!(*output.errors.lock().unwrap(), Vec::<String>::new());
+        assert!(
+            engine
+                .tool_effects_requiring_reconciliation()
+                .unwrap()
+                .is_empty()
+        );
+        let state = journal.state().unwrap();
+        let tool = &state.tools[&tool_execution_id];
+        assert_eq!(
+            tool.result
+                .as_ref()
+                .and_then(|result| result["content"].as_str()),
+            Some("Operator evidence confirms the interrupted tool effect succeeded")
+        );
+        assert_eq!(
+            tool.result
+                .as_ref()
+                .and_then(|result| result["is_error"].as_bool()),
+            Some(false)
+        );
+        assert_eq!(
+            tool.resolution_source,
+            Some(
+                wcore_agent::session_journal::ToolResolutionSource::Operator {
+                    operator_id: "operator-7".into(),
+                }
+            )
+        );
+        assert_eq!(
+            tool.resolution_evidence,
+            Some(json!({
+                "source": "external_system_record",
+                "reference_id": "record-11",
+                "observed_at_unix_ms": 1_721_000_003_000_u64,
+                "digest": format!("sha256:{}", "b".repeat(64)),
+            }))
+        );
+        assert!(matches!(
+            writer.events.lock().unwrap().as_slice(),
+            [ProtocolEvent::UnknownToolEffectResolved { resolution }]
+                if resolution.session_id == "f14a0004"
+                    && resolution.turn_id == "turn-operator-recovery"
+                    && resolution.cursor == cursor
+                    && resolution.tool_execution_id == tool_execution_id
+        ));
+    }
+
+    #[test]
+    fn json_failed_operator_resolution_persists_canonical_error_result() {
+        let (_directory, engine, journal, cursor, tool_execution_id) =
+            unknown_tool_recovery_engine("f14a0006");
+        let writer = CapturingProtocolEmitter::default();
+        let output = CapturingOutputSink::default();
+        let mut command = operator_resolution_command("f14a0006", cursor, &tool_execution_id);
+        let ProtocolCommand::ResolveUnknownToolEffect(resolution) = &mut command else {
+            unreachable!()
+        };
+        resolution.outcome = wcore_protocol::events::OperatorToolEffectOutcome::Failed;
+
+        handle_operator_tool_effect_resolution(&engine, &writer, &output, command);
+
+        let state = journal.state().unwrap();
+        let result = state.tools[&tool_execution_id]
+            .result
+            .as_ref()
+            .expect("failed operator evidence must preserve a provider-visible result");
+        assert_eq!(
+            result["content"],
+            "Operator evidence confirms the interrupted tool effect failed"
+        );
+        assert_eq!(result["is_error"], true);
+        assert!(result.get("operator_resolution_evidence").is_some());
+    }
+
+    #[test]
+    fn json_operator_resolution_rejects_stale_cursor_without_mutation_or_receipt() {
+        let (_directory, engine, journal, mut cursor, tool_execution_id) =
+            unknown_tool_recovery_engine("f14a0005");
+        cursor.journal_digest = format!("sha256:{}", "c".repeat(64));
+        let writer = CapturingProtocolEmitter::default();
+        let output = wcore_agent::output::null_sink::NullSink;
+        let command = operator_resolution_command("f14a0005", cursor, &tool_execution_id);
+
+        handle_operator_tool_effect_resolution(&engine, &writer, &output, command);
+
+        assert_eq!(
+            engine.tool_effects_requiring_reconciliation().unwrap(),
+            vec![tool_execution_id.clone()]
+        );
+        assert!(matches!(
+            journal.state().unwrap().tools[&tool_execution_id].effect,
+            wcore_agent::session_journal::ToolEffectState::Unknown { .. }
+        ));
+        assert!(writer.events.lock().unwrap().is_empty());
     }
 
     async fn pending_bundled_reference_session(
@@ -4569,8 +5873,8 @@ mod tests {
         )
         .unwrap();
         assert_eq!(selection.approvals(), ApprovalPolicy::Bypass);
-        assert_eq!(selection.baseline.sandbox(), SandboxPolicy::Required);
-        assert!(selection.dangerous_grant.is_none());
+        assert_eq!(selection.baseline().sandbox(), SandboxPolicy::Required);
+        assert!(selection.dangerous_grant().is_none());
     }
 
     #[test]
@@ -4605,7 +5909,7 @@ mod tests {
         let selection = resolve_local_execution(&Config::default(), false, true, 30, true)
             .expect("Desktop process launch is an allowed local source");
         let grant = selection
-            .dangerous_grant
+            .dangerous_grant()
             .expect("Dangerous must produce a resolver-owned lease");
         assert_eq!(grant.source(), PolicySource::DesktopLocalLaunch);
         assert_eq!(grant.ttl_millis(), 30_000);

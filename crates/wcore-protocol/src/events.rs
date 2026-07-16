@@ -218,6 +218,169 @@ pub struct WorkflowRunFinished {
     pub failure: Option<WorkflowFailure>,
 }
 
+/// Opaque, content-bound position in the durable session journal.
+///
+/// `journal_sequence = None` is the unambiguous genesis position. The digest
+/// is required even at genesis so a host cannot advance recovery using an
+/// unbound numeric offset.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RecoveryCursor {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub journal_sequence: Option<u64>,
+    pub journal_digest: String,
+}
+
+/// Operator-observed result for a tool effect whose authoritative outcome
+/// cannot be reconstructed by a Core reconciler.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OperatorToolEffectOutcome {
+    Succeeded,
+    Failed,
+    NotStarted,
+}
+
+/// Closed vocabulary for the external record an operator used to resolve an
+/// otherwise unknown tool effect. Unknown sources are authority-critical and
+/// fail deserialization rather than degrading to an untyped label.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OperatorResolutionEvidenceSource {
+    ToolReceipt,
+    ProviderReceipt,
+    ProcessObservation,
+    ExternalSystemRecord,
+}
+
+/// Content-bound evidence for an operator resolution. Evidence contains only
+/// an opaque reference and digest; it never carries tool arguments, output,
+/// credentials, or free-form authority claims.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct OperatorResolutionEvidence {
+    pub source: OperatorResolutionEvidenceSource,
+    pub reference_id: String,
+    pub observed_at_unix_ms: u64,
+    pub digest: String,
+}
+
+/// Cursor-bound authority claim shared by the host command and Core receipt.
+/// The closed shape makes unknown authority-bearing additions fail closed.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct OperatorToolEffectResolution {
+    pub recovery_version: u16,
+    pub session_id: String,
+    pub turn_id: String,
+    pub cursor: RecoveryCursor,
+    pub tool_execution_id: String,
+    pub outcome: OperatorToolEffectOutcome,
+    pub operator_id: String,
+    pub evidence: OperatorResolutionEvidence,
+}
+
+/// Stable recovery lifecycle exposed to both standalone and hosted clients.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RecoveryLifecycle {
+    Ready,
+    Streaming,
+    AwaitingApproval,
+    ToolInFlight,
+    ReconciliationRequired,
+    Suspended,
+    Completed,
+    Cancelled,
+    Failed,
+}
+
+/// Fail-closed reasons why Core cannot produce a trustworthy recovery view.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RecoveryUnavailableReason {
+    SessionNotFound,
+    UnsupportedVersion,
+    CursorInvalid,
+    CursorAhead,
+    CursorDigestMismatch,
+    HistoryGap,
+    JournalCorrupt,
+    SnapshotUnavailable,
+    UnknownCriticalState,
+}
+
+/// Typed reasons why an interrupted turn cannot be continued directly.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RecoveryReconcileReason {
+    ApprovalExpired,
+    ProviderOutcomeUnknown,
+    ToolOutcomeUnknown,
+    EffectRequiresOperator,
+    BudgetExhausted,
+    ContextUnrestorable,
+    CancellationAmbiguous,
+    UnknownCriticalState,
+}
+
+/// Sanitized interrupted-turn projection. It deliberately contains only
+/// opaque identifiers and typed state: never transcript text, prompts, tool
+/// arguments or output, paths, approval secrets, or provider payloads.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RecoveryTurnSnapshot {
+    pub turn_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub msg_id: Option<String>,
+    pub lifecycle: RecoveryLifecycle,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pending_call_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reconcile_reason: Option<RecoveryReconcileReason>,
+}
+
+/// Sanitized budget projection needed to make a safe resume decision.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RecoveryBudgetSnapshot {
+    pub tokens_used: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub token_limit: Option<u64>,
+    pub cost_used_usd: f64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cost_limit_usd: Option<f64>,
+}
+
+/// Content-free milestone kinds that may be replayed to reconstruct recovery
+/// UI without exposing journal payloads.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RecoveryReplayKind {
+    /// A committed journal transition with no more-specific public milestone.
+    /// This keeps replay cursors contiguous without exposing event payloads.
+    StateAdvanced,
+    TurnStarted,
+    StreamStarted,
+    StreamCommitted,
+    ApprovalRequested,
+    ApprovalResolved,
+    ToolStarted,
+    ToolCommitted,
+    EffectUncertain,
+    CancellationRequested,
+    TurnCompleted,
+    TurnCancelled,
+    TurnFailed,
+}
+
+/// One ordered, sanitized recovery milestone.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RecoveryReplayItem {
+    pub cursor: RecoveryCursor,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub turn_id: Option<String>,
+    pub kind: RecoveryReplayKind,
+}
+
 /// Events emitted by the agent to the client (Agent -> Client)
 ///
 /// `Clone` is derived (Wave 2) so the in-process TUI bridge can fan an
@@ -253,6 +416,52 @@ pub enum ProtocolEvent {
     /// receipt; hosts cannot submit this shape to widen a session.
     WorkspacePolicy {
         policy: wcore_types::workspace_trust::WorkspacePolicyReceipt,
+    },
+    /// Complete sanitized recovery projection at one durable journal cursor.
+    SessionRecoverySnapshot {
+        recovery_version: u16,
+        request_id: String,
+        session_id: String,
+        cursor: RecoveryCursor,
+        state_digest: String,
+        lifecycle: RecoveryLifecycle,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pending_turn: Option<RecoveryTurnSnapshot>,
+        budget: RecoveryBudgetSnapshot,
+    },
+    /// Ordered, content-free milestones after a host-provided cursor.
+    SessionRecoveryReplay {
+        recovery_version: u16,
+        request_id: String,
+        session_id: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        from: Option<RecoveryCursor>,
+        through: RecoveryCursor,
+        items: Vec<RecoveryReplayItem>,
+    },
+    /// Typed refusal to recover when Core cannot prove a trustworthy view.
+    SessionRecoveryUnavailable {
+        recovery_version: u16,
+        request_id: String,
+        session_id: String,
+        reason: RecoveryUnavailableReason,
+    },
+    /// Durable lifecycle transition for one recoverable turn.
+    TurnRecoveryLifecycle {
+        recovery_version: u16,
+        session_id: String,
+        turn_id: String,
+        cursor: RecoveryCursor,
+        lifecycle: RecoveryLifecycle,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        reconcile_reason: Option<RecoveryReconcileReason>,
+    },
+    /// Durable receipt for a validated operator resolution of an otherwise
+    /// unknown tool effect. This event echoes the exact authority-bound input
+    /// so hosts can replay it without inventing state.
+    UnknownToolEffectResolved {
+        #[serde(flatten)]
+        resolution: OperatorToolEffectResolution,
     },
     /// Typed capability construction/runtime evidence. Startup events are
     /// emitted after `Ready`; runtime events are emitted at the real success

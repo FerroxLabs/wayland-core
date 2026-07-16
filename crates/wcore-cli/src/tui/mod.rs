@@ -624,6 +624,11 @@ async fn run_loop(
             if guard.quit {
                 break;
             }
+            // F14: apply a completed `/resume` transfer before drawing. The
+            // engine result channel fires only after journal/lease authority
+            // has moved, so a target transcript never paints speculatively.
+            router.poll_session_switch(&mut guard);
+            router.poll_recovery_action(&mut guard);
             router.sync_plan_mode(&mut guard);
             // v0.9.1 W1-B: the centered approval-modal auto-open/close
             // (sync_approval_modal) was removed. Inline approval cards

@@ -185,6 +185,7 @@ impl CommandRegistry {
         let commands = vec![
             // SESSION
             Command::new("/resume", Session, "reopen a past session", false),
+            Command::new("/recover", Session, "resolve an interrupted turn", false),
             Command::new(
                 "/rewind",
                 Session,
@@ -585,9 +586,11 @@ mod tests {
         // `/connect` is the 28th — S4b paste-to-detect provider connect.
         // `/effective` is the 29th — S9 redacted effective-config preview.
         // `/crucible` is the 30th — Crucible Stage 4a cross-vendor council.
-        assert_eq!(reg.len(), 30);
+        // `/recover` is the 31st — cursor-bound interrupted-turn recovery.
+        assert_eq!(reg.len(), 31);
         for name in [
             "/resume",
+            "/recover",
             "/rewind",
             "/new",
             "/compact",

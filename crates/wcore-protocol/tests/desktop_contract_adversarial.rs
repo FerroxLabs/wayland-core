@@ -147,6 +147,177 @@ fn canonical_ready_advertises_the_embedded_generated_contract() {
     );
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RecoveryApply {
+    Snapshot,
+    Replay,
+    Duplicate,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RecoveryError {
+    Version,
+    CursorDigest,
+    CursorGap,
+    StateConflict,
+    Correlation,
+    ThroughMismatch,
+}
+
+#[derive(Default)]
+struct SerializedRecoveryReducer {
+    request_id: Option<String>,
+    session_id: Option<String>,
+    sequence: Option<u64>,
+    cursor_digest: Option<String>,
+    state_digest: Option<String>,
+}
+
+impl SerializedRecoveryReducer {
+    fn apply(&mut self, event: &Value) -> Result<RecoveryApply, RecoveryError> {
+        if event["recovery_version"] != 1 {
+            return Err(RecoveryError::Version);
+        }
+        let request_id = event["request_id"]
+            .as_str()
+            .ok_or(RecoveryError::Correlation)?;
+        let session_id = event["session_id"]
+            .as_str()
+            .ok_or(RecoveryError::Correlation)?;
+        match event["type"].as_str() {
+            Some("session_recovery_snapshot") => {
+                let (sequence, cursor_digest) = recovery_cursor(&event["cursor"])?;
+                let state_digest = event["state_digest"]
+                    .as_str()
+                    .filter(|digest| valid_digest(digest))
+                    .ok_or(RecoveryError::CursorDigest)?;
+                if let Some(current) = self.sequence {
+                    if Some(current) == sequence
+                        && self.cursor_digest.as_deref() == Some(cursor_digest)
+                    {
+                        return if self.state_digest.as_deref() == Some(state_digest) {
+                            Ok(RecoveryApply::Duplicate)
+                        } else {
+                            Err(RecoveryError::StateConflict)
+                        };
+                    }
+                    return Err(RecoveryError::Correlation);
+                }
+                self.request_id = Some(request_id.to_owned());
+                self.session_id = Some(session_id.to_owned());
+                self.sequence = sequence;
+                self.cursor_digest = Some(cursor_digest.to_owned());
+                self.state_digest = Some(state_digest.to_owned());
+                Ok(RecoveryApply::Snapshot)
+            }
+            Some("session_recovery_replay") => {
+                if self.request_id.as_deref() != Some(request_id)
+                    || self.session_id.as_deref() != Some(session_id)
+                {
+                    return Err(RecoveryError::Correlation);
+                }
+                let (from_sequence, from_digest) = recovery_cursor(&event["from"])?;
+                if self.sequence != from_sequence
+                    || self.cursor_digest.as_deref() != Some(from_digest)
+                {
+                    return Err(RecoveryError::CursorDigest);
+                }
+                let expected_start = self.sequence.map_or(0, |sequence| sequence + 1);
+                let items = event["items"].as_array().ok_or(RecoveryError::CursorGap)?;
+                let mut last = (
+                    self.sequence,
+                    self.cursor_digest.clone().unwrap_or_default(),
+                );
+                for (expected, item) in (expected_start..).zip(items) {
+                    let (sequence, digest) = recovery_cursor(&item["cursor"])?;
+                    if sequence != Some(expected) {
+                        return Err(RecoveryError::CursorGap);
+                    }
+                    last = (sequence, digest.to_owned());
+                }
+                let (through_sequence, through_digest) = recovery_cursor(&event["through"])?;
+                if through_sequence != last.0 || through_digest != last.1 {
+                    return Err(RecoveryError::ThroughMismatch);
+                }
+                self.sequence = last.0;
+                self.cursor_digest = Some(last.1);
+                Ok(RecoveryApply::Replay)
+            }
+            _ => Err(RecoveryError::Correlation),
+        }
+    }
+}
+
+fn valid_digest(digest: &str) -> bool {
+    digest.len() == 64
+        && digest
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+}
+
+fn recovery_cursor(cursor: &Value) -> Result<(Option<u64>, &str), RecoveryError> {
+    let sequence = match cursor.get("journal_sequence") {
+        Some(value) => Some(value.as_u64().ok_or(RecoveryError::CursorGap)?),
+        None => None,
+    };
+    let digest = cursor["journal_digest"]
+        .as_str()
+        .filter(|digest| valid_digest(digest))
+        .ok_or(RecoveryError::CursorDigest)?;
+    Ok((sequence, digest))
+}
+
+#[test]
+fn serialized_recovery_reducer_accepts_pinned_cursor_replay() {
+    let events = json_lines("adversarial/recovery/valid-replay.jsonl");
+    let mut reducer = SerializedRecoveryReducer::default();
+    assert_eq!(reducer.apply(&events[0]), Ok(RecoveryApply::Snapshot));
+    assert_eq!(reducer.apply(&events[1]), Ok(RecoveryApply::Replay));
+    assert_eq!(reducer.sequence, Some(42));
+}
+
+#[test]
+fn serialized_recovery_reducer_fails_closed_on_version_cursor_and_state_drift() {
+    let cases = [
+        (
+            "adversarial/recovery/version-mismatch.jsonl",
+            0,
+            RecoveryError::Version,
+        ),
+        (
+            "adversarial/recovery/cursor-digest-mismatch.jsonl",
+            1,
+            RecoveryError::CursorDigest,
+        ),
+        (
+            "adversarial/recovery/cursor-gap.jsonl",
+            1,
+            RecoveryError::CursorGap,
+        ),
+        (
+            "adversarial/recovery/state-digest-conflict.jsonl",
+            1,
+            RecoveryError::StateConflict,
+        ),
+    ];
+    for (path, failing_index, expected) in cases {
+        let events = json_lines(path);
+        let mut reducer = SerializedRecoveryReducer::default();
+        if failing_index == 1 {
+            assert_eq!(
+                reducer.apply(&events[0]),
+                Ok(RecoveryApply::Snapshot),
+                "{path}"
+            );
+        }
+        assert_eq!(
+            reducer.apply(&events[failing_index]),
+            Err(expected),
+            "{path}"
+        );
+    }
+}
+
 #[test]
 fn negotiated_observer_accepts_authoritative_anvil_invalidation() {
     let mut observer = observer();

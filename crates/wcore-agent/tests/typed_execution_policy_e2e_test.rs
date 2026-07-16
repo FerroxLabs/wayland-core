@@ -4,7 +4,9 @@ mod common;
 
 use std::sync::{Arc, Mutex};
 
-use common::MockLlmProvider;
+use common::{
+    MockLlmProvider, RECOVERY_TEST_KEY, configure_persisted_test_session, physical_attempt_server,
+};
 use serde_json::json;
 use wcore_agent::bootstrap::AgentBootstrap;
 use wcore_agent::output::OutputSink;
@@ -89,24 +91,34 @@ impl OutputSink for CapturingSink {
 #[tokio::test]
 async fn typed_bypass_executes_read_without_bypassing_required_sandbox() {
     let workspace = tempfile::tempdir().unwrap();
+    let physical = physical_attempt_server().await;
     let proof_path = workspace.path().join("proof.txt");
     std::fs::write(&proof_path, "typed-bypass-read-succeeded").unwrap();
 
     let mut config = bootstrap_config();
     config.tools.auto_approve = false;
+    configure_persisted_test_session(&mut config, workspace.path());
     let capture = Arc::new(CapturingSink::default());
     let sink: Arc<dyn OutputSink> = capture.clone();
     let mut result = AgentBootstrap::new(config, workspace.path().to_string_lossy(), sink)
         .with_smart_execution_policy(ApprovalPolicy::Bypass, PolicySource::LocalCliLaunch)
-        .provider(Arc::new(MockLlmProvider::with_tool_use(
-            "typed-read",
-            "Read",
-            json!({"file_path": proof_path.to_string_lossy()}),
-        )))
+        .provider(Arc::new(
+            MockLlmProvider::with_tool_use(
+                "typed-read",
+                "Read",
+                json!({"file_path": proof_path.to_string_lossy()}),
+            )
+            .with_physical_url(physical.uri()),
+        ))
         .without_channels(true)
         .build()
         .await
         .expect("typed approval bypass must retain an enforceable sandbox");
+    result
+        .engine
+        .init_session("openai", &workspace.path().to_string_lossy(), None)
+        .expect("persisted session must bind the production budget authority");
+    result.engine.use_recovery_test_key(&RECOVERY_TEST_KEY);
 
     assert_ne!(
         result.engine.tools().sandbox_runtime().backend_name(),
@@ -129,21 +141,31 @@ async fn typed_bypass_executes_read_without_bypassing_required_sandbox() {
 #[tokio::test]
 async fn typed_bypass_executes_bash_inside_required_sandbox() {
     let workspace = tempfile::tempdir().unwrap();
+    let physical = physical_attempt_server().await;
     let mut config = bootstrap_config();
     config.tools.auto_approve = false;
+    configure_persisted_test_session(&mut config, workspace.path());
     let capture = Arc::new(CapturingSink::default());
     let sink: Arc<dyn OutputSink> = capture.clone();
     let mut result = AgentBootstrap::new(config, workspace.path().to_string_lossy(), sink)
         .with_smart_execution_policy(ApprovalPolicy::Bypass, PolicySource::LocalCliLaunch)
-        .provider(Arc::new(MockLlmProvider::with_tool_use(
-            "typed-bash",
-            "Bash",
-            json!({"command": "printf typed-bypass-bash-succeeded"}),
-        )))
+        .provider(Arc::new(
+            MockLlmProvider::with_tool_use(
+                "typed-bash",
+                "Bash",
+                json!({"command": "printf typed-bypass-bash-succeeded"}),
+            )
+            .with_physical_url(physical.uri()),
+        ))
         .without_channels(true)
         .build()
         .await
         .expect("typed approval bypass must retain an enforceable sandbox");
+    result
+        .engine
+        .init_session("openai", &workspace.path().to_string_lossy(), None)
+        .expect("persisted session must bind the production budget authority");
+    result.engine.use_recovery_test_key(&RECOVERY_TEST_KEY);
 
     assert_ne!(
         result.engine.tools().sandbox_runtime().backend_name(),
@@ -165,26 +187,36 @@ async fn typed_bypass_executes_bash_inside_required_sandbox() {
 #[tokio::test]
 async fn typed_prompt_overrides_legacy_auto_approve_and_denies_write() {
     let workspace = tempfile::tempdir().unwrap();
+    let physical = physical_attempt_server().await;
     let write_path = workspace.path().join("must-not-exist.txt");
 
     let mut config = bootstrap_config();
     config.tools.auto_approve = true;
+    configure_persisted_test_session(&mut config, workspace.path());
     let capture = Arc::new(CapturingSink::default());
     let sink: Arc<dyn OutputSink> = capture.clone();
     let mut result = AgentBootstrap::new(config, workspace.path().to_string_lossy(), sink)
         .with_smart_execution_policy(ApprovalPolicy::Prompt, PolicySource::LocalCliLaunch)
-        .provider(Arc::new(MockLlmProvider::with_tool_use(
-            "typed-prompt-write",
-            "Write",
-            json!({
-                "file_path": write_path.to_string_lossy(),
-                "content": "typed Prompt was ignored"
-            }),
-        )))
+        .provider(Arc::new(
+            MockLlmProvider::with_tool_use(
+                "typed-prompt-write",
+                "Write",
+                json!({
+                    "file_path": write_path.to_string_lossy(),
+                    "content": "typed Prompt was ignored"
+                }),
+            )
+            .with_physical_url(physical.uri()),
+        ))
         .without_channels(true)
         .build()
         .await
         .expect("typed Prompt must override the legacy auto-approve boolean");
+    result
+        .engine
+        .init_session("openai", &workspace.path().to_string_lossy(), None)
+        .expect("persisted session must bind the production budget authority");
+    result.engine.use_recovery_test_key(&RECOVERY_TEST_KEY);
 
     result
         .engine
@@ -205,27 +237,39 @@ async fn typed_prompt_overrides_legacy_auto_approve_and_denies_write() {
 #[tokio::test]
 async fn typed_auto_edit_allows_write_but_denies_bash() {
     let workspace = tempfile::tempdir().unwrap();
+    let physical = physical_attempt_server().await;
     let write_path = workspace.path().join("auto-edit.txt");
 
     let mut write_config = bootstrap_config();
     write_config.tools.auto_approve = false;
+    configure_persisted_test_session(&mut write_config, workspace.path());
     let write_capture = Arc::new(CapturingSink::default());
     let write_sink: Arc<dyn OutputSink> = write_capture.clone();
     let mut write_result =
         AgentBootstrap::new(write_config, workspace.path().to_string_lossy(), write_sink)
             .with_smart_execution_policy(ApprovalPolicy::AutoEdit, PolicySource::LocalCliLaunch)
-            .provider(Arc::new(MockLlmProvider::with_tool_use(
-                "typed-auto-edit-write",
-                "Write",
-                json!({
-                    "file_path": write_path.to_string_lossy(),
-                    "content": "typed-auto-edit-write-succeeded"
-                }),
-            )))
+            .provider(Arc::new(
+                MockLlmProvider::with_tool_use(
+                    "typed-auto-edit-write",
+                    "Write",
+                    json!({
+                        "file_path": write_path.to_string_lossy(),
+                        "content": "typed-auto-edit-write-succeeded"
+                    }),
+                )
+                .with_physical_url(physical.uri()),
+            ))
             .without_channels(true)
             .build()
             .await
             .expect("typed AutoEdit bootstrap must succeed");
+    write_result
+        .engine
+        .init_session("openai", &workspace.path().to_string_lossy(), None)
+        .expect("persisted session must bind the production budget authority");
+    write_result
+        .engine
+        .use_recovery_test_key(&RECOVERY_TEST_KEY);
 
     write_result
         .engine
@@ -245,26 +289,35 @@ async fn typed_auto_edit_allows_write_but_denies_bash() {
 
     let mut bash_config = bootstrap_config();
     bash_config.tools.auto_approve = false;
+    configure_persisted_test_session(&mut bash_config, workspace.path());
     let bash_marker = workspace.path().join("auto-edit-bash-must-not-exist.txt");
     let bash_capture = Arc::new(CapturingSink::default());
     let bash_sink: Arc<dyn OutputSink> = bash_capture.clone();
     let mut bash_result =
         AgentBootstrap::new(bash_config, workspace.path().to_string_lossy(), bash_sink)
             .with_smart_execution_policy(ApprovalPolicy::AutoEdit, PolicySource::LocalCliLaunch)
-            .provider(Arc::new(MockLlmProvider::with_tool_use(
-                "typed-auto-edit-bash",
-                "Bash",
-                json!({
-                    "command": format!(
-                        "echo typed-auto-edit-bash-must-not-run > \"{}\"",
-                        bash_marker.display()
-                    )
-                }),
-            )))
+            .provider(Arc::new(
+                MockLlmProvider::with_tool_use(
+                    "typed-auto-edit-bash",
+                    "Bash",
+                    json!({
+                        "command": format!(
+                            "echo typed-auto-edit-bash-must-not-run > \"{}\"",
+                            bash_marker.display()
+                        )
+                    }),
+                )
+                .with_physical_url(physical.uri()),
+            ))
             .without_channels(true)
             .build()
             .await
             .expect("typed AutoEdit bootstrap must succeed");
+    bash_result
+        .engine
+        .init_session("openai", &workspace.path().to_string_lossy(), None)
+        .expect("persisted session must bind the production budget authority");
+    bash_result.engine.use_recovery_test_key(&RECOVERY_TEST_KEY);
 
     bash_result
         .engine

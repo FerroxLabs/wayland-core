@@ -24,9 +24,26 @@ pub mod config;
 pub mod execution;
 pub mod tracker;
 
+/// Validation failures while persisting or restoring durable budget authority.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum BudgetSnapshotError {
+    /// The serialized representation is malformed, unsafe, or inconsistent.
+    #[error("invalid budget snapshot: {reason}")]
+    Invalid { reason: String },
+    /// A snapshot can only be applied once to a pristine restore target.
+    #[error("budget snapshot restore target is not pristine")]
+    RestoreTargetNotPristine,
+    /// Snapshot schemas are versioned and must be explicitly supported.
+    #[error("unsupported budget snapshot schema version {found}; expected {expected}")]
+    UnsupportedVersion { found: u32, expected: u32 },
+}
+
 pub use config::{BudgetConfig, BudgetConfigError};
-pub use execution::{AgentDepthGuard, ExecutionBudget, ExecutionBudgetView, ToolRunGuard};
+pub use execution::{
+    AgentDepthGuard, ExecutionBudget, ExecutionBudgetSnapshot, ExecutionBudgetView,
+    ProcessCleanupProof, ToolRunGuard,
+};
 pub use tracker::{
     BudgetCap, BudgetCapBuilder, BudgetError, BudgetEvent, BudgetEventSink, BudgetReservation,
-    BudgetTracker,
+    BudgetTracker, BudgetTrackerSnapshot, RestoredReservationReconciliation,
 };

@@ -5,6 +5,9 @@
 
 pub mod plugin;
 
+// Shared packaged-process execution-policy and static-plugin link seam.
+pub mod packaged_runtime;
+
 // v0.7.0 Task 1.A.10: `acp` subcommand — production caller for the
 // `wcore-acp` crate (methodology #27). Lives in the lib so the e2e
 // `serve + request` round-trip test runs under `cargo test -p wcore-cli

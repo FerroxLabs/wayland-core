@@ -167,6 +167,22 @@ impl InMemorySessionState {
     pub fn set_active_model(&self, model: impl Into<String>) {
         *self.active_model.lock() = model.into();
     }
+
+    /// Re-baseline live counters when a long-running host transfers the
+    /// engine to another persisted session.
+    pub(crate) fn reset_for_session(
+        &self,
+        active_model: impl Into<String>,
+        input_tokens: u64,
+        output_tokens: u64,
+    ) {
+        self.input_tokens.store(input_tokens, Ordering::Relaxed);
+        self.output_tokens.store(output_tokens, Ordering::Relaxed);
+        self.tool_calls.lock().clear();
+        self.recent_errors.lock().clear();
+        self.provider_health.lock().clear();
+        *self.active_model.lock() = active_model.into();
+    }
 }
 
 impl Default for InMemorySessionState {

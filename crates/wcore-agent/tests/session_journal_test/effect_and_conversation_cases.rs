@@ -120,6 +120,7 @@ fn tool_execution_identity_digests_and_collisions_are_enforced() {
             effective_input: StoredToolInput::redacted(bad_input_digest),
             effect_contract: ToolEffectContract::default(),
             effect_receipt: None,
+            pre_hook_phase_id: None,
         }),
         Err(JournalError::InvalidTransition(_))
     ));
@@ -141,6 +142,7 @@ fn tool_execution_identity_digests_and_collisions_are_enforced() {
             effective_input_digest: "wrong".into(),
             effect_contract: ToolEffectContract::default(),
             effect_receipt: None,
+            pre_hook_phase_id: None,
         }),
         Err(JournalError::InvalidTransition(_))
     ));

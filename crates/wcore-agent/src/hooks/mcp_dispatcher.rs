@@ -81,6 +81,31 @@ impl HookDispatcher for McpHookDispatcher {
             }
         }
     }
+
+    async fn dispatch_durable(
+        &self,
+        plugin: &str,
+        hook_name: &str,
+        _phase: HookPhase,
+    ) -> Result<Option<String>, super::HookDispatchError> {
+        let Some(server) = self.server_for_plugin.get(plugin) else {
+            return Ok(None);
+        };
+        match self.caller.call(server, hook_name).await {
+            Ok(text) if !text.trim().is_empty() => Ok(Some(text)),
+            Ok(_) => Ok(None),
+            Err(error) => {
+                tracing::warn!(
+                    target: "wcore_agent::hooks",
+                    plugin,
+                    hook = hook_name,
+                    error = %error,
+                    "durable hook MCP dispatch did not complete authoritatively"
+                );
+                Err(super::HookDispatchError)
+            }
+        }
+    }
 }
 
 /// F5/F6 — resolve the `plugin -> mcp server` binding from registry state,
@@ -323,9 +348,9 @@ mod tests {
         );
     }
 
-    // A caller error is tolerated: dispatch returns None, never propagates.
+    // A caller error is ambiguous and must propagate to durable callers.
     #[tokio::test]
-    async fn caller_error_returns_none() {
+    async fn caller_error_is_legacy_none_but_durable_error() {
         let caller = Arc::new(FakeCaller {
             ok_server: "memory-server".to_string(),
             ok_tool: "context_tool".to_string(),
@@ -334,10 +359,14 @@ mod tests {
             calls: AtomicUsize::new(0),
         });
         let dispatcher = McpHookDispatcher::new(caller, map_one("plugin-a", "memory-server"));
-        let out = dispatcher
+        let legacy = dispatcher
             .dispatch("plugin-a", "context_tool", HookPhase::SessionStart)
             .await;
-        assert!(out.is_none());
+        assert!(legacy.is_none());
+        let durable = dispatcher
+            .dispatch_durable("plugin-a", "context_tool", HookPhase::SessionStart)
+            .await;
+        assert!(durable.is_err());
     }
 
     // F4: a response larger than the cap is truncated to <= cap, on a char

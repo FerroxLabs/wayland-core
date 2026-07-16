@@ -20,6 +20,33 @@ use wcore_types::llm::{LlmEvent, LlmRequest};
 use wcore_types::message::{StopReason, TokenUsage};
 use wcore_types::tool::ToolResult;
 
+/// Stable in-memory key for unrelated integration harnesses that need the
+/// durable session path. Dedicated encrypted-vault tests prove production
+/// storage; these tests keep recovery protection instance-local so parallel
+/// test binaries never mutate process-global profile environment.
+pub const RECOVERY_TEST_KEY: [u8; 32] = [0x5a; 32];
+
+pub fn configure_persisted_test_session(config: &mut Config, session_root: &std::path::Path) {
+    config.session.enabled = true;
+    config.session.directory = session_root.join("sessions").to_string_lossy().into_owned();
+}
+
+/// Local HTTP boundary used by persisted-session mock providers. Durable
+/// recovery records the accepted physical attempt before scripted LLM events
+/// become visible, so a purely in-memory provider is intentionally
+/// insufficient for these production-path tests.
+pub async fn physical_attempt_server() -> wiremock::MockServer {
+    use wiremock::matchers::method;
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .respond_with(ResponseTemplate::new(200))
+        .mount(&server)
+        .await;
+    server
+}
+
 // ---------------------------------------------------------------------------
 // MockLlmProvider — deterministic LLM for engine / spawn tests
 // ---------------------------------------------------------------------------

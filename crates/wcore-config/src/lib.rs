@@ -24,6 +24,7 @@ pub mod chatgpt_catalog;
 // W8c.2 F.1: CuaConfig TOML schema (consumed by wcore-cua::adapter::from_spec).
 pub mod compact;
 pub mod compat;
+pub mod confidential_blob;
 pub mod config;
 // Anvil (native gated-forge engine): `[anvil]` kill-switch config.
 pub mod anvil;

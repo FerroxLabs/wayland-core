@@ -37,6 +37,7 @@ pub use wcore_tools::ToolExecutionClass;
 pub struct ToolBudgetTracker {
     inner: Arc<Mutex<HashMap<String, ToolUsage>>>,
     execution_budget: Option<crate::budget::ExecutionBudgetView>,
+    budget_authority: Option<crate::budget_authority::SharedBudgetAuthorityCoordinator>,
 }
 
 /// Aggregated usage for a single tool name across a session.
@@ -68,6 +69,12 @@ pub struct ToolAdmissionError {
     pub limit: String,
 }
 
+type ToolBudgetAdmission = (
+    Option<crate::budget::ToolRunGuard>,
+    Option<wcore_budget::execution::ToolRuntimeGuard>,
+    Option<Duration>,
+);
+
 impl std::fmt::Display for ToolAdmissionError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
@@ -90,6 +97,19 @@ impl ToolBudgetTracker {
         Self {
             inner: Arc::new(Mutex::new(HashMap::new())),
             execution_budget: Some(budget),
+            budget_authority: None,
+        }
+    }
+
+    /// Attach the sole production budget owner. Process/runtime admission and
+    /// guard settlement are journaled before returning to the dispatcher.
+    pub fn with_budget_authority(
+        authority: crate::budget_authority::SharedBudgetAuthorityCoordinator,
+    ) -> Self {
+        Self {
+            inner: Arc::new(Mutex::new(HashMap::new())),
+            execution_budget: None,
+            budget_authority: Some(authority),
         }
     }
 
@@ -109,39 +129,23 @@ impl ToolBudgetTracker {
         class: ToolExecutionClass,
         requested_runtime: Duration,
     ) -> Result<ToolRunHandle, ToolAdmissionError> {
-        let process_guard = match (class, self.execution_budget.as_ref()) {
-            (ToolExecutionClass::ProcessSpawning, Some(budget)) => Some(
-                budget
-                    .try_enter_process()
+        let (process_guard, runtime_guard, dispatch_time_limit) =
+            if let Some(authority) = self.budget_authority.as_ref() {
+                authority
+                    .lock()
+                    .transaction(|mutation| {
+                        admit_tool_run(mutation.execution(), class, requested_runtime)
+                    })
                     .map_err(|error| ToolAdmissionError {
-                        reason: error.reason,
-                        observed: error.observed.to_string(),
-                        limit: error.limit.to_string(),
-                    })?,
-            ),
-            (ToolExecutionClass::ProcessSpawning | ToolExecutionClass::InProcess, None)
-            | (ToolExecutionClass::InProcess, Some(_)) => None,
-        };
-        let (runtime_guard, dispatch_time_limit) = match self.execution_budget.as_ref() {
-            Some(budget) => {
-                let requested_runtime = budget
-                    .remaining_wall_time()
-                    .map_or(requested_runtime, |remaining| {
-                        requested_runtime.min(remaining)
-                    });
-                let guard =
-                    budget
-                        .try_reserve_tool_runtime(requested_runtime)
-                        .map_err(|error| ToolAdmissionError {
-                            reason: error.reason,
-                            observed: format!("{:.3}s", error.observed.as_secs_f64()),
-                            limit: format!("{:.3}s", error.limit.as_secs_f64()),
-                        })?;
-                let admitted = guard.admitted_runtime();
-                (Some(guard), Some(admitted))
-            }
-            None => (None, Some(requested_runtime)),
-        };
+                        reason: "budget_authority",
+                        observed: error.to_string(),
+                        limit: "durable authority".to_owned(),
+                    })??
+            } else if let Some(budget) = self.execution_budget.as_ref() {
+                admit_tool_run(budget, class, requested_runtime)?
+            } else {
+                (None, None, Some(requested_runtime))
+            };
         Ok(self.start_admitted(
             tool.into(),
             process_guard,
@@ -153,6 +157,13 @@ impl ToolBudgetTracker {
     /// Remaining time the dispatcher may give a new tool future before the
     /// session's tool-runtime or wall-time envelope is exhausted.
     pub fn remaining_dispatch_time(&self) -> Option<Duration> {
+        if let Some(authority) = self.budget_authority.as_ref() {
+            return authority
+                .lock()
+                .inspect(|_, budget| budget.remaining_tool_dispatch_time())
+                .ok()
+                .flatten();
+        }
         self.execution_budget
             .as_ref()
             .and_then(|budget| budget.remaining_tool_dispatch_time())
@@ -161,6 +172,13 @@ impl ToolBudgetTracker {
     /// Monotonic deadline; convert with `tokio::time::Instant::from_std`
     /// before passing it to `tokio::time::timeout_at`.
     pub fn dispatch_deadline(&self) -> Option<Instant> {
+        if let Some(authority) = self.budget_authority.as_ref() {
+            return authority
+                .lock()
+                .inspect(|_, budget| budget.tool_dispatch_deadline())
+                .ok()
+                .flatten();
+        }
         self.execution_budget
             .as_ref()
             .and_then(|budget| budget.tool_dispatch_deadline())
@@ -210,6 +228,37 @@ impl ToolBudgetTracker {
     }
 }
 
+fn admit_tool_run(
+    budget: &crate::budget::ExecutionBudgetView,
+    class: ToolExecutionClass,
+    requested_runtime: Duration,
+) -> Result<ToolBudgetAdmission, ToolAdmissionError> {
+    let process_guard = match class {
+        ToolExecutionClass::ProcessSpawning => Some(budget.try_enter_process().map_err(
+            |error| ToolAdmissionError {
+                reason: error.reason,
+                observed: error.observed.to_string(),
+                limit: error.limit.to_string(),
+            },
+        )?),
+        ToolExecutionClass::InProcess => None,
+    };
+    let requested_runtime = budget
+        .remaining_wall_time()
+        .map_or(requested_runtime, |remaining| {
+            requested_runtime.min(remaining)
+        });
+    let runtime_guard = budget
+        .try_reserve_tool_runtime(requested_runtime)
+        .map_err(|error| ToolAdmissionError {
+            reason: error.reason,
+            observed: format!("{:.3}s", error.observed.as_secs_f64()),
+            limit: format!("{:.3}s", error.limit.as_secs_f64()),
+        })?;
+    let admitted = runtime_guard.admitted_runtime();
+    Ok((process_guard, Some(runtime_guard), Some(admitted)))
+}
+
 impl ToolRunHandle {
     /// Maximum wall-clock time admitted for this invocation after applying
     /// category, session wall-time, and aggregate tool-runtime limits.
@@ -229,7 +278,22 @@ impl ToolRunHandle {
         let entry = inner.entry(self.tool.clone()).or_default();
         entry.total_runtime = entry.total_runtime.saturating_add(elapsed);
         drop(inner);
-        if let Some(runtime_guard) = self.runtime_guard.as_mut() {
+        if let Some(authority) = self.tracker.budget_authority.as_ref() {
+            let mut runtime_guard = self.runtime_guard.take();
+            let process_guard = self.process_guard.take();
+            if let Err(error) = authority.lock().transaction(|_| {
+                if let Some(runtime_guard) = runtime_guard.as_mut() {
+                    runtime_guard.settle(elapsed);
+                }
+                drop(process_guard);
+            }) {
+                tracing::error!(
+                    error = %error,
+                    tool = %self.tool,
+                    "durable tool budget settlement failed"
+                );
+            }
+        } else if let Some(runtime_guard) = self.runtime_guard.as_mut() {
             runtime_guard.settle(elapsed);
         } else if let Some(budget) = self.tracker.execution_budget.as_ref() {
             budget.record_tool_runtime(elapsed);
@@ -249,7 +313,52 @@ impl Drop for ToolRunHandle {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
     use std::thread::sleep;
+
+    fn durable_tracker() -> (
+        tempfile::TempDir,
+        crate::session_journal::SessionJournal,
+        crate::budget_authority::SharedBudgetAuthorityCoordinator,
+        ToolBudgetTracker,
+    ) {
+        let dir = tempfile::tempdir().unwrap();
+        let journal = crate::session_journal::SessionJournal::open(
+            dir.path().join("session.journal"),
+            "session",
+        )
+        .unwrap();
+        let session = json!({
+            "id": "session",
+            "schema_version": 1,
+            "messages": [],
+        });
+        journal
+            .append(crate::session_journal::SessionEvent::SessionImported {
+                source_schema_version: 1,
+                session_digest: crate::session_journal::state_payload_digest(&session).unwrap(),
+                session,
+            })
+            .unwrap();
+        let authority = crate::budget_authority::BudgetAuthorityCoordinator::bind(
+            crate::budget_authority::BudgetAuthorityConfig {
+                journal: Some(journal.clone()),
+                budget_session_id: "session-budget".to_owned(),
+                provider_caps: wcore_budget::BudgetCap::default(),
+                execution_policy: crate::budget::ExecutionBudget {
+                    max_tool_runtime: Some(Duration::from_secs(1)),
+                    max_processes: Some(1),
+                    ..Default::default()
+                },
+                wall_clock: crate::session_journal::BudgetWallClockAuthority::ActiveRuntime,
+                process_cleanup_proof: None,
+            },
+        )
+        .unwrap()
+        .into_shared();
+        let tracker = ToolBudgetTracker::with_budget_authority(Arc::clone(&authority));
+        (dir, journal, authority, tracker)
+    }
 
     #[test]
     fn empty_tracker_returns_default_usage() {
@@ -385,6 +494,42 @@ mod tests {
             )
             .expect("dropping the guard releases the slot");
         drop(second);
+    }
+
+    #[test]
+    fn durable_process_and_runtime_guards_commit_admission_and_release() {
+        let (_dir, journal, authority, tracker) = durable_tracker();
+        let initial = journal.state().unwrap().budget_authority.unwrap();
+
+        let handle = tracker
+            .try_start(
+                "Bash",
+                ToolExecutionClass::ProcessSpawning,
+                Duration::from_millis(100),
+            )
+            .expect("durable authority admits the first process");
+        let admitted = journal.state().unwrap().budget_authority.unwrap();
+        assert_eq!(admitted.authority_epoch, initial.authority_epoch + 1);
+        let admitted_view =
+            crate::budget::ExecutionBudgetView::from_snapshot(admitted.execution_root).unwrap();
+        assert_eq!(
+            admitted_view.observed_for("max_concurrent_process_tools"),
+            "1"
+        );
+
+        sleep(Duration::from_millis(5));
+        drop(handle);
+        let settled = journal.state().unwrap().budget_authority.unwrap();
+        assert_eq!(settled.authority_epoch, initial.authority_epoch + 2);
+        let settled_view =
+            crate::budget::ExecutionBudgetView::from_snapshot(settled.execution_root.clone())
+                .unwrap();
+        assert_eq!(
+            settled_view.observed_for("max_concurrent_process_tools"),
+            "0"
+        );
+        assert_ne!(settled.execution_root, initial.execution_root);
+        assert_eq!(authority.lock().authority_epoch(), settled.authority_epoch);
     }
 
     #[test]

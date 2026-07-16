@@ -31,6 +31,7 @@ use serde_json::{Value, json};
 use thiserror::Error;
 use tokio::sync::mpsc;
 use wcore_plugin_api::registry::providers::PluginProvider;
+use wcore_providers::retry::{builder_send_with_retry, scope_max_retries};
 use wcore_providers::{LlmProvider, ProviderError};
 use wcore_types::llm::{LlmEvent, LlmRequest};
 use wcore_types::message::{ContentBlock, FinishReason, Message, Role, StopReason, TokenUsage};
@@ -197,13 +198,15 @@ impl LlmProvider for OllamaProvider {
             "stream": true,
         });
 
-        let resp = self
-            .http
-            .post(&self.base_url)
-            .json(&body)
-            .send()
-            .await
-            .map_err(ProviderError::Egress)?;
+        // Keep Ollama's historical one-shot behavior while crossing the
+        // provider-neutral durable physical-attempt boundary. Persisted
+        // sessions must never observe a stream whose accepted request has no
+        // journal identity.
+        let resp = scope_max_retries(
+            0,
+            builder_send_with_retry(self.http.post(&self.base_url).json(&body)),
+        )
+        .await?;
 
         let status = resp.status();
         if !status.is_success() {

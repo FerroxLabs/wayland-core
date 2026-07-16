@@ -9596,6 +9596,7 @@ dependencies = [
  "chacha20poly1305",
  "chrono",
  "dirs",
+ "fd-lock",
  "glob",
  "keyring",
  "parking_lot",

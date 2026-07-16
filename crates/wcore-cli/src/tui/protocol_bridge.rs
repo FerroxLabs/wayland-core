@@ -942,6 +942,14 @@ fn apply_event_inner(app: &mut App, event: ProtocolEvent) {
         // json-stream hosts; the in-process TUI never runs delegated (no
         // host to fulfil the send), so it has no view impact here.
         ProtocolEvent::Ready { .. }
+        | ProtocolEvent::SessionRecoverySnapshot { .. }
+        | ProtocolEvent::SessionRecoveryReplay { .. }
+        | ProtocolEvent::SessionRecoveryUnavailable { .. }
+        | ProtocolEvent::TurnRecoveryLifecycle { .. }
+        // Operator resolution receipts are consumed by JSON-stream hosts.
+        // The in-process TUI derives recovery state directly from the engine,
+        // so accepting the receipt here must not synthesize local authority.
+        | ProtocolEvent::UnknownToolEffectResolved { .. }
         | ProtocolEvent::ProviderAttempt { .. }
         | ProtocolEvent::ProviderRetry { .. }
         | ProtocolEvent::ProviderFailure { .. }

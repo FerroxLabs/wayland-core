@@ -19,7 +19,12 @@ use lease::WriterLease;
 mod model;
 pub use model::*;
 mod reducer;
-pub use reducer::{provider_request_digest, reduce, replay_state, state_payload_digest};
+pub(crate) use reducer::require_turn_descendants_terminal;
+pub use reducer::{
+    PREPARED_PROVIDER_REQUEST_SNAPSHOT_VERSION, decode_prepared_provider_request_snapshot,
+    prepared_provider_request_snapshot, provider_request_digest, reduce, replay_state,
+    state_payload_digest,
+};
 mod snapshot;
 pub use snapshot::*;
 
@@ -120,6 +125,8 @@ pub enum JournalError {
     SnapshotCursorMismatch,
     #[error("snapshot and journal do not describe the same authority: {0}")]
     SnapshotJournalMismatch(String),
+    #[error("locked journal state and committed head do not describe the same authority: {0}")]
+    JournalAuthorityMismatch(String),
     #[error("compacted journal begins at sequence {first_seq} but its snapshot is missing")]
     CompactedJournalMissingSnapshot { first_seq: u64 },
     #[error("session journal writer lock is poisoned")]
@@ -143,6 +150,7 @@ struct JournalWriter {
     previous_checksum: String,
     state: ReducedSessionState,
     last_envelope: Option<JournalEnvelope>,
+    base_snapshot: Option<SessionSnapshot>,
     faulted: bool,
     _lease: WriterLease,
 }
@@ -152,6 +160,12 @@ type SharedWriter = Arc<Mutex<JournalWriter>>;
 #[derive(Debug, Clone)]
 pub struct SessionJournal {
     inner: SharedWriter,
+}
+
+pub(crate) struct CommittedJournalAuthority {
+    pub(crate) state: ReducedSessionState,
+    pub(crate) entries: Vec<JournalEnvelope>,
+    pub(crate) base_snapshot: Option<SessionSnapshot>,
 }
 
 /// Exclusive authority used while retiring every durable file for a session.
@@ -191,6 +205,33 @@ impl SessionJournal {
             .lock()
             .map_err(|_| JournalError::WriterPoisoned)
             .map(|writer| writer.state.clone())
+    }
+
+    /// Snapshot the reduced state and committed entries from one locked writer.
+    ///
+    /// Reading the already-open data file prevents a pathname replacement from
+    /// supplying head evidence for a different authority. The writer validates
+    /// that the parsed head still matches its reduced state before returning
+    /// either value.
+    pub(crate) fn committed_authority(&self) -> Result<CommittedJournalAuthority, JournalError> {
+        self.inner
+            .lock()
+            .map_err(|_| JournalError::WriterPoisoned)?
+            .committed_authority()
+    }
+
+    /// Compatibility projection for callers that need only committed entries.
+    /// The entries still come from the locked writer authority, never by
+    /// reopening its mutable pathname.
+    #[cfg(test)]
+    pub(crate) fn committed_entries(&self) -> Result<Vec<JournalEnvelope>, JournalError> {
+        self.committed_authority().map(|authority| {
+            debug_assert_eq!(
+                authority.state.last_seq,
+                authority.entries.last().map(|entry| entry.seq)
+            );
+            authority.entries
+        })
     }
 
     /// Stable session identity used when deriving durable effect keys.
@@ -770,6 +811,7 @@ impl JournalWriter {
             previous_checksum: recovery.previous_checksum,
             state: recovery.state,
             last_envelope: recovery.last_envelope,
+            base_snapshot: snapshot,
             faulted: false,
             _lease: lease,
         })
@@ -808,6 +850,72 @@ impl JournalWriter {
         self.state = candidate_state;
         self.last_envelope = Some(envelope.clone());
         Ok(envelope)
+    }
+
+    fn committed_authority(&mut self) -> Result<CommittedJournalAuthority, JournalError> {
+        if self.faulted {
+            return Err(JournalError::WriterFaulted);
+        }
+
+        let authority = (|| {
+            let mut bytes = Vec::new();
+            self.file
+                .seek(SeekFrom::Start(0))
+                .and_then(|_| self.file.read_to_end(&mut bytes))
+                .map_err(|source| JournalError::Io {
+                    path: self.path.clone(),
+                    source,
+                })?;
+            let (entries, _) = parse_complete_frames(&self.path, &bytes)?;
+            if let Some(first) = entries.first() {
+                verify_chain_from(
+                    &entries,
+                    first.seq,
+                    &first.previous_checksum,
+                    &self.session_id,
+                )?;
+            }
+
+            let head = entries.last();
+            let head_matches_state = match (self.state.last_seq, head) {
+                (None, None) => {
+                    self.state.last_checksum == GENESIS_CHECKSUM && self.last_envelope.is_none()
+                }
+                (Some(state_seq), Some(head)) => {
+                    head.seq == state_seq
+                        && head.checksum == self.state.last_checksum
+                        && self.last_envelope.as_ref() == Some(head)
+                }
+                _ => false,
+            };
+            if !head_matches_state {
+                return Err(JournalError::JournalAuthorityMismatch(format!(
+                    "state cursor {:?}/{} does not match committed head {:?}/{}",
+                    self.state.last_seq,
+                    self.state.last_checksum,
+                    head.map(|entry| entry.seq),
+                    head.map_or(GENESIS_CHECKSUM, |entry| entry.checksum.as_str())
+                )));
+            }
+
+            Ok(CommittedJournalAuthority {
+                state: self.state.clone(),
+                entries,
+                base_snapshot: self.base_snapshot.clone(),
+            })
+        })();
+
+        if let Err(source) = self.file.seek(SeekFrom::End(0)) {
+            self.faulted = true;
+            return Err(JournalError::Io {
+                path: self.path.clone(),
+                source,
+            });
+        }
+        if authority.is_err() {
+            self.faulted = true;
+        }
+        authority
     }
 
     fn compact(&mut self) -> Result<SessionSnapshot, JournalError> {
@@ -856,6 +964,7 @@ impl JournalWriter {
                 return Err(error);
             }
         };
+        self.base_snapshot = Some(snapshot.clone());
         Ok(snapshot)
     }
 }
@@ -1187,6 +1296,65 @@ fn sha256_bytes(bytes: &[u8]) -> [u8; 32] {
 #[cfg(test)]
 mod fault_tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn committed_authority_cannot_mix_in_a_pathname_replacement() {
+        let dir = tempfile::tempdir().unwrap();
+        let journal_path = dir.path().join("session.journal");
+        let displaced_path = dir.path().join("displaced.journal");
+        let replacement_path = dir.path().join("replacement.journal");
+
+        let journal = SessionJournal::open(&journal_path, "session").unwrap();
+        let original = journal
+            .append(SessionEvent::TurnStarted {
+                turn_id: "original-turn".into(),
+                user_message: "original".into(),
+            })
+            .unwrap();
+        let original_state = journal.state().unwrap();
+
+        let replacement = SessionJournal::open(&replacement_path, "session").unwrap();
+        let forged = replacement
+            .append(SessionEvent::TurnStarted {
+                turn_id: "forged-turn".into(),
+                user_message: "forged".into(),
+            })
+            .unwrap();
+        drop(replacement);
+
+        std::fs::rename(&journal_path, &displaced_path).unwrap();
+        std::fs::rename(&replacement_path, &journal_path).unwrap();
+
+        let authority = journal.committed_authority().unwrap();
+        assert_eq!(authority.state, original_state);
+        assert_eq!(authority.entries, vec![original]);
+        assert_eq!(SessionJournal::replay(&journal_path).unwrap(), vec![forged]);
+    }
+
+    #[test]
+    fn committed_authority_rejects_a_state_head_mismatch() {
+        let dir = tempfile::tempdir().unwrap();
+        let journal = SessionJournal::open(dir.path().join("session.journal"), "session").unwrap();
+        journal
+            .append(SessionEvent::TurnStarted {
+                turn_id: "turn".into(),
+                user_message: "hello".into(),
+            })
+            .unwrap();
+        journal.inner.lock().unwrap().state.last_checksum = GENESIS_CHECKSUM.to_owned();
+
+        assert!(matches!(
+            journal.committed_authority(),
+            Err(JournalError::JournalAuthorityMismatch(_))
+        ));
+        assert!(matches!(
+            journal.append(SessionEvent::TurnCancelled {
+                turn_id: "turn".into()
+            }),
+            Err(JournalError::WriterFaulted)
+        ));
+    }
 
     #[test]
     fn effect_checkpoint_round_trips_and_rejects_digest_mismatch() {

@@ -11,9 +11,10 @@ use wcore_types::tool::ToolEffectContract;
 use crate::session_journal::{
     ApprovalOrigin, ApprovalResolution, BudgetAmount, BudgetOwner, BudgetPurpose,
     ChildNotStartedReason, CompletionOutcome, DeliveryCompletion, DeliveryEvidence,
-    DeliveryNotStartedReason, DeliveryOrigin, DeliveryUnknownReason, JournalError, SessionEvent,
-    SessionJournal, StoredToolInput, ToolNotStartedReason, ToolResolution, ToolResolutionSource,
-    ToolUnknownReason, state_payload_digest,
+    DeliveryNotStartedReason, DeliveryOrigin, DeliveryUnknownReason, HOOK_PHASE_LIFECYCLE_VERSION,
+    HookManifestSlot, HookPhaseNotStartedReason, HookSlotReceipt, JournalError, SessionEvent,
+    SessionJournal, StoredToolInput, ToolHookPhase, ToolNotStartedReason, ToolResolution,
+    ToolResolutionSource, ToolUnknownReason, state_payload_digest,
 };
 
 /// Session-wide journal authority for effect lifecycles.
@@ -42,7 +43,20 @@ impl JournalEffectCoordinator {
         origin: ApprovalOrigin,
         intent: &Value,
     ) -> Result<PendingApprovalLease, JournalError> {
-        let approval_id = new_id("approval");
+        self.request_approval_with_id(new_id("approval"), origin, intent)
+    }
+
+    /// Persist an approval using the caller's stable correlation identifier.
+    ///
+    /// Host-backed tool approvals use the provider call id so recovery, the
+    /// approval manager, and protocol frames all refer to the same request.
+    pub fn request_approval_with_id(
+        &self,
+        approval_id: impl Into<String>,
+        origin: ApprovalOrigin,
+        intent: &Value,
+    ) -> Result<PendingApprovalLease, JournalError> {
+        let approval_id = approval_id.into();
         let intent_digest = state_payload_digest(intent)?;
         self.journal.append(SessionEvent::ApprovalRequested {
             approval_id: approval_id.clone(),
@@ -137,6 +151,59 @@ impl TurnEffectScope {
             .store_effect_checkpoint(digest, contents)
     }
 
+    /// Persist aggregate hook-phase authority before any hook implementation
+    /// can observe or affect the tool round. The identifier is deterministic,
+    /// so recovery can rediscover the same phase without minting a second
+    /// execution authority.
+    #[allow(clippy::too_many_arguments)]
+    pub fn prepare_hook_phase(
+        &self,
+        provider_call_id: impl Into<String>,
+        ordinal: u64,
+        phase: ToolHookPhase,
+        tool_execution_id: Option<String>,
+        input_digest: impl Into<String>,
+        hook_authority_digest: impl Into<String>,
+        hook_manifest_digest: impl Into<String>,
+        hook_slots: Vec<HookManifestSlot>,
+    ) -> Result<PreparedHookPhaseLease, JournalError> {
+        let provider_call_id = provider_call_id.into();
+        let input_digest = input_digest.into();
+        let hook_authority_digest = hook_authority_digest.into();
+        let hook_manifest_digest = hook_manifest_digest.into();
+        let session_id = self.coordinator.journal.session_id()?;
+        let hook_phase_id = hook_phase_id(
+            &session_id,
+            &self.turn_id,
+            &provider_call_id,
+            ordinal,
+            phase,
+            tool_execution_id.as_deref(),
+            &input_digest,
+            &hook_authority_digest,
+            &hook_manifest_digest,
+        )?;
+        self.coordinator
+            .journal
+            .append(SessionEvent::HookPhasePrepared {
+                hook_phase_id: hook_phase_id.clone(),
+                lifecycle_version: HOOK_PHASE_LIFECYCLE_VERSION,
+                turn_id: self.turn_id.clone(),
+                provider_call_id,
+                ordinal,
+                phase,
+                tool_execution_id,
+                input_digest,
+                hook_authority_digest,
+                hook_manifest_digest,
+                hook_slots,
+            })?;
+        Ok(PreparedHookPhaseLease {
+            journal: self.coordinator.journal.clone(),
+            hook_phase_id,
+        })
+    }
+
     pub fn prepare_tool(
         &self,
         provider_call_id: impl Into<String>,
@@ -174,6 +241,7 @@ impl TurnEffectScope {
             None,
             None,
             None,
+            None,
         )
     }
 
@@ -196,6 +264,7 @@ impl TurnEffectScope {
             effective_input,
             effect_contract,
             Some(effect_receipt),
+            None,
             None,
             None,
         )
@@ -226,6 +295,58 @@ impl TurnEffectScope {
             None,
             Some(secured_requested_input),
             Some(secured_effective_input),
+            None,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn prepare_tool_after_hook(
+        &self,
+        provider_call_id: impl Into<String>,
+        ordinal: u64,
+        tool: impl Into<String>,
+        requested_input: Value,
+        effective_input: Value,
+        effect_contract: ToolEffectContract,
+        pre_hook_phase_id: impl Into<String>,
+    ) -> Result<PreparedToolLease, JournalError> {
+        self.prepare_tool_recorded(
+            provider_call_id,
+            ordinal,
+            tool,
+            requested_input,
+            effective_input,
+            effect_contract,
+            None,
+            None,
+            None,
+            Some(pre_hook_phase_id.into()),
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn prepare_tool_with_effect_receipt_after_hook(
+        &self,
+        provider_call_id: impl Into<String>,
+        ordinal: u64,
+        tool: impl Into<String>,
+        requested_input: Value,
+        effective_input: Value,
+        effect_contract: ToolEffectContract,
+        effect_receipt: Value,
+        pre_hook_phase_id: impl Into<String>,
+    ) -> Result<PreparedToolLease, JournalError> {
+        self.prepare_tool_recorded(
+            provider_call_id,
+            ordinal,
+            tool,
+            requested_input,
+            effective_input,
+            effect_contract,
+            Some(effect_receipt),
+            None,
+            None,
+            Some(pre_hook_phase_id.into()),
         )
     }
 
@@ -241,6 +362,7 @@ impl TurnEffectScope {
         effect_receipt: Option<Value>,
         secured_requested_input: Option<Value>,
         secured_effective_input: Option<Value>,
+        pre_hook_phase_id: Option<String>,
     ) -> Result<PreparedToolLease, JournalError> {
         let tool_execution_id = new_id("tool-execution");
         let provider_call_id = provider_call_id.into();
@@ -286,6 +408,7 @@ impl TurnEffectScope {
                 effective_input_digest,
                 effect_contract,
                 effect_receipt,
+                pre_hook_phase_id,
             })?;
         Ok(PreparedToolLease {
             journal: self.coordinator.journal.clone(),
@@ -333,6 +456,7 @@ impl TurnEffectScope {
                 effective_input_digest: prior.effective_input_digest.clone(),
                 effect_contract: prior.effect_contract.clone(),
                 effect_receipt: prior.effect_receipt.clone(),
+                pre_hook_phase_id: prior.pre_hook_phase_id.clone(),
             })?;
         Ok(PreparedToolLease {
             journal: self.coordinator.journal.clone(),
@@ -343,6 +467,20 @@ impl TurnEffectScope {
 
     pub fn request_approval(&self, intent: &Value) -> Result<PendingApprovalLease, JournalError> {
         self.coordinator.request_approval(
+            ApprovalOrigin::Turn {
+                turn_id: self.turn_id.clone(),
+            },
+            intent,
+        )
+    }
+
+    pub fn request_approval_with_id(
+        &self,
+        approval_id: impl Into<String>,
+        intent: &Value,
+    ) -> Result<PendingApprovalLease, JournalError> {
+        self.coordinator.request_approval_with_id(
+            approval_id,
             ApprovalOrigin::Turn {
                 turn_id: self.turn_id.clone(),
             },
@@ -395,6 +533,96 @@ impl TurnEffectScope {
             destination,
             payload,
         )
+    }
+}
+
+#[derive(Debug)]
+#[must_use = "a prepared hook phase must be started or closed as not applicable"]
+pub struct PreparedHookPhaseLease {
+    journal: SessionJournal,
+    hook_phase_id: String,
+}
+
+impl PreparedHookPhaseLease {
+    #[must_use]
+    pub fn id(&self) -> &str {
+        &self.hook_phase_id
+    }
+
+    pub fn start(
+        self,
+        result_digest: Option<String>,
+    ) -> Result<StartedHookPhaseLease, JournalError> {
+        self.journal.append(SessionEvent::HookPhaseStarted {
+            hook_phase_id: self.hook_phase_id.clone(),
+            result_digest: result_digest.clone(),
+        })?;
+        Ok(StartedHookPhaseLease {
+            journal: self.journal,
+            hook_phase_id: self.hook_phase_id,
+            result_digest,
+        })
+    }
+
+    pub fn not_applicable(self) -> Result<(), JournalError> {
+        self.journal.append(SessionEvent::HookPhaseNotApplicable {
+            hook_phase_id: self.hook_phase_id,
+        })?;
+        Ok(())
+    }
+
+    pub fn not_started(self, reason: HookPhaseNotStartedReason) -> Result<(), JournalError> {
+        self.journal.append(SessionEvent::HookPhaseNotStarted {
+            hook_phase_id: self.hook_phase_id,
+            reason,
+        })?;
+        Ok(())
+    }
+}
+
+#[derive(Debug)]
+#[must_use = "a started hook phase must be finished or abandoned as unknown"]
+pub struct StartedHookPhaseLease {
+    journal: SessionJournal,
+    hook_phase_id: String,
+    result_digest: Option<String>,
+}
+
+impl StartedHookPhaseLease {
+    #[must_use]
+    pub fn id(&self) -> &str {
+        &self.hook_phase_id
+    }
+
+    pub fn finish(
+        self,
+        effective_input_digest: Option<String>,
+        outcome_digest: impl Into<String>,
+        slot_receipts_digest: impl Into<String>,
+        slot_receipts: Vec<HookSlotReceipt>,
+    ) -> Result<crate::session_journal::HookPhaseConsumption, JournalError> {
+        let hook_phase_id = self.hook_phase_id;
+        let outcome_digest = outcome_digest.into();
+        self.journal.append(SessionEvent::HookPhaseFinished {
+            hook_phase_id: hook_phase_id.clone(),
+            result_digest: self.result_digest,
+            effective_input_digest,
+            outcome_digest: outcome_digest.clone(),
+            slot_receipts_digest: slot_receipts_digest.into(),
+            slot_receipts,
+        })?;
+        Ok(crate::session_journal::HookPhaseConsumption {
+            hook_phase_id,
+            outcome_digest,
+        })
+    }
+
+    pub fn abandon_unknown(self) -> Result<(), JournalError> {
+        self.journal
+            .append(SessionEvent::HookPhaseAbandonedUnknown {
+                hook_phase_id: self.hook_phase_id,
+            })?;
+        Ok(())
     }
 }
 
@@ -753,6 +981,33 @@ fn new_id(prefix: &str) -> String {
     format!("{prefix}-{}", uuid::Uuid::new_v4())
 }
 
+#[allow(clippy::too_many_arguments)]
+fn hook_phase_id(
+    session_id: &str,
+    turn_id: &str,
+    provider_call_id: &str,
+    ordinal: u64,
+    phase: ToolHookPhase,
+    tool_execution_id: Option<&str>,
+    input_digest: &str,
+    hook_authority_digest: &str,
+    hook_manifest_digest: &str,
+) -> Result<String, JournalError> {
+    let digest = state_payload_digest(&serde_json::json!([
+        "wayland-hook-phase-v1",
+        session_id,
+        turn_id,
+        provider_call_id,
+        ordinal,
+        phase,
+        tool_execution_id,
+        input_digest,
+        hook_authority_digest,
+        hook_manifest_digest,
+    ]))?;
+    Ok(format!("hook-phase-{digest}"))
+}
+
 fn tool_idempotency_key(
     session_id: &str,
     turn_id: &str,
@@ -821,6 +1076,7 @@ mod tests {
             effective_input_digest: prior.effective_input_digest.clone(),
             effect_contract: prior.effect_contract.clone(),
             effect_receipt: prior.effect_receipt.clone(),
+            pre_hook_phase_id: prior.pre_hook_phase_id.clone(),
         }
     }
 
@@ -1619,5 +1875,61 @@ mod tests {
                 .is_err()
         );
         assert!(journal.state().unwrap().tools.is_empty());
+    }
+
+    #[test]
+    fn hook_phase_lease_requires_explicit_started_and_finished_transitions() {
+        let fixture = fixture();
+        let digest = "a".repeat(64);
+        let slots = vec![HookManifestSlot {
+            ordinal: 0,
+            slot_id: "slot-0".into(),
+            source: crate::session_journal::HookSlotSource::Rust,
+            descriptor_digest: digest.clone(),
+        }];
+        let manifest_digest = state_payload_digest(&serde_json::to_value(&slots).unwrap()).unwrap();
+        let prepared = fixture
+            .scope
+            .prepare_hook_phase(
+                "provider-call-hook",
+                0,
+                ToolHookPhase::PreToolUse,
+                None,
+                digest.clone(),
+                digest.clone(),
+                manifest_digest,
+                slots.clone(),
+            )
+            .unwrap();
+        let phase_id = prepared.id().to_owned();
+        prepared
+            .start(None)
+            .unwrap()
+            .finish(
+                Some(digest.clone()),
+                digest.clone(),
+                state_payload_digest(
+                    &serde_json::to_value(vec![HookSlotReceipt {
+                        ordinal: 0,
+                        slot_id: "slot-0".into(),
+                        descriptor_digest: digest,
+                        status: crate::session_journal::HookSlotTerminalStatus::Completed,
+                    }])
+                    .unwrap(),
+                )
+                .unwrap(),
+                vec![HookSlotReceipt {
+                    ordinal: 0,
+                    slot_id: "slot-0".into(),
+                    descriptor_digest: "a".repeat(64),
+                    status: crate::session_journal::HookSlotTerminalStatus::Completed,
+                }],
+            )
+            .unwrap();
+
+        assert!(matches!(
+            fixture.journal.state().unwrap().hook_phases[&phase_id].state,
+            crate::session_journal::HookPhaseState::Finished { .. }
+        ));
     }
 }

@@ -23,10 +23,11 @@ use wcore_providers::{LlmProvider, ModelInfo, ProviderError};
 use wcore_types::llm::{LlmEvent, LlmRequest};
 use wcore_types::message::StopReason;
 
+use crate::provider_recovery::provider_response_digest;
 use crate::session_journal::{
     CompletionOutcome, ProviderAttemptNotStartedReason as JournalNotStartedReason,
     ProviderAttemptPurpose, ProviderStreamEvent, SessionEvent, SessionJournal,
-    provider_request_digest, state_payload_digest,
+    provider_request_digest,
 };
 
 pub const JOURNAL_AUTHORITY_ERROR_PREFIX: &str = "wayland journal authority failure: ";
@@ -48,6 +49,7 @@ pub struct JournaledLlmProvider {
     purpose: LifecyclePurpose,
     provider: String,
     model: String,
+    dispatch_id: Option<String>,
 }
 
 impl JournaledLlmProvider {
@@ -66,7 +68,16 @@ impl JournaledLlmProvider {
             purpose,
             provider: provider.into(),
             model: model.into(),
+            dispatch_id: None,
         }
+    }
+
+    /// Bind every physical retry/fallback attempt to the logical provider
+    /// dispatch authorized by a durable recovery checkpoint.
+    #[must_use]
+    pub fn with_dispatch_id(mut self, dispatch_id: impl Into<String>) -> Self {
+        self.dispatch_id = Some(dispatch_id.into());
+        self
     }
 }
 
@@ -89,15 +100,26 @@ impl ProviderAttemptLifecycle for JournalAttemptLifecycle {
         &self,
         attempt: &PhysicalProviderAttempt,
     ) -> Result<(), ProviderAttemptLifecycleError> {
-        self.append(SessionEvent::ProviderAttemptPrepared {
-            attempt_id: attempt.attempt_id.clone(),
-            turn_id: attempt.turn_id.clone(),
-            purpose: journal_purpose(attempt.purpose),
-            provider: attempt.provider.clone(),
-            model: attempt.model.clone(),
-            request_digest: attempt.request_digest.clone(),
-        })
-        .await
+        let event = attempt.dispatch_id.as_ref().map_or_else(
+            || SessionEvent::ProviderAttemptPrepared {
+                attempt_id: attempt.attempt_id.clone(),
+                turn_id: attempt.turn_id.clone(),
+                purpose: journal_purpose(attempt.purpose),
+                provider: attempt.provider.clone(),
+                model: attempt.model.clone(),
+                request_digest: attempt.request_digest.clone(),
+            },
+            |dispatch_id| SessionEvent::ProviderAttemptPreparedV2 {
+                attempt_id: attempt.attempt_id.clone(),
+                dispatch_id: dispatch_id.clone(),
+                turn_id: attempt.turn_id.clone(),
+                purpose: journal_purpose(attempt.purpose),
+                provider: attempt.provider.clone(),
+                model: attempt.model.clone(),
+                request_digest: attempt.request_digest.clone(),
+            },
+        );
+        self.append(event).await
     }
 
     async fn started(
@@ -118,12 +140,18 @@ impl ProviderAttemptLifecycle for JournalAttemptLifecycle {
         let error = match outcome {
             ProviderAttemptHeaderOutcome::HeadersReceived { status: 200..=299 } => return Ok(()),
             ProviderAttemptHeaderOutcome::NotStarted { reason } => {
-                return self
-                    .append(SessionEvent::ProviderAttemptNotStarted {
+                let event = attempt.dispatch_id.as_ref().map_or_else(
+                    || SessionEvent::ProviderAttemptNotStarted {
                         attempt_id: attempt.attempt_id.clone(),
                         reason: journal_not_started_reason(reason),
-                    })
-                    .await;
+                    },
+                    |dispatch_id| SessionEvent::ProviderAttemptNotStartedV2 {
+                        attempt_id: attempt.attempt_id.clone(),
+                        dispatch_id: dispatch_id.clone(),
+                        reason: journal_not_started_reason(reason),
+                    },
+                );
+                return self.append(event).await;
             }
             ProviderAttemptHeaderOutcome::HeadersReceived { status } => {
                 format!("provider returned HTTP {status}")
@@ -132,12 +160,21 @@ impl ProviderAttemptLifecycle for JournalAttemptLifecycle {
                 format!("provider failed before response headers: {failure_code}")
             }
         };
-        self.append(SessionEvent::ProviderAttemptFinished {
-            attempt_id: attempt.attempt_id.clone(),
-            outcome: CompletionOutcome::Failed { error },
-            response_digest: None,
-        })
-        .await
+        let outcome = CompletionOutcome::Failed { error };
+        let event = match attempt.dispatch_id.as_ref() {
+            None => SessionEvent::ProviderAttemptFinished {
+                attempt_id: attempt.attempt_id.clone(),
+                outcome,
+                response_digest: None,
+            },
+            Some(dispatch_id) => SessionEvent::ProviderAttemptFinishedV2 {
+                attempt_id: attempt.attempt_id.clone(),
+                dispatch_id: dispatch_id.clone(),
+                outcome,
+                response_digest: None,
+            },
+        };
+        self.append(event).await
     }
 }
 
@@ -163,6 +200,7 @@ impl LlmProvider for JournaledLlmProvider {
         };
         let scope = scope_provider_attempt_lifecycle(
             ProviderAttemptContext {
+                dispatch_id: self.dispatch_id.clone(),
                 turn_id: self.turn_id.clone(),
                 purpose: self.purpose,
                 request_digest,
@@ -197,6 +235,7 @@ impl LlmProvider for JournaledLlmProvider {
             let _ = finish_attempt(
                 &self.journal,
                 &attempt_id,
+                self.dispatch_id.as_deref(),
                 CompletionOutcome::Failed {
                     error: format!("provider stream authority could not start: {error}"),
                 },
@@ -208,8 +247,9 @@ impl LlmProvider for JournaledLlmProvider {
 
         let (tx, rx) = mpsc::channel(64);
         let journal = self.journal.clone();
+        let dispatch_id = self.dispatch_id.clone();
         tokio::spawn(async move {
-            forward_durable_stream(journal, attempt_id, stream_id, inner_rx, tx).await;
+            forward_durable_stream(journal, attempt_id, dispatch_id, stream_id, inner_rx, tx).await;
         });
         Ok(rx)
     }
@@ -226,6 +266,7 @@ impl LlmProvider for JournaledLlmProvider {
 async fn forward_durable_stream(
     journal: SessionJournal,
     attempt_id: String,
+    dispatch_id: Option<String>,
     stream_id: String,
     mut inner_rx: mpsc::Receiver<LlmEvent>,
     tx: mpsc::Sender<LlmEvent>,
@@ -236,17 +277,11 @@ async fn forward_durable_stream(
     loop {
         let event = tokio::select! {
             _ = tx.closed() => {
-                let _ = finish_attempt(
-                    &journal,
-                    &attempt_id,
-                    CompletionOutcome::Cancelled,
-                    if response.is_empty() {
-                        None
-                    } else {
-                        response_digest(&response).ok()
-                    },
-                )
-                .await;
+                // The local consumer going away proves only that Wayland
+                // stopped reading. Once the physical attempt was accepted it
+                // does not prove the provider stopped generating, nor reveal
+                // its final usage/outcome. Leave the attempt StartedUnknown
+                // so recovery requires explicit reconciliation.
                 return;
             }
             event = inner_rx.recv() => event,
@@ -260,13 +295,14 @@ async fn forward_durable_stream(
                 let _ = finish_attempt(
                     &journal,
                     &attempt_id,
+                    dispatch_id.as_deref(),
                     CompletionOutcome::Failed {
                         error: error.to_string(),
                     },
                     if response.is_empty() {
                         None
                     } else {
-                        response_digest(&response).ok()
+                        provider_response_digest(&response).ok()
                     },
                 )
                 .await;
@@ -287,6 +323,7 @@ async fn forward_durable_stream(
             let _ = finish_attempt(
                 &journal,
                 &attempt_id,
+                dispatch_id.as_deref(),
                 CompletionOutcome::Failed {
                     error: "provider stream batch could not be made durable".to_owned(),
                 },
@@ -303,6 +340,7 @@ async fn forward_durable_stream(
                 let _ = finish_attempt(
                     &journal,
                     &attempt_id,
+                    dispatch_id.as_deref(),
                     CompletionOutcome::Failed {
                         error: "provider stream batch ordinal exhausted".to_owned(),
                     },
@@ -322,7 +360,15 @@ async fn forward_durable_stream(
 
         match &event {
             LlmEvent::Done { .. } => {
-                match finish_success(&journal, &attempt_id, &stream_id, &response).await {
+                match finish_success(
+                    &journal,
+                    &attempt_id,
+                    dispatch_id.as_deref(),
+                    &stream_id,
+                    &response,
+                )
+                .await
+                {
                     Ok(()) => {
                         let _ = tx.send(event).await;
                     }
@@ -337,6 +383,7 @@ async fn forward_durable_stream(
                         let _ = finish_attempt(
                             &journal,
                             &attempt_id,
+                            dispatch_id.as_deref(),
                             CompletionOutcome::Failed {
                                 error: error.to_string(),
                             },
@@ -350,6 +397,7 @@ async fn forward_durable_stream(
                 match finish_attempt(
                     &journal,
                     &attempt_id,
+                    dispatch_id.as_deref(),
                     CompletionOutcome::Failed {
                         error: message.clone(),
                     },
@@ -366,14 +414,9 @@ async fn forward_durable_stream(
             }
             _ => {
                 if tx.send(event).await.is_err() {
-                    let response_digest = partial_response_digest(&response).unwrap_or(None);
-                    let _ = finish_attempt(
-                        &journal,
-                        &attempt_id,
-                        CompletionOutcome::Cancelled,
-                        response_digest,
-                    )
-                    .await;
+                    // As above, a failed local delivery is not a terminal
+                    // receipt from the provider. Keep the accepted attempt
+                    // unknown rather than fabricating cancellation authority.
                     return;
                 }
             }
@@ -386,6 +429,7 @@ async fn forward_durable_stream(
             let _ = finish_attempt(
                 &journal,
                 &attempt_id,
+                dispatch_id.as_deref(),
                 CompletionOutcome::Failed {
                     error: error.to_string(),
                 },
@@ -399,6 +443,7 @@ async fn forward_durable_stream(
     if let Err(error) = finish_attempt(
         &journal,
         &attempt_id,
+        dispatch_id.as_deref(),
         CompletionOutcome::Failed {
             error: "provider stream closed before a Done event".to_owned(),
         },
@@ -413,10 +458,12 @@ async fn forward_durable_stream(
 async fn finish_success(
     journal: &SessionJournal,
     attempt_id: &str,
+    dispatch_id: Option<&str>,
     stream_id: &str,
     response: &[ProviderStreamEvent],
 ) -> Result<(), ProviderError> {
-    let digest = response_digest(response)?;
+    let digest = provider_response_digest(response)
+        .map_err(|error| ProviderError::Parse(authority_message(error.to_string())))?;
     append_event(
         journal,
         SessionEvent::StreamFinished {
@@ -427,6 +474,7 @@ async fn finish_success(
     finish_attempt(
         journal,
         attempt_id,
+        dispatch_id,
         CompletionOutcome::Succeeded,
         Some(digest),
     )
@@ -436,18 +484,24 @@ async fn finish_success(
 async fn finish_attempt(
     journal: &SessionJournal,
     attempt_id: &str,
+    dispatch_id: Option<&str>,
     outcome: CompletionOutcome,
     response_digest: Option<String>,
 ) -> Result<(), ProviderError> {
-    append_event(
-        journal,
-        SessionEvent::ProviderAttemptFinished {
+    let event = match dispatch_id {
+        None => SessionEvent::ProviderAttemptFinished {
             attempt_id: attempt_id.to_owned(),
             outcome,
             response_digest,
         },
-    )
-    .await
+        Some(dispatch_id) => SessionEvent::ProviderAttemptFinishedV2 {
+            attempt_id: attempt_id.to_owned(),
+            dispatch_id: dispatch_id.to_owned(),
+            outcome,
+            response_digest,
+        },
+    };
+    append_event(journal, event).await
 }
 
 async fn append_event(journal: &SessionJournal, event: SessionEvent) -> Result<(), ProviderError> {
@@ -489,23 +543,15 @@ fn journal_not_started_reason(reason: &LifecycleNotStartedReason) -> JournalNotS
     }
 }
 
-fn response_digest(events: &[ProviderStreamEvent]) -> Result<String, ProviderError> {
-    let value = serde_json::to_value(events).map_err(|error| {
-        ProviderError::Parse(authority_message(format!(
-            "provider response could not be journaled: {error}"
-        )))
-    })?;
-    state_payload_digest(&value)
-        .map_err(|error| ProviderError::Parse(authority_message(error.to_string())))
-}
-
 fn partial_response_digest(
     events: &[ProviderStreamEvent],
 ) -> Result<Option<String>, ProviderError> {
     if events.is_empty() {
         Ok(None)
     } else {
-        response_digest(events).map(Some)
+        provider_response_digest(events)
+            .map(Some)
+            .map_err(|error| ProviderError::Parse(authority_message(error.to_string())))
     }
 }
 

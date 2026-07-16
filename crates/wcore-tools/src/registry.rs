@@ -17,6 +17,15 @@ fn default_breaker_cfg() -> CircuitBreakerConfig {
     CircuitBreakerConfig::default()
 }
 
+/// A requested circuit-breaker restoration named tools that are not
+/// registered in this registry.
+#[derive(Debug, thiserror::Error, PartialEq, Eq)]
+#[error("cannot restore circuit breakers for unregistered tools: {names:?}")]
+pub struct BreakerRestoreError {
+    /// Sorted, deduplicated unregistered tool names.
+    pub names: Vec<String>,
+}
+
 pub struct ToolRegistry {
     tools: Vec<Box<dyn Tool>>,
     /// One circuit breaker per registered tool name. `Arc<RwLock<…>>`
@@ -209,6 +218,54 @@ impl ToolRegistry {
         for breaker in self.breakers.read().values() {
             breaker.record_success();
         }
+    }
+
+    /// Return the registered tool names whose live breaker state must be
+    /// restored conservatively after a process restart.
+    ///
+    /// The result is sorted by tool name so callers can persist and compare it
+    /// deterministically regardless of `HashMap` iteration order.
+    pub fn breakers_requiring_conservative_restore(&self) -> Vec<String> {
+        let breakers = self.breakers.read();
+        let mut names: Vec<String> = breakers
+            .iter()
+            .filter(|(_, breaker)| breaker.requires_conservative_restore())
+            .map(|(name, _)| name.clone())
+            .collect();
+        names.sort();
+        names
+    }
+
+    /// Restore exactly the supplied circuit breakers conservatively.
+    ///
+    /// Every name is validated before any breaker is changed, so an invalid
+    /// request is atomic. Supplied names are sorted and deduplicated for
+    /// deterministic application. Breakers omitted from `tool_names` are left
+    /// untouched; a fresh registry therefore keeps them Closed, while an
+    /// already-live registry preserves their existing state.
+    pub fn restore_breakers_conservatively(
+        &self,
+        tool_names: &[String],
+    ) -> Result<(), BreakerRestoreError> {
+        let breakers = self.breakers.read();
+        let requested: std::collections::BTreeSet<&str> =
+            tool_names.iter().map(String::as_str).collect();
+        let unknown: Vec<String> = requested
+            .iter()
+            .filter(|name| !breakers.contains_key(**name))
+            .map(|name| (*name).to_string())
+            .collect();
+        if !unknown.is_empty() {
+            return Err(BreakerRestoreError { names: unknown });
+        }
+
+        for name in requested {
+            breakers
+                .get(name)
+                .expect("all breaker names were validated above")
+                .restore_conservative();
+        }
+        Ok(())
     }
 
     /// Get all registered tool names
@@ -645,6 +702,74 @@ mod tests {
         );
         registry.set_tool_vfs(Arc::new(crate::vfs::RealFs));
         assert!(registry.tool_vfs().is_some(), "installed vfs is observable");
+    }
+
+    #[test]
+    fn conservative_restore_candidates_are_sorted_and_include_closed_history() {
+        let mut registry = ToolRegistry::new();
+        registry.register(make_tool("zeta", "last"));
+        registry.register(make_tool("alpha", "first"));
+        registry.register(make_tool("middle", "middle"));
+
+        registry.record_breaker_outcome("zeta", true);
+        registry.record_breaker_outcome("alpha", true);
+
+        assert_eq!(
+            registry.breakers_requiring_conservative_restore(),
+            vec!["alpha".to_string(), "zeta".to_string()]
+        );
+        assert_eq!(
+            registry.breakers.read()["alpha"].state(),
+            BreakerState::Closed,
+            "a below-threshold failure is still restart-relevant"
+        );
+    }
+
+    #[test]
+    fn conservative_restore_mutates_only_supplied_breakers() {
+        let mut registry = ToolRegistry::new();
+        registry.register(make_tool("alpha", "already has history"));
+        registry.register(make_tool("beta", "restore this"));
+        registry.register(make_tool("gamma", "leave fresh"));
+        registry.record_breaker_outcome("alpha", true);
+
+        registry
+            .restore_breakers_conservatively(&["beta".to_string(), "beta".to_string()])
+            .unwrap();
+
+        let breakers = registry.breakers.read();
+        assert_eq!(breakers["alpha"].state(), BreakerState::Closed);
+        assert!(breakers["alpha"].requires_conservative_restore());
+        assert_eq!(breakers["beta"].state(), BreakerState::Open);
+        assert_eq!(breakers["gamma"].state(), BreakerState::Closed);
+        assert!(!breakers["gamma"].requires_conservative_restore());
+    }
+
+    #[test]
+    fn invalid_conservative_restore_is_atomic_and_reports_sorted_names() {
+        let mut registry = ToolRegistry::new();
+        registry.register(make_tool("alpha", "registered"));
+
+        let error = registry
+            .restore_breakers_conservatively(&[
+                "zeta".to_string(),
+                "alpha".to_string(),
+                "missing".to_string(),
+                "zeta".to_string(),
+            ])
+            .unwrap_err();
+
+        assert_eq!(
+            error,
+            BreakerRestoreError {
+                names: vec!["missing".to_string(), "zeta".to_string()]
+            }
+        );
+        assert_eq!(
+            registry.breakers.read()["alpha"].state(),
+            BreakerState::Closed,
+            "validation failure must not partially restore registered names"
+        );
     }
 
     // --- to_tool_defs_filtered tests ---

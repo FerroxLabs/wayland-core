@@ -26,6 +26,7 @@ dirs.workspace       = true
 chrono.workspace     = true
 reqwest.workspace    = true
 glob.workspace       = true
+fd-lock.workspace    = true
 tokio.workspace      = true
 async-trait.workspace = true
 

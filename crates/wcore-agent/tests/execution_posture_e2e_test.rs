@@ -5,7 +5,9 @@ mod common;
 
 use std::sync::{Arc, Mutex};
 
-use common::MockLlmProvider;
+use common::{
+    MockLlmProvider, RECOVERY_TEST_KEY, configure_persisted_test_session, physical_attempt_server,
+};
 use serde_json::json;
 use wcore_agent::bootstrap::AgentBootstrap;
 use wcore_agent::output::OutputSink;
@@ -51,23 +53,29 @@ impl OutputSink for CapturingSink {
 #[tokio::test]
 async fn approval_bypass_retains_required_sandbox_and_tool_function() {
     let workspace = tempfile::tempdir().unwrap();
+    let physical = physical_attempt_server().await;
     let proof_path = workspace.path().join("proof.txt");
     std::fs::write(&proof_path, "contained-read-succeeded").unwrap();
 
     let mut config = bootstrap_config();
     config.tools.auto_approve = true;
+    configure_persisted_test_session(&mut config, workspace.path());
     let capture = Arc::new(CapturingSink::default());
     let sink: Arc<dyn OutputSink> = capture.clone();
     let mut result = AgentBootstrap::new(config, workspace.path().to_string_lossy(), sink)
-        .provider(Arc::new(MockLlmProvider::with_tool_use(
-            "read-proof",
-            "Read",
-            json!({"file_path": proof_path}),
-        )))
+        .provider(Arc::new(
+            MockLlmProvider::with_tool_use("read-proof", "Read", json!({"file_path": proof_path}))
+                .with_physical_url(physical.uri()),
+        ))
         .without_channels(true)
         .build()
         .await
         .expect("approval bypass must retain an enforceable sandbox");
+    result
+        .engine
+        .init_session("openai", &workspace.path().to_string_lossy(), None)
+        .expect("persisted session must bind the production budget authority");
+    result.engine.use_recovery_test_key(&RECOVERY_TEST_KEY);
 
     assert_ne!(
         result.engine.tools().sandbox_runtime().backend_name(),

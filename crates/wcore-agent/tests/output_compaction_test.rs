@@ -7,7 +7,10 @@ use base64::Engine as _;
 use tempfile::tempdir;
 use tokio::sync::mpsc;
 
-use common::{MockLlmProvider, MockTool, auto_approve_confirmer, test_config};
+use common::{
+    MockLlmProvider, MockTool, RECOVERY_TEST_KEY, auto_approve_confirmer,
+    configure_persisted_test_session, test_config,
+};
 use serde_json::json;
 use wcore_agent::context::{SystemPromptCache, build_system_prompt};
 use wcore_agent::engine::AgentEngine;
@@ -462,16 +465,16 @@ async fn secret_tool_result_is_redacted_before_host_provider_and_persistence() {
     let mut config = test_config();
     config.compact.compaction = CompactionLevel::Off;
     config.compact.toon = false;
-    config.session.enabled = true;
-    config.session.directory = dir.path().to_string_lossy().into_owned();
+    configure_persisted_test_session(&mut config, dir.path());
     let mut registry = ToolRegistry::new();
     registry.register(Box::new(MockTool::new("secret_tool", &raw_output, false)));
     let sink = Arc::new(ToolResultSink::default());
     let output: Arc<dyn OutputSink> = sink.clone();
     let mut engine = AgentEngine::new_with_provider(Arc::new(provider), config, registry, output);
     engine
-        .init_session("test-provider", "/tmp", None)
+        .init_session("test-provider", &dir.path().to_string_lossy(), None)
         .expect("session init");
+    engine.use_recovery_test_key(&RECOVERY_TEST_KEY);
 
     engine
         .run("call secret_tool", "")
@@ -513,7 +516,7 @@ async fn secret_tool_result_is_redacted_before_host_provider_and_persistence() {
         .expect("provider follow-up tool result");
     assert_redacted(provider_result);
 
-    let session = SessionManager::new(dir.path().to_path_buf(), 10)
+    let session = SessionManager::new(dir.path().join("sessions"), 10)
         .load("latest")
         .expect("persisted session");
     let persisted_result = session
