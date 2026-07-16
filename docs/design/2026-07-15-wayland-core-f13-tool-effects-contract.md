@@ -1,10 +1,12 @@
 # Wayland Core F13 Tool-Effect Contract
 
-**Status:** adversarially amended implementation contract; verification pending
+**Status:** implemented and Linux-sealed at integration source `e50ed42364a90f348ac80e920922a31b2c4aca45`; native macOS/Windows release proof remains deferred to F28
 
 **Baseline:** `d0aa0abc75afe056cc5434fcd652efa6d474ab0c`
 
 **Coordination:** FerroxLabs/wayland#889
+
+**Seal receipt:** `docs/design/2026-07-16-wayland-core-f13-tool-effects-seal.md`
 
 ## 1. Safety invariant
 
