@@ -210,16 +210,16 @@ fn checked_corpus_matches_real_serializers_byte_for_byte() {
 }
 
 #[test]
-fn inventory_is_exactly_seventeen_commands_and_forty_eight_events() {
-    assert_eq!(COMMAND_SPECS.len(), 17);
-    assert_eq!(EVENT_SPECS.len(), 48);
+fn inventory_is_exactly_eighteen_commands_and_forty_nine_events() {
+    assert_eq!(COMMAND_SPECS.len(), 18);
+    assert_eq!(EVENT_SPECS.len(), 49);
     assert_eq!(
         COMMAND_SPECS
             .iter()
             .map(|spec| spec.wire_type)
             .collect::<BTreeSet<_>>()
             .len(),
-        17
+        18
     );
     assert_eq!(
         EVENT_SPECS
@@ -227,7 +227,7 @@ fn inventory_is_exactly_seventeen_commands_and_forty_eight_events() {
             .map(|spec| spec.wire_type)
             .collect::<BTreeSet<_>>()
             .len(),
-        48
+        49
     );
 }
 
