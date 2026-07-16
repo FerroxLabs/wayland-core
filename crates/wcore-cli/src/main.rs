@@ -22,6 +22,10 @@ use wcore_cli::packaged_runtime::{
 use wayland_ollama::OllamaProvider;
 
 use wcore_agent::bootstrap::{AgentBootstrap, PluginProviderRouter};
+use wcore_agent::mcp_lifecycle::{
+    McpConfigIdentity, McpConnectionReservation, McpLifecycleCatalog, McpLifecycleState,
+    McpReservationOutcome,
+};
 use wcore_agent::output::OutputSink;
 use wcore_agent::output::protocol_sink::ProtocolSink;
 use wcore_agent::output::terminal::TerminalSink;
@@ -2629,22 +2633,38 @@ fn mcp_server_failure_reason(health: &McpServerHealth) -> Option<String> {
 fn note_deferred_mcp_connect(
     outcome: Result<McpManager, wcore_mcp::transport::McpError>,
     resolved: HashMap<String, McpServerConfig>,
+    mut reservations: HashMap<String, McpConnectionReservation>,
     engine: &mut wcore_agent::engine::AgentEngine,
     writer: &ProtocolWriter,
     output: &Arc<dyn OutputSink>,
     dynamic_managers: &mut Vec<Arc<McpManager>>,
-) -> Option<(Arc<McpManager>, HashMap<String, McpServerConfig>)> {
+) -> Option<PendingDeferredMcp> {
     match outcome {
         Ok(mgr) => {
             let mgr = Arc::new(mgr);
-            if integrate_deferred_mcp(engine, mgr.clone(), &resolved, writer, dynamic_managers) {
+            if integrate_deferred_mcp(
+                engine,
+                mgr.clone(),
+                &resolved,
+                &mut reservations,
+                writer,
+                dynamic_managers,
+            ) {
                 None
             } else {
-                Some((mgr, resolved))
+                Some(PendingDeferredMcp {
+                    manager: mgr,
+                    resolved,
+                    reservations,
+                })
             }
         }
         Err(e) => {
-            output.emit_error(&format!("MCP initialization error: {e}"), false);
+            let reason = format!("MCP initialization error: {e}");
+            for (_, reservation) in reservations {
+                reservation.complete_failed(reason.clone());
+            }
+            output.emit_error(&reason, false);
             None
         }
     }
@@ -2657,6 +2677,7 @@ fn integrate_deferred_mcp(
     engine: &mut wcore_agent::engine::AgentEngine,
     mgr: Arc<McpManager>,
     resolved_servers: &HashMap<String, McpServerConfig>,
+    reservations: &mut HashMap<String, McpConnectionReservation>,
     writer: &ProtocolWriter,
     dynamic_managers: &mut Vec<Arc<McpManager>>,
 ) -> bool {
@@ -2667,6 +2688,19 @@ fn integrate_deferred_mcp(
     };
     wcore_mcp::tool_proxy::register_mcp_tools(reg, &mgr, &builtin_names, resolved_servers);
     reg.refresh_tool_search_catalog(&defer_cold);
+    for (name, reservation) in reservations.drain() {
+        match mgr.health().get(&name).and_then(mcp_server_failure_reason) {
+            Some(reason) => {
+                reservation.complete_failed(reason);
+            }
+            None if mgr.health().contains_key(&name) => {
+                reservation.complete_ready();
+            }
+            None => {
+                reservation.complete_failed("connect outcome missing from MCP health report");
+            }
+        }
+    }
     for event in mcp_ready_events_for(&mgr, reg) {
         let _ = writer.emit(&event);
     }
@@ -2677,10 +2711,19 @@ fn integrate_deferred_mcp(
     true
 }
 
-type DeferredMcpReceiver = tokio::sync::oneshot::Receiver<(
-    Result<McpManager, wcore_mcp::transport::McpError>,
-    HashMap<String, McpServerConfig>,
-)>;
+struct DeferredMcpConnectResult {
+    outcome: Result<McpManager, wcore_mcp::transport::McpError>,
+    resolved: HashMap<String, McpServerConfig>,
+    reservations: HashMap<String, McpConnectionReservation>,
+}
+
+struct PendingDeferredMcp {
+    manager: Arc<McpManager>,
+    resolved: HashMap<String, McpServerConfig>,
+    reservations: HashMap<String, McpConnectionReservation>,
+}
+
+type DeferredMcpReceiver = tokio::sync::oneshot::Receiver<DeferredMcpConnectResult>;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SessionCommandReadiness {
@@ -2705,23 +2748,37 @@ fn session_command_readiness(command: &ProtocolCommand) -> SessionCommandReadine
 /// ahead of the already-running MCP handshake.
 async fn settle_deferred_mcp_before_message(
     deferred_mcp_rx: &mut Option<DeferredMcpReceiver>,
-    pending_deferred_mcp: &mut Option<(Arc<McpManager>, HashMap<String, McpServerConfig>)>,
+    pending_deferred_mcp: &mut Option<PendingDeferredMcp>,
     engine: &mut wcore_agent::engine::AgentEngine,
     writer: &ProtocolWriter,
     output: &Arc<dyn OutputSink>,
     dynamic_managers: &mut Vec<Arc<McpManager>>,
 ) -> bool {
     if let Some(rx) = deferred_mcp_rx.take()
-        && let Ok((outcome, resolved)) = rx.await
+        && let Ok(result) = rx.await
     {
-        *pending_deferred_mcp =
-            note_deferred_mcp_connect(outcome, resolved, engine, writer, output, dynamic_managers);
+        *pending_deferred_mcp = note_deferred_mcp_connect(
+            result.outcome,
+            result.resolved,
+            result.reservations,
+            engine,
+            writer,
+            output,
+            dynamic_managers,
+        );
     }
 
-    if let Some((mgr, resolved)) = pending_deferred_mcp.take()
-        && !integrate_deferred_mcp(engine, mgr.clone(), &resolved, writer, dynamic_managers)
+    if let Some(mut pending) = pending_deferred_mcp.take()
+        && !integrate_deferred_mcp(
+            engine,
+            pending.manager.clone(),
+            &pending.resolved,
+            &mut pending.reservations,
+            writer,
+            dynamic_managers,
+        )
     {
-        *pending_deferred_mcp = Some((mgr, resolved));
+        *pending_deferred_mcp = Some(pending);
     }
 
     pending_deferred_mcp.is_none()
@@ -3771,6 +3828,13 @@ async fn run_json_stream_mode(
         }
     }
 
+    let mcp_lifecycle = McpLifecycleCatalog::new();
+    for mgr in &result.mcp_managers {
+        for name in mgr.server_names() {
+            mcp_lifecycle.seed_ready(name, McpConfigIdentity::UNKNOWN);
+        }
+    }
+
     // wayland#551 — dial the deferred config MCP servers in the background,
     // AFTER ready is on the wire. The command loop integrates the manager
     // into the live engine between turns (see the select below) and emits
@@ -3778,14 +3842,33 @@ async fn run_json_stream_mode(
     // `AddMcpServer` path. The host can open immediately; the first real
     // message queues behind this already-running handshake so its provider
     // request cannot race ahead with an incomplete configured-tool set.
-    let mut deferred_mcp_rx = deferred_mcp_servers.map(|resolved| {
+    let mut deferred_mcp_rx = deferred_mcp_servers.and_then(|resolved| {
+        let mut reserved_configs = HashMap::new();
+        let mut reservations = HashMap::new();
+        for (name, config) in resolved {
+            let identity = McpConfigIdentity::for_server(&config);
+            if let McpReservationOutcome::Acquired(reservation) =
+                mcp_lifecycle.reserve(name.clone(), identity)
+            {
+                reserved_configs.insert(name.clone(), config);
+                reservations.insert(name, reservation);
+            }
+        }
+        if reserved_configs.is_empty() {
+            return None;
+        }
         let (tx, rx) = tokio::sync::oneshot::channel();
         let egress_policy = session_egress_policy.clone();
         tokio::spawn(async move {
-            let outcome = McpManager::connect_all_with_policy(&resolved, egress_policy).await;
-            let _ = tx.send((outcome, resolved));
+            let outcome =
+                McpManager::connect_all_with_policy(&reserved_configs, egress_policy).await;
+            let _ = tx.send(DeferredMcpConnectResult {
+                outcome,
+                resolved: reserved_configs,
+                reservations,
+            });
         });
-        rx
+        Some(rx)
     });
 
     // D012 (P0 security): install the gating writer as the engine's
@@ -3830,8 +3913,7 @@ async fn run_json_stream_mode(
 
     // wayland#551 — a deferred-MCP manager whose integration found the
     // registry borrowed; retried at the next between-turns boundary.
-    let mut pending_deferred_mcp: Option<(Arc<McpManager>, HashMap<String, McpServerConfig>)> =
-        None;
+    let mut pending_deferred_mcp: Option<PendingDeferredMcp> = None;
 
     loop {
         // wayland#551 — the pre-message phase can park in recv() forever on
@@ -3848,10 +3930,11 @@ async fn run_json_stream_mode(
             {
                 deferred_mcp_rx = None;
                 // Err = connect task dropped without sending (panic).
-                if let Ok((outcome, resolved)) = res {
+                if let Ok(result) = res {
                     pending_deferred_mcp = note_deferred_mcp_connect(
-                        outcome,
-                        resolved,
+                        result.outcome,
+                        result.resolved,
+                        result.reservations,
                         &mut engine,
                         &writer,
                         &output,
@@ -3880,6 +3963,7 @@ async fn run_json_stream_mode(
                 // the reconnect. NOTE: a re-add with changed config is ignored (the
                 // existing connection is kept) — remove then add to reconfigure.
                 if engine.mcp_server_connected(&name) {
+                    mcp_lifecycle.seed_ready(name.clone(), McpConfigIdentity::UNKNOWN);
                     let existing: Vec<String> = engine
                         .tools()
                         .to_tool_defs()
@@ -3907,6 +3991,34 @@ async fn run_json_stream_mode(
                         }
                     };
 
+                let config_identity = McpConfigIdentity::for_server(&config);
+                let reservation = match mcp_lifecycle.reserve(name.clone(), config_identity) {
+                    McpReservationOutcome::Acquired(reservation) => reservation,
+                    McpReservationOutcome::Existing(snapshot) => {
+                        match snapshot.state {
+                            McpLifecycleState::Ready => {
+                                let tools = registered_mcp_tool_names(&engine.tools(), &name);
+                                let _ = writer.emit(&ProtocolEvent::McpReady { name, tools });
+                            }
+                            McpLifecycleState::Connecting => {
+                                eprintln!(
+                                    "[mcp] '{name}' is already connecting; ignoring duplicate add"
+                                );
+                            }
+                            McpLifecycleState::Stopping => {
+                                output.emit_error(
+                                    &format!("AddMcpServer '{name}': server is stopping"),
+                                    true,
+                                );
+                            }
+                            McpLifecycleState::Failed { .. } => {
+                                unreachable!("failed lifecycle entries are retryable")
+                            }
+                        }
+                        continue;
+                    }
+                };
+
                 let mut single_configs = HashMap::new();
                 single_configs.insert(name.clone(), config.clone());
                 eprintln!("[mcp] Connecting to '{name}'...");
@@ -3924,6 +4036,7 @@ async fn run_json_stream_mode(
                             }
                         };
                         if let Some(reason) = failure_reason {
+                            reservation.complete_failed(reason.clone());
                             eprintln!("[mcp] connect failed for '{name}': {reason}");
                             output.emit_error(
                                 &format!("AddMcpServer '{name}' failed: {reason}"),
@@ -3958,6 +4071,7 @@ async fn run_json_stream_mode(
                                 );
                             }
                             None => {
+                                reservation.complete_failed("tool registry is busy");
                                 eprintln!(
                                     "[mcp] cannot register tools for '{name}': registry is currently borrowed"
                                 );
@@ -3972,6 +4086,7 @@ async fn run_json_stream_mode(
                         }
                         let tool_names = registered_mcp_tool_names(&engine.tools(), &name);
                         dynamic_managers.push(mgr_arc);
+                        reservation.complete_ready();
                         let _ = writer.emit(&ProtocolEvent::McpReady {
                             name,
                             tools: tool_names,
@@ -3980,6 +4095,7 @@ async fn run_json_stream_mode(
                     Err(e) => {
                         eprintln!("[mcp] connect_one failed for '{name}': {e:#}");
                         let reason = format!("{e:#}");
+                        reservation.complete_failed(reason.clone());
                         output
                             .emit_error(&format!("AddMcpServer '{name}' failed: {reason}"), false);
                         // Companion to the McpReady success emit: tell the host /
@@ -4002,11 +4118,12 @@ async fn run_json_stream_mode(
                 // `McpManager` bounds every server handshake independently.
                 if matches!(&other, ProtocolCommand::Message { .. })
                     && let Some(rx) = deferred_mcp_rx.take()
-                    && let Ok((outcome, resolved)) = rx.await
+                    && let Ok(result) = rx.await
                 {
                     pending_deferred_mcp = note_deferred_mcp_connect(
-                        outcome,
-                        resolved,
+                        result.outcome,
+                        result.resolved,
+                        result.reservations,
                         &mut engine,
                         &writer,
                         &output,
@@ -4030,28 +4147,30 @@ async fn run_json_stream_mode(
         // in the select below) and a parked integration whose earlier
         // attempt found the registry borrowed.
         if let Some(rx) = deferred_mcp_rx.as_mut()
-            && let Ok((outcome, resolved)) = rx.try_recv()
+            && let Ok(result) = rx.try_recv()
         {
             deferred_mcp_rx = None;
             pending_deferred_mcp = note_deferred_mcp_connect(
-                outcome,
-                resolved,
+                result.outcome,
+                result.resolved,
+                result.reservations,
                 &mut engine,
                 &writer,
                 &output,
                 &mut dynamic_managers,
             );
         }
-        if let Some((mgr, resolved)) = pending_deferred_mcp.take()
+        if let Some(mut pending) = pending_deferred_mcp.take()
             && !integrate_deferred_mcp(
                 &mut engine,
-                mgr.clone(),
-                &resolved,
+                pending.manager.clone(),
+                &pending.resolved,
+                &mut pending.reservations,
                 &writer,
                 &mut dynamic_managers,
             )
         {
-            pending_deferred_mcp = Some((mgr, resolved));
+            pending_deferred_mcp = Some(pending);
         }
 
         let cmd = if let Some(c) = pending_cmd.take() {
@@ -4073,10 +4192,11 @@ async fn run_json_stream_mode(
                         deferred_mcp_rx = None;
                         // Err = connect task dropped without sending (panic);
                         // nothing to integrate.
-                        if let Ok((outcome, resolved)) = res {
+                        if let Ok(result) = res {
                             pending_deferred_mcp = note_deferred_mcp_connect(
-                                outcome,
-                                resolved,
+                                result.outcome,
+                                result.resolved,
+                                result.reservations,
                                 &mut engine,
                                 &writer,
                                 &output,
@@ -4820,6 +4940,25 @@ mod tests {
     use std::time::Duration;
     use wcore_mcp::manager::McpManager;
     use wcore_types::execution_policy::{BaselineExecutionPolicy, PolicySource};
+
+    fn lifecycle_reservations(
+        configs: &HashMap<String, McpServerConfig>,
+    ) -> HashMap<String, McpConnectionReservation> {
+        let catalog = McpLifecycleCatalog::new();
+        configs
+            .iter()
+            .map(|(name, config)| {
+                let reservation =
+                    match catalog.reserve(name.clone(), McpConfigIdentity::for_server(config)) {
+                        McpReservationOutcome::Acquired(reservation) => reservation,
+                        McpReservationOutcome::Existing(_) => {
+                            panic!("each fixture server name must reserve once")
+                        }
+                    };
+                (name.clone(), reservation)
+            })
+            .collect()
+    }
 
     fn lifecycle_test_plan(
         disposition: wcore_agent::recovery::RecoveryDisposition,
@@ -5843,8 +5982,16 @@ mod tests {
             )
             .expect("valid test server config"),
         )]);
+        let mut reservations = lifecycle_reservations(&resolved);
         assert!(
-            integrate_deferred_mcp(&mut engine, mgr, &resolved, &writer, &mut dynamic_managers),
+            integrate_deferred_mcp(
+                &mut engine,
+                mgr,
+                &resolved,
+                &mut reservations,
+                &writer,
+                &mut dynamic_managers,
+            ),
             "integration must succeed on an idle engine"
         );
         assert!(
@@ -5930,11 +6077,13 @@ mod tests {
         )]);
         let writer = ProtocolWriter::new();
         let mut dynamic_managers = Vec::new();
+        let mut reservations = lifecycle_reservations(&resolved);
 
         assert!(integrate_deferred_mcp(
             &mut engine,
             manager.clone(),
             &resolved,
+            &mut reservations,
             &writer,
             &mut dynamic_managers,
         ));
@@ -6007,6 +6156,7 @@ mod tests {
             )
             .expect("valid test server config"),
         )]);
+        let reservations = lifecycle_reservations(&resolved);
         let manager = McpManager::new_for_test_with_tools(vec![(
             "delayed",
             false,
@@ -6016,7 +6166,11 @@ mod tests {
         let (tx, rx) = tokio::sync::oneshot::channel();
         tokio::spawn(async move {
             tokio::time::sleep(Duration::from_millis(40)).await;
-            let _ = tx.send((Ok(manager), resolved));
+            let _ = tx.send(DeferredMcpConnectResult {
+                outcome: Ok(manager),
+                resolved,
+                reservations,
+            });
         });
 
         let writer = ProtocolWriter::new();
@@ -6144,11 +6298,13 @@ mod tests {
         )]));
         let writer = ProtocolWriter::new();
         let mut dynamic_managers = Vec::new();
+        let mut reservations = HashMap::new();
         assert!(
             !integrate_deferred_mcp(
                 &mut engine,
                 mgr,
                 &HashMap::new(),
+                &mut reservations,
                 &writer,
                 &mut dynamic_managers
             ),
@@ -6180,7 +6336,11 @@ mod tests {
             vec![tool("held_echo")],
         )]));
         let mut deferred_mcp_rx = None;
-        let mut pending_deferred_mcp = Some((manager, HashMap::new()));
+        let mut pending_deferred_mcp = Some(PendingDeferredMcp {
+            manager,
+            resolved: HashMap::new(),
+            reservations: HashMap::new(),
+        });
         let writer = ProtocolWriter::new();
         let output: Arc<dyn OutputSink> = Arc::new(wcore_agent::output::null_sink::NullSink);
         let mut dynamic_managers = Vec::new();

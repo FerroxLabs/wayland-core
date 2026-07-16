@@ -36,6 +36,9 @@ use serde::Serialize;
 use tokio::sync::mpsc::UnboundedSender;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
+use wcore_agent::mcp_lifecycle::{
+    McpConfigIdentity, McpLifecycleCatalog, McpLifecycleState, McpReservationOutcome,
+};
 use wcore_agent::output::OutputSink;
 use wcore_protocol::commands::OPERATOR_RESOLUTION_RECOVERY_VERSION;
 use wcore_protocol::events::{
@@ -912,6 +915,8 @@ pub struct TuiEngine {
     /// hooks, read by the synchronous `/skills` `/mcp` `/hooks` dispatch.
     /// Default-empty until [`Self::set_inventory`] runs in `run_tui_mode`.
     inventory: EngineInventory,
+    /// Session-owned single-flight authority for every live MCP add path.
+    mcp_lifecycle: McpLifecycleCatalog,
     /// The project root the session was launched in. `/repomap` scans this.
     /// Defaults to `.` until [`Self::set_repo_root`] runs in `run_tui_mode`.
     repo_root: PathBuf,
@@ -1174,6 +1179,7 @@ impl TuiEngine {
             turn_cancel: CancellationToken::new(),
             recovery_cancel: CancellationToken::new(),
             inventory: EngineInventory::default(),
+            mcp_lifecycle: McpLifecycleCatalog::new(),
             repo_root: PathBuf::from("."),
             session_store: None,
             pending_at_ref_output: None,
@@ -1200,6 +1206,18 @@ impl TuiEngine {
     /// in `run_tui_mode` after the engine + MCP managers are built, before
     /// the render loop starts. Read by `/skills` `/mcp` `/hooks`.
     pub fn set_inventory(&mut self, inventory: EngineInventory) {
+        // Adopt boot connections before the first live command. This includes
+        // resource-only servers, which cannot be inferred from tool
+        // provenance and would otherwise be re-spawned by `/mcp add`.
+        for server in &inventory.mcp_servers {
+            if matches!(
+                server.health,
+                wcore_mcp::manager::McpServerHealth::Ready { .. }
+            ) {
+                self.mcp_lifecycle
+                    .seed_ready(server.name.clone(), McpConfigIdentity::UNKNOWN);
+            }
+        }
         self.inventory = inventory;
     }
 
@@ -2032,6 +2050,7 @@ impl TuiEngine {
         tokio::spawn(Self::connect_and_register_mcp(
             self.engine.clone(),
             self.tx.clone(),
+            self.mcp_lifecycle.clone(),
             name,
             config,
         ));
@@ -2052,6 +2071,7 @@ impl TuiEngine {
                 tokio::spawn(Self::connect_and_register_mcp(
                     self.engine.clone(),
                     self.tx.clone(),
+                    self.mcp_lifecycle.clone(),
                     name,
                     server,
                 ));
@@ -2103,6 +2123,7 @@ impl TuiEngine {
         };
 
         let engine = self.engine.clone();
+        let mcp_lifecycle = self.mcp_lifecycle.clone();
         let tx2 = self.tx.clone();
         let label = server.label().to_string();
         tokio::spawn(async move {
@@ -2164,7 +2185,14 @@ impl TuiEngine {
                     }
                     match Self::store_and_persist_forge(&server.name, &server.url, &token) {
                         Ok(cfg) => {
-                            Self::connect_and_register_mcp(engine, tx2, server.name, cfg).await
+                            Self::connect_and_register_mcp(
+                                engine,
+                                tx2,
+                                mcp_lifecycle,
+                                server.name,
+                                cfg,
+                            )
+                            .await
                         }
                         Err(e) => report_err(e),
                     }
@@ -2259,16 +2287,38 @@ impl TuiEngine {
     async fn connect_and_register_mcp(
         engine: Arc<tokio::sync::Mutex<wcore_agent::engine::AgentEngine>>,
         tx: UnboundedSender<ProtocolEvent>,
+        mcp_lifecycle: McpLifecycleCatalog,
         name: String,
         mut config: wcore_config::config::McpServerConfig,
     ) {
-        // #135: idempotency. If a server with this name is already connected,
-        // re-adding it must NOT spawn a duplicate connection (a second stdio
-        // child process for stdio transports). Check the live registry BEFORE
-        // any connect, report the no-op, and return. Covers the plain `/mcp add`
-        // path and the Forge grant path (both funnel through here).
+        // Reserve BEFORE any async check or dial. Two concurrently spawned
+        // same-name tasks can no longer both observe "not connected" and
+        // launch duplicate stdio children.
+        let config_identity = McpConfigIdentity::for_server(&config);
+        let reservation = match mcp_lifecycle.reserve(name.clone(), config_identity) {
+            McpReservationOutcome::Acquired(reservation) => reservation,
+            McpReservationOutcome::Existing(snapshot) => {
+                let status = match snapshot.state {
+                    McpLifecycleState::Connecting => "is already connecting",
+                    McpLifecycleState::Ready => "is already connected",
+                    McpLifecycleState::Stopping => "is stopping",
+                    McpLifecycleState::Failed { .. } => unreachable!("failed is retryable"),
+                };
+                let _ = tx.send(ProtocolEvent::Info {
+                    msg_id: String::new(),
+                    message: format!(
+                        "MCP server '{name}' {status} — keeping the existing lifecycle generation."
+                    ),
+                });
+                return;
+            }
+        };
+
+        // Preserve live sequential re-add behavior for boot connections that
+        // predate the catalog (the inventory normally seeds these first).
         let already_connected = engine.lock().await.mcp_server_connected(&name);
         if already_connected {
+            reservation.complete_ready();
             let _ = tx.send(ProtocolEvent::Info {
                 msg_id: String::new(),
                 message: format!(
@@ -2295,6 +2345,7 @@ impl TuiEngine {
                 wcore_config::mcp_cred_refs::resolve_server_headers(&mut config, &*store)
         {
             let reason = format!("{e}");
+            reservation.complete_failed(reason.clone());
             let _ = tx.send(ProtocolEvent::McpFailed {
                 name: name.clone(),
                 reason: reason.clone(),
@@ -2319,6 +2370,7 @@ impl TuiEngine {
                 Ok(mgr) => std::sync::Arc::new(mgr),
                 Err(e) => {
                     let reason = format!("{e}");
+                    reservation.complete_failed(reason.clone());
                     let _ = tx.send(ProtocolEvent::McpFailed {
                         name: name.clone(),
                         reason: reason.clone(),
@@ -2349,6 +2401,7 @@ impl TuiEngine {
                     }
                     _ => "server did not connect".to_string(),
                 };
+                reservation.complete_failed(reason.clone());
                 let _ = tx.send(ProtocolEvent::McpFailed {
                     name: name.clone(),
                     reason: reason.clone(),
@@ -2390,6 +2443,8 @@ impl TuiEngine {
                     .collect();
                 tool_names.sort();
                 let tool_count = tool_names.len();
+                reg.refresh_tool_search_catalog(&defer_cold);
+                reservation.complete_ready();
                 // Update the TUI's live mcp_status (so /doctor reflects the
                 // add) — the bridge's McpReady arm records Ready{tool_count}.
                 // Previously this path emitted only Info, leaving mcp_status
@@ -2404,6 +2459,7 @@ impl TuiEngine {
                 )
             }
             None => {
+                reservation.complete_failed("tool registry is busy");
                 let _ = tx.send(ProtocolEvent::Error {
                     msg_id: None,
                     error: ErrorInfo {

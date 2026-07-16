@@ -70,6 +70,7 @@ pub mod inbound_webhook;
 pub mod journal_effects;
 pub mod journal_provider;
 pub mod mcp_curator;
+pub mod mcp_lifecycle;
 pub mod orchestration;
 pub mod output;
 mod output_redaction;
