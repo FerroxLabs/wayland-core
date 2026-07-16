@@ -5,7 +5,9 @@ use std::path::{Path, PathBuf};
 use serde_json::{Value, json};
 
 use crate::anvil::{AnvilReceipt, anvil_receipt_body_digest};
-use crate::commands::ProtocolCommand;
+use crate::commands::{
+    BUDGET_GRANT_REQUEST_ID_MAX_BYTES, BUDGET_GRANT_REQUEST_ID_PATTERN, ProtocolCommand,
+};
 
 use super::ContractResult;
 use super::canonical::{canonical_json, digest_named_bytes};
@@ -19,7 +21,7 @@ use super::spec::{
 pub const CONTRACT_NAME: &str = "wayland-desktop-core";
 pub const CONTRACT_MAJOR: u64 = 1;
 pub const CONTRACT_MINOR: u64 = 6;
-pub const GENERATOR_VERSION: &str = "wcore-desktop-contract-gen/7";
+pub const GENERATOR_VERSION: &str = "wcore-desktop-contract-gen/9";
 pub const CONTRACT_ROOT: &str = "contracts/desktop/v1";
 
 const DEFERRED: &str = r#"# Deferred Desktop contract adversarial cases
@@ -119,10 +121,10 @@ fn inferred_schema(value: &Value) -> Value {
 fn constrained_property_schema(wire_type: &str, field: &str, value: &Value) -> Value {
     match (wire_type, field) {
         (_, "type") => json!({"const": wire_type}),
-        ("continue_with_budget", "additional_tokens") => {
-            json!({"minimum": 0, "type": "integer"})
+        ("continue_with_budget" | "budget_grant_result", "additional_tokens") => {
+            json!({"minimum": 0, "maximum": u64::MAX, "type": "integer"})
         }
-        ("continue_with_budget", "additional_cost_usd") => {
+        ("continue_with_budget" | "budget_grant_result", "additional_cost_usd") => {
             json!({"minimum": 0, "type": "number"})
         }
         (
@@ -149,6 +151,12 @@ fn constrained_property_schema(wire_type: &str, field: &str, value: &Value) -> V
         ("runtime_diagnostics_unavailable", "reason") => {
             json!({"enum": ["unsupported_version", "invalid_request"], "type": "string"})
         }
+        ("continue_with_budget" | "budget_grant_result", "request_id") => json!({
+            "minLength": 1,
+            "maxLength": BUDGET_GRANT_REQUEST_ID_MAX_BYTES,
+            "pattern": BUDGET_GRANT_REQUEST_ID_PATTERN,
+            "type": "string"
+        }),
         (
             "get_runtime_diagnostics"
             | "runtime_diagnostics_snapshot"
@@ -225,6 +233,23 @@ fn constrained_property_schema(wire_type: &str, field: &str, value: &Value) -> V
         ("tool_result", "output_type") => {
             json!({"enum": ["text", "diff", "image"], "type": "string"})
         }
+        ("budget_grant_result", "outcome") => {
+            json!({"enum": ["granted", "refused"], "type": "string"})
+        }
+        ("budget_grant_result", "refusal_reason") => json!({
+            "enum": [
+                "host_not_authorized",
+                "managed_policy",
+                "no_exhausted_budget",
+                "invalid_grant",
+                "budget_tracker_unavailable",
+                "persistence_failure",
+                "request_id_conflict",
+                "ledger_capacity_exceeded",
+                "turn_in_progress"
+            ],
+            "type": "string"
+        }),
         ("execution_policy", "reason") => json!({
             "enum": ["launch", "mode_change", "resume", "expiry"],
             "type": "string"
@@ -870,6 +895,15 @@ fn schema_branch(spec: &WireSpec, fixture: &Value) -> Value {
                 .entry("observed_artifact_digest")
                 .or_insert_with(|| json!({"type": "string"}));
         }
+        "budget_grant_result" => {
+            properties.entry("refusal_reason").or_insert_with(|| {
+                constrained_property_schema(
+                    "budget_grant_result",
+                    "refusal_reason",
+                    &Value::String(String::new()),
+                )
+            });
+        }
         _ => {}
     }
     let mut branch = json!({
@@ -893,9 +927,28 @@ fn schema_branch(spec: &WireSpec, fixture: &Value) -> Value {
             }
         ]);
     }
+    if spec.wire_type == "budget_grant_result" {
+        branch["allOf"] = json!([
+            {
+                "if": {
+                    "properties": {"outcome": {"const": "granted"}},
+                    "required": ["outcome"]
+                },
+                "then": {"not": {"required": ["refusal_reason"]}}
+            },
+            {
+                "if": {
+                    "properties": {"outcome": {"const": "refused"}},
+                    "required": ["outcome"]
+                },
+                "then": {"required": ["refusal_reason"]}
+            }
+        ]);
+    }
     if matches!(
         spec.wire_type,
         "continue_with_budget"
+            | "budget_grant_result"
             | "session_resync"
             | "resume_turn"
             | "resolve_interrupted_approval"
@@ -1426,16 +1479,54 @@ pub fn generated_artifacts() -> ContractResult<BTreeMap<String, Vec<u8>>> {
 
     artifacts.insert(
         "adversarial/commands/continue-with-budget-empty.jsonl".into(),
-        b"{\"type\":\"continue_with_budget\"}\n".to_vec(),
+        b"{\"request_id\":\"budget-empty\",\"type\":\"continue_with_budget\"}\n".to_vec(),
+    );
+    artifacts.insert(
+        "adversarial/commands/continue-with-budget-missing-request-id.jsonl".into(),
+        b"{\"additional_tokens\":1,\"type\":\"continue_with_budget\"}\n".to_vec(),
     );
     artifacts.insert(
         "adversarial/commands/continue-with-budget-negative-cost.jsonl".into(),
-        b"{\"additional_cost_usd\":-1,\"type\":\"continue_with_budget\"}\n".to_vec(),
+        b"{\"additional_cost_usd\":-1,\"request_id\":\"budget-negative\",\"type\":\"continue_with_budget\"}\n".to_vec(),
     );
     artifacts.insert(
         "adversarial/commands/continue-with-budget-unknown-field.jsonl".into(),
-        b"{\"additional_tokens\":1,\"future_authority\":true,\"type\":\"continue_with_budget\"}\n"
+        b"{\"additional_tokens\":1,\"future_authority\":true,\"request_id\":\"budget-unknown\",\"type\":\"continue_with_budget\"}\n"
             .to_vec(),
+    );
+    artifacts.insert(
+        "adversarial/commands/continue-with-budget-empty-request-id.jsonl".into(),
+        b"{\"additional_tokens\":1,\"request_id\":\"\",\"type\":\"continue_with_budget\"}\n"
+            .to_vec(),
+    );
+    artifacts.insert(
+        "adversarial/commands/continue-with-budget-whitespace-request-id.jsonl".into(),
+        b"{\"additional_tokens\":1,\"request_id\":\"   \t\",\"type\":\"continue_with_budget\"}\n"
+            .to_vec(),
+    );
+    artifacts.insert(
+        "adversarial/commands/continue-with-budget-unicode-request-id.jsonl".into(),
+        format!(
+            "{{\"additional_tokens\":1,\"request_id\":\"{}\",\"type\":\"continue_with_budget\"}}\n",
+            "😀".repeat(BUDGET_GRANT_REQUEST_ID_MAX_BYTES)
+        )
+        .into_bytes(),
+    );
+    artifacts.insert(
+        "adversarial/commands/continue-with-budget-long-request-id.jsonl".into(),
+        format!(
+            "{{\"additional_tokens\":1,\"request_id\":\"{}\",\"type\":\"continue_with_budget\"}}\n",
+            "x".repeat(129)
+        )
+        .into_bytes(),
+    );
+    artifacts.insert(
+        "adversarial/commands/continue-with-budget-overflow-tokens.jsonl".into(),
+        b"{\"additional_tokens\":18446744073709551616,\"request_id\":\"budget-overflow\",\"type\":\"continue_with_budget\"}\n".to_vec(),
+    );
+    artifacts.insert(
+        "adversarial/commands/continue-with-budget-wrong-numeric-type.jsonl".into(),
+        b"{\"additional_tokens\":\"1\",\"request_id\":\"budget-wrong-type\",\"type\":\"continue_with_budget\"}\n".to_vec(),
     );
     artifacts.insert(
         "adversarial/commands/invalid-json.jsonl".into(),

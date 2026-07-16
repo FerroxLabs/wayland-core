@@ -966,6 +966,10 @@ fn apply_event_inner(app: &mut App, event: ProtocolEvent) {
         | ProtocolEvent::CuaEvent { .. }
         | ProtocolEvent::Suspend { .. }
         | ProtocolEvent::ApprovalResume { .. }
+        // Budget grant commands are accepted only by the JSON-stream host
+        // loop; the in-process TUI cannot originate one. Keep the event
+        // exhaustively accepted without synthesizing local grant authority.
+        | ProtocolEvent::BudgetGrantResult { .. }
         | ProtocolEvent::CompactOffload { .. }
         | ProtocolEvent::HostSendMessageRequest { .. }
         // Node state is redundant with the correlated child relay for the TUI;

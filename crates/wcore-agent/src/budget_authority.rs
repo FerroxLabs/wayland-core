@@ -34,6 +34,10 @@ pub type SharedBudgetAuthorityCoordinator = Arc<Mutex<BudgetAuthorityCoordinator
 #[derive(Clone)]
 pub struct BudgetAuthoritySeed {
     pub provider_caps: BudgetCap,
+    /// Whether locally committed per-session extensions survive restart.
+    /// Managed policy sets this false so current organization ceilings clamp
+    /// all prior interactive headroom.
+    pub preserve_committed_session_extensions: bool,
     pub execution_policy: ExecutionBudget,
     pub wall_clock: BudgetWallClockAuthority,
     pub process_cleanup_proof: Option<ProcessCleanupProof>,
@@ -49,6 +53,7 @@ impl BudgetAuthoritySeed {
             journal,
             budget_session_id: budget_session_id.into(),
             provider_caps: self.provider_caps.clone(),
+            preserve_committed_session_extensions: self.preserve_committed_session_extensions,
             execution_policy: self.execution_policy.clone(),
             wall_clock: self.wall_clock.clone(),
             process_cleanup_proof: self.process_cleanup_proof.clone(),
@@ -74,6 +79,9 @@ pub struct BudgetAuthorityConfig {
     /// Provider caps effective in the new process. Restore intersects these
     /// with captured caps and durable extensions.
     pub provider_caps: BudgetCap,
+    /// Preserve durable local grants on restart. Must be false whenever a
+    /// managed policy controls the provider ceiling.
+    pub preserve_committed_session_extensions: bool,
     /// Current session-root execution policy.
     pub execution_policy: ExecutionBudget,
     /// New-session wall-clock authority. On restore only the semantic variant
@@ -908,10 +916,17 @@ fn restore(
             Duration::from_millis(now.saturating_sub(authority.captured_at_unix_millis))
         }
     };
-    let mut provider_tracker = BudgetTracker::from_snapshot_with_current_caps(
-        authority.provider_tracker,
-        config.provider_caps,
-    )
+    let mut provider_tracker = if config.preserve_committed_session_extensions {
+        BudgetTracker::from_snapshot_with_current_caps_preserving_extensions(
+            authority.provider_tracker,
+            config.provider_caps,
+        )
+    } else {
+        BudgetTracker::from_snapshot_with_current_caps(
+            authority.provider_tracker,
+            config.provider_caps,
+        )
+    }
     .map_err(|error| BudgetAuthorityError::Snapshot(error.to_string()))?;
     let mut restored_reservations = reconcile_dispatch_bound_reservations(
         &mut provider_tracker,
@@ -1123,6 +1138,7 @@ mod tests {
                 .per_session_tokens(token_cap)
                 .per_session_usd(10.0)
                 .build(),
+            preserve_committed_session_extensions: true,
             execution_policy: ExecutionBudget {
                 max_tokens_in: Some(token_cap),
                 max_wall_time: Some(Duration::from_secs(60)),
@@ -1443,6 +1459,133 @@ mod tests {
     }
 
     #[test]
+    fn budget_grant_request_survives_durable_reopen_without_double_extension() {
+        let dir = tempfile::tempdir().unwrap();
+        let journal = SessionJournal::open(dir.path().join("session.journal"), "session").unwrap();
+        baseline(&journal);
+        let mut coordinator =
+            BudgetAuthorityCoordinator::bind(config(Some(journal.clone()), 100)).unwrap();
+
+        let blocked = coordinator
+            .transaction(|authority| {
+                authority
+                    .provider_tracker()
+                    .reserve("stable-budget-session", 101, 0.0)
+            })
+            .unwrap();
+        assert!(blocked.is_err());
+        assert_eq!(
+            coordinator
+                .transaction(|authority| {
+                    authority.provider_tracker().extend_session_idempotent(
+                        "stable-budget-session",
+                        "grant-001",
+                        50,
+                        0.0,
+                    )
+                })
+                .unwrap()
+                .unwrap(),
+            wcore_budget::BudgetExtensionOutcome::Applied
+        );
+        assert_eq!(
+            coordinator
+                .inspect(|tracker, _| { tracker.effective_session_limits("stable-budget-session") })
+                .unwrap()
+                .0,
+            Some(150)
+        );
+        drop(coordinator);
+
+        let mut reopened =
+            BudgetAuthorityCoordinator::bind(config(Some(journal.clone()), 100)).unwrap();
+        assert_eq!(
+            reopened
+                .transaction(|authority| {
+                    authority.provider_tracker().extend_session_idempotent(
+                        "stable-budget-session",
+                        "grant-001",
+                        50,
+                        0.0,
+                    )
+                })
+                .unwrap()
+                .unwrap(),
+            wcore_budget::BudgetExtensionOutcome::AlreadyApplied
+        );
+        assert_eq!(
+            reopened
+                .inspect(|tracker, _| { tracker.effective_session_limits("stable-budget-session") })
+                .unwrap()
+                .0,
+            Some(150)
+        );
+        assert_eq!(
+            reopened
+                .transaction(|authority| {
+                    authority.provider_tracker().extend_session_idempotent(
+                        "stable-budget-session",
+                        "grant-001",
+                        51,
+                        0.0,
+                    )
+                })
+                .unwrap(),
+            Err(wcore_budget::BudgetExtensionError::RequestIdConflict)
+        );
+
+        let durable = journal.state().unwrap().budget_authority.unwrap();
+        let restored = BudgetTracker::from_snapshot(durable.provider_tracker).unwrap();
+        assert_eq!(
+            restored.effective_session_limits("stable-budget-session").0,
+            Some(150)
+        );
+    }
+
+    #[test]
+    fn managed_restore_clamps_prior_interactive_budget_extension() {
+        let dir = tempfile::tempdir().unwrap();
+        let journal = SessionJournal::open(dir.path().join("session.journal"), "session").unwrap();
+        baseline(&journal);
+        let mut coordinator =
+            BudgetAuthorityCoordinator::bind(config(Some(journal.clone()), 100)).unwrap();
+        assert!(
+            coordinator
+                .transaction(|authority| {
+                    authority
+                        .provider_tracker()
+                        .reserve("stable-budget-session", 101, 0.0)
+                })
+                .unwrap()
+                .is_err()
+        );
+        coordinator
+            .transaction(|authority| {
+                authority.provider_tracker().extend_session_idempotent(
+                    "stable-budget-session",
+                    "grant-before-managed",
+                    50,
+                    0.0,
+                )
+            })
+            .unwrap()
+            .unwrap();
+        drop(coordinator);
+
+        let mut managed = config(Some(journal), 100);
+        managed.preserve_committed_session_extensions = false;
+        let restored = BudgetAuthorityCoordinator::bind(managed).unwrap();
+
+        assert_eq!(
+            restored
+                .inspect(|tracker, _| tracker.effective_session_limits("stable-budget-session"))
+                .unwrap()
+                .0,
+            Some(100)
+        );
+    }
+
+    #[test]
     fn restore_intersects_caps_and_conservatively_settles_reservations() {
         let dir = tempfile::tempdir().unwrap();
         let journal = SessionJournal::open(dir.path().join("session.journal"), "session").unwrap();
@@ -1626,6 +1769,7 @@ mod tests {
         baseline(&journal);
         let seed = BudgetAuthoritySeed {
             provider_caps: config(None, 100).provider_caps,
+            preserve_committed_session_extensions: true,
             execution_policy: config(None, 100).execution_policy,
             wall_clock: BudgetWallClockAuthority::ActiveRuntime,
             process_cleanup_proof: None,
@@ -1667,6 +1811,7 @@ mod tests {
         baseline(&second);
         let seed = BudgetAuthoritySeed {
             provider_caps: config(None, 100).provider_caps,
+            preserve_committed_session_extensions: true,
             execution_policy: config(None, 100).execution_policy,
             wall_clock: BudgetWallClockAuthority::ActiveRuntime,
             process_cleanup_proof: None,
@@ -1697,6 +1842,7 @@ mod tests {
         baseline(&journal);
         let seed = BudgetAuthoritySeed {
             provider_caps: config(None, 100).provider_caps,
+            preserve_committed_session_extensions: true,
             execution_policy: config(None, 100).execution_policy,
             wall_clock: BudgetWallClockAuthority::ActiveRuntime,
             process_cleanup_proof: None,

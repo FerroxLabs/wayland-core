@@ -659,17 +659,54 @@ provider budget stop:
 ```json
 {
   "type": "continue_with_budget",
+  "request_id": "budget-001",
   "additional_tokens": 250000,
   "additional_cost_usd": 2.50
 }
 ```
 
-Both fields are optional individually, but at least one must be positive. The
-grant applies only to the current session; it does not widen another session or
-a per-user daily limit. Managed sessions reject interactive increases so a host
-cannot override an organization-controlled ceiling. Core reports acceptance or
-refusal with an `info` event. A host should expose this only as an explicit
-local action after showing the exhausted limit and requested headroom.
+`request_id` is required and must match
+`^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$`: 1–128 ASCII bytes, beginning with an
+alphanumeric byte. Whitespace, Unicode, shell/path punctuation, and longer
+identifiers fail closed in both the JSON Schema and Core decoder. Both grant
+fields are optional individually, but at least one must be positive. Token
+headroom is an unsigned 64-bit integer; negative, fractional, wrong-type, and
+values above `18446744073709551615` fail closed.
+
+The grant applies only to the current session; it does not widen another
+session or a per-user daily limit. Managed sessions reject interactive
+increases so a host cannot override an organization-controlled ceiling.
+
+Core returns a typed `budget_grant_result` correlated by `request_id`:
+
+```json
+{
+  "type": "budget_grant_result",
+  "request_id": "budget-001",
+  "additional_tokens": 250000,
+  "additional_cost_usd": 2.5,
+  "outcome": "granted"
+}
+```
+
+A `granted` result must omit `refusal_reason`. A `refused` result must include
+exactly one reason from the closed refusal vocabulary. Contradictory result
+shapes fail schema validation and typed deserialization.
+
+During an active turn, Core returns terminal `refused` with
+`turn_in_progress`; the host may retry after the terminal turn event with a
+fresh request ID. Replaying the refused request ID returns the exact cached
+terminal refusal; Core never converts it into a later grant. Core never
+acknowledges a grant for later application unless that pending state is durable.
+Identical replay returns the exact cached result without applying the grant
+twice. Reusing a request ID with different grant content is refused with
+`request_id_conflict`. Applied request bindings are
+committed in the same durable budget-authority transaction as the extension,
+so a crash after mutation but before response emission cannot apply the retry
+twice. The durable and response ledgers are finite, fail closed with
+`ledger_capacity_exceeded`, and never evict authoritative prior receipts. A
+host should expose this only as an explicit local action after showing the
+exhausted limit and requested headroom.
 
 ### 2.7c `session_resync`
 

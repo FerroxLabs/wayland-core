@@ -58,6 +58,8 @@ fn malformed_and_unknown_commands_never_deserialize_for_dispatch() {
         "continue-with-budget-empty.jsonl",
         "continue-with-budget-negative-cost.jsonl",
         "continue-with-budget-unknown-field.jsonl",
+        "continue-with-budget-whitespace-request-id.jsonl",
+        "continue-with-budget-unicode-request-id.jsonl",
         "invalid-json.jsonl",
         "missing-type.jsonl",
         "non-object.jsonl",

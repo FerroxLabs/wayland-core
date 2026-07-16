@@ -8,6 +8,20 @@ use crate::events::{OperatorToolEffectResolution, RecoveryCursor};
 
 pub const OPERATOR_RESOLUTION_RECOVERY_VERSION: u16 = 1;
 pub const RECOVERED_APPROVAL_VERSION: u16 = 1;
+pub const BUDGET_GRANT_REQUEST_ID_MAX_BYTES: usize = 128;
+pub const BUDGET_GRANT_REQUEST_ID_PATTERN: &str = "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$";
+
+pub(crate) fn is_valid_budget_grant_request_id(request_id: &str) -> bool {
+    if request_id.len() > BUDGET_GRANT_REQUEST_ID_MAX_BYTES {
+        return false;
+    }
+    let mut bytes = request_id.bytes();
+    bytes
+        .next()
+        .is_some_and(|byte| byte.is_ascii_alphanumeric())
+        && bytes
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b':' | b'-'))
+}
 
 /// Closed payload for a versioned durable-session resynchronization request.
 ///
@@ -54,8 +68,9 @@ pub struct ResolveInterruptedApprovalCommand {
 /// Closed, structurally valid operator grant for continuing a budget-stopped
 /// session. Runtime authority checks (launcher opt-in, outstanding receipt,
 /// and managed-policy ownership) remain the dispatcher's responsibility.
-#[derive(Debug, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct ContinueWithBudgetCommand {
+    pub request_id: String,
     pub additional_tokens: u64,
     pub additional_cost_usd: f64,
 }
@@ -68,6 +83,7 @@ impl<'de> Deserialize<'de> for ContinueWithBudgetCommand {
         #[derive(Deserialize)]
         #[serde(deny_unknown_fields)]
         struct Wire {
+            request_id: String,
             #[serde(default)]
             additional_tokens: u64,
             #[serde(default)]
@@ -75,6 +91,11 @@ impl<'de> Deserialize<'de> for ContinueWithBudgetCommand {
         }
 
         let wire = Wire::deserialize(deserializer)?;
+        if !is_valid_budget_grant_request_id(&wire.request_id) {
+            return Err(serde::de::Error::custom(format!(
+                "request_id must match {BUDGET_GRANT_REQUEST_ID_PATTERN} and contain at most {BUDGET_GRANT_REQUEST_ID_MAX_BYTES} ASCII bytes"
+            )));
+        }
         if !wire.additional_cost_usd.is_finite() || wire.additional_cost_usd < 0.0 {
             return Err(serde::de::Error::custom(
                 "additional_cost_usd must be finite and non-negative",
@@ -86,6 +107,7 @@ impl<'de> Deserialize<'de> for ContinueWithBudgetCommand {
             ));
         }
         Ok(Self {
+            request_id: wire.request_id,
             additional_tokens: wire.additional_tokens,
             additional_cost_usd: wire.additional_cost_usd,
         })
@@ -493,12 +515,14 @@ mod tests {
 
     #[test]
     fn continue_with_budget_is_typed_and_defaults_missing_axes_to_zero() {
-        let command: ProtocolCommand =
-            serde_json::from_str(r#"{"type":"continue_with_budget","additional_tokens":250000}"#)
-                .unwrap();
+        let command: ProtocolCommand = serde_json::from_str(
+            r#"{"type":"continue_with_budget","request_id":"budget-001","additional_tokens":250000}"#,
+        )
+        .unwrap();
         assert_eq!(
             command,
             ProtocolCommand::ContinueWithBudget(ContinueWithBudgetCommand {
+                request_id: "budget-001".into(),
                 additional_tokens: 250_000,
                 additional_cost_usd: 0.0,
             })
@@ -507,12 +531,14 @@ mod tests {
 
     #[test]
     fn continue_with_budget_accepts_cost_only_grants() {
-        let command: ProtocolCommand =
-            serde_json::from_str(r#"{"type":"continue_with_budget","additional_cost_usd":2.5}"#)
-                .unwrap();
+        let command: ProtocolCommand = serde_json::from_str(
+            r#"{"type":"continue_with_budget","request_id":"budget-002","additional_cost_usd":2.5}"#,
+        )
+        .unwrap();
         assert_eq!(
             command,
             ProtocolCommand::ContinueWithBudget(ContinueWithBudgetCommand {
+                request_id: "budget-002".into(),
                 additional_tokens: 0,
                 additional_cost_usd: 2.5,
             })
@@ -523,15 +549,33 @@ mod tests {
     fn continue_with_budget_rejects_structurally_invalid_grants() {
         for invalid in [
             r#"{"type":"continue_with_budget"}"#,
-            r#"{"type":"continue_with_budget","additional_tokens":0,"additional_cost_usd":0}"#,
-            r#"{"type":"continue_with_budget","additional_cost_usd":-1}"#,
-            r#"{"type":"continue_with_budget","additional_tokens":1,"future_authority":true}"#,
+            r#"{"type":"continue_with_budget","request_id":"","additional_tokens":1}"#,
+            r#"{"type":"continue_with_budget","request_id":"   ","additional_tokens":1}"#,
+            r#"{"type":"continue_with_budget","request_id":"budget/invalid","additional_tokens":1}"#,
+            r#"{"type":"continue_with_budget","request_id":"budget-😀","additional_tokens":1}"#,
+            r#"{"type":"continue_with_budget","request_id":"budget-empty","additional_tokens":0,"additional_cost_usd":0}"#,
+            r#"{"type":"continue_with_budget","request_id":"budget-negative","additional_cost_usd":-1}"#,
+            r#"{"type":"continue_with_budget","request_id":"budget-wrong-type","additional_tokens":1.5}"#,
+            r#"{"type":"continue_with_budget","request_id":"budget-overflow","additional_tokens":18446744073709551616}"#,
+            r#"{"type":"continue_with_budget","request_id":"budget-unknown","additional_tokens":1,"future_authority":true}"#,
         ] {
             assert!(
                 serde_json::from_str::<ProtocolCommand>(invalid).is_err(),
                 "invalid grant unexpectedly deserialized: {invalid}"
             );
         }
+
+        let oversized_request_id = format!(
+            r#"{{"type":"continue_with_budget","request_id":"{}","additional_tokens":1}}"#,
+            "x".repeat(BUDGET_GRANT_REQUEST_ID_MAX_BYTES + 1)
+        );
+        assert!(serde_json::from_str::<ProtocolCommand>(&oversized_request_id).is_err());
+
+        let boundary_request_id = format!(
+            r#"{{"type":"continue_with_budget","request_id":"{}","additional_tokens":1}}"#,
+            "x".repeat(BUDGET_GRANT_REQUEST_ID_MAX_BYTES)
+        );
+        assert!(serde_json::from_str::<ProtocolCommand>(&boundary_request_id).is_ok());
     }
 
     #[test]

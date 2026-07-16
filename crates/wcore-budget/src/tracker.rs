@@ -127,6 +127,43 @@ pub enum BudgetError {
     },
 }
 
+/// Structured failures raised while extending one blocked session's budget.
+///
+/// This is intentionally separate from [`BudgetError`]: interactive budget
+/// grants need stable machine-readable reasons and must never classify a
+/// display-oriented `CapExceeded.kind` string.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Error, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BudgetExtensionError {
+    /// The session has no outstanding budget-exceeded state to reopen.
+    #[error("the session has no exhausted budget to extend")]
+    NoExhaustedBudget,
+    /// The USD extension is negative, non-finite, or not representable.
+    #[error("the USD extension is invalid")]
+    InvalidUsd,
+    /// Neither token nor USD headroom was supplied.
+    #[error("the budget extension is empty")]
+    EmptyExtension,
+    /// The caller supplied an unusable idempotency key.
+    #[error("the budget extension request id is invalid")]
+    InvalidRequestId,
+    /// A prior committed grant used this request id with different values.
+    #[error("the budget extension request id conflicts with a committed grant")]
+    RequestIdConflict,
+    /// Retaining another grant receipt would exceed the durable bound.
+    #[error("the durable budget grant ledger is full")]
+    GrantLedgerCapacityExceeded,
+}
+
+/// Result of an idempotent session-budget extension.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BudgetExtensionOutcome {
+    /// This call committed new headroom.
+    Applied,
+    /// The same request was committed previously; no mutation occurred.
+    AlreadyApplied,
+}
+
 /// Observability event emitted by `BudgetTracker` on every charge attempt.
 #[derive(Debug, Clone, serde::Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
@@ -199,6 +236,8 @@ struct DailyTotals {
 }
 
 const BUDGET_TRACKER_SNAPSHOT_VERSION: u32 = 1;
+const MAX_BUDGET_EXTENSION_REQUEST_ID_BYTES: usize = 128;
+const MAX_DURABLE_BUDGET_GRANTS_PER_SESSION: usize = 1_024;
 
 /// Serializable, immutable copy of tracker enforcement authority.
 ///
@@ -215,6 +254,10 @@ pub struct BudgetTrackerSnapshot {
     reservations: BTreeMap<u64, ReservationSnapshot>,
     next_reservation_id: u64,
     session_extensions: BTreeMap<String, SessionExtensionSnapshot>,
+    /// Added compatibly to version 1. Missing fields in older snapshots
+    /// migrate to an empty ledger during deserialization.
+    #[serde(default)]
+    applied_budget_grants: BTreeMap<String, BTreeMap<String, BudgetGrantBindingSnapshot>>,
     blocked_sessions: BTreeSet<String>,
     per_user_daily: BTreeMap<String, DailyTotalsSnapshot>,
 }
@@ -307,6 +350,13 @@ struct SessionExtensionSnapshot {
 
 #[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
+struct BudgetGrantBindingSnapshot {
+    additional_tokens: u64,
+    additional_usd: f64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 struct DailyTotalsSnapshot {
     day_ordinal: i32,
     usd: f64,
@@ -319,6 +369,7 @@ pub struct BudgetTracker {
     reservations: HashMap<u64, ReservationEntry>,
     next_reservation_id: u64,
     session_extensions: HashMap<String, SessionExtension>,
+    applied_budget_grants: HashMap<String, HashMap<String, BudgetGrantBindingSnapshot>>,
     /// Sessions with a provider admission/settlement cap receipt outstanding.
     /// An extension consumes this latch; arbitrary pre-emptive widening is not
     /// a valid Continue operation.
@@ -358,6 +409,7 @@ impl BudgetTracker {
             reservations: HashMap::new(),
             next_reservation_id: 1,
             session_extensions: HashMap::new(),
+            applied_budget_grants: HashMap::new(),
             blocked_sessions: HashSet::new(),
             per_user_daily: HashMap::new(),
             sink: None,
@@ -416,6 +468,19 @@ impl BudgetTracker {
                     )
                 })
                 .collect(),
+            applied_budget_grants: self
+                .applied_budget_grants
+                .iter()
+                .map(|(session_id, grants)| {
+                    (
+                        session_id.clone(),
+                        grants
+                            .iter()
+                            .map(|(request_id, grant)| (request_id.clone(), *grant))
+                            .collect(),
+                    )
+                })
+                .collect(),
             blocked_sessions: self.blocked_sessions.iter().cloned().collect(),
             per_user_daily: self
                 .per_user_daily
@@ -460,6 +525,21 @@ impl BudgetTracker {
         current_caps: BudgetCap,
     ) -> Result<Self, crate::BudgetSnapshotError> {
         build_tracker_from_snapshot(constrain_tracker_snapshot(snapshot, current_caps)?)
+    }
+
+    /// Restore under current base caps while retaining committed per-session
+    /// extensions. This is for an unmanaged durable session whose explicit
+    /// operator grants must survive process restart. Managed callers must use
+    /// [`Self::from_snapshot_with_current_caps`] so their current ceiling
+    /// clamps all prior interactive headroom.
+    pub fn from_snapshot_with_current_caps_preserving_extensions(
+        mut snapshot: BudgetTrackerSnapshot,
+        current_caps: BudgetCap,
+    ) -> Result<Self, crate::BudgetSnapshotError> {
+        validate_tracker_snapshot(&snapshot)?;
+        snapshot.caps = intersect_caps(&snapshot.caps, &normalize_caps(current_caps));
+        validate_tracker_snapshot(&snapshot)?;
+        build_tracker_from_snapshot(snapshot)
     }
 
     /// Atomically apply serialized authority to a pristine tracker.
@@ -596,6 +676,7 @@ impl BudgetTracker {
             && self.reservations.is_empty()
             && self.next_reservation_id == 1
             && self.session_extensions.is_empty()
+            && self.applied_budget_grants.is_empty()
             && self.blocked_sessions.is_empty()
             && self.per_user_daily.is_empty()
             && self.restored_reservations.is_empty()
@@ -614,30 +695,15 @@ impl BudgetTracker {
         session_id: &str,
         additional_tokens: u64,
         additional_usd: f64,
-    ) -> Result<(), BudgetError> {
+    ) -> Result<(), BudgetExtensionError> {
         if !self.blocked_sessions.contains(session_id) {
-            return Err(self.cap_block(
-                session_id,
-                "no_exhausted_budget",
-                "an outstanding budget-exceeded receipt".to_string(),
-                "none".to_string(),
-            ));
+            return Err(BudgetExtensionError::NoExhaustedBudget);
         }
         if !additional_usd.is_finite() || additional_usd < 0.0 {
-            return Err(self.cap_block(
-                session_id,
-                "invalid_usd",
-                "finite non-negative USD".to_string(),
-                additional_usd.to_string(),
-            ));
+            return Err(BudgetExtensionError::InvalidUsd);
         }
         if additional_tokens == 0 && additional_usd == 0.0 {
-            return Err(self.cap_block(
-                session_id,
-                "empty_extension",
-                "positive tokens or USD".to_string(),
-                "zero".to_string(),
-            ));
+            return Err(BudgetExtensionError::EmptyExtension);
         }
         let current_extension_usd = self
             .session_extensions
@@ -646,22 +712,12 @@ impl BudgetTracker {
             .unwrap_or(0.0);
         let Some(next_extension_usd) = checked_usd_add(current_extension_usd, additional_usd)
         else {
-            return Err(self.cap_block(
-                session_id,
-                "invalid_usd",
-                "finite representable USD extension".to_string(),
-                format!("{current_extension_usd} + {additional_usd}"),
-            ));
+            return Err(BudgetExtensionError::InvalidUsd);
         };
         if let Some(base_cap) = self.caps.per_session_usd
             && checked_usd_add(base_cap, next_extension_usd).is_none()
         {
-            return Err(self.cap_block(
-                session_id,
-                "invalid_usd",
-                "finite representable effective USD cap".to_string(),
-                format!("{base_cap} + {next_extension_usd}"),
-            ));
+            return Err(BudgetExtensionError::InvalidUsd);
         }
         let extension = self
             .session_extensions
@@ -671,6 +727,55 @@ impl BudgetTracker {
         extension.usd = next_extension_usd;
         self.blocked_sessions.remove(session_id);
         Ok(())
+    }
+
+    /// Apply operator-authorized headroom at most once for a stable request.
+    ///
+    /// The request binding is captured in the same tracker snapshot as the
+    /// extension. A durable authority transaction therefore commits both or
+    /// neither across a crash. Receipts are never evicted: once the per-session
+    /// bound is reached, new request ids fail closed.
+    pub fn extend_session_idempotent(
+        &mut self,
+        session_id: &str,
+        request_id: &str,
+        additional_tokens: u64,
+        additional_usd: f64,
+    ) -> Result<BudgetExtensionOutcome, BudgetExtensionError> {
+        if request_id.trim().is_empty() || request_id.len() > MAX_BUDGET_EXTENSION_REQUEST_ID_BYTES
+        {
+            return Err(BudgetExtensionError::InvalidRequestId);
+        }
+
+        let requested = BudgetGrantBindingSnapshot {
+            additional_tokens,
+            additional_usd,
+        };
+        if let Some(existing) = self
+            .applied_budget_grants
+            .get(session_id)
+            .and_then(|grants| grants.get(request_id))
+        {
+            return if *existing == requested {
+                Ok(BudgetExtensionOutcome::AlreadyApplied)
+            } else {
+                Err(BudgetExtensionError::RequestIdConflict)
+            };
+        }
+        if self
+            .applied_budget_grants
+            .get(session_id)
+            .is_some_and(|grants| grants.len() >= MAX_DURABLE_BUDGET_GRANTS_PER_SESSION)
+        {
+            return Err(BudgetExtensionError::GrantLedgerCapacityExceeded);
+        }
+
+        self.extend_session(session_id, additional_tokens, additional_usd)?;
+        self.applied_budget_grants
+            .entry(session_id.to_owned())
+            .or_default()
+            .insert(request_id.to_owned(), requested);
+        Ok(BudgetExtensionOutcome::Applied)
     }
 
     fn session_token_cap(&self, session_id: &str) -> Option<u64> {
@@ -1270,6 +1375,31 @@ fn validate_tracker_snapshot(
             )));
         }
     }
+    for (session_id, grants) in &snapshot.applied_budget_grants {
+        if grants.len() > MAX_DURABLE_BUDGET_GRANTS_PER_SESSION {
+            return Err(invalid_snapshot(format!(
+                "applied_budget_grants[{session_id:?}] exceeds the durable receipt bound"
+            )));
+        }
+        for (request_id, grant) in grants {
+            if request_id.trim().is_empty()
+                || request_id.len() > MAX_BUDGET_EXTENSION_REQUEST_ID_BYTES
+            {
+                return Err(invalid_snapshot(format!(
+                    "applied_budget_grants[{session_id:?}] contains an invalid request id"
+                )));
+            }
+            validate_usd(
+                &format!("applied_budget_grants[{session_id:?}][{request_id:?}].additional_usd"),
+                grant.additional_usd,
+            )?;
+            if grant.additional_tokens == 0 && grant.additional_usd == 0.0 {
+                return Err(invalid_snapshot(format!(
+                    "applied_budget_grants[{session_id:?}][{request_id:?}] is empty"
+                )));
+            }
+        }
+    }
     for (user_id, totals) in &snapshot.per_user_daily {
         validate_usd(&format!("per_user_daily[{user_id:?}].usd"), totals.usd)?;
     }
@@ -1371,6 +1501,11 @@ fn build_tracker_from_snapshot(
                     },
                 )
             })
+            .collect(),
+        applied_budget_grants: snapshot
+            .applied_budget_grants
+            .into_iter()
+            .map(|(session_id, grants)| (session_id, grants.into_iter().collect()))
             .collect(),
         blocked_sessions: snapshot.blocked_sessions.into_iter().collect(),
         per_user_daily: snapshot
@@ -1810,10 +1945,81 @@ mod tests {
         assert!(tracker.reserve("s1", 0, 2.0).is_err());
 
         let err = tracker.extend_session("s1", 0, f64::MAX).unwrap_err();
-        assert!(matches!(
-            err,
-            BudgetError::CapExceeded { ref kind, .. } if kind == "invalid_usd"
-        ));
+        assert_eq!(err, BudgetExtensionError::InvalidUsd);
+    }
+
+    #[test]
+    fn extension_failures_are_structured_not_display_string_kinds() {
+        let mut tracker = BudgetTracker::new(BudgetCap::builder().per_session_tokens(1).build());
+        assert_eq!(
+            tracker.extend_session("s1", 1, 0.0),
+            Err(BudgetExtensionError::NoExhaustedBudget)
+        );
+
+        assert!(tracker.reserve("s1", 2, 0.0).is_err());
+        assert_eq!(
+            tracker.extend_session("s1", 0, 0.0),
+            Err(BudgetExtensionError::EmptyExtension)
+        );
+        assert_eq!(
+            tracker.extend_session("s1", 1, f64::NAN),
+            Err(BudgetExtensionError::InvalidUsd)
+        );
+    }
+
+    #[test]
+    fn idempotent_extension_replays_after_snapshot_restore_without_mutation() {
+        let mut tracker = BudgetTracker::new(BudgetCap::builder().per_session_tokens(100).build());
+        assert!(tracker.reserve("s1", 101, 0.0).is_err());
+        assert_eq!(
+            tracker
+                .extend_session_idempotent("s1", "grant-001", 50, 0.0)
+                .unwrap(),
+            BudgetExtensionOutcome::Applied
+        );
+        assert_eq!(tracker.effective_session_limits("s1").0, Some(150));
+
+        let snapshot = tracker.snapshot().unwrap();
+        let mut reopened = BudgetTracker::from_snapshot(snapshot).unwrap();
+        assert_eq!(
+            reopened
+                .extend_session_idempotent("s1", "grant-001", 50, 0.0)
+                .unwrap(),
+            BudgetExtensionOutcome::AlreadyApplied
+        );
+        assert_eq!(reopened.effective_session_limits("s1").0, Some(150));
+        assert_eq!(
+            reopened.extend_session_idempotent("s1", "grant-001", 51, 0.0),
+            Err(BudgetExtensionError::RequestIdConflict)
+        );
+    }
+
+    #[test]
+    fn durable_extension_ledger_is_bounded_without_evicting_receipts() {
+        let mut tracker = BudgetTracker::new(BudgetCap::builder().per_session_tokens(1).build());
+        for index in 0..MAX_DURABLE_BUDGET_GRANTS_PER_SESSION {
+            let cap = tracker.effective_session_limits("s1").0.unwrap();
+            assert!(tracker.reserve("s1", cap.saturating_add(1), 0.0).is_err());
+            assert_eq!(
+                tracker
+                    .extend_session_idempotent("s1", &format!("grant-{index}"), 1, 0.0)
+                    .unwrap(),
+                BudgetExtensionOutcome::Applied
+            );
+        }
+
+        let cap = tracker.effective_session_limits("s1").0.unwrap();
+        assert!(tracker.reserve("s1", cap.saturating_add(1), 0.0).is_err());
+        assert_eq!(
+            tracker.extend_session_idempotent("s1", "grant-overflow", 1, 0.0),
+            Err(BudgetExtensionError::GrantLedgerCapacityExceeded)
+        );
+        assert_eq!(
+            tracker
+                .extend_session_idempotent("s1", "grant-0", 1, 0.0)
+                .unwrap(),
+            BudgetExtensionOutcome::AlreadyApplied
+        );
     }
 
     #[test]
@@ -1901,6 +2107,26 @@ mod tests {
         assert!(restored.reserve("blocked", 1, 0.0).is_err());
         assert!(restored.reserve("committed", 21, 0.21).is_err());
         assert!(restored.reserve("extended", 50, 0.50).is_ok());
+    }
+
+    #[test]
+    fn version_one_snapshot_without_grant_ledger_migrates_to_empty() {
+        let snapshot = BudgetTracker::new(BudgetCap::default()).snapshot().unwrap();
+        let mut wire = serde_json::to_value(snapshot).unwrap();
+        wire.as_object_mut()
+            .unwrap()
+            .remove("applied_budget_grants");
+
+        let migrated: BudgetTrackerSnapshot = serde_json::from_value(wire).unwrap();
+        assert!(migrated.applied_budget_grants.is_empty());
+        let restored = BudgetTracker::from_snapshot(migrated).unwrap();
+        assert!(
+            restored
+                .snapshot()
+                .unwrap()
+                .applied_budget_grants
+                .is_empty()
+        );
     }
 
     #[test]
@@ -2035,6 +2261,29 @@ mod tests {
         assert!((extension.usd - 0.20).abs() < f64::EPSILON * 4.0);
         assert_eq!(restored.session_totals("used"), (60, 0.60));
         assert!(restored.reserve("blocked", 1, 0.0).is_err());
+    }
+
+    #[test]
+    fn unmanaged_restore_intersects_base_caps_but_preserves_committed_extension() {
+        let mut tracker = BudgetTracker::new(BudgetCap::builder().per_session_tokens(100).build());
+        assert!(tracker.reserve("session", 101, 0.0).is_err());
+        tracker
+            .extend_session_idempotent("session", "grant-001", 50, 0.0)
+            .unwrap();
+
+        let mut restored = BudgetTracker::from_snapshot_with_current_caps_preserving_extensions(
+            tracker.snapshot().unwrap(),
+            BudgetCap::builder().per_session_tokens(100).build(),
+        )
+        .unwrap();
+
+        assert_eq!(restored.effective_session_limits("session").0, Some(150));
+        assert_eq!(
+            restored
+                .extend_session_idempotent("session", "grant-001", 50, 0.0)
+                .unwrap(),
+            BudgetExtensionOutcome::AlreadyApplied
+        );
     }
 
     #[test]

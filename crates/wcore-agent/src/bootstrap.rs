@@ -182,6 +182,7 @@ impl SessionBudgetEnvelope {
 
         let authority_seed = crate::budget_authority::BudgetAuthoritySeed {
             provider_caps: cap.clone(),
+            preserve_committed_session_extensions: !config.execution_policy.is_managed(),
             execution_policy: operational_budget.clone(),
             wall_clock: crate::session_journal::BudgetWallClockAuthority::ActiveRuntime,
             process_cleanup_proof: None,

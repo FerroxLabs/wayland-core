@@ -1505,6 +1505,7 @@ mod spawn_task_set_tests {
                 journal: Some(journal.clone()),
                 budget_session_id: "session-budget".to_owned(),
                 provider_caps: wcore_budget::BudgetCap::default(),
+                preserve_committed_session_extensions: false,
                 execution_policy: wcore_budget::ExecutionBudget {
                     max_agent_depth: Some(2),
                     ..Default::default()

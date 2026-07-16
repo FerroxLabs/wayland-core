@@ -16,12 +16,13 @@ use crate::diagnostics::{
     RuntimeProfileBinding, RuntimeRemediationCode, RuntimeWorkspaceKind, UnsupportedConfigOverride,
 };
 use crate::events::{
-    Capabilities, ErrorInfo, OperatorResolutionEvidence, OperatorResolutionEvidenceSource,
-    OperatorToolEffectOutcome, OperatorToolEffectResolution, OutputType, ProtocolEvent,
-    RecoveryBudgetSnapshot, RecoveryCursor, RecoveryLifecycle, RecoveryReconcileReason,
-    RecoveryReplayItem, RecoveryReplayKind, RecoveryTurnSnapshot, RecoveryUnavailableReason,
-    ToolCategory, ToolInfo, ToolStatus, TurnCost, Usage, WorkflowChildTerminalState,
-    WorkflowNodeState, WorkflowTerminalState,
+    BudgetGrantRefusalReason, BudgetGrantResult, Capabilities, ErrorInfo,
+    OperatorResolutionEvidence, OperatorResolutionEvidenceSource, OperatorToolEffectOutcome,
+    OperatorToolEffectResolution, OutputType, ProtocolEvent, RecoveryBudgetSnapshot,
+    RecoveryCursor, RecoveryLifecycle, RecoveryReconcileReason, RecoveryReplayItem,
+    RecoveryReplayKind, RecoveryTurnSnapshot, RecoveryUnavailableReason, ToolCategory, ToolInfo,
+    ToolStatus, TurnCost, Usage, WorkflowChildTerminalState, WorkflowNodeState,
+    WorkflowTerminalState,
 };
 use crate::execution_policy::{ExecutionPolicyChangeReason, ExecutionPolicySequence};
 use wcore_types::execution_policy::{
@@ -131,9 +132,9 @@ pub const COMMAND_SPECS: &[WireSpec] = &[
     wire!(
         "continue_with_budget",
         "commands/continue_with_budget.json",
-        [],
+        ["request_id"],
         Safety,
-        "session",
+        "request_id",
         "available"
     ),
     wire!(
@@ -586,6 +587,19 @@ pub const EVENT_SPECS: &[WireSpec] = &[
         "available"
     ),
     wire!(
+        "budget_grant_result",
+        "events/budget_grant_result.json",
+        [
+            "request_id",
+            "additional_tokens",
+            "additional_cost_usd",
+            "outcome"
+        ],
+        Safety,
+        "request_id",
+        "available"
+    ),
+    wire!(
         "tool_panicked",
         "events/tool_panicked.json",
         ["msg_id", "call_id", "tool_name", "panic_message"],
@@ -770,6 +784,7 @@ pub const PRODUCER_EVENT_TYPES: &[&str] = &[
     "suspend",
     "approval_resume",
     "budget_exceeded",
+    "budget_grant_result",
     "tool_panicked",
     "plugin_registration_failed",
     "plugin_event",
@@ -805,13 +820,17 @@ pub const SOURCE_INPUTS: &[&str] = &[
     "crates/wcore-types/src/workspace_trust.rs",
     "crates/wcore-agent/src/output/protocol_sink.rs",
     "crates/wcore-agent/src/bootstrap.rs",
+    "crates/wcore-agent/src/engine.rs",
     "crates/wcore-agent/src/plugins/loader.rs",
     "crates/wcore-agent/src/plugins/mcp_delivery.rs",
     "crates/wcore-agent/src/orchestration/workflow/runner.rs",
     "crates/wcore-agent/src/orchestration/anvil/forge.rs",
     "crates/wcore-cli/src/main.rs",
+    "crates/wcore-cli/src/budget_grants.rs",
     "crates/wcore-cli/src/packaged_runtime.rs",
     "crates/wcore-cli/src/runtime_diagnostics.rs",
+    "crates/wcore-budget/src/tracker.rs",
+    "crates/wcore-agent/src/budget_authority.rs",
     "crates/wcore-config/src/shell/executable_readiness.rs",
     "crates/wcore-config/src/shell/mcp_stdio_launch_context.rs",
     "crates/wcore-mcp/src/transport/stdio.rs",
@@ -838,7 +857,7 @@ pub fn command_fixture_values() -> BTreeMap<String, Value> {
         ),
         (
             "commands/continue_with_budget.json".into(),
-            json!({"type":"continue_with_budget","additional_tokens":250000,"additional_cost_usd":2.5}),
+            json!({"type":"continue_with_budget","request_id":"budget-001","additional_tokens":250000,"additional_cost_usd":2.5}),
         ),
         (
             "commands/get_runtime_diagnostics.json".into(),
@@ -907,11 +926,11 @@ pub fn command_fixture_values() -> BTreeMap<String, Value> {
         ),
         (
             "compat/commands/continue_with_budget.cost-only.json".into(),
-            json!({"type":"continue_with_budget","additional_cost_usd":2.5}),
+            json!({"type":"continue_with_budget","request_id":"budget-cost-only","additional_cost_usd":2.5}),
         ),
         (
             "compat/commands/continue_with_budget.tokens-only.json".into(),
-            json!({"type":"continue_with_budget","additional_tokens":250000}),
+            json!({"type":"continue_with_budget","request_id":"budget-tokens-only","additional_tokens":250000}),
         ),
         (
             "compat/commands/host_send_message_result.minimal.json".into(),
@@ -1203,6 +1222,12 @@ pub fn event_fixture_values() -> BTreeMap<String, ProtocolEvent> {
                 reason: "max_tokens_out".into(),
                 observed: "8192".into(),
                 limit: "4096".into(),
+            },
+        ),
+        (
+            "events/budget_grant_result.json".into(),
+            ProtocolEvent::BudgetGrantResult {
+                result: BudgetGrantResult::granted("budget-001".into(), 250_000, 2.5),
             },
         ),
         (
@@ -1624,6 +1649,17 @@ pub fn event_fixture_values() -> BTreeMap<String, ProtocolEvent> {
 pub fn compatibility_event_values() -> BTreeMap<String, ProtocolEvent> {
     use wcore_types::message::FinishReason;
     BTreeMap::from([
+        (
+            "compat/events/budget_grant_result.turn-in-progress.json".into(),
+            ProtocolEvent::BudgetGrantResult {
+                result: BudgetGrantResult::refused(
+                    "budget-active-turn".into(),
+                    1,
+                    0.0,
+                    BudgetGrantRefusalReason::TurnInProgress,
+                ),
+            },
+        ),
         (
             "compat/events/approval_required.minimal.json".into(),
             ProtocolEvent::ApprovalRequired {

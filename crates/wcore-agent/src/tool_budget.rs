@@ -345,6 +345,7 @@ mod tests {
                 journal: Some(journal.clone()),
                 budget_session_id: "session-budget".to_owned(),
                 provider_caps: wcore_budget::BudgetCap::default(),
+                preserve_committed_session_extensions: false,
                 execution_policy: crate::budget::ExecutionBudget {
                     max_tool_runtime: Some(Duration::from_secs(1)),
                     max_processes: Some(1),

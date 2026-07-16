@@ -44,6 +44,7 @@ pub use execution::{
     ProcessCleanupProof, ToolRunGuard,
 };
 pub use tracker::{
-    BudgetCap, BudgetCapBuilder, BudgetError, BudgetEvent, BudgetEventSink, BudgetReservation,
-    BudgetTracker, BudgetTrackerSnapshot, RestoredReservationReconciliation,
+    BudgetCap, BudgetCapBuilder, BudgetError, BudgetEvent, BudgetEventSink, BudgetExtensionError,
+    BudgetExtensionOutcome, BudgetReservation, BudgetTracker, BudgetTrackerSnapshot,
+    RestoredReservationReconciliation,
 };

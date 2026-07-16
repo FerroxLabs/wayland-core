@@ -3591,47 +3591,70 @@ impl AgentEngine {
     /// never widen an organization-controlled ceiling.
     pub fn continue_with_additional_budget(
         &self,
+        request_id: &str,
         additional_tokens: u64,
         additional_cost_usd: f64,
-    ) -> Result<String, String> {
+    ) -> Result<(), wcore_protocol::events::BudgetGrantRefusalReason> {
+        use wcore_protocol::events::BudgetGrantRefusalReason;
+
+        fn classify_budget_grant_error(
+            error: wcore_budget::BudgetExtensionError,
+        ) -> BudgetGrantRefusalReason {
+            match error {
+                wcore_budget::BudgetExtensionError::NoExhaustedBudget => {
+                    BudgetGrantRefusalReason::NoExhaustedBudget
+                }
+                wcore_budget::BudgetExtensionError::InvalidUsd
+                | wcore_budget::BudgetExtensionError::EmptyExtension
+                | wcore_budget::BudgetExtensionError::InvalidRequestId => {
+                    BudgetGrantRefusalReason::InvalidGrant
+                }
+                wcore_budget::BudgetExtensionError::RequestIdConflict => {
+                    BudgetGrantRefusalReason::RequestIdConflict
+                }
+                wcore_budget::BudgetExtensionError::GrantLedgerCapacityExceeded => {
+                    BudgetGrantRefusalReason::LedgerCapacityExceeded
+                }
+            }
+        }
+
         if self.config.execution_policy.is_managed() {
-            return Err(
-                "managed policy forbids interactive budget increases; update the managed policy"
-                    .to_string(),
-            );
+            return Err(BudgetGrantRefusalReason::ManagedPolicy);
         }
         if let Some(authority) = self
             .durable_budget_authority()
-            .map_err(|error| error.to_string())?
+            .map_err(|_| BudgetGrantRefusalReason::PersistenceFailure)?
         {
             let session_id = authority.lock().budget_session_id().to_owned();
-            authority
+            let result = authority
                 .lock()
                 .transaction(|mutation| {
-                    mutation.provider_tracker().extend_session(
+                    mutation.provider_tracker().extend_session_idempotent(
                         &session_id,
+                        request_id,
                         additional_tokens,
                         additional_cost_usd,
                     )
                 })
-                .map_err(|error| error.to_string())?
-                .map_err(|error| error.to_string())?;
-            return Ok(format!(
-                "budget extended for this session: +{additional_tokens} tokens, +${additional_cost_usd:.4}"
-            ));
+                .map_err(|_| BudgetGrantRefusalReason::PersistenceFailure)?;
+            result.map_err(classify_budget_grant_error)?;
+            return Ok(());
         }
         let tracker = self
             .budget_tracker
             .as_ref()
-            .ok_or_else(|| "this session has no provider budget tracker".to_string())?;
+            .ok_or(BudgetGrantRefusalReason::BudgetTrackerUnavailable)?;
         let session_id = self.budget_session_id();
         tracker
             .lock()
-            .extend_session(&session_id, additional_tokens, additional_cost_usd)
-            .map_err(|error| error.to_string())?;
-        Ok(format!(
-            "budget extended for this session: +{additional_tokens} tokens, +${additional_cost_usd:.4}"
-        ))
+            .extend_session_idempotent(
+                &session_id,
+                request_id,
+                additional_tokens,
+                additional_cost_usd,
+            )
+            .map_err(classify_budget_grant_error)?;
+        Ok(())
     }
 
     /// Install the session-root execution envelope built from resolved config.
@@ -22331,6 +22354,7 @@ mod audit_2026_05_22_tests {
                 .per_session_tokens(100)
                 .per_session_usd(10.0)
                 .build(),
+            preserve_committed_session_extensions: true,
             execution_policy: wcore_budget::ExecutionBudget {
                 max_tokens_in: Some(100),
                 max_tokens_out: Some(100),
@@ -22658,8 +22682,11 @@ mod audit_2026_05_22_tests {
         );
 
         engine
-            .continue_with_additional_budget(50, 0.50)
+            .continue_with_additional_budget("grant-001", 50, 0.50)
             .expect("Smart session may add explicit headroom");
+        engine
+            .continue_with_additional_budget("grant-001", 50, 0.50)
+            .expect("an identical retry must not require another exhausted latch");
 
         assert!(tracker.lock().reserve("session-unknown", 150, 1.50).is_ok());
         assert!(tracker.lock().reserve("another-session", 101, 0.0).is_err());
@@ -22683,7 +22710,10 @@ mod audit_2026_05_22_tests {
             ),
         )));
 
-        assert!(engine.continue_with_additional_budget(1, 0.0).is_err());
+        assert_eq!(
+            engine.continue_with_additional_budget("grant-managed", 1, 0.0),
+            Err(wcore_protocol::events::BudgetGrantRefusalReason::ManagedPolicy)
+        );
     }
 
     #[tokio::test]

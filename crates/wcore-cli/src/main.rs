@@ -10,6 +10,7 @@ use tracing_subscriber::fmt;
 use clap::{Parser, Subcommand, ValueEnum};
 // `doctor` lives in the `wcore_cli` lib so the TUI diagnostics surface can
 // share it; the binary re-imports it here for the `--doctor` CLI flag.
+use wcore_cli::budget_grants::BudgetGrantLedger;
 use wcore_cli::doctor;
 use wcore_cli::packaged_runtime::{
     LocalExecutionSelection, audit_unix_time_millis, resolve_local_execution,
@@ -37,8 +38,8 @@ use wcore_mcp::manager::{McpManager, McpServerHealth};
 use wcore_mcp::tool_proxy::register_single_server_tools;
 use wcore_protocol::commands::{ProtocolCommand, ResumeTurnAction};
 use wcore_protocol::events::{
-    FinishReason, ProtocolEvent, RecoveryLifecycle, RecoveryReconcileReason,
-    RecoveryUnavailableReason,
+    BudgetGrantRefusalReason, FinishReason, ProtocolEvent, RecoveryLifecycle,
+    RecoveryReconcileReason, RecoveryUnavailableReason,
 };
 use wcore_protocol::execution_policy::{
     ExecutionPolicyChangeReason, ExecutionPolicySequence, ExecutionPolicySequenceError,
@@ -4051,6 +4052,7 @@ async fn run_json_stream_mode(
     // wayland#551 — a deferred-MCP manager whose integration found the
     // registry borrowed; retried at the next between-turns boundary.
     let mut pending_deferred_mcp: Option<PendingDeferredMcp> = None;
+    let mut budget_grants = BudgetGrantLedger::default();
 
     loop {
         // wayland#551 — the pre-message phase can park in recv() forever on
@@ -4463,7 +4465,6 @@ async fn run_json_stream_mode(
 
                 let mut stopped = false;
                 let mut pending_config: Option<PendingConfig> = None;
-                let mut pending_budget_extension: Option<(u64, f64)> = None;
                 let mut mode_changed = false;
                 // CORE-2: an errored run may still have consumed provider
                 // round-trips (total_usage/run_usage grew before the Err),
@@ -4553,15 +4554,14 @@ async fn run_json_stream_mode(
                                         });
                                     }
                                     ProtocolCommand::ContinueWithBudget(command) => {
-                                        let message = if allow_host_budget_grants {
-                                            pending_budget_extension = Some((command.additional_tokens, command.additional_cost_usd));
-                                            "continue_with_budget: queued, will apply after current response".to_string()
+                                        let refusal = if allow_host_budget_grants {
+                                            BudgetGrantRefusalReason::TurnInProgress
                                         } else {
-                                            "continue_with_budget refused: the local launcher did not opt in with --allow-host-budget-grants".to_string()
+                                            BudgetGrantRefusalReason::HostNotAuthorized
                                         };
-                                        let _ = writer.emit(&wcore_protocol::events::ProtocolEvent::Info {
-                                            msg_id: String::new(),
-                                            message,
+                                        let emission = budget_grants.complete(command, |_| Err(refusal));
+                                        let _ = writer.emit(&ProtocolEvent::BudgetGrantResult {
+                                            result: emission.into_result(),
                                         });
                                     }
                                     ProtocolCommand::SetMode { mode } => {
@@ -4763,18 +4763,6 @@ async fn run_json_stream_mode(
                     } else {
                         output.emit_stream_end(&msg_id, 0, 0, 0, 0, 0, FinishReason::Error);
                     }
-                }
-
-                if let Some((additional_tokens, additional_cost_usd)) =
-                    pending_budget_extension.take()
-                {
-                    let message = engine
-                        .continue_with_additional_budget(additional_tokens, additional_cost_usd)
-                        .unwrap_or_else(|error| format!("continue_with_budget refused: {error}"));
-                    let _ = writer.emit(&wcore_protocol::events::ProtocolEvent::Info {
-                        msg_id: String::new(),
-                        message,
-                    });
                 }
 
                 if let Some((model, thinking, thinking_budget, effort, compaction)) =
@@ -4987,19 +4975,21 @@ async fn run_json_stream_mode(
                 }
             }
             ProtocolCommand::ContinueWithBudget(command) => {
-                let message = if allow_host_budget_grants {
-                    engine
-                        .continue_with_additional_budget(
+                let emission = if allow_host_budget_grants {
+                    budget_grants.complete(command, |command| {
+                        engine.continue_with_additional_budget(
+                            &command.request_id,
                             command.additional_tokens,
                             command.additional_cost_usd,
                         )
-                        .unwrap_or_else(|error| format!("continue_with_budget refused: {error}"))
+                    })
                 } else {
-                    "continue_with_budget refused: the local launcher did not opt in with --allow-host-budget-grants".to_string()
+                    budget_grants.complete(command, |_| {
+                        Err(BudgetGrantRefusalReason::HostNotAuthorized)
+                    })
                 };
-                let _ = writer.emit(&wcore_protocol::events::ProtocolEvent::Info {
-                    msg_id: String::new(),
-                    message,
+                let _ = writer.emit(&ProtocolEvent::BudgetGrantResult {
+                    result: emission.into_result(),
                 });
             }
             ProtocolCommand::GetRuntimeDiagnostics(command) => {

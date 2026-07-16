@@ -351,6 +351,171 @@ pub struct RecoveryBudgetSnapshot {
     pub cost_limit_usd: Option<f64>,
 }
 
+/// Terminal disposition for one correlated provider-budget grant.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BudgetGrantOutcome {
+    /// The budget mutation was applied exactly once.
+    Granted,
+    Refused,
+}
+
+/// Closed refusal vocabulary for budget grants. Hosts must not infer policy
+/// state from human-readable strings.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BudgetGrantRefusalReason {
+    HostNotAuthorized,
+    ManagedPolicy,
+    NoExhaustedBudget,
+    InvalidGrant,
+    BudgetTrackerUnavailable,
+    PersistenceFailure,
+    RequestIdConflict,
+    LedgerCapacityExceeded,
+    /// A grant cannot be accepted while its turn is still executing. After
+    /// the terminal turn event, retry with a fresh request id; replaying the
+    /// refused id returns the same terminal refusal.
+    TurnInProgress,
+}
+
+/// Content-bound result cached by Core for at-most-once grant application.
+/// Identical `request_id` replay emits the exact stored value; conflicting
+/// reuse emits a refusal and never mutates the stored result.
+#[derive(Debug, Clone, PartialEq)]
+pub struct BudgetGrantResult {
+    pub request_id: String,
+    pub additional_tokens: u64,
+    pub additional_cost_usd: f64,
+    pub outcome: BudgetGrantOutcome,
+    pub refusal_reason: Option<BudgetGrantRefusalReason>,
+}
+
+impl Serialize for BudgetGrantResult {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        if !crate::commands::is_valid_budget_grant_request_id(&self.request_id) {
+            return Err(serde::ser::Error::custom(
+                "budget grant result has an invalid request_id",
+            ));
+        }
+        if !self.additional_cost_usd.is_finite() || self.additional_cost_usd < 0.0 {
+            return Err(serde::ser::Error::custom(
+                "budget grant result cost must be finite and non-negative",
+            ));
+        }
+        match (self.outcome, self.refusal_reason) {
+            (BudgetGrantOutcome::Granted, None) | (BudgetGrantOutcome::Refused, Some(_)) => {}
+            (BudgetGrantOutcome::Granted, Some(_)) => {
+                return Err(serde::ser::Error::custom(
+                    "granted budget result must omit refusal_reason",
+                ));
+            }
+            (BudgetGrantOutcome::Refused, None) => {
+                return Err(serde::ser::Error::custom(
+                    "refused budget result must include refusal_reason",
+                ));
+            }
+        }
+
+        #[derive(Serialize)]
+        struct Wire<'a> {
+            request_id: &'a str,
+            additional_tokens: u64,
+            additional_cost_usd: f64,
+            outcome: BudgetGrantOutcome,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            refusal_reason: Option<BudgetGrantRefusalReason>,
+        }
+
+        Wire {
+            request_id: &self.request_id,
+            additional_tokens: self.additional_tokens,
+            additional_cost_usd: self.additional_cost_usd,
+            outcome: self.outcome,
+            refusal_reason: self.refusal_reason,
+        }
+        .serialize(serializer)
+    }
+}
+
+impl BudgetGrantResult {
+    pub fn granted(request_id: String, additional_tokens: u64, additional_cost_usd: f64) -> Self {
+        Self {
+            request_id,
+            additional_tokens,
+            additional_cost_usd,
+            outcome: BudgetGrantOutcome::Granted,
+            refusal_reason: None,
+        }
+    }
+
+    pub fn refused(
+        request_id: String,
+        additional_tokens: u64,
+        additional_cost_usd: f64,
+        refusal_reason: BudgetGrantRefusalReason,
+    ) -> Self {
+        Self {
+            request_id,
+            additional_tokens,
+            additional_cost_usd,
+            outcome: BudgetGrantOutcome::Refused,
+            refusal_reason: Some(refusal_reason),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for BudgetGrantResult {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Wire {
+            request_id: String,
+            additional_tokens: u64,
+            additional_cost_usd: f64,
+            outcome: BudgetGrantOutcome,
+            refusal_reason: Option<BudgetGrantRefusalReason>,
+        }
+
+        let wire = Wire::deserialize(deserializer)?;
+        if !crate::commands::is_valid_budget_grant_request_id(&wire.request_id) {
+            return Err(serde::de::Error::custom(
+                "budget grant result has an invalid request_id",
+            ));
+        }
+        if !wire.additional_cost_usd.is_finite() || wire.additional_cost_usd < 0.0 {
+            return Err(serde::de::Error::custom(
+                "budget grant result cost must be finite and non-negative",
+            ));
+        }
+        match (wire.outcome, wire.refusal_reason) {
+            (BudgetGrantOutcome::Granted, None) => Ok(Self::granted(
+                wire.request_id,
+                wire.additional_tokens,
+                wire.additional_cost_usd,
+            )),
+            (BudgetGrantOutcome::Refused, Some(reason)) => Ok(Self::refused(
+                wire.request_id,
+                wire.additional_tokens,
+                wire.additional_cost_usd,
+                reason,
+            )),
+            (BudgetGrantOutcome::Granted, Some(_)) => Err(serde::de::Error::custom(
+                "granted budget result must omit refusal_reason",
+            )),
+            (BudgetGrantOutcome::Refused, None) => Err(serde::de::Error::custom(
+                "refused budget result must include refusal_reason",
+            )),
+        }
+    }
+}
+
 /// Content-free milestone kinds that may be replayed to reconstruct recovery
 /// UI without exposing journal payloads.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -837,6 +1002,13 @@ pub enum ProtocolEvent {
         reason: String,
         observed: String,
         limit: String,
+    },
+    /// Correlated result for `continue_with_budget`. This is the sole
+    /// authority-bearing acknowledgement; free-form `info` text is not a
+    /// grant receipt.
+    BudgetGrantResult {
+        #[serde(flatten)]
+        result: BudgetGrantResult,
     },
     /// Wave RB RELIABILITY MAJOR: a tool's `execute_with_ctx` panicked.
     /// The orchestration dispatcher caught the panic via

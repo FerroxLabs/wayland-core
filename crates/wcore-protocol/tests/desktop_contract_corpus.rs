@@ -8,6 +8,7 @@ use wcore_protocol::contract::{
     COMMAND_SPECS, CONTRACT_ROOT, ContractCriticality, EVENT_SPECS, GENERATOR_VERSION,
     canonical_json, check_contract, generated_artifacts,
 };
+use wcore_protocol::events::{BudgetGrantOutcome, BudgetGrantRefusalReason, BudgetGrantResult};
 
 fn root() -> std::path::PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join(CONTRACT_ROOT)
@@ -49,6 +50,13 @@ fn schema_accepts(schema: &Value, instance: &Value) -> bool {
     {
         return false;
     }
+    if let Some(maximum) = schema.get("maxLength").and_then(Value::as_u64)
+        && instance
+            .as_str()
+            .is_some_and(|value| value.chars().count() > maximum as usize)
+    {
+        return false;
+    }
     if let Some(minimum) = schema.get("minimum").and_then(Value::as_f64)
         && instance.as_f64().is_none_or(|value| value < minimum)
     {
@@ -82,6 +90,19 @@ fn schema_accepts(schema: &Value, instance: &Value) -> bool {
                 && value
                     .bytes()
                     .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+        })
+    {
+        return false;
+    }
+    if schema.get("pattern").and_then(Value::as_str) == Some("^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
+        && !instance.as_str().is_some_and(|value| {
+            let mut bytes = value.bytes();
+            bytes
+                .next()
+                .is_some_and(|byte| byte.is_ascii_alphanumeric())
+                && bytes.all(|byte| {
+                    byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b':' | b'-')
+                })
         })
     {
         return false;
@@ -168,6 +189,12 @@ fn generated_json(relative: &str) -> Value {
     .unwrap()
 }
 
+fn decode_budget_grant_result(event: &Value) -> serde_json::Result<BudgetGrantResult> {
+    let mut result = event.clone();
+    result.as_object_mut().unwrap().remove("type");
+    serde_json::from_value(result)
+}
+
 #[test]
 fn checked_corpus_matches_real_serializers_byte_for_byte() {
     check_contract().expect("checked-in Desktop contract corpus must match the generator");
@@ -183,9 +210,9 @@ fn checked_corpus_matches_real_serializers_byte_for_byte() {
 }
 
 #[test]
-fn inventory_is_exactly_seventeen_commands_and_forty_seven_events() {
+fn inventory_is_exactly_seventeen_commands_and_forty_eight_events() {
     assert_eq!(COMMAND_SPECS.len(), 17);
-    assert_eq!(EVENT_SPECS.len(), 47);
+    assert_eq!(EVENT_SPECS.len(), 48);
     assert_eq!(
         COMMAND_SPECS
             .iter()
@@ -200,7 +227,7 @@ fn inventory_is_exactly_seventeen_commands_and_forty_seven_events() {
             .map(|spec| spec.wire_type)
             .collect::<BTreeSet<_>>()
             .len(),
-        47
+        48
     );
 }
 
@@ -248,9 +275,9 @@ fn manifest_pins_generator_and_all_three_digests() {
     assert_eq!(manifest["contract"]["major"], 1);
     assert_eq!(manifest["contract"]["minor"], 6);
     assert_eq!(manifest["commands"].as_array().unwrap().len(), 17);
-    assert_eq!(manifest["events"].as_array().unwrap().len(), 47);
+    assert_eq!(manifest["events"].as_array().unwrap().len(), 48);
     assert_eq!(manifest["counts"]["commands"], 17);
-    assert_eq!(manifest["counts"]["events"], 47);
+    assert_eq!(manifest["counts"]["events"], 48);
     assert_eq!(
         manifest["capabilities"]["contract_negotiation"],
         "available"
@@ -413,6 +440,13 @@ fn generated_schemas_reject_malformed_authority_types_and_enums() {
 
     let mut budget = generated_json("commands/continue_with_budget.json");
     assert!(schema_accepts(&command_schema, &budget));
+    budget["request_id"] = Value::String("   ".into());
+    assert!(!schema_accepts(&command_schema, &budget));
+    budget["request_id"] = Value::String("😀".repeat(128));
+    assert!(!schema_accepts(&command_schema, &budget));
+    budget["request_id"] = Value::String("x".repeat(128));
+    assert!(schema_accepts(&command_schema, &budget));
+    budget["request_id"] = Value::String("budget-001".into());
     budget["additional_tokens"] = Value::from(0_u64);
     budget["additional_cost_usd"] = Value::from(0_u64);
     assert!(!schema_accepts(&command_schema, &budget));
@@ -422,6 +456,39 @@ fn generated_schemas_reject_malformed_authority_types_and_enums() {
     budget["additional_cost_usd"] = Value::from(0_u64);
     budget["future_authority"] = Value::Bool(true);
     assert!(!schema_accepts(&command_schema, &budget));
+
+    let budget_branch = command_schema["oneOf"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|branch| branch["properties"]["type"]["const"] == "continue_with_budget")
+        .expect("continue_with_budget schema branch missing");
+    assert_eq!(
+        budget_branch["properties"]["additional_tokens"]["maximum"],
+        Value::from(u64::MAX),
+        "the wire schema must pin the exact Rust u64 ceiling"
+    );
+
+    let mut grant_result = generated_json("events/budget_grant_result.json");
+    assert!(schema_accepts(&event_schema, &grant_result));
+    assert!(decode_budget_grant_result(&grant_result).is_ok());
+    grant_result["refusal_reason"] = Value::String("managed_policy".into());
+    assert!(!schema_accepts(&event_schema, &grant_result));
+    assert!(decode_budget_grant_result(&grant_result).is_err());
+    grant_result
+        .as_object_mut()
+        .unwrap()
+        .remove("refusal_reason");
+    grant_result["outcome"] = Value::String("applied_twice".into());
+    assert!(!schema_accepts(&event_schema, &grant_result));
+    grant_result["outcome"] = Value::String("refused".into());
+    assert!(!schema_accepts(&event_schema, &grant_result));
+    assert!(decode_budget_grant_result(&grant_result).is_err());
+    grant_result["refusal_reason"] = Value::String("turn_in_progress".into());
+    assert!(schema_accepts(&event_schema, &grant_result));
+    assert!(decode_budget_grant_result(&grant_result).is_ok());
+    grant_result["refusal_reason"] = Value::String("host_said_no".into());
+    assert!(!schema_accepts(&event_schema, &grant_result));
 
     let mut resume = generated_json("commands/resume_turn.json");
     assert!(schema_accepts(&command_schema, &resume));
@@ -489,11 +556,62 @@ fn generated_schemas_reject_malformed_authority_types_and_enums() {
 }
 
 #[test]
+fn budget_grant_adversarial_fixtures_fail_closed() {
+    let artifacts = generated_artifacts().unwrap();
+    for relative in [
+        "adversarial/commands/continue-with-budget-empty.jsonl",
+        "adversarial/commands/continue-with-budget-missing-request-id.jsonl",
+        "adversarial/commands/continue-with-budget-negative-cost.jsonl",
+        "adversarial/commands/continue-with-budget-unknown-field.jsonl",
+        "adversarial/commands/continue-with-budget-empty-request-id.jsonl",
+        "adversarial/commands/continue-with-budget-whitespace-request-id.jsonl",
+        "adversarial/commands/continue-with-budget-unicode-request-id.jsonl",
+        "adversarial/commands/continue-with-budget-long-request-id.jsonl",
+        "adversarial/commands/continue-with-budget-overflow-tokens.jsonl",
+        "adversarial/commands/continue-with-budget-wrong-numeric-type.jsonl",
+    ] {
+        let bytes = artifacts
+            .get(relative)
+            .unwrap_or_else(|| panic!("missing adversarial fixture {relative}"));
+        assert!(
+            serde_json::from_slice::<ProtocolCommand>(bytes).is_err(),
+            "{relative} must be rejected by the real command decoder"
+        );
+    }
+}
+
+#[test]
+fn contradictory_budget_grant_results_cannot_cross_the_wire() {
+    for invalid in [
+        BudgetGrantResult {
+            request_id: "budget-invalid-granted".into(),
+            additional_tokens: 1,
+            additional_cost_usd: 0.0,
+            outcome: BudgetGrantOutcome::Granted,
+            refusal_reason: Some(BudgetGrantRefusalReason::ManagedPolicy),
+        },
+        BudgetGrantResult {
+            request_id: "budget-invalid-refused".into(),
+            additional_tokens: 1,
+            additional_cost_usd: 0.0,
+            outcome: BudgetGrantOutcome::Refused,
+            refusal_reason: None,
+        },
+    ] {
+        assert!(
+            serde_json::to_value(invalid).is_err(),
+            "contradictory budget result unexpectedly serialized"
+        );
+    }
+}
+
+#[test]
 fn producer_complete_schema_keeps_current_and_non_desktop_variants_visible() {
     let schema = generated_json("schema/producer-complete.schema.json");
     let wire = serde_json::to_string(&schema).unwrap();
     for required in [
         "continue_with_budget",
+        "budget_grant_result",
         "grant_workspace_capability",
         "session_resync",
         "resume_turn",
