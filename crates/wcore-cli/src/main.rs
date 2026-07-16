@@ -4838,6 +4838,15 @@ async fn run_json_stream_mode(
                     message,
                 });
             }
+            ProtocolCommand::GetRuntimeDiagnostics(command) => {
+                output.emit_error(
+                    &format!(
+                        "get_runtime_diagnostics v{} is not available in this build",
+                        command.diagnostics_version
+                    ),
+                    false,
+                );
+            }
             ProtocolCommand::AddMcpServer { name, .. } => {
                 output.emit_error(
                     &format!("AddMcpServer '{name}': rejected — only allowed before first Message"),

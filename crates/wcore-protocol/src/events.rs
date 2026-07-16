@@ -2,6 +2,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::anvil::{AnvilReceipt, AnvilReceiptInvalidation};
+use crate::diagnostics::RuntimeDiagnosticsSnapshotV1;
 
 pub use wcore_types::message::FinishReason;
 
@@ -559,6 +560,14 @@ pub enum ProtocolEvent {
     McpFailed {
         name: String,
         reason: String,
+    },
+    /// Correlated, versioned, redacted effective runtime state for local host
+    /// diagnostics. This contains no environment values, launch arguments,
+    /// request headers, credentials, or raw process errors.
+    RuntimeDiagnosticsSnapshot {
+        diagnostics_version: u16,
+        request_id: String,
+        snapshot: RuntimeDiagnosticsSnapshotV1,
     },
     /// W1: F9 structured trace for one turn. Gated by the W0-reserved
     /// `capabilities.structured_traces` flag — the engine only emits this

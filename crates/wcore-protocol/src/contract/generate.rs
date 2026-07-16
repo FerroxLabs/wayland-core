@@ -17,12 +17,12 @@ use super::spec::{
 };
 
 pub const CONTRACT_NAME: &str = "wayland-desktop-core";
-pub const GENERATOR_VERSION: &str = "wcore-desktop-contract-gen/4";
+pub const GENERATOR_VERSION: &str = "wcore-desktop-contract-gen/5";
 pub const CONTRACT_ROOT: &str = "contracts/desktop/v1";
 
 const DEFERRED: &str = r#"# Deferred Desktop contract adversarial cases
 
-This v1.3 corpus records the current producer wire. Contract negotiation,
+This v1.4 corpus records the current producer wire. Contract negotiation,
 unknown-critical rejection, and unknown-noncritical dropping are live and
 proved by serialized replay through the reference host observer.
 
@@ -47,6 +47,8 @@ replay and a persistent later-mutation watcher remain deferred.
 Malformed command fixtures and the current unknown-type behavior are proved by
 `desktop_contract_adversarial.rs`. Browser, CUA, and plugin event fixtures are
 shape-only because no production emitter is proven at this source baseline.
+Runtime diagnostics are likewise shape-only until the redacted producer
+mapping and correlated command handler land atomically.
 "#;
 
 fn json_lines(values: impl IntoIterator<Item = Value>) -> ContractResult<Vec<u8>> {
@@ -126,6 +128,9 @@ fn constrained_property_schema(wire_type: &str, field: &str, value: &Value) -> V
             | "unknown_tool_effect_resolved",
             "recovery_version",
         ) => json!({"const": 1, "type": "integer"}),
+        ("get_runtime_diagnostics" | "runtime_diagnostics_snapshot", "diagnostics_version") => {
+            json!({"const": 1, "type": "integer"})
+        }
         ("resume_turn", "action") => {
             json!({"enum": ["continue", "reconcile", "cancel"], "type": "string"})
         }
@@ -455,6 +460,77 @@ fn effective_execution_policy_schema() -> Value {
     })
 }
 
+fn runtime_diagnostics_snapshot_schema() -> Value {
+    json!({
+        "additionalProperties": false,
+        "properties": {
+            "process": {
+                "additionalProperties": false,
+                "properties": {
+                    "profile_bound": {"type": "boolean"},
+                    "profile_name": {"type": "string"},
+                    "raw_engine_mode": {"type": "boolean"},
+                    "workspace_kind": {"enum": ["none", "project", "temporary", "profile_home"], "type": "string"}
+                },
+                "required": ["profile_bound", "raw_engine_mode", "workspace_kind"],
+                "type": "object"
+            },
+            "config_sources": {
+                "items": {
+                    "additionalProperties": false,
+                    "properties": {
+                        "role": {"enum": ["global", "project", "profile", "cli", "environment", "credential_store", "desktop_launch"], "type": "string"},
+                        "disposition": {"enum": ["loaded", "absent", "ignored", "unreadable", "invalid", "overridden", "restricted"], "type": "string"},
+                        "precedence": {"minimum": 0, "maximum": 65535, "type": "integer"},
+                        "display_path": {"type": "string"},
+                        "content_digest": prefixed_sha256_digest_schema()
+                    },
+                    "required": ["role", "disposition", "precedence"],
+                    "type": "object"
+                },
+                "type": "array"
+            },
+            "unsupported_overrides": {
+                "items": {
+                    "additionalProperties": false,
+                    "properties": {
+                        "name": {"type": "string"},
+                        "disposition": {"enum": ["loaded", "absent", "ignored", "unreadable", "invalid", "overridden", "restricted"], "type": "string"}
+                    },
+                    "required": ["name", "disposition"],
+                    "type": "object"
+                },
+                "type": "array"
+            },
+            "mcp_servers": {
+                "items": {
+                    "additionalProperties": false,
+                    "properties": {
+                        "name": {"type": "string"},
+                        "origin": {"enum": ["global_config", "project_config", "profile_config", "runtime_command", "plugin"], "type": "string"},
+                        "transport": {"enum": ["stdio", "sse", "streamable_http"], "type": "string"},
+                        "connection": {"enum": ["configured", "deferred", "connecting", "ready", "failed", "timed_out", "skipped", "stopped"], "type": "string"},
+                        "exposure": {"enum": ["not_attempted", "not_applicable", "exposed", "hidden_no_tools", "blocked"], "type": "string"},
+                        "deferred": {"type": "boolean"},
+                        "tool_count": {"minimum": 0, "maximum": 4294967295_u64, "type": "integer"},
+                        "assistant_scoped": {"type": "boolean"},
+                        "executable_basename": {"type": "string"},
+                        "executable_readiness": {"enum": ["not_applicable", "resolved", "missing_effective_path", "not_found", "invalid_absolute_path", "unsupported_transport"], "type": "string"},
+                        "working_directory": {"enum": ["inherited_process", "project_root", "profile_home", "explicit"], "type": "string"},
+                        "failure": {"enum": ["missing_executable", "launch_failed", "connection_refused", "timeout", "protocol_mismatch", "authentication_required", "authorization_denied", "invalid_configuration", "transport_closed", "unknown"], "type": "string"},
+                        "remediation": {"items": {"enum": ["open_active_config", "restart_desktop", "fix_gui_launch_path", "install_executable", "review_server_config", "retry_connection", "check_assistant_scope"], "type": "string"}, "type": "array"}
+                    },
+                    "required": ["name", "origin", "transport", "connection", "exposure", "deferred", "tool_count", "assistant_scoped", "executable_readiness", "working_directory", "remediation"],
+                    "type": "object"
+                },
+                "type": "array"
+            }
+        },
+        "required": ["process", "config_sources", "unsupported_overrides", "mcp_servers"],
+        "type": "object"
+    })
+}
+
 fn execution_policy_snapshot_schema() -> Value {
     json!({
         "additionalProperties": true,
@@ -678,6 +754,11 @@ fn schema_branch(spec: &WireSpec, fixture: &Value) -> Value {
                 .entry("policy")
                 .and_modify(|schema| *schema = effective_execution_policy_schema());
         }
+        "runtime_diagnostics_snapshot" => {
+            properties
+                .entry("snapshot")
+                .and_modify(|schema| *schema = runtime_diagnostics_snapshot_schema());
+        }
         "session_resync" => {
             properties
                 .entry("after")
@@ -779,6 +860,8 @@ fn schema_branch(spec: &WireSpec, fixture: &Value) -> Value {
             | "resolve_interrupted_approval"
             | "resolve_unknown_tool_effect"
             | "unknown_tool_effect_resolved"
+            | "get_runtime_diagnostics"
+            | "runtime_diagnostics_snapshot"
     ) {
         branch["additionalProperties"] = json!(false);
     }
@@ -988,6 +1071,10 @@ fn contract_capabilities() -> BTreeMap<String, ContractCapabilityStatus> {
             ContractCapabilityStatus::Available,
         ),
         (
+            "runtime_diagnostics_v1".into(),
+            ContractCapabilityStatus::ShapeOnly,
+        ),
+        (
             "workflow_lifecycle_v1".into(),
             ContractCapabilityStatus::Available,
         ),
@@ -1003,7 +1090,7 @@ fn descriptor(
     ContractDescriptor {
         name: CONTRACT_NAME.into(),
         major: 1,
-        minor: 3,
+        minor: 4,
         generator: GENERATOR_VERSION.into(),
         fixture_digest,
         schema_digest,
@@ -1406,11 +1493,12 @@ pub fn generated_artifacts() -> ContractResult<BTreeMap<String, Vec<u8>>> {
             "events": EVENT_SPECS.len(),
             "fixtures": fixture_inventory.len()
         },
-        "contract": {"major": 1, "minor": 3, "name": CONTRACT_NAME},
+        "contract": {"major": 1, "minor": 4, "name": CONTRACT_NAME},
         "deferred_adversarial": [
             "ordinary_turn_tool_replay_reducer",
             "anvil_desktop_replay_reducer",
-            "anvil_persistent_mutation_watcher"
+            "anvil_persistent_mutation_watcher",
+            "runtime_diagnostics_producer"
         ],
         "events": specs_manifest(EVENT_SPECS),
         "fixture_digest": fixture_digest,
@@ -1420,6 +1508,7 @@ pub fn generated_artifacts() -> ContractResult<BTreeMap<String, Vec<u8>>> {
             "anvil_receipts": "1.0",
             "execution_policy": "1.0",
             "operator_tool_effect_resolution": "1.0",
+            "runtime_diagnostics": "1.0",
             "semantic_failover_receipts": "1.0",
             "turn_recovery": "1.0",
             "workflow_lifecycle": "1.0"

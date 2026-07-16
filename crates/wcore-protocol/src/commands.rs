@@ -3,6 +3,10 @@ use std::collections::HashMap;
 use serde::Deserialize;
 use thiserror::Error;
 
+use crate::diagnostics::{
+    GetRuntimeDiagnosticsCommand, RuntimeDiagnosticsVersionError,
+    validate_runtime_diagnostics_version,
+};
 use crate::events::{OperatorToolEffectResolution, RecoveryCursor};
 
 pub const OPERATOR_RESOLUTION_RECOVERY_VERSION: u16 = 1;
@@ -121,6 +125,8 @@ pub enum ProtocolCommand {
     /// [`ProtocolCommand::validate_operator_resolution`] against live
     /// authority before applying this command.
     ResolveUnknownToolEffect(OperatorToolEffectResolution),
+    /// Request the process's versioned, redacted effective runtime view.
+    GetRuntimeDiagnostics(GetRuntimeDiagnosticsCommand),
     AddMcpServer {
         name: String,
         transport: String,
@@ -201,6 +207,16 @@ pub enum OperatorResolutionValidationError {
 }
 
 impl ProtocolCommand {
+    /// Reject versioned commands before they enter the bounded dispatch queue.
+    pub fn validate_admission(&self) -> Result<(), RuntimeDiagnosticsVersionError> {
+        match self {
+            Self::GetRuntimeDiagnostics(command) => {
+                validate_runtime_diagnostics_version(command.diagnostics_version)
+            }
+            _ => Ok(()),
+        }
+    }
+
     /// Validate syntax and exact live authority before an operator resolution
     /// reaches a dispatcher. Unknown fields/enums are already rejected by the
     /// closed serde types; this boundary additionally rejects malformed and

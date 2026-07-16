@@ -8,6 +8,12 @@ use crate::anvil::{
     AnvilInvalidationReason, AnvilReceipt, AnvilReceiptInvalidation,
     anvil_invalidation_body_digest, anvil_receipt_body_digest,
 };
+use crate::diagnostics::{
+    ConfigSourceDisposition, ConfigSourceRole, McpConnectionState, McpDeclarationOrigin,
+    McpExecutableReadiness, McpExposureState, McpServerDiagnostic, McpTransportKind,
+    McpWorkingDirectoryRole, RuntimeConfigSource, RuntimeDiagnosticsSnapshotV1,
+    RuntimeProcessBinding, RuntimeRemediationCode, RuntimeWorkspaceKind, UnsupportedConfigOverride,
+};
 use crate::events::{
     Capabilities, ErrorInfo, OperatorResolutionEvidence, OperatorResolutionEvidenceSource,
     OperatorToolEffectOutcome, OperatorToolEffectResolution, OutputType, ProtocolEvent,
@@ -184,6 +190,14 @@ pub const COMMAND_SPECS: &[WireSpec] = &[
         Safety,
         "name",
         "available"
+    ),
+    wire!(
+        "get_runtime_diagnostics",
+        "commands/get_runtime_diagnostics.json",
+        ["diagnostics_version", "request_id"],
+        Safety,
+        "request_id",
+        "runtime_diagnostics_v1"
     ),
     wire!(
         "host_send_message_result",
@@ -406,6 +420,14 @@ pub const EVENT_SPECS: &[WireSpec] = &[
         Safety,
         "name",
         "available"
+    ),
+    wire!(
+        "runtime_diagnostics_snapshot",
+        "events/runtime_diagnostics_snapshot.json",
+        ["diagnostics_version", "request_id", "snapshot"],
+        Safety,
+        "request_id",
+        "runtime_diagnostics_v1"
     ),
     wire!(
         "pong",
@@ -676,6 +698,7 @@ pub const PRODUCER_COMMAND_TYPES: &[&str] = &[
     "resume_turn",
     "resolve_interrupted_approval",
     "resolve_unknown_tool_effect",
+    "get_runtime_diagnostics",
     "add_mcp_server",
     "grant_workspace_capability",
     "approval_resume",
@@ -706,6 +729,7 @@ pub const PRODUCER_EVENT_TYPES: &[&str] = &[
     "config_changed",
     "mcp_ready",
     "mcp_failed",
+    "runtime_diagnostics_snapshot",
     "trace_event",
     "session_cost",
     "sub_agent_event",
@@ -741,6 +765,7 @@ pub const PRODUCER_EVENT_TYPES: &[&str] = &[
 pub const SOURCE_INPUTS: &[&str] = &[
     "crates/wcore-protocol/src/commands.rs",
     "crates/wcore-protocol/src/events.rs",
+    "crates/wcore-protocol/src/diagnostics.rs",
     "crates/wcore-protocol/src/reader.rs",
     "crates/wcore-protocol/src/writer.rs",
     "crates/wcore-protocol/src/anvil.rs",
@@ -776,6 +801,10 @@ pub fn command_fixture_values() -> BTreeMap<String, Value> {
         (
             "commands/host_send_message_result.json".into(),
             json!({"type":"host_send_message_result","call_id":"call-send-001","ok":true,"message_id":"desktop-message-001","error":""}),
+        ),
+        (
+            "commands/get_runtime_diagnostics.json".into(),
+            json!({"type":"get_runtime_diagnostics","diagnostics_version":1,"request_id":"runtime-diagnostics-001"}),
         ),
         (
             "commands/init_history.json".into(),
@@ -1287,6 +1316,47 @@ pub fn event_fixture_values() -> BTreeMap<String, ProtocolEvent> {
             ProtocolEvent::McpReady {
                 name: "desktop-tools".into(),
                 tools: vec!["search".into(), "fetch".into()],
+            },
+        ),
+        (
+            "events/runtime_diagnostics_snapshot.json".into(),
+            ProtocolEvent::RuntimeDiagnosticsSnapshot {
+                diagnostics_version: 1,
+                request_id: "runtime-diagnostics-001".into(),
+                snapshot: RuntimeDiagnosticsSnapshotV1 {
+                    process: RuntimeProcessBinding {
+                        profile_bound: true,
+                        profile_name: Some("desktop".into()),
+                        raw_engine_mode: false,
+                        workspace_kind: RuntimeWorkspaceKind::Temporary,
+                    },
+                    config_sources: vec![RuntimeConfigSource {
+                        role: ConfigSourceRole::Global,
+                        disposition: ConfigSourceDisposition::Loaded,
+                        precedence: 10,
+                        display_path: Some("$CONFIG/wayland-core/config.toml".into()),
+                        content_digest: Some(digest('d')),
+                    }],
+                    unsupported_overrides: vec![UnsupportedConfigOverride {
+                        name: "WAYLAND_CONFIG_PATH".into(),
+                        disposition: ConfigSourceDisposition::Ignored,
+                    }],
+                    mcp_servers: vec![McpServerDiagnostic {
+                        name: "desktop-tools".into(),
+                        origin: McpDeclarationOrigin::GlobalConfig,
+                        transport: McpTransportKind::Stdio,
+                        connection: McpConnectionState::Ready,
+                        exposure: McpExposureState::Exposed,
+                        deferred: false,
+                        tool_count: 2,
+                        assistant_scoped: true,
+                        executable_basename: Some("desktop-mcp".into()),
+                        executable_readiness: McpExecutableReadiness::Resolved,
+                        working_directory: McpWorkingDirectoryRole::ProjectRoot,
+                        failure: None,
+                        remediation: vec![RuntimeRemediationCode::OpenActiveConfig],
+                    }],
+                },
             },
         ),
         (

@@ -956,6 +956,7 @@ fn apply_event_inner(app: &mut App, event: ProtocolEvent) {
         // Failover receipts are authoritative host/protocol evidence. The TUI
         // has no receipt view yet, so accepting one must not mutate local state.
         | ProtocolEvent::ProviderFailoverReceipt { .. }
+        | ProtocolEvent::RuntimeDiagnosticsSnapshot { .. }
         | ProtocolEvent::MidFlightMonitorDecision { .. }
         | ProtocolEvent::TraceEvent { .. }
         | ProtocolEvent::PluginEvent { .. }

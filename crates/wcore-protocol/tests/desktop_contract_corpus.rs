@@ -49,6 +49,16 @@ fn schema_accepts(schema: &Value, instance: &Value) -> bool {
     {
         return false;
     }
+    if let Some(minimum) = schema.get("minimum").and_then(Value::as_f64)
+        && instance.as_f64().is_none_or(|value| value < minimum)
+    {
+        return false;
+    }
+    if let Some(maximum) = schema.get("maximum").and_then(Value::as_f64)
+        && instance.as_f64().is_none_or(|value| value > maximum)
+    {
+        return false;
+    }
     if schema.get("pattern").and_then(Value::as_str) == Some("^sha256:[0-9a-f]{64}$")
         && !instance.as_str().is_some_and(|value| {
             value.strip_prefix("sha256:").is_some_and(|hex| {
@@ -168,16 +178,16 @@ fn checked_corpus_matches_real_serializers_byte_for_byte() {
 }
 
 #[test]
-fn inventory_is_exactly_fifteen_commands_and_forty_five_events() {
-    assert_eq!(COMMAND_SPECS.len(), 15);
-    assert_eq!(EVENT_SPECS.len(), 45);
+fn inventory_is_exactly_sixteen_commands_and_forty_six_events() {
+    assert_eq!(COMMAND_SPECS.len(), 16);
+    assert_eq!(EVENT_SPECS.len(), 46);
     assert_eq!(
         COMMAND_SPECS
             .iter()
             .map(|spec| spec.wire_type)
             .collect::<BTreeSet<_>>()
             .len(),
-        15
+        16
     );
     assert_eq!(
         EVENT_SPECS
@@ -185,7 +195,7 @@ fn inventory_is_exactly_fifteen_commands_and_forty_five_events() {
             .map(|spec| spec.wire_type)
             .collect::<BTreeSet<_>>()
             .len(),
-        45
+        46
     );
 }
 
@@ -231,11 +241,11 @@ fn manifest_pins_generator_and_all_three_digests() {
         );
     }
     assert_eq!(manifest["contract"]["major"], 1);
-    assert_eq!(manifest["contract"]["minor"], 3);
-    assert_eq!(manifest["commands"].as_array().unwrap().len(), 15);
-    assert_eq!(manifest["events"].as_array().unwrap().len(), 45);
-    assert_eq!(manifest["counts"]["commands"], 15);
-    assert_eq!(manifest["counts"]["events"], 45);
+    assert_eq!(manifest["contract"]["minor"], 4);
+    assert_eq!(manifest["commands"].as_array().unwrap().len(), 16);
+    assert_eq!(manifest["events"].as_array().unwrap().len(), 46);
+    assert_eq!(manifest["counts"]["commands"], 16);
+    assert_eq!(manifest["counts"]["events"], 46);
     assert_eq!(
         manifest["capabilities"]["contract_negotiation"],
         "available"
@@ -257,6 +267,11 @@ fn manifest_pins_generator_and_all_three_digests() {
         "available"
     );
     assert_eq!(manifest["capabilities"]["turn_recovery_v1"], "available");
+    assert_eq!(
+        manifest["capabilities"]["runtime_diagnostics_v1"],
+        "shape_only"
+    );
+    assert_eq!(manifest["subcontracts"]["runtime_diagnostics"], "1.0");
     assert_eq!(manifest["subcontracts"]["turn_recovery"], "1.0");
     let invalidation = manifest["events"]
         .as_array()
@@ -423,6 +438,14 @@ fn generated_schemas_reject_malformed_authority_types_and_enums() {
     assert!(schema_accepts(&event_schema, &replay));
     replay["items"][0]["kind"] = Value::String("provider_payload".into());
     assert!(!schema_accepts(&event_schema, &replay));
+
+    let mut diagnostics = generated_json("events/runtime_diagnostics_snapshot.json");
+    assert!(schema_accepts(&event_schema, &diagnostics));
+    diagnostics["snapshot"]["config_sources"][0]["precedence"] = Value::from(-1);
+    assert!(!schema_accepts(&event_schema, &diagnostics));
+    diagnostics["snapshot"]["config_sources"][0]["precedence"] = Value::from(10_u64);
+    diagnostics["snapshot"]["mcp_servers"][0]["tool_count"] = Value::from(4_294_967_296_u64);
+    assert!(!schema_accepts(&event_schema, &diagnostics));
 
     let artifacts = generated_artifacts().unwrap();
     let lifecycle = std::str::from_utf8(

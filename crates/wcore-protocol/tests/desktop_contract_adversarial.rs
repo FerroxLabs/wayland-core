@@ -11,6 +11,10 @@ use wcore_protocol::contract::{
     CONTRACT_ROOT, ContractCapabilityStatus, HostContractObserver, HostObservation,
     HostObservationError, producer_contract_descriptor,
 };
+use wcore_protocol::diagnostics::{
+    RUNTIME_DIAGNOSTICS_VERSION, RuntimeDiagnosticsSnapshotV1, RuntimeDiagnosticsVersionError,
+    validate_runtime_diagnostics_version,
+};
 use wcore_protocol::execution_policy::validate_execution_policy_contract_version;
 use wcore_protocol::workflow::{
     WorkflowReplayAcceptance, WorkflowReplayError, WorkflowReplayReducer,
@@ -63,6 +67,57 @@ fn malformed_and_unknown_commands_never_deserialize_for_dispatch() {
             serde_json::from_slice::<ProtocolCommand>(&bytes).is_err(),
             "{name} unexpectedly produced a dispatchable command"
         );
+    }
+}
+
+#[test]
+fn runtime_diagnostics_is_closed_versioned_correlated_and_redacted() {
+    let command_bytes = fs::read(root().join("commands/get_runtime_diagnostics.json")).unwrap();
+    let command: ProtocolCommand = serde_json::from_slice(&command_bytes).unwrap();
+    let ProtocolCommand::GetRuntimeDiagnostics(command) = command else {
+        panic!("fixture must deserialize to get_runtime_diagnostics");
+    };
+    assert_eq!(command.diagnostics_version, RUNTIME_DIAGNOSTICS_VERSION);
+    validate_runtime_diagnostics_version(command.diagnostics_version).unwrap();
+
+    let mut unknown_command: Value = serde_json::from_slice(&command_bytes).unwrap();
+    unknown_command["authority_override"] = Value::Bool(true);
+    assert!(
+        serde_json::from_value::<ProtocolCommand>(unknown_command).is_err(),
+        "unknown command authority must fail closed"
+    );
+
+    assert_eq!(
+        validate_runtime_diagnostics_version(RUNTIME_DIAGNOSTICS_VERSION + 1),
+        Err(RuntimeDiagnosticsVersionError::UnsupportedVersion {
+            actual: RUNTIME_DIAGNOSTICS_VERSION + 1
+        })
+    );
+
+    let event: Value = serde_json::from_slice(
+        &fs::read(root().join("events/runtime_diagnostics_snapshot.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(event["diagnostics_version"], RUNTIME_DIAGNOSTICS_VERSION);
+    assert_eq!(event["request_id"], command.request_id);
+    serde_json::from_value::<RuntimeDiagnosticsSnapshotV1>(event["snapshot"].clone()).unwrap();
+
+    let mut unknown_snapshot = event["snapshot"].clone();
+    unknown_snapshot["environment"] = serde_json::json!({"PATH":"secret-bin"});
+    assert!(
+        serde_json::from_value::<RuntimeDiagnosticsSnapshotV1>(unknown_snapshot).is_err(),
+        "unknown diagnostic fields must fail closed"
+    );
+
+    let serialized = serde_json::to_string(&event).unwrap();
+    for forbidden in [
+        "secret-token-canary",
+        "authorization_header",
+        "environment_values",
+        "launch_arguments",
+        "raw_stderr",
+    ] {
+        assert!(!serialized.contains(forbidden), "leaked {forbidden}");
     }
 }
 
