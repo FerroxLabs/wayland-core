@@ -704,11 +704,11 @@ state; standalone and Desktop behavior is equivalent.
 
 **Goal:** Make attachments and document/image workflows reliable and honestly capability-gated across hosts/providers.
 
-**Work:** local-image to `ContentBlock::Image`; text-only provider degradation; document extraction and bounded auto-ingest; visual-heavy PDF routing; resource accounting; protocol metadata and failure semantics.
+**Work:** consume host-protocol `message.files[]` rather than discarding it; use one bounded, open-once, magic-byte-validated local attachment loader across standalone and host paths; convert supported local images to `ContentBlock::Image`; text-only provider degradation; distinguish active provider/session credentials from optional legacy vision-tool credentials; keep built-in and dynamically activated MCP image-generation capability truth consistent with the live registry; document extraction and bounded auto-ingest; visual-heavy PDF routing; resource accounting; protocol metadata and failure semantics.
 
 **Primary paths:** message/content types, provider compatibility, document/media tools, engine attachment path, JSON stream.
 
-**Proof:** deterministic image/PDF/docx/xlsx/pptx corpus through standalone and host protocol; unsupported models degrade explicitly; decompression/size/path adversarial cases remain contained.
+**Proof:** deterministic image/PDF/docx/xlsx/pptx corpus through standalone and host protocol; dropped PNG/JPEG image-only and text-plus-image turns reach the authenticated active vision provider without requiring a duplicate environment key; built-in-only, MCP-only, late-MCP and built-in-plus-MCP image-generation cases keep ToolSearch, readiness and capability advisories consistent; unsupported models degrade explicitly; decompression/size/path/UNC/symlink/reparse adversarial cases remain contained. Run the focused packaged attachment/generation smoke on native macOS, Linux and Windows during F27; F28 repeats it inside the full signed E5 certification matrix.
 
 **Dependencies:** F03–F05, F08–F09, F11–F14. **Board crosswalk:** #181, #637, #648, #650, #652.
 
