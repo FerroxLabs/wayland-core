@@ -14,6 +14,8 @@ pub struct StartupCapabilityInputs {
     pub memory_constructed: bool,
     pub legacy_drafter_constructed: bool,
     pub midflight_monitor_constructed: bool,
+    pub pricing_refresher_constructed: bool,
+    pub cooldown_tracker_constructed: bool,
 }
 
 fn unavailable(
@@ -61,11 +63,15 @@ fn ready(events: &mut Vec<CapabilityActivation>, capability: CapabilityId) {
 pub fn startup_activations(inputs: StartupCapabilityInputs) -> Vec<CapabilityActivation> {
     let mut events = Vec::with_capacity(24);
 
-    unavailable(
-        &mut events,
-        CapabilityId::PricingRefresher,
-        CapabilityReasonCode::NoProductionConstructor,
-    );
+    if inputs.pricing_refresher_constructed {
+        ready(&mut events, CapabilityId::PricingRefresher);
+    } else {
+        unavailable(
+            &mut events,
+            CapabilityId::PricingRefresher,
+            CapabilityReasonCode::DisabledByConfig,
+        );
+    }
     if inputs.midflight_monitor_constructed {
         ready(&mut events, CapabilityId::MidFlightMonitor);
     } else {
@@ -75,11 +81,15 @@ pub fn startup_activations(inputs: StartupCapabilityInputs) -> Vec<CapabilityAct
             CapabilityReasonCode::NoProductionConstructor,
         );
     }
-    unavailable(
-        &mut events,
-        CapabilityId::CooldownTracker,
-        CapabilityReasonCode::NoProductionConstructor,
-    );
+    if inputs.cooldown_tracker_constructed {
+        ready(&mut events, CapabilityId::CooldownTracker);
+    } else {
+        unavailable(
+            &mut events,
+            CapabilityId::CooldownTracker,
+            CapabilityReasonCode::NoProductionConstructor,
+        );
+    }
     unavailable(
         &mut events,
         CapabilityId::LearnedPolicy,
@@ -197,6 +207,8 @@ mod tests {
             memory_constructed: false,
             legacy_drafter_constructed: false,
             midflight_monitor_constructed: false,
+            pricing_refresher_constructed: false,
+            cooldown_tracker_constructed: false,
         });
         assert_legal_chains(&events);
         let statuses = final_statuses(&events);
@@ -220,6 +232,8 @@ mod tests {
             memory_constructed: true,
             legacy_drafter_constructed: true,
             midflight_monitor_constructed: true,
+            pricing_refresher_constructed: true,
+            cooldown_tracker_constructed: true,
         });
         assert_legal_chains(&events);
         let statuses = final_statuses(&events);
@@ -231,16 +245,19 @@ mod tests {
         ] {
             assert_eq!(statuses[&capability].stage, CapabilityStage::Ready);
         }
-        for capability in [
-            CapabilityId::PricingRefresher,
-            CapabilityId::CooldownTracker,
-            CapabilityId::LearnedPolicy,
-            CapabilityId::DelegateIsolation,
-        ] {
+        for capability in [CapabilityId::LearnedPolicy, CapabilityId::DelegateIsolation] {
             assert_eq!(statuses[&capability].stage, CapabilityStage::Unavailable);
         }
         assert_eq!(
             statuses[&CapabilityId::MidFlightMonitor].stage,
+            CapabilityStage::Ready
+        );
+        assert_eq!(
+            statuses[&CapabilityId::PricingRefresher].stage,
+            CapabilityStage::Ready
+        );
+        assert_eq!(
+            statuses[&CapabilityId::CooldownTracker].stage,
             CapabilityStage::Ready
         );
     }
@@ -254,6 +271,8 @@ mod tests {
             memory_constructed: false,
             legacy_drafter_constructed: false,
             midflight_monitor_constructed: true,
+            pricing_refresher_constructed: true,
+            cooldown_tracker_constructed: true,
         });
         assert_legal_chains(&events);
         let statuses = final_statuses(&events);
@@ -279,6 +298,8 @@ mod tests {
             memory_constructed: true,
             legacy_drafter_constructed: false,
             midflight_monitor_constructed: true,
+            pricing_refresher_constructed: false,
+            cooldown_tracker_constructed: true,
         });
         assert_legal_chains(&events);
         let statuses = final_statuses(&events);

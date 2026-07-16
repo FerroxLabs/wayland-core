@@ -206,11 +206,11 @@ fn classify_by_provider_error(err: &ProviderError) -> FailoverReason {
         ProviderError::Api { status, .. } => {
             classify_by_status(*status).unwrap_or(FailoverReason::Unknown)
         }
-        // Missing credential is a terminal config error, not a productive
-        // failover target — another provider has its own (also-required) key.
-        ProviderError::MissingApiKey | ProviderError::NotAttempted { .. } => {
-            FailoverReason::Unknown
-        }
+        // Missing credentials cannot heal without operator action. Cool down
+        // this provider/model candidate permanently while allowing another
+        // independently credentialed provider to be selected.
+        ProviderError::MissingApiKey => FailoverReason::AuthPermanent,
+        ProviderError::NotAttempted { .. } => FailoverReason::Unknown,
         // Flux capability / entitlement gates (402): terminal — not a
         // productive failover target; the typed message is surfaced to the user.
         ProviderError::PremiumLocked { .. }
@@ -764,11 +764,19 @@ mod tests {
     #[test]
     fn fallback_prompt_too_long_provider_error() {
         // PromptTooLong must map to ContextOverflow so downstream policy
-        // compacts / re-routes to a larger model instead of swapping provider.
+        // compacts or admits only a proven larger-context candidate.
         let err = ProviderError::PromptTooLong("too big".into());
         assert_eq!(
             classify_failover(&err, None, None, None),
             FailoverReason::ContextOverflow
+        );
+    }
+
+    #[test]
+    fn missing_api_key_is_permanent_for_that_candidate() {
+        assert_eq!(
+            classify_failover(&ProviderError::MissingApiKey, None, None, None),
+            FailoverReason::AuthPermanent
         );
     }
 

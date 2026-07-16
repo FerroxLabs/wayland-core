@@ -168,9 +168,9 @@ fn checked_corpus_matches_real_serializers_byte_for_byte() {
 }
 
 #[test]
-fn inventory_is_exactly_fifteen_commands_and_forty_four_events() {
+fn inventory_is_exactly_fifteen_commands_and_forty_five_events() {
     assert_eq!(COMMAND_SPECS.len(), 15);
-    assert_eq!(EVENT_SPECS.len(), 44);
+    assert_eq!(EVENT_SPECS.len(), 45);
     assert_eq!(
         COMMAND_SPECS
             .iter()
@@ -185,7 +185,7 @@ fn inventory_is_exactly_fifteen_commands_and_forty_four_events() {
             .map(|spec| spec.wire_type)
             .collect::<BTreeSet<_>>()
             .len(),
-        44
+        45
     );
 }
 
@@ -231,11 +231,11 @@ fn manifest_pins_generator_and_all_three_digests() {
         );
     }
     assert_eq!(manifest["contract"]["major"], 1);
-    assert_eq!(manifest["contract"]["minor"], 2);
+    assert_eq!(manifest["contract"]["minor"], 3);
     assert_eq!(manifest["commands"].as_array().unwrap().len(), 15);
-    assert_eq!(manifest["events"].as_array().unwrap().len(), 44);
+    assert_eq!(manifest["events"].as_array().unwrap().len(), 45);
     assert_eq!(manifest["counts"]["commands"], 15);
-    assert_eq!(manifest["counts"]["events"], 44);
+    assert_eq!(manifest["counts"]["events"], 45);
     assert_eq!(
         manifest["capabilities"]["contract_negotiation"],
         "available"
@@ -246,6 +246,10 @@ fn manifest_pins_generator_and_all_three_digests() {
     );
     assert_eq!(
         manifest["capabilities"]["workflow_lifecycle_v1"],
+        "available"
+    );
+    assert_eq!(
+        manifest["capabilities"]["semantic_failover_receipts"],
         "available"
     );
     assert_eq!(
@@ -359,6 +363,27 @@ fn generated_schemas_reject_malformed_authority_types_and_enums() {
         "retryable": "no"
     });
     assert!(!schema_accepts(&event_schema, &finished));
+
+    let mut failover = generated_json("events/provider_failover_receipt.json");
+    assert!(schema_accepts(&event_schema, &failover));
+    failover["receipt"]["candidates"][0]["disposition"] =
+        serde_json::json!({"Err": "tools_unsupported"});
+    failover["receipt"]["candidates"][0]["failure_reason"] =
+        Value::String("context_overflow".into());
+    failover["receipt"]["candidates"][0]["cooldown_reason"] = Value::String("rate_limit".into());
+    failover["receipt"]["candidates"][0]["pricing"]["age_seconds"] = Value::from(12_u64);
+    failover["receipt"]["selected_provider"] = Value::Null;
+    failover["receipt"]["selected_model"] = Value::Null;
+    assert!(
+        schema_accepts(&event_schema, &failover),
+        "receipt schema must accept typed rejection and reason evidence"
+    );
+    failover["receipt"]["candidates"][0]["disposition"] =
+        serde_json::json!({"Err": "silently_retry_anywhere"});
+    assert!(
+        !schema_accepts(&event_schema, &failover),
+        "receipt schema must reject unknown candidate dispositions"
+    );
 
     let command_schema = generated_json("schema/host-command.schema.json");
     let mut message = generated_json("commands/message.json");

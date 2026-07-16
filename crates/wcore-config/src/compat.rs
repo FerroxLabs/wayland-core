@@ -341,6 +341,19 @@ pub struct ProviderCompat {
     /// fireworks, nvidia, xai, qwen, groq, flux-router, mistral).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub supports_vision: Option<bool>,
+
+    /// Whether this provider/model contract accepts tool definitions and can
+    /// return tool calls. `None` is unknown and therefore fail-closed for a
+    /// fallback carrying tools; provider presets set this only where the wire
+    /// path is implemented and exercised.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub supports_tools: Option<bool>,
+
+    /// Whether this provider/model contract supports caller-constrained
+    /// structured output (for example JSON Schema response formats). Unknown
+    /// support is fail-closed whenever a request explicitly requires it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub supports_structured_output: Option<bool>,
 }
 
 impl ProviderCompat {
@@ -367,6 +380,9 @@ impl ProviderCompat {
             cost_per_cache_write_token: Some(18.75 / 1_000_000.0),
             // Crucible #3: Anthropic chat models accept an explicit temperature.
             supports_temperature: Some(true),
+            // Native Anthropic messages carry inline base64 image blocks.
+            supports_vision: Some(true),
+            supports_tools: Some(true),
             ..Default::default()
         }
     }
@@ -389,6 +405,7 @@ impl ProviderCompat {
             cost_per_cache_write_token: Some(18.75 / 1_000_000.0),
             // Crucible #3: Anthropic-on-Bedrock chat models accept temperature.
             supports_temperature: Some(true),
+            supports_tools: Some(true),
             ..Default::default()
         }
     }
@@ -482,6 +499,8 @@ impl ProviderCompat {
             // the served model's own ceiling when the field is absent, so an
             // unknown Gemini model with no explicit user cap may omit it.
             omit_max_tokens_when_unsized: Some(true),
+            supports_vision: Some(true),
+            supports_tools: Some(true),
             ..Default::default()
         }
     }
@@ -514,6 +533,8 @@ impl ProviderCompat {
             supports_temperature: Some(true),
             // #648: native OpenAI hosts vision models (gpt-4o family).
             supports_vision: Some(true),
+            supports_tools: Some(true),
+            supports_structured_output: Some(true),
             ..Default::default()
         }
     }
@@ -885,6 +906,10 @@ impl ProviderCompat {
                 .omit_max_tokens_when_unsized
                 .or(defaults.omit_max_tokens_when_unsized),
             supports_vision: user.supports_vision.or(defaults.supports_vision),
+            supports_tools: user.supports_tools.or(defaults.supports_tools),
+            supports_structured_output: user
+                .supports_structured_output
+                .or(defaults.supports_structured_output),
         }
     }
 
@@ -962,6 +987,14 @@ impl ProviderCompat {
     /// fireworks, nvidia, xai, qwen, groq, flux-router, mistral) set `true`.
     pub fn supports_vision(&self) -> bool {
         self.supports_vision.unwrap_or(false)
+    }
+
+    pub fn supports_tools(&self) -> bool {
+        self.supports_tools.unwrap_or(false)
+    }
+
+    pub fn supports_structured_output(&self) -> bool {
+        self.supports_structured_output.unwrap_or(false)
     }
 
     /// Whether to replay historical assistant `reasoning_content` on the Chat
@@ -2001,5 +2034,27 @@ mod input_optimization_tests {
             ProviderCompat::default(),
         );
         assert_eq!(merged_empty.omit_max_tokens_when_unsized, Some(true));
+    }
+
+    #[test]
+    fn failover_capability_presets_match_native_wire_support() {
+        let anthropic = ProviderCompat::anthropic_defaults();
+        assert!(anthropic.supports_tools());
+        assert!(anthropic.supports_vision());
+        assert!(!anthropic.supports_structured_output());
+
+        let gemini = ProviderCompat::gemini_defaults();
+        assert!(gemini.supports_tools());
+        assert!(gemini.supports_vision());
+
+        let openai = ProviderCompat::openai_defaults();
+        assert!(openai.supports_tools());
+        assert!(openai.supports_vision());
+        assert!(openai.supports_structured_output());
+
+        let unknown = ProviderCompat::default();
+        assert!(!unknown.supports_tools());
+        assert!(!unknown.supports_vision());
+        assert!(!unknown.supports_structured_output());
     }
 }

@@ -35,8 +35,16 @@ tokio::task_local! {
 }
 
 pub type ProviderAttemptObserver = Arc<dyn Fn(ProviderAttemptEvidence) + Send + Sync>;
-pub type ConfiguredFallbackAdmitter =
-    Arc<dyn Fn(&str, &str, &str, &str, bool) -> Result<(), ProviderError> + Send + Sync>;
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ConfiguredFallbackAdmission {
+    pub estimated_microcents: Option<u64>,
+}
+
+pub type ConfiguredFallbackAdmitter = Arc<
+    dyn Fn(&str, &str, &str, &str, bool) -> Result<ConfiguredFallbackAdmission, ProviderError>
+        + Send
+        + Sync,
+>;
 
 /// Run `future` with a task-local ceiling on provider retry counts.
 ///
@@ -89,20 +97,22 @@ pub fn admit_configured_fallback(
     next_provider: &str,
     next_model: &str,
     previous_attempted: bool,
-) -> Result<(), ProviderError> {
+) -> Result<ConfiguredFallbackAdmission, ProviderError> {
     CONFIGURED_FALLBACK_ADMITTER
         .try_with(|admitter| {
-            admitter.as_ref().map_or(Ok(()), |admitter| {
-                admitter(
-                    previous_provider,
-                    next_label,
-                    next_provider,
-                    next_model,
-                    previous_attempted,
-                )
-            })
+            admitter
+                .as_ref()
+                .map_or(Ok(ConfiguredFallbackAdmission::default()), |admitter| {
+                    admitter(
+                        previous_provider,
+                        next_label,
+                        next_provider,
+                        next_model,
+                        previous_attempted,
+                    )
+                })
         })
-        .unwrap_or(Ok(()))
+        .unwrap_or(Ok(ConfiguredFallbackAdmission::default()))
 }
 
 /// Whether a provider error proves no paid request could have been sent.

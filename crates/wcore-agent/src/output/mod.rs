@@ -211,6 +211,10 @@ pub trait OutputSink: Send + Sync {
     ) {
     }
 
+    /// Emit one complete F15 provider-selection receipt. Default no-op for
+    /// non-protocol sinks; JSON-stream output remains additive.
+    fn emit_provider_failover_receipt(&self, _receipt: serde_json::Value) {}
+
     /// Emit one physical provider attempt with its typed outcome. Default
     /// no-op for non-protocol sinks; JSON-stream output is always-on evidence.
     fn emit_provider_attempt(&self, _failure: Option<&str>) {}

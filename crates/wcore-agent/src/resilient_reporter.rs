@@ -11,7 +11,7 @@
 
 use std::sync::Arc;
 
-use wcore_providers::{CircuitReporter, CircuitState};
+use wcore_providers::{CircuitReporter, CircuitState, FailoverReceipt};
 
 use crate::output::OutputSink;
 
@@ -36,6 +36,15 @@ impl CircuitReporter for ProtocolCircuitReporter {
         self.output
             .emit_provider_circuit_event(primary, fallback, state.as_str(), error);
     }
+
+    fn report_failover(&self, receipt: &FailoverReceipt) {
+        match serde_json::to_value(receipt) {
+            Ok(receipt) => self.output.emit_provider_failover_receipt(receipt),
+            Err(error) => self.output.emit_info(&format!(
+                "provider failover receipt serialization failed: {error}"
+            )),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -50,6 +59,7 @@ mod tests {
     #[derive(Default)]
     struct Rec {
         events: Mutex<Vec<ReportedEvent>>,
+        receipts: Mutex<Vec<serde_json::Value>>,
     }
     impl OutputSink for Rec {
         fn emit_text_delta(&self, _: &str, _: &str) {}
@@ -84,6 +94,10 @@ mod tests {
                 error.map(String::from),
             ));
         }
+
+        fn emit_provider_failover_receipt(&self, receipt: serde_json::Value) {
+            self.receipts.lock().unwrap().push(receipt);
+        }
     }
 
     #[test]
@@ -113,5 +127,44 @@ mod tests {
         assert_eq!(events[0].2, "closed");
         assert!(events[0].1.is_none());
         assert!(events[0].3.is_none());
+    }
+
+    #[test]
+    fn serializes_typed_failover_receipt_without_losing_cost_or_reason() {
+        use wcore_providers::{CandidateReceipt, FailoverReason, PricingEvidence};
+
+        let rec = Arc::new(Rec::default());
+        let reporter = ProtocolCircuitReporter::new(rec.clone() as Arc<dyn OutputSink>);
+        let mut receipt =
+            FailoverReceipt::new(FailoverReason::RateLimit, "anthropic", "claude-sonnet-4-6");
+        receipt.candidates.push(CandidateReceipt {
+            provider: "openai".into(),
+            model: "gpt-5".into(),
+            region: Some("us-east".into()),
+            disposition: Ok(()),
+            failure_reason: None,
+            cooldown_reason: None,
+            retry_after_ms: Some(1_500),
+            pricing: PricingEvidence {
+                source: "cached_live".into(),
+                age_seconds: Some(30),
+                stale: false,
+                priced: true,
+                estimated_microcents: Some(4242),
+            },
+        });
+        receipt.selected_provider = Some("openai".into());
+        receipt.selected_model = Some("gpt-5".into());
+
+        reporter.report_failover(&receipt);
+
+        let receipts = rec.receipts.lock().unwrap();
+        assert_eq!(receipts.len(), 1);
+        assert_eq!(receipts[0]["reason"], "rate_limit");
+        assert_eq!(receipts[0]["selected_provider"], "openai");
+        assert_eq!(
+            receipts[0]["candidates"][0]["pricing"]["estimated_microcents"],
+            4242
+        );
     }
 }

@@ -5,8 +5,8 @@
 //! so this addition is purely additive and does not break the ABI.
 //!
 //! `ContextOverflow` is distinct from `Format`: recovery for ContextOverflow is
-//! "compact history or pick a larger-context model" rather than "swap provider"
-//! (matches openclaw's separate `context_overflow` classification).
+//! compaction or a policy-admitted model with a proven larger context window,
+//! never an arbitrary provider swap.
 
 use crate::ProviderError;
 use serde::{Deserialize, Serialize};
@@ -28,7 +28,7 @@ pub enum FailoverReason {
     ModelNotFound,
     SessionExpired,
     /// Prompt/context exceeded the model's window. Recovery is to compact or
-    /// route to a larger-context model — NOT to swap providers.
+    /// route only to a candidate with a proven larger context window.
     ContextOverflow,
     Unknown,
 }

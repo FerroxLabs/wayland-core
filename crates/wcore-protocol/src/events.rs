@@ -729,6 +729,12 @@ pub enum ProtocolEvent {
         #[serde(skip_serializing_if = "Option::is_none")]
         error: Option<String>,
     },
+    /// F15: deterministic provider-failover decision evidence. The provider
+    /// crate owns the typed receipt; the protocol carries its serialized shape
+    /// opaquely to preserve crate layering and forward-compatible decoding.
+    ProviderFailoverReceipt {
+        receipt: serde_json::Value,
+    },
     /// One physical provider request attempt. Always emitted so evaluators and
     /// hosts can distinguish real recovery from a fixture-side request count.
     /// Unknown hosts drop this additive event under the W0 decoder contract.
@@ -2001,6 +2007,37 @@ mod tests {
         assert_eq!(json["policy"]["trust"]["level"], "untrusted");
         assert_eq!(json["policy"]["trust"]["fingerprint"], "fingerprint");
         assert_eq!(json["policy"]["backend"], "bwrap");
+    }
+
+    #[test]
+    fn provider_failover_receipt_preserves_opaque_replay_shape() {
+        let receipt = serde_json::json!({
+            "reason": "rate_limit",
+            "failed_provider": "anthropic",
+            "failed_model": "claude-sonnet-4-6",
+            "candidates": [{
+                "provider": "openai",
+                "model": "gpt-5",
+                "disposition": { "Ok": null },
+                "pricing": {
+                    "source": "bundled",
+                    "stale": false,
+                    "priced": true,
+                    "estimated_microcents": 4242
+                }
+            }],
+            "selected_provider": "openai",
+            "selected_model": "gpt-5"
+        });
+        let event = ProtocolEvent::ProviderFailoverReceipt {
+            receipt: receipt.clone(),
+        };
+
+        let wire = serde_json::to_string(&event).unwrap();
+        let replayed: serde_json::Value = serde_json::from_str(&wire).unwrap();
+
+        assert_eq!(replayed["type"], "provider_failover_receipt");
+        assert_eq!(replayed["receipt"], receipt);
     }
 
     #[test]

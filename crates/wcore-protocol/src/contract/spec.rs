@@ -502,6 +502,14 @@ pub const EVENT_SPECS: &[WireSpec] = &[
         "available"
     ),
     wire!(
+        "provider_failover_receipt",
+        "events/provider_failover_receipt.json",
+        ["receipt"],
+        Safety,
+        "failed_provider_and_selected_provider",
+        "semantic_failover_receipts"
+    ),
+    wire!(
         "approval_required",
         "events/approval_required.json",
         ["call_id", "resume_token", "reason", "context"],
@@ -706,6 +714,7 @@ pub const PRODUCER_EVENT_TYPES: &[&str] = &[
     "workflow_finished",
     "tool_chunk",
     "provider_circuit_event",
+    "provider_failover_receipt",
     "provider_attempt",
     "provider_retry",
     "provider_failure",
@@ -1305,6 +1314,34 @@ pub fn event_fixture_values() -> BTreeMap<String, ProtocolEvent> {
                 fallback: Some("openai".into()),
                 state: "open".into(),
                 error: Some("timeout".into()),
+            },
+        ),
+        (
+            "events/provider_failover_receipt.json".into(),
+            ProtocolEvent::ProviderFailoverReceipt {
+                receipt: json!({
+                    "reason": "rate_limit",
+                    "failed_provider": "anthropic",
+                    "failed_model": "claude-sonnet-4-6",
+                    "candidates": [{
+                        "provider": "openai",
+                        "model": "gpt-5",
+                        "region": "us-east",
+                        "disposition": {"Ok": null},
+                        "failure_reason": null,
+                        "cooldown_reason": null,
+                        "retry_after_ms": null,
+                        "pricing": {
+                            "source": "bundled",
+                            "age_seconds": null,
+                            "stale": false,
+                            "priced": true,
+                            "estimated_microcents": 77
+                        }
+                    }],
+                    "selected_provider": "openai",
+                    "selected_model": "gpt-5"
+                }),
             },
         ),
         (

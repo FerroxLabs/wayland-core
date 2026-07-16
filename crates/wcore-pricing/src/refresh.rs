@@ -85,6 +85,23 @@ pub struct CachedCatalog {
     pub catalog: PricingCatalog,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PricingSnapshotSource {
+    Bundled,
+    Configured,
+    CachedLive,
+}
+
+#[derive(Debug, Clone)]
+pub struct PricingSnapshot {
+    pub catalog: PricingCatalog,
+    pub source: PricingSnapshotSource,
+    pub fetched_at: Option<DateTime<Utc>>,
+    pub stale: bool,
+    pub fallback_reason: Option<String>,
+}
+
 /// HTTP fetcher with a configurable base URL (for testability).
 pub struct PricingRefresher {
     base_url: String,
@@ -124,16 +141,27 @@ impl PricingRefresher {
         &self,
         path: &std::path::Path,
     ) -> Result<Option<PricingCatalog>, RefreshError> {
+        Ok(self
+            .load_cached_at(path, Utc::now())?
+            .map(|cached| cached.catalog))
+    }
+
+    /// Deterministic cache load used by the F15 fake-time matrix.
+    pub fn load_cached_at(
+        &self,
+        path: &std::path::Path,
+        now: DateTime<Utc>,
+    ) -> Result<Option<CachedCatalog>, RefreshError> {
         if !path.exists() {
             return Ok(None);
         }
         let raw = std::fs::read_to_string(path)?;
         let cached: CachedCatalog = serde_json::from_str(&raw)?;
-        let age = Utc::now().signed_duration_since(cached.fetched_at);
+        let age = now.signed_duration_since(cached.fetched_at);
         if age.num_seconds().unsigned_abs() > self.ttl.as_secs() {
             return Ok(None);
         }
-        Ok(Some(cached.catalog))
+        Ok(Some(cached))
     }
 
     /// Save a catalog snapshot to disk with current timestamp.
@@ -142,16 +170,69 @@ impl PricingRefresher {
         path: &std::path::Path,
         catalog: &PricingCatalog,
     ) -> Result<(), RefreshError> {
+        self.save_snapshot_at(path, catalog, Utc::now())
+    }
+
+    pub fn save_snapshot_at(
+        &self,
+        path: &std::path::Path,
+        catalog: &PricingCatalog,
+        fetched_at: DateTime<Utc>,
+    ) -> Result<(), RefreshError> {
         let cached = CachedCatalog {
-            fetched_at: Utc::now(),
+            fetched_at,
             catalog: catalog.clone(),
         };
         let s = serde_json::to_string_pretty(&cached)?;
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        std::fs::write(path, s)?;
+        wcore_config::atomic_io::atomic_write(path, s.as_bytes())?;
         Ok(())
+    }
+
+    /// Resolve a catalog without silently trusting stale or corrupt live data.
+    /// The live cache is considered only after explicit operator opt-in.
+    pub fn resolve_snapshot_at(
+        &self,
+        fallback: PricingCatalog,
+        fallback_source: PricingSnapshotSource,
+        cache_path: &std::path::Path,
+        now: DateTime<Utc>,
+        live_cache_enabled: bool,
+    ) -> PricingSnapshot {
+        if !live_cache_enabled {
+            return PricingSnapshot {
+                catalog: fallback,
+                source: fallback_source,
+                fetched_at: None,
+                stale: false,
+                fallback_reason: Some("live pricing cache disabled by operator policy".into()),
+            };
+        }
+        match self.load_cached_at(cache_path, now) {
+            Ok(Some(cached)) => PricingSnapshot {
+                catalog: cached.catalog,
+                source: PricingSnapshotSource::CachedLive,
+                fetched_at: Some(cached.fetched_at),
+                stale: false,
+                fallback_reason: None,
+            },
+            Ok(None) => PricingSnapshot {
+                catalog: fallback,
+                source: fallback_source,
+                fetched_at: None,
+                stale: false,
+                fallback_reason: Some("live pricing cache missing or stale".into()),
+            },
+            Err(error) => PricingSnapshot {
+                catalog: fallback,
+                source: fallback_source,
+                fetched_at: None,
+                stale: false,
+                fallback_reason: Some(format!("live pricing cache rejected: {error}")),
+            },
+        }
     }
 
     /// Compute pricing deltas between two catalogs.
@@ -266,6 +347,7 @@ pub fn default_cache_path() -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chrono::TimeZone;
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
@@ -433,6 +515,64 @@ output_per_mtok_usd = 75.0
         let path = tmp.path().join("does-not-exist.json");
         let refresher = PricingRefresher::default();
         assert!(refresher.load_cached(&path).unwrap().is_none());
+    }
+
+    #[test]
+    fn snapshot_selection_uses_fake_time_and_falls_back_from_stale_cache() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("pricing.json");
+        let fallback = PricingCatalog::from_toml_str(
+            "[fallback.model]\ninput_per_mtok_usd=1.0\noutput_per_mtok_usd=2.0\n",
+        )
+        .unwrap();
+        let live = PricingCatalog::from_toml_str(
+            "[live.model]\ninput_per_mtok_usd=3.0\noutput_per_mtok_usd=4.0\n",
+        )
+        .unwrap();
+        let fetched_at = Utc.with_ymd_and_hms(2026, 7, 1, 0, 0, 0).unwrap();
+        let refresher = PricingRefresher::default();
+        refresher
+            .save_snapshot_at(&path, &live, fetched_at)
+            .unwrap();
+
+        let fresh = refresher.resolve_snapshot_at(
+            fallback.clone(),
+            PricingSnapshotSource::Bundled,
+            &path,
+            fetched_at + chrono::Duration::hours(23),
+            true,
+        );
+        assert_eq!(fresh.source, PricingSnapshotSource::CachedLive);
+        assert!(fresh.catalog.providers.contains_key("live"));
+
+        let stale = refresher.resolve_snapshot_at(
+            fallback,
+            PricingSnapshotSource::Bundled,
+            &path,
+            fetched_at + chrono::Duration::hours(25),
+            true,
+        );
+        assert_eq!(stale.source, PricingSnapshotSource::Bundled);
+        assert!(stale.catalog.providers.contains_key("fallback"));
+        assert!(stale.fallback_reason.unwrap().contains("stale"));
+    }
+
+    #[test]
+    fn disabled_live_cache_never_changes_catalog() {
+        let tmp = tempfile::tempdir().unwrap();
+        let fallback = PricingCatalog::from_toml_str(
+            "[fallback.model]\ninput_per_mtok_usd=1.0\noutput_per_mtok_usd=2.0\n",
+        )
+        .unwrap();
+        let snapshot = PricingRefresher::default().resolve_snapshot_at(
+            fallback,
+            PricingSnapshotSource::Configured,
+            &tmp.path().join("unused.json"),
+            Utc.with_ymd_and_hms(2026, 7, 1, 0, 0, 0).unwrap(),
+            false,
+        );
+        assert_eq!(snapshot.source, PricingSnapshotSource::Configured);
+        assert!(snapshot.catalog.providers.contains_key("fallback"));
     }
 
     #[test]

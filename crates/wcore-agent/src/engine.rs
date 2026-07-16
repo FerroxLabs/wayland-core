@@ -9625,7 +9625,12 @@ impl AgentEngine {
                         state.current = next_reservation;
                         state.current_provider = next_provider.to_string();
                         state.current_model = next_model.to_string();
-                        Ok(())
+                        Ok(wcore_providers::retry::ConfiguredFallbackAdmission {
+                            estimated_microcents: next_cost.priced.then(|| {
+                                (next_cost.usd * wcore_types::crucible::MICROCENTS_PER_USD).round()
+                                    as u64
+                            }),
+                        })
                     });
 
                 // P1 Bug#3 — `stream()` can surface a *retryable*

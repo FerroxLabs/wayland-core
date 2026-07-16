@@ -17,12 +17,12 @@ use super::spec::{
 };
 
 pub const CONTRACT_NAME: &str = "wayland-desktop-core";
-pub const GENERATOR_VERSION: &str = "wcore-desktop-contract-gen/3";
+pub const GENERATOR_VERSION: &str = "wcore-desktop-contract-gen/4";
 pub const CONTRACT_ROOT: &str = "contracts/desktop/v1";
 
 const DEFERRED: &str = r#"# Deferred Desktop contract adversarial cases
 
-This v1.2 corpus records the current producer wire. Contract negotiation,
+This v1.3 corpus records the current producer wire. Contract negotiation,
 unknown-critical rejection, and unknown-noncritical dropping are live and
 proved by serialized replay through the reference host observer.
 
@@ -534,6 +534,123 @@ fn child_terminal_conditions() -> Value {
     ])
 }
 
+fn failover_reason_schema() -> Value {
+    json!({
+        "enum": [
+            "auth",
+            "auth_permanent",
+            "format",
+            "rate_limit",
+            "overloaded",
+            "billing",
+            "timeout",
+            "model_not_found",
+            "session_expired",
+            "context_overflow",
+            "unknown"
+        ],
+        "type": "string"
+    })
+}
+
+fn nullable_schema(schema: Value) -> Value {
+    json!({"oneOf": [schema, {"type": "null"}]})
+}
+
+fn provider_failover_receipt_schema() -> Value {
+    let disposition = json!({
+        "oneOf": [
+            {
+                "additionalProperties": false,
+                "properties": {"Ok": {"type": "null"}},
+                "required": ["Ok"],
+                "type": "object"
+            },
+            {
+                "additionalProperties": false,
+                "properties": {
+                    "Err": {
+                        "enum": [
+                            "provider_not_allowed",
+                            "provider_denied",
+                            "region_not_allowed",
+                            "organization_mismatch",
+                            "tools_unsupported",
+                            "vision_unsupported",
+                            "structured_output_unsupported",
+                            "context_window_unknown",
+                            "context_window_too_small",
+                            "pricing_stale",
+                            "pricing_unavailable",
+                            "cooldown_active",
+                            "budget_denied"
+                        ],
+                        "type": "string"
+                    }
+                },
+                "required": ["Err"],
+                "type": "object"
+            }
+        ]
+    });
+    let pricing = json!({
+        "additionalProperties": false,
+        "properties": {
+            "source": {"type": "string"},
+            "age_seconds": nullable_schema(json!({"minimum": 0, "type": "integer"})),
+            "stale": {"type": "boolean"},
+            "priced": {"type": "boolean"},
+            "estimated_microcents": nullable_schema(json!({"minimum": 0, "type": "integer"}))
+        },
+        "required": ["source", "age_seconds", "stale", "priced", "estimated_microcents"],
+        "type": "object"
+    });
+    let candidate = json!({
+        "additionalProperties": false,
+        "properties": {
+            "provider": {"type": "string"},
+            "model": {"type": "string"},
+            "region": nullable_schema(json!({"type": "string"})),
+            "disposition": disposition,
+            "failure_reason": nullable_schema(failover_reason_schema()),
+            "cooldown_reason": nullable_schema(failover_reason_schema()),
+            "retry_after_ms": nullable_schema(json!({"minimum": 0, "type": "integer"})),
+            "pricing": pricing
+        },
+        "required": [
+            "provider",
+            "model",
+            "region",
+            "disposition",
+            "failure_reason",
+            "cooldown_reason",
+            "retry_after_ms",
+            "pricing"
+        ],
+        "type": "object"
+    });
+    json!({
+        "additionalProperties": false,
+        "properties": {
+            "reason": failover_reason_schema(),
+            "failed_provider": {"type": "string"},
+            "failed_model": {"type": "string"},
+            "candidates": {"items": candidate, "type": "array"},
+            "selected_provider": nullable_schema(json!({"type": "string"})),
+            "selected_model": nullable_schema(json!({"type": "string"}))
+        },
+        "required": [
+            "reason",
+            "failed_provider",
+            "failed_model",
+            "candidates",
+            "selected_provider",
+            "selected_model"
+        ],
+        "type": "object"
+    })
+}
+
 fn schema_branch(spec: &WireSpec, fixture: &Value) -> Value {
     let object = fixture
         .as_object()
@@ -628,6 +745,11 @@ fn schema_branch(spec: &WireSpec, fixture: &Value) -> Value {
             properties
                 .entry("terminal_state")
                 .or_insert_with(|| json!({"enum": ["succeeded", "failed"], "type": "string"}));
+        }
+        "provider_failover_receipt" => {
+            properties
+                .entry("receipt")
+                .and_modify(|schema| *schema = provider_failover_receipt_schema());
         }
         "anvil_receipt" => {
             properties
@@ -854,6 +976,10 @@ fn contract_capabilities() -> BTreeMap<String, ContractCapabilityStatus> {
         ),
         ("plugin_events".into(), ContractCapabilityStatus::ShapeOnly),
         (
+            "semantic_failover_receipts".into(),
+            ContractCapabilityStatus::Available,
+        ),
+        (
             "turn_recovery_v1".into(),
             ContractCapabilityStatus::Available,
         ),
@@ -877,7 +1003,7 @@ fn descriptor(
     ContractDescriptor {
         name: CONTRACT_NAME.into(),
         major: 1,
-        minor: 2,
+        minor: 3,
         generator: GENERATOR_VERSION.into(),
         fixture_digest,
         schema_digest,
@@ -1222,13 +1348,13 @@ pub fn generated_artifacts() -> ContractResult<BTreeMap<String, Vec<u8>>> {
         COMMAND_SPECS,
         &command_schema_fixtures,
         None,
-        "Desktop-consumed HostCommand v1.2",
+        "Desktop-consumed HostCommand v1.3",
     );
     let event_schema = schema_for(
         EVENT_SPECS,
         &event_schema_fixtures,
         legacy_child,
-        "Desktop-consumed CoreEvent v1.2",
+        "Desktop-consumed CoreEvent v1.3",
     );
     artifacts.insert(
         "schema/host-command.schema.json".into(),
@@ -1280,7 +1406,7 @@ pub fn generated_artifacts() -> ContractResult<BTreeMap<String, Vec<u8>>> {
             "events": EVENT_SPECS.len(),
             "fixtures": fixture_inventory.len()
         },
-        "contract": {"major": 1, "minor": 2, "name": CONTRACT_NAME},
+        "contract": {"major": 1, "minor": 3, "name": CONTRACT_NAME},
         "deferred_adversarial": [
             "ordinary_turn_tool_replay_reducer",
             "anvil_desktop_replay_reducer",
@@ -1294,6 +1420,7 @@ pub fn generated_artifacts() -> ContractResult<BTreeMap<String, Vec<u8>>> {
             "anvil_receipts": "1.0",
             "execution_policy": "1.0",
             "operator_tool_effect_resolution": "1.0",
+            "semantic_failover_receipts": "1.0",
             "turn_recovery": "1.0",
             "workflow_lifecycle": "1.0"
         },

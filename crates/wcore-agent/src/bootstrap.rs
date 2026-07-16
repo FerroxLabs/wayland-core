@@ -7,7 +7,10 @@ use wcore_config::config::Config;
 use wcore_mcp::manager::McpManager;
 use wcore_observability::sink::SpanSink;
 use wcore_plugin_api::registry::providers::PluginProvider;
-use wcore_providers::{CircuitConfig, LlmProvider, ResilientProvider};
+use wcore_providers::{
+    CandidateCapabilities, CircuitConfig, FailoverCandidateMetadata, FailoverRoutingPolicy,
+    LlmProvider, PricingEvidence, ResilientProvider,
+};
 use wcore_types::execution_policy::{
     ApprovalPolicy, BaselineExecutionPolicy, DangerousSessionGrant, EffectiveExecutionPolicy,
     PolicySource,
@@ -874,23 +877,22 @@ impl AgentBootstrap {
             } else {
                 Arc::new(wcore_providers::NoOpCircuitReporter)
             };
-        // Rank 20: feed the fallback chain. Each configured `fallback_models`
-        // entry that resolves to the SAME provider as the primary (a cheaper /
-        // alternate model on the same endpoint) is built via the same
-        // `create_native_provider` path and handed to `ResilientProvider`, so
-        // the failover machinery is reachable instead of dead. Cross-provider
-        // entries (a different `<provider>:` prefix) are skipped with a warning
-        // — they need their own credential/base-url resolution (follow-up).
-        // No fallbacks configured → empty Vec, identical to prior behaviour.
-        let fallbacks = build_fallback_providers(&self.config);
-        let provider: Arc<dyn LlmProvider> =
-            Arc::new(ResilientProvider::new_with_fallback_identities(
-                self.config.provider_label.clone(),
-                primary_provider,
-                fallbacks,
-                cfg,
-                reporter,
-            ));
+        // Rank 20: feed the fallback chain. Every configured candidate is
+        // paired with its independently resolved provider configuration, then
+        // admitted by semantic compatibility, policy, health, and budget.
+        // No fallbacks configured means an empty chain, preserving the prior
+        // circuit-breaker-only behavior.
+        refresh_pricing_cache_if_enabled(&self.config).await;
+        let fallbacks = build_fallback_providers(&self.config)?;
+        let policy = failover_routing_policy(&self.config);
+        let provider: Arc<dyn LlmProvider> = Arc::new(ResilientProvider::new_with_policy(
+            self.config.provider_label.clone(),
+            primary_provider,
+            fallbacks,
+            cfg,
+            reporter,
+            policy,
+        ));
 
         // #182: honor `[tools] windows_shell` for the BashTool interpreter on
         // Windows (set once at boot; WAYLAND_BASH_SHELL env still overrides).
@@ -2555,6 +2557,7 @@ impl AgentBootstrap {
             capabilities: workspace_policy.developer_capabilities(),
         };
 
+        let pricing_refresher_constructed = self.config.provider_chain.enabled;
         let mut engine = if let Some(session) = self.resume_session {
             AgentEngine::resume_active_with_provider(
                 provider.clone(),
@@ -2690,6 +2693,8 @@ impl AgentBootstrap {
                 memory_constructed,
                 legacy_drafter_constructed: engine.skill_drafter().is_some(),
                 midflight_monitor_constructed: engine.midflight_monitor_constructed(),
+                pricing_refresher_constructed,
+                cooldown_tracker_constructed: true,
             },
         );
 
@@ -3595,12 +3600,11 @@ fn xai_oauth_available() -> bool {
 ///
 /// Builds the inner provider via [`build_native_or_chatgpt_provider`] (so the
 /// `OpenAIChatGpt` OAuth case is handled instead of panicking in the factory),
-/// then wraps it in a [`ResilientProvider`] with the SAME configuration
-/// `create_provider` applies: an empty fallback chain and a
-/// [`NoOpCircuitReporter`], with circuit thresholds read from
-/// `config.provider_chain`. For every non-OAuth provider the result is
-/// byte-for-byte what `create_provider` returned — the only difference is the
-/// chatgpt arm no longer hits the `create_native_provider` panic.
+/// then wraps it in a [`ResilientProvider`] with resolved fallback candidates,
+/// the configured routing policy, and a [`NoOpCircuitReporter`]. Callers that
+/// own an output sink construct the wrapper directly so failover receipts are
+/// emitted on that sink. For every non-OAuth provider, only the OAuth-aware
+/// construction seam differs from the native factory.
 ///
 /// This is the entry point the CLI runtime rebind path
 /// (`/provider`, `/profile`, post-onboarding + disk re-resolve) calls in place
@@ -3613,69 +3617,165 @@ pub fn create_provider_with_oauth(config: &Config) -> anyhow::Result<Arc<dyn Llm
         window: Duration::from_secs(config.provider_chain.recovery_timeout_secs),
         cooldown: Duration::from_secs(config.provider_chain.recovery_timeout_secs),
     };
-    Ok(Arc::new(ResilientProvider::new(
+    Ok(Arc::new(ResilientProvider::new_with_policy(
         config.provider_label.clone(),
         inner,
-        Vec::new(),
+        build_fallback_providers(config)?,
         cfg,
         Arc::new(wcore_providers::NoOpCircuitReporter),
+        failover_routing_policy(config),
     )))
 }
 
 /// Rank 20: build the fallback provider chain fed to `ResilientProvider`.
 ///
-/// Each `provider_chain.fallback_models` entry is turned into a concrete
-/// `(label, Arc<dyn LlmProvider>)` by cloning the primary's `Config` with only
-/// the `model` field swapped, then routing it through the SAME
-/// `create_native_provider` path as the primary. The clone keeps the primary's
-/// resolved provider type, credentials, and base URL, so a fallback is a
-/// cheaper / alternate model on the SAME endpoint.
-///
-/// A fallback string carrying a `<provider>:<role>` short-form whose provider
-/// prefix names a DIFFERENT provider than the primary (e.g. primary
-/// `anthropic`, fallback `openai:gpt4o`) is skipped with a warning —
-/// cross-provider failover needs its own credential / base-url resolution and
-/// is reserved for a follow-up. A bare literal (no recognised prefix) or a
-/// prefix matching the primary is treated as same-provider.
+/// Each `provider_chain.fallback_models` entry is paired with the independently
+/// resolved config produced by `Config::resolve`: same-provider entries retain
+/// the active endpoint and credentials, while cross-provider entries use that
+/// provider's own credentials, compatibility profile, organization and region.
+/// Every candidate is constructed through the same OAuth-aware provider path
+/// as the primary and carries typed admission metadata.
 ///
 /// No `fallback_models` configured → empty `Vec`, byte-for-byte the prior
 /// (circuit-breaker-only) behaviour.
 fn build_fallback_providers(
     config: &Config,
-) -> Vec<(String, String, String, Arc<dyn LlmProvider>)> {
-    let primary_label = config.provider_label.as_str();
-    let mut fallbacks = Vec::new();
-    for entry in &config.provider_chain.fallback_models {
-        let entry = entry.trim();
-        if entry.is_empty() {
-            continue;
-        }
-        // Detect a cross-provider short-form: a `<prefix>:<role>` whose prefix
-        // is a recognised provider name that differs from the primary's.
-        if let Some((prefix, _role)) = entry.split_once(':')
-            && wcore_types::model_aliases::known_providers().contains(&prefix)
-            && prefix != primary_label
-        {
-            tracing::warn!(
-                fallback = %entry,
-                primary = %primary_label,
-                "skipping cross-provider fallback model: only same-provider \
-                 fallbacks are wired today (needs separate credential resolution)"
-            );
-            continue;
-        }
-        // Expand a same-provider short-form to its canonical id; a bare literal
-        // flows through unchanged.
-        let model = wcore_types::model_aliases::expand_short_form(entry)
-            .map(str::to_string)
-            .unwrap_or_else(|| entry.to_string());
-        let mut fb_config = config.clone();
-        fb_config.model = model.clone();
-        let pricing_provider = fb_config.compat.provider_type().to_string();
-        let provider = wcore_providers::create_native_provider(&fb_config);
-        fallbacks.push((entry.to_string(), pricing_provider, model, provider));
+) -> anyhow::Result<Vec<(FailoverCandidateMetadata, Arc<dyn LlmProvider>)>> {
+    if !config.provider_chain.enabled {
+        return Ok(Vec::new());
     }
-    fallbacks
+
+    let labels: Vec<&str> = config
+        .provider_chain
+        .fallback_models
+        .iter()
+        .map(|entry| entry.trim())
+        .filter(|entry| !entry.is_empty())
+        .collect();
+    anyhow::ensure!(
+        labels.len() == config.resolved_fallbacks.len(),
+        "fallback configuration resolution mismatch: {} labels, {} resolved configs",
+        labels.len(),
+        config.resolved_fallbacks.len()
+    );
+
+    let refresher = wcore_pricing::PricingRefresher::default();
+    let fallback_source = if std::env::var_os("WAYLAND_PRICING_PATH").is_some() {
+        wcore_pricing::PricingSnapshotSource::Configured
+    } else {
+        wcore_pricing::PricingSnapshotSource::Bundled
+    };
+    let live_cache_enabled = pricing_auto_refresh_enabled();
+    let snapshot = refresher.resolve_snapshot_at(
+        wcore_pricing::PricingCatalog::load_default()?,
+        fallback_source,
+        &wcore_pricing::default_cache_path(),
+        chrono::Utc::now(),
+        live_cache_enabled,
+    );
+    let source = match snapshot.source {
+        wcore_pricing::PricingSnapshotSource::Bundled => "bundled",
+        wcore_pricing::PricingSnapshotSource::Configured => "configured",
+        wcore_pricing::PricingSnapshotSource::CachedLive => "cached_live",
+    };
+    let age_seconds = snapshot.fetched_at.map(|fetched_at| {
+        chrono::Utc::now()
+            .signed_duration_since(fetched_at)
+            .num_seconds()
+            .max(0) as u64
+    });
+
+    let mut fallbacks = Vec::new();
+    for (entry, fallback) in labels.into_iter().zip(&config.resolved_fallbacks) {
+        let provider_name = fallback.compat.provider_type().to_string();
+        let status = snapshot
+            .catalog
+            .estimate_cost_status(&provider_name, &fallback.model, 0, 0)
+            .ok();
+        let metadata = FailoverCandidateMetadata {
+            label: entry.to_string(),
+            provider: provider_name.clone(),
+            model: fallback.model.clone(),
+            organization: fallback.provider_organization.clone(),
+            region: fallback.provider_region.clone(),
+            capabilities: CandidateCapabilities {
+                tools: fallback.compat.supports_tools(),
+                vision: fallback.compat.supports_vision(),
+                structured_output: fallback.compat.supports_structured_output(),
+                context_window: wcore_config::limits::model_output_ceiling(
+                    &provider_name,
+                    &fallback.model,
+                )
+                .map(|(_, window)| u64::from(window)),
+            },
+            pricing: PricingEvidence {
+                source: source.into(),
+                age_seconds,
+                stale: snapshot.stale,
+                priced: status.is_some_and(|status| status.priced),
+                estimated_microcents: status.map(|status| status.microcents),
+            },
+        };
+        fallbacks.push((metadata, build_native_or_chatgpt_provider(fallback)?));
+    }
+    Ok(fallbacks)
+}
+
+/// Refresh the opt-in live pricing cache before failover candidates snapshot
+/// their cost evidence. A fresh cache avoids network work; any fetch or write
+/// failure degrades to the trusted configured/bundled catalog in
+/// `build_fallback_providers` and is never treated as fresh live evidence.
+async fn refresh_pricing_cache_if_enabled(config: &Config) {
+    if !config.provider_chain.enabled || !pricing_auto_refresh_enabled() {
+        return;
+    }
+    let refresher = wcore_pricing::PricingRefresher::default();
+    let cache_path = wcore_pricing::default_cache_path();
+    if matches!(refresher.load_cached(&cache_path), Ok(Some(_))) {
+        return;
+    }
+    match refresher.fetch_live().await {
+        Ok(catalog) => {
+            if let Err(error) = refresher.save_snapshot(&cache_path, &catalog) {
+                tracing::warn!(%error, "live pricing fetched but cache publication failed; using trusted fallback catalog");
+            }
+        }
+        Err(error) => {
+            tracing::warn!(%error, "live pricing refresh failed; using trusted fallback catalog");
+        }
+    }
+}
+
+fn pricing_auto_refresh_enabled() -> bool {
+    std::env::var("WAYLAND_PRICING_AUTO_REFRESH")
+        .ok()
+        .is_some_and(|value| matches!(value.to_ascii_lowercase().as_str(), "1" | "on" | "true"))
+}
+
+fn failover_routing_policy(config: &Config) -> FailoverRoutingPolicy {
+    FailoverRoutingPolicy {
+        allowed_providers: config
+            .provider_policy
+            .allowed_providers
+            .iter()
+            .cloned()
+            .collect(),
+        denied_providers: config
+            .provider_policy
+            .denied_providers
+            .iter()
+            .cloned()
+            .collect(),
+        allowed_regions: config
+            .provider_policy
+            .allowed_regions
+            .iter()
+            .cloned()
+            .collect(),
+        organization: config.provider_policy.organization.clone(),
+        require_fresh_pricing: config.provider_policy.require_fresh_pricing,
+        require_priced: config.provider_policy.require_priced,
+    }
 }
 
 #[cfg(test)]
@@ -3689,15 +3789,38 @@ mod fallback_pricing_identity_tests {
             compat: wcore_config::compat::ProviderCompat::anthropic_defaults(),
             ..Default::default()
         };
+        config.provider_chain.enabled = true;
         config.provider_chain.fallback_models = vec!["claude-haiku-4-5".into()];
+        let mut fallback = config.clone();
+        fallback.model = "claude-haiku-4-5".into();
+        fallback.resolved_fallbacks.clear();
+        config.resolved_fallbacks = vec![fallback];
 
-        let fallbacks = build_fallback_providers(&config);
+        let fallbacks = build_fallback_providers(&config).unwrap();
 
         assert_eq!(fallbacks.len(), 1);
-        let (label, pricing_provider, model, _) = &fallbacks[0];
-        assert_eq!(label, "claude-haiku-4-5");
-        assert_eq!(pricing_provider, "anthropic");
-        assert_eq!(model, "claude-haiku-4-5");
+        let (metadata, _) = &fallbacks[0];
+        assert_eq!(metadata.label, "claude-haiku-4-5");
+        assert_eq!(metadata.provider, "anthropic");
+        assert_eq!(metadata.model, "claude-haiku-4-5");
+        assert!(metadata.capabilities.tools);
+    }
+
+    #[test]
+    fn fallback_resolution_mismatch_fails_closed() {
+        let mut config = Config::default();
+        config.provider_chain.enabled = true;
+        config.provider_chain.fallback_models = vec!["claude-haiku-4-5".into()];
+
+        let error = build_fallback_providers(&config)
+            .err()
+            .expect("unresolved fallback must be rejected");
+
+        assert!(
+            error
+                .to_string()
+                .contains("fallback configuration resolution mismatch")
+        );
     }
 }
 

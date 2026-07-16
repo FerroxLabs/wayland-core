@@ -13,6 +13,7 @@ pub mod cohere;
 pub mod cooldown;
 pub mod deepseek;
 pub mod failover;
+pub mod failover_policy;
 pub mod fingerprint;
 pub mod fireworks;
 pub mod flux_fetch;
@@ -58,8 +59,16 @@ pub use catalog::{CatalogProviderConfig, provider_for_entry, register_catalog};
 // `LlmRequest`. Re-exported here for backward compatibility.
 pub use chain::{ProviderChain, ProviderSlot};
 pub use classify::classify_failover;
-pub use cooldown::{CooldownClass, CooldownState, CooldownTracker};
+pub use cooldown::{
+    CooldownClass, CooldownClock, CooldownPermit, CooldownState, CooldownTracker,
+    SystemCooldownClock,
+};
 pub use failover::{FailoverError, FailoverReason, wrap_provider_error};
+pub use failover_policy::{
+    CandidateCapabilities, CandidateReceipt, CandidateRejection, FailoverCandidateMetadata,
+    FailoverReceipt, FailoverRoutingPolicy, PricingEvidence, RequestRequirements,
+    evaluate_candidate,
+};
 pub use key_rotation::{KeyPool, split_keys};
 pub use openai::{AsyncTokenSource, OpenAIProvider, is_flux_tier_alias};
 pub use openai_chatgpt::{AsyncBearerSource, BearerCreds, OpenAIChatGptProvider};

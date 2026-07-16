@@ -348,6 +348,11 @@ pub struct ConfigFile {
     #[serde(default)]
     pub provider_chain: ProviderChainConfig,
 
+    /// Administrator-owned provider routing floor. Project files cannot set
+    /// or relax it; merge retains only the global value.
+    #[serde(default)]
+    pub provider_policy: ProviderRoutingPolicyConfig,
+
     /// W8a A.5: ExecutionBudget caps (wall-time/tool-runtime/processes/
     /// agent-depth/tokens/cost). All fields default to `None` = no cap.
     /// Wired through bootstrap into `ExecutionBudgetView` in A.6.
@@ -543,9 +548,9 @@ pub struct ProviderChainConfig {
     /// Only fallbacks that resolve to the **same provider** as the primary
     /// (a cheaper / alternate model on the same endpoint) are wired today:
     /// they reuse the primary's resolved credentials and base URL. Entries
-    /// that name a different provider are skipped at bootstrap with a warning
-    /// — cross-provider failover needs its own credential resolution and is
-    /// reserved for a follow-up.
+    /// that name a different provider are resolved against that provider's
+    /// own credentials, endpoint, compatibility profile, organization, and
+    /// region before bootstrap constructs the chain.
     #[serde(default)]
     pub fallback_models: Vec<String>,
 }
@@ -559,6 +564,24 @@ impl Default for ProviderChainConfig {
             fallback_models: Vec::new(),
         }
     }
+}
+
+/// Trusted global ceiling for provider failover. Project configuration may
+/// choose a narrower fallback list, but it cannot widen these organization,
+/// provider, region, or pricing requirements.
+#[derive(Debug, Clone, Deserialize, Serialize, Default, PartialEq, Eq)]
+pub struct ProviderRoutingPolicyConfig {
+    #[serde(default)]
+    pub allowed_providers: Vec<String>,
+    #[serde(default)]
+    pub denied_providers: Vec<String>,
+    #[serde(default)]
+    pub allowed_regions: Vec<String>,
+    pub organization: Option<String>,
+    #[serde(default)]
+    pub require_fresh_pricing: bool,
+    #[serde(default)]
+    pub require_priced: bool,
 }
 
 fn default_failure_threshold() -> u32 {
@@ -851,6 +874,9 @@ pub struct ProviderConfig {
     pub model: Option<String>,
     pub api_key: Option<String>,
     pub base_url: Option<String>,
+    /// Routing-policy metadata, not a credential or provider wire header.
+    pub organization: Option<String>,
+    pub region: Option<String>,
     /// Enable prompt caching (Anthropic only, default: true). Accepts the
     /// legacy bool form or the detailed `[providers.<name>.prompt_caching]`
     /// table — see [`PromptCachingConfig`].
@@ -866,6 +892,8 @@ pub struct ProfileConfig {
     pub model: Option<String>,
     pub api_key: Option<String>,
     pub base_url: Option<String>,
+    pub organization: Option<String>,
+    pub region: Option<String>,
     pub max_tokens: Option<u32>,
     pub max_turns: Option<usize>,
     /// Inherit settings from another profile
@@ -1073,6 +1101,8 @@ pub struct Config {
     pub provider: ProviderType,
     pub api_key: String,
     pub base_url: String,
+    pub provider_organization: Option<String>,
+    pub provider_region: Option<String>,
     /// B2 — egress security policy (allowlist + on/off). See [`SecurityConfig`].
     pub security: SecurityConfig,
     /// Immutable typed baseline used by every local, host and child runtime.
@@ -1141,6 +1171,10 @@ pub struct Config {
     /// W7 F8-3: bootstrap consults `enabled` to decide whether to wrap the
     /// primary provider in `ResilientProvider`.
     pub provider_chain: ProviderChainConfig,
+    pub provider_policy: ProviderRoutingPolicyConfig,
+    /// Independently resolved provider configurations for semantic failover.
+    /// Children carry an empty list so construction cannot recurse.
+    pub resolved_fallbacks: Vec<Config>,
     /// W8a A.5/A.6: ExecutionBudget caps. Resolved-config copy of the
     /// merged `ConfigFile.budget`; bootstrap converts this into a
     /// `wcore_agent::budget::ExecutionBudgetView` via the `From` impl.
@@ -1311,6 +1345,8 @@ impl Default for Config {
             provider: ProviderType::default(),
             api_key: String::new(),
             base_url: String::new(),
+            provider_organization: None,
+            provider_region: None,
             model: String::new(),
             max_tokens: default_max_tokens(),
             max_tokens_explicit: false,
@@ -1337,6 +1373,8 @@ impl Default for Config {
             debug: crate::debug::DebugConfig::default(),
             observability: ObservabilityConfig::default(),
             provider_chain: ProviderChainConfig::default(),
+            provider_policy: ProviderRoutingPolicyConfig::default(),
+            resolved_fallbacks: Vec::new(),
             budget: wcore_budget::BudgetConfig::default(),
             storage: StorageConfig::default(),
             memory: MemoryConfig::default(),
@@ -1960,6 +1998,10 @@ pub struct CliArgs {
 impl Config {
     /// Load and merge config from all sources
     pub fn resolve(cli: &CliArgs) -> anyhow::Result<Self> {
+        Self::resolve_inner(cli, true)
+    }
+
+    fn resolve_inner(cli: &CliArgs, resolve_fallbacks: bool) -> anyhow::Result<Self> {
         // 1. Load global config. D011: a corrupt (parse-failing) file that
         //    EXISTS must propagate a typed error here rather than silently
         //    downgrade to defaults — silent defaulting wipes the user's whole
@@ -2203,11 +2245,46 @@ impl Config {
                 .map_err(|error| anyhow::anyhow!("invalid [session_cap]: {error}"))?;
         }
 
-        Ok(Config {
+        let provider_organization = provider_config.organization.clone();
+        let provider_region = provider_config.region.clone().or_else(|| match provider {
+            ProviderType::Bedrock => merged.bedrock.as_ref().and_then(|cfg| cfg.region.clone()),
+            ProviderType::Vertex => merged.vertex.as_ref().and_then(|cfg| cfg.region.clone()),
+            _ => None,
+        });
+
+        let fallback_specs = if resolve_fallbacks {
+            merged
+                .provider_chain
+                .fallback_models
+                .iter()
+                .filter_map(|entry| {
+                    let entry = entry.trim();
+                    if entry.is_empty() {
+                        return None;
+                    }
+                    if let Some((prefix, role)) = entry.split_once(':')
+                        && (wcore_types::model_aliases::known_providers().contains(&prefix)
+                            || merged.providers.contains_key(prefix))
+                    {
+                        let model = wcore_types::model_aliases::expand_short_form(entry)
+                            .map(str::to_string)
+                            .unwrap_or_else(|| role.to_string());
+                        return Some((Some(prefix.to_string()), model));
+                    }
+                    Some((None, entry.to_string()))
+                })
+                .collect::<Vec<_>>()
+        } else {
+            Vec::new()
+        };
+
+        let mut resolved = Config {
             provider_label,
             provider,
             api_key,
             base_url,
+            provider_organization,
+            provider_region,
             model,
             max_tokens,
             max_tokens_explicit,
@@ -2236,6 +2313,8 @@ impl Config {
             debug: merged.debug,
             observability: merged.observability.resolve(),
             provider_chain: merged.provider_chain,
+            provider_policy: merged.provider_policy,
+            resolved_fallbacks: Vec::new(),
             budget: merged.budget,
             storage: merged.storage,
             // Absent `[memory]` resolves to the (memory-ON) default.
@@ -2246,7 +2325,30 @@ impl Config {
             workspace_trust,
             session_cap: merged.session_cap,
             crucible: merged.crucible,
-        })
+        };
+
+        for (fallback_provider, fallback_model) in fallback_specs {
+            if fallback_provider
+                .as_deref()
+                .is_none_or(|provider| provider == resolved.provider_label)
+            {
+                let mut fallback = resolved.clone();
+                fallback.model = fallback_model;
+                fallback.resolved_fallbacks.clear();
+                resolved.resolved_fallbacks.push(fallback);
+                continue;
+            }
+            let fallback_cli = CliArgs {
+                provider: fallback_provider,
+                model: Some(fallback_model),
+                project_dir: cli.project_dir.clone(),
+                ..Default::default()
+            };
+            resolved
+                .resolved_fallbacks
+                .push(Self::resolve_inner(&fallback_cli, false)?);
+        }
+        Ok(resolved)
     }
 
     /// Wave SD — open the configured credentials store. The plaintext
@@ -2349,6 +2451,8 @@ fn merge_provider_configs(base: ProviderConfig, overlay: ProviderConfig) -> Prov
         model: overlay.model.or(base.model),
         api_key: overlay.api_key.or(base.api_key),
         base_url: overlay.base_url.or(base.base_url),
+        organization: overlay.organization.or(base.organization),
+        region: overlay.region.or(base.region),
         prompt_caching: overlay.prompt_caching.or(base.prompt_caching),
         compat: match (base.compat, overlay.compat) {
             (Some(base), Some(overlay)) => Some(ProviderCompat::merge(base, overlay)),
@@ -3613,6 +3717,12 @@ fn merge_config_files_with_trust(
         );
     }
     let execution = global.execution;
+    if project.provider_policy != ProviderRoutingPolicyConfig::default() {
+        tracing::warn!(
+            "ignored project [provider_policy] block; provider routing policy is loaded only from the global config"
+        );
+    }
+    let provider_policy = global.provider_policy.clone();
     let default = DefaultConfig {
         provider: if project.default.provider != default_provider() {
             project.default.provider
@@ -4029,6 +4139,7 @@ fn merge_config_files_with_trust(
         debug,
         observability,
         provider_chain,
+        provider_policy,
         budget,
         storage,
         memory,
@@ -4118,6 +4229,8 @@ fn merge_profiles(base: ProfileConfig, overlay: ProfileConfig) -> ProfileConfig 
         model: overlay.model.or(base.model),
         api_key: overlay.api_key.or(base.api_key),
         base_url: overlay.base_url.or(base.base_url),
+        organization: overlay.organization.or(base.organization),
+        region: overlay.region.or(base.region),
         max_tokens: overlay.max_tokens.or(base.max_tokens),
         max_turns: overlay.max_turns.or(base.max_turns),
         extends: None, // already resolved
@@ -4151,6 +4264,12 @@ fn apply_profile(mut config: ConfigFile, profile_name: &str) -> anyhow::Result<C
     }
     if let Some(base_url) = profile.base_url {
         entry.base_url = Some(base_url);
+    }
+    if let Some(organization) = profile.organization {
+        entry.organization = Some(organization);
+    }
+    if let Some(region) = profile.region {
+        entry.region = Some(region);
     }
     if let Some(compat) = profile.compat {
         entry.compat = Some(match entry.compat.take() {
@@ -5519,6 +5638,37 @@ command = "local-mcp"
             !merged.tools.auto_approve,
             "a project must not be able to enable auto_approve when global has it off"
         );
+    }
+
+    #[test]
+    fn project_cannot_replace_global_provider_routing_floor() {
+        let global = ConfigFile {
+            provider_policy: ProviderRoutingPolicyConfig {
+                allowed_providers: vec!["anthropic".into()],
+                denied_providers: vec!["untrusted".into()],
+                allowed_regions: vec!["us-east".into()],
+                organization: Some("acme".into()),
+                require_fresh_pricing: true,
+                require_priced: true,
+            },
+            ..Default::default()
+        };
+        let expected = global.provider_policy.clone();
+        let project = ConfigFile {
+            provider_policy: ProviderRoutingPolicyConfig {
+                allowed_providers: vec!["untrusted".into()],
+                denied_providers: Vec::new(),
+                allowed_regions: Vec::new(),
+                organization: None,
+                require_fresh_pricing: false,
+                require_priced: false,
+            },
+            ..Default::default()
+        };
+
+        let merged = merge_config_files(global, project);
+
+        assert_eq!(merged.provider_policy, expected);
     }
 
     #[test]
@@ -7281,6 +7431,69 @@ skills_lifecycle = true
         assert!(
             out.contains("gpt-sentinel"),
             "CLI model override not stamped:\n{out}"
+        );
+    }
+
+    #[test]
+    #[serial_test::serial(wayland_home_env)]
+    fn resolves_same_and_cross_provider_fallbacks_with_independent_credentials() {
+        let wh_key = "WAYLAND_HOME";
+        let previous = std::env::var_os(wh_key);
+        let sandbox = tempfile::tempdir().expect("tempdir sandbox");
+        unsafe { std::env::set_var(wh_key, sandbox.path()) };
+        std::fs::write(
+            sandbox.path().join("config.toml"),
+            r#"
+[default]
+provider = "anthropic"
+model = "claude-sonnet-4-6"
+
+[providers.anthropic]
+api_key = "anthropic-test-key"
+organization = "acme"
+
+[providers.openai]
+api_key = "openai-test-key"
+organization = "acme"
+region = "us-east"
+
+[provider_chain]
+enabled = true
+fallback_models = ["anthropic:claude-haiku-4-5", "openai:gpt-5"]
+
+[provider_policy]
+allowed_providers = ["anthropic", "openai"]
+organization = "acme"
+require_priced = true
+"#,
+        )
+        .expect("write config");
+
+        let resolved = Config::resolve(&CliArgs::default());
+        match previous {
+            Some(value) => unsafe { std::env::set_var(wh_key, value) },
+            None => unsafe { std::env::remove_var(wh_key) },
+        }
+
+        let resolved = resolved.expect("resolve fallback configs");
+        assert_eq!(resolved.resolved_fallbacks.len(), 2);
+        assert_eq!(resolved.resolved_fallbacks[0].provider_label, "anthropic");
+        assert_eq!(resolved.resolved_fallbacks[0].api_key, "anthropic-test-key");
+        assert_eq!(resolved.resolved_fallbacks[1].provider_label, "openai");
+        assert_eq!(resolved.resolved_fallbacks[1].api_key, "openai-test-key");
+        assert_eq!(
+            resolved.resolved_fallbacks[1].provider_region.as_deref(),
+            Some("us-east")
+        );
+        assert_eq!(
+            resolved.provider_policy.allowed_providers,
+            vec!["anthropic", "openai"]
+        );
+        assert!(
+            resolved
+                .resolved_fallbacks
+                .iter()
+                .all(|fallback| fallback.resolved_fallbacks.is_empty())
         );
     }
 

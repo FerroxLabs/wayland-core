@@ -14,6 +14,7 @@ toml.workspace       = true
 thiserror.workspace  = true
 once_cell            = "1.19"
 wcore-egress.workspace = true
+wcore-config.workspace = true
 reqwest  = { workspace = true, features = ["json"] }
 tokio    = { workspace = true }
 chrono   = { workspace = true }

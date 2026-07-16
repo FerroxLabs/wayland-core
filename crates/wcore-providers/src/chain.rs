@@ -284,7 +284,7 @@ mod tests {
                 assert_eq!((previous, next), ("p1", "p2"));
                 assert!(previous_attempted);
                 admission_count.fetch_add(1, Ordering::SeqCst);
-                Ok(())
+                Ok(Default::default())
             });
         let result = crate::retry::scope_configured_fallback_admitter(
             admitter,

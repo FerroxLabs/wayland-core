@@ -840,6 +840,12 @@ impl OutputSink for ProtocolSink {
         });
     }
 
+    fn emit_provider_failover_receipt(&self, receipt: serde_json::Value) {
+        let _ = self
+            .writer
+            .emit(&ProtocolEvent::ProviderFailoverReceipt { receipt });
+    }
+
     fn emit_provider_attempt(&self, failure: Option<&str>) {
         let _ = self.writer.emit(&ProtocolEvent::ProviderAttempt {
             failure: failure.map(String::from),

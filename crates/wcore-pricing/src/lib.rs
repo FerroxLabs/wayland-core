@@ -12,7 +12,8 @@ use thiserror::Error;
 
 pub mod refresh;
 pub use refresh::{
-    CachedCatalog, CatalogChange, ChangeKind, PricingRefresher, RefreshError, default_cache_path,
+    CachedCatalog, CatalogChange, ChangeKind, PricingRefresher, PricingSnapshot,
+    PricingSnapshotSource, RefreshError, default_cache_path,
 };
 
 const BUNDLED_PRICING_TOML: &str = include_str!("../pricing.toml");

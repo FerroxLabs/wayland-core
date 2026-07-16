@@ -1,83 +1,113 @@
-//! Per-FailoverReason cooldown state machine — ported from openclaw MIT (c) Peter Steinberger 2025.
+//! Deterministic, reason-specific provider cooldown authority.
 //!
-//! When a provider fails with reason R, it enters cooldown for a duration
-//! derived from R's classification:
-//!   - PERMANENT reasons (AuthPermanent, Billing): long cooldown, no probe
-//!   - TRANSIENT reasons (RateLimit, Overloaded, Timeout): short cooldown, probe-on-expiry
-//!   - SEMANTIC reasons (ContextOverflow, Format, ModelNotFound): no cooldown
-//!     (these aren't retried — caller must change inputs)
+//! A tracker owns one provider/model candidate. Transient failures cool for an
+//! exponentially increasing interval (respecting a longer server Retry-After),
+//! permanent failures stay unavailable until an explicit success/reset, and
+//! semantic failures do not poison provider health. Expired transient entries
+//! admit exactly one half-open probe.
 
 use crate::FailoverReason;
+use parking_lot::Mutex;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CooldownClass {
-    /// Transient — short cooldown, probe-on-expiry
     Transient,
-    /// Permanent — long cooldown, no probe (require human intervention)
     Permanent,
-    /// Semantic — no cooldown (caller must change inputs to retry)
     Semantic,
 }
 
 impl FailoverReason {
     pub fn cooldown_class(&self) -> CooldownClass {
         match self {
-            // Transient
-            Self::RateLimit | Self::Overloaded | Self::Timeout => CooldownClass::Transient,
-            // Permanent (manual recovery)
-            Self::AuthPermanent | Self::Billing | Self::SessionExpired => CooldownClass::Permanent,
-            // Semantic (caller responsibility)
-            Self::ContextOverflow | Self::Format | Self::ModelNotFound => CooldownClass::Semantic,
-            // Default: treat unclassified Auth/Unknown as Transient (probe quickly)
-            Self::Auth | Self::Unknown => CooldownClass::Transient,
-        }
-    }
-
-    /// Per-reason base cooldown duration. Permanent reasons use a long base;
-    /// Transient use a short base scaled by failure count later.
-    pub fn base_cooldown(&self) -> Duration {
-        match self.cooldown_class() {
-            CooldownClass::Transient => Duration::from_secs(5),
-            CooldownClass::Permanent => Duration::from_secs(15 * 60), // 15 minutes
-            CooldownClass::Semantic => Duration::from_secs(0),
+            Self::RateLimit | Self::Overloaded | Self::Timeout | Self::Auth | Self::Unknown => {
+                CooldownClass::Transient
+            }
+            Self::AuthPermanent | Self::Billing | Self::SessionExpired | Self::ModelNotFound => {
+                CooldownClass::Permanent
+            }
+            Self::Format | Self::ContextOverflow => CooldownClass::Semantic,
         }
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+/// Monotonic clock used by the dispatch authority. Production uses
+/// [`SystemCooldownClock`]; tests inject a manual clock and never sleep.
+pub trait CooldownClock: Send + Sync {
+    fn now(&self) -> Duration;
+}
+
+#[derive(Debug)]
+pub struct SystemCooldownClock {
+    origin: Instant,
+}
+
+impl Default for SystemCooldownClock {
+    fn default() -> Self {
+        Self {
+            origin: Instant::now(),
+        }
+    }
+}
+
+impl CooldownClock for SystemCooldownClock {
+    fn now(&self) -> Duration {
+        self.origin.elapsed()
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum CooldownState {
-    /// Available for use.
     #[default]
     Ready,
-    /// In cooldown until the given Instant.
     Cooling {
-        until: Instant,
+        /// `None` is a permanent/manual-recovery cooldown.
+        retry_at: Option<Duration>,
         reason: FailoverReason,
     },
-    /// One probe is allowed; if it succeeds, return to Ready.
-    HalfOpen { reason: FailoverReason },
+    HalfOpen {
+        reason: FailoverReason,
+    },
 }
 
-/// Per-provider cooldown tracker. Caller invokes [`CooldownTracker::record_failure`]
-/// on each failure and [`CooldownTracker::record_success`] on each success;
-/// [`CooldownTracker::state`] returns the current decision.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CooldownPermit {
+    Ready,
+    HalfOpen,
+}
+
 #[derive(Debug)]
-pub struct CooldownTracker {
+struct CooldownInner {
     state: CooldownState,
     failure_count: u32,
-    /// Test-only override for the transient base cooldown so expiry tests
-    /// don't have to sleep for whole seconds. None = use FailoverReason::base_cooldown.
-    transient_base_override: Option<Duration>,
+    probe_in_flight: bool,
+}
+
+pub struct CooldownTracker {
+    inner: Mutex<CooldownInner>,
+    clock: Arc<dyn CooldownClock>,
+    transient_base: Duration,
+    failure_threshold: u32,
+}
+
+impl std::fmt::Debug for CooldownTracker {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CooldownTracker")
+            .field("inner", &self.inner)
+            .field("transient_base", &self.transient_base)
+            .field("failure_threshold", &self.failure_threshold)
+            .finish_non_exhaustive()
+    }
 }
 
 impl Default for CooldownTracker {
     fn default() -> Self {
-        Self {
-            state: CooldownState::Ready,
-            failure_count: 0,
-            transient_base_override: None,
-        }
+        Self::with_clock(
+            Arc::new(SystemCooldownClock::default()),
+            Duration::from_secs(5),
+            1,
+        )
     }
 }
 
@@ -86,64 +116,122 @@ impl CooldownTracker {
         Self::default()
     }
 
-    /// Test-only: construct a tracker whose transient cooldowns use the given
-    /// short base duration. Permanent and semantic classes are unaffected.
-    #[cfg(test)]
-    fn with_transient_base(base: Duration) -> Self {
+    pub fn with_failure_threshold(failure_threshold: u32) -> Self {
+        Self::with_failure_threshold_and_base(failure_threshold, Duration::from_secs(5))
+    }
+
+    pub fn with_failure_threshold_and_base(
+        failure_threshold: u32,
+        transient_base: Duration,
+    ) -> Self {
+        Self::with_clock(
+            Arc::new(SystemCooldownClock::default()),
+            transient_base,
+            failure_threshold,
+        )
+    }
+
+    pub fn with_clock(
+        clock: Arc<dyn CooldownClock>,
+        transient_base: Duration,
+        failure_threshold: u32,
+    ) -> Self {
         Self {
-            state: CooldownState::Ready,
-            failure_count: 0,
-            transient_base_override: Some(base),
+            inner: Mutex::new(CooldownInner {
+                state: CooldownState::Ready,
+                failure_count: 0,
+                probe_in_flight: false,
+            }),
+            clock,
+            transient_base,
+            failure_threshold: failure_threshold.max(1),
         }
     }
 
-    /// Current state. Auto-transitions Cooling -> HalfOpen if expiry has passed.
-    pub fn state(&mut self) -> &CooldownState {
-        if let CooldownState::Cooling { until, reason } = self.state
-            && Instant::now() >= until
+    fn refresh_expiry(&self, inner: &mut CooldownInner) {
+        if let CooldownState::Cooling {
+            retry_at: Some(retry_at),
+            reason,
+        } = inner.state
+            && self.clock.now() >= retry_at
         {
-            self.state = CooldownState::HalfOpen { reason };
+            inner.state = CooldownState::HalfOpen { reason };
+            inner.probe_in_flight = false;
         }
-        &self.state
     }
 
-    /// Record a failure with classified reason. Bumps failure count and sets
-    /// Cooling state (exponential backoff for transient).
-    pub fn record_failure(&mut self, reason: FailoverReason) {
-        self.failure_count = self.failure_count.saturating_add(1);
-        let class = reason.cooldown_class();
-        let base = match class {
-            CooldownClass::Transient => self
-                .transient_base_override
-                .unwrap_or_else(|| reason.base_cooldown()),
-            _ => reason.base_cooldown(),
-        };
-        let scaled = match class {
-            CooldownClass::Transient => {
-                // exponential backoff capped at 5 minutes
-                let mult = 1u32 << self.failure_count.min(6); // 2^1..2^6 = 2..64
-                base.saturating_mul(mult).min(Duration::from_secs(5 * 60))
+    pub fn state(&self) -> CooldownState {
+        let mut inner = self.inner.lock();
+        self.refresh_expiry(&mut inner);
+        inner.state
+    }
+
+    /// Acquire dispatch permission. A half-open candidate grants one probe;
+    /// concurrent callers remain denied until that probe records an outcome.
+    pub fn try_acquire(&self) -> Option<CooldownPermit> {
+        let mut inner = self.inner.lock();
+        self.refresh_expiry(&mut inner);
+        match inner.state {
+            CooldownState::Ready => Some(CooldownPermit::Ready),
+            CooldownState::HalfOpen { .. } if !inner.probe_in_flight => {
+                inner.probe_in_flight = true;
+                Some(CooldownPermit::HalfOpen)
             }
-            CooldownClass::Permanent => base,
-            CooldownClass::Semantic => Duration::from_secs(0),
-        };
-        if scaled.is_zero() {
-            self.state = CooldownState::Ready;
-        } else {
-            self.state = CooldownState::Cooling {
-                until: Instant::now() + scaled,
-                reason,
-            };
+            CooldownState::HalfOpen { .. } | CooldownState::Cooling { .. } => None,
         }
     }
 
-    /// Record a success. Returns to Ready and clears failure count.
-    pub fn record_success(&mut self) {
-        self.state = CooldownState::Ready;
-        self.failure_count = 0;
+    pub fn record_failure(&self, reason: FailoverReason, retry_after: Option<Duration>) {
+        let mut inner = self.inner.lock();
+        inner.probe_in_flight = false;
+        if reason.cooldown_class() == CooldownClass::Semantic {
+            inner.state = CooldownState::Ready;
+            return;
+        }
+
+        inner.failure_count = inner.failure_count.saturating_add(1);
+        if reason.cooldown_class() == CooldownClass::Transient
+            && inner.failure_count < self.failure_threshold
+        {
+            inner.state = CooldownState::Ready;
+            return;
+        }
+
+        let retry_at = match reason.cooldown_class() {
+            CooldownClass::Permanent => None,
+            CooldownClass::Semantic => unreachable!("semantic failures return above"),
+            CooldownClass::Transient => {
+                let exponent = inner
+                    .failure_count
+                    .saturating_sub(self.failure_threshold)
+                    .min(6);
+                let multiplier = 1u32 << exponent;
+                let local = self
+                    .transient_base
+                    .saturating_mul(multiplier)
+                    .min(Duration::from_secs(5 * 60));
+                Some(
+                    self.clock
+                        .now()
+                        .saturating_add(retry_after.unwrap_or(Duration::ZERO).max(local)),
+                )
+            }
+        };
+        inner.state = CooldownState::Cooling { retry_at, reason };
     }
 
-    pub fn is_available(&mut self) -> bool {
+    pub fn record_success(&self) {
+        let mut inner = self.inner.lock();
+        inner.state = CooldownState::Ready;
+        inner.failure_count = 0;
+        inner.probe_in_flight = false;
+    }
+
+    pub fn reset(&self) {
+        self.record_success();
+    }
+
+    pub fn is_available(&self) -> bool {
         matches!(
             self.state(),
             CooldownState::Ready | CooldownState::HalfOpen { .. }
@@ -151,153 +239,113 @@ impl CooldownTracker {
     }
 
     pub fn failure_count(&self) -> u32 {
-        self.failure_count
+        self.inner.lock().failure_count
+    }
+
+    pub fn retry_after(&self) -> Option<Duration> {
+        match self.state() {
+            CooldownState::Cooling {
+                retry_at: Some(retry_at),
+                ..
+            } => Some(retry_at.saturating_sub(self.clock.now())),
+            _ => None,
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicU64, Ordering};
 
-    #[test]
-    fn new_tracker_is_ready() {
-        let mut t = CooldownTracker::new();
-        assert_eq!(*t.state(), CooldownState::Ready);
-        assert_eq!(t.failure_count(), 0);
-        assert!(t.is_available());
-    }
+    #[derive(Default)]
+    struct ManualClock(AtomicU64);
 
-    #[test]
-    fn record_transient_failure_enters_cooling() {
-        let mut t = CooldownTracker::new();
-        t.record_failure(FailoverReason::RateLimit);
-        assert!(matches!(
-            *t.state(),
-            CooldownState::Cooling {
-                reason: FailoverReason::RateLimit,
-                ..
-            }
-        ));
-        assert_eq!(t.failure_count(), 1);
-    }
-
-    #[test]
-    fn record_permanent_failure_enters_cooling_long_duration() {
-        let mut t = CooldownTracker::new();
-        t.record_failure(FailoverReason::AuthPermanent);
-        match *t.state() {
-            CooldownState::Cooling { until, reason } => {
-                assert_eq!(reason, FailoverReason::AuthPermanent);
-                let remaining = until.saturating_duration_since(Instant::now());
-                // 15 minutes minus a tiny slop for clock drift
-                assert!(
-                    remaining >= Duration::from_secs(14 * 60 + 50),
-                    "remaining={:?}",
-                    remaining
-                );
-            }
-            ref s => panic!("expected Cooling, got {:?}", s),
-        }
-    }
-
-    #[test]
-    fn record_semantic_failure_stays_ready() {
-        for reason in [
-            FailoverReason::ContextOverflow,
-            FailoverReason::Format,
-            FailoverReason::ModelNotFound,
-        ] {
-            let mut t = CooldownTracker::new();
-            t.record_failure(reason);
-            assert_eq!(
-                *t.state(),
-                CooldownState::Ready,
-                "semantic reason {:?} should not cool",
-                reason
+    impl ManualClock {
+        fn advance(&self, duration: Duration) {
+            self.0.fetch_add(
+                u64::try_from(duration.as_millis()).unwrap(),
+                Ordering::SeqCst,
             );
         }
     }
 
+    impl CooldownClock for ManualClock {
+        fn now(&self) -> Duration {
+            Duration::from_millis(self.0.load(Ordering::SeqCst))
+        }
+    }
+
+    fn tracker(clock: Arc<ManualClock>, threshold: u32) -> CooldownTracker {
+        CooldownTracker::with_clock(clock, Duration::from_secs(5), threshold)
+    }
+
     #[test]
-    fn cooling_transitions_to_half_open_on_expiry() {
-        let mut t = CooldownTracker::with_transient_base(Duration::from_millis(5));
-        t.record_failure(FailoverReason::RateLimit);
-        // base 5ms * 2^1 = 10ms — wait 30ms to be safe
-        std::thread::sleep(Duration::from_millis(30));
+    fn transient_uses_threshold_fake_time_and_one_half_open_probe() {
+        let clock = Arc::new(ManualClock::default());
+        let tracker = tracker(clock.clone(), 2);
+        tracker.record_failure(FailoverReason::RateLimit, None);
+        assert_eq!(tracker.state(), CooldownState::Ready);
+        tracker.record_failure(FailoverReason::RateLimit, None);
+        assert!(matches!(tracker.state(), CooldownState::Cooling { .. }));
+        clock.advance(Duration::from_secs(5));
+        assert!(matches!(tracker.state(), CooldownState::HalfOpen { .. }));
+        assert_eq!(tracker.try_acquire(), Some(CooldownPermit::HalfOpen));
+        assert_eq!(tracker.try_acquire(), None);
+    }
+
+    #[test]
+    fn retry_after_wins_over_local_backoff() {
+        let clock = Arc::new(ManualClock::default());
+        let tracker = tracker(clock.clone(), 1);
+        tracker.record_failure(FailoverReason::RateLimit, Some(Duration::from_secs(30)));
+        clock.advance(Duration::from_secs(29));
+        assert_eq!(tracker.try_acquire(), None);
+        clock.advance(Duration::from_secs(1));
+        assert_eq!(tracker.try_acquire(), Some(CooldownPermit::HalfOpen));
+    }
+
+    #[test]
+    fn permanent_failure_never_auto_probes() {
+        let clock = Arc::new(ManualClock::default());
+        let tracker = tracker(clock.clone(), 1);
+        tracker.record_failure(FailoverReason::AuthPermanent, None);
+        clock.advance(Duration::from_secs(24 * 60 * 60));
+        assert_eq!(tracker.try_acquire(), None);
         assert!(matches!(
-            *t.state(),
-            CooldownState::HalfOpen {
-                reason: FailoverReason::RateLimit
+            tracker.state(),
+            CooldownState::Cooling {
+                retry_at: None,
+                reason: FailoverReason::AuthPermanent
             }
         ));
+        tracker.reset();
+        assert_eq!(tracker.try_acquire(), Some(CooldownPermit::Ready));
     }
 
     #[test]
-    fn record_success_clears_state_and_count() {
-        let mut t = CooldownTracker::new();
-        t.record_failure(FailoverReason::RateLimit);
-        t.record_failure(FailoverReason::RateLimit);
-        assert_eq!(t.failure_count(), 2);
-        t.record_success();
-        assert_eq!(*t.state(), CooldownState::Ready);
-        assert_eq!(t.failure_count(), 0);
+    fn semantic_failure_does_not_poison_health() {
+        let tracker = CooldownTracker::new();
+        tracker.record_failure(FailoverReason::Format, None);
+        assert_eq!(tracker.state(), CooldownState::Ready);
+        tracker.record_failure(FailoverReason::ContextOverflow, None);
+        assert_eq!(tracker.state(), CooldownState::Ready);
     }
 
     #[test]
-    fn exponential_backoff_doubles_then_caps_at_5min() {
-        // Use real base (5s) so the cap math is exercised against the production constants.
-        let mut t = CooldownTracker::new();
-        // Drive the failure count up — at counts ≥6, mult = 2^6 = 64, so
-        // 5s * 64 = 320s which exceeds the 300s (5min) cap.
-        for _ in 0..10 {
-            t.record_failure(FailoverReason::RateLimit);
-        }
-        match *t.state() {
-            CooldownState::Cooling { until, .. } => {
-                let remaining = until.saturating_duration_since(Instant::now());
-                // Must be exactly capped at 5min (minus tiny slop).
-                assert!(
-                    remaining <= Duration::from_secs(5 * 60),
-                    "remaining must be ≤5min cap, got {:?}",
-                    remaining
-                );
-                assert!(
-                    remaining >= Duration::from_secs(5 * 60 - 1),
-                    "remaining must hit the 5min cap, got {:?}",
-                    remaining
-                );
-            }
-            ref s => panic!("expected Cooling, got {:?}", s),
-        }
+    fn success_resets_backoff_and_probe_lease() {
+        let clock = Arc::new(ManualClock::default());
+        let tracker = tracker(clock.clone(), 1);
+        tracker.record_failure(FailoverReason::Timeout, None);
+        clock.advance(Duration::from_secs(5));
+        assert_eq!(tracker.try_acquire(), Some(CooldownPermit::HalfOpen));
+        tracker.record_success();
+        assert_eq!(tracker.failure_count(), 0);
+        assert_eq!(tracker.try_acquire(), Some(CooldownPermit::Ready));
     }
 
     #[test]
-    fn half_open_after_success_returns_to_ready() {
-        let mut t = CooldownTracker::with_transient_base(Duration::from_millis(5));
-        t.record_failure(FailoverReason::Overloaded);
-        std::thread::sleep(Duration::from_millis(30));
-        // Force transition by reading state.
-        assert!(matches!(*t.state(), CooldownState::HalfOpen { .. }));
-        t.record_success();
-        assert_eq!(*t.state(), CooldownState::Ready);
-        assert_eq!(t.failure_count(), 0);
-    }
-
-    #[test]
-    fn half_open_after_failure_returns_to_cooling() {
-        let mut t = CooldownTracker::with_transient_base(Duration::from_millis(5));
-        t.record_failure(FailoverReason::Timeout);
-        std::thread::sleep(Duration::from_millis(30));
-        assert!(matches!(*t.state(), CooldownState::HalfOpen { .. }));
-        // A failure during probe should re-enter Cooling.
-        t.record_failure(FailoverReason::Timeout);
-        assert!(matches!(*t.state(), CooldownState::Cooling { .. }));
-        assert_eq!(t.failure_count(), 2);
-    }
-
-    #[test]
-    fn cooldown_class_for_all_11_variants() {
-        // Exhaustive classification table — must stay in sync with the enum.
+    fn classifies_all_reasons() {
         let table = [
             (FailoverReason::Auth, CooldownClass::Transient),
             (FailoverReason::AuthPermanent, CooldownClass::Permanent),
@@ -306,43 +354,14 @@ mod tests {
             (FailoverReason::Overloaded, CooldownClass::Transient),
             (FailoverReason::Billing, CooldownClass::Permanent),
             (FailoverReason::Timeout, CooldownClass::Transient),
-            (FailoverReason::ModelNotFound, CooldownClass::Semantic),
+            (FailoverReason::ModelNotFound, CooldownClass::Permanent),
             (FailoverReason::SessionExpired, CooldownClass::Permanent),
             (FailoverReason::ContextOverflow, CooldownClass::Semantic),
             (FailoverReason::Unknown, CooldownClass::Transient),
         ];
-        assert_eq!(table.len(), 11, "must cover all 11 FailoverReason variants");
-        for (reason, expected) in table {
-            assert_eq!(
-                reason.cooldown_class(),
-                expected,
-                "wrong class for {:?}",
-                reason
-            );
+        assert_eq!(table.len(), 11);
+        for (reason, class) in table {
+            assert_eq!(reason.cooldown_class(), class);
         }
-    }
-
-    #[test]
-    fn failure_count_saturates() {
-        let mut t = CooldownTracker::new();
-        // Manually push failure_count near u32::MAX to verify saturation does not overflow.
-        t.failure_count = u32::MAX - 1;
-        t.record_failure(FailoverReason::RateLimit);
-        assert_eq!(t.failure_count(), u32::MAX);
-        t.record_failure(FailoverReason::RateLimit);
-        assert_eq!(t.failure_count(), u32::MAX, "must saturate, not overflow");
-    }
-
-    #[test]
-    fn is_available_true_when_ready_or_half_open_false_when_cooling() {
-        let mut t = CooldownTracker::with_transient_base(Duration::from_millis(5));
-        // Ready
-        assert!(t.is_available());
-        // Cooling
-        t.record_failure(FailoverReason::RateLimit);
-        assert!(!t.is_available(), "Cooling must be unavailable");
-        // HalfOpen
-        std::thread::sleep(Duration::from_millis(30));
-        assert!(t.is_available(), "HalfOpen must be available");
     }
 }
