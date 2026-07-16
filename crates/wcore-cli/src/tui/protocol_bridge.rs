@@ -953,6 +953,9 @@ fn apply_event_inner(app: &mut App, event: ProtocolEvent) {
         | ProtocolEvent::ProviderAttempt { .. }
         | ProtocolEvent::ProviderRetry { .. }
         | ProtocolEvent::ProviderFailure { .. }
+        // Failover receipts are authoritative host/protocol evidence. The TUI
+        // has no receipt view yet, so accepting one must not mutate local state.
+        | ProtocolEvent::ProviderFailoverReceipt { .. }
         | ProtocolEvent::MidFlightMonitorDecision { .. }
         | ProtocolEvent::TraceEvent { .. }
         | ProtocolEvent::PluginEvent { .. }
@@ -3656,6 +3659,12 @@ mod tests {
             ProtocolEvent::Suspend {
                 reason: "approval".into(),
                 resume_token: "t".into(),
+            },
+        );
+        apply_event(
+            &mut app,
+            ProtocolEvent::ProviderFailoverReceipt {
+                receipt: json!({"selected_provider": "fallback"}),
             },
         );
         assert!(app.session.turns.is_empty());
