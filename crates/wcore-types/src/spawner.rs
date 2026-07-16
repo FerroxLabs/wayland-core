@@ -138,6 +138,30 @@ pub enum ChildWorkspaceMode {
     External,
 }
 
+/// Workspace authority requested by a delegated child before a concrete
+/// workspace has been created. This is intentionally distinct from
+/// [`ChildWorkspace`], which records what the runtime actually realized.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RequestedChildWorkspace {
+    SharedReadOnly,
+    IsolatedMutation,
+}
+
+/// Built-in tools whose effects permit a child to share the parent workspace.
+pub const SHARED_READ_ONLY_CHILD_TOOLS: &[&str] = &["Read", "Grep", "Glob"];
+
+impl RequestedChildWorkspace {
+    /// Whether a realized workspace is safe for this request.
+    #[must_use]
+    pub const fn permits(self, realized: ChildWorkspaceMode) -> bool {
+        match self {
+            Self::SharedReadOnly => true,
+            Self::IsolatedMutation => !matches!(realized, ChildWorkspaceMode::SharedReadOnly),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ChildWorkspace {
@@ -500,8 +524,29 @@ pub struct ForkOverrides {
     pub model: Option<String>,
     /// Reasoning effort ("low"/"medium"/"high"/"max").
     pub effort: Option<String>,
-    /// Restrict registered tools to this list; empty = all built-in tools.
+    /// Restrict registered tools to this list; empty = shared read-only tools.
     pub allowed_tools: Vec<String>,
+}
+
+impl ForkOverrides {
+    /// Classify the workspace authority implied by the requested tools.
+    ///
+    /// Empty tool lists retain the existing read-only default. Every unknown
+    /// tool is conservatively mutation-capable so a new or misspelled tool can
+    /// never cause a child to be labelled shared read-only.
+    #[must_use]
+    pub fn requested_workspace(&self) -> RequestedChildWorkspace {
+        if self.allowed_tools.is_empty()
+            || self
+                .allowed_tools
+                .iter()
+                .all(|tool| SHARED_READ_ONLY_CHILD_TOOLS.contains(&tool.as_str()))
+        {
+            RequestedChildWorkspace::SharedReadOnly
+        } else {
+            RequestedChildWorkspace::IsolatedMutation
+        }
+    }
 }
 
 /// Result from a completed sub-agent execution.

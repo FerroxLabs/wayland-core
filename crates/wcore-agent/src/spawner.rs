@@ -21,7 +21,8 @@ use wcore_types::message::{FinishReason, TokenUsage};
 use wcore_types::spawner::{
     ChildDeliveryState, ChildDesiredState, ChildId, ChildOrigin, ChildParent, ChildPolicySnapshot,
     ChildRecoveryState, ChildRequestEvidence, ChildTimestamps, ChildWorkspace, ChildWorkspaceMode,
-    DURABLE_CHILD_SCHEMA_VERSION, DurableChildRecord, DurableChildStatus,
+    DURABLE_CHILD_SCHEMA_VERSION, DurableChildRecord, DurableChildStatus, RequestedChildWorkspace,
+    SHARED_READ_ONLY_CHILD_TOOLS,
 };
 
 use crate::agents::bus::{AgentBus, AgentMessage, now_ms, preview};
@@ -89,6 +90,8 @@ pub struct ResolvedChildLaunch {
     model: String,
     config: Config,
     policy: ChildPolicySnapshot,
+    requested_workspace: RequestedChildWorkspace,
+    workspace: ChildWorkspace,
     authority: DurableAuthorityToken,
     parent_cancel: tokio_util::sync::CancellationToken,
 }
@@ -119,6 +122,18 @@ impl ResolvedChildLaunch {
         &self.policy
     }
 
+    /// Workspace authority requested by the child tool set.
+    #[must_use]
+    pub fn requested_workspace(&self) -> RequestedChildWorkspace {
+        self.requested_workspace
+    }
+
+    /// Workspace the runtime will actually use for this launch.
+    #[must_use]
+    pub fn workspace(&self) -> &ChildWorkspace {
+        &self.workspace
+    }
+
     #[must_use]
     pub fn authority(&self) -> &DurableAuthorityToken {
         &self.authority
@@ -141,6 +156,9 @@ impl ResolvedChildLaunch {
         }
         if record.policy_snapshot != self.policy {
             return Err(DurableSpawnerError::EvidenceMismatch("policy snapshot"));
+        }
+        if record.workspace != self.workspace {
+            return Err(DurableSpawnerError::EvidenceMismatch("workspace"));
         }
         Ok(())
     }
@@ -172,10 +190,7 @@ impl ResolvedChildLaunch {
             policy_snapshot: self.policy.clone(),
             provider: Some(self.provider_id.clone()),
             model: Some(self.model.clone()),
-            workspace: ChildWorkspace {
-                mode: ChildWorkspaceMode::External,
-                workspace_id: format!("runtime-{}", child_id.as_str()),
-            },
+            workspace: self.workspace.clone(),
             child_id,
             status: DurableChildStatus::Prepared,
             desired_state: ChildDesiredState::Run,
@@ -231,6 +246,27 @@ fn child_policy_snapshot(
                 "managed_floor_active",
             ))?,
         dangerous_activation_id_digest,
+    })
+}
+
+fn default_child_workspace(
+    requested: RequestedChildWorkspace,
+) -> Result<ChildWorkspace, DurableSpawnerError> {
+    let cwd = std::env::current_dir()
+        .map_err(|_| DurableSpawnerError::EvidenceMismatch("child workspace"))?;
+    let workspace_digest = crate::session_journal::state_payload_digest(&serde_json::json!({
+        "cwd": cwd.to_string_lossy(),
+    }))?;
+    let (mode, prefix) = match requested {
+        RequestedChildWorkspace::SharedReadOnly => (ChildWorkspaceMode::SharedReadOnly, "shared"),
+        // Until the workspace-binding slice supplies an isolated workspace,
+        // mutating legacy launches execute in the externally managed cwd. Do
+        // not claim isolation that has not been realized.
+        RequestedChildWorkspace::IsolatedMutation => (ChildWorkspaceMode::External, "external"),
+    };
+    Ok(ChildWorkspace {
+        mode,
+        workspace_id: format!("{prefix}-{workspace_digest}"),
     })
 }
 
@@ -921,8 +957,28 @@ impl AgentSpawner {
         request: SubAgentConfig,
         overrides: ForkOverrides,
     ) -> Result<ResolvedChildLaunch, DurableSpawnerError> {
+        let requested_workspace = overrides.requested_workspace();
+        let workspace = default_child_workspace(requested_workspace)?;
+        self.resolve_durable_launch_in_workspace(request, overrides, workspace)
+    }
+
+    /// Resolve a child against a workspace already created by a binding layer.
+    /// The supplied value is realized execution evidence, not a request. A
+    /// mutating request can therefore never be recorded as shared read-only.
+    pub fn resolve_durable_launch_in_workspace(
+        &self,
+        request: SubAgentConfig,
+        overrides: ForkOverrides,
+        workspace: ChildWorkspace,
+    ) -> Result<ResolvedChildLaunch, DurableSpawnerError> {
         let parent_cancel = self.active_cancel_token();
         let authority = self.durable_authority.token()?;
+        let requested_workspace = overrides.requested_workspace();
+        if !requested_workspace.permits(workspace.mode) {
+            return Err(DurableSpawnerError::EvidenceMismatch(
+                "workspace does not satisfy requested authority",
+            ));
+        }
         let ResolvedProvider {
             provider,
             provider_id,
@@ -956,6 +1012,8 @@ impl AgentSpawner {
             model,
             config,
             policy,
+            requested_workspace,
+            workspace,
             authority,
             parent_cancel,
         })
@@ -1683,8 +1741,6 @@ type ToolFactory = fn() -> Box<dyn wcore_tools::Tool>;
 /// read-only subset (security audit H-7 / M-9): an empty `toolsets` on the
 /// model-facing `Delegate`/`Spawn` tool must NOT silently grant the child
 /// Bash/Write/Edit. Destructive tools require explicit opt-in via `allowed`.
-const READ_ONLY_TOOLS: &[&str] = &["Read", "Grep", "Glob"];
-
 fn build_tool_registry(
     allowed: &[String],
     sandbox_runtime: Arc<wcore_sandbox::SandboxRegistry>,
@@ -1707,7 +1763,7 @@ fn build_tool_registry(
         // Bash/Write/Edit. Callers that genuinely need destructive tools must
         // name them explicitly in `allowed`.
         let permitted = if allowed.is_empty() {
-            READ_ONLY_TOOLS.contains(name)
+            SHARED_READ_ONLY_CHILD_TOOLS.contains(name)
         } else {
             allowed.iter().any(|a| a.as_str() == *name)
         };
@@ -2080,6 +2136,7 @@ mod crucible_provider_resolution_tests {
         ChildDeliveryState, ChildDeliveryTarget, ChildDesiredState, ChildId, ChildOrigin,
         ChildParent, ChildRecoveryState, ChildRequestEvidence, ChildTimestamps, ChildWorkspace,
         ChildWorkspaceMode, DURABLE_CHILD_SCHEMA_VERSION, DurableChildRecord, DurableChildStatus,
+        RequestedChildWorkspace,
     };
 
     use super::{AgentSpawner, DurableSessionAuthority, ForkOverrides, SubAgentConfig};
@@ -2321,6 +2378,90 @@ mod crucible_provider_resolution_tests {
         assert_ne!(
             exact,
             super::DurableSpawner::request_digest(&request, &different_tools).unwrap()
+        );
+    }
+
+    #[test]
+    fn durable_record_reports_requested_and_realized_workspace_truth() {
+        let dir = tempfile::tempdir().unwrap();
+        let manager = crate::session::SessionManager::new(dir.path().to_path_buf(), 10);
+        let session = manager
+            .create("test", "parent-model", "/tmp", Some("f200001"))
+            .unwrap();
+        manager.persist_first_message(&session).unwrap();
+        let active = manager.load_for_run(&session.id).unwrap();
+        let authority = DurableSessionAuthority::new();
+        authority.bind(active.journal, &session.id).unwrap();
+
+        let parent: Arc<dyn LlmProvider> = Arc::new(StubProvider);
+        let spawner = AgentSpawner::new(parent, Config::default())
+            .with_durable_session_authority(
+                authority,
+                wcore_types::execution_policy::EffectiveExecutionPolicy::baseline(
+                    &Config::default().execution_policy,
+                ),
+            )
+            .unwrap();
+        let mut request = sub("workspace-child", None);
+        request.model = Some("workspace-model".into());
+
+        let read_only = spawner
+            .resolve_durable_launch(request.clone(), ForkOverrides::default())
+            .unwrap();
+        assert_eq!(
+            read_only.requested_workspace(),
+            RequestedChildWorkspace::SharedReadOnly
+        );
+        assert_eq!(
+            read_only.workspace().mode,
+            ChildWorkspaceMode::SharedReadOnly
+        );
+        assert!(read_only.workspace().workspace_id.starts_with("shared-"));
+        let read_only_record = read_only.durable_record(ChildOrigin::Spawn, None).unwrap();
+        assert_eq!(read_only_record.workspace, read_only.workspace().clone());
+
+        let mutating = ForkOverrides {
+            allowed_tools: vec!["Write".into()],
+            ..ForkOverrides::default()
+        };
+        let legacy = spawner
+            .resolve_durable_launch(request.clone(), mutating.clone())
+            .unwrap();
+        assert_eq!(
+            legacy.requested_workspace(),
+            RequestedChildWorkspace::IsolatedMutation
+        );
+        assert_eq!(legacy.workspace().mode, ChildWorkspaceMode::External);
+        assert!(legacy.workspace().workspace_id.starts_with("external-"));
+        let legacy_record = legacy.durable_record(ChildOrigin::Spawn, None).unwrap();
+        assert_eq!(legacy_record.workspace, legacy.workspace().clone());
+
+        let isolated_workspace = ChildWorkspace {
+            mode: ChildWorkspaceMode::Isolated,
+            workspace_id: "isolated-f20-child".into(),
+        };
+        let isolated = spawner
+            .resolve_durable_launch_in_workspace(
+                request.clone(),
+                mutating.clone(),
+                isolated_workspace.clone(),
+            )
+            .unwrap();
+        let isolated_record = isolated.durable_record(ChildOrigin::Spawn, None).unwrap();
+        assert_eq!(isolated_record.workspace, isolated_workspace);
+
+        assert!(
+            spawner
+                .resolve_durable_launch_in_workspace(
+                    request,
+                    mutating,
+                    ChildWorkspace {
+                        mode: ChildWorkspaceMode::SharedReadOnly,
+                        workspace_id: "shared-parent".into(),
+                    },
+                )
+                .is_err(),
+            "mutating intent must never be realized as shared read-only"
         );
     }
 
@@ -2808,6 +2949,7 @@ mod phase7_tests {
     use super::{AgentSpawner, ForkOverrides, SubAgentConfig, build_tool_registry};
     use wcore_config::config::Config;
     use wcore_providers::LlmProvider;
+    use wcore_types::spawner::RequestedChildWorkspace;
 
     fn test_sandbox_runtime() -> Arc<wcore_sandbox::SandboxRegistry> {
         wcore_tools::registry::ToolRegistry::new().sandbox_runtime()
@@ -2819,6 +2961,36 @@ mod phase7_tests {
         assert!(o.model.is_none());
         assert!(o.effort.is_none());
         assert!(o.allowed_tools.is_empty());
+        assert_eq!(
+            o.requested_workspace(),
+            RequestedChildWorkspace::SharedReadOnly
+        );
+    }
+
+    #[test]
+    fn workspace_request_classification_is_conservative() {
+        for tools in [vec!["Read"], vec!["Read", "Grep", "Glob"]] {
+            let overrides = ForkOverrides {
+                allowed_tools: tools.into_iter().map(str::to_owned).collect(),
+                ..ForkOverrides::default()
+            };
+            assert_eq!(
+                overrides.requested_workspace(),
+                RequestedChildWorkspace::SharedReadOnly
+            );
+        }
+
+        for tool in ["Write", "Edit", "Bash", "FutureTool", "read"] {
+            let overrides = ForkOverrides {
+                allowed_tools: vec![tool.to_owned()],
+                ..ForkOverrides::default()
+            };
+            assert_eq!(
+                overrides.requested_workspace(),
+                RequestedChildWorkspace::IsolatedMutation,
+                "unknown or mutating tool {tool:?} must request isolation"
+            );
+        }
     }
 
     // Security audit H-7 / M-9: an empty `allowed` list must default to the

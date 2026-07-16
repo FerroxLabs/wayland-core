@@ -480,6 +480,7 @@ impl DurableSpawner {
                 "model": overrides.model,
                 "effort": overrides.effort,
                 "allowed_tools": overrides.allowed_tools,
+                "requested_workspace": overrides.requested_workspace(),
             },
         }))
         .map_err(DurableSpawnerError::Journal)
