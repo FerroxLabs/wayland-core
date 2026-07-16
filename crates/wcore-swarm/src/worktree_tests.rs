@@ -130,9 +130,14 @@ async fn run_fixture_git(repo: &Path, args: &[&str]) {
 
 #[cfg(target_os = "linux")]
 fn make_executable(path: &Path, contents: &str) {
+    use std::io::Write;
     use std::os::unix::fs::PermissionsExt;
 
-    std::fs::write(path, contents).expect("write executable fixture");
+    let mut file = std::fs::File::create(path).expect("create executable fixture");
+    file.write_all(contents.as_bytes())
+        .expect("write executable fixture");
+    file.sync_all().expect("sync executable fixture");
+    drop(file);
     let mut permissions = std::fs::metadata(path).unwrap().permissions();
     permissions.set_mode(0o700);
     std::fs::set_permissions(path, permissions).expect("make executable");
