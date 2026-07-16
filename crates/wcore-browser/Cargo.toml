@@ -25,6 +25,7 @@ wcore-types.workspace    = true
 wcore-tools.workspace    = true
 wcore-protocol.workspace = true
 wcore-config.workspace   = true
+wcore-sandbox.workspace  = true
 
 async-trait.workspace = true
 tokio.workspace       = true

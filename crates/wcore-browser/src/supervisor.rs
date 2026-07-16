@@ -22,7 +22,9 @@
 //!     `std::process::Command` w/ `tasklist /FI` — see [`process_alive`].)
 
 use std::path::PathBuf;
+use std::process::Stdio;
 use std::sync::Arc;
+use std::sync::OnceLock;
 use std::time::Duration;
 
 use parking_lot::Mutex;
@@ -37,6 +39,11 @@ pub struct SupervisorConfig {
     pub healthcheck_interval: Duration,
     /// HTTP healthcheck endpoint (Camoufox sidecar `/health`).
     pub healthcheck_url: String,
+    /// Installed Camoufox sidecar command. `None` keeps the supervisor in
+    /// observe-only mode, which is useful for externally managed providers.
+    pub sidecar_program: Option<String>,
+    /// Maximum time to wait for a newly spawned sidecar to become healthy.
+    pub startup_timeout: Duration,
 }
 
 impl Default for SupervisorConfig {
@@ -46,6 +53,25 @@ impl Default for SupervisorConfig {
             reaper_interval: Duration::from_secs(1),
             healthcheck_interval: Duration::from_secs(30),
             healthcheck_url: "http://localhost:9377/health".to_string(),
+            sidecar_program: None,
+            startup_timeout: Duration::from_secs(15),
+        }
+    }
+}
+
+impl SupervisorConfig {
+    /// Production configuration for the locally managed Camoufox sidecar.
+    /// The command may be overridden by Desktop or an operator; Core never
+    /// invokes a package manager or downloads executable code at runtime.
+    pub fn local_camoufox(base_url: &str) -> Self {
+        let base_url = base_url.trim_end_matches('/');
+        Self {
+            healthcheck_url: format!("{base_url}/health"),
+            sidecar_program: Some(
+                std::env::var("WAYLAND_CAMOUFOX_BIN")
+                    .unwrap_or_else(|_| "camofox-browser".to_string()),
+            ),
+            ..Self::default()
         }
     }
 }
@@ -77,6 +103,11 @@ pub struct BrowserSupervisor {
     /// Cancellation handle for the reaper task (when started). The handle
     /// is dropped on `Drop` so an unstarted supervisor leaks nothing.
     reaper_cancel: Mutex<Option<CancellationToken>>,
+}
+
+fn sidecar_start_lock() -> &'static tokio::sync::Mutex<()> {
+    static LOCK: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| tokio::sync::Mutex::new(()))
 }
 
 impl BrowserSupervisor {
@@ -245,6 +276,68 @@ impl BrowserSupervisor {
         }
     }
 
+    /// Ensure the configured local Camoufox service is reachable. A healthy
+    /// externally managed service is reused. Otherwise Core starts only the
+    /// already-installed command and waits under a fixed deadline.
+    pub async fn ensure_ready(self: &Arc<Self>) -> Result<(), String> {
+        let Some(program) = self.config.sidecar_program.as_deref() else {
+            return Ok(());
+        };
+
+        let _startup_guard = sidecar_start_lock().lock().await;
+        if self
+            .healthcheck(Duration::from_millis(500))
+            .await
+            .unwrap_or(false)
+        {
+            return Ok(());
+        }
+
+        let session_id = format!("camoufox-sidecar-{}", std::process::id());
+        // A prior owned sidecar may be alive but unhealthy. Remove it before
+        // reusing the stable ownership key so inserting the replacement can
+        // never detach the old Child handle.
+        if children_map().lock().contains_key(&session_id) {
+            let _ = self.on_session_end(&session_id);
+        }
+        let pid = self
+            .launch_camoufox_program(program, &[], &session_id)
+            .await
+            .map_err(|error| {
+                format!(
+                    "Camoufox is unavailable at {} and Core could not start `{program}`: {error}. \
+Install @askjo/camofox-browser or set WAYLAND_CAMOUFOX_BIN to its executable",
+                    self.config.healthcheck_url
+                )
+            })?;
+
+        let deadline = tokio::time::Instant::now() + self.config.startup_timeout;
+        loop {
+            if self
+                .healthcheck(Duration::from_millis(500))
+                .await
+                .unwrap_or(false)
+            {
+                return Ok(());
+            }
+            if let Some(status) = owned_child_status(&session_id) {
+                let _ = self.on_session_end(&session_id);
+                return Err(format!(
+                    "Camoufox process {pid} exited before becoming healthy ({status}); run `{program}` directly for diagnostics"
+                ));
+            }
+            if tokio::time::Instant::now() >= deadline {
+                let _ = self.on_session_end(&session_id);
+                return Err(format!(
+                    "Camoufox process {pid} did not become healthy at {} within {}ms",
+                    self.config.healthcheck_url,
+                    self.config.startup_timeout.as_millis()
+                ));
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    }
+
     /// Launch the Camoufox sidecar binary at `path`. The child is spawned
     /// with `kill_on_drop(true)` and tracked via `register`. The returned
     /// child can be retained by the caller for `wait()` semantics, or
@@ -258,16 +351,34 @@ impl BrowserSupervisor {
         args: &[&str],
         session_id: impl Into<String>,
     ) -> Result<u32, String> {
+        let program = binary_path
+            .to_str()
+            .ok_or_else(|| "Camoufox executable path is not valid UTF-8".to_string())?;
+        self.launch_camoufox_program(program, args, session_id)
+            .await
+    }
+
+    async fn launch_camoufox_program(
+        self: &Arc<Self>,
+        program: &str,
+        args: &[&str],
+        session_id: impl Into<String>,
+    ) -> Result<u32, String> {
         let session = session_id.into();
-        let mut cmd = tokio::process::Command::new(binary_path);
-        cmd.args(args).kill_on_drop(true);
+        let mut cmd = wcore_config::shell::shell_command_argv(program, args);
+        cmd.stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        wcore_sandbox::backends::process_tree::isolate(&mut cmd);
         let child = cmd.spawn().map_err(|e| format!("spawn camoufox: {e}"))?;
         let pid = child.id().ok_or_else(|| "no child PID".to_string())?;
+        let tree_guard = wcore_sandbox::backends::process_tree::ProcessTreeGuard::new(Some(pid))
+            .map_err(|error| format!("own camoufox process tree: {error}"))?;
         // Forget the child handle in-memory; kill_on_drop fired when this
         // Child struct drops, so we have to stash it (or accept SIGKILL when
         // the local goes out of scope). We stash via a static map keyed by
         // session_id so multiple sidecars can coexist.
-        retain_child(&session, child);
+        retain_child(&session, child, tree_guard);
         self.register(BackendHandle {
             session_id: session,
             pid,
@@ -282,6 +393,17 @@ impl Drop for BrowserSupervisor {
         if let Some(c) = self.reaper_cancel.lock().take() {
             c.cancel();
         }
+        // Kill only processes for which this process retained a Child handle.
+        // Recovered PID-file entries are not safe to signal here because the
+        // numeric PID may have been reused.
+        for handle in self.sessions.lock().iter() {
+            terminate_owned_session(&handle.session_id);
+            let pid_path = self
+                .config
+                .pid_dir
+                .join(format!("{}.pid", handle.session_id));
+            let _ = std::fs::remove_file(pid_path);
+        }
     }
 }
 
@@ -290,17 +412,41 @@ impl Drop for BrowserSupervisor {
 /// die — we'd kill children before the orphan-reaper logic gets to run.
 /// Stashing here means the child outlives the supervisor and the reaper
 /// owns the SIGTERM path.
-fn children_map()
--> &'static parking_lot::Mutex<std::collections::HashMap<String, tokio::process::Child>> {
+fn children_map() -> &'static parking_lot::Mutex<std::collections::HashMap<String, OwnedChild>> {
     use parking_lot::Mutex as PM;
     use std::collections::HashMap;
     use std::sync::OnceLock;
-    static CHILDREN: OnceLock<PM<HashMap<String, tokio::process::Child>>> = OnceLock::new();
+    static CHILDREN: OnceLock<PM<HashMap<String, OwnedChild>>> = OnceLock::new();
     CHILDREN.get_or_init(|| PM::new(HashMap::new()))
 }
 
-fn retain_child(session: &str, child: tokio::process::Child) {
-    children_map().lock().insert(session.to_string(), child);
+struct OwnedChild {
+    child: tokio::process::Child,
+    tree_guard: wcore_sandbox::backends::process_tree::ProcessTreeGuard,
+}
+
+fn retain_child(
+    session: &str,
+    child: tokio::process::Child,
+    tree_guard: wcore_sandbox::backends::process_tree::ProcessTreeGuard,
+) {
+    children_map()
+        .lock()
+        .insert(session.to_string(), OwnedChild { child, tree_guard });
+}
+
+fn owned_child_status(session: &str) -> Option<std::process::ExitStatus> {
+    children_map()
+        .lock()
+        .get_mut(session)
+        .and_then(|owned| owned.child.try_wait().ok().flatten())
+}
+
+fn terminate_owned_session(session: &str) {
+    if let Some(mut owned) = children_map().lock().remove(session) {
+        let _ = owned.child.start_kill();
+        drop(owned.tree_guard);
+    }
 }
 
 /// Terminate the backend for `session` race-free. When a stashed
@@ -312,9 +458,10 @@ fn retain_child(session: &str, child: tokio::process::Child) {
 /// `pid`.
 fn terminate_session(session: &str, pid: u32) {
     let mut map = children_map().lock();
-    if let Some(mut child) = map.remove(session) {
+    if let Some(mut owned) = map.remove(session) {
         // start_kill targets the Child by handle — immune to PID reuse.
-        let _ = child.start_kill();
+        let _ = owned.child.start_kill();
+        drop(owned.tree_guard);
     } else {
         drop(map);
         terminate_pid(pid);
@@ -489,6 +636,39 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn ensure_ready_reuses_healthy_external_sidecar() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/health"))
+            .respond_with(ResponseTemplate::new(200).set_body_string("ok"))
+            .mount(&server)
+            .await;
+        let cfg = SupervisorConfig {
+            healthcheck_url: format!("{}/health", server.uri()),
+            sidecar_program: Some("definitely-not-a-real-camoufox-command".into()),
+            ..Default::default()
+        };
+        let sup = Arc::new(BrowserSupervisor::with_config(cfg));
+        sup.ensure_ready().await.unwrap();
+        assert!(sup.live_sessions().is_empty());
+    }
+
+    #[tokio::test]
+    async fn ensure_ready_reports_actionable_missing_sidecar() {
+        let cfg = SupervisorConfig {
+            healthcheck_url: "http://127.0.0.1:9/health".into(),
+            sidecar_program: Some("wcore-camoufox-command-that-does-not-exist".into()),
+            startup_timeout: Duration::from_millis(100),
+            ..Default::default()
+        };
+        let sup = Arc::new(BrowserSupervisor::with_config(cfg));
+        let error = sup.ensure_ready().await.unwrap_err();
+        assert!(error.contains("Install @askjo/camofox-browser"), "{error}");
+        assert!(error.contains("WAYLAND_CAMOUFOX_BIN"), "{error}");
+        assert!(sup.live_sessions().is_empty());
+    }
+
+    #[tokio::test]
     async fn reaper_terminates_orphans_with_dead_parent() {
         let tmp = tempfile::tempdir().unwrap();
         let cfg = SupervisorConfig {
@@ -496,6 +676,7 @@ mod tests {
             reaper_interval: Duration::from_millis(50),
             healthcheck_interval: Duration::from_secs(30),
             healthcheck_url: "http://unused.invalid/".into(),
+            ..Default::default()
         };
         let sup = Arc::new(BrowserSupervisor::with_config(cfg));
         // Register a fake handle whose parent_pid is dead (very large PID)
@@ -525,6 +706,7 @@ mod tests {
             reaper_interval: Duration::from_millis(50),
             healthcheck_interval: Duration::from_secs(30),
             healthcheck_url: "http://unused.invalid/".into(),
+            ..Default::default()
         };
         let sup = Arc::new(BrowserSupervisor::with_config(cfg));
         // The current process is the "parent" — definitely alive.
@@ -559,15 +741,18 @@ mod tests {
         let sid = "release-child-test";
         // A trivially-short child stands in for the Camoufox sidecar; we only
         // need a real `tokio::process::Child` to stash and then drop.
-        let child = tokio::process::Command::new(if std::path::Path::new("/bin/true").exists() {
-            "/bin/true"
-        } else {
-            "true"
-        })
-        .kill_on_drop(true)
-        .spawn()
-        .expect("spawn /bin/true");
-        retain_child(sid, child);
+        let mut command =
+            tokio::process::Command::new(if std::path::Path::new("/bin/true").exists() {
+                "/bin/true"
+            } else {
+                "true"
+            });
+        command.kill_on_drop(true);
+        wcore_sandbox::backends::process_tree::isolate(&mut command);
+        let child = command.spawn().expect("spawn /bin/true");
+        let guard = wcore_sandbox::backends::process_tree::ProcessTreeGuard::new(child.id())
+            .expect("own /bin/true process tree");
+        retain_child(sid, child, guard);
         assert!(
             children_map().lock().contains_key(sid),
             "child handle should be stashed before session end"
@@ -595,6 +780,7 @@ mod tests {
             reaper_interval: Duration::from_secs(3600),
             healthcheck_interval: Duration::from_secs(3600),
             healthcheck_url: "http://unused.invalid/".into(),
+            ..Default::default()
         };
         let sup = Arc::new(BrowserSupervisor::with_config(cfg));
         let first = sup.start_reaper();
@@ -622,6 +808,7 @@ mod tests {
             reaper_interval: Duration::from_millis(50),
             healthcheck_interval: Duration::ZERO,
             healthcheck_url: "http://unused.invalid/".into(),
+            ..Default::default()
         };
         let sup = Arc::new(BrowserSupervisor::with_config(cfg));
         let cancel = sup.start_reaper();
@@ -646,6 +833,7 @@ mod tests {
             reaper_interval: Duration::from_secs(3600),
             healthcheck_interval: Duration::from_millis(50),
             healthcheck_url: format!("{}/health", server.uri()),
+            ..Default::default()
         };
         let sup = Arc::new(BrowserSupervisor::with_config(cfg));
         let cancel = sup.start_reaper();
@@ -685,5 +873,32 @@ mod tests {
         assert!(sup.on_session_end("spawn-test"));
         // Give the OS a tick to reap.
         tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn dropping_supervisor_kills_owned_sidecar() {
+        let sup = Arc::new(BrowserSupervisor::new());
+        let bin = if std::path::Path::new("/bin/sleep").exists() {
+            std::path::Path::new("/bin/sleep")
+        } else {
+            std::path::Path::new("/usr/bin/sleep")
+        };
+        if !bin.exists() {
+            return;
+        }
+        let pid = sup
+            .launch_camoufox(bin, &["60"], "drop-owned-sidecar")
+            .await
+            .unwrap();
+        assert!(process_alive(pid));
+        drop(sup);
+        for _ in 0..20 {
+            if !process_alive(pid) {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        panic!("owned sidecar process {pid} survived supervisor drop");
     }
 }

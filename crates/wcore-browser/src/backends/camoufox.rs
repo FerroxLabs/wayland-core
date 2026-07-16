@@ -52,7 +52,7 @@ impl CamoufoxBackend {
     }
 
     pub fn new(base_url: impl Into<String>) -> Self {
-        Self::build(base_url.into(), None)
+        Self::build(base_url.into(), None, camoufox_access_key())
     }
 
     /// Construct a backend with a [`BrowserPolicy`] wired in. The reqwest
@@ -62,10 +62,15 @@ impl CamoufoxBackend {
     /// also re-checked against the policy — closes BLOCKER #3 from
     /// `SECURITY-v0.2.0.md` (one-shot policy bypass via redirects).
     pub fn with_policy(base_url: impl Into<String>, policy: BrowserPolicy) -> Self {
-        Self::build(base_url.into(), Some(policy))
+        Self::build(base_url.into(), Some(policy), camoufox_access_key())
     }
 
-    fn build(base_url: String, policy: Option<BrowserPolicy>) -> Self {
+    #[cfg(test)]
+    fn with_access_key(base_url: impl Into<String>, access_key: impl Into<String>) -> Self {
+        Self::build(base_url.into(), None, Some(access_key.into()))
+    }
+
+    fn build(base_url: String, policy: Option<BrowserPolicy>, access_key: Option<String>) -> Self {
         let mut url = base_url;
         // Normalize: drop trailing slash.
         if url.ends_with('/') {
@@ -98,6 +103,15 @@ impl CamoufoxBackend {
                 .pool_idle_timeout(std::time::Duration::from_secs(5))
                 .connect_timeout(std::time::Duration::from_secs(10))
                 .timeout(std::time::Duration::from_secs(90));
+            if let Some(key) = access_key.as_deref()
+                && let Ok(mut value) =
+                    reqwest::header::HeaderValue::from_str(&format!("Bearer {key}"))
+            {
+                value.set_sensitive(true);
+                let mut headers = reqwest::header::HeaderMap::new();
+                headers.insert(reqwest::header::AUTHORIZATION, value);
+                b = b.default_headers(headers);
+            }
             if let Some(r) = maybe_redirect {
                 b = b.redirect(r);
             }
@@ -153,6 +167,13 @@ impl CamoufoxBackend {
             ))
         })
     }
+}
+
+fn camoufox_access_key() -> Option<String> {
+    std::env::var("CAMOFOX_ACCESS_KEY")
+        .ok()
+        .map(|key| key.trim().to_string())
+        .filter(|key| !key.is_empty())
 }
 
 #[async_trait]
@@ -565,7 +586,7 @@ fn sidecar_snapshot(snapshot_id: u32, url: &str, text: &str) -> AriaSnapshot {
 mod tests {
     use super::*;
     use crate::provider::ScreenshotOpts;
-    use wiremock::matchers::{method, path};
+    use wiremock::matchers::{header, method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     async fn mount_open(server: &MockServer, tab_id: &str) {
@@ -592,6 +613,23 @@ mod tests {
         assert!(body["userId"].as_str().unwrap().starts_with("wayland-"));
         assert!(body["sessionKey"].as_str().unwrap().starts_with("wcore-"));
         assert_eq!(cf.identity("tab-77").unwrap().user_id, body["userId"]);
+    }
+
+    #[tokio::test]
+    async fn access_key_authenticates_sidecar_requests() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/tabs"))
+            .and(header("authorization", "Bearer local-sidecar-secret"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "tabId": "auth-tab",
+                "url": "about:blank"
+            })))
+            .mount(&server)
+            .await;
+        let cf = CamoufoxBackend::with_access_key(server.uri(), "local-sidecar-secret");
+        let session = cf.open_session(false).await.unwrap();
+        assert_eq!(session.ctx.session_id, "auth-tab");
     }
 
     #[tokio::test]

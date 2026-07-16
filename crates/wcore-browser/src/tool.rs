@@ -297,6 +297,12 @@ impl BrowserTool {
         if let Some(s) = self.sessions.lock().get(&key) {
             return Ok(s.clone());
         }
+        if self.provider.backend_name() == "camoufox" {
+            self.supervisor
+                .ensure_ready()
+                .await
+                .map_err(BrowserOpError::Backend)?;
+        }
         // The lock is released across this `await` (we must not hold a
         // `parking_lot::Mutex` guard over an await point). Two concurrent
         // first-calls for the same key can therefore both miss above and both
@@ -584,6 +590,55 @@ mod tests {
         fn backend_name(&self) -> &'static str {
             "ok"
         }
+    }
+
+    struct CamoufoxNamedOkBackend;
+
+    #[async_trait]
+    impl BrowserProvider for CamoufoxNamedOkBackend {
+        async fn open_session(
+            &self,
+            persistent_profile: bool,
+        ) -> Result<BrowserSession, BrowserOpError> {
+            Ok(BrowserSession {
+                ctx: SessionCtx::for_test("camoufox-ok"),
+                persistent_profile,
+            })
+        }
+
+        async fn close_session(&self, _ctx: &SessionCtx) -> Result<(), BrowserOpError> {
+            Ok(())
+        }
+
+        async fn dispatch(
+            &self,
+            _ctx: &SessionCtx,
+            _op: BrowserOp,
+        ) -> Result<OpResult, BrowserOpError> {
+            Ok(OpResult::Ok)
+        }
+
+        fn backend_name(&self) -> &'static str {
+            "camoufox"
+        }
+    }
+
+    #[tokio::test]
+    async fn camoufox_tool_checks_sidecar_before_opening_session() {
+        let supervisor = BrowserSupervisor::with_config(crate::supervisor::SupervisorConfig {
+            healthcheck_url: "http://127.0.0.1:9/health".into(),
+            sidecar_program: Some("wcore-camoufox-command-that-does-not-exist".into()),
+            startup_timeout: Duration::from_millis(100),
+            ..Default::default()
+        });
+        let tool = BrowserTool::new(
+            Arc::new(CamoufoxNamedOkBackend),
+            BrowserPolicy::default(),
+            Arc::new(supervisor),
+        );
+        let result = tool.execute(json!({ "op": { "kind": "get_state" } })).await;
+        assert!(result.is_error);
+        assert!(result.content.contains("Install @askjo/camofox-browser"));
     }
 
     #[tokio::test]
