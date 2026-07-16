@@ -36,6 +36,7 @@ struct McpDeclaration {
     executable_basename: Option<String>,
     executable_readiness: McpExecutableReadiness,
     path_source: LaunchValueSource,
+    preconnect_failure: Option<McpFailureCode>,
 }
 
 /// Immutable launch evidence plus redacted declarations. Arguments,
@@ -104,6 +105,23 @@ impl RuntimeDiagnosticsState {
         true
     }
 
+    pub fn has_runtime_declaration(&self, name: &str) -> bool {
+        self.declarations
+            .contains_key(&(McpDeclarationOrigin::RuntimeCommand, name.to_owned()))
+    }
+
+    pub fn has_non_runtime_declaration(&self, name: &str) -> bool {
+        self.declarations.values().any(|declaration| {
+            declaration.name == name && declaration.origin != McpDeclarationOrigin::RuntimeCommand
+        })
+    }
+
+    pub fn remove_runtime_declaration(&mut self, name: &str) -> bool {
+        self.declarations
+            .remove(&(McpDeclarationOrigin::RuntimeCommand, name.to_owned()))
+            .is_some()
+    }
+
     pub fn record_plugin_declarations(&mut self, declarations: &[PluginMcpDeclaration]) {
         for declaration in declarations {
             let (executable_readiness, path_source) = declaration
@@ -123,6 +141,7 @@ impl RuntimeDiagnosticsState {
                 executable_basename: None,
                 executable_readiness,
                 path_source,
+                preconnect_failure: None,
             };
             self.declarations.insert(
                 (McpDeclarationOrigin::Plugin, declaration.name.clone()),
@@ -157,8 +176,25 @@ impl RuntimeDiagnosticsState {
                     McpExecutableReadiness::NotApplicable
                 },
                 path_source: LaunchValueSource::Unavailable,
+                preconnect_failure: None,
             },
         );
+    }
+
+    /// Record a secret-free failure that prevented transport creation. This
+    /// keeps an omitted credential-bearing declaration from appearing merely
+    /// "configured" in the live snapshot.
+    pub fn record_preconnect_failure(
+        &mut self,
+        origin: McpDeclarationOrigin,
+        name: &str,
+        failure: McpFailureCode,
+    ) -> bool {
+        let Some(declaration) = self.declarations.get_mut(&(origin, name.to_owned())) else {
+            return false;
+        };
+        declaration.preconnect_failure = Some(failure);
+        true
     }
 
     /// Attach secret-free readiness evidence produced from the exact launch
@@ -270,6 +306,8 @@ fn project_server(
         )
     } else if !declaration.visible_to_assistant {
         (McpConnectionState::Skipped, None)
+    } else if let Some(failure) = declaration.preconnect_failure {
+        (McpConnectionState::Skipped, Some(failure))
     } else if let Some(snapshot) = lifecycle {
         match snapshot.state {
             McpLifecycleState::Connecting => (McpConnectionState::Connecting, None),
@@ -278,6 +316,9 @@ fn project_server(
                 (McpConnectionState::Failed, Some(McpFailureCode::Unknown))
             }
             McpLifecycleState::Stopping => (McpConnectionState::Stopping, None),
+            McpLifecycleState::CleanupUnverified { .. } => {
+                (McpConnectionState::Failed, Some(McpFailureCode::Unknown))
+            }
         }
     } else {
         match health {
@@ -673,6 +714,28 @@ mod tests {
     }
 
     #[test]
+    fn credential_omission_is_reported_as_skipped_not_configured() {
+        let mut state = state_with_servers(
+            [(
+                "credentialed".to_string(),
+                http_server("https://example.invalid/mcp"),
+            )],
+            None,
+        );
+        assert!(state.record_preconnect_failure(
+            McpDeclarationOrigin::EffectiveConfig,
+            "credentialed",
+            McpFailureCode::AuthenticationRequired,
+        ));
+
+        let snapshot = state.snapshot(&McpLifecycleCatalog::new(), &[], &ToolRegistry::new());
+        let server = &snapshot.mcp_servers[0];
+        assert_eq!(server.connection, McpConnectionState::Skipped);
+        assert_eq!(server.exposure, McpExposureState::Blocked);
+        assert_eq!(server.failure, Some(McpFailureCode::AuthenticationRequired));
+    }
+
+    #[test]
     fn snapshot_is_secret_safe_and_keeps_scoped_servers_visible() {
         let state = state_with_servers(
             [
@@ -902,6 +965,22 @@ mod tests {
             .find(|server| server.name == "new")
             .unwrap();
         assert_eq!(runtime.origin, McpDeclarationOrigin::RuntimeCommand);
+    }
+
+    #[test]
+    fn runtime_declaration_removal_cannot_mutate_config_authority() {
+        let mut state = state_with_servers(
+            [("configured".to_string(), stdio_server("configured", None))],
+            None,
+        );
+        assert!(state.record_runtime_declaration("runtime", &stdio_server("runtime", None)));
+        assert!(state.has_runtime_declaration("runtime"));
+        assert!(state.has_non_runtime_declaration("configured"));
+
+        assert!(state.remove_runtime_declaration("runtime"));
+        assert!(!state.remove_runtime_declaration("runtime"));
+        assert!(!state.remove_runtime_declaration("configured"));
+        assert!(state.has_non_runtime_declaration("configured"));
     }
 
     #[test]

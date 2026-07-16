@@ -47,6 +47,10 @@ const MAX_LINE_BYTES: u64 = 8 * 1024 * 1024;
 pub struct StdioTransport {
     stdin: Mutex<BufWriter<ChildStdin>>,
     child: Mutex<Child>,
+    /// Stable process-group identity captured at spawn. `Child::id()` becomes
+    /// `None` after the direct wrapper exits, while grandchildren can still
+    /// be alive, so cleanup must not depend on consulting it later.
+    process_group_id: Option<u32>,
     next_id: AtomicU64,
     /// Pending request→response channels, keyed by JSON-RPC id.
     pending: Arc<Mutex<HashMap<u64, oneshot::Sender<JsonRpcResponse>>>>,
@@ -187,16 +191,19 @@ fn windows_program_token(command: &str) -> String {
 /// `kill().await`); in that case there is nothing to signal and we no-op.
 /// `ESRCH` (group already gone) is benign and ignored.
 #[cfg(unix)]
-fn kill_process_group(child: &Child) {
-    if let Some(pid) = child.id() {
-        // SAFETY: `kill` is async-signal-safe and we only pass a process-group
-        // target (negated PID) plus a constant signal. The PID was assigned by
-        // a successful spawn and is the leader of its own group via
-        // `process_group(0)`; signalling a stale group merely returns ESRCH.
-        unsafe {
-            libc::kill(-(pid as libc::pid_t), libc::SIGKILL);
+fn kill_process_group(process_group_id: u32) -> std::io::Result<()> {
+    // SAFETY: `kill` is async-signal-safe and we only pass a process-group
+    // target (negated PID) plus a constant signal. The PID was assigned by
+    // a successful spawn and is the leader of its own group via
+    // `process_group(0)`; signalling a stale group merely returns ESRCH.
+    let result = unsafe { libc::kill(-(process_group_id as libc::pid_t), libc::SIGKILL) };
+    if result != 0 {
+        let error = std::io::Error::last_os_error();
+        if error.raw_os_error() != Some(libc::ESRCH) {
+            return Err(error);
         }
     }
+    Ok(())
 }
 
 // Platform-agnostic unit tests for the cmd.exe quoting function. `shell_quote`
@@ -451,6 +458,7 @@ impl StdioTransport {
         let mut child = cmd
             .spawn()
             .map_err(|e| McpError::Transport(format!("Failed to spawn '{}': {}", command, e)))?;
+        let process_group_id = child.id();
 
         let stdin = child
             .stdin
@@ -480,6 +488,7 @@ impl StdioTransport {
         Ok(Self {
             stdin: Mutex::new(BufWriter::new(stdin)),
             child: Mutex::new(child),
+            process_group_id,
             next_id: AtomicU64::new(1),
             pending,
             reader_task: Mutex::new(Some(reader_task)),
@@ -635,7 +644,9 @@ impl StdioTransport {
         // wrapper grandchildren are reaped, then `start_kill` the tracked
         // child so tokio still reaps the direct PID and updates its state.
         #[cfg(unix)]
-        kill_process_group(&child);
+        if let Some(process_group_id) = self.process_group_id {
+            let _ = kill_process_group(process_group_id);
+        }
         let _ = child.start_kill();
     }
 
@@ -758,9 +769,22 @@ impl McpTransport for StdioTransport {
             // grandchildren (npx→node, uvx→python) are reaped, not orphaned.
             // `kill().await` below additionally reaps the direct child PID.
             #[cfg(unix)]
-            kill_process_group(&child);
-            if let Err(e) = child.kill().await {
-                warn!(error = %e, "[mcp] stdio close: kill failed");
+            let group_cleanup_error = self
+                .process_group_id
+                .and_then(|process_group_id| kill_process_group(process_group_id).err());
+            if child.try_wait()?.is_none() {
+                child.start_kill().map_err(|error| {
+                    McpError::Transport(format!("failed to kill MCP child: {error}"))
+                })?;
+                child.wait().await.map_err(|error| {
+                    McpError::Transport(format!("failed to reap MCP child: {error}"))
+                })?;
+            }
+            #[cfg(unix)]
+            if let Some(error) = group_cleanup_error {
+                return Err(McpError::Transport(format!(
+                    "failed to kill MCP process group: {error}"
+                )));
             }
         }
 
@@ -801,6 +825,10 @@ impl Drop for StdioTransport {
             && let Some(handle) = guard.take()
         {
             handle.abort();
+        }
+        #[cfg(unix)]
+        if let Some(process_group_id) = self.process_group_id {
+            let _ = kill_process_group(process_group_id);
         }
     }
 }

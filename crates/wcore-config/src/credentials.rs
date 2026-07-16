@@ -1395,10 +1395,15 @@ pub fn open_store(
             plaintext_path.to_path_buf(),
         ))),
         CredentialsBackend::Keyring => {
-            let service = cfg
+            let base_service = cfg
                 .service_name
                 .clone()
                 .unwrap_or_else(|| "wayland-core".to_string());
+            let service = if std::env::var_os("WAYLAND_HOME").is_some() {
+                profile_keyring_service(&base_service, plaintext_path)?
+            } else {
+                base_service
+            };
             Ok(Box::new(KeyringCredentialsStore::new(service)))
         }
         // S11 (v0.6.3): EncryptedFile backend is wired here. Crypto primitives

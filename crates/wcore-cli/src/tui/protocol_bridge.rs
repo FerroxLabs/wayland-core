@@ -20,7 +20,7 @@ use std::time::Instant;
 
 use tokio::sync::Notify;
 use tokio::sync::mpsc::UnboundedReceiver;
-use wcore_protocol::events::{ProtocolEvent, ToolStatus};
+use wcore_protocol::events::{McpRemovalOutcome, ProtocolEvent, ToolStatus};
 use wcore_types::message::{ContentBlock, Message, Role};
 
 use crate::tui::anim::AnimId;
@@ -788,6 +788,29 @@ fn apply_event_inner(app: &mut App, event: ProtocolEvent) {
                 );
                 crate::tui::state::TransientSlice {
                     toast: Some(toast_msg.clone()),
+                    toast_at: Some(now),
+                    mcp_status,
+                    ..prev.clone()
+                }
+            });
+        }
+        ProtocolEvent::McpRemovalResult {
+            name,
+            outcome,
+            removed_tools,
+            ..
+        } => {
+            let tool_count = removed_tools.len();
+            let now = Instant::now();
+            app.set_transient(|prev| {
+                let mut mcp_status = prev.mcp_status.clone();
+                if outcome == McpRemovalOutcome::Removed {
+                    mcp_status.remove(&name);
+                }
+                crate::tui::state::TransientSlice {
+                    toast: Some(format!(
+                        "{name} removal {outcome:?} · {tool_count} tools"
+                    )),
                     toast_at: Some(now),
                     mcp_status,
                     ..prev.clone()

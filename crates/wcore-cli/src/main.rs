@@ -36,9 +36,11 @@ use wcore_agent::slash::{Dispatcher as SlashDispatcher, SlashError, SlashOutcome
 use wcore_config::config::{self, CliArgs, Config, McpServerConfig, TransportType};
 use wcore_mcp::manager::{McpManager, McpServerHealth};
 use wcore_mcp::tool_proxy::register_single_server_tools;
-use wcore_protocol::commands::{ProtocolCommand, ResumeTurnAction};
+use wcore_protocol::commands::{
+    MCP_LIFECYCLE_VERSION, ProtocolCommand, RemoveMcpServerCommand, ResumeTurnAction,
+};
 use wcore_protocol::events::{
-    BudgetGrantRefusalReason, FinishReason, ProtocolEvent, RecoveryLifecycle,
+    BudgetGrantRefusalReason, FinishReason, McpRemovalOutcome, ProtocolEvent, RecoveryLifecycle,
     RecoveryReconcileReason, RecoveryUnavailableReason,
 };
 use wcore_protocol::execution_policy::{
@@ -1293,7 +1295,7 @@ async fn run() -> anyhow::Result<ExitCode> {
                     DEFAULT_DANGEROUS_SESSION_TTL_SECS,
                     false,
                 )?;
-                run_tui_mode(config, &cwd, None, None, true, execution, false).await?;
+                run_tui_mode(config, &cwd, None, None, None, true, execution, false).await?;
                 // B3: explicitly disarm the crash sentinel on normal TUI
                 // exit so it isn't present if the process is still alive
                 // during post-TUI cleanup (MCP shutdown, etc.) and then
@@ -1647,6 +1649,7 @@ async fn run() -> anyhow::Result<ExitCode> {
                     &cwd,
                     None,
                     cli.session_id.clone(),
+                    cli.assistant.clone(),
                     true,
                     execution,
                     cli.search,
@@ -1763,6 +1766,7 @@ async fn run() -> anyhow::Result<ExitCode> {
             &cwd,
             resume,
             cli.session_id,
+            cli.assistant,
             false,
             execution,
             cli.search,
@@ -2067,11 +2071,13 @@ fn wire_force_opt_in_env() -> bool {
         .unwrap_or(false)
 }
 
+#[allow(clippy::too_many_arguments)] // One explicit argument per host-controlled launch input.
 async fn run_tui_mode(
     config: Config,
     cwd: &str,
     resume: Option<String>,
     session_id: Option<String>,
+    active_assistant: Option<String>,
     force_onboarding: bool,
     execution: LocalExecutionSelection,
     web_search: bool,
@@ -2166,6 +2172,7 @@ async fn run_tui_mode(
     // channel messages into agent turns for the lifetime of this session).
     let mut bootstrap = execution
         .apply(AgentBootstrap::new(config, cwd, output.clone()))
+        .active_assistant(active_assistant.clone())
         .with_approval_manager(approval_manager.clone())
         .plugin_provider_router(make_plugin_provider_router())
         .enable_inbound_dispatch(true);
@@ -2315,6 +2322,7 @@ async fn run_tui_mode(
     // The `TuiEngine` controller keeps the last `tx` clone so it can
     // synthesize the `StreamEnd` the engine never emits itself.
     let mut tui_engine = tui::TuiEngine::new(engine, approval_manager, tx);
+    tui_engine.set_active_assistant(active_assistant);
     tui_engine.set_inventory(tui::EngineInventory {
         skills: skills_snapshot,
         mcp_servers: mcp_snapshot,
@@ -2674,8 +2682,18 @@ fn mcp_server_failure_reason(health: &McpServerHealth) -> Option<String> {
         McpServerHealth::Failed { reason } | McpServerHealth::Skipped { reason } => {
             Some(reason.clone())
         }
-        McpServerHealth::TimedOut { after } => {
-            Some(format!("connect timed out after {}s", after.as_secs()))
+        McpServerHealth::TimedOut {
+            after,
+            cleanup_error,
+        } => {
+            let cleanup = cleanup_error
+                .as_ref()
+                .map(|error| format!("; cleanup unverified: {error}"))
+                .unwrap_or_default();
+            Some(format!(
+                "connect timed out after {}s{cleanup}",
+                after.as_secs()
+            ))
         }
         McpServerHealth::Ready { .. } => None,
     }
@@ -2731,6 +2749,256 @@ fn runtime_diagnostics_admission_rejection(
         request_id: command.request_id.clone(),
         reason,
     })
+}
+
+fn mcp_removal_receipt(
+    command: &RemoveMcpServerCommand,
+    outcome: McpRemovalOutcome,
+    removed_tools: Vec<String>,
+) -> ProtocolEvent {
+    ProtocolEvent::McpRemovalResult {
+        lifecycle_version: command.lifecycle_version,
+        request_id: bounded_mcp_receipt_field(&command.request_id, MAX_MCP_REQUEST_ID_LEN),
+        name: bounded_mcp_receipt_field(&command.name, MAX_MCP_SERVER_NAME_LEN),
+        outcome,
+        removed_tools,
+    }
+}
+
+fn bounded_mcp_receipt_field(value: &str, max_bytes: usize) -> String {
+    if !value.trim().is_empty() && value.len() <= max_bytes {
+        value.to_string()
+    } else {
+        "<invalid>".to_string()
+    }
+}
+
+fn mcp_removal_request_rejection(command: &RemoveMcpServerCommand) -> Option<McpRemovalOutcome> {
+    if command.lifecycle_version != MCP_LIFECYCLE_VERSION {
+        Some(McpRemovalOutcome::UnsupportedVersion)
+    } else if mcp_removal_request_id_invalid(command)
+        || command.name.trim().is_empty()
+        || command.name.len() > MAX_MCP_SERVER_NAME_LEN
+    {
+        Some(McpRemovalOutcome::InvalidRequest)
+    } else {
+        None
+    }
+}
+
+fn mcp_removal_request_id_invalid(command: &RemoveMcpServerCommand) -> bool {
+    command.request_id.trim().is_empty() || command.request_id.len() > MAX_MCP_REQUEST_ID_LEN
+}
+
+#[derive(Default)]
+struct McpRemovalLedger {
+    receipts: std::collections::HashMap<String, (RemoveMcpServerCommand, ProtocolEvent)>,
+}
+
+const MAX_MCP_REMOVAL_RECEIPTS: usize = 4096;
+const MAX_MCP_REQUEST_ID_LEN: usize = 256;
+const MAX_MCP_SERVER_NAME_LEN: usize = 256;
+const MAX_MCP_CONFIG_VALUE_LEN: usize = 8 * 1024;
+const MAX_MCP_CONFIG_ENTRIES: usize = 256;
+
+#[allow(clippy::too_many_arguments)]
+fn mcp_add_request_rejection(
+    name: &str,
+    transport: &str,
+    command: Option<&str>,
+    args: Option<&[String]>,
+    env: Option<&HashMap<String, String>>,
+    url: Option<&str>,
+    headers: Option<&HashMap<String, String>>,
+) -> Option<&'static str> {
+    if name.trim().is_empty() || name.len() > MAX_MCP_SERVER_NAME_LEN {
+        return Some("server name is empty or too long");
+    }
+    if transport.trim().is_empty() || transport.len() > 32 {
+        return Some("transport is empty or too long");
+    }
+    if command.is_some_and(|value| value.len() > MAX_MCP_CONFIG_VALUE_LEN)
+        || url.is_some_and(|value| value.len() > MAX_MCP_CONFIG_VALUE_LEN)
+    {
+        return Some("command or URL is too long");
+    }
+    if args.is_some_and(|values| {
+        values.len() > MAX_MCP_CONFIG_ENTRIES
+            || values
+                .iter()
+                .any(|value| value.len() > MAX_MCP_CONFIG_VALUE_LEN)
+    }) {
+        return Some("argument list exceeds the MCP request limit");
+    }
+    if [env, headers].into_iter().flatten().any(|values| {
+        values.len() > MAX_MCP_CONFIG_ENTRIES
+            || values.iter().any(|(key, value)| {
+                key.len() > MAX_MCP_SERVER_NAME_LEN || value.len() > MAX_MCP_CONFIG_VALUE_LEN
+            })
+    }) {
+        return Some("environment or header map exceeds the MCP request limit");
+    }
+    None
+}
+
+impl McpRemovalLedger {
+    fn is_full_for_new(&self, request_id: &str) -> bool {
+        !self.receipts.contains_key(request_id) && self.receipts.len() >= MAX_MCP_REMOVAL_RECEIPTS
+    }
+
+    fn replay_or_conflict(&self, command: &RemoveMcpServerCommand) -> Option<ProtocolEvent> {
+        let (bound_command, receipt) = self.receipts.get(&command.request_id)?;
+        if bound_command == command {
+            Some(receipt.clone())
+        } else {
+            Some(mcp_removal_receipt(
+                command,
+                McpRemovalOutcome::RequestIdConflict,
+                Vec::new(),
+            ))
+        }
+    }
+
+    fn record(&mut self, command: &RemoveMcpServerCommand, receipt: &ProtocolEvent) {
+        if !command.request_id.trim().is_empty()
+            && !command.name.trim().is_empty()
+            && command.request_id.len() <= MAX_MCP_REQUEST_ID_LEN
+            && command.name.len() <= MAX_MCP_SERVER_NAME_LEN
+        {
+            self.receipts
+                .entry(command.request_id.clone())
+                .or_insert_with(|| (command.clone(), receipt.clone()));
+        }
+    }
+}
+
+fn emit_mcp_removal_receipt(
+    command: &RemoveMcpServerCommand,
+    outcome: McpRemovalOutcome,
+    removed_tools: Vec<String>,
+    ledger: &mut McpRemovalLedger,
+    writer: &dyn ProtocolEmitter,
+) {
+    let receipt = mcp_removal_receipt(command, outcome, removed_tools);
+    ledger.record(command, &receipt);
+    let _ = writer.emit(&receipt);
+}
+
+fn mcp_removal_cleanup_outcome(cleanup_failures: &[String]) -> McpRemovalOutcome {
+    if cleanup_failures.is_empty() {
+        McpRemovalOutcome::Removed
+    } else {
+        McpRemovalOutcome::CleanupUnverified
+    }
+}
+
+/// Remove only a server introduced through the current process's host command.
+/// Config/plugin declarations and profile-scoped OAuth state are outside this
+/// authority and are never touched.
+async fn remove_runtime_mcp_server(
+    command: RemoveMcpServerCommand,
+    removal_ledger: &mut McpRemovalLedger,
+    runtime_diagnostics: &mut RuntimeDiagnosticsState,
+    lifecycle: &McpLifecycleCatalog,
+    engine: &mut wcore_agent::engine::AgentEngine,
+    dynamic_managers: &mut Vec<Arc<McpManager>>,
+    writer: &dyn ProtocolEmitter,
+) {
+    if mcp_removal_request_id_invalid(&command) {
+        let _ = writer.emit(&mcp_removal_receipt(
+            &command,
+            McpRemovalOutcome::InvalidRequest,
+            Vec::new(),
+        ));
+        return;
+    }
+    if let Some(receipt) = removal_ledger.replay_or_conflict(&command) {
+        let _ = writer.emit(&receipt);
+        return;
+    }
+    if removal_ledger.is_full_for_new(&command.request_id) {
+        let _ = writer.emit(&mcp_removal_receipt(
+            &command,
+            McpRemovalOutcome::CapacityExceeded,
+            Vec::new(),
+        ));
+        return;
+    }
+    if let Some(outcome) = mcp_removal_request_rejection(&command) {
+        emit_mcp_removal_receipt(&command, outcome, Vec::new(), removal_ledger, writer);
+        return;
+    }
+
+    let admission = if runtime_diagnostics.has_non_runtime_declaration(&command.name) {
+        Some(McpRemovalOutcome::NotRuntimeManaged)
+    } else if !runtime_diagnostics.has_runtime_declaration(&command.name) {
+        Some(McpRemovalOutcome::AlreadyAbsent)
+    } else {
+        None
+    };
+    if let Some(outcome) = admission {
+        emit_mcp_removal_receipt(&command, outcome, Vec::new(), removal_ledger, writer);
+        return;
+    }
+
+    let defer_cold = engine.defer_cold_config();
+    let Some(registry) = engine.registry_mut() else {
+        emit_mcp_removal_receipt(
+            &command,
+            McpRemovalOutcome::RegistryBusy,
+            Vec::new(),
+            removal_ledger,
+            writer,
+        );
+        return;
+    };
+
+    let _ = lifecycle.mark_stopping(&command.name);
+    let removed_tools = registry.remove_mcp_server(&command.name);
+    registry.refresh_tool_search_catalog(&defer_cold);
+
+    let matching: Vec<_> = dynamic_managers
+        .iter()
+        .filter(|manager| {
+            manager.hosts_server(&command.name) || manager.health().contains_key(&command.name)
+        })
+        .cloned()
+        .collect();
+    let mut cleanup_failures = Vec::new();
+    for manager in &matching {
+        if let Err(error) = manager.close_server(&command.name).await {
+            cleanup_failures.push(error.to_string());
+        }
+    }
+    let cleanup_outcome = mcp_removal_cleanup_outcome(&cleanup_failures);
+    if cleanup_outcome != McpRemovalOutcome::Removed {
+        let reason = format!(
+            "MCP transport cleanup could not be verified: {}",
+            cleanup_failures.join("; ")
+        );
+        let _ = lifecycle.mark_cleanup_unverified(&command.name, reason);
+        emit_mcp_removal_receipt(
+            &command,
+            cleanup_outcome,
+            removed_tools,
+            removal_ledger,
+            writer,
+        );
+        return;
+    }
+    dynamic_managers.retain(|manager| {
+        !(manager.hosts_server(&command.name) || manager.health().contains_key(&command.name))
+    });
+    runtime_diagnostics.remove_runtime_declaration(&command.name);
+    let _ = lifecycle.complete_stopping(&command.name);
+
+    emit_mcp_removal_receipt(
+        &command,
+        McpRemovalOutcome::Removed,
+        removed_tools,
+        removal_ledger,
+        writer,
+    );
 }
 
 /// wayland#551 — integrate a background-connected config-MCP manager into
@@ -2918,6 +3186,7 @@ fn to_mcp_server_config(
     env: Option<HashMap<String, String>>,
     url: Option<String>,
     headers: Option<HashMap<String, String>>,
+    allow_local: bool,
 ) -> Result<McpServerConfig, String> {
     let transport_type = match transport {
         "stdio" => TransportType::Stdio,
@@ -2933,9 +3202,32 @@ fn to_mcp_server_config(
         url,
         headers,
         deferred: Some(false),
-        allow_local: false,
+        allow_local,
         only_for_assistant: None,
     })
+}
+
+fn scope_host_runtime_mcp(
+    config: McpServerConfig,
+    active_assistant: Option<&str>,
+) -> Result<McpServerConfig, &'static str> {
+    let active_assistant = active_assistant
+        .filter(|assistant| !assistant.trim().is_empty())
+        .ok_or("active assistant identity is required for a runtime MCP declaration")?;
+    Ok(config.scoped_to_assistant(Some(active_assistant)))
+}
+
+fn resolve_live_mcp_credential_references(config: &mut McpServerConfig) -> Result<(), String> {
+    if !wcore_config::mcp_cred_refs::server_has_credential_references(config) {
+        return Ok(());
+    }
+    let resolved = Config::resolve(&CliArgs::default())
+        .map_err(|error| format!("credentials config unavailable: {error}"))?;
+    let store = resolved
+        .open_credentials_store()
+        .map_err(|error| format!("credentials store unavailable: {error}"))?;
+    wcore_config::mcp_cred_refs::resolve_server_headers(config, &*store)
+        .map_err(|error| error.to_string())
 }
 
 /// Pending config fields: (model, thinking, thinking_budget, effort)
@@ -3837,17 +4129,27 @@ async fn run_json_stream_mode(
     // server marked `only_for_assistant` must not be background-connected for a
     // non-matching assistant. Fail-closed when `assistant` is None.
     let scoped_config_servers = config.mcp.servers_for_assistant(assistant.as_deref());
-    let deferred_mcp_servers = if scoped_config_servers.is_empty() {
-        None
+    let (deferred_mcp_servers, credential_skips) = if scoped_config_servers.is_empty() {
+        (None, Vec::new())
     } else {
-        Some(match config.open_credentials_store() {
-            Ok(store) => wcore_config::mcp_cred_refs::resolve_servers_for_connect(
+        let resolution = match config.open_credentials_store() {
+            Ok(store) => wcore_config::mcp_cred_refs::resolve_servers_for_connect_with_report(
                 &scoped_config_servers,
                 &*store,
             ),
-            Err(_) => scoped_config_servers,
-        })
+            Err(_) => wcore_config::mcp_cred_refs::without_credential_references_with_report(
+                &scoped_config_servers,
+            ),
+        };
+        (Some(resolution.connectable), resolution.skipped)
     };
+    for (name, _) in &credential_skips {
+        runtime_diagnostics.record_preconnect_failure(
+            wcore_protocol::diagnostics::McpDeclarationOrigin::EffectiveConfig,
+            name,
+            wcore_protocol::diagnostics::McpFailureCode::AuthenticationRequired,
+        );
+    }
 
     // Bootstrap engine with full feature initialization. Phase 1B-2 —
     // json-stream is a primary long-running host session (e.g. the Wayland
@@ -3902,7 +4204,10 @@ async fn run_json_stream_mode(
     let mut workspace_policy_receipt = result.workspace_policy_receipt.clone();
     // wayland#551 — declared-but-still-connecting servers count as MCP
     // capability on the ready frame; their tools register shortly after.
-    let initial_has_mcp = result.has_mcp || deferred_mcp_servers.is_some();
+    let initial_has_mcp = result.has_mcp
+        || deferred_mcp_servers
+            .as_ref()
+            .is_some_and(|servers| !servers.is_empty());
     let initial_has_plugins = result.has_plugins;
     // W8c.3 H.2: snapshot the plugin-derived capability set so the
     // protocol sink advertises `browser_suite` / `computer_use` flags
@@ -3941,6 +4246,12 @@ async fn run_json_stream_mode(
         engine.advertised_capabilities(),
         Some(execution_policy_sequence.current().clone()),
     );
+    for (name, reason) in &credential_skips {
+        let _ = writer.emit(&ProtocolEvent::McpFailed {
+            name: name.clone(),
+            reason: reason.message().to_string(),
+        });
+    }
     let _ = writer.emit(&ProtocolEvent::ExecutionPolicy {
         snapshot: execution_policy_sequence.current().clone(),
     });
@@ -3969,7 +4280,13 @@ async fn run_json_stream_mode(
     let mcp_lifecycle = McpLifecycleCatalog::new();
     for mgr in &result.mcp_managers {
         for name in mgr.server_names() {
-            mcp_lifecycle.seed_ready(name, McpConfigIdentity::UNKNOWN);
+            if !mcp_lifecycle.seed_ready(name.clone(), McpConfigIdentity::UNKNOWN) {
+                let _ = writer.emit(&ProtocolEvent::McpFailed {
+                    name,
+                    reason: "MCP lifecycle capacity exceeded; runtime management unavailable"
+                        .to_string(),
+                });
+            }
         }
     }
 
@@ -4047,6 +4364,7 @@ async fn run_json_stream_mode(
 
     // --- Pre-message phase: accept AddMcpServer commands ---
     let mut dynamic_managers: Vec<Arc<McpManager>> = Vec::new();
+    let mut mcp_removal_ledger = McpRemovalLedger::default();
     let mut first_cmd: Option<ProtocolCommand> = None;
 
     // wayland#551 — a deferred-MCP manager whose integration found the
@@ -4102,50 +4420,82 @@ async fn run_json_stream_mode(
                 env,
                 url,
                 headers,
+                allow_local,
             } => {
-                eprintln!(
-                    "[mcp] AddMcpServer received: name={name}, transport={transport}, command={command:?}"
-                );
-                // #135: idempotency — re-adding an already-connected server (boot
-                // set or a prior dynamic add) does not spawn a duplicate. Re-emit
-                // the existing tools so the host's view stays consistent, then skip
-                // the reconnect. NOTE: a re-add with changed config is ignored (the
-                // existing connection is kept) — remove then add to reconfigure.
-                if engine.mcp_server_connected(&name) {
-                    mcp_lifecycle.seed_ready(name.clone(), McpConfigIdentity::UNKNOWN);
-                    let existing: Vec<String> = engine
-                        .tools()
-                        .to_tool_defs()
-                        .iter()
-                        .filter(|t| t.server.as_deref() == Some(name.as_str()))
-                        .map(|t| t.name.clone())
-                        .collect();
-                    eprintln!(
-                        "[mcp] '{name}' already connected ({} tools); keeping existing \
-                         connection, ignoring re-add (remove then add to change config)",
-                        existing.len()
+                if let Some(reason) = mcp_add_request_rejection(
+                    &name,
+                    &transport,
+                    command.as_deref(),
+                    args.as_deref(),
+                    env.as_ref(),
+                    url.as_deref(),
+                    headers.as_ref(),
+                ) {
+                    output.emit_error(
+                        &format!("AddMcpServer rejected: invalid request ({reason})"),
+                        false,
                     );
-                    let _ = writer.emit(&ProtocolEvent::McpReady {
-                        name,
-                        tools: existing,
+                    let safe_name = if name.len() <= MAX_MCP_SERVER_NAME_LEN {
+                        name
+                    } else {
+                        "<invalid>".to_string()
+                    };
+                    let _ = writer.emit(&ProtocolEvent::McpFailed {
+                        name: safe_name,
+                        reason: format!("invalid request: {reason}"),
                     });
                     continue;
                 }
-                let config =
-                    match to_mcp_server_config(&transport, command, args, env, url, headers) {
-                        Ok(c) => c,
-                        Err(e) => {
-                            output.emit_error(&format!("AddMcpServer '{name}': {e}"), false);
-                            continue;
-                        }
-                    };
-                if !runtime_diagnostics.record_runtime_declaration(&name, &config) {
+                eprintln!(
+                    "[mcp] AddMcpServer received: name={name}, transport={transport}, command_present={}",
+                    command.is_some()
+                );
+                let mut config = match to_mcp_server_config(
+                    &transport,
+                    command,
+                    args,
+                    env,
+                    url,
+                    headers,
+                    allow_local,
+                ) {
+                    Ok(c) => c,
+                    Err(e) => {
+                        output.emit_error(&format!("AddMcpServer '{name}': {e}"), false);
+                        continue;
+                    }
+                };
+                config = match scope_host_runtime_mcp(config, assistant.as_deref()) {
+                    Ok(config) => config,
+                    Err(reason) => {
+                        output.emit_error(&format!("AddMcpServer '{name}': {reason}"), false);
+                        let _ = writer.emit(&ProtocolEvent::McpFailed {
+                            name: name.clone(),
+                            reason: reason.to_string(),
+                        });
+                        continue;
+                    }
+                };
+                if let Err(error) = resolve_live_mcp_credential_references(&mut config) {
+                    let reason = format!("credential resolution failed: {error}");
+                    output.emit_error(&format!("AddMcpServer '{name}': {reason}"), false);
+                    let _ = writer.emit(&ProtocolEvent::McpFailed {
+                        name: name.clone(),
+                        reason,
+                    });
+                    continue;
+                }
+                if runtime_diagnostics.has_non_runtime_declaration(&name) {
                     output.emit_error(
                         &format!(
                             "AddMcpServer '{name}': name collides with an effective config declaration"
                         ),
                         false,
                     );
+                    let _ = writer.emit(&ProtocolEvent::McpFailed {
+                        name,
+                        reason: "name collides with an effective config declaration".to_string(),
+                    });
                     continue;
                 }
 
@@ -4153,6 +4503,12 @@ async fn run_json_stream_mode(
                 let reservation = match mcp_lifecycle.reserve(name.clone(), config_identity) {
                     McpReservationOutcome::Acquired(reservation) => reservation,
                     McpReservationOutcome::Existing(snapshot) => {
+                        if snapshot.config_identity != config_identity {
+                            let reason = "same-name MCP server is already owned by a different configuration; remove it before re-adding".to_string();
+                            output.emit_error(&format!("AddMcpServer '{name}': {reason}"), false);
+                            let _ = writer.emit(&ProtocolEvent::McpFailed { name, reason });
+                            continue;
+                        }
                         match snapshot.state {
                             McpLifecycleState::Ready => {
                                 let tools = registered_mcp_tool_names(&engine.tools(), &name);
@@ -4169,13 +4525,31 @@ async fn run_json_stream_mode(
                                     true,
                                 );
                             }
+                            McpLifecycleState::CleanupUnverified { .. } => {
+                                output.emit_error(
+                                    &format!(
+                                        "AddMcpServer '{name}': prior transport cleanup is unverified; retry remove first"
+                                    ),
+                                    false,
+                                );
+                            }
                             McpLifecycleState::Failed { .. } => {
                                 unreachable!("failed lifecycle entries are retryable")
                             }
                         }
                         continue;
                     }
+                    McpReservationOutcome::CapacityExceeded => {
+                        output.emit_error(
+                            "AddMcpServer refused: session MCP lifecycle capacity exceeded",
+                            false,
+                        );
+                        continue;
+                    }
                 };
+                let declaration_recorded =
+                    runtime_diagnostics.record_runtime_declaration(&name, &config);
+                debug_assert!(declaration_recorded);
 
                 let mut single_configs = HashMap::new();
                 single_configs.insert(name.clone(), config.clone());
@@ -4275,6 +4649,18 @@ async fn run_json_stream_mode(
                         });
                     }
                 }
+            }
+            ProtocolCommand::RemoveMcpServer(command) => {
+                remove_runtime_mcp_server(
+                    command,
+                    &mut mcp_removal_ledger,
+                    &mut runtime_diagnostics,
+                    &mcp_lifecycle,
+                    &mut engine,
+                    &mut dynamic_managers,
+                    writer.as_ref(),
+                )
+                .await;
             }
             ProtocolCommand::Stop => return Ok(()),
             other => {
@@ -4663,6 +5049,45 @@ async fn run_json_stream_mode(
                                             false,
                                         );
                                     }
+                                    ProtocolCommand::RemoveMcpServer(command) => {
+                                        if mcp_removal_request_id_invalid(&command) {
+                                            let _ = writer.emit(&mcp_removal_receipt(
+                                                &command,
+                                                McpRemovalOutcome::InvalidRequest,
+                                                Vec::new(),
+                                            ));
+                                        } else if let Some(receipt) = mcp_removal_ledger
+                                            .replay_or_conflict(&command)
+                                        {
+                                            let _ = writer.emit(&receipt);
+                                        } else if mcp_removal_ledger
+                                            .is_full_for_new(&command.request_id)
+                                        {
+                                            let _ = writer.emit(&mcp_removal_receipt(
+                                                &command,
+                                                McpRemovalOutcome::CapacityExceeded,
+                                                Vec::new(),
+                                            ));
+                                        } else if let Some(outcome) =
+                                            mcp_removal_request_rejection(&command)
+                                        {
+                                            emit_mcp_removal_receipt(
+                                                &command,
+                                                outcome,
+                                                Vec::new(),
+                                                &mut mcp_removal_ledger,
+                                                writer.as_ref(),
+                                            );
+                                        } else {
+                                            emit_mcp_removal_receipt(
+                                                &command,
+                                                McpRemovalOutcome::TurnInProgress,
+                                                Vec::new(),
+                                                &mut mcp_removal_ledger,
+                                                writer.as_ref(),
+                                            );
+                                        }
+                                    }
                                     ProtocolCommand::Ping => {
                                         let _ = writer.emit(&wcore_protocol::events::ProtocolEvent::Pong);
                                     }
@@ -5009,6 +5434,18 @@ async fn run_json_stream_mode(
                     false,
                 );
             }
+            ProtocolCommand::RemoveMcpServer(command) => {
+                remove_runtime_mcp_server(
+                    command,
+                    &mut mcp_removal_ledger,
+                    &mut runtime_diagnostics,
+                    &mcp_lifecycle,
+                    &mut engine,
+                    &mut dynamic_managers,
+                    writer.as_ref(),
+                )
+                .await;
+            }
             ProtocolCommand::GrantWorkspaceCapability { executable } => {
                 emit_workspace_capability_grant(
                     allow_host_workspace_grants,
@@ -5107,6 +5544,226 @@ mod tests {
     use wcore_types::execution_policy::{BaselineExecutionPolicy, PolicySource};
 
     #[test]
+    fn host_runtime_mcp_requires_an_immutable_assistant_scope() {
+        let config = to_mcp_server_config(
+            "stdio",
+            Some("example-mcp".into()),
+            None,
+            None,
+            None,
+            None,
+            false,
+        )
+        .expect("valid MCP config");
+
+        assert!(scope_host_runtime_mcp(config.clone(), None).is_err());
+        assert!(scope_host_runtime_mcp(config.clone(), Some(" ")).is_err());
+
+        let scoped = scope_host_runtime_mcp(config, Some("research"))
+            .expect("identified host session must be scoped");
+        assert!(scoped.is_visible_to_assistant(Some("research")));
+        assert!(!scoped.is_visible_to_assistant(Some("operations")));
+        assert!(!scoped.is_visible_to_assistant(None));
+    }
+
+    #[test]
+    fn cleanup_failure_cannot_produce_removed_receipt() {
+        assert_eq!(mcp_removal_cleanup_outcome(&[]), McpRemovalOutcome::Removed);
+        assert_eq!(
+            mcp_removal_cleanup_outcome(&["injected close failure".into()]),
+            McpRemovalOutcome::CleanupUnverified
+        );
+    }
+
+    #[test]
+    fn removal_admission_is_versioned_bounded_and_replay_safe_during_turns() {
+        let unsupported = RemoveMcpServerCommand {
+            lifecycle_version: MCP_LIFECYCLE_VERSION + 1,
+            request_id: String::new(),
+            name: String::new(),
+        };
+        assert_eq!(
+            mcp_removal_request_rejection(&unsupported),
+            Some(McpRemovalOutcome::UnsupportedVersion)
+        );
+
+        let blank = RemoveMcpServerCommand {
+            lifecycle_version: MCP_LIFECYCLE_VERSION,
+            request_id: " ".into(),
+            name: "server".into(),
+        };
+        assert_eq!(
+            mcp_removal_request_rejection(&blank),
+            Some(McpRemovalOutcome::InvalidRequest)
+        );
+
+        let command = RemoveMcpServerCommand {
+            lifecycle_version: MCP_LIFECYCLE_VERSION,
+            request_id: "active-turn-1".into(),
+            name: "server".into(),
+        };
+        let receipt = mcp_removal_receipt(&command, McpRemovalOutcome::TurnInProgress, Vec::new());
+        let mut ledger = McpRemovalLedger::default();
+        ledger.record(&command, &receipt);
+        assert_eq!(
+            serde_json::to_value(
+                ledger
+                    .replay_or_conflict(&command)
+                    .expect("same request must replay its terminal receipt")
+            )
+            .unwrap(),
+            serde_json::to_value(receipt).unwrap()
+        );
+
+        let conflict = RemoveMcpServerCommand {
+            name: "different-server".into(),
+            ..command
+        };
+        let conflict = ledger
+            .replay_or_conflict(&conflict)
+            .expect("same request id with a different name must terminate as conflict");
+        assert_eq!(
+            serde_json::to_value(conflict).unwrap()["outcome"],
+            "request_id_conflict"
+        );
+    }
+
+    #[test]
+    fn removal_ledger_and_add_request_are_hard_bounded() {
+        let receipt = ProtocolEvent::Pong;
+        let mut ledger = McpRemovalLedger::default();
+        for index in 0..MAX_MCP_REMOVAL_RECEIPTS {
+            let request_id = format!("request-{index}");
+            ledger.receipts.insert(
+                request_id.clone(),
+                (
+                    RemoveMcpServerCommand {
+                        lifecycle_version: MCP_LIFECYCLE_VERSION,
+                        request_id,
+                        name: "server".into(),
+                    },
+                    receipt.clone(),
+                ),
+            );
+        }
+        assert!(ledger.is_full_for_new("new-request"));
+        assert!(!ledger.is_full_for_new("request-0"));
+
+        let oversized_name = "n".repeat(MAX_MCP_SERVER_NAME_LEN + 1);
+        assert_eq!(
+            mcp_add_request_rejection(&oversized_name, "stdio", None, None, None, None, None),
+            Some("server name is empty or too long")
+        );
+        let oversized_value = "v".repeat(MAX_MCP_CONFIG_VALUE_LEN + 1);
+        assert_eq!(
+            mcp_add_request_rejection(
+                "server",
+                "stdio",
+                Some(&oversized_value),
+                None,
+                None,
+                None,
+                None,
+            ),
+            Some("command or URL is too long")
+        );
+        let too_many_args = vec![String::new(); MAX_MCP_CONFIG_ENTRIES + 1];
+        assert_eq!(
+            mcp_add_request_rejection(
+                "server",
+                "stdio",
+                None,
+                Some(&too_many_args),
+                None,
+                None,
+                None,
+            ),
+            Some("argument list exceeds the MCP request limit")
+        );
+
+        let mut invalid_ledger = McpRemovalLedger::default();
+        for command in [
+            RemoveMcpServerCommand {
+                lifecycle_version: MCP_LIFECYCLE_VERSION,
+                request_id: "r".repeat(MAX_MCP_REQUEST_ID_LEN + 1),
+                name: "server".into(),
+            },
+            RemoveMcpServerCommand {
+                lifecycle_version: MCP_LIFECYCLE_VERSION,
+                request_id: "bounded-id".into(),
+                name: "n".repeat(MAX_MCP_SERVER_NAME_LEN + 1),
+            },
+        ] {
+            invalid_ledger.record(&command, &receipt);
+        }
+        assert!(invalid_ledger.receipts.is_empty());
+
+        let oversized = RemoveMcpServerCommand {
+            lifecycle_version: MCP_LIFECYCLE_VERSION,
+            request_id: "r".repeat(MAX_MCP_REQUEST_ID_LEN + 1),
+            name: "n".repeat(MAX_MCP_SERVER_NAME_LEN + 1),
+        };
+        let value = serde_json::to_value(mcp_removal_receipt(
+            &oversized,
+            McpRemovalOutcome::InvalidRequest,
+            Vec::new(),
+        ))
+        .unwrap();
+        assert_eq!(value["request_id"], "<invalid>");
+        assert_eq!(value["name"], "<invalid>");
+    }
+
+    #[test]
+    fn removal_ledger_binds_full_command_and_never_overwrites() {
+        let original = RemoveMcpServerCommand {
+            lifecycle_version: MCP_LIFECYCLE_VERSION,
+            request_id: "stable-request".into(),
+            name: "server".into(),
+        };
+        let original_receipt = mcp_removal_receipt(
+            &original,
+            McpRemovalOutcome::Removed,
+            vec!["server_tool".into()],
+        );
+        let mut ledger = McpRemovalLedger::default();
+        ledger.record(&original, &original_receipt);
+
+        for conflicting in [
+            RemoveMcpServerCommand {
+                lifecycle_version: MCP_LIFECYCLE_VERSION + 1,
+                ..original.clone()
+            },
+            RemoveMcpServerCommand {
+                name: "different-server".into(),
+                ..original.clone()
+            },
+            RemoveMcpServerCommand {
+                name: String::new(),
+                ..original.clone()
+            },
+        ] {
+            let conflict = ledger
+                .replay_or_conflict(&conflicting)
+                .expect("a reused request id must terminate");
+            assert_eq!(
+                serde_json::to_value(&conflict).unwrap()["outcome"],
+                "request_id_conflict"
+            );
+            ledger.record(&conflicting, &conflict);
+        }
+
+        assert_eq!(
+            serde_json::to_value(
+                ledger
+                    .replay_or_conflict(&original)
+                    .expect("original exact command must remain replayable")
+            )
+            .unwrap(),
+            serde_json::to_value(original_receipt).unwrap()
+        );
+    }
+
+    #[test]
     fn unsupported_runtime_diagnostics_request_gets_correlated_terminal_event() {
         let event = runtime_diagnostics_admission_rejection(
             &wcore_protocol::diagnostics::GetRuntimeDiagnosticsCommand {
@@ -5135,6 +5792,9 @@ mod tests {
                         McpReservationOutcome::Acquired(reservation) => reservation,
                         McpReservationOutcome::Existing(_) => {
                             panic!("each fixture server name must reserve once")
+                        }
+                        McpReservationOutcome::CapacityExceeded => {
+                            panic!("fixture must stay below lifecycle capacity")
                         }
                     };
                 (name.clone(), reservation)
@@ -6095,6 +6755,7 @@ mod tests {
                 "slow",
                 McpServerHealth::TimedOut {
                     after: std::time::Duration::from_secs(30),
+                    cleanup_error: None,
                 },
             ),
             ("okay", McpServerHealth::Ready { tool_count: 3 }),
@@ -6161,6 +6822,7 @@ mod tests {
                 None,
                 None,
                 None,
+                false,
             )
             .expect("valid test server config"),
         )]);
@@ -6254,6 +6916,7 @@ mod tests {
                 None,
                 None,
                 None,
+                false,
             )
             .expect("valid test server config"),
         )]);
@@ -6335,6 +6998,7 @@ mod tests {
                 None,
                 None,
                 None,
+                false,
             )
             .expect("valid test server config"),
         )]);

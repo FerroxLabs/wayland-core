@@ -306,6 +306,29 @@ impl ToolRegistry {
         counts
     }
 
+    /// Remove every callable tool owned by one MCP server.
+    ///
+    /// Returns sorted removed display names for a deterministic host receipt.
+    /// The caller must refresh the `ToolSearch` snapshot after this mutation.
+    pub fn remove_mcp_server(&mut self, server: &str) -> Vec<String> {
+        let mut removed = Vec::new();
+        self.tools.retain(|tool| {
+            if tool.mcp_server() == Some(server) {
+                removed.push(tool.name().to_string());
+                false
+            } else {
+                true
+            }
+        });
+        let mut breakers = self.breakers.write();
+        for name in &removed {
+            breakers.remove(name);
+        }
+        drop(breakers);
+        removed.sort();
+        removed
+    }
+
     /// Generate API tool definitions for all registered tools
     pub fn to_tool_defs(&self) -> Vec<ToolDef> {
         self.tools
@@ -1218,5 +1241,64 @@ mod tests {
                 backend_names
             );
         }
+    }
+
+    struct MockMcpTool {
+        name: String,
+        server: String,
+    }
+
+    #[async_trait]
+    impl Tool for MockMcpTool {
+        fn name(&self) -> &str {
+            &self.name
+        }
+
+        fn description(&self) -> &str {
+            "mcp fixture"
+        }
+
+        fn input_schema(&self) -> serde_json::Value {
+            serde_json::json!({"type":"object"})
+        }
+
+        fn is_concurrency_safe(&self, _input: &serde_json::Value) -> bool {
+            false
+        }
+
+        async fn execute(&self, _input: serde_json::Value) -> ToolResult {
+            ToolResult {
+                content: "ok".into(),
+                is_error: false,
+            }
+        }
+
+        fn category(&self) -> ToolCategory {
+            ToolCategory::Mcp
+        }
+
+        fn mcp_server(&self) -> Option<&str> {
+            Some(&self.server)
+        }
+    }
+
+    #[test]
+    fn removing_mcp_server_is_scoped_and_idempotent() {
+        let mut registry = ToolRegistry::new();
+        registry.register(make_tool("Read", "built in"));
+        registry.register(Box::new(MockMcpTool {
+            name: "alpha_search".into(),
+            server: "alpha".into(),
+        }));
+        registry.register(Box::new(MockMcpTool {
+            name: "beta_search".into(),
+            server: "beta".into(),
+        }));
+
+        assert_eq!(registry.remove_mcp_server("alpha"), ["alpha_search"]);
+        assert!(registry.get("alpha_search").is_none());
+        assert!(registry.get("beta_search").is_some());
+        assert!(registry.get("Read").is_some());
+        assert!(registry.remove_mcp_server("alpha").is_empty());
     }
 }

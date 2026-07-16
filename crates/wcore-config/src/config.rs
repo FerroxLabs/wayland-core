@@ -141,6 +141,13 @@ pub struct McpServerConfig {
 }
 
 impl McpServerConfig {
+    /// Bind a transient or persisted declaration to the immutable assistant
+    /// identity that created it. `None` remains global for bare CLI sessions.
+    pub fn scoped_to_assistant(mut self, active: Option<&str>) -> Self {
+        self.only_for_assistant = active.map(|name| vec![name.to_string()]);
+        self
+    }
+
     /// #111 — is this server visible to the given `active` assistant?
     ///
     /// - `only_for_assistant` unset or empty ⇒ GLOBAL, always visible.

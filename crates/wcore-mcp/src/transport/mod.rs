@@ -50,6 +50,12 @@ pub enum McpError {
     #[error("Initialization failed: {0}")]
     InitFailed(String),
 
+    #[error("MCP connect timed out after {after:?}{cleanup}")]
+    ConnectTimedOut {
+        after: std::time::Duration,
+        cleanup: String,
+    },
+
     #[error("IO error: {0}")]
     Io(#[from] std::io::Error),
 }

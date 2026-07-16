@@ -1336,14 +1336,16 @@ impl AgentBootstrap {
             // against the credentials store at the connect boundary, on a clone.
             // The long-lived `self.config` keeps the literal `${cred:...}` so the
             // token never round-trips back to config.toml. If the store can't be
-            // opened, connect with the literals (each referencing server then
-            // fails its own connect, in isolation).
+            // opened, omit reference-bearing servers before any transport sees
+            // a literal credential placeholder.
             let resolved_servers = match self.config.open_credentials_store() {
                 Ok(store) => wcore_config::mcp_cred_refs::resolve_servers_for_connect(
                     &scoped_servers,
                     &*store,
                 ),
-                Err(_) => scoped_servers.clone(),
+                Err(_) => {
+                    wcore_config::mcp_cred_refs::without_credential_references(&scoped_servers)
+                }
             };
             let egress_policy: wcore_egress::SharedPolicy = Arc::new(
                 self.session_egress_policy

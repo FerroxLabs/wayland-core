@@ -42,9 +42,9 @@ use wcore_agent::mcp_lifecycle::{
 use wcore_agent::output::OutputSink;
 use wcore_protocol::commands::OPERATOR_RESOLUTION_RECOVERY_VERSION;
 use wcore_protocol::events::{
-    ErrorInfo, FinishReason, MonitorDirective, MonitorReason, OperatorResolutionEvidence,
-    OperatorToolEffectOutcome, OperatorToolEffectResolution, ProtocolEvent, RecoveryCursor,
-    RecoveryLifecycle, RecoveryTurnSnapshot, ToolStatus, Usage,
+    ErrorInfo, FinishReason, McpRemovalOutcome, MonitorDirective, MonitorReason,
+    OperatorResolutionEvidence, OperatorToolEffectOutcome, OperatorToolEffectResolution,
+    ProtocolEvent, RecoveryCursor, RecoveryLifecycle, RecoveryTurnSnapshot, ToolStatus, Usage,
 };
 use wcore_protocol::writer::ProtocolEmitter;
 use wcore_protocol::{ToolApprovalManager, ToolApprovalResult};
@@ -54,6 +54,12 @@ use wcore_protocol::{ToolApprovalManager, ToolApprovalResult};
 /// authority so pending approvals and other provably-not-started effects can
 /// be terminalized before the engine lock is released.
 const TUI_CANCEL_GRACE: std::time::Duration = std::time::Duration::from_secs(2);
+
+#[derive(Clone)]
+struct TuiRuntimeMcp {
+    manager: Arc<wcore_mcp::manager::McpManager>,
+    config: wcore_config::config::McpServerConfig,
+}
 
 // ─────────────────────────────────────────────────────────────────────────
 // ChannelEmitter — a ProtocolEmitter that forwards into an mpsc channel
@@ -823,6 +829,45 @@ fn mcp_config_from_target(target: &str) -> Result<wcore_config::config::McpServe
     })
 }
 
+const STANDALONE_TUI_RUNTIME_MCP_SCOPE: &str = "\0wayland:tui:standalone-runtime";
+
+fn scope_tui_runtime_mcp(
+    server: wcore_config::config::McpServerConfig,
+    active_assistant: Option<&str>,
+) -> wcore_config::config::McpServerConfig {
+    let owner = active_assistant
+        .filter(|assistant| !assistant.trim().is_empty())
+        .unwrap_or(STANDALONE_TUI_RUNTIME_MCP_SCOPE);
+    server.scoped_to_assistant(Some(owner))
+}
+
+fn scope_persisted_forge_server(
+    server: wcore_config::config::McpServerConfig,
+    assistant: Option<&str>,
+) -> wcore_config::config::McpServerConfig {
+    server.scoped_to_assistant(assistant)
+}
+
+fn cancel_tui_connecting_mcp(lifecycle: &McpLifecycleCatalog, name: &str) -> Option<u64> {
+    let snapshot = lifecycle.snapshot(name)?;
+    if !matches!(snapshot.state, McpLifecycleState::Connecting)
+        || !lifecycle.cancel_connecting(name, snapshot.generation)
+    {
+        return None;
+    }
+    Some(snapshot.generation)
+}
+
+fn lifecycle_generation_is_stopping(
+    lifecycle: &McpLifecycleCatalog,
+    name: &str,
+    generation: u64,
+) -> bool {
+    lifecycle.snapshot(name).is_some_and(|snapshot| {
+        snapshot.generation == generation && matches!(snapshot.state, McpLifecycleState::Stopping)
+    })
+}
+
 /// D008: render the `/model` picker listing from a LIVE [`ModelInfo`] set
 /// (the result of `LlmProvider::list_models`), marking the active model `●`.
 ///
@@ -917,6 +962,13 @@ pub struct TuiEngine {
     inventory: EngineInventory,
     /// Session-owned single-flight authority for every live MCP add path.
     mcp_lifecycle: McpLifecycleCatalog,
+    /// Runtime-only TUI connections. Keeping manager provenance here makes
+    /// `/mcp remove` authoritative without granting it config/plugin scope.
+    runtime_mcp: Arc<tokio::sync::Mutex<std::collections::HashMap<String, TuiRuntimeMcp>>>,
+    mcp_command_sequence: Arc<AtomicU64>,
+    /// Named assistant owning persisted Forge grants. `None` means the
+    /// operator launched the profile-global/default TUI explicitly.
+    active_assistant: Option<String>,
     /// The project root the session was launched in. `/repomap` scans this.
     /// Defaults to `.` until [`Self::set_repo_root`] runs in `run_tui_mode`.
     repo_root: PathBuf,
@@ -1180,6 +1232,9 @@ impl TuiEngine {
             recovery_cancel: CancellationToken::new(),
             inventory: EngineInventory::default(),
             mcp_lifecycle: McpLifecycleCatalog::new(),
+            runtime_mcp: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
+            mcp_command_sequence: Arc::new(AtomicU64::new(0)),
+            active_assistant: None,
             repo_root: PathBuf::from("."),
             session_store: None,
             pending_at_ref_output: None,
@@ -1213,12 +1268,21 @@ impl TuiEngine {
             if matches!(
                 server.health,
                 wcore_mcp::manager::McpServerHealth::Ready { .. }
-            ) {
-                self.mcp_lifecycle
-                    .seed_ready(server.name.clone(), McpConfigIdentity::UNKNOWN);
+            ) && !self
+                .mcp_lifecycle
+                .seed_ready(server.name.clone(), McpConfigIdentity::UNKNOWN)
+            {
+                tracing::warn!(
+                    server = %server.name,
+                    "MCP lifecycle capacity exceeded; runtime management unavailable"
+                );
             }
         }
         self.inventory = inventory;
+    }
+
+    pub fn set_active_assistant(&mut self, assistant: Option<String>) {
+        self.active_assistant = assistant;
     }
 
     /// Set the project root scanned by `/repomap`. Called once in
@@ -2034,7 +2098,7 @@ impl TuiEngine {
     /// `registry busy` guard.
     pub fn add_mcp_server(&self, name: String, target: String) {
         let config = match mcp_config_from_target(&target) {
-            Ok(c) => c,
+            Ok(c) => scope_tui_runtime_mcp(c, self.active_assistant.as_deref()),
             Err(e) => {
                 let _ = self.tx.send(ProtocolEvent::Error {
                     msg_id: None,
@@ -2051,6 +2115,8 @@ impl TuiEngine {
             self.engine.clone(),
             self.tx.clone(),
             self.mcp_lifecycle.clone(),
+            self.runtime_mcp.clone(),
+            true,
             name,
             config,
         ));
@@ -2065,13 +2131,15 @@ impl TuiEngine {
     /// connected + registered live (no restart). The TUI (Piece 3) calls this
     /// once [`wcore_mcp::forge_grant::request_grant`] returns `Granted`.
     pub fn connect_forge_server(&self, name: String, url: String, token: String) {
-        match Self::store_and_persist_forge(&name, &url, &token) {
+        match Self::store_and_persist_forge(&name, &url, &token, self.active_assistant.as_deref()) {
             Ok(server) => {
                 // Connect + register live (the `${cred:}` header is resolved inside).
                 tokio::spawn(Self::connect_and_register_mcp(
                     self.engine.clone(),
                     self.tx.clone(),
                     self.mcp_lifecycle.clone(),
+                    self.runtime_mcp.clone(),
+                    false,
                     name,
                     server,
                 ));
@@ -2124,6 +2192,8 @@ impl TuiEngine {
 
         let engine = self.engine.clone();
         let mcp_lifecycle = self.mcp_lifecycle.clone();
+        let runtime_mcp = self.runtime_mcp.clone();
+        let active_assistant = self.active_assistant.clone();
         let tx2 = self.tx.clone();
         let label = server.label().to_string();
         tokio::spawn(async move {
@@ -2183,12 +2253,19 @@ impl TuiEngine {
                         ));
                         return;
                     }
-                    match Self::store_and_persist_forge(&server.name, &server.url, &token) {
+                    match Self::store_and_persist_forge(
+                        &server.name,
+                        &server.url,
+                        &token,
+                        active_assistant.as_deref(),
+                    ) {
                         Ok(cfg) => {
                             Self::connect_and_register_mcp(
                                 engine,
                                 tx2,
                                 mcp_lifecycle,
+                                runtime_mcp,
+                                false,
                                 server.name,
                                 cfg,
                             )
@@ -2255,6 +2332,7 @@ impl TuiEngine {
         name: &str,
         url: &str,
         token: &str,
+        assistant: Option<&str>,
     ) -> Result<wcore_config::config::McpServerConfig, String> {
         let cred_key = wcore_config::mcp_cred_refs::mcp_token_cred_key(name);
         let cfg = wcore_config::config::Config::resolve(&wcore_config::config::CliArgs::default())
@@ -2266,7 +2344,10 @@ impl TuiEngine {
             .put(&cred_key, token)
             .map_err(|e| format!("Couldn't store the grant token securely: {e}"))?;
 
-        let server = wcore_config::mcp_cred_refs::build_forge_mcp_server_config(url, &cred_key);
+        let server = scope_persisted_forge_server(
+            wcore_config::mcp_cred_refs::build_forge_mcp_server_config(url, &cred_key),
+            assistant,
+        );
         wcore_config::config::patch_global_config({
             let name = name.to_string();
             let server = server.clone();
@@ -2288,6 +2369,8 @@ impl TuiEngine {
         engine: Arc<tokio::sync::Mutex<wcore_agent::engine::AgentEngine>>,
         tx: UnboundedSender<ProtocolEvent>,
         mcp_lifecycle: McpLifecycleCatalog,
+        runtime_mcp: Arc<tokio::sync::Mutex<std::collections::HashMap<String, TuiRuntimeMcp>>>,
+        runtime_owned: bool,
         name: String,
         mut config: wcore_config::config::McpServerConfig,
     ) {
@@ -2298,10 +2381,29 @@ impl TuiEngine {
         let reservation = match mcp_lifecycle.reserve(name.clone(), config_identity) {
             McpReservationOutcome::Acquired(reservation) => reservation,
             McpReservationOutcome::Existing(snapshot) => {
+                if snapshot.config_identity != config_identity {
+                    let reason = "same-name MCP server is already owned by a different configuration; remove it before re-adding";
+                    let _ = tx.send(ProtocolEvent::Error {
+                        msg_id: None,
+                        error: ErrorInfo {
+                            code: "mcp_config_conflict".to_string(),
+                            message: format!("Can't add MCP server '{name}': {reason}"),
+                            retryable: false,
+                        },
+                    });
+                    let _ = tx.send(ProtocolEvent::McpFailed {
+                        name,
+                        reason: reason.to_string(),
+                    });
+                    return;
+                }
                 let status = match snapshot.state {
                     McpLifecycleState::Connecting => "is already connecting",
                     McpLifecycleState::Ready => "is already connected",
                     McpLifecycleState::Stopping => "is stopping",
+                    McpLifecycleState::CleanupUnverified { .. } => {
+                        "has unverified cleanup; retry /mcp remove first"
+                    }
                     McpLifecycleState::Failed { .. } => unreachable!("failed is retryable"),
                 };
                 let _ = tx.send(ProtocolEvent::Info {
@@ -2312,20 +2414,38 @@ impl TuiEngine {
                 });
                 return;
             }
+            McpReservationOutcome::CapacityExceeded => {
+                let _ = tx.send(ProtocolEvent::Error {
+                    msg_id: None,
+                    error: ErrorInfo {
+                        code: "mcp_capacity".to_string(),
+                        message: "MCP lifecycle capacity exceeded for this session".to_string(),
+                        retryable: false,
+                    },
+                });
+                return;
+            }
         };
+        let generation = reservation.generation();
 
         // Preserve live sequential re-add behavior for boot connections that
         // predate the catalog (the inventory normally seeds these first).
         let already_connected = engine.lock().await.mcp_server_connected(&name);
         if already_connected {
-            reservation.complete_ready();
-            let _ = tx.send(ProtocolEvent::Info {
-                msg_id: String::new(),
-                message: format!(
-                    "MCP server '{name}' is already connected — keeping the existing \
-                     connection (no duplicate started). To change its settings, remove \
-                     it first, then add it again."
-                ),
+            if !reservation
+                .complete_failed("existing connection has no matching lifecycle identity")
+            {
+                let _ = mcp_lifecycle.complete_stopping_generation(&name, generation);
+            }
+            let _ = tx.send(ProtocolEvent::Error {
+                msg_id: None,
+                error: ErrorInfo {
+                    code: "mcp_config_conflict".to_string(),
+                    message: format!(
+                        "Can't add MCP server '{name}': an existing connection has no matching configuration identity"
+                    ),
+                    retryable: false,
+                },
             });
             return;
         }
@@ -2338,26 +2458,37 @@ impl TuiEngine {
         // server, so silently falling through to a literal `${cred:...}` bearer
         // would be a confusing mis-connect (F22). A no-reference header (the
         // plain `/mcp add` path) never touches the store and never errors.
-        if let Ok(cfg) =
-            wcore_config::config::Config::resolve(&wcore_config::config::CliArgs::default())
-            && let Ok(store) = cfg.open_credentials_store()
-            && let Err(e) =
-                wcore_config::mcp_cred_refs::resolve_server_headers(&mut config, &*store)
-        {
-            let reason = format!("{e}");
-            reservation.complete_failed(reason.clone());
-            let _ = tx.send(ProtocolEvent::McpFailed {
-                name: name.clone(),
-                reason: reason.clone(),
-            });
-            let _ = tx.send(ProtocolEvent::Error {
-                msg_id: None,
-                error: ErrorInfo {
-                    code: "mcp_add".to_string(),
-                    message: format!("Couldn't connect MCP server '{name}': {reason}"),
-                    retryable: false,
-                },
-            });
+        if wcore_config::mcp_cred_refs::server_has_credential_references(&config) {
+            let resolution =
+                wcore_config::config::Config::resolve(&wcore_config::config::CliArgs::default())
+                    .map_err(|e| e.to_string())
+                    .and_then(|cfg| cfg.open_credentials_store().map_err(|e| e.to_string()))
+                    .and_then(|store| {
+                        wcore_config::mcp_cred_refs::resolve_server_headers(&mut config, &*store)
+                            .map_err(|e| e.to_string())
+                    });
+            if let Err(reason) = resolution {
+                if !reservation.complete_failed(reason.clone()) {
+                    let _ = mcp_lifecycle.complete_stopping_generation(&name, generation);
+                }
+                let _ = tx.send(ProtocolEvent::McpFailed {
+                    name: name.clone(),
+                    reason: reason.clone(),
+                });
+                let _ = tx.send(ProtocolEvent::Error {
+                    msg_id: None,
+                    error: ErrorInfo {
+                        code: "mcp_add".to_string(),
+                        message: format!("Couldn't connect MCP server '{name}': {reason}"),
+                        retryable: false,
+                    },
+                });
+                return;
+            }
+        }
+
+        if lifecycle_generation_is_stopping(&mcp_lifecycle, &name, generation) {
+            let _ = reservation.complete_cancelled_before_transport();
             return;
         }
 
@@ -2370,7 +2501,9 @@ impl TuiEngine {
                 Ok(mgr) => std::sync::Arc::new(mgr),
                 Err(e) => {
                     let reason = format!("{e}");
-                    reservation.complete_failed(reason.clone());
+                    if !reservation.complete_failed(reason.clone()) {
+                        let _ = mcp_lifecycle.complete_stopping_generation(&name, generation);
+                    }
                     let _ = tx.send(ProtocolEvent::McpFailed {
                         name: name.clone(),
                         reason: reason.clone(),
@@ -2396,12 +2529,33 @@ impl TuiEngine {
             other => {
                 let reason = match other {
                     Some(McpServerHealth::Failed { reason }) => reason.clone(),
-                    Some(McpServerHealth::TimedOut { after }) => {
-                        format!("connect timed out after {after:?}")
+                    Some(McpServerHealth::TimedOut {
+                        after,
+                        cleanup_error,
+                    }) => {
+                        let cleanup = cleanup_error
+                            .as_ref()
+                            .map(|error| format!("; cleanup unverified: {error}"))
+                            .unwrap_or_default();
+                        format!("connect timed out after {after:?}{cleanup}")
                     }
                     _ => "server did not connect".to_string(),
                 };
-                reservation.complete_failed(reason.clone());
+                let cleanup = manager.close_server(&name).await;
+                if !reservation.complete_failed(reason.clone()) {
+                    match cleanup {
+                        Ok(_) => {
+                            let _ = mcp_lifecycle.complete_stopping_generation(&name, generation);
+                        }
+                        Err(error) => {
+                            let _ = mcp_lifecycle.mark_cleanup_unverified_generation(
+                                &name,
+                                generation,
+                                format!("MCP transport cleanup could not be verified: {error}"),
+                            );
+                        }
+                    }
+                }
                 let _ = tx.send(ProtocolEvent::McpFailed {
                     name: name.clone(),
                     reason: reason.clone(),
@@ -2425,7 +2579,7 @@ impl TuiEngine {
         let mut guard = engine.lock().await;
         let builtin_names = guard.tool_names();
         let defer_cold = guard.defer_cold_config();
-        let message = match guard.registry_mut() {
+        let (message, tool_names) = match guard.registry_mut() {
             Some(reg) => {
                 wcore_mcp::tool_proxy::register_single_server_tools(
                     reg,
@@ -2444,22 +2598,31 @@ impl TuiEngine {
                 tool_names.sort();
                 let tool_count = tool_names.len();
                 reg.refresh_tool_search_catalog(&defer_cold);
-                reservation.complete_ready();
-                // Update the TUI's live mcp_status (so /doctor reflects the
-                // add) — the bridge's McpReady arm records Ready{tool_count}.
-                // Previously this path emitted only Info, leaving mcp_status
-                // stale after a live `/mcp add`.
-                let _ = tx.send(ProtocolEvent::McpReady {
-                    name: name.clone(),
-                    tools: tool_names,
-                });
-                format!(
-                    "MCP server '{name}' connected. {tool_count} tool(s) available now. \
-                     Type /mcp to see all servers."
+                (
+                    format!(
+                        "MCP server '{name}' connected. {tool_count} tool(s) available now. \
+                         Type /mcp to see all servers."
+                    ),
+                    tool_names,
                 )
             }
             None => {
-                reservation.complete_failed("tool registry is busy");
+                drop(guard);
+                let cleanup = manager.close_server(&name).await;
+                if !reservation.complete_failed("tool registry is busy") {
+                    match cleanup {
+                        Ok(_) => {
+                            let _ = mcp_lifecycle.complete_stopping_generation(&name, generation);
+                        }
+                        Err(error) => {
+                            let _ = mcp_lifecycle.mark_cleanup_unverified_generation(
+                                &name,
+                                generation,
+                                format!("MCP transport cleanup could not be verified: {error}"),
+                            );
+                        }
+                    }
+                }
                 let _ = tx.send(ProtocolEvent::Error {
                     msg_id: None,
                     error: ErrorInfo {
@@ -2474,10 +2637,239 @@ impl TuiEngine {
                 return;
             }
         };
+        let published = if runtime_owned {
+            // The runtime map mutex makes Ready + provenance publication
+            // atomic with remove's lookup. Remove either cancels Connecting,
+            // or observes the fully published manager for this generation.
+            let mut runtimes = runtime_mcp.lock().await;
+            let published = reservation.complete_ready();
+            if published {
+                runtimes.insert(
+                    name.clone(),
+                    TuiRuntimeMcp {
+                        manager: manager.clone(),
+                        config: config.clone(),
+                    },
+                );
+            }
+            published
+        } else {
+            reservation.complete_ready()
+        };
+        if !published {
+            if let Some(registry) = guard.registry_mut() {
+                registry.remove_mcp_server(&name);
+                registry.refresh_tool_search_catalog(&defer_cold);
+            }
+            drop(guard);
+            match manager.close_server(&name).await {
+                Ok(_) => {
+                    let _ = mcp_lifecycle.complete_stopping_generation(&name, generation);
+                }
+                Err(error) => {
+                    let _ = mcp_lifecycle.mark_cleanup_unverified_generation(
+                        &name,
+                        generation,
+                        format!("MCP transport cleanup could not be verified: {error}"),
+                    );
+                }
+            }
+            return;
+        }
+        drop(guard);
+        let _ = tx.send(ProtocolEvent::McpReady {
+            name: name.clone(),
+            tools: tool_names,
+        });
         let _ = tx.send(ProtocolEvent::Info {
             msg_id: String::new(),
             message,
         });
+    }
+
+    fn next_mcp_request_id(&self, operation: &str, name: &str) -> String {
+        let sequence = self
+            .mcp_command_sequence
+            .fetch_add(1, Ordering::Relaxed)
+            .saturating_add(1);
+        format!("tui-{operation}-{sequence}-{name}")
+    }
+
+    pub fn remove_mcp_server(&self, name: String) {
+        let request_id = self.next_mcp_request_id("remove", &name);
+        let engine = self.engine.clone();
+        let tx = self.tx.clone();
+        let lifecycle = self.mcp_lifecycle.clone();
+        let runtime_mcp = self.runtime_mcp.clone();
+        tokio::spawn(async move {
+            let _ =
+                Self::remove_tui_runtime_mcp(engine, tx, lifecycle, runtime_mcp, request_id, name)
+                    .await;
+        });
+    }
+
+    pub fn restart_mcp_server(&self, name: String) {
+        let request_id = self.next_mcp_request_id("restart", &name);
+        let engine = self.engine.clone();
+        let tx = self.tx.clone();
+        let lifecycle = self.mcp_lifecycle.clone();
+        let runtime_mcp = self.runtime_mcp.clone();
+        tokio::spawn(async move {
+            let config = Self::remove_tui_runtime_mcp(
+                engine.clone(),
+                tx.clone(),
+                lifecycle.clone(),
+                runtime_mcp.clone(),
+                request_id,
+                name.clone(),
+            )
+            .await;
+            if let Some(config) = config {
+                Self::connect_and_register_mcp(
+                    engine,
+                    tx,
+                    lifecycle,
+                    runtime_mcp,
+                    true,
+                    name,
+                    config,
+                )
+                .await;
+            }
+        });
+    }
+
+    async fn remove_tui_runtime_mcp(
+        engine: Arc<tokio::sync::Mutex<wcore_agent::engine::AgentEngine>>,
+        tx: UnboundedSender<ProtocolEvent>,
+        lifecycle: McpLifecycleCatalog,
+        runtime_mcp: Arc<tokio::sync::Mutex<std::collections::HashMap<String, TuiRuntimeMcp>>>,
+        request_id: String,
+        name: String,
+    ) -> Option<wcore_config::config::McpServerConfig> {
+        let mut runtimes = runtime_mcp.lock().await;
+        let runtime = runtimes.remove(&name);
+        let Some(runtime) = runtime else {
+            let snapshot = lifecycle.snapshot(&name);
+            let connecting_generation = cancel_tui_connecting_mcp(&lifecycle, &name);
+            drop(runtimes);
+            if let Some(generation) = connecting_generation {
+                loop {
+                    match lifecycle.snapshot(&name) {
+                        None => {
+                            let _ = tx.send(ProtocolEvent::McpRemovalResult {
+                                lifecycle_version: wcore_protocol::commands::MCP_LIFECYCLE_VERSION,
+                                request_id,
+                                name,
+                                outcome: McpRemovalOutcome::Removed,
+                                removed_tools: Vec::new(),
+                            });
+                            return None;
+                        }
+                        Some(snapshot)
+                            if snapshot.generation == generation
+                                && matches!(
+                                    snapshot.state,
+                                    McpLifecycleState::CleanupUnverified { .. }
+                                ) =>
+                        {
+                            let _ = tx.send(ProtocolEvent::McpRemovalResult {
+                                lifecycle_version: wcore_protocol::commands::MCP_LIFECYCLE_VERSION,
+                                request_id,
+                                name,
+                                outcome: McpRemovalOutcome::CleanupUnverified,
+                                removed_tools: Vec::new(),
+                            });
+                            return None;
+                        }
+                        Some(snapshot) if snapshot.generation != generation => {
+                            let _ = tx.send(ProtocolEvent::McpRemovalResult {
+                                lifecycle_version: wcore_protocol::commands::MCP_LIFECYCLE_VERSION,
+                                request_id,
+                                name,
+                                outcome: McpRemovalOutcome::AlreadyAbsent,
+                                removed_tools: Vec::new(),
+                            });
+                            return None;
+                        }
+                        Some(_) => tokio::time::sleep(std::time::Duration::from_millis(10)).await,
+                    }
+                }
+            }
+            let outcome = if snapshot.is_some() {
+                McpRemovalOutcome::NotRuntimeManaged
+            } else {
+                McpRemovalOutcome::AlreadyAbsent
+            };
+            let _ = tx.send(ProtocolEvent::McpRemovalResult {
+                lifecycle_version: wcore_protocol::commands::MCP_LIFECYCLE_VERSION,
+                request_id,
+                name,
+                outcome,
+                removed_tools: Vec::new(),
+            });
+            return None;
+        };
+
+        let generation = lifecycle
+            .snapshot(&name)
+            .map(|snapshot| snapshot.generation);
+        let Some(generation) = generation.filter(|_| lifecycle.mark_stopping(&name)) else {
+            runtimes.insert(name.clone(), runtime);
+            drop(runtimes);
+            let _ = tx.send(ProtocolEvent::McpRemovalResult {
+                lifecycle_version: wcore_protocol::commands::MCP_LIFECYCLE_VERSION,
+                request_id,
+                name,
+                outcome: McpRemovalOutcome::NotRuntimeManaged,
+                removed_tools: Vec::new(),
+            });
+            return None;
+        };
+        drop(runtimes);
+        let mut guard = engine.lock().await;
+        let defer_cold = guard.defer_cold_config();
+        let Some(registry) = guard.registry_mut() else {
+            runtime_mcp.lock().await.insert(name.clone(), runtime);
+            let _ = lifecycle.cancel_stopping(&name);
+            let _ = tx.send(ProtocolEvent::McpRemovalResult {
+                lifecycle_version: wcore_protocol::commands::MCP_LIFECYCLE_VERSION,
+                request_id,
+                name,
+                outcome: McpRemovalOutcome::RegistryBusy,
+                removed_tools: Vec::new(),
+            });
+            return None;
+        };
+        let removed_tools = registry.remove_mcp_server(&name);
+        registry.refresh_tool_search_catalog(&defer_cold);
+        drop(guard);
+        if let Err(error) = runtime.manager.close_server(&name).await {
+            runtime_mcp.lock().await.insert(name.clone(), runtime);
+            let _ = lifecycle.mark_cleanup_unverified_generation(
+                &name,
+                generation,
+                format!("MCP transport cleanup could not be verified: {error}"),
+            );
+            let _ = tx.send(ProtocolEvent::McpRemovalResult {
+                lifecycle_version: wcore_protocol::commands::MCP_LIFECYCLE_VERSION,
+                request_id,
+                name,
+                outcome: McpRemovalOutcome::CleanupUnverified,
+                removed_tools,
+            });
+            return None;
+        }
+        let _ = lifecycle.complete_stopping_generation(&name, generation);
+        let config = runtime.config;
+        let _ = tx.send(ProtocolEvent::McpRemovalResult {
+            lifecycle_version: wcore_protocol::commands::MCP_LIFECYCLE_VERSION,
+            request_id,
+            name,
+            outcome: McpRemovalOutcome::Removed,
+            removed_tools,
+        });
+        Some(config)
     }
 
     /// v0.9.1 W1 E (debt sweep): direct `/voice` toggle entry — the
@@ -3516,6 +3908,70 @@ mod tests {
 
         // An empty target is an honest error, never a spawned empty command.
         assert!(mcp_config_from_target("   ").is_err());
+    }
+
+    #[test]
+    fn persisted_forge_grant_is_visible_only_to_owning_assistant_after_restart() {
+        let server = scope_persisted_forge_server(
+            wcore_config::mcp_cred_refs::build_forge_mcp_server_config(
+                "http://127.0.0.1:7777/mcp",
+                "mcp.token.forge",
+            ),
+            Some("research"),
+        );
+        assert!(server.is_visible_to_assistant(Some("research")));
+        assert!(!server.is_visible_to_assistant(Some("operations")));
+        assert!(!server.is_visible_to_assistant(None));
+        assert_eq!(
+            server.only_for_assistant.as_deref(),
+            Some(["research".to_string()].as_slice())
+        );
+    }
+
+    #[test]
+    fn runtime_add_is_visible_only_to_owning_assistant() {
+        let server = scope_tui_runtime_mcp(
+            mcp_config_from_target("example-mcp --stdio").expect("valid runtime target"),
+            Some("research"),
+        );
+        assert!(server.is_visible_to_assistant(Some("research")));
+        assert!(!server.is_visible_to_assistant(Some("operations")));
+        assert!(!server.is_visible_to_assistant(None));
+    }
+
+    #[test]
+    fn standalone_runtime_add_is_never_encoded_as_global() {
+        let server = scope_tui_runtime_mcp(
+            mcp_config_from_target("example-mcp --stdio").expect("valid runtime target"),
+            None,
+        );
+        assert_eq!(
+            server.only_for_assistant.as_deref(),
+            Some([STANDALONE_TUI_RUNTIME_MCP_SCOPE.to_string()].as_slice())
+        );
+        assert!(!server.is_visible_to_assistant(None));
+        assert!(!server.is_visible_to_assistant(Some("research")));
+    }
+
+    #[test]
+    fn tui_remove_cancels_only_the_connecting_generation_before_publication() {
+        let lifecycle = McpLifecycleCatalog::new();
+        let first = match lifecycle.reserve("runtime", McpConfigIdentity::UNKNOWN) {
+            McpReservationOutcome::Acquired(reservation) => reservation,
+            _ => panic!("first runtime add must reserve"),
+        };
+        assert_eq!(cancel_tui_connecting_mcp(&lifecycle, "runtime"), Some(1));
+        assert!(!first.complete_ready(), "late add must not publish Ready");
+        assert!(lifecycle.complete_stopping_generation("runtime", 1));
+
+        let second = match lifecycle.reserve("runtime", McpConfigIdentity::UNKNOWN) {
+            McpReservationOutcome::Acquired(reservation) => reservation,
+            _ => panic!("cleaned cancellation must permit re-add"),
+        };
+        assert_eq!(second.generation(), 2);
+        assert!(!lifecycle.cancel_connecting("runtime", 1));
+        second.complete_ready();
+        assert_eq!(cancel_tui_connecting_mcp(&lifecycle, "runtime"), None);
     }
 
     #[test]

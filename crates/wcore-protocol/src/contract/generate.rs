@@ -20,13 +20,13 @@ use super::spec::{
 
 pub const CONTRACT_NAME: &str = "wayland-desktop-core";
 pub const CONTRACT_MAJOR: u64 = 1;
-pub const CONTRACT_MINOR: u64 = 6;
-pub const GENERATOR_VERSION: &str = "wcore-desktop-contract-gen/9";
+pub const CONTRACT_MINOR: u64 = 7;
+pub const GENERATOR_VERSION: &str = "wcore-desktop-contract-gen/10";
 pub const CONTRACT_ROOT: &str = "contracts/desktop/v1";
 
 const DEFERRED: &str = r#"# Deferred Desktop contract adversarial cases
 
-This v1.6 corpus records the current producer wire. Contract negotiation,
+This v1.7 corpus records the current producer wire. Contract negotiation,
 unknown-critical rejection, and unknown-noncritical dropping are live and
 proved by serialized replay through the reference host observer.
 
@@ -164,6 +164,17 @@ fn constrained_property_schema(wire_type: &str, field: &str, value: &Value) -> V
             "request_id",
         ) => {
             json!({"minLength": 1, "maxLength": 128, "type": "string"})
+        }
+        ("remove_mcp_server" | "mcp_removal_result", "request_id" | "name") => {
+            json!({
+                "minLength": 1,
+                "maxLength": 256,
+                "type": "string",
+                "x-maxUtf8Bytes": 256
+            })
+        }
+        ("remove_mcp_server" | "mcp_removal_result", "lifecycle_version") => {
+            json!({"minimum": 0, "maximum": 65535, "type": "integer"})
         }
         ("resume_turn", "action") => {
             json!({"enum": ["continue", "reconcile", "cancel"], "type": "string"})
@@ -956,6 +967,8 @@ fn schema_branch(spec: &WireSpec, fixture: &Value) -> Value {
             | "unknown_tool_effect_resolved"
             | "get_runtime_diagnostics"
             | "runtime_diagnostics_snapshot"
+            | "remove_mcp_server"
+            | "mcp_removal_result"
     ) {
         branch["additionalProperties"] = json!(false);
     }
@@ -1166,6 +1179,10 @@ fn contract_capabilities() -> BTreeMap<String, ContractCapabilityStatus> {
         ),
         (
             "runtime_diagnostics_v1".into(),
+            ContractCapabilityStatus::Available,
+        ),
+        (
+            "runtime_mcp_lifecycle_v1".into(),
             ContractCapabilityStatus::Available,
         ),
         (
@@ -1576,17 +1593,21 @@ pub fn generated_artifacts() -> ContractResult<BTreeMap<String, Vec<u8>>> {
         .collect::<ContractResult<BTreeMap<_, _>>>()?;
     let legacy_child =
         compatibility_schema_fixtures.get("compat/events/sub_agent_event.legacy.json");
+    let command_schema_title =
+        format!("Desktop-consumed HostCommand v{CONTRACT_MAJOR}.{CONTRACT_MINOR}");
+    let event_schema_title =
+        format!("Desktop-consumed CoreEvent v{CONTRACT_MAJOR}.{CONTRACT_MINOR}");
     let command_schema = schema_for(
         COMMAND_SPECS,
         &command_schema_fixtures,
         None,
-        &format!("Desktop-consumed HostCommand v{CONTRACT_MAJOR}.{CONTRACT_MINOR}"),
+        &command_schema_title,
     );
     let event_schema = schema_for(
         EVENT_SPECS,
         &event_schema_fixtures,
         legacy_child,
-        &format!("Desktop-consumed CoreEvent v{CONTRACT_MAJOR}.{CONTRACT_MINOR}"),
+        &event_schema_title,
     );
     artifacts.insert(
         "schema/host-command.schema.json".into(),
@@ -1638,7 +1659,11 @@ pub fn generated_artifacts() -> ContractResult<BTreeMap<String, Vec<u8>>> {
             "events": EVENT_SPECS.len(),
             "fixtures": fixture_inventory.len()
         },
-        "contract": {"major": CONTRACT_MAJOR, "minor": CONTRACT_MINOR, "name": CONTRACT_NAME},
+        "contract": {
+            "major": CONTRACT_MAJOR,
+            "minor": CONTRACT_MINOR,
+            "name": CONTRACT_NAME
+        },
         "deferred_adversarial": [
             "ordinary_turn_tool_replay_reducer",
             "anvil_desktop_replay_reducer",

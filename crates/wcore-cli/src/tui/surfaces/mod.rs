@@ -1913,6 +1913,34 @@ impl Router {
                                     ),
                                 }
                             }
+                            Some("remove") => match (parts.next(), self.engine.as_ref()) {
+                                (Some(server), Some(engine)) => {
+                                    engine.remove_mcp_server(server.to_string());
+                                    push_system(app, format!("Removing MCP server '{server}'…"));
+                                }
+                                (None, _) => {
+                                    push_system(app, "Usage: /mcp remove <name>".to_string())
+                                }
+                                (_, None) => push_system(
+                                    app,
+                                    "No engine attached. /mcp remove needs a live session."
+                                        .to_string(),
+                                ),
+                            },
+                            Some("restart") => match (parts.next(), self.engine.as_ref()) {
+                                (Some(server), Some(engine)) => {
+                                    engine.restart_mcp_server(server.to_string());
+                                    push_system(app, format!("Restarting MCP server '{server}'…"));
+                                }
+                                (None, _) => {
+                                    push_system(app, "Usage: /mcp restart <name>".to_string())
+                                }
+                                (_, None) => push_system(
+                                    app,
+                                    "No engine attached. /mcp restart needs a live session."
+                                        .to_string(),
+                                ),
+                            },
                             _ => {
                                 let inv = self.engine.as_ref().map(|e| e.inventory());
                                 push_system(app, render_mcp_list(inv));
@@ -2662,8 +2690,15 @@ fn render_mcp_list(inv: Option<&EngineInventory>) -> String {
             McpServerHealth::Failed { reason } => {
                 format!("  ✗ {}  (failed: {reason})\n", s.name)
             }
-            McpServerHealth::TimedOut { after } => {
-                format!("  ⏱ {}  (timed out after {after:?})\n", s.name)
+            McpServerHealth::TimedOut {
+                after,
+                cleanup_error,
+            } => {
+                let cleanup = cleanup_error
+                    .as_ref()
+                    .map(|error| format!("; cleanup unverified: {error}"))
+                    .unwrap_or_default();
+                format!("  ⏱ {}  (timed out after {after:?}{cleanup})\n", s.name)
             }
             McpServerHealth::Skipped { reason } => {
                 format!("  ⊘ {}  (skipped: {reason})\n", s.name)
@@ -5711,6 +5746,32 @@ mod tests {
         assert!(
             out.contains("Connecting MCP server"),
             "the /mcp add confirmation must paint to the buffer: {out}"
+        );
+    }
+
+    #[tokio::test]
+    async fn mcp_remove_and_restart_drive_live_engine_actions() {
+        let mut app = App::new();
+        let mut router = router_with_inventory(&app, vec![], None);
+
+        router.apply(SurfaceAction::Command("/mcp remove docs".into()), &mut app);
+        assert!(
+            app.session
+                .turns
+                .last()
+                .unwrap()
+                .text()
+                .contains("Removing MCP server 'docs'")
+        );
+
+        router.apply(SurfaceAction::Command("/mcp restart docs".into()), &mut app);
+        assert!(
+            app.session
+                .turns
+                .last()
+                .unwrap()
+                .text()
+                .contains("Restarting MCP server 'docs'")
         );
     }
 

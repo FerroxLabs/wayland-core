@@ -474,8 +474,15 @@ async fn print_mcp_section(probe: bool) {
                                     format!("  ● {name:<20} ready ({tool_count} tools)")
                                 }
                                 Failed { reason } => format!("  ✕ {name:<20} failed: {reason}"),
-                                TimedOut { after } => {
-                                    format!("  ⏱ {name:<20} timed out after {after:?}")
+                                TimedOut {
+                                    after,
+                                    cleanup_error,
+                                } => {
+                                    let cleanup = cleanup_error
+                                        .as_ref()
+                                        .map(|error| format!("; cleanup unverified: {error}"))
+                                        .unwrap_or_default();
+                                    format!("  ⏱ {name:<20} timed out after {after:?}{cleanup}")
                                 }
                                 Skipped { reason } => format!("  ⊘ {name:<20} skipped: {reason}"),
                             };

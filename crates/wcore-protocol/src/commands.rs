@@ -10,6 +10,7 @@ pub const OPERATOR_RESOLUTION_RECOVERY_VERSION: u16 = 1;
 pub const RECOVERED_APPROVAL_VERSION: u16 = 1;
 pub const BUDGET_GRANT_REQUEST_ID_MAX_BYTES: usize = 128;
 pub const BUDGET_GRANT_REQUEST_ID_PATTERN: &str = "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$";
+pub const MCP_LIFECYCLE_VERSION: u16 = 1;
 
 pub(crate) fn is_valid_budget_grant_request_id(request_id: &str) -> bool {
     if request_id.len() > BUDGET_GRANT_REQUEST_ID_MAX_BYTES {
@@ -114,6 +115,19 @@ impl<'de> Deserialize<'de> for ContinueWithBudgetCommand {
     }
 }
 
+/// Closed, correlated request to remove one session-scoped runtime MCP server.
+///
+/// This command never mutates configured or plugin-owned declarations. Within
+/// one Core session, replaying the same `request_id` and `name` returns the
+/// original terminal result; reusing the ID for another name is rejected.
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct RemoveMcpServerCommand {
+    pub lifecycle_version: u16,
+    pub request_id: String,
+    pub name: String,
+}
+
 /// Commands sent from the client to the agent (Client -> Agent)
 #[derive(Debug, Deserialize, PartialEq)]
 #[serde(tag = "type")]
@@ -195,7 +209,14 @@ pub enum ProtocolCommand {
         url: Option<String>,
         #[serde(default)]
         headers: Option<HashMap<String, String>>,
+        /// Explicit user/host opt-in for loopback MCP endpoints. Other
+        /// non-public address classes remain blocked by the MCP egress guard.
+        #[serde(default)]
+        allow_local: bool,
     },
+    /// Remove a server previously introduced by [`ProtocolCommand::AddMcpServer`]
+    /// in this process. Configured and plugin-owned servers remain authoritative.
+    RemoveMcpServer(RemoveMcpServerCommand),
     /// Request a read-only, process-lifetime developer capability for an
     /// already-running local Desktop session. Core accepts this only when the
     /// local launcher opted in and the workspace uses the trusted-local
@@ -598,6 +619,7 @@ mod tests {
                 env,
                 url,
                 headers,
+                allow_local,
             } => {
                 assert_eq!(name, "team-tools");
                 assert_eq!(transport, "stdio");
@@ -606,6 +628,7 @@ mod tests {
                 assert_eq!(env.unwrap().get("TOKEN").unwrap(), "abc123");
                 assert!(url.is_none());
                 assert!(headers.is_none());
+                assert!(!allow_local);
             }
             _ => panic!("expected AddMcpServer"),
         }
@@ -639,7 +662,8 @@ mod tests {
             "name": "remote-tools",
             "transport": "sse",
             "url": "http://localhost:8080/sse",
-            "headers": {"Authorization": "Bearer tok"}
+            "headers": {"Authorization": "Bearer tok"},
+            "allow_local": true
         }"#;
         let cmd: ProtocolCommand = serde_json::from_str(json).unwrap();
         match cmd {
@@ -649,6 +673,7 @@ mod tests {
                 command,
                 url,
                 headers,
+                allow_local,
                 ..
             } => {
                 assert_eq!(name, "remote-tools");
@@ -656,9 +681,29 @@ mod tests {
                 assert!(command.is_none());
                 assert_eq!(url.unwrap(), "http://localhost:8080/sse");
                 assert_eq!(headers.unwrap().get("Authorization").unwrap(), "Bearer tok");
+                assert!(allow_local);
             }
             _ => panic!("expected AddMcpServer"),
         }
+    }
+
+    #[test]
+    fn remove_mcp_server_is_closed_and_versioned() {
+        let command: ProtocolCommand = serde_json::from_str(
+            r#"{"type":"remove_mcp_server","lifecycle_version":1,"request_id":"remove-001","name":"runtime-tools"}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            command,
+            ProtocolCommand::RemoveMcpServer(RemoveMcpServerCommand {
+                lifecycle_version: MCP_LIFECYCLE_VERSION,
+                request_id: "remove-001".into(),
+                name: "runtime-tools".into(),
+            })
+        );
+
+        let unknown_field = r#"{"type":"remove_mcp_server","lifecycle_version":1,"request_id":"remove-001","name":"runtime-tools","persistent":true}"#;
+        assert!(serde_json::from_str::<ProtocolCommand>(unknown_field).is_err());
     }
 
     #[test]

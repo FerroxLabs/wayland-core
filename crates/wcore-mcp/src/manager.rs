@@ -58,7 +58,13 @@ pub enum McpServerHealth {
     /// Connect attempt returned a clean error (transport/init/handshake).
     Failed { reason: String },
     /// Connect attempt exceeded the per-server budget before erroring.
-    TimedOut { after: Duration },
+    TimedOut {
+        after: Duration,
+        /// Present when the connect budget elapsed but the spawned transport
+        /// could not be proven closed and reaped. Consumers must surface this
+        /// rather than reducing the outcome to an ordinary timeout.
+        cleanup_error: Option<String>,
+    },
     /// Registration was skipped by a gate BEFORE any connect was attempted
     /// (e.g. an unreachable transport command). No manager populates this —
     /// it exists so a boot snapshot can carry skipped servers uniformly.
@@ -79,6 +85,7 @@ enum ConnectOutcome {
     },
     TimedOut {
         after: Duration,
+        cleanup_error: Option<String>,
         executable_readiness: Option<McpStdioExecutableReadiness>,
     },
 }
@@ -235,13 +242,20 @@ impl McpManager {
                 }
                 ConnectOutcome::TimedOut {
                     after,
+                    cleanup_error,
                     executable_readiness: readiness,
                 } => {
                     if let Some(readiness) = readiness {
                         executable_readiness.insert(name.clone(), readiness);
                     }
                     tracing::warn!(target: "mcp.manager", server = %name, ?after, "MCP server connect timed out");
-                    health.insert(name, McpServerHealth::TimedOut { after });
+                    health.insert(
+                        name,
+                        McpServerHealth::TimedOut {
+                            after,
+                            cleanup_error,
+                        },
+                    );
                 }
             }
         }
@@ -296,27 +310,41 @@ impl McpManager {
         } else {
             (None, None)
         };
-        match timeout(
-            connect_timeout,
-            Self::connect_server(name, config, egress_policy, stdio_context),
-        )
-        .await
-        {
-            Ok(Ok(server)) => ConnectOutcome::Ok {
+        let result = if config.transport == TransportType::Stdio {
+            Self::connect_server(name, config, egress_policy, stdio_context, connect_timeout)
+                .await
+                .map(Some)
+        } else {
+            timeout(
+                connect_timeout,
+                Self::connect_server(name, config, egress_policy, stdio_context, connect_timeout),
+            )
+            .await
+            .map_err(|_| McpError::ConnectTimedOut {
+                after: connect_timeout,
+                cleanup: String::new(),
+            })
+            .and_then(|result| result)
+            .map(Some)
+        };
+        match result {
+            Ok(Some(server)) => ConnectOutcome::Ok {
                 server: Box::new(server),
                 executable_readiness,
             },
-            Ok(Err(e)) => ConnectOutcome::Failed {
-                reason: e.to_string(),
-                executable_readiness,
-            },
-            Err(_) => {
+            Ok(None) => unreachable!("successful connect always returns a server"),
+            Err(McpError::ConnectTimedOut { cleanup, .. }) => {
                 warn!(server = %name, "[mcp] connect timed out — skipping server");
                 ConnectOutcome::TimedOut {
                     after: connect_timeout,
+                    cleanup_error: (!cleanup.is_empty()).then_some(cleanup),
                     executable_readiness,
                 }
             }
+            Err(e) => ConnectOutcome::Failed {
+                reason: e.to_string(),
+                executable_readiness,
+            },
         }
     }
 
@@ -387,16 +415,28 @@ impl McpManager {
             }
             ConnectOutcome::TimedOut {
                 after,
+                cleanup_error,
                 executable_readiness,
             } => {
                 if let Some(readiness) = executable_readiness {
                     self.executable_readiness.insert(name.clone(), readiness);
                 }
-                self.health
-                    .insert(name.clone(), McpServerHealth::TimedOut { after });
-                Err(McpError::Transport(format!(
-                    "connect to '{name}' timed out after {after:?}"
-                )))
+                self.health.insert(
+                    name.clone(),
+                    McpServerHealth::TimedOut {
+                        after,
+                        cleanup_error: cleanup_error.clone(),
+                    },
+                );
+                if let Some(cleanup_error) = cleanup_error {
+                    Err(McpError::Transport(format!(
+                        "connect to '{name}' timed out after {after:?}; cleanup unverified: {cleanup_error}"
+                    )))
+                } else {
+                    Err(McpError::Transport(format!(
+                        "connect to '{name}' timed out after {after:?}"
+                    )))
+                }
             }
         }
     }
@@ -407,6 +447,7 @@ impl McpManager {
         config: &McpServerConfig,
         egress_policy: wcore_egress::SharedPolicy,
         stdio_context: Option<McpStdioLaunchContext>,
+        connect_timeout: Duration,
     ) -> Result<McpServer, McpError> {
         let empty_map = HashMap::new();
 
@@ -455,72 +496,101 @@ impl McpManager {
             }
         };
 
-        // 2. Initialize handshake
-        let init_params = InitializeParams {
-            protocol_version: "2025-03-26".to_string(),
-            capabilities: ClientCapabilities {
-                tools: Some(json!({})),
-            },
-            client_info: ClientInfo {
-                name: "wayland-core".to_string(),
-                version: "0.3.0".to_string(),
-            },
-        };
+        let handshake = async {
+            // 2. Initialize handshake
+            let init_params = InitializeParams {
+                protocol_version: "2025-03-26".to_string(),
+                capabilities: ClientCapabilities {
+                    tools: Some(json!({})),
+                },
+                client_info: ClientInfo {
+                    name: "wayland-core".to_string(),
+                    version: "0.3.0".to_string(),
+                },
+            };
 
-        let init_req = JsonRpcRequest::new(
-            1,
-            "initialize",
-            Some(serde_json::to_value(&init_params).map_err(|e| {
-                McpError::InitFailed(format!("Failed to serialize init params: {}", e))
-            })?),
-        );
+            let init_req = JsonRpcRequest::new(
+                1,
+                "initialize",
+                Some(serde_json::to_value(&init_params).map_err(|e| {
+                    McpError::InitFailed(format!("Failed to serialize init params: {}", e))
+                })?),
+            );
 
-        let init_response = transport.request(&init_req).await?;
-        let init_result: InitializeResult = serde_json::from_value(
-            init_response
-                .result
-                .ok_or_else(|| McpError::InitFailed("No result in initialize response".into()))?,
-        )
-        .map_err(|e| McpError::InitFailed(format!("Failed to parse init result: {}", e)))?;
-
-        // Check whether server declared resources capability
-        let supports_resources = init_result
-            .capabilities
-            .get("resources")
-            .map(|v| !v.is_null())
-            .unwrap_or(false);
-        let supports_tools = init_result
-            .capabilities
-            .get("tools")
-            .map(|v| !v.is_null())
-            .unwrap_or(false);
-
-        // 3. Send initialized notification
-        let initialized_notification =
-            JsonRpcRequest::notification("notifications/initialized", None);
-        transport.notify(&initialized_notification).await?;
-
-        // 4. Discover tools only when the server advertises that capability.
-        // Resource-only MCP servers are valid and may reject `tools/list`.
-        let tools = if supports_tools {
-            let list_req = JsonRpcRequest::new(2, "tools/list", None);
-            let list_response = transport.request(&list_req).await?;
-            let tools_result: ToolsListResult =
-                serde_json::from_value(list_response.result.ok_or_else(|| {
-                    McpError::InitFailed("No result in tools/list response".into())
+            let init_response = transport.request(&init_req).await?;
+            let init_result: InitializeResult =
+                serde_json::from_value(init_response.result.ok_or_else(|| {
+                    McpError::InitFailed("No result in initialize response".into())
                 })?)
-                .map_err(|e| McpError::InitFailed(format!("Failed to parse tools list: {}", e)))?;
-            tools_result.tools
-        } else {
-            Vec::new()
+                .map_err(|e| McpError::InitFailed(format!("Failed to parse init result: {}", e)))?;
+
+            // Check whether server declared resources capability
+            let supports_resources = init_result
+                .capabilities
+                .get("resources")
+                .map(|v| !v.is_null())
+                .unwrap_or(false);
+            let supports_tools = init_result
+                .capabilities
+                .get("tools")
+                .map(|v| !v.is_null())
+                .unwrap_or(false);
+
+            // 3. Send initialized notification
+            let initialized_notification =
+                JsonRpcRequest::notification("notifications/initialized", None);
+            transport.notify(&initialized_notification).await?;
+
+            // 4. Discover tools only when the server advertises that capability.
+            // Resource-only MCP servers are valid and may reject `tools/list`.
+            let tools = if supports_tools {
+                let list_req = JsonRpcRequest::new(2, "tools/list", None);
+                let list_response = transport.request(&list_req).await?;
+                let tools_result: ToolsListResult =
+                    serde_json::from_value(list_response.result.ok_or_else(|| {
+                        McpError::InitFailed("No result in tools/list response".into())
+                    })?)
+                    .map_err(|e| {
+                        McpError::InitFailed(format!("Failed to parse tools list: {}", e))
+                    })?;
+                tools_result.tools
+            } else {
+                Vec::new()
+            };
+
+            Ok::<_, McpError>((tools, supports_resources))
         };
 
-        Ok(McpServer {
-            name: name.to_string(),
-            transport,
-            tools,
-            supports_resources,
-        })
+        match timeout(connect_timeout, handshake).await {
+            Ok(Ok((tools, supports_resources))) => Ok(McpServer {
+                name: name.to_string(),
+                transport,
+                tools,
+                supports_resources,
+            }),
+            Ok(Err(error)) => {
+                let cleanup = transport.close().await.err();
+                if let Some(cleanup) = cleanup {
+                    Err(McpError::InitFailed(format!(
+                        "{error}; transport cleanup failed: {cleanup}"
+                    )))
+                } else {
+                    Err(error)
+                }
+            }
+            Err(_) => {
+                let cleanup = transport
+                    .close()
+                    .await
+                    .err()
+                    .map(|error| format!("; cleanup failed: {error}"))
+                    .unwrap_or_default();
+                Err(McpError::ConnectTimedOut {
+                    after: connect_timeout,
+                    cleanup,
+                })
+            }
+        }
     }
 
     /// Get all discovered tools with their server names.
@@ -751,12 +821,12 @@ impl McpManager {
     /// id correlation, pre-C3) could desync the next call. After this the
     /// server reports `is_alive() == false`, so `all_tools()` stops
     /// advertising it and `call_tool` fast-fails.
-    pub async fn close_server(&self, server_name: &str) {
-        if let Some(server) = self.servers.get(server_name)
-            && let Err(e) = server.transport.close().await
-        {
-            warn!(server = %server_name, error = %e, "[mcp] close_server failed");
-        }
+    pub async fn close_server(&self, server_name: &str) -> Result<bool, McpError> {
+        let Some(server) = self.servers.get(server_name) else {
+            return Ok(false);
+        };
+        server.transport.close().await?;
+        Ok(true)
     }
 
     /// Test-only constructor: build a manager with an explicit health map
@@ -921,12 +991,45 @@ mod tests {
         }
     }
 
+    struct CloseErrorTransport;
+
+    #[async_trait]
+    impl McpTransport for CloseErrorTransport {
+        async fn request(&self, _req: &JsonRpcRequest) -> Result<JsonRpcResponse, McpError> {
+            Err(McpError::Transport("unused request".into()))
+        }
+
+        async fn notify(&self, _req: &JsonRpcRequest) -> Result<(), McpError> {
+            Ok(())
+        }
+
+        async fn close(&self) -> Result<(), McpError> {
+            Err(McpError::Transport("injected cleanup failure".into()))
+        }
+    }
+
     // -----------------------------------------------------------------------
     // Test helpers: build McpManager with pre-configured servers
     // -----------------------------------------------------------------------
 
     fn make_manager_with_servers(entries: Vec<(&str, bool, Box<dyn McpTransport>)>) -> McpManager {
         McpManager::new_for_test(entries)
+    }
+
+    #[tokio::test]
+    async fn close_server_preserves_cleanup_failure() {
+        let manager =
+            make_manager_with_servers(vec![("fails-close", false, Box::new(CloseErrorTransport))]);
+
+        let error = manager
+            .close_server("fails-close")
+            .await
+            .expect_err("close failure must not be reported as success");
+        assert!(error.to_string().contains("injected cleanup failure"));
+        assert!(
+            manager.hosts_server("fails-close"),
+            "failed cleanup must retain manager ownership for a retry"
+        );
     }
 
     #[tokio::test]
@@ -1372,6 +1475,121 @@ mod tests {
     // -----------------------------------------------------------------------
 
     #[cfg(unix)]
+    fn process_gone_or_zombie(pid: i32) -> bool {
+        // SAFETY: signal 0 is a standard liveness probe and sends no signal.
+        if unsafe { libc::kill(pid as libc::pid_t, 0) } != 0 {
+            return true;
+        }
+        #[cfg(target_os = "linux")]
+        {
+            std::fs::read_to_string(format!("/proc/{pid}/stat"))
+                .map(|stat| {
+                    stat.rsplit_once(')')
+                        .is_some_and(|(_, rest)| rest.trim_start().starts_with('Z'))
+                })
+                .unwrap_or(true)
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            false
+        }
+    }
+
+    #[cfg(unix)]
+    async fn assert_recorded_processes_reaped(pid_file: &std::path::Path) {
+        let contents = std::fs::read_to_string(pid_file).expect("fixture must record process ids");
+        let pids: Vec<i32> = contents
+            .split_whitespace()
+            .map(|pid| pid.parse().expect("fixture pid"))
+            .collect();
+        assert_eq!(
+            pids.len(),
+            2,
+            "fixture must record direct and grandchild pids"
+        );
+        for pid in pids {
+            let mut reaped = false;
+            for _ in 0..100 {
+                if process_gone_or_zombie(pid) {
+                    reaped = true;
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+            assert!(reaped, "fixture process {pid} survived manager return");
+        }
+    }
+
+    #[cfg(unix)]
+    fn process_tree_fixture(pid_file: &std::path::Path, response: &str) -> McpServerConfig {
+        use wcore_config::config::TransportType;
+
+        let script = format!(
+            "sleep 300 & grandchild=$!; echo \"$$ $grandchild\" > '{}'; read line; {response}",
+            pid_file.display()
+        );
+        McpServerConfig {
+            transport: TransportType::Stdio,
+            command: Some("sh".into()),
+            args: Some(vec!["-c".into(), script]),
+            env: None,
+            url: None,
+            headers: None,
+            deferred: None,
+            allow_local: false,
+            only_for_assistant: None,
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn connect_timeout_reaps_direct_and_grandchild_processes() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let pid_file = tmp.path().join("timeout.pids");
+        let mut configs = HashMap::new();
+        configs.insert(
+            "hung".to_string(),
+            process_tree_fixture(&pid_file, "sleep 300"),
+        );
+
+        let manager =
+            McpManager::connect_all_with_connect_timeout(&configs, Duration::from_millis(400))
+                .await
+                .expect("bounded connect returns manager");
+        assert!(matches!(
+            manager.health().get("hung"),
+            Some(McpServerHealth::TimedOut {
+                cleanup_error: None,
+                ..
+            })
+        ));
+        assert_recorded_processes_reaped(&pid_file).await;
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn malformed_handshake_reaps_direct_and_grandchild_processes() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let pid_file = tmp.path().join("malformed.pids");
+        let malformed = r#"printf '{"jsonrpc":"2.0","id":1,"result":[]}\n'; sleep 300"#;
+        let mut configs = HashMap::new();
+        configs.insert(
+            "malformed".to_string(),
+            process_tree_fixture(&pid_file, malformed),
+        );
+
+        let manager =
+            McpManager::connect_all_with_connect_timeout(&configs, Duration::from_secs(2))
+                .await
+                .expect("malformed connect returns manager");
+        assert!(matches!(
+            manager.health().get("malformed"),
+            Some(McpServerHealth::Failed { .. })
+        ));
+        assert_recorded_processes_reaped(&pid_file).await;
+    }
+
+    #[cfg(unix)]
     #[tokio::test]
     async fn health_records_timeout_for_a_hung_server() {
         use wcore_config::config::TransportType;
@@ -1398,8 +1616,12 @@ mod tests {
         // No live server, but the timeout is recorded with its cause.
         assert!(manager.server_names().is_empty());
         match manager.health().get("hung") {
-            Some(McpServerHealth::TimedOut { after }) => {
+            Some(McpServerHealth::TimedOut {
+                after,
+                cleanup_error,
+            }) => {
                 assert_eq!(*after, Duration::from_millis(300));
+                assert!(cleanup_error.is_none());
             }
             other => panic!("expected TimedOut, got {other:?}"),
         }

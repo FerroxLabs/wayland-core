@@ -726,6 +726,14 @@ pub enum ProtocolEvent {
         name: String,
         reason: String,
     },
+    /// Terminal receipt for a correlated runtime-MCP removal request.
+    McpRemovalResult {
+        lifecycle_version: u16,
+        request_id: String,
+        name: String,
+        outcome: McpRemovalOutcome,
+        removed_tools: Vec<String>,
+    },
     /// Correlated, versioned, redacted effective runtime state for local host
     /// diagnostics. This contains no environment values, launch arguments,
     /// request headers, credentials, or raw process errors.
@@ -1244,6 +1252,22 @@ pub enum ProtocolEvent {
         invalidation: AnvilReceiptInvalidation,
     },
     Pong,
+}
+
+/// Result of a session-scoped runtime MCP removal request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum McpRemovalOutcome {
+    Removed,
+    AlreadyAbsent,
+    NotRuntimeManaged,
+    UnsupportedVersion,
+    InvalidRequest,
+    RequestIdConflict,
+    TurnInProgress,
+    CapacityExceeded,
+    CleanupUnverified,
+    RegistryBusy,
 }
 
 /// W6 F7 per-turn cost row carried by [`ProtocolEvent::SessionCost`].

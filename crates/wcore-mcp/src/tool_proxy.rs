@@ -63,7 +63,7 @@ impl McpToolProxy {
         });
         tokio::select! {
             _ = ctx.cancel.cancelled() => {
-                self.manager.close_server(&self.server_name).await;
+                let _ = self.manager.close_server(&self.server_name).await;
                 ToolResult {
                     content: format!(
                         "MCP tool '{}/{}' call aborted by cancellation token \

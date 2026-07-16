@@ -202,6 +202,14 @@ pub const COMMAND_SPECS: &[WireSpec] = &[
         "available"
     ),
     wire!(
+        "remove_mcp_server",
+        "commands/remove_mcp_server.json",
+        ["lifecycle_version", "request_id", "name"],
+        Safety,
+        "request_id",
+        "runtime_mcp_lifecycle_v1"
+    ),
+    wire!(
         "get_runtime_diagnostics",
         "commands/get_runtime_diagnostics.json",
         ["diagnostics_version", "request_id"],
@@ -430,6 +438,20 @@ pub const EVENT_SPECS: &[WireSpec] = &[
         Safety,
         "name",
         "available"
+    ),
+    wire!(
+        "mcp_removal_result",
+        "events/mcp_removal_result.json",
+        [
+            "lifecycle_version",
+            "request_id",
+            "name",
+            "outcome",
+            "removed_tools"
+        ],
+        Safety,
+        "request_id",
+        "runtime_mcp_lifecycle_v1"
     ),
     wire!(
         "runtime_diagnostics_snapshot",
@@ -736,6 +758,7 @@ pub const PRODUCER_COMMAND_TYPES: &[&str] = &[
     "resolve_unknown_tool_effect",
     "get_runtime_diagnostics",
     "add_mcp_server",
+    "remove_mcp_server",
     "grant_workspace_capability",
     "approval_resume",
     "host_send_message_result",
@@ -765,6 +788,7 @@ pub const PRODUCER_EVENT_TYPES: &[&str] = &[
     "config_changed",
     "mcp_ready",
     "mcp_failed",
+    "mcp_removal_result",
     "runtime_diagnostics_snapshot",
     "runtime_diagnostics_unavailable",
     "trace_event",
@@ -845,7 +869,11 @@ pub fn command_fixture_values() -> BTreeMap<String, Value> {
     BTreeMap::from([
         (
             "commands/add_mcp_server.json".into(),
-            json!({"type":"add_mcp_server","name":"desktop-tools","transport":"stdio","command":"desktop-mcp","args":["--stdio"],"env":{"WAYLAND_PROFILE":"desktop"},"url":"https://mcp.invalid/v1","headers":{"X-Wayland-Contract":"v1"}}),
+            json!({"type":"add_mcp_server","name":"desktop-tools","transport":"stdio","command":"desktop-mcp","args":["--stdio"],"env":{"WAYLAND_PROFILE":"desktop"},"url":"https://mcp.invalid/v1","headers":{"X-Wayland-Contract":"v1"},"allow_local":false}),
+        ),
+        (
+            "commands/remove_mcp_server.json".into(),
+            json!({"type":"remove_mcp_server","lifecycle_version":1,"request_id":"mcp-remove-001","name":"desktop-tools"}),
         ),
         (
             "commands/approval_resume.json".into(),
@@ -1387,6 +1415,16 @@ pub fn event_fixture_values() -> BTreeMap<String, ProtocolEvent> {
             ProtocolEvent::McpReady {
                 name: "desktop-tools".into(),
                 tools: vec!["search".into(), "fetch".into()],
+            },
+        ),
+        (
+            "events/mcp_removal_result.json".into(),
+            ProtocolEvent::McpRemovalResult {
+                lifecycle_version: 1,
+                request_id: "mcp-remove-001".into(),
+                name: "desktop-tools".into(),
+                outcome: crate::events::McpRemovalOutcome::Removed,
+                removed_tools: vec!["fetch".into(), "search".into()],
             },
         ),
         (

@@ -5,8 +5,8 @@ use std::path::Path;
 use serde_json::Value;
 use wcore_protocol::commands::ProtocolCommand;
 use wcore_protocol::contract::{
-    COMMAND_SPECS, CONTRACT_ROOT, ContractCriticality, EVENT_SPECS, GENERATOR_VERSION,
-    canonical_json, check_contract, generated_artifacts,
+    COMMAND_SPECS, CONTRACT_MAJOR, CONTRACT_MINOR, CONTRACT_ROOT, ContractCriticality, EVENT_SPECS,
+    GENERATOR_VERSION, canonical_json, check_contract, generated_artifacts,
 };
 use wcore_protocol::events::{BudgetGrantOutcome, BudgetGrantRefusalReason, BudgetGrantResult};
 
@@ -272,12 +272,12 @@ fn manifest_pins_generator_and_all_three_digests() {
             "manifest {key} must be a prefixed SHA-256 digest"
         );
     }
-    assert_eq!(manifest["contract"]["major"], 1);
-    assert_eq!(manifest["contract"]["minor"], 6);
-    assert_eq!(manifest["commands"].as_array().unwrap().len(), 17);
-    assert_eq!(manifest["events"].as_array().unwrap().len(), 48);
-    assert_eq!(manifest["counts"]["commands"], 17);
-    assert_eq!(manifest["counts"]["events"], 48);
+    assert_eq!(manifest["contract"]["major"], CONTRACT_MAJOR);
+    assert_eq!(manifest["contract"]["minor"], CONTRACT_MINOR);
+    assert_eq!(manifest["commands"].as_array().unwrap().len(), 18);
+    assert_eq!(manifest["events"].as_array().unwrap().len(), 49);
+    assert_eq!(manifest["counts"]["commands"], 18);
+    assert_eq!(manifest["counts"]["events"], 49);
     assert_eq!(
         manifest["capabilities"]["contract_negotiation"],
         "available"
@@ -320,6 +320,32 @@ fn manifest_pins_generator_and_all_three_digests() {
         .find(|event| event["type"] == "sub_agent_event")
         .expect("child terminal evidence must be in EVENT_SPECS");
     assert_eq!(child_event["criticality"], "safety");
+}
+
+#[test]
+fn manifest_ready_and_schema_titles_share_one_contract_identity() {
+    let manifest = generated_json("manifest.json");
+    let ready = generated_json("events/ready.json");
+    assert_eq!(ready["contract"]["name"], manifest["contract"]["name"]);
+    assert_eq!(ready["contract"]["major"], manifest["contract"]["major"]);
+    assert_eq!(ready["contract"]["minor"], manifest["contract"]["minor"]);
+    assert_eq!(ready["contract"]["generator"], manifest["generator"]);
+    assert_eq!(manifest["contract"]["major"], CONTRACT_MAJOR);
+    assert_eq!(manifest["contract"]["minor"], CONTRACT_MINOR);
+    assert_eq!(manifest["generator"], GENERATOR_VERSION);
+
+    let expected_version = format!("v{CONTRACT_MAJOR}.{CONTRACT_MINOR}");
+    for schema in [
+        generated_json("schema/host-command.schema.json"),
+        generated_json("schema/core-event.schema.json"),
+    ] {
+        assert!(
+            schema["title"]
+                .as_str()
+                .is_some_and(|title| title.ends_with(&expected_version)),
+            "schema title must end with the current contract version"
+        );
+    }
 }
 
 #[test]
