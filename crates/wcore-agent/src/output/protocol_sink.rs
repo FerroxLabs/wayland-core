@@ -218,6 +218,20 @@ impl ProtocolSink {
         }
     }
 
+    /// Emit a turn-scoped error when the caller still owns the protocol
+    /// command's correlation id (for example, before the engine starts).
+    pub fn emit_correlated_error(&self, msg_id: &str, msg: &str, retryable: bool) {
+        let code = auth_error_code(msg).unwrap_or("engine_error");
+        let _ = self.writer.emit(&ProtocolEvent::Error {
+            msg_id: Some(msg_id.to_string()),
+            error: ErrorInfo {
+                code: code.to_string(),
+                message: msg.to_string(),
+                retryable,
+            },
+        });
+    }
+
     /// F-079: update the active turn msg_id so subsequent `emit_info`
     /// calls carry the right id. Call this when a new `Message` command
     /// arrives (before dispatching to the engine). The `Arc<RwLock<_>>`

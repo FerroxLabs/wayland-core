@@ -229,18 +229,37 @@ impl SessionManager {
         })
     }
 
-    /// Append the user message text to the WAL file for this session (F-030).
+    /// Append a text-only user message to the WAL file for this session (F-030).
     ///
     /// The WAL survives a SIGKILL.  On the next `load()` the engine merges
-    /// it back (see `merge_wal`).  Each WAL line is a JSON object:
-    /// `{"role":"user","content":"<text>"}` so it can be parsed without the
-    /// full `Message` type.
+    /// it back (see `merge_wal`). New records serialize the complete `Message`;
+    /// the reader still accepts the legacy `{"role":"user","content":"..."}`
+    /// shape.
     pub fn append_wal(&self, session: &Session, user_text: &str) -> anyhow::Result<()> {
+        self.append_wal_message(
+            session,
+            &Message::now(
+                wcore_types::message::Role::User,
+                vec![wcore_types::message::ContentBlock::Text {
+                    text: user_text.to_string(),
+                }],
+            ),
+        )
+    }
+
+    /// Append one complete user message to the WAL, including structured
+    /// content such as inline images. New records carry the serialized
+    /// `Message`; `merge_wal` remains compatible with the legacy text-only
+    /// `content` shape.
+    pub fn append_wal_message(&self, session: &Session, message: &Message) -> anyhow::Result<()> {
+        if message.role != wcore_types::message::Role::User {
+            anyhow::bail!("Session WAL accepts only user messages");
+        }
         std::fs::create_dir_all(&self.directory)?;
         let wal_path = self.wal_path(session);
         let entry = serde_json::json!({
             "role": "user",
-            "content": user_text,
+            "message": message,
             "ts": Utc::now().to_rfc3339(),
             // The canonical snapshot has this many messages immediately before
             // this prompt. Recovery can therefore distinguish an unapplied WAL
@@ -260,9 +279,9 @@ impl SessionManager {
 
     /// Merge a WAL file (if present) into `session.messages` and delete it.
     ///
-    /// Called at `SessionManager::load` time.  If the WAL contains entries
-    /// not already in `session.messages` (comparing by text), they are
-    /// appended as `Role::User` messages so a SIGKILL mid-turn is recoverable.
+    /// Called at `SessionManager::load` time. If the WAL contains entries not
+    /// already committed at their recorded message cursor, they are appended
+    /// as exact `Role::User` messages so a SIGKILL mid-turn is recoverable.
     pub fn merge_wal(&self, session: &mut Session) -> anyhow::Result<()> {
         let wal_path = self.wal_path(session);
         with_wal_lock(&wal_path, || {
@@ -313,13 +332,6 @@ impl SessionManager {
                         line_index + 1
                     );
                 };
-                let Some(Value::String(text)) = obj.get("content") else {
-                    anyhow::bail!(
-                        "Session WAL '{}' is corrupt at line {}: missing string content",
-                        wal_path.display(),
-                        line_index + 1
-                    );
-                };
                 if role != "user" {
                     anyhow::bail!(
                         "Session WAL '{}' is corrupt at line {}: unsupported role '{}'",
@@ -346,29 +358,64 @@ impl SessionManager {
                         line_index + 1
                     );
                 }
-                recovered_records.push((text.clone(), base_message_count));
+                let message = if let Some(value) = obj.get("message") {
+                    let message: Message =
+                        serde_json::from_value(value.clone()).map_err(|error| {
+                            anyhow::anyhow!(
+                                "Session WAL '{}' is corrupt at line {}: invalid message: {}",
+                                wal_path.display(),
+                                line_index + 1,
+                                error
+                            )
+                        })?;
+                    if message.role != wcore_types::message::Role::User {
+                        anyhow::bail!(
+                            "Session WAL '{}' is corrupt at line {}: message role is not user",
+                            wal_path.display(),
+                            line_index + 1
+                        );
+                    }
+                    message
+                } else {
+                    let Some(Value::String(text)) = obj.get("content") else {
+                        anyhow::bail!(
+                            "Session WAL '{}' is corrupt at line {}: missing message or string content",
+                            wal_path.display(),
+                            line_index + 1
+                        );
+                    };
+                    Message::now(
+                        wcore_types::message::Role::User,
+                        vec![wcore_types::message::ContentBlock::Text { text: text.clone() }],
+                    )
+                };
+                recovered_records.push((message, base_message_count));
             }
 
             use wcore_types::message::{ContentBlock, Role};
             let original_message_count = session.messages.len();
-            for (text, base_message_count) in recovered_records {
+            for (message, base_message_count) in recovered_records {
                 let already_committed = if let Some(base_message_count) = base_message_count {
                     original_message_count > base_message_count
                 } else {
                     // Pre-F12 WAL records lack a cursor. Preserve their legacy
                     // duplicate-suppression behavior because exact ordering is
                     // unknowable; all new records use base_message_count.
-                    session.messages.iter().any(|message| {
-                        message.role == Role::User
-                            && message.content.iter().any(|block| {
-                                matches!(block, ContentBlock::Text { text: existing } if existing == &text)
-                            })
+                    let legacy_text = message.content.iter().find_map(|block| match block {
+                        ContentBlock::Text { text } => Some(text),
+                        _ => None,
+                    });
+                    legacy_text.is_some_and(|text| {
+                        session.messages.iter().any(|message| {
+                            message.role == Role::User
+                                && message.content.iter().any(|block| {
+                                    matches!(block, ContentBlock::Text { text: existing } if existing == text)
+                                })
+                        })
                     })
                 };
                 if !already_committed {
-                    session
-                        .messages
-                        .push(Message::now(Role::User, vec![ContentBlock::Text { text }]));
+                    session.messages.push(message);
                 }
             }
 
@@ -1565,6 +1612,48 @@ mod tests {
         }));
         // WAL must be deleted after merge.
         assert!(!manager.wal_path(&session).exists());
+    }
+
+    #[test]
+    fn structured_wal_recovers_non_first_image_turn_exactly() {
+        let dir = tempdir().unwrap();
+        let manager = SessionManager::new(dir.path().to_path_buf(), 10);
+        let mut session = manager
+            .create("anthropic", "vision-model", "/tmp", None)
+            .unwrap();
+        session.messages.push(make_user_msg("first turn"));
+        session.messages.push(Message::now(
+            Role::Assistant,
+            vec![ContentBlock::Text {
+                text: "first answer".into(),
+            }],
+        ));
+        manager.save(&session).unwrap();
+
+        let image_turn = Message::now(
+            Role::User,
+            vec![
+                ContentBlock::Text {
+                    text: "describe this".into(),
+                },
+                ContentBlock::Image {
+                    mime: "image/png".into(),
+                    data: "iVBORw0KGgoAAA==".into(),
+                },
+            ],
+        );
+        manager.append_wal_message(&session, &image_turn).unwrap();
+
+        let mut recovered = session.clone();
+        manager.merge_wal(&mut recovered).unwrap();
+        let recovered_turn = recovered.messages.last().unwrap();
+        assert!(matches!(
+            recovered_turn.content.as_slice(),
+            [ContentBlock::Text { text }, ContentBlock::Image { mime, data }]
+                if text == "describe this"
+                    && mime == "image/png"
+                    && data == "iVBORw0KGgoAAA=="
+        ));
     }
 
     // F-030 #273: --resume reads .wal when .json is missing

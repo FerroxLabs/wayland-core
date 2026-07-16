@@ -148,6 +148,7 @@ tracing-subscriber.workspace = true
 tracing-appender.workspace   = true
 clap.workspace   = true
 serde_json.workspace = true
+base64.workspace = true
 uuid.workspace   = true
 
 # TUI (ratatui terminal UI) — Wave 0 foundation. ratatui re-exports
@@ -262,9 +263,6 @@ async-trait.workspace = true
 # WCORE_MEMORY_DIR env var; serialize against other crates that
 # touch the same env (wcore-memory/wcore-cua/wcore-browser/wcore-agent).
 serial_test.workspace = true
-# Test fixtures for the chatgpt OAuth verbs build base64url-encoded JWT
-# payloads (Task 5.2) — same encoder wcore-agent's oauth module uses.
-base64.workspace = true
 # User-flow harness Layer 2/3: drive the real `wayland-core` binary
 # through a pseudo-terminal like a human would.
 # - `portable-pty` spawns the binary attached to a PTY (so the TUI's

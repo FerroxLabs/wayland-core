@@ -44,7 +44,10 @@
 //! and defers vendor-specific image handling to the backend wired by
 //! the host.
 
-use std::path::PathBuf;
+use std::fs::File;
+#[cfg(not(unix))]
+use std::fs::OpenOptions;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -139,13 +142,21 @@ pub fn validate_image_url(url: &str) -> Result<(), String> {
 /// string (a desktop drag-drop sends an absolute temp path, not a URL);
 /// `None` for `http(s)://` URLs, which stay on the fetcher path. Path SAFETY is
 /// enforced later by [`validate_user_path`], not here.
-fn local_image_path(image_url: &str) -> Option<PathBuf> {
+fn local_image_path(image_url: &str) -> Result<Option<PathBuf>, String> {
     if image_url.starts_with("http://") || image_url.starts_with("https://") {
-        return None;
+        return Ok(None);
     }
-    // `file:///abs/path` -> `/abs/path`; a bare path passes through unchanged.
-    let path = image_url.strip_prefix("file://").unwrap_or(image_url);
-    Some(PathBuf::from(path))
+    if image_url.starts_with("file:") {
+        let url = url::Url::parse(image_url).map_err(|e| format!("Invalid file URL: {e}"))?;
+        if url.host_str().is_some_and(|host| host != "localhost") {
+            return Err("Network file URLs are not allowed".to_string());
+        }
+        return url
+            .to_file_path()
+            .map(Some)
+            .map_err(|()| "Invalid local file URL".to_string());
+    }
+    Ok(Some(PathBuf::from(image_url)))
 }
 
 /// True for a Windows UNC / network path (`\\server\share`, `\\?\UNC\...`).
@@ -159,6 +170,172 @@ fn is_network_path(path: &std::path::Path) -> bool {
         path.components().next(),
         Some(Component::Prefix(p)) if matches!(p.kind(), Prefix::UNC(..) | Prefix::VerbatimUNC(..))
     )
+}
+
+/// Open a local image without following a symlink/reparse point.
+///
+/// `O_NONBLOCK` prevents a hostile FIFO from hanging before the regular-file
+/// check. Unix walks from `/` with directory handles and `openat(O_NOFOLLOW)`
+/// so a raced parent rename cannot redirect the final open. Windows rejects
+/// reparse-point parents before opening the leaf reparse point itself.
+fn open_local_image(path: &Path) -> Result<File, String> {
+    #[cfg(unix)]
+    {
+        use std::ffi::CString;
+        use std::os::fd::{AsRawFd as _, FromRawFd as _};
+        use std::os::unix::ffi::OsStrExt as _;
+        use std::path::Component;
+
+        let mut parts = path.components();
+        if !matches!(parts.next(), Some(Component::RootDir)) {
+            return Err(format!("Image path is not absolute: {}", path.display()));
+        }
+        let names = parts
+            .map(|part| match part {
+                Component::Normal(name) => CString::new(name.as_bytes())
+                    .map_err(|_| format!("Image path contains NUL: {}", path.display())),
+                _ => Err(format!(
+                    "Image path contains an unsupported component: {}",
+                    path.display()
+                )),
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        if names.is_empty() {
+            return Err(format!("Image path has no file name: {}", path.display()));
+        }
+
+        let mut parent = File::open("/")
+            .map_err(|e| format!("Cannot open image path root for {}: {e}", path.display()))?;
+        for (index, name) in names.iter().enumerate() {
+            let is_leaf = index + 1 == names.len();
+            let flags = if is_leaf {
+                libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC
+            } else {
+                libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC
+            };
+            // SAFETY: `parent` is a live directory descriptor for every
+            // non-leaf iteration, `name` is NUL-terminated, and no pointer is
+            // retained after `openat` returns.
+            let fd = unsafe { libc::openat(parent.as_raw_fd(), name.as_ptr(), flags) };
+            if fd < 0 {
+                return Err(format!(
+                    "Cannot open image path component in {}: {}",
+                    path.display(),
+                    std::io::Error::last_os_error()
+                ));
+            }
+            // SAFETY: `openat` returned a new owned descriptor on success.
+            let opened = unsafe { File::from_raw_fd(fd) };
+            if is_leaf {
+                return Ok(opened);
+            }
+            parent = opened;
+        }
+        unreachable!("non-empty component walk returns at the leaf")
+    }
+
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::{MetadataExt as _, OpenOptionsExt as _};
+        const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0000_0400;
+        const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+
+        for parent in path.ancestors().skip(1) {
+            let metadata = std::fs::symlink_metadata(parent).map_err(|e| {
+                format!(
+                    "Cannot inspect image path component {}: {e}",
+                    parent.display()
+                )
+            })?;
+            if metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+                return Err(format!(
+                    "Image symlinks/reparse points are not allowed: {}",
+                    parent.display()
+                ));
+            }
+        }
+
+        let file = OpenOptions::new()
+            .read(true)
+            .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
+            .open(path)
+            .map_err(|e| format!("Cannot open image file {}: {e}", path.display()))?;
+        let metadata = file
+            .metadata()
+            .map_err(|e| format!("Cannot stat image file {}: {e}", path.display()))?;
+        if metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+            return Err(format!(
+                "Image symlinks/reparse points are not allowed: {}",
+                path.display()
+            ));
+        }
+        return Ok(file);
+    }
+
+    #[cfg(not(any(unix, windows)))]
+    {
+        OpenOptions::new()
+            .read(true)
+            .open(path)
+            .map_err(|e| format!("Cannot open image file {}: {e}", path.display()))
+    }
+}
+
+/// Resolve one local image path into sniffed MIME and bounded bytes.
+///
+/// This is the shared local-file boundary for the legacy `vision_analyze`
+/// tool and host composer attachments. It never fetches a URL, opens the target
+/// exactly once, rejects symlink/reparse components and non-regular files, and
+/// bounds a file that grows after its metadata check.
+pub fn load_local_image(image_path: &str) -> Result<(&'static str, Vec<u8>), String> {
+    let path = local_image_path(image_path)?
+        .ok_or_else(|| "Composer attachments must be local files".to_string())?;
+    if is_network_path(&path) {
+        return Err("Network/UNC image paths are not allowed".to_string());
+    }
+    let validated = validate_user_path(&path).map_err(|e| format!("Invalid image path: {e}"))?;
+    let file = open_local_image(&validated)?;
+    let meta = file
+        .metadata()
+        .map_err(|e| format!("Cannot stat image file {}: {e}", validated.display()))?;
+    if !meta.is_file() {
+        return Err(format!("Not a regular image file: {}", validated.display()));
+    }
+    if meta.len() > VISION_MAX_BYTES as u64 {
+        return Err(format!(
+            "Image too large for vision API: {} bytes (limit {} bytes)",
+            meta.len(),
+            VISION_MAX_BYTES,
+        ));
+    }
+
+    use std::io::Read as _;
+    let mut buf = Vec::with_capacity(meta.len().min(VISION_MAX_BYTES as u64) as usize);
+    file.take(VISION_MAX_BYTES as u64 + 1)
+        .read_to_end(&mut buf)
+        .map_err(|e| format!("Failed to read image file {}: {e}", validated.display()))?;
+    validate_image_bytes(buf)
+}
+
+fn validate_image_bytes(bytes: Vec<u8>) -> Result<(&'static str, Vec<u8>), String> {
+    if bytes.len() < VISION_MIN_BYTES {
+        return Err(format!(
+            "Image too small to be valid ({} bytes)",
+            bytes.len()
+        ));
+    }
+    if bytes.len() > VISION_MAX_BYTES {
+        return Err(format!(
+            "Image too large for vision API: {} bytes (limit {} bytes)",
+            bytes.len(),
+            VISION_MAX_BYTES,
+        ));
+    }
+    let mime = detect_image_mime(&bytes).ok_or_else(|| {
+        "Unsupported image format (only PNG, JPEG, GIF, BMP, WEBP are supported)".to_string()
+    })?;
+    debug_assert!(SUPPORTED_MIME_PREFIXES.contains(&mime));
+    Ok((mime, bytes))
 }
 
 /// Source of an image — either a remote URL the fetcher must resolve,
@@ -341,57 +518,8 @@ impl VisionAnalyzeTool {
         // 1-3. Load raw bytes from a LOCAL file or a remote URL. A dropped
         //       local image (absolute path or `file://` URI) is read from disk;
         //       an `http(s)` URL is fetched via the host-wired fetcher.
-        let bytes = match local_image_path(image_url) {
-            Some(path) => {
-                // Refuse a Windows UNC / network path (\\server\share) BEFORE any
-                // I/O: merely opening one triggers an outbound SMB connection (a
-                // NetNTLM-hash leak vector), and it is never a legitimate dropped
-                // local image. No-op on Unix (paths carry no UNC prefix there).
-                if is_network_path(&path) {
-                    return Err("Network/UNC image paths are not allowed".to_string());
-                }
-                // Mirror the Read tool's path validation (absolute-only, no
-                // `..` traversal, denied-system-path list, symlink
-                // canonicalization) so an arg like "/etc/shadow" is refused
-                // exactly as Read refuses it. No URL/SSRF/website-policy checks
-                // apply to a local file — those are network-only.
-                let validated =
-                    validate_user_path(&path).map_err(|e| format!("Invalid image path: {e}"))?;
-                // Open ONCE, then take the type + size from the handle (fstat) so
-                // the checks and the read all refer to the SAME file — no
-                // metadata/read TOCTOU where the path is swapped between calls.
-                let file = std::fs::File::open(&validated)
-                    .map_err(|e| format!("Cannot open image file {}: {e}", validated.display()))?;
-                let meta = file
-                    .metadata()
-                    .map_err(|e| format!("Cannot stat image file {}: {e}", validated.display()))?;
-                // An image is always a regular file. Rejecting FIFOs/devices/
-                // directories closes a read-hang / OOM DoS — e.g. /dev/zero,
-                // whose metadata size lies as 0 and whose read never ends. This
-                // matches the is_file() guard sibling file tools already apply.
-                if !meta.is_file() {
-                    return Err(format!("Not a regular image file: {}", validated.display()));
-                }
-                if meta.len() > VISION_MAX_BYTES as u64 {
-                    return Err(format!(
-                        "Image too large for vision API: {} bytes (limit {} bytes)",
-                        meta.len(),
-                        VISION_MAX_BYTES,
-                    ));
-                }
-                // Bounded read (defense-in-depth): cap the bytes pulled into
-                // memory at the limit + 1 so a file that GROWS after the size
-                // check still cannot OOM; the shared post-read length check
-                // below then rejects the overflow.
-                use std::io::Read as _;
-                let mut buf = Vec::with_capacity(meta.len().min(VISION_MAX_BYTES as u64) as usize);
-                file.take(VISION_MAX_BYTES as u64 + 1)
-                    .read_to_end(&mut buf)
-                    .map_err(|e| {
-                        format!("Failed to read image file {}: {e}", validated.display())
-                    })?;
-                buf
-            }
+        let bytes = match local_image_path(image_url)? {
+            Some(_) => return load_local_image(image_url),
             None => {
                 // Validate URL shape and SSRF safety.
                 validate_image_url(image_url)?;
@@ -413,25 +541,8 @@ impl VisionAnalyzeTool {
                 self.fetcher.fetch(image_url).await?
             }
         };
-        // 4. Size + MIME validation (shared by both sources).
-        if bytes.len() < VISION_MIN_BYTES {
-            return Err(format!(
-                "Image too small to be valid ({} bytes)",
-                bytes.len()
-            ));
-        }
-        if bytes.len() > VISION_MAX_BYTES {
-            return Err(format!(
-                "Image too large for vision API: {} bytes (limit {} bytes)",
-                bytes.len(),
-                VISION_MAX_BYTES,
-            ));
-        }
-        let mime = detect_image_mime(&bytes).ok_or_else(|| {
-            "Unsupported image format (only PNG, JPEG, GIF, BMP, WEBP are supported)".to_string()
-        })?;
-        debug_assert!(SUPPORTED_MIME_PREFIXES.contains(&mime));
-        Ok((mime, bytes))
+        // 4. Size + MIME validation for the fetched source.
+        validate_image_bytes(bytes)
     }
 }
 
@@ -687,17 +798,78 @@ mod tests {
     #[test]
     fn local_image_path_classifies_url_vs_file() {
         // http(s) URLs stay on the fetcher path.
-        assert!(local_image_path("http://example.com/x.png").is_none());
-        assert!(local_image_path("https://example.com/x.png").is_none());
-        // A `file://` URI strips to its absolute path.
-        assert_eq!(
-            local_image_path("file:///Users/me/x.png"),
-            Some(PathBuf::from("/Users/me/x.png"))
+        assert_eq!(local_image_path("http://example.com/x.png"), Ok(None));
+        assert_eq!(local_image_path("https://example.com/x.png"), Ok(None));
+        // A `file://` URI strips to its absolute path on every platform.
+        let dir = tempdir().expect("tempdir");
+        let path = dir.path().join("x.png");
+        let uri = url::Url::from_file_path(&path).expect("absolute file URL");
+        assert_eq!(local_image_path(uri.as_str()), Ok(Some(path.clone())));
+        // A bare path (what a desktop drop sends) is classified as local;
+        // `load_local_image` performs the absolute-path safety check.
+        assert_eq!(local_image_path(path.to_str().unwrap()), Ok(Some(path)));
+    }
+
+    #[test]
+    fn local_image_loader_rejects_corrupt_and_oversized_files() {
+        let dir = tempdir().expect("tempdir");
+        let corrupt = dir.path().join("corrupt.png");
+        fs::write(&corrupt, b"not an image payload").expect("write corrupt image");
+        assert!(load_local_image(corrupt.to_str().unwrap()).is_err());
+
+        let oversized = dir.path().join("oversized.png");
+        let file = fs::File::create(&oversized).expect("create oversized image");
+        file.set_len(VISION_MAX_BYTES as u64 + 1)
+            .expect("extend sparse fixture");
+        let error = load_local_image(oversized.to_str().unwrap()).unwrap_err();
+        assert!(error.contains("too large"), "unexpected error: {error}");
+    }
+
+    #[test]
+    fn post_open_growth_limit_is_fail_closed() {
+        let bytes = vec![0; VISION_MAX_BYTES + 1];
+        let error = validate_image_bytes(bytes).unwrap_err();
+        assert!(error.contains("too large"), "unexpected error: {error}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn local_image_loader_rejects_symlink_components_and_fifo() {
+        use std::ffi::CString;
+        use std::os::unix::ffi::OsStrExt as _;
+        use std::os::unix::fs::symlink;
+
+        let dir = tempdir().expect("tempdir");
+        let target = dir.path().join("target.png");
+        let link = dir.path().join("link.png");
+        fs::write(&target, png_bytes()).expect("write target");
+        symlink(&target, &link).expect("create symlink");
+        assert!(load_local_image(link.to_str().unwrap()).is_err());
+
+        let actual_parent = dir.path().join("actual-parent");
+        let linked_parent = dir.path().join("linked-parent");
+        fs::create_dir(&actual_parent).expect("create actual parent");
+        let nested_target = actual_parent.join("nested.png");
+        fs::write(&nested_target, png_bytes()).expect("write nested target");
+        symlink(&actual_parent, &linked_parent).expect("create parent symlink");
+        let error =
+            load_local_image(linked_parent.join("nested.png").to_str().unwrap()).unwrap_err();
+        assert!(
+            error.contains("open image path component"),
+            "unexpected error: {error}"
         );
-        // A bare absolute path (what a desktop drop sends) is local.
-        assert_eq!(
-            local_image_path("/Users/me/x.png"),
-            Some(PathBuf::from("/Users/me/x.png"))
+
+        let fifo = dir.path().join("pipe.png");
+        let fifo_c = CString::new(fifo.as_os_str().as_bytes()).expect("fifo path");
+        // SAFETY: `fifo_c` is a valid NUL-terminated pathname and the mode is
+        // a conventional owner-only fixture permission.
+        assert_eq!(unsafe { libc::mkfifo(fifo_c.as_ptr(), 0o600) }, 0);
+        let error = load_local_image(fifo.to_str().unwrap()).unwrap_err();
+        assert!(
+            error.contains("regular file")
+                || error.contains("regular image file")
+                || error.contains("open image file"),
+            "unexpected error: {error}"
         );
     }
 

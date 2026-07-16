@@ -12,6 +12,9 @@ pub mod packaged_runtime;
 /// and its focused acceptance tests.
 pub mod budget_grants;
 
+/// Secure lowering of JSON-stream composer files into inline image blocks.
+pub mod attachments;
+
 // v0.7.0 Task 1.A.10: `acp` subcommand — production caller for the
 // `wcore-acp` crate (methodology #27). Lives in the lib so the e2e
 // `serve + request` round-trip test runs under `cargo test -p wcore-cli

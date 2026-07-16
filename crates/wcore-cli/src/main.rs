@@ -4790,7 +4790,7 @@ async fn run_json_stream_mode(
             ProtocolCommand::Message {
                 msg_id,
                 content,
-                files: _,
+                files,
             } => {
                 // F-079: thread the active turn id into the protocol sink so
                 // any emit_info calls during this turn carry the right msg_id
@@ -4849,6 +4849,20 @@ async fn run_json_stream_mode(
                     }
                 }
 
+                let attachment_content = match wcore_cli::attachments::load_composer_images(&files)
+                {
+                    Ok(content) => content,
+                    Err(error) => {
+                        protocol_sink.emit_correlated_error(
+                            &msg_id,
+                            &format!("composer attachment rejected: {error}"),
+                            false,
+                        );
+                        output.emit_stream_end(&msg_id, 0, 0, 0, 0, 0, FinishReason::Error);
+                        continue;
+                    }
+                };
+
                 let mut stopped = false;
                 let mut pending_config: Option<PendingConfig> = None;
                 let mut mode_changed = false;
@@ -4861,7 +4875,7 @@ async fn run_json_stream_mode(
                 let mut run_failed = false;
 
                 {
-                    let engine_fut = engine.run(&content, &msg_id);
+                    let engine_fut = engine.run_with_content(&content, attachment_content, &msg_id);
                     tokio::pin!(engine_fut);
 
                     loop {

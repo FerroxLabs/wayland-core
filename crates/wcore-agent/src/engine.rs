@@ -2144,6 +2144,20 @@ enum CancellationDescendantClosure {
     ReconciliationRequired,
 }
 
+struct UserTurnInput<'a> {
+    text: &'a str,
+    additional_content: Option<Vec<ContentBlock>>,
+}
+
+impl<'a> UserTurnInput<'a> {
+    fn new(text: &'a str, additional_content: Option<Vec<ContentBlock>>) -> Self {
+        Self {
+            text,
+            additional_content,
+        }
+    }
+}
+
 pub struct AgentEngine {
     provider: Arc<dyn LlmProvider>,
     /// Immutable outbound authority for this session. Runtime-lazy clients
@@ -5095,11 +5109,25 @@ impl AgentEngine {
     /// compaction preserves the pairing. Synthetic error results are
     /// bundled into this same user message so conversation roles stay
     /// strictly alternating.
+    #[cfg(test)]
     fn push_user_turn(&mut self, user_input: &str) {
+        self.push_user_turn_with_content(user_input, Vec::new());
+    }
+
+    fn push_user_turn_with_content(
+        &mut self,
+        user_input: &str,
+        additional_content: Vec<ContentBlock>,
+    ) {
         let mut content: Vec<ContentBlock> = Self::orphan_repair_results(self.messages.last());
-        content.push(ContentBlock::Text {
-            text: user_input.to_string(),
-        });
+        // Preserve legacy empty-text turns, but do not insert a meaningless
+        // empty text block ahead of an image-only composer message.
+        if !user_input.is_empty() || additional_content.is_empty() {
+            content.push(ContentBlock::Text {
+                text: user_input.to_string(),
+            });
+        }
+        content.extend(additional_content);
         self.messages.push(Message::now(Role::User, content));
     }
 
@@ -5636,6 +5664,20 @@ impl AgentEngine {
     /// committed. In-memory/test engines without a journal retain the legacy
     /// path unchanged.
     pub async fn run(&mut self, user_input: &str, msg_id: &str) -> Result<AgentResult, AgentError> {
+        self.run_with_content(user_input, Vec::new(), msg_id).await
+    }
+
+    /// Run one user turn with provider-neutral content appended after its text.
+    ///
+    /// Host protocol adapters use this for already-validated inline images.
+    /// The active provider receives the image blocks in this turn directly;
+    /// no auxiliary vision backend or second credential is involved.
+    pub async fn run_with_content(
+        &mut self,
+        user_input: &str,
+        additional_content: Vec<ContentBlock>,
+        msg_id: &str,
+    ) -> Result<AgentResult, AgentError> {
         if self.session_manager.is_some()
             && self.current_session.is_some()
             && self.session_journal.is_none()
@@ -5656,7 +5698,14 @@ impl AgentEngine {
 
         if self.session_journal.is_none() {
             let result = self
-                .run_inner(user_input, msg_id, None, None, None, None)
+                .run_inner(
+                    UserTurnInput::new(user_input, Some(additional_content)),
+                    msg_id,
+                    None,
+                    None,
+                    None,
+                    None,
+                )
                 .await;
             if result.is_ok() {
                 self.observe_user_turn(user_input).await;
@@ -5699,7 +5748,14 @@ impl AgentEngine {
         }
 
         let result = self
-            .run_inner(user_input, msg_id, Some(&turn_id), None, None, None)
+            .run_inner(
+                UserTurnInput::new(user_input, Some(additional_content)),
+                msg_id,
+                Some(&turn_id),
+                None,
+                None,
+                None,
+            )
             .await;
         // Cancellation may drop the graph future before its pending approval
         // or other not-started descendants get a chance to close themselves.
@@ -6029,7 +6085,7 @@ impl AgentEngine {
             Some(result) => result,
             None => {
                 self.run_inner(
-                    &user_message,
+                    UserTurnInput::new(&user_message, None),
                     msg_id,
                     Some(turn_id),
                     checkpoint,
@@ -8172,13 +8228,17 @@ impl AgentEngine {
     /// owns durable session authority.
     async fn run_inner(
         &mut self,
-        user_input: &str,
+        user_turn: UserTurnInput<'_>,
         msg_id: &str,
         journal_turn_id: Option<&str>,
         resume_checkpoint: Option<crate::recovery::RecoveryCheckpoint>,
         mut prepared_recovery_request: Option<LlmRequest>,
         mut recovered_provider_round: Option<crate::provider_recovery::RecoveredProviderRound>,
     ) -> Result<AgentResult, AgentError> {
+        let UserTurnInput {
+            text: user_input,
+            additional_content: mut additional_user_content,
+        } = user_turn;
         let resume_from_checkpoint = resume_checkpoint.is_some();
         if self.session_manager.is_some()
             && self.current_session.is_some()
@@ -8283,7 +8343,10 @@ impl AgentEngine {
         // sessions, with NullMemory, or when nothing relevant is stored.
         if !resume_from_checkpoint {
             self.recall_relevant_facts(user_input).await;
-            self.push_user_turn(user_input);
+            self.push_user_turn_with_content(
+                user_input,
+                additional_user_content.take().unwrap_or_default(),
+            );
             // TurnStarted is already durable. Canonical conversation sync is
             // intentionally delayed until context and budget admission, so an
             // over-ceiling prompt cannot replace the last resumable history.
@@ -8313,7 +8376,12 @@ impl AgentEngine {
                         .emit_error(&format!("Failed to persist first message: {}", e), false);
                 }
             } else {
-                if let Err(e) = mgr.append_wal(session, user_input) {
+                let user_message = self.messages.last().ok_or_else(|| {
+                    AgentError::SessionAuthority(
+                        "user turn was not present after composer ingestion".to_string(),
+                    )
+                })?;
+                if let Err(e) = mgr.append_wal_message(session, user_message) {
                     self.output
                         .emit_error(&format!("Failed to append WAL: {}", e), false);
                 }
@@ -16765,7 +16833,7 @@ mod compact_tests {
     use wcore_types::message::FinishReason;
     // v0.8.0 Task M: inline-test fixture builders need access to the
     // engine-private user-id resolver.
-    use super::resolve_user_model_user_id;
+    use super::{message_requires_vision, resolve_user_model_user_id};
     use wcore_types::message::{ContentBlock, Message, Role};
 
     use crate::approval::ApprovalBridge;
@@ -16977,6 +17045,50 @@ mod compact_tests {
         assert_eq!(m.role, Role::User);
         assert_eq!(m.content.len(), 1);
         assert!(matches!(&m.content[0], ContentBlock::Text { text } if text == "hello"));
+    }
+
+    #[test]
+    fn push_user_turn_preserves_text_then_image_wire_order() {
+        let mut engine = engine_with_history(vec![]);
+        let images = vec![
+            ContentBlock::Image {
+                mime: "image/png".into(),
+                data: "cG5n".into(),
+            },
+            ContentBlock::Image {
+                mime: "image/jpeg".into(),
+                data: "anBlZw==".into(),
+            },
+        ];
+        engine.push_user_turn_with_content("describe both", images.clone());
+
+        let content = &engine.messages[0].content;
+        assert!(matches!(&content[0], ContentBlock::Text { text } if text == "describe both"));
+        assert!(matches!(
+            &content[1],
+            ContentBlock::Image { mime, data } if mime == "image/png" && data == "cG5n"
+        ));
+        assert!(matches!(
+            &content[2],
+            ContentBlock::Image { mime, data } if mime == "image/jpeg" && data == "anBlZw=="
+        ));
+        assert!(message_requires_vision(&engine.messages));
+    }
+
+    #[test]
+    fn push_user_turn_image_only_has_no_empty_text_block() {
+        let mut engine = engine_with_history(vec![]);
+        let image = ContentBlock::Image {
+            mime: "image/png".into(),
+            data: "cG5n".into(),
+        };
+        engine.push_user_turn_with_content("", vec![image.clone()]);
+
+        assert!(matches!(
+            engine.messages[0].content.as_slice(),
+            [ContentBlock::Image { mime, data }] if mime == "image/png" && data == "cG5n"
+        ));
+        assert!(message_requires_vision(&engine.messages));
     }
 
     #[test]
@@ -22328,6 +22440,55 @@ mod audit_2026_05_22_tests {
     }
 
     #[tokio::test]
+    async fn durable_image_turn_is_preserved_and_pre_checkpoint_crash_fails_closed() {
+        let dir = tempfile::tempdir().unwrap();
+        let manager = crate::session::SessionManager::new(dir.path().to_path_buf(), 10);
+        let active = manager
+            .create_for_run("anthropic", "vision-model", "/tmp", Some("f27a110001"))
+            .unwrap();
+        let mut engine = engine_with(Arc::new(ScriptedProvider::new(Vec::new())));
+        engine.session_manager = Some(manager);
+        engine.current_session = Some(active.session);
+        engine.session_journal = Some(active.journal);
+
+        let turn_id = "turn-with-image";
+        engine.active_journal_turn_id = Some(turn_id.into());
+        engine
+            .append_journal_event(crate::session_journal::SessionEvent::TurnStarted {
+                turn_id: turn_id.into(),
+                user_message: "describe this".into(),
+            })
+            .await
+            .unwrap();
+        engine.push_user_turn_with_content(
+            "describe this",
+            vec![ContentBlock::Image {
+                mime: "image/png".into(),
+                data: "iVBORw0KGgoAAA==".into(),
+            }],
+        );
+        engine.sync_journal_conversation(turn_id).await.unwrap();
+
+        let state = engine.session_journal.as_ref().unwrap().state().unwrap();
+        let canonical: Message = serde_json::from_value(state.conversation[0].clone()).unwrap();
+        assert!(matches!(
+            canonical.content.as_slice(),
+            [ContentBlock::Text { text }, ContentBlock::Image { mime, data }]
+                if text == "describe this"
+                    && mime == "image/png"
+                    && data == "iVBORw0KGgoAAA=="
+        ));
+        let recovery = engine.recovery_plan().unwrap();
+        assert!(matches!(
+            recovery.disposition,
+            crate::recovery::RecoveryDisposition::Blocked {
+                reason: crate::recovery::RecoveryBlocker::ContextCheckpointMissing,
+                ..
+            }
+        ));
+    }
+
+    #[tokio::test]
     async fn restart_reconciles_durable_provider_success_without_redispatch() {
         let dir = tempfile::tempdir().unwrap();
         let recovery_key = [0x71; 32];
@@ -23583,7 +23744,7 @@ mod audit_2026_05_22_tests {
 
         let result = engine
             .run_inner(
-                "finish once",
+                super::UserTurnInput::new("finish once", None),
                 "terminal-message",
                 Some(turn_id),
                 None,
@@ -23738,7 +23899,7 @@ mod audit_2026_05_22_tests {
 
         let result = engine
             .run_inner(
-                "run only within budget",
+                super::UserTurnInput::new("run only within budget", None),
                 "budget-message",
                 Some(turn_id),
                 None,
