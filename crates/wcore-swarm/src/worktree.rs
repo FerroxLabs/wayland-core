@@ -11,6 +11,13 @@ use wcore_config::shell;
 
 use crate::error::{Result, SwarmError};
 
+#[path = "worktree_security.rs"]
+mod security;
+use security::{
+    ensure_absent_destination, ensure_real_directory, ensure_unchanged_real_directory,
+    reject_option_like_ref, validate_worker_id,
+};
+
 /// Manages the `<repo>/.swarm-worktrees/` directory and per-worker
 /// worktrees within it. Each worker gets a fresh checkout at
 /// `<repo>/.swarm-worktrees/<worker_id>` on a branch named by
@@ -24,10 +31,18 @@ impl WorktreeManager {
     /// Construct a new manager for `repo_root`. Creates the
     /// `.swarm-worktrees/` directory if it does not exist.
     pub fn new(repo_root: &Path) -> Result<Self> {
+        let repo_root = std::fs::canonicalize(repo_root)?;
         let swarm_root = repo_root.join(".swarm-worktrees");
-        std::fs::create_dir_all(&swarm_root)?;
+        ensure_real_directory(&swarm_root)?;
+        let swarm_root = std::fs::canonicalize(&swarm_root)?;
+        if swarm_root.parent() != Some(repo_root.as_path()) {
+            return Err(SwarmError::WorktreeIo(format!(
+                "refused worktree root outside repository: {}",
+                swarm_root.display()
+            )));
+        }
         Ok(Self {
-            repo_root: repo_root.to_path_buf(),
+            repo_root,
             swarm_root,
         })
     }
@@ -76,13 +91,19 @@ impl WorktreeManager {
         branch: &str,
         base: &str,
     ) -> Result<PathBuf> {
+        validate_worker_id(worker_id)?;
+        reject_option_like_ref("branch", branch)?;
+        reject_option_like_ref("base", base)?;
+        ensure_unchanged_real_directory(&self.swarm_root, &self.repo_root)?;
         let tree_path = self.swarm_root.join(worker_id);
+        ensure_absent_destination(&tree_path)?;
         let tree_path_str = tree_path.to_string_lossy().into_owned();
-        let args: [&str; 6] = [
+        let args: [&str; 7] = [
             "worktree",
             "add",
             "-b",
             branch,
+            "--",
             tree_path_str.as_str(),
             base,
         ];
@@ -123,5 +144,66 @@ impl WorktreeManager {
             }
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn invalid_worker_and_ref_inputs_fail_before_git_dispatch() {
+        let repo = tempfile::tempdir().unwrap();
+        let manager = WorktreeManager::new(repo.path()).unwrap();
+
+        for worker_id in ["../escape", "nested/worker", "", "."] {
+            let error = manager
+                .create_worker_tree(worker_id, "worker/safe", "main")
+                .await
+                .unwrap_err();
+            assert!(error.to_string().contains("invalid worker id"));
+        }
+        for (branch, base) in [("--orphan", "main"), ("worker/safe", "-C")] {
+            let error = manager
+                .create_worker_tree("safe-worker", branch, base)
+                .await
+                .unwrap_err();
+            assert!(error.to_string().contains("invalid"));
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn linked_swarm_root_is_rejected_without_touching_target() {
+        use std::os::unix::fs::symlink;
+
+        let repo = tempfile::tempdir().unwrap();
+        let target = tempfile::tempdir().unwrap();
+        symlink(target.path(), repo.path().join(".swarm-worktrees")).unwrap();
+
+        let error = match WorktreeManager::new(repo.path()) {
+            Ok(_) => panic!("linked swarm root was accepted"),
+            Err(error) => error,
+        };
+        assert!(error.to_string().contains("linked worktree root"));
+        assert!(std::fs::read_dir(target.path()).unwrap().next().is_none());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn linked_worker_destination_is_rejected_before_git_dispatch() {
+        use std::os::unix::fs::symlink;
+
+        let repo = tempfile::tempdir().unwrap();
+        let target = tempfile::tempdir().unwrap();
+        let manager = WorktreeManager::new(repo.path()).unwrap();
+        symlink(target.path(), manager.swarm_root().join("safe-worker")).unwrap();
+
+        let error = manager
+            .create_worker_tree("safe-worker", "worker/safe", "main")
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("existing or linked"));
+        assert!(std::fs::read_dir(target.path()).unwrap().next().is_none());
     }
 }
