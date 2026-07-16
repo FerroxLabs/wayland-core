@@ -323,6 +323,75 @@ async fn conditional_include_is_refused_before_checkout() {
 
 #[cfg(target_os = "linux")]
 #[tokio::test]
+async fn worktree_config_filter_and_include_are_refused_before_checkout() {
+    let fixture = tempfile::tempdir().expect("fixture");
+    init_fixture_repo(fixture.path()).await;
+    std::fs::write(
+        fixture.path().join(".gitattributes"),
+        "*.payload filter=evil\n",
+    )
+    .unwrap();
+    std::fs::write(fixture.path().join("canary.payload"), "safe input\n").unwrap();
+    run_fixture_git(fixture.path(), &["add", ".gitattributes", "canary.payload"]).await;
+    run_fixture_git(
+        fixture.path(),
+        &[
+            "-c",
+            "user.email=swarm-test@example.invalid",
+            "-c",
+            "user.name=Swarm Test",
+            "commit",
+            "-qm",
+            "content",
+        ],
+    )
+    .await;
+
+    let filter = fixture.path().join("worktree-filter.sh");
+    make_executable(&filter, "#!/bin/sh\nprintf executed > \"${0}.ran\"\ncat\n");
+    let included = fixture.path().join("worktree-include.config");
+    std::fs::write(&included, "[filter \"evil\"]\n\tsmudge = false\n").unwrap();
+    run_fixture_git(
+        fixture.path(),
+        &["config", "extensions.worktreeConfig", "true"],
+    )
+    .await;
+    run_fixture_git(
+        fixture.path(),
+        &[
+            "config",
+            "--worktree",
+            "filter.evil.smudge",
+            &filter.to_string_lossy(),
+        ],
+    )
+    .await;
+    run_fixture_git(
+        fixture.path(),
+        &[
+            "config",
+            "--worktree",
+            "include.path",
+            &included.to_string_lossy(),
+        ],
+    )
+    .await;
+
+    let manager = WorktreeManager::new(fixture.path()).expect("manager");
+    let error = manager
+        .create_worker_tree("worker-1", "swarm/worker-1", "HEAD")
+        .await
+        .expect_err("worktree checkout config must fail closed")
+        .to_string();
+    assert!(error.contains("--worktree"), "{error}");
+    assert!(error.contains("filter.evil.smudge"), "{error}");
+    assert!(error.contains("include.path"), "{error}");
+    assert!(!PathBuf::from(format!("{}.ran", filter.display())).exists());
+    assert!(!manager.swarm_root().join("worker-1").exists());
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
 async fn status_output_cap_kills_git_descendant() {
     let fixture = tempfile::tempdir().expect("fixture");
     let fake_git = fixture.path().join("flood-git.sh");

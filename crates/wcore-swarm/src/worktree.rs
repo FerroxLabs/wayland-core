@@ -304,33 +304,38 @@ impl WorktreeManager {
 
     async fn reject_executable_checkout_config(&self) -> Result<()> {
         // System/global configuration is disabled for every Swarm Git command.
-        // Inspect local keys without following includes so executable filters
-        // and conditional/external includes fail closed before checkout.
-        let cmd = self.git_command(&[
-            "config",
-            "--local",
-            "--no-includes",
-            "--name-only",
-            "--get-regexp",
-            UNSAFE_CHECKOUT_CONFIG,
-        ]);
-        let output = capture_bounded_process(cmd, self.capture_limits, None)
-            .await
-            .map_err(|error| capture_error("git config safety check", error))?;
-        if output.status.success() {
-            let keys = String::from_utf8_lossy(&output.stdout);
+        // Inspect both repository-local scopes without following includes so
+        // executable filters and conditional/external includes fail closed
+        // before checkout. `--local` does not include `config.worktree` when
+        // `extensions.worktreeConfig` is enabled.
+        for scope in ["--local", "--worktree"] {
+            let cmd = self.git_command(&[
+                "config",
+                scope,
+                "--no-includes",
+                "--name-only",
+                "--get-regexp",
+                UNSAFE_CHECKOUT_CONFIG,
+            ]);
+            let output = capture_bounded_process(cmd, self.capture_limits, None)
+                .await
+                .map_err(|error| capture_error("git config safety check", error))?;
+            if output.status.success() {
+                let keys = String::from_utf8_lossy(&output.stdout);
+                return Err(SwarmError::WorktreeIo(format!(
+                    "refused executable or conditional Git checkout configuration in {scope}: {}",
+                    keys.trim()
+                )));
+            }
+            if output.status.code() == Some(1) && output.stdout.is_empty() {
+                continue;
+            }
             return Err(SwarmError::WorktreeIo(format!(
-                "refused executable or conditional Git checkout configuration: {}",
-                keys.trim()
+                "git config safety check failed for {scope}: {}",
+                String::from_utf8_lossy(&output.stderr).trim()
             )));
         }
-        if output.status.code() == Some(1) && output.stdout.is_empty() {
-            return Ok(());
-        }
-        Err(SwarmError::WorktreeIo(format!(
-            "git config safety check failed: {}",
-            String::from_utf8_lossy(&output.stderr).trim()
-        )))
+        Ok(())
     }
 
     fn git_command(&self, args: &[&str]) -> tokio::process::Command {
