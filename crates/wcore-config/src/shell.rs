@@ -18,10 +18,17 @@
 //!
 //! See `AGENTS.md` "Shell Execution" for the policy and migration guidance.
 
+mod executable_readiness;
+
 use std::process::Output;
 use std::sync::OnceLock;
 
 use tokio::process::Command;
+
+pub use executable_readiness::{
+    ExecutableEnvironmentVariable, ExecutableReadinessError, ExecutableReadinessLimit,
+    ResolvedExecutable, resolve_mcp_stdio_executable,
+};
 
 /// Process-global Bash-tool shell override, sourced from `[tools] windows_shell`
 /// in config and set once at boot by the host via [`set_bash_shell_config`].
