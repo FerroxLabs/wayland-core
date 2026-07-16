@@ -19,12 +19,12 @@ use lease::WriterLease;
 mod model;
 pub use model::*;
 mod reducer;
-pub(crate) use reducer::require_turn_descendants_terminal;
 pub use reducer::{
     PREPARED_PROVIDER_REQUEST_SNAPSHOT_VERSION, decode_prepared_provider_request_snapshot,
     prepared_provider_request_snapshot, provider_request_digest, reduce, replay_state,
     state_payload_digest,
 };
+pub(crate) use reducer::{require_turn_descendants_terminal, validate_durable_child_lineage};
 mod snapshot;
 pub use snapshot::*;
 
@@ -198,6 +198,29 @@ impl SessionJournal {
             .lock()
             .map_err(|_| JournalError::WriterPoisoned)?
             .append(event)
+    }
+
+    /// Evaluate an idempotency decision and append under one writer lock.
+    ///
+    /// This is crate-private because only journal-backed stores may define a
+    /// content-bound exact-replay decision. Public append semantics stay
+    /// unconditional.
+    pub(crate) fn append_conditionally<F>(
+        &self,
+        event: SessionEvent,
+        should_append: F,
+    ) -> Result<Option<JournalEnvelope>, JournalError>
+    where
+        F: FnOnce(&ReducedSessionState, &str) -> Result<bool, JournalError>,
+    {
+        let mut writer = self
+            .inner
+            .lock()
+            .map_err(|_| JournalError::WriterPoisoned)?;
+        if !should_append(&writer.state, &writer.session_id)? {
+            return Ok(None);
+        }
+        writer.append(event).map(Some)
     }
 
     pub fn state(&self) -> Result<ReducedSessionState, JournalError> {

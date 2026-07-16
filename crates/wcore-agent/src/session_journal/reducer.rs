@@ -3,9 +3,11 @@
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 
 use super::*;
+use crate::durable_child::{TransitionDisposition, apply_transition};
 use crate::provider_recovery::{
     provider_response_digest, validate_appended_provider_events, validate_finished_provider_events,
 };
+use wcore_types::spawner::{ChildDeliveryTarget, DurableChildRecord, DurableChildStatus};
 
 impl ReducedSessionState {
     pub fn digest(&self) -> Result<String, JournalError> {
@@ -734,7 +736,7 @@ fn budget_owner_belongs_to_turn(
         BudgetOwner::Child { child_id } => state
             .children
             .get(child_id)
-            .is_some_and(|child| child.turn_id == turn_id),
+            .is_some_and(|child| child.durable.is_none() && child.turn_id == turn_id),
     }
 }
 
@@ -791,6 +793,7 @@ pub(crate) fn require_turn_descendants_terminal(
     }
     if let Some((child_id, _)) = state.children.iter().find(|(_, child)| {
         child.turn_id == turn_id
+            && child.durable.is_none()
             && matches!(
                 child.effect,
                 ExternalEffectState::Prepared | ExternalEffectState::Unknown
@@ -1285,6 +1288,165 @@ fn commit_recovery_checkpoint(
             checkpoint_id: checkpoint_id.to_owned(),
         };
     }
+    Ok(())
+}
+
+pub(crate) fn validate_durable_child_lineage(
+    state: &ReducedSessionState,
+    record: &DurableChildRecord,
+    journal_session_id: &str,
+) -> Result<(), JournalError> {
+    if state
+        .session_id
+        .as_deref()
+        .is_some_and(|state_session_id| state_session_id != journal_session_id)
+        || record.parent.session_id != journal_session_id
+    {
+        return Err(JournalError::InvalidTransition(format!(
+            "durable child {} parent session does not match journal authority",
+            record.child_id
+        )));
+    }
+    if let Some(turn_id) = &record.parent.turn_id {
+        require_active_turn(state, turn_id)?;
+    }
+
+    let mut parent_ids = BTreeSet::from([record.child_id.to_string()]);
+    let mut next_parent = record.parent.parent_child_id.as_ref();
+    while let Some(parent_id) = next_parent {
+        if !parent_ids.insert(parent_id.to_string()) {
+            return Err(JournalError::InvalidTransition(format!(
+                "durable child {} has a cyclic parent lineage",
+                record.child_id
+            )));
+        }
+        let parent = state
+            .children
+            .get(parent_id.as_str())
+            .and_then(|child| child.durable.as_ref())
+            .ok_or_else(|| missing("durable parent child", parent_id.as_str()))?;
+        if parent.parent.session_id != record.parent.session_id {
+            return Err(JournalError::InvalidTransition(format!(
+                "durable child {} crosses session lineage",
+                record.child_id
+            )));
+        }
+        if parent.status.is_terminal() {
+            return Err(JournalError::InvalidTransition(format!(
+                "durable child {} declares terminal parent {parent_id}",
+                record.child_id
+            )));
+        }
+        next_parent = parent.parent.parent_child_id.as_ref();
+    }
+
+    if let Some(retry_of) = &record.retry_of {
+        let previous = state
+            .children
+            .get(retry_of.as_str())
+            .and_then(|child| child.durable.as_ref())
+            .ok_or_else(|| missing("durable retry child", retry_of.as_str()))?;
+        if !matches!(
+            previous.status,
+            DurableChildStatus::Failed | DurableChildStatus::Cancelled
+        ) {
+            return Err(JournalError::InvalidTransition(format!(
+                "durable child {} retries ineligible child {retry_of}",
+                record.child_id
+            )));
+        }
+        // Provider/model may change on a retry (for example provider failover),
+        // but task identity, authority, workspace, and delivery binding may not.
+        if previous.parent != record.parent
+            || previous.origin != record.origin
+            || previous.request != record.request
+            || previous.policy_snapshot != record.policy_snapshot
+            || previous.workspace != record.workspace
+            || previous.delivery_target != record.delivery_target
+            || previous
+                .attempt
+                .checked_add(1)
+                .is_none_or(|attempt| attempt != record.attempt)
+        {
+            return Err(JournalError::InvalidTransition(format!(
+                "durable child {} has an invalid retry sequence",
+                record.child_id
+            )));
+        }
+        let mut retry_ids = BTreeSet::from([record.child_id.to_string()]);
+        let mut next_retry = Some(retry_of);
+        while let Some(retry_id) = next_retry {
+            if !retry_ids.insert(retry_id.to_string()) {
+                return Err(JournalError::InvalidTransition(format!(
+                    "durable child {} has a cyclic retry lineage",
+                    record.child_id
+                )));
+            }
+            let retry = state
+                .children
+                .get(retry_id.as_str())
+                .and_then(|child| child.durable.as_ref())
+                .ok_or_else(|| missing("durable retry child", retry_id.as_str()))?;
+            next_retry = retry.retry_of.as_ref();
+        }
+    }
+
+    match &record.delivery_target {
+        Some(ChildDeliveryTarget::ParentTurn) if record.parent.turn_id.is_none() => {
+            return Err(JournalError::InvalidTransition(format!(
+                "durable child {} has no parent turn delivery target",
+                record.child_id
+            )));
+        }
+        Some(ChildDeliveryTarget::ParentChild { child_id })
+            if state
+                .children
+                .get(child_id.as_str())
+                .is_none_or(|child| child.durable.is_none()) =>
+        {
+            return Err(missing("durable delivery child", child_id.as_str()));
+        }
+        _ => {}
+    }
+
+    Ok(())
+}
+
+fn project_durable_child_compatibility(child: &mut ChildState) -> Result<(), JournalError> {
+    let record = child.durable.as_ref().ok_or_else(|| {
+        JournalError::InvalidTransition("durable child projection lost its record".to_owned())
+    })?;
+    child.result = record
+        .result
+        .as_ref()
+        .map(serde_json::to_value)
+        .transpose()
+        .map_err(|source| JournalError::Json {
+            context: "encoding durable child result evidence",
+            source,
+        })?;
+    child.not_started_reason = None;
+    child.effect = match record.status {
+        DurableChildStatus::Prepared | DurableChildStatus::Queued | DurableChildStatus::Paused => {
+            ExternalEffectState::Prepared
+        }
+        DurableChildStatus::Running | DurableChildStatus::RecoveryRequired => {
+            ExternalEffectState::Unknown
+        }
+        DurableChildStatus::Succeeded => ExternalEffectState::Completed {
+            outcome: CompletionOutcome::Succeeded,
+        },
+        DurableChildStatus::Failed => ExternalEffectState::Completed {
+            outcome: CompletionOutcome::Failed {
+                error: "durable child failed; inspect result digest".to_owned(),
+            },
+        },
+        DurableChildStatus::Cancelled | DurableChildStatus::Expired => {
+            ExternalEffectState::Completed {
+                outcome: CompletionOutcome::Cancelled,
+            }
+        }
+    };
     Ok(())
 }
 
@@ -2473,6 +2635,8 @@ fn apply_event(state: &mut ReducedSessionState, event: &SessionEvent) -> Result<
                     result: None,
                     not_started_reason: None,
                     effect: ExternalEffectState::Prepared,
+                    durable: None,
+                    durable_declaration_digest: None,
                 },
             );
         }
@@ -2485,6 +2649,11 @@ fn apply_event(state: &mut ReducedSessionState, event: &SessionEvent) -> Result<
                 .clone();
             require_active_turn(state, &turn_id)?;
             let child = required_mut(&mut state.children, "child", child_id)?;
+            if child.durable.is_some() {
+                return Err(JournalError::InvalidTransition(format!(
+                    "durable child {child_id} requires V2 transitions"
+                )));
+            }
             require_prepared(&child.effect, "child", child_id)?;
             child.effect = ExternalEffectState::Unknown;
         }
@@ -2494,6 +2663,11 @@ fn apply_event(state: &mut ReducedSessionState, event: &SessionEvent) -> Result<
             result,
         } => {
             let child = required_mut(&mut state.children, "child", child_id)?;
+            if child.durable.is_some() {
+                return Err(JournalError::InvalidTransition(format!(
+                    "durable child {child_id} requires V2 transitions"
+                )));
+            }
             require_unknown(&child.effect, "child", child_id)?;
             child.result = Some(result.clone());
             child.effect = ExternalEffectState::Completed {
@@ -2509,9 +2683,98 @@ fn apply_event(state: &mut ReducedSessionState, event: &SessionEvent) -> Result<
                 .clone();
             require_active_turn(state, &turn_id)?;
             let child = required_mut(&mut state.children, "child", child_id)?;
+            if child.durable.is_some() {
+                return Err(JournalError::InvalidTransition(format!(
+                    "durable child {child_id} requires V2 transitions"
+                )));
+            }
             require_prepared(&child.effect, "child", child_id)?;
             child.not_started_reason = Some(reason.clone());
             child.effect = ExternalEffectState::NotStarted;
+        }
+        SessionEvent::ChildDeclaredV2 { record } => {
+            record
+                .validate_declaration()
+                .map_err(|error| JournalError::InvalidTransition(error.to_string()))?;
+            let child_id = record.child_id.to_string();
+            let declaration_value =
+                serde_json::to_value(record).map_err(|source| JournalError::Json {
+                    context: "encoding durable child declaration",
+                    source,
+                })?;
+            let declaration_digest = state_payload_digest(&declaration_value)?;
+            if let Some(existing) = state.children.get(&child_id) {
+                if existing
+                    .durable
+                    .as_ref()
+                    .is_none_or(|durable| durable.declaration_id != record.declaration_id)
+                    || existing.durable_declaration_digest.as_deref()
+                        != Some(declaration_digest.as_str())
+                {
+                    return Err(JournalError::InvalidTransition(format!(
+                        "durable child {child_id} declaration conflicts with committed authority"
+                    )));
+                }
+            } else {
+                if let Some((other_child_id, _)) = state.children.iter().find(|(_, child)| {
+                    child
+                        .durable
+                        .as_ref()
+                        .is_some_and(|durable| durable.declaration_id == record.declaration_id)
+                }) {
+                    return Err(JournalError::InvalidTransition(format!(
+                        "durable declaration {} is already bound to child {other_child_id}",
+                        record.declaration_id
+                    )));
+                }
+                let journal_session_id = state.session_id.clone().ok_or_else(|| {
+                    JournalError::InvalidTransition(
+                        "durable child declaration has no journal session authority".to_owned(),
+                    )
+                })?;
+                validate_durable_child_lineage(state, record, &journal_session_id)?;
+                let request =
+                    serde_json::to_value(&record.request).map_err(|source| JournalError::Json {
+                        context: "encoding durable child request evidence",
+                        source,
+                    })?;
+                state.children.insert(
+                    child_id,
+                    ChildState {
+                        turn_id: record.parent.turn_id.clone().unwrap_or_default(),
+                        request,
+                        result: None,
+                        not_started_reason: None,
+                        effect: ExternalEffectState::Prepared,
+                        durable: Some(record.clone()),
+                        durable_declaration_digest: Some(declaration_digest),
+                    },
+                );
+            }
+        }
+        SessionEvent::ChildTransitionedV2 {
+            child_id,
+            event_id,
+            expected_revision,
+            at_unix_ms,
+            transition,
+        } => {
+            let child = required_mut(&mut state.children, "durable child", child_id.as_str())?;
+            let record = child.durable.as_mut().ok_or_else(|| {
+                JournalError::InvalidTransition(format!(
+                    "legacy child {child_id} cannot accept a V2 transition"
+                ))
+            })?;
+            if apply_transition(
+                record,
+                event_id,
+                *expected_revision,
+                *at_unix_ms,
+                transition,
+            )? == TransitionDisposition::Applied
+            {
+                project_durable_child_compatibility(child)?;
+            }
         }
         SessionEvent::DeliveryPrepared {
             delivery_id,

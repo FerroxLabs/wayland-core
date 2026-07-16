@@ -1,6 +1,7 @@
 use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
+use wcore_types::spawner::{ChildId, DurableChildRecord, DurableChildTransition};
 use wcore_types::tool::ToolEffectContract;
 
 use super::GENESIS_CHECKSUM;
@@ -742,6 +743,19 @@ pub enum SessionEvent {
         child_id: String,
         reason: ChildNotStartedReason,
     },
+    /// F18 typed child declaration. Legacy child events remain replayable but
+    /// cannot be mistaken for a complete durable child resource.
+    ChildDeclaredV2 {
+        record: DurableChildRecord,
+    },
+    /// One revision-checked transition in the durable child state machine.
+    ChildTransitionedV2 {
+        child_id: ChildId,
+        event_id: String,
+        expected_revision: u64,
+        at_unix_ms: u64,
+        transition: DurableChildTransition,
+    },
     DeliveryPrepared {
         delivery_id: String,
         origin: DeliveryOrigin,
@@ -911,6 +925,14 @@ pub struct ChildState {
     pub result: Option<serde_json::Value>,
     pub not_started_reason: Option<ChildNotStartedReason>,
     pub effect: ExternalEffectState,
+    /// Present only for F18 V2 children. The legacy fields above remain as a
+    /// compatibility projection for old snapshots and recovery callers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub durable: Option<DurableChildRecord>,
+    /// Digest of the pristine declaration payload, retained across mutations
+    /// so an exact declaration retry remains distinguishable from conflict.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub durable_declaration_digest: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

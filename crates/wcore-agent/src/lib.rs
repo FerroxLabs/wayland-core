@@ -47,6 +47,7 @@ pub mod context;
 // v0.8.1 U7 — production wire-up for `wcore-cron`. `bootstrap.rs`
 // spawns a `CronRunner` with the `EngineJobHandler` defined here.
 pub mod cron;
+pub mod durable_child;
 // B2: the real egress policy (allowlist + ask-with-memory + exfil-class)
 // installed into the B1 wcore-egress chokepoint at bootstrap.
 pub mod egress;
