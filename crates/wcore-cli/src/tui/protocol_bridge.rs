@@ -957,6 +957,7 @@ fn apply_event_inner(app: &mut App, event: ProtocolEvent) {
         // has no receipt view yet, so accepting one must not mutate local state.
         | ProtocolEvent::ProviderFailoverReceipt { .. }
         | ProtocolEvent::RuntimeDiagnosticsSnapshot { .. }
+        | ProtocolEvent::RuntimeDiagnosticsUnavailable { .. }
         | ProtocolEvent::MidFlightMonitorDecision { .. }
         | ProtocolEvent::TraceEvent { .. }
         | ProtocolEvent::PluginEvent { .. }

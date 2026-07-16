@@ -12,7 +12,8 @@ use crate::diagnostics::{
     ConfigSourceDisposition, ConfigSourceRole, McpConnectionState, McpDeclarationOrigin,
     McpExecutableReadiness, McpExposureState, McpServerDiagnostic, McpTransportKind,
     McpWorkingDirectoryRole, RuntimeConfigSource, RuntimeDiagnosticsSnapshotV1,
-    RuntimeProcessBinding, RuntimeRemediationCode, RuntimeWorkspaceKind, UnsupportedConfigOverride,
+    RuntimeDiagnosticsUnavailableReason, RuntimeEngineMode, RuntimeProcessBinding,
+    RuntimeProfileBinding, RuntimeRemediationCode, RuntimeWorkspaceKind, UnsupportedConfigOverride,
 };
 use crate::events::{
     Capabilities, ErrorInfo, OperatorResolutionEvidence, OperatorResolutionEvidenceSource,
@@ -430,6 +431,19 @@ pub const EVENT_SPECS: &[WireSpec] = &[
         "runtime_diagnostics_v1"
     ),
     wire!(
+        "runtime_diagnostics_unavailable",
+        "events/runtime_diagnostics_unavailable.json",
+        [
+            "diagnostics_version",
+            "supported_version",
+            "request_id",
+            "reason"
+        ],
+        Safety,
+        "request_id",
+        "runtime_diagnostics_v1"
+    ),
+    wire!(
         "pong",
         "events/pong.json",
         [],
@@ -730,6 +744,7 @@ pub const PRODUCER_EVENT_TYPES: &[&str] = &[
     "mcp_ready",
     "mcp_failed",
     "runtime_diagnostics_snapshot",
+    "runtime_diagnostics_unavailable",
     "trace_event",
     "session_cost",
     "sub_agent_event",
@@ -781,10 +796,13 @@ pub const SOURCE_INPUTS: &[&str] = &[
     "crates/wcore-types/src/execution_policy.rs",
     "crates/wcore-types/src/workspace_trust.rs",
     "crates/wcore-agent/src/output/protocol_sink.rs",
+    "crates/wcore-agent/src/bootstrap.rs",
     "crates/wcore-agent/src/orchestration/workflow/runner.rs",
     "crates/wcore-agent/src/orchestration/anvil/forge.rs",
     "crates/wcore-cli/src/main.rs",
     "crates/wcore-cli/src/packaged_runtime.rs",
+    "crates/wcore-cli/src/runtime_diagnostics.rs",
+    "crates/wcore-tools/src/registry.rs",
 ];
 
 /// Canonical command inputs. Every value is accepted by `ProtocolCommand`.
@@ -1325,9 +1343,9 @@ pub fn event_fixture_values() -> BTreeMap<String, ProtocolEvent> {
                 request_id: "runtime-diagnostics-001".into(),
                 snapshot: RuntimeDiagnosticsSnapshotV1 {
                     process: RuntimeProcessBinding {
-                        profile_bound: true,
+                        profile_binding: RuntimeProfileBinding::BoundProfile,
                         profile_name: Some("desktop".into()),
-                        raw_engine_mode: false,
+                        engine_mode: RuntimeEngineMode::Standard,
                         workspace_kind: RuntimeWorkspaceKind::Temporary,
                     },
                     config_sources: vec![RuntimeConfigSource {
@@ -1349,6 +1367,8 @@ pub fn event_fixture_values() -> BTreeMap<String, ProtocolEvent> {
                         exposure: McpExposureState::Exposed,
                         deferred: false,
                         tool_count: 2,
+                        resources_declared: false,
+                        resources_exposed: false,
                         assistant_scoped: true,
                         executable_basename: Some("desktop-mcp".into()),
                         executable_readiness: McpExecutableReadiness::Resolved,
@@ -1357,6 +1377,15 @@ pub fn event_fixture_values() -> BTreeMap<String, ProtocolEvent> {
                         remediation: vec![RuntimeRemediationCode::OpenActiveConfig],
                     }],
                 },
+            },
+        ),
+        (
+            "events/runtime_diagnostics_unavailable.json".into(),
+            ProtocolEvent::RuntimeDiagnosticsUnavailable {
+                diagnostics_version: 2,
+                supported_version: 1,
+                request_id: "runtime-diagnostics-unsupported".into(),
+                reason: RuntimeDiagnosticsUnavailableReason::UnsupportedVersion,
             },
         ),
         (

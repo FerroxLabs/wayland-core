@@ -102,6 +102,18 @@ fn runtime_diagnostics_is_closed_versioned_correlated_and_redacted() {
     assert_eq!(event["request_id"], command.request_id);
     serde_json::from_value::<RuntimeDiagnosticsSnapshotV1>(event["snapshot"].clone()).unwrap();
 
+    let unavailable: Value = serde_json::from_slice(
+        &fs::read(root().join("events/runtime_diagnostics_unavailable.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(unavailable["diagnostics_version"], 2);
+    assert_eq!(
+        unavailable["supported_version"],
+        RUNTIME_DIAGNOSTICS_VERSION
+    );
+    assert_eq!(unavailable["reason"], "unsupported_version");
+    assert_eq!(unavailable["request_id"], "runtime-diagnostics-unsupported");
+
     let mut unknown_snapshot = event["snapshot"].clone();
     unknown_snapshot["environment"] = serde_json::json!({"PATH":"secret-bin"});
     assert!(

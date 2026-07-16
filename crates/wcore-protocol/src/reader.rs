@@ -153,16 +153,10 @@ fn read_commands<R: BufRead>(
             break;
         }
         match serde_json::from_str::<ProtocolCommand>(trimmed) {
-            Ok(cmd) if cmd.validate_admission().is_ok() => {
+            Ok(cmd) => {
                 if tx.blocking_send(cmd).is_err() {
                     break;
                 }
-            }
-            Ok(cmd) => {
-                tracing::warn!(
-                    error = %cmd.validate_admission().expect_err("guarded by failed validation"),
-                    "protocol command failed admission validation"
-                );
             }
             Err(e) => {
                 // F-074: include the expected JSON shape in the
@@ -306,7 +300,7 @@ mod tests {
     }
 
     #[test]
-    fn unsupported_runtime_diagnostics_version_never_enters_dispatch_queue() {
+    fn unsupported_runtime_diagnostics_version_reaches_correlated_dispatch() {
         let (tx, mut rx) = mpsc::channel(2);
         let cancelled = AtomicBool::new(false);
         let reader = BufReader::new(std::io::Cursor::new(
@@ -315,6 +309,15 @@ mod tests {
 
         read_commands(reader, tx, &cancelled);
 
+        assert_eq!(
+            rx.blocking_recv(),
+            Some(ProtocolCommand::GetRuntimeDiagnostics(
+                crate::diagnostics::GetRuntimeDiagnosticsCommand {
+                    diagnostics_version: 2,
+                    request_id: "bad-version".into(),
+                }
+            ))
+        );
         assert_eq!(rx.blocking_recv(), Some(ProtocolCommand::Ping));
         assert!(rx.blocking_recv().is_none());
     }

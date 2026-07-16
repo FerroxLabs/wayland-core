@@ -28,24 +28,49 @@ pub const fn validate_runtime_diagnostics_version(
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RuntimeWorkspaceKind {
+    Unknown,
     None,
     Project,
     Temporary,
     ProfileHome,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RuntimeEngineMode {
+    Unknown,
+    Standard,
+    Raw,
+}
+
 /// Identifies the process binding without exposing environment values.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RuntimeProcessBinding {
-    pub profile_bound: bool,
+    pub profile_binding: RuntimeProfileBinding,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub profile_name: Option<String>,
-    pub raw_engine_mode: bool,
+    pub engine_mode: RuntimeEngineMode,
     pub workspace_kind: RuntimeWorkspaceKind,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RuntimeProfileBinding {
+    Unknown,
+    DefaultHome,
+    ExplicitHome,
+    BoundProfile,
+    UnboundProfile,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RuntimeDiagnosticsUnavailableReason {
+    UnsupportedVersion,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -95,9 +120,10 @@ pub struct UnsupportedConfigOverride {
     pub disposition: ConfigSourceDisposition,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum McpDeclarationOrigin {
+    EffectiveConfig,
     GlobalConfig,
     ProjectConfig,
     ProfileConfig,
@@ -123,6 +149,7 @@ pub enum McpConnectionState {
     Failed,
     TimedOut,
     Skipped,
+    Stopping,
     Stopped,
 }
 
@@ -132,6 +159,8 @@ pub enum McpExposureState {
     NotAttempted,
     NotApplicable,
     Exposed,
+    ResourceOnly,
+    ResourceOnlyUnavailable,
     HiddenNoTools,
     Blocked,
 }
@@ -140,6 +169,7 @@ pub enum McpExposureState {
 #[serde(rename_all = "snake_case")]
 pub enum McpExecutableReadiness {
     NotApplicable,
+    Unchecked,
     Resolved,
     MissingEffectivePath,
     NotFound,
@@ -181,6 +211,7 @@ pub enum RuntimeRemediationCode {
     ReviewServerConfig,
     RetryConnection,
     CheckAssistantScope,
+    RestartToLoadResources,
 }
 
 /// Redacted effective state for one configured MCP server.
@@ -194,6 +225,8 @@ pub struct McpServerDiagnostic {
     pub exposure: McpExposureState,
     pub deferred: bool,
     pub tool_count: u32,
+    pub resources_declared: bool,
+    pub resources_exposed: bool,
     pub assistant_scoped: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub executable_basename: Option<String>,

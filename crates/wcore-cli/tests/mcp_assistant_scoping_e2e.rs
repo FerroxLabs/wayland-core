@@ -98,7 +98,7 @@ fn write_config(home: &Path) {
     const PROBE_CMD: &str = "wayland_mcp_scoping_probe_absent_cmd";
     let toml = format!(
         "[default]\nprovider = \"anthropic\"\nmodel = \"claude-sonnet-4-20250514\"\n\
-         \n[providers.anthropic]\napi_key = \"sk-ant-harness-not-real-key-0000000000\"\n\
+         \n[providers.anthropic]\napi_key = \"diagnostics-redaction-sentinel\"\n\
          base_url = \"http://127.0.0.1:9/unused\"\n\
          \n[mcp.servers.open_diag]\ntransport = \"stdio\"\ncommand = \"{PROBE_CMD}\"\n\
          args = [\"--noop\"]\n\
@@ -116,6 +116,8 @@ struct DialObs {
     saw_open: bool,
     /// The scoped `diag` server — dialed only for a matching assistant.
     saw_diag: bool,
+    diagnostics: Option<serde_json::Value>,
+    unsupported: Option<serde_json::Value>,
 }
 
 /// Boot `--json-stream` with the given active assistant and observe which of the
@@ -155,6 +157,10 @@ fn observe_deferred_dials(assistant: Option<&str>) -> DialObs {
 
     let mut saw_open = false;
     let mut saw_diag = false;
+    let mut diagnostics = None;
+    let mut unsupported = None;
+    let mut diagnostics_requested = false;
+    let mut unsupported_requested = false;
     // The deferred connect settles in the pre-message phase, so the events
     // arrive within a second or two. The window is generous to tolerate the
     // slower connect-timeout path on a loaded CI runner.
@@ -167,7 +173,11 @@ fn observe_deferred_dials(assistant: Option<&str>) -> DialObs {
         if let Ok(line) = rx.recv_timeout(Duration::from_millis(200))
             && let Ok(v) = serde_json::from_str::<serde_json::Value>(&line)
         {
-            let ty = v.get("type").and_then(|t| t.as_str()).unwrap_or("");
+            let ty = v
+                .get("type")
+                .and_then(|t| t.as_str())
+                .unwrap_or("")
+                .to_string();
             if ty == "mcp_ready" || ty == "mcp_failed" {
                 match v.get("name").and_then(|n| n.as_str()) {
                     Some("open_diag") => {
@@ -178,9 +188,36 @@ fn observe_deferred_dials(assistant: Option<&str>) -> DialObs {
                     _ => {}
                 }
             }
+            if ty == "runtime_diagnostics_snapshot"
+                && v.get("request_id").and_then(|id| id.as_str()) == Some("pre-message")
+            {
+                diagnostics = Some(v);
+            } else if ty == "runtime_diagnostics_unavailable"
+                && v.get("request_id").and_then(|id| id.as_str()) == Some("unsupported")
+            {
+                unsupported = Some(v);
+            }
+        }
+        if saw_open && !diagnostics_requested {
+            writeln!(
+                stdin,
+                "{{\"type\":\"get_runtime_diagnostics\",\"diagnostics_version\":1,\"request_id\":\"pre-message\"}}"
+            )
+            .expect("request pre-message diagnostics");
+            diagnostics_requested = true;
+        }
+        if diagnostics.is_some() && !unsupported_requested {
+            writeln!(
+                stdin,
+                "{{\"type\":\"get_runtime_diagnostics\",\"diagnostics_version\":2,\"request_id\":\"unsupported\"}}"
+            )
+            .expect("request unsupported diagnostics version");
+            unsupported_requested = true;
         }
         if let Some(g) = grace_until
             && Instant::now() >= g
+            && diagnostics.is_some()
+            && unsupported.is_some()
         {
             break;
         }
@@ -190,7 +227,41 @@ fn observe_deferred_dials(assistant: Option<&str>) -> DialObs {
     let _ = child.kill();
     let _ = child.wait();
 
-    DialObs { saw_open, saw_diag }
+    DialObs {
+        saw_open,
+        saw_diag,
+        diagnostics,
+        unsupported,
+    }
+}
+
+fn assert_runtime_diagnostics(obs: &DialObs, scoped_connection: &str) {
+    let diagnostics = obs
+        .diagnostics
+        .as_ref()
+        .expect("pre-message diagnostics response");
+    let servers = diagnostics["snapshot"]["mcp_servers"]
+        .as_array()
+        .expect("MCP diagnostics array");
+    let scoped = servers
+        .iter()
+        .find(|server| server["name"] == "diag")
+        .expect("scoped declaration remains visible");
+    assert_eq!(scoped["connection"], scoped_connection);
+
+    let serialized = serde_json::to_string(diagnostics).unwrap();
+    for canary in ["diagnostics-redaction-sentinel", "--noop", "127.0.0.1:9"] {
+        assert!(!serialized.contains(canary), "diagnostics leaked {canary}");
+    }
+
+    let unsupported = obs
+        .unsupported
+        .as_ref()
+        .expect("unsupported version receives terminal response");
+    assert_eq!(unsupported["type"], "runtime_diagnostics_unavailable");
+    assert_eq!(unsupported["diagnostics_version"], 2);
+    assert_eq!(unsupported["supported_version"], 1);
+    assert_eq!(unsupported["reason"], "unsupported_version");
 }
 
 /// Matching assistant: the scoped `diag` server MUST be dialed on the deferred
@@ -206,6 +277,7 @@ fn matching_assistant_dials_scoped_deferred_server() {
         obs.saw_diag,
         "a server scoped to `concierge` MUST be dialed on the deferred path for --assistant concierge"
     );
+    assert_runtime_diagnostics(&obs, "failed");
 }
 
 /// Non-matching assistant: the scoped `diag` server must NOT be dialed, while
@@ -223,6 +295,7 @@ fn nonmatching_assistant_does_not_dial_scoped_deferred_server() {
         "a server scoped to `concierge` must NOT be dialed on the deferred path for a \
          non-matching assistant"
     );
+    assert_runtime_diagnostics(&obs, "skipped");
 }
 
 /// Absent assistant (bare `--json-stream`, no `--assistant`): fail-closed — the
@@ -239,4 +312,5 @@ fn absent_assistant_does_not_dial_scoped_deferred_server() {
         "fail-closed: a scoped server must NOT be dialed on the deferred path when the active \
          assistant is unset"
     );
+    assert_runtime_diagnostics(&obs, "skipped");
 }

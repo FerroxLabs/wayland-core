@@ -293,6 +293,19 @@ impl ToolRegistry {
         self.tools.iter().map(|t| t.name().to_string()).collect()
     }
 
+    /// Count registered MCP tools by server without materializing provider
+    /// schemas. Intended for read-only runtime diagnostics.
+    pub fn mcp_tool_counts(&self) -> HashMap<String, u32> {
+        let mut counts = HashMap::new();
+        for tool in &self.tools {
+            if let Some(server) = tool.mcp_server() {
+                let count = counts.entry(server.to_string()).or_insert(0_u32);
+                *count = count.saturating_add(1);
+            }
+        }
+        counts
+    }
+
     /// Generate API tool definitions for all registered tools
     pub fn to_tool_defs(&self) -> Vec<ToolDef> {
         self.tools

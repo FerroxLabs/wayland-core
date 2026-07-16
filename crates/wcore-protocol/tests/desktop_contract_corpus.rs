@@ -178,9 +178,9 @@ fn checked_corpus_matches_real_serializers_byte_for_byte() {
 }
 
 #[test]
-fn inventory_is_exactly_sixteen_commands_and_forty_six_events() {
+fn inventory_is_exactly_sixteen_commands_and_forty_seven_events() {
     assert_eq!(COMMAND_SPECS.len(), 16);
-    assert_eq!(EVENT_SPECS.len(), 46);
+    assert_eq!(EVENT_SPECS.len(), 47);
     assert_eq!(
         COMMAND_SPECS
             .iter()
@@ -195,7 +195,7 @@ fn inventory_is_exactly_sixteen_commands_and_forty_six_events() {
             .map(|spec| spec.wire_type)
             .collect::<BTreeSet<_>>()
             .len(),
-        46
+        47
     );
 }
 
@@ -243,9 +243,9 @@ fn manifest_pins_generator_and_all_three_digests() {
     assert_eq!(manifest["contract"]["major"], 1);
     assert_eq!(manifest["contract"]["minor"], 4);
     assert_eq!(manifest["commands"].as_array().unwrap().len(), 16);
-    assert_eq!(manifest["events"].as_array().unwrap().len(), 46);
+    assert_eq!(manifest["events"].as_array().unwrap().len(), 47);
     assert_eq!(manifest["counts"]["commands"], 16);
-    assert_eq!(manifest["counts"]["events"], 46);
+    assert_eq!(manifest["counts"]["events"], 47);
     assert_eq!(
         manifest["capabilities"]["contract_negotiation"],
         "available"

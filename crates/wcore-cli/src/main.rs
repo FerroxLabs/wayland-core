@@ -7,13 +7,14 @@ use std::sync::Arc;
 use tracing_subscriber::EnvFilter;
 use tracing_subscriber::fmt;
 
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 // `doctor` lives in the `wcore_cli` lib so the TUI diagnostics surface can
 // share it; the binary re-imports it here for the `--doctor` CLI flag.
 use wcore_cli::doctor;
 use wcore_cli::packaged_runtime::{
     LocalExecutionSelection, audit_unix_time_millis, resolve_local_execution,
 };
+use wcore_cli::runtime_diagnostics::RuntimeDiagnosticsState;
 // Wave OL: typed import — `OllamaProvider` is downcast from
 // `Arc<dyn PluginProvider>` in `make_plugin_provider_router` below to
 // route `--model ollama:*` through the wayland-ollama plugin. The
@@ -391,6 +392,14 @@ struct Cli {
     #[arg(long)]
     json_stream: bool,
 
+    /// Host-supplied engine-mode evidence for local runtime diagnostics.
+    #[arg(long, value_enum, requires = "json_stream", hide = true)]
+    runtime_engine_mode: Option<RuntimeEngineModeArg>,
+
+    /// Host-supplied workspace-role evidence for local runtime diagnostics.
+    #[arg(long, value_enum, requires = "json_stream", hide = true)]
+    runtime_workspace_kind: Option<RuntimeWorkspaceKindArg>,
+
     /// Disable the ratatui TUI — fall back to the line-based REPL even
     /// on an interactive terminal. The TUI is the default for
     /// `wayland-core` on a TTY with no prompt; this is the escape hatch
@@ -533,6 +542,52 @@ struct Cli {
     /// REPL, json-stream) keeps working unchanged.
     #[command(subcommand)]
     command: Option<TopCmd>,
+}
+
+#[derive(Clone, Copy, Debug, ValueEnum)]
+enum RuntimeEngineModeArg {
+    Standard,
+    Raw,
+}
+
+fn runtime_engine_mode(
+    value: Option<RuntimeEngineModeArg>,
+) -> wcore_protocol::diagnostics::RuntimeEngineMode {
+    match value {
+        Some(RuntimeEngineModeArg::Standard) => {
+            wcore_protocol::diagnostics::RuntimeEngineMode::Standard
+        }
+        Some(RuntimeEngineModeArg::Raw) => wcore_protocol::diagnostics::RuntimeEngineMode::Raw,
+        None => wcore_protocol::diagnostics::RuntimeEngineMode::Unknown,
+    }
+}
+
+#[derive(Clone, Copy, Debug, ValueEnum)]
+enum RuntimeWorkspaceKindArg {
+    None,
+    Project,
+    Temporary,
+    ProfileHome,
+}
+
+fn runtime_workspace_kind(
+    value: Option<RuntimeWorkspaceKindArg>,
+) -> wcore_protocol::diagnostics::RuntimeWorkspaceKind {
+    match value {
+        Some(RuntimeWorkspaceKindArg::None) => {
+            wcore_protocol::diagnostics::RuntimeWorkspaceKind::None
+        }
+        Some(RuntimeWorkspaceKindArg::Project) => {
+            wcore_protocol::diagnostics::RuntimeWorkspaceKind::Project
+        }
+        Some(RuntimeWorkspaceKindArg::Temporary) => {
+            wcore_protocol::diagnostics::RuntimeWorkspaceKind::Temporary
+        }
+        Some(RuntimeWorkspaceKindArg::ProfileHome) => {
+            wcore_protocol::diagnostics::RuntimeWorkspaceKind::ProfileHome
+        }
+        None => wcore_protocol::diagnostics::RuntimeWorkspaceKind::Unknown,
+    }
 }
 
 /// M5.4: top-level subcommands. We add new subcommands here as the CLI
@@ -1509,9 +1564,10 @@ async fn run() -> anyhow::Result<ExitCode> {
     // call Config::resolve directly with a temp project_dir. Idempotent.
     wcore_config::config::migrate_legacy_yaml_if_needed();
 
-    let mut config = match Config::resolve(&cli_args) {
-        Ok(c) => c,
-        Err(e) => {
+    let resolved_config = match Config::resolve_with_provenance(&cli_args) {
+        Ok(resolved) => resolved,
+        Err(resolution_error) => {
+            let e = resolution_error.source;
             // T0-1: On a true first run (no global config yet) where the user
             // just typed `wayland-core` to open the interactive TUI, a missing
             // API key must route into the Onboarding surface — not crash to
@@ -1617,6 +1673,8 @@ async fn run() -> anyhow::Result<ExitCode> {
             return Err(e);
         }
     };
+    let mut config = resolved_config.value;
+    let config_provenance = resolved_config.provenance;
 
     if let Some(ref level_str) = cli.compaction {
         match level_str.parse::<wcore_compact::CompactionLevel>() {
@@ -1668,6 +1726,7 @@ async fn run() -> anyhow::Result<ExitCode> {
     if cli.json_stream {
         let run_result = run_json_stream_mode(
             config,
+            config_provenance,
             &cwd,
             resume,
             cli.session_id,
@@ -1675,6 +1734,8 @@ async fn run() -> anyhow::Result<ExitCode> {
             cli.assistant.clone(),
             cli.allow_host_workspace_grants,
             cli.allow_host_budget_grants,
+            runtime_engine_mode(cli.runtime_engine_mode),
+            runtime_workspace_kind(cli.runtime_workspace_kind),
         )
         .await;
         let evidence_result = wcore_agent::egress::finalize_eval_egress_observer();
@@ -2617,6 +2678,45 @@ fn mcp_server_failure_reason(health: &McpServerHealth) -> Option<String> {
         }
         McpServerHealth::Ready { .. } => None,
     }
+}
+
+fn emit_runtime_diagnostics(
+    command: &wcore_protocol::diagnostics::GetRuntimeDiagnosticsCommand,
+    state: &RuntimeDiagnosticsState,
+    lifecycle: &McpLifecycleCatalog,
+    boot_managers: &[Arc<McpManager>],
+    dynamic_managers: &[Arc<McpManager>],
+    registry: &wcore_tools::registry::ToolRegistry,
+    writer: &dyn ProtocolEmitter,
+) {
+    if let Some(event) = runtime_diagnostics_admission_rejection(command) {
+        let _ = writer.emit(&event);
+        return;
+    }
+    let managers: Vec<_> = boot_managers
+        .iter()
+        .chain(dynamic_managers)
+        .cloned()
+        .collect();
+    let snapshot = state.snapshot(lifecycle, &managers, registry);
+    let _ = writer.emit(&ProtocolEvent::RuntimeDiagnosticsSnapshot {
+        diagnostics_version: command.diagnostics_version,
+        request_id: command.request_id.clone(),
+        snapshot,
+    });
+}
+
+fn runtime_diagnostics_admission_rejection(
+    command: &wcore_protocol::diagnostics::GetRuntimeDiagnosticsCommand,
+) -> Option<ProtocolEvent> {
+    wcore_protocol::diagnostics::validate_runtime_diagnostics_version(command.diagnostics_version)
+        .err()
+        .map(|_| ProtocolEvent::RuntimeDiagnosticsUnavailable {
+            diagnostics_version: command.diagnostics_version,
+            supported_version: wcore_protocol::diagnostics::RUNTIME_DIAGNOSTICS_VERSION,
+            request_id: command.request_id.clone(),
+            reason: wcore_protocol::diagnostics::RuntimeDiagnosticsUnavailableReason::UnsupportedVersion,
+        })
 }
 
 /// wayland#551 — integrate a background-connected config-MCP manager into
@@ -3625,6 +3725,7 @@ fn handle_operator_tool_effect_resolution(
 #[allow(clippy::too_many_arguments)] // One explicit boundary argument per host-controlled posture.
 async fn run_json_stream_mode(
     config: Config,
+    config_provenance: wcore_config::resolution_provenance::ConfigResolutionProvenance,
     cwd: &str,
     resume: Option<String>,
     session_id: Option<String>,
@@ -3632,6 +3733,8 @@ async fn run_json_stream_mode(
     assistant: Option<String>,
     allow_host_workspace_grants: bool,
     allow_host_budget_grants: bool,
+    runtime_engine_mode: wcore_protocol::diagnostics::RuntimeEngineMode,
+    runtime_workspace_kind: wcore_protocol::diagnostics::RuntimeWorkspaceKind,
 ) -> anyhow::Result<()> {
     let writer = Arc::new(ProtocolWriter::new());
     let approval_policy = execution.approvals();
@@ -3686,6 +3789,13 @@ async fn run_json_stream_mode(
     let output: Arc<dyn OutputSink> = protocol_sink.clone();
 
     let provider_name = config.provider_label.clone();
+    let mut runtime_diagnostics = RuntimeDiagnosticsState::from_launch(
+        &config,
+        &config_provenance,
+        assistant.as_deref(),
+        runtime_engine_mode,
+        runtime_workspace_kind,
+    );
 
     // wayland#551 — config-declared MCP connects must NOT gate the `ready`
     // frame: a slow/hung server eats up to the full 30s per-server connect
@@ -3755,6 +3865,7 @@ async fn run_json_stream_mode(
         )
     };
     let session_control = result.cancel_root.clone();
+    runtime_diagnostics.record_plugin_declarations(&result.plugin_mcp_declarations);
     let mut engine = result.engine;
     let session_egress_policy = engine.egress_policy();
     let workspace_policy = engine
@@ -3945,6 +4056,17 @@ async fn run_json_stream_mode(
             }
         };
         match cmd {
+            ProtocolCommand::GetRuntimeDiagnostics(command) => {
+                emit_runtime_diagnostics(
+                    &command,
+                    &runtime_diagnostics,
+                    &mcp_lifecycle,
+                    &result.mcp_managers,
+                    &dynamic_managers,
+                    &engine.tools(),
+                    writer.as_ref(),
+                );
+            }
             ProtocolCommand::AddMcpServer {
                 name,
                 transport,
@@ -3990,6 +4112,15 @@ async fn run_json_stream_mode(
                             continue;
                         }
                     };
+                if !runtime_diagnostics.record_runtime_declaration(&name, &config) {
+                    output.emit_error(
+                        &format!(
+                            "AddMcpServer '{name}': name collides with an effective config declaration"
+                        ),
+                        false,
+                    );
+                    continue;
+                }
 
                 let config_identity = McpConfigIdentity::for_server(&config);
                 let reservation = match mcp_lifecycle.reserve(name.clone(), config_identity) {
@@ -4029,7 +4160,8 @@ async fn run_json_stream_mode(
                 .await
                 {
                     Ok(mgr) => {
-                        let failure_reason = match mgr.health().get(&name) {
+                        let mgr_arc = Arc::new(mgr);
+                        let failure_reason = match mgr_arc.health().get(&name) {
                             Some(health) => mcp_server_failure_reason(health),
                             None => {
                                 Some("connect outcome missing from MCP health report".to_string())
@@ -4037,6 +4169,9 @@ async fn run_json_stream_mode(
                         };
                         if let Some(reason) = failure_reason {
                             reservation.complete_failed(reason.clone());
+                            // Retain the typed health outcome for local runtime
+                            // diagnostics even though no live tools exist.
+                            dynamic_managers.push(mgr_arc);
                             eprintln!("[mcp] connect failed for '{name}': {reason}");
                             output.emit_error(
                                 &format!("AddMcpServer '{name}' failed: {reason}"),
@@ -4048,9 +4183,8 @@ async fn run_json_stream_mode(
                             });
                             continue;
                         }
-                        let discovered_tool_count = mgr.all_tools().len();
+                        let discovered_tool_count = mgr_arc.all_tools().len();
                         eprintln!("[mcp] Connected to '{name}': {discovered_tool_count} tools");
-                        let mgr_arc = Arc::new(mgr);
                         let builtin_names = engine.tool_names();
                         let defer_cold = engine.defer_cold_config();
                         // Wave OR: `registry_mut` returns `Option` because
@@ -4839,12 +4973,14 @@ async fn run_json_stream_mode(
                 });
             }
             ProtocolCommand::GetRuntimeDiagnostics(command) => {
-                output.emit_error(
-                    &format!(
-                        "get_runtime_diagnostics v{} is not available in this build",
-                        command.diagnostics_version
-                    ),
-                    false,
+                emit_runtime_diagnostics(
+                    &command,
+                    &runtime_diagnostics,
+                    &mcp_lifecycle,
+                    &result.mcp_managers,
+                    &dynamic_managers,
+                    &engine.tools(),
+                    writer.as_ref(),
                 );
             }
             ProtocolCommand::AddMcpServer { name, .. } => {
@@ -4949,6 +5085,23 @@ mod tests {
     use std::time::Duration;
     use wcore_mcp::manager::McpManager;
     use wcore_types::execution_policy::{BaselineExecutionPolicy, PolicySource};
+
+    #[test]
+    fn unsupported_runtime_diagnostics_request_gets_correlated_terminal_event() {
+        let event = runtime_diagnostics_admission_rejection(
+            &wcore_protocol::diagnostics::GetRuntimeDiagnosticsCommand {
+                diagnostics_version: 2,
+                request_id: "diagnostics-request-2".into(),
+            },
+        )
+        .expect("unsupported version must be rejected");
+        let value = serde_json::to_value(event).unwrap();
+        assert_eq!(value["type"], "runtime_diagnostics_unavailable");
+        assert_eq!(value["diagnostics_version"], 2);
+        assert_eq!(value["supported_version"], 1);
+        assert_eq!(value["request_id"], "diagnostics-request-2");
+        assert_eq!(value["reason"], "unsupported_version");
+    }
 
     fn lifecycle_reservations(
         configs: &HashMap<String, McpServerConfig>,

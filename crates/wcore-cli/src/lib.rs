@@ -104,6 +104,9 @@ pub mod self_update;
 // `doctor::run()` through the lib for the `--doctor` CLI flag.
 pub mod doctor;
 
+// Secret-safe live state projection for the JSON-stream diagnostics contract.
+pub mod runtime_diagnostics;
+
 // Wave 0 (CLI/TUI redesign): the ratatui terminal UI. `tui::run()` is the
 // entry point; the `main.rs` default-mode dispatch into it is deferred to
 // T2.3 (the binary is intentionally untouched in Wave 0).

@@ -3,7 +3,7 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use std::time::Duration;
 
-use wcore_config::config::Config;
+use wcore_config::config::{Config, TransportType};
 use wcore_mcp::manager::McpManager;
 use wcore_observability::sink::SpanSink;
 use wcore_plugin_api::registry::providers::PluginProvider;
@@ -35,6 +35,12 @@ fn approval_policy_to_session_mode(
 }
 
 /// Result of bootstrapping an agent engine with all features initialized.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PluginMcpDeclaration {
+    pub name: String,
+    pub transport: TransportType,
+}
+
 pub struct BootstrapResult {
     pub engine: AgentEngine,
     pub provider: Arc<dyn LlmProvider>,
@@ -46,6 +52,9 @@ pub struct BootstrapResult {
     /// Hosts emit these additive events only after their `Ready` boundary.
     pub capability_activations: Vec<wcore_protocol::events::CapabilityActivation>,
     pub mcp_managers: Vec<Arc<McpManager>>,
+    /// Redacted declarations retained even when a plugin MCP connection fails.
+    /// Command arguments, environment, and URLs never cross this boundary.
+    pub plugin_mcp_declarations: Vec<PluginMcpDeclaration>,
     pub has_mcp: bool,
     /// #537/#141 — correlation bridge for host-delegated `send_message`.
     /// Always constructed (cheap empty map); only populated when the engine
@@ -1386,6 +1395,18 @@ impl AgentBootstrap {
                 .expect("session egress policy is installed before scoped bootstrap")
                 .clone(),
         );
+        let plugin_mcp_declarations = applied
+            .plugin_mcp_servers
+            .iter()
+            .map(|server| PluginMcpDeclaration {
+                name: server.name.clone(),
+                transport: match &server.transport {
+                    wcore_plugin_api::McpTransport::Stdio { .. } => TransportType::Stdio,
+                    wcore_plugin_api::McpTransport::Sse { .. } => TransportType::Sse,
+                    wcore_plugin_api::McpTransport::Http { .. } => TransportType::StreamableHttp,
+                },
+            })
+            .collect();
         if let Some(plugin_mcp_mgr) =
             crate::plugins::mcp_delivery::connect_plugin_mcp_servers_with_policy(
                 &applied.plugin_mcp_servers,
@@ -3283,6 +3304,7 @@ impl AgentBootstrap {
             workspace_policy_receipt,
             capability_activations,
             mcp_managers,
+            plugin_mcp_declarations,
             has_mcp,
             host_send_bridge,
             has_plugins,

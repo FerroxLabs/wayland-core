@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::anvil::{AnvilReceipt, AnvilReceiptInvalidation};
-use crate::diagnostics::RuntimeDiagnosticsSnapshotV1;
+use crate::diagnostics::{RuntimeDiagnosticsSnapshotV1, RuntimeDiagnosticsUnavailableReason};
 
 pub use wcore_types::message::FinishReason;
 
@@ -568,6 +568,14 @@ pub enum ProtocolEvent {
         diagnostics_version: u16,
         request_id: String,
         snapshot: RuntimeDiagnosticsSnapshotV1,
+    },
+    /// Correlated rejection for a diagnostics request that this producer
+    /// cannot satisfy. Hosts must treat this as terminal for `request_id`.
+    RuntimeDiagnosticsUnavailable {
+        diagnostics_version: u16,
+        supported_version: u16,
+        request_id: String,
+        reason: RuntimeDiagnosticsUnavailableReason,
     },
     /// W1: F9 structured trace for one turn. Gated by the W0-reserved
     /// `capabilities.structured_traces` flag — the engine only emits this

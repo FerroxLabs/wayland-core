@@ -131,6 +131,15 @@ fn constrained_property_schema(wire_type: &str, field: &str, value: &Value) -> V
         ("get_runtime_diagnostics" | "runtime_diagnostics_snapshot", "diagnostics_version") => {
             json!({"const": 1, "type": "integer"})
         }
+        ("runtime_diagnostics_unavailable", "diagnostics_version") => {
+            json!({"minimum": 0, "maximum": 65535, "type": "integer"})
+        }
+        ("runtime_diagnostics_unavailable", "supported_version") => {
+            json!({"const": 1, "type": "integer"})
+        }
+        ("runtime_diagnostics_unavailable", "reason") => {
+            json!({"enum": ["unsupported_version"], "type": "string"})
+        }
         ("resume_turn", "action") => {
             json!({"enum": ["continue", "reconcile", "cancel"], "type": "string"})
         }
@@ -467,12 +476,12 @@ fn runtime_diagnostics_snapshot_schema() -> Value {
             "process": {
                 "additionalProperties": false,
                 "properties": {
-                    "profile_bound": {"type": "boolean"},
+                    "profile_binding": {"enum": ["unknown", "default_home", "explicit_home", "bound_profile", "unbound_profile"], "type": "string"},
                     "profile_name": {"type": "string"},
-                    "raw_engine_mode": {"type": "boolean"},
-                    "workspace_kind": {"enum": ["none", "project", "temporary", "profile_home"], "type": "string"}
+                    "engine_mode": {"enum": ["unknown", "standard", "raw"], "type": "string"},
+                    "workspace_kind": {"enum": ["unknown", "none", "project", "temporary", "profile_home"], "type": "string"}
                 },
-                "required": ["profile_bound", "raw_engine_mode", "workspace_kind"],
+                "required": ["profile_binding", "engine_mode", "workspace_kind"],
                 "type": "object"
             },
             "config_sources": {
@@ -507,20 +516,22 @@ fn runtime_diagnostics_snapshot_schema() -> Value {
                     "additionalProperties": false,
                     "properties": {
                         "name": {"type": "string"},
-                        "origin": {"enum": ["global_config", "project_config", "profile_config", "runtime_command", "plugin"], "type": "string"},
+                        "origin": {"enum": ["effective_config", "global_config", "project_config", "profile_config", "runtime_command", "plugin"], "type": "string"},
                         "transport": {"enum": ["stdio", "sse", "streamable_http"], "type": "string"},
-                        "connection": {"enum": ["configured", "deferred", "connecting", "ready", "failed", "timed_out", "skipped", "stopped"], "type": "string"},
-                        "exposure": {"enum": ["not_attempted", "not_applicable", "exposed", "hidden_no_tools", "blocked"], "type": "string"},
+                        "connection": {"enum": ["configured", "deferred", "connecting", "ready", "failed", "timed_out", "skipped", "stopping", "stopped"], "type": "string"},
+                        "exposure": {"enum": ["not_attempted", "not_applicable", "exposed", "resource_only", "resource_only_unavailable", "hidden_no_tools", "blocked"], "type": "string"},
                         "deferred": {"type": "boolean"},
                         "tool_count": {"minimum": 0, "maximum": 4294967295_u64, "type": "integer"},
+                        "resources_declared": {"type": "boolean"},
+                        "resources_exposed": {"type": "boolean"},
                         "assistant_scoped": {"type": "boolean"},
                         "executable_basename": {"type": "string"},
-                        "executable_readiness": {"enum": ["not_applicable", "resolved", "missing_effective_path", "not_found", "invalid_absolute_path", "unsupported_transport"], "type": "string"},
+                        "executable_readiness": {"enum": ["not_applicable", "unchecked", "resolved", "missing_effective_path", "not_found", "invalid_absolute_path", "unsupported_transport"], "type": "string"},
                         "working_directory": {"enum": ["inherited_process", "project_root", "profile_home", "explicit"], "type": "string"},
                         "failure": {"enum": ["missing_executable", "launch_failed", "connection_refused", "timeout", "protocol_mismatch", "authentication_required", "authorization_denied", "invalid_configuration", "transport_closed", "unknown"], "type": "string"},
-                        "remediation": {"items": {"enum": ["open_active_config", "restart_desktop", "fix_gui_launch_path", "install_executable", "review_server_config", "retry_connection", "check_assistant_scope"], "type": "string"}, "type": "array"}
+                        "remediation": {"items": {"enum": ["open_active_config", "restart_desktop", "fix_gui_launch_path", "install_executable", "review_server_config", "retry_connection", "check_assistant_scope", "restart_to_load_resources"], "type": "string"}, "type": "array"}
                     },
-                    "required": ["name", "origin", "transport", "connection", "exposure", "deferred", "tool_count", "assistant_scoped", "executable_readiness", "working_directory", "remediation"],
+                    "required": ["name", "origin", "transport", "connection", "exposure", "deferred", "tool_count", "resources_declared", "resources_exposed", "assistant_scoped", "executable_readiness", "working_directory", "remediation"],
                     "type": "object"
                 },
                 "type": "array"
