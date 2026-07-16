@@ -487,7 +487,7 @@ mod child_prompt_trim_tests {
 
 #[cfg(test)]
 mod topology_cap_tests {
-    use wcore_swarm::Topology;
+    use wcore_swarm::{MAX_CONCURRENT_WORKERS, MAX_DISPATCH_WORKERS, Topology};
 
     fn cap_for(topology: Topology) -> usize {
         topology.default_config().max_agents as usize
@@ -499,8 +499,15 @@ mod topology_cap_tests {
     }
 
     #[test]
-    fn swarm_topology_cap_is_20() {
-        assert_eq!(cap_for(Topology::Swarm), 20);
+    fn swarm_topology_scheduled_cap_is_100() {
+        assert_eq!(cap_for(Topology::Swarm), MAX_DISPATCH_WORKERS);
+        assert_eq!(MAX_DISPATCH_WORKERS, 100);
+    }
+
+    #[test]
+    fn swarm_active_concurrency_cap_is_20() {
+        assert_eq!(MAX_CONCURRENT_WORKERS, 20);
+        assert!(MAX_CONCURRENT_WORKERS < cap_for(Topology::Swarm));
     }
 
     #[test]

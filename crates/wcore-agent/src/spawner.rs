@@ -503,6 +503,11 @@ pub struct AgentSpawner {
     durable_authority: DurableSessionAuthority,
     /// Resolver-produced session policy used to derive redacted child evidence.
     effective_policy: EffectiveExecutionPolicy,
+    /// Clone-shared admission boundary for child engines started by parallel
+    /// Spawn, workflow, mesh, swarm, and fleet paths. Topology limits describe
+    /// how much work may be scheduled; this semaphore independently bounds the
+    /// number of full child engines that may own resources at once.
+    active_child_permits: Arc<tokio::sync::Semaphore>,
 }
 
 /// Provider-spend, execution, and cancellation authority inherited by a
@@ -517,6 +522,7 @@ pub struct SpawnerBudgetGovernance {
     execution_budget: Option<wcore_budget::ExecutionBudgetView>,
     cancel: tokio_util::sync::CancellationToken,
     budget_guard: Option<Arc<crate::cancel::BudgetGuard>>,
+    active_child_permits: Arc<tokio::sync::Semaphore>,
 }
 
 impl SpawnerBudgetGovernance {
@@ -533,6 +539,9 @@ impl SpawnerBudgetGovernance {
             execution_budget: Some(execution_budget),
             cancel,
             budget_guard: None,
+            active_child_permits: Arc::new(tokio::sync::Semaphore::new(
+                wcore_swarm::MAX_CONCURRENT_WORKERS,
+            )),
         }
     }
 
@@ -548,6 +557,9 @@ impl SpawnerBudgetGovernance {
             execution_budget: None,
             cancel,
             budget_guard: None,
+            active_child_permits: Arc::new(tokio::sync::Semaphore::new(
+                wcore_swarm::MAX_CONCURRENT_WORKERS,
+            )),
         }
     }
 
@@ -591,6 +603,9 @@ impl AgentSpawner {
             budget_guard: None,
             durable_authority: DurableSessionAuthority::new(),
             effective_policy,
+            active_child_permits: Arc::new(tokio::sync::Semaphore::new(
+                wcore_swarm::MAX_CONCURRENT_WORKERS,
+            )),
         }
     }
 
@@ -791,6 +806,7 @@ impl AgentSpawner {
         self.execution_budget = governance.execution_budget;
         self.cancel = governance.cancel;
         self.budget_guard = governance.budget_guard;
+        self.active_child_permits = governance.active_child_permits;
         self
     }
 
@@ -799,7 +815,7 @@ impl AgentSpawner {
     /// without an attached provider ledger return `None` rather than fabricating
     /// an independent allowance.
     pub fn budget_governance(&self) -> Option<SpawnerBudgetGovernance> {
-        let governance = if let Some(authority) = self.budget_authority.as_ref() {
+        let mut governance = if let Some(authority) = self.budget_authority.as_ref() {
             SpawnerBudgetGovernance::from_authority(
                 Arc::clone(authority),
                 self.active_cancel_token(),
@@ -812,6 +828,7 @@ impl AgentSpawner {
                 self.active_cancel_token(),
             )
         };
+        governance.active_child_permits = Arc::clone(&self.active_child_permits);
         Some(match self.budget_guard.as_ref() {
             Some(guard) => governance.with_budget_guard(Arc::clone(guard)),
             None => governance,
@@ -1094,7 +1111,9 @@ impl AgentSpawner {
                     let spawner = self.clone_for_spawn();
                     let extras = extras.clone();
                     tokio::spawn(async move {
-                        spawner.spawn_one_with_extras(config, extras, origin).await
+                        spawner
+                            .spawn_one_with_active_permit(config, extras, origin)
+                            .await
                     })
                 })
                 .collect(),
@@ -1169,7 +1188,7 @@ impl AgentSpawner {
                         let mut extras = extras;
                         extras.parent_call_id = Some(format!("fleet:{}", ctx.agent_id));
                         let result = spawner
-                            .spawn_one_with_extras(sub_config, extras, ChildOrigin::Fleet)
+                            .spawn_one_with_active_permit(sub_config, extras, ChildOrigin::Fleet)
                             .await;
                         let succeeded = !result.is_error;
                         AgentReport {
@@ -1254,7 +1273,9 @@ impl AgentSpawner {
             let spawner = self.clone_for_spawn();
             join_terminals.push((config.name.clone(), extras.channel_sink.clone()));
             handles.push(tokio::spawn(async move {
-                spawner.spawn_one_with_extras(config, extras, origin).await
+                spawner
+                    .spawn_one_with_active_permit(config, extras, origin)
+                    .await
             }));
         }
         let mut futures = SpawnTaskSet(handles);
@@ -1290,6 +1311,44 @@ impl AgentSpawner {
     ) -> SubAgentResult {
         self.spawn_durable(sub_config, ForkOverrides::default(), extras, origin)
             .await
+    }
+
+    async fn spawn_one_with_active_permit(
+        &self,
+        sub_config: SubAgentConfig,
+        extras: SpawnExtras,
+        origin: ChildOrigin,
+    ) -> SubAgentResult {
+        let name = sub_config.name.clone();
+        let terminal_sink = extras.channel_sink.clone();
+        let cancel = self.active_cancel_token();
+        let permit = tokio::select! {
+            biased;
+            _ = cancel.cancelled() => {
+                let result = SubAgentResult::error(
+                    &name,
+                    "parent cancelled before child concurrency admission",
+                );
+                relay_subagent_terminal(terminal_sink.as_deref(), &result);
+                return result;
+            }
+            permit = Arc::clone(&self.active_child_permits).acquire_owned() => {
+                match permit {
+                    Ok(permit) => permit,
+                    Err(_) => {
+                        let result = SubAgentResult::error(
+                            &name,
+                            "child concurrency admission is unavailable",
+                        );
+                        relay_subagent_terminal(terminal_sink.as_deref(), &result);
+                        return result;
+                    }
+                }
+            }
+        };
+        let result = self.spawn_one_with_extras(sub_config, extras, origin).await;
+        drop(permit);
+        result
     }
 
     async fn spawn_durable(
@@ -1514,6 +1573,7 @@ impl AgentSpawner {
             budget_guard: self.budget_guard.clone(),
             durable_authority: self.durable_authority.clone(),
             effective_policy: self.effective_policy.clone(),
+            active_child_permits: Arc::clone(&self.active_child_permits),
         }
     }
 
@@ -1879,6 +1939,42 @@ mod spawn_task_set_tests {
         }
     }
 
+    struct ActiveCallGuard<'a>(&'a AtomicUsize);
+
+    impl Drop for ActiveCallGuard<'_> {
+        fn drop(&mut self) {
+            self.0.fetch_sub(1, Ordering::SeqCst);
+        }
+    }
+
+    struct PeakConcurrencyProvider {
+        active: AtomicUsize,
+        peak: AtomicUsize,
+        calls: AtomicUsize,
+        release: tokio::sync::Semaphore,
+    }
+
+    #[async_trait]
+    impl LlmProvider for PeakConcurrencyProvider {
+        async fn stream(
+            &self,
+            _request: &LlmRequest,
+        ) -> Result<tokio::sync::mpsc::Receiver<LlmEvent>, ProviderError> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            let active = self.active.fetch_add(1, Ordering::SeqCst) + 1;
+            self.peak.fetch_max(active, Ordering::SeqCst);
+            let _active = ActiveCallGuard(&self.active);
+            self.release
+                .acquire()
+                .await
+                .expect("test release semaphore remains open")
+                .forget();
+            Err(ProviderError::Connection(
+                "peak concurrency probe completed".into(),
+            ))
+        }
+    }
+
     fn bounded_child(name: &str) -> SubAgentConfig {
         SubAgentConfig {
             name: name.into(),
@@ -1922,6 +2018,70 @@ mod spawn_task_set_tests {
                 .all(|result| result.text.contains("max_agent_depth"))
         );
         assert_eq!(provider.calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn parallel_spawn_caps_active_child_engines_across_shared_calls() {
+        const CHILDREN_PER_CALL: usize = 15;
+        const TOTAL_CHILDREN: usize = CHILDREN_PER_CALL * 2;
+
+        let dir = tempfile::tempdir().unwrap();
+        let provider = Arc::new(PeakConcurrencyProvider {
+            active: AtomicUsize::new(0),
+            peak: AtomicUsize::new(0),
+            calls: AtomicUsize::new(0),
+            release: tokio::sync::Semaphore::new(0),
+        });
+        let config = Config {
+            model: "test-model".into(),
+            provider_label: "test-provider".into(),
+            ..Config::default()
+        };
+        let spawner = AgentSpawner::new(provider.clone(), config);
+        bind_test_durable_session(&spawner, dir.path(), "f200020");
+        let cloned = spawner.clone_for_spawn();
+        let first = (0..CHILDREN_PER_CALL)
+            .map(|index| bounded_child(&format!("first-{index}")))
+            .collect();
+        let second = (0..CHILDREN_PER_CALL)
+            .map(|index| bounded_child(&format!("second-{index}")))
+            .collect();
+
+        let run = tokio::spawn(async move {
+            tokio::join!(spawner.spawn_parallel(first), cloned.spawn_parallel(second))
+        });
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while provider.active.load(Ordering::SeqCst) < wcore_swarm::MAX_CONCURRENT_WORKERS {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the shared active-child limit must fill");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        assert_eq!(
+            provider.active.load(Ordering::SeqCst),
+            wcore_swarm::MAX_CONCURRENT_WORKERS,
+            "queued children must not start provider work above the shared limit"
+        );
+        assert_eq!(
+            provider.peak.load(Ordering::SeqCst),
+            wcore_swarm::MAX_CONCURRENT_WORKERS
+        );
+
+        provider.release.add_permits(TOTAL_CHILDREN);
+        let (first_results, second_results) = tokio::time::timeout(Duration::from_secs(15), run)
+            .await
+            .expect("all queued children must run after permits are released")
+            .expect("parallel spawn task must not panic");
+        assert_eq!(first_results.len(), CHILDREN_PER_CALL);
+        assert_eq!(second_results.len(), CHILDREN_PER_CALL);
+        assert_eq!(provider.calls.load(Ordering::SeqCst), TOTAL_CHILDREN);
+        assert_eq!(provider.active.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            provider.peak.load(Ordering::SeqCst),
+            wcore_swarm::MAX_CONCURRENT_WORKERS
+        );
     }
 
     #[tokio::test]
