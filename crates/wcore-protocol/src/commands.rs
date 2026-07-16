@@ -51,6 +51,47 @@ pub struct ResolveInterruptedApprovalCommand {
     pub answer: Option<String>,
 }
 
+/// Closed, structurally valid operator grant for continuing a budget-stopped
+/// session. Runtime authority checks (launcher opt-in, outstanding receipt,
+/// and managed-policy ownership) remain the dispatcher's responsibility.
+#[derive(Debug, PartialEq)]
+pub struct ContinueWithBudgetCommand {
+    pub additional_tokens: u64,
+    pub additional_cost_usd: f64,
+}
+
+impl<'de> Deserialize<'de> for ContinueWithBudgetCommand {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Wire {
+            #[serde(default)]
+            additional_tokens: u64,
+            #[serde(default)]
+            additional_cost_usd: f64,
+        }
+
+        let wire = Wire::deserialize(deserializer)?;
+        if !wire.additional_cost_usd.is_finite() || wire.additional_cost_usd < 0.0 {
+            return Err(serde::de::Error::custom(
+                "additional_cost_usd must be finite and non-negative",
+            ));
+        }
+        if wire.additional_tokens == 0 && wire.additional_cost_usd == 0.0 {
+            return Err(serde::de::Error::custom(
+                "continue_with_budget must add tokens or cost headroom",
+            ));
+        }
+        Ok(Self {
+            additional_tokens: wire.additional_tokens,
+            additional_cost_usd: wire.additional_cost_usd,
+        })
+    }
+}
+
 /// Commands sent from the client to the agent (Client -> Agent)
 #[derive(Debug, Deserialize, PartialEq)]
 #[serde(tag = "type")]
@@ -100,12 +141,7 @@ pub enum ProtocolCommand {
     },
     /// Add explicit operator-authorized headroom to the active session's
     /// provider envelope. This never changes global or per-user limits.
-    ContinueWithBudget {
-        #[serde(default)]
-        additional_tokens: u64,
-        #[serde(default)]
-        additional_cost_usd: f64,
-    },
+    ContinueWithBudget(ContinueWithBudgetCommand),
     /// Request a versioned, idempotently-correlated recovery view of a
     /// durable session. `after = None` asks for the current snapshot;
     /// supplying a cursor additionally asks for typed replay after it.
@@ -462,11 +498,40 @@ mod tests {
                 .unwrap();
         assert_eq!(
             command,
-            ProtocolCommand::ContinueWithBudget {
+            ProtocolCommand::ContinueWithBudget(ContinueWithBudgetCommand {
                 additional_tokens: 250_000,
                 additional_cost_usd: 0.0,
-            }
+            })
         );
+    }
+
+    #[test]
+    fn continue_with_budget_accepts_cost_only_grants() {
+        let command: ProtocolCommand =
+            serde_json::from_str(r#"{"type":"continue_with_budget","additional_cost_usd":2.5}"#)
+                .unwrap();
+        assert_eq!(
+            command,
+            ProtocolCommand::ContinueWithBudget(ContinueWithBudgetCommand {
+                additional_tokens: 0,
+                additional_cost_usd: 2.5,
+            })
+        );
+    }
+
+    #[test]
+    fn continue_with_budget_rejects_structurally_invalid_grants() {
+        for invalid in [
+            r#"{"type":"continue_with_budget"}"#,
+            r#"{"type":"continue_with_budget","additional_tokens":0,"additional_cost_usd":0}"#,
+            r#"{"type":"continue_with_budget","additional_cost_usd":-1}"#,
+            r#"{"type":"continue_with_budget","additional_tokens":1,"future_authority":true}"#,
+        ] {
+            assert!(
+                serde_json::from_str::<ProtocolCommand>(invalid).is_err(),
+                "invalid grant unexpectedly deserialized: {invalid}"
+            );
+        }
     }
 
     #[test]

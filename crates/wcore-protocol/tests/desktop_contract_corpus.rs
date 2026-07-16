@@ -54,6 +54,11 @@ fn schema_accepts(schema: &Value, instance: &Value) -> bool {
     {
         return false;
     }
+    if let Some(minimum) = schema.get("exclusiveMinimum").and_then(Value::as_f64)
+        && instance.as_f64().is_none_or(|value| value <= minimum)
+    {
+        return false;
+    }
     if let Some(maximum) = schema.get("maximum").and_then(Value::as_f64)
         && instance.as_f64().is_none_or(|value| value > maximum)
     {
@@ -178,8 +183,8 @@ fn checked_corpus_matches_real_serializers_byte_for_byte() {
 }
 
 #[test]
-fn inventory_is_exactly_sixteen_commands_and_forty_seven_events() {
-    assert_eq!(COMMAND_SPECS.len(), 16);
+fn inventory_is_exactly_seventeen_commands_and_forty_seven_events() {
+    assert_eq!(COMMAND_SPECS.len(), 17);
     assert_eq!(EVENT_SPECS.len(), 47);
     assert_eq!(
         COMMAND_SPECS
@@ -187,7 +192,7 @@ fn inventory_is_exactly_sixteen_commands_and_forty_seven_events() {
             .map(|spec| spec.wire_type)
             .collect::<BTreeSet<_>>()
             .len(),
-        16
+        17
     );
     assert_eq!(
         EVENT_SPECS
@@ -241,10 +246,10 @@ fn manifest_pins_generator_and_all_three_digests() {
         );
     }
     assert_eq!(manifest["contract"]["major"], 1);
-    assert_eq!(manifest["contract"]["minor"], 5);
-    assert_eq!(manifest["commands"].as_array().unwrap().len(), 16);
+    assert_eq!(manifest["contract"]["minor"], 6);
+    assert_eq!(manifest["commands"].as_array().unwrap().len(), 17);
     assert_eq!(manifest["events"].as_array().unwrap().len(), 47);
-    assert_eq!(manifest["counts"]["commands"], 16);
+    assert_eq!(manifest["counts"]["commands"], 17);
     assert_eq!(manifest["counts"]["events"], 47);
     assert_eq!(
         manifest["capabilities"]["contract_negotiation"],
@@ -406,6 +411,18 @@ fn generated_schemas_reject_malformed_authority_types_and_enums() {
     message["msg_id"] = Value::from(7_u64);
     assert!(!schema_accepts(&command_schema, &message));
 
+    let mut budget = generated_json("commands/continue_with_budget.json");
+    assert!(schema_accepts(&command_schema, &budget));
+    budget["additional_tokens"] = Value::from(0_u64);
+    budget["additional_cost_usd"] = Value::from(0_u64);
+    assert!(!schema_accepts(&command_schema, &budget));
+    budget["additional_cost_usd"] = Value::from(-1);
+    assert!(!schema_accepts(&command_schema, &budget));
+    budget["additional_tokens"] = Value::from(1_u64);
+    budget["additional_cost_usd"] = Value::from(0_u64);
+    budget["future_authority"] = Value::Bool(true);
+    assert!(!schema_accepts(&command_schema, &budget));
+
     let mut resume = generated_json("commands/resume_turn.json");
     assert!(schema_accepts(&command_schema, &resume));
     resume["recovery_version"] = Value::from(2_u64);
@@ -472,7 +489,7 @@ fn generated_schemas_reject_malformed_authority_types_and_enums() {
 }
 
 #[test]
-fn producer_complete_schema_keeps_non_desktop_variants_visible() {
+fn producer_complete_schema_keeps_current_and_non_desktop_variants_visible() {
     let schema = generated_json("schema/producer-complete.schema.json");
     let wire = serde_json::to_string(&schema).unwrap();
     for required in [

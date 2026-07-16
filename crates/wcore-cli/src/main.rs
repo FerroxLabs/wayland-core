@@ -4552,9 +4552,9 @@ async fn run_json_stream_mode(
                                             message: "set_config: queued, will apply after current response".to_string(),
                                         });
                                     }
-                                    ProtocolCommand::ContinueWithBudget { additional_tokens, additional_cost_usd } => {
+                                    ProtocolCommand::ContinueWithBudget(command) => {
                                         let message = if allow_host_budget_grants {
-                                            pending_budget_extension = Some((additional_tokens, additional_cost_usd));
+                                            pending_budget_extension = Some((command.additional_tokens, command.additional_cost_usd));
                                             "continue_with_budget: queued, will apply after current response".to_string()
                                         } else {
                                             "continue_with_budget refused: the local launcher did not opt in with --allow-host-budget-grants".to_string()
@@ -4986,13 +4986,13 @@ async fn run_json_stream_mode(
                     );
                 }
             }
-            ProtocolCommand::ContinueWithBudget {
-                additional_tokens,
-                additional_cost_usd,
-            } => {
+            ProtocolCommand::ContinueWithBudget(command) => {
                 let message = if allow_host_budget_grants {
                     engine
-                        .continue_with_additional_budget(additional_tokens, additional_cost_usd)
+                        .continue_with_additional_budget(
+                            command.additional_tokens,
+                            command.additional_cost_usd,
+                        )
                         .unwrap_or_else(|error| format!("continue_with_budget refused: {error}"))
                 } else {
                     "continue_with_budget refused: the local launcher did not opt in with --allow-host-budget-grants".to_string()

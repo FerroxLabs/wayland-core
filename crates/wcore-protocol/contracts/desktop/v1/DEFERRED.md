@@ -1,6 +1,6 @@
 # Deferred Desktop contract adversarial cases
 
-This v1.5 corpus records the current producer wire. Contract negotiation,
+This v1.6 corpus records the current producer wire. Contract negotiation,
 unknown-critical rejection, and unknown-noncritical dropping are live and
 proved by serialized replay through the reference host observer.
 

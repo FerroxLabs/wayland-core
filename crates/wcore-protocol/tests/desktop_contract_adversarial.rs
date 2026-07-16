@@ -55,6 +55,9 @@ fn raw_lines(relative: &str) -> Vec<String> {
 #[test]
 fn malformed_and_unknown_commands_never_deserialize_for_dispatch() {
     for name in [
+        "continue-with-budget-empty.jsonl",
+        "continue-with-budget-negative-cost.jsonl",
+        "continue-with-budget-unknown-field.jsonl",
         "invalid-json.jsonl",
         "missing-type.jsonl",
         "non-object.jsonl",

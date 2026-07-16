@@ -129,6 +129,14 @@ pub const COMMAND_SPECS: &[WireSpec] = &[
         "available"
     ),
     wire!(
+        "continue_with_budget",
+        "commands/continue_with_budget.json",
+        [],
+        Safety,
+        "session",
+        "available"
+    ),
+    wire!(
         "session_resync",
         "commands/session_resync.json",
         ["recovery_version", "request_id", "session_id"],
@@ -829,6 +837,10 @@ pub fn command_fixture_values() -> BTreeMap<String, Value> {
             json!({"type":"host_send_message_result","call_id":"call-send-001","ok":true,"message_id":"desktop-message-001","error":""}),
         ),
         (
+            "commands/continue_with_budget.json".into(),
+            json!({"type":"continue_with_budget","additional_tokens":250000,"additional_cost_usd":2.5}),
+        ),
+        (
             "commands/get_runtime_diagnostics.json".into(),
             json!({"type":"get_runtime_diagnostics","diagnostics_version":1,"request_id":"runtime-diagnostics-001"}),
         ),
@@ -892,6 +904,14 @@ pub fn command_fixture_values() -> BTreeMap<String, Value> {
         (
             "compat/commands/approval_resume.minimal.json".into(),
             json!({"type":"approval_resume","resume_token":"resume-minimal","approved":false}),
+        ),
+        (
+            "compat/commands/continue_with_budget.cost-only.json".into(),
+            json!({"type":"continue_with_budget","additional_cost_usd":2.5}),
+        ),
+        (
+            "compat/commands/continue_with_budget.tokens-only.json".into(),
+            json!({"type":"continue_with_budget","additional_tokens":250000}),
         ),
         (
             "compat/commands/host_send_message_result.minimal.json".into(),

@@ -17,12 +17,14 @@ use super::spec::{
 };
 
 pub const CONTRACT_NAME: &str = "wayland-desktop-core";
-pub const GENERATOR_VERSION: &str = "wcore-desktop-contract-gen/6";
+pub const CONTRACT_MAJOR: u64 = 1;
+pub const CONTRACT_MINOR: u64 = 6;
+pub const GENERATOR_VERSION: &str = "wcore-desktop-contract-gen/7";
 pub const CONTRACT_ROOT: &str = "contracts/desktop/v1";
 
 const DEFERRED: &str = r#"# Deferred Desktop contract adversarial cases
 
-This v1.5 corpus records the current producer wire. Contract negotiation,
+This v1.6 corpus records the current producer wire. Contract negotiation,
 unknown-critical rejection, and unknown-noncritical dropping are live and
 proved by serialized replay through the reference host observer.
 
@@ -117,6 +119,12 @@ fn inferred_schema(value: &Value) -> Value {
 fn constrained_property_schema(wire_type: &str, field: &str, value: &Value) -> Value {
     match (wire_type, field) {
         (_, "type") => json!({"const": wire_type}),
+        ("continue_with_budget", "additional_tokens") => {
+            json!({"minimum": 0, "type": "integer"})
+        }
+        ("continue_with_budget", "additional_cost_usd") => {
+            json!({"minimum": 0, "type": "number"})
+        }
         (
             "session_resync"
             | "resume_turn"
@@ -873,9 +881,22 @@ fn schema_branch(spec: &WireSpec, fixture: &Value) -> Value {
     if spec.wire_type == "sub_agent_event" {
         branch["allOf"] = child_terminal_conditions();
     }
+    if spec.wire_type == "continue_with_budget" {
+        branch["anyOf"] = json!([
+            {
+                "properties": {"additional_tokens": {"minimum": 1}},
+                "required": ["additional_tokens"]
+            },
+            {
+                "properties": {"additional_cost_usd": {"exclusiveMinimum": 0}},
+                "required": ["additional_cost_usd"]
+            }
+        ]);
+    }
     if matches!(
         spec.wire_type,
-        "session_resync"
+        "continue_with_budget"
+            | "session_resync"
             | "resume_turn"
             | "resolve_interrupted_approval"
             | "resolve_unknown_tool_effect"
@@ -1109,8 +1130,8 @@ fn descriptor(
 ) -> ContractDescriptor {
     ContractDescriptor {
         name: CONTRACT_NAME.into(),
-        major: 1,
-        minor: 5,
+        major: CONTRACT_MAJOR,
+        minor: CONTRACT_MINOR,
         generator: GENERATOR_VERSION.into(),
         fixture_digest,
         schema_digest,
@@ -1404,6 +1425,19 @@ pub fn generated_artifacts() -> ContractResult<BTreeMap<String, Vec<u8>>> {
     );
 
     artifacts.insert(
+        "adversarial/commands/continue-with-budget-empty.jsonl".into(),
+        b"{\"type\":\"continue_with_budget\"}\n".to_vec(),
+    );
+    artifacts.insert(
+        "adversarial/commands/continue-with-budget-negative-cost.jsonl".into(),
+        b"{\"additional_cost_usd\":-1,\"type\":\"continue_with_budget\"}\n".to_vec(),
+    );
+    artifacts.insert(
+        "adversarial/commands/continue-with-budget-unknown-field.jsonl".into(),
+        b"{\"additional_tokens\":1,\"future_authority\":true,\"type\":\"continue_with_budget\"}\n"
+            .to_vec(),
+    );
+    artifacts.insert(
         "adversarial/commands/invalid-json.jsonl".into(),
         b"{not-json}\n".to_vec(),
     );
@@ -1455,13 +1489,13 @@ pub fn generated_artifacts() -> ContractResult<BTreeMap<String, Vec<u8>>> {
         COMMAND_SPECS,
         &command_schema_fixtures,
         None,
-        "Desktop-consumed HostCommand v1.3",
+        &format!("Desktop-consumed HostCommand v{CONTRACT_MAJOR}.{CONTRACT_MINOR}"),
     );
     let event_schema = schema_for(
         EVENT_SPECS,
         &event_schema_fixtures,
         legacy_child,
-        "Desktop-consumed CoreEvent v1.3",
+        &format!("Desktop-consumed CoreEvent v{CONTRACT_MAJOR}.{CONTRACT_MINOR}"),
     );
     artifacts.insert(
         "schema/host-command.schema.json".into(),
@@ -1513,7 +1547,7 @@ pub fn generated_artifacts() -> ContractResult<BTreeMap<String, Vec<u8>>> {
             "events": EVENT_SPECS.len(),
             "fixtures": fixture_inventory.len()
         },
-        "contract": {"major": 1, "minor": 5, "name": CONTRACT_NAME},
+        "contract": {"major": CONTRACT_MAJOR, "minor": CONTRACT_MINOR, "name": CONTRACT_NAME},
         "deferred_adversarial": [
             "ordinary_turn_tool_replay_reducer",
             "anvil_desktop_replay_reducer",
